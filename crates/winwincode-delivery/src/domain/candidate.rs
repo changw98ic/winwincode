@@ -3,9 +3,9 @@
 //! Deterministic candidate identity derived from sealed Control Plane facts.
 //!
 //! This module does not read Git, Worker messages, or API payloads. The
-//! storage-owned Git/Artifact adapter returns an opaque
-//! [`ValidatedGitSourceArtifact`]; this module revalidates its exact successful
-//! Worker outcome and converts it into the private candidate snapshot seal.
+//! Git/Artifact adapter returns storage-neutral durable facts; this module
+//! revalidates their exact successful Worker outcome and converts them into
+//! the private candidate snapshot seal.
 //!
 //! ```compile_fail
 //! use winwincode_delivery::domain::candidate::ValidatedGitSnapshotFact;
@@ -45,10 +45,9 @@ use super::{
     SessionBindingId, bounded_text, validation_error,
 };
 use winwincode_domain::{
-    CodexThreadId, DeliveryId, ExecutionJobId, FencingToken, LeaseId, ProductSessionId,
+    ArtifactId, CodexThreadId, DeliveryId, ExecutionJobId, FencingToken, LeaseId, ProductSessionId,
     Sha256Digest, WorkItemId, WorkRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
 };
-use winwincode_storage::{GitSourcePathState, ValidatedGitSourceArtifact};
 
 mod verdict_authority;
 
@@ -87,6 +86,37 @@ pub struct CandidateHunkFact {
     /// Present only for a remediator old-to-new delta. The trusted Git adapter
     /// derives this mapping from hunk ranges; it is not copied from a prompt.
     pub source_hunk_sha256: Option<String>,
+}
+
+/// Storage-neutral Artifact facts copied from a trusted source adapter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableCandidateArtifactInput {
+    pub artifact_id: ArtifactId,
+    pub digest: Sha256Digest,
+    pub complete: bool,
+    pub deleted_at_millis: Option<u64>,
+    pub execution_job_id: ExecutionJobId,
+    pub attempt: u64,
+    pub lease_id: LeaseId,
+    pub fencing_token: FencingToken,
+    pub worker_id: WorkerId,
+    pub worker_instance_id: WorkerInstanceId,
+    pub worker_session_id: WorkerSessionId,
+}
+
+/// Storage-neutral Git and Artifact facts rebuilt by a trusted adapter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableCandidateSourceInput {
+    pub repository_locator: String,
+    pub requested_base_revision: String,
+    pub base_commit_id: String,
+    pub base_tree_id: String,
+    pub candidate_commit_id: String,
+    pub candidate_tree_id: String,
+    pub diff_sha256: String,
+    pub changed_paths: Vec<CandidatePathFact>,
+    pub changed_hunks: Vec<CandidateHunkFact>,
+    pub artifact: DurableCandidateArtifactInput,
 }
 
 /// A Git/Artifact-adapter fact for one exact Job workspace snapshot.
@@ -513,7 +543,7 @@ pub fn freeze_delivery_candidate(
     freeze_candidate_for_profile(delivery, facts, "executor")
 }
 
-/// Freezes a candidate only after the storage-owned source adapter rebuilt all
+/// Freezes a candidate only after the durable source adapter rebuilt all
 /// Git identities and the Delivery-owned terminal authority revalidated the
 /// exact successful producer.
 ///
@@ -524,7 +554,7 @@ pub fn freeze_delivery_candidate(
 /// stale/non-successful producer.
 pub fn freeze_delivery_candidate_from_source(
     delivery: &Delivery,
-    source: &ValidatedGitSourceArtifact,
+    source: &DurableCandidateSourceInput,
     terminal_facts: &DeliveryTerminalOutcomeFacts,
 ) -> Result<FrozenDeliveryCandidate, DeliveryValidationError> {
     let (git_snapshot, terminal_outcome) =
@@ -540,12 +570,12 @@ pub fn freeze_delivery_candidate_from_source(
 
 pub(super) fn validated_git_snapshot_from_source(
     delivery: &Delivery,
-    source: &ValidatedGitSourceArtifact,
+    source: &DurableCandidateSourceInput,
     terminal_facts: &DeliveryTerminalOutcomeFacts,
 ) -> Result<(ValidatedGitSnapshotFact, VerifiedTerminalOutcome), DeliveryValidationError> {
     if delivery.snapshot().spec.repository.kind != super::RepositoryKind::LocalGit
-        || delivery.snapshot().spec.repository.locator != source.repository_locator()
-        || delivery.snapshot().spec.base_revision != source.requested_base_revision()
+        || delivery.snapshot().spec.repository.locator != source.repository_locator
+        || delivery.snapshot().spec.base_revision != source.requested_base_revision
     {
         return Err(invalid_candidate(
             "rebuilt candidate source does not match the current local Git repository and base revision",
@@ -582,16 +612,15 @@ pub(super) fn validated_git_snapshot_from_source(
         .ok_or_else(|| stale_candidate("candidate producer CodexThread is missing"))?;
     let last_event_sequence = u64::try_from(terminal_outcome.last_event_sequence().0)
         .map_err(|_| invalid_candidate("candidate terminal event sequence is invalid"))?;
-    let artifact = source.artifact();
-    let provenance = artifact.provenance();
-    let exact_provenance = provenance.execution_job_id() == terminal_outcome.execution_job_id()
-        && provenance.attempt() == terminal_outcome.attempt()
-        && provenance.lease_id() == terminal_outcome.lease_id()
-        && provenance.fencing_token() == terminal_outcome.fencing_token()
-        && provenance.worker_id() == terminal_outcome.worker_id()
-        && provenance.worker_instance_id() == terminal_outcome.worker_instance_id()
-        && provenance.worker_session_id() == terminal_outcome.worker_session_id();
-    if !artifact.is_complete() || artifact.deleted_at_millis().is_some() || !exact_provenance {
+    let artifact = &source.artifact;
+    let exact_provenance = artifact.execution_job_id == *terminal_outcome.execution_job_id()
+        && artifact.attempt == terminal_outcome.attempt()
+        && artifact.lease_id == *terminal_outcome.lease_id()
+        && artifact.fencing_token == *terminal_outcome.fencing_token()
+        && artifact.worker_id == *terminal_outcome.worker_id()
+        && artifact.worker_instance_id == *terminal_outcome.worker_instance_id()
+        && artifact.worker_session_id == *terminal_outcome.worker_session_id();
+    if !artifact.complete || artifact.deleted_at_millis.is_some() || !exact_provenance {
         return Err(stale_candidate(
             "candidate Artifact is incomplete, deleted, or belongs to another Worker outcome",
         ));
@@ -612,15 +641,15 @@ pub(super) fn validated_git_snapshot_from_source(
         worker_session_id: terminal_outcome.worker_session_id().clone(),
         codex_thread_id,
         repository: delivery.snapshot().spec.repository.clone(),
-        base_commit_id: source.base_commit_id().to_owned(),
-        base_tree_id: source.base_tree_id().to_owned(),
-        candidate_commit_id: source.candidate_commit_id().to_owned(),
-        candidate_tree_id: source.candidate_tree_id().to_owned(),
-        diff_sha256: source.diff_sha256().to_owned(),
+        base_commit_id: source.base_commit_id.clone(),
+        base_tree_id: source.base_tree_id.clone(),
+        candidate_commit_id: source.candidate_commit_id.clone(),
+        candidate_tree_id: source.candidate_tree_id.clone(),
+        diff_sha256: source.diff_sha256.clone(),
         changed_paths,
         changed_hunks,
-        artifact_ref: artifact.artifact_id().0.clone(),
-        artifact_digest: artifact.digest().clone(),
+        artifact_ref: artifact.artifact_id.0.clone(),
+        artifact_digest: artifact.digest.clone(),
         last_event_sequence,
         finished_at_millis: terminal_outcome.finished_at_millis(),
         validation_seal: [0; 32],
@@ -702,31 +731,12 @@ pub(super) fn validated_git_snapshot_from_candidate(
     Ok((git_snapshot, terminal_outcome))
 }
 
-fn source_path_facts(source: &ValidatedGitSourceArtifact) -> Vec<CandidatePathFact> {
-    source
-        .changed_paths()
-        .iter()
-        .map(|path| CandidatePathFact {
-            path: path.path().to_owned(),
-            state: match path.state() {
-                GitSourcePathState::Present => CandidatePathState::Present,
-                GitSourcePathState::Deleted => CandidatePathState::Deleted,
-            },
-            object_id: path.object_id().map(str::to_owned),
-        })
-        .collect()
+fn source_path_facts(source: &DurableCandidateSourceInput) -> Vec<CandidatePathFact> {
+    source.changed_paths.clone()
 }
 
-fn source_hunk_facts(source: &ValidatedGitSourceArtifact) -> Vec<CandidateHunkFact> {
-    source
-        .changed_hunks()
-        .iter()
-        .map(|hunk| CandidateHunkFact {
-            file_path: hunk.file_path().to_owned(),
-            hunk_sha256: hunk.hunk_sha256().to_owned(),
-            source_hunk_sha256: None,
-        })
-        .collect()
+fn source_hunk_facts(source: &DurableCandidateSourceInput) -> Vec<CandidateHunkFact> {
+    source.changed_hunks.clone()
 }
 
 pub(crate) fn freeze_authorized_rework_candidate(

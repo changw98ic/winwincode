@@ -19,7 +19,8 @@ use winwincode_delivery::{
         },
     },
     domain::{
-        DELIVERY_SCHEMA_VERSION, Delivery, RepositoryKind, RepositoryRef, SessionBinding,
+        DELIVERY_SCHEMA_VERSION, Delivery, DurableCandidateSourceInput, RepositoryKind,
+        RepositoryRef, SessionBinding,
         candidate::{
             ProductionRuntimeEvent, ProductionRuntimeEventCategory, ProductionRuntimePayload,
             ProductionVerificationRuntime, freeze_delivery_candidate_from_source,
@@ -36,7 +37,7 @@ use winwincode_domain::{
 use winwincode_storage::{
     ArtifactAccess, ArtifactChunk, ArtifactMeteringAttribution, ArtifactOpen, ArtifactProvenance,
     ArtifactRetention, ArtifactStore, CandidateSourceManifest, FakeArtifactObjectStore,
-    LocalGitSourceResolver, ReceiptScopeKey, ValidatedGitSourceArtifact,
+    LocalGitSourceResolver, ReceiptScopeKey,
 };
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -44,7 +45,7 @@ static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 #[derive(Clone)]
 struct SettledSource {
     terminal: DeliveryTerminalOutcomeFacts,
-    source: ValidatedGitSourceArtifact,
+    source: DurableCandidateSourceInput,
 }
 
 #[test]
@@ -419,7 +420,10 @@ fn settled_source(
             ),
         ),
     );
-    SettledSource { terminal, source }
+    SettledSource {
+        terminal,
+        source: winwincode_storage::delivery_candidate_source(&source),
+    }
 }
 
 fn runtime_events(

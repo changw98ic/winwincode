@@ -74,6 +74,11 @@
 
 use std::collections::HashSet;
 
+use crate::domain::{
+    AttentionItemStatus, Delivery, DeliverySnapshot, DeliveryStatus, SessionBinding,
+    rework::{ReworkAuthorization, ReworkClarificationReason, ReworkDecision},
+};
+use crate::domain::{MAX_COLLECTION_LENGTH, MAX_SAFE_INTEGER};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use winwincode_domain::{
@@ -81,13 +86,6 @@ use winwincode_domain::{
     Instant, LeaseId, ProductSessionId, Revision, Sha256Digest, WorkContractId, WorkItemId,
     WorkRun, WorkRunId, WorkRunState, WorkerId, WorkerInstanceId, WorkerSessionId,
 };
-use winwincode_storage::ExecutionDispatchAuthority;
-
-use crate::domain::{
-    AttentionItemStatus, Delivery, DeliverySnapshot, DeliveryStatus, SessionBinding,
-    rework::{ReworkAuthorization, ReworkClarificationReason, ReworkDecision},
-};
-use crate::domain::{MAX_COLLECTION_LENGTH, MAX_SAFE_INTEGER};
 
 use super::workrun::WorkRunAggregate;
 use super::{CoordinationError, CoordinationErrorCode, require_mutation_time};
@@ -192,29 +190,40 @@ pub struct SessionBindingAuthority {
     expires_at: Instant,
 }
 
+/// Storage-neutral copy of one Registry-accepted dispatch authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableDispatchAuthorityInput {
+    pub execution_job_id: ExecutionJobId,
+    pub attempt: u64,
+    pub lease_id: LeaseId,
+    pub fencing_token: FencingToken,
+    pub worker_id: WorkerId,
+    pub worker_instance_id: WorkerInstanceId,
+    pub worker_session_id: WorkerSessionId,
+    pub issued_at: Instant,
+    pub expires_at: Instant,
+}
+
 /// Seals the Registry's accepted dispatch record for Delivery/Runtime ingress.
 ///
-/// [`ExecutionDispatchAuthority`] has no public field constructor and is
-/// returned only after the durable Registry has joined an accepted Worker
-/// dispatch result to its exact current lease. Keeping this conversion here
-/// prevents Worker message fields from becoming scheduler authority.
+/// The Control Plane creates this only after the durable Registry has joined
+/// an accepted Worker dispatch result to its exact current lease.
 #[must_use]
 pub fn seal_session_binding_authority(
-    dispatch: &ExecutionDispatchAuthority,
+    dispatch: &DurableDispatchAuthorityInput,
 ) -> SessionBindingAuthority {
-    let lease = dispatch.lease();
     SessionBindingAuthority {
         active_lease: ActiveLeaseIdentity {
-            execution_job_id: lease.job_id.clone(),
-            attempt: lease.attempt,
-            lease_id: lease.lease_id.clone(),
-            fencing_token: lease.fencing_token.clone(),
-            worker_id: lease.worker_id.clone(),
-            worker_instance_id: lease.worker_instance_id.clone(),
-            worker_session_id: dispatch.worker_session_id().clone(),
+            execution_job_id: dispatch.execution_job_id.clone(),
+            attempt: dispatch.attempt,
+            lease_id: dispatch.lease_id.clone(),
+            fencing_token: dispatch.fencing_token.clone(),
+            worker_id: dispatch.worker_id.clone(),
+            worker_instance_id: dispatch.worker_instance_id.clone(),
+            worker_session_id: dispatch.worker_session_id.clone(),
         },
-        issued_at: lease.issued_at.clone(),
-        expires_at: lease.expires_at.clone(),
+        issued_at: dispatch.issued_at.clone(),
+        expires_at: dispatch.expires_at.clone(),
     }
 }
 
@@ -278,20 +287,19 @@ pub struct WorkerTerminalOutcomeReport {
 /// the Delivery has already advanced.
 #[must_use]
 pub fn seal_dispatch_terminal_outcome(
-    dispatch: &ExecutionDispatchAuthority,
+    dispatch: &DurableDispatchAuthorityInput,
     report: WorkerTerminalOutcomeReport,
 ) -> DeliveryTerminalOutcomeFacts {
-    let lease = dispatch.lease();
     terminal_outcome_facts(DurableTerminalOutcomeInput {
-        execution_job_id: lease.job_id.clone(),
-        attempt: lease.attempt,
-        lease_id: lease.lease_id.clone(),
-        fencing_token: lease.fencing_token.clone(),
-        worker_id: lease.worker_id.clone(),
-        worker_instance_id: lease.worker_instance_id.clone(),
-        worker_session_id: dispatch.worker_session_id().clone(),
-        issued_at: lease.issued_at.clone(),
-        expires_at: lease.expires_at.clone(),
+        execution_job_id: dispatch.execution_job_id.clone(),
+        attempt: dispatch.attempt,
+        lease_id: dispatch.lease_id.clone(),
+        fencing_token: dispatch.fencing_token.clone(),
+        worker_id: dispatch.worker_id.clone(),
+        worker_instance_id: dispatch.worker_instance_id.clone(),
+        worker_session_id: dispatch.worker_session_id.clone(),
+        issued_at: dispatch.issued_at.clone(),
+        expires_at: dispatch.expires_at.clone(),
         work_run_id: report.work_run_id,
         status: report.status,
         codex_thread_id: report.codex_thread_id,

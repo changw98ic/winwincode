@@ -228,8 +228,8 @@ fn queue_proof_appends_work_run_and_replays() {
         request_digest: "c".repeat(64),
         expected_revision: delivery.revision(),
         run: run.clone(),
-        authority,
-        proof,
+        authority: winwincode_storage::delivery_dispatch_authority(&authority),
+        execution_profile: proof.execution_profile().unwrap(),
         now_millis: delivery.snapshot().updated_at_millis + 1,
     };
     for state in [

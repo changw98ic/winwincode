@@ -475,8 +475,8 @@ fn real_scheduler_replacement_rotates_delivery_workrun_and_rejects_old_authority
         request_digest: "e".repeat(64),
         expected_revision: with_items.revision(),
         run: run.clone(),
-        authority: old_authority.clone(),
-        proof: old_proof,
+        authority: winwincode_storage::delivery_dispatch_authority(&old_authority),
+        execution_profile: old_proof.execution_profile().unwrap(),
         now_millis: with_items.snapshot().updated_at_millis + 1,
     };
     let appended = store
@@ -749,7 +749,9 @@ fn real_scheduler_replacement_rotates_delivery_workrun_and_rejects_old_authority
         WorkerSessionId(id("wsn", 141)),
         replacement_dispatch.message_id.clone(),
     );
-    let replacement_for_delivery = DeliveryExecutionAttemptReplacement::from_scheduler(&opaque);
+    let replacement_for_delivery = DeliveryExecutionAttemptReplacement::from_scheduler(
+        winwincode_storage::delivery_execution_replacement(&opaque),
+    );
     let mut changed_item_snapshot = bound.clone().into_snapshot();
     changed_item_snapshot.work_run_aggregate.items[0].revision = Revision(2);
     changed_item_snapshot.work_run_aggregate.items[0].goal = "changed acceptance".into();

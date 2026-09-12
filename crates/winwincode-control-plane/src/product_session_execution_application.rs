@@ -693,7 +693,9 @@ where
                 }
                 if let ExecutionPortMessage::ArtifactOpenMessage(artifact) = message {
                     let repository_scope = context.repository_scope().clone();
-                    let authority = seal_session_binding_authority(dispatch);
+                    let authority = seal_session_binding_authority(
+                        &winwincode_storage::delivery_dispatch_authority(dispatch),
+                    );
                     let acknowledgement = context
                         .control_plane()
                         .accept_artifact_open(&repository_scope, artifact, &authority)
@@ -708,7 +710,9 @@ where
                 }
                 if let ExecutionPortMessage::ArtifactChunkMessage(artifact) = message {
                     let repository_scope = context.repository_scope().clone();
-                    let authority = seal_session_binding_authority(dispatch);
+                    let authority = seal_session_binding_authority(
+                        &winwincode_storage::delivery_dispatch_authority(dispatch),
+                    );
                     let acknowledgement = context
                         .control_plane()
                         .accept_artifact_chunk(&repository_scope, artifact, &authority)

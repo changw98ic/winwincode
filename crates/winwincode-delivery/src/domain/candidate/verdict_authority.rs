@@ -5,15 +5,13 @@
 use std::collections::{BTreeMap, HashSet};
 use std::{error::Error, fmt};
 
+use crate::application::workrun_execution::DeliveryTerminalOutcomeFacts;
 use serde::Deserialize;
 use serde_json::Value;
 use winwincode_domain::{ExecutionEventId, ExecutionSequence};
-use winwincode_storage::ValidatedGitSourceArtifact;
-
-use crate::application::workrun_execution::DeliveryTerminalOutcomeFacts;
 
 use super::{
-    FrozenDeliveryCandidate, freeze_delivery_candidate_from_source,
+    DurableCandidateSourceInput, FrozenDeliveryCandidate, freeze_delivery_candidate_from_source,
     validated_git_snapshot_from_candidate, validated_git_snapshot_from_source,
 };
 use crate::domain::evidence::{
@@ -107,7 +105,7 @@ impl ProductionRuntimePayload {
 pub struct ProductionVerificationRuntime {
     role: VerificationRole,
     terminal: DeliveryTerminalOutcomeFacts,
-    source: ValidatedGitSourceArtifact,
+    source: DurableCandidateSourceInput,
     events: Vec<ProductionRuntimeEvent>,
     read_only_candidate_source: bool,
 }
@@ -120,7 +118,7 @@ impl ProductionVerificationRuntime {
     pub fn from_durable(
         role: VerificationRole,
         terminal: DeliveryTerminalOutcomeFacts,
-        source: ValidatedGitSourceArtifact,
+        source: DurableCandidateSourceInput,
         events: Vec<ProductionRuntimeEvent>,
     ) -> Self {
         Self {
@@ -140,7 +138,7 @@ impl ProductionVerificationRuntime {
     pub fn from_durable_read_only(
         role: VerificationRole,
         terminal: DeliveryTerminalOutcomeFacts,
-        candidate_source: ValidatedGitSourceArtifact,
+        candidate_source: DurableCandidateSourceInput,
         events: Vec<ProductionRuntimeEvent>,
     ) -> Self {
         Self {
@@ -207,7 +205,7 @@ impl Error for ProductionVerdictResolutionError {}
 /// Git identity drift.
 pub fn resolve_production_verdict(
     delivery: &Delivery,
-    writer_source: &ValidatedGitSourceArtifact,
+    writer_source: &DurableCandidateSourceInput,
     writer_terminal: &DeliveryTerminalOutcomeFacts,
     verification: Vec<ProductionVerificationRuntime>,
 ) -> Result<ProductionVerdictFacts, ProductionVerdictResolutionError> {

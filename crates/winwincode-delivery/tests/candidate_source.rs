@@ -306,11 +306,19 @@ fn delivery_freezes_only_the_rebuilt_source_named_by_the_successful_worker_outco
             ),
         ),
     );
-    freeze_delivery_candidate_from_source(&delivery, &source, &foreign_artifact_outcome)
-        .expect_err("candidate source must be named by the accepted terminal outcome");
+    freeze_delivery_candidate_from_source(
+        &delivery,
+        &winwincode_storage::delivery_candidate_source(&source),
+        &foreign_artifact_outcome,
+    )
+    .expect_err("candidate source must be named by the accepted terminal outcome");
 
-    let candidate = freeze_delivery_candidate_from_source(&delivery, &source, &outcome)
-        .expect("candidate from rebuilt source");
+    let candidate = freeze_delivery_candidate_from_source(
+        &delivery,
+        &winwincode_storage::delivery_candidate_source(&source),
+        &outcome,
+    )
+    .expect("candidate from rebuilt source");
     assert_eq!(candidate.base_commit_id(), base_commit);
     assert_eq!(candidate.candidate_commit_id(), candidate_commit);
     assert_eq!(candidate.changed_paths().len(), 1);

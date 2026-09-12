@@ -519,7 +519,9 @@ fn commit_replacement_worker_session(
                 request_digest: phase.request_digest()?,
                 expected_revision: current.revision(),
                 identity: predecessor_identity,
-                replacement: DeliveryExecutionAttemptReplacement::from_scheduler(replacement),
+                replacement: DeliveryExecutionAttemptReplacement::from_scheduler(
+                    winwincode_storage::delivery_execution_replacement(replacement),
+                ),
                 successor_authority: authority.clone(),
                 now_millis: context.bound_at_millis,
             },

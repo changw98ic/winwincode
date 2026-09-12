@@ -50,6 +50,7 @@ pub(crate) fn resolve(
         delivery,
         &writer_terminal,
     )?;
+    let delivery_writer_source = winwincode_storage::delivery_candidate_source(&writer_source);
     let mut verification = Vec::new();
     for binding in current_verification_bindings(delivery)? {
         let terminal = load_terminal(storage, delivery, &binding.execution_job_id)?;
@@ -63,13 +64,17 @@ pub(crate) fn resolve(
         verification.push(ProductionVerificationRuntime::from_durable_read_only(
             role,
             terminal,
-            writer_source.clone(),
+            delivery_writer_source.clone(),
             events,
         ));
     }
-    let resolved =
-        resolve_production_verdict(delivery, &writer_source, &writer_terminal, verification)
-            .map_err(|error| authority_error(&error))?;
+    let resolved = resolve_production_verdict(
+        delivery,
+        &delivery_writer_source,
+        &writer_terminal,
+        verification,
+    )
+    .map_err(|error| authority_error(&error))?;
     let (candidate, verification, evidence, produced_at_millis) = resolved.into_parts();
     Ok(DeliveryVerdictAuthority {
         candidate,
@@ -133,8 +138,12 @@ pub(crate) fn resolve_current_candidate_with_source(
     }
     let terminal = load_terminal(storage, delivery, &writer.execution_job_id)?;
     let source = source_for_terminal(artifacts, source_resolver, scope, delivery, &terminal)?;
-    let candidate = freeze_delivery_candidate_from_source(delivery, &source, &terminal)
-        .map_err(|error| authority_error(&error))?;
+    let candidate = freeze_delivery_candidate_from_source(
+        delivery,
+        &winwincode_storage::delivery_candidate_source(&source),
+        &terminal,
+    )
+    .map_err(|error| authority_error(&error))?;
     Ok(Some((candidate, source)))
 }
 

@@ -16,7 +16,7 @@ use winwincode_execution_port::generated::{ExecutionJob, ExecutionScope};
 use winwincode_storage::{
     DurableOutboxEvent, ExecutionDispatchAuthority, ExecutionDispatchWorkRunProof,
     ProductStateStorage, PublicEventActor, PublicEventSource, ReceiptIdentity, StateCommit,
-    StorageError, receipt_actor_key,
+    StorageError, delivery_dispatch_authority, receipt_actor_key,
 };
 
 use crate::delivery_transaction::{delivery_journal_key, delivery_stream_id};
@@ -81,6 +81,8 @@ pub(crate) fn execute(
         work_item_revision: scope.work_item_revision.clone(),
     };
     proof.verify_work_run(&run, &delivery_id.0)?;
+    let execution_profile = proof.execution_profile()?;
+    let delivery_authority = delivery_dispatch_authority(authority);
 
     let request_id = authority.dispatch_request_id().clone();
     let request_digest = request_digest(job, &run)?;
@@ -127,8 +129,8 @@ pub(crate) fn execute(
                 request_digest: request_digest.clone(),
                 expected_revision: delivery.revision(),
                 run,
-                authority: authority.clone(),
-                proof: proof.clone(),
+                authority: delivery_authority,
+                execution_profile,
                 now_millis,
             },
         )))

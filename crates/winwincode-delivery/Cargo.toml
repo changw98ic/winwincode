@@ -6,7 +6,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish = false
+include = ["src/**", "Cargo.toml", "README.md"]
 
 [features]
 # Exposes raw Scheduler/Worker fixture builders only to Rust integration tests.
@@ -20,7 +20,9 @@ serde_json.workspace = true
 sha2.workspace = true
 time.workspace = true
 winwincode-domain.workspace = true
-winwincode-storage = { version = "0.1.0-alpha.2", path = "../winwincode-storage" }
+
+[dev-dependencies]
+winwincode-storage = { path = "../winwincode-storage" }
 
 [[test]]
 name = "stage_task_lifecycle"

@@ -15,11 +15,6 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use winwincode_domain::{DeliveryId, FencingToken, RequestId, WorkRun};
-use winwincode_storage::{ExecutionDispatchAuthority, ExecutionDispatchWorkRunProof};
-
 use crate::{
     application::{
         CoordinationError, CoordinationErrorCode,
@@ -31,8 +26,8 @@ use crate::{
         },
         verdict::ComputedVerdictTransition,
         workrun_execution::{
-            DeliveryTerminalOutcomeFacts, WorkRunStartEffect, WorkRunStartResult,
-            apply_terminal_outcome as settle_terminal_outcome,
+            DeliveryTerminalOutcomeFacts, DurableDispatchAuthorityInput, WorkRunStartEffect,
+            WorkRunStartResult, apply_terminal_outcome as settle_terminal_outcome,
         },
     },
     domain::{
@@ -42,6 +37,9 @@ use crate::{
         safe_non_negative,
     },
 };
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use winwincode_domain::{DeliveryId, FencingToken, RequestId, WorkRun};
 
 pub const DELIVERY_STORE_SCHEMA_VERSION: u8 = 1;
 
@@ -296,8 +294,8 @@ pub struct AppendDeliveryWorkRun {
     pub request_digest: String,
     pub expected_revision: u64,
     pub run: WorkRun,
-    pub authority: ExecutionDispatchAuthority,
-    pub proof: ExecutionDispatchWorkRunProof,
+    pub authority: DurableDispatchAuthorityInput,
+    pub execution_profile: String,
     pub now_millis: u64,
 }
 
@@ -1132,21 +1130,6 @@ impl<'journal> DeliveryStore<'journal> {
         validate_request(&command.request_id, &command.request_digest)?;
         let stored = self.read(&command.delivery_id)?;
         validate_work_run_authority(&command.run, &command.authority)?;
-        command
-            .proof
-            .verify_work_run(&command.run, &command.delivery_id.0)
-            .map_err(|error| {
-                store_error(
-                    DeliveryStoreErrorCode::InvalidStoreOptions,
-                    error.to_string(),
-                )
-            })?;
-        let execution_profile = command.proof.execution_profile().map_err(|error| {
-            store_error(
-                DeliveryStoreErrorCode::InvalidStoreOptions,
-                error.to_string(),
-            )
-        })?;
         if let Some(replayed) = replayed_append(
             &stored,
             &command.request_id,
@@ -1201,7 +1184,7 @@ impl<'journal> DeliveryStore<'journal> {
             command.expected_revision,
             &command.run,
             command.now_millis,
-            &execution_profile,
+            &command.execution_profile,
         )?;
         self.append_authorized(
             AppendDelivery {
@@ -1212,7 +1195,7 @@ impl<'journal> DeliveryStore<'journal> {
                 expected_revision: command.expected_revision,
                 snapshot: next,
             },
-            AppendAuthority::WorkRun(&command.run, &command.authority, &command.proof),
+            AppendAuthority::WorkRun(&command.run, &command.authority, &command.execution_profile),
         )
     }
 
@@ -1469,16 +1452,8 @@ impl<'journal> DeliveryStore<'journal> {
                     .validate_rework_clarification_source(&stored.snapshot)
                     .map_err(|error| map_transition_error(&error, &command, &stored.snapshot))?;
             }
-            AppendAuthority::WorkRun(run, authority, proof) => {
+            AppendAuthority::WorkRun(run, authority, execution_profile) => {
                 validate_work_run_authority(run, authority)?;
-                proof
-                    .verify_work_run(run, &command.delivery_id.0)
-                    .map_err(|error| {
-                        store_error(
-                            DeliveryStoreErrorCode::InvalidStoreOptions,
-                            error.to_string(),
-                        )
-                    })?;
                 validate_authorized_operation(
                     command.operation,
                     DeliveryMutationOperation::WorkRunAppended,
@@ -1489,12 +1464,7 @@ impl<'journal> DeliveryStore<'journal> {
                     command.expected_revision,
                     run,
                     command.snapshot.snapshot().updated_at_millis,
-                    &proof.execution_profile().map_err(|error| {
-                        store_error(
-                            DeliveryStoreErrorCode::InvalidStoreOptions,
-                            error.to_string(),
-                        )
-                    })?,
+                    execution_profile,
                 )
                 .map_err(|error| {
                     store_error(
@@ -1663,8 +1633,8 @@ enum AppendAuthority<'transition> {
     ReworkClarification(&'transition WorkRunStartResult),
     WorkRun(
         &'transition WorkRun,
-        &'transition ExecutionDispatchAuthority,
-        &'transition ExecutionDispatchWorkRunProof,
+        &'transition DurableDispatchAuthorityInput,
+        &'transition str,
     ),
 }
 
@@ -1770,16 +1740,15 @@ fn create_work_items_snapshot(
 
 fn validate_work_run_authority(
     run: &WorkRun,
-    authority: &ExecutionDispatchAuthority,
+    authority: &DurableDispatchAuthorityInput,
 ) -> Result<(), DeliveryStoreError> {
-    let lease = authority.lease();
-    let valid = run.execution_job_id == lease.job_id
-        && run.lease_id == lease.lease_id
-        && run.worker_id == lease.worker_id
-        && run.worker_instance_id == lease.worker_instance_id
-        && run.worker_session_id == *authority.worker_session_id()
-        && run.attempt == i64::try_from(lease.attempt).unwrap_or_default()
-        && run.fencing_token == lease.fencing_token.0;
+    let valid = run.execution_job_id == authority.execution_job_id
+        && run.lease_id == authority.lease_id
+        && run.worker_id == authority.worker_id
+        && run.worker_instance_id == authority.worker_instance_id
+        && run.worker_session_id == authority.worker_session_id
+        && run.attempt == i64::try_from(authority.attempt).unwrap_or_default()
+        && run.fencing_token == authority.fencing_token.0;
     if valid {
         Ok(())
     } else {

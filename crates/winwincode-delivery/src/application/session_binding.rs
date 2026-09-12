@@ -2,18 +2,13 @@
 
 //! Exact execution-session binding transitions.
 
+use crate::domain::{
+    Delivery, SessionBindingSourceKind, SessionBindingSourceProvenance, SessionRuntimeContext,
+};
 use winwincode_domain::{
     CodexThreadId, DeliveryId, ExecutionJobId, FencingToken, LeaseId, ProductSessionId, RequestId,
     Revision, Sha256Digest, WorkContractId, WorkItemId, WorkItemState, WorkRunId, WorkerId,
     WorkerInstanceId, WorkerSessionId,
-};
-use winwincode_storage::{
-    ExecutionLeaseRecord, ExecutionQueueScope, ExecutionScopeReplacementAuthority,
-    WorkerSlotAuthority,
-};
-
-use crate::domain::{
-    Delivery, SessionBindingSourceKind, SessionBindingSourceProvenance, SessionRuntimeContext,
 };
 
 use super::{CoordinationError, CoordinationErrorCode, require_mutation_time};
@@ -47,6 +42,41 @@ pub struct SessionBindingAuthority {
     source_provenance: SessionBindingSourceProvenance,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableExecutionLeaseInput {
+    pub job_id: ExecutionJobId,
+    pub lease_id: LeaseId,
+    pub worker_id: WorkerId,
+    pub worker_instance_id: WorkerInstanceId,
+    pub attempt: u64,
+    pub fencing_token: FencingToken,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableWorkerSlotInput {
+    pub worker_id: WorkerId,
+    pub worker_instance_id: WorkerInstanceId,
+    pub worker_session_id: WorkerSessionId,
+    pub codex_thread_id: CodexThreadId,
+    pub job_id: ExecutionJobId,
+    pub lease_id: LeaseId,
+    pub attempt: u64,
+    pub fencing_token: FencingToken,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableExecutionAttemptReplacementInput {
+    pub receipt_id: RequestId,
+    pub receipt_digest: Sha256Digest,
+    pub delivery_id: Option<DeliveryId>,
+    pub product_session_id: ProductSessionId,
+    pub work_run_id: Option<WorkRunId>,
+    pub predecessor_lease: DurableExecutionLeaseInput,
+    pub predecessor_worker_session_id: Option<WorkerSessionId>,
+    pub predecessor_slot: Option<DurableWorkerSlotInput>,
+    pub successor_lease: DurableExecutionLeaseInput,
+}
+
 /// Scheduler-sealed old-to-new execution authority accepted by one Delivery.
 ///
 /// Only [`Self::from_scheduler`] can construct production values. The
@@ -56,27 +86,29 @@ pub struct SessionBindingAuthority {
 pub struct DeliveryExecutionAttemptReplacement {
     receipt_id: RequestId,
     receipt_digest: Sha256Digest,
-    scope: ExecutionQueueScope,
+    delivery_id: Option<DeliveryId>,
+    product_session_id: ProductSessionId,
     work_run_id: Option<WorkRunId>,
-    predecessor_lease: ExecutionLeaseRecord,
+    predecessor_lease: DurableExecutionLeaseInput,
     predecessor_worker_session_id: Option<WorkerSessionId>,
-    predecessor_slot: Option<WorkerSlotAuthority>,
-    successor_lease: ExecutionLeaseRecord,
+    predecessor_slot: Option<DurableWorkerSlotInput>,
+    successor_lease: DurableExecutionLeaseInput,
 }
 
 impl DeliveryExecutionAttemptReplacement {
     /// Copies one already verified scheduler seal into the Delivery owner.
     #[must_use]
-    pub fn from_scheduler(authority: &ExecutionScopeReplacementAuthority) -> Self {
+    pub fn from_scheduler(authority: DurableExecutionAttemptReplacementInput) -> Self {
         Self {
-            receipt_id: authority.receipt_id().clone(),
-            receipt_digest: authority.receipt_digest().clone(),
-            scope: authority.scope().clone(),
-            work_run_id: authority.work_run_id().cloned(),
-            predecessor_lease: authority.predecessor_lease().clone(),
-            predecessor_worker_session_id: authority.previous_worker_session_id().cloned(),
-            predecessor_slot: authority.predecessor_slot().cloned(),
-            successor_lease: authority.replacement_lease().clone(),
+            receipt_id: authority.receipt_id,
+            receipt_digest: authority.receipt_digest,
+            delivery_id: authority.delivery_id,
+            product_session_id: authority.product_session_id,
+            work_run_id: authority.work_run_id,
+            predecessor_lease: authority.predecessor_lease,
+            predecessor_worker_session_id: authority.predecessor_worker_session_id,
+            predecessor_slot: authority.predecessor_slot,
+            successor_lease: authority.successor_lease,
         }
     }
 
@@ -303,8 +335,8 @@ fn validate_replacement_identity(
 ) -> Result<(), CoordinationError> {
     let predecessor = &replacement.predecessor_lease;
     let successor = &replacement.successor_lease;
-    if replacement.scope.delivery_id.as_ref() != Some(&identity.delivery_id)
-        || replacement.scope.product_session_id != identity.product_session_id
+    if replacement.delivery_id.as_ref() != Some(&identity.delivery_id)
+        || replacement.product_session_id != identity.product_session_id
         || predecessor.job_id != identity.execution_job_id
         || successor.job_id != identity.execution_job_id
         || run.attempt != i64::try_from(predecessor.attempt).unwrap_or(-1)
@@ -699,17 +731,17 @@ fn active_run<'delivery>(
 #[cfg(test)]
 mod tests {
     use super::{
-        DeliveryExecutionAttemptReplacement, SessionBindingAuthority, SessionBindingIdentity,
+        DeliveryExecutionAttemptReplacement, DurableExecutionLeaseInput, DurableWorkerSlotInput,
+        SessionBindingAuthority, SessionBindingIdentity,
         accept_replacement_worker_session_with_authority, accept_worker_session_with_authority,
         report_codex_thread_with_authority,
     };
     use crate::domain::SessionBindingSourceProvenance;
     use crate::domain::{Delivery, DeliveryStatus, test_fixture};
     use winwincode_domain::{
-        CodexThreadId, ExecutionMessageId, FencingToken, Instant, LeaseId, RequestId, Sha256Digest,
+        CodexThreadId, ExecutionMessageId, FencingToken, LeaseId, RequestId, Sha256Digest,
         WorkerId, WorkerInstanceId, WorkerSessionId,
     };
-    use winwincode_storage::{ExecutionLeaseRecord, WorkerSlotAuthority};
 
     fn active_delivery() -> Delivery {
         let mut snapshot = test_fixture();
@@ -802,37 +834,22 @@ mod tests {
 
     fn replacement(delivery: &Delivery) -> DeliveryExecutionAttemptReplacement {
         let binding = &delivery.snapshot().session_bindings[0];
-        let predecessor_lease = ExecutionLeaseRecord {
+        let predecessor_lease = DurableExecutionLeaseInput {
             job_id: binding.execution_job_id.clone(),
             lease_id: binding.lease_id.clone().expect("old lease"),
-            payload_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
             worker_id: binding.worker_id.clone().expect("old Worker"),
             worker_instance_id: binding.worker_instance_id.clone().expect("old instance"),
             attempt: binding.attempt,
             fencing_token: binding.fencing_token.clone().expect("old fence"),
-            issued_at: Instant("2027-10-01T10:00:01.000Z".into()),
-            expires_at: Instant("2027-10-01T10:00:20.000Z".into()),
         };
         DeliveryExecutionAttemptReplacement {
             receipt_id: RequestId("req_01J00000000000000000000009".into()),
             receipt_digest: Sha256Digest(format!("sha256:{}", "b".repeat(64))),
-            scope: winwincode_storage::ExecutionQueueScope {
-                organization_id: winwincode_domain::OrganizationId(
-                    "org_01J00000000000000000000000".into(),
-                ),
-                workspace_id: winwincode_domain::WorkspaceId(
-                    "wsp_01J00000000000000000000000".into(),
-                ),
-                project_id: winwincode_domain::ProjectId("prj_01J00000000000000000000000".into()),
-                repository_id: winwincode_domain::RepositoryId(
-                    "rep_01J00000000000000000000000".into(),
-                ),
-                product_session_id: binding.product_session_id.clone(),
-                delivery_id: Some(binding.delivery_id.clone()),
-            },
+            delivery_id: Some(binding.delivery_id.clone()),
+            product_session_id: binding.product_session_id.clone(),
             work_run_id: Some(delivery.snapshot().work_run_aggregate.runs[0].id.clone()),
             predecessor_worker_session_id: binding.worker_session_id.clone(),
-            predecessor_slot: Some(WorkerSlotAuthority {
+            predecessor_slot: Some(DurableWorkerSlotInput {
                 worker_id: predecessor_lease.worker_id.clone(),
                 worker_instance_id: predecessor_lease.worker_instance_id.clone(),
                 worker_session_id: binding.worker_session_id.clone().expect("old session"),
@@ -842,16 +859,13 @@ mod tests {
                 attempt: predecessor_lease.attempt,
                 fencing_token: predecessor_lease.fencing_token.clone(),
             }),
-            successor_lease: ExecutionLeaseRecord {
+            successor_lease: DurableExecutionLeaseInput {
                 job_id: predecessor_lease.job_id.clone(),
                 lease_id: LeaseId("lse_01J00000000000000000000009".into()),
-                payload_digest: predecessor_lease.payload_digest.clone(),
                 worker_id: predecessor_lease.worker_id.clone(),
                 worker_instance_id: WorkerInstanceId("wki_01J00000000000000000000009".into()),
                 attempt: predecessor_lease.attempt + 1,
                 fencing_token: FencingToken("8".into()),
-                issued_at: Instant("2027-10-01T10:00:21.000Z".into()),
-                expires_at: Instant("2027-10-01T10:00:40.000Z".into()),
             },
             predecessor_lease,
         }

@@ -8,10 +8,9 @@ use super::workrun_execution::{TerminalOutcomeStatus, VerifiedTerminalOutcome};
 use std::collections::HashSet;
 use winwincode_domain::is_canonical_prefixed_id;
 use winwincode_domain::{
-    Revision, SchemaVersion, WorkContract, WorkItem, WorkItemId, WorkItemState, WorkRun, WorkRunId,
+    Revision, SchemaVersion, WorkContract, WorkItem, WorkItemId, WorkItemState, WorkRun,
     WorkRunState,
 };
-use winwincode_storage::ExecutionDispatchAuthority;
 
 fn valid_revision(value: i64) -> bool {
     (1..=9_007_199_254_740_991).contains(&value)
@@ -598,33 +597,6 @@ struct WorkRunTerminalFact {
 }
 
 impl WorkRunTerminalFact {
-    fn from_dispatch_authority(
-        run: &WorkRun,
-        authority: &ExecutionDispatchAuthority,
-        verified: &VerifiedTerminalOutcome,
-    ) -> Result<Self, WorkRunSchedulingError> {
-        let lease = authority.lease();
-        if verified.work_run_id() != &run.id
-            || run.execution_job_id != lease.job_id
-            || run.lease_id != lease.lease_id
-            || run.worker_id != lease.worker_id
-            || run.worker_instance_id != lease.worker_instance_id
-            || &run.worker_session_id != authority.worker_session_id()
-            || u64::try_from(run.attempt).ok() != Some(lease.attempt)
-            || run.fencing_token != lease.fencing_token.0
-            || verified.execution_job_id() != &lease.job_id
-            || verified.lease_id() != &lease.lease_id
-            || verified.worker_id() != &lease.worker_id
-            || verified.worker_instance_id() != &lease.worker_instance_id
-            || verified.attempt() != lease.attempt
-            || verified.fencing_token() != &lease.fencing_token
-            || verified.worker_session_id() != authority.worker_session_id()
-        {
-            return Err(WorkRunSchedulingError::StaleWorkItem);
-        }
-        Self::from_verified(run, verified)
-    }
-
     fn from_verified(
         run: &WorkRun,
         verified: &VerifiedTerminalOutcome,
@@ -761,26 +733,6 @@ fn start_next_work_run(
 }
 
 impl WorkRunAggregate {
-    /// Settles only the persisted run whose complete lease binding was verified.
-    ///
-    /// # Errors
-    /// Rejects stale or mismatched run, lease, terminal evidence or revision.
-    pub fn settle_verified_run(
-        &mut self,
-        run_id: &WorkRunId,
-        authority: &ExecutionDispatchAuthority,
-        verified: &VerifiedTerminalOutcome,
-    ) -> Result<(), WorkRunSchedulingError> {
-        self.validate()?;
-        let run = self
-            .runs
-            .iter()
-            .find(|run| &run.id == run_id)
-            .ok_or(WorkRunSchedulingError::StaleWorkItem)?;
-        let fact = WorkRunTerminalFact::from_dispatch_authority(run, authority, verified)?;
-        self.settle_fact(&fact)
-    }
-
     pub(crate) fn settle_verified_outcome(
         &mut self,
         verified: &VerifiedTerminalOutcome,

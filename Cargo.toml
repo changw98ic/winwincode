@@ -84,6 +84,7 @@ winwincode-api = { path = "crates/winwincode-api" }
 winwincode-audit = { path = "crates/winwincode-audit" }
 winwincode-backup = { path = "crates/winwincode-backup" }
 winwincode-data-export = { path = "crates/winwincode-data-export" }
+winwincode-delivery = { version = "=0.1.0-alpha.2", path = "crates/winwincode-delivery" }
 winwincode-domain = { version = "=0.1.0-alpha.2", path = "crates/winwincode-domain" }
 winwincode-execution-port = { path = "crates/winwincode-execution-port" }
 winwincode-integration-core = { version = "=0.1.0-alpha.2", path = "crates/winwincode-integration-core" }

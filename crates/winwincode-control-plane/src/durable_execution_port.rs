@@ -349,7 +349,9 @@ impl<'application> DurableExecutionPortIngress<'application> {
                         },
                     );
                 }
-                let authority = seal_session_binding_authority(&authority);
+                let authority = seal_session_binding_authority(
+                    &winwincode_storage::delivery_dispatch_authority(&authority),
+                );
                 self.control_plane
                     .commit_delivery_session_binding(binding, &authority, &self.server_time)
                     .map_err(DurableExecutionPortError::SessionBinding)?;
@@ -357,7 +359,9 @@ impl<'application> DurableExecutionPortIngress<'application> {
             }
             ExecutionPortMessage::RuntimeEventMessage(runtime) => {
                 let authority = self.dispatch_authority(&runtime.lease.job_id)?;
-                let authority = seal_session_binding_authority(&authority);
+                let authority = seal_session_binding_authority(
+                    &winwincode_storage::delivery_dispatch_authority(&authority),
+                );
                 let acknowledgement = self
                     .control_plane
                     .accept_runtime_event(
@@ -650,7 +654,7 @@ impl<'application> DurableExecutionPortIngress<'application> {
             ));
         };
         Ok(seal_dispatch_terminal_outcome(
-            authority,
+            &winwincode_storage::delivery_dispatch_authority(authority),
             WorkerTerminalOutcomeReport {
                 work_run_id: job_scope.work_run_id.clone(),
                 status: terminal_status(&message.outcome.status),

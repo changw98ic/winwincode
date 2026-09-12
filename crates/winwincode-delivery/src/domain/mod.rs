@@ -30,7 +30,8 @@ use winwincode_domain::is_canonical_prefixed_id;
 pub use attention::{AttentionItem, AttentionItemStatus, AttentionItemType, AttentionOption};
 pub(crate) use candidate::assert_frozen_candidate_current;
 pub use candidate::{
-    CandidatePathFact, CandidatePathState, FreezeCandidateFacts, FrozenDeliveryCandidate,
+    CandidateHunkFact, CandidatePathFact, CandidatePathState, DurableCandidateArtifactInput,
+    DurableCandidateSourceInput, FreezeCandidateFacts, FrozenDeliveryCandidate,
     ValidatedGitSnapshotFact, freeze_delivery_candidate,
 };
 pub use evidence::{EvidenceRef, EvidenceRefType, VerifiedEvidenceOutcome};

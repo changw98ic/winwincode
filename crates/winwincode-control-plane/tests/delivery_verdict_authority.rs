@@ -538,9 +538,12 @@ fn seed_verdict_sources(
     ) {
         current_candidate_ref = "git-candidate:latest-writer-failed".to_owned();
     } else {
-        let frozen =
-            freeze_delivery_candidate_from_source(delivery, &writer_source, &writer_terminal)
-                .expect("frozen production candidate");
+        let frozen = freeze_delivery_candidate_from_source(
+            delivery,
+            &winwincode_storage::delivery_candidate_source(&writer_source),
+            &writer_terminal,
+        )
+        .expect("frozen production candidate");
         current_candidate_ref = frozen.candidate_ref().to_owned();
         writer_candidate.replace(frozen);
     }

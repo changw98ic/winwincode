@@ -101,7 +101,12 @@ pub(crate) fn resolve(
         )
         .into());
     }
-    freeze_delivery_candidate_from_source(&delivery, &source, terminal_facts).map_err(Into::into)
+    freeze_delivery_candidate_from_source(
+        &delivery,
+        &winwincode_storage::delivery_candidate_source(&source),
+        terminal_facts,
+    )
+    .map_err(Into::into)
 }
 
 /// Rebuilds a candidate source from a complete Artifact and the current

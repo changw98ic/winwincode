@@ -143,7 +143,9 @@
         "provide-atomic-product-state-receipts-and-outbox-storage"
       ],
       "allowedInternalDependencies": [
-        "winwincode-domain"
+        "winwincode-delivery",
+        "winwincode-domain",
+        "winwincode-publication"
       ]
     },
     {
@@ -200,8 +202,7 @@
         "own-delivery-state-stage-runs-and-candidate-verdict-rules"
       ],
       "allowedInternalDependencies": [
-        "winwincode-domain",
-        "winwincode-storage"
+        "winwincode-domain"
       ]
     },
     {
@@ -229,8 +230,7 @@
         "own-approval-bound-external-publication-effects"
       ],
       "allowedInternalDependencies": [
-        "winwincode-domain",
-        "winwincode-storage"
+        "winwincode-domain"
       ]
     },
     {
@@ -412,8 +412,7 @@
       ],
       "allowedInternalDependencies": [
         "winwincode-domain",
-        "winwincode-integration-core",
-        "winwincode-publication"
+        "winwincode-integration-core"
       ]
     },
     {

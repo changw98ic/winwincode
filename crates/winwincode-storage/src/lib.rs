@@ -15,6 +15,7 @@ mod client_launch_grant;
 mod client_occupancy;
 mod client_registry;
 mod control_plane_instances;
+mod delivery;
 mod device_execution_binding;
 mod device_scheduler;
 mod execution_admission;
@@ -78,6 +79,9 @@ pub use control_plane_instances::{
     ControlPlaneInstanceAuthority, ControlPlaneInstanceError, ControlPlaneInstanceErrorKind,
     ControlPlaneInstanceHealth, ControlPlaneInstanceIdentity, ControlPlaneInstanceLedger,
     ControlPlaneInstanceState,
+};
+pub use delivery::{
+    delivery_candidate_source, delivery_dispatch_authority, delivery_execution_replacement,
 };
 pub use device_execution_binding::{
     DeviceBindingReceipt, DeviceExecutionBindingIssuance, DeviceExecutionBindingLedger,
