@@ -15,11 +15,16 @@ import {
   managedRunPhaseText,
   managedRunPhaseTone,
 } from './candidate-run-preview-view-model.js'
+import type { PageAnnotationViewModel } from './page-annotation-view-model.js'
+import { mountPageAnnotationPage } from './page-annotation-page.js'
 
 export interface CandidateRunPreviewPageOptions {
   readonly root: HTMLElement
   readonly model: CandidatePreviewViewModel
   readonly taskHref?: string
+  readonly annotations?: PageAnnotationViewModel
+  readonly appOrigin?: string
+  readonly devicePixelRatio?: number
 }
 
 export interface CandidateRunPreviewPage {
@@ -134,6 +139,7 @@ export function mountCandidateRunPreviewPage(
   const fileList = element(document, 'ul', 'wwc-candidate-run-preview-files')
   const logList = element(document, 'ul', 'wwc-candidate-run-preview-logs')
   const citation = element(document, 'p', 'wwc-candidate-run-preview-citation')
+  const annotationRoot = element(document, 'div', 'wwc-candidate-run-preview-annotations')
 
   let closed = false
 
@@ -206,9 +212,15 @@ export function mountCandidateRunPreviewPage(
     fileList,
     logList,
     citation,
+    annotationRoot,
   )
   topbar.append(back)
   options.root.replaceChildren(section)
+  const annotationPage = options.annotations === undefined
+    ? null
+    : mountPageAnnotationPage({ root: annotationRoot, model: options.annotations })
+  annotationRoot.hidden = annotationPage === null
+  let annotationSurface = ''
 
   function renderFiles(files: readonly PreviewFileFacts[]): void {
     fileList.replaceChildren()
@@ -327,6 +339,29 @@ export function mountCandidateRunPreviewPage(
       openPreview.hidden = false
       openPreview.href = frameUrl
     }
+    if (options.annotations !== undefined && state.source !== null) {
+      const nextSurface = [
+        state.source.previewAccessId,
+        state.source.access,
+        state.navigation.path,
+        state.viewport.width,
+        state.viewport.height,
+      ].join('|')
+      if (annotationSurface !== nextSurface) {
+        annotationSurface = nextSurface
+        options.annotations.prepare({
+          pageUrl: frameUrl ?? options.appOrigin ?? 'about:blank',
+          pagePath: state.navigation.path,
+          access: state.source.access === 'authorized' ? 'authorized' : 'revoked',
+          injectable: false,
+          viewport: {
+            width: state.viewport.width,
+            height: state.viewport.height,
+            devicePixelRatio: options.devicePixelRatio ?? 1,
+          },
+        })
+      }
+    }
 
     renderFiles(state.files)
     renderLogs(state.logSegments)
@@ -387,6 +422,7 @@ export function mountCandidateRunPreviewPage(
     close() {
       closed = true
       unsubscribe()
+      annotationPage?.close()
       options.model.close()
       options.root.replaceChildren()
     },

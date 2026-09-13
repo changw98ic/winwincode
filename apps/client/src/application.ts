@@ -1380,10 +1380,12 @@ export function mountWinWinCodeClient(
         { createCandidatePreviewViewModel },
         { mountCandidateRunPreviewPage },
         { createControlPlaneCandidatePreviewPort },
+        { createPageAnnotationViewModel },
       ] = await Promise.all([
         import('./candidate-run-preview-view-model.js'),
         import('./candidate-run-preview-page.js'),
         import('./candidate-run-preview-control-plane.js'),
+        import('./page-annotation-view-model.js'),
       ])
       if (closed || generation !== renderGeneration || controller.signal.aborted) return
       const parameters = routeParameters(browser.location.hash)
@@ -1420,6 +1422,9 @@ export function mountWinWinCodeClient(
       activeFeature = mountCandidateRunPreviewPage({
         root: slot,
         model,
+        annotations: createPageAnnotationViewModel({ appOrigin: browser.location.origin }),
+        appOrigin: browser.location.origin,
+        devicePixelRatio: browser.devicePixelRatio,
         taskHref: surfaceHash('/home', scopeSelectionFromHash(browser.location.hash)),
       })
     } catch (error) {

@@ -76,10 +76,11 @@ export interface PageAnnotationViewModel {
   readonly state: AnnotationState
   subscribe(listener: (state: AnnotationState) => void): () => void
   prepare(input: {
-    readonly origin: string
     readonly pageUrl: string
+    readonly pagePath: string
     readonly access: 'authorized' | 'revoked'
     readonly injectable: boolean
+    readonly viewport: AnnotationViewport
   }): void
   pickElement(summary: AnnotationElementSummary): void
   markScreenshotRegion(region: AnnotationScreenshotRegion): void
@@ -140,11 +141,12 @@ function clampRegion(
   region: AnnotationScreenshotRegion,
   viewport: AnnotationViewport,
 ): AnnotationScreenshotRegion | null {
+  if (![region.x, region.y, region.width, region.height].every(Number.isFinite)
+    || region.width <= 0 || region.height <= 0) return null
   const x = Math.max(0, Math.min(viewport.width - 1, Math.round(region.x)))
   const y = Math.max(0, Math.min(viewport.height - 1, Math.round(region.y)))
   const width = Math.max(1, Math.min(viewport.width - x, Math.round(region.width)))
   const height = Math.max(1, Math.min(viewport.height - y, Math.round(region.height)))
-  if (!Number.isFinite(x) || !Number.isFinite(y)) return null
   return Object.freeze({ x, y, width, height })
 }
 
@@ -193,13 +195,8 @@ export function createPageAnnotationViewModel(
         access: input.access,
         injectable: input.injectable,
       })
-      let path = '/'
-      try {
-        path = new URL(input.pageUrl).pathname
-      } catch {
-        path = '/'
-      }
-      pagePath = path
+      pagePath = input.pagePath
+      viewport = input.viewport
       pendingElement = null
       pendingRegion = null
       comment = ''
@@ -208,7 +205,7 @@ export function createPageAnnotationViewModel(
         injectability: resolved.kind,
         surfaceKind: surfaceKindFor(resolved.kind),
         degradationReason: resolved.reason,
-        drafts: Object.freeze([]),
+        drafts: state.status === 'idle' ? Object.freeze([]) : state.drafts,
         notice: resolved.reason,
       })
     },
@@ -246,7 +243,7 @@ export function createPageAnnotationViewModel(
       emit({ ...ready, notice: null })
     },
     setComment(text) {
-      comment = text
+      comment = text.slice(0, 4000)
     },
     addDraft() {
       if (closed) return
@@ -258,6 +255,10 @@ export function createPageAnnotationViewModel(
       }
       if (comment.trim().length === 0) {
         emit({ ...ready, notice: '请填写批注意见。' })
+        return
+      }
+      if (ready.drafts.length >= 50) {
+        emit({ ...ready, notice: '一次最多记录 50 条页面批注。' })
         return
       }
       const draft: PageAnnotationDraft = Object.freeze({

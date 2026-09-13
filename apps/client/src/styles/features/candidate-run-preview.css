@@ -54,3 +54,24 @@
   font-family: var(--wwc-font-mono, ui-monospace, monospace);
   font-size: 12px;
 }
+
+.wwc-page-annotation {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  border-top: 1px solid var(--wwc-border, #d0d7de);
+  padding-top: 12px;
+}
+
+.wwc-page-annotation-heading,
+.wwc-page-annotation-mode,
+.wwc-page-annotation-notice,
+.wwc-page-annotation-comment,
+.wwc-page-annotation-list {
+  flex-basis: 100%;
+}
+
+.wwc-page-annotation-coordinate {
+  width: 72px;
+}

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type {
+  AnnotationElementSummary,
   PageAnnotationDraft,
   AnnotationState,
   PageAnnotationViewModel,
@@ -9,13 +10,8 @@ import type {
 export interface PageAnnotationPageOptions {
   readonly root: HTMLElement
   readonly model: PageAnnotationViewModel
-  /** Called once with the prepared injectability inputs. */
-  readonly prepare: () => {
-    readonly origin: string
-    readonly pageUrl: string
-    readonly access: 'authorized' | 'revoked'
-    readonly injectable: boolean
-  }
+  /** Present only when the host installed a restricted element-pick bridge. */
+  readonly pickElement?: () => AnnotationElementSummary | null
 }
 
 export interface PageAnnotationPage {
@@ -56,6 +52,10 @@ export function mountPageAnnotationPage(
   const notice = element(document, 'p', 'wwc-page-annotation-notice')
   const pick = element(document, 'button', 'wwc-page-annotation-pick')
   const region = element(document, 'button', 'wwc-page-annotation-region')
+  const x = element(document, 'input', 'wwc-page-annotation-coordinate')
+  const y = element(document, 'input', 'wwc-page-annotation-coordinate')
+  const width = element(document, 'input', 'wwc-page-annotation-coordinate')
+  const height = element(document, 'input', 'wwc-page-annotation-coordinate')
   const comment = element(document, 'textarea', 'wwc-page-annotation-comment')
   const add = element(document, 'button', 'wwc-page-annotation-add')
   const submit = element(document, 'button', 'wwc-page-annotation-submit')
@@ -68,8 +68,15 @@ export function mountPageAnnotationPage(
   notice.setAttribute('role', 'status')
   pick.type = 'button'
   pick.textContent = '拾取元素'
+  pick.title = options.pickElement === undefined ? '当前预览没有可用的受限拾取桥' : ''
   region.type = 'button'
-  region.textContent = '框选截图区域'
+  region.textContent = '记录截图区域'
+  for (const [input, label] of [[x, 'X'], [y, 'Y'], [width, '宽'], [height, '高']] as const) {
+    input.type = 'number'
+    input.min = label === '宽' || label === '高' ? '1' : '0'
+    input.placeholder = label
+    input.setAttribute('aria-label', `截图区域${label}`)
+  }
   add.type = 'button'
   add.textContent = '添加批注'
   submit.type = 'button'
@@ -113,7 +120,7 @@ export function mountPageAnnotationPage(
     mode.dataset.surface = state.surfaceKind
     notice.hidden = state.notice === null
     notice.textContent = state.notice ?? ''
-    pick.disabled = state.surfaceKind !== 'injectable-element'
+    pick.disabled = state.surfaceKind !== 'injectable-element' || options.pickElement === undefined
     region.disabled = false
     add.disabled = false
     submit.disabled = state.drafts.length === 0
@@ -121,16 +128,16 @@ export function mountPageAnnotationPage(
   }
 
   pick.addEventListener('click', () => {
-    options.model.pickElement({
-      tagName: 'button',
-      role: 'button',
-      accessibleName: '提交',
-      locator: 'role=button[name=提交]',
-      bounds: { x: 24, y: 40, width: 96, height: 32 },
-    })
+    const summary = options.pickElement?.()
+    if (summary !== null && summary !== undefined) options.model.pickElement(summary)
   })
   region.addEventListener('click', () => {
-    options.model.markScreenshotRegion({ x: 10, y: 10, width: 200, height: 120 })
+    options.model.markScreenshotRegion({
+      x: Number(x.value),
+      y: Number(y.value),
+      width: Number(width.value),
+      height: Number(height.value),
+    })
   })
   add.addEventListener('click', () => {
     options.model.setComment(comment.value)
@@ -142,9 +149,8 @@ export function mountPageAnnotationPage(
   })
 
   const unsubscribe = options.model.subscribe(render)
-  section.append(heading, mode, notice, pick, region, comment, add, submit, list)
+  section.append(heading, mode, notice, pick, x, y, width, height, region, comment, add, submit, list)
   options.root.replaceChildren(section)
-  options.model.prepare(options.prepare())
   render(options.model.state)
 
   return {

@@ -95,10 +95,11 @@ test('RUN-09 revoked or non-injectable never claims pickable', () => {
 test('screenshot draft works without element pick', () => {
   const model = createPageAnnotationViewModel({ appOrigin: APP_ORIGIN })
   model.prepare({
-    origin: APP_ORIGIN,
     pageUrl: 'https://cdn.example.test/doc',
+    pagePath: '/doc',
     access: 'authorized',
     injectable: true,
+    viewport: { width: 1280, height: 800, devicePixelRatio: 1 },
   })
   assert.equal(model.state.status, 'ready')
   if (model.state.status !== 'ready') return
@@ -132,10 +133,11 @@ test('element pick draft keeps locator and bounds on injectable surface', () => 
     nextDraftId: () => 'ann_1',
   })
   model.prepare({
-    origin: APP_ORIGIN,
     pageUrl: `${APP_ORIGIN}/preview`,
+    pagePath: '/preview',
     access: 'authorized',
     injectable: true,
+    viewport: { width: 390, height: 844, devicePixelRatio: 2 },
   })
   model.pickElement({
     tagName: 'button',
@@ -155,19 +157,52 @@ test('element pick draft keeps locator and bounds on injectable surface', () => 
   }
 })
 
+test('page element pick uses only the host bridge result', () => {
+  const document = new TrackedDocument()
+  const rootElement = document.createElement('div')
+  const model = createPageAnnotationViewModel({ appOrigin: APP_ORIGIN })
+  model.prepare({
+    pageUrl: `${APP_ORIGIN}/preview`,
+    pagePath: '/preview',
+    access: 'authorized',
+    injectable: true,
+    viewport: { width: 390, height: 844, devicePixelRatio: 2 },
+  })
+  const page = mountPageAnnotationPage({
+    root: rootElement,
+    model,
+    pickElement: () => ({
+      tagName: 'button',
+      role: 'button',
+      accessibleName: '保存',
+      locator: 'role=button[name=保存]',
+      bounds: { x: 12, y: 20, width: 80, height: 32 },
+    }),
+  })
+  findByClass(rootElement, 'wwc-page-annotation-pick').emit('click')
+  findByClass(rootElement, 'wwc-page-annotation-comment').value = '保留这个按钮'
+  findByClass(rootElement, 'wwc-page-annotation-add').emit('click')
+  assert.equal(model.state.status, 'ready')
+  if (model.state.status === 'ready') {
+    assert.equal(model.state.drafts[0].element?.locator, 'role=button[name=保存]')
+  }
+  page.close()
+})
+
 test('page mounts degradation copy for cross-origin', async () => {
   const document = new TrackedDocument()
   const rootElement = document.createElement('div')
   const model = createPageAnnotationViewModel({ appOrigin: APP_ORIGIN })
+  model.prepare({
+    pageUrl: 'https://evil.example.test/',
+    pagePath: '/',
+    access: 'authorized',
+    injectable: true,
+    viewport: { width: 1280, height: 800, devicePixelRatio: 1 },
+  })
   const page = mountPageAnnotationPage({
     root: rootElement,
     model,
-    prepare: () => ({
-      origin: APP_ORIGIN,
-      pageUrl: 'https://evil.example.test/',
-      access: 'authorized',
-      injectable: true,
-    }),
   })
   await flush()
   const mode = findByClass(rootElement, 'wwc-page-annotation-mode')
@@ -175,6 +210,13 @@ test('page mounts degradation copy for cross-origin', async () => {
   const pick = findByClass(rootElement, 'wwc-page-annotation-pick')
   assert.equal(pick.disabled, true)
   const region = findByClass(rootElement, 'wwc-page-annotation-region')
+  const coordinates = []
+  const collectCoordinates = node => {
+    if (node.className === 'wwc-page-annotation-coordinate') coordinates.push(node)
+    for (const child of node.children) collectCoordinates(child)
+  }
+  collectCoordinates(rootElement)
+  ;[coordinates[0].value, coordinates[1].value, coordinates[2].value, coordinates[3].value] = ['10', '10', '200', '120']
   region.emit('click')
   const comment = findByClass(rootElement, 'wwc-page-annotation-comment')
   comment.value = '此处需要说明'

@@ -36,6 +36,7 @@ async function cachedModule(name) {
 const viewModule = await cachedModule('candidate-run-preview-view-model.js')
 const pageModule = await cachedModule('candidate-run-preview-page.js')
 const controlPlaneModule = await cachedModule('candidate-run-preview-control-plane.js')
+const annotationModule = await cachedModule('page-annotation-view-model.js')
 
 const {
   createCandidatePreviewViewModel,
@@ -52,6 +53,7 @@ const {
 } = viewModule
 const { mountCandidateRunPreviewPage } = pageModule
 const { createControlPlaneCandidatePreviewPort } = controlPlaneModule
+const { createPageAnnotationViewModel } = annotationModule
 
 function flush() {
   return new Promise(resolvePromise => setTimeout(resolvePromise, 0))
@@ -307,11 +309,19 @@ test('page mounts mode, controls, viewport, and files from one snapshot', async 
   const document = new TrackedDocument()
   const rootElement = document.createElement('div')
   const port = createPort()
+  const annotations = createPageAnnotationViewModel({ appOrigin: 'https://app.example.test' })
   const model = createCandidatePreviewViewModel({
     port,
     nextRequestId: () => 'req_1',
   })
-  const page = mountCandidateRunPreviewPage({ root: rootElement, model, taskHref: '#/home' })
+  const page = mountCandidateRunPreviewPage({
+    root: rootElement,
+    model,
+    annotations,
+    appOrigin: 'https://app.example.test',
+    devicePixelRatio: 2,
+    taskHref: '#/home',
+  })
   await flush()
   await flush()
 
@@ -339,6 +349,13 @@ test('page mounts mode, controls, viewport, and files from one snapshot', async 
   const access = findByClass(rootElement, 'wwc-candidate-run-preview-access')
   assert.ok(access)
   assert.doesNotMatch(access.textContent, /preview\.example\.test/)
+  const annotationMode = findByClass(rootElement, 'wwc-page-annotation-mode')
+  assert.ok(annotationMode)
+  assert.match(annotationMode.textContent, /降级为截图坐标/)
+  assert.equal(annotations.state.status, 'ready')
+  if (annotations.state.status === 'ready') {
+    assert.equal(annotations.state.surfaceKind, 'screenshot-coordinate')
+  }
 
   const degraded = findByClass(rootElement, 'wwc-candidate-run-preview-file-open')
   assert.ok(degraded)
