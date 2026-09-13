@@ -319,31 +319,6 @@ async fn login(address: std::net::SocketAddr, username: &str, password: &str) ->
     (session_cookie_from_response(&response), user_id)
 }
 
-/// Creates one member account and signs in; returns (cookie, userId).
-async fn create_and_login_member(
-    address: std::net::SocketAddr,
-    owner_cookie: &str,
-    username: &str,
-) -> (String, String) {
-    let create = json!({
-        "schemaVersion": SCHEMA_VERSION,
-        "username": username,
-        "role": "member",
-    })
-    .to_string();
-    let response = http_request(
-        address,
-        &cookie_post("/api/v1/users", &create, owner_cookie),
-    )
-    .await;
-    assert!(response.starts_with("HTTP/1.1 201"), "{response}");
-    let temporary = response_body(&response)["temporaryPassword"]
-        .as_str()
-        .expect("temporary password")
-        .to_owned();
-    login(address, username, &temporary).await
-}
-
 // ---- exchange protocol helpers (device side) ------------------------------
 
 async fn post_exchange(
@@ -904,101 +879,6 @@ async fn claim_completes_through_offer_ack_and_projects_occupied() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
-async fn concurrent_claims_exactly_one_wins_and_missing_grants_are_denied() {
-    let data_directory = test_directory("occupancy-race");
-    let auth_directory = test_directory("occupancy-race-sessions");
-    let running = start_server(&data_directory, &auth_directory).await;
-    let address = running.local_address();
-    let (owner_cookie, owner_id) = initialize_and_login_owner(address).await;
-    let (member_cookie, member_id) =
-        create_and_login_member(address, &owner_cookie, "member").await;
-    assert_ne!(owner_id, member_id);
-
-    let (node, public_client_id, credential) = enroll_online_device(address, &data_directory).await;
-
-    // A user without an active use grant fails the grant condition.
-    let response = http_request(
-        address,
-        &cookie_post(
-            "/api/v1/clients/occupancy",
-            &occupancy_body(&public_client_id),
-            &member_cookie,
-        ),
-    )
-    .await;
-    assert_eq!(status_of(&response), "403", "{response}");
-    assert_eq!(wire_code(&response), "ACCESS_DENIED");
-
-    consume_code_as(
-        &data_directory,
-        &node,
-        &publish_connect_code(&data_directory, &node, "11112222"),
-        &owner_id,
-    );
-    consume_code_as(
-        &data_directory,
-        &node,
-        &publish_connect_code(&data_directory, &node, "22223333"),
-        &member_id,
-    );
-    let responder = spawn_offer_responder(
-        data_directory.clone(),
-        address,
-        node.clone(),
-        credential,
-        downlink_ack_cursor(&data_directory, &node),
-        next_client_sequence(&data_directory, &node),
-    );
-
-    let owner_request = cookie_post(
-        "/api/v1/clients/occupancy",
-        &occupancy_body(&public_client_id),
-        &owner_cookie,
-    );
-    let member_request = cookie_post(
-        "/api/v1/clients/occupancy",
-        &occupancy_body(&public_client_id),
-        &member_cookie,
-    );
-    let (owner_response, member_response) = tokio::join!(
-        http_request(address, &owner_request),
-        http_request(address, &member_request)
-    );
-    let owner_status = status_of(&owner_response);
-    let member_status = status_of(&member_response);
-    assert_ne!(
-        owner_status, member_status,
-        "{owner_response} {member_response}"
-    );
-    let (winner_body, loser_code) = if owner_status == "201" {
-        assert_eq!(member_status, "409", "{member_response}");
-        assert_eq!(wire_code(&member_response), "OCCUPIED_BY_OTHER");
-        (response_body(&owner_response), "OCCUPIED_BY_OTHER")
-    } else {
-        assert_eq!(owner_status, "409", "{owner_response}");
-        assert_eq!(wire_code(&owner_response), "OCCUPIED_BY_OTHER");
-        (response_body(&member_response), "OCCUPIED_BY_OTHER")
-    };
-    let holder = winner_body["holderUserId"].as_str().expect("holder");
-    assert!(
-        holder == owner_id || holder == member_id,
-        "exactly one granted user holds the lease"
-    );
-
-    // Exactly one active lease exists and it belongs to the winner.
-    let lease = active_lease(&data_directory, &node).expect("the winning lease");
-    assert_eq!(lease.state, OccupancyLeaseState::Occupied);
-    assert_eq!(lease.holder_user_id, holder);
-    let _ = loser_code;
-
-    responder.abort();
-    running.shutdown().await.expect("shutdown");
-    let _ = std::fs::remove_dir_all(&data_directory);
-    let _ = std::fs::remove_dir_all(&auth_directory);
-}
-
-#[tokio::test]
 async fn unanswered_offer_times_out_rolls_back_and_feeds_the_rate_limit() {
     let data_directory = test_directory("occupancy-timeout");
     let auth_directory = test_directory("occupancy-timeout-sessions");
@@ -1059,103 +939,6 @@ async fn unanswered_offer_times_out_rolls_back_and_feeds_the_rate_limit() {
         ClientOccupancyErrorKind::RateLimited,
         "{throttled}"
     );
-
-    running.shutdown().await.expect("shutdown");
-    let _ = std::fs::remove_dir_all(&data_directory);
-    let _ = std::fs::remove_dir_all(&auth_directory);
-}
-
-#[tokio::test]
-async fn non_holder_gets_only_the_occupied_by_other_privacy_projection() {
-    let data_directory = test_directory("occupancy-privacy");
-    let auth_directory = test_directory("occupancy-privacy-sessions");
-    let running = start_server(&data_directory, &auth_directory).await;
-    let address = running.local_address();
-    let (owner_cookie, owner_id) = initialize_and_login_owner(address).await;
-    let (member_cookie, _member_id) =
-        create_and_login_member(address, &owner_cookie, "member").await;
-
-    let (node, public_client_id, credential) = enroll_online_device(address, &data_directory).await;
-    consume_code_as(
-        &data_directory,
-        &node,
-        &publish_connect_code(&data_directory, &node, "77778888"),
-        &owner_id,
-    );
-    let responder = spawn_offer_responder(
-        data_directory.clone(),
-        address,
-        node.clone(),
-        credential,
-        downlink_ack_cursor(&data_directory, &node),
-        next_client_sequence(&data_directory, &node),
-    );
-    claim_occupied(address, &public_client_id, &owner_cookie).await;
-    responder.abort();
-
-    // The non-holder sees only the privacy projection: exactly three fields,
-    // no holder identity, no lease identity, no capacity.
-    let response = http_request(
-        address,
-        &cookie_get(
-            &format!("/api/v1/clients/{public_client_id}/occupancy"),
-            &member_cookie,
-        ),
-    )
-    .await;
-    assert_eq!(status_of(&response), "200", "{response}");
-    let view = response_body(&response);
-    let fields = view
-        .as_object()
-        .expect("projection object")
-        .keys()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-    assert_eq!(fields.len(), 3, "{view}");
-    assert!(fields.contains(&"schemaVersion"));
-    assert!(fields.contains(&"clientId"));
-    assert_eq!(view["occupancy"], json!("occupied-by-other"));
-    let serialized = response_body(&response).to_string();
-    assert!(!serialized.to_lowercase().contains("holder"));
-    assert!(!serialized.contains("occupancyLeaseId"));
-    assert!(!serialized.contains(&owner_id));
-
-    // The holder sees the full projection of the same client.
-    let response = http_request(
-        address,
-        &cookie_get(
-            &format!("/api/v1/clients/{public_client_id}/occupancy"),
-            &owner_cookie,
-        ),
-    )
-    .await;
-    assert_eq!(status_of(&response), "200", "{response}");
-    let full = response_body(&response);
-    assert_eq!(full["holderUserId"], json!(owner_id));
-    assert!(full["occupancyLeaseId"].is_string());
-    assert_eq!(full["capacityTotal"], json!(4));
-
-    // After the release the projection reads available again.
-    let response = http_request(
-        address,
-        &cookie_delete(
-            "/api/v1/clients/occupancy",
-            &release_body(&public_client_id, "release"),
-            &owner_cookie,
-        ),
-    )
-    .await;
-    assert_eq!(status_of(&response), "200", "{response}");
-    assert_eq!(response_body(&response)["occupancy"], json!("released"));
-    let response = http_request(
-        address,
-        &cookie_get(
-            &format!("/api/v1/clients/{public_client_id}/occupancy"),
-            &member_cookie,
-        ),
-    )
-    .await;
-    assert_eq!(response_body(&response)["occupancy"], json!("available"));
 
     running.shutdown().await.expect("shutdown");
     let _ = std::fs::remove_dir_all(&data_directory);
@@ -1396,27 +1179,18 @@ async fn release_modes_map_onto_the_service_semantics_and_downlink_frames() {
 
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
-async fn offline_sweep_marks_recovery_blocks_preemption_and_resumes_with_same_token() {
+async fn offline_sweep_marks_recovery_and_resumes_with_same_token() {
     let data_directory = test_directory("occupancy-recovery");
     let auth_directory = test_directory("occupancy-recovery-sessions");
     let running = start_server(&data_directory, &auth_directory).await;
     let address = running.local_address();
     let (owner_cookie, owner_id) = initialize_and_login_owner(address).await;
-    let (member_cookie, member_id) =
-        create_and_login_member(address, &owner_cookie, "member").await;
-
     let (node, public_client_id, credential) = enroll_online_device(address, &data_directory).await;
     consume_code_as(
         &data_directory,
         &node,
         &publish_connect_code(&data_directory, &node, "23232323"),
         &owner_id,
-    );
-    consume_code_as(
-        &data_directory,
-        &node,
-        &publish_connect_code(&data_directory, &node, "34343434"),
-        &member_id,
     );
     let responder = spawn_offer_responder(
         data_directory.clone(),
@@ -1460,20 +1234,7 @@ async fn offline_sweep_marks_recovery_blocks_preemption_and_resumes_with_same_to
         "the recovery window is still open"
     );
 
-    // No preemption while the lease is pending recovery: the member's claim
-    // is rejected both while the device is offline and after it reconnects
-    // (reconciliation has not run yet).
-    let response = http_request(
-        address,
-        &cookie_post(
-            "/api/v1/clients/occupancy",
-            &occupancy_body(&public_client_id),
-            &member_cookie,
-        ),
-    )
-    .await;
-    assert_eq!(status_of(&response), "409", "{response}");
-    assert_eq!(wire_code(&response), "OCCUPIED_BY_OTHER");
+    // Reconnect the device before reconciling the pending lease.
     walk_hello(
         address,
         &data_directory,
@@ -1482,17 +1243,6 @@ async fn offline_sweep_marks_recovery_blocks_preemption_and_resumes_with_same_to
         &credential,
     )
     .await;
-    let response = http_request(
-        address,
-        &cookie_post(
-            "/api/v1/clients/occupancy",
-            &occupancy_body(&public_client_id),
-            &member_cookie,
-        ),
-    )
-    .await;
-    assert_eq!(status_of(&response), "409", "{response}");
-    assert_eq!(wire_code(&response), "OCCUPIED_BY_OTHER");
 
     // The recovery resume reuses the original fencing token unchanged: no new
     // occupancy happened. (The `client.worker.reconcile` exchange settlement
@@ -1532,21 +1282,18 @@ async fn offline_sweep_marks_recovery_blocks_preemption_and_resumes_with_same_to
 
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
-async fn force_release_is_owner_only_and_enforces_the_recovery_deadline() {
+async fn force_release_enforces_the_recovery_deadline() {
     let data_directory = test_directory("occupancy-force");
     let auth_directory = test_directory("occupancy-force-sessions");
     let running = start_server(&data_directory, &auth_directory).await;
     let address = running.local_address();
     let (owner_cookie, owner_id) = initialize_and_login_owner(address).await;
-    let (member_cookie, member_id) =
-        create_and_login_member(address, &owner_cookie, "member").await;
-
     let (node, public_client_id, credential) = enroll_online_device(address, &data_directory).await;
     consume_code_as(
         &data_directory,
         &node,
         &publish_connect_code(&data_directory, &node, "45454545"),
-        &member_id,
+        &owner_id,
     );
     let responder = spawn_offer_responder(
         data_directory.clone(),
@@ -1556,7 +1303,7 @@ async fn force_release_is_owner_only_and_enforces_the_recovery_deadline() {
         downlink_ack_cursor(&data_directory, &node),
         next_client_sequence(&data_directory, &node),
     );
-    claim_occupied(address, &public_client_id, &member_cookie).await;
+    claim_occupied(address, &public_client_id, &owner_cookie).await;
     responder.abort();
     let occupied = active_lease(&data_directory, &node).expect("occupied lease");
 
@@ -1575,18 +1322,6 @@ async fn force_release_is_owner_only_and_enforces_the_recovery_deadline() {
         outcome.leases_pending_recovery,
         vec![occupied.occupancy_lease_id.clone()]
     );
-
-    let response = http_request(
-        address,
-        &cookie_post(
-            "/api/v1/clients/occupancy/force-release",
-            &occupancy_body(&public_client_id),
-            &member_cookie,
-        ),
-    )
-    .await;
-    assert_eq!(status_of(&response), "403", "{response}");
-    assert_eq!(wire_code(&response), "PERMISSION_DENIED");
 
     let response = http_request(
         address,
@@ -1675,19 +1410,16 @@ async fn force_release_is_owner_only_and_enforces_the_recovery_deadline() {
         );
     }
 
-    // The member sees the released client as available again — the occupancy
-    // was cleaned up, never handed over.
+    // The released client is available again.
     let response = http_request(
         address,
         &cookie_get(
             &format!("/api/v1/clients/{public_client_id}/occupancy"),
-            &member_cookie,
+            &owner_cookie,
         ),
     )
     .await;
     assert_eq!(response_body(&response)["occupancy"], json!("available"));
-    let _ = owner_id;
-
     running.shutdown().await.expect("shutdown");
     let _ = std::fs::remove_dir_all(&data_directory);
     let _ = std::fs::remove_dir_all(&auth_directory);

@@ -5,14 +5,14 @@
 - 对应任务：`WWC-ER-0002` / `winwincode-hrw`
 - 前置审计：`WWC-ER-0001` / `winwincode-dwz`；审计快照 [`backlog-migration.json`](../engineering-runtime/backlog-migration.json)，源计划 SHA-256 `4359a7084e904640a1e4383d70278101cbbbf9aabf2eb4afc2ba78ff834671f8`（以仓库记录为准）
 - 上层运行边界：[ADR-0028](0028-control-plane-worker-migration.md)
-- Client/占用边界：[ADR-0030](0030-multi-user-client-access-and-occupancy.md)
+- Client 设备、占用与 fencing 历史边界：[ADR-0030](0030-multi-user-client-access-and-occupancy.md)；身份受众以 [ADR-0031](0031-three-product-editions.md) 为准
 - 持久化边界：[0032-community-persistence-ports.md](0032-community-persistence-ports.md)
 
 > 本 ADR 根据本轮用户授权实施，并采用 root 作为实现负责人的默认裁决；不表示全部 E01–E13 业务已完成。
 
 ## 背景与证据
 
-现有 ADR-0028 已将 Control Plane 定义为产品状态唯一写入方、Worker 定义为一次执行协调方、Kernel 定义为 Codex 执行事实权威。ADR-0030 已冻结 Client/占用/fencing 分层。dwz 审计覆盖 111 条 active 旧任务，分类为 KEEP 59、REWRITE 47、MERGE 2、DEFER 3；证据级别和 CI 事实仍按审计记录保留，不把映射或历史关闭记录误报为全产品实现验收。
+现有 ADR-0028 已将 Control Plane 定义为产品状态唯一写入方、Worker 定义为一次执行协调方、Kernel 定义为 Codex 执行事实权威。ADR-0030 中的 Client 设备、占用与 fencing 分层继续有效，身份和受众边界由 ADR-0031 的 Community 单 Owner 决定取代。dwz 审计覆盖 111 条 active 旧任务，分类为 KEEP 59、REWRITE 47、MERGE 2、DEFER 3；证据级别和 CI 事实仍按审计记录保留，不把映射或历史关闭记录误报为全产品实现验收。
 
 ## 决定
 

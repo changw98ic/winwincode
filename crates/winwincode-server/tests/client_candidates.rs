@@ -338,31 +338,6 @@ async fn login(address: std::net::SocketAddr, username: &str, password: &str) ->
     (session_cookie_from_response(&response), user_id)
 }
 
-/// Creates one member account and signs in; returns (cookie, userId).
-async fn create_and_login_member(
-    address: std::net::SocketAddr,
-    owner_cookie: &str,
-    username: &str,
-) -> (String, String) {
-    let create = json!({
-        "schemaVersion": SCHEMA_VERSION,
-        "username": username,
-        "role": "member",
-    })
-    .to_string();
-    let response = http_request(
-        address,
-        &cookie_post("/api/v1/users", &create, owner_cookie),
-    )
-    .await;
-    assert!(response.starts_with("HTTP/1.1 201"), "{response}");
-    let temporary = response_body(&response)["temporaryPassword"]
-        .as_str()
-        .expect("temporary password")
-        .to_owned();
-    login(address, username, &temporary).await
-}
-
 // ---- exchange protocol helpers (device side) ------------------------------
 
 async fn post_exchange(
@@ -1024,9 +999,6 @@ async fn retained_frames_project_into_the_dual_authorized_list() {
     let running = start_server(&data_directory, &auth_directory).await;
     let address = running.local_address();
     let (owner_cookie, owner_id) = initialize_and_login_owner(address).await;
-    let (member_cookie, _member_id) =
-        create_and_login_member(address, &owner_cookie, "member").await;
-
     let (node, public_client_id, credential) = enroll_online_device(address, &data_directory).await;
     consume_code_as(
         &data_directory,
@@ -1137,18 +1109,6 @@ async fn retained_frames_project_into_the_dual_authorized_list() {
         1,
         "the replayed retention dedupes"
     );
-
-    // A user without the dual grants sees no candidates at all.
-    let response = http_request(
-        address,
-        &cookie_get(
-            &format!("/api/v1/clients/{public_client_id}/candidates"),
-            &member_cookie,
-        ),
-    )
-    .await;
-    assert_eq!(status_of(&response), "200", "{response}");
-    assert_eq!(response_body(&response)["candidates"], json!([]));
 
     // An unknown Client id is not a candidate source.
     let response = http_request(
@@ -1668,10 +1628,6 @@ async fn branch_and_apply_require_the_dual_authorization() {
     let running = start_server(&data_directory, &auth_directory).await;
     let address = running.local_address();
     let (owner_cookie, owner_id) = initialize_and_login_owner(address).await;
-    let (member_cookie, member_id) =
-        create_and_login_member(address, &owner_cookie, "member").await;
-    assert_ne!(owner_id, member_id);
-
     let (node, public_client_id, credential) = enroll_online_device(address, &data_directory).await;
     consume_code_as(
         &data_directory,
@@ -1709,19 +1665,6 @@ async fn branch_and_apply_require_the_dual_authorization() {
         hidden_commit,
     )
     .await;
-
-    // A signed-in user without the occupancy fails the holder gate.
-    let response = http_request(
-        address,
-        &cookie_post(
-            "/api/v1/clients/candidates/branch",
-            &branch_body(&public_client_id, &candidate_ref_of(commit), &visible),
-            &member_cookie,
-        ),
-    )
-    .await;
-    assert_eq!(status_of(&response), "403", "{response}");
-    assert_eq!(wire_code(&response), "PERMISSION_DENIED");
 
     // The holder without the repository grant fails the visibility half of
     // the dual authorization.

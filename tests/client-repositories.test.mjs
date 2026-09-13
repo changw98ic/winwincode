@@ -73,8 +73,6 @@ function repository(overrides = {}) {
     headCommit: 'abc1234def5678abc1234def5678abc1234def56',
     dirtyState: 'clean',
     availability: 'available',
-    permissions: 'use',
-    canGrantAccess: false,
     ...overrides,
   }
 }
@@ -103,6 +101,7 @@ function baseClient(overrides = {}) {
     async restore() { return session() },
     async initializeOwner() { return session() },
     async login() { return session() },
+    async changePassword() {},
     async initializationStatus() { return { initialized: true } },
     async logout() {},
     async command() { throw new Error('not used') },
@@ -240,52 +239,7 @@ test('facade validates the repository list input before any request exists', asy
   assert.equal(requests, 0)
 })
 
-test('facade posts a strict repository grant and preserves server errors', async () => {
-  const requests = []
-  const directory = directoryFixture({
-    async fetch(input, init) {
-      requests.push({ input: String(input), init: structuredClone(init) })
-      return response(201, {
-        schemaVersion,
-        repositoryBindingId: repository().repositoryBindingId,
-        userId: actor.id,
-        permissions: 'use+manage',
-        revision: 4,
-      })
-    },
-  })
-  const outcome = await directory.grantRepositoryAccess({
-    repositoryBindingId: repository().repositoryBindingId,
-    userId: actor.id,
-    permissions: 'use+manage',
-  })
-  assert.deepEqual(outcome, {
-    repositoryBindingId: repository().repositoryBindingId,
-    userId: actor.id,
-    permissions: 'use+manage',
-    revision: 4,
-  })
-  assert.equal(requests[0].input, 'https://control.example/api/v1/repositories/grants')
-  assert.equal(requests[0].init.method, 'POST')
-  assert.deepEqual(JSON.parse(requests[0].init.body), {
-    schemaVersion,
-    repositoryBindingId: repository().repositoryBindingId,
-    userId: actor.id,
-    permissions: 'use+manage',
-  })
-  for (const input of [
-    { repositoryBindingId: '', userId: actor.id, permissions: 'use' },
-    { repositoryBindingId: repository().repositoryBindingId, userId: '/tmp/user', permissions: 'use' },
-    { repositoryBindingId: repository().repositoryBindingId, userId: actor.id, permissions: 'admin' },
-  ]) {
-    await assert.rejects(
-      directory.grantRepositoryAccess(input),
-      error => error.code === 'REPOSITORY_GRANT_INPUT_INVALID',
-    )
-  }
-})
-
-test('directory reuses an injected facade that already implements the repository list', async () => {
+ test('directory reuses an injected facade that already implements the repository list', async () => {
   const attempts = []
   const directory = createControlPlaneClientDirectory({
     client: baseClient({
@@ -404,34 +358,7 @@ test('repositories view-model keeps shown cards across an unavailable read and n
   model.close()
 })
 
-test('repositories view-model enforces the projected sharing capability', async () => {
-  const calls = []
-  const client = repositoriesClientFake({
-    repositories: [repository({ canGrantAccess: false })],
-    async grantRepositoryAccess(input) { calls.push(input); return input },
-  })
-  const model = createRepositoriesViewModel({ client })
-  await model.showDevice('123456789012')
-  await assert.rejects(
-    model.grantRepositoryAccess({
-      repositoryBindingId: repository().repositoryBindingId,
-      userId: actor.id,
-      permissions: 'use',
-    }),
-    error => error.code === 'REPOSITORY_GRANT_NOT_ALLOWED',
-  )
-  client.repositories = [repository({ canGrantAccess: true })]
-  await model.refresh()
-  await model.grantRepositoryAccess({
-    repositoryBindingId: repository().repositoryBindingId,
-    userId: actor.id,
-    permissions: 'use',
-  })
-  assert.equal(calls.length, 1)
-  model.close()
-})
-
-class PageElement {
+ class PageElement {
   constructor(ownerDocument, tagName) {
     this.ownerDocument = ownerDocument
     this.tagName = tagName.toUpperCase()
@@ -555,10 +482,6 @@ test('repositories page renders every card field and never renders a path', asyn
   assert.equal(findOne(cards[0], 'wwc-repositories-card-dirty').dataset.tone, 'success')
   assert.equal(findOne(cards[0], 'wwc-repositories-card-head').textContent, 'HEAD abc1234')
   assert.equal(findOne(cards[0], 'wwc-repositories-card-availability').hidden, true)
-  assert.equal(findOne(cards[0], 'wwc-repositories-card-grant-user').getAttribute('aria-label'), '用户 ID')
-  assert.equal(findOne(cards[0], 'wwc-repositories-card-grant-permissions').getAttribute('aria-label'), '仓库权限')
-  assert.equal(findOne(cards[0], 'wwc-repositories-card-grant-status').getAttribute('aria-live'), 'polite')
-
   assert.equal(findOne(cards[1], 'wwc-repositories-card-name').textContent, 'n0vel')
   assert.equal(findOne(cards[1], 'wwc-repositories-card-branch').textContent, 'develop')
   assert.equal(findOne(cards[1], 'wwc-repositories-card-dirty').textContent, '有改动')

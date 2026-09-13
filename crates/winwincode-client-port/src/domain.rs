@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Domain objects for the multi-user shared device client (plan section 7).
+//! Domain objects for the shared device client protocol.
 //!
 //! Field names on the wire match the plan YAML spelling exactly. Nullable
 //! plan fields are modeled as [`Option`]; every other field is required.
@@ -9,26 +9,6 @@
 
 use serde::Deserialize;
 use serde::Serialize;
-
-/// Role of a user account within a WinWinCode server (plan 7.1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UserRole {
-    /// Server owner with administrative rights.
-    Owner,
-    /// Regular member.
-    Member,
-}
-
-/// Lifecycle state of a user account (plan 7.1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UserAccountState {
-    /// Account may authenticate.
-    Active,
-    /// Account is disabled and may not authenticate.
-    Disabled,
-}
 
 /// Machine-level presence state of a client node (plan 4.1, 7.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -617,35 +597,6 @@ pub enum ClientControlMessageKind {
     CredentialRotate,
 }
 
-/// A user account on a WinWinCode server (plan 7.1).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct UserAccount {
-    /// Stable user identifier.
-    #[serde(rename = "userId")]
-    pub user_id: String,
-    /// Display username as entered.
-    pub username: String,
-    /// Normalized unique username.
-    #[serde(rename = "normalizedUsername")]
-    pub normalized_username: String,
-    /// Password verifier digest; never leaves the control plane.
-    #[serde(rename = "passwordHash")]
-    pub password_hash: String,
-    /// Administrative role.
-    pub role: UserRole,
-    /// Lifecycle state.
-    pub state: UserAccountState,
-    /// Creation timestamp (RFC 3339).
-    #[serde(rename = "createdAt")]
-    pub created_at: String,
-    /// Last update timestamp (RFC 3339).
-    #[serde(rename = "updatedAt")]
-    pub updated_at: String,
-    /// Monotonic optimistic-concurrency revision.
-    pub revision: u64,
-}
-
 /// A registered client node (device) projection (plan 7.2).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1094,23 +1045,6 @@ mod tests {
             "reserialized JSON must be semantically equal to the inline JSON"
         );
         parsed
-    }
-
-    #[test]
-    fn user_account_round_trips() {
-        assert_round_trip::<UserAccount>(
-            r#"{
-                "userId": "usr_01j2",
-                "username": "Alice",
-                "normalizedUsername": "alice",
-                "passwordHash": "argon2id$abc123",
-                "role": "owner",
-                "state": "active",
-                "createdAt": "2026-01-01T00:00:00Z",
-                "updatedAt": "2026-01-02T00:00:00Z",
-                "revision": 3
-            }"#,
-        );
     }
 
     #[test]

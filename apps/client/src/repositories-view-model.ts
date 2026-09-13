@@ -1,10 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
-  ControlPlaneClientError,
   type ControlPlaneClientDirectory,
-  type ControlPlaneRepositoryGrantInput,
-  type ControlPlaneRepositoryGrantOutcome,
   type ControlPlaneRepositorySummary,
 } from './community-control-plane-client.js'
 
@@ -27,8 +24,6 @@ export interface RepositoriesViewModel {
   showDevice(clientId: string | null): Promise<void>
   /** Re-read the list for the selected device; a failed read never discards shown cards. */
   refresh(): Promise<void>
-  /** Grant a repository only when its Server projection allows sharing. */
-  grantRepositoryAccess(input: ControlPlaneRepositoryGrantInput): Promise<ControlPlaneRepositoryGrantOutcome>
   close(): void
 }
 
@@ -139,24 +134,6 @@ export function createRepositoriesViewModel(options: {
     }
   }
 
-  async function grantRepositoryAccess(
-    input: ControlPlaneRepositoryGrantInput,
-  ): Promise<ControlPlaneRepositoryGrantOutcome> {
-    const repository = current.repositories.find(
-      candidate => candidate.repositoryBindingId === input.repositoryBindingId,
-    )
-    if (repository === undefined || !repository.canGrantAccess) {
-      throw new ControlPlaneClientError({
-        kind: 'authorization',
-        code: 'REPOSITORY_GRANT_NOT_ALLOWED',
-        message: '你没有共享此仓库的权限。',
-        requestId: null,
-        retryable: false,
-      })
-    }
-    return client.grantRepositoryAccess(input)
-  }
-
   return {
     get state() {
       return current
@@ -168,7 +145,6 @@ export function createRepositoriesViewModel(options: {
       return () => { listeners.delete(listener) }
     },
     showDevice,
-    grantRepositoryAccess,
     async refresh() {
       if (closed || current.clientId === null) return
       await showDevice(current.clientId)

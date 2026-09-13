@@ -1,10 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { mountKeyedCollection } from './components/keyed-collection.js'
-import type {
-  ControlPlaneRepositoryPermissions,
-  ControlPlaneRepositorySummary,
-} from './community-control-plane-client.js'
+import type { ControlPlaneRepositorySummary } from './community-control-plane-client.js'
 import type {
   RepositoriesViewModel,
   RepositoriesViewModelState,
@@ -35,11 +32,6 @@ interface RepositoryCardRefs {
   readonly branch: HTMLElement
   readonly dirty: HTMLElement
   readonly head: HTMLElement
-  readonly permissions: HTMLElement
-  readonly grantForm: HTMLFormElement
-  readonly grantUser: HTMLInputElement
-  readonly grantPermissions: HTMLSelectElement
-  readonly grantStatus: HTMLElement
 }
 
 function element<K extends keyof HTMLElementTagNameMap>(
@@ -96,52 +88,12 @@ export function mountRepositoriesPage(options: RepositoriesPageOptions): Reposit
       const branch = element(document, 'span', 'wwc-repositories-card-branch')
       const dirty = element(document, 'span', 'wwc-repositories-card-dirty')
       const head = element(document, 'span', 'wwc-repositories-card-head')
-      const permissions = element(document, 'span', 'wwc-repositories-card-permissions')
-      const grantForm = element(document, 'form', 'wwc-repositories-card-grant') as HTMLFormElement
-      const grantUser = element(document, 'input', 'wwc-repositories-card-grant-user') as HTMLInputElement
-      const grantPermissions = element(document, 'select', 'wwc-repositories-card-grant-permissions') as HTMLSelectElement
-      const grantStatus = element(document, 'p', 'wwc-repositories-card-grant-status')
-      grantUser.type = 'text'
-      grantUser.placeholder = '用户 ID'
-      grantUser.autocomplete = 'off'
-      grantUser.setAttribute('aria-label', '用户 ID')
-      grantPermissions.setAttribute('aria-label', '仓库权限')
-      grantStatus.setAttribute('aria-live', 'polite')
-      for (const [value, label] of [['use', '使用'], ['use+manage', '使用和管理']] as const) {
-        const option = element(document, 'option', '')
-        option.setAttribute('value', value)
-        option.textContent = label
-        grantPermissions.append(option)
-      }
-      const grantSubmit = element(document, 'button', 'wwc-repositories-card-grant-submit')
-      grantSubmit.type = 'submit'
-      grantSubmit.textContent = '授予访问'
-      grantForm.append(grantUser, grantPermissions, grantSubmit, grantStatus)
-      meta.append(branch, dirty, head, permissions)
-      card.append(name, availability, meta, grantForm)
+      meta.append(branch, dirty, head)
+      card.append(name, availability, meta)
       const refs: RepositoryCardRefs = {
-        card, name, availability, branch, dirty, head, permissions,
-        grantForm, grantUser, grantPermissions, grantStatus,
+        card, name, availability, branch, dirty, head,
       }
       cards.set(card, refs)
-      grantForm.addEventListener('submit', event => {
-        event.preventDefault()
-        grantSubmit.disabled = true
-        grantStatus.textContent = ''
-        void options.model.grantRepositoryAccess({
-          repositoryBindingId: repository.repositoryBindingId,
-          userId: grantUser.value.trim(),
-          permissions: grantPermissions.value as ControlPlaneRepositoryPermissions,
-        }).then(() => {
-          grantUser.value = ''
-          grantStatus.textContent = '仓库访问已授予。'
-        }).catch(error => {
-          grantStatus.textContent = error instanceof Error
-            ? error.message : '无法授予仓库访问权限。'
-        }).finally(() => {
-          grantSubmit.disabled = false
-        })
-      })
       updateCard(refs, repository)
       return card
     },
@@ -165,9 +117,6 @@ export function mountRepositoriesPage(options: RepositoriesPageOptions): Reposit
     refs.dirty.textContent = repositoryDirtyText(repository)
     refs.dirty.dataset.tone = repositoryDirtyTone(repository)
     refs.head.textContent = repositoryHeadShortText(repository)
-    refs.permissions.textContent = repository.permissions === 'use+manage'
-      ? '权限：使用和管理' : '权限：使用'
-    refs.grantForm.hidden = !repository.canGrantAccess
   }
 
   function render(snapshot: RepositoriesViewModelState): void {

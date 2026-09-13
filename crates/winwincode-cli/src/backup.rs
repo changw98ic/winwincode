@@ -478,7 +478,7 @@ fn parse_store(parsed: &ParsedArguments) -> Result<BackupStoreKind, BackupFailur
 }
 
 /// Resolves the data directory. The Server store falls back to
-/// `WWC_SERVER_DATA_DIRECTORY` exactly like the `wwc user` commands; the
+/// `WWC_SERVER_DATA_DIRECTORY` used by the Server; the
 /// Device store requires an explicit `--data-dir` like the `wwc device`
 /// commands.
 fn resolve_data_directory(

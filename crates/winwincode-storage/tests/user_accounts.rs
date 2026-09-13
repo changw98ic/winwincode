@@ -3,9 +3,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use rusqlite::params;
-use winwincode_domain::{
-    Instant, Revision, UserAccount, UserAccountRole, UserAccountState, UserId,
-};
+use winwincode_domain::{Instant, Revision, UserAccount, UserId};
 use winwincode_storage::{SqliteStorage, UserAccountStoreErrorKind};
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -14,11 +12,25 @@ const PHC_HASH: &str =
     "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$RdescudvJCsgt3ub+b+dWRWJTmaaJObG";
 const OTHER_PHC_HASH: &str =
     "$argon2id$v=19$m=65540,t=3,p=4$mt0udVVJSStlcXI$Zx1PIFhaof2+k1LmoGeWHrAfTj0KXkRz";
+const LEGACY_SCHEMA: &str = r"
+CREATE TABLE users (
+    user_id TEXT PRIMARY KEY NOT NULL,
+    username TEXT NOT NULL CHECK (length(username) > 0),
+    normalized_username TEXT NOT NULL CHECK (length(normalized_username) > 0),
+    password_hash TEXT NOT NULL CHECK (length(password_hash) > 0),
+    role TEXT NOT NULL CHECK (role IN ('owner', 'member')),
+    state TEXT NOT NULL CHECK (state IN ('active', 'disabled')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL CHECK (updated_at >= created_at),
+    revision INTEGER NOT NULL CHECK (revision > 0)
+);
+CREATE UNIQUE INDEX users_by_normalized_username ON users (normalized_username);
+";
 
 fn temporary_directory(name: &str) -> PathBuf {
     let suffix = NEXT_TEMP_DIRECTORY.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!(
-        "winwincode-user-accounts-{name}-{}-{suffix}",
+        "winwincode-owner-account-{name}-{}-{suffix}",
         std::process::id()
     ))
 }
@@ -30,289 +42,198 @@ fn instant(text: &str) -> Instant {
 fn account(seed: u64) -> UserAccount {
     UserAccount::new(
         UserId(format!("usr_{seed:026}")),
-        format!("user-{seed}"),
-        format!("user-{seed}"),
+        format!("owner-{seed}"),
+        format!("owner-{seed}"),
         PHC_HASH.to_owned(),
-        UserAccountRole::Member,
-        UserAccountState::Active,
         instant("2027-05-01T08:00:00.000Z"),
         instant("2027-05-01T08:00:00.000Z"),
         Revision(1),
     )
-    .expect("valid user account")
+    .expect("valid Owner account")
 }
 
-fn rename(account: &UserAccount, username: &str, normalized: &str) -> UserAccount {
-    UserAccount::new(
-        account.user_id.clone(),
-        username.to_owned(),
-        normalized.to_owned(),
-        account.password_hash.clone(),
-        account.role,
-        account.state,
-        account.created_at.clone(),
-        account.updated_at.clone(),
-        Revision(account.revision.0),
-    )
-    .expect("valid renamed user account")
+fn insert_legacy(connection: &rusqlite::Connection, seed: u64, role: &str, state: &str) {
+    connection
+        .execute(
+            "INSERT INTO users
+             (user_id, username, normalized_username, password_hash, role, state,
+              created_at, updated_at, revision)
+             VALUES (?1, ?2, ?2, ?3, ?4, ?5,
+                     '2027-05-01T08:00:00.000Z',
+                     '2027-05-01T08:00:00.000Z', 1)",
+            params![
+                format!("usr_{seed:026}"),
+                format!("owner-{seed}"),
+                PHC_HASH,
+                role,
+                state
+            ],
+        )
+        .expect("insert legacy account");
 }
 
 #[test]
-fn created_account_round_trips_by_id_and_normalized_username() {
-    let root = temporary_directory("round-trip");
+fn owner_round_trips_and_sqlite_rejects_a_second_account() {
+    let root = temporary_directory("singleton");
     let mut storage = SqliteStorage::open(&root).expect("storage");
-    let account = account(1);
-    let stored = storage
+    let owner = account(1);
+    storage
         .user_account_ledger()
         .expect("ledger")
-        .create(&account)
-        .expect("create");
-    assert_eq!(stored, account);
+        .create(&owner)
+        .expect("create Owner");
 
     let ledger = storage.user_account_ledger().expect("ledger");
-    let by_id = ledger.find(&account.user_id).expect("find by id");
-    assert_eq!(by_id.as_ref(), Some(&account));
-    let by_username = ledger
-        .find_by_normalized_username(&account.normalized_username)
-        .expect("find by normalized username");
-    assert_eq!(by_username.as_ref(), Some(&account));
-    let missing_id = ledger
-        .find(&UserId("usr_99999999999999999999999999".to_owned()))
-        .expect("find missing id");
-    assert_eq!(missing_id, None);
-    let missing_username = ledger
-        .find_by_normalized_username("missing")
-        .expect("find missing normalized username");
-    assert_eq!(missing_username, None);
-
-    let malformed_id = ledger.find(&UserId("not-canonical".to_owned()));
+    assert_eq!(ledger.owner().expect("load Owner"), Some(owner.clone()));
     assert_eq!(
-        malformed_id.expect_err("malformed id").kind(),
-        UserAccountStoreErrorKind::InvalidInput
+        ledger.find(&owner.user_id).expect("find by id"),
+        Some(owner.clone())
+    );
+    assert_eq!(
+        ledger
+            .find_by_normalized_username(&owner.normalized_username)
+            .expect("find by username"),
+        Some(owner)
     );
 
-    drop(storage);
-    fs::remove_dir_all(root).expect("cleanup");
-}
-
-#[test]
-fn normalized_username_uniqueness_rejects_case_variants() {
-    let root = temporary_directory("uniqueness");
-    let mut storage = SqliteStorage::open(&root).expect("storage");
-    let first = rename(&account(1), "Wen", "wen");
-    storage
-        .user_account_ledger()
-        .expect("first ledger")
-        .create(&first)
-        .expect("first create");
-
-    let same_normalized = rename(&account(2), "WEN", "wen");
-    let conflict = storage
-        .user_account_ledger()
-        .expect("conflict ledger")
-        .create(&same_normalized)
-        .expect_err("normalized username conflict");
-    assert_eq!(
-        conflict.kind(),
-        UserAccountStoreErrorKind::NormalizedUsernameConflict
-    );
-
-    let same_id = rename(&account(1), "Other", "other");
-    let id_conflict = storage
-        .user_account_ledger()
-        .expect("identity ledger")
-        .create(&same_id)
-        .expect_err("user id conflict");
-    assert_eq!(
-        id_conflict.kind(),
-        UserAccountStoreErrorKind::UserIdConflict
-    );
-
-    // The display username itself is not a uniqueness key.
-    let same_username_distinct_normalized = rename(&account(3), "Wen", "wen3");
-    storage
-        .user_account_ledger()
-        .expect("third ledger")
-        .create(&same_username_distinct_normalized)
-        .expect("same username with distinct normalized username");
-    let first_after = storage
-        .user_account_ledger()
-        .expect("reload ledger")
-        .find(&first.user_id)
-        .expect("reload")
-        .expect("first account still present");
-    assert_eq!(first_after, first);
-    drop(storage);
-    fs::remove_dir_all(root).expect("cleanup");
-}
-
-#[test]
-fn users_table_enforces_the_closed_role_and_state_enums() {
-    let root = temporary_directory("enums");
-    let mut storage = SqliteStorage::open(&root).expect("storage");
-    let account = account(1);
-    storage
+    let second = storage
         .user_account_ledger()
         .expect("ledger")
-        .create(&account)
-        .expect("create");
-    let database_path = storage.database_path().to_path_buf();
-    drop(storage);
+        .create(&account(2))
+        .expect_err("second Owner");
+    assert_eq!(second.kind(), UserAccountStoreErrorKind::AlreadyInitialized);
 
-    let connection = rusqlite::Connection::open(&database_path).expect("raw connection");
-    let insert_with_state = |state: &str| {
-        connection.execute(
-            "INSERT INTO users
-             (user_id, username, normalized_username, password_hash, role, state,
-              created_at, updated_at, revision)
-             VALUES ('usr_99999999999999999999999902', 'other', 'other', ?2,
-                     'member', ?1, '2027-05-01T08:00:00.000Z',
-                     '2027-05-01T08:00:00.000Z', 1)",
-            params![state, PHC_HASH],
-        )
-    };
-    assert!(insert_with_state("archived").is_err());
-    assert!(insert_with_state("active").is_ok());
-    let insert_with_role = |role: &str| {
-        connection.execute(
-            "INSERT INTO users
-             (user_id, username, normalized_username, password_hash, role, state,
-              created_at, updated_at, revision)
-             VALUES ('usr_99999999999999999999999903', 'third', 'third', ?2,
-                     ?1, 'active', '2027-05-01T08:00:00.000Z',
-                     '2027-05-01T08:00:00.000Z', 1)",
-            params![role, PHC_HASH],
-        )
-    };
-    assert!(insert_with_role("administrator").is_err());
-    assert!(insert_with_role("owner").is_ok());
+    drop(storage);
     fs::remove_dir_all(root).expect("cleanup");
 }
 
 #[test]
-fn updates_cas_increment_revision_and_reject_stale_expectations() {
-    let root = temporary_directory("revision");
+fn password_update_uses_the_owner_revision() {
+    let root = temporary_directory("password");
     let mut storage = SqliteStorage::open(&root).expect("storage");
-    let account = account(1);
+    let owner = account(1);
     let mut ledger = storage.user_account_ledger().expect("ledger");
-    ledger.create(&account).expect("create");
+    ledger.create(&owner).expect("create Owner");
 
-    let rehashed = ledger
+    let stale = ledger
         .set_password_hash(
-            &account.user_id,
-            &Revision(1),
+            &owner.user_id,
+            &Revision(99),
+            OTHER_PHC_HASH,
+            &instant("2027-05-01T08:00:01.000Z"),
+        )
+        .expect_err("stale revision");
+    assert_eq!(stale.kind(), UserAccountStoreErrorKind::RevisionConflict);
+
+    let updated = ledger
+        .set_password_hash(
+            &owner.user_id,
+            &owner.revision,
             OTHER_PHC_HASH,
             &instant("2027-05-01T08:00:01.000Z"),
         )
         .expect("password update");
-    assert_eq!(rehashed.revision, Revision(2));
-    assert_eq!(rehashed.password_hash, OTHER_PHC_HASH);
-    assert_eq!(rehashed.updated_at, instant("2027-05-01T08:00:01.000Z"));
-    assert_eq!(rehashed.created_at, account.created_at);
-
-    let disabled = ledger
-        .set_state(
-            &account.user_id,
-            &Revision(2),
-            UserAccountState::Disabled,
-            &instant("2027-05-01T08:00:02.000Z"),
-        )
-        .expect("disable");
-    assert_eq!(disabled.revision, Revision(3));
-    assert_eq!(disabled.state, UserAccountState::Disabled);
-
-    let stale = ledger.set_password_hash(
-        &account.user_id,
-        &Revision(2),
-        PHC_HASH,
-        &instant("2027-05-01T08:00:03.000Z"),
-    );
-    assert_eq!(
-        stale.expect_err("stale revision").kind(),
-        UserAccountStoreErrorKind::RevisionConflict
-    );
-
-    let invalid_hash = ledger.set_password_hash(
-        &account.user_id,
-        &Revision(3),
-        "plain-text-password",
-        &instant("2027-05-01T08:00:03.000Z"),
-    );
-    assert_eq!(
-        invalid_hash.expect_err("invalid hash").kind(),
-        UserAccountStoreErrorKind::InvalidInput
-    );
-
-    let missing = ledger.set_password_hash(
-        &UserId("usr_88888888888888888888888888".to_owned()),
-        &Revision(1),
-        OTHER_PHC_HASH,
-        &instant("2027-05-01T08:00:03.000Z"),
-    );
-    assert_eq!(
-        missing.expect_err("missing account").kind(),
-        UserAccountStoreErrorKind::NotFound
-    );
-
-    let unchanged = ledger
-        .find(&account.user_id)
-        .expect("reload")
-        .expect("account present");
-    assert_eq!(unchanged.revision, Revision(3));
-    assert_eq!(unchanged.password_hash, OTHER_PHC_HASH);
-    assert_eq!(unchanged.state, UserAccountState::Disabled);
-
-    let reactivated = ledger
-        .set_state(
-            &account.user_id,
-            &Revision(3),
-            UserAccountState::Active,
-            &instant("2027-05-01T08:00:04.000Z"),
-        )
-        .expect("re-activate");
-    assert_eq!(reactivated.revision, Revision(4));
-    assert_eq!(reactivated.state, UserAccountState::Active);
+    assert_eq!(updated.revision, Revision(2));
+    assert_eq!(updated.password_hash, OTHER_PHC_HASH);
 
     drop(storage);
     fs::remove_dir_all(root).expect("cleanup");
 }
 
 #[test]
-fn serialized_shape_uses_canonical_camel_case_fields() {
-    let account = account(1);
-    let value = serde_json::to_value(&account).expect("serialize");
-    let object = value.as_object().expect("object");
-    for name in [
-        "userId",
-        "username",
+fn one_active_legacy_owner_migrates_once() {
+    let root = temporary_directory("migrate");
+    let storage = SqliteStorage::open(&root).expect("storage");
+    let database_path = storage.database_path().to_path_buf();
+    drop(storage);
+    let connection = rusqlite::Connection::open(&database_path).expect("raw connection");
+    connection
+        .execute_batch(LEGACY_SCHEMA)
+        .expect("legacy schema");
+    insert_legacy(&connection, 1, "owner", "active");
+    drop(connection);
+
+    let mut storage = SqliteStorage::open(&root).expect("reopen");
+    let owner = storage
+        .user_account_ledger()
+        .expect("migrated ledger")
+        .owner()
+        .expect("load")
+        .expect("Owner");
+    assert_eq!(owner.username, "owner-1");
+    let connection = rusqlite::Connection::open(storage.database_path()).expect("raw connection");
+    let old_table: i64 = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'users')",
+            [],
+            |row| row.get(0),
+        )
+        .expect("table probe");
+    assert_eq!(old_table, 0);
+
+    drop(connection);
+    drop(storage);
+    fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn legacy_identity_sets_are_rejected_without_data_loss() {
+    let root = temporary_directory("reject-multi");
+    let storage = SqliteStorage::open(&root).expect("storage");
+    let database_path = storage.database_path().to_path_buf();
+    drop(storage);
+    let connection = rusqlite::Connection::open(&database_path).expect("raw connection");
+    connection
+        .execute_batch(LEGACY_SCHEMA)
+        .expect("legacy schema");
+    insert_legacy(&connection, 1, "owner", "active");
+    insert_legacy(&connection, 2, "member", "active");
+    drop(connection);
+
+    let mut storage = SqliteStorage::open(&root).expect("reopen");
+    let Err(rejected) = storage.user_account_ledger() else {
+        panic!("legacy identity set must be rejected");
+    };
+    assert_eq!(rejected.kind(), UserAccountStoreErrorKind::CorruptState);
+    drop(storage);
+
+    let connection = rusqlite::Connection::open(&database_path).expect("raw connection");
+    let count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM users", [], |row| row.get(0))
+        .expect("legacy rows");
+    let owner_table: i64 = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master
+             WHERE type = 'table' AND name = 'owner_account')",
+            [],
+            |row| row.get(0),
+        )
+        .expect("table probe");
+    assert_eq!(count, 2);
+    assert_eq!(owner_table, 0);
+
+    drop(connection);
+    fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn serialized_shape_contains_only_owner_account_fields() {
+    let owner = account(1);
+    let object = serde_json::to_value(&owner)
+        .expect("serialize")
+        .as_object()
+        .expect("object")
+        .clone();
+    assert_eq!(object.len(), 7);
+    for field in [
+        "createdAt",
         "normalizedUsername",
         "passwordHash",
-        "role",
-        "state",
-        "createdAt",
-        "updatedAt",
         "revision",
+        "updatedAt",
+        "userId",
+        "username",
     ] {
-        assert!(object.contains_key(name), "missing field {name}");
+        assert!(object.contains_key(field), "missing {field}");
     }
-    assert_eq!(object["role"], "member");
-    assert_eq!(object["state"], "active");
-    assert_eq!(object["normalizedUsername"], "user-1");
-
-    let parsed: UserAccount = serde_json::from_value(value.clone()).expect("deserialize");
-    assert_eq!(parsed, account);
-
-    let mut unknown_field = object.clone();
-    unknown_field.insert("extra".to_owned(), serde_json::Value::Null);
-    assert!(
-        serde_json::from_value::<UserAccount>(serde_json::Value::Object(unknown_field)).is_err()
-    );
-
-    let mut wrong_role = object.clone();
-    wrong_role["role"] = serde_json::Value::String("administrator".to_owned());
-    assert!(serde_json::from_value::<UserAccount>(serde_json::Value::Object(wrong_role)).is_err());
-
-    let mut wrong_state = object.clone();
-    wrong_state["state"] = serde_json::Value::String("archived".to_owned());
-    assert!(serde_json::from_value::<UserAccount>(serde_json::Value::Object(wrong_state)).is_err());
 }

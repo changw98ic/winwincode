@@ -333,30 +333,6 @@ async fn login(address: std::net::SocketAddr, username: &str, password: &str) ->
     (session_cookie_from_response(&response), user_id)
 }
 
-async fn create_and_login_member(
-    address: std::net::SocketAddr,
-    owner_cookie: &str,
-    username: &str,
-) -> (String, String) {
-    let create = json!({
-        "schemaVersion": SCHEMA_VERSION,
-        "username": username,
-        "role": "member",
-    })
-    .to_string();
-    let response = http_request(
-        address,
-        &cookie_post("/api/v1/users", &create, owner_cookie),
-    )
-    .await;
-    assert!(response.starts_with("HTTP/1.1 201"), "{response}");
-    let temporary = response_body(&response)["temporaryPassword"]
-        .as_str()
-        .expect("temporary password")
-        .to_owned();
-    login(address, username, &temporary).await
-}
-
 // ---- occupancy HTTP bodies -------------------------------------------------
 
 fn occupancy_body(client_id: &str) -> String {
@@ -608,11 +584,8 @@ async fn the_real_device_daemon_runs_the_full_occupancy_loop_over_http() {
     let address = running.local_address();
     let endpoint = format!("http://{address}{EXCHANGE_ENDPOINT_PATH}");
 
-    // ---- Phase 0: users, enrollment, hello, heartbeat ----------------------
+    // ---- Phase 0: Owner, enrollment, hello, heartbeat ----------------------
     let (owner_cookie, owner_id) = initialize_and_login_owner(address).await;
-    let (member_cookie, member_id) =
-        create_and_login_member(address, &owner_cookie, "member").await;
-    assert_ne!(owner_id, member_id);
 
     let (mut daemon, config) = start_daemon(&endpoint, 0, &device_root, "2026-09-04T00:00:00.000Z");
     drive_until(&mut daemon, "the enrollment adoption", |daemon| {
@@ -731,43 +704,7 @@ async fn the_real_device_daemon_runs_the_full_occupancy_loop_over_http() {
         "the device must not refuse the first offer"
     );
 
-    // ---- Phase 2: the non-holder sees nothing but the conflict -------------
-    let response = http_request(
-        address,
-        &cookie_get(
-            &format!("/api/v1/clients/{public_client_id}/occupancy"),
-            &member_cookie,
-        ),
-    )
-    .await;
-    assert_eq!(status_of(&response), "200", "{response}");
-    let view = response_body(&response);
-    let fields = view
-        .as_object()
-        .expect("projection object")
-        .keys()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-    assert_eq!(fields.len(), 3, "{view}");
-    assert_eq!(view["occupancy"], json!("occupied-by-other"));
-    let serialized = response.clone();
-    assert!(!serialized.to_lowercase().contains("holder"));
-    assert!(!serialized.contains("occupancyLeaseId"));
-    assert!(!serialized.contains(&owner_id));
-
-    let response = http_request(
-        address,
-        &cookie_post(
-            "/api/v1/clients/occupancy",
-            &occupancy_body(&public_client_id),
-            &member_cookie,
-        ),
-    )
-    .await;
-    assert_eq!(status_of(&response), "409", "{response}");
-    assert_eq!(wire_code(&response), "OCCUPIED_BY_OTHER");
-
-    // ---- Phase 3: drain release with the real device -----------------------
+    // ---- Phase 2: drain release with the real device -----------------------
     // A restart with running sessions (a new launch instance) reports two
     // active worker sessions, so the holder release drains instead of
     // releasing.
@@ -1103,39 +1040,14 @@ async fn the_real_device_daemon_runs_the_full_occupancy_loop_over_http() {
     assert_eq!(pending.fencing_token, token_four);
     assert!(pending.recovery_deadline_at.is_some());
 
-    // No preemption while the lease is pending recovery: B's claim is
-    // rejected by the active-lease gate even though the device is offline.
-    let response = http_request(
-        address,
-        &cookie_post(
-            "/api/v1/clients/occupancy",
-            &occupancy_body(&public_client_id),
-            &member_cookie,
-        ),
-    )
-    .await;
-    assert_eq!(status_of(&response), "409", "{response}");
-    assert_eq!(wire_code(&response), "OCCUPIED_BY_OTHER");
-
     // The device reconnects; the heartbeats project it online again while
     // the lease stays recovery pending (reconciliation belongs to the worker
-    // lane) — still no preemption.
+    // lane).
     drive_until(&mut daemon, "the reconnect to project online", |daemon| {
         settled(daemon)
             && node_snapshot(&data_directory, &node_id).presence_state
                 == winwincode_storage::ClientPresenceState::Online
     });
-    let response = http_request(
-        address,
-        &cookie_post(
-            "/api/v1/clients/occupancy",
-            &occupancy_body(&public_client_id),
-            &member_cookie,
-        ),
-    )
-    .await;
-    assert_eq!(status_of(&response), "409", "{response}");
-    assert_eq!(wire_code(&response), "OCCUPIED_BY_OTHER");
     assert_eq!(
         active_lease(&data_directory, &node_id)
             .expect("still pending")
@@ -1151,18 +1063,6 @@ async fn the_real_device_daemon_runs_the_full_occupancy_loop_over_http() {
             .expect("overdue query"),
         "the elapsed window reads as overdue"
     );
-    let response = http_request(
-        address,
-        &cookie_post(
-            "/api/v1/clients/occupancy/force-release",
-            &occupancy_body(&public_client_id),
-            &member_cookie,
-        ),
-    )
-    .await;
-    assert_eq!(status_of(&response), "403", "{response}");
-    assert_eq!(wire_code(&response), "PERMISSION_DENIED");
-
     let response = http_request(
         address,
         &cookie_post(
@@ -1223,7 +1123,7 @@ async fn the_real_device_daemon_runs_the_full_occupancy_loop_over_http() {
         address,
         &cookie_get(
             &format!("/api/v1/clients/{public_client_id}/occupancy"),
-            &member_cookie,
+            &owner_cookie,
         ),
     )
     .await;

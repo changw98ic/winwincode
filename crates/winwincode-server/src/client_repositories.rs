@@ -25,14 +25,10 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 use serde_json::json;
-use winwincode_control_plane::AccessGrantService;
 use winwincode_control_plane::ClientRegistryService;
-use winwincode_control_plane::RepositoryAccessGrantService;
 use winwincode_control_plane::RepositoryBindingService;
 use winwincode_storage::ClientPresenceState;
-use winwincode_storage::RepositoryAccessGrantIssuance;
 use winwincode_storage::RepositoryBindingRecord;
-use winwincode_storage::RepositoryGrantPermissions;
 use winwincode_storage::SqliteStorage;
 
 /// Schema version of the public browser-facing repository directory.
@@ -52,12 +48,6 @@ pub enum ClientRepositoriesErrorKind {
     InvalidRequest,
     /// The public Client ID does not name a Client.
     ClientNotFound,
-    /// The signed-in user may not administer repository grants.
-    PermissionDenied,
-    /// The target binding or user does not exist in the requested operation.
-    ResourceNotFound,
-    /// The target already has an active grant.
-    Conflict,
     /// Durable state or storage failed; nothing was decided.
     Unavailable,
 }
@@ -86,27 +76,6 @@ impl ClientRepositoriesError {
         Self::new(
             ClientRepositoriesErrorKind::ClientNotFound,
             "no client matches the requested id",
-        )
-    }
-
-    fn permission_denied() -> Self {
-        Self::new(
-            ClientRepositoriesErrorKind::PermissionDenied,
-            "the signed-in user may not grant repository access",
-        )
-    }
-
-    fn resource_not_found() -> Self {
-        Self::new(
-            ClientRepositoriesErrorKind::ResourceNotFound,
-            "the repository binding was not found",
-        )
-    }
-
-    fn conflict() -> Self {
-        Self::new(
-            ClientRepositoriesErrorKind::Conflict,
-            "an active repository grant already exists",
         )
     }
 
@@ -186,138 +155,16 @@ impl ClientRepositoriesApplication {
                 _ => return Err(ClientRepositoriesError::client_not_found()),
             }
         };
-        let can_grant_access = {
-            let mut grants = AccessGrantService::new(&mut storage);
-            grants
-                .active_grant(&node.client_node_id, user_id)
-                .map_err(|_| ClientRepositoriesError::unavailable())?
-                .is_some_and(|grant| grant.permissions.can_manage())
-        };
         let bindings = {
             let mut bindings = RepositoryBindingService::new(&mut storage);
             bindings
                 .visible_bindings(user_id, &node.client_node_id)
                 .map_err(|_| ClientRepositoriesError::unavailable())?
         };
-        let repositories = {
-            let mut service = RepositoryAccessGrantService::new(&mut storage);
-            bindings
-                .iter()
-                .map(|binding| {
-                    let permission = service
-                        .active_grants_for_binding(&binding.repository_binding_id)
-                        .map_err(|_| ClientRepositoriesError::unavailable())?
-                        .into_iter()
-                        .find(|grant| grant.user_id == user_id)
-                        .map_or(RepositoryGrantPermissions::Use, |grant| grant.permissions);
-                    Ok(repository_summary(
-                        binding,
-                        permission,
-                        can_grant_access && permission == RepositoryGrantPermissions::UseManage,
-                    ))
-                })
-                .collect::<Result<Vec<_>, ClientRepositoriesError>>()?
-        };
+        let repositories = bindings.iter().map(repository_summary).collect::<Vec<_>>();
         Ok(json!({
             "schemaVersion": SUPPORTED_SCHEMA_VERSION,
             "repositories": repositories,
-        }))
-    }
-
-    /// Creates one repository grant for a user already authorized to manage
-    /// the Client. The request body is the sole write contract for this
-    /// surface: `{schemaVersion,repositoryBindingId,userId,permissions}`.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable invalid-input, permission, not-found, conflict, or
-    /// unavailable error without exposing local paths or credentials.
-    pub fn grant(
-        &self,
-        acting_user_id: &str,
-        body: &Value,
-    ) -> Result<Value, ClientRepositoriesError> {
-        let object = body
-            .as_object()
-            .ok_or_else(ClientRepositoriesError::invalid_request)?;
-        if object.len() != 4
-            || object.get("schemaVersion").and_then(Value::as_str) != Some(SUPPORTED_SCHEMA_VERSION)
-            || object.keys().any(|key| {
-                !matches!(
-                    key.as_str(),
-                    "schemaVersion" | "repositoryBindingId" | "userId" | "permissions"
-                )
-            })
-        {
-            return Err(ClientRepositoriesError::invalid_request());
-        }
-        let binding_id = object
-            .get("repositoryBindingId")
-            .and_then(Value::as_str)
-            .ok_or_else(ClientRepositoriesError::invalid_request)?;
-        let target_user_id = object
-            .get("userId")
-            .and_then(Value::as_str)
-            .ok_or_else(ClientRepositoriesError::invalid_request)?;
-        let permissions = match object.get("permissions").and_then(Value::as_str) {
-            Some("use") => RepositoryGrantPermissions::Use,
-            Some("use+manage") => RepositoryGrantPermissions::UseManage,
-            _ => return Err(ClientRepositoriesError::invalid_request()),
-        };
-        let mut storage = self.open_storage()?;
-        let binding = {
-            let mut service = RepositoryBindingService::new(&mut storage);
-            service
-                .snapshot(binding_id)
-                .map_err(|_| ClientRepositoriesError::unavailable())?
-                .ok_or_else(ClientRepositoriesError::resource_not_found)?
-        };
-        {
-            let mut grants = AccessGrantService::new(&mut storage);
-            let client_grant = grants
-                .active_grant(&binding.client_node_id, acting_user_id)
-                .map_err(|_| ClientRepositoriesError::unavailable())?;
-            if !client_grant.is_some_and(|grant| grant.permissions.can_manage()) {
-                return Err(ClientRepositoriesError::permission_denied());
-            }
-        }
-        {
-            let mut grants = RepositoryAccessGrantService::new(&mut storage);
-            let repository_grant = grants
-                .active_grants_for_binding(&binding.repository_binding_id)
-                .map_err(|_| ClientRepositoriesError::unavailable())?
-                .into_iter()
-                .find(|grant| grant.user_id == acting_user_id);
-            if !repository_grant
-                .is_some_and(|grant| grant.permissions == RepositoryGrantPermissions::UseManage)
-            {
-                return Err(ClientRepositoriesError::permission_denied());
-            }
-        }
-        let issuance = RepositoryAccessGrantIssuance::try_new(
-            generate_prefixed_id("rag_")?,
-            binding.repository_binding_id,
-            target_user_id,
-            acting_user_id,
-        )
-        .map_err(|_| ClientRepositoriesError::invalid_request())?;
-        let grant = RepositoryAccessGrantService::new(&mut storage)
-            .create_grant(&issuance, permissions, &now_instant())
-            .map_err(|error| match error.kind() {
-                winwincode_control_plane::RepositoryBindingServiceErrorKind::AccessGrantConflict => {
-                    ClientRepositoriesError::conflict()
-                }
-                winwincode_control_plane::RepositoryBindingServiceErrorKind::UnknownRepositoryBinding => {
-                    ClientRepositoriesError::resource_not_found()
-                }
-                _ => ClientRepositoriesError::unavailable(),
-            })?;
-        Ok(json!({
-            "schemaVersion": SUPPORTED_SCHEMA_VERSION,
-            "repositoryBindingId": grant.repository_binding_id,
-            "userId": grant.user_id,
-            "permissions": grant.permissions.as_str(),
-            "revision": grant.revision,
         }))
     }
 
@@ -329,11 +176,7 @@ impl ClientRepositoriesApplication {
 
 /// One repository card: exactly the fields the repo-ui facade validates
 /// (REPO-100.3), under the facade's names.
-fn repository_summary(
-    record: &RepositoryBindingRecord,
-    permissions: RepositoryGrantPermissions,
-    can_grant_access: bool,
-) -> Value {
+fn repository_summary(record: &RepositoryBindingRecord) -> Value {
     json!({
         "repositoryBindingId": record.repository_binding_id,
         "displayName": record.display_name,
@@ -341,28 +184,7 @@ fn repository_summary(
         "headCommit": record.head_commit.as_deref().unwrap_or(UNKNOWN_FIELD),
         "dirtyState": record.dirty_state.as_str(),
         "availability": record.availability.as_str(),
-        "permissions": permissions.as_str(),
-        "canGrantAccess": can_grant_access,
     })
-}
-
-fn now_instant() -> winwincode_domain::Instant {
-    use crate::application::StandaloneApplicationClock as _;
-    crate::application::SystemStandaloneApplicationClock.now_instant()
-}
-
-const IDENTITY_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-
-fn generate_prefixed_id(prefix: &str) -> Result<String, ClientRepositoriesError> {
-    let mut random = [0_u8; 13];
-    getrandom::fill(&mut random).map_err(|_| ClientRepositoriesError::unavailable())?;
-    let mut identity = String::with_capacity(prefix.len() + 26);
-    identity.push_str(prefix);
-    for byte in random {
-        identity.push(IDENTITY_ALPHABET[usize::from(byte >> 4)] as char);
-        identity.push(IDENTITY_ALPHABET[usize::from(byte & 0x0f)] as char);
-    }
-    Ok(identity)
 }
 
 /// Reads the query identity: exactly one `clientId` parameter carrying a
@@ -426,16 +248,12 @@ mod tests {
 
     #[test]
     fn repository_summary_matches_the_facade_contract_field_by_field() {
-        let value = repository_summary(
-            &record(
-                Some("main"),
-                Some(&"a".repeat(40)),
-                RepositoryDirtyState::Clean,
-                RepositoryAvailability::Available,
-            ),
-            RepositoryGrantPermissions::Use,
-            false,
-        );
+        let value = repository_summary(&record(
+            Some("main"),
+            Some(&"a".repeat(40)),
+            RepositoryDirtyState::Clean,
+            RepositoryAvailability::Available,
+        ));
         let object = value.as_object().expect("summary object");
         let mut field_names = object.keys().map(String::as_str).collect::<Vec<_>>();
         field_names.sort_unstable();
@@ -443,12 +261,10 @@ mod tests {
             field_names,
             vec![
                 "availability",
-                "canGrantAccess",
                 "defaultBranch",
                 "dirtyState",
                 "displayName",
                 "headCommit",
-                "permissions",
                 "repositoryBindingId",
             ],
             "exactly the facade fields"
@@ -466,16 +282,12 @@ mod tests {
 
     #[test]
     fn repository_summary_maps_the_seven_state_and_two_state_vocabularies() {
-        let moved = repository_summary(
-            &record(
-                Some("trunk"),
-                Some(&"b".repeat(64)),
-                RepositoryDirtyState::Dirty,
-                RepositoryAvailability::Moved,
-            ),
-            RepositoryGrantPermissions::UseManage,
-            true,
-        );
+        let moved = repository_summary(&record(
+            Some("trunk"),
+            Some(&"b".repeat(64)),
+            RepositoryDirtyState::Dirty,
+            RepositoryAvailability::Moved,
+        ));
         assert_eq!(moved["dirtyState"], "dirty");
         assert_eq!(moved["availability"], "moved");
         assert_eq!(moved["headCommit"], "b".repeat(64));
@@ -483,16 +295,12 @@ mod tests {
 
     #[test]
     fn unknown_device_facts_project_stable_non_empty_placeholders() {
-        let value = repository_summary(
-            &record(
-                None,
-                None,
-                RepositoryDirtyState::Dirty,
-                RepositoryAvailability::ScanFailed,
-            ),
-            RepositoryGrantPermissions::Use,
-            false,
-        );
+        let value = repository_summary(&record(
+            None,
+            None,
+            RepositoryDirtyState::Dirty,
+            RepositoryAvailability::ScanFailed,
+        ));
         assert_eq!(value["defaultBranch"], "unknown");
         assert_eq!(value["headCommit"], "unknown");
         assert_eq!(value["availability"], "scan_failed");

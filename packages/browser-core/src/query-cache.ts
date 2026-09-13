@@ -563,6 +563,9 @@ export function createQueryCache<
       clear('authorization-epoch')
       return session
     },
+    changePassword(change, requestOptions) {
+      return sourceClient.changePassword(change, requestOptions)
+    },
     async initializationStatus(requestOptions) {
       return sourceClient.initializationStatus(requestOptions)
     },

@@ -83,6 +83,41 @@ test('facade restores context, initializes the owner once, and closes the cookie
   assert.doesNotMatch(JSON.stringify(client), /proof-material/u)
 })
 
+test('facade changes the signed-in Owner password through the auth route', async () => {
+  const requests = []
+  const client = createControlPlaneClient({
+    serverUrl: 'https://control.example',
+    transport: {
+      async fetch(input, init) {
+        requests.push({ input, init: structuredClone(init) })
+        return response(204)
+      },
+    },
+  })
+
+  await client.changePassword({
+    currentPassword: 'initial-owner-password',
+    newPassword: 'rotated-owner-password',
+  })
+
+  assert.equal(requests.length, 1)
+  assert.equal(requests[0].input, 'https://control.example/api/v1/auth/password')
+  assert.equal(requests[0].init.method, 'POST')
+  assert.equal(requests[0].init.credentials, 'include')
+  assert.deepEqual(JSON.parse(requests[0].init.body), {
+    schemaVersion,
+    currentPassword: 'initial-owner-password',
+    newPassword: 'rotated-owner-password',
+  })
+
+  await assert.rejects(
+    client.changePassword({ currentPassword: 'short', newPassword: 'also-short' }),
+    error => error instanceof ControlPlaneClientError
+      && error.code === 'PASSWORD_CHANGE_INPUT_INVALID',
+  )
+  assert.equal(requests.length, 1)
+})
+
 test('facade treats redirect as an error and submits owner initialization exactly once', async () => {
   let requests = 0
   const proof = 'proof-not-forwarded-by-the-client'

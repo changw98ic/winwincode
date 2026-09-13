@@ -156,24 +156,6 @@
       "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$",
       "description": "Device Client semantic version."
     },
-    "UserAccountRole": {
-      "type": "string",
-      "enum": [
-        "owner",
-        "member"
-      ],
-      "title": "UserAccountRole",
-      "description": "Server-wide account role."
-    },
-    "UserAccountState": {
-      "type": "string",
-      "enum": [
-        "active",
-        "disabled"
-      ],
-      "title": "UserAccountState",
-      "description": "Lifecycle state of a user account; disabled accounts lose every active browser session immediately."
-    },
     "ClientNodePresenceState": {
       "type": "string",
       "enum": [
@@ -655,62 +637,6 @@
       ],
       "title": "ClientWorkerReconciliation",
       "description": "Reconciliation verdict for one supervised worker process after Device Client restart."
-    },
-    "UserAccount": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "userId": {
-          "$ref": "./domain.schema.json#/$defs/UserId"
-        },
-        "username": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 64,
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}$"
-        },
-        "normalizedUsername": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 64,
-          "pattern": "^[a-z0-9][a-z0-9_.@-]{0,63}$"
-        },
-        "passwordHash": {
-          "type": "string",
-          "maxLength": 512,
-          "pattern": "^\\$argon2id\\$[A-Za-z0-9$+=/.,-]{10,500}$",
-          "description": "Argon2id PHC password hash. Control Plane owned; it is never returned by a projection and never leaves the server boundary."
-        },
-        "role": {
-          "$ref": "#/$defs/UserAccountRole"
-        },
-        "state": {
-          "$ref": "#/$defs/UserAccountState"
-        },
-        "createdAt": {
-          "$ref": "./domain.schema.json#/$defs/Instant"
-        },
-        "updatedAt": {
-          "$ref": "./domain.schema.json#/$defs/Instant"
-        },
-        "revision": {
-          "$ref": "./domain.schema.json#/$defs/Revision"
-        }
-      },
-      "required": [
-        "userId",
-        "username",
-        "normalizedUsername",
-        "passwordHash",
-        "role",
-        "state",
-        "createdAt",
-        "updatedAt",
-        "revision"
-      ],
-      "title": "UserAccount",
-      "description": "Server-local user account. Ownership: Control Plane.",
-      "x-owner": "control-plane"
     },
     "ClientNode": {
       "type": "object",

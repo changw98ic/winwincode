@@ -42,7 +42,6 @@ const canonicalTestFiles = Object.freeze([
   'tests/client-occupancy-card-detail.test.mjs',
   'tests/browser-control-packages.test.mjs',
   'tests/browser-ui-package.test.mjs',
-  'tests/client-users-facade.test.mjs',
   'tests/client-server-separation.test.mjs',
   'tests/community-core-finalize.test.mjs',
   'tests/community-persistence-ports.test.mjs',

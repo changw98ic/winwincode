@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
-// Phase 0 source-boundary lint (multi-user client plan §8.1, §13, §17.3,
-// §20.7, task 6). Absolute local paths must never enter the multi-user
+// Client source-boundary lint (original plan §8.1, §13, §17.3,
+// §20.7, task 6). Absolute local paths must never enter the
 // Client public surface: schemas, generated contracts, contract docs,
 // public fixtures, and the ADR that freezes access and occupancy. These
 // files are projected to the Server verbatim, so a committed absolute path
@@ -22,7 +22,7 @@ export const NO_ABSOLUTE_PATHS_SCHEMA_VERSION = 1
 
 const root = resolve(import.meta.dirname, '..')
 
-// Public multi-user Client surface. `match` filters directory targets by
+// Public Client surface. `match` filters directory targets by
 // entry name; null means the target path itself (file or directory tree).
 const scanTargets = Object.freeze([
   {
@@ -203,14 +203,14 @@ function main() {
       process.stderr.write(`${finding.path}:${finding.line}: [${finding.ruleId}] ${finding.snippet}\n`)
     }
     process.stderr.write(
-      `absolute-path gate rejected the multi-user client public surface `
+      `absolute-path gate rejected the client public surface `
         + `(${report.findings.length} finding(s) across ${report.scannedFiles} file(s)); `
         + `use --allow=<literal> only for legitimate non-filesystem path text\n`,
     )
     process.exit(1)
   }
   process.stdout.write(
-    `no absolute paths in the multi-user client public surface `
+    `no absolute paths in the client public surface `
       + `(${report.scannedFiles} file(s) scanned)\n`,
   )
 }

@@ -356,7 +356,7 @@ impl RepositoryRuntimeScheduler {
         }
         let active_owner = storage
             .user_account_ledger()
-            .and_then(|ledger| ledger.active_owner())
+            .and_then(|ledger| ledger.owner())
             .ok()
             .flatten();
         if let Some(owner) = active_owner {
@@ -1124,21 +1124,19 @@ impl RepositoryRuntimeScheduler {
     }
 }
 
-/// Reports whether the reservation subject resolves to one active durable
-/// user account.
+/// Reports whether the reservation subject resolves to the durable Owner.
 fn admission_user_is_active(
     storage: &mut winwincode_storage::SqliteStorage,
     user_id: &UserId,
 ) -> Result<bool, RuntimeSupervisorError> {
-    let state = storage
+    let owner = storage
         .user_account_ledger()
         .and_then(|ledger| ledger.find(user_id))
-        .map(|account| account.map(|account| account.state))
         .map_err(|error| {
             debug_scheduler_error("load admission user account", &error);
             scheduler_failure()
         })?;
-    Ok(state == Some(winwincode_domain::UserAccountState::Active))
+    Ok(owner.is_some())
 }
 
 fn validate_admission_job(
@@ -1916,7 +1914,7 @@ mod tests {
 
     use winwincode_domain::{
         OrganizationId, ProductSessionId, ProjectId, RepositoryId, Revision, Sha256Digest,
-        UserAccount, UserAccountRole, UserAccountState, WorkspaceId,
+        UserAccount, WorkspaceId,
     };
     use winwincode_execution_port::generated::{
         ExecutionJob, ExecutionLimits, ExecutionScope, ExecutionWorkspace,
@@ -2072,8 +2070,6 @@ mod tests {
             username: "nb4-owner".to_owned(),
             normalized_username: "nb4-owner".to_owned(),
             password_hash: "$argon2id$v=19$m=19456,t=2,p=1$fixture$fixture".to_owned(),
-            role: UserAccountRole::Owner,
-            state: UserAccountState::Active,
             created_at: fixed_instant("2026-09-06T00:00:00.000Z"),
             updated_at: fixed_instant("2026-09-06T00:00:00.000Z"),
             revision: Revision(1),

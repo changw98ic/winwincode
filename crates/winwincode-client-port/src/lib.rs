@@ -2,8 +2,8 @@
 
 //! Shared Rust types for the canonical `WinWinCode` `ClientControlPort`.
 //!
-//! This crate is the hand-written contract skeleton for the multi-user
-//! shared device client plan (plan sections 3.3, 7, and 9). It declares the
+//! This crate is the hand-written contract skeleton for the shared device
+//! client protocol (plan sections 3.3, 7, and 9). It declares the
 //! ten domain objects, the `Envelope` frame, and the client-to-server and
 //! server-to-client message enums with their exact wire `kind` strings.
 //!
