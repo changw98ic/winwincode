@@ -1,342 +1,503 @@
 // SPDX-License-Identifier: Apache-2.0
 
-/**
- * WWX-DEC-03 clarification / comparison / acceptance-edit view-model.
- *
- * Constrained interaction protocol only (DEC-01): form, single/multi select,
- * text, table, comparison card, and action reference. Unknown component kinds
- * and unknown actions are rejected. Drafts autosave locally and bind to
- * user/session/version/candidate/requestId on submit (DEC-07/DEC-08).
- */
+import type { ControlPlaneClient } from './community-control-plane-client.js'
+import { queryDeliveryDetail } from './community-control-plane-client.js'
+import { createEditableDraft, type DraftFieldConflict } from './editable-draft.js'
+import type {
+  Actor,
+  DeliveryDetailProjection,
+  DeliveryId,
+  DeliveryUpdateSpecCommand,
+  RepositoryScope,
+  RequestId,
+} from './generated/contracts.js'
 
-export type ClarificationComponentKind =
-  | 'form'
-  | 'single-select'
-  | 'multi-select'
-  | 'text'
-  | 'table'
-  | 'comparison'
-  | 'action'
+export type ClarificationField =
+  | 'title'
+  | 'goal'
+  | 'scope'
+  | 'outOfScope'
+  | 'constraints'
+  | 'acceptanceCriteria'
 
-export type ClarificationEstimateLabel =
-  | 'unverified-model-estimate'
-  | 'measured'
-  | 'unknown'
+export type ClarificationValues = Readonly<Record<ClarificationField, string>>
 
-export interface ClarificationField {
-  readonly id: string
-  readonly label: string
-  readonly required: boolean
-  /** Progressive entry: the user may answer "unknown" or "later". */
-  readonly allowUnknown: boolean
-  readonly allowLater: boolean
-  readonly maxLength: number
-}
-
-export interface ClarificationOption {
-  readonly id: string
-  readonly label: string
-}
-
-export interface ComparisonRow {
-  readonly id: string
-  readonly label: string
-  readonly left: string
-  readonly right: string
-}
-
-export interface AcceptanceCriterionDraft {
+export interface ClarificationCriterion {
   readonly id: string
   readonly title: string
+  readonly required: boolean
+  /** Verification is selected by the trusted repository adapter, not the browser. */
   readonly verificationMethod: string | null
-  readonly required: boolean
 }
 
-export type ScopeBoundary = 'in-scope' | 'out-of-scope'
-
-export interface ClarificationComponent {
-  readonly kind: ClarificationComponentKind
-  readonly id: string
-  readonly title: string
-  readonly fields?: readonly ClarificationField[]
-  readonly options?: readonly ClarificationOption[]
-  readonly rows?: readonly ComparisonRow[]
-  readonly criteria?: readonly AcceptanceCriterionDraft[]
-  readonly scope?: ScopeBoundary
-  readonly actionId?: string
-  /** DEC-03: estimates always carry a label; never bare model claims. */
-  readonly estimate?: {
-    readonly value: string
-    readonly label: ClarificationEstimateLabel
-  }
-  readonly maxWidth?: number
-  readonly maxDepth?: number
-}
-
-export interface ClarificationAnswerValue {
-  readonly fieldId: string
-  readonly text: string | null
-  readonly choiceIds: readonly string[]
-  readonly unknown: boolean
-  readonly later: boolean
-}
-
-export interface ClarificationDraft {
-  readonly componentId: string
-  readonly requestId: string
-  readonly answers: readonly ClarificationAnswerValue[]
-  readonly offline: boolean
-  readonly updatedAt: string
-}
-
-export interface ClarificationSubmitBinding {
-  readonly userId: string
-  readonly productSessionId: string
+export interface ClarificationSnapshot {
+  readonly deliveryId: DeliveryId
   readonly deliveryRevision: number
+  readonly deliverySpecRevision: number
+  readonly actorId: string
+  readonly productSessionId: DeliveryDetailProjection['requirements']['sourceProductSessionId']
   readonly candidateRef: string | null
-  readonly requestId: string
+  readonly baseRevision: string
+  readonly publicationTarget: DeliveryDetailProjection['requirements']['publicationTarget']
+  readonly values: ClarificationValues
 }
 
-export type ClarificationRejectionReason =
-  | 'unknown-component-kind'
-  | 'unknown-action'
-  | 'component-too-wide'
-  | 'component-too-deep'
-  | 'field-limit'
-  | 'illegal-html'
+export interface ClarificationSaveInput {
+  readonly source: ClarificationSnapshot
+  readonly expectedRevision: number
+  readonly requestId: RequestId
+  readonly values: ClarificationValues
+}
 
-export type ClarificationState =
-  | { readonly status: 'empty' }
-  | {
-    readonly status: 'editing'
-    readonly components: readonly ClarificationComponent[]
-    readonly draft: ClarificationDraft
-    readonly blockedHighRisk: boolean
-    readonly notice: string | null
-  }
-  | {
-    readonly status: 'submitted'
-    readonly binding: ClarificationSubmitBinding
-  }
+export interface ClarificationPort {
+  load(): Promise<ClarificationSnapshot>
+  save(input: ClarificationSaveInput): Promise<ClarificationSnapshot>
+}
+
+export interface ClarificationChange {
+  readonly field: ClarificationField
+  readonly label: string
+  readonly before: string
+  readonly after: string
+}
+
+export interface ClarificationState {
+  readonly status: 'loading' | 'editing' | 'failed'
+  readonly snapshot: ClarificationSnapshot | null
+  readonly values: ClarificationValues
+  readonly criteria: readonly ClarificationCriterion[]
+  readonly changes: readonly ClarificationChange[]
+  readonly dirty: boolean
+  readonly busy: boolean
+  readonly offline: boolean
+  readonly conflicts: readonly DraftFieldConflict[]
+  readonly notice: string | null
+  readonly lastRequestId: RequestId | null
+  /** Changes only when controls must be rebuilt, so typing never loses focus. */
+  readonly formRevision: number
+}
 
 export interface ClarificationViewModel {
   readonly state: ClarificationState
   subscribe(listener: (state: ClarificationState) => void): () => void
-  load(components: readonly ClarificationComponent[]): void
-  setAnswer(input: ClarificationAnswerValue): void
+  start(): Promise<void>
+  refresh(): Promise<void>
+  edit(field: Exclude<ClarificationField, 'acceptanceCriteria'>, value: string): void
+  markUnknown(field: Exclude<ClarificationField, 'acceptanceCriteria'>): void
+  markLater(field: Exclude<ClarificationField, 'acceptanceCriteria'>): void
+  addCriterion(): void
+  updateCriterion(id: string, patch: Readonly<Partial<Pick<ClarificationCriterion, 'title' | 'required'>>>): void
+  removeCriterion(id: string): void
   setOffline(offline: boolean): void
-  markLater(fieldId: string): void
-  markUnknown(fieldId: string): void
-  submit(binding: Omit<ClarificationSubmitBinding, 'requestId'> & { requestId?: string }): void
+  resolveConflicts(resolution: 'keep-draft' | 'use-server'): void
+  submit(): Promise<void>
   close(): void
 }
 
-export const CLARIFICATION_MAX_COMPONENTS = 40
-export const CLARIFICATION_MAX_FIELDS = 20
-export const CLARIFICATION_MAX_WIDTH = 12
-export const CLARIFICATION_MAX_DEPTH = 3
-
-const ALLOWED_KINDS: ReadonlySet<ClarificationComponentKind> = new Set([
-  'form',
-  'single-select',
-  'multi-select',
-  'text',
-  'table',
-  'comparison',
-  'action',
-])
-
-/** DEC-01: every rendered title/label is plain text; HTML never executes. */
-export function containsIllegalMarkup(value: string): boolean {
-  return /<\s*script|javascript:|on\w+\s*=/i.test(value)
+export interface ClarificationViewModelOptions {
+  readonly port: ClarificationPort
+  readonly nextRequestId: () => RequestId
+  readonly nextCriterionId: () => string
 }
 
-export function validateClarificationComponent(
-  component: ClarificationComponent,
-): ClarificationRejectionReason | null {
-  if (!ALLOWED_KINDS.has(component.kind)) return 'unknown-component-kind'
-  if (containsIllegalMarkup(component.title)) return 'illegal-html'
-  if (component.kind === 'action' && (component.actionId === undefined || component.actionId.length === 0)) {
-    return 'unknown-action'
-  }
-  if (component.maxWidth !== undefined && component.maxWidth > CLARIFICATION_MAX_WIDTH) {
-    return 'component-too-wide'
-  }
-  if (component.maxDepth !== undefined && component.maxDepth > CLARIFICATION_MAX_DEPTH) {
-    return 'component-too-deep'
-  }
-  const fields = component.fields ?? []
-  if (fields.length > CLARIFICATION_MAX_FIELDS) return 'field-limit'
-  for (const field of fields) {
-    if (containsIllegalMarkup(field.label)) return 'illegal-html'
-  }
-  return null
+const EMPTY_VALUES: ClarificationValues = Object.freeze({
+  title: '',
+  goal: '',
+  scope: '',
+  outOfScope: '',
+  constraints: '',
+  acceptanceCriteria: '[]',
+})
+
+const FIELD_LABELS: Readonly<Record<ClarificationField, string>> = Object.freeze({
+  title: '标题',
+  goal: '目标',
+  scope: '范围内',
+  outOfScope: '范围外',
+  constraints: '约束',
+  acceptanceCriteria: '验收条件',
+})
+
+const UNKNOWN = '【不知道】'
+const LATER = '【稍后补充】'
+const MAX_CRITERIA = 1_000
+
+function criteriaJson(criteria: readonly ClarificationCriterion[]): string {
+  return JSON.stringify(criteria)
 }
 
-/**
- * DEC-02: only missing required fields on high-risk stages block. Unrelated
- * fields never block unrelated edits.
- */
-export function missingRequiredFields(
-  component: ClarificationComponent,
-  answers: readonly ClarificationAnswerValue[],
-): readonly string[] {
-  const byField = new Map(answers.map(answer => [answer.fieldId, answer]))
-  const missing: string[] = []
-  for (const field of component.fields ?? []) {
-    if (!field.required) continue
-    const answer = byField.get(field.id)
-    if (answer === undefined) {
-      missing.push(field.id)
-      continue
-    }
-    if (answer.unknown || answer.later) continue
-    const emptyText = answer.text === null || answer.text.trim() === ''
-    const emptyChoices = answer.choiceIds.length === 0
-    if (emptyText && emptyChoices) missing.push(field.id)
+function criteriaFrom(value: string): readonly ClarificationCriterion[] {
+  try {
+    const parsed: unknown = JSON.parse(value)
+    if (!Array.isArray(parsed)) return Object.freeze([])
+    return Object.freeze(parsed.flatMap(item => {
+      if (item === null || typeof item !== 'object') return []
+      const source = item as Readonly<Record<string, unknown>>
+      if (typeof source.id !== 'string' || typeof source.title !== 'string'
+        || typeof source.required !== 'boolean'
+        || (source.verificationMethod !== null && typeof source.verificationMethod !== 'string')) return []
+      return [Object.freeze({
+        id: source.id,
+        title: source.title,
+        required: source.required,
+        verificationMethod: source.verificationMethod,
+      })]
+    }))
+  } catch {
+    return Object.freeze([])
   }
-  return missing
 }
 
-/** DEC-03: model estimates never render as verified facts. */
-export function estimateDisplayText(
-  estimate: { readonly value: string; readonly label: ClarificationEstimateLabel },
-): string {
-  if (estimate.label === 'unverified-model-estimate') {
-    return `${estimate.value}（模型估算，未验证）`
-  }
-  if (estimate.label === 'measured') {
-    return `${estimate.value}（已测量）`
-  }
-  return `${estimate.value}（未知来源）`
+function lines(value: string): readonly string[] {
+  return [...new Set(value.split('\n').map(item => item.trim()).filter(Boolean))]
 }
 
-function emptyDraft(componentId: string, requestId: string): ClarificationDraft {
+function valuesFrom(detail: DeliveryDetailProjection): ClarificationValues {
+  const requirements = detail.requirements
   return Object.freeze({
-    componentId,
-    requestId,
-    answers: Object.freeze([]) as readonly ClarificationAnswerValue[],
-    offline: false,
-    updatedAt: '1970-01-01T00:00:00.000Z',
+    title: requirements.title,
+    goal: requirements.goal,
+    scope: requirements.scope.join('\n'),
+    outOfScope: requirements.outOfScope.join('\n'),
+    constraints: requirements.constraints.join('\n'),
+    acceptanceCriteria: criteriaJson(requirements.acceptanceCriteria.map(criterion => ({
+      id: criterion.id,
+      title: criterion.description,
+      required: criterion.required,
+      verificationMethod: criterion.verificationMethod,
+    }))),
   })
 }
 
-export interface ClarificationViewModelOptions {
-  readonly now?: () => string
-  readonly nextRequestId?: () => string
-  /** High-risk stage ids whose required fields must be complete before submit. */
-  readonly highRiskComponentIds?: readonly string[]
+function snapshotFrom(
+  detail: DeliveryDetailProjection,
+  actor: Actor,
+): ClarificationSnapshot {
+  return Object.freeze({
+    deliveryId: detail.deliveryId,
+    deliveryRevision: detail.deliveryRevision,
+    deliverySpecRevision: detail.requirements.deliverySpecRevision,
+    actorId: actor.id,
+    productSessionId: detail.requirements.sourceProductSessionId,
+    candidateRef: detail.currentCandidate?.candidateRef ?? null,
+    baseRevision: detail.requirements.baseRevision,
+    publicationTarget: detail.requirements.publicationTarget,
+    values: valuesFrom(detail),
+  })
+}
+
+/** The existing delivery.get/update_spec contract is the only persistence path. */
+export function clarificationUpdateCommand(
+  input: ClarificationSaveInput,
+  actor: Actor,
+  scope: RepositoryScope,
+): DeliveryUpdateSpecCommand {
+  return {
+    schemaVersion: 'winwincode/v1',
+    command: 'delivery.update_spec',
+    actor,
+    scope,
+    requestId: input.requestId,
+    expectedRevision: input.expectedRevision,
+    payload: {
+      deliveryId: input.source.deliveryId,
+      spec: {
+        title: input.values.title.trim(),
+        goal: input.values.goal.trim(),
+        repositoryId: scope.repositoryId,
+        baseRevision: input.source.baseRevision,
+        scope: lines(input.values.scope),
+        outOfScope: lines(input.values.outOfScope),
+        constraints: lines(input.values.constraints),
+        sourceProductSessionId: input.source.productSessionId,
+        acceptanceCriteria: criteriaFrom(input.values.acceptanceCriteria).map(criterion => ({
+          id: criterion.id,
+          title: criterion.title.trim(),
+          required: criterion.required,
+        })),
+        publicationTarget: input.source.publicationTarget,
+      },
+    },
+  }
+}
+
+export function createControlPlaneClarificationPort(options: {
+  readonly client: ControlPlaneClient
+  readonly actor: Actor
+  readonly scope: RepositoryScope
+  readonly deliveryId: DeliveryId
+  readonly nextRequestId: () => RequestId
+}): ClarificationPort {
+  async function load(): Promise<ClarificationSnapshot> {
+    return snapshotFrom(await queryDeliveryDetail(options.client, {
+      actor: options.actor,
+      scope: options.scope,
+      deliveryId: options.deliveryId,
+      requestId: options.nextRequestId(),
+    }), options.actor)
+  }
+
+  return Object.freeze({
+    load,
+    async save(input: ClarificationSaveInput) {
+      const command = clarificationUpdateCommand(input, options.actor, options.scope)
+      const response = await options.client.command(command)
+      if (response.outcome !== 'completed' || response.command !== 'delivery.update_spec') {
+        throw new Error('控制平面已接收更新，但尚未确认完成；请使用同一草稿重试。')
+      }
+      return load()
+    },
+  })
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : '需求更新失败。'
+}
+
+function isRevisionConflict(error: unknown): boolean {
+  return error !== null && typeof error === 'object'
+    && Reflect.get(error, 'code') === 'REVISION_CONFLICT'
+}
+
+function unresolved(value: string): boolean {
+  return value.includes(UNKNOWN) || value.includes(LATER)
+}
+
+function validationMessage(values: ClarificationValues): string | null {
+  if (values.title.trim() === '') return '标题不能为空。'
+  if (values.goal.trim() === '') return '目标不能为空。'
+  if (Object.values(values).some(unresolved)) return '仍有“不知道”或“稍后补充”的信息，不能提交高风险规范变更。'
+  const criteria = criteriaFrom(values.acceptanceCriteria)
+  if (criteria.length === 0) return '至少需要一项验收条件。'
+  if (criteria.some(criterion => criterion.title.trim() === '')) return '验收条件不能为空。'
+  if (!criteria.some(criterion => criterion.required)) return '至少需要一项必须验收条件。'
+  return null
+}
+
+function displayValue(field: ClarificationField, value: string): string {
+  if (field !== 'acceptanceCriteria') return value
+  return criteriaFrom(value).map(criterion => (
+    `${criterion.required ? '必须' : '可选'}：${criterion.title}`
+  )).join('\n')
 }
 
 export function createClarificationViewModel(
-  options: ClarificationViewModelOptions = {},
+  options: ClarificationViewModelOptions,
 ): ClarificationViewModel {
-  const now = options.now ?? (() => new Date().toISOString())
-  const nextRequestId = options.nextRequestId ?? (() => `req_${String(Date.now())}`)
-  const highRisk = new Set(options.highRiskComponentIds ?? [])
-  let state: ClarificationState = Object.freeze({ status: 'empty' })
-  const listeners = new Set<(next: ClarificationState) => void>()
+  const draft = createEditableDraft<ClarificationValues>({ revisionSensitive: true })
+  const listeners = new Set<(state: ClarificationState) => void>()
+  let snapshot: ClarificationSnapshot | null = null
+  let status: ClarificationState['status'] = 'loading'
+  let notice: string | null = null
+  let offline = false
+  let closed = false
+  let pendingRequestId: RequestId | null = null
+  let lastRequestId: RequestId | null = null
+  let formRevision = 0
+  let loadGeneration = 0
 
-  function emit(next: ClarificationState): void {
-    state = Object.freeze(next)
-    for (const listener of listeners) listener(state)
+  function currentState(): ClarificationState {
+    const draftState = draft.state
+    const values = draftState.scope === null ? EMPTY_VALUES : draftState.values
+    const changes: ClarificationChange[] = []
+    if (snapshot !== null) {
+      for (const field of Object.keys(FIELD_LABELS) as ClarificationField[]) {
+        if (snapshot.values[field] === values[field]) continue
+        changes.push(Object.freeze({
+          field,
+          label: FIELD_LABELS[field],
+          before: displayValue(field, snapshot.values[field]),
+          after: displayValue(field, values[field]),
+        }))
+      }
+    }
+    return Object.freeze({
+      status,
+      snapshot,
+      values,
+      criteria: criteriaFrom(values.acceptanceCriteria),
+      changes: Object.freeze(changes),
+      dirty: draftState.dirtyFields.length > 0,
+      busy: draftState.submission !== null,
+      offline,
+      conflicts: draftState.conflicts,
+      notice,
+      lastRequestId,
+      formRevision,
+    })
   }
 
-  return {
-    get state() {
-      return state
-    },
+  function emit(): void {
+    if (closed) return
+    const next = currentState()
+    for (const listener of listeners) listener(next)
+  }
+
+  async function synchronize(message: string | null): Promise<void> {
+    const generation = ++loadGeneration
+    const loaded = await options.port.load()
+    if (closed || generation !== loadGeneration) return
+    snapshot = loaded
+    draft.synchronize({
+      scope: loaded.deliveryId,
+      revision: loaded.deliveryRevision,
+      values: loaded.values,
+    })
+    status = 'editing'
+    notice = message
+    formRevision += 1
+    emit()
+  }
+
+  function editCriteria(criteria: readonly ClarificationCriterion[], rebuild: boolean): void {
+    if (status !== 'editing' || draft.state.submission !== null) return
+    draft.edit('acceptanceCriteria', criteriaJson(criteria))
+    pendingRequestId = null
+    notice = null
+    if (rebuild) formRevision += 1
+    emit()
+  }
+
+  const model: ClarificationViewModel = {
+    get state() { return currentState() },
     subscribe(listener) {
       listeners.add(listener)
       return () => listeners.delete(listener)
     },
-    load(components) {
-      if (components.length > CLARIFICATION_MAX_COMPONENTS) {
-        emit({
-          status: 'editing',
-          components: Object.freeze([]),
-          draft: emptyDraft('', nextRequestId()),
-          blockedHighRisk: true,
-          notice: '澄清组件数量超过限制，已拒绝加载。',
-        })
+    async start() {
+      try {
+        await synchronize(null)
+      } catch (error) {
+        if (closed) return
+        status = 'failed'
+        notice = errorMessage(error)
+        emit()
+      }
+    },
+    async refresh() {
+      if (draft.state.submission !== null) return
+      try {
+        await synchronize('已读取最新规范。')
+      } catch (error) {
+        if (closed) return
+        notice = errorMessage(error)
+        emit()
+      }
+    },
+    edit(field, value) {
+      if (status !== 'editing' || draft.state.submission !== null) return
+      draft.edit(field, value)
+      pendingRequestId = null
+      notice = null
+      emit()
+    },
+    markUnknown(field) { this.edit(field, UNKNOWN) },
+    markLater(field) { this.edit(field, LATER) },
+    addCriterion() {
+      const criteria = criteriaFrom(draft.state.values.acceptanceCriteria)
+      if (criteria.length >= MAX_CRITERIA) {
+        notice = '验收条件数量已达到上限。'
+        emit()
         return
       }
-      const accepted: ClarificationComponent[] = []
-      for (const component of components) {
-        const reason = validateClarificationComponent(component)
-        if (reason === null) accepted.push(Object.freeze(component))
-      }
-      emit({
-        status: 'editing',
-        components: Object.freeze(accepted),
-        draft: emptyDraft(accepted[0]?.id ?? '', nextRequestId()),
-        blockedHighRisk: false,
-        notice: accepted.length < components.length
-          ? '部分非法组件已被拒绝，不会渲染。'
-          : null,
-      })
+      editCriteria([...criteria, Object.freeze({
+        id: options.nextCriterionId(),
+        title: '',
+        required: false,
+        verificationMethod: null,
+      })], true)
     },
-    setAnswer(input) {
-      if (state.status !== 'editing') return
-      const answers = [
-        ...state.draft.answers.filter(answer => answer.fieldId !== input.fieldId),
-        Object.freeze(input),
-      ]
-      const draft = Object.freeze({
-        ...state.draft,
-        answers: Object.freeze(answers),
-        updatedAt: now(),
-      })
-      emit({ ...state, draft, notice: null })
+    updateCriterion(id, patch) {
+      editCriteria(criteriaFrom(draft.state.values.acceptanceCriteria).map(criterion => (
+        criterion.id === id ? Object.freeze({ ...criterion, ...patch }) : criterion
+      )), false)
     },
-    setOffline(offline) {
-      if (state.status !== 'editing') return
-      const draft = Object.freeze({ ...state.draft, offline, updatedAt: now() })
-      emit({
-        ...state,
-        draft,
-        notice: offline ? '离线草稿已标记，提交前不会当作已授权。' : null,
-      })
+    removeCriterion(id) {
+      editCriteria(criteriaFrom(draft.state.values.acceptanceCriteria).filter(criterion => (
+        criterion.id !== id
+      )), true)
     },
-    markLater(fieldId) {
-      this.setAnswer({ fieldId, text: null, choiceIds: [], unknown: false, later: true })
+    setOffline(value) {
+      offline = value
+      if (value) notice = '当前离线：草稿仍保留在本页，但不会显示为已授权。'
+      else if (notice?.startsWith('当前离线：') === true) notice = null
+      emit()
     },
-    markUnknown(fieldId) {
-      this.setAnswer({ fieldId, text: null, choiceIds: [], unknown: true, later: false })
+    resolveConflicts(resolution) {
+      draft.resolveConflicts(resolution)
+      pendingRequestId = null
+      notice = resolution === 'use-server' ? '已采用服务端最新值。' : '已保留本页草稿，请重新提交。'
+      formRevision += 1
+      emit()
     },
-    submit(binding) {
-      if (state.status !== 'editing') return
-      const missing = state.components.flatMap(component => {
-        if (!highRisk.has(component.id)) return []
-        return missingRequiredFields(component, state.status === 'editing' ? state.draft.answers : [])
-      })
-      if (missing.length > 0) {
-        emit({
-          ...state,
-          blockedHighRisk: true,
-          notice: `高风险阶段仍有必填信息未完成：${missing.join('、')}`,
-        })
+    async submit() {
+      if (status !== 'editing' || snapshot === null || offline) {
+        if (offline) {
+          notice = '离线草稿不能提交为已授权变更。'
+          emit()
+        }
         return
       }
-      if (state.status === 'editing' && state.draft.offline) {
-        emit({
-          ...state,
-          blockedHighRisk: true,
-          notice: '离线草稿不能直接提交为已授权变更。',
-        })
+      const problem = validationMessage(draft.state.values)
+      if (problem !== null) {
+        notice = problem
+        emit()
         return
       }
-      emit({
-        status: 'submitted',
-        binding: Object.freeze({
-          ...binding,
-          requestId: binding.requestId ?? nextRequestId(),
-        }),
-      })
+      if (draft.state.dirtyFields.length === 0) return
+      const submission = draft.beginSubmission()
+      if (submission === null) {
+        if (draft.state.revisionConflict) notice = '请先解决并发修改冲突。'
+        emit()
+        return
+      }
+      const requestId = pendingRequestId ?? options.nextRequestId()
+      loadGeneration += 1
+      pendingRequestId = requestId
+      notice = '正在提交规范修订…'
+      emit()
+      try {
+        const saved = await options.port.save({
+          source: snapshot,
+          expectedRevision: submission.revision,
+          requestId,
+          values: submission.values,
+        })
+        if (closed) return
+        snapshot = saved
+        draft.synchronize({ scope: saved.deliveryId, revision: saved.deliveryRevision, values: saved.values })
+        draft.finishSubmission('success')
+        lastRequestId = requestId
+        pendingRequestId = null
+        notice = `已保存为规范修订 ${String(saved.deliverySpecRevision)}。`
+        formRevision += 1
+        emit()
+      } catch (error) {
+        if (closed) return
+        if (isRevisionConflict(error)) {
+          try {
+            const latest = await options.port.load()
+            if (closed) return
+            snapshot = latest
+            draft.synchronize({ scope: latest.deliveryId, revision: latest.deliveryRevision, values: latest.values })
+            pendingRequestId = null
+            formRevision += 1
+            notice = '服务端规范已被其他窗口修改，请选择保留草稿或采用服务端值。'
+          } catch (reloadError) {
+            notice = `检测到修订冲突，但读取最新规范失败：${errorMessage(reloadError)}`
+          }
+        } else {
+          notice = errorMessage(error)
+        }
+        draft.finishSubmission('failure')
+        emit()
+      }
     },
     close() {
+      closed = true
       listeners.clear()
-      state = Object.freeze({ status: 'empty' })
+      draft.reset()
     },
   }
+  return model
 }

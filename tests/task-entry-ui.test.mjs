@@ -1116,6 +1116,7 @@ test('the run page renders the twelve identity rows and seven WorkItem facts', a
     root: rootElement,
     model: fixture.model,
     homeHref: '#/home?organizationId=org_00000000000000000000000001',
+    clarificationHref: '#/home/clarify?delivery=dlv_00000000000000000000000001',
   })
   await fixture.model.start()
 
@@ -1128,6 +1129,10 @@ test('the run page renders the twelve identity rows and seven WorkItem facts', a
   )
   const topbarActions = byClass(rootElement, 'wwc-task-run-topbar-actions')
   assert.match(visibleText(topbarActions), /流程与记录/u)
+  assert.equal(
+    byClass(rootElement, 'wwc-task-run-clarification-link').href,
+    '#/home/clarify?delivery=dlv_00000000000000000000000001',
+  )
   assert.match(visibleText(topbarActions), /更多/u)
 
   assert.match(visibleText(byClass(rootElement, 'wwc-task-run-heading')), /运行中的任务/u)

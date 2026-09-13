@@ -20,6 +20,8 @@ export interface TaskRunPageOptions {
   readonly homeHref?: string
   /** Exact Delivery review route; omitted when the route has no Delivery fact. */
   readonly reviewHref?: string
+  /** Canonical Delivery Spec editor route. */
+  readonly clarificationHref?: string
   /** 已知锚点(假优先种子/表单创建):提供设计稿 05 的任务名与改动/验收两行。 */
   readonly anchor?: {
     readonly title?: string
@@ -88,6 +90,7 @@ export function mountTaskRunPage(options: TaskRunPageOptions): TaskRunPage {
   const topbarActions = element(document, 'div', 'wwc-task-run-topbar-actions')
   const recordSlot = element(document, 'span', 'wwc-task-run-topbar-record')
   const reviewLink = element(document, 'a', 'wwc-task-run-review-link')
+  const clarificationLink = element(document, 'a', 'wwc-task-run-clarification-link')
   const separator = element(document, 'span', 'wwc-task-run-topbar-separator')
   const moreSlot = element(document, 'span', 'wwc-task-run-topbar-more')
   const heading = element(document, 'h2', 'wwc-task-run-heading')
@@ -135,6 +138,9 @@ export function mountTaskRunPage(options: TaskRunPageOptions): TaskRunPage {
   reviewLink.textContent = '查看审核产物'
   if (options.reviewHref !== undefined) reviewLink.href = options.reviewHref
   else reviewLink.hidden = true
+  clarificationLink.textContent = '编辑需求与验收'
+  if (options.clarificationHref !== undefined) clarificationLink.href = options.clarificationHref
+  else clarificationLink.hidden = true
   separator.textContent = '|'
   moreSlot.textContent = '⋯ 更多'
   back.textContent = '返回看板'
@@ -191,7 +197,7 @@ export function mountTaskRunPage(options: TaskRunPageOptions): TaskRunPage {
   rows.hidden = true
   rows.append(...ROW_TERMS.map(term => (rowsByTerm.get(term) as RowRefs).row))
   zone.append(identityToggle, rows, identityNotice)
-  topbarActions.append(recordSlot, reviewLink, separator, moreSlot)
+  topbarActions.append(recordSlot, clarificationLink, reviewLink, separator, moreSlot)
   topbar.append(back, topbarActions)
   actions.append(approve, requestChange)
   changesLine.textContent = options.anchor?.changes ?? ''

@@ -152,7 +152,7 @@ function element<K extends keyof HTMLElementTagNameMap>(
 const CONTRACT_ID_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'
 
 function contractId(
-  prefix: 'req' | 'sub' | 'psn' | 'dlv' | 'wit',
+  prefix: 'req' | 'sub' | 'psn' | 'dlv' | 'wit' | 'crt',
   crypto: Crypto,
 ): string {
   const entropy = crypto.getRandomValues(new Uint8Array(26))
@@ -1176,13 +1176,14 @@ export function mountWinWinCodeClient(
   }
 
   /** The Home surface carries the §16.6/§16.7 sub-routes under its path. */
-  function homeSubRoute(): 'my-work' | 'task-entry' | 'task-run' | 'review' | 'candidate-preview' {
+  function homeSubRoute(): 'my-work' | 'task-entry' | 'task-run' | 'review' | 'candidate-preview' | 'clarification' {
     const path = browser.location.hash.replace(/^#/u, '').replace(/\?.*$/u, '')
     if (path === '/home/new-task') return 'task-entry'
     // `/home/run` is the canonical sub-route; `/home/task-run` is the same
     // task-detail page under its design-page name.
     if (path === '/home/run' || path === '/home/task-run') return 'task-run'
     if (path === '/home/preview') return 'candidate-preview'
+    if (path === '/home/clarify') return 'clarification'
     if (path === '/home/review') return 'review'
     return 'my-work'
   }
@@ -1307,12 +1308,59 @@ export function mountWinWinCodeClient(
           `#/home/review?delivery=${encodeURIComponent(anchorFacts.deliveryId)}`,
           scopeSelectionFromHash(browser.location.hash),
         ),
+        clarificationHref: scopeHash(
+          `#/home/clarify?delivery=${encodeURIComponent(anchorFacts.deliveryId)}`,
+          scopeSelectionFromHash(browser.location.hash),
+        ),
         ...(knownAnchor === null ? {} : { anchor: knownAnchor }),
       })
       await model.start()
     } catch (error) {
       if (closed || generation !== renderGeneration || controller.signal.aborted) return
       showRouteFailure(error, 'TASK_RUN_ROUTE_FAILURE')
+    }
+  }
+
+  /** Edit the current Delivery Spec through the canonical delivery contract. */
+  async function renderDecisionClarification(generation: number): Promise<void> {
+    const context = authenticatedRouteContext()
+    if (context === null) return
+    const deliveryId = routeParameters(browser.location.hash).get('delivery')
+    if (deliveryId === null || !matchesCanonicalSchema('DeliveryId', deliveryId)) {
+      routeUnavailable('需求编辑链接缺少有效的交付标识。请从任务页面重新打开。')
+      return
+    }
+    const controller = new AbortController()
+    featureController = controller
+    routeLoading('正在加载需求与验收…')
+    try {
+      const [{ createClarificationViewModel, createControlPlaneClarificationPort }, { mountDecisionClarificationPage }] =
+        await Promise.all([
+          import('./decision-clarification-view-model.js'),
+          import('./decision-clarification-page.js'),
+        ])
+      if (closed || generation !== renderGeneration || controller.signal.aborted) return
+      const model = createClarificationViewModel({
+        port: createControlPlaneClarificationPort({
+          client: controlPlane,
+          actor: context.actor,
+          scope: context.scope,
+          deliveryId: deliveryId as DeliveryId,
+          nextRequestId: () => contractId('req', browser.crypto) as RequestId,
+        }),
+        nextRequestId: () => contractId('req', browser.crypto) as RequestId,
+        nextCriterionId: () => contractId('crt', browser.crypto),
+      })
+      activeFeature = mountDecisionClarificationPage({
+        root: slot,
+        model,
+        backHref: surfaceHash('/home', scopeSelectionFromHash(browser.location.hash)),
+        window: browser,
+      })
+      await model.start()
+    } catch (error) {
+      if (closed || generation !== renderGeneration || controller.signal.aborted) return
+      showRouteFailure(error, 'DECISION_CLARIFICATION_ROUTE_FAILURE')
     }
   }
 
@@ -1595,6 +1643,8 @@ export function mountWinWinCodeClient(
         launchRoute(renderTaskRun(generation), generation, 'TASK_RUN_ROUTE_FAILURE')
       } else if (homeRoute === 'candidate-preview') {
         launchRoute(renderCandidateRunPreview(generation), generation, 'CANDIDATE_PREVIEW_ROUTE_FAILURE')
+      } else if (homeRoute === 'clarification') {
+        launchRoute(renderDecisionClarification(generation), generation, 'DECISION_CLARIFICATION_ROUTE_FAILURE')
       } else if (homeRoute === 'review') {
         launchRoute(renderReview(generation), generation, 'STRONGFLOW_REVIEW_ROUTE_FAILURE')
       } else {

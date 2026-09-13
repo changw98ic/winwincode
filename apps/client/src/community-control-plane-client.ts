@@ -359,7 +359,7 @@ export async function queryWorkRunAggregate(
   return response.result
 }
 
-async function queryDeliveryDetail(
+export async function queryDeliveryDetail(
   client: ControlPlaneClient,
   input: Pick<WorkRunAggregateQueryInput, 'actor' | 'scope' | 'requestId' | 'deliveryId'>,
 ): Promise<DeliveryDetailProjection> {
