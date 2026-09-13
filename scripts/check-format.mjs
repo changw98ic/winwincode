@@ -11,6 +11,8 @@ const excludedDirectories = new Set([
   '.claude',
   '.codex',
   '.git',
+  '.playwright-mcp',
+  '.tmp-ui-review',
   'dist',
   'node_modules',
   'publication-secrets',
