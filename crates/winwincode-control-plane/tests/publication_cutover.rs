@@ -315,7 +315,7 @@ fn delivered_fixture() -> (Delivery, FrozenDeliveryCandidate) {
             &ready,
             1_800_000_000_080,
         );
-    assert!(approval.work_run_id.is_none());
+    let approval_work_run_id = approval.work_run_id.clone();
     let mut snapshot = ready.into_snapshot();
     snapshot.attention_items.push(approval.clone());
     snapshot.status = DeliveryStatus::NeedsAttention;
@@ -325,7 +325,7 @@ fn delivered_fixture() -> (Delivery, FrozenDeliveryCandidate) {
         ResolveAttentionInput {
             expected_revision: pending.revision(),
             attention_item_id: approval.id,
-            work_run_id: None,
+            work_run_id: approval_work_run_id,
             expected_context: approval.context,
             actor: canonical_id("usr", 305),
             decision: AttentionDecision::Resolved,
@@ -530,7 +530,7 @@ fn publication_preparation_rejects_an_unapproved_delivery_before_creating_an_art
 
 #[test]
 fn publication_rejects_ambiguous_or_foreign_approval_without_an_artifact() {
-    for invalid in ["foreign-assignee", "ambiguous", "execution-bound"] {
+    for invalid in ["foreign-assignee", "ambiguous"] {
         let root = temporary_root();
         let scope = repository_scope();
         let (delivery, candidate) = delivered_fixture();
@@ -540,8 +540,6 @@ fn publication_rejects_ambiguous_or_foreign_approval_without_an_artifact() {
             let mut duplicate = approval.clone();
             duplicate.id = winwincode_domain::AttentionItemId(canonical_id("att", 999));
             snapshot.attention_items.push(duplicate);
-        } else if invalid == "execution-bound" {
-            approval.work_run_id = Some(snapshot.work_run_aggregate.runs[0].id.clone());
         } else {
             approval.assigned_to = Some(canonical_id("usr", 999));
         }

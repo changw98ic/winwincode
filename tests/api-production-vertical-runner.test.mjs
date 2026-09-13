@@ -157,7 +157,7 @@ test('Delivery reaches its real terminal state after more transitions than the e
   assert.deepEqual(client.commands, [], 'active WorkRuns must be polled, not advanced')
 })
 
-test('candidate-ready dispatch sequence tolerates a lagging WorkRun projection', async () => {
+test('candidate-ready lagging projection waits for the Controller without local dispatch', async () => {
   let revision = 7
   let delivered = false
   let instant = 0
@@ -178,6 +178,9 @@ test('candidate-ready dispatch sequence tolerates a lagging WorkRun projection',
           },
         }
       }
+      // The lagging WorkRun projection eventually catches up to done without
+      // the runner inventing workrun.start / submit_verdict commands.
+      if (instant >= 3) delivered = true
       return {
         result: {
           attention: [],
@@ -194,11 +197,14 @@ test('candidate-ready dispatch sequence tolerates a lagging WorkRun projection',
         },
       }
     },
-    async command(command, previousRevision, payload) {
-      commands.push({ command, profile: payload.dispatchProfile ?? null })
-      if (command === 'delivery.submit_verdict') delivered = true
-      revision = previousRevision + 1
-      return { command, currentRevision: revision, outcome: 'completed', previousRevision }
+    async command(command) {
+      commands.push({ command })
+      return {
+        command,
+        currentRevision: revision,
+        outcome: 'completed',
+        previousRevision: revision,
+      }
     },
     requestId() {
       requestSequence += 1
@@ -206,12 +212,8 @@ test('candidate-ready dispatch sequence tolerates a lagging WorkRun projection',
     },
   }
 
-  await driveDelivery(client, 10, undefined, () => instant++)
-  assert.deepEqual(commands, [
-    { command: 'workrun.start', profile: 'reviewer' },
-    { command: 'workrun.start', profile: 'verifier' },
-    { command: 'delivery.submit_verdict', profile: null },
-  ])
+  await driveDelivery(client, 20, undefined, () => instant++)
+  assert.deepEqual(commands, [], 'Controller owns verification and verdict dispatch')
 })
 
 test('Delivery timeout reports the total count and only the newest transition window', async () => {
@@ -259,13 +261,18 @@ test('API production vertical is a direct generated HTTP runner', async () => {
     'workitems.create',
     'workrun.start',
     'delivery.resolve_attention',
-    'delivery.submit_verdict',
+    // Controller owns delivery.submit_verdict after verifier terminal.
     'delivery.get',
     'runtime.projection.get',
     'workrun.get',
   ]) {
     assert.equal(source.includes(operation), true, `runner must cover ${operation}`)
   }
+  assert.equal(
+    source.includes('delivery.submit_verdict'),
+    false,
+    'Controller owns submit_verdict; the runner must not dual-dispatch it',
+  )
   assert.match(source, /\/health/u)
   assert.match(source, /httpsRequest/u)
   assert.match(source, /CARGO_TARGET_DIR/u)

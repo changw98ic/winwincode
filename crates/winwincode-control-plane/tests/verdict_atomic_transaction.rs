@@ -552,8 +552,8 @@ fn passing_verdict_enters_final_manual_delivery_review_state() {
     );
     assert!(approval.blocking);
     assert!(
-        approval.work_run_id.is_none(),
-        "human approval is not a Worker execution"
+        approval.work_run_id.is_some(),
+        "DeliveryApproval is bound to the exact candidate producer WorkRun"
     );
     assert!(
         delivery

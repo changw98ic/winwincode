@@ -1768,8 +1768,8 @@ fn approved_solution_review_survives_ready_delivery_review_and_delivery_settleme
         );
     let approval_id = approval.id.clone();
     assert!(
-        approval.work_run_id.is_none(),
-        "a human approval is not an execution"
+        approval.work_run_id.is_some(),
+        "DeliveryApproval is bound to the exact candidate producer WorkRun"
     );
     review_snapshot.attention_items.push(approval);
     review_snapshot.status = DeliveryStatus::NeedsAttention;

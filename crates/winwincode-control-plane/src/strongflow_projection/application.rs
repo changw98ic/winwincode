@@ -991,8 +991,7 @@ pub(crate) fn current_publication_approval(
     ) else {
         return Ok(None);
     };
-    if approval.work_run_id.is_some()
-        || approval.status != AttentionItemStatus::Resolved
+    if approval.status != AttentionItemStatus::Resolved
         || !approval.blocking
         || approval
             .assigned_to
