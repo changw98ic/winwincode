@@ -1,7 +1,8 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "declaration": false,
+    "composite": true,
+    "declaration": true,
     "declarationMap": false,
     "lib": [
       "DOM",
@@ -16,5 +17,16 @@
   },
   "include": [
     "src/**/*.ts"
+  ],
+  "references": [
+    {
+      "path": "../../packages/browser-ui"
+    },
+    {
+      "path": "../../packages/control-plane-client"
+    },
+    {
+      "path": "../../packages/browser-core"
+    }
   ]
 }
