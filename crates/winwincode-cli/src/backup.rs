@@ -1815,8 +1815,7 @@ mod tests {
     }
 
     fn seed_server_store(data_directory: &Path) -> (String, String, String) {
-        let admin = UserAccountService::open(data_directory)
-            .expect("account service");
+        let admin = UserAccountService::open(data_directory).expect("account service");
         let owner = admin
             .initialize_owner("ops-owner", "ops-owner-password", &chrono_now())
             .expect("owner account");
