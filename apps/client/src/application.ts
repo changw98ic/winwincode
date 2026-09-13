@@ -36,6 +36,7 @@ import {
 } from './core/connection-state.js'
 import {
   loadRecentChats,
+  recordRecentChat,
   type RecentChatEntry,
 } from './recent-chats.js'
 import { createQueryCache } from '@winwincode/browser-core/query-cache'
@@ -967,6 +968,26 @@ export function mountWinWinCodeClient(
           browser.crypto,
         ) as ProductSessionId,
       })
+      // Design shell 03: opening a session writes the title into the shell
+      // sidebar source so 「最近对话」 reflects real chat activity.
+      let lastRecordedSession: string | null = productSessionId
+      const unsubscribeRecentChats = model.subscribe(state => {
+        const session = state.session
+        if (session === null || session.id === lastRecordedSession) return
+        lastRecordedSession = session.id
+        recordRecentChat(browser.localStorage ?? null, {
+          sessionKey: session.id,
+          title: session.title.length > 0 ? session.title : '新对话',
+          at: Date.now(),
+        })
+      })
+      const chatPage = activeFeature
+      activeFeature = {
+        close() {
+          unsubscribeRecentChats()
+          chatPage?.close()
+        },
+      }
     } catch (error) {
       if (closed || generation !== renderGeneration || controller.signal.aborted) return
       showRouteFailure(error, 'CHAT_ROUTE_FAILURE')
@@ -1155,12 +1176,13 @@ export function mountWinWinCodeClient(
   }
 
   /** The Home surface carries the §16.6/§16.7 sub-routes under its path. */
-  function homeSubRoute(): 'my-work' | 'task-entry' | 'task-run' | 'review' {
+  function homeSubRoute(): 'my-work' | 'task-entry' | 'task-run' | 'review' | 'candidate-preview' {
     const path = browser.location.hash.replace(/^#/u, '').replace(/\?.*$/u, '')
     if (path === '/home/new-task') return 'task-entry'
     // `/home/run` is the canonical sub-route; `/home/task-run` is the same
     // task-detail page under its design-page name.
     if (path === '/home/run' || path === '/home/task-run') return 'task-run'
+    if (path === '/home/preview') return 'candidate-preview'
     if (path === '/home/review') return 'review'
     return 'my-work'
   }
@@ -1291,6 +1313,87 @@ export function mountWinWinCodeClient(
     } catch (error) {
       if (closed || generation !== renderGeneration || controller.signal.aborted) return
       showRouteFailure(error, 'TASK_RUN_ROUTE_FAILURE')
+    }
+  }
+
+  /**
+   * WWX-RUN-04: the candidate run preview main surface under `#/home/preview`.
+   * Identity comes from the route query when present; a missing source still
+   * mounts so the page can name the gap instead of inventing a run.
+   */
+  async function renderCandidateRunPreview(generation: number): Promise<void> {
+    const context = authenticatedRouteContext()
+    if (context === null) return
+    const controller = new AbortController()
+    featureController = controller
+    routeLoading('正在加载候选运行预览…')
+    try {
+      const [
+        { createCandidatePreviewViewModel },
+        { mountCandidateRunPreviewPage },
+      ] = await Promise.all([
+        import('./candidate-run-preview-view-model.js'),
+        import('./candidate-run-preview-page.js'),
+      ])
+      if (closed || generation !== renderGeneration || controller.signal.aborted) return
+      const parameters = routeParameters(browser.location.hash)
+      const sourceId = parameters.get('source')
+      const mode = parameters.get('mode') === 'live' ? 'live' as const : 'frozen-candidate' as const
+      const commit = parameters.get('commit')
+      const port = {
+        async loadIdentity() {
+          if (sourceId === null) return null
+          return {
+            mode,
+            sourceId,
+            workerSessionId: parameters.get('worker') ?? '',
+            repositoryBindingId: parameters.get('repository') ?? '',
+            taskId: parameters.get('task'),
+            attempt: parameters.get('attempt') === null
+              ? null
+              : Number(parameters.get('attempt')),
+            candidateCommit: commit,
+            candidateTreeId: parameters.get('tree'),
+            runConfigVersion: parameters.get('config'),
+          }
+        },
+        async startRun() {
+          throw new Error('managed-run-start-unavailable')
+        },
+        async stopRun() {
+          throw new Error('managed-run-stop-unavailable')
+        },
+        async restartRun() {
+          throw new Error('managed-run-restart-unavailable')
+        },
+        async authorizePreview() {
+          throw new Error('preview-authorize-unavailable')
+        },
+        async revokePreview() {
+          throw new Error('preview-revoke-unavailable')
+        },
+        async listFiles() {
+          return []
+        },
+        async listLogSegments() {
+          return []
+        },
+        async readLogCitation() {
+          return null
+        },
+      }
+      const model = createCandidatePreviewViewModel({
+        port,
+        nextRequestId: () => contractId('req', browser.crypto) as RequestId,
+      })
+      activeFeature = mountCandidateRunPreviewPage({
+        root: slot,
+        model,
+        taskHref: surfaceHash('/home', scopeSelectionFromHash(browser.location.hash)),
+      })
+    } catch (error) {
+      if (closed || generation !== renderGeneration || controller.signal.aborted) return
+      showRouteFailure(error, 'CANDIDATE_PREVIEW_ROUTE_FAILURE')
     }
   }
 
@@ -1490,6 +1593,8 @@ export function mountWinWinCodeClient(
         launchRoute(renderTaskEntry(generation), generation, 'TASK_ENTRY_ROUTE_FAILURE')
       } else if (homeRoute === 'task-run') {
         launchRoute(renderTaskRun(generation), generation, 'TASK_RUN_ROUTE_FAILURE')
+      } else if (homeRoute === 'candidate-preview') {
+        launchRoute(renderCandidateRunPreview(generation), generation, 'CANDIDATE_PREVIEW_ROUTE_FAILURE')
       } else if (homeRoute === 'review') {
         launchRoute(renderReview(generation), generation, 'STRONGFLOW_REVIEW_ROUTE_FAILURE')
       } else {

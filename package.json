@@ -30,6 +30,7 @@
     "verify:release-artifacts": "node scripts/verify-release-artifacts.mjs",
     "verify:release-artifact-security": "node scripts/verify-release-artifact-security.mjs",
     "verify:api-production-vertical": "node scripts/run-api-production-vertical.mjs",
+    "verify:core-lock": "node scripts/verify-core-lock.mjs --lock",
     "test:ts": "pnpm build:ts && node scripts/run-ts-tests.mjs",
     "test:rust": "cargo build -p winwincode-kernel-helper --bin winwincode-kernel-helper --locked && cargo test --workspace --all-features --locked",
     "test": "pnpm test:ts && pnpm test:rust",

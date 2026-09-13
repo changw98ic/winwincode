@@ -16,3 +16,4 @@
 @import './features/clients.css' layer(features);
 @import './features/repositories.css' layer(features);
 @import './features/strongflow-review.css' layer(features);
+@import './features/candidate-run-preview.css' layer(features);

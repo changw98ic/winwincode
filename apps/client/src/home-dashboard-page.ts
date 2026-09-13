@@ -156,7 +156,7 @@ const PRESENTATION_SPEC: HomeDashboardPresentation = {
   openChatLabel: '打开对话',
   deliveryProgressLabel: '查看进度',
   disabledLabel: '该决策已关闭。请刷新查看当前状态。',
-  countLabel: count => String(count),
+  countLabel: count => `${String(count)}`,
   updatedLabel: at => `更新于 ${formatInstant(at)}`,
   visitedLabel: (at: string) => `访问于 ${at}`,
   taskLabel: card => [
@@ -555,6 +555,10 @@ export function mountHomeDashboardPage(
           'aria-label',
           `${presentation.sectionHeading[id]} · ${expanded ? presentation.expandLabel : presentation.collapseLabel}`,
         )
+        const liveTotal = options.model.state.counts[id === 'visited' ? 'visited' : id]
+        toggleButton.textContent = expanded
+          ? `${presentation.sectionHeading[id]} · ${presentation.collapseLabel}`
+          : `${presentation.sectionHeading[id]} · ${presentation.countLabel(liveTotal)}`
         cards.hidden = expanded
         empty.hidden = expanded ? true : !renderedEmpty(id)
       })
@@ -671,6 +675,14 @@ export function mountHomeDashboardPage(
                     : id === 'completed' ? state.counts.completed
                       : state.counts.visited
       section.count.textContent = presentation.countLabel(total)
+      // Design 04: the collapsed hairline is a count row driven by the home
+      // projection — never a silent empty strip.
+      if (section.toggle !== null) {
+        const expandedNow = section.toggle.getAttribute('aria-expanded') === 'true'
+        section.toggle.textContent = expandedNow
+          ? `${presentation.sectionHeading[id]} · ${presentation.collapseLabel}`
+          : `${presentation.sectionHeading[id]} · ${presentation.countLabel(total)}`
+      }
       if (attentionOnlyEnabled && id !== 'decisions') {
         section.root.hidden = true
         continue
