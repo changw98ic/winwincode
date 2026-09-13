@@ -751,6 +751,7 @@ fn repository_receipt_scope(scope: &RepositoryScope) -> ReceiptScopeKey {
     ReceiptScopeKey::from_encoded(encoded).expect("repository receipt scope")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn seed_candidate_artifact(
     root: &Path,
     repository: &Path,

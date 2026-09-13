@@ -1970,7 +1970,7 @@ mod tests {
             database
                 .execute_batch(
                     "DELETE FROM projection_event_stream_heads; DELETE FROM outbox; \
-                     DELETE FROM command_receipts; DELETE FROM users;",
+                     DELETE FROM command_receipts; DELETE FROM owner_account;",
                 )
                 .expect("wipe live state");
         }
@@ -1978,7 +1978,7 @@ mod tests {
             count(
                 &data_directory,
                 "control-plane.sqlite3",
-                "SELECT count(*) FROM users"
+                "SELECT count(*) FROM owner_account"
             ),
             0
         );

@@ -255,7 +255,7 @@ fn accept_terminal_message(
         root,
         scope,
         message,
-        JobOutcomeAckMessageStatus::Accepted,
+        &JobOutcomeAckMessageStatus::Accepted,
     );
 }
 
@@ -270,7 +270,7 @@ fn replay_terminal_message(
         root,
         scope,
         message,
-        JobOutcomeAckMessageStatus::Duplicate,
+        &JobOutcomeAckMessageStatus::Duplicate,
     );
 }
 
@@ -279,7 +279,7 @@ fn accept_terminal_message_with_status(
     root: &Path,
     scope: &RepositoryScope,
     message: &JobOutcomeMessage,
-    expected_status: JobOutcomeAckMessageStatus,
+    expected_status: &JobOutcomeAckMessageStatus,
 ) {
     let mut storage = SqliteStorage::open(root).expect("terminal ingress storage");
     let output = DurableExecutionPortIngress::new(
@@ -294,7 +294,7 @@ fn accept_terminal_message_with_status(
     let [ExecutionPortMessage::JobOutcomeAckMessage(ack)] = output.as_slice() else {
         panic!("terminal ingress must return one acknowledgement");
     };
-    assert_eq!(ack.status, expected_status);
+    assert_eq!(&ack.status, expected_status);
     Box::new(storage)
         .close()
         .expect("terminal ingress storage close");

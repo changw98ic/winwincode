@@ -500,6 +500,7 @@ fn fixture_delivery(
     Delivery::try_from_snapshot(snapshot).expect("production verdict Delivery")
 }
 
+#[allow(clippy::too_many_lines)]
 fn seed_verdict_sources(
     data: &Path,
     repository: &Path,
