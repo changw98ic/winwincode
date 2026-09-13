@@ -41,3 +41,9 @@ source-repositories/
 /fixture-cert.pem
 /fixture-key.pem
 /openssl.cnf
+
+# Local browser-review artifacts and beads machine state
+.playwright-mcp/
+.tmp-ui-review/
+.beads/dolt-backup.json
+.beads/dolt-backup-state.json
