@@ -91,12 +91,12 @@ test('real Chrome cascades, switches, restores, and revokes one exact Scope', as
   const switched = await evaluate(
     devtools,
     sessionId,
-    'globalThis.switchScopeWithNetworkFailure()',
+    'globalThis.switchScopeAndCloseOldFeature()',
   )
   assert.equal(switched.oldSubscriptionClosed, true)
   assert.equal(switched.featureVisible, false)
-  assert.equal(switched.state.retryVisible, true)
-  assert.match(switched.state.status, /network/iu)
+  assert.equal(switched.state.values.organization, 'org_00000000000000000000000001')
+  assert.equal(switched.state.retryVisible, false)
 
   await evaluate(devtools, sessionId, 'globalThis.restoreSecondRepository()')
   await devtools.send('Page.reload', {}, sessionId)

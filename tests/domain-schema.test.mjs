@@ -60,15 +60,14 @@ const COMMAND_NAMES = Object.freeze([
   'worker.enable',
   'publication.publish',
   'publication.cancel',
-  'enterprise.organization.update',
-  'enterprise.membership.update',
-  'enterprise.team.update',
-  'enterprise.role.update',
-  'enterprise.project_repository.update',
-  'enterprise.policy.update',
-  'enterprise.fleet.update',
-  'enterprise.integration.update',
-  'enterprise.identity.update',
+
+
+
+
+
+
+
+
   'collaboration.notification.ack',
   'collaboration.presence.update',
 ])

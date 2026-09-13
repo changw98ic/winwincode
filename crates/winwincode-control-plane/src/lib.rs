@@ -34,18 +34,14 @@ mod device_execution_binding;
 mod device_scheduler;
 pub mod device_session_gate;
 mod durable_execution_port;
-mod enterprise_hierarchy;
 mod enterprise_identity;
 mod enterprise_identity_lifecycle;
 mod enterprise_identity_protocols;
 mod enterprise_identity_verification;
-mod enterprise_policy;
 mod enterprise_policy_enforcement;
 mod enterprise_policy_evaluation;
 mod enterprise_quota;
 mod enterprise_rbac;
-mod enterprise_reporting;
-mod enterprise_scope_binding;
 mod enterprise_usage;
 pub mod execution_port_service;
 mod gate_interaction_service;
@@ -102,7 +98,6 @@ mod vault_secret_store;
 mod verdict_transaction;
 mod worker_enterprise_quota;
 mod worker_execution_lifecycle;
-mod worker_fleet_projection;
 mod worker_interaction_outbound;
 pub mod worker_management;
 mod worker_policy;
@@ -199,12 +194,6 @@ pub use durable_execution_port::{
     DurableExecutionPortContext, DurableExecutionPortDelegate, DurableExecutionPortError,
     DurableExecutionPortIngress, DurableExecutionPortSupplement,
 };
-pub use enterprise_hierarchy::{
-    EnterpriseHierarchyCommand, EnterpriseHierarchyError, EnterpriseHierarchyErrorKind,
-    EnterpriseHierarchyReceipt, EnterpriseHierarchyService, EnvironmentId, HierarchyMutation,
-    HierarchyResource, HierarchyResourceId, HierarchyResourceKind, HierarchyResourceState,
-    HierarchyScope, ResolvedHierarchyResource,
-};
 pub use enterprise_identity::{
     AuthenticatedEnterpriseIdentity, EnterpriseIdentityClock, EnterpriseIdentityClockError,
     EnterpriseIdentityError, EnterpriseIdentityErrorKind, EnterpriseIdentityService,
@@ -232,10 +221,6 @@ pub use enterprise_identity_verification::{
     EnterpriseIdentityVerifierTimeouts, EnterpriseIdentityVerifierTlsRoots,
     ProductionOidcTokenVerifier, ProductionSamlResponseVerifier, ProductionScimBearerVerifier,
 };
-pub use enterprise_policy::{
-    EnterprisePolicyApiError, EnterprisePolicyApiErrorKind, EnterprisePolicyApiService,
-    EnterprisePolicyClock,
-};
 pub use enterprise_policy_enforcement::{
     EnterprisePolicyEnforcement, EnterprisePolicyEnforcementError,
     EnterprisePolicyEnforcementErrorKind, EnterprisePolicyEnforcementRequest,
@@ -255,20 +240,6 @@ pub use enterprise_rbac::{
     ActiveMemberContext, ActiveTeamContext, EnterpriseRbacClock, EnterpriseRbacClockError,
     EnterpriseRbacError, EnterpriseRbacErrorKind, EnterpriseRbacService, EvaluatedRoleVersion,
     RbacAuthoritySeal, RbacDecision, RbacDenialReason, SystemEnterpriseRbacClock,
-};
-pub use enterprise_reporting::{
-    EnterpriseReportCurrencyRule, EnterpriseReportCursor, EnterpriseReportDetail,
-    EnterpriseReportDimension, EnterpriseReportError, EnterpriseReportErrorKind,
-    EnterpriseReportExport, EnterpriseReportFormat, EnterpriseReportGroup, EnterpriseReportPage,
-    EnterpriseReportQuery, EnterpriseReportRow, EnterpriseReportTimeRule, EnterpriseReportTotals,
-    EnterpriseReportingLimits, EnterpriseReportingProjection, EnterpriseReportingService,
-};
-pub use enterprise_scope_binding::{
-    EnterpriseScopeBinding, EnterpriseScopeBindingCommand, EnterpriseScopeBindingError,
-    EnterpriseScopeBindingErrorKind, EnterpriseScopeBindingMutation, EnterpriseScopeBindingReceipt,
-    EnterpriseScopeBindingService, LocalScopeMigrationCommand, LocalScopeMigrationReceipt,
-    LocalScopeMigrationStatus, ResolvedScopeBinding, ScopeBindingSource, ScopeBindingSubject,
-    ScopeBindingSubjectKind, local_scope_inventory_digest,
 };
 pub use enterprise_usage::{
     ProviderEnterpriseUsageError, ProviderEnterpriseUsageErrorKind,
@@ -531,10 +502,6 @@ pub use worker_execution_lifecycle::{
     DurableWorkerExecutionLifecycle, WorkerExecutionLifecycleError,
     WorkerExecutionLifecycleErrorKind, WorkerExecutionRelease, WorkerExecutionTerminalReceipt,
     WorkerExecutionUsageSettlement,
-};
-pub use worker_fleet_projection::{
-    WorkerFleetProjectionService, WorkerFleetProjectionServiceError,
-    WorkerFleetProjectionServiceErrorKind,
 };
 pub use worker_interaction_outbound::{
     DurableWorkerInteractionOutbound, WorkerInteractionClaim, WorkerInteractionClaimPage,

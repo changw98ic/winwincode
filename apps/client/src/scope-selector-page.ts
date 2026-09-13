@@ -71,14 +71,6 @@ function updateOptions(
 }
 
 function statusMessage(state: ScopeSelectorViewModelState): string {
-  if (state.status === 'loading') return 'Loading authorized Scope names…'
-  if (state.status === 'permission-denied') {
-    return 'Some Scope names are unavailable for this identity. Exact authorized Scope IDs remain selectable.'
-  }
-  if (state.status === 'network-error') {
-    return 'Scope names could not be refreshed. Check the network and retry.'
-  }
-  if (state.status === 'error') return 'Scope names could not be loaded.'
   if (state.status === 'closed') return 'Scope selector closed.'
   if (state.emptyLevel === 'organization') return 'No authorized organizations are available.'
   if (state.emptyLevel === 'workspace') return 'No authorized workspaces exist in this organization.'
@@ -173,9 +165,9 @@ export function mountScopeSelectorPage(options: ScopeSelectorPageOptions): Scope
     repository.select.disabled = selectorClosed
       || state.selection.projectId === null
       || state.options.repositories.length === 0
-    region.setAttribute('aria-busy', state.status === 'loading' ? 'true' : 'false')
+    region.setAttribute('aria-busy', 'false')
     status.textContent = statusMessage(state)
-    retry.hidden = state.status !== 'network-error'
+    retry.hidden = true
   }
 
   const unsubscribe = options.model.subscribe(render)

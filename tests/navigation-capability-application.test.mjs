@@ -48,11 +48,6 @@ const repositoryScope = {
   projectId: 'prj_00000000000000000000000001',
   repositoryId: 'rep_00000000000000000000000001',
 }
-const organizationScope = {
-  kind: 'organization',
-  organizationId: 'org_00000000000000000000000001',
-}
-
 function sessionWith(scopes) {
   return {
     schemaVersion,
@@ -62,29 +57,11 @@ function sessionWith(scopes) {
   }
 }
 
-const areaByQuery = Object.freeze({
-  'enterprise.organization.list': 'organization',
-  'enterprise.membership.list': 'members',
-  'enterprise.project.list': 'projects',
-  'enterprise.policy.list': 'policy',
-  'enterprise.fleet.list': 'fleet',
-  'enterprise.usage.list': 'usage',
-  'enterprise.audit.list': 'audit',
-  'enterprise.integration.list': 'integration',
-})
+const areaByQuery = Object.freeze({})
 
-const kindByArea = Object.freeze({
-  organization: 'enterprise_organization_page',
-  members: 'enterprise_membership_page',
-  projects: 'enterprise_project_repository_page',
-  policy: 'enterprise_policy_page',
-  fleet: 'enterprise_fleet_page',
-  usage: 'enterprise_usage_page',
-  audit: 'enterprise_audit_page',
-  integration: 'enterprise_integration_page',
-})
+const kindByArea = Object.freeze({})
 
-/** Deterministic facade fake covering session, product, and enterprise reads. */
+/** Deterministic facade fake covering session and Community product reads. */
 function facadeFake(currentSession = sessionWith([repositoryScope])) {
   const queries = []
   const commands = []
@@ -176,6 +153,27 @@ function facadeFake(currentSession = sessionWith([repositoryScope])) {
           return respond(request, { kind: 'chat_interaction_page', items: [] })
         case 'approval.list':
           return respond(request, { kind: 'approval_page', items: [] })
+        case 'delivery.list':
+          return respond(request, { kind: 'delivery_page', items: [] })
+        case 'model.route.availability.list':
+          return respond(request, {
+            kind: 'model_route_availability_page',
+            defaultModelId: null,
+            defaultProviderId: null,
+            items: [],
+            reason: 'no_provider',
+            requestPoolRevision: 1,
+            requestPoolSource: {
+              kind: 'project',
+              organizationId: repositoryScope.organizationId,
+              workspaceId: repositoryScope.workspaceId,
+              projectId: repositoryScope.projectId,
+            },
+            scope: repositoryScope,
+            settingsRevision: null,
+            settingsSource: null,
+            status: 'disabled',
+          })
         default:
           if (area !== undefined) {
             return respond(request, {
@@ -351,11 +349,11 @@ async function restoredFixture(hash, client = facadeFake()) {
   return fixture
 }
 
-test('personal deployment hides the Enterprise entry and keeps product areas navigable', async () => {
+test('personal deployment shows the five product entries without Enterprise', async () => {
   const fixture = await restoredFixture('#/chat', facadeFake())
   await waitFor(() => navigationLinks(fixture.rootElement).chat !== undefined, 'navigation')
   // UI-504: Home joins Chat, StrongFlow, Settings and Attention in the nav.
-  await waitFor(() => Object.values(navigationLinks(fixture.rootElement)).length === 5, 'trimmed navigation')
+  await waitFor(() => Object.values(navigationLinks(fixture.rootElement)).length === 5, 'canonical navigation')
 
   const links = navigationLinks(fixture.rootElement)
   assert.deepEqual(
@@ -363,56 +361,26 @@ test('personal deployment hides the Enterprise entry and keeps product areas nav
     ['attention', 'chat', 'home', 'settings', 'strongflow'],
   )
   assert.equal(links.chat.getAttribute('aria-disabled'), null)
+  assert.equal(links.enterprise, undefined)
   fixture.application.close()
 })
 
-test('enterprise deployment shows every entry including Enterprise', async () => {
-  const fixture = await restoredFixture(
-    '#/chat',
-    facadeFake(sessionWith([organizationScope, repositoryScope])),
-  )
-  await waitFor(() => Object.values(navigationLinks(fixture.rootElement)).length === 6, 'full navigation')
-
-  const links = navigationLinks(fixture.rootElement)
-  assert.equal(links.enterprise.getAttribute('aria-disabled'), null)
-  fixture.application.close()
-})
-
-test('directly opening an unauthorized Enterprise URL is refused by the page, not by trust', async () => {
+test('unknown Enterprise URLs fall back to Home instead of loading an Enterprise surface', async () => {
   const client = facadeFake(sessionWith([repositoryScope]))
   const fixture = await restoredFixture('#/enterprise/resources', client)
   await waitFor(
-    () => descendants(fixture.rootElement).some(node => (
-      node.className === 'wwc-surface-route-denied'
-    )),
-    'enterprise route denial',
+    () => navigationLinks(fixture.rootElement).home !== undefined,
+    'home fallback navigation',
   )
-  assert.equal(
-    fixture.client.queries.some(query => areaByQuery[query.query] !== undefined),
-    false,
-    'no enterprise query left the browser for an unauthorized scope',
-  )
-  assert.equal(fixture.application.activeSurface.id, 'enterprise')
+  assert.equal(fixture.application.activeSurface.id, 'home')
   assert.equal(navigationLinks(fixture.rootElement).enterprise, undefined)
-  await assert.rejects(
-    fixture.application.controlPlane.command({
-      schemaVersion,
-      requestId: 'req_00000000000000000000000001',
-      actor,
-      scope: repositoryScope,
-      command: 'enterprise.organization.update',
-      expectedRevision: 1,
-      payload: {},
-    }),
-    error => error instanceof ControlPlaneClientError && error.kind === 'authorization',
-  )
   fixture.application.close()
 })
 
 test('revoking the session hides navigation and exits the route with subscriptions closed', async () => {
-  const client = facadeFake(sessionWith([organizationScope, repositoryScope]))
-  const fixture = await restoredFixture('#/enterprise/resources', client)
-  await waitFor(() => fixture.client.subscriptions.length > 0, 'enterprise subscription')
+  const client = facadeFake(sessionWith([repositoryScope]))
+  const fixture = await restoredFixture('#/attention', client)
+  await waitFor(() => fixture.client.subscriptions.length > 0, 'attention subscription')
   const subscription = fixture.client.subscriptions[0]
 
   fixture.application.authSession.authenticationRequired(new ControlPlaneClientError({
@@ -431,85 +399,72 @@ test('revoking the session hides navigation and exits the route with subscriptio
   fixture.application.close()
 })
 
-test('losing the enterprise scope mid-session returns to the safe entry', async () => {
-  const client = facadeFake(sessionWith([organizationScope, repositoryScope]))
-  const fixture = await restoredFixture('#/enterprise/resources', client)
-  await waitFor(() => fixture.client.subscriptions.length > 0, 'enterprise subscription')
-  const subscription = fixture.client.subscriptions[0]
+test('losing the repository Scope mid-session disables product entries', async () => {
+  const client = facadeFake(sessionWith([repositoryScope]))
+  const fixture = await restoredFixture('#/attention', client)
+  await waitFor(() => navigationLinks(fixture.rootElement).attention !== undefined, 'attention nav')
 
-  const personal = sessionWith([repositoryScope])
-  Object.assign(fixture.application.authSession, {})
-  client.restore = async () => structuredClone(personal)
+  const empty = sessionWith([])
+  client.restore = async () => structuredClone(empty)
   await fixture.application.authSession.restore()
   await waitFor(
-    () => descendants(fixture.rootElement).some(node => (
-      node.className === 'wwc-surface-route-denied'
-    )),
-    'enterprise route after scope loss',
-  )
-  await waitFor(() => subscription.handle.closed === true, 'closed enterprise subscription')
-  assert.equal(navigationLinks(fixture.rootElement).enterprise, undefined)
-  assert.equal(
-    descendants(fixture.rootElement).some(node => (
-      node.className === 'wwc-surface-route-safe-entry' && node.href === '#/chat'
-    )),
-    true,
+    () => navigationLinks(fixture.rootElement).chat?.getAttribute('aria-disabled') === 'true'
+      || navigationLinks(fixture.rootElement).chat === undefined,
+    'repository scope loss',
   )
   fixture.application.close()
 })
 
 test('disabled navigation entries stay visible and block navigation', async () => {
-  const client = facadeFake(sessionWith([organizationScope, repositoryScope]))
+  const client = facadeFake(sessionWith([repositoryScope]))
   const fixture = mountedFixture('#/chat', client, {
     navigationCapabilities: {
-      deployment: 'enterprise',
-      surfaceAccess: { enterprise: 'denied' },
+      surfaceAccess: { chat: 'denied' },
     },
   })
   await waitFor(
     () => fixture.application.authSession.state.status === 'signed-in',
     'restored session',
   )
-  await waitFor(() => Object.values(navigationLinks(fixture.rootElement)).length === 6, 'full navigation')
+  await waitFor(() => navigationLinks(fixture.rootElement).chat !== undefined, 'disabled entry')
 
   const links = navigationLinks(fixture.rootElement)
-  assert.equal(links.enterprise.getAttribute('aria-disabled'), 'true')
-  assert.equal(links.enterprise.tabIndex, -1)
-  assert.match(links.enterprise.textContent, /unavailable/iu)
+  assert.equal(links.chat.getAttribute('aria-disabled'), 'true')
+  assert.equal(links.chat.tabIndex, -1)
+  assert.match(links.chat.textContent, /unavailable/iu)
   const event = {
     type: 'click',
     defaultPrevented: false,
     preventDefault() { this.defaultPrevented = true },
   }
-  links.enterprise.dispatchEvent(event)
+  links.chat.dispatchEvent(event)
   assert.equal(event.defaultPrevented, true)
   fixture.application.close()
 })
 
 test('read-only navigation stays enterable and names its access level', async () => {
-  const client = facadeFake(sessionWith([organizationScope, repositoryScope]))
+  const client = facadeFake(sessionWith([repositoryScope]))
   const fixture = mountedFixture('#/chat', client, {
     navigationCapabilities: {
-      deployment: 'enterprise',
-      surfaceAccess: { enterprise: 'read-only' },
+      surfaceAccess: { chat: 'read-only' },
     },
   })
   await waitFor(
     () => fixture.application.authSession.state.status === 'signed-in',
     'restored session',
   )
-  await waitFor(() => navigationLinks(fixture.rootElement).enterprise !== undefined, 'read-only entry')
-  const enterprise = navigationLinks(fixture.rootElement).enterprise
-  assert.equal(enterprise.dataset.capability, 'read-only')
-  assert.equal(enterprise.getAttribute('aria-disabled'), null)
-  assert.match(enterprise.textContent, /read only/iu)
+  await waitFor(() => navigationLinks(fixture.rootElement).chat !== undefined, 'read-only entry')
+  const chat = navigationLinks(fixture.rootElement).chat
+  assert.equal(chat.dataset.capability, 'read-only')
+  assert.equal(chat.getAttribute('aria-disabled'), null)
+  assert.match(chat.textContent, /read only/iu)
   fixture.application.close()
 })
 
 test('WebSocket authorization revocation closes the feature and shows the shell safe entry', async () => {
-  const client = facadeFake(sessionWith([organizationScope, repositoryScope]))
-  const fixture = await restoredFixture('#/enterprise/resources', client)
-  await waitFor(() => fixture.client.subscriptions.length > 0, 'enterprise subscription')
+  const client = facadeFake(sessionWith([repositoryScope]))
+  const fixture = await restoredFixture('#/attention', client)
+  await waitFor(() => fixture.client.subscriptions.length > 0, 'attention subscription')
   const subscription = fixture.client.subscriptions[0]
 
   await subscription.options.onAuthorizationRevoked(null)
@@ -521,66 +476,9 @@ test('WebSocket authorization revocation closes the feature and shows the shell 
     )),
     'shell safe entry',
   )
-  assert.equal(fixture.application.activeSurface.id, 'enterprise')
-  assert.equal(navigationLinks(fixture.rootElement).enterprise.dataset.capability, 'available')
-  assert.equal(navigationLinks(fixture.rootElement).enterprise.getAttribute('data-route-access'), 'denied')
-  fixture.application.close()
-})
-
-test('one denied enterprise area does not disable the whole surface', async () => {
-  const client = facadeFake(sessionWith([organizationScope, repositoryScope]))
-  client.deniedAreas.add('organization')
-  const fixture = await restoredFixture('#/enterprise/resources', client)
-  await waitFor(
-    () => fixture.client.queries.some(query => areaByQuery[query.query] === 'organization'),
-    'denied object-area query',
-  )
-  await waitFor(
-    () => fixture.client.queries.some(query => areaByQuery[query.query] === 'members'),
-    'authorized sibling query',
-  )
-
-  assert.equal(navigationLinks(fixture.rootElement).enterprise.dataset.capability, 'available')
-  assert.equal(descendants(fixture.rootElement).some(node => (
-    node.className === 'wwc-surface-route-denied'
-  )), false)
-  fixture.application.close()
-})
-
-test('read-only Enterprise disables mutation controls while direct commands still reach Server authority', async () => {
-  const client = facadeFake(sessionWith([organizationScope, repositoryScope]))
-  const fixture = mountedFixture('#/enterprise/resources', client, {
-    navigationCapabilities: {
-      deployment: 'enterprise',
-      surfaceAccess: { enterprise: 'read-only' },
-    },
-  })
-  await waitFor(
-    () => descendants(fixture.rootElement).some(node => (
-      node.className === 'wwc-enterprise-organization-fields'
-    )),
-    'enterprise mutation controls',
-  )
-  const fields = descendants(fixture.rootElement).find(node => (
-    node.className === 'wwc-enterprise-organization-fields'
-  ))
-  assert.equal(fields.disabled, true)
-  assert.equal(descendants(fixture.rootElement).find(node => (
-    node.className === 'wwc-surface-read-only'
-  )).hidden, false)
-  await assert.rejects(
-    fixture.application.controlPlane.command({
-      schemaVersion,
-      requestId: 'req_00000000000000000000000001',
-      actor,
-      scope: repositoryScope,
-      command: 'enterprise.organization.update',
-      expectedRevision: 1,
-      payload: {},
-    }),
-    error => error instanceof ControlPlaneClientError && error.kind === 'authorization',
-  )
-  assert.equal(client.commands.length, 1)
+  assert.equal(fixture.application.activeSurface.id, 'attention')
+  assert.equal(navigationLinks(fixture.rootElement).attention.dataset.capability, 'available')
+  assert.equal(navigationLinks(fixture.rootElement).attention.getAttribute('data-route-access'), 'denied')
   fixture.application.close()
 })
 

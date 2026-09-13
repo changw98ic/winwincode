@@ -13,18 +13,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
-    Actor, ActorId, ControlPlaneWebSocketEnterpriseMembershipInvalidatedEvent,
-    ControlPlaneWebSocketEnterpriseMembershipInvalidatedEventTypeValue,
-    ControlPlaneWebSocketEnterpriseMembershipListReloadQuery,
-    ControlPlaneWebSocketEnterpriseOrganizationInvalidatedEvent,
-    ControlPlaneWebSocketEnterpriseOrganizationInvalidatedEventTypeValue,
-    ControlPlaneWebSocketEnterpriseOrganizationListReloadQuery,
-    ControlPlaneWebSocketEnterpriseRoleInvalidatedEvent,
-    ControlPlaneWebSocketEnterpriseRoleInvalidatedEventTypeValue,
-    ControlPlaneWebSocketEnterpriseRoleListReloadQuery,
-    ControlPlaneWebSocketEnterpriseTeamInvalidatedEvent,
-    ControlPlaneWebSocketEnterpriseTeamInvalidatedEventTypeValue,
-    ControlPlaneWebSocketEnterpriseTeamListReloadQuery, EnterpriseMembershipListQuery,
+    Actor, ActorId, EnterpriseMembershipListQuery,
     EnterpriseMembershipListResultResponse, EnterpriseMembershipListResultResponseQuery,
     EnterpriseMembershipPage, EnterpriseMembershipPageKind, EnterpriseMembershipProjection,
     EnterpriseMembershipUpdateCommand, EnterpriseMembershipUpdateCompletedResponse,
@@ -236,190 +225,26 @@ impl EnterpriseRbacService {
     /// # Errors
     ///
     /// Rejects invalid scope, stale revision, changed replay, or unavailable storage.
-    pub fn update_organization(
-        &self,
-        command: &EnterpriseOrganizationUpdateCommand,
-    ) -> Result<EnterpriseOrganizationUpdateCompletedResponse, EnterpriseRbacError> {
-        let Scope::OrganizationScope(scope) = &command.scope else {
-            return Err(scope_denied());
-        };
-        if scope.organization_id != command.payload.organization_id {
-            return Err(scope_denied());
-        }
-        let meta = CommandMeta::new(
-            &command.actor,
-            scope,
-            &command.request_id,
-            &command.schema_version,
-            command.expected_revision.0,
-            "rbac.organization.update",
-            EventKind::Organization,
-        )?;
-        self.lock()?.mutate(command, &meta, |state, now, revision| {
-            validate_display_name(&command.payload.display_name)?;
-            validate_slug(&command.payload.slug)?;
-            validate_value(&command.payload.state, &["active", "suspended", "archived"])?;
-            state.organization = Some(OrganizationRecord {
-                id: command.payload.organization_id.clone(),
-                slug: command.payload.slug.clone(),
-                display_name: command.payload.display_name.clone(),
-                state: command.payload.state.clone(),
-                revision,
-                updated_at: now.clone(),
-            });
-            Ok(EnterpriseOrganizationUpdateCompletedResponse {
-                command: EnterpriseOrganizationUpdateCompletedResponseCommand::EnterpriseOrganizationUpdate,
-                current_revision: Revision(i64_revision(revision)?),
-                outcome: EnterpriseOrganizationUpdateCompletedResponseOutcome::Completed,
-                previous_revision: Revision(i64_revision(revision - 1)?),
-                request_id: command.request_id.clone(),
-                result: organization_projection(
-                    state.organization.as_ref().ok_or_else(storage_unavailable)?,
-                )?,
-                schema_version: command.schema_version.clone(),
-            })
-        })
-    }
-
     /// Writes a versioned role head. Every successful write creates a new immutable role version.
     ///
     /// # Errors
     ///
     /// Rejects cycles, foreign references, invalid rules, stale revisions, and reactivation.
-    pub fn update_role(
-        &self,
-        command: &EnterpriseRoleUpdateCommand,
-    ) -> Result<EnterpriseRoleUpdateCompletedResponse, EnterpriseRbacError> {
-        let meta = CommandMeta::new(
-            &command.actor,
-            &command.scope,
-            &command.request_id,
-            &command.schema_version,
-            command.expected_revision.0,
-            "rbac.role.update",
-            EventKind::Role,
-        )?;
-        self.lock()?.mutate(command, &meta, |state, now, revision| {
-            require_active_organization(state)?;
-            validate_role_payload(command, state)?;
-            let key = command.payload.role_id.0.clone();
-            let next_version = state
-                .roles
-                .get(&key)
-                .map_or(1, |role| role.current_version + 1);
-            if state
-                .roles
-                .get(&key)
-                .is_some_and(|role| role.state == "revoked")
-                && command.payload.state != "revoked"
-            {
-                return Err(wrong_state());
-            }
-            let version = RoleVersionRecord {
-                version: next_version,
-                rules: command.payload.rules.clone(),
-                inherited_roles: command.payload.inherited_roles.clone(),
-                conflicting_role_ids: command.payload.conflicting_role_ids.clone(),
-            };
-            let role = state.roles.entry(key).or_insert_with(|| RoleRecord {
-                id: command.payload.role_id.clone(),
-                display_name: command.payload.display_name.clone(),
-                state: command.payload.state.clone(),
-                current_version: next_version,
-                versions: BTreeMap::new(),
-                revision,
-                updated_at: now.clone(),
-            });
-            role.display_name.clone_from(&command.payload.display_name);
-            role.state.clone_from(&command.payload.state);
-            role.current_version = next_version;
-            role.versions.insert(next_version, version);
-            role.revision = revision;
-            role.updated_at.clone_from(now);
-            validate_role_graph(state, &command.payload.role_id, next_version)?;
-            validate_active_members(state, instant_millis(now)?)?;
-            Ok(EnterpriseRoleUpdateCompletedResponse {
-                command: EnterpriseRoleUpdateCompletedResponseCommand::EnterpriseRoleUpdate,
-                current_revision: Revision(i64_revision(revision)?),
-                outcome: EnterpriseRoleUpdateCompletedResponseOutcome::Completed,
-                previous_revision: Revision(i64_revision(revision - 1)?),
-                request_id: command.request_id.clone(),
-                result: role_projection(
-                    &meta.scope.organization_id,
-                    state
-                        .roles
-                        .get(&command.payload.role_id.0)
-                        .ok_or_else(storage_unavailable)?,
-                )?,
-                schema_version: command.schema_version.clone(),
-            })
-        })
-    }
-
     /// Creates or updates one Team and its exact role-version grants.
     ///
     /// # Errors
     ///
     /// Rejects foreign scope, conflicting grants, inactive roles, and stale revisions.
-    pub fn update_team(
-        &self,
-        command: &EnterpriseTeamUpdateCommand,
-    ) -> Result<EnterpriseTeamUpdateCompletedResponse, EnterpriseRbacError> {
-        let meta = CommandMeta::new(
-            &command.actor,
-            &command.scope,
-            &command.request_id,
-            &command.schema_version,
-            command.expected_revision.0,
-            "rbac.team.update",
-            EventKind::Team,
-        )?;
-        self.lock()?.mutate(command, &meta, |state, now, revision| {
-            require_active_organization(state)?;
-            validate_display_name(&command.payload.display_name)?;
-            validate_value(&command.payload.state, &["active", "disabled"])?;
-            validate_assignments(
-                state,
-                &meta.scope.organization_id,
-                &command.payload.role_assignments,
-            )?;
-            let now_millis = instant_millis(now)?;
-            validate_separation(state, &command.payload.role_assignments, now_millis)?;
-            let record = TeamRecord {
-                id: command.payload.team_id.clone(),
-                display_name: command.payload.display_name.clone(),
-                state: command.payload.state.clone(),
-                role_assignments: command.payload.role_assignments.clone(),
-                revision,
-                updated_at: now.clone(),
-            };
-            state
-                .teams
-                .insert(command.payload.team_id.0.clone(), record);
-            validate_active_members(state, now_millis)?;
-            Ok(EnterpriseTeamUpdateCompletedResponse {
-                command: EnterpriseTeamUpdateCompletedResponseCommand::EnterpriseTeamUpdate,
-                current_revision: Revision(i64_revision(revision)?),
-                outcome: EnterpriseTeamUpdateCompletedResponseOutcome::Completed,
-                previous_revision: Revision(i64_revision(revision - 1)?),
-                request_id: command.request_id.clone(),
-                result: team_projection(
-                    &meta.scope.organization_id,
-                    state
-                        .teams
-                        .get(&command.payload.team_id.0)
-                        .ok_or_else(storage_unavailable)?,
-                )?,
-                schema_version: command.schema_version.clone(),
-            })
-        })
-    }
-
     /// Creates or updates one actor Membership.
     ///
     /// # Errors
     ///
     /// Rejects duplicate actors, foreign Team/Role references, conflicting grants, and stale revisions.
+    /// Evaluates one permission against current durable membership and role facts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an availability error only when current authority cannot be read safely.
     pub fn update_membership(
         &self,
         command: &EnterpriseMembershipUpdateCommand,
@@ -490,11 +315,60 @@ impl EnterpriseRbacService {
         })
     }
 
-    /// Evaluates one permission against current durable membership and role facts.
-    ///
-    /// # Errors
-    ///
-    /// Returns an availability error only when current authority cannot be read safely.
+    pub fn update_team(
+        &self,
+        command: &EnterpriseTeamUpdateCommand,
+    ) -> Result<EnterpriseTeamUpdateCompletedResponse, EnterpriseRbacError> {
+        let meta = CommandMeta::new(
+            &command.actor,
+            &command.scope,
+            &command.request_id,
+            &command.schema_version,
+            command.expected_revision.0,
+            "rbac.team.update",
+            EventKind::Team,
+        )?;
+        self.lock()?.mutate(command, &meta, |state, now, revision| {
+            require_active_organization(state)?;
+            validate_display_name(&command.payload.display_name)?;
+            validate_value(&command.payload.state, &["active", "disabled"])?;
+            validate_assignments(
+                state,
+                &meta.scope.organization_id,
+                &command.payload.role_assignments,
+            )?;
+            let now_millis = instant_millis(now)?;
+            validate_separation(state, &command.payload.role_assignments, now_millis)?;
+            let record = TeamRecord {
+                id: command.payload.team_id.clone(),
+                display_name: command.payload.display_name.clone(),
+                state: command.payload.state.clone(),
+                role_assignments: command.payload.role_assignments.clone(),
+                revision,
+                updated_at: now.clone(),
+            };
+            state
+                .teams
+                .insert(command.payload.team_id.0.clone(), record);
+            validate_active_members(state, now_millis)?;
+            Ok(EnterpriseTeamUpdateCompletedResponse {
+                command: EnterpriseTeamUpdateCompletedResponseCommand::EnterpriseTeamUpdate,
+                current_revision: Revision(i64_revision(revision)?),
+                outcome: EnterpriseTeamUpdateCompletedResponseOutcome::Completed,
+                previous_revision: Revision(i64_revision(revision - 1)?),
+                request_id: command.request_id.clone(),
+                result: team_projection(
+                    &meta.scope.organization_id,
+                    state
+                        .teams
+                        .get(&command.payload.team_id.0)
+                        .ok_or_else(storage_unavailable)?,
+                )?,
+                schema_version: command.schema_version.clone(),
+            })
+        })
+    }
+
     pub fn authorize(
         &self,
         actor: &Actor,
@@ -736,210 +610,21 @@ impl EnterpriseRbacService {
     /// # Errors
     ///
     /// Rejects invalid scope, stale cursors, corrupt state, or unavailable storage.
-    pub fn list_organizations(
-        &self,
-        query: &EnterpriseOrganizationListQuery,
-    ) -> Result<EnterpriseOrganizationListResultResponse, EnterpriseRbacError> {
-        let scope = require_organization_scope(&query.scope)?;
-        let state = self.lock()?.load(&scope.organization_id)?;
-        let revision = state.as_ref().map_or(0, |state| state.revision);
-        let mut items = state
-            .and_then(|state| state.organization)
-            .filter(|organization| {
-                query.parameters.states.is_empty()
-                    || query.parameters.states.contains(&organization.state)
-            })
-            .map(|organization| organization_projection(&organization))
-            .transpose()?
-            .into_iter()
-            .collect::<Vec<_>>();
-        let page = page_slice(
-            &mut items,
-            query.page.limit,
-            query.page.cursor.as_ref(),
-            "organization",
-            &scope.organization_id,
-            revision,
-            &query.parameters.states,
-        )?;
-        Ok(EnterpriseOrganizationListResultResponse {
-            page: page.page,
-            query: EnterpriseOrganizationListResultResponseQuery::EnterpriseOrganizationList,
-            request_id: query.request_id.clone(),
-            result: EnterpriseOrganizationPage {
-                items: page.items,
-                kind: EnterpriseOrganizationPageKind::EnterpriseOrganizationPage,
-                snapshot_revision: Revision(i64_revision(revision)?),
-            },
-            schema_version: query.schema_version.clone(),
-        })
-    }
-
     /// Lists one stable page of Memberships inside the exact query scope.
     ///
     /// # Errors
     ///
     /// Rejects invalid scope, stale cursors, corrupt state, or unavailable storage.
-    pub fn list_memberships(
-        &self,
-        query: &EnterpriseMembershipListQuery,
-    ) -> Result<EnterpriseMembershipListResultResponse, EnterpriseRbacError> {
-        let scope = require_organization_scope(&query.scope)?;
-        let state = self
-            .lock()?
-            .load(&scope.organization_id)?
-            .unwrap_or_else(|| empty_state(&scope.organization_id));
-        let filter = (
-            &query.parameters.states,
-            &query.parameters.team_ids,
-            &query.parameters.role_ids,
-        );
-        let mut items = state
-            .memberships
-            .values()
-            .filter(|member| {
-                (query.parameters.states.is_empty()
-                    || query.parameters.states.contains(&member.state))
-                    && (query.parameters.team_ids.is_empty()
-                        || query
-                            .parameters
-                            .team_ids
-                            .iter()
-                            .all(|id| member.team_ids.contains(id)))
-                    && (query.parameters.role_ids.is_empty()
-                        || query
-                            .parameters
-                            .role_ids
-                            .iter()
-                            .all(|id| member_has_role(&state, member, id)))
-            })
-            .map(|member| membership_projection(&scope.organization_id, member))
-            .collect::<Result<Vec<_>, _>>()?;
-        items.sort_by(|left, right| left.id.0.cmp(&right.id.0));
-        let page = page_slice(
-            &mut items,
-            query.page.limit,
-            query.page.cursor.as_ref(),
-            "membership",
-            &scope.organization_id,
-            state.revision,
-            &filter,
-        )?;
-        Ok(EnterpriseMembershipListResultResponse {
-            page: page.page,
-            query: EnterpriseMembershipListResultResponseQuery::EnterpriseMembershipList,
-            request_id: query.request_id.clone(),
-            result: EnterpriseMembershipPage {
-                items: page.items,
-                kind: EnterpriseMembershipPageKind::EnterpriseMembershipPage,
-                snapshot_revision: Revision(i64_revision(state.revision)?),
-            },
-            schema_version: query.schema_version.clone(),
-        })
-    }
-
     /// Lists one stable page of Teams inside the exact Organization scope.
     ///
     /// # Errors
     ///
     /// Rejects stale cursors, corrupt state, or unavailable storage.
-    pub fn list_teams(
-        &self,
-        query: &EnterpriseTeamListQuery,
-    ) -> Result<EnterpriseTeamListResultResponse, EnterpriseRbacError> {
-        let state = self
-            .lock()?
-            .load(&query.scope.organization_id)?
-            .unwrap_or_else(|| empty_state(&query.scope.organization_id));
-        let mut items = state
-            .teams
-            .values()
-            .filter(|team| {
-                query.parameters.states.is_empty() || query.parameters.states.contains(&team.state)
-            })
-            .map(|team| team_projection(&query.scope.organization_id, team))
-            .collect::<Result<Vec<_>, _>>()?;
-        items.sort_by(|left, right| left.id.0.cmp(&right.id.0));
-        let page = page_slice(
-            &mut items,
-            query.page.limit,
-            query.page.cursor.as_ref(),
-            "team",
-            &query.scope.organization_id,
-            state.revision,
-            &query.parameters.states,
-        )?;
-        Ok(EnterpriseTeamListResultResponse {
-            page: page.page,
-            query: EnterpriseTeamListResultResponseQuery::EnterpriseTeamList,
-            request_id: query.request_id.clone(),
-            result: EnterpriseTeamPage {
-                items: page.items,
-                kind: EnterpriseTeamPageKind::EnterpriseTeamPage,
-                snapshot_revision: Revision(i64_revision(state.revision)?),
-            },
-            schema_version: query.schema_version.clone(),
-        })
-    }
-
     /// Lists one stable page of immutable Role heads inside the exact Organization scope.
     ///
     /// # Errors
     ///
     /// Rejects stale cursors, corrupt state, or unavailable storage.
-    pub fn list_roles(
-        &self,
-        query: &EnterpriseRoleListQuery,
-    ) -> Result<EnterpriseRoleListResultResponse, EnterpriseRbacError> {
-        let state = self
-            .lock()?
-            .load(&query.scope.organization_id)?
-            .unwrap_or_else(|| empty_state(&query.scope.organization_id));
-        let filter = (&query.parameters.states, &query.parameters.permissions);
-        let mut items = state
-            .roles
-            .values()
-            .filter(|role| {
-                (query.parameters.states.is_empty()
-                    || query.parameters.states.contains(&role.state))
-                    && (query.parameters.permissions.is_empty()
-                        || role
-                            .versions
-                            .get(&role.current_version)
-                            .is_some_and(|version| {
-                                query.parameters.permissions.iter().all(|permission| {
-                                    version
-                                        .rules
-                                        .iter()
-                                        .any(|rule| &rule.permission == permission)
-                                })
-                            }))
-            })
-            .map(|role| role_projection(&query.scope.organization_id, role))
-            .collect::<Result<Vec<_>, _>>()?;
-        items.sort_by(|left, right| left.id.0.cmp(&right.id.0));
-        let page = page_slice(
-            &mut items,
-            query.page.limit,
-            query.page.cursor.as_ref(),
-            "role",
-            &query.scope.organization_id,
-            state.revision,
-            &filter,
-        )?;
-        Ok(EnterpriseRoleListResultResponse {
-            page: page.page,
-            query: EnterpriseRoleListResultResponseQuery::EnterpriseRoleList,
-            request_id: query.request_id.clone(),
-            result: EnterpriseRolePage {
-                items: page.items,
-                kind: EnterpriseRolePageKind::EnterpriseRolePage,
-                snapshot_revision: Revision(i64_revision(state.revision)?),
-            },
-            schema_version: query.schema_version.clone(),
-        })
-    }
-
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, EnterpriseRbacInner>, EnterpriseRbacError> {
         self.inner.lock().map_err(|_| storage_unavailable())
     }
@@ -1613,12 +1298,44 @@ fn public_event(
 ) -> Result<NewOutboxEvent, EnterpriseRbacError> {
     let snapshot_revision = Revision(i64_revision(revision)?);
     let (topic, payload) = match meta.event_kind {
-        EventKind::Organization => ("enterprise-organization.invalidated.v1", serde_json::to_vec(&ControlPlaneWebSocketEnterpriseOrganizationInvalidatedEvent { reload_queries: (ControlPlaneWebSocketEnterpriseOrganizationListReloadQuery::EnterpriseOrganizationList,), snapshot_revision, type_value: ControlPlaneWebSocketEnterpriseOrganizationInvalidatedEventTypeValue::EnterpriseOrganizationInvalidatedV1 })),
-        EventKind::Membership => ("enterprise-membership.invalidated.v1", serde_json::to_vec(&ControlPlaneWebSocketEnterpriseMembershipInvalidatedEvent { reload_queries: (ControlPlaneWebSocketEnterpriseMembershipListReloadQuery::EnterpriseMembershipList,), snapshot_revision, type_value: ControlPlaneWebSocketEnterpriseMembershipInvalidatedEventTypeValue::EnterpriseMembershipInvalidatedV1 })),
-        EventKind::Team => ("enterprise-team.invalidated.v1", serde_json::to_vec(&ControlPlaneWebSocketEnterpriseTeamInvalidatedEvent { reload_queries: (ControlPlaneWebSocketEnterpriseTeamListReloadQuery::EnterpriseTeamList,), snapshot_revision, type_value: ControlPlaneWebSocketEnterpriseTeamInvalidatedEventTypeValue::EnterpriseTeamInvalidatedV1 })),
-        EventKind::Role => ("enterprise-role.invalidated.v1", serde_json::to_vec(&ControlPlaneWebSocketEnterpriseRoleInvalidatedEvent { reload_queries: (ControlPlaneWebSocketEnterpriseRoleListReloadQuery::EnterpriseRoleList,), snapshot_revision, type_value: ControlPlaneWebSocketEnterpriseRoleInvalidatedEventTypeValue::EnterpriseRoleInvalidatedV1 })),
+        EventKind::Organization => (
+            "enterprise-organization.invalidated.v1",
+            serde_json::to_vec(&serde_json::json!({
+                "type": "enterprise-organization.invalidated.v1",
+                "snapshotRevision": snapshot_revision,
+                "reloadQueries": ["enterprise.organization.list"],
+            }))
+            .expect("organization invalidation JSON"),
+        ),
+        EventKind::Membership => (
+            "enterprise-membership.invalidated.v1",
+            serde_json::to_vec(&serde_json::json!({
+                "type": "enterprise-membership.invalidated.v1",
+                "snapshotRevision": snapshot_revision,
+                "reloadQueries": ["enterprise.membership.list"],
+            }))
+            .expect("membership invalidation JSON"),
+        ),
+        EventKind::Team => (
+            "enterprise-team.invalidated.v1",
+            serde_json::to_vec(&serde_json::json!({
+                "type": "enterprise-team.invalidated.v1",
+                "snapshotRevision": snapshot_revision,
+                "reloadQueries": ["enterprise.team.list"],
+            }))
+            .expect("team invalidation JSON"),
+        ),
+        EventKind::Role => (
+            "enterprise-role.invalidated.v1",
+            serde_json::to_vec(&serde_json::json!({
+                "type": "enterprise-role.invalidated.v1",
+                "snapshotRevision": snapshot_revision,
+                "reloadQueries": ["enterprise.role.list"],
+            }))
+            .expect("role invalidation JSON"),
+        ),
     };
-    let payload = payload.map_err(|_| invalid())?;
+    // payload is already a successful Vec<u8>
     let mut id_digest = Sha256::new();
     id_digest.update(b"winwincode.enterprise-rbac-event.v1\0");
     id_digest.update(digest.0.as_bytes());

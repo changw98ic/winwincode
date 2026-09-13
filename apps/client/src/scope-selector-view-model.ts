@@ -2,36 +2,23 @@
 
 import {
   ControlPlaneClientError,
-  type ControlPlaneClient,
 } from './community-control-plane-client.js'
 import {
   scopeSelectionOptions,
   type ScopeRouteSelection,
 } from '@winwincode/browser-core/scope-context'
 import type {
-  Actor,
-  EnterpriseOrganizationListResultResponse,
-  EnterpriseProjectListResultResponse,
   OrganizationId,
   ProjectId,
   RepositoryId,
-  RequestId,
   Scope,
   WorkspaceId,
 } from './generated/contracts.js'
-import { QueryName } from './generated/contracts.js'
-
-const SCHEMA_VERSION = 'winwincode/v1'
-const PAGE_LIMIT = 100
 
 export type ScopeSelectorStatus =
   | 'idle'
-  | 'loading'
   | 'ready'
   | 'empty'
-  | 'permission-denied'
-  | 'network-error'
-  | 'error'
   | 'closed'
 
 export interface ScopeSelectorOption<Id extends string = string> {
@@ -55,11 +42,8 @@ export interface ScopeSelectorViewModelState {
 }
 
 export interface ScopeSelectorViewModelOptions {
-  readonly client: ControlPlaneClient
-  readonly actor: Actor
   readonly authorizedScopes: readonly Scope[]
   readonly selection: ScopeRouteSelection
-  readonly nextRequestId: () => RequestId
   readonly onSelectionChange?: (selection: ScopeRouteSelection) => void
 }
 
@@ -75,40 +59,12 @@ export interface ScopeSelectorViewModel {
   close(): void
 }
 
-function scopeDepth(scope: Scope): number {
-  if (scope.kind === 'organization') return 1
-  if (scope.kind === 'workspace') return 2
-  if (scope.kind === 'project') return 3
-  return 4
-}
-
-function scopeWithinOrganization(scope: Scope, organizationId: OrganizationId): boolean {
-  return scope.organizationId === organizationId
-}
-
-function scopeWithinWorkspace(
-  scope: Scope,
-  organizationId: OrganizationId,
-  workspaceId: WorkspaceId,
-): boolean {
-  return scope.organizationId === organizationId
-    && scope.kind !== 'organization'
-    && scope.workspaceId === workspaceId
-}
-
-function shallowest(scopes: readonly Scope[]): Scope | null {
-  return [...scopes].sort((left, right) => scopeDepth(left) - scopeDepth(right))[0] ?? null
-}
-
 function freezeSelection(selection: ScopeRouteSelection): ScopeRouteSelection {
   return Object.freeze({ ...selection })
 }
 
-function asOptions<Id extends string>(
-  ids: readonly Id[],
-  labels: ReadonlyMap<string, string>,
-): readonly ScopeSelectorOption<Id>[] {
-  return Object.freeze(ids.map(id => Object.freeze({ id, label: labels.get(id) ?? id })))
+function asOptions<Id extends string>(ids: readonly Id[]): readonly ScopeSelectorOption<Id>[] {
+  return Object.freeze(ids.map(id => Object.freeze({ id, label: id })))
 }
 
 function emptyLevel(
@@ -122,33 +78,6 @@ function emptyLevel(
   return null
 }
 
-function normalizeError(error: unknown, signal: AbortSignal): ControlPlaneClientError {
-  if (error instanceof ControlPlaneClientError) return error
-  if (signal.aborted) return new ControlPlaneClientError({
-    kind: 'cancelled',
-    code: 'REQUEST_CANCELLED',
-    message: 'The Scope detail request was cancelled.',
-    requestId: null,
-    retryable: false,
-  })
-  return new ControlPlaneClientError({
-    kind: 'protocol',
-    code: 'SCOPE_SELECTOR_QUERY_FAILURE',
-    message: 'The authorized Scope details could not be loaded.',
-    requestId: null,
-    retryable: false,
-    cause: error,
-  })
-}
-
-function errorStatus(error: ControlPlaneClientError): ScopeSelectorStatus {
-  if (error.kind === 'authentication' || error.kind === 'authorization') {
-    return 'permission-denied'
-  }
-  if (error.kind === 'network' || error.kind === 'server') return 'network-error'
-  return 'error'
-}
-
 function selectionError(): ControlPlaneClientError {
   return new ControlPlaneClientError({
     kind: 'authorization',
@@ -159,26 +88,25 @@ function selectionError(): ControlPlaneClientError {
   })
 }
 
-/** Load display facts while keeping the AuthSession hierarchy as the only option authority. */
+/**
+ * Project the AuthSession hierarchy into Scope selector options.
+ * Community never queries Enterprise management APIs for labels; option ids
+ * come only from authorized scopes and display with the id itself.
+ */
 export function createScopeSelectorViewModel(
   options: ScopeSelectorViewModelOptions,
 ): ScopeSelectorViewModel {
   const listeners = new Set<(state: ScopeSelectorViewModelState) => void>()
-  const organizationLabels = new Map<string, string>()
-  const projectLabels = new Map<string, string>()
-  const repositoryLabels = new Map<string, string>()
   let selection = freezeSelection(options.selection)
-  let controller: AbortController | null = null
-  let generation = 0
   let closed = false
 
   function projectedOptions(): ScopeSelectorOptionsState {
     const ids = scopeSelectionOptions(options.authorizedScopes, selection)
     return Object.freeze({
-      organizations: asOptions(ids.organizations, organizationLabels),
-      workspaces: asOptions(ids.workspaces, new Map()),
-      projects: asOptions(ids.projects, projectLabels),
-      repositories: asOptions(ids.repositories, repositoryLabels),
+      organizations: asOptions(ids.organizations),
+      workspaces: asOptions(ids.workspaces),
+      projects: asOptions(ids.projects),
+      repositories: asOptions(ids.repositories),
     })
   }
 
@@ -190,10 +118,7 @@ export function createScopeSelectorViewModel(
     error: null,
   })
 
-  function publish(
-    status: ScopeSelectorStatus,
-    error: ControlPlaneClientError | null = null,
-  ): void {
+  function publish(status: ScopeSelectorStatus): void {
     const nextOptions = projectedOptions()
     current = Object.freeze({
       status,
@@ -202,7 +127,7 @@ export function createScopeSelectorViewModel(
       emptyLevel: status === 'ready' || status === 'empty'
         ? emptyLevel(selection, nextOptions)
         : null,
-      error,
+      error: null,
     })
     for (const listener of listeners) listener(current)
   }
@@ -223,104 +148,15 @@ export function createScopeSelectorViewModel(
     throw selectionError()
   }
 
-  async function loadOrganizationLabels(signal: AbortSignal): Promise<void> {
-    const organizationId = selection.organizationId
-    if (organizationId === null) return
-    const scope = shallowest(options.authorizedScopes.filter(candidate => (
-      scopeWithinOrganization(candidate, organizationId)
-    )))
-    if (scope === null) throw selectionError()
-    const requestId = options.nextRequestId()
-    const value = await options.client.query({
-      schemaVersion: SCHEMA_VERSION,
-      requestId,
-      actor: options.actor,
-      scope,
-      query: QueryName.EnterpriseOrganizationList,
-      parameters: { states: [] },
-      page: { cursor: null, limit: PAGE_LIMIT },
-    }, { signal })
-    if (value.query !== QueryName.EnterpriseOrganizationList || value.requestId !== requestId) {
-      throw new ControlPlaneClientError({
-        kind: 'protocol',
-        code: 'SCOPE_SELECTOR_RESPONSE_MISMATCH',
-        message: 'The Scope selector received another organization response.',
-        requestId,
-        retryable: false,
-      })
-    }
-    const response = value as EnterpriseOrganizationListResultResponse
-    const authorized = new Set(scopeSelectionOptions(
-      options.authorizedScopes,
-      selection,
-    ).organizations)
-    for (const item of response.result.items) {
-      if (authorized.has(item.id)) organizationLabels.set(item.id, item.displayName)
-    }
-  }
-
-  async function loadProjectLabels(signal: AbortSignal): Promise<void> {
-    const { organizationId, workspaceId } = selection
-    if (organizationId === null || workspaceId === null) return
-    const scope = shallowest(options.authorizedScopes.filter(candidate => (
-      scopeWithinWorkspace(candidate, organizationId, workspaceId)
-    )))
-    if (scope === null) throw selectionError()
-    const requestId = options.nextRequestId()
-    const value = await options.client.query({
-      schemaVersion: SCHEMA_VERSION,
-      requestId,
-      actor: options.actor,
-      scope,
-      query: QueryName.EnterpriseProjectList,
-      parameters: { states: [], includeRepositories: true },
-      page: { cursor: null, limit: PAGE_LIMIT },
-    }, { signal })
-    if (value.query !== QueryName.EnterpriseProjectList || value.requestId !== requestId) {
-      throw new ControlPlaneClientError({
-        kind: 'protocol',
-        code: 'SCOPE_SELECTOR_RESPONSE_MISMATCH',
-        message: 'The Scope selector received another project response.',
-        requestId,
-        retryable: false,
-      })
-    }
-    const response = value as EnterpriseProjectListResultResponse
-    const factual = scopeSelectionOptions(options.authorizedScopes, selection)
-    const projects = new Set(factual.projects)
-    const repositories = new Set(factual.repositories)
-    for (const item of response.result.items) {
-      if (item.kind === 'project' && projects.has(item.projectId)) {
-        projectLabels.set(item.projectId, item.displayName)
-      } else if (item.kind === 'repository' && repositories.has(item.repositoryId)) {
-        repositoryLabels.set(item.repositoryId, item.displayName)
-      }
-    }
-  }
-
   async function load(): Promise<void> {
     requireOpen()
-    controller?.abort()
-    const operationController = new AbortController()
-    controller = operationController
-    generation += 1
-    const operationGeneration = generation
-    publish('loading')
-    try {
-      await loadOrganizationLabels(operationController.signal)
-      if (closed || generation !== operationGeneration) return
-      await loadProjectLabels(operationController.signal)
-      if (closed || generation !== operationGeneration) return
-      const level = emptyLevel(selection, projectedOptions())
-      publish(level === null ? 'ready' : 'empty')
-    } catch (error) {
-      if (closed || generation !== operationGeneration) return
-      const normalized = normalizeError(error, operationController.signal)
-      if (normalized.kind === 'cancelled') return
-      publish(errorStatus(normalized), normalized)
-    } finally {
-      if (controller === operationController) controller = null
+    const nextOptions = projectedOptions()
+    if (nextOptions.organizations.length === 0) {
+      publish('empty')
+      return
     }
+    const level = emptyLevel(selection, nextOptions)
+    publish(level === null ? 'ready' : 'empty')
   }
 
   function choose(next: ScopeRouteSelection): Promise<void> {
@@ -378,11 +214,8 @@ export function createScopeSelectorViewModel(
     close() {
       if (closed) return
       closed = true
-      generation += 1
-      controller?.abort()
-      controller = null
-      current = Object.freeze({ ...current, status: 'closed', error: null })
       listeners.clear()
+      current = Object.freeze({ ...current, status: 'closed', error: null })
     },
   }
 }

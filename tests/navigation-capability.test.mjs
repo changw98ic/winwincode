@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import test from 'node:test'
@@ -52,17 +51,6 @@ const organizationScope = {
   kind: 'organization',
   organizationId: 'org_00000000000000000000000001',
 }
-const workspaceScope = {
-  kind: 'workspace',
-  organizationId: 'org_00000000000000000000000000001',
-  workspaceId: 'wsp_00000000000000000000000001',
-}
-const projectScope = {
-  kind: 'project',
-  organizationId: 'org_00000000000000000000000001',
-  workspaceId: 'wsp_00000000000000000000000000001',
-  projectId: 'prj_00000000000000000000000001',
-}
 
 function sessionWith(scopes, sessionActor = actor) {
   return {
@@ -86,11 +74,12 @@ function capabilityMap(status, session = null, error = null, facts = {}) {
 }
 
 const SIGNED_OUT = { status: 'signed-out', session: null, error: null }
+const PRODUCT_SURFACES = ['home', 'chat', 'strongflow', 'settings', 'attention']
 
 test('signed-out and restoring sessions hide every navigation entry', () => {
   for (const status of ['signed-out', 'restoring']) {
     const capabilities = capabilityMap(status)
-    for (const surface of ['home', 'chat', 'strongflow', 'settings', 'attention', 'enterprise']) {
+    for (const surface of PRODUCT_SURFACES) {
       assert.equal(
         capabilities[surface].capability,
         'hidden',
@@ -101,71 +90,53 @@ test('signed-out and restoring sessions hide every navigation entry', () => {
   }
 })
 
-test('a personal repository-only session trims Enterprise and keeps product areas available', () => {
+test('a personal repository-only session keeps every product area available', () => {
   const capabilities = capabilityMap('signed-in', sessionWith([repositoryScope]))
+  assert.equal(capabilities.home.capability, 'available')
   assert.equal(capabilities.chat.capability, 'available')
   assert.equal(capabilities.strongflow.capability, 'available')
   assert.equal(capabilities.settings.capability, 'available')
   assert.equal(capabilities.attention.capability, 'available')
-  assert.equal(capabilities.enterprise.capability, 'hidden')
   assert.equal(capabilities.chat.reason, 'authorized-scope')
-  assert.equal(capabilities.enterprise.reason, 'no-enterprise-scope')
 })
 
-test('an enterprise-hierarchy scope makes Enterprise enterable', () => {
-  for (const scope of [organizationScope, workspaceScope, projectScope]) {
-    const capabilities = capabilityMap('signed-in', sessionWith([scope, repositoryScope]))
-    assert.equal(capabilities.enterprise.capability, 'available', scope.kind)
-    assert.equal(capabilities.enterprise.reason, 'enterprise-scope')
-    assert.equal(capabilities.chat.capability, 'available')
+test('organization-only sessions still require a repository Scope for product surfaces', () => {
+  const capabilities = capabilityMap('signed-in', sessionWith([organizationScope]))
+  for (const surface of PRODUCT_SURFACES) {
+    assert.equal(capabilities[surface].capability, 'hidden', surface)
+    assert.equal(capabilities[surface].reason, 'no-repository-scope', surface)
   }
 })
 
-test('known enterprise deployment keeps missing permissions visible as disabled', () => {
-  const capabilities = capabilityMap(
-    'signed-in',
-    sessionWith([repositoryScope]),
-    null,
-    { deployment: 'enterprise' },
-  )
-  assert.equal(capabilities.chat.capability, 'available')
-  assert.equal(capabilities.enterprise.capability, 'disabled')
-  assert.equal(capabilities.enterprise.reason, 'no-enterprise-scope')
-})
-
 test('query capability facts distinguish read-only and denied entries', () => {
-  const session = sessionWith([organizationScope, repositoryScope])
+  const session = sessionWith([repositoryScope])
   const readOnly = capabilityMap('signed-in', session, null, {
-    surfaceAccess: { enterprise: 'read-only' },
+    surfaceAccess: { chat: 'read-only' },
   })
   const denied = capabilityMap('signed-in', session, null, {
-    surfaceAccess: { enterprise: 'denied' },
+    surfaceAccess: { chat: 'denied' },
   })
-  assert.equal(readOnly.enterprise.capability, 'read-only')
-  assert.equal(readOnly.enterprise.reason, 'read-only-capability')
-  assert.equal(denied.enterprise.capability, 'disabled')
-  assert.equal(denied.enterprise.reason, 'capability-denied')
+  assert.equal(readOnly.chat.capability, 'read-only')
+  assert.equal(readOnly.chat.reason, 'read-only-capability')
+  assert.equal(denied.chat.capability, 'disabled')
+  assert.equal(denied.chat.reason, 'capability-denied')
 })
 
-test('deployment projection distinguishes personal from enterprise sessions', () => {
+test('deployment projection is personal only when a repository Scope exists', () => {
   assert.equal(
     projection('signed-in', sessionWith([repositoryScope])).deployment,
     'personal',
   )
   assert.equal(
     projection('signed-in', sessionWith([organizationScope])).deployment,
-    'enterprise',
-  )
-  assert.equal(
-    projection('signed-in', sessionWith([workspaceScope, repositoryScope])).deployment,
-    'enterprise',
+    'unknown',
   )
   assert.equal(projection('signed-out').deployment, 'unknown')
 })
 
 test('a session without any scope hides product areas without crashing', () => {
   const capabilities = capabilityMap('signed-in', sessionWith([]))
-  for (const surface of ['home', 'chat', 'strongflow', 'settings', 'attention', 'enterprise']) {
+  for (const surface of PRODUCT_SURFACES) {
     assert.equal(capabilities[surface].capability, 'hidden', surface)
   }
 })
@@ -180,24 +151,23 @@ test('runtime revocation moves every entry back to hidden', () => {
   })
   for (const status of ['authentication-required', 'signed-out', 'error']) {
     const capabilities = capabilityMap(status, null, revoked)
-    assert.equal(capabilities.enterprise.capability, 'hidden', status)
     assert.equal(capabilities.chat.capability, 'hidden', status)
+    assert.equal(capabilities.home.capability, 'hidden', status)
   }
 })
 
 test('surfaceCapabilityForHash resolves the exact surface a URL will enter', () => {
-  assert.equal(surfaceCapabilityForHash('#/enterprise/resources', {
-    status: 'signed-in',
-    session: sessionWith([organizationScope]),
-    error: null,
-  }).surface.id, 'enterprise')
   assert.equal(surfaceCapabilityForHash('#/chat?session=psn_1', {
     status: 'signed-in',
     session: sessionWith([repositoryScope]),
     error: null,
   }).surface.id, 'chat')
-  // UI-504: an address without a product path, and an unknown path, both enter
-  // the canonical Home dashboard instead of an arbitrary product area.
+  // An unknown path falls back to Home instead of an Enterprise surface.
+  assert.equal(surfaceCapabilityForHash('#/enterprise/resources', {
+    status: 'signed-in',
+    session: sessionWith([repositoryScope]),
+    error: null,
+  }).surface.id, 'home')
   assert.equal(surfaceCapabilityForHash('', {
     status: 'signed-in',
     session: sessionWith([repositoryScope]),

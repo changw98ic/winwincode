@@ -77,7 +77,6 @@ import {
   mountReadinessPage,
   type ReadinessFixTarget,
 } from './readiness-page.js'
-import type { EnterpriseApplication } from './enterprise-application.js'
 import {
   mountScopeSelectorPage,
   type ScopeSelectorPage,
@@ -105,7 +104,6 @@ import type {
   ProductSessionId,
   RepositoryScope,
   RequestId,
-  Scope,
   StageRunId,
 } from './generated/contracts.js'
 import { matchesCanonicalSchema } from './generated/control-plane-client.js'
@@ -318,7 +316,7 @@ export function mountWinWinCodeClient(
   const slot = element(document, 'section', 'wwc-surface-slot')
   const links = new Map<ClientSurfaceId, HTMLAnchorElement>()
   let activeSurface = clientSurfaceFromHash(browser.location.hash)
-  let activeFeature: EnterpriseApplication | MountedClientFeature | null = null
+  let activeFeature: MountedClientFeature | null = null
   let scopeSelectorPage: ScopeSelectorPage | null = null
   let currentScopeResolution: ScopeContextResolution | null = null
   let featureController: AbortController | null = null
@@ -369,7 +367,7 @@ export function mountWinWinCodeClient(
     const resolution = resolveScopeContext(
       session.authorizedScopes,
       browser.location.hash,
-      activeSurface.id === 'enterprise' ? 'scope' : 'repository',
+      'repository',
     )
     const scope = resolution.status === 'selected' ? resolution.scope : null
     lastKnownDiagnosticScope = scope
@@ -1550,62 +1548,6 @@ export function mountWinWinCodeClient(
     }
   }
 
-  async function renderEnterprise(generation: number): Promise<void> {
-    const session = authSession.state.session
-    const resolution = currentScopeResolution
-    if (
-      authSession.state.status !== 'signed-in'
-      || session === null
-      || resolution?.status !== 'selected'
-    ) {
-      const unavailable = element(document, 'p', 'wwc-enterprise-context-required')
-      unavailable.setAttribute('role', resolution?.status === 'denied' ? 'alert' : 'status')
-      unavailable.textContent = authSession.state.status === 'restoring'
-        ? 'Restoring enterprise identity and organization access…'
-        : resolution?.status === 'denied'
-          ? 'The enterprise Scope in this URL is not authorized. Choose another Scope.'
-          : resolution?.status === 'selection-required'
-            ? 'Choose an authorized Scope to load enterprise management.'
-        : 'Sign in to load enterprise management.'
-      slot.replaceChildren(unavailable)
-      return
-    }
-    const scope: Scope = resolution.scope
-    const loading = element(document, 'p', 'wwc-enterprise-route-loading')
-    loading.setAttribute('role', 'status')
-    loading.textContent = 'Loading enterprise management…'
-    slot.replaceChildren(loading)
-    const controller = new AbortController()
-    featureController = controller
-    try {
-      const enterprise = await import('./enterprise-application.js')
-      if (closed || generation !== renderGeneration || controller.signal.aborted) return
-      const mounted = await enterprise.mountEnterpriseApplication({
-        root: slot,
-        client: controlPlane,
-        hash: browser.location.hash,
-        signal: controller.signal,
-        actor: session.actor,
-        scope,
-        subscriptionId: contractId(
-          'sub',
-          browser.crypto,
-        ) as ControlPlaneWebSocketSubscriptionId,
-        nextRequestId: () => contractId('req', browser.crypto) as RequestId,
-        readOnly: activeRouteReadOnly,
-      })
-      if (mounted === null) return
-      if (closed || generation !== renderGeneration || controller.signal.aborted) {
-        mounted.close()
-        return
-      }
-      activeFeature = mounted
-    } catch (error) {
-      if (closed || generation !== renderGeneration || controller.signal.aborted) return
-      showRouteFailure(error, 'ENTERPRISE_ROUTE_FAILURE')
-    }
-  }
-
   function performRender(scopeSelectorMode: ScopeSelectorRenderMode = 'replace'): void {
     renderGeneration += 1
     const generation = renderGeneration
@@ -1641,7 +1583,7 @@ export function mountWinWinCodeClient(
       const resolved = resolveScopeContext(
         session.authorizedScopes,
         browser.location.hash,
-        activeSurface.id === 'enterprise' ? 'scope' : 'repository',
+        'repository',
       )
       const resolution: ScopeContextResolution = resolved.status === 'selected'
         && selectionIdentity(resolved.selection) === revokedScopeIdentity
@@ -1655,11 +1597,8 @@ export function mountWinWinCodeClient(
       currentScopeResolution = resolution
       if (scopeSelectorPage === null) {
         const model = createScopeSelectorViewModel({
-          client: rawControlPlane,
-          actor: session.actor,
           authorizedScopes: session.authorizedScopes,
           selection: resolution.selection,
-          nextRequestId: () => contractId('req', browser.crypto) as RequestId,
           onSelectionChange(nextSelection) {
             if (closed || scopeSelectorPage === null) return
             if (selectionLeavesRevokedScope(nextSelection)) revokedScopeIdentity = null
@@ -1686,7 +1625,6 @@ export function mountWinWinCodeClient(
     readinessRoot.hidden = !(
       authSession.state.status === 'signed-in'
       && session !== null
-      && activeSurface.id !== 'enterprise'
     )
     if (!readinessRoot.hidden) {
       const resolution = currentScopeResolution
@@ -1746,8 +1684,6 @@ export function mountWinWinCodeClient(
       launchRoute(renderSettings(generation), generation, 'SETTINGS_ROUTE_FAILURE')
     } else if (activeSurface.id === 'attention') {
       launchRoute(renderAttention(generation), generation, 'ATTENTION_ROUTE_FAILURE')
-    } else if (activeSurface.id === 'enterprise') {
-      launchRoute(renderEnterprise(generation), generation, 'ENTERPRISE_ROUTE_FAILURE')
     }
   }
 
@@ -1815,7 +1751,6 @@ export function mountWinWinCodeClient(
       || activeSurface.id === 'strongflow'
       || activeSurface.id === 'settings'
       || activeSurface.id === 'attention'
-      || activeSurface.id === 'enterprise'
     )) render()
   })
   render()

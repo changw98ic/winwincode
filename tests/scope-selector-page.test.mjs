@@ -164,7 +164,7 @@ test('scope selector uses labelled native controls and keeps unavailable descend
   page.close()
 })
 
-test('revoked URL context is announced and network metadata failures offer retry', async () => {
+test('revoked URL context is announced and retry stays hidden', () => {
   const document = new FakeDocument()
   const rootElement = new FakeElement(document, 'div')
   const model = modelFake()
@@ -179,14 +179,10 @@ test('revoked URL context is announced and network metadata failures offer retry
   assert.equal(access.getAttribute('role'), 'alert')
   assert.match(access.textContent, /no longer authorized/iu)
 
-  model.publish({ ...state('network-error'), error: { code: 'NETWORK_ERROR' } })
   const retry = descendants(rootElement).find(node => (
     node.className === 'wwc-scope-selector-retry'
   ))
-  assert.equal(retry.hidden, false)
-  retry.dispatchEvent({ type: 'click' })
-  await new Promise(resolvePromise => setTimeout(resolvePromise, 0))
-  assert.deepEqual(model.calls, [['retry']])
+  assert.equal(retry.hidden, true)
   page.close()
 })
 

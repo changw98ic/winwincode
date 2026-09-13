@@ -21,7 +21,6 @@ pub enum CommandFamily {
     Approval,
     Worker,
     Publication,
-    Enterprise,
     Collaboration,
 }
 
@@ -48,15 +47,6 @@ impl CommandFamily {
             CommandName::ApprovalDecide => Self::Approval,
             CommandName::WorkerDrain | CommandName::WorkerEnable => Self::Worker,
             CommandName::PublicationPublish | CommandName::PublicationCancel => Self::Publication,
-            CommandName::EnterpriseOrganizationUpdate
-            | CommandName::EnterpriseMembershipUpdate
-            | CommandName::EnterpriseTeamUpdate
-            | CommandName::EnterpriseRoleUpdate
-            | CommandName::EnterpriseProjectRepositoryUpdate
-            | CommandName::EnterprisePolicyUpdate
-            | CommandName::EnterpriseFleetUpdate
-            | CommandName::EnterpriseIntegrationUpdate
-            | CommandName::EnterpriseIdentityUpdate => Self::Enterprise,
             CommandName::CollaborationNotificationAck
             | CommandName::CollaborationPresenceUpdate => Self::Collaboration,
         }
@@ -74,7 +64,6 @@ pub enum QueryFamily {
     Approval,
     Worker,
     Publication,
-    Enterprise,
     Collaboration,
 }
 
@@ -102,17 +91,6 @@ impl QueryFamily {
             QueryName::ApprovalList | QueryName::ApprovalGet => Self::Approval,
             QueryName::WorkerList | QueryName::WorkerGet => Self::Worker,
             QueryName::PublicationList | QueryName::PublicationGet => Self::Publication,
-            QueryName::EnterpriseOrganizationList
-            | QueryName::EnterpriseMembershipList
-            | QueryName::EnterpriseTeamList
-            | QueryName::EnterpriseRoleList
-            | QueryName::EnterpriseProjectList
-            | QueryName::EnterprisePolicyList
-            | QueryName::EnterpriseFleetList
-            | QueryName::EnterpriseUsageList
-            | QueryName::EnterpriseAuditList
-            | QueryName::EnterpriseIntegrationList
-            | QueryName::EnterpriseIdentityList => Self::Enterprise,
             QueryName::CollaborationActivityList
             | QueryName::CollaborationNotificationList
             | QueryName::CollaborationPresenceList => Self::Collaboration,

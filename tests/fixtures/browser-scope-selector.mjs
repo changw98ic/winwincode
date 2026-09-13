@@ -1,5 +1,4 @@
 import { mountWinWinCodeClient } from '/module/application.js'
-import { ControlPlaneClientError } from '/module/community-control-plane-client.js'
 
 const schemaVersion = 'winwincode/v1'
 const actor = { kind: 'user', id: 'usr_00000000000000000000000001' }
@@ -18,7 +17,6 @@ const repositoryTwo = {
   repositoryId: 'rep_00000000000000000000000002',
 }
 let authorizedScopes = [repositoryOne, repositoryTwo]
-let metadataFailure = null
 const queries = []
 const subscriptions = []
 
@@ -41,16 +39,6 @@ function response(request, result) {
   }
 }
 
-function metadataError(kind) {
-  return new ControlPlaneClientError({
-    kind,
-    code: kind === 'authorization' ? 'PERMISSION_DENIED' : 'NETWORK_ERROR',
-    message: 'private metadata diagnostics',
-    requestId: null,
-    retryable: kind === 'network',
-  })
-}
-
 const controlPlane = {
   serverUrl: 'https://control.localhost',
   async restore() { return structuredClone(session()) },
@@ -59,56 +47,8 @@ const controlPlane = {
   async command() { throw new Error('unexpected command') },
   async query(request) {
     queries.push(structuredClone(request))
-    if (
-      metadataFailure !== null
-      && (request.query === 'enterprise.organization.list'
-        || request.query === 'enterprise.project.list')
-    ) throw metadataError(metadataFailure)
-    if (request.query === 'enterprise.organization.list') return response(request, {
-      kind: 'enterprise_organization_page',
-      snapshotRevision: 1,
-      items: [{
-        id: repositoryOne.organizationId,
-        displayName: 'Acme',
-        slug: 'acme',
-        state: 'active',
-        revision: 1,
-        updatedAt: '2026-09-02T00:00:00.000Z',
-      }, {
-        id: repositoryTwo.organizationId,
-        displayName: 'Beta',
-        slug: 'beta',
-        state: 'active',
-        revision: 1,
-        updatedAt: '2026-09-02T00:00:00.000Z',
-      }],
-    })
-    if (request.query === 'enterprise.project.list') {
-      const selected = request.scope.organizationId === repositoryOne.organizationId
-        ? repositoryOne
-        : repositoryTwo
-      return response(request, {
-        kind: 'enterprise_project_repository_page',
-        snapshotRevision: 1,
-        items: [{
-          kind: 'project',
-          projectId: selected.projectId,
-          displayName: selected === repositoryOne ? 'Core' : 'Workbench',
-          repositoryCount: 1,
-          state: 'active',
-          revision: 1,
-          updatedAt: '2026-09-02T00:00:00.000Z',
-        }, {
-          kind: 'repository',
-          projectId: selected.projectId,
-          repositoryId: selected.repositoryId,
-          displayName: selected === repositoryOne ? 'Server' : 'Client',
-          defaultBranch: 'main',
-          state: 'active',
-          revision: 1,
-          updatedAt: '2026-09-02T00:00:00.000Z',
-        }],
-      })
+    if (request.query.startsWith('enterprise.')) {
+      throw new Error(`Community Scope selector must not call ${request.query}`)
     }
     if (request.query === 'settings.get') return response(request, {
       revision: 1,
@@ -117,6 +57,10 @@ const controlPlane = {
     })
     if (request.query === 'credential.reference.list') return response(request, {
       kind: 'credential_reference_page',
+      items: [],
+    })
+    if (request.query === 'delivery.list') return response(request, {
+      kind: 'delivery_page',
       items: [],
     })
     throw new Error(`unexpected query: ${request.query}`)
@@ -233,12 +177,10 @@ globalThis.runScopeSelection = async () => {
   }
 }
 
-globalThis.switchScopeWithNetworkFailure = async () => {
+globalThis.switchScopeAndCloseOldFeature = async () => {
   const oldSubscription = subscriptions.at(-1).handle
-  metadataFailure = 'network'
   await choose('organization', repositoryOne.organizationId)
   await waitFor(() => oldSubscription.closed, 'old Scope subscription close')
-  await waitFor(() => selectorState().retryVisible, 'network retry state')
   return {
     featureVisible: document.querySelector('.wwc-settings') !== null,
     oldSubscriptionClosed: oldSubscription.closed,
@@ -247,7 +189,6 @@ globalThis.switchScopeWithNetworkFailure = async () => {
 }
 
 globalThis.restoreSecondRepository = async () => {
-  metadataFailure = null
   await chooseRepository(repositoryTwo)
   return { hash: location.hash }
 }

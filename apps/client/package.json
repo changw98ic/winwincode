@@ -1,7 +1,7 @@
 {
   "name": "@winwincode/client",
   "version": "0.1.0-alpha.1",
-  "description": "Deployable browser client for WinWinCode Chat, StrongFlow, settings, approvals, and enterprise administration",
+  "description": "Deployable browser client for WinWinCode Chat, StrongFlow, settings, and approvals",
   "license": "Apache-2.0",
   "type": "module",
   "sideEffects": false,

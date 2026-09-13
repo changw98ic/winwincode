@@ -39,16 +39,15 @@ const eventTypes = Object.freeze([
   'chat-interactions.invalidated.v1',
   'delivery.changed.v1',
   'delivery-task.changed.v1',
-  'enterprise-audit.invalidated.v1',
-  'enterprise-fleet.invalidated.v1',
-  'enterprise-integration.invalidated.v1',
-  'enterprise-membership.invalidated.v1',
-  'enterprise-team.invalidated.v1',
-  'enterprise-role.invalidated.v1',
-  'enterprise-organization.invalidated.v1',
-  'enterprise-policy.invalidated.v1',
-  'enterprise-project.invalidated.v1',
-  'enterprise-usage.invalidated.v1',
+
+
+
+
+
+
+
+
+
   'model-route-availability.invalidated.v1',
   'presence.changed.v1',
   'product-session.message.appended.v1',
@@ -607,32 +606,34 @@ test('positive transcripts cover every public event and reconnect control frame'
   ]) assert.equal(coveredFrames.has(frameType), true, frameType)
 })
 
-test('enterprise invalidations bind each area to its one generated reload query', () => {
-  const transcript = validFixture.transcripts.find(item => (
-    item.name === 'enterprise-management-scope-invalidations'
-  ))
-  assert.ok(transcript)
-  const organization = transcript.frames.find(frame => (
-    frame.type === 'event.v1'
-    && frame.event.type === 'enterprise-organization.invalidated.v1'
-  ))
-  assert.ok(organization)
-  assert.deepEqual(validateSchemaNode(organization, schema), [])
-
-  const crossed = structuredClone(organization)
-  crossed.event.reloadQueries = ['enterprise.membership.list']
-  assert.notDeepEqual(validateSchemaNode(crossed, schema), [])
-})
-
 test('ModelRoute invalidation exposes only a closed source and the one reload query', () => {
-  const transcript = validFixture.transcripts.find(item => (
-    item.name === 'enterprise-management-scope-invalidations'
-  ))
-  const invalidation = transcript.frames.find(frame => (
-    frame.type === 'event.v1'
-    && frame.event.type === 'model-route-availability.invalidated.v1'
-  ))
-  assert.ok(invalidation)
+  const invalidation = {
+    type: 'event.v1',
+    subscriptionId: 'sub_01J00000000000000000000000',
+    eventId: 'evt_01J00000000000000000000000',
+    scope: {
+      kind: 'repository',
+      organizationId: 'org_01J00000000000000000000000',
+      workspaceId: 'wsp_01J00000000000000000000000',
+      projectId: 'prj_01J00000000000000000000000',
+      repositoryId: 'rep_01J00000000000000000000000',
+    },
+    stream: { kind: 'scope' },
+    sequence: 4,
+    occurredAt: '2026-08-27T00:00:00.000Z',
+    source: {
+      kind: 'control-plane',
+      component: 'settings',
+      actor: { kind: 'user', id: 'usr_01J00000000000000000000000' },
+    },
+    authorizationEpoch: 1,
+    event: {
+      type: 'model-route-availability.invalidated.v1',
+      source: 'settings',
+      sourceRevision: 3,
+      reloadQueries: ['model.route.availability.list'],
+    },
+  }
   assert.deepEqual(validateSchemaNode(invalidation, schema), [])
   assert.deepEqual(
     schema.$defs.ControlPlaneWebSocketModelRouteAvailabilityInvalidationSource.enum,

@@ -9,14 +9,11 @@ use std::{
 };
 
 use serde_json::{Value, from_value};
-use winwincode_api::generated::{
-    Actor, EnterpriseFleetListParameters, EnterpriseFleetListQuery, EnterpriseFleetListQueryQuery,
-    PageRequest, Scope, SystemActor, SystemActorKind,
-};
+use winwincode_api::generated::{Actor, Scope, SystemActor, SystemActorKind};
 use winwincode_control_plane::{
     ExecutionPortService, RemoteWorkerAuthenticationError, RemoteWorkerAuthenticator,
     RemoteWorkerConnection, RemoteWorkerConnectionState, RemoteWorkerCredential,
-    RemoteWorkerPoolAdapter, RemoteWorkerPrincipal, WorkerFleetProjectionService,
+    RemoteWorkerPoolAdapter, RemoteWorkerPrincipal,
 };
 use winwincode_domain::{
     ExecutionMessageId, FencingToken, Instant, LeaseId, OpaqueCursor, OrganizationId, ProjectId,
@@ -464,51 +461,6 @@ fn connect_and_register(
     (connection, response)
 }
 
-fn fleet_query(scope: &RepositoryScope, request: u64) -> EnterpriseFleetListQuery {
-    EnterpriseFleetListQuery {
-        actor: Actor::SystemActor(SystemActor {
-            id: SystemActorId(format!("sys_{request:026}")),
-            kind: SystemActorKind::System,
-        }),
-        page: PageRequest {
-            cursor: Option::<OpaqueCursor>::None,
-            limit: 10,
-        },
-        parameters: EnterpriseFleetListParameters { states: Vec::new() },
-        query: EnterpriseFleetListQueryQuery::EnterpriseFleetList,
-        request_id: RequestId(format!("req_{request:026}")),
-        schema_version: SchemaVersion::WinwincodeV1,
-        scope: Scope::RepositoryScope(scope.clone()),
-    }
-}
-
-fn assert_public_fleet(
-    storage: &mut SqliteStorage,
-    scope: &RepositoryScope,
-    observed_at: &Instant,
-    state: &str,
-    active_leases: i64,
-    available_capacity: i64,
-) {
-    let response = WorkerFleetProjectionService::with_stale_after_ms(storage, 5_000)
-        .list(&fleet_query(scope, 950), observed_at)
-        .expect("generated Fleet projection");
-    assert_eq!(response.result.items.len(), 1);
-    let pool = &response.result.items[0];
-    assert_eq!(pool.state, state);
-    assert_eq!(pool.active_leases, active_leases);
-    assert_eq!(pool.available_capacity, available_capacity);
-    assert_eq!(pool.registered_workers, 1);
-    assert!(response.result.snapshot_revision.0 >= 1);
-    let public = serde_json::to_value(&response).expect("public Fleet JSON");
-    assert_eq!(public["result"]["items"][0]["state"], state);
-    assert_eq!(public["result"]["items"][0]["activeLeases"], active_leases);
-    assert_eq!(
-        public["result"]["items"][0]["availableCapacity"],
-        available_capacity
-    );
-}
-
 fn heartbeat_for(
     registration: &WorkerRegisterMessage,
     sequence: i64,
@@ -628,14 +580,6 @@ fn disconnect_and_replace(
     replacement: &WorkerRegisterMessage,
     lease: &ExecutionLeaseClaim,
 ) -> RemoteWorkerConnection {
-    assert_public_fleet(
-        storage,
-        scope,
-        &Instant("2026-08-24T12:00:02.000Z".to_owned()),
-        "healthy",
-        1,
-        3,
-    );
 
     assert!(
         RemoteWorkerPoolAdapter::new(storage, authenticator)
@@ -645,14 +589,6 @@ fn disconnect_and_replace(
     assert_eq!(
         connection.state(),
         RemoteWorkerConnectionState::Disconnected
-    );
-    assert_public_fleet(
-        storage,
-        scope,
-        &Instant("2026-08-24T12:00:03.000Z".to_owned()),
-        "offline",
-        1,
-        0,
     );
 
     let (replacement_connection, replacement_result) =
@@ -764,13 +700,5 @@ fn remote_disconnect_replacement_and_terminal_restore_browser_fleet_after_restar
             .expect("execution Registry")
             .finish_execution_lease(&terminal)
             .expect("exact terminal replay")
-    );
-    assert_public_fleet(
-        &mut restarted,
-        &scope,
-        &Instant("2026-08-24T12:00:06.000Z".to_owned()),
-        "healthy",
-        0,
-        4,
     );
 }

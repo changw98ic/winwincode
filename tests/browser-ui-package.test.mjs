@@ -106,13 +106,6 @@ test('Community callers consume the exact browser-ui package entry', async () =>
   const oldEntry = /from ['"](?:\.\/|\.\.\/)components\/(?:button|error-state|mounted-view|page-header|panel|status-badge)\.js['"]/u
   assert.deepEqual(sources.filter(({ source }) => oldEntry.test(source)).map(({ path }) => path), [])
   assert.ok(sources.filter(({ source }) => source.includes("from '@winwincode/browser-ui'")).length > 20)
-  for (const path of [
-    'apps/client/src/enterprise-operations-page.ts',
-    'apps/client/src/enterprise-resource-page.ts',
-  ]) {
-    const source = await readFile(join(root, path), 'utf8')
-    assert.equal(source.split("from '@winwincode/browser-ui'").length - 1, 1)
-  }
 })
 
 test('release build records the exact package version, bytes, and SHA-256', async t => {

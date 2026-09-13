@@ -10,6 +10,7 @@ mod client_exchange;
 mod client_occupancy;
 mod client_repositories;
 mod client_sessions;
+mod collaboration_application;
 mod config;
 mod dispatcher;
 mod durable_event_hub;
@@ -57,6 +58,9 @@ pub use client_sessions::{
     ClientSessionsApplication, ClientSessionsConfig, ClientSessionsError, ClientSessionsErrorKind,
     worker_stop_message,
 };
+pub use collaboration_application::{
+    CollaborationApplicationPort, UnavailableCollaborationApplication,
+};
 pub use winwincode_api::generated::{AuthSessionRequest, AuthSessionResponse};
 
 pub use config::{ServerConfig, ServerConfigError, ServerTls};
@@ -70,8 +74,7 @@ pub use durable_event_hub::{
 };
 pub use enterprise_identity_protocol::EnterpriseIdentityProtocolApplication;
 pub use enterprise_management::{
-    EnterpriseIdentityManagementApplication, EnterpriseManagementApplicationPort,
-    EnterpriseRbacManagementApplication, UnavailableEnterpriseManagementApplication,
+    EnterpriseManagementApplicationPort, UnavailableEnterpriseManagementApplication,
 };
 pub use identity_authenticator::EnterpriseRequestAuthenticator;
 pub use model_authority::{

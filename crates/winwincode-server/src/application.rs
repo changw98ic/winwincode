@@ -25,9 +25,8 @@ use winwincode_control_plane::strongflow_projection::{
 };
 use winwincode_control_plane::{
     ChatInteractionApiService, ChatInteractionServiceError, ChatInteractionServiceErrorCode,
-    CollaborationClock, CollaborationClockError, CollaborationError, CollaborationErrorKind,
-    CollaborationService, ControlPlane, DeliveryApplicationError, DurableWorkerInteractionOutbound,
-    EnterpriseRbacService, ModelRequestPoolConfig, ModelRouteAvailabilityError,
+    ControlPlane, DeliveryApplicationError, DurableWorkerInteractionOutbound,
+    ModelRequestPoolConfig, ModelRouteAvailabilityError,
     ModelRouteAvailabilityErrorKind, ModelRouteAvailabilityService, ModelSettingsError,
     ModelSettingsErrorKind, ModelSettingsService, ProductSessionApiClock, ProductSessionApiService,
     ProductSessionExecutionConfig, ProductSessionServiceError, ProductSessionServiceErrorCode,
@@ -40,9 +39,10 @@ use winwincode_domain::{ControlPlaneWebSocketAuthorizationEpoch, Instant, Produc
 use winwincode_storage::{ProductStateStorage, SqliteStorage};
 
 use crate::{
-    ApiError, AuthenticatedPrincipal, CommandDispatchResponse, CommandFamily, DurableEventHub,
-    EnterpriseManagementApplicationPort, EventSubscription, HealthyRuntimeHealth, QueryFamily,
-    RuntimeHealthPort, TypedControlPlaneApiPort, UnavailableEnterpriseManagementApplication,
+    ApiError, AuthenticatedPrincipal, CollaborationApplicationPort, CommandDispatchResponse,
+    CommandFamily, DurableEventHub, EnterpriseManagementApplicationPort, EventSubscription,
+    HealthyRuntimeHealth, QueryFamily, RuntimeHealthPort, TypedControlPlaneApiPort,
+    UnavailableCollaborationApplication, UnavailableEnterpriseManagementApplication,
 };
 
 const AUTHORIZATION_EPOCH: i64 = 1;
@@ -81,14 +81,6 @@ impl ProductSessionApiClock for ProductSessionClockAdapter<'_> {
     }
 }
 
-struct CollaborationClockAdapter(Arc<dyn StandaloneApplicationClock>);
-
-impl CollaborationClock for CollaborationClockAdapter {
-    fn now_millis(&mut self) -> Result<u64, CollaborationClockError> {
-        Ok(self.0.now_millis())
-    }
-}
-
 pub(crate) struct ApplicationState {
     pub(crate) control_plane: ControlPlane,
     pub(crate) storage: SqliteStorage,
@@ -104,7 +96,7 @@ pub(crate) struct ApplicationState {
 
 struct ApplicationComposition {
     enterprise: Arc<dyn EnterpriseManagementApplicationPort>,
-    collaboration: Arc<CollaborationService>,
+    collaboration: Arc<dyn CollaborationApplicationPort>,
     execution_config: ProductSessionExecutionConfig,
 }
 
@@ -114,7 +106,7 @@ pub struct StandaloneControlPlaneApplication {
     hub: Arc<DurableEventHub>,
     clock: Arc<dyn StandaloneApplicationClock>,
     enterprise: Arc<dyn EnterpriseManagementApplicationPort>,
-    collaboration: Arc<CollaborationService>,
+    collaboration: Arc<dyn CollaborationApplicationPort>,
     runtime: Arc<dyn RuntimeHealthPort>,
 }
 
@@ -169,8 +161,8 @@ impl StandaloneControlPlaneApplication {
         )
     }
 
-    /// Composes enterprise and collaboration services that share the same
-    /// durable authority and current RBAC service.
+    /// Composes an enterprise management port and an unavailable collaboration
+    /// port. Community does not run enterprise collaboration or RBAC.
     ///
     /// # Errors
     ///
@@ -181,7 +173,7 @@ impl StandaloneControlPlaneApplication {
         worker_outbound: DurableWorkerInteractionOutbound,
         hub: Arc<DurableEventHub>,
         enterprise: Arc<dyn EnterpriseManagementApplicationPort>,
-        collaboration: Arc<CollaborationService>,
+        collaboration: Arc<dyn CollaborationApplicationPort>,
         execution_config: ProductSessionExecutionConfig,
     ) -> Result<Self, ApiError> {
         Self::compose(
@@ -236,18 +228,6 @@ impl StandaloneControlPlaneApplication {
         enterprise: Arc<dyn EnterpriseManagementApplicationPort>,
         execution_config: ProductSessionExecutionConfig,
     ) -> Result<Self, ApiError> {
-        let data_directory = storage
-            .database_path()
-            .parent()
-            .ok_or_else(application_configuration_invalid)?;
-        let rbac = Arc::new(EnterpriseRbacService::new(Box::new(
-            SqliteStorage::open(data_directory).map_err(|_| application_configuration_invalid())?,
-        )));
-        let collaboration = Arc::new(CollaborationService::with_clock(
-            SqliteStorage::open(data_directory).map_err(|_| application_configuration_invalid())?,
-            rbac,
-            Box::new(CollaborationClockAdapter(Arc::clone(&clock))),
-        ));
         Self::compose(
             control_plane,
             storage,
@@ -256,7 +236,7 @@ impl StandaloneControlPlaneApplication {
             clock,
             ApplicationComposition {
                 enterprise,
-                collaboration,
+                collaboration: Arc::new(UnavailableCollaborationApplication),
                 execution_config,
             },
         )
@@ -272,7 +252,6 @@ impl StandaloneControlPlaneApplication {
     ) -> Result<Self, ApiError> {
         if control_plane.local_database_path() != Some(storage.database_path())
             || worker_outbound.database_path() != storage.database_path()
-            || composition.collaboration.database_path() != storage.database_path()
         {
             return Err(application_configuration_invalid());
         }
@@ -749,24 +728,8 @@ impl StandaloneControlPlaneApplication {
         principal: &AuthenticatedPrincipal,
         request: CommandRequest,
     ) -> Result<CommandDispatchResponse, ApiError> {
-        let response = match request {
-            CommandRequest::CollaborationNotificationAckCommand(command) => self
-                .collaboration
-                .notification_ack(principal.authorized_scopes(), &command)
-                .map(CommandCompletedResponse::CollaborationNotificationAckCompletedResponse),
-            CommandRequest::CollaborationPresenceUpdateCommand(command) => self
-                .collaboration
-                .presence_update(principal.authorized_scopes(), &command)
-                .map(CommandCompletedResponse::CollaborationPresenceUpdateCompletedResponse),
-            _ => return Err(application_variant_mismatch()),
-        }
-        .map_err(|error| collaboration_error(&error))?;
-        let mut guard = self.state()?;
-        let state = guard.as_mut().ok_or_else(service_unavailable)?;
-        self.hub
-            .publish_pending(&mut state.storage)
-            .map_err(|error| error.api_error())?;
-        Ok(CommandDispatchResponse::Completed(Box::new(response)))
+        self.collaboration
+            .command(principal.authorized_scopes(), request)
     }
 
     fn collaboration_query(
@@ -774,22 +737,8 @@ impl StandaloneControlPlaneApplication {
         principal: &AuthenticatedPrincipal,
         request: QueryRequest,
     ) -> Result<QueryResultResponse, ApiError> {
-        match request {
-            QueryRequest::CollaborationActivityListQuery(query) => self
-                .collaboration
-                .activity_list(principal.authorized_scopes(), &query)
-                .map(QueryResultResponse::CollaborationActivityListResultResponse),
-            QueryRequest::CollaborationNotificationListQuery(query) => self
-                .collaboration
-                .notification_list(principal.authorized_scopes(), &query)
-                .map(QueryResultResponse::CollaborationNotificationListResultResponse),
-            QueryRequest::CollaborationPresenceListQuery(query) => self
-                .collaboration
-                .presence_list(principal.authorized_scopes(), &query)
-                .map(QueryResultResponse::CollaborationPresenceListResultResponse),
-            _ => return Err(application_variant_mismatch()),
-        }
-        .map_err(|error| collaboration_error(&error))
+        self.collaboration
+            .query(principal.authorized_scopes(), request)
     }
 
     fn strongflow_query(&self, request: QueryRequest) -> Result<QueryResultResponse, ApiError> {
@@ -889,7 +838,6 @@ impl TypedControlPlaneApiPort for StandaloneControlPlaneApplication {
             CommandFamily::Approval => self.interaction_command(request),
             CommandFamily::Worker => self.worker_command(request),
             CommandFamily::Publication => self.publication_command(request),
-            CommandFamily::Enterprise => self.enterprise.command(request),
             CommandFamily::Collaboration => self.collaboration_command(principal, request),
         }
     }
@@ -914,7 +862,6 @@ impl TypedControlPlaneApiPort for StandaloneControlPlaneApplication {
             QueryFamily::Settings => self.settings_query(request),
             QueryFamily::Approval => self.interaction_query(request),
             QueryFamily::Publication => self.publication_query(request),
-            QueryFamily::Enterprise => self.enterprise.query(request),
             QueryFamily::Collaboration => self.collaboration_query(principal, request),
         }
     }
@@ -1398,33 +1345,6 @@ fn strongflow_error(error: &StrongFlowProjectionError) -> ApiError {
             "StrongFlow trusted facts are unavailable",
         ),
         ServiceUnavailable(_) | Internal(_) => service_unavailable(),
-    }
-}
-
-fn collaboration_error(error: &CollaborationError) -> ApiError {
-    match error.kind() {
-        CollaborationErrorKind::InvalidRequest => {
-            ApiError::new(400, "INVALID_REQUEST", "Collaboration request is invalid")
-        }
-        CollaborationErrorKind::PermissionDenied => ApiError::new(
-            403,
-            "PERMISSION_DENIED",
-            "Collaboration permission is denied",
-        ),
-        CollaborationErrorKind::RevisionConflict => {
-            ApiError::new(409, "REVISION_CONFLICT", "Collaboration revision changed")
-        }
-        CollaborationErrorKind::RequestConflict => ApiError::new(
-            409,
-            "IDEMPOTENCY_CONFLICT",
-            "requestId was already used with different input",
-        ),
-        CollaborationErrorKind::CursorInvalid => ApiError::new(
-            409,
-            "READ_CURSOR_EXPIRED",
-            "Collaboration read cursor is no longer valid",
-        ),
-        CollaborationErrorKind::Storage | CollaborationErrorKind::Corrupt => service_unavailable(),
     }
 }
 

@@ -1343,16 +1343,6 @@ function eventMatchesStream(frame: ControlPlaneWebSocketEventFrame): boolean {
         : stream.kind === 'product-session' && event.productSessionId === stream.productSessionId
     case 'worker-health.changed.v1':
       return stream.kind === 'lease' && event.workerId === stream.workerId
-    case 'enterprise-organization.invalidated.v1':
-    case 'enterprise-membership.invalidated.v1':
-    case 'enterprise-team.invalidated.v1':
-    case 'enterprise-role.invalidated.v1':
-    case 'enterprise-project.invalidated.v1':
-    case 'enterprise-policy.invalidated.v1':
-    case 'enterprise-fleet.invalidated.v1':
-    case 'enterprise-usage.invalidated.v1':
-    case 'enterprise-audit.invalidated.v1':
-    case 'enterprise-integration.invalidated.v1':
     case 'model-route-availability.invalidated.v1':
       return stream.kind === 'scope'
     case 'activity.recorded.v1':

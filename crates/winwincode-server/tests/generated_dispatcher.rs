@@ -49,30 +49,6 @@ impl TypedControlPlaneApiPort for RecordingApplication {
             .lock()
             .expect("command families")
             .push(family);
-        if family == CommandFamily::Enterprise {
-            assert!(matches!(
-                request,
-                CommandRequest::EnterpriseOrganizationUpdateCommand(_)
-            ));
-            let response: CommandCompletedResponse = serde_json::from_value(json!({
-                "schemaVersion": "winwincode/v1",
-                "requestId": REQUEST_ID,
-                "command": "enterprise.organization.update",
-                "outcome": "completed",
-                "previousRevision": 1,
-                "currentRevision": 2,
-                "result": {
-                    "id": "org_00000000000000000000000001",
-                    "slug": "example",
-                    "displayName": "Example",
-                    "state": "active",
-                    "revision": 2,
-                    "updatedAt": "2026-08-27T00:00:00.000Z"
-                }
-            }))
-            .expect("enterprise command response fixture");
-            return Ok(CommandDispatchResponse::Completed(Box::new(response)));
-        }
         if family != CommandFamily::Settings {
             return Err(ApiError::new(418, "HANDLER_FIXTURE", "handler fixture"));
         }
@@ -108,32 +84,6 @@ impl TypedControlPlaneApiPort for RecordingApplication {
             && matches!(&request, QueryRequest::PublicationGetQuery(_))
         {
             return Ok(publication_detail_response());
-        }
-        if family == QueryFamily::Enterprise {
-            assert!(matches!(
-                request,
-                QueryRequest::EnterpriseOrganizationListQuery(_)
-            ));
-            let response: QueryResultResponse = serde_json::from_value(json!({
-                "schemaVersion": "winwincode/v1",
-                "requestId": REQUEST_ID,
-                "query": "enterprise.organization.list",
-                "page": { "nextCursor": null, "hasMore": false },
-                "result": {
-                    "kind": "enterprise_organization_page",
-                    "snapshotRevision": 2,
-                    "items": [{
-                        "id": "org_00000000000000000000000001",
-                        "slug": "example",
-                        "displayName": "Example",
-                        "state": "active",
-                        "revision": 2,
-                        "updatedAt": "2026-08-27T00:00:00.000Z"
-                    }]
-                }
-            }))
-            .expect("enterprise query response fixture");
-            return Ok(response);
         }
         if family != QueryFamily::Settings {
             return Err(ApiError::new(418, "HANDLER_FIXTURE", "handler fixture"));
@@ -341,27 +291,6 @@ fn publication_get_query() -> Value {
     )
 }
 
-fn enterprise_organization_command() -> Value {
-    command_fixture(
-        "enterprise.organization.update",
-        &organization_scope(),
-        &json!({
-            "organizationId": "org_00000000000000000000000001",
-            "slug": "example",
-            "displayName": "Example",
-            "state": "active"
-        }),
-    )
-}
-
-fn enterprise_organization_query() -> Value {
-    query_fixture(
-        "enterprise.organization.list",
-        &organization_scope(),
-        &json!({ "states": [] }),
-    )
-}
-
 #[test]
 fn every_generated_operation_has_one_stable_application_family() {
     assert_command_families();
@@ -410,30 +339,6 @@ fn assert_command_families() {
         (CommandName::PublicationPublish, CommandFamily::Publication),
         (CommandName::PublicationCancel, CommandFamily::Publication),
         (
-            CommandName::EnterpriseOrganizationUpdate,
-            CommandFamily::Enterprise,
-        ),
-        (
-            CommandName::EnterpriseMembershipUpdate,
-            CommandFamily::Enterprise,
-        ),
-        (
-            CommandName::EnterpriseProjectRepositoryUpdate,
-            CommandFamily::Enterprise,
-        ),
-        (
-            CommandName::EnterprisePolicyUpdate,
-            CommandFamily::Enterprise,
-        ),
-        (
-            CommandName::EnterpriseFleetUpdate,
-            CommandFamily::Enterprise,
-        ),
-        (
-            CommandName::EnterpriseIntegrationUpdate,
-            CommandFamily::Enterprise,
-        ),
-        (
             CommandName::CollaborationNotificationAck,
             CommandFamily::Collaboration,
         ),
@@ -478,20 +383,6 @@ fn assert_query_families() {
         (QueryName::WorkerGet, QueryFamily::Worker),
         (QueryName::PublicationList, QueryFamily::Publication),
         (QueryName::PublicationGet, QueryFamily::Publication),
-        (
-            QueryName::EnterpriseOrganizationList,
-            QueryFamily::Enterprise,
-        ),
-        (QueryName::EnterpriseMembershipList, QueryFamily::Enterprise),
-        (QueryName::EnterpriseProjectList, QueryFamily::Enterprise),
-        (QueryName::EnterprisePolicyList, QueryFamily::Enterprise),
-        (QueryName::EnterpriseFleetList, QueryFamily::Enterprise),
-        (QueryName::EnterpriseUsageList, QueryFamily::Enterprise),
-        (QueryName::EnterpriseAuditList, QueryFamily::Enterprise),
-        (
-            QueryName::EnterpriseIntegrationList,
-            QueryFamily::Enterprise,
-        ),
         (
             QueryName::CollaborationActivityList,
             QueryFamily::Collaboration,
@@ -558,7 +449,6 @@ fn representative_generated_commands_reach_each_application_family() {
                 "reason": "fixture"
             }),
         ),
-        enterprise_organization_command(),
         command_fixture(
             "publication.cancel",
             &repository_scope(),
@@ -585,7 +475,6 @@ fn representative_generated_commands_reach_each_application_family() {
             CommandFamily::CredentialReference,
             CommandFamily::Approval,
             CommandFamily::Worker,
-            CommandFamily::Enterprise,
             CommandFamily::Publication,
             CommandFamily::Collaboration,
         ]
@@ -636,7 +525,6 @@ fn representative_generated_queries_reach_each_application_family() {
             &repository_scope(),
             &json!({ "deliveryId": null, "states": [] }),
         ),
-        enterprise_organization_query(),
         query_fixture(
             "collaboration.activity.list",
             &organization_scope(),
@@ -661,7 +549,6 @@ fn representative_generated_queries_reach_each_application_family() {
             QueryFamily::Approval,
             QueryFamily::Worker,
             QueryFamily::Publication,
-            QueryFamily::Enterprise,
             QueryFamily::Collaboration,
         ]
     );
@@ -695,34 +582,6 @@ fn generated_command_and_query_are_authorized_routed_and_correlated() {
     );
 }
 
-#[test]
-fn enterprise_contracts_use_the_one_generated_http_dispatcher() {
-    let application = Arc::new(RecordingApplication::default());
-    let dispatcher = GeneratedContractDispatcher::new(application.clone());
-
-    let query = dispatcher
-        .query(&principal(), enterprise_organization_query())
-        .expect("enterprise query response");
-    assert_eq!(query["query"], "enterprise.organization.list");
-    assert_eq!(query["result"]["snapshotRevision"], 2);
-
-    let command = dispatcher
-        .command(&principal(), enterprise_organization_command())
-        .expect("enterprise command response");
-    assert_eq!(command["command"], "enterprise.organization.update");
-    assert_eq!(command["previousRevision"], 1);
-    assert_eq!(command["currentRevision"], 2);
-
-    assert_eq!(application.authorizations.load(Ordering::Relaxed), 2);
-    assert_eq!(
-        *application.query_families.lock().expect("queries"),
-        vec![QueryFamily::Enterprise]
-    );
-    assert_eq!(
-        *application.command_families.lock().expect("commands"),
-        vec![CommandFamily::Enterprise]
-    );
-}
 
 #[test]
 fn publication_get_dispatches_one_bounded_detail_projection() {

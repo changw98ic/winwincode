@@ -111,35 +111,6 @@ function queryResponse(request) {
   }
 }
 
-function enterpriseOrganizationList(value = 20) {
-  return {
-    schemaVersion,
-    requestId: requestId(value),
-    actor,
-    scope,
-    query: 'enterprise.organization.list',
-    parameters: { states: ['active'] },
-    page: { cursor: null, limit: 100 },
-  }
-}
-
-function enterpriseOrganizationUpdate(value = 21) {
-  return {
-    schemaVersion,
-    requestId: requestId(value),
-    actor,
-    scope,
-    command: 'enterprise.organization.update',
-    expectedRevision: 7,
-    payload: {
-      organizationId: scope.organizationId,
-      displayName: 'WinWinCode Enterprise',
-      slug: 'winwincode-enterprise',
-      state: 'active',
-    },
-  }
-}
-
 class FakeSocket {
   readyState = 0
   onopen = null
@@ -255,60 +226,6 @@ test('query cancellation reaches the transport and never retries the cancelled r
   assert.equal(attempts, 1)
 })
 
-test('enterprise queries and mutations use the one generated facade and preserve revision identity', async () => {
-  const requests = []
-  const client = createControlPlaneClient({
-    serverUrl: 'https://control.example',
-    transport: {
-      async fetch(input, init) {
-        const request = JSON.parse(init.body)
-        requests.push({ input, request })
-        if (input.endsWith('/queries')) return response(200, {
-          schemaVersion,
-          requestId: request.requestId,
-          query: request.query,
-          result: {
-            kind: 'enterprise_organization_page',
-            snapshotRevision: 7,
-            items: [],
-          },
-          page: { hasMore: false, nextCursor: null },
-        })
-        return response(200, {
-          schemaVersion,
-          requestId: request.requestId,
-          command: request.command,
-          outcome: 'completed',
-          previousRevision: request.expectedRevision,
-          currentRevision: 8,
-          result: {
-            id: scope.organizationId,
-            displayName: request.payload.displayName,
-            slug: request.payload.slug,
-            state: request.payload.state,
-            revision: 8,
-            updatedAt: '2026-08-27T00:00:00.000Z',
-          },
-        })
-      },
-    },
-  })
-  const query = enterpriseOrganizationList()
-  const command = enterpriseOrganizationUpdate()
-
-  const snapshot = await client.query(query)
-  const mutation = await client.command(command)
-
-  assert.equal(snapshot.query, 'enterprise.organization.list')
-  assert.equal(snapshot.result.snapshotRevision, 7)
-  assert.equal(mutation.command, 'enterprise.organization.update')
-  assert.equal(mutation.previousRevision, command.expectedRevision)
-  assert.equal(mutation.currentRevision, 8)
-  assert.deepEqual(requests, [
-    { input: 'https://control.example/api/v1/queries', request: query },
-    { input: 'https://control.example/api/v1/commands', request: command },
-  ])
-})
 
 test('authentication, authorization, and schema versions use one safe error shape', async () => {
   const accessFailures = []

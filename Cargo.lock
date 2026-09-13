@@ -12907,6 +12907,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite",
+ "ureq",
  "winwincode-api",
  "winwincode-client-port",
  "winwincode-codex",
@@ -12918,7 +12919,6 @@ dependencies = [
  "winwincode-session",
  "winwincode-storage",
  "winwincode-worker",
- "ureq",
 ]
 
 [[package]]

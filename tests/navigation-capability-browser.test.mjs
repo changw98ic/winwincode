@@ -32,7 +32,7 @@ async function waitForMode(devtools, sessionId, mode) {
   throw new Error(`navigation browser fixture did not load ${mode}`)
 }
 
-test('real Chrome projects personal, enterprise, disabled, and read-only navigation', async t => {
+test('real Chrome projects personal, disabled, and read-only navigation without Enterprise', async t => {
   const chromePath = chromeBinary()
   assert.notEqual(chromePath, null, 'Chrome or Chromium is required for navigation validation')
   command(root, 'corepack', ['pnpm', '--filter', '@winwincode/client', 'build'])
@@ -82,51 +82,20 @@ test('real Chrome projects personal, enterprise, disabled, and read-only navigat
   const personal = await navigate('personal')
   assert.equal(personal.deployment, 'personal')
   assert.deepEqual(Object.keys(personal.entries).sort(), [
-    'attention', 'chat', 'settings', 'strongflow',
+    'attention', 'chat', 'home', 'settings', 'strongflow',
   ])
-  const directDenial = await evaluate(
-    devtools,
-    sessionId,
-    'globalThis.openDeniedEnterpriseRoute()',
-  )
-  assert.equal(directDenial.alertRole, 'alert')
-  assert.equal(directDenial.enterpriseQueries, 0)
-  assert.equal(directDenial.focused, true)
-  assert.equal(directDenial.safeHref, '#/chat')
-  assert.match(directDenial.text, /not available.*Return to Chat/iu)
-
-  const enterprise = await navigate('enterprise')
-  assert.equal(enterprise.deployment, 'enterprise')
-  assert.deepEqual(Object.keys(enterprise.entries).sort(), [
-    'attention', 'chat', 'enterprise', 'settings', 'strongflow',
-  ])
-  assert.equal(enterprise.entries.enterprise.capability, 'available')
-  const websocketRevoked = await evaluate(
-    devtools,
-    sessionId,
-    'globalThis.revokeEnterpriseSubscription()',
-  )
-  assert.equal(websocketRevoked.subscriptionClosed, true)
-  assert.equal(websocketRevoked.safeHref, '#/chat')
-  assert.equal(websocketRevoked.routeAccess, 'denied')
-  assert.equal(websocketRevoked.capability, 'available')
-
-  await navigate('enterprise')
-  const revoked = await evaluate(devtools, sessionId, 'globalThis.revokeEnterpriseRoute()')
-  assert.equal(revoked.subscriptionClosed, true)
-  assert.equal(revoked.visibleEntries, 0)
-  assert.match(revoked.routeText, /Sign in/iu)
+  assert.equal(personal.entries.enterprise, undefined)
 
   const disabled = await navigate('disabled')
-  assert.equal(disabled.entries.enterprise.capability, 'disabled')
-  assert.equal(disabled.entries.enterprise.ariaDisabled, 'true')
-  assert.equal(disabled.entries.enterprise.tabIndex, -1)
-  assert.match(disabled.entries.enterprise.label, /unavailable/iu)
-  const blocked = await evaluate(devtools, sessionId, 'globalThis.tryDisabledEnterpriseEntry()')
+  assert.equal(disabled.entries.chat.capability, 'disabled')
+  assert.equal(disabled.entries.chat.ariaDisabled, 'true')
+  assert.equal(disabled.entries.chat.tabIndex, -1)
+  assert.match(disabled.entries.chat.label, /unavailable/iu)
+  const blocked = await evaluate(devtools, sessionId, 'globalThis.tryDisabledChatEntry()')
   assert.equal(blocked.after, blocked.before)
 
   const readOnly = await navigate('read-only')
-  assert.equal(readOnly.entries.enterprise.capability, 'read-only')
-  assert.equal(readOnly.entries.enterprise.ariaDisabled, null)
-  assert.match(readOnly.entries.enterprise.label, /read only/iu)
+  assert.equal(readOnly.entries.chat.capability, 'read-only')
+  assert.equal(readOnly.entries.chat.ariaDisabled, null)
+  assert.match(readOnly.entries.chat.label, /read only/iu)
 })

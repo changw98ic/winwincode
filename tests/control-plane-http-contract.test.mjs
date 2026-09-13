@@ -28,15 +28,14 @@ const COMMANDS = Object.freeze([
   'worker.enable',
   'publication.publish',
   'publication.cancel',
-  'enterprise.organization.update',
-  'enterprise.membership.update',
-  'enterprise.team.update',
-  'enterprise.role.update',
-  'enterprise.project_repository.update',
-  'enterprise.policy.update',
-  'enterprise.fleet.update',
-  'enterprise.integration.update',
-  'enterprise.identity.update',
+
+
+
+
+
+
+
+
   'collaboration.notification.ack',
   'collaboration.presence.update',
 ])
@@ -65,17 +64,16 @@ const QUERIES = Object.freeze([
   'worker.get',
   'publication.list',
   'publication.get',
-  'enterprise.organization.list',
-  'enterprise.membership.list',
-  'enterprise.team.list',
-  'enterprise.role.list',
-  'enterprise.project.list',
-  'enterprise.policy.list',
-  'enterprise.fleet.list',
-  'enterprise.usage.list',
-  'enterprise.audit.list',
-  'enterprise.integration.list',
-  'enterprise.identity.list',
+
+
+
+
+
+
+
+
+
+
   'collaboration.activity.list',
   'collaboration.notification.list',
   'collaboration.presence.list',
@@ -232,17 +230,16 @@ test('HTTP query contract covers every current read surface with an opaque stabl
     'worker.get': '#/$defs/WorkerProjection',
     'publication.list': '#/$defs/PublicationPage',
     'publication.get': '#/$defs/PublicationDetailProjection',
-    'enterprise.organization.list': '#/$defs/EnterpriseOrganizationPage',
-    'enterprise.membership.list': '#/$defs/EnterpriseMembershipPage',
-    'enterprise.team.list': '#/$defs/EnterpriseTeamPage',
-    'enterprise.role.list': '#/$defs/EnterpriseRolePage',
-    'enterprise.project.list': '#/$defs/EnterpriseProjectRepositoryPage',
-    'enterprise.policy.list': '#/$defs/EnterprisePolicyPage',
-    'enterprise.fleet.list': '#/$defs/EnterpriseFleetPage',
-    'enterprise.usage.list': '#/$defs/EnterpriseUsagePage',
-    'enterprise.audit.list': '#/$defs/EnterpriseAuditPage',
-    'enterprise.integration.list': '#/$defs/EnterpriseIntegrationPage',
-    'enterprise.identity.list': '#/$defs/EnterpriseIdentityPage',
+
+
+
+
+
+
+
+
+
+
     'collaboration.activity.list': '#/$defs/CollaborationActivityPage',
     'collaboration.notification.list': '#/$defs/CollaborationNotificationPage',
     'collaboration.presence.list': '#/$defs/CollaborationPresencePage',

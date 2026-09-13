@@ -156,24 +156,6 @@ try {
     '--outfile=dist/public/assets/client.css',
     '--banner:css=/* SPDX-License-Identifier: Apache-2.0 */',
   ], packageRoot)
-  run('corepack', [
-    'pnpm',
-    'exec',
-    'esbuild',
-    'src/enterprise-application.ts',
-    'src/enterprise-resource-page.ts',
-    'src/enterprise-operations-page.ts',
-    '--bundle',
-    '--splitting',
-    '--format=esm',
-    '--platform=browser',
-    '--target=es2023',
-    '--minify',
-    '--entry-names=[name]-[hash]',
-    '--chunk-names=chunk-[hash]',
-    '--outdir=dist/public/assets',
-    '--banner:js=// SPDX-License-Identifier: Apache-2.0',
-  ], packageRoot)
   cpSync(join(packageRoot, 'public'), publicOutputRoot, { recursive: true, force: true })
 
   const version = Object.freeze({

@@ -19,7 +19,7 @@ use winwincode_codex::{
     ProductionCodexConfig, ProductionCodexOptions,
 };
 use winwincode_control_plane::{
-    CanonicalEnterpriseIdentityLifecycle, CollaborationService, ControlPlane, ControlPlaneConfig,
+    CanonicalEnterpriseIdentityLifecycle, ControlPlane, ControlPlaneConfig,
     ControlPlaneInstanceRuntimeConfig, DurableWorkerInteractionOutbound,
     EnterpriseIdentityProductionVerifiers, EnterpriseIdentityProtocolAdapter,
     EnterpriseIdentityProtocolConfig, EnterpriseIdentityService, EnterpriseIdentityVerifierConfig,
@@ -49,14 +49,15 @@ use winwincode_local::LocalLauncherConfig;
 use winwincode_server::{
     AuthSessionBootstrap, AuthSessionConfig, ClientExchangeApplication, ClientExchangeConfig,
     ClientExchangePort, DurableEventHub, DurableEventHubConfig, DurableEventPublisher,
-    EnterpriseIdentityManagementApplication, EnterpriseIdentityProtocolApplication,
-    EnterpriseRbacManagementApplication, EnterpriseRequestAuthenticator,
+    EnterpriseIdentityProtocolApplication,
+    EnterpriseRequestAuthenticator,
     FileRemoteWorkerAuthenticator, GeneratedContractDispatcher, LocalModelRoute,
     LocalRuntimeSupervisor, OwnerInitializationHook, ProductionRemoteWorkerExchange,
     RemoteWorkerExchangePort, RepositoryRuntimeScheduler, RequestAuthenticator, ServerConfig,
     ServerExecutionPortCore, ServerTls, SqliteAuthSessionManager, StandaloneApplicationClock,
     StandaloneControlPlaneApplication, SystemStandaloneApplicationClock,
-    UnavailableEnterpriseManagementApplication, UserAccountService,
+    UnavailableCollaborationApplication, UnavailableEnterpriseManagementApplication,
+    UserAccountService,
     configure_local_model_authority, start_server, start_server_with_remote_worker,
 };
 use winwincode_storage::{
@@ -949,18 +950,10 @@ fn compose_production_application(
     let rbac = Arc::new(EnterpriseRbacService::new(Box::new(SqliteStorage::open(
         config.data_directory(),
     )?)));
-    let collaboration = Arc::new(CollaborationService::new(
-        SqliteStorage::open(config.data_directory())?,
-        Arc::clone(&rbac),
-    ));
-    let rbac_application = Arc::new(EnterpriseRbacManagementApplication::new(
-        Arc::clone(&rbac),
-        Arc::new(UnavailableEnterpriseManagementApplication),
-    ));
-    let enterprise = Arc::new(EnterpriseIdentityManagementApplication::new(
-        Arc::clone(&identities),
-        rbac_application,
-    ));
+    // Community production does not mount enterprise collaboration or RBAC.
+    // Those product surfaces belong to the Enterprise repository.
+    let enterprise = Arc::new(UnavailableEnterpriseManagementApplication);
+    let collaboration = Arc::new(UnavailableCollaborationApplication);
     let application = StandaloneControlPlaneApplication::new_with_enterprise_and_collaboration(
         control_plane,
         storage,
