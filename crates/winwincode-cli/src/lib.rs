@@ -7,7 +7,6 @@ mod git;
 mod launcher;
 mod model;
 mod repo_admin;
-mod user_admin;
 
 pub use backup::{BACKUP_HELP_LINES, BackupOutcome, run_backup};
 pub use cli::{WwcCliExit, render_help, run_cli};
@@ -28,10 +27,6 @@ pub use model::{
 };
 pub use repo_admin::{
     RepoAdminError, RepoAdminOutcome, RepositoryBindingView, repo_add, repo_list, repo_remove,
-};
-pub use user_admin::{
-    UserAccountAdmin, UserAccountView, UserAdminError, UserAdminOutcome,
-    generate_temporary_password,
 };
 pub use winwincode_device_client::{
     DeviceServiceConfig, DeviceServiceError, DeviceServiceStatus, device_service_logs,

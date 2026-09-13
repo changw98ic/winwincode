@@ -4,12 +4,10 @@ members = [
   "crates/kernel",
   "crates/winwincode-api",
   "crates/winwincode-audit",
-  "crates/winwincode-backup",
   "crates/winwincode-cli",
   "crates/winwincode-client-port",
   "crates/winwincode-delivery",
   "crates/winwincode-device-client",
-  "crates/winwincode-drill",
   "crates/winwincode-control-plane",
   "crates/winwincode-codex",
   "crates/winwincode-data-export",
@@ -82,7 +80,6 @@ toml = "=0.9.11"
 uuid = { version = "=1.20.0", features = ["v7"] }
 winwincode-api = { path = "crates/winwincode-api" }
 winwincode-audit = { path = "crates/winwincode-audit" }
-winwincode-backup = { path = "crates/winwincode-backup" }
 winwincode-data-export = { path = "crates/winwincode-data-export" }
 winwincode-delivery = { version = "=0.1.0-alpha.2", path = "crates/winwincode-delivery" }
 winwincode-domain = { version = "=0.1.0-alpha.2", path = "crates/winwincode-domain" }

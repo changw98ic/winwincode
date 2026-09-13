@@ -1,0 +1,48 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+
+.wwc-candidate-run-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+}
+
+.wwc-candidate-run-preview-mode {
+  font-weight: 600;
+}
+
+.wwc-candidate-run-preview-mode[data-tone='warning'] {
+  color: var(--wwc-tone-warning, #9a6700);
+}
+
+.wwc-candidate-run-preview-mode[data-tone='success'] {
+  color: var(--wwc-tone-success, #1a7f37);
+}
+
+.wwc-candidate-run-preview-run-bar,
+.wwc-candidate-run-preview-preview-bar,
+.wwc-candidate-run-preview-viewport-bar,
+.wwc-candidate-run-preview-nav-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.wwc-candidate-run-preview-frame-shell {
+  min-height: 160px;
+  border: 1px solid var(--wwc-border, #d0d7de);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.wwc-candidate-run-preview-files,
+.wwc-candidate-run-preview-logs {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.wwc-candidate-run-preview-citation {
+  font-family: var(--wwc-font-mono, ui-monospace, monospace);
+  font-size: 12px;
+}

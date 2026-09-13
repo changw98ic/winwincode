@@ -1743,11 +1743,9 @@ mod tests {
     use winwincode_device_client::{
         DeviceIdentitySeed, DeviceStore, ensure_device_identity, load_device_identity,
     };
-    use winwincode_domain::UserAccountRole;
     use winwincode_server::UserAccountService;
 
     use crate::cli::WwcCliExit;
-    use crate::user_admin::{UserAccountAdmin, UserAdminOutcome};
 
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -1812,22 +1810,19 @@ mod tests {
         Connection::open(path).expect("raw test connection")
     }
 
+    fn chrono_now() -> winwincode_domain::Instant {
+        winwincode_domain::Instant("2026-09-13T00:00:00.000Z".to_owned())
+    }
+
     fn seed_server_store(data_directory: &Path) -> (String, String, String) {
-        let admin = UserAccountAdmin::open(data_directory.to_path_buf());
-        let outcome = admin
-            .create("ops-owner", UserAccountRole::Owner)
+        let admin = UserAccountService::open(data_directory)
+            .expect("account service");
+        let owner = admin
+            .initialize_owner("ops-owner", "ops-owner-password", &chrono_now())
             .expect("owner account");
-        let (user_id, username, temporary_password) = match outcome {
-            UserAdminOutcome::UserCreated {
-                user,
-                temporary_password,
-            } => (
-                user.user_id.clone(),
-                user.username.clone(),
-                temporary_password,
-            ),
-            other => panic!("unexpected admin outcome: {other:?}"),
-        };
+        let user_id = owner.user_id.0.clone();
+        let username = owner.username.clone();
+        let temporary_password = "ops-owner-password".to_string();
         let database = connection(&data_directory.join("control-plane.sqlite3"));
         database
             .execute_batch(
