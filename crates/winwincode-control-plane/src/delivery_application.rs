@@ -36,15 +36,16 @@ use winwincode_delivery::{
         workrun_execution::{WorkRunStartEffect, WorkRunStartResult},
     },
     domain::{
-        AttentionItemStatus, Delivery, DeliverySourceRef, DeliveryStatus, FrozenDeliveryCandidate,
-        RepositoryRef, evidence::ResolvedDeliveryEvidence, verification::IndependentVerification,
+        AttentionItemStatus, AttentionItemType, Delivery, DeliverySourceRef, DeliveryStatus,
+        FrozenDeliveryCandidate, RepositoryRef, evidence::ResolvedDeliveryEvidence,
+        verification::IndependentVerification,
     },
     store::{DeliveryQuery, DeliveryQueryPort, DeliveryStore},
 };
 use winwincode_domain::RepositoryScope;
 use winwincode_domain::{
-    Count, DeliveryId, ExecutionJobId, OpaqueCursor, ProductSessionId, RequestId, Revision,
-    SchemaVersion, Sha256Digest, WorkItemState,
+    AttentionItemId, Count, DeliveryId, ExecutionJobId, OpaqueCursor, ProductSessionId, RequestId,
+    Revision, SchemaVersion, Sha256Digest, WorkItemState,
 };
 use winwincode_storage::{
     CandidateGitTerminalOutcome, CommitReceipt, ProductStateStorage, ProjectionEventStream,
@@ -796,7 +797,93 @@ impl ControlPlane {
             &receipt,
             &delivery,
         )?;
+        self.continue_delivery_after_retry_verification(
+            &command.scope,
+            &command.payload.delivery_id,
+            &command.payload.attention_item_id,
+            &command.actor,
+            &delivery,
+        )?;
         attention_response(command, &receipt, &delivery)
+    }
+
+    /// After a resolved `VerificationBlocked` Attention invalidates the current
+    /// verdict, the Controller owns the next independent verification dispatch.
+    /// The receipt on `workrun.start` makes a crash after this handoff a no-op.
+    fn continue_delivery_after_retry_verification(
+        &mut self,
+        scope: &RepositoryScope,
+        delivery_id: &DeliveryId,
+        attention_item_id: &AttentionItemId,
+        command_actor: &Actor,
+        delivery: &Delivery,
+    ) -> Result<(), DeliveryApplicationError> {
+        if self.delivery_authority.is_none() || self.delivery_dispatcher.is_none() {
+            return Ok(());
+        }
+        if delivery.snapshot().status != DeliveryStatus::Ready
+            || delivery.snapshot().verdict.is_some()
+        {
+            return Ok(());
+        }
+        if delivery
+            .snapshot()
+            .work_run_aggregate
+            .runs
+            .iter()
+            .any(|run| {
+                matches!(
+                    run.state,
+                    winwincode_domain::WorkRunState::Queued
+                        | winwincode_domain::WorkRunState::Leased
+                        | winwincode_domain::WorkRunState::Running
+                )
+            })
+        {
+            return Ok(());
+        }
+        let Some(item) = delivery
+            .snapshot()
+            .attention_items
+            .iter()
+            .find(|item| item.id == *attention_item_id)
+        else {
+            return Ok(());
+        };
+        if item.item_type != AttentionItemType::VerificationBlocked
+            || item.status != AttentionItemStatus::Resolved
+        {
+            return Ok(());
+        }
+        let context: serde_json::Value = serde_json::from_str(&item.context).map_err(|error| {
+            DeliveryApplicationError::TrustedFactsUnavailable(format!(
+                "resolved Attention context is not canonical JSON: {error}"
+            ))
+        })?;
+        let action = context.get("action").and_then(serde_json::Value::as_str);
+        if !matches!(action, Some("complete-verification" | "retry-verification")) {
+            return Ok(());
+        }
+        let expected_revision = Revision(i64::try_from(delivery.revision()).map_err(|_| {
+            DeliveryApplicationError::InvalidRequest(
+                "Delivery Controller revision exceeds the public range".to_owned(),
+            )
+        })?);
+        let request_id = delivery_controller_attention_request_id(attention_item_id);
+        self.workrun_start(&WorkRunStartCommand {
+            actor: command_actor.clone(),
+            command: WorkRunStartCommandCommand::WorkRunStart,
+            expected_revision,
+            payload: WorkRunStartPayload {
+                rework: None,
+                delivery_id: delivery_id.clone(),
+                dispatch_profile: "reviewer".to_owned(),
+            },
+            request_id,
+            schema_version: SchemaVersion::WinwincodeV1,
+            scope: scope.clone(),
+        })?;
+        Ok(())
     }
 
     /// Computes and commits a verdict only from the installed candidate,
@@ -1801,6 +1888,19 @@ fn delivery_controller_request_id(action: &str, job_id: &ExecutionJobId) -> Requ
         .chain_update(action.as_bytes())
         .chain_update([0])
         .chain_update(job_id.0.as_bytes())
+        .finalize();
+    let suffix = digest
+        .iter()
+        .take(26)
+        .map(|byte| char::from(CROCKFORD_BASE32[usize::from(byte & 31)]))
+        .collect::<String>();
+    RequestId(format!("req_{suffix}"))
+}
+
+fn delivery_controller_attention_request_id(attention_item_id: &AttentionItemId) -> RequestId {
+    let digest = Sha256::new()
+        .chain_update(b"winwincode.delivery-controller.attention-retry.v1\0")
+        .chain_update(attention_item_id.0.as_bytes())
         .finalize();
     let suffix = digest
         .iter()

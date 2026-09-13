@@ -9,7 +9,9 @@ use winwincode_domain::{AttentionItemId, WorkRunId};
 use crate::domain::{
     AttentionItem, AttentionItemStatus, AttentionItemType, Delivery, DeliverySnapshot,
     DeliveryStatus,
-    rework::{resolved_verdict_attention_action, safest_attention_transition},
+    rework::{
+        VerdictAttentionAction, resolved_verdict_attention_action, safest_attention_transition,
+    },
 };
 
 use super::{
@@ -278,7 +280,7 @@ fn apply_resolution(
     mut snapshot: DeliverySnapshot,
     input: ResolveAttentionInput,
     item_index: usize,
-    verdict_actions: Option<Vec<crate::domain::rework::VerdictAttentionAction>>,
+    verdict_actions: Option<Vec<VerdictAttentionAction>>,
     solution_review_settlement: Option<ValidatedSolutionReviewSettlement>,
 ) -> Result<Delivery, CoordinationError> {
     let item_type = snapshot.attention_items[item_index].item_type;
@@ -351,6 +353,17 @@ fn apply_resolution(
         if actions.is_empty() {
             next_delivery_status(item_type, review_decision)?
         } else {
+            // A computed-verdict Attention (CompleteVerification /
+            // RetryVerification) is resolved only to collect missing direct
+            // evidence.  The previous verdict cannot authorize a second
+            // computation, so invalidate the current verdict while the
+            // append-only journal retains the prior revision history.
+            if input.decision == AttentionDecision::Resolved
+                && item_type == AttentionItemType::VerificationBlocked
+                && actions.contains(&VerdictAttentionAction::RetryVerification)
+            {
+                snapshot.verdict = None;
+            }
             safest_attention_transition(&actions)
         }
     };

@@ -1394,7 +1394,7 @@ mod tests {
             .snapshot()
             .attention_items
             .iter()
-            .find(|item| item.item_type == crate::domain::AttentionItemType::DeliveryApproval)
+            .find(|item| item.item_type == AttentionItemType::DeliveryApproval)
             .expect("delivery approval");
         assert_eq!(approval.work_run_id.as_ref(), Some(&producer_id));
 
@@ -1490,7 +1490,7 @@ mod tests {
             .snapshot()
             .attention_items
             .iter()
-            .find(|item| item.item_type == crate::domain::AttentionItemType::DeliveryApproval)
+            .find(|item| item.item_type == AttentionItemType::DeliveryApproval)
             .expect("delivery approval");
 
         let completed = resolve_attention(
@@ -1655,8 +1655,8 @@ mod tests {
         );
     }
     use crate::domain::{
-        AttentionItemStatus, Delivery, DeliveryStatus, EvidenceRefType, FrozenDeliveryCandidate,
-        SessionBinding, SessionBindingId,
+        AttentionItemStatus, AttentionItemType, Delivery, DeliveryStatus, EvidenceRefType,
+        FrozenDeliveryCandidate, SessionBinding, SessionBindingId,
         candidate::test_support::frozen_candidate,
         evidence::{VerifiedEvidenceOutcome, test_support::resolved_role_evidence},
         test_fixture,
@@ -1848,6 +1848,55 @@ mod tests {
         assert_eq!(
             next.work_run_aggregate.items[0].state,
             winwincode_domain::WorkItemState::Failed
+        );
+    }
+
+    #[test]
+    fn resolving_complete_verification_attention_invalidates_the_current_verdict() {
+        let fixture = test_support::verdict_fixture(
+            &winwincode_domain::DeliveryId("dlv_01J00000000000000000000019".into()),
+            test_support::VerdictFixtureOutcome::Inconclusive,
+        );
+        let transition = compute_verdict_transition(
+            &fixture.delivery,
+            SubmitVerdictFacts {
+                expected_revision: fixture.delivery.revision(),
+                candidate: &fixture.candidate,
+                verification: &fixture.verification,
+                evidence: &fixture.evidence,
+                produced_at_millis: PRODUCED_AT_MILLIS,
+            },
+        )
+        .expect("computed inconclusive transition");
+        let with_attention = transition.delivery();
+        assert!(with_attention.snapshot().verdict.is_some());
+        assert_eq!(
+            with_attention.snapshot().verdict.as_ref().unwrap().status,
+            CriterionVerdict::Inconclusive
+        );
+        let attention = &with_attention.snapshot().attention_items[0];
+        assert_eq!(attention.item_type, AttentionItemType::VerificationBlocked);
+
+        let resolved = resolve_attention(
+            with_attention,
+            ResolveAttentionInput {
+                expected_revision: with_attention.revision(),
+                attention_item_id: attention.id.clone(),
+                work_run_id: attention.work_run_id.clone(),
+                expected_context: attention.context.clone(),
+                actor: "usr_reviewer".to_owned(),
+                decision: AttentionDecision::Resolved,
+                resolution: "Collect the missing direct verification evidence.".to_owned(),
+                now_millis: PRODUCED_AT_MILLIS + 1,
+            },
+        )
+        .expect("resolve complete-verification Attention");
+        let next = resolved.delivery().snapshot();
+        assert_eq!(next.verdict, None);
+        assert_eq!(next.status, DeliveryStatus::Ready);
+        assert_eq!(
+            next.attention_items[0].status,
+            AttentionItemStatus::Resolved
         );
     }
 }

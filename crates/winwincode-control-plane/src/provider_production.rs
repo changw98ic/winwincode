@@ -86,6 +86,9 @@ enum LoopbackResponseProfile {
         delivery_spec_revision: u64,
         candidate_ref: String,
         criterion_ids: Vec<String>,
+        /// Exact approved verification method from the `WorkContract` criteria.
+        /// Runtime command evidence must digest-match this string.
+        verification_command: String,
     },
 }
 
@@ -102,6 +105,7 @@ struct LoopbackWorkInput {
     delivery_spec_revision: u64,
     candidate_ref: Option<String>,
     criterion_ids: Vec<String>,
+    verification_command: String,
 }
 
 #[derive(Serialize)]
@@ -260,6 +264,7 @@ fn loopback_profile_from_request(request: &serde_json::Value) -> LoopbackRespons
             delivery_spec_revision: work_input.delivery_spec_revision,
             candidate_ref,
             criterion_ids: work_input.criterion_ids,
+            verification_command: work_input.verification_command,
         };
     }
 
@@ -378,26 +383,42 @@ fn work_input_from_request(request: &serde_json::Value) -> Option<LoopbackWorkIn
         .clone()
         .filter(|value| !value.trim().is_empty());
     let mut criterion_ids = Vec::with_capacity(work_input.work_item.criterion_ids.len());
+    let mut verification_commands = Vec::new();
     for criterion_id in &work_input.work_item.criterion_ids {
         let id = criterion_id.0.clone();
-        if !work_input
+        let criterion = work_input
             .work_contract
             .criteria
             .iter()
-            .any(|criterion| criterion.id.0 == id)
-        {
-            return None;
-        }
+            .find(|criterion| criterion.id.0 == id)?;
         if criterion_ids.contains(&id) {
             return None;
         }
         criterion_ids.push(id);
+        let method = criterion
+            .verification_method
+            .as_deref()
+            .map(str::trim)
+            .filter(|method| !method.is_empty())?;
+        if !verification_commands
+            .iter()
+            .any(|existing| existing == method)
+        {
+            verification_commands.push(method.to_owned());
+        }
+    }
+    if verification_commands.len() != 1 {
+        return None;
     }
     Some(LoopbackWorkInput {
         delivery_spec_id,
         delivery_spec_revision,
         candidate_ref,
         criterion_ids,
+        verification_command: verification_commands
+            .into_iter()
+            .next()
+            .expect("single verification command"),
     })
 }
 
@@ -521,17 +542,19 @@ fn loopback_response_for_profile(profile: &LoopbackResponseProfile) -> String {
 
 fn loopback_tool_call_for_profile(
     profile: &LoopbackResponseProfile,
-) -> Option<(&'static str, &'static str)> {
+) -> Option<(&'static str, String)> {
     match profile {
         LoopbackResponseProfile::Executor { completed: false } => Some((
             "loopback-executor-change",
-            "printf '%s\\n' 'deterministic StrongFlow candidate' > .winwincode-api-candidate; pwd; git status --porcelain=v1 --untracked-files=all",
+            "printf '%s\\n' 'deterministic StrongFlow candidate' > .winwincode-api-candidate; pwd; git status --porcelain=v1 --untracked-files=all".to_owned(),
         )),
         LoopbackResponseProfile::Verification {
-            completed: false, ..
+            completed: false,
+            verification_command,
+            ..
         } => Some((
             "loopback-verification-command",
-            "test -s .winwincode-api-candidate",
+            verification_command.clone(),
         )),
         _ => None,
     }
@@ -1597,6 +1620,14 @@ mod verification_tests {
             "git-candidate:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         );
         assert_eq!(criterion_ids, vec!["crt_01J00000000000000000000001"]);
+        let LoopbackResponseProfile::Verification {
+            verification_command,
+            ..
+        } = loopback_profile_from_request(&request_with_output(None))
+        else {
+            panic!("expected verification profile");
+        };
+        assert_eq!(verification_command, "Run the exact candidate check.");
     }
 
     #[test]
@@ -1621,6 +1652,7 @@ mod verification_tests {
             delivery_spec_revision: 1,
             candidate_ref: "git-candidate:sha256:test".to_owned(),
             criterion_ids: vec!["criterion-test".to_owned()],
+            verification_command: "Run the exact candidate check.".to_owned(),
         })
         .expect("verification response");
         let response: Value = serde_json::from_str(&response).expect("JSON response");

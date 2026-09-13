@@ -931,10 +931,14 @@ export function prepareControlledRepository({ fixtureDirectory, files = {} }) {
     `${JSON.stringify({
       name: 'winwincode-api-fixture',
       private: true,
-      scripts: { verify: "printf '%s\\n' 'fixture verified'" },
+      scripts: {
+        verify: "test -s .winwincode-api-candidate && printf '%s\\n' 'fixture verified'",
+      },
     }, null, 2)}\n`,
   )
-  writeFileSync(join(repository, 'pnpm-lock.yaml'), "lockfileVersion: '9.0'\n")
+  // Prefer npm over pnpm/corepack so the Worker sandbox can execute the
+  // scanned verification command without a package-manager bootstrap.
+  writeFileSync(join(repository, 'package-lock.json'), '{}\n')
   writeFileSync(
     join(repository, '.winwincode-api-candidate'),
     'deterministic StrongFlow candidate baseline\n',
@@ -1394,6 +1398,14 @@ function candidateArtifactSummary(candidate) {
 }
 
 function deliveryFailureSummary(detail, modelRoute = configuredModelRoute()) {
+  const criteria = Array.isArray(detail?.verdict?.criteria)
+    ? detail.verdict.criteria.map(criterion => ({
+      criterionId: criterion.criterionId ?? null,
+      verdict: criterion.verdict ?? null,
+      explanation: criterion.explanation ?? null,
+      unresolvedFindings: criterion.unresolvedFindings ?? null,
+    }))
+    : []
   return {
     deliveryRevision: detail?.deliveryRevision ?? null,
     status: detail?.status ?? null,
@@ -1408,6 +1420,10 @@ function deliveryFailureSummary(detail, modelRoute = configuredModelRoute()) {
         },
     candidateArtifact: candidateArtifactSummary(detail?.currentCandidate),
     verdictStatus: detail?.verdict?.status ?? null,
+    criteria,
+    unresolvedFindings: Array.isArray(detail?.verdict?.unresolvedFindings)
+      ? detail.verdict.unresolvedFindings
+      : detail?.unresolvedFindings ?? null,
     openAttentionIds: Array.isArray(detail?.attention)
       ? detail.attention
         .filter(item => item.status === 'open')
@@ -1462,6 +1478,8 @@ export async function driveDelivery(
   const deadline = now() + timeoutMillis
   let detail = null
   let terminalCommand = null
+  let idlePolls = 0
+  const stuckPollLimit = 80
   for (;;) {
     detail = (await client.query('delivery.get', { deliveryId: IDS.delivery })).result
     // Scheduling and completion use the current WorkRun aggregate.
@@ -1486,6 +1504,7 @@ export async function driveDelivery(
       fail(`StrongFlow did not reach done: ${JSON.stringify({
         observations: transitionTrace.observations,
         totalTransitionCount: transitionTrace.totalTransitionCount,
+        workRunStates: workRuns.map(run => ({ id: run.id, state: run.state })),
         failure: deliveryFailureSummary(detail, modelRoute),
         transientErrors: transientDeliveryErrorSummary(transientErrors),
       })}`)
@@ -1493,57 +1512,43 @@ export async function driveDelivery(
 
     let command = null
     let payload = null
-    if (
-      detail.currentCandidate !== null
-      && detail.verdict === null
-      && activeWorkRuns.length === 0
-    ) {
-      const verificationProfile = ['reviewer', 'verifier'][
-        actions.filter(action => action.command === 'workrun.start').length
-      ]
-      if (verificationProfile !== undefined) {
-        command = 'workrun.start'
-        payload = { deliveryId: IDS.delivery, dispatchProfile: verificationProfile }
-      } else {
-        command = 'delivery.submit_verdict'
-        const candidateRef = detail.currentCandidate.candidateRef
-        assert.match(
-          candidateRef ?? '',
-          /^git-candidate:sha256:[0-9a-f]{64}$/u,
-          'Delivered candidate must expose its canonical Git candidate reference',
-        )
-        payload = {
-          deliveryId: IDS.delivery,
-          // `candidateDigest` is the stale-check suffix of the immutable
-          // candidate reference.  `diffSha256` identifies the patch bytes and
-          // is deliberately a different value.
-          candidateDigest: candidateRef.slice('git-candidate:'.length),
-        }
-      }
-    } else if (activeWorkRuns.length > 0) {
-      // The Controller owns the active WorkRun; wait for accepted runtime facts.
-      // Do not resolve Attention or issue another dispatch while it runs.
+    if (activeWorkRuns.length > 0) {
+      // The Controller owns active WorkRuns (executor → reviewer → verifier →
+      // submit_verdict, and retry verification after a resolved Attention).
+      idlePolls = 0
       await new Promise(resolvePromise => setTimeout(resolvePromise, POLL_INTERVAL_MILLIS))
       continue
-    } else if (detail.solutionReview?.reviewStatus === 'pending') {
+    }
+    if (detail.solutionReview?.reviewStatus === 'pending') {
       fail('Delivery requires an external Solution Review decision')
-    } else {
-      const attention = detail.attention.find(item => item.status === 'open')
-      if (attention !== undefined) {
-        command = 'delivery.resolve_attention'
-        payload = {
-          deliveryId: IDS.delivery,
-          attentionItemId: attention.id,
-          decision: 'resolve',
-          resolution: 'Resolve the bounded API workflow attention item.',
-          remediation: null,
-        }
-      } else {
-        // A running WorkRun is polled above. A completed writer is followed
-        // only by the two independent verification WorkRuns above.
-        await new Promise(resolvePromise => setTimeout(resolvePromise, POLL_INTERVAL_MILLIS))
-        continue
+    }
+    const attention = detail.attention.find(item => item.status === 'open')
+    if (attention !== undefined) {
+      idlePolls = 0
+      command = 'delivery.resolve_attention'
+      payload = {
+        deliveryId: IDS.delivery,
+        attentionItemId: attention.id,
+        decision: 'resolve',
+        resolution: 'Resolve the bounded API workflow attention item.',
+        remediation: null,
       }
+    } else {
+      // No active WorkRun and no open Attention while the Delivery is not
+      // done: the Controller should already have dispatched the next step.
+      // A stuck projection is a product bug, not a slow poll.
+      idlePolls += 1
+      if (idlePolls >= stuckPollLimit) {
+        fail(`StrongFlow stalled without a dispatchable next action: ${JSON.stringify({
+          observations: transitionTrace.observations,
+          totalTransitionCount: transitionTrace.totalTransitionCount,
+          workRunStates: workRuns.map(run => ({ id: run.id, state: run.state })),
+          failure: deliveryFailureSummary(detail, modelRoute),
+          transientErrors: transientDeliveryErrorSummary(transientErrors),
+        })}`)
+      }
+      await new Promise(resolvePromise => setTimeout(resolvePromise, POLL_INTERVAL_MILLIS))
+      continue
     }
 
     const beforeRevision = detail.deliveryRevision
