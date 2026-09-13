@@ -8,7 +8,7 @@ use super::workrun_execution::{TerminalOutcomeStatus, VerifiedTerminalOutcome};
 use std::collections::HashSet;
 use winwincode_domain::is_canonical_prefixed_id;
 use winwincode_domain::{
-    Revision, SchemaVersion, WorkContract, WorkItem, WorkItemId, WorkItemState, WorkRun,
+    Revision, SchemaVersion, WorkContract, WorkItem, WorkItemId, WorkItemState, WorkRun, WorkRunId,
     WorkRunState,
 };
 
@@ -344,20 +344,19 @@ impl WorkRunAggregate {
         Ok(())
     }
 
-    /// Applies the Controller completion gate to the one current candidate.
-    pub(crate) fn complete_current_candidate(&mut self) -> Result<(), WorkRunSchedulingError> {
+    /// Applies the Controller completion gate to one explicitly approved candidate.
+    pub(crate) fn complete_candidate(
+        &mut self,
+        work_run_id: &WorkRunId,
+    ) -> Result<(), WorkRunSchedulingError> {
         self.validate()?;
-        let mut candidates = self
+        let run_index = self
             .runs
             .iter()
             .enumerate()
-            .filter(|(_, run)| run.state == WorkRunState::CandidateReady);
-        let (run_index, _) = candidates
-            .next()
+            .find(|(_, run)| run.id == *work_run_id && run.state == WorkRunState::CandidateReady)
+            .map(|(index, _)| index)
             .ok_or(WorkRunSchedulingError::StaleWorkItem)?;
-        if candidates.next().is_some() {
-            return Err(WorkRunSchedulingError::StaleWorkItem);
-        }
         let run = &self.runs[run_index];
         let item_id = run.work_item_id.clone();
         if !self.items.iter().any(|item| {

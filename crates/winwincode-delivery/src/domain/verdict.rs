@@ -753,6 +753,23 @@ fn evaluate_settled_role(
             source_evidence_ids(&resolved_sources),
         );
     }
+    let method = criterion
+        .verification_method
+        .as_deref()
+        .expect("criterion method checked before role evaluation");
+    let direct = direct
+        .into_iter()
+        .filter(|resolved| resolved.matches_verification_method(method))
+        .collect::<Vec<_>>();
+    if direct.is_empty() {
+        return role_evidence_mismatch(
+            role,
+            &criterion.id,
+            finding.finding_ref(),
+            "direct Evidence does not match the approved verification method",
+            source_evidence_ids(&resolved_sources),
+        );
+    }
     let claimed = match finding.conclusion() {
         VerificationFindingConclusion::Pass => ProductOutcome::Pass,
         VerificationFindingConclusion::Fail => ProductOutcome::Fail,
@@ -869,11 +886,7 @@ fn role_evidence_mismatch(
 const fn direct_evidence_type(evidence_type: EvidenceRefType) -> bool {
     matches!(
         evidence_type,
-        EvidenceRefType::Test
-            | EvidenceRefType::Command
-            | EvidenceRefType::Diff
-            | EvidenceRefType::File
-            | EvidenceRefType::Commit
+        EvidenceRefType::Test | EvidenceRefType::Command
     )
 }
 
@@ -1087,7 +1100,10 @@ mod tests {
     use crate::domain::candidate::test_support::frozen_candidate;
     use crate::domain::evidence::{
         EvidenceRefType, VerifiedEvidenceOutcome,
-        test_support::{resolved_role_evidence, resolved_role_evidence_at_sequence},
+        test_support::{
+            resolved_role_evidence, resolved_role_evidence_at_sequence,
+            resolved_role_evidence_for_method,
+        },
     };
     use crate::domain::verification::{
         VerificationFacts, VerificationPermissionProfile, VerificationRole,
@@ -1547,6 +1563,62 @@ mod tests {
                     .all(|finding| finding.starts_with("evidence-mismatch:"))
             );
         }
+    }
+
+    #[test]
+    fn unrelated_successful_command_cannot_satisfy_verification_method() {
+        let mut snapshot = verdict_delivery().into_snapshot();
+        snapshot.spec.acceptance_criteria[0].verification_method =
+            Some("npm run verify".to_owned());
+        let delivery = Delivery::try_from_snapshot(snapshot).expect("exact verification method");
+        let candidate = candidate(&delivery);
+        let verification = independent_verification(
+            &delivery,
+            &candidate,
+            VerificationFixtureState::SettledPass,
+            VerificationFixtureState::SettledPass,
+        );
+        let evidence = [VerificationRole::Reviewer, VerificationRole::Verifier]
+            .into_iter()
+            .map(|role| {
+                resolved_role_evidence_for_method(
+                    &delivery,
+                    &candidate,
+                    match role {
+                        VerificationRole::Reviewer => "reviewer",
+                        VerificationRole::Verifier => "verifier",
+                        VerificationRole::AdversarialVerifier => unreachable!(),
+                    },
+                    EvidenceRefType::Command,
+                    VerifiedEvidenceOutcome::Succeeded,
+                    fixture_evidence_id(role, &delivery.snapshot().spec.acceptance_criteria[0].id),
+                    "git status",
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let computed = compute_delivery_verdict(
+            &delivery,
+            &candidate,
+            &verification,
+            &evidence,
+            PRODUCED_AT_MILLIS,
+        )
+        .expect("unrelated command is classified");
+
+        assert_eq!(computed.verdict().status, CriterionVerdict::Inconclusive);
+        assert!(
+            computed
+                .verdict()
+                .unresolved_findings
+                .iter()
+                .all(|finding| finding.starts_with("evidence-mismatch:"))
+        );
+        assert!(computed.verdict().criteria.iter().all(|criterion| {
+            criterion
+                .explanation
+                .contains("approved verification method")
+        }));
     }
 
     #[test]

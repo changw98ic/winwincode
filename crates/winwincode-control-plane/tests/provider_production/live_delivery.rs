@@ -2,6 +2,9 @@
 
 use super::*;
 use std::process::Command;
+#[path = "../../../../tests/support/git_candidate.rs"]
+mod git_candidate;
+use git_candidate::candidate_bundle;
 use winwincode_api::generated::{
     AcceptanceCriterionInput, DeliveryCreateCommand, DeliveryCreateCommandCommand,
     DeliveryCreatePayload, DeliveryResolveAttentionCommand, DeliveryResolveAttentionCommandCommand,
@@ -36,8 +39,8 @@ use winwincode_execution_port::generated::{
     SessionBindingMessage, SessionBindingMessageKind,
 };
 use winwincode_storage::{
-    CandidateSourceManifest, ExecutionLeaseTerminalOutcome, ExecutionLeaseTerminalRequest,
-    ExecutionReservationSettlement, WorkerSlotCloseRequest, WorkerSlotState,
+    ExecutionLeaseTerminalOutcome, ExecutionLeaseTerminalRequest, ExecutionReservationSettlement,
+    GitCandidateArtifactManifest, WorkerSlotCloseRequest, WorkerSlotState,
 };
 
 const LIVE_GATE: &str = "WINWINCODE_MIMO_LIVE_DELIVERY_GATE";
@@ -207,6 +210,7 @@ impl LiveDeliveryRuntime {
             &mut self.delivery_cp,
             &self.scope,
             executor,
+            &self.repository,
             &candidate_commit,
             210,
         );
@@ -259,6 +263,7 @@ impl LiveDeliveryRuntime {
             &mut self.delivery_cp,
             &self.scope,
             &stage,
+            &self.repository,
             candidate_commit,
             artifact_seed,
         );
@@ -1208,13 +1213,28 @@ fn upload_candidate(
     control_plane: &mut ControlPlane,
     scope: &RepositoryScope,
     stage: &StageAuthority,
+    repository: &Path,
     commit: &str,
     seed: u64,
 ) -> ArtifactReference {
-    let bytes = CandidateSourceManifest::new(commit.to_owned())
-        .expect("candidate manifest")
-        .encode()
-        .expect("candidate bytes");
+    let parent_revision = Command::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(["rev-parse", &format!("{commit}^")])
+        .output()
+        .expect("candidate parent lookup");
+    assert!(parent_revision.status.success(), "candidate parent lookup");
+    let base_commit = String::from_utf8(parent_revision.stdout)
+        .expect("candidate parent UTF-8")
+        .trim()
+        .to_owned();
+    let bytes = GitCandidateArtifactManifest::new(
+        commit.to_owned(),
+        candidate_bundle(repository, &base_commit, commit),
+    )
+    .expect("candidate manifest")
+    .encode()
+    .expect("candidate bytes");
     let digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(&bytes)));
     let artifact_id = ArtifactId(id("art", seed));
     let open = ArtifactOpenMessage {
@@ -1522,7 +1542,16 @@ fn accept_verification_events(
             } else {
                 ExecutionEventCategory::Test
             },
-            serde_json::json!({"status": "completed", "exit_code": 0}),
+            serde_json::json!({
+                "status": "completed",
+                "exit_code": 0,
+                "command_digest": winwincode_domain::verification_method_digest(
+                    criterion
+                        .verification_method
+                        .as_deref()
+                        .expect("live verification method")
+                ).expect("live verification method"),
+            }),
         ),
         (
             ExecutionEventCategory::Activity,

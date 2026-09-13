@@ -12830,7 +12830,10 @@ dependencies = [
 name = "winwincode-domain"
 version = "0.1.0-alpha.2"
 dependencies = [
+ "base64 0.22.1",
  "serde",
+ "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]

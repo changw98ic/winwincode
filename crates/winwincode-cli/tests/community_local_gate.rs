@@ -6,6 +6,10 @@ use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[path = "../../../tests/support/git_candidate.rs"]
+mod git_candidate;
+use git_candidate::candidate_bundle;
+
 use sha2::{Digest, Sha256};
 use winwincode_cli::{
     AttachRequest, Attachment, BaselineChoice, CommunityGateFailureCategory,
@@ -50,7 +54,7 @@ use winwincode_repository_context::{
 };
 use winwincode_storage::{
     ArtifactAccess, ArtifactChunk, ArtifactMeteringAttribution, ArtifactOpen, ArtifactProvenance,
-    ArtifactRetention, ArtifactStore, CandidateSourceManifest, FakeArtifactObjectStore,
+    ArtifactRetention, ArtifactStore, FakeArtifactObjectStore, GitCandidateArtifactManifest,
     LocalGitSourceResolver, ReceiptScopeKey,
 };
 use winwincode_test_assets::manifest::{
@@ -613,10 +617,14 @@ fn freeze_local_candidate(
     codex_thread_id: Option<CodexThreadId>,
 ) -> (FrozenDeliveryCandidate, PathBuf) {
     let artifact_id = ArtifactId("art_00000000000000000000000906".into());
-    let manifest = CandidateSourceManifest::new(candidate_commit.to_owned())
-        .expect("candidate manifest")
-        .encode()
-        .expect("manifest encoding");
+    let repository = repositories.join(&delivery.snapshot().spec.repository.locator);
+    let manifest = GitCandidateArtifactManifest::new(
+        candidate_commit.to_owned(),
+        candidate_bundle(&repository, base_commit, candidate_commit),
+    )
+    .expect("candidate manifest")
+    .encode()
+    .expect("manifest encoding");
     let manifest_digest = Sha256Digest(format!("sha256:{}", digest(&manifest)));
     let scope = ReceiptScopeKey::from_encoded(b"repository:project-one".to_vec()).expect("scope");
     let provenance = ArtifactProvenance::execution_job(

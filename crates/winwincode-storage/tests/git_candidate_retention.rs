@@ -3,6 +3,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[path = "../../../tests/support/git_candidate.rs"]
+mod git_candidate;
+use git_candidate::candidate_bundle;
+
 use sha2::{Digest, Sha256};
 use winwincode_domain::{
     ArtifactId, DeliveryId, ExecutionJobId, ExecutionMessageId, FencingToken, LeaseId,
@@ -12,8 +16,8 @@ use winwincode_domain::{
 use winwincode_storage::{
     ArtifactChunk, ArtifactMeteringAttribution, ArtifactOpen, ArtifactProvenance,
     ArtifactRetention, ArtifactStore, CandidateGitPinReceipt, CandidateGitReleaseAuthority,
-    CandidateGitRetentionState, CandidateGitTerminalOutcome, CandidateSourceManifest,
-    FakeArtifactObjectStore, LocalGitSourceResolver, ProductStateStorage, SqliteStorage,
+    CandidateGitRetentionState, CandidateGitTerminalOutcome, FakeArtifactObjectStore,
+    GitCandidateArtifactManifest, LocalGitSourceResolver, ProductStateStorage, SqliteStorage,
 };
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -129,10 +133,13 @@ fn pin_fixture() -> (
     let repositories = root.join("repositories");
     let repository = repositories.join("project-one");
     let (base, candidate) = repository_fixture(&repository);
-    let bytes = CandidateSourceManifest::new(candidate.clone())
-        .expect("candidate manifest")
-        .encode()
-        .expect("candidate manifest bytes");
+    let bytes = GitCandidateArtifactManifest::new(
+        candidate.clone(),
+        candidate_bundle(&repository, &base, &candidate),
+    )
+    .expect("candidate manifest")
+    .encode()
+    .expect("candidate manifest bytes");
     let digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(&bytes)));
     let scope = winwincode_storage::ReceiptScopeKey::from_encoded(b"repository:one".to_vec())
         .expect("scope");

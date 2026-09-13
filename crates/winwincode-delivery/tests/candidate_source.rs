@@ -3,6 +3,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[path = "../../../tests/support/git_candidate.rs"]
+mod git_candidate;
+use git_candidate::candidate_bundle;
+
 use sha2::{Digest, Sha256};
 use winwincode_delivery::{
     application::{
@@ -28,7 +32,7 @@ use winwincode_domain::{
 };
 use winwincode_storage::{
     ArtifactAccess, ArtifactChunk, ArtifactMeteringAttribution, ArtifactOpen, ArtifactProvenance,
-    ArtifactRetention, ArtifactStore, CandidateSourceManifest, FakeArtifactObjectStore,
+    ArtifactRetention, ArtifactStore, FakeArtifactObjectStore, GitCandidateArtifactManifest,
     LocalGitSourceResolver, ReceiptScopeKey,
 };
 
@@ -174,10 +178,13 @@ fn delivery_freezes_only_the_rebuilt_source_named_by_the_successful_worker_outco
     let delivery = Delivery::try_from_snapshot(snapshot).expect("settled executor Delivery");
 
     let artifact_id = ArtifactId("art_00000000000000000000000301".into());
-    let manifest = CandidateSourceManifest::new(candidate_commit.clone())
-        .expect("candidate manifest")
-        .encode()
-        .expect("manifest encoding");
+    let manifest = GitCandidateArtifactManifest::new(
+        candidate_commit.clone(),
+        candidate_bundle(&repository, &base_commit, &candidate_commit),
+    )
+    .expect("candidate manifest")
+    .encode()
+    .expect("manifest encoding");
     let digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(&manifest)));
     let scope = ReceiptScopeKey::from_encoded(b"repository:project-one".to_vec()).expect("scope");
     let provenance = ArtifactProvenance::execution_job(

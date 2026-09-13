@@ -9,15 +9,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 
+#[path = "../../../tests/support/git_candidate.rs"]
+mod git_candidate;
+use git_candidate::candidate_bundle;
+
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use winwincode_api::generated::{
     Actor, CommandEnvelope, CommandName, DeliveryResolveAttentionCommand,
-    DeliveryResolveAttentionCommandCommand, DeliveryResolveAttentionPayload,
-    DeliverySubmitVerdictCommand, DeliverySubmitVerdictCommandCommand,
-    DeliverySubmitVerdictPayload, Scope,
+    DeliveryResolveAttentionCommandCommand, DeliveryResolveAttentionPayload, Scope,
 };
 use winwincode_audit::{AuditEvent, AuditExecutionSubjectKind, AuditScope};
 use winwincode_control_plane::{
@@ -61,7 +63,7 @@ use winwincode_execution_port::generated::{
 use winwincode_storage::{
     AggregateJournalKey, AggregateJournalPublication, AggregateJournalRecord, ArtifactErrorKind,
     CandidateGitPinReceipt, CandidateGitReleaseAuthority, CandidateGitTerminalOutcome,
-    CandidateSourceManifest, ExecutionQueueScope, NewOutboxEvent, ProductStateStorage,
+    ExecutionQueueScope, GitCandidateArtifactManifest, NewOutboxEvent, ProductStateStorage,
     ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, RepositorySchedulerClaimRequest,
     RepositorySchedulerScope, SqliteStorage, StateCommit, WorkerSlotAuthority,
     WorkerSlotOpenRequest, WorkerSlotResourceLimits, WorkerSlotResources,
@@ -121,6 +123,15 @@ fn latest_queued_delivery_job(root: &Path) -> ExecutionJob {
         .expect("read queued Delivery job");
     connection.close().expect("Delivery queue inspection close");
     serde_json::from_slice(&payload).expect("decode queued Delivery job")
+}
+
+fn queued_delivery_job_count(root: &Path) -> i64 {
+    rusqlite::Connection::open(root.join("control-plane.sqlite3"))
+        .expect("Delivery queue count")
+        .query_row("SELECT COUNT(*) FROM scheduler_execution_jobs", [], |row| {
+            row.get(0)
+        })
+        .expect("read Delivery queue count")
 }
 
 fn load_candidate_pin(
@@ -239,6 +250,37 @@ fn accept_terminal_message(
     scope: &RepositoryScope,
     message: &JobOutcomeMessage,
 ) {
+    accept_terminal_message_with_status(
+        control_plane,
+        root,
+        scope,
+        message,
+        JobOutcomeAckMessageStatus::Accepted,
+    );
+}
+
+fn replay_terminal_message(
+    control_plane: &mut ControlPlane,
+    root: &Path,
+    scope: &RepositoryScope,
+    message: &JobOutcomeMessage,
+) {
+    accept_terminal_message_with_status(
+        control_plane,
+        root,
+        scope,
+        message,
+        JobOutcomeAckMessageStatus::Duplicate,
+    );
+}
+
+fn accept_terminal_message_with_status(
+    control_plane: &mut ControlPlane,
+    root: &Path,
+    scope: &RepositoryScope,
+    message: &JobOutcomeMessage,
+    expected_status: JobOutcomeAckMessageStatus,
+) {
     let mut storage = SqliteStorage::open(root).expect("terminal ingress storage");
     let output = DurableExecutionPortIngress::new(
         control_plane,
@@ -252,7 +294,7 @@ fn accept_terminal_message(
     let [ExecutionPortMessage::JobOutcomeAckMessage(ack)] = output.as_slice() else {
         panic!("terminal ingress must return one acknowledgement");
     };
-    assert_eq!(ack.status, JobOutcomeAckMessageStatus::Accepted);
+    assert_eq!(ack.status, expected_status);
     Box::new(storage)
         .close()
         .expect("terminal ingress storage close");
@@ -380,6 +422,9 @@ fn accept_runtime_events(batch: RuntimeEventBatch<'_>) {
                 Some(encoded_json(&serde_json::json!({
                     "status": "succeeded",
                     "exit_code": 0,
+                    "command_digest": winwincode_domain::verification_method_digest(
+                        "Run the invitation integration test."
+                    ).expect("fixture verification method"),
                 }))),
             ),
             3 => (
@@ -2485,10 +2530,13 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
         .expect("complete SessionBinding");
 
     let artifact_id = ArtifactId(canonical_id("art", seed));
-    let manifest = CandidateSourceManifest::new(candidate_commit.clone())
-        .expect("candidate manifest")
-        .encode()
-        .expect("manifest encoding");
+    let manifest = GitCandidateArtifactManifest::new(
+        candidate_commit.clone(),
+        candidate_bundle(&repository, &base_commit, &candidate_commit),
+    )
+    .expect("candidate manifest")
+    .encode()
+    .expect("manifest encoding");
     let digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(&manifest)));
     let open = ArtifactOpenMessage {
         artifact: ArtifactDescriptor {
@@ -2729,6 +2777,12 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
         worker_session_id: binding_message.worker_session_id.clone(),
     };
     accept_terminal_message(&mut control_plane, &root, &scope, &outcome_message);
+    let jobs_after_reviewer_dispatch = queued_delivery_job_count(&root);
+    replay_terminal_message(&mut control_plane, &root, &scope, &outcome_message);
+    assert_eq!(
+        queued_delivery_job_count(&root),
+        jobs_after_reviewer_dispatch
+    );
     let reported_state = control_plane
         .load_state(&format!("delivery:{}", initial.id().0))
         .expect("Delivery after Worker terminal report")
@@ -2742,27 +2796,7 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
         &reported.snapshot().work_run_aggregate.items[1..],
         &active.snapshot().work_run_aggregate.items[1..]
     );
-    assert_eq!(reported.revision(), active.revision() + 1);
-    let next_request_id = RequestId(canonical_id("req", seed + 3));
-    let next_command = winwincode_api::generated::WorkRunStartCommand {
-        actor: Actor::UserActor(UserActor {
-            id: UserId(canonical_id("usr", seed)),
-            kind: winwincode_domain::UserActorKind::User,
-        }),
-        command: winwincode_api::generated::WorkRunStartCommandCommand::WorkRunStart,
-        expected_revision: Revision(i64::try_from(reported.revision()).expect("revision")),
-        payload: winwincode_api::generated::WorkRunStartPayload {
-            rework: None,
-            delivery_id: initial.id().clone(),
-            dispatch_profile: "reviewer".into(),
-        },
-        request_id: next_request_id,
-        schema_version: SchemaVersion::WinwincodeV1,
-        scope: scope.clone(),
-    };
-    control_plane
-        .workrun_start(&next_command)
-        .expect("production authority must resolve the exact frozen candidate");
+    assert_eq!(reported.revision(), active.revision() + 2);
     let pending_query = serde_json::from_value(serde_json::json!({
         "schemaVersion":"winwincode/v1", "requestId":canonical_id("req", seed + 9000),
         "actor":{"kind":"user","id":canonical_id("usr",seed)}, "scope":scope,
@@ -2782,6 +2816,7 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
     let verifying = Delivery::decode_json(&verifying_state.payload).expect("Verifying Delivery");
     assert_eq!(verifying.snapshot().work_run_aggregate.items.len(), 1);
     let verification_job = latest_queued_delivery_job(&root);
+    assert_eq!(verification_job.execution_profile, "reviewer");
     let verification_execution = RecordedExecution {
         delivery: verifying.clone(),
         job: verification_job.clone(),
@@ -2909,25 +2944,12 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
         worker_session_id: verification_binding.worker_session_id.clone(),
     };
     accept_terminal_message(&mut control_plane, &root, &scope, &verification_outcome);
-    let review_advance = winwincode_api::generated::WorkRunStartCommand {
-        actor: Actor::UserActor(UserActor {
-            id: UserId(canonical_id("usr", seed)),
-            kind: winwincode_domain::UserActorKind::User,
-        }),
-        command: winwincode_api::generated::WorkRunStartCommandCommand::WorkRunStart,
-        expected_revision: Revision(i64::try_from(verifying.revision() + 1).expect("revision")),
-        payload: winwincode_api::generated::WorkRunStartPayload {
-            rework: None,
-            delivery_id: initial.id().clone(),
-            dispatch_profile: "verifier".into(),
-        },
-        request_id: RequestId(canonical_id("req", seed + 6)),
-        schema_version: SchemaVersion::WinwincodeV1,
-        scope: scope.clone(),
-    };
-    control_plane
-        .workrun_start(&review_advance)
-        .expect("advance successful verification into Delivery review");
+    let jobs_after_verifier_dispatch = queued_delivery_job_count(&root);
+    replay_terminal_message(&mut control_plane, &root, &scope, &verification_outcome);
+    assert_eq!(
+        queued_delivery_job_count(&root),
+        jobs_after_verifier_dispatch
+    );
     let second_verifying_state = control_plane
         .load_state(&format!("delivery:{}", initial.id().0))
         .expect("second Verifying state")
@@ -2939,6 +2961,7 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
         1
     );
     let second_verification_job = latest_queued_delivery_job(&root);
+    assert_eq!(second_verification_job.execution_profile, "verifier");
     let second_verification_execution = RecordedExecution {
         delivery: second_verifying.clone(),
         job: second_verification_job.clone(),
@@ -3056,35 +3079,14 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
         &scope,
         &second_verification_outcome,
     );
-    let current_verdict_state = control_plane
-        .load_state(&format!("delivery:{}", initial.id().0))
-        .expect("current Delivery state")
-        .expect("current Delivery state exists");
-    let submit_verdict = DeliverySubmitVerdictCommand {
-        actor: Actor::UserActor(UserActor {
-            id: UserId(canonical_id("usr", seed)),
-            kind: winwincode_domain::UserActorKind::User,
-        }),
-        command: DeliverySubmitVerdictCommandCommand::DeliverySubmitVerdict,
-        expected_revision: Revision(
-            i64::try_from(current_verdict_state.revision).expect("verdict revision"),
-        ),
-        payload: DeliverySubmitVerdictPayload {
-            candidate_digest: Sha256Digest(
-                candidate_ref
-                    .strip_prefix("git-candidate:")
-                    .expect("candidate ref prefix")
-                    .to_owned(),
-            ),
-            delivery_id: initial.id().clone(),
-        },
-        request_id: RequestId(canonical_id("req", seed + 9)),
-        schema_version: SchemaVersion::WinwincodeV1,
-        scope: scope.clone(),
-    };
-    control_plane
-        .delivery_submit_verdict(&submit_verdict)
-        .expect("compute and persist the production Delivery verdict");
+    let jobs_after_verdict = queued_delivery_job_count(&root);
+    replay_terminal_message(
+        &mut control_plane,
+        &root,
+        &scope,
+        &second_verification_outcome,
+    );
+    assert_eq!(queued_delivery_job_count(&root), jobs_after_verdict);
     let candidate = control_plane
         .resolve_delivery_candidate(&scope, initial.id(), &artifact_id, &digest, &terminal_facts)
         .expect("candidate resolution from the pinned Artifact and canonical Git root");
@@ -3208,8 +3210,9 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
             .args(["rev-parse", "--verify", pin.reference_name()])
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .status()
+            .output()
             .expect("released reference lookup")
+            .status
             .success()
     );
     for verification_artifact_id in [&verification_artifact_id, &second_verification_artifact_id] {
@@ -3228,8 +3231,9 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
                 .args(["rev-parse", "--verify", verification_pin.reference_name()])
                 .env("GIT_CONFIG_NOSYSTEM", "1")
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .status()
+                .output()
                 .expect("released verification reference lookup")
+                .status
                 .success()
         );
         let replay = control_plane

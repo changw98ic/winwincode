@@ -15,16 +15,19 @@ use winwincode_api::generated::{
     DeliveryResolveAttentionCommand, DeliveryResolveAttentionCompletedResponse,
     DeliveryResolveAttentionCompletedResponseCommand,
     DeliveryResolveAttentionCompletedResponseOutcome, DeliverySpecInput,
-    DeliverySubmitVerdictCommand, DeliverySubmitVerdictCompletedResponse,
-    DeliverySubmitVerdictCompletedResponseCommand, DeliverySubmitVerdictCompletedResponseOutcome,
+    DeliverySubmitVerdictCommand, DeliverySubmitVerdictCommandCommand,
+    DeliverySubmitVerdictCompletedResponse, DeliverySubmitVerdictCompletedResponseCommand,
+    DeliverySubmitVerdictCompletedResponseOutcome, DeliverySubmitVerdictPayload,
     DeliveryUpdateSpecCommand, DeliveryUpdateSpecCompletedResponse,
     DeliveryUpdateSpecCompletedResponseCommand, DeliveryUpdateSpecCompletedResponseOutcome,
-    ErrorCode, PageInfo, Scope, WorkItemCountsProjection, WorkItemsCreateCommand,
+    ErrorCode, PageInfo, Scope, ServiceAccountActor, ServiceAccountActorKind, SystemActor,
+    SystemActorKind, WorkItemCountsProjection, WorkItemsCreateCommand,
     WorkItemsCreateCompletedResponse, WorkItemsCreateCompletedResponseCommand,
     WorkItemsCreateCompletedResponseOutcome, WorkItemsCreateResult, WorkRunCancelCommand,
     WorkRunCancelCompletedResponse, WorkRunCancelCompletedResponseCommand,
-    WorkRunCancelCompletedResponseOutcome, WorkRunStartCommand, WorkRunStartCompletedResponse,
-    WorkRunStartCompletedResponseCommand, WorkRunStartCompletedResponseOutcome,
+    WorkRunCancelCompletedResponseOutcome, WorkRunStartCommand, WorkRunStartCommandCommand,
+    WorkRunStartCompletedResponse, WorkRunStartCompletedResponseCommand,
+    WorkRunStartCompletedResponseOutcome, WorkRunStartPayload,
 };
 use winwincode_delivery::{
     application::{
@@ -40,12 +43,13 @@ use winwincode_delivery::{
 };
 use winwincode_domain::RepositoryScope;
 use winwincode_domain::{
-    Count, DeliveryId, OpaqueCursor, ProductSessionId, RequestId, Revision, SchemaVersion,
-    Sha256Digest, WorkItemState,
+    Count, DeliveryId, ExecutionJobId, OpaqueCursor, ProductSessionId, RequestId, Revision,
+    SchemaVersion, Sha256Digest, WorkItemState,
 };
 use winwincode_storage::{
     CandidateGitTerminalOutcome, CommitReceipt, ProductStateStorage, ProjectionEventStream,
-    ProjectionEventStreamKey, StateMutation, StateRevisionGuard, StorageError, StoredState,
+    ProjectionEventStreamKey, PublicEventActor, StateMutation, StateRevisionGuard, StorageError,
+    StoredState,
 };
 
 use crate::{
@@ -68,6 +72,12 @@ const MAX_CURSOR_BYTES: usize = 4_096;
 const MAX_PAGE_SIZE: usize = 200;
 const SCAN_PAGE_SIZE: usize = 256;
 const MAX_SNAPSHOT_ROWS: usize = 100_000;
+const CROCKFORD_BASE32: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+enum DeliveryControllerAction {
+    Start(&'static str),
+    SubmitVerdict,
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -383,6 +393,95 @@ impl ControlPlane {
             ));
         }
         self.delivery_dispatcher = Some(dispatcher);
+        Ok(())
+    }
+
+    /// Continues one successful production `WorkRun` through the existing
+    /// generated command paths after its terminal state and execution resources
+    /// are durable. The terminal revision fences late replays, while the stable
+    /// Controller receipt makes a crash after dispatch or verdict commit a no-op.
+    pub(crate) fn continue_delivery_after_terminal(
+        &mut self,
+        scope: &RepositoryScope,
+        delivery_id: &DeliveryId,
+        completed_profile: &str,
+        completed_job_id: &ExecutionJobId,
+        terminal_revision: u64,
+        initiating_actor: &PublicEventActor,
+    ) -> Result<(), DeliveryApplicationError> {
+        if self.delivery_authority.is_none() || self.delivery_dispatcher.is_none() {
+            return Ok(());
+        }
+        let action = match completed_profile {
+            "executor" | "remediator" => DeliveryControllerAction::Start("reviewer"),
+            "reviewer" => DeliveryControllerAction::Start("verifier"),
+            "verifier" => DeliveryControllerAction::SubmitVerdict,
+            _ => return Ok(()),
+        };
+        let action_name = match action {
+            DeliveryControllerAction::Start(profile) => profile,
+            DeliveryControllerAction::SubmitVerdict => "verdict",
+        };
+        let actor = delivery_controller_actor(initiating_actor);
+        let request_id = delivery_controller_request_id(action_name, completed_job_id);
+        let receipt_identity = crate::command_receipt_identity(
+            &actor,
+            &Scope::RepositoryScope(scope.clone()),
+            request_id.clone(),
+        )?;
+        if let Some(receipt) = self
+            .storage_ref()?
+            .load_receipt_for_identity(&receipt_identity)?
+        {
+            if receipt.stream_id != delivery_stream_id(delivery_id) {
+                return Err(DeliveryApplicationError::Storage(StorageError::adapter(
+                    "Delivery Controller receipt belongs to another stream",
+                )));
+            }
+            return Ok(());
+        }
+        let delivery = load_current_delivery(self.storage_ref()?, delivery_id)?;
+        if delivery.revision() != terminal_revision {
+            return Ok(());
+        }
+        let expected_revision = Revision(i64::try_from(delivery.revision()).map_err(|_| {
+            DeliveryApplicationError::InvalidRequest(
+                "Delivery Controller revision exceeds the public range".to_owned(),
+            )
+        })?);
+        match action {
+            DeliveryControllerAction::Start(dispatch_profile) => {
+                self.workrun_start(&WorkRunStartCommand {
+                    actor,
+                    command: WorkRunStartCommandCommand::WorkRunStart,
+                    expected_revision,
+                    payload: WorkRunStartPayload {
+                        rework: None,
+                        delivery_id: delivery_id.clone(),
+                        dispatch_profile: dispatch_profile.to_owned(),
+                    },
+                    request_id,
+                    schema_version: SchemaVersion::WinwincodeV1,
+                    scope: scope.clone(),
+                })?;
+            }
+            DeliveryControllerAction::SubmitVerdict => {
+                let candidate_digest =
+                    delivery_controller_candidate_digest(self, scope, &delivery)?;
+                self.delivery_submit_verdict(&DeliverySubmitVerdictCommand {
+                    actor,
+                    command: DeliverySubmitVerdictCommandCommand::DeliverySubmitVerdict,
+                    expected_revision,
+                    payload: DeliverySubmitVerdictPayload {
+                        candidate_digest,
+                        delivery_id: delivery_id.clone(),
+                    },
+                    request_id,
+                    schema_version: SchemaVersion::WinwincodeV1,
+                    scope: scope.clone(),
+                })?;
+            }
+        }
         Ok(())
     }
 
@@ -1633,6 +1732,82 @@ fn digest_json<T: Serialize + ?Sized>(value: &T) -> Result<String, DeliveryAppli
 
 fn digest_bytes(bytes: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
+}
+
+fn delivery_controller_actor(actor: &PublicEventActor) -> Actor {
+    match actor {
+        PublicEventActor::User { id } => Actor::UserActor(winwincode_domain::UserActor {
+            id: id.clone(),
+            kind: winwincode_domain::UserActorKind::User,
+        }),
+        PublicEventActor::ServiceAccount { id } => {
+            Actor::ServiceAccountActor(ServiceAccountActor {
+                id: id.clone(),
+                kind: ServiceAccountActorKind::ServiceAccount,
+            })
+        }
+        PublicEventActor::System { id } => Actor::SystemActor(SystemActor {
+            id: id.clone(),
+            kind: SystemActorKind::System,
+        }),
+    }
+}
+
+fn delivery_controller_candidate_digest(
+    control_plane: &ControlPlane,
+    scope: &RepositoryScope,
+    delivery: &Delivery,
+) -> Result<Sha256Digest, DeliveryApplicationError> {
+    let artifacts = control_plane.artifact_store.as_ref().ok_or_else(|| {
+        DeliveryApplicationError::TrustedFactsUnavailable(
+            "Delivery Controller has no Artifact store".to_owned(),
+        )
+    })?;
+    let resolver = control_plane
+        .git_source_resolver
+        .as_deref()
+        .ok_or_else(|| {
+            DeliveryApplicationError::TrustedFactsUnavailable(
+                "Delivery Controller has no Git source resolver".to_owned(),
+            )
+        })?;
+    let candidate = crate::delivery_verdict_authority::resolve_current_candidate(
+        control_plane.storage_ref()?,
+        artifacts,
+        resolver,
+        scope,
+        delivery,
+    )
+    .map_err(authority_error)?
+    .ok_or_else(|| {
+        DeliveryApplicationError::TrustedFactsUnavailable(
+            "Delivery Controller has no current candidate".to_owned(),
+        )
+    })?;
+    candidate
+        .candidate_ref()
+        .strip_prefix("git-candidate:")
+        .map(|digest| Sha256Digest(digest.to_owned()))
+        .ok_or_else(|| {
+            DeliveryApplicationError::TrustedFactsUnavailable(
+                "Delivery Controller candidate identity is invalid".to_owned(),
+            )
+        })
+}
+
+fn delivery_controller_request_id(action: &str, job_id: &ExecutionJobId) -> RequestId {
+    let digest = Sha256::new()
+        .chain_update(b"winwincode.delivery-controller.v1\0")
+        .chain_update(action.as_bytes())
+        .chain_update([0])
+        .chain_update(job_id.0.as_bytes())
+        .finalize();
+    let suffix = digest
+        .iter()
+        .take(26)
+        .map(|byte| char::from(CROCKFORD_BASE32[usize::from(byte & 31)]))
+        .collect::<String>();
+    RequestId(format!("req_{suffix}"))
 }
 
 pub(crate) fn delivery_catalog_mutation(

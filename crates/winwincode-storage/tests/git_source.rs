@@ -11,8 +11,8 @@ use winwincode_domain::{
 };
 use winwincode_storage::{
     ArtifactAccess, ArtifactChunk, ArtifactErrorKind, ArtifactMeteringAttribution, ArtifactOpen,
-    ArtifactProvenance, ArtifactRetention, ArtifactStore, CandidateSourceManifest,
-    FakeArtifactObjectStore, GitCandidateReviewFileEncoding, GitCandidateReviewFileStatus,
+    ArtifactProvenance, ArtifactRetention, ArtifactStore, FakeArtifactObjectStore,
+    GitCandidateArtifactManifest, GitCandidateReviewFileEncoding, GitCandidateReviewFileStatus,
     GitSourcePathState, GitSourceResolver, LocalGitSourceResolver, ReceiptScopeKey,
 };
 
@@ -108,6 +108,19 @@ fn repository_fixture(root: &Path) -> (String, String) {
     (base, candidate)
 }
 
+fn candidate_manifest(repository: &Path, base: &str, candidate: &str) -> Vec<u8> {
+    let reference = format!("refs/winwincode/candidates/{candidate}");
+    git(repository, &["update-ref", &reference, candidate]);
+    let bundle = git(
+        repository,
+        &["bundle", "create", "-", &reference, &format!("^{base}")],
+    );
+    GitCandidateArtifactManifest::new(candidate, bundle)
+        .expect("candidate source manifest")
+        .encode()
+        .expect("manifest encoding")
+}
+
 fn scope() -> ReceiptScopeKey {
     ReceiptScopeKey::from_encoded(b"repository:one".to_vec()).expect("scope")
 }
@@ -170,15 +183,40 @@ fn metering_attribution() -> ArtifactMeteringAttribution {
 
 #[test]
 #[allow(clippy::too_many_lines)]
-fn local_git_resolver_rebuilds_identity_from_exact_candidate_artifact() {
+fn local_git_resolver_imports_candidate_from_an_isolated_worker_repository() {
     let root = temporary_directory("rebuild");
     let repositories = root.join("repositories");
     let repository = repositories.join("project-one");
-    let (base_commit, candidate_commit) = repository_fixture(&repository);
-    let manifest = CandidateSourceManifest::new(candidate_commit.clone())
-        .expect("candidate source manifest")
-        .encode()
-        .expect("manifest encoding");
+    let worker_repository = root.join("worker-repository");
+    let (base_commit, candidate_commit) = repository_fixture(&worker_repository);
+    fs::create_dir_all(&repository).expect("server repository root");
+    git(&repository, &["init", "-q", "-b", "main"]);
+    git(
+        &repository,
+        &[
+            "fetch",
+            "-q",
+            "--no-tags",
+            worker_repository.to_str().expect("worker repository path"),
+            &format!("{base_commit}:refs/remotes/worker/base"),
+        ],
+    );
+    git(
+        &repository,
+        &["reset", "-q", "--hard", "refs/remotes/worker/base"],
+    );
+    assert!(
+        !Command::new("git")
+            .arg("-C")
+            .arg(&repository)
+            .args(["cat-file", "-e", &format!("{candidate_commit}^{{commit}}")])
+            .output()
+            .expect("candidate absence probe")
+            .status
+            .success(),
+        "server repository must not share the worker candidate object"
+    );
+    let manifest = candidate_manifest(&worker_repository, &base_commit, &candidate_commit);
     let digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(&manifest)));
     let chunk_digest = digest.clone();
     let artifact_id = ArtifactId("art_0000000000000000000000000C".into());
@@ -431,16 +469,13 @@ fn local_git_resolver_ignores_repository_replace_refs() {
     let repositories = root.join("repositories");
     let repository = repositories.join("project-one");
     let (base_commit, candidate_commit) = repository_fixture(&repository);
+    let manifest = candidate_manifest(&repository, &base_commit, &candidate_commit);
     let candidate_tree = text(git(
         &repository,
         &["rev-parse", &format!("{candidate_commit}^{{tree}}")],
     ));
     git(&repository, &["replace", &candidate_commit, &base_commit]);
 
-    let manifest = CandidateSourceManifest::new(candidate_commit.clone())
-        .expect("candidate source manifest")
-        .encode()
-        .expect("manifest encoding");
     let digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(&manifest)));
     let artifact_id = ArtifactId("art_0000000000000000000000000E".into());
     let artifact_scope = scope();

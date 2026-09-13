@@ -3,6 +3,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[path = "../../../tests/support/git_candidate.rs"]
+mod git_candidate;
+use git_candidate::candidate_bundle;
+
 use sha2::{Digest as _, Sha256};
 use winwincode_api::generated::{
     ControlPlaneWebSocketDeliveryChangedEvent, ControlPlaneWebSocketDeliveryChangedEventTypeValue,
@@ -17,7 +21,7 @@ use winwincode_domain::{
 use winwincode_storage::{
     ArtifactAccess, ArtifactChunk, ArtifactMeteringAttribution, ArtifactOpen, ArtifactProvenance,
     ArtifactRetention, ArtifactStore, CandidateGitReleaseAuthority, CandidateGitRetentionState,
-    CandidateGitTerminalOutcome, CandidateSourceManifest, FakeArtifactObjectStore,
+    CandidateGitTerminalOutcome, FakeArtifactObjectStore, GitCandidateArtifactManifest,
     LocalGitSourceResolver, NewOutboxEvent, ProductStateStorage, PublicEventActor,
     PublicEventScope, PublicEventSource, ReceiptIdentity, ReceiptScopeKey, SqliteStorage,
     StateCommit,
@@ -68,8 +72,9 @@ fn git_status(root: &Path, arguments: &[&str]) -> bool {
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
-        .status()
+        .output()
         .expect("git status command")
+        .status
         .success()
 }
 
@@ -164,10 +169,13 @@ fn candidate_fixture() -> CandidateFixture {
     let (base_commit, candidate_commit) = candidate_repository(&repository);
     let delivery_id = DeliveryId("dlv_01J00000000000000000000000".into());
     let artifact_id = winwincode_domain::ArtifactId("art_0000000000000000000000000C".into());
-    let bytes = CandidateSourceManifest::new(candidate_commit.clone())
-        .expect("candidate manifest")
-        .encode()
-        .expect("candidate manifest bytes");
+    let bytes = GitCandidateArtifactManifest::new(
+        candidate_commit.clone(),
+        candidate_bundle(&repository, &base_commit, &candidate_commit),
+    )
+    .expect("candidate manifest")
+    .encode()
+    .expect("candidate manifest bytes");
     let digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(&bytes)));
     let scope = ReceiptScopeKey::from_encoded(b"repository:one".to_vec()).expect("scope");
     let provenance = artifact_provenance();

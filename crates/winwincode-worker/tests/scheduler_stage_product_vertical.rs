@@ -38,10 +38,11 @@ use winwincode_codex::stage_product::{
 use winwincode_control_plane::RepositoryExecutionScheduler;
 use winwincode_domain::{
     ArtifactId, CodexThreadId, Criterion, CriterionId, ExecutionEventId, ExecutionJobId,
-    ExecutionMessageId, ExecutionSequence, Instant, OrganizationId, ProductSessionId, ProjectId,
-    RepositoryId, RepositoryScope, RepositoryScopeKind, RequestId, Revision, SchemaVersion,
-    SessionIdentity, Sha256Digest, UserId, WorkContract, WorkContractId, WorkItem, WorkItemId,
-    WorkItemState, WorkRunId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
+    ExecutionMessageId, ExecutionSequence, GitCandidateArtifactManifest, Instant, OrganizationId,
+    ProductSessionId, ProjectId, RepositoryId, RepositoryScope, RepositoryScopeKind, RequestId,
+    Revision, SchemaVersion, SessionIdentity, Sha256Digest, UserId, WorkContract, WorkContractId,
+    WorkItem, WorkItemId, WorkItemState, WorkRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
+    WorkspaceId, verification_method_digest,
 };
 use winwincode_execution_port::agent_config::{AgentProfileSettings, resolve_agent_session_config};
 use winwincode_execution_port::generated::{
@@ -280,6 +281,7 @@ struct Run {
 struct CandidateRecord {
     authority: CandidateArtifactAuthority,
     artifact: ArtifactReference,
+    candidate_commit_id: String,
 }
 
 #[derive(Default)]
@@ -304,6 +306,16 @@ impl ScriptedStageProductAdapter {
             .values()
             .next()
             .map(|record| format!("git-candidate:{}", record.artifact.digest.0))
+    }
+
+    fn candidate_commit_id(&self) -> Option<String> {
+        self.state
+            .lock()
+            .expect("adapter state")
+            .candidates
+            .values()
+            .next()
+            .map(|record| record.candidate_commit_id.clone())
     }
 }
 
@@ -431,6 +443,7 @@ fn products_for_job(job: &ExecutionJob) -> Result<Vec<SemanticEvent>, ()> {
                 VerificationEvidenceStatus::Completed,
                 0,
                 &format!("evidence-{}", job.execution_profile),
+                &verification_method_digest("Inspect the canonical runtime product.").ok_or(())?,
             )
             .map_err(|_| ())?;
             let result = prepare_verification_result_activity(
@@ -787,6 +800,10 @@ impl CodexCoreAdapter for ScriptedStageProductAdapter {
             CandidateRecord {
                 authority: upload.authority(),
                 artifact: artifact.clone(),
+                candidate_commit_id: GitCandidateArtifactManifest::decode(&upload.bytes)
+                    .map_err(|_| ())?
+                    .candidate_commit_id()
+                    .to_owned(),
             },
         );
         Ok(RetainedCandidateArtifact {
@@ -1526,13 +1543,14 @@ fn scheduler_stage_product_roles_cancel_restart_and_old_attempt_are_exact() {
         .await;
 
         let mut candidate_ref = None;
+        let mut checkout_revision = fixture.revision.clone();
         for (role, seed) in [
             ("planner", 1),
             ("executor", 2),
             ("reviewer", 3),
             ("verifier", 4),
         ] {
-            let job = stage_job(role, seed, &fixture.revision, candidate_ref.as_deref());
+            let job = stage_job(role, seed, &checkout_revision, candidate_ref.as_deref());
             submit_job(&mut storage, &job, seed);
             reserve_and_start(&mut storage, &job, seed);
             let dispatch = RepositoryExecutionScheduler::new(&mut storage)
@@ -1593,7 +1611,12 @@ fn scheduler_stage_product_roles_cancel_restart_and_old_attempt_are_exact() {
                 outcome.outcome.codex_thread_id,
                 Some(binding.codex_thread_id.clone())
             );
-            assert_eq!(outcome.outcome.status, ExecutionOutcomeStatus::Succeeded);
+            assert_eq!(
+                outcome.outcome.status,
+                ExecutionOutcomeStatus::Succeeded,
+                "{role} stage failed: {:?}",
+                outcome.outcome
+            );
             let runtime = runtime_for(&port.messages(), &job.job_id);
             assert!(!runtime.is_empty(), "{role} emitted no runtime product");
             assert!(runtime.iter().all(|message| {
@@ -1609,6 +1632,9 @@ fn scheduler_stage_product_roles_cancel_restart_and_old_attempt_are_exact() {
                     assert_eq!(runtime[0].event.category, ExecutionEventCategory::Diff);
                     assert_eq!(outcome.outcome.artifacts.len(), 1);
                     candidate_ref = adapter.candidate_ref();
+                    checkout_revision = adapter
+                        .candidate_commit_id()
+                        .expect("executor candidate commit");
                     assert!(
                         candidate_ref.is_some(),
                         "executor candidate was not retained"

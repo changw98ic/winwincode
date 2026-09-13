@@ -7,11 +7,18 @@
 //! objects whose lifecycle lives in code rather than in the schema.
 
 mod generated;
+mod git_candidate_artifact;
 mod user_account;
+mod verification_command;
 
 pub use generated::*;
+pub use git_candidate_artifact::{GitCandidateArtifactManifest, GitCandidateArtifactManifestError};
 pub use user_account::{
     UserAccount, UserAccountError, UserAccountErrorKind, UserAccountRole, UserAccountState,
+};
+pub use verification_command::{
+    observed_verification_command_digest, observed_verification_command_is_test,
+    verification_method_digest,
 };
 
 /// Returns whether `value` is the canonical Delivery identifier defined by the

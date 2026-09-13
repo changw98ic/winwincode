@@ -127,10 +127,9 @@ pub use git_candidate_retention::{
     CandidateGitRetentionState, CandidateGitTerminalOutcome,
 };
 pub use git_source::{
-    CandidateSourceManifest, GitCandidateReviewFile, GitCandidateReviewFileEncoding,
-    GitCandidateReviewFileStatus, GitSourceHunk, GitSourcePath, GitSourcePathState,
-    GitSourceResolver, LocalGitSourceResolver, ValidatedGitCandidateDiff,
-    ValidatedGitCandidateReview, ValidatedGitSourceArtifact,
+    GitCandidateReviewFile, GitCandidateReviewFileEncoding, GitCandidateReviewFileStatus,
+    GitSourceHunk, GitSourcePath, GitSourcePathState, GitSourceResolver, LocalGitSourceResolver,
+    ValidatedGitCandidateDiff, ValidatedGitCandidateReview, ValidatedGitSourceArtifact,
 };
 pub use local_candidate::{
     LocalApplyReceiptRecord, LocalApplyResult, LocalApplySettlement, LocalApplyStrategy,
@@ -168,6 +167,7 @@ pub use scheduler_policy::{
     SchedulerRetryPolicy, SchedulerWeights, plan_scheduler_cancellation, scheduler_retry_decision,
 };
 pub use user_accounts::{UserAccountLedger, UserAccountStoreError, UserAccountStoreErrorKind};
+pub use winwincode_domain::GitCandidateArtifactManifest;
 pub use worker_fleet_inventory::{
     WorkerFleetInventoryPage, WorkerFleetInventoryState, WorkerFleetInventoryStore,
     WorkerFleetPoolInventory, WorkerFleetSnapshotCursor, WorkerFleetSnapshotRequest,
