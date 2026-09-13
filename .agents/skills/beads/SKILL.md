@@ -9,7 +9,7 @@ Use Beads as the shared project task system. Local plans, scratch files, and per
 
 ## First Step
 
-Run:
+Use the injected Beads context when it is already present. Otherwise run:
 
 ```bash
 bd prime

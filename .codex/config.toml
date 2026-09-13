@@ -1,2 +1,11 @@
 [features]
 hooks = true
+
+[mcp_servers.github]
+enabled = false
+
+[mcp_servers.memory]
+enabled = false
+
+[mcp_servers.cpb]
+enabled = false
