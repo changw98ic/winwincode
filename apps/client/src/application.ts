@@ -1379,59 +1379,42 @@ export function mountWinWinCodeClient(
       const [
         { createCandidatePreviewViewModel },
         { mountCandidateRunPreviewPage },
+        { createControlPlaneCandidatePreviewPort },
       ] = await Promise.all([
         import('./candidate-run-preview-view-model.js'),
         import('./candidate-run-preview-page.js'),
+        import('./candidate-run-preview-control-plane.js'),
       ])
       if (closed || generation !== renderGeneration || controller.signal.aborted) return
       const parameters = routeParameters(browser.location.hash)
       const sourceId = parameters.get('source')
       const mode = parameters.get('mode') === 'live' ? 'live' as const : 'frozen-candidate' as const
       const commit = parameters.get('commit')
-      const port = {
-        async loadIdentity() {
-          if (sourceId === null) return null
-          return {
-            mode,
-            sourceId,
-            workerSessionId: parameters.get('worker') ?? '',
-            repositoryBindingId: parameters.get('repository') ?? '',
-            taskId: parameters.get('task'),
-            attempt: parameters.get('attempt') === null
-              ? null
-              : Number(parameters.get('attempt')),
-            candidateCommit: commit,
-            candidateTreeId: parameters.get('tree'),
-            runConfigVersion: parameters.get('config'),
-          }
-        },
-        async startRun() {
-          throw new Error('managed-run-start-unavailable')
-        },
-        async stopRun() {
-          throw new Error('managed-run-stop-unavailable')
-        },
-        async restartRun() {
-          throw new Error('managed-run-restart-unavailable')
-        },
-        async authorizePreview() {
-          throw new Error('preview-authorize-unavailable')
-        },
-        async revokePreview() {
-          throw new Error('preview-revoke-unavailable')
-        },
-        async listFiles() {
-          return []
-        },
-        async listLogSegments() {
-          return []
-        },
-        async readLogCitation() {
-          return null
-        },
+      const clientId = parameters.get('client')
+      const workerSessionId = parameters.get('worker')
+      const repositoryBindingId = parameters.get('repository')
+      if (sourceId === null || clientId === null || workerSessionId === null || repositoryBindingId === null) {
+        routeUnavailable('预览链接缺少 Client、来源或运行身份。请从候选任务重新打开。')
+        return
+      }
+      const identity = {
+        mode,
+        clientId,
+        sourceId,
+        workerSessionId,
+        repositoryBindingId,
+        taskId: parameters.get('task'),
+        attempt: parameters.get('attempt') === null ? null : Number(parameters.get('attempt')),
+        candidateCommit: commit,
+        candidateTreeId: parameters.get('tree'),
+        runConfigVersion: parameters.get('config'),
       }
       const model = createCandidatePreviewViewModel({
-        port,
+        port: createControlPlaneCandidatePreviewPort({
+          serverUrl: controlPlane.serverUrl,
+          fetch: browserTransport.fetch,
+          identity,
+        }),
         nextRequestId: () => contractId('req', browser.crypto) as RequestId,
       })
       activeFeature = mountCandidateRunPreviewPage({

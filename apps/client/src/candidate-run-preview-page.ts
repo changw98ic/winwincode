@@ -127,7 +127,9 @@ export function mountCandidateRunPreviewPage(
   const navError = element(document, 'p', 'wwc-candidate-run-preview-nav-error')
 
   const frameShell = element(document, 'div', 'wwc-candidate-run-preview-frame-shell')
+  const frame = element(document, 'iframe', 'wwc-candidate-run-preview-frame')
   const frameNotice = element(document, 'p', 'wwc-candidate-run-preview-frame-notice')
+  const openPreview = element(document, 'a', 'wwc-candidate-run-preview-open')
 
   const fileList = element(document, 'ul', 'wwc-candidate-run-preview-files')
   const logList = element(document, 'ul', 'wwc-candidate-run-preview-logs')
@@ -178,12 +180,18 @@ export function mountCandidateRunPreviewPage(
   pathInput.type = 'text'
   pathInput.placeholder = '/path'
   pathInput.setAttribute('aria-label', '预览路径')
+  frame.title = '受控候选预览'
+  frame.setAttribute('sandbox', 'allow-downloads allow-forms allow-modals allow-popups allow-scripts')
+  frame.setAttribute('referrerpolicy', 'no-referrer')
+  openPreview.textContent = '在新窗口打开'
+  openPreview.target = '_blank'
+  openPreview.rel = 'noopener noreferrer'
 
   runBar.append(runBadge, startButton, stopButton, restartButton)
-  previewBar.append(authorizeButton, revokeButton, accessLine)
+  previewBar.append(authorizeButton, revokeButton, accessLine, openPreview)
   viewportBar.append(desktopButton, mobileButton, customWidth, customHeight, applyCustom, viewportLabel)
   navBar.append(backButton, forwardButton, refreshButton, pathInput, goButton, navError)
-  frameShell.append(frameNotice)
+  frameShell.append(frame, frameNotice)
   section.append(
     topbar,
     heading,
@@ -273,15 +281,19 @@ export function mountCandidateRunPreviewPage(
     runBadge.textContent = managedRunPhaseText(phase)
     runBadge.dataset.tone = managedRunPhaseTone(phase)
     const hasRun = state.run !== null
-    startButton.disabled = state.status !== 'ready' || (hasRun && phase !== 'exited' && phase !== 'failed' && phase !== 'idle')
-    stopButton.disabled = !hasRun || phase === 'idle' || phase === 'exited'
-    restartButton.disabled = !hasRun
+    startButton.disabled = !state.runControlAvailable || state.status !== 'ready' || (hasRun && phase !== 'exited' && phase !== 'failed' && phase !== 'idle')
+    stopButton.disabled = !state.runControlAvailable || !hasRun || phase === 'idle' || phase === 'exited'
+    restartButton.disabled = !state.runControlAvailable || !hasRun
+    const runControlTitle = state.runControlAvailable ? '' : '等待本地 Client 提供受管应用控制能力'
+    startButton.title = runControlTitle
+    stopButton.title = runControlTitle
+    restartButton.title = runControlTitle
 
     const access = state.source?.access ?? 'none'
     accessLine.textContent = state.source === null
       ? '尚未授权远程预览。'
       : access === 'authorized'
-        ? `已授权 · ${state.source.previewOrigin}`
+        ? `已授权 · ${state.source.accessExpiresAt ?? '短期访问'}`
         : access === 'revoked'
           ? '访问已撤销。'
           : '无预览访问。'
@@ -302,7 +314,19 @@ export function mountCandidateRunPreviewPage(
       : '受控预览帧在授权后加载；此处不内嵌任意本机地址。'
     frameShell.dataset.viewport = `${String(state.viewport.width)}x${String(state.viewport.height)}`
     frameShell.dataset.path = state.navigation.path
-    frameShell.dataset.origin = state.source?.previewOrigin ?? ''
+    const frameUrl = frameReady && state.source !== null
+      ? new URL(state.navigation.path.replace(/^\//u, ''), state.source.previewOrigin).toString()
+      : null
+    if (frameUrl === null) {
+      frame.removeAttribute('src')
+      frame.hidden = true
+      openPreview.hidden = true
+    } else {
+      if (frame.src !== frameUrl) frame.src = frameUrl
+      frame.hidden = false
+      openPreview.hidden = false
+      openPreview.href = frameUrl
+    }
 
     renderFiles(state.files)
     renderLogs(state.logSegments)
@@ -349,6 +373,7 @@ export function mountCandidateRunPreviewPage(
   })
   refreshButton.addEventListener('click', () => {
     options.model.refresh()
+    if (!frame.hidden) frame.src = frame.src
   })
   goButton.addEventListener('click', () => {
     options.model.navigate(pathInput.value)

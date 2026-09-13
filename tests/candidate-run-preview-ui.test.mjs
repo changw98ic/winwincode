@@ -35,19 +35,23 @@ async function cachedModule(name) {
 
 const viewModule = await cachedModule('candidate-run-preview-view-model.js')
 const pageModule = await cachedModule('candidate-run-preview-page.js')
+const controlPlaneModule = await cachedModule('candidate-run-preview-control-plane.js')
 
 const {
   createCandidatePreviewViewModel,
   candidatePreviewModeText,
   candidatePreviewAcceptanceEligible,
   classifyPreviewFile,
+  isCandidatePreviewIdentity,
   isSafePreviewOrigin,
+  isSafePreviewPath,
   isRepositoryRelativePath,
   managedRunPhaseText,
   PREVIEW_LOG_MAX_LINES,
   projectLogSegments,
 } = viewModule
 const { mountCandidateRunPreviewPage } = pageModule
+const { createControlPlaneCandidatePreviewPort } = controlPlaneModule
 
 function flush() {
   return new Promise(resolvePromise => setTimeout(resolvePromise, 0))
@@ -56,6 +60,7 @@ function flush() {
 function identity(overrides = {}) {
   return {
     mode: 'frozen-candidate',
+    clientId: '123456789012',
     sourceId: 'pvs_demo',
     workerSessionId: 'ws_demo',
     repositoryBindingId: 'rb_demo',
@@ -83,6 +88,7 @@ function runControl(overrides = {}) {
 
 function sourceFacts(overrides = {}) {
   return {
+    previewAccessId: 'pva_demo',
     sourceId: 'pvs_demo',
     mode: 'frozen-candidate',
     candidateCommit: 'a'.repeat(40),
@@ -161,7 +167,10 @@ test('RUN-02 frozen mode without a commit refuses start', async () => {
   })
   await model.start()
   assert.equal(model.state.status, 'error')
-  assert.match(model.state.notice ?? '', /缺少提交标识/)
+  assert.match(model.state.notice ?? '', /身份不完整或无效/)
+  assert.equal(isCandidatePreviewIdentity(identity()), true)
+  assert.equal(isCandidatePreviewIdentity(identity({ attempt: Number.NaN })), false)
+  assert.equal(isCandidatePreviewIdentity(identity({ mode: 'live' })), false)
 })
 
 test('RUN-03 start is idempotent for one live run', async () => {
@@ -245,7 +254,10 @@ test('RUN-06 viewport presets and navigation stack', async () => {
   model.goForward()
   assert.equal(model.state.navigation.path, '/docs/a')
   model.navigate('relative')
-  assert.match(model.state.navigation.lastError ?? '', /必须以/)
+  assert.match(model.state.navigation.lastError ?? '', /安全的站内绝对路径/)
+  assert.equal(isSafePreviewPath('/docs?tab=one'), true)
+  assert.equal(isSafePreviewPath('/../secret'), false)
+  assert.equal(isSafePreviewPath('/%2e%2e/secret'), false)
 })
 
 test('RUN-07 repository-relative paths only; degraded paths are not openable', async () => {
@@ -319,6 +331,15 @@ test('page mounts mode, controls, viewport, and files from one snapshot', async 
   await flush()
   await flush()
 
+  const frame = findByClass(rootElement, 'wwc-candidate-run-preview-frame')
+  assert.ok(frame)
+  assert.equal(frame.getAttribute('sandbox'), 'allow-downloads allow-forms allow-modals allow-popups allow-scripts')
+  assert.equal(frame.hidden, false)
+  assert.match(frame.src, /^https:\/\/preview\.example\.test\/p\/pvs_demo/)
+  const access = findByClass(rootElement, 'wwc-candidate-run-preview-access')
+  assert.ok(access)
+  assert.doesNotMatch(access.textContent, /preview\.example\.test/)
+
   const degraded = findByClass(rootElement, 'wwc-candidate-run-preview-file-open')
   assert.ok(degraded)
   // First file is README.md (enabled); second is /etc/passwd (disabled).
@@ -345,4 +366,67 @@ test('page mounts mode, controls, viewport, and files from one snapshot', async 
 
   page.close()
   assert.equal(rootElement.childNodes.length, 0)
+})
+
+test('RUN-05 browser port grants and revokes the exact Server preview access', async () => {
+  const requests = []
+  const port = createControlPlaneCandidatePreviewPort({
+    serverUrl: 'https://server.example.test',
+    identity: identity(),
+    async fetch(url, init) {
+      requests.push({ url, init })
+      if (init.method === 'DELETE') return new Response(null, { status: 204 })
+      return new Response(JSON.stringify({
+        schemaVersion: 'winwincode/v1',
+        previewAccessId: 'pva_0123456789abcdef0123456789abcdef',
+        previewUrl: `https://server.example.test/p/pva_0123456789abcdef0123456789abcdef/${'b'.repeat(64)}/`,
+        expiresAt: '2026-09-12T00:10:00.000Z',
+        source: {
+          sourceId: 'pvs_demo',
+          workerSessionId: 'ws_demo',
+          repositoryBindingId: 'rb_demo',
+          mode: 'frozen-candidate',
+          candidateCommit: 'a'.repeat(40),
+        },
+      }), { status: 201 })
+    },
+  })
+
+  const granted = await port.authorizePreview({ sourceId: 'pvs_demo', requestId: 'req_1' })
+  assert.equal(granted.previewAccessId, 'pva_0123456789abcdef0123456789abcdef')
+  assert.deepEqual(JSON.parse(requests[0].init.body), {
+    schemaVersion: 'winwincode/v1',
+    clientId: '123456789012',
+    sourceId: 'pvs_demo',
+  })
+  assert.equal(requests[0].init.credentials, 'include')
+  await port.revokePreview({ previewAccessId: granted.previewAccessId, requestId: 'req_2' })
+  assert.equal(requests[1].url, 'https://server.example.test/api/v1/previews/pva_0123456789abcdef0123456789abcdef')
+})
+
+test('RUN-05 browser port rejects a grant for a different source identity', async () => {
+  const port = createControlPlaneCandidatePreviewPort({
+    serverUrl: 'https://server.example.test',
+    identity: identity(),
+    async fetch() {
+      return new Response(JSON.stringify({
+        schemaVersion: 'winwincode/v1',
+        previewAccessId: 'pva_0123456789abcdef0123456789abcdef',
+        previewUrl: `https://server.example.test/p/pva_0123456789abcdef0123456789abcdef/${'b'.repeat(64)}/`,
+        expiresAt: '2026-09-12T00:10:00.000Z',
+        source: {
+          sourceId: 'pvs_other',
+          workerSessionId: 'ws_demo',
+          repositoryBindingId: 'rb_demo',
+          mode: 'frozen-candidate',
+          candidateCommit: 'a'.repeat(40),
+        },
+      }), { status: 201 })
+    },
+  })
+
+  await assert.rejects(
+    port.authorizePreview({ sourceId: 'pvs_demo', requestId: 'req_1' }),
+    error => error.code === 'INVALID_PREVIEW_ACCESS_RESPONSE',
+  )
 })

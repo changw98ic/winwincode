@@ -40,6 +40,7 @@ export type PreviewTone = 'info' | 'success' | 'warning' | 'danger' | 'neutral'
 /** RUN-02 identity: never interchangeable between live and frozen modes. */
 export interface CandidatePreviewIdentity {
   readonly mode: CandidatePreviewMode
+  readonly clientId: string
   readonly sourceId: string
   readonly workerSessionId: string
   readonly repositoryBindingId: string
@@ -63,6 +64,7 @@ export interface ManagedRunControl {
 
 /** RUN-05 authorized tunnel source; local sockets never appear here. */
 export interface AuthorizedPreviewSourceFacts {
+  readonly previewAccessId: string
   readonly sourceId: string
   readonly mode: CandidatePreviewMode
   readonly candidateCommit: string | null
@@ -122,22 +124,23 @@ export interface CandidatePreviewState {
   readonly logSegments: readonly PreviewLogSegmentFacts[]
   readonly logCitation: PreviewLogCitation | null
   readonly notice: string | null
+  readonly runControlAvailable: boolean
 }
 
 export interface CandidatePreviewPort {
   /** Current identity for this candidate/work run; null when unknown. */
   loadIdentity(): Promise<CandidatePreviewIdentity | null>
   /** Lease-bound start. Calling start while a run is live returns the same run. */
-  startRun(input: {
+  startRun?(input: {
     readonly identity: CandidatePreviewIdentity
     readonly requestId: string
   }): Promise<ManagedRunControl>
-  stopRun(input: {
+  stopRun?(input: {
     readonly runId: string
     readonly leaseId: string
     readonly requestId: string
   }): Promise<ManagedRunControl>
-  restartRun(input: {
+  restartRun?(input: {
     readonly runId: string
     readonly leaseId: string
     readonly requestId: string
@@ -148,16 +151,16 @@ export interface CandidatePreviewPort {
     readonly requestId: string
   }): Promise<AuthorizedPreviewSourceFacts>
   revokePreview(input: {
-    readonly sourceId: string
+    readonly previewAccessId: string
     readonly requestId: string
   }): Promise<AuthorizedPreviewSourceFacts>
-  listFiles(input: {
+  listFiles?(input: {
     readonly sourceId: string
   }): Promise<readonly PreviewFileFacts[]>
-  listLogSegments(input: {
+  listLogSegments?(input: {
     readonly runId: string
   }): Promise<readonly PreviewLogSegmentFacts[]>
-  readLogCitation(input: {
+  readLogCitation?(input: {
     readonly runId: string
     readonly segmentKey: string
     readonly lineStart: number
@@ -222,6 +225,7 @@ function initialState(): CandidatePreviewState {
     logSegments: Object.freeze([]) as readonly PreviewLogSegmentFacts[],
     logCitation: null,
     notice: null,
+    runControlAvailable: false,
   })
 }
 
@@ -279,6 +283,41 @@ export function isSafePreviewOrigin(origin: string): boolean {
   if (host.startsWith('169.254.')) return false
   if (host === '0.0.0.0') return false
   return host.length > 0
+}
+
+function isPortablePreviewId(value: string | null): boolean {
+  return value !== null && value.length > 0 && value.length <= 200
+    && /^[A-Za-z0-9_.:/-]+$/u.test(value)
+}
+
+/** Validates the route-carried identity before it can authorize a source. */
+export function isCandidatePreviewIdentity(identity: CandidatePreviewIdentity): boolean {
+  return /^\d{9,12}$/u.test(identity.clientId)
+    && isPortablePreviewId(identity.sourceId)
+    && isPortablePreviewId(identity.workerSessionId)
+    && isPortablePreviewId(identity.repositoryBindingId)
+    && (identity.taskId === null || isPortablePreviewId(identity.taskId))
+    && (identity.attempt === null || (Number.isSafeInteger(identity.attempt) && identity.attempt > 0))
+    && (identity.candidateTreeId === null || /^[0-9a-f]{40}$/iu.test(identity.candidateTreeId))
+    && (identity.runConfigVersion === null || isPortablePreviewId(identity.runConfigVersion))
+    && (identity.mode === 'live'
+      ? identity.candidateCommit === null
+      : identity.candidateCommit !== null && /^[0-9a-f]{40}$/iu.test(identity.candidateCommit))
+}
+
+/** Keeps navigation inside the granted preview URL path. */
+export function isSafePreviewPath(path: string): boolean {
+  if (!path.startsWith('/') || path.startsWith('//') || path.length > 4096 || path.includes('\\')) {
+    return false
+  }
+  try {
+    return (path.split(/[?#]/u, 1)[0] ?? '').split('/').every(segment => {
+      const decoded = decodeURIComponent(segment)
+      return decoded !== '.' && decoded !== '..' && !/[\u0000-\u001f\u007f]/u.test(decoded)
+    })
+  } catch {
+    return false
+  }
 }
 
 /** RUN-07: attachments only under a normalized repository-relative path. */
@@ -349,6 +388,7 @@ function clampViewport(size: { width: number; height: number }): PreviewViewport
 function identityFingerprint(identity: CandidatePreviewIdentity): string {
   return [
     identity.mode,
+    identity.clientId,
     identity.sourceId,
     identity.workerSessionId,
     identity.repositoryBindingId,
@@ -363,7 +403,12 @@ function identityFingerprint(identity: CandidatePreviewIdentity): string {
 export function createCandidatePreviewViewModel(
   options: CandidatePreviewViewModelOptions,
 ): CandidatePreviewViewModel {
-  let state = initialState()
+  let state = Object.freeze({
+    ...initialState(),
+    runControlAvailable: options.port.startRun !== undefined
+      && options.port.stopRun !== undefined
+      && options.port.restartRun !== undefined,
+  })
   const listeners = new Set<(next: CandidatePreviewState) => void>()
   const backStack: string[] = []
   const forwardStack: string[] = []
@@ -409,10 +454,10 @@ export function createCandidatePreviewViewModel(
           })
           return
         }
-        if (identity.mode === 'frozen-candidate' && identity.candidateCommit === null) {
+        if (!isCandidatePreviewIdentity(identity)) {
           emit({
             status: 'error',
-            notice: '冻结候选预览缺少提交标识，拒绝启动。',
+            notice: '候选运行身份不完整或无效，拒绝打开预览。',
           })
           return
         }
@@ -431,6 +476,10 @@ export function createCandidatePreviewViewModel(
     },
     async startRun() {
       if (closed) return
+      if (options.port.startRun === undefined) {
+        notice('本地 Client 尚未发布受管应用控制能力。')
+        return
+      }
       const identity = await ensureIdentity()
       if (identity === null) {
         notice('缺少候选运行身份，无法启动受管应用。')
@@ -463,6 +512,10 @@ export function createCandidatePreviewViewModel(
     },
     async stopRun() {
       if (closed) return
+      if (options.port.stopRun === undefined) {
+        notice('本地 Client 尚未发布受管应用控制能力。')
+        return
+      }
       const run = state.run
       if (run === null || run.phase === 'idle' || run.phase === 'exited') {
         notice('当前没有可停止的受管运行。')
@@ -484,6 +537,10 @@ export function createCandidatePreviewViewModel(
     },
     async restartRun() {
       if (closed) return
+      if (options.port.restartRun === undefined) {
+        notice('本地 Client 尚未发布受管应用控制能力。')
+        return
+      }
       const run = state.run
       if (run === null) {
         notice('尚未启动受管运行，无法重启。')
@@ -522,7 +579,9 @@ export function createCandidatePreviewViewModel(
           })
           return
         }
-        const files = await options.port.listFiles({ sourceId: source.sourceId })
+        const files = options.port.listFiles === undefined
+          ? []
+          : await options.port.listFiles({ sourceId: source.sourceId })
         if (closed) return
         emit({
           source,
@@ -543,7 +602,7 @@ export function createCandidatePreviewViewModel(
       }
       try {
         const next = await options.port.revokePreview({
-          sourceId: source.sourceId,
+          previewAccessId: source.previewAccessId,
           requestId: options.nextRequestId(),
         })
         if (closed) return
@@ -567,11 +626,11 @@ export function createCandidatePreviewViewModel(
     },
     navigate(path) {
       if (closed) return
-      if (!path.startsWith('/')) {
+      if (!isSafePreviewPath(path)) {
         emit({
           navigation: Object.freeze({
             ...state.navigation,
-            lastError: '预览路径必须以 / 开头。',
+            lastError: '预览路径必须是安全的站内绝对路径。',
           }),
         })
         return
@@ -642,6 +701,10 @@ export function createCandidatePreviewViewModel(
       const run = state.run
       if (run === null) {
         notice('尚未启动受管运行，无法引用日志。')
+        return
+      }
+      if (options.port.readLogCitation === undefined) {
+        notice('当前运行没有可引用的日志来源。')
         return
       }
       try {
