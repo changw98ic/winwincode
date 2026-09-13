@@ -781,6 +781,7 @@ pub fn prepare_verification_command_evidence(
     status: VerificationEvidenceStatus,
     exit_code: i64,
     source_id: &str,
+    command_digest: &Sha256Digest,
 ) -> Result<PreparedStageProduct, StageProductError> {
     ensure_verification_role(job)?;
     if i32::try_from(exit_code).is_err() || !bounded_text(source_id) {
@@ -795,6 +796,7 @@ pub fn prepare_verification_command_evidence(
             source_id,
             status,
             exit_code,
+            command_digest,
         },
         match kind {
             VerificationEvidenceKind::Command => "verification command produced direct evidence",
@@ -1147,6 +1149,7 @@ struct VerificationCommandEvidence<'source> {
     source_id: &'source str,
     status: VerificationEvidenceStatus,
     exit_code: i64,
+    command_digest: &'source Sha256Digest,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1882,12 +1885,20 @@ mod tests {
             VerificationEvidenceStatus::Completed,
             0,
             "call-fixture",
+            &winwincode_domain::verification_method_digest("fixture check")
+                .expect("fixture command digest"),
         )
         .expect("command evidence");
         assert_eq!(evidence.category(), &ExecutionEventCategory::Command);
         assert_eq!(
-            evidence.bytes(),
-            br#"{"source_id":"call-fixture","status":"completed","exit_code":0}"#
+            serde_json::from_slice::<Value>(evidence.bytes()).expect("command evidence JSON"),
+            serde_json::json!({
+                "source_id": "call-fixture",
+                "status": "completed",
+                "exit_code": 0,
+                "command_digest": winwincode_domain::verification_method_digest("fixture check")
+                    .expect("fixture command digest"),
+            })
         );
 
         let result =

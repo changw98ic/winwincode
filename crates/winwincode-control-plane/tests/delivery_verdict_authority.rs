@@ -7,6 +7,10 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+#[path = "../../../tests/support/git_candidate.rs"]
+mod git_candidate;
+use git_candidate::candidate_bundle;
+
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::Serialize;
 use serde_json::json;
@@ -52,7 +56,7 @@ use winwincode_execution_port::generated::{
 use winwincode_storage::{
     AggregateJournalKey, AggregateJournalPublication, AggregateJournalRecord, ArtifactAccess,
     ArtifactChunk, ArtifactMeteringAttribution, ArtifactOpen, ArtifactProvenance,
-    ArtifactRetention, ArtifactStore, CandidateSourceManifest, LocalArtifactObjectStore,
+    ArtifactRetention, ArtifactStore, GitCandidateArtifactManifest, LocalArtifactObjectStore,
     LocalGitSourceResolver, NewOutboxEvent, ProductStateStorage, PublicEventScope, ReceiptActorKey,
     ReceiptIdentity, ReceiptScopeKey, SqliteStorage, StateCommit, StateMutation, receipt_scope_key,
 };
@@ -529,6 +533,7 @@ fn seed_verdict_sources(
         &scope_key,
         delivery,
         writer,
+        repository,
         candidate_commit,
         1_100,
     );
@@ -562,6 +567,7 @@ fn seed_verdict_sources(
             &scope_key,
             delivery,
             binding,
+            repository,
             candidate_commit,
             1_200 + index as u64,
         );
@@ -719,6 +725,7 @@ fn seed_terminal_and_artifact(
     scope: &ReceiptScopeKey,
     delivery: &Delivery,
     binding: &SessionBinding,
+    repository: &Path,
     candidate_commit: &str,
     seed: u64,
 ) -> (
@@ -742,6 +749,7 @@ fn seed_terminal_and_artifact(
         scope,
         delivery,
         binding,
+        repository,
         candidate_commit,
         seed,
         finished_at,
@@ -828,6 +836,7 @@ fn seed_candidate_artifact(
     scope: &ReceiptScopeKey,
     delivery: &Delivery,
     binding: &SessionBinding,
+    repository: &Path,
     candidate_commit: &str,
     seed: u64,
     finished_at: u64,
@@ -843,10 +852,17 @@ fn seed_candidate_artifact(
     )
     .expect("Artifact provenance");
     let artifact_id = ArtifactId(canonical_id("art", seed));
-    let bytes = CandidateSourceManifest::new(candidate_commit.to_owned())
-        .expect("candidate manifest")
-        .encode()
-        .expect("manifest encode");
+    let bytes = GitCandidateArtifactManifest::new(
+        candidate_commit.to_owned(),
+        candidate_bundle(
+            repository,
+            &delivery.snapshot().spec.base_revision,
+            candidate_commit,
+        ),
+    )
+    .expect("candidate manifest")
+    .encode()
+    .expect("manifest encode");
     let digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(&bytes)));
     artifacts
         .open_artifact(ArtifactOpen::new(
@@ -944,6 +960,10 @@ fn seed_runtime(
         &delivery.snapshot().spec.id.0,
         delivery.snapshot().spec.revision,
         &delivery.snapshot().spec.acceptance_criteria[0].id.0,
+        delivery.snapshot().spec.acceptance_criteria[0]
+            .verification_method
+            .as_deref()
+            .expect("fixture verification method"),
         role,
         &cited_event,
         matches!(fixture, RuntimeFixture::ProductFailure),
@@ -987,6 +1007,7 @@ fn runtime_events(
     delivery_spec_id: &str,
     delivery_spec_revision: u64,
     criterion_id: &str,
+    verification_method: &str,
     role: &str,
     cited_event: &str,
     failed: bool,
@@ -1020,7 +1041,13 @@ fn runtime_events(
                 ExecutionEventCategory::Test
             },
             source_id,
-            encoded_json(&json!({"status": "completed", "exit_code": i32::from(failed)})),
+            encoded_json(&json!({
+                "status": "completed",
+                "exit_code": i32::from(failed),
+                "command_digest": winwincode_domain::verification_method_digest(
+                    verification_method
+                ).expect("fixture verification method"),
+            })),
         ),
         (
             ExecutionEventCategory::Activity,

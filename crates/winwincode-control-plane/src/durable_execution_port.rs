@@ -15,7 +15,7 @@ use winwincode_delivery::application::workrun_execution::{
     WorkerTerminalOutcomeReport, seal_dispatch_terminal_outcome, seal_session_binding_authority,
 };
 use winwincode_domain::RepositoryScope;
-use winwincode_domain::{ExecutionMessageId, Instant, SchemaVersion};
+use winwincode_domain::{DeliveryId, ExecutionMessageId, Instant, SchemaVersion};
 use winwincode_execution_port::generated::{
     ExecutionJob, ExecutionLeaseStamp, ExecutionOutcomeStatus, ExecutionPortError,
     ExecutionPortErrorCode, ExecutionPortMessage, ExecutionScope, JobOutcomeAckMessage,
@@ -24,15 +24,15 @@ use winwincode_execution_port::generated::{
 use winwincode_execution_port::transport::ExecutionPortCore;
 use winwincode_storage::{
     DurableOutboxEvent, ExecutionDispatchAuthority, ExecutionQueueScope, ProductStateStorage,
-    SqliteStorage, StorageError, StorageErrorKind,
+    SqliteStorage, StorageError, StorageErrorKind, public_actor_from_receipt_key,
 };
 
 use crate::delivery_transaction::load_durable_execution_job;
 use crate::session_binding_transaction::instant_millis;
 use crate::{
-    ActionPolicyEnforcementError, ControlPlane, DeliverySessionBindingCommitError,
-    DeliveryTerminalOutcomeCommitError, ExecutionPortService, ExecutionPortServiceError,
-    RuntimeMessageError,
+    ActionPolicyEnforcementError, ControlPlane, DeliveryApplicationError,
+    DeliverySessionBindingCommitError, DeliveryTerminalOutcomeCommitError, ExecutionPortService,
+    ExecutionPortServiceError, RuntimeMessageError,
 };
 
 const OUTCOME_ACK_NAMESPACE: &[u8] = b"winwincode.execution-port.outcome-ack.v1";
@@ -49,6 +49,8 @@ pub enum DurableExecutionPortError {
     Storage(StorageError),
     /// The canonical Delivery binding transaction failed.
     SessionBinding(DeliverySessionBindingCommitError),
+    /// The Controller could not continue a successful Delivery stage.
+    Controller(DeliveryApplicationError),
     /// The canonical runtime ledger transaction failed.
     Runtime(RuntimeMessageError),
     /// The canonical Delivery terminal transaction failed.
@@ -67,6 +69,7 @@ impl fmt::Display for DurableExecutionPortError {
             Self::Service(error) => write!(formatter, "{error}"),
             Self::Storage(error) => write!(formatter, "ExecutionPort authority failed: {error}"),
             Self::SessionBinding(error) => write!(formatter, "{error}"),
+            Self::Controller(error) => write!(formatter, "{error}"),
             Self::Runtime(error) => write!(formatter, "{error}"),
             Self::Terminal(error) => write!(formatter, "{error}"),
             Self::ActionPolicy(error) => write!(formatter, "{error}"),
@@ -83,6 +86,7 @@ impl std::error::Error for DurableExecutionPortError {
             Self::Service(error) => Some(error),
             Self::Storage(error) => Some(error),
             Self::SessionBinding(error) => Some(error),
+            Self::Controller(error) => Some(error),
             Self::Runtime(error) => Some(error),
             Self::Terminal(error) => Some(error),
             Self::ActionPolicy(error) => Some(error),
@@ -528,11 +532,37 @@ impl<'application> DurableExecutionPortIngress<'application> {
             );
         }
         let facts = Self::terminal_facts(message, &authority, &job)?;
-        let replayed = match self.commit_terminal(message, &facts)? {
-            Ok(replayed) => replayed,
+        let (replayed, terminal_revision) = match self.commit_terminal(message, &facts)? {
+            Ok(committed) => committed,
             Err(rejection) => return Ok(outcome_output(rejection)),
         };
         self.finish_delivery_execution_resources(message, &job, &authority, &durable)?;
+        if facts.status() == TerminalOutcomeStatus::Succeeded {
+            let initiating_actor =
+                public_actor_from_receipt_key(durable.receipt_identity().actor_key())
+                    .map_err(DurableExecutionPortError::Storage)?;
+            let delivery_id = DeliveryId(
+                durable
+                    .stream_id()
+                    .strip_prefix("delivery:")
+                    .ok_or_else(|| {
+                        DurableExecutionPortError::Storage(StorageError::invalid_input(
+                            "Delivery terminal intent has no Delivery stream",
+                        ))
+                    })?
+                    .to_owned(),
+            );
+            self.control_plane
+                .continue_delivery_after_terminal(
+                    self.repository_scope,
+                    &delivery_id,
+                    &job.execution_profile,
+                    &job.job_id,
+                    terminal_revision,
+                    &initiating_actor,
+                )
+                .map_err(DurableExecutionPortError::Controller)?;
+        }
         Ok(outcome_output(outcome_success(message, replayed)))
     }
 
@@ -560,7 +590,7 @@ impl<'application> DurableExecutionPortIngress<'application> {
             project_id: self.repository_scope.project_id.clone(),
             repository_id: self.repository_scope.repository_id.clone(),
             product_session_id: job_scope.product_session_id.clone(),
-            delivery_id: Some(winwincode_domain::DeliveryId(
+            delivery_id: Some(DeliveryId(
                 durable
                     .stream_id()
                     .strip_prefix("delivery:")
@@ -679,7 +709,7 @@ impl<'application> DurableExecutionPortIngress<'application> {
         &mut self,
         message: &JobOutcomeMessage,
         facts: &DeliveryTerminalOutcomeFacts,
-    ) -> Result<Result<bool, JobOutcomeAckMessage>, DurableExecutionPortError> {
+    ) -> Result<Result<(bool, u64), JobOutcomeAckMessage>, DurableExecutionPortError> {
         let commit = match self.control_plane.commit_delivery_terminal_outcome(
             self.repository_scope,
             message,
@@ -704,7 +734,10 @@ impl<'application> DurableExecutionPortIngress<'application> {
             }
             Err(error) => return Err(DurableExecutionPortError::Terminal(error)),
         };
-        Ok(Ok(commit.receipt().idempotent_replay))
+        Ok(Ok((
+            commit.receipt().idempotent_replay,
+            commit.receipt().revision,
+        )))
     }
 }
 

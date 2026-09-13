@@ -16,8 +16,9 @@ use std::process::{Command, Output, Stdio};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use winwincode_domain::{
-    CodexThreadId, ExecutionJobId, FencingToken, Instant, LeaseId, ProductSessionId, RepositoryId,
-    RequestId, Sha256Digest, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceRevision,
+    CodexThreadId, ExecutionJobId, FencingToken, GitCandidateArtifactManifest, Instant, LeaseId,
+    ProductSessionId, RepositoryId, RequestId, Sha256Digest, WorkerId, WorkerInstanceId,
+    WorkerSessionId, WorkspaceRevision,
 };
 use winwincode_execution_port::generated::{
     ExecutionJob, ExecutionJobReplacementAuthority, ExecutionLeaseStamp, ExecutionScope,
@@ -514,13 +515,6 @@ impl CandidateSnapshot {
     pub fn manifest_bytes(&self) -> &[u8] {
         &self.manifest_bytes
     }
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct CandidateArtifactManifest<'a> {
-    schema_version: u8,
-    candidate_commit_id: &'a str,
 }
 
 #[derive(Serialize)]
@@ -1369,11 +1363,7 @@ impl WorkerWorkspace {
             },
         )?;
         let content_digest = tree_digest(&self.layout.checkout, &candidate_commit_id)?;
-        let manifest_bytes = serde_json::to_vec(&CandidateArtifactManifest {
-            schema_version: CANDIDATE_MANIFEST_SCHEMA,
-            candidate_commit_id: &candidate_commit_id,
-        })
-        .map_err(|error| WorkspaceError::io("candidate manifest cannot be encoded", error))?;
+        let manifest_bytes = candidate_manifest(&self.layout.checkout, &candidate_commit_id)?;
         Ok(CandidateSnapshot {
             repository_id: self.repository_id.clone(),
             checkout_revision: self.checkout_revision.clone(),
@@ -1411,11 +1401,15 @@ impl WorkerWorkspace {
             &format!("{candidate_commit_id}^{{tree}}"),
         )?;
         let content_digest = tree_digest(&self.layout.checkout, &candidate_commit_id)?;
-        let manifest_bytes = serde_json::to_vec(&CandidateArtifactManifest {
-            schema_version: CANDIDATE_MANIFEST_SCHEMA,
-            candidate_commit_id: &candidate_commit_id,
-        })
-        .map_err(|error| WorkspaceError::io("candidate manifest cannot be encoded", error))?;
+        candidate_ref::create_candidate_ref(&self.layout.checkout, &candidate_commit_id).map_err(
+            |error| {
+                WorkspaceError::new(
+                    WorkspaceErrorCode::Git,
+                    format!("verification candidate ref cannot be recorded: {error}"),
+                )
+            },
+        )?;
+        let manifest_bytes = candidate_manifest(&self.layout.checkout, &candidate_commit_id)?;
         Ok(CandidateSnapshot {
             repository_id: self.repository_id.clone(),
             checkout_revision: self.checkout_revision.clone(),
@@ -1444,11 +1438,8 @@ impl WorkerWorkspace {
             &self.layout.checkout,
             &format!("{}^", snapshot.candidate_commit_id),
         )?;
-        let expected_manifest = serde_json::to_vec(&CandidateArtifactManifest {
-            schema_version: CANDIDATE_MANIFEST_SCHEMA,
-            candidate_commit_id: &snapshot.candidate_commit_id,
-        })
-        .map_err(|error| WorkspaceError::io("candidate manifest cannot be encoded", error))?;
+        let manifest = GitCandidateArtifactManifest::decode(&snapshot.manifest_bytes)
+            .map_err(|error| WorkspaceError::io("candidate manifest cannot be decoded", error))?;
         let digest = tree_digest(&self.layout.checkout, &snapshot.candidate_commit_id)?;
         if snapshot.repository_id != self.repository_id
             || snapshot.checkout_revision != self.checkout_revision
@@ -1459,7 +1450,7 @@ impl WorkerWorkspace {
             || candidate_parent != self.source_commit_id
             || candidate_tree != snapshot.candidate_tree_id
             || digest != snapshot.content_digest
-            || snapshot.manifest_bytes != expected_manifest
+            || manifest.candidate_commit_id() != snapshot.candidate_commit_id
         {
             return Err(WorkspaceError::new(
                 WorkspaceErrorCode::DigestMismatch,
@@ -1483,11 +1474,8 @@ impl WorkerWorkspace {
             &self.layout.checkout,
             &format!("{}^{{tree}}", snapshot.candidate_commit_id),
         )?;
-        let expected_manifest = serde_json::to_vec(&CandidateArtifactManifest {
-            schema_version: CANDIDATE_MANIFEST_SCHEMA,
-            candidate_commit_id: &snapshot.candidate_commit_id,
-        })
-        .map_err(|error| WorkspaceError::io("candidate manifest cannot be encoded", error))?;
+        let manifest = GitCandidateArtifactManifest::decode(&snapshot.manifest_bytes)
+            .map_err(|error| WorkspaceError::io("candidate manifest cannot be decoded", error))?;
         let digest = tree_digest(&self.layout.checkout, &snapshot.candidate_commit_id)?;
         if !workspace_checkout_clean(&self.layout.checkout)?
             || snapshot.repository_id != self.repository_id
@@ -1501,7 +1489,7 @@ impl WorkerWorkspace {
             || candidate_tree != self.source_tree_id
             || candidate_tree != snapshot.candidate_tree_id
             || digest != snapshot.content_digest
-            || snapshot.manifest_bytes != expected_manifest
+            || manifest.candidate_commit_id() != snapshot.candidate_commit_id
         {
             return Err(WorkspaceError::new(
                 WorkspaceErrorCode::DigestMismatch,
@@ -2802,6 +2790,27 @@ pub(crate) fn git_output(repository: &Path, arguments: &[&str]) -> Result<Vec<u8
     let mut command = git_command(repository);
     command.args(arguments);
     checked_output(command, "Git operation failed").map(|output| output.stdout)
+}
+
+fn candidate_manifest(
+    repository: &Path,
+    candidate_commit_id: &str,
+) -> Result<Vec<u8>, WorkspaceError> {
+    let reference = candidate_ref::candidate_ref_name(candidate_commit_id).map_err(|error| {
+        WorkspaceError::new(
+            WorkspaceErrorCode::Git,
+            format!("candidate bundle ref is invalid: {error}"),
+        )
+    })?;
+    let parent = rev_parse(repository, &format!("{candidate_commit_id}^"))?;
+    let exclude_parent = format!("^{parent}");
+    let bundle = git_output(
+        repository,
+        &["bundle", "create", "-", &reference, &exclude_parent],
+    )?;
+    GitCandidateArtifactManifest::new(candidate_commit_id, bundle)
+        .and_then(|manifest| manifest.encode())
+        .map_err(|error| WorkspaceError::io("candidate manifest cannot be encoded", error))
 }
 
 fn commit_tree(

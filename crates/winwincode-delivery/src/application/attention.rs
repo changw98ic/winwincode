@@ -158,9 +158,16 @@ pub fn resolve_attention(
                     "delivery approval requires the current passing verdict",
                 )
             })?;
+        let producer_work_run_id = item.work_run_id.as_ref().ok_or_else(|| {
+            CoordinationError::new(
+                CoordinationErrorCode::StaleAttention,
+                "delivery approval has no verified candidate WorkRun",
+            )
+        })?;
         let expected = super::verdict::delivery_approval(
             delivery.snapshot(),
             verdict,
+            producer_work_run_id,
             item.created_at_millis,
         )?;
         if item.id != expected.id
@@ -291,9 +298,15 @@ fn apply_resolution(
     if item_type == AttentionItemType::DeliveryApproval
         && input.decision == AttentionDecision::Resolved
     {
+        let work_run_id = target_work_run_id.as_ref().ok_or_else(|| {
+            CoordinationError::new(
+                CoordinationErrorCode::StaleAttention,
+                "delivery approval has no verified candidate WorkRun",
+            )
+        })?;
         snapshot
             .work_run_aggregate
-            .complete_current_candidate()
+            .complete_candidate(work_run_id)
             .map_err(|_| {
                 CoordinationError::new(
                     CoordinationErrorCode::StaleAttention,
@@ -309,6 +322,16 @@ fn apply_resolution(
         .any(|item| item.blocking && item.status == AttentionItemStatus::Open)
     {
         DeliveryStatus::NeedsAttention
+    } else if item_type == AttentionItemType::DeliveryApproval
+        && input.decision == AttentionDecision::Resolved
+        && snapshot
+            .work_run_aggregate
+            .items
+            .iter()
+            .any(|item| item.state != winwincode_domain::WorkItemState::Done)
+    {
+        snapshot.verdict = None;
+        DeliveryStatus::Ready
     } else if let Some(settlement) = solution_review_settlement {
         settlement.delivery_status()
     } else {

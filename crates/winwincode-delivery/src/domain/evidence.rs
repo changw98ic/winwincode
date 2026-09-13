@@ -15,7 +15,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use winwincode_domain::{
     CodexThreadId, DeliveryId, EvidenceId, ExecutionEventId, ExecutionJobId, FencingToken, LeaseId,
-    ProductSessionId, WorkRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
+    ProductSessionId, Sha256Digest, WorkRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
+    verification_method_digest,
 };
 
 use super::verification::AcceptedVerificationJobOutcomeFact;
@@ -124,6 +125,7 @@ pub(crate) struct AcceptedRuntimeSourceFact {
     candidate_ref: String,
     occurred_at_millis: u64,
     outcome: VerifiedEvidenceOutcome,
+    command_digest: Sha256Digest,
 }
 
 pub(crate) fn checkout_attestation_from_snapshot(
@@ -157,6 +159,7 @@ pub(crate) fn accepted_runtime_source(
     source_sequence: u64,
     occurred_at_millis: u64,
     outcome: VerifiedEvidenceOutcome,
+    command_digest: Sha256Digest,
 ) -> AcceptedRuntimeSourceFact {
     AcceptedRuntimeSourceFact {
         source_event_id,
@@ -176,6 +179,7 @@ pub(crate) fn accepted_runtime_source(
         candidate_ref: candidate.candidate_ref().into(),
         occurred_at_millis,
         outcome,
+        command_digest,
     }
 }
 
@@ -267,6 +271,7 @@ pub(crate) struct VerifiedRuntimeEvidenceSourceIdentity {
     candidate_ref: String,
     checkout_commit_id: String,
     checkout_tree_id: String,
+    command_digest: Sha256Digest,
 }
 
 /// Canonical Evidence plus source facts that were checked by this module.
@@ -324,6 +329,19 @@ impl ResolvedDeliveryEvidence {
             | VerifiedEvidenceSourceIdentity::CandidateDiff { .. }
             | VerifiedEvidenceSourceIdentity::CandidateFile { .. } => false,
         }
+    }
+
+    /// Confirms that direct runtime evidence came from the exact approved
+    /// verification command rather than another successful process.
+    pub(crate) fn matches_verification_method(&self, method: &str) -> bool {
+        let Some(expected) = verification_method_digest(method) else {
+            return false;
+        };
+        matches!(
+            &self.source_identity,
+            VerifiedEvidenceSourceIdentity::Runtime(identity)
+                if identity.command_digest == expected
+        )
     }
 
     #[cfg(test)]
@@ -814,6 +832,7 @@ fn resolve_runtime_source(
                 candidate_ref: fact.candidate_ref.clone(),
                 checkout_commit_id: checkout.checkout_commit_id.clone(),
                 checkout_tree_id: checkout.checkout_tree_id.clone(),
+                command_digest: fact.command_digest.clone(),
             },
         )),
     })
@@ -1076,6 +1095,42 @@ pub(crate) mod test_support {
         )
     }
 
+    /// Builds a role Evidence fixture for a command other than the approved
+    /// criterion method so verdict tests can exercise fail-closed binding.
+    pub(crate) fn resolved_role_evidence_for_method(
+        delivery: &Delivery,
+        candidate: &FrozenDeliveryCandidate,
+        role_id: &str,
+        evidence_type: EvidenceRefType,
+        outcome: VerifiedEvidenceOutcome,
+        evidence_id: EvidenceId,
+        observed_method: &str,
+    ) -> ResolvedDeliveryEvidence {
+        let (reviewer, verifier) = match role_id {
+            "reviewer" => (
+                VerificationFixtureState::SettledPass,
+                VerificationFixtureState::Missing,
+            ),
+            "verifier" => (
+                VerificationFixtureState::Missing,
+                VerificationFixtureState::SettledPass,
+            ),
+            _ => panic!("Evidence fixture supports reviewer or verifier"),
+        };
+        let verification = independent_verification(delivery, candidate, reviewer, verifier);
+        resolved_role_evidence_with_digest(
+            delivery,
+            candidate,
+            &verification,
+            role_id,
+            evidence_type,
+            outcome,
+            evidence_id,
+            1,
+            verification_method_digest(observed_method).expect("observed method digest"),
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn resolved_role_evidence_from_verification(
         delivery: &Delivery,
@@ -1086,6 +1141,40 @@ pub(crate) mod test_support {
         outcome: VerifiedEvidenceOutcome,
         evidence_id: EvidenceId,
         source_sequence: u64,
+    ) -> ResolvedDeliveryEvidence {
+        let method = delivery
+            .snapshot()
+            .spec
+            .acceptance_criteria
+            .first()
+            .and_then(|criterion| criterion.verification_method.as_deref())
+            .unwrap_or("fixture verification command");
+        let command_digest =
+            verification_method_digest(method).expect("fixture verification method digest");
+        resolved_role_evidence_with_digest(
+            delivery,
+            candidate,
+            verification,
+            role_id,
+            evidence_type,
+            outcome,
+            evidence_id,
+            source_sequence,
+            command_digest,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn resolved_role_evidence_with_digest(
+        delivery: &Delivery,
+        candidate: &FrozenDeliveryCandidate,
+        verification: &IndependentVerification,
+        role_id: &str,
+        evidence_type: EvidenceRefType,
+        outcome: VerifiedEvidenceOutcome,
+        evidence_id: EvidenceId,
+        source_sequence: u64,
+        command_digest: Sha256Digest,
     ) -> ResolvedDeliveryEvidence {
         let terminal = verification
             .settlements()
@@ -1122,6 +1211,7 @@ pub(crate) mod test_support {
             candidate_ref: candidate.candidate_ref().into(),
             occurred_at_millis: finished_at_millis,
             outcome,
+            command_digest,
         };
         let checkout = ValidatedCheckoutAttestationFact {
             product_session_id: terminal.product_session_id().clone(),
@@ -1309,7 +1399,13 @@ mod tests {
             candidate_ref: candidate.candidate_ref().into(),
             occurred_at_millis: 1_800_000_000_040,
             outcome: VerifiedEvidenceOutcome::Succeeded,
+            command_digest: delivery_verification_method_digest(),
         }
+    }
+
+    fn delivery_verification_method_digest() -> Sha256Digest {
+        verification_method_digest("Run the invitation integration test.")
+            .expect("fixture verification method digest")
     }
 
     fn checkout_attestation(

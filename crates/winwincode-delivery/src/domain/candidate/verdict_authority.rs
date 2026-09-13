@@ -8,7 +8,7 @@ use std::{error::Error, fmt};
 use crate::application::workrun_execution::DeliveryTerminalOutcomeFacts;
 use serde::Deserialize;
 use serde_json::Value;
-use winwincode_domain::{ExecutionEventId, ExecutionSequence};
+use winwincode_domain::{ExecutionEventId, ExecutionSequence, Sha256Digest};
 
 use super::{
     DurableCandidateSourceInput, FrozenDeliveryCandidate, freeze_delivery_candidate_from_source,
@@ -581,7 +581,7 @@ fn resolve_findings(
                     "verification finding Evidence must precede its structured result",
                 ));
             }
-            let outcome = runtime_outcome(source_event, source.evidence_type)?;
+            let (outcome, command_digest) = runtime_outcome(source_event, source.evidence_type)?;
             let key = (
                 source.event_id.0.clone(),
                 evidence_type_order(source.evidence_type),
@@ -595,6 +595,7 @@ fn resolve_findings(
                     source_event.sequence,
                     source_event.occurred_at_millis,
                     outcome,
+                    command_digest,
                 );
                 let created_at_millis = terminal
                     .finished_at_millis()
@@ -663,7 +664,7 @@ fn exact_source_event<'events>(
 fn runtime_outcome(
     event: &AcceptedRuntimeEvent<'_>,
     evidence_type: EvidenceRefType,
-) -> Result<VerifiedEvidenceOutcome, ProductionVerdictResolutionError> {
+) -> Result<(VerifiedEvidenceOutcome, Sha256Digest), ProductionVerdictResolutionError> {
     let expected_category = match evidence_type {
         EvidenceRefType::Test => ProductionRuntimeEventCategory::Test,
         EvidenceRefType::Command => ProductionRuntimeEventCategory::Command,
@@ -688,6 +689,17 @@ fn runtime_outcome(
         .or_else(|| nested_string(&value, "outcome"))
         .map(|value| value.to_ascii_lowercase().replace('_', "-"));
     let exit_code = nested_i64(&value, "exit_code").or_else(|| nested_i64(&value, "exitCode"));
+    let command_digest = nested_string(&value, "command_digest")
+        .or_else(|| nested_string(&value, "commandDigest"))
+        .filter(|value| {
+            value.strip_prefix("sha256:").is_some_and(|digest| {
+                digest.len() == 64
+                    && digest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+            })
+        })
+        .ok_or_else(|| error("verification Evidence has no canonical command identity"))?;
     let outcome = match status.as_deref() {
         Some("timed-out" | "timeout") => VerifiedEvidenceOutcome::TimedOut,
         Some("policy-denied" | "sandbox-denied" | "declined" | "denied") => {
@@ -705,7 +717,7 @@ fn runtime_outcome(
         _ if exit_code.is_some_and(|code| code != 0) => VerifiedEvidenceOutcome::Failed,
         _ => VerifiedEvidenceOutcome::Observed,
     };
-    Ok(outcome)
+    Ok((outcome, Sha256Digest(command_digest.to_owned())))
 }
 
 fn nested_string<'value>(value: &'value Value, key: &str) -> Option<&'value str> {

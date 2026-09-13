@@ -15,7 +15,8 @@ use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 use winwincode_domain::{
     ExecutionEventId, ExecutionMessageId, ExecutionSequence, Instant, SchemaVersion,
-    SessionIdentity, Sha256Digest, WorkerSessionId,
+    SessionIdentity, Sha256Digest, WorkerSessionId, observed_verification_command_digest,
+    observed_verification_command_is_test,
 };
 use winwincode_execution_port::{
     generated::{
@@ -211,6 +212,8 @@ impl WorkRunRuntimeProjector {
             command_end.status,
             command_end.exit_code,
             command_end.call_id,
+            &observed_verification_command_digest(command_end.command)
+                .ok_or(WorkRunRuntimeProjectionError::InvalidEvidence)?,
         )
         .map_err(WorkRunRuntimeProjectionError::Product)?;
         self.retain_product_with_snapshot(
@@ -646,30 +649,7 @@ fn decode_payload(payload: &EncodedPayload) -> Option<Vec<u8>> {
 }
 
 fn classify_evidence(command: &[String]) -> VerificationEvidenceKind {
-    let normalized = command
-        .iter()
-        .map(|part| part.to_ascii_lowercase())
-        .collect::<Vec<_>>()
-        .join(" ");
-    let test = [
-        "cargo test",
-        "cargo nextest",
-        "pnpm test",
-        "npm test",
-        "npm run test",
-        "yarn test",
-        "bun test",
-        "pytest",
-        "python -m pytest",
-        "go test",
-        "dotnet test",
-        "swift test",
-        "gradle test",
-        "mvn test",
-    ]
-    .iter()
-    .any(|needle| normalized.contains(needle));
-    if test {
+    if observed_verification_command_is_test(command) {
         VerificationEvidenceKind::Test
     } else {
         VerificationEvidenceKind::Command
@@ -1291,6 +1271,14 @@ mod tests {
                 )
                 .expect("failed turn has no product"),
             None
+        );
+    }
+
+    #[test]
+    fn printed_test_name_is_not_test_evidence() {
+        assert_eq!(
+            classify_evidence(&["printf".to_owned(), "npm test".to_owned()]),
+            VerificationEvidenceKind::Command
         );
     }
 }

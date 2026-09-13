@@ -5,6 +5,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[path = "../../../tests/support/git_candidate.rs"]
+mod git_candidate;
+use git_candidate::candidate_bundle;
+
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use winwincode_delivery::{
@@ -36,7 +40,7 @@ use winwincode_domain::{
 };
 use winwincode_storage::{
     ArtifactAccess, ArtifactChunk, ArtifactMeteringAttribution, ArtifactOpen, ArtifactProvenance,
-    ArtifactRetention, ArtifactStore, CandidateSourceManifest, FakeArtifactObjectStore,
+    ArtifactRetention, ArtifactStore, FakeArtifactObjectStore, GitCandidateArtifactManifest,
     LocalGitSourceResolver, ReceiptScopeKey,
 };
 
@@ -119,6 +123,8 @@ fn durable_sources_resolve_one_replay_stable_production_verdict() {
     let writer_source = settled_source(
         &delivery,
         writer,
+        &repository,
+        &base_commit,
         &candidate_commit,
         &scope,
         &mut artifacts,
@@ -145,6 +151,8 @@ fn durable_sources_resolve_one_replay_stable_production_verdict() {
             let settled = settled_source(
                 &delivery,
                 run,
+                &repository,
+                &base_commit,
                 &candidate_commit,
                 &scope,
                 &mut artifacts,
@@ -275,6 +283,10 @@ fn verification_runtime(
             &delivery.snapshot().spec.id.0,
             delivery.snapshot().spec.revision,
             &delivery.snapshot().spec.acceptance_criteria[0].id.0,
+            delivery.snapshot().spec.acceptance_criteria[0]
+                .verification_method
+                .as_deref()
+                .expect("fixture verification method"),
             role,
             evidence_event_override,
         ),
@@ -288,6 +300,8 @@ fn verification_runtime(
 fn settled_source(
     delivery: &Delivery,
     run: &SessionBinding,
+    repository: &Path,
+    base_commit: &str,
     candidate_commit: &str,
     scope: &ReceiptScopeKey,
     artifacts: &mut ArtifactStore,
@@ -324,10 +338,13 @@ fn settled_source(
     )
     .expect("Artifact provenance");
     let artifact_id = ArtifactId(canonical_id("art", seed));
-    let manifest = CandidateSourceManifest::new(candidate_commit.to_owned())
-        .expect("manifest")
-        .encode()
-        .expect("manifest encode");
+    let manifest = GitCandidateArtifactManifest::new(
+        candidate_commit.to_owned(),
+        candidate_bundle(repository, base_commit, candidate_commit),
+    )
+    .expect("manifest")
+    .encode()
+    .expect("manifest encode");
     let digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(&manifest)));
     let finished_at = run.bound_at_millis + 9;
     artifacts
@@ -432,6 +449,7 @@ fn runtime_events(
     delivery_spec_id: &str,
     delivery_spec_revision: u64,
     criterion_id: &str,
+    verification_method: &str,
     role: &str,
     evidence_event_override: Option<&str>,
 ) -> Vec<ProductionRuntimeEvent> {
@@ -471,7 +489,14 @@ fn runtime_events(
             3,
             category,
             encoded_payload(
-                &serde_json::to_vec(&json!({"status": "completed", "exit_code": 0})).expect("JSON"),
+                &serde_json::to_vec(&json!({
+                    "status": "completed",
+                    "exit_code": 0,
+                    "command_digest": winwincode_domain::verification_method_digest(
+                        verification_method
+                    ).expect("fixture verification method"),
+                }))
+                .expect("JSON"),
             ),
             source_id.clone(),
         ),

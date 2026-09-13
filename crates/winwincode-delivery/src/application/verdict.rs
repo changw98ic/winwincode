@@ -190,6 +190,7 @@ pub fn compute_verdict_transition(
         vec![delivery_approval(
             &snapshot,
             &verdict,
+            facts.candidate.producer_work_run_id(),
             facts.produced_at_millis,
         )?]
     } else {
@@ -332,8 +333,18 @@ fn attention_id(digest: [u8; 32]) -> AttentionItemId {
 pub(crate) fn delivery_approval(
     snapshot: &DeliverySnapshot,
     verdict: &DeliveryVerdict,
+    producer_work_run_id: &WorkRunId,
     created_at_millis: u64,
 ) -> Result<AttentionItem, CoordinationError> {
+    if !snapshot.work_run_aggregate.runs.iter().any(|run| {
+        run.id == *producer_work_run_id
+            && run.state == winwincode_domain::WorkRunState::CandidateReady
+    }) {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::Conflict,
+            "delivery approval producer is not a current candidate",
+        ));
+    }
     let context = serde_json::to_string(&(
         "winwincode.delivery-approval.v1",
         &snapshot.id,
@@ -341,6 +352,7 @@ pub(crate) fn delivery_approval(
         snapshot.spec.revision,
         &verdict.id,
         &verdict.candidate_ref,
+        producer_work_run_id,
     ))
     .map_err(|error| CoordinationError::new(CoordinationErrorCode::Conflict, error.to_string()))?;
     let digest = Sha256::digest(context.as_bytes());
@@ -349,7 +361,7 @@ pub(crate) fn delivery_approval(
         id: attention_id(digest.into()),
         delivery_id: snapshot.id.clone(),
         delivery_spec_id: snapshot.spec.id.clone(),
-        work_run_id: None,
+        work_run_id: Some(producer_work_run_id.clone()),
         item_type: AttentionItemType::DeliveryApproval,
         title: "Approve the verified candidate".into(),
         context,
@@ -951,8 +963,21 @@ pub mod test_support {
             .as_ref()
             .expect("fixture verdict");
         assert_eq!(verdict.status, crate::domain::CriterionVerdict::Pass);
-        super::delivery_approval(delivery.snapshot(), verdict, created_at_millis)
-            .expect("canonical delivery approval fixture")
+        let producer_work_run_id = delivery
+            .snapshot()
+            .work_run_aggregate
+            .runs
+            .iter()
+            .find(|run| run.state == winwincode_domain::WorkRunState::CandidateReady)
+            .map(|run| &run.id)
+            .expect("fixture candidate producer");
+        super::delivery_approval(
+            delivery.snapshot(),
+            verdict,
+            producer_work_run_id,
+            created_at_millis,
+        )
+        .expect("canonical delivery approval fixture")
     }
 
     const fn role_id(role: VerificationRole) -> &'static str {
@@ -1371,7 +1396,7 @@ mod tests {
             .iter()
             .find(|item| item.item_type == crate::domain::AttentionItemType::DeliveryApproval)
             .expect("delivery approval");
-        assert_eq!(approval.work_run_id, None);
+        assert_eq!(approval.work_run_id.as_ref(), Some(&producer_id));
 
         let completed = resolve_attention(
             pending,
@@ -1407,6 +1432,94 @@ mod tests {
                 .expect("candidate producer")
                 .state,
             winwincode_domain::WorkRunState::Settled
+        );
+    }
+
+    #[test]
+    fn approval_of_one_parallel_candidate_does_not_stale_on_another_candidate() {
+        let fixture = test_support::verdict_fixture(
+            &winwincode_domain::DeliveryId("dlv_01J00000000000000000000019".into()),
+            test_support::VerdictFixtureOutcome::Pass,
+        );
+        let producer_id = fixture.candidate.producer_work_run_id().clone();
+        let facts = test_support::verdict_facts_fixture(
+            &fixture.delivery,
+            &fixture.candidate,
+            test_support::VerdictFixtureOutcome::Pass,
+        );
+        let transition = compute_verdict_transition(
+            &fixture.delivery,
+            SubmitVerdictFacts {
+                expected_revision: fixture.delivery.revision(),
+                candidate: &fixture.candidate,
+                verification: facts.verification(),
+                evidence: facts.evidence(),
+                produced_at_millis: PRODUCED_AT_MILLIS,
+            },
+        )
+        .expect("passing verdict");
+        let mut snapshot = transition.delivery().clone().into_snapshot();
+        let producer = snapshot
+            .work_run_aggregate
+            .runs
+            .iter()
+            .find(|run| run.id == producer_id)
+            .expect("candidate producer")
+            .clone();
+        let mut parallel_item = snapshot
+            .work_run_aggregate
+            .items
+            .iter()
+            .find(|item| item.id == producer.work_item_id)
+            .expect("producer item")
+            .clone();
+        parallel_item.id = winwincode_domain::WorkItemId("wit_01J00000000000000000000019".into());
+        parallel_item.title = "Parallel candidate".into();
+        parallel_item.depends_on.clear();
+        let mut parallel_run = producer;
+        parallel_run.id = winwincode_domain::WorkRunId("wrn_01J00000000000000000000019".into());
+        parallel_run.work_item_id = parallel_item.id.clone();
+        parallel_run.execution_job_id = ExecutionJobId("job_01J00000000000000000000019".into());
+        snapshot
+            .work_run_aggregate
+            .items
+            .push(parallel_item.clone());
+        snapshot.work_run_aggregate.runs.push(parallel_run);
+        let pending = Delivery::try_from_snapshot(snapshot).expect("parallel candidate Delivery");
+        let approval = pending
+            .snapshot()
+            .attention_items
+            .iter()
+            .find(|item| item.item_type == crate::domain::AttentionItemType::DeliveryApproval)
+            .expect("delivery approval");
+
+        let completed = resolve_attention(
+            &pending,
+            ResolveAttentionInput {
+                expected_revision: pending.revision(),
+                attention_item_id: approval.id.clone(),
+                work_run_id: approval.work_run_id.clone(),
+                expected_context: approval.context.clone(),
+                actor: "delivery-reviewer".into(),
+                decision: AttentionDecision::Resolved,
+                resolution: "Approve the verified candidate.".into(),
+                now_millis: PRODUCED_AT_MILLIS + 1,
+            },
+        )
+        .expect("approval is scoped to its exact candidate");
+
+        assert_eq!(completed.snapshot().status, DeliveryStatus::Ready);
+        assert!(completed.snapshot().verdict.is_none());
+        assert_eq!(
+            completed
+                .snapshot()
+                .work_run_aggregate
+                .items
+                .iter()
+                .find(|item| item.id == parallel_item.id)
+                .expect("parallel item")
+                .state,
+            winwincode_domain::WorkItemState::CandidateReady
         );
     }
 

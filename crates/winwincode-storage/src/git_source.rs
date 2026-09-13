@@ -8,67 +8,22 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use winwincode_domain::GitCandidateArtifactManifest;
 
 use crate::{ArtifactError, ArtifactErrorKind, ArtifactObject, ArtifactRecord};
 
-const CANDIDATE_MANIFEST_SCHEMA_VERSION: u8 = 1;
 const CANDIDATE_MEDIA_TYPE: &str = "application/vnd.winwincode.git-candidate+json";
 const MAX_CHANGED_PATHS: usize = 100_000;
 const MAX_PATH_BYTES: usize = 4_096;
 const MAX_DIFF_BYTES: usize = 268_435_456;
-
-/// Minimal Worker-produced hint stored inside a candidate Artifact.
-///
-/// Tree, diff, path, and object identities are deliberately absent. The local
-/// resolver obtains them from Git rather than trusting a report.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CandidateSourceManifest {
-    schema_version: u8,
-    candidate_commit_id: String,
-}
-
-impl CandidateSourceManifest {
-    /// Creates the one canonical candidate Artifact manifest.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a value that cannot name a SHA-1 or SHA-256 Git commit object.
-    pub fn new(candidate_commit_id: impl Into<String>) -> Result<Self, ArtifactError> {
-        let candidate_commit_id = candidate_commit_id.into();
-        git_object_id(&candidate_commit_id, "candidateCommitId")?;
-        Ok(Self {
-            schema_version: CANDIDATE_MANIFEST_SCHEMA_VERSION,
-            candidate_commit_id,
-        })
-    }
-
-    /// Encodes the strict canonical JSON stored as Artifact bytes.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter error if canonical serialization fails.
-    pub fn encode(&self) -> Result<Vec<u8>, ArtifactError> {
-        serde_json::to_vec(self).map_err(|error| {
-            ArtifactError::adapter(format!(
-                "candidate source manifest cannot be encoded: {error}"
-            ))
-        })
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct CandidateSourceManifestInput {
-    schema_version: u8,
-    candidate_commit_id: String,
-}
+static NEXT_BUNDLE_FILE: AtomicU64 = AtomicU64::new(1);
 
 /// State of one path rebuilt at the candidate commit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -449,16 +404,17 @@ impl LocalGitSourceResolver {
         repository_locator: &str,
         base_revision: &str,
     ) -> Result<ValidatedGitSourceArtifact, ArtifactError> {
-        let candidate_commit = candidate_manifest_commit(artifact)?;
+        let manifest = candidate_manifest(artifact)?;
         bounded_locator(repository_locator)?;
         bounded_revision(base_revision)?;
         let repository = controlled_repository(&self.allowed_root, repository_locator)?;
         assert_git_repository(&repository)?;
+        import_candidate_bundle(&repository, &manifest)?;
         rebuild_candidate_source(
             &repository,
             repository_locator,
             base_revision,
-            &candidate_commit,
+            manifest.candidate_commit_id(),
             artifact.metadata().clone(),
         )
     }
@@ -782,7 +738,9 @@ fn candidate_file_encoding(binary: bool, diff: &[u8]) -> GitCandidateReviewFileE
     }
 }
 
-fn candidate_manifest_commit(artifact: &ArtifactObject) -> Result<String, ArtifactError> {
+fn candidate_manifest(
+    artifact: &ArtifactObject,
+) -> Result<GitCandidateArtifactManifest, ArtifactError> {
     if artifact.metadata().kind() != "candidate"
         || artifact.metadata().media_type() != CANDIDATE_MEDIA_TYPE
     {
@@ -790,23 +748,81 @@ fn candidate_manifest_commit(artifact: &ArtifactObject) -> Result<String, Artifa
             "Git source resolver requires one canonical candidate Artifact",
         ));
     }
-    let manifest: CandidateSourceManifestInput =
-        serde_json::from_slice(artifact.bytes()).map_err(|_| {
-            ArtifactError::invalid("candidate Artifact is not the strict canonical source manifest")
+    GitCandidateArtifactManifest::decode(artifact.bytes()).map_err(|_| {
+        ArtifactError::invalid("candidate Artifact is not the strict canonical source manifest")
+    })
+}
+
+struct TemporaryCandidateBundle(PathBuf);
+
+impl Drop for TemporaryCandidateBundle {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+fn import_candidate_bundle(
+    repository: &Path,
+    manifest: &GitCandidateArtifactManifest,
+) -> Result<(), ArtifactError> {
+    let common_directory = utf8_line(
+        git_output(
+            repository,
+            &[
+                "rev-parse".into(),
+                "--path-format=absolute".into(),
+                "--git-common-dir".into(),
+            ],
+            "common Git directory",
+        )?,
+        "common Git directory",
+    )?;
+    let common_directory = fs::canonicalize(common_directory).map_err(|error| {
+        ArtifactError::adapter(format!("common Git directory cannot be opened: {error}"))
+    })?;
+    let sequence = NEXT_BUNDLE_FILE.fetch_add(1, Ordering::Relaxed);
+    let bundle_path = common_directory.join(format!(
+        ".winwincode-candidate-bundle-{}-{sequence}",
+        std::process::id()
+    ));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&bundle_path)
+        .map_err(|error| {
+            ArtifactError::adapter(format!("candidate bundle cannot be staged: {error}"))
         })?;
-    if manifest.schema_version != CANDIDATE_MANIFEST_SCHEMA_VERSION {
+    file.write_all(manifest.bundle())
+        .and_then(|()| file.sync_all())
+        .map_err(|error| {
+            ArtifactError::adapter(format!("candidate bundle cannot be persisted: {error}"))
+        })?;
+    drop(file);
+    let temporary = TemporaryCandidateBundle(bundle_path);
+    let bundle_name = temporary.0.as_os_str().to_owned();
+    git_output(
+        repository,
+        &["bundle".into(), "verify".into(), bundle_name.clone()],
+        "candidate bundle verification",
+    )?;
+    let advertised = git_output(
+        repository,
+        &["bundle".into(), "unbundle".into(), bundle_name],
+        "candidate bundle import",
+    )?;
+    let advertised = String::from_utf8(advertised)
+        .map_err(|_| ArtifactError::corrupt("candidate bundle advertised invalid UTF-8"))?;
+    let expected_ref = format!(
+        "refs/winwincode/candidates/{}",
+        manifest.candidate_commit_id()
+    );
+    let expected = format!("{} {expected_ref}", manifest.candidate_commit_id());
+    if !advertised.lines().any(|line| line == expected) {
         return Err(ArtifactError::invalid(
-            "candidate source manifest schema version is unsupported",
+            "candidate bundle does not advertise its exact commit identity",
         ));
     }
-    git_object_id(&manifest.candidate_commit_id, "candidateCommitId")?;
-    let canonical = CandidateSourceManifest::new(manifest.candidate_commit_id.clone())?.encode()?;
-    if artifact.bytes() != canonical {
-        return Err(ArtifactError::invalid(
-            "candidate Artifact bytes are not the canonical source manifest",
-        ));
-    }
-    Ok(manifest.candidate_commit_id)
+    Ok(())
 }
 
 fn controlled_repository(

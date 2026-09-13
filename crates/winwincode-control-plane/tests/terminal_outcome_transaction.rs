@@ -9,6 +9,10 @@ use std::{
     thread,
 };
 
+#[path = "../../../tests/support/git_candidate.rs"]
+mod git_candidate;
+use git_candidate::candidate_bundle;
+
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::{Actor, CommandEnvelope, CommandName, Scope};
 use winwincode_audit::{AuditEvent, AuditExecutionSubjectKind, AuditScope};
@@ -53,16 +57,15 @@ use winwincode_storage::PublicEventSource;
 use winwincode_storage::{
     AggregateJournalKey, AggregateJournalPublication, AggregateJournalRecord, ArtifactChunk,
     ArtifactMeteringAttribution, ArtifactOpen, ArtifactProvenance, ArtifactRetention,
-    ArtifactStore, AuthenticatedWorkerPlacement, CandidateSourceManifest,
-    EXECUTION_PROTOCOL_VERSION, ExecutionAdmissionBoundary, ExecutionAdmissionLimits,
-    ExecutionAdmissionPolicy, ExecutionJobState, ExecutionJobSubmission,
-    ExecutionJobTransitionRequest, ExecutionLeaseClaim, ExecutionQueueScope,
-    ExecutionRepositoryAccess, ExecutionReservationRequest, ExecutionReservationStart,
-    LocalArtifactObjectStore, NewOutboxEvent, ProductStateStorage, PublicEventActor,
-    ReceiptIdentity, ReceiptScopeKey, SqliteStorage, StateCommit, WorkerAuthenticationIdentity,
-    WorkerHeartbeatRequest, WorkerPlatform, WorkerPoolId, WorkerRegistrationRequest,
-    WorkerRegistryScope, WorkerSlotAuthority, WorkerSlotOpenRequest, WorkerSlotResourceLimits,
-    WorkerSlotResources,
+    ArtifactStore, AuthenticatedWorkerPlacement, EXECUTION_PROTOCOL_VERSION,
+    ExecutionAdmissionBoundary, ExecutionAdmissionLimits, ExecutionAdmissionPolicy,
+    ExecutionJobState, ExecutionJobSubmission, ExecutionJobTransitionRequest, ExecutionLeaseClaim,
+    ExecutionQueueScope, ExecutionRepositoryAccess, ExecutionReservationRequest,
+    ExecutionReservationStart, GitCandidateArtifactManifest, LocalArtifactObjectStore,
+    NewOutboxEvent, ProductStateStorage, PublicEventActor, ReceiptIdentity, ReceiptScopeKey,
+    SqliteStorage, StateCommit, WorkerAuthenticationIdentity, WorkerHeartbeatRequest,
+    WorkerPlatform, WorkerPoolId, WorkerRegistrationRequest, WorkerRegistryScope,
+    WorkerSlotAuthority, WorkerSlotOpenRequest, WorkerSlotResourceLimits, WorkerSlotResources,
 };
 
 use winwincode_storage::{
@@ -750,16 +753,21 @@ fn repository_receipt_scope(scope: &RepositoryScope) -> ReceiptScopeKey {
 
 fn seed_candidate_artifact(
     root: &Path,
+    repository: &Path,
+    base_commit: &str,
     scope: &RepositoryScope,
     delivery: &Delivery,
     message: &mut JobOutcomeMessage,
     candidate_commit: &str,
     seed: u64,
 ) {
-    let bytes = CandidateSourceManifest::new(candidate_commit.to_owned())
-        .expect("candidate manifest")
-        .encode()
-        .expect("candidate manifest encoding");
+    let bytes = GitCandidateArtifactManifest::new(
+        candidate_commit.to_owned(),
+        candidate_bundle(repository, base_commit, candidate_commit),
+    )
+    .expect("candidate manifest")
+    .encode()
+    .expect("candidate manifest encoding");
     let digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(&bytes)));
     let artifact = message
         .outcome
@@ -2356,6 +2364,8 @@ fn successful_writer_settles_candidate_ready_and_replays_after_lease_expiry() {
     let mut message = terminal_message(&job, &delivery, seed, ExecutionOutcomeStatus::Succeeded);
     seed_candidate_artifact(
         &root,
+        &repository,
+        &base_commit,
         &scope,
         &delivery,
         &mut message,
