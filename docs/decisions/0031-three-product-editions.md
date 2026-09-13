@@ -38,6 +38,12 @@ WinWinCode 需要分别服务个人开发者、SaaS 用户和私有化客户。�
 Community 面向单用户、本机项目和本地 Worker。本机产品数据使用 SQLite；Codex Core 的
 SQLite 继续由内核独占。项目自有代码使用 Apache-2.0。
 
+Community 的身份模型只有一个本地 Owner：首次启动用 bootstrap proof 创建 Owner，之后
+通过 Owner 用户名和密码登录；允许同一 Owner 同时拥有多个浏览器会话和连接多台 Device
+Client。Owner 只能修改自己的凭据。组织用户、Member、团队、RBAC、账号生命周期管理和
+向其他用户授予 Client/Repository 权限属于 Enterprise，不进入 Community 的 Server、Web、
+schema 或生成合同。
+
 Community 核心发布物只包含执行和公共协议能力。组织管理、租户、计费、Hosted 运维、
 私有化部署和产品管理页面归入各自产品仓库。
 

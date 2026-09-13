@@ -379,30 +379,6 @@ async fn login(address: std::net::SocketAddr, username: &str, password: &str) ->
     (session_cookie_from_response(&response), user_id)
 }
 
-async fn create_and_login_member(
-    address: std::net::SocketAddr,
-    owner_cookie: &str,
-    username: &str,
-) -> (String, String) {
-    let create = json!({
-        "schemaVersion": SCHEMA_VERSION,
-        "username": username,
-        "role": "member",
-    })
-    .to_string();
-    let response = http_request(
-        address,
-        &cookie_post("/api/v1/users", &create, owner_cookie),
-    )
-    .await;
-    assert!(response.starts_with("HTTP/1.1 201"), "{response}");
-    let temporary = response_body(&response)["temporaryPassword"]
-        .as_str()
-        .expect("temporary password")
-        .to_owned();
-    login(address, username, &temporary).await
-}
-
 // ---- staging bodies --------------------------------------------------------
 
 fn occupancy_body(client_id: &str) -> String {
@@ -896,10 +872,8 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
     let address = running.local_address();
     let endpoint = format!("http://{address}{EXCHANGE_ENDPOINT_PATH}");
 
-    // ---- Phase 0: users, enrollment, capacity, worker lane, occupancy -----
+    // ---- Phase 0: Owner, enrollment, capacity, worker lane, occupancy -----
     let (owner_cookie, owner_id) = initialize_and_login_owner(address).await;
-    let (member_cookie, _member_id) =
-        create_and_login_member(address, &owner_cookie, "member").await;
 
     let mut daemon = start_daemon(&endpoint, &device_root, "2026-09-04T00:00:00.000Z");
     drive_until(&mut daemon, "the enrollment adoption", |daemon| {
@@ -991,20 +965,7 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
     assert_eq!(mirror.occupancy_lease_id, lease_one_id);
     assert_eq!(mirror.fencing_token, token_one);
 
-    // ---- Phase 2: the non-holder cannot launch -----------------------------
-    let response = http_request(
-        address,
-        &cookie_post(
-            "/api/v1/sessions",
-            &launch_body(&public_client_id, &binding_id),
-            &member_cookie,
-        ),
-    )
-    .await;
-    assert_eq!(status_of(&response), "403", "{response}");
-    assert_eq!(wire_code(&response), "NOT_HOLDER");
-
-    // ---- Phase 3: the holder launches; the daemon consumes the grant -------
+    // ---- Phase 2: the holder launches; the daemon consumes the grant -------
     // The launch flow's 201 answers only after the device consumed the
     // grant, so the POST runs concurrently while the vertical drives the
     // daemon: the launch command is signed (durable downlink frame), the

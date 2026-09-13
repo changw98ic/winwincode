@@ -10,9 +10,7 @@ mod generated;
 mod user_account;
 
 pub use generated::*;
-pub use user_account::{
-    UserAccount, UserAccountError, UserAccountErrorKind, UserAccountRole, UserAccountState,
-};
+pub use user_account::{UserAccount, UserAccountError, UserAccountErrorKind};
 
 /// Returns whether `value` is the canonical Delivery identifier defined by the
 /// public schema.

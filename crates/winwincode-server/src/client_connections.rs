@@ -21,9 +21,8 @@
 //! the occupancy epic lands, and presence and lock facts map from the
 //! `ClientNode` registry.
 //!
-//! `POST /api/v1/clients/grants/revoke` revokes one grant immediately
-//! (contract 3): the holder themself or an Owner may revoke; revocation takes
-//! effect without waiting for the Device Client.
+//! `POST /api/v1/clients/grants/revoke` revokes the Owner's grant immediately;
+//! revocation takes effect without waiting for the Device Client.
 //!
 //! Authorization decisions (grant creation and revocation) are recorded in
 //! the durable `client_connect_audit` table. The connect flow carries no
@@ -120,8 +119,6 @@ pub enum ClientConnectionsErrorKind {
     ClientLocked,
     /// One of the three attempt dimensions is throttled.
     RateLimited,
-    /// The acting user may not revoke the requested grant.
-    PermissionDenied,
     /// No active grant matches the revoke request.
     ResourceNotFound,
     /// Durable state or storage failed; nothing was decided.
@@ -286,35 +283,25 @@ impl ClientConnectionsApplication {
         directory_json(&mut storage, user_id)
     }
 
-    /// Revokes one active grant immediately (contract 3). The holder or an
-    /// Owner may revoke; the request names the Client and optionally the
-    /// holder (`clientId`, optional `userId`).
+    /// Revokes the signed-in Owner's active grant immediately (contract 3).
     ///
     /// # Errors
     ///
-    /// Rejects an invalid body, an unknown grant, a non-holder non-Owner
-    /// actor, or storage failure.
+    /// Rejects an invalid body, an unknown grant, or storage failure.
     pub fn revoke(
         &self,
-        acting_user_id: &str,
-        acting_is_owner: bool,
+        owner_user_id: &str,
         request: &Value,
     ) -> Result<Value, ClientConnectionsError> {
         let Some(fields) = request.as_object() else {
             return Err(ClientConnectionsError::invalid_request());
         };
-        // `schemaVersion` plus `clientId`, optionally plus `userId`.
-        if fields.len() != 2 && fields.len() != 3 {
+        if fields.len() != 2
+            || fields.get("schemaVersion").and_then(Value::as_str) != Some(SUPPORTED_SCHEMA_VERSION)
+        {
             return Err(ClientConnectionsError::invalid_request());
         }
         let public_client_id = required_digits(fields.get("clientId"), 9, 12)?;
-        let target_user_id = match fields.get("userId") {
-            Some(value) => value
-                .as_str()
-                .ok_or_else(ClientConnectionsError::invalid_request)?
-                .to_owned(),
-            None => acting_user_id.to_owned(),
-        };
         let mut storage = self.open_storage()?;
         let node = {
             let mut registry = ClientRegistryService::new(&mut storage);
@@ -330,7 +317,7 @@ impl ClientConnectionsApplication {
         };
         let mut grants = AccessGrantService::new(&mut storage);
         let grant = grants
-            .active_grant(&node.client_node_id, &target_user_id)
+            .active_grant(&node.client_node_id, owner_user_id)
             .map_err(|_| ClientConnectionsError::unavailable())?
             .ok_or_else(|| {
                 ClientConnectionsError::new(
@@ -338,12 +325,6 @@ impl ClientConnectionsApplication {
                     "no active grant matches the requested client and user",
                 )
             })?;
-        if acting_user_id != target_user_id && !acting_is_owner {
-            return Err(ClientConnectionsError::new(
-                ClientConnectionsErrorKind::PermissionDenied,
-                "only the grant holder or an Owner may revoke a grant",
-            ));
-        }
         let revoked = grants
             .revoke_grant(&grant.client_access_grant_id, grant.revision)
             .map_err(|error| match error.kind() {
@@ -359,14 +340,13 @@ impl ClientConnectionsApplication {
             &node.client_node_id,
             &revoked.client_access_grant_id,
             &revoked.user_id,
-            acting_user_id,
-            Some("revoked by grant holder or owner"),
+            owner_user_id,
+            Some("revoked by local owner"),
         )?;
         Ok(json!({
             "schemaVersion": SUPPORTED_SCHEMA_VERSION,
             "revoked": true,
             "clientId": node.public_client_id,
-            "userId": revoked.user_id,
         }))
     }
 

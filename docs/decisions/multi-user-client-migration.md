@@ -1,11 +1,15 @@
 # 多用户 Client 迁移边界 inventory（CLIENT-000.10）
 
-- 状态：草案（Phase 0 迁移 inventory lane 交付）
+- 状态：已取代
 - 日期：2026-09-04
+- 取代者：[ADR-0031](0031-three-product-editions.md) 的 Community 单 Owner 边界（`winwincode-baum`，2026-09-13）
 - 输入：`winwincode-multi-user-client-complete-plan.md` §10.1、§22、Phase 1-8
 - 机器可读清单：[`multi-user-client-migration.inventory.json`](multi-user-client-migration.inventory.json)
 - 格式先例：[`0028-control-plane-worker-migration.inventory.json`](0028-control-plane-worker-migration.inventory.json)
 - 行号基准：分支 `agent/muc-migration-inventory` 本次检出；后续演进时须重新核对
+
+> 本文仅保留为旧迁移盘点。Community 不再实施其中的 Member、账号管理或用户间授权；
+> 设备连接、占用、恢复、fencing 与 Worker 启动触点按单一 Owner 模型继续维护。
 
 本清单盘点多用户共享 Client 迁移会触碰的既有触点。每个触点记录当前职责、
 `file:line` 证据、计划中的迁移目标（Phase / Beads epic）与风险备注。

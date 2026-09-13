@@ -1,11 +1,16 @@
 # ADR-0030：多用户共享 Client 的访问授权与独占占用
 
-- 状态：已接受
+- 状态：已取代
 - 日期：2026-09-05
+- 取代者：[ADR-0031](0031-three-product-editions.md) 的 Community 单 Owner 边界（`winwincode-baum`，2026-09-13）
 - 对应任务：`winwincode-9fu.1`（CLIENT-000.1）
 - 上层运行边界：[ADR-0028](0028-control-plane-worker-migration.md)
 - Client 表现层边界：[ADR-0029](0029-client-ui-architecture.md)
 - 执行合同：[ExecutionPort v1](../contracts/execution-port-v1.md)
+
+> 本文保留为历史设计记录。Community 当前只支持一个本地 Owner；本文的多账号、Member、
+> 用户间授权与管理员语义归 Enterprise。设备 presence、单 Owner 占用、恢复和 fencing
+> 仍是 Community 运行边界，但不构成多用户产品能力。
 
 ## 背景
 

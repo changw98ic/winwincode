@@ -99,7 +99,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     )?);
     let api = Arc::new(GeneratedContractDispatcher::new(application));
     let accounts = Arc::new(UserAccountService::open(config.data_directory())?);
-    let initialized_owner = Arc::new(Mutex::new(accounts.active_owner_id()?));
+    let initialized_owner = Arc::new(Mutex::new(accounts.owner_id()?));
     let owner_hook = approval_seed.map(|(runtime, product_session_revision)| {
         Arc::new(FixtureOwnerInitialization {
             data_directory: config.data_directory().to_path_buf(),

@@ -227,13 +227,6 @@ fn bearer_post(path: &str, body: &str, proof: &str) -> String {
     )
 }
 
-fn cookie_post(path: &str, body: &str, cookie: &str) -> String {
-    format!(
-        "POST {path} HTTP/1.1\r\nHost: control.example\r\nOrigin: {ORIGIN}\r\nCookie: wwc_session={cookie}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    )
-}
-
 fn status_of(response: &str) -> String {
     response
         .lines()
@@ -310,31 +303,6 @@ async fn login(address: std::net::SocketAddr, username: &str, password: &str) ->
         .expect("actor id")
         .to_owned();
     (session_cookie_from_response(&response), user_id)
-}
-
-/// Creates one member account and signs in; returns (cookie, userId).
-async fn create_and_login_member(
-    address: std::net::SocketAddr,
-    owner_cookie: &str,
-    username: &str,
-) -> (String, String) {
-    let create = serde_json::json!({
-        "schemaVersion": SCHEMA_VERSION,
-        "username": username,
-        "role": "member",
-    })
-    .to_string();
-    let response = http_request(
-        address,
-        &cookie_post("/api/v1/users", &create, owner_cookie),
-    )
-    .await;
-    assert!(response.starts_with("HTTP/1.1 201"), "{response}");
-    let temporary = response_body(&response)["temporaryPassword"]
-        .as_str()
-        .expect("temporary password")
-        .to_owned();
-    login(address, username, &temporary).await
 }
 
 // ---- durable staging (the Device-Client side of the projection) -----------
@@ -466,15 +434,6 @@ fn stage_repository_grant_with_permissions(
         .expect("repository grant");
 }
 
-fn stage_managing_repository_grant(data_directory: &Path, binding_id: &str, user_id: &str) {
-    stage_repository_grant_with_permissions(
-        data_directory,
-        binding_id,
-        user_id,
-        RepositoryGrantPermissions::UseManage,
-    );
-}
-
 /// Applies one rescan outcome through the repository service (the server-side
 /// consumption of a device revalidation); returns the new revision. A
 /// non-`available` outcome reports a dirty work tree, which the frozen
@@ -569,28 +528,16 @@ async fn repository_directory_rejects_malformed_and_unknown_client_identities() 
     let _ = std::fs::remove_dir_all(&auth_directory);
 }
 
-/// The dual-authorization matrix (plan 13.4) plus the field-by-field facade
-/// shape and per-user directory sets:
-///
-/// - the Owner holds the Client grant and the repository grant on `alpha`, so
-///   `alpha` is visible and `beta` (repository grant missing) is not;
-/// - the Member holds the Client grant and the repository grant on `beta`, so
-///   their directory is different from the Owner's;
-/// - the Spectator holds a repository grant on `alpha` but no Client grant,
-///   so nothing is visible.
+/// The Owner holds the Client grant and the repository grant on `alpha`, so
+/// `alpha` is visible and `beta` (repository grant missing) is not.
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
-async fn repository_directory_follows_the_dual_authorization_and_facade_shape() {
+async fn repository_directory_follows_owner_authorization_and_facade_shape() {
     let data_directory = test_directory("repo-dir-acl");
     let auth_directory = test_directory("repo-dir-acl-sessions");
     let running = start_server(&data_directory, &auth_directory).await;
     let address = running.local_address();
     let (owner_cookie, owner_id) = initialize_and_login_owner(address).await;
-    let (member_cookie, member_id) =
-        create_and_login_member(address, &owner_cookie, "member").await;
-    let (spectator_cookie, spectator_id) =
-        create_and_login_member(address, &owner_cookie, "spectator").await;
-
     stage_device(&data_directory);
     upsert_binding(
         &data_directory,
@@ -609,10 +556,7 @@ async fn repository_directory_follows_the_dual_authorization_and_facade_shape() 
         "fingerprint-beta",
     );
     stage_managing_client_grant(&data_directory, NODE, &owner_id);
-    stage_client_grant(&data_directory, NODE, &member_id);
     stage_repository_grant(&data_directory, &alpha_binding_id(), &owner_id);
-    stage_repository_grant(&data_directory, &beta_binding_id(), &member_id);
-    stage_repository_grant(&data_directory, &alpha_binding_id(), &spectator_id);
 
     // The Owner sees exactly alpha, field by field in the facade shape.
     let response = http_request(
@@ -647,12 +591,10 @@ async fn repository_directory_follows_the_dual_authorization_and_facade_shape() 
         field_names,
         vec![
             "availability",
-            "canGrantAccess",
             "defaultBranch",
             "dirtyState",
             "displayName",
             "headCommit",
-            "permissions",
             "repositoryBindingId",
         ]
     );
@@ -662,156 +604,6 @@ async fn repository_directory_follows_the_dual_authorization_and_facade_shape() 
     assert_eq!(card["headCommit"], "a".repeat(40));
     assert_eq!(card["dirtyState"], "clean");
     assert_eq!(card["availability"], "available");
-    assert_eq!(card["permissions"], "use");
-    assert_eq!(card["canGrantAccess"], false);
-
-    // The Member's directory is a different set: beta, with its own facts.
-    let response = http_request(
-        address,
-        &repositories_get("/api/v1/repositories?clientId=927351842", &member_cookie),
-    )
-    .await;
-    assert_eq!(status_of(&response), "200", "{response}");
-    let repositories = response_body(&response)["repositories"]
-        .as_array()
-        .expect("repositories array")
-        .to_owned();
-    assert_eq!(repositories.len(), 1, "member sees only beta");
-    assert_eq!(
-        repositories[0]["repositoryBindingId"],
-        beta_binding_id().as_str()
-    );
-    assert_eq!(repositories[0]["displayName"], "Beta Repo");
-    assert_eq!(repositories[0]["defaultBranch"], "trunk");
-    assert_eq!(repositories[0]["headCommit"], "b".repeat(64));
-    assert_eq!(repositories[0]["dirtyState"], "clean");
-    assert_eq!(repositories[0]["availability"], "available");
-    assert_eq!(repositories[0]["permissions"], "use");
-    assert_eq!(repositories[0]["canGrantAccess"], false);
-
-    // A repository grant without the Client grant is invisible (plan 13.4).
-    let response = http_request(
-        address,
-        &repositories_get("/api/v1/repositories?clientId=927351842", &spectator_cookie),
-    )
-    .await;
-    assert_eq!(status_of(&response), "200", "{response}");
-    assert_eq!(
-        response_body(&response)["repositories"]
-            .as_array()
-            .expect("repositories array")
-            .len(),
-        0,
-        "the spectator holds a repository grant but no Client grant"
-    );
-
-    running.shutdown().await.expect("shutdown");
-    let _ = std::fs::remove_dir_all(&data_directory);
-    let _ = std::fs::remove_dir_all(&auth_directory);
-}
-
-#[tokio::test]
-async fn repository_grant_route_requires_binding_manage_and_accepts_canonical_body() {
-    let data_directory = test_directory("repo-grant-route");
-    let auth_directory = test_directory("repo-grant-route-sessions");
-    let running = start_server(&data_directory, &auth_directory).await;
-    let address = running.local_address();
-    let (owner_cookie, owner_id) = initialize_and_login_owner(address).await;
-    let (_, target_id) = create_and_login_member(address, &owner_cookie, "grant-target").await;
-    let (limited_cookie, limited_id) =
-        create_and_login_member(address, &owner_cookie, "limited-grantor").await;
-
-    stage_device(&data_directory);
-    upsert_binding(
-        &data_directory,
-        &alpha_binding_id(),
-        "Alpha Repo",
-        "main",
-        &"a".repeat(40),
-        "fingerprint-alpha",
-    );
-    stage_managing_client_grant(&data_directory, NODE, &owner_id);
-    stage_managing_repository_grant(&data_directory, &alpha_binding_id(), &owner_id);
-    stage_managing_client_grant(&data_directory, NODE, &limited_id);
-    stage_repository_grant(&data_directory, &alpha_binding_id(), &limited_id);
-
-    let body = serde_json::json!({
-        "schemaVersion": SCHEMA_VERSION,
-        "repositoryBindingId": alpha_binding_id(),
-        "userId": target_id,
-        "permissions": "use",
-    })
-    .to_string();
-    let response = http_request(
-        address,
-        &cookie_post("/api/v1/repositories/grants", &body, &owner_cookie),
-    )
-    .await;
-    assert_eq!(status_of(&response), "201", "authorized grant: {response}");
-    let grant = response_body(&response);
-    assert_eq!(grant["schemaVersion"], SCHEMA_VERSION);
-    assert_eq!(grant["repositoryBindingId"], alpha_binding_id());
-    assert_eq!(grant["userId"], target_id);
-    assert_eq!(grant["permissions"], "use");
-    assert_eq!(grant["revision"], 1);
-
-    for (body, expected_status) in [
-        (
-            serde_json::json!({
-                "schemaVersion": "winwincode/v0",
-                "repositoryBindingId": alpha_binding_id(),
-                "userId": target_id,
-                "permissions": "use",
-            }),
-            "426",
-        ),
-        (
-            serde_json::json!({
-                "schemaVersion": SCHEMA_VERSION,
-                "repositoryBindingId": alpha_binding_id(),
-                "userId": target_id,
-                "permissions": "use",
-                "unexpected": true,
-            }),
-            "400",
-        ),
-    ] {
-        let response = http_request(
-            address,
-            &cookie_post(
-                "/api/v1/repositories/grants",
-                &body.to_string(),
-                &owner_cookie,
-            ),
-        )
-        .await;
-        assert_eq!(
-            status_of(&response),
-            expected_status,
-            "non-canonical grant: {response}"
-        );
-        assert_eq!(wire_code(&response), "INVALID_REQUEST");
-    }
-
-    // Client manage alone does not grant administration of a binding.
-    let body = serde_json::json!({
-        "schemaVersion": SCHEMA_VERSION,
-        "repositoryBindingId": alpha_binding_id(),
-        "userId": target_id,
-        "permissions": "use+manage",
-    })
-    .to_string();
-    let response = http_request(
-        address,
-        &cookie_post("/api/v1/repositories/grants", &body, &limited_cookie),
-    )
-    .await;
-    assert_eq!(
-        status_of(&response),
-        "403",
-        "use-only binding grant: {response}"
-    );
-    assert_eq!(wire_code(&response), "PERMISSION_DENIED");
 
     running.shutdown().await.expect("shutdown");
     let _ = std::fs::remove_dir_all(&data_directory);

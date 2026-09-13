@@ -119,6 +119,11 @@ export interface BrowserControlPasswordCredentials {
   readonly password: string
 }
 
+export interface BrowserControlPasswordChange {
+  readonly currentPassword: string
+  readonly newPassword: string
+}
+
 export interface BrowserControlOwnerInitialization extends BrowserControlPasswordCredentials {
   readonly bootstrapProof: string
 }
@@ -270,6 +275,10 @@ export interface QueryCacheClientPort<
     credentials: BrowserControlPasswordCredentials,
     options?: BrowserControlRequestOptions,
   ): Promise<ProductSession>
+  changePassword(
+    change: BrowserControlPasswordChange,
+    options?: BrowserControlRequestOptions,
+  ): Promise<void>
   initializationStatus(
     options?: BrowserControlRequestOptions,
   ): Promise<BrowserControlInitializationStatus>

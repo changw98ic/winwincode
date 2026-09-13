@@ -25,9 +25,7 @@ use winwincode_api::generated::{
     Actor, ControlPlaneWebSocketProtocolErrorFrame, Error, ErrorDetailValue, ErrorEnvelope,
     OrganizationScope, OrganizationScopeKind, RetryableErrorCode, Scope, TerminalErrorCode,
 };
-use winwincode_domain::{
-    Instant, OrganizationId, UserAccountRole, UserActor, UserActorKind, UserId,
-};
+use winwincode_domain::{Instant, OrganizationId, UserActor, UserActorKind, UserId};
 use winwincode_server::{
     ApiError, AuthSessionBootstrap, AuthSessionConfig, AuthenticatedPrincipal, ControlPlaneApiPort,
     EventSubscription, RequestAuthenticator, RunningServer, ServerConfig, ServerError, ServerTls,
@@ -354,40 +352,6 @@ async fn login_as(address: SocketAddr, username: &str, password: &str) -> (Strin
     )
 }
 
-/// Creates one user through the Owner endpoint and returns (userId, temp).
-async fn create_user_via_api(
-    address: SocketAddr,
-    owner_cookie: &str,
-    username: &str,
-    role: &str,
-) -> (String, String) {
-    let body = json!({
-        "schemaVersion": "winwincode/v1",
-        "username": username,
-        "role": role,
-    })
-    .to_string();
-    let response = http_request(
-        address,
-        &cookie_post(
-            "/api/v1/users",
-            &body,
-            "https://client.example",
-            owner_cookie,
-        ),
-    )
-    .await;
-    assert!(response.starts_with("HTTP/1.1 201 Created"), "{response}");
-    let value = response_json(&response);
-    (
-        value["user"]["userId"].as_str().expect("userId").to_owned(),
-        value["temporaryPassword"]
-            .as_str()
-            .expect("temporaryPassword")
-            .to_owned(),
-    )
-}
-
 async fn current_session(address: SocketAddr, cookie: &str) -> String {
     http_request(
         address,
@@ -611,21 +575,13 @@ async fn one_origin_serves_authenticated_commands_queries_and_events() {
 }
 
 #[tokio::test]
-async fn session_context_isolates_users_shrinks_scope_revokes_and_survives_restart() {
+async fn session_context_updates_all_owner_sessions_and_survives_restart() {
     let directory = test_directory("winwincode-auth-context-test");
     let (accounts, manager) = open_auth(
         &directory,
         "proof-owner-initialization",
         vec![fixture_scope(1), fixture_scope(2)],
     );
-    accounts
-        .create_user(
-            "Ada",
-            UserAccountRole::Member,
-            "member-password-1",
-            &Instant("2027-05-01T08:00:00.000Z".to_owned()),
-        )
-        .expect("member account");
     let first_server = start_server(
         config("127.0.0.1:0".parse().expect("address")),
         Arc::clone(&manager),
@@ -643,47 +599,31 @@ async fn session_context_isolates_users_shrinks_scope_revokes_and_survives_resta
         )
         .await,
     );
-    let (member_cookie, member) = login_as(address, "ada", "member-password-1").await;
+    let (second_cookie, second) = login_as(address, OWNER_USERNAME, OWNER_PASSWORD).await;
     let owner_user_id = manager
         .initialized_owner()
         .expect("durable Owner marker")
         .0
         .clone();
-    let member_user_id = member["actor"]["id"]
-        .as_str()
-        .expect("member id")
-        .to_owned();
     assert!(owner_user_id.starts_with("usr_"));
-    assert_ne!(owner_user_id, member_user_id);
-    assert_eq!(member["authorizedScopes"].as_array().map(Vec::len), Some(2));
+    assert_eq!(second["actor"]["id"], owner_user_id);
+    assert_eq!(second["authorizedScopes"].as_array().map(Vec::len), Some(2));
 
     let owner_actor = actor_for(&owner_user_id);
     assert_eq!(
         manager
             .replace_authorized_scopes(&owner_actor, vec![fixture_scope(2)])
             .expect("shrink owner"),
-        1
+        2
     );
     let first = current_session(address, &owner_cookie).await;
-    let second = current_session(address, &member_cookie).await;
+    let second = current_session(address, &second_cookie).await;
     let second_context = response_json(&second);
     assert_eq!(
         response_json(&first)["authorizedScopes"],
         json!([fixture_scope(2)])
     );
-    assert_eq!(second_context["actor"]["id"], member["actor"]["id"]);
-
-    assert_eq!(
-        manager
-            .revoke_actor_sessions(&owner_actor)
-            .expect("revoke owner"),
-        1
-    );
-    assert!(
-        current_session(address, &owner_cookie)
-            .await
-            .starts_with("HTTP/1.1 401 Unauthorized")
-    );
+    assert_eq!(second_context["actor"]["id"], owner_user_id);
     first_server.shutdown().await.expect("first shutdown");
     drop(manager);
     drop(accounts);
@@ -698,7 +638,7 @@ async fn session_context_isolates_users_shrinks_scope_revokes_and_survives_resta
     )
     .await
     .expect("restart server");
-    let restored = current_session(restarted.local_address(), &member_cookie).await;
+    let restored = current_session(restarted.local_address(), &second_cookie).await;
     assert!(restored.starts_with("HTTP/1.1 200 OK"), "{restored}");
     assert_eq!(response_json(&restored), second_context);
     restarted.shutdown().await.expect("restarted shutdown");
@@ -1552,45 +1492,6 @@ fn origin_get(path: &str, origin: &str) -> String {
     )
 }
 
-async fn set_user_state_via_api(
-    address: SocketAddr,
-    owner_cookie: &str,
-    user_id: &str,
-    state: &str,
-    expected_revision: i64,
-) -> String {
-    let body = json!({
-        "schemaVersion": "winwincode/v1",
-        "userId": user_id,
-        "state": state,
-        "expectedRevision": expected_revision,
-    })
-    .to_string();
-    http_request(
-        address,
-        &cookie_post(
-            "/api/v1/users/state",
-            &body,
-            "https://client.example",
-            owner_cookie,
-        ),
-    )
-    .await
-}
-
-async fn reset_password_via_api(address: SocketAddr, cookie: &str, body: Value) -> String {
-    http_request(
-        address,
-        &cookie_post(
-            "/api/v1/users/password",
-            &body.to_string(),
-            "https://client.example",
-            cookie,
-        ),
-    )
-    .await
-}
-
 #[tokio::test]
 async fn first_initialization_completes_once_and_restarts_stay_closed() {
     let directory = test_directory("winwincode-initialization-gate-test");
@@ -1679,98 +1580,6 @@ async fn first_initialization_completes_once_and_restarts_stay_closed() {
 }
 
 #[tokio::test]
-async fn disabled_user_sessions_end_immediately_and_users_stay_isolated() {
-    let api = Arc::new(FakeApi::default());
-    let running = start_server(
-        config("127.0.0.1:0".parse().expect("address")),
-        auth(),
-        api.clone(),
-    )
-    .await
-    .expect("start server");
-    let address = running.local_address();
-    let owner_cookie = bootstrap_cookie(address).await;
-    let (member_id, member_password) =
-        create_user_via_api(address, &owner_cookie, "ada", "member").await;
-    let (member_cookie, _) = login_as(address, "ada", &member_password).await;
-
-    // A member cannot drive the Owner endpoints.
-    let forbidden = http_request(
-        address,
-        &cookie_post(
-            "/api/v1/users",
-            r#"{"schemaVersion":"winwincode/v1","username":"third","role":"member"}"#,
-            "https://client.example",
-            &member_cookie,
-        ),
-    )
-    .await;
-    assert!(
-        forbidden.starts_with("HTTP/1.1 403 Forbidden"),
-        "{forbidden}"
-    );
-
-    // Disabling the member kills every live session immediately.
-    let disabled = set_user_state_via_api(address, &owner_cookie, &member_id, "disabled", 1).await;
-    assert!(disabled.starts_with("HTTP/1.1 200 OK"), "{disabled}");
-    assert!(
-        current_session(address, &member_cookie)
-            .await
-            .starts_with("HTTP/1.1 401 Unauthorized"),
-        "disabled member session must be revoked"
-    );
-    let revoked_query = http_request(
-        address,
-        &cookie_post(
-            "/api/v1/queries",
-            r#"{"query":"settings.get","schemaVersion":"winwincode/v1"}"#,
-            "https://client.example",
-            &member_cookie,
-        ),
-    )
-    .await;
-    assert!(
-        revoked_query.starts_with("HTTP/1.1 401 Unauthorized"),
-        "{revoked_query}"
-    );
-    let disabled_login = login_response(address, "ada", &member_password).await;
-    assert!(
-        disabled_login.starts_with("HTTP/1.1 401 Unauthorized"),
-        "{disabled_login}"
-    );
-    // The Owner session is untouched.
-    assert!(
-        current_session(address, &owner_cookie)
-            .await
-            .starts_with("HTTP/1.1 200 OK")
-    );
-
-    // Re-enabling restores login with the unchanged password.
-    let enabled = set_user_state_via_api(address, &owner_cookie, &member_id, "active", 2).await;
-    assert!(enabled.starts_with("HTTP/1.1 200 OK"), "{enabled}");
-    let (_, member_again) = login_as(address, "ada", &member_password).await;
-    assert_eq!(member_again["actor"]["kind"], "user");
-
-    // The acting Owner cannot disable the account in use.
-    let owner_id = auth_owner_id(address, &owner_cookie).await;
-    let self_disable =
-        set_user_state_via_api(address, &owner_cookie, &owner_id, "disabled", 1).await;
-    assert!(
-        self_disable.starts_with("HTTP/1.1 409 Conflict"),
-        "{self_disable}"
-    );
-    running.shutdown().await.expect("shutdown");
-}
-
-async fn auth_owner_id(address: SocketAddr, cookie: &str) -> String {
-    let current = current_session(address, cookie).await;
-    response_json(&current)["actor"]["id"]
-        .as_str()
-        .expect("owner id")
-        .to_owned()
-}
-
-#[tokio::test]
 async fn login_rate_limiting_returns_an_explicit_error() {
     let running = start_server(
         config("127.0.0.1:0".parse().expect("address")),
@@ -1780,8 +1589,7 @@ async fn login_rate_limiting_returns_an_explicit_error() {
     .await
     .expect("start server");
     let address = running.local_address();
-    let owner_cookie = bootstrap_cookie(address).await;
-    let (_, member_password) = create_user_via_api(address, &owner_cookie, "ada", "member").await;
+    let _owner_cookie = bootstrap_cookie(address).await;
 
     for attempt in 0..5 {
         let failed = login_response(address, "owner", "wrong-password-1").await;
@@ -1797,18 +1605,18 @@ async fn login_rate_limiting_returns_an_explicit_error() {
     );
     assert!(limited.contains("RATE_LIMITED"), "{limited}");
 
-    // A different username keeps its own budget.
-    let (member_cookie, _) = login_as(address, "ada", &member_password).await;
+    // An unknown username has its own budget and still receives a generic
+    // authentication failure rather than the Owner's rate-limit response.
+    let unknown = login_response(address, "ada", OWNER_PASSWORD).await;
     assert!(
-        current_session(address, &member_cookie)
-            .await
-            .starts_with("HTTP/1.1 200 OK")
+        unknown.starts_with("HTTP/1.1 401 Unauthorized"),
+        "{unknown}"
     );
     running.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test]
-async fn owner_user_management_endpoints_cover_create_state_and_password_resets() {
+async fn owner_password_change_rotates_the_only_credential() {
     let running = start_server(
         config("127.0.0.1:0".parse().expect("address")),
         auth(),
@@ -1819,97 +1627,55 @@ async fn owner_user_management_endpoints_cover_create_state_and_password_resets(
     let address = running.local_address();
     let owner_cookie = bootstrap_cookie(address).await;
 
-    // Owner creates a member whose temporary password is the only credential.
-    let (member_id, first_temporary) =
-        create_user_via_api(address, &owner_cookie, "ada", "member").await;
-    assert!(member_id.starts_with("usr_"));
-    let (_, created) = login_as(address, "ada", &first_temporary).await;
-    assert_eq!(created["actor"]["kind"], "user");
-
-    // A duplicate normalized username conflicts.
-    let duplicate = http_request(
+    let removed_users_route = http_request(
         address,
         &cookie_post(
             "/api/v1/users",
-            r#"{"schemaVersion":"winwincode/v1","username":"ADA","role":"member"}"#,
+            r#"{"schemaVersion":"winwincode/v1","username":"ada","role":"member"}"#,
             "https://client.example",
             &owner_cookie,
         ),
     )
     .await;
     assert!(
-        duplicate.starts_with("HTTP/1.1 409 Conflict"),
-        "{duplicate}"
+        removed_users_route.starts_with("HTTP/1.1 404 Not Found"),
+        "{removed_users_route}"
     );
 
-    // Owner resets the member password: a fresh temporary password is issued
-    // and the previous one stops working.
-    let reset = reset_password_via_api(
+    let wrong_current = http_request(
         address,
-        &owner_cookie,
-        json!({
-            "schemaVersion": "winwincode/v1",
-            "userId": member_id,
-            "expectedRevision": 1,
-        }),
+        &cookie_post(
+            "/api/v1/auth/password",
+            r#"{"schemaVersion":"winwincode/v1","currentPassword":"wrong-owner-password","newPassword":"rotated-owner-password"}"#,
+            "https://client.example",
+            &owner_cookie,
+        ),
     )
     .await;
-    assert!(reset.starts_with("HTTP/1.1 200 OK"), "{reset}");
-    let second_temporary = response_json(&reset)["temporaryPassword"]
-        .as_str()
-        .expect("temporaryPassword")
-        .to_owned();
-    assert_ne!(first_temporary, second_temporary);
-    let old_login = login_response(address, "ada", &first_temporary).await;
-    assert!(
-        old_login.starts_with("HTTP/1.1 401 Unauthorized"),
-        "{old_login}"
-    );
-    let (member_cookie, member) = login_as(address, "ada", &second_temporary).await;
-    assert_eq!(member["actor"]["kind"], "user");
-    let member_revision = response_json(&reset)["user"]["revision"]
-        .as_i64()
-        .expect("revision");
-
-    // Self reset requires the current password and rotates it.
-    let self_reset = reset_password_via_api(
-        address,
-        &member_cookie,
-        json!({
-            "schemaVersion": "winwincode/v1",
-            "userId": member_id,
-            "expectedRevision": member_revision,
-            "currentPassword": second_temporary,
-            "newPassword": "member-rotated-password",
-        }),
-    )
-    .await;
-    assert!(self_reset.starts_with("HTTP/1.1 200 OK"), "{self_reset}");
-    let wrong_current = login_response(address, "ada", &second_temporary).await;
     assert!(
         wrong_current.starts_with("HTTP/1.1 401 Unauthorized"),
         "{wrong_current}"
     );
-    let (rotated_cookie, rotated) = login_as(address, "ada", "member-rotated-password").await;
-    assert_eq!(rotated["actor"]["kind"], "user");
 
-    // A self reset with the wrong current password is refused.
-    let refused = reset_password_via_api(
+    let changed = http_request(
         address,
-        &rotated_cookie,
-        json!({
-            "schemaVersion": "winwincode/v1",
-            "userId": member_id,
-            "expectedRevision": member_revision + 1,
-            "currentPassword": "not-the-current-password",
-            "newPassword": "member-escalated-password",
-        }),
+        &cookie_post(
+            "/api/v1/auth/password",
+            r#"{"schemaVersion":"winwincode/v1","currentPassword":"initial-owner-password","newPassword":"rotated-owner-password"}"#,
+            "https://client.example",
+            &owner_cookie,
+        ),
     )
     .await;
+    assert!(changed.starts_with("HTTP/1.1 204 No Content"), "{changed}");
+
+    let old_login = login_response(address, OWNER_USERNAME, OWNER_PASSWORD).await;
     assert!(
-        refused.starts_with("HTTP/1.1 401 Unauthorized"),
-        "{refused}"
+        old_login.starts_with("HTTP/1.1 401 Unauthorized"),
+        "{old_login}"
     );
+    let (_, rotated) = login_as(address, OWNER_USERNAME, "rotated-owner-password").await;
+    assert_eq!(rotated["actor"]["kind"], "user");
     running.shutdown().await.expect("shutdown");
 }
 
@@ -1962,18 +1728,18 @@ async fn unauthenticated_requests_are_rejected() {
         "{no_cookie_query}"
     );
 
-    let no_cookie_users = http_request(
+    let no_cookie_password_change = http_request(
         address,
         &plain_post(
-            "/api/v1/users",
-            r#"{"schemaVersion":"winwincode/v1","username":"third","role":"member"}"#,
+            "/api/v1/auth/password",
+            r#"{"schemaVersion":"winwincode/v1","currentPassword":"initial-owner-password","newPassword":"rotated-owner-password"}"#,
             "https://client.example",
         ),
     )
     .await;
     assert!(
-        no_cookie_users.starts_with("HTTP/1.1 401 Unauthorized"),
-        "{no_cookie_users}"
+        no_cookie_password_change.starts_with("HTTP/1.1 401 Unauthorized"),
+        "{no_cookie_password_change}"
     );
 
     // An uninitialized Server refuses password logins outright.

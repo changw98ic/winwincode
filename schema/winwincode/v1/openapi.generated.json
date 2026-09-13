@@ -22362,80 +22362,6 @@
         ],
         "type": "string"
       },
-      "UserAccount": {
-        "additionalProperties": false,
-        "description": "Server-local user account. Ownership: Control Plane.",
-        "properties": {
-          "createdAt": {
-            "$ref": "#/components/schemas/Instant"
-          },
-          "normalizedUsername": {
-            "maxLength": 64,
-            "minLength": 1,
-            "pattern": "^[a-z0-9][a-z0-9_.@-]{0,63}$",
-            "type": "string"
-          },
-          "passwordHash": {
-            "description": "Argon2id PHC password hash. Control Plane owned; it is never returned by a projection and never leaves the server boundary.",
-            "maxLength": 512,
-            "pattern": "^\\$argon2id\\$[A-Za-z0-9$+=/.,-]{10,500}$",
-            "type": "string"
-          },
-          "revision": {
-            "$ref": "#/components/schemas/Revision"
-          },
-          "role": {
-            "$ref": "#/components/schemas/UserAccountRole"
-          },
-          "state": {
-            "$ref": "#/components/schemas/UserAccountState"
-          },
-          "updatedAt": {
-            "$ref": "#/components/schemas/Instant"
-          },
-          "userId": {
-            "$ref": "#/components/schemas/UserId"
-          },
-          "username": {
-            "maxLength": 64,
-            "minLength": 1,
-            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}$",
-            "type": "string"
-          }
-        },
-        "required": [
-          "userId",
-          "username",
-          "normalizedUsername",
-          "passwordHash",
-          "role",
-          "state",
-          "createdAt",
-          "updatedAt",
-          "revision"
-        ],
-        "title": "UserAccount",
-        "type": "object",
-        "x-owner": "control-plane"
-      },
-      "UserAccountRole": {
-        "description": "Server-wide account role.",
-        "enum": [
-          "owner",
-          "member"
-        ],
-        "title": "UserAccountRole",
-        "type": "string"
-      },
-      "UserAccountState": {
-        "description": "Lifecycle state of a user account; disabled accounts lose every active browser session immediately.",
-        "enum": [
-          "active",
-          "disabled"
-        ],
-        "title": "UserAccountState",
-        "type": "string"
-      },
       "UserActor": {
         "additionalProperties": false,
         "properties": {
@@ -25812,7 +25738,7 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:d372fb2de1e63bf9029b0c1b96cf6909e09b169f2d4ad2a993991e5fd5b398b3",
+  "x-source-digest": "sha256:85bdfac65fa5fe58a5ebe78fceade644992e254101f9ecd1d2ec0b1efcf0db9f",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {

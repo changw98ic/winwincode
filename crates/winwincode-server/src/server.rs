@@ -24,16 +24,13 @@ use axum_server::tls_rustls::RustlsConfig;
 use futures::StreamExt;
 use serde_json::{Value, json};
 use winwincode_api::generated::{
-    Actor, AuthSessionRequest, ControlPlaneWebSocketProtocolErrorFrame,
+    AuthSessionRequest, ControlPlaneWebSocketProtocolErrorFrame,
     ControlPlaneWebSocketProtocolErrorFrameTypeValue, ControlPlaneWebSocketServerFrame, Error,
     ErrorDetailValue, ErrorDetails, ErrorEnvelope, RetryableError, RetryableErrorCode,
     TerminalError, TerminalErrorCode,
 };
 use winwincode_control_plane::{CredentialLeakGate, CredentialOutputBoundary};
-use winwincode_domain::{
-    RequestId, Revision, SchemaVersion, UserAccount, UserAccountRole, UserAccountState, UserActor,
-    UserActorKind, UserId,
-};
+use winwincode_domain::{RequestId, SchemaVersion, UserAccount};
 
 use crate::application::{StandaloneApplicationClock, SystemStandaloneApplicationClock};
 use crate::auth_session::{
@@ -65,7 +62,7 @@ use crate::transport::{
     ApiError, AuthenticatedPrincipal, ControlPlaneApiPort, RequestAuthenticator,
     TransportCredentials,
 };
-use crate::user_accounts::{UserAccountServiceErrorKind, generate_temporary_password};
+use crate::user_accounts::UserAccountServiceErrorKind;
 
 const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024;
 const FIRST_SUBSCRIPTION_FRAME_TIMEOUT: Duration = Duration::from_secs(15);
@@ -425,14 +422,9 @@ fn router(state: ServerState) -> Router {
         .route("/api/v1/commands", post(command).options(preflight))
         .route("/api/v1/queries", post(query).options(preflight))
         .route("/api/v1/events", get(events).options(preflight))
-        .route("/api/v1/users", post(create_user).options(preflight))
         .route(
-            "/api/v1/users/state",
-            post(set_user_state).options(preflight),
-        )
-        .route(
-            "/api/v1/users/password",
-            post(reset_password).options(preflight),
+            "/api/v1/auth/password",
+            post(change_owner_password).options(preflight),
         )
         .route(
             "/internal/v1/execution-port/exchange",
@@ -479,10 +471,6 @@ fn router(state: ServerState) -> Router {
         .route(
             "/api/v1/repositories",
             get(list_repositories).options(preflight),
-        )
-        .route(
-            "/api/v1/repositories/grants",
-            post(grant_repository_access).options(preflight),
         )
         .route(
             "/api/v1/clients/candidates/branch",
@@ -882,78 +870,7 @@ async fn list_repositories(
                     "CLIENT_NOT_FOUND",
                     "no client matches the requested id",
                 ),
-                ClientRepositoriesErrorKind::PermissionDenied
-                | ClientRepositoriesErrorKind::ResourceNotFound
-                | ClientRepositoriesErrorKind::Conflict
-                | ClientRepositoriesErrorKind::Unavailable => (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "SERVICE_UNAVAILABLE",
-                    "repository directory service is unavailable",
-                ),
-            };
-            connect_error_response(status, code, message, origin.as_ref())
-        }
-    }
-}
-
-/// Grants one visible repository to another signed-in user. The application
-/// checks the durable Client `manage` grant before writing the repository
-/// grant; the browser never supplies credentials or local paths.
-async fn grant_repository_access(
-    State(state): State<ServerState>,
-    headers: HeaderMap,
-    uri: Uri,
-    request: Request<Body>,
-) -> Response {
-    let Some(application) = &state.client_repositories else {
-        return not_found().await;
-    };
-    let origin = match allowed_origin(&state, &headers) {
-        Ok(origin) => origin,
-        Err(error) => return error.into_response(),
-    };
-    let body = match parse_json_body(request, origin.clone()).await {
-        Ok(body) => body,
-        Err(error) => return error.into_response(),
-    };
-    let (principal, origin, _) = match authorize(&state, &headers, &uri) {
-        Ok(authorized) => authorized,
-        Err(error) => return error.into_response(),
-    };
-    let Some(user_id) = principal.actor_user_id() else {
-        return connect_error_response(
-            StatusCode::FORBIDDEN,
-            "PERMISSION_DENIED",
-            "a signed-in user is required",
-            origin.as_ref(),
-        );
-    };
-    match application.grant(&user_id.0, &body) {
-        Ok(body) => json_response(StatusCode::CREATED, body, origin.as_ref()),
-        Err(error) => {
-            let (status, code, message) = match error.kind() {
-                ClientRepositoriesErrorKind::InvalidRequest => (
-                    StatusCode::BAD_REQUEST,
-                    "INVALID_REQUEST",
-                    "repository grant request is invalid",
-                ),
-                ClientRepositoriesErrorKind::PermissionDenied => (
-                    StatusCode::FORBIDDEN,
-                    "PERMISSION_DENIED",
-                    "the signed-in user may not grant repository access",
-                ),
-                ClientRepositoriesErrorKind::ResourceNotFound => (
-                    StatusCode::NOT_FOUND,
-                    "RESOURCE_NOT_FOUND",
-                    "the repository binding was not found",
-                ),
-                ClientRepositoriesErrorKind::Conflict => (
-                    StatusCode::CONFLICT,
-                    "REVISION_CONFLICT",
-                    "an active repository grant already exists",
-                ),
-                ClientRepositoriesErrorKind::ClientNotFound
-                | ClientRepositoriesErrorKind::Unavailable => (
+                ClientRepositoriesErrorKind::Unavailable => (
                     StatusCode::SERVICE_UNAVAILABLE,
                     "SERVICE_UNAVAILABLE",
                     "repository directory service is unavailable",
@@ -1013,7 +930,7 @@ async fn create_client_connection(
     }
 }
 
-/// Immediate grant revocation (contract 3): the holder or an Owner.
+/// Immediate revocation of the signed-in Owner's Client grant.
 async fn revoke_client_grant(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -1052,16 +969,7 @@ async fn revoke_client_grant(
             origin.as_ref(),
         );
     };
-    let acting_is_owner = state
-        .auth_sessions
-        .accounts()
-        .find(&user_id)
-        .ok()
-        .flatten()
-        .is_some_and(|account| {
-            account.role == UserAccountRole::Owner && account.state == UserAccountState::Active
-        });
-    match application.revoke(&user_id.0, acting_is_owner, &body) {
+    match application.revoke(&user_id.0, &body) {
         Ok(body) => json_response(StatusCode::OK, body, origin.as_ref()),
         Err(error) => connect_flow_error(&error, origin.as_ref()),
     }
@@ -1109,11 +1017,6 @@ fn connect_flow_error(error: &ClientConnectionsError, origin: Option<&HeaderValu
             StatusCode::TOO_MANY_REQUESTS,
             "RATE_LIMITED",
             "connect attempts are rate limited",
-        ),
-        ClientConnectionsErrorKind::PermissionDenied => (
-            StatusCode::FORBIDDEN,
-            "PERMISSION_DENIED",
-            "only the grant holder or an Owner may revoke a grant",
         ),
         ClientConnectionsErrorKind::ResourceNotFound => (
             StatusCode::NOT_FOUND,
@@ -2056,121 +1959,26 @@ fn auth_session_error(error: AuthSessionError, origin: Option<HeaderValue>) -> B
     }
 }
 
-async fn create_user(State(state): State<ServerState>, request: Request<Body>) -> Response {
+async fn change_owner_password(
+    State(state): State<ServerState>,
+    request: Request<Body>,
+) -> Response {
     let headers = request.headers().clone();
     let uri = request.uri().clone();
     let origin = match allowed_origin(&state, &headers) {
         Ok(origin) => origin,
         Err(error) => return error.into_response(),
     };
-    if let Err(error) = require_owner(&state, &headers, &uri) {
-        return error.into_response();
-    }
-    let body = match parse_json_body(request, origin.clone()).await {
-        Ok(body) => body,
-        Err(error) => return error.into_response(),
-    };
-    let creation = match parse_create_user_request(&body, origin.clone()) {
-        Ok(creation) => creation,
-        Err(error) => return error.into_response(),
-    };
-    let Ok(temporary_password) = generate_temporary_password() else {
-        return account_error(UserAccountServiceErrorKind::Storage, origin).into_response();
-    };
-    let occurred_at = SystemStandaloneApplicationClock.now_instant();
-    match state.auth_sessions.accounts().create_user(
-        &creation.username,
-        creation.role,
-        &temporary_password,
-        &occurred_at,
-    ) {
-        Ok(account) => json_response(
-            StatusCode::CREATED,
-            json!({
-                "schemaVersion": SUPPORTED_SCHEMA_VERSION,
-                "user": account_json(&account),
-                "temporaryPassword": temporary_password,
-            }),
-            origin.as_ref(),
-        ),
-        Err(error) => account_error(error.kind(), origin).into_response(),
-    }
-}
-
-async fn set_user_state(State(state): State<ServerState>, request: Request<Body>) -> Response {
-    let headers = request.headers().clone();
-    let uri = request.uri().clone();
-    let origin = match allowed_origin(&state, &headers) {
-        Ok(origin) => origin,
-        Err(error) => return error.into_response(),
-    };
-    let (_, acting) = match require_owner(&state, &headers, &uri) {
-        Ok(authorized) => authorized,
-        Err(error) => return error.into_response(),
-    };
-    let body = match parse_json_body(request, origin.clone()).await {
-        Ok(body) => body,
-        Err(error) => return error.into_response(),
-    };
-    let update = match parse_user_state_request(&body, origin.clone()) {
-        Ok(update) => update,
-        Err(error) => return error.into_response(),
-    };
-    if update.state == UserAccountState::Disabled && update.user_id == acting.user_id {
+    if uri.query().is_some() {
         return BoundaryError::new(
-            StatusCode::CONFLICT,
-            "WRONG_STATE",
-            "the acting Owner cannot disable the account in use",
+            StatusCode::BAD_REQUEST,
+            "QUERY_PARAMETERS_FORBIDDEN",
+            "credentials are not accepted in the URL query",
             origin,
         )
         .into_response();
     }
-    let occurred_at = SystemStandaloneApplicationClock.now_instant();
-    let account = match state.auth_sessions.accounts().set_state(
-        &update.user_id,
-        &Revision(update.expected_revision),
-        update.state,
-        &occurred_at,
-    ) {
-        Ok(account) => account,
-        Err(error) => return account_error(error.kind(), origin).into_response(),
-    };
-    if update.state == UserAccountState::Disabled {
-        // Disable kill switch: revoke every live session immediately.
-        let actor = Actor::UserActor(UserActor {
-            kind: UserActorKind::User,
-            id: account.user_id.clone(),
-        });
-        if state.auth_sessions.revoke_actor_sessions(&actor).is_err() {
-            return BoundaryError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "SERVICE_UNAVAILABLE",
-                "browser session service is unavailable",
-                origin,
-            )
-            .into_response();
-        }
-    }
-    json_response(
-        StatusCode::OK,
-        json!({
-            "schemaVersion": SUPPORTED_SCHEMA_VERSION,
-            "user": account_json(&account),
-        }),
-        origin.as_ref(),
-    )
-}
-
-async fn reset_password(State(state): State<ServerState>, request: Request<Body>) -> Response {
-    let headers = request.headers().clone();
-    let uri = request.uri().clone();
-    let origin = match allowed_origin(&state, &headers) {
-        Ok(origin) => origin,
-        Err(error) => return error.into_response(),
-    };
-    // Password reset is available to the account holder themself and to an
-    // Owner on behalf of anyone.
-    let (principal, _, _) = match authorize(&state, &headers, &uri) {
+    let (_, owner) = match require_owner(&state, &headers, &uri) {
         Ok(authorized) => authorized,
         Err(error) => return error.into_response(),
     };
@@ -2178,83 +1986,42 @@ async fn reset_password(State(state): State<ServerState>, request: Request<Body>
         Ok(body) => body,
         Err(error) => return error.into_response(),
     };
-    let reset = match parse_password_reset_request(&body, origin.clone()) {
-        Ok(reset) => reset,
+    let change = match parse_password_change_request(&body, origin.clone()) {
+        Ok(change) => change,
         Err(error) => return error.into_response(),
     };
-    let occurred_at = SystemStandaloneApplicationClock.now_instant();
-    let acting_user = principal.actor_user_id();
-    let self_reset = acting_user.is_some_and(|user| user == reset.user_id);
-    let temporary_password;
-    if self_reset {
-        // A self reset must prove the current password.
-        let (Some(current_password), Some(new_password)) =
-            (&reset.current_password, &reset.new_password)
-        else {
+    match state
+        .auth_sessions
+        .accounts()
+        .verify_credentials(&owner.username, &change.current_password)
+    {
+        Ok(Ok(_)) => {}
+        Ok(Err(_)) => {
             return BoundaryError::new(
-                StatusCode::BAD_REQUEST,
-                "INVALID_REQUEST",
-                "self reset requires currentPassword and newPassword",
+                StatusCode::UNAUTHORIZED,
+                "AUTHENTICATION_REQUIRED",
+                "authentication failed",
                 origin,
             )
             .into_response();
-        };
-        let account = match state.auth_sessions.accounts().find(&reset.user_id) {
-            Ok(Some(account)) => account,
-            Ok(None) => {
-                return account_error(UserAccountServiceErrorKind::NotFound, origin)
-                    .into_response();
-            }
-            Err(error) => return account_error(error.kind(), origin).into_response(),
-        };
-        match state
-            .auth_sessions
-            .accounts()
-            .verify_credentials(&account.username, current_password)
-        {
-            Ok(Ok(_)) => {}
-            Ok(Err(_)) => {
-                return BoundaryError::new(
-                    StatusCode::UNAUTHORIZED,
-                    "AUTHENTICATION_REQUIRED",
-                    "authentication failed",
-                    origin,
-                )
-                .into_response();
-            }
-            Err(error) => return account_error(error.kind(), origin).into_response(),
         }
-        temporary_password = new_password.clone();
-    } else {
-        // Resetting somebody else's password requires the Owner role.
-        if let Err(error) = require_owner(&state, &headers, &uri) {
-            return error.into_response();
-        }
-        // An Owner reset issues a fresh temporary password returned once.
-        match generate_temporary_password() {
-            Ok(password) => temporary_password = password,
-            Err(_) => {
-                return account_error(UserAccountServiceErrorKind::Storage, origin).into_response();
-            }
-        }
+        Err(error) => return account_error(error.kind(), origin).into_response(),
     }
-    let account = match state.auth_sessions.accounts().set_password(
-        &reset.user_id,
-        &Revision(reset.expected_revision),
-        &temporary_password,
+    let occurred_at = SystemStandaloneApplicationClock.now_instant();
+    if let Err(error) = state.auth_sessions.accounts().set_password(
+        &owner.user_id,
+        &owner.revision,
+        &change.new_password,
         &occurred_at,
     ) {
-        Ok(account) => account,
-        Err(error) => return account_error(error.kind(), origin).into_response(),
-    };
-    let mut value = json!({
-        "schemaVersion": SUPPORTED_SCHEMA_VERSION,
-        "user": account_json(&account),
-    });
-    if !self_reset {
-        value["temporaryPassword"] = Value::String(temporary_password);
+        return account_error(error.kind(), origin).into_response();
     }
-    json_response(StatusCode::OK, value, origin.as_ref())
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    if let Some(origin) = origin.as_ref() {
+        apply_cors(response.headers_mut(), origin);
+    }
+    prevent_auth_session_caching(&mut response);
+    response
 }
 
 fn require_owner(
@@ -2267,7 +2034,7 @@ fn require_owner(
         return Err(BoundaryError::new(
             StatusCode::FORBIDDEN,
             "PERMISSION_DENIED",
-            "owner role is required",
+            "local Owner is required",
             None,
         ));
     };
@@ -2287,32 +2054,11 @@ fn require_owner(
             BoundaryError::new(
                 StatusCode::FORBIDDEN,
                 "PERMISSION_DENIED",
-                "owner role is required",
+                "local Owner is required",
                 None,
             )
         })?;
-    if account.role != UserAccountRole::Owner || account.state != UserAccountState::Active {
-        return Err(BoundaryError::new(
-            StatusCode::FORBIDDEN,
-            "PERMISSION_DENIED",
-            "owner role is required",
-            None,
-        ));
-    }
     Ok((principal, account))
-}
-
-fn account_json(account: &UserAccount) -> Value {
-    json!({
-        "userId": account.user_id.0,
-        "username": account.username,
-        "normalizedUsername": account.normalized_username,
-        "role": account.role.as_str(),
-        "state": account.state.as_str(),
-        "createdAt": account.created_at.0,
-        "updatedAt": account.updated_at.0,
-        "revision": account.revision.0,
-    })
 }
 
 fn account_error(kind: UserAccountServiceErrorKind, origin: Option<HeaderValue>) -> BoundaryError {
@@ -2323,14 +2069,12 @@ fn account_error(kind: UserAccountServiceErrorKind, origin: Option<HeaderValue>)
             "user account request is invalid",
             origin,
         ),
-        UserAccountServiceErrorKind::Conflict | UserAccountServiceErrorKind::AlreadyInitialized => {
-            BoundaryError::new(
-                StatusCode::CONFLICT,
-                "WRONG_STATE",
-                "user account request conflicts with durable state",
-                origin,
-            )
-        }
+        UserAccountServiceErrorKind::AlreadyInitialized => BoundaryError::new(
+            StatusCode::CONFLICT,
+            "WRONG_STATE",
+            "Owner account is already initialized",
+            origin,
+        ),
         UserAccountServiceErrorKind::NotFound => BoundaryError::new(
             StatusCode::NOT_FOUND,
             "RESOURCE_NOT_FOUND",
@@ -2343,37 +2087,29 @@ fn account_error(kind: UserAccountServiceErrorKind, origin: Option<HeaderValue>)
             "user account revision differs from the expected revision",
             origin,
         ),
-        UserAccountServiceErrorKind::InvalidCredentials => BoundaryError::new(
-            StatusCode::UNAUTHORIZED,
-            "AUTHENTICATION_REQUIRED",
-            "authentication failed",
+        UserAccountServiceErrorKind::Storage => BoundaryError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "SERVICE_UNAVAILABLE",
+            "Owner account service is unavailable",
             origin,
         ),
-        UserAccountServiceErrorKind::AccountDisabled | UserAccountServiceErrorKind::Storage => {
-            BoundaryError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "SERVICE_UNAVAILABLE",
-                "user account service is unavailable",
-                origin,
-            )
-        }
     }
 }
 
-struct CreateUserRequest {
-    username: String,
-    role: UserAccountRole,
+struct PasswordChangeRequest {
+    current_password: String,
+    new_password: String,
 }
 
-fn parse_create_user_request(
+fn parse_password_change_request(
     value: &Value,
     origin: Option<HeaderValue>,
-) -> ResponseResult<CreateUserRequest> {
+) -> ResponseResult<PasswordChangeRequest> {
     let invalid = |origin: Option<HeaderValue>| {
         BoundaryError::new(
             StatusCode::BAD_REQUEST,
             "INVALID_REQUEST",
-            "user creation must carry string username and owner|member role fields",
+            "password change must carry currentPassword and newPassword",
             origin,
         )
     };
@@ -2391,122 +2127,27 @@ fn parse_create_user_request(
     if fields.len() != 3 {
         return Err(invalid(origin));
     }
-    let username = fields
-        .get("username")
+    let current_password = fields
+        .get("currentPassword")
         .and_then(Value::as_str)
         .ok_or_else(|| invalid(origin.clone()))?;
-    let role = match fields.get("role").and_then(Value::as_str) {
-        Some("owner") => UserAccountRole::Owner,
-        Some("member") => UserAccountRole::Member,
-        _ => return Err(invalid(origin)),
-    };
-    Ok(CreateUserRequest {
-        username: username.to_owned(),
-        role,
-    })
-}
-
-struct UserStateRequest {
-    user_id: UserId,
-    expected_revision: i64,
-    state: UserAccountState,
-}
-
-fn parse_user_state_request(
-    value: &Value,
-    origin: Option<HeaderValue>,
-) -> ResponseResult<UserStateRequest> {
-    let invalid = |origin: Option<HeaderValue>| {
-        BoundaryError::new(
-            StatusCode::BAD_REQUEST,
-            "INVALID_REQUEST",
-            "user state update must carry userId, active|disabled state, and expectedRevision",
-            origin,
-        )
-    };
-    if value.get("schemaVersion").and_then(Value::as_str) != Some(SUPPORTED_SCHEMA_VERSION) {
-        return Err(BoundaryError::new(
-            StatusCode::UPGRADE_REQUIRED,
-            "CLIENT_UPGRADE_REQUIRED",
-            "client protocol is unsupported; upgrade to winwincode/v1",
-            origin,
-        ));
-    }
-    let Some(fields) = value.as_object() else {
-        return Err(invalid(origin));
-    };
-    if fields.len() != 4 {
-        return Err(invalid(origin));
-    }
-    let user_id = fields
-        .get("userId")
+    let new_password = fields
+        .get("newPassword")
         .and_then(Value::as_str)
-        .map(|value| UserId(value.to_owned()))
         .ok_or_else(|| invalid(origin.clone()))?;
-    let expected_revision = fields
-        .get("expectedRevision")
-        .and_then(Value::as_i64)
-        .ok_or_else(|| invalid(origin.clone()))?;
-    let state = match fields.get("state").and_then(Value::as_str) {
-        Some("active") => UserAccountState::Active,
-        Some("disabled") => UserAccountState::Disabled,
-        _ => return Err(invalid(origin)),
+    let invalid_password = |password: &str| {
+        password.len() < 8
+            || password.len() > 256
+            || password
+                .bytes()
+                .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
     };
-    Ok(UserStateRequest {
-        user_id,
-        expected_revision,
-        state,
-    })
-}
-
-struct PasswordResetRequest {
-    user_id: UserId,
-    expected_revision: i64,
-    current_password: Option<String>,
-    new_password: Option<String>,
-}
-
-fn parse_password_reset_request(
-    value: &Value,
-    origin: Option<HeaderValue>,
-) -> ResponseResult<PasswordResetRequest> {
-    let invalid = |origin: Option<HeaderValue>| {
-        BoundaryError::new(
-            StatusCode::BAD_REQUEST,
-            "INVALID_REQUEST",
-            "password reset must carry userId and expectedRevision",
-            origin,
-        )
-    };
-    if value.get("schemaVersion").and_then(Value::as_str) != Some(SUPPORTED_SCHEMA_VERSION) {
-        return Err(BoundaryError::new(
-            StatusCode::UPGRADE_REQUIRED,
-            "CLIENT_UPGRADE_REQUIRED",
-            "client protocol is unsupported; upgrade to winwincode/v1",
-            origin,
-        ));
-    }
-    let Some(fields) = value.as_object() else {
-        return Err(invalid(origin));
-    };
-    if fields.len() < 3 || fields.len() > 5 {
+    if invalid_password(current_password) || invalid_password(new_password) {
         return Err(invalid(origin));
     }
-    let user_id = fields
-        .get("userId")
-        .and_then(Value::as_str)
-        .map(|value| UserId(value.to_owned()))
-        .ok_or_else(|| invalid(origin.clone()))?;
-    let expected_revision = fields
-        .get("expectedRevision")
-        .and_then(Value::as_i64)
-        .ok_or_else(|| invalid(origin.clone()))?;
-    let optional_string = |name: &str| fields.get(name).and_then(Value::as_str).map(str::to_owned);
-    Ok(PasswordResetRequest {
-        user_id,
-        expected_revision,
-        current_password: optional_string("currentPassword"),
-        new_password: optional_string("newPassword"),
+    Ok(PasswordChangeRequest {
+        current_password: current_password.to_owned(),
+        new_password: new_password.to_owned(),
     })
 }
 

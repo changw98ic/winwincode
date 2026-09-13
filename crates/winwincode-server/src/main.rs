@@ -33,8 +33,7 @@ use winwincode_control_plane::{
 use winwincode_domain::Sha256Digest;
 use winwincode_domain::{
     CredentialReferenceId, OrganizationId, ProjectId, RepositoryId, RepositoryScope,
-    RepositoryScopeKind, UserAccount, UserAccountRole, UserAccountState, UserId, WorkerId,
-    WorkerInstanceId, WorkspaceId,
+    RepositoryScopeKind, UserAccount, UserId, WorkerId, WorkerInstanceId, WorkspaceId,
 };
 use winwincode_execution_port::{
     action_enforcement::{ActionEnforcementIssuer, ActionEnforcementSigningKey},
@@ -345,12 +344,6 @@ fn resolved_owner(
     let account = accounts
         .find(&user_id)?
         .ok_or("durable initialization marker names a missing Owner account")?;
-    if account.role != UserAccountRole::Owner {
-        return Err("durable initialization marker does not name an Owner account".into());
-    }
-    if account.state != UserAccountState::Active {
-        return Err("the durable first Owner account is disabled".into());
-    }
     Ok(Some(account))
 }
 

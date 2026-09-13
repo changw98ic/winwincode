@@ -177,6 +177,7 @@ const CONTROL_PLANE_SCHEMA_VERSION = 'winwincode/v1'
 const DEFAULT_NETWORK_RETRIES = 2
 const DEFAULT_RECONNECT_DELAY_MILLIS = 250
 const AUTH_SESSION_PATH = '/api/v1/auth/session'
+const AUTH_PASSWORD_PATH = '/api/v1/auth/password'
 const SERVER_INITIALIZATION_PATH = '/api/v1/server/initialization'
 const RFC3339_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/u
 
@@ -371,6 +372,12 @@ export interface ControlPlanePasswordCredentials {
   readonly password: string
 }
 
+/** Current and replacement password for the signed-in local Owner. */
+export interface ControlPlanePasswordChange {
+  readonly currentPassword: string
+  readonly newPassword: string
+}
+
 export interface ControlPlaneOwnerInitialization extends ControlPlanePasswordCredentials {
   readonly bootstrapProof: string
 }
@@ -460,6 +467,11 @@ export interface ControlPlaneClient<
     credentials: ControlPlanePasswordCredentials,
     options?: ControlPlaneRequestOptions,
   ): Promise<ProductSession>
+  /** Replace the signed-in Owner password after verifying the current password. */
+  changePassword(
+    change: ControlPlanePasswordChange,
+    options?: ControlPlaneRequestOptions,
+  ): Promise<void>
   /** Read whether the Server still shows the first-time initialization entry. */
   initializationStatus(
     options?: ControlPlaneRequestOptions,
@@ -615,6 +627,22 @@ function assertLoginCredentials(credentials: ControlPlanePasswordCredentials): v
       kind: 'authentication',
       code: 'LOGIN_INPUT_INVALID',
       message: 'Enter a valid username and password.',
+      requestId: null,
+      retryable: false,
+    })
+  }
+}
+
+function assertPasswordChange(change: ControlPlanePasswordChange): void {
+  const invalid = (password: unknown): boolean => typeof password !== 'string'
+    || password.length < 8
+    || password.length > 256
+    || /\s/u.test(password)
+  if (invalid(change?.currentPassword) || invalid(change?.newPassword)) {
+    throw new ControlPlaneClientError({
+      kind: 'authentication',
+      code: 'PASSWORD_CHANGE_INPUT_INVALID',
+      message: 'Enter the current password and a valid replacement password.',
       requestId: null,
       retryable: false,
     })
@@ -1008,6 +1036,57 @@ export function createControlPlaneClient<
     }
   }
 
+  async function passwordChangeRequest(
+    change: ControlPlanePasswordChange,
+    requestOptions: ControlPlaneRequestOptions | undefined,
+  ): Promise<void> {
+    requireOpen()
+    if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
+    assertPasswordChange(change)
+    try {
+      const response = await transportRequest(
+        `${location.serverUrl}${AUTH_PASSWORD_PATH}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            schemaVersion: CONTROL_PLANE_SCHEMA_VERSION,
+            currentPassword: change.currentPassword,
+            newPassword: change.newPassword,
+          }),
+          redirect: 'error',
+          cache: 'no-store',
+          referrerPolicy: 'no-referrer',
+        },
+        requestOptions?.signal,
+      )
+      const source = await response.text()
+      if (!response.ok) throw sessionBoundaryError(response.status, source)
+      if (response.status !== 204 || source.length !== 0) {
+        throw new ControlPlaneClientError({
+          kind: 'protocol',
+          code: 'INVALID_PASSWORD_CHANGE_RESPONSE',
+          message: 'The authentication server returned an invalid password change response.',
+          requestId: null,
+          retryable: false,
+        })
+      }
+    } catch (error) {
+      if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
+      const normalized = error instanceof ControlPlaneClientError
+        ? error
+        : new ControlPlaneClientError({
+            kind: 'network',
+            code: 'NETWORK_ERROR',
+            message: 'The authentication server could not be reached.',
+            requestId: null,
+            retryable: true,
+          })
+      reportAccessFailure(normalized)
+      throw normalized
+    }
+  }
+
   function requestFetch(signal: AbortSignal | undefined, requestId: RequestId): ControlPlaneFetch {
     return async (input: string, init: ControlPlaneHttpRequestInit) => {
       if (signalIsAborted(signal)) throw generated.createError({
@@ -1101,6 +1180,9 @@ export function createControlPlaneClient<
           retryable: false,
         })
       return session
+    },
+    changePassword(change, requestOptions) {
+      return passwordChangeRequest(change, requestOptions)
     },
     async initializationStatus(requestOptions) {
       requireOpen()

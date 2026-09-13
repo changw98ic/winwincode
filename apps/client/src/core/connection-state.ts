@@ -425,6 +425,9 @@ export function observeControlPlaneClient(
     login(credentials, requestOptions) {
       return observe(options.client.login(credentials, requestOptions))
     },
+    changePassword(change, requestOptions) {
+      return observe(options.client.changePassword(change, requestOptions))
+    },
     initializationStatus(requestOptions) {
       // A missing pre-auth initialization probe is presentation state for the
       // sign-in page, never a connection-health signal for mounted features.

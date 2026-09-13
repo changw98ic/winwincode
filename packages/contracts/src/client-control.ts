@@ -1,5 +1,5 @@
 /**
- * ClientControlPort contracts for the multi-user shared Client model.
+ * ClientControlPort contracts for the shared device Client model.
  *
  * Authoritative source: `schema/winwincode/v1/client-control.schema.json`
  * (shared scalars come from its `domain.schema.json` sibling). This module is
@@ -105,9 +105,6 @@ const CANDIDATE_REF_PATTERN
   = new RegExp('^refs/winwincode/candidates/[A-Za-z0-9][A-Za-z0-9._-]{0,199}$', 'u')
 const CONFLICT_ARTIFACT_REF_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$/u
 const CLIENT_VERSION_PATTERN = /^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$/u
-const USERNAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}$/u
-const NORMALIZED_USERNAME_PATTERN = /^[a-z0-9][a-z0-9_.@-]{0,63}$/u
-const PASSWORD_HASH_PATTERN = /^\$argon2id\$[A-Za-z0-9$+=/.,-]{10,500}$/u
 const INSTANT_PATTERN
   = /^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\.[0-9]{3}Z$/u
 
@@ -471,12 +468,6 @@ function conflictArtifactRef(value: unknown, path: string): string | null {
   )
 }
 
-export const USER_ACCOUNT_ROLES = Object.freeze(['owner', 'member'] as const)
-export type UserAccountRole = typeof USER_ACCOUNT_ROLES[number]
-
-export const USER_ACCOUNT_STATES = Object.freeze(['active', 'disabled'] as const)
-export type UserAccountState = typeof USER_ACCOUNT_STATES[number]
-
 export const CLIENT_NODE_PRESENCE_STATES = Object.freeze([
   'pending_enrollment',
   'online',
@@ -720,22 +711,6 @@ export const CLIENT_CONTROL_ERROR_CODES = Object.freeze([
   'INTERNAL_ERROR',
 ] as const)
 export type ClientControlErrorCode = typeof CLIENT_CONTROL_ERROR_CODES[number]
-
-/**
- * `UserAccount`. `passwordHash` is a Control-Plane-only secret: it is part of
- * the domain object for completeness and never crosses ClientControlPort.
- */
-export interface UserAccount {
-  readonly userId: UserId
-  readonly username: string
-  readonly normalizedUsername: string
-  readonly passwordHash: string
-  readonly role: UserAccountRole
-  readonly state: UserAccountState
-  readonly createdAt: Instant
-  readonly updatedAt: Instant
-  readonly revision: Revision
-}
 
 /**
  * `ClientNode`. `publicClientId` is a stable, non-secret lookup id. This
@@ -1031,50 +1006,6 @@ function boundedErrorText(value: unknown, path: string): string {
     )
   }
   return value
-}
-
-export function parseUserAccount(value: unknown, path = 'userAccount'): UserAccount {
-  const input = record(value, path)
-  exactKeys(input, [
-    'userId',
-    'username',
-    'normalizedUsername',
-    'passwordHash',
-    'role',
-    'state',
-    'createdAt',
-    'updatedAt',
-    'revision',
-  ], path)
-  return Object.freeze({
-    userId: USER_ID(input.userId, `${path}.userId`),
-    username: brandedText(
-      input.username,
-      `${path}.username`,
-      'Username',
-      USERNAME_PATTERN,
-      'a username of 1 to 64 portable characters',
-    ),
-    normalizedUsername: brandedText(
-      input.normalizedUsername,
-      `${path}.normalizedUsername`,
-      'NormalizedUsername',
-      NORMALIZED_USERNAME_PATTERN,
-      'a lowercase normalized username of 1 to 64 portable characters',
-    ),
-    passwordHash: brandedText(
-      input.passwordHash,
-      `${path}.passwordHash`,
-      'PasswordHash',
-      PASSWORD_HASH_PATTERN,
-      'an Argon2id PHC password hash; server-side only, never transported',
-    ),
-    role: enumValue(input.role, USER_ACCOUNT_ROLES, `${path}.role`),
-    state: enumValue(input.state, USER_ACCOUNT_STATES, `${path}.state`),
-    createdAt: instant(input.createdAt, `${path}.createdAt`),
-    updatedAt: instant(input.updatedAt, `${path}.updatedAt`),
-    revision: revision(input.revision, `${path}.revision`),
-  })
 }
 
 export function parseClientNode(value: unknown, path = 'clientNode'): ClientNode {

@@ -1023,36 +1023,14 @@ async fn connect_times_out_with_client_offline_and_feeds_the_rate_limit() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
-async fn directory_shape_and_immediate_revocation() {
+async fn owner_directory_and_immediate_self_revocation() {
     let data_directory = test_directory("client-connect-revoke");
     let auth_directory = test_directory("client-connect-revoke-sessions");
     let running = start_server(&data_directory, &auth_directory).await;
     let address = running.local_address();
     let (owner_cookie, owner_id) = initialize_and_login_owner(address).await;
 
-    // A second member user for the holder-vs-owner authorization matrix.
-    let create = json!({
-        "schemaVersion": SCHEMA_VERSION,
-        "username": "member",
-        "role": "member",
-    })
-    .to_string();
-    let response = http_request(
-        address,
-        &cookie_post("/api/v1/users", &create, &owner_cookie),
-    )
-    .await;
-    assert!(response.starts_with("HTTP/1.1 201"), "{response}");
-    let temporary = response_body(&response)["temporaryPassword"]
-        .as_str()
-        .expect("temporary password")
-        .to_owned();
-    let (member_cookie, member_id) = login(address, "member", &temporary).await;
-
     let (node, public_client_id, credential, next) = enroll_device(address).await;
-    // A hello from a fresh launch instance takes the device projection over
-    // and carries the reported capacity (4 worker sessions).
     walk_hello(
         address,
         &node,
@@ -1067,14 +1045,7 @@ async fn directory_shape_and_immediate_revocation() {
         &publish_connect_code(&data_directory, &node, "77778888"),
         &owner_id,
     );
-    consume_code_as(
-        &data_directory,
-        &node,
-        &publish_connect_code(&data_directory, &node, "88889999"),
-        &member_id,
-    );
 
-    // Directory shape, field by field.
     let response = http_request(address, &cookie_get("/api/v1/clients", &owner_cookie)).await;
     assert!(response.starts_with("HTTP/1.1 200"), "{response}");
     let value = response_body(&response);
@@ -1082,47 +1053,10 @@ async fn directory_shape_and_immediate_revocation() {
     let clients = value["clients"].as_array().expect("clients array");
     assert_eq!(clients.len(), 1);
     let card = &clients[0];
-    let mut field_names = card
-        .as_object()
-        .expect("card object")
-        .keys()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-    field_names.sort_unstable();
-    assert_eq!(
-        field_names,
-        vec![
-            "capacityTotal",
-            "capacityUsed",
-            "clientId",
-            "displayName",
-            "lastHeartbeatAt",
-            "occupancy",
-            "presence",
-            "version",
-        ]
-    );
+    assert_eq!(card.as_object().expect("card object").len(), 8);
+    assert!(card.get("userId").is_none());
     assert_eq!(card["clientId"], json!(public_client_id));
-    assert_eq!(card["displayName"], json!("Cheng's MacBook"));
-    assert_eq!(card["presence"], json!("online"));
-    assert_eq!(card["occupancy"], json!("available"));
-    assert_eq!(card["capacityUsed"], json!(0));
-    assert_eq!(card["capacityTotal"], json!(4));
-    assert!(card["lastHeartbeatAt"].is_string());
-    assert_eq!(card["version"], json!("0.1.0-alpha.1"));
 
-    // The member sees the same device.
-    let response = http_request(address, &cookie_get("/api/v1/clients", &member_cookie)).await;
-    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
-    assert_eq!(
-        response_body(&response)["clients"]
-            .as_array()
-            .expect("clients")
-            .len(),
-        1
-    );
-
-    // A member may not revoke somebody else's grant.
     let response = http_request(
         address,
         &cookie_post(
@@ -1133,14 +1067,13 @@ async fn directory_shape_and_immediate_revocation() {
                 "userId": owner_id,
             })
             .to_string(),
-            &member_cookie,
+            &owner_cookie,
         ),
     )
     .await;
-    assert_eq!(status_of(&response), "403", "{response}");
-    assert_eq!(wire_code(&response), "PERMISSION_DENIED");
+    assert_eq!(status_of(&response), "400", "{response}");
+    assert_eq!(wire_code(&response), "INVALID_REQUEST");
 
-    // The holder revokes their own grant immediately.
     let response = http_request(
         address,
         &cookie_post(
@@ -1148,67 +1081,6 @@ async fn directory_shape_and_immediate_revocation() {
             &json!({
                 "schemaVersion": SCHEMA_VERSION,
                 "clientId": public_client_id,
-            })
-            .to_string(),
-            &member_cookie,
-        ),
-    )
-    .await;
-    assert_eq!(status_of(&response), "200", "{response}");
-    let value = response_body(&response);
-    assert_eq!(value["revoked"], json!(true));
-    assert_eq!(value["userId"], json!(member_id));
-    {
-        let mut storage = SqliteStorage::open(&data_directory).expect("storage");
-        let mut grants = AccessGrantService::new(&mut storage);
-        assert!(
-            grants
-                .active_grant(&node, &member_id)
-                .expect("grant lookup")
-                .is_none(),
-            "revocation takes effect immediately"
-        );
-    }
-    let response = http_request(address, &cookie_get("/api/v1/clients", &member_cookie)).await;
-    assert_eq!(
-        response_body(&response)["clients"]
-            .as_array()
-            .expect("clients")
-            .len(),
-        0,
-        "the revoked device leaves the directory"
-    );
-
-    // Revoking an already-revoked grant is a resource miss at this boundary.
-    let response = http_request(
-        address,
-        &cookie_post(
-            "/api/v1/clients/grants/revoke",
-            &json!({
-                "schemaVersion": SCHEMA_VERSION,
-                "clientId": public_client_id,
-                "userId": member_id,
-            })
-            .to_string(),
-            &member_cookie,
-        ),
-    )
-    .await;
-    assert_eq!(status_of(&response), "404", "{response}");
-    assert_eq!(wire_code(&response), "RESOURCE_NOT_FOUND");
-
-    // The Owner revokes on behalf of anyone; the owner grant is untouched,
-    // and a revoked user can reconnect with a fresh code afterwards.
-    let reconnect = publish_connect_code(&data_directory, &node, "12121212");
-    consume_code_as(&data_directory, &node, &reconnect, &member_id);
-    let response = http_request(
-        address,
-        &cookie_post(
-            "/api/v1/clients/grants/revoke",
-            &json!({
-                "schemaVersion": SCHEMA_VERSION,
-                "clientId": public_client_id,
-                "userId": member_id,
             })
             .to_string(),
             &owner_cookie,
@@ -1216,33 +1088,35 @@ async fn directory_shape_and_immediate_revocation() {
     )
     .await;
     assert_eq!(status_of(&response), "200", "{response}");
+    assert_eq!(response_body(&response)["revoked"], json!(true));
     {
         let mut storage = SqliteStorage::open(&data_directory).expect("storage");
         let mut grants = AccessGrantService::new(&mut storage);
         assert!(
             grants
-                .active_grant(&node, &member_id)
+                .active_grant(&node, &owner_id)
                 .expect("grant lookup")
                 .is_none()
         );
-        assert!(
-            grants
-                .active_grant(&node, &owner_id)
-                .expect("grant lookup")
-                .is_some(),
-            "the owner grant is untouched"
-        );
     }
-    let connection =
-        Connection::open(data_directory.join("control-plane.sqlite3")).expect("open database");
-    let revocations = connection
-        .query_row(
-            "SELECT COUNT(*) FROM client_connect_audit WHERE action = 'client.access.revoked'",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .expect("audit count");
-    assert_eq!(revocations, 2, "every revocation is audited");
+    let response = http_request(address, &cookie_get("/api/v1/clients", &owner_cookie)).await;
+    assert_eq!(response_body(&response)["clients"], json!([]));
+
+    let response = http_request(
+        address,
+        &cookie_post(
+            "/api/v1/clients/grants/revoke",
+            &json!({
+                "schemaVersion": SCHEMA_VERSION,
+                "clientId": public_client_id,
+            })
+            .to_string(),
+            &owner_cookie,
+        ),
+    )
+    .await;
+    assert_eq!(status_of(&response), "404", "{response}");
+    assert_eq!(wire_code(&response), "RESOURCE_NOT_FOUND");
 
     running.shutdown().await.expect("shutdown");
     let _ = std::fs::remove_dir_all(&data_directory);

@@ -376,8 +376,9 @@ impl SqliteAuthSessionManager {
             .accounts
             .initialize_owner(username, password, &occurred_at)
             .map_err(|error| match error.kind() {
-                UserAccountServiceErrorKind::AlreadyInitialized
-                | UserAccountServiceErrorKind::Conflict => AuthSessionError::already_initialized(),
+                UserAccountServiceErrorKind::AlreadyInitialized => {
+                    AuthSessionError::already_initialized()
+                }
                 UserAccountServiceErrorKind::InvalidInput => AuthSessionError::invalid_request(),
                 _ => AuthSessionError::storage(),
             })?;
@@ -448,7 +449,6 @@ impl SqliteAuthSessionManager {
                 self.login_limiter.clear(client, &normalized);
                 self.issue_for_user(&account.user_id)
             }
-            Err(CredentialRejection::AccountDisabled) => Err(AuthSessionError::authentication()),
             Err(CredentialRejection::UnknownAccount | CredentialRejection::BadPassword) => {
                 self.login_limiter.record_failure(client, &normalized, now);
                 Err(AuthSessionError::authentication())
@@ -463,7 +463,7 @@ impl SqliteAuthSessionManager {
         if let Some(owner) = self.stored_initialization_owner() {
             return Some(owner);
         }
-        self.accounts.active_owner_id().ok().flatten()
+        self.accounts.owner_id().ok().flatten()
     }
 
     fn stored_initialization_owner(&self) -> Option<UserId> {
@@ -1008,7 +1008,7 @@ mod tests {
     use std::sync::atomic::{AtomicI64, AtomicU8, Ordering};
 
     use winwincode_api::generated::{OrganizationScope, OrganizationScopeKind};
-    use winwincode_domain::{OrganizationId, UserAccountRole};
+    use winwincode_domain::OrganizationId;
 
     use super::*;
 
@@ -1120,17 +1120,6 @@ mod tests {
             username,
             password,
         )
-    }
-
-    fn add_member(
-        manager: &SqliteAuthSessionManager,
-        username: &str,
-    ) -> winwincode_domain::UserAccount {
-        let now = Instant("2027-05-01T08:00:00.000Z".to_owned());
-        manager
-            .accounts()
-            .create_user(username, UserAccountRole::Member, "member-password-1", &now)
-            .expect("member account")
     }
 
     #[test]
@@ -1275,62 +1264,54 @@ mod tests {
     }
 
     #[test]
-    fn login_issues_isolated_sessions_and_actor_revocation_stays_exact() {
-        let directory = test_directory("multi-user");
+    fn login_issues_multiple_owner_sessions_and_actor_revocation_stays_exact() {
+        let directory = test_directory("owner-sessions");
         let clock = Arc::new(ManualClock::new(2_000));
         let manager = manager(&directory, clock, "initialization-proof");
-        let owner = initialize(&manager, "Wen", "initial-owner-password");
-        let member_account = add_member(&manager, "Ada");
-        let member_actor = actor_of(&member_account.user_id.0);
-        let member =
-            login(&manager, "203.0.113.9", "Ada", "member-password-1").expect("member login");
+        let first = initialize(&manager, "Wen", "initial-owner-password");
+        let second = login(&manager, "203.0.113.9", "Wen", "initial-owner-password")
+            .expect("second Owner session");
 
-        let owner_credentials = TransportCredentials::new(None, Some(owner.cookie_value.clone()));
-        let member_credentials = TransportCredentials::new(None, Some(member.cookie_value.clone()));
+        let first_credentials = TransportCredentials::new(None, Some(first.cookie_value.clone()));
+        let second_credentials = TransportCredentials::new(None, Some(second.cookie_value.clone()));
         assert_eq!(
-            manager.current(&owner_credentials).expect("owner").actor,
-            owner.principal.actor().clone()
+            manager.current(&first_credentials).expect("first").actor,
+            first.principal.actor().clone()
         );
         assert_eq!(
-            manager.current(&member_credentials).expect("member").actor,
-            member_actor
+            manager.current(&second_credentials).expect("second").actor,
+            first.principal.actor().clone()
         );
-        assert!(login(&manager, "203.0.113.9", "Ada", "wrong-password-1").is_err());
+        assert!(login(&manager, "203.0.113.9", "Wen", "wrong-password-1").is_err());
 
         assert_eq!(
             manager
-                .replace_authorized_scopes(owner.principal.actor(), vec![scope(2)])
-                .expect("shrink owner"),
-            1
+                .replace_authorized_scopes(first.principal.actor(), vec![scope(2)])
+                .expect("shrink Owner"),
+            2
         );
         assert_eq!(
             manager
-                .current(&owner_credentials)
+                .current(&first_credentials)
                 .expect("shrunk")
                 .authorized_scopes,
             vec![scope(2)]
         );
         assert_eq!(
             manager
-                .current(&member_credentials)
-                .expect("member unchanged")
+                .current(&second_credentials)
+                .expect("second shrunk")
                 .authorized_scopes,
-            vec![scope(1), scope(2)]
+            vec![scope(2)]
         );
         assert_eq!(
             manager
-                .replace_authorized_scopes(owner.principal.actor(), Vec::new())
+                .replace_authorized_scopes(first.principal.actor(), Vec::new())
                 .expect("empty authorization revokes the Actor"),
-            1
+            2
         );
-        assert!(manager.current(&owner_credentials).is_err());
-        assert_eq!(
-            manager
-                .current(&member_credentials)
-                .expect("member still active")
-                .actor,
-            member_actor
-        );
+        assert!(manager.current(&first_credentials).is_err());
+        assert!(manager.current(&second_credentials).is_err());
     }
 
     #[test]
@@ -1396,55 +1377,6 @@ mod tests {
         assert!(limited.is_rate_limited());
         // A different client is not affected.
         assert!(login(&manager, "198.51.100.4", "wen", "initial-owner-password").is_ok());
-        // A different username on the limited client is not affected.
-        let member = add_member(&manager, "Ada");
-        assert!(
-            login(&manager, "203.0.113.9", "ada", "member-password-1").is_ok(),
-            "member {member:?} should log in",
-        );
-    }
-
-    #[test]
-    fn disabled_accounts_reject_new_logins_and_the_kill_switch_revokes_live_sessions() {
-        let directory = test_directory("disabled");
-        let clock = Arc::new(ManualClock::new(4_000));
-        let manager = manager(&directory, clock, "initialization-proof");
-        initialize(&manager, "Wen", "initial-owner-password");
-        let member = add_member(&manager, "Ada");
-        let member_actor = actor_of(&member.user_id.0);
-        let member_credentials = TransportCredentials::new(
-            None,
-            Some(
-                login(&manager, "203.0.113.9", "ada", "member-password-1")
-                    .expect("login")
-                    .cookie_value,
-            ),
-        );
-        assert!(manager.current(&member_credentials).is_ok());
-
-        let now = Instant("2027-05-01T08:00:00.000Z".to_owned());
-        manager
-            .accounts()
-            .set_state(
-                &member.user_id,
-                &member.revision,
-                winwincode_domain::UserAccountState::Disabled,
-                &now,
-            )
-            .expect("disable");
-        // New logins are refused immediately.
-        let error = login(&manager, "203.0.113.9", "ada", "member-password-1")
-            .err()
-            .expect("disabled login must fail");
-        assert!(error.is_authentication());
-        // The disable kill switch revokes every live session of the account.
-        assert_eq!(
-            manager
-                .revoke_actor_sessions(&member_actor)
-                .expect("kill switch"),
-            1
-        );
-        assert!(manager.current(&member_credentials).is_err());
     }
 
     #[test]

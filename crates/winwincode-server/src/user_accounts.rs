@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! The `UserAccountService`: the single canonical authority for durable
-//! operator accounts used by browser login.
+//! local Owner account used by browser login.
 //!
 //! The service is a thin secret-free boundary over the storage crate's
 //! `UserAccountLedger`: it owns username normalization, Argon2id password
@@ -12,20 +12,12 @@
 use std::fmt;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
 
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
-use winwincode_domain::{
-    Instant, Revision, UserAccount, UserAccountRole, UserAccountState, UserId,
-};
+use winwincode_domain::{Instant, Revision, UserAccount, UserId};
 use winwincode_storage::SqliteStorage;
 use winwincode_storage::UserAccountStoreErrorKind;
 
 use crate::password_hash::{hash_password, verify_password};
-
-/// How long one read-only probe waits for a concurrent writer. Matches the
-/// storage adapter's busy bound so Server and CLI probes behave alike.
-const PROBE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Crockford-style identifier alphabet shared with the canonical `usr_`
 /// identifier rules in the domain model (no `I`, `L`, `O`, or `U`).
@@ -40,16 +32,10 @@ const PASSWORD_MAX_BYTES: usize = 256;
 pub enum UserAccountServiceErrorKind {
     /// Rejected input, such as a malformed username or password length.
     InvalidInput,
-    /// The requested login identity already belongs to another account.
-    Conflict,
     /// The server already has its first Owner account.
     AlreadyInitialized,
     /// No account matches the requested identity.
     NotFound,
-    /// The username and password pair is wrong.
-    InvalidCredentials,
-    /// The account exists but is disabled.
-    AccountDisabled,
     /// The account changed after the supplied revision expectation.
     RevisionConflict,
     /// The storage operation itself failed.
@@ -85,11 +71,9 @@ pub enum CredentialRejection {
     UnknownAccount,
     /// The password does not verify against the stored Argon2id hash.
     BadPassword,
-    /// The credentials verify but the account is disabled.
-    AccountDisabled,
 }
 
-/// The single canonical authority over durable operator accounts.
+/// The single canonical authority over the durable local Owner account.
 pub struct UserAccountService {
     storage: Mutex<SqliteStorage>,
 }
@@ -109,7 +93,7 @@ impl UserAccountService {
         })
     }
 
-    /// Loads one account by exact user identity.
+    /// Loads the Owner by exact user identity.
     ///
     /// # Errors
     ///
@@ -118,49 +102,18 @@ impl UserAccountService {
         self.with_ledger(|ledger| ledger.find(user_id).map_err(|store| storage_error(&store)))
     }
 
-    /// Loads the durable active Owner's identity, if one exists, through one
-    /// read-only probe of the ledger-owned `users` table.
-    ///
-    /// "One active Owner exists" is the shared initialization authority for
-    /// both first-Owner paths: the browser bootstrap writes the account plus
-    /// the session-store marker, while the CLI's `create --role owner` writes
-    /// the same account without the marker. Both surfaces therefore agree on
-    /// one durable fact, and a disabled-only Owner leaves the recovery path
-    /// open.
+    /// Loads the durable local Owner identity, if initialization has completed.
     ///
     /// # Errors
     ///
     /// Reports an unavailable store.
-    pub fn active_owner_id(&self) -> Result<Option<UserId>, UserAccountServiceError> {
-        let database_path = {
-            let guard = self.storage.lock().map_err(|_| storage_unavailable())?;
-            guard.database_path().to_path_buf()
-        };
-        let connection =
-            Connection::open_with_flags(&database_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-                .map_err(|_| storage_unavailable())?;
-        connection
-            .busy_timeout(PROBE_BUSY_TIMEOUT)
-            .map_err(|_| storage_unavailable())?;
-        let users_table: i64 = connection
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master
-                 WHERE type = 'table' AND name = 'users')",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(|_| storage_unavailable())?;
-        if users_table != 1 {
-            return Ok(None);
-        }
-        connection
-            .query_row(
-                "SELECT user_id FROM users WHERE role = 'owner' AND state = 'active' LIMIT 1",
-                [],
-                |row| Ok(UserId(row.get(0)?)),
-            )
-            .optional()
-            .map_err(|_| storage_unavailable())
+    pub fn owner_id(&self) -> Result<Option<UserId>, UserAccountServiceError> {
+        self.with_ledger(|ledger| {
+            ledger
+                .owner()
+                .map(|account| account.map(|account| account.user_id))
+                .map_err(|store| storage_error(&store))
+        })
     }
 
     /// Normalizes one raw username: trim first, then lowercase; the
@@ -225,16 +178,12 @@ impl UserAccountService {
 
     /// Creates the first Owner account with a fresh canonical `usr_` id.
     ///
-    /// The per-Server one-shot initialization gate lives in the session
-    /// manager's durable marker, and one durable active Owner — from the
-    /// browser bootstrap or from the CLI's `create --role owner` — closes
-    /// this path permanently. This layer additionally refuses any request
-    /// whose normalized username is already taken.
+    /// The `SQLite` singleton constraint and the session manager's durable marker
+    /// both close this path after the first successful initialization.
     ///
     /// # Errors
     ///
-    /// Rejects an existing active Owner, an occupied normalized username,
-    /// invalid input, and storage failure.
+    /// Rejects an existing Owner, invalid input, and storage failure.
     pub fn initialize_owner(
         &self,
         username: &str,
@@ -242,7 +191,7 @@ impl UserAccountService {
         now: &Instant,
     ) -> Result<UserAccount, UserAccountServiceError> {
         Self::validate_password(password)?;
-        if self.active_owner_id()?.is_some() {
+        if self.owner_id()?.is_some() {
             return Err(error(
                 UserAccountServiceErrorKind::AlreadyInitialized,
                 "server initialization already completed",
@@ -251,68 +200,18 @@ impl UserAccountService {
         let password_hash = hash_password(password).map_err(|()| hashing_unavailable())?;
         self.with_ledger(|ledger| {
             let normalized = Self::normalize_username(username)?;
-            if ledger
-                .find_by_normalized_username(&normalized)
-                .map_err(|store| storage_error(&store))?
-                .is_some()
-            {
-                return Err(error(
-                    UserAccountServiceErrorKind::AlreadyInitialized,
-                    "server initialization already completed",
-                ));
-            }
             ledger
                 .create(&account(
                     generate_user_id()?,
                     Self::stored_username(username),
                     &normalized,
                     &password_hash,
-                    UserAccountRole::Owner,
                     now,
                 )?)
                 .map_err(|store| match store.kind() {
-                    UserAccountStoreErrorKind::NormalizedUsernameConflict => error(
+                    UserAccountStoreErrorKind::AlreadyInitialized => error(
                         UserAccountServiceErrorKind::AlreadyInitialized,
                         "server initialization already completed",
-                    ),
-                    UserAccountStoreErrorKind::InvalidInput => {
-                        error(UserAccountServiceErrorKind::InvalidInput, store.to_string())
-                    }
-                    _ => storage_error(&store),
-                })
-        })
-    }
-
-    /// Creates one additional account on behalf of the acting Owner.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid input, an occupied normalized username, and storage
-    /// failure.
-    pub fn create_user(
-        &self,
-        username: &str,
-        role: UserAccountRole,
-        password: &str,
-        now: &Instant,
-    ) -> Result<UserAccount, UserAccountServiceError> {
-        Self::validate_password(password)?;
-        let password_hash = hash_password(password).map_err(|()| hashing_unavailable())?;
-        self.with_ledger(|ledger| {
-            let normalized = Self::normalize_username(username)?;
-            ledger
-                .create(&account(
-                    generate_user_id()?,
-                    Self::stored_username(username),
-                    &normalized,
-                    &password_hash,
-                    role,
-                    now,
-                )?)
-                .map_err(|store| match store.kind() {
-                    UserAccountStoreErrorKind::NormalizedUsernameConflict => error(
-                        UserAccountServiceErrorKind::Conflict,
-                        "username already belongs to another account",
                     ),
                     UserAccountStoreErrorKind::InvalidInput => {
                         error(UserAccountServiceErrorKind::InvalidInput, store.to_string())
@@ -348,13 +247,10 @@ impl UserAccountService {
         if !verify_password(password, &account.password_hash) {
             return Ok(Err(CredentialRejection::BadPassword));
         }
-        if account.state == UserAccountState::Disabled {
-            return Ok(Err(CredentialRejection::AccountDisabled));
-        }
         Ok(Ok(account))
     }
 
-    /// Replaces one account password under an exact revision expectation.
+    /// Replaces the Owner password under an exact revision expectation.
     ///
     /// # Errors
     ///
@@ -376,27 +272,6 @@ impl UserAccountService {
         })
     }
 
-    /// Activates or disables one account under an exact revision
-    /// expectation.
-    ///
-    /// # Errors
-    ///
-    /// Reports a stale revision expectation, a missing account, or storage
-    /// failure.
-    pub fn set_state(
-        &self,
-        user_id: &UserId,
-        expected_revision: &Revision,
-        state: UserAccountState,
-        now: &Instant,
-    ) -> Result<UserAccount, UserAccountServiceError> {
-        self.with_ledger(|ledger| {
-            ledger
-                .set_state(user_id, expected_revision, state, now)
-                .map_err(|store| map_cas_error(&store))
-        })
-    }
-
     fn with_ledger<T>(
         &self,
         operation: impl FnOnce(
@@ -409,23 +284,6 @@ impl UserAccountService {
             .map_err(|store| storage_error(&store))?;
         operation(&mut ledger)
     }
-}
-
-/// Generates one random temporary password. It is the only plaintext source
-/// of the stored Argon2id hash and is returned exactly once to the caller.
-///
-/// # Errors
-///
-/// Reports entropy failure.
-pub fn generate_temporary_password() -> Result<String, UserAccountServiceError> {
-    const ALPHABET: &[u8; 36] = b"abcdefghijklmnopqrstuvwxyz0123456789";
-    const LENGTH: usize = 20;
-    let mut random = [0_u8; LENGTH];
-    getrandom::fill(&mut random).map_err(|_| storage_unavailable())?;
-    Ok(random
-        .iter()
-        .map(|byte| char::from(ALPHABET[usize::from(*byte) % ALPHABET.len()]))
-        .collect())
 }
 
 /// One stored Argon2id hash of an unknown random password, generated once.
@@ -457,7 +315,6 @@ fn account(
     username: &str,
     normalized_username: &str,
     password_hash: &str,
-    role: UserAccountRole,
     now: &Instant,
 ) -> Result<UserAccount, UserAccountServiceError> {
     UserAccount::new(
@@ -465,8 +322,6 @@ fn account(
         username.to_owned(),
         normalized_username.to_owned(),
         password_hash.to_owned(),
-        role,
-        UserAccountState::Active,
         now.clone(),
         now.clone(),
         Revision(1),
@@ -566,10 +421,8 @@ mod tests {
         let owner = service
             .initialize_owner("Wen", "first-owner-password", &now())
             .expect("first owner");
-        assert_eq!(owner.role, UserAccountRole::Owner);
         assert_eq!(owner.username, "Wen");
         assert_eq!(owner.normalized_username, "wen");
-        assert_eq!(owner.state, UserAccountState::Active);
         assert!(owner.user_id.0.starts_with("usr_"));
         assert_eq!(owner.user_id.0.len(), 30);
         assert!(owner.password_hash.starts_with("$argon2id$v=19$"));
@@ -590,20 +443,17 @@ mod tests {
     }
 
     #[test]
-    fn active_owner_blocks_a_second_owner_from_either_initialization_path() {
+    fn local_owner_blocks_a_second_initialization() {
         let (service, directory) = service("shared-authority");
-        assert_eq!(service.active_owner_id().expect("empty store"), None);
+        assert_eq!(service.owner_id().expect("empty store"), None);
         let owner = service
             .initialize_owner("Wen", "first-owner-password", &now())
             .expect("first owner");
         assert_eq!(
-            service.active_owner_id().expect("active owner"),
+            service.owner_id().expect("Owner"),
             Some(owner.user_id.clone())
         );
 
-        // A second Owner under a fresh username is refused exactly like a
-        // repeated username: one active Owner closes initialization for both
-        // the browser bootstrap and the CLI.
         let refused = service
             .initialize_owner("Ada", "second-owner-password", &now())
             .expect_err("second owner initialization");
@@ -612,47 +462,21 @@ mod tests {
             UserAccountServiceErrorKind::AlreadyInitialized
         );
 
-        // A disabled-only Owner no longer blocks bootstrap, keeping the
-        // recovery path open.
-        let disabled = service
-            .set_state(
-                &owner.user_id,
-                &owner.revision,
-                UserAccountState::Disabled,
-                &now(),
-            )
-            .expect("disable");
-        assert_eq!(service.active_owner_id().expect("no active owner"), None);
-        let recovered = service
-            .initialize_owner("Ada", "recovery-owner-password", &now())
-            .expect("recovery owner");
-        assert_eq!(recovered.role, UserAccountRole::Owner);
-        assert_eq!(disabled.state, UserAccountState::Disabled);
         drop(service);
         let _ = std::fs::remove_dir_all(directory);
     }
 
     #[test]
-    fn verifies_credentials_and_reports_disabled_accounts() {
+    fn verifies_owner_credentials() {
         let (service, directory) = service("verify");
         service
             .initialize_owner("Wen", "owner-password-1", &now())
             .expect("owner");
-        service
-            .create_user("Ada", UserAccountRole::Member, "member-password-1", &now())
-            .expect("member");
-
         let owner = service
             .verify_credentials("WEN", "owner-password-1")
             .expect("lookup")
             .expect("verified");
         assert_eq!(owner.username, "Wen");
-        assert!(
-            service
-                .verify_credentials("ada", "member-password-1")
-                .expect("lookup")
-                .is_ok()
-        );
         assert_eq!(
             service
                 .verify_credentials("stranger", "whatever-password")
@@ -661,32 +485,16 @@ mod tests {
         );
         assert_eq!(
             service
-                .verify_credentials("ada", "wrong-password")
+                .verify_credentials("wen", "wrong-password")
                 .expect("lookup"),
             Err(CredentialRejection::BadPassword)
-        );
-
-        let disabled = service
-            .set_state(
-                &owner.user_id,
-                &owner.revision,
-                UserAccountState::Disabled,
-                &now(),
-            )
-            .expect("disable");
-        assert_eq!(disabled.state, UserAccountState::Disabled);
-        assert_eq!(
-            service
-                .verify_credentials("wen", "owner-password-1")
-                .expect("lookup"),
-            Err(CredentialRejection::AccountDisabled)
         );
         drop(service);
         let _ = std::fs::remove_dir_all(directory);
     }
 
     #[test]
-    fn password_reset_and_state_changes_cas_the_revision() {
+    fn password_change_uses_the_owner_revision() {
         let (service, directory) = service("cas");
         let owner = service
             .initialize_owner("Wen", "owner-password-1", &now())
@@ -709,29 +517,7 @@ mod tests {
                 .expect("lookup")
                 .is_ok()
         );
-        let disabled = service
-            .set_state(
-                &owner.user_id,
-                &rotated.revision,
-                UserAccountState::Disabled,
-                &now(),
-            )
-            .expect("disable");
-        assert_eq!(disabled.revision, Revision(3));
         drop(service);
         let _ = std::fs::remove_dir_all(directory);
-    }
-
-    #[test]
-    fn generates_distinct_temporary_passwords() {
-        let first = generate_temporary_password().expect("first");
-        let second = generate_temporary_password().expect("second");
-        assert_eq!(first.len(), 20);
-        assert_ne!(first, second);
-        assert!(
-            first
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-        );
     }
 }

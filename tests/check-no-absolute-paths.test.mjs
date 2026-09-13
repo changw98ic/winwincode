@@ -12,7 +12,7 @@ import {
 } from '../scripts/check-no-absolute-paths.mjs'
 
 // Phase 0 path-ban lint lane: absolute local paths must never enter the
-// multi-user Client public surface (plan §8.1, §13, §17.3, §20.7, gate
+// Client public surface (original plan §8.1, §13, §17.3, §20.7, gate
 // "no absolute path in public projections"). These tests exercise the gate
 // against fabricated temporary trees plus the current repository tree.
 
@@ -137,5 +137,5 @@ test('current repository tree passes and the script exits green from any cwd', (
   assert.equal(scanPublicSurface().status, 'green')
   const result = spawnSync(process.execPath, [scriptPath], { cwd: tmpdir() })
   assert.equal(result.status, 0, `${scriptPath} must exit 0: ${result.stderr}`)
-  assert.match(result.stdout.toString(), /no absolute paths in the multi-user client public surface/)
+  assert.match(result.stdout.toString(), /no absolute paths in the client public surface/)
 })

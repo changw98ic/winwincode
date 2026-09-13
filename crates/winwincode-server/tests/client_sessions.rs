@@ -321,31 +321,6 @@ async fn login(address: std::net::SocketAddr, username: &str, password: &str) ->
     (session_cookie_from_response(&response), user_id)
 }
 
-/// Creates one member account and signs in; returns (cookie, userId).
-async fn create_and_login_member(
-    address: std::net::SocketAddr,
-    owner_cookie: &str,
-    username: &str,
-) -> (String, String) {
-    let create = json!({
-        "schemaVersion": SCHEMA_VERSION,
-        "username": username,
-        "role": "member",
-    })
-    .to_string();
-    let response = http_request(
-        address,
-        &cookie_post("/api/v1/users", &create, owner_cookie),
-    )
-    .await;
-    assert!(response.starts_with("HTTP/1.1 201"), "{response}");
-    let temporary = response_body(&response)["temporaryPassword"]
-        .as_str()
-        .expect("temporary password")
-        .to_owned();
-    login(address, username, &temporary).await
-}
-
 // ---- exchange protocol helpers (device side) ------------------------------
 
 async fn post_exchange(
@@ -1073,9 +1048,6 @@ async fn occupancy_preconditions_binding_visibility_and_capacity_gate_the_launch
     let running = start_server(&data_directory, &auth_directory).await;
     let address = running.local_address();
     let (owner_cookie, owner_id) = initialize_and_login_owner(address).await;
-    let (member_cookie, _member_id) =
-        create_and_login_member(address, &owner_cookie, "member").await;
-
     let (node, public_client_id, credential) = enroll_online_device(address, &data_directory).await;
     let code = publish_connect_code(&data_directory, &node, "11112222");
     consume_code_as(&data_directory, &node, &code, &owner_id);
@@ -1095,7 +1067,7 @@ async fn occupancy_preconditions_binding_visibility_and_capacity_gate_the_launch
     assert_eq!(status_of(&response), "409", "{response}");
     assert_eq!(wire_code(&response), "OCCUPANCY_REQUIRED");
 
-    // The owner occupies the device; the member is not the holder.
+    // The Owner occupies the device.
     let responder = spawn_device_responder(
         data_directory.clone(),
         address,
@@ -1117,18 +1089,6 @@ async fn occupancy_preconditions_binding_visibility_and_capacity_gate_the_launch
     .await;
     assert_eq!(status_of(&response), "201", "{response}");
     responder.abort();
-
-    let response = http_request(
-        address,
-        &cookie_post(
-            "/api/v1/sessions",
-            &launch_body(&public_client_id, &binding_id),
-            &member_cookie,
-        ),
-    )
-    .await;
-    assert_eq!(status_of(&response), "403", "{response}");
-    assert_eq!(wire_code(&response), "NOT_HOLDER");
 
     // A binding without an active repository grant is invisible to the
     // holder, even while they occupy the client.

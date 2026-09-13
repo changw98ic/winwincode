@@ -1,17 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The `UserAccount` domain object for the multi-user login surface.
+//! The `UserAccount` domain object for the local Owner login.
 //!
-//! One `UserAccount` is the durable identity of one human operator. The
-//! fields mirror the multi-user plan section 7.1: the user-chosen
-//! `username`, the uniqueness-bearing `normalizedUsername`, the opaque
-//! Argon2id PHC `passwordHash` string, the `owner | member` role, the
-//! `active | disabled` lifecycle state, and the optimistic-concurrency
+//! The one `UserAccount` is the durable identity of the local Owner. It keeps
+//! the user-chosen `username`, its normalized login form, the opaque Argon2id
+//! PHC `passwordHash` string, timestamps, and the optimistic-concurrency
 //! `revision`.
 //!
 //! This model owns only the stored invariants. Username normalization and
-//! password hashing stay in their own layers; the uniqueness of
-//! `normalizedUsername` is enforced by the storage adapter, not here.
+//! password hashing stay in their own layers; matching the one
+//! `normalizedUsername` is the storage adapter's responsibility.
 
 use std::fmt;
 
@@ -24,70 +22,6 @@ const MAX_USERNAME_BYTES: usize = 96;
 
 /// Maximum byte length accepted for an Argon2id PHC `passwordHash` string.
 const MAX_PASSWORD_HASH_BYTES: usize = 512;
-
-/// Administration role of one `UserAccount`.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
-pub enum UserAccountRole {
-    /// The first accountable operator; may administer other accounts.
-    #[serde(rename = "owner")]
-    Owner,
-    /// A regular operator created by an Owner.
-    #[serde(rename = "member")]
-    Member,
-}
-
-impl UserAccountRole {
-    /// Canonical stored spelling of this role.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Owner => "owner",
-            Self::Member => "member",
-        }
-    }
-
-    /// Parses one canonical stored role spelling.
-    #[must_use]
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "owner" => Some(Self::Owner),
-            "member" => Some(Self::Member),
-            _ => None,
-        }
-    }
-}
-
-/// Lifecycle state of one `UserAccount`.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
-pub enum UserAccountState {
-    /// Login and session use are allowed.
-    #[serde(rename = "active")]
-    Active,
-    /// Login is refused and every session must be revoked.
-    #[serde(rename = "disabled")]
-    Disabled,
-}
-
-impl UserAccountState {
-    /// Canonical stored spelling of this state.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Active => "active",
-            Self::Disabled => "disabled",
-        }
-    }
-
-    /// Parses one canonical stored state spelling.
-    #[must_use]
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "active" => Some(Self::Active),
-            "disabled" => Some(Self::Disabled),
-            _ => None,
-        }
-    }
-}
 
 /// Validation failure category for one `UserAccount` value.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -129,7 +63,7 @@ impl fmt::Display for UserAccountError {
 
 impl std::error::Error for UserAccountError {}
 
-/// One durable human login account.
+/// The durable local Owner login account.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct UserAccount {
@@ -139,18 +73,12 @@ pub struct UserAccount {
     /// Chosen login name exactly as entered by the operator.
     #[serde(rename = "username")]
     pub username: String,
-    /// Normalized uniqueness key for the username; unique across accounts.
+    /// Normalized form used for login matching.
     #[serde(rename = "normalizedUsername")]
     pub normalized_username: String,
     /// Argon2id PHC string; never a plaintext password.
     #[serde(rename = "passwordHash")]
     pub password_hash: String,
-    /// Administration role.
-    #[serde(rename = "role")]
-    pub role: UserAccountRole,
-    /// Lifecycle state.
-    #[serde(rename = "state")]
-    pub state: UserAccountState,
     /// Canonical creation instant.
     #[serde(rename = "createdAt")]
     pub created_at: Instant,
@@ -173,14 +101,11 @@ impl UserAccount {
     /// `passwordHash` that is not an Argon2id PHC string, a non-canonical
     /// timestamp, an `updatedAt` earlier than `createdAt`, or a revision
     /// that is not positive.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         user_id: UserId,
         username: String,
         normalized_username: String,
         password_hash: String,
-        role: UserAccountRole,
-        state: UserAccountState,
         created_at: Instant,
         updated_at: Instant,
         revision: Revision,
@@ -232,8 +157,6 @@ impl UserAccount {
             username,
             normalized_username,
             password_hash,
-            role,
-            state,
             created_at,
             updated_at,
             revision,
@@ -336,8 +259,6 @@ mod tests {
             username.to_owned(),
             normalized_username.to_owned(),
             password_hash.to_owned(),
-            UserAccountRole::Owner,
-            UserAccountState::Active,
             Instant(created_at.to_owned()),
             Instant(updated_at.to_owned()),
             Revision(revision),
@@ -348,8 +269,6 @@ mod tests {
     fn builds_a_valid_account() {
         let account = build(USER_ID, "Wen", "wen", PHC_HASH, CREATED_AT, UPDATED_AT, 1)
             .expect("valid user account");
-        assert_eq!(account.role.as_str(), "owner");
-        assert_eq!(account.state.as_str(), "active");
         assert_eq!(account.user_id.0, USER_ID);
     }
 
@@ -444,26 +363,6 @@ mod tests {
             .expect_err("invalid user account");
             assert_eq!(built.kind(), UserAccountErrorKind::InvalidRevision);
         }
-    }
-
-    #[test]
-    fn role_and_state_enums_round_trip_their_canonical_spellings() {
-        for (role, spelling) in [
-            (UserAccountRole::Owner, "owner"),
-            (UserAccountRole::Member, "member"),
-        ] {
-            assert_eq!(role.as_str(), spelling);
-            assert_eq!(UserAccountRole::parse(spelling), Some(role));
-        }
-        for (state, spelling) in [
-            (UserAccountState::Active, "active"),
-            (UserAccountState::Disabled, "disabled"),
-        ] {
-            assert_eq!(state.as_str(), spelling);
-            assert_eq!(UserAccountState::parse(spelling), Some(state));
-        }
-        assert_eq!(UserAccountRole::parse("administrator"), None);
-        assert_eq!(UserAccountState::parse("archived"), None);
     }
 
     #[test]
