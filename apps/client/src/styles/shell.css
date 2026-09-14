@@ -134,62 +134,18 @@
   overflow-y: auto;
 }
 
-.wwc-scope-selector-root {
-  margin-bottom: var(--wwc-space-6);
-}
-
-/* Design 03a: the Scope region is frameless — only the compact 「winwincode ∨」
-   dropdown shows at the top-left of the Chat canvas. */
-.wwc-scope-selector {
-  padding: var(--wwc-space-0);
-  border: 0;
-  border-radius: var(--wwc-radius-lg);
-  background: transparent;
-}
-
-.wwc-scope-selector-heading {
-  margin: var(--wwc-space-0) var(--wwc-space-0) var(--wwc-space-3);
-  font-size: var(--wwc-font-size-lg);
-}
-
-.wwc-scope-selector-access,
-.wwc-scope-selector-status {
-  margin: var(--wwc-space-2) var(--wwc-space-0);
+.wwc-scope-notice {
+  margin: var(--wwc-space-0) var(--wwc-space-0) var(--wwc-space-6);
+  padding: var(--wwc-space-3);
+  border: var(--wwc-border-width) solid transparent;
+  border-radius: var(--wwc-radius-md);
   color: var(--wwc-color-text-muted);
 }
 
-.wwc-scope-selector-access[role='alert'] {
-  padding: var(--wwc-space-3);
-  border: var(--wwc-border-width) solid var(--wwc-color-danger-border);
-  border-radius: var(--wwc-radius-md);
+.wwc-scope-notice[role='alert'] {
+  border-color: var(--wwc-color-danger-border);
   color: var(--wwc-color-danger-text);
   background: var(--wwc-color-danger-surface);
-}
-
-.wwc-scope-selector-controls {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: var(--wwc-space-3);
-}
-
-.wwc-scope-selector-field {
-  min-width: 0;
-}
-
-.wwc-scope-selector-label {
-  display: block;
-  margin-bottom: var(--wwc-space-1);
-  font-size: var(--wwc-font-size-sm);
-  font-weight: var(--wwc-font-weight-medium);
-}
-
-.wwc-scope-selector-control {
-  width: 100%;
-  min-width: 0;
-}
-
-.wwc-scope-selector-retry {
-  margin-top: var(--wwc-space-2);
 }
 
 .wwc-surface-title {
@@ -389,10 +345,6 @@
     grid-column: 1;
     grid-row: 2;
   }
-
-  .wwc-scope-selector-controls {
-    grid-template-columns: 1fr;
-  }
 }
 
 /* Design shell: nav links are icon + label rows in the sidebar. */
@@ -487,18 +439,6 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-/* Compact Scope disclosure (design 03a 「winwincode ∨」). */
-.wwc-scope-selector-compact {
-  min-height: var(--wwc-control-min-height);
-  padding: var(--wwc-space-2) var(--wwc-space-4);
-  border: var(--wwc-border-width-control) solid var(--wwc-color-border);
-  border-radius: var(--wwc-radius-md);
-  color: var(--wwc-color-text);
-  background: var(--wwc-color-surface);
-  font-weight: var(--wwc-font-weight-medium);
-  cursor: pointer;
 }
 
 .wwc-login-subtitle {

@@ -1,30 +1,9 @@
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import test from 'node:test'
 
 const root = resolve(import.meta.dirname, '..')
-const compiler = spawnSync(
-  'corepack',
-  [
-    'pnpm',
-    'exec',
-    'tsc',
-    '-p',
-    'apps/client/tsconfig.scope-selector-tests.json',
-    '--pretty',
-    'false',
-    '--incremental',
-    'false',
-  ],
-  { cwd: root, encoding: 'utf8' },
-)
-assert.equal(
-  compiler.status,
-  0,
-  `Scope selector boundary did not compile:\n${compiler.stdout}${compiler.stderr}`,
-)
 
 const scopeContext = await import(`${pathToFileURL(resolve(
   root,

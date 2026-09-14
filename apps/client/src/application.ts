@@ -85,11 +85,6 @@ import {
   mountReadinessPage,
   type ReadinessFixTarget,
 } from './readiness-page.js'
-import {
-  mountScopeSelectorPage,
-  type ScopeSelectorPage,
-} from './scope-selector-page.js'
-import { createScopeSelectorViewModel } from './scope-selector-view-model.js'
 import type {
   ControlPlaneWebSocketSubscriptionId,
   DeliveryId,
@@ -136,8 +131,6 @@ export interface WinWinCodeClientApplication {
 interface MountedClientFeature {
   close(): void
 }
-
-type ScopeSelectorRenderMode = 'replace' | 'preserve'
 
 function element<K extends keyof HTMLElementTagNameMap>(
   document: Document,
@@ -311,7 +304,9 @@ export function mountWinWinCodeClient(
   const clientsRoot = element(document, 'div', 'wwc-clients-root')
   const repositoriesRoot = element(document, 'div', 'wwc-repositories-root')
   const main = element(document, 'main', 'wwc-main')
-  const scopeRoot = element(document, 'div', 'wwc-scope-selector-root')
+  // Community binds one repository at Server startup; there is no multi-tenant
+  // Scope switcher. Notices for revoked/empty scope use a plain alert region.
+  const scopeNotice = element(document, 'p', 'wwc-scope-notice')
   const readinessRoot = element(document, 'div', 'wwc-readiness-root')
   // Pages own their page headers (design); the shell title elements stay in
   // the DOM for ARIA but render empty.
@@ -322,7 +317,6 @@ export function mountWinWinCodeClient(
   const links = new Map<ClientSurfaceId, HTMLAnchorElement>()
   let activeSurface = clientSurfaceFromHash(browser.location.hash)
   let activeFeature: MountedClientFeature | null = null
-  let scopeSelectorPage: ScopeSelectorPage | null = null
   let currentScopeResolution: ScopeContextResolution | null = null
   let featureController: AbortController | null = null
   let renderGeneration = 0
@@ -340,17 +334,6 @@ export function mountWinWinCodeClient(
       selection.projectId ?? '',
       selection.repositoryId ?? '',
     ].join('\u0000')
-  }
-
-  function selectionLeavesRevokedScope(selection: ScopeRouteSelection): boolean {
-    if (revokedScopeIdentity === null) return false
-    const revoked = revokedScopeIdentity.split('\u0000')
-    return [
-      selection.organizationId,
-      selection.workspaceId,
-      selection.projectId,
-      selection.repositoryId,
-    ].some((value, index) => value !== null && value !== revoked[index])
   }
 
   function diagnosticScope(): unknown {
@@ -597,7 +580,7 @@ export function mountWinWinCodeClient(
   header.append(skipLink, brand, navigation, recentChatsRoot, authRoot)
   authRoot.hidden = true
   main.append(
-    scopeRoot,
+    scopeNotice,
     readinessRoot,
     title,
     description,
@@ -783,14 +766,11 @@ export function mountWinWinCodeClient(
     featureController = null
     activeFeature?.close()
     activeFeature = null
-    scopeSelectorPage?.close()
-    scopeSelectorPage = null
     currentScopeResolution = null
     closeAttentionMonitor()
-    const scopeRevoked = element(document, 'p', 'wwc-scope-selector-access')
-    scopeRevoked.setAttribute('role', 'alert')
-    scopeRevoked.textContent = '此范围的授权已被撤销。请返回安全入口并恢复访问。'
-    scopeRoot.replaceChildren(scopeRevoked)
+    scopeNotice.setAttribute('role', 'alert')
+    scopeNotice.textContent = '此范围的授权已被撤销。请返回安全入口并恢复访问。'
+    scopeNotice.hidden = false
     clearRouteFailure()
     const link = links.get(activeSurface.id)
     link?.setAttribute('data-route-access', 'denied')
@@ -1487,17 +1467,13 @@ export function mountWinWinCodeClient(
     }
   }
 
-  function performRender(scopeSelectorMode: ScopeSelectorRenderMode = 'replace'): void {
+  function performRender(): void {
     renderGeneration += 1
     const generation = renderGeneration
     featureController?.abort()
     featureController = null
     activeFeature?.close()
     activeFeature = null
-    if (scopeSelectorMode === 'replace') {
-      scopeSelectorPage?.close()
-      scopeSelectorPage = null
-    }
     currentScopeResolution = null
     activeSurface = clientSurfaceFromHash(browser.location.hash)
     // Design pages 07/08: device onboarding and repository lists live on their
@@ -1537,35 +1513,28 @@ export function mountWinWinCodeClient(
           })
         : resolved
       currentScopeResolution = resolution
-      if (scopeSelectorPage === null) {
-        const model = createScopeSelectorViewModel({
-          authorizedScopes: session.authorizedScopes,
-          selection: resolution.selection,
-          onSelectionChange(nextSelection) {
-            if (closed || scopeSelectorPage === null) return
-            if (selectionLeavesRevokedScope(nextSelection)) revokedScopeIdentity = null
-            replaceHash(scopeHash(browser.location.hash, nextSelection))
-            render('preserve')
-          },
-        })
-        scopeSelectorPage = mountScopeSelectorPage({
-          root: scopeRoot,
-          model,
-          contextStatus: resolution.status,
-        })
-        if (!routeAccessDenied && resolution.status !== 'denied') void model.start()
+      // Community: resolve the single authorized repository without a Scope
+      // switcher. Empty selection auto-picks the only compatible repository.
+      if (resolution.status === 'selected') {
+        scopeNotice.hidden = true
+        scopeNotice.textContent = ''
+      } else if (resolution.status === 'denied') {
+        scopeNotice.setAttribute('role', 'alert')
+        scopeNotice.textContent = 'URL 中的范围已不再被授权，或当前账号没有可用仓库。'
+        scopeNotice.hidden = false
+      } else if (resolution.status === 'empty') {
+        scopeNotice.setAttribute('role', 'status')
+        scopeNotice.textContent = '此区域没有兼容的授权范围。'
+        scopeNotice.hidden = false
       } else {
-        scopeSelectorPage.updateContextStatus(resolution.status)
+        scopeNotice.setAttribute('role', 'alert')
+        scopeNotice.textContent = '当前账号有多个授权仓库；社区版仅支持启动时绑定的单一仓库。'
+        scopeNotice.hidden = false
       }
-      // Design pages 03a/03b: the 「winwincode ∨」 Scope dropdown lives at the
-      // top-left of the Chat canvas only; other surfaces render without it
-      // unless the scope itself needs attention.
-      scopeRoot.hidden = activeSurface.id !== 'chat' && resolution.status === 'selected'
     } else {
-      scopeSelectorPage?.close()
-      scopeSelectorPage = null
-      scopeRoot.hidden = true
-      scopeRoot.replaceChildren()
+      currentScopeResolution = null
+      scopeNotice.hidden = true
+      scopeNotice.textContent = ''
     }
     // 设计稿 16 页:没有任何页面在内联位置渲染就绪检查清单(它属于独立的
     // 首次设置流程),因此外壳不再把这个区块压在内容上方;模型照常更新,
@@ -1711,9 +1680,9 @@ export function mountWinWinCodeClient(
     })
   }
 
-  function render(scopeSelectorMode: ScopeSelectorRenderMode = 'replace'): void {
+  function render(): void {
     try {
-      performRender(scopeSelectorMode)
+      performRender()
     } catch (error) {
       showRouteFailure(error, 'CLIENT_RENDER_FAILURE')
     }
@@ -1806,8 +1775,6 @@ export function mountWinWinCodeClient(
       featureController = null
       activeFeature?.close()
       activeFeature = null
-      scopeSelectorPage?.close()
-      scopeSelectorPage = null
       currentScopeResolution = null
       closeAttentionMonitor()
       readinessPage.close()
