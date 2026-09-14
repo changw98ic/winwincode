@@ -117,7 +117,7 @@ test('board: default expand running + decisions; collapse others as count rows',
   assert.ok(presentation.collapsibleSections.includes('ready'))
   assert.ok(presentation.collapsibleSections.includes('completed'))
   assert.equal(presentation.sectionHeading.decisions, '待我处理')
-  assert.equal(presentation.sectionHeading.running, '运行中（Running）')
+  assert.equal(presentation.sectionHeading.running, '运行中')
   assert.equal(presentation.countLabel(3), '3')
 })
 

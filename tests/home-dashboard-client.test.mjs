@@ -840,13 +840,13 @@ test('the dashboard announcement names every section count and its gaps', () => 
     deliveries: deliveryState([]),
     attention: attentionState([]),
     usage: usageState(),
-  })), /^就绪 · 0 项待决策/u)
+  })), /^就绪$/u)
   assert.match(homeDashboardAnnouncement(homeDashboardState({
     visits: [],
     deliveries: deliveryState([deliverySummary()]),
     attention: attentionState([decisionCard()]),
     usage: usageState(),
-  })), /1 项待决策 · 0 个待拆分 · 1 个运行中 · 0 个待启动 · 0 个等待中 · 0 个验证中 · 0 个失败或阻塞 · 0 个已完成/u)
+  })), /1 项待决策 · 1 个运行中/u)
   assert.match(homeDashboardAnnouncement(homeDashboardState({
     visits: [],
     deliveries: deliveryState([]),
@@ -1098,13 +1098,13 @@ test('the Home page mounts the task board chrome, one polite live region, and ex
   assert.equal(liveRegions.length, 1, 'the Home page keeps exactly one polite live region')
   assert.match(
     visibleText(liveRegions[0]),
-    /就绪 · 3 项待决策 · 0 个待拆分 · 1 个运行中 · 0 个待启动 · 0 个等待中 · 0 个验证中 · 0 个失败或阻塞 · 1 个已完成/u,
+    /就绪 · 3 项待决策 · 1 个运行中 · 1 个已完成/u,
   )
 
   // The two live columns: Running left, Needs-you right, bold + gray count.
   const runningSection = descendants(page).find(node => node.dataset?.section === 'running')
   assert.notEqual(runningSection, undefined)
-  assert.equal(byClass(runningSection, 'wwc-home-section-heading').textContent, '运行中（Running）')
+  assert.equal(byClass(runningSection, 'wwc-home-section-heading').textContent, '运行中')
   assert.equal(byClass(runningSection, 'wwc-home-section-count').textContent, '1')
   const decisionsSection = descendants(page).find(node => node.dataset?.section === 'decisions')
   assert.notEqual(decisionsSection, undefined)
@@ -1177,7 +1177,7 @@ test('the Home page mounts the task board chrome, one polite live region, and ex
     const cards = byClass(section, 'wwc-home-cards')
     assert.equal(cards.hidden, true, `${id} stays collapsed`)
     if (id === 'completed') {
-      assert.equal(byClass(section, 'wwc-home-section-heading').textContent, '已完成（Done）')
+      assert.match(toggle.textContent, /已完成/u)
       toggle.dispatch('click')
       assert.equal(toggle.getAttribute('aria-expanded'), 'true')
       assert.equal(cards.hidden, false, 'the completed row expands in place')

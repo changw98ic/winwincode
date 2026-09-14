@@ -98,13 +98,13 @@ const PRESENTATION_SPEC: HomeDashboardPresentation = {
   }),
   sectionHeading: Object.freeze({
     decisions: '待我处理',
-    backlog: '待拆分（Backlog）',
-    ready: '待启动（Ready）',
-    running: '运行中（Running）',
-    waiting: '等待中（Waiting）',
-    validating: '验证中（Validating）',
+    backlog: '待拆分',
+    ready: '待启动',
+    running: '运行中',
+    waiting: '等待中',
+    validating: '验证中',
     failed: '失败或阻塞',
-    completed: '已完成（Done）',
+    completed: '已完成',
     visited: '最近访问',
   }),
   sectionEmpty: Object.freeze({
@@ -180,16 +180,23 @@ export function homeDashboardAnnouncement(state: HomeDashboardState): string {
     return PRESENTATION.statusLabel[state.status]
   }
   const counts = state.counts
+  const total = counts.decisions + counts.backlog + counts.running + counts.ready
+    + counts.waiting + counts.validating + counts.failed + counts.completed
+  if (total === 0) {
+    return state.status === 'partial'
+      ? `${PRESENTATION.statusLabel.partial} · ${PRESENTATION.partialNote}`
+      : PRESENTATION.statusLabel.ready
+  }
   const summary = [
-    `${String(counts.decisions)} 项待决策`,
-    `${String(counts.backlog)} 个待拆分`,
-    `${String(counts.running)} 个运行中`,
-    `${String(counts.ready)} 个待启动`,
-    `${String(counts.waiting)} 个等待中`,
-    `${String(counts.validating)} 个验证中`,
-    `${String(counts.failed)} 个失败或阻塞`,
-    `${String(counts.completed)} 个已完成`,
-  ].join(' · ')
+    counts.decisions > 0 ? `${String(counts.decisions)} 项待决策` : null,
+    counts.backlog > 0 ? `${String(counts.backlog)} 个待拆分` : null,
+    counts.running > 0 ? `${String(counts.running)} 个运行中` : null,
+    counts.ready > 0 ? `${String(counts.ready)} 个待启动` : null,
+    counts.waiting > 0 ? `${String(counts.waiting)} 个等待中` : null,
+    counts.validating > 0 ? `${String(counts.validating)} 个验证中` : null,
+    counts.failed > 0 ? `${String(counts.failed)} 个失败或阻塞` : null,
+    counts.completed > 0 ? `${String(counts.completed)} 个已完成` : null,
+  ].filter((entry): entry is string => entry !== null).join(' · ')
   return state.status === 'partial'
     ? `${PRESENTATION.statusLabel.partial} · ${summary} · ${PRESENTATION.partialNote}`
     : `${PRESENTATION.statusLabel.ready} · ${summary}`
@@ -528,14 +535,13 @@ export function mountHomeDashboardPage(
     const heading = element(document, 'h3', 'wwc-home-section-heading')
     heading.textContent = presentation.sectionHeading[id]
     const count = element(document, 'span', 'wwc-home-section-count')
-    headingRow.append(heading, count)
     const empty = element(document, 'p', 'wwc-home-section-empty')
     empty.hidden = true
     empty.textContent = presentation.sectionEmpty[id]
     const cards = element(document, 'ul', 'wwc-home-cards')
     const root = element(document, 'section', 'wwc-home-section')
     root.dataset.section = id
-    // Design page 04: history groups render as collapsed single hairline rows.
+    // Design 04: history groups are a single collapsed row — no second heading.
     const collapsible = presentation.collapsibleSections.includes(id)
     let toggle: HTMLButtonElement | null = null
     if (collapsible) {
@@ -565,6 +571,8 @@ export function mountHomeDashboardPage(
       headingRow.append(toggleButton)
       cards.hidden = true
       toggle = toggleButton
+    } else {
+      headingRow.append(heading, count)
     }
     root.append(headingRow, empty, cards)
     sectionsRoot.append(root)
@@ -682,6 +690,11 @@ export function mountHomeDashboardPage(
         section.toggle.textContent = expandedNow
           ? `${presentation.sectionHeading[id]} · ${presentation.collapseLabel}`
           : `${presentation.sectionHeading[id]} · ${presentation.countLabel(total)}`
+        // Hide empty history rows; a zero count is noise, not a queue.
+        if (total === 0 && !expandedNow) {
+          section.root.hidden = true
+          continue
+        }
       }
       if (attentionOnlyEnabled && id !== 'decisions') {
         section.root.hidden = true
