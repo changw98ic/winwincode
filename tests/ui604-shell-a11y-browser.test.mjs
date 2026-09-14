@@ -78,6 +78,7 @@ test('a real browser keeps one page heading, one live-region channel per page, a
     )
 
     assert.equal(audit.h1.length, 1, `${surface} must expose exactly one page heading`)
+    assert.ok(audit.h1[0].length > 0, `${surface} must name its page heading`)
     assert.deepEqual(
       audit.skippedHeadingLevels,
       [],
@@ -175,4 +176,73 @@ test('a real browser keeps one page heading, one live-region channel per page, a
   assert.equal(zoomed.skipLink.present, true)
   assert.equal(zoomed.h1.length, 1)
   assert.deepEqual(zoomed.collectionLiveRegions, [])
+
+  const providerForm = await evaluate(devtools, sessionId, `(() => {
+    document.querySelector('.wwc-settings-add-provider').click()
+    const panel = document.querySelector('.wwc-settings-create-credential')
+    return {
+      visible: panel.checkVisibility(),
+      focus: document.activeElement.id,
+      id: document.querySelector('.wwc-settings-create-id').value,
+      model: document.querySelector('.wwc-settings-default-model').textContent,
+    }
+  })()`)
+  assert.equal(providerForm.visible, true, 'adding a provider must reveal the real form')
+  assert.equal(providerForm.focus, 'wwc-settings-create-name')
+  assert.match(providerForm.id, /^crd_[0-9A-HJKMNP-TV-Z]{26}$/u)
+  assert.equal(providerForm.model, '尚未配置默认模型')
+
+  await devtools.send('Emulation.setDeviceMetricsOverride', {
+    width: 390, height: 844, deviceScaleFactor: 1, mobile: false,
+  }, sessionId)
+  await open('#/chat')
+  await evaluate(devtools, sessionId, 'globalThis.inspectAccessibility("chat")')
+  const composer = await evaluate(devtools, sessionId, `(() => {
+    const input = document.querySelector('.wwc-chat-composer-input').getBoundingClientRect()
+    const send = document.querySelector('.wwc-chat-send').getBoundingClientRect()
+    return { top: input.top, bottom: send.bottom, viewport: innerHeight }
+  })()`)
+  assert.ok(composer.top >= 0 && composer.bottom <= composer.viewport,
+    'the mobile composer and send button must fit in the viewport')
+
+  const extensions = await evaluate(devtools, sessionId, `(async () => {
+    const { mountExtensionsPage } = await import('/module/extensions-page.js')
+    const root = document.createElement('div')
+    document.body.append(root)
+    const view = mountExtensionsPage({ root })
+    const tabs = [...root.querySelectorAll('[role="tab"]')]
+    const results = tabs.map(tab => {
+      tab.click()
+      return root.querySelector('[role="tabpanel"]:not([hidden])').textContent
+    })
+    view.close()
+    root.remove()
+    return results
+  })()`)
+  assert.equal(extensions.length, 3)
+  for (const text of extensions) {
+    assert.match(text, /暂不可用/u)
+    assert.doesNotMatch(text, /已安装|已连接|Archify/u)
+  }
+
+  const pairing = await evaluate(devtools, sessionId, `(async () => {
+    const { mountOnboardingPage } = await import('/module/onboarding-page.js')
+    const root = document.createElement('div')
+    document.body.append(root)
+    const calls = []
+    const view = mountOnboardingPage({ root,
+      connect: async (...args) => { calls.push(args) }, onSignOut() {},
+    })
+    const form = root.querySelector('form')
+    form.requestSubmit()
+    const invalidCalls = calls.length
+    root.querySelector('#wwc-onboarding-device-id').value = '123 456 789'
+    root.querySelector('#wwc-onboarding-code').value = '12345678'
+    form.requestSubmit()
+    await Promise.resolve()
+    view.close()
+    root.remove()
+    return { invalidCalls, calls }
+  })()`)
+  assert.deepEqual(pairing, { invalidCalls: 0, calls: [['123456789', '12345678']] })
 })

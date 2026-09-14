@@ -183,7 +183,10 @@ function runExtensionLane() {
   const reject = policy.arbitraryDomOrAuthorityAccess === 'unsupported'
     && policy.installation.startsWith('not-enabled-')
   const page = readFileSync(join(root, 'apps/client/src/extensions-page.ts'), 'utf8')
-  const replay = !page.includes('submitCommand') && page.includes('disabled: true')
+  // The current surface has only tabs and unavailable states, with no actions
+  // to enable after remount. Browser coverage checks all three rendered tabs.
+  const replay = page.includes('mountEmptyState')
+    && !/submitCommand|mountButton|localStorage|createElement\(['"]button['"]\)/u.test(page)
   return { success, reject, replay, details: { policyUnknown: policy.unknownPackage } }
 }
 

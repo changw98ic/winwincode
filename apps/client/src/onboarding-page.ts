@@ -12,7 +12,7 @@ import {
 export interface OnboardingPageOptions {
   readonly root: HTMLElement
   /** Submits the pairing code; resolves on success, rejects with a message. */
-  readonly connect: (connectionCode: string) => Promise<void>
+  readonly connect: (clientId: string, connectionCode: string) => Promise<void>
   /** Signed-out entry in the brand row (设计稿 02 右上角). */
   readonly onSignOut: () => void
 }
@@ -65,6 +65,14 @@ export function mountOnboardingPage(options: OnboardingPageOptions): OnboardingP
   subtitle.textContent = '在执行任务的电脑上启动执行设备客户端，输入它显示的配对码。'
 
   const form = element(document, 'form', 'wwc-onboarding-form')
+  const deviceLabel = element(document, 'label', 'wwc-onboarding-label')
+  deviceLabel.htmlFor = 'wwc-onboarding-device-id'
+  deviceLabel.textContent = '设备 ID'
+  const deviceId = element(document, 'input', 'wwc-onboarding-control')
+  deviceId.id = 'wwc-onboarding-device-id'
+  deviceId.inputMode = 'numeric'
+  deviceId.autocomplete = 'off'
+  deviceId.placeholder = '输入客户端显示的 9–12 位设备 ID'
   const codeLabel = element(document, 'label', 'wwc-onboarding-label')
   codeLabel.htmlFor = 'wwc-onboarding-code'
   codeLabel.textContent = '配对码'
@@ -78,7 +86,7 @@ export function mountOnboardingPage(options: OnboardingPageOptions): OnboardingP
   submit.textContent = '连接设备'
   const feedback = element(document, 'p', 'wwc-onboarding-feedback')
   feedback.setAttribute('role', 'status')
-  form.append(codeLabel, code, submit, feedback)
+  form.append(deviceLabel, deviceId, codeLabel, code, submit, feedback)
 
   const helpContent = element(document, 'div', 'wwc-onboarding-help')
   const helpText = element(document, 'p', 'wwc-onboarding-help-text')
@@ -105,13 +113,18 @@ export function mountOnboardingPage(options: OnboardingPageOptions): OnboardingP
   form.addEventListener('submit', event => {
     event.preventDefault()
     const pairingCode = code.value.replace(/\D+/gu, '')
+    const clientId = deviceId.value.replace(/\D+/gu, '')
+    if (!/^\d{9,12}$/u.test(clientId)) {
+      feedback.textContent = '设备 ID 是执行设备客户端显示的 9–12 位数字。'
+      return
+    }
     if (!PAIRING_CODE_PATTERN.test(pairingCode)) {
       feedback.textContent = '配对码是执行设备客户端显示的 8 位数字。'
       return
     }
     submit.disabled = true
     feedback.textContent = '正在连接执行设备…'
-    void options.connect(pairingCode)
+    void options.connect(clientId, pairingCode)
       .then(() => {
         feedback.textContent = '已连接。正在打开执行设备页…'
       })

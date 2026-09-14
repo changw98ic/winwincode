@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
+  ControlPlaneClientError,
   type ControlPlaneClientDirectory,
   type ControlPlaneDeviceSummary,
   type ControlPlaneRequestOptions,
@@ -51,9 +52,9 @@ export function renderDevicePage(options: DevicePageOptions): DevicePage {
       className: 'wwc-device-heading',
     },
   })
-  const more = element(document, 'button', 'wwc-device-more')
-  more.type = 'button'
-  more.textContent = '更多 ∨'
+  const more = element(document, 'a', 'wwc-device-more')
+  more.href = options.homeHref
+  more.textContent = '连接设备'
   const headerRow = element(document, 'div', 'wwc-device-header')
   headerRow.append(pageHeader.root, more)
 
@@ -62,11 +63,19 @@ export function renderDevicePage(options: DevicePageOptions): DevicePage {
   status.textContent = '正在读取执行设备…'
 
   const body = element(document, 'div', 'wwc-device-body')
+  const retry = element(document, 'button', 'wwc-device-retry')
+  retry.type = 'button'
+  retry.textContent = '重试'
+  retry.hidden = true
+  retry.addEventListener('click', () => { void load() })
 
-  layout.append(headerRow, status, body)
+  layout.append(headerRow, status, retry, body)
   options.root.replaceChildren(layout)
 
   async function load(): Promise<void> {
+    retry.hidden = true
+    status.hidden = false
+    status.textContent = '正在读取执行设备…'
     try {
       const clients = await options.clientDirectory.listClients(
         options.requestOptions?.(),
@@ -122,10 +131,13 @@ export function renderDevicePage(options: DevicePageOptions): DevicePage {
       rows.append(running, history)
       body.append(rows)
       status.hidden = true
-    } catch {
+    } catch (error) {
       body.replaceChildren()
       status.hidden = false
-      status.textContent = '执行设备读取失败。请检查连接后重试。'
+      status.textContent = error instanceof ControlPlaneClientError && error.code === 'RESOURCE_NOT_FOUND'
+        ? '当前服务器未提供设备管理。请确认已启用远程执行设备服务。'
+        : '执行设备读取失败。请检查连接后重试。'
+      retry.hidden = false
     }
   }
 

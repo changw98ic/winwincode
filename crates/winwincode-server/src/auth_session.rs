@@ -734,14 +734,14 @@ impl SqliteAuthSessionManager {
         }
         let Some(cookie) = credentials.session_cookie() else {
             // Community unlocked local: no cookie is the Owner session.
-            if self.config.local_open {
-                if let Some(principal) = self.local_principal() {
-                    let now = self.clock.unix_millis()?;
-                    let expires = now
-                        .checked_add(duration_millis(self.config.session_ttl)?)
-                        .ok_or_else(AuthSessionError::clock)?;
-                    return session_response(&principal, expires);
-                }
+            if self.config.local_open
+                && let Some(principal) = self.local_principal()
+            {
+                let now = self.clock.unix_millis()?;
+                let expires = now
+                    .checked_add(duration_millis(self.config.session_ttl)?)
+                    .ok_or_else(AuthSessionError::clock)?;
+                return session_response(&principal, expires);
             }
             return Err(AuthSessionError::authentication());
         };
@@ -817,10 +817,10 @@ impl RequestAuthenticator for SqliteAuthSessionManager {
         }
         let Some(cookie) = credentials.session_cookie() else {
             // Community unlocked local loopback: cookie-less Owner access.
-            if self.config.local_open {
-                if let Some(principal) = self.local_principal() {
-                    return Ok(principal);
-                }
+            if self.config.local_open
+                && let Some(principal) = self.local_principal()
+            {
+                return Ok(principal);
             }
             return Err(AuthError::new("browser session authentication is required"));
         };

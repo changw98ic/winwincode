@@ -224,7 +224,7 @@ export function chatPagePresentation(state: ChatViewModelState): ChatPagePresent
         ? '继续对话'
         : '给 WinWinCode 发消息',
     composerPlaceholder: state.session === null
-      ? '描述你的想法，或输入 / 查看技能…'
+      ? '描述你的想法…'
       : '继续当前对话…',
     sendLabel: running ? '引导' : continuing ? '继续' : '发送',
     messageListBusy: state.status === 'loading'
@@ -442,7 +442,7 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   composer.id = 'wwc-chat-composer'
   composer.rows = 3
   composer.autocomplete = 'off'
-  composer.placeholder = '描述你的想法，或输入 / 查看技能…'
+  composer.placeholder = '描述你的想法…'
   attach.type = 'button'
   attach.disabled = true
   attach.textContent = '+'

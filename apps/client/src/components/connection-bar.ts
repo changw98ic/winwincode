@@ -47,7 +47,7 @@ interface ConnectionPresentation {
 
 const PRESENTATION: Readonly<Record<GlobalConnectionStatus, ConnectionPresentation>> = Object.freeze({
   connected: Object.freeze({
-    label: '客户端已连接',
+    label: '服务器已连接',
     detail: '服务器请求与实时更新可用。',
     tone: 'success',
     live: 'polite',

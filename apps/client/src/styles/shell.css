@@ -149,10 +149,31 @@
 }
 
 .wwc-surface-title {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
   margin: var(--wwc-space-0);
   font-size: var(--wwc-font-size-display);
   font-weight: var(--wwc-font-weight-display);
   letter-spacing: -0.01em;
+}
+
+.wwc-shell:has(.wwc-main[data-surface='chat']) {
+  height: 100dvh;
+}
+
+.wwc-main[data-surface='chat'] {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.wwc-main[data-surface='chat'] .wwc-surface-slot {
+  flex: 1;
+  min-height: 0;
 }
 
 .wwc-surface-description {

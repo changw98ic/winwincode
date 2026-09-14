@@ -224,9 +224,6 @@ const SETTINGS_CATEGORIES: readonly {
   }),
 ])
 
-/** 设计稿 13:新会话默认模型下拉的“不指定”选项。 */
-const FOLLOW_PROVIDER_DEFAULT = ''
-
 function categoryOf(id: SettingsCategoryId): {
   readonly id: SettingsCategoryId
   readonly label: string
@@ -524,7 +521,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   if (routePanel.description !== undefined) {
     routePanel.description.className = 'wwc-settings-section-note'
   }
-  const defaultModel = element(document, 'select', 'wwc-settings-default-model')
+  const defaultModel = element(document, 'p', 'wwc-settings-default-model')
   defaultModel.id = 'wwc-settings-default-model'
   const routeForm = element(document, 'form', 'wwc-settings-route-form')
   const provider = labelledInput(document, 'wwc-settings-provider', '服务商', 'wwc-settings-provider')
@@ -584,11 +581,15 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
     },
   })
   const createSection = createPanel.root
+  createSection.hidden = true
+  addProvider.setAttribute('aria-controls', createSection.id)
+  addProvider.setAttribute('aria-expanded', 'false')
   const createHeading = createPanel.title
   createHeading.className = 'wwc-settings-section-heading'
   const createHelp = element(document, 'p', 'wwc-settings-secret-help')
   const createForm = element(document, 'form', 'wwc-settings-create-form')
   const createId = labelledInput(document, 'wwc-settings-create-id', '名称', 'wwc-settings-create-id')
+  createId.label.hidden = true
   const createName = labelledInput(document, 'wwc-settings-create-name', '显示名称', 'wwc-settings-create-name')
   const createProvider = labelledInput(
     document,
@@ -616,6 +617,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
     },
   })
   const referencesSection = referencesPanel.root
+  referencesSection.hidden = true
   const referencesHeading = referencesPanel.title
   referencesHeading.className = 'wwc-settings-section-heading'
   const referencesHelp = element(document, 'p', 'wwc-settings-credential-help')
@@ -663,18 +665,25 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
     routeConflict,
     routeControls,
   )
-  // 设计稿 13:页面只保留「新会话默认模型」下拉与 Provider 列表;完整路由
-  // 表单(Provider/模型/凭据/并发)是该契约的真实编辑面,不在稿内——由样式表
-  // 折叠(DOM 保留,契约测试照常驱动)。
   const routeNote = routePanel.description
   routePanel.content.append(defaultModel)
   if (routeNote !== undefined) routePanel.content.append(routeNote)
-  routePanel.content.append(routeForm)
+  const routeDetails = element(document, 'details', 'wwc-settings-route-details')
+  const routeSummary = element(document, 'summary', 'wwc-settings-route-summary')
+  routeSummary.textContent = '编辑默认模型'
+  routeDetails.append(routeSummary, routeForm)
+  routePanel.content.append(routeDetails)
 
   // 设计稿 13:「添加 Provider」指向真实的添加凭据引用表单,不假造新增动作。
   addProvider.addEventListener('click', () => {
+    if (createId.input.value === '') {
+      createId.input.value = `crd_${crypto.randomUUID().replaceAll('-', '').slice(0, 26).toUpperCase()}`
+      createDraft.edit('credentialReferenceId', createId.input.value)
+    }
+    createSection.hidden = false
+    addProvider.setAttribute('aria-expanded', 'true')
     createSection.scrollIntoView?.({ block: 'nearest' })
-    if (createId.input.disabled !== true) createId.input.focus?.()
+    if (createName.input.disabled !== true) createName.input.focus?.()
   })
 
   createHelp.textContent = '密钥只提交一次，之后不再显示。'
@@ -1073,14 +1082,6 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   const editConcurrency = () => {
     routeDraft.edit('workerConcurrencyLimit', concurrency.input.value)
   }
-  /** 设计稿 13:下拉与表单绑定同一个路由草稿;选择凭据时带出其 Provider。 */
-  const editDefaultModel = () => {
-    routeDraft.edit('credentialReferenceId', defaultModel.value)
-    const match = options.model.state.credentials.find(
-      reference => reference.id === defaultModel.value,
-    )
-    if (match !== undefined) routeDraft.edit('providerId', match.providerId)
-  }
   const credentialOptions = mountKeyedCollection<CredentialChoice, string, HTMLOptionElement>({
     parent: credential,
     key: choice => choice.key,
@@ -1089,17 +1090,6 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
       choice.value = item.key
       choice.textContent = item.reference === null
         ? '选择可用的 API Key'
-        : `${item.reference.displayName} · ${item.reference.providerId}`
-    },
-  })
-  const defaultModelOptions = mountKeyedCollection<CredentialChoice, string, HTMLOptionElement>({
-    parent: defaultModel,
-    key: choice => choice.key,
-    create: () => document.createElement('option'),
-    update(choice, item) {
-      choice.value = item.key
-      choice.textContent = item.reference === null
-        ? '跟随模型服务商默认设置'
         : `${item.reference.displayName} · ${item.reference.providerId}`
     },
   })
@@ -1135,6 +1125,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
       manage.dataset.variant = 'default'
       manage.textContent = '管理'
       const onManage = () => {
+        referencesSection.hidden = false
         const items = references.children ?? []
         for (const candidate of items) {
           if (candidate.getAttribute?.('data-reference-id') === reference.id) {
@@ -1164,7 +1155,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
       const revoked = reference.secretState === 'revoked'
       item.dataset.tone = connected ? 'success' : revoked ? 'danger' : 'neutral'
       row.state.dataset.tone = connected ? 'success' : revoked ? 'danger' : 'neutral'
-      row.stateText.textContent = connected ? '已连接' : revoked ? '已吊销' : '未配置'
+      row.stateText.textContent = connected ? '密钥已保存' : revoked ? '已吊销' : '未配置'
       row.manage.textContent = connected ? '管理' : '配置'
     },
     remove(item) {
@@ -1559,7 +1550,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
         .map(reference => ({ key: reference.id, reference })),
     ]
     credentialOptions.update(credentialChoices)
-    defaultModelOptions.update(credentialChoices)
+    defaultModel.textContent = state.settings?.defaultModelRoute?.modelId ?? '尚未配置默认模型'
     const routeValues = routeDraft.state.values
     const routeProviderId = routeValues.providerId ?? ''
     const routeModelId = routeValues.modelId ?? ''
@@ -1573,7 +1564,6 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
     if (credential.value !== routeCredentialId) {
       credential.value = routeCredentialId
     }
-    if (defaultModel.value !== routeCredentialId) defaultModel.value = routeCredentialId
     const routeConflicts = routeDraft.state.conflicts
     routeConflict.hidden = routeConflicts.length === 0
     routeConflictText.textContent = routeConflicts.length === 0
@@ -1587,7 +1577,6 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
     provider.input.disabled = mutationsDisabled || routeSubmissionPending
     model.input.disabled = mutationsDisabled || routeSubmissionPending
     credential.disabled = mutationsDisabled || routeSubmissionPending
-    defaultModel.disabled = mutationsDisabled || routeSubmissionPending
     concurrency.input.disabled = mutationsDisabled || routeSubmissionPending
     saveRoute.disabled = mutationsDisabled
       || routeSubmissionPending
@@ -1689,7 +1678,6 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   provider.input.addEventListener('input', editProvider)
   model.input.addEventListener('input', editModel)
   credential.addEventListener('change', editCredential)
-  defaultModel.addEventListener('change', editDefaultModel)
   concurrency.input.addEventListener('input', editConcurrency)
   routeForm.addEventListener('submit', onRouteSubmit)
   clearRoute.addEventListener('click', onClearRoute)
@@ -1711,7 +1699,6 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
       provider.input.removeEventListener('input', editProvider)
       model.input.removeEventListener('input', editModel)
       credential.removeEventListener('change', editCredential)
-      defaultModel.removeEventListener('change', editDefaultModel)
       concurrency.input.removeEventListener('input', editConcurrency)
       categorySelect.removeEventListener('change', onCategoryChange)
       routeForm.removeEventListener('submit', onRouteSubmit)
@@ -1727,7 +1714,6 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
       providerRowsCollection.close()
       credentialReferences.close()
       credentialOptions.close()
-      defaultModelOptions.close()
       diagnosticsTabs.close()
       runCheck.close()
       referencesEmpty.close()

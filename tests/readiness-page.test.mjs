@@ -185,7 +185,7 @@ test('every checklist item shows its status, reason, check time, and real fix en
   assert.equal(byId['repository-scope'].dataset.status, 'ready')
   assert.match(byId['repository-scope'].textContent, /通过/u)
   assert.equal(byId['model-route'].dataset.status, 'attention')
-  assert.match(byId['model-route'].textContent, /尚未配置模型服务商/u)
+  assert.match(byId['model-route'].textContent, /尚未配置模型/u)
   assert.match(byId['model-route'].textContent, new RegExp(`检查于 ${LOCAL_NOW}`, 'u'))
   assert.equal(byId['helper-availability'].dataset.status, 'attention')
   assert.match(byId['helper-availability'].textContent, /执行容量/u)
@@ -275,7 +275,7 @@ test('blocked and unavailable items explain themselves without fake check times'
     node.className === 'wwc-readiness-item'
   ))
   const byId = Object.fromEntries(items.map(node => [node.dataset.itemId, node]))
-  assert.match(byId['repository-scope'].textContent, /请使用范围选择器选择已授权的仓库范围/u)
+  assert.match(byId['repository-scope'].textContent, /当前账号没有唯一可选的仓库/u)
   assert.match(byId['model-route'].textContent, /等待仓库范围/u)
   assert.equal(byId['model-route'].textContent.includes(NOW), false)
   assert.match(byId['server-worker-health'].textContent, /无法执行/u)
@@ -284,6 +284,6 @@ test('blocked and unavailable items explain themselves without fake check times'
     node.className === 'wwc-readiness-fix'
   ))
   assert.equal(scopeFixes.length, 0)
-  assert.match(byId['repository-scope'].textContent, /范围选择器/u)
+  assert.match(byId['repository-scope'].textContent, /请在项目页确认已授权的仓库/u)
   page.close()
 })

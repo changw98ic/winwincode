@@ -299,7 +299,7 @@ fn response_json(response: &str) -> Value {
 
 async fn bootstrap_cookie(address: SocketAddr) -> String {
     let response = initialize_owner(address, BOOTSTRAP_PROOF, OWNER_USERNAME, OWNER_PASSWORD).await;
-    cookie_from_bootstrap_response(&response)
+    cookie_from_bootstrap_response(&response, false)
 }
 
 async fn initialize_owner(
@@ -347,7 +347,7 @@ async fn login_as(address: SocketAddr, username: &str, password: &str) -> (Strin
     let response = login_response(address, username, password).await;
     assert!(response.starts_with("HTTP/1.1 201 Created"), "{response}");
     (
-        session_cookie_from_response(&response),
+        session_cookie_from_response(&response, false),
         response_json(&response),
     )
 }
@@ -360,7 +360,7 @@ async fn current_session(address: SocketAddr, cookie: &str) -> String {
     .await
 }
 
-fn cookie_from_bootstrap_response(response: &str) -> String {
+fn cookie_from_bootstrap_response(response: &str, secure: bool) -> String {
     assert!(response.starts_with("HTTP/1.1 201 Created"), "{response}");
     assert!(response.contains("cache-control: no-store"), "{response}");
     let body = response_json(response);
@@ -373,24 +373,24 @@ fn cookie_from_bootstrap_response(response: &str) -> String {
             .starts_with("usr_")
     );
     assert_eq!(body["authorizedScopes"][0]["kind"], "organization");
-    session_cookie_from_response(response)
+    session_cookie_from_response(response, secure)
 }
 
-fn session_cookie_from_response(response: &str) -> String {
+fn session_cookie_from_response(response: &str, secure: bool) -> String {
     let set_cookie = response
         .lines()
         .find_map(|line| line.strip_prefix("set-cookie: "))
         .expect("session Set-Cookie header");
-    for attribute in [
-        "Path=/",
-        "HttpOnly",
-        "SameSite=Lax",
-        "Max-Age=",
-        "Expires=",
-    ] {
+    for attribute in ["Path=/", "HttpOnly", "Max-Age=", "Expires="] {
         assert!(set_cookie.contains(attribute), "{set_cookie}");
     }
-    assert!(!set_cookie.contains("Secure"), "{set_cookie}");
+    assert_eq!(set_cookie.contains("Secure"), secure, "{set_cookie}");
+    let same_site = if secure {
+        "SameSite=None"
+    } else {
+        "SameSite=Lax"
+    };
+    assert!(set_cookie.contains(same_site), "{set_cookie}");
     let pair = set_cookie.split(';').next().expect("cookie pair");
     pair.strip_prefix("wwc_session=")
         .expect("session cookie name")
@@ -466,9 +466,7 @@ async fn assert_logout_revokes(address: SocketAddr, session_cookie: &str) {
     .await;
     assert!(logout.starts_with("HTTP/1.1 204 No Content"), "{logout}");
     assert!(
-        logout.contains(
-            "set-cookie: wwc_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0;"
-        )
+        logout.contains("set-cookie: wwc_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0;")
     );
     assert!(logout.contains("cache-control: no-store"), "{logout}");
     let current = http_request(
@@ -598,6 +596,7 @@ async fn session_context_updates_all_owner_sessions_and_survives_restart() {
             OWNER_PASSWORD,
         )
         .await,
+        false,
     );
     let (second_cookie, second) = login_as(address, OWNER_USERNAME, OWNER_PASSWORD).await;
     let owner_user_id = manager
@@ -1390,7 +1389,7 @@ async fn bootstrap_cookie_https(
     tls.read_to_end(&mut response)
         .await
         .expect("read auth response");
-    cookie_from_bootstrap_response(&String::from_utf8(response).expect("HTTPS response"))
+    cookie_from_bootstrap_response(&String::from_utf8(response).expect("HTTPS response"), true)
 }
 
 #[tokio::test]
@@ -1521,6 +1520,7 @@ async fn first_initialization_completes_once_and_restarts_stay_closed() {
             OWNER_PASSWORD,
         )
         .await,
+        false,
     );
     assert!(manager.initialized_owner().is_some());
     drop(accounts);
@@ -1763,7 +1763,7 @@ async fn initialization_status_is_public_and_reflects_the_durable_marker() {
     let address = running.local_address();
 
     // Unauthenticated and credential-free: the probe publishes exactly the
-    // schema version and the boolean, nothing else.
+    // schema version, initialization state, and authentication mode.
     let before = http_request(
         address,
         &origin_get("/api/v1/server/initialization", "https://client.example"),
@@ -1773,7 +1773,7 @@ async fn initialization_status_is_public_and_reflects_the_durable_marker() {
     assert!(before.contains("cache-control: no-store"), "{before}");
     assert_eq!(
         response_json(&before),
-        json!({ "schemaVersion": "winwincode/v1", "initialized": false })
+        json!({ "schemaVersion": "winwincode/v1", "initialized": false, "authMode": "password" })
     );
 
     bootstrap_cookie(address).await;
@@ -1786,7 +1786,7 @@ async fn initialization_status_is_public_and_reflects_the_durable_marker() {
     assert!(after.starts_with("HTTP/1.1 200 OK"), "{after}");
     assert_eq!(
         response_json(&after),
-        json!({ "schemaVersion": "winwincode/v1", "initialized": true })
+        json!({ "schemaVersion": "winwincode/v1", "initialized": true, "authMode": "password" })
     );
     running.shutdown().await.expect("shutdown");
 }

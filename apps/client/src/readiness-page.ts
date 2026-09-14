@@ -143,7 +143,7 @@ export function mountReadinessPage(options: ReadinessPageOptions): ReadinessPage
       const target = options.fixTarget(item)
       if (target === null) {
         const hint = element(document, 'p', 'wwc-readiness-fix-hint')
-        hint.textContent = '请使用上方清单中的范围选择器。'
+        hint.textContent = '请在项目页确认已授权的仓库。'
         row.append(hint)
       } else {
         const link = element(document, 'a', 'wwc-readiness-fix')

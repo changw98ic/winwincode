@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
+  ControlPlaneClientError,
   type ControlPlaneClientDirectory,
   type ControlPlaneDeviceSummary,
   type ControlPlaneRepositorySummary,
@@ -64,6 +65,11 @@ export function renderProjectsPage(options: ProjectsPageOptions): ProjectsPage {
   status.textContent = '正在加载项目…'
 
   const list = element(document, 'ul', 'wwc-projects-list')
+  const retry = element(document, 'button', 'wwc-projects-retry')
+  retry.type = 'button'
+  retry.textContent = '重试'
+  retry.hidden = true
+  retry.addEventListener('click', () => { void load() })
 
   function repoRow(repo: ControlPlaneRepositorySummary): HTMLLIElement {
     const row = element(document, 'li', 'wwc-projects-row')
@@ -87,6 +93,9 @@ export function renderProjectsPage(options: ProjectsPageOptions): ProjectsPage {
   }
 
   async function load(): Promise<void> {
+    retry.hidden = true
+    status.hidden = false
+    status.textContent = '正在加载项目…'
     try {
       const clients = await options.clientDirectory.listClients(
         options.requestOptions?.(),
@@ -105,13 +114,16 @@ export function renderProjectsPage(options: ProjectsPageOptions): ProjectsPage {
         status.textContent = '还没有仓库。先连接执行设备并授权仓库。'
       }
       list.replaceChildren(...rows)
-    } catch {
+    } catch (error) {
       status.hidden = false
-      status.textContent = '项目列表读取失败。请检查执行设备连接后重试。'
+      status.textContent = error instanceof ControlPlaneClientError && error.code === 'RESOURCE_NOT_FOUND'
+        ? '当前服务器未提供设备仓库列表。请确认已启用远程执行设备服务。'
+        : '项目列表读取失败。请检查执行设备连接后重试。'
+      retry.hidden = false
     }
   }
 
-  layout.append(headerRow, status, list)
+  layout.append(headerRow, status, retry, list)
   options.root.replaceChildren(layout)
   void load()
 

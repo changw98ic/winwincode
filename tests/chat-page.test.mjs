@@ -532,7 +532,7 @@ test('empty Chat does not show WinWinCode system diagrams as project data', () =
   assert.equal(findByClass(rootElement, 'wwc-chat-delegation-chip').hidden, true)
   assert.equal(findByClass(rootElement, 'wwc-chat-messages').hidden, true)
   assert.equal(findByClass(rootElement, 'wwc-chat-composer-input').placeholder,
-    '描述你的想法，或输入 / 查看技能…')
+    '描述你的想法…')
   // Project architecture/flow diagrams belong to Delivery solution review in
   // StrongFlow, not the Chat empty state.
   assert.equal(findAllByClass(rootElement, 'wwc-chat-diagram').length, 0)

@@ -387,20 +387,11 @@
   font-size: var(--wwc-font-size-sm);
 }
 
-.wwc-settings-route-form {
-  display: none;
-}
-
 /* 设计稿 13/16:小节为素色平铺,无卡片描边;13 稿外的凭据编辑面折叠。 */
 .wwc-settings [data-wwc-component='panel'] {
   padding: var(--wwc-space-0);
   border: 0;
   background: transparent;
-}
-
-.wwc-settings-create-credential,
-.wwc-settings-credentials {
-  display: none;
 }
 
 /* 设计稿 16:从备份恢复为素色文字动作;选择范围靠行尾。 */

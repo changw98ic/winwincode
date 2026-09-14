@@ -308,8 +308,7 @@ export function mountWinWinCodeClient(
   // Scope switcher. Notices for revoked/empty scope use a plain alert region.
   const scopeNotice = element(document, 'p', 'wwc-scope-notice')
   const readinessRoot = element(document, 'div', 'wwc-readiness-root')
-  // Pages own their page headers (design); the shell title elements stay in
-  // the DOM for ARIA but render empty.
+  // The shell supplies the accessible page title for every routed surface.
   const title = element(document, 'h1', 'wwc-surface-title')
   const description = element(document, 'p', 'wwc-surface-description')
   const readOnlyNotice = element(document, 'p', 'wwc-surface-read-only')
@@ -1015,7 +1014,7 @@ export function mountWinWinCodeClient(
       activeFeature = renderDevicePage({
         root: slot,
         clientDirectory,
-        homeHref: '#/home',
+        homeHref: '#/onboarding',
         projectsHref: '#/projects',
         requestOptions: () => undefined,
       })
@@ -1488,7 +1487,10 @@ export function mountWinWinCodeClient(
       entry.surface.id === activeSurface.id
     )) as SurfaceCapability
     activeRouteReadOnly = capability.capability === 'read-only'
-    title.textContent = ''
+    title.textContent = browser.location.hash.startsWith('#/home/new-task')
+      ? '新任务' : activeSurface.label
+    title.hidden = activeSurface.id === 'onboarding'
+    main.dataset.surface = activeSurface.id
     description.textContent = ''
     readOnlyNotice.hidden = !activeRouteReadOnly
     slot.dataset.winwincodeSurface = activeSurface.id
@@ -1632,14 +1634,9 @@ export function mountWinWinCodeClient(
     try {
       page = mountOnboardingPage({
         root: slot,
-        connect: async connectionCode => {
-          const clients = await clientDirectory.listClients()
-          const target = clients[0]?.clientId
-          if (target === undefined) {
-            throw new Error('尚未发现待连接的执行设备。请在客户端窗口确认设备后重试。')
-          }
+        connect: async (clientId, connectionCode) => {
           await clientDirectory.addClient({
-            clientId: target,
+            clientId,
             connectionCode,
           })
           browser.location.hash = `#/device?${new URLSearchParams({
