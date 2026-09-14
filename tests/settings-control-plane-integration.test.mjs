@@ -1382,7 +1382,7 @@ test('settings merges clean fields, exposes revision conflicts, and submits one 
   assert.equal(modelId.value, 'server-model-b')
   assert.equal(concurrency.value, '3')
   assert.equal(conflict.hidden, false)
-  assert.match(visibleText(conflict), /模型服务商 ID.*server-provider-b.*browser-provider/u)
+  assert.match(visibleText(conflict), /服务商.*server-provider-b.*browser-provider/u)
   assert.equal(byClass(rootElement, 'wwc-settings-save-route').disabled, true)
 
   byClass(rootElement, 'wwc-settings-route-keep-draft').dispatch('click')

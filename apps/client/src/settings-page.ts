@@ -61,16 +61,16 @@ export interface SettingsPagePresentation {
 function knownSettingsError(error: ControlPlaneClientError): string | null {
   const labels: Readonly<Record<string, string>> = Object.freeze({
     SETTINGS_CONCURRENCY_INVALID: '执行并发数必须在 1 到 10000 之间。',
-    SETTINGS_PROVIDER_REQUIRED: '请输入模型服务商 ID。',
-    SETTINGS_MODEL_REQUIRED: '请输入模型 ID。',
-    SETTINGS_CREDENTIAL_ROUTE_INVALID: '请选择该模型服务商的可用凭据引用。',
-    SETTINGS_SNAPSHOT_REQUIRED: '请刷新设置后再保存模型路由。',
+    SETTINGS_PROVIDER_REQUIRED: '请输入服务商。',
+    SETTINGS_MODEL_REQUIRED: '请输入模型。',
+    SETTINGS_CREDENTIAL_ROUTE_INVALID: '请选择该服务商的 API Key。',
+    SETTINGS_SNAPSHOT_REQUIRED: '请刷新设置后再保存。',
     SETTINGS_DECISION_IN_FLIGHT: '请等待当前设置更改完成。',
     SETTINGS_REVISION_REQUIRED: '请刷新设置后再提交此更改。',
     CREDENTIAL_DISPLAY_NAME_REQUIRED: '请输入凭据显示名称。',
-    CREDENTIAL_PROVIDER_REQUIRED: '请输入凭据的模型服务商 ID。',
-    CREDENTIAL_SECRET_REQUIRED: '提交凭据引用前，请选择本地密钥。',
-    CREDENTIAL_REFERENCE_STALE: '请刷新设置并选择当前凭据引用。',
+    CREDENTIAL_PROVIDER_REQUIRED: '请输入服务商。',
+    CREDENTIAL_SECRET_REQUIRED: '请填写 API Key。',
+    CREDENTIAL_REFERENCE_STALE: '请刷新设置并重新选择 API Key。',
     INVALID_CLIENT_REQUEST: '请检查本地用户身份和工作区范围配置后重试。',
   })
   return labels[error.code] ?? null
@@ -200,9 +200,9 @@ const SETTINGS_CATEGORIES: readonly {
   }),
   Object.freeze({
     id: 'providers',
-    label: '模型与服务商',
-    title: '模型与服务商',
-    description: '选择默认模型路由，管理只写一次的凭据引用。',
+    label: '模型',
+    title: '模型',
+    description: '选择默认模型，添加服务商 API Key。',
   }),
   Object.freeze({
     id: 'execution',
@@ -268,7 +268,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   const executionDraft = new Map<string, string>()
   const layout = element(document, 'section', 'wwc-settings')
   layout.dataset.wwcPage = 'management'
-  let selectedCategory: SettingsCategoryId = 'general'
+  let selectedCategory: SettingsCategoryId = 'providers'
   const initialCategory = categoryOf(selectedCategory)
 
   // Design page 12: the display title stands alone — no status badge copy and
@@ -512,7 +512,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
     props: {
       id: 'wwc-settings-route',
       headingLevel: 3,
-      title: '新会话默认模型',
+      title: '默认模型',
       description: '更改后用于新创建的会话。',
       className: 'wwc-settings-route',
     },
@@ -527,8 +527,8 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   const defaultModel = element(document, 'select', 'wwc-settings-default-model')
   defaultModel.id = 'wwc-settings-default-model'
   const routeForm = element(document, 'form', 'wwc-settings-route-form')
-  const provider = labelledInput(document, 'wwc-settings-provider', '模型服务商 ID', 'wwc-settings-provider')
-  const model = labelledInput(document, 'wwc-settings-model', '模型 ID', 'wwc-settings-model')
+  const provider = labelledInput(document, 'wwc-settings-provider', '服务商', 'wwc-settings-provider')
+  const model = labelledInput(document, 'wwc-settings-model', '模型', 'wwc-settings-model')
   const credentialLabel = element(document, 'label', 'wwc-settings-credential-label')
   const credential = element(document, 'select', 'wwc-settings-credential')
   const concurrency = labelledInput(
@@ -555,7 +555,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
     props: {
       id: 'wwc-settings-provider-list',
       headingLevel: 3,
-      title: '模型服务商列表',
+      title: '服务商',
       description: '',
       className: 'wwc-settings-provider-list',
     },
@@ -565,12 +565,12 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   providerListHeading.className = 'wwc-settings-section-heading'
   const providerListRows = element(document, 'ul', 'wwc-settings-provider-rows')
   const providerListEmpty = element(document, 'p', 'wwc-settings-provider-list-empty')
-  providerListEmpty.textContent = '尚未配置模型服务商凭据，添加凭据引用后会显示在这里。'
+  providerListEmpty.textContent = '还没有服务商。点下面「添加 API Key」。'
   const addProvider = element(document, 'button', 'wwc-settings-add-provider')
   addProvider.type = 'button'
   addProvider.dataset.wwcComponent = 'button'
   addProvider.dataset.variant = 'primary'
-  addProvider.textContent = '添加模型服务商'
+  addProvider.textContent = '添加 API Key'
   providerListPanel.content.append(providerListRows, providerListEmpty, addProvider)
 
   const createPanel = mountPanel({
@@ -578,8 +578,8 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
     props: {
       id: 'wwc-settings-create-credential',
       headingLevel: 3,
-      title: '添加凭据引用',
-      description: '本地密钥库定位符只提交一次，之后不再显示。',
+      title: '添加 API Key',
+      description: '密钥只提交一次，之后不再显示。',
       className: 'wwc-settings-create-credential',
     },
   })
@@ -588,18 +588,18 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   createHeading.className = 'wwc-settings-section-heading'
   const createHelp = element(document, 'p', 'wwc-settings-secret-help')
   const createForm = element(document, 'form', 'wwc-settings-create-form')
-  const createId = labelledInput(document, 'wwc-settings-create-id', '引用 ID', 'wwc-settings-create-id')
+  const createId = labelledInput(document, 'wwc-settings-create-id', '名称', 'wwc-settings-create-id')
   const createName = labelledInput(document, 'wwc-settings-create-name', '显示名称', 'wwc-settings-create-name')
   const createProvider = labelledInput(
     document,
     'wwc-settings-create-provider',
-    '模型服务商 ID',
+    '服务商',
     'wwc-settings-create-provider',
   )
   const createSecret = labelledInput(
     document,
     'wwc-settings-create-secret',
-    '本地密钥库定位符',
+    'API Key',
     'wwc-settings-create-secret',
     'password',
   )
@@ -610,8 +610,8 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
     props: {
       id: 'wwc-settings-credentials',
       headingLevel: 3,
-      title: '凭据引用',
-      description: '仅显示不含敏感信息的生命周期元数据。',
+      title: 'API Key',
+      description: '只显示名称与状态，不显示密钥内容。',
       className: 'wwc-settings-credentials',
     },
   })
@@ -623,8 +623,8 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   const referencesEmpty = mountEmptyState({
     document,
     props: {
-      title: '暂无凭据引用',
-      detail: '选择默认模型路由前，请先添加只写一次的凭据引用。',
+      title: '暂无 API Key',
+      detail: '先添加服务商的 API Key，再选默认模型。',
       className: 'wwc-settings-credential-empty',
       headingLevel: 3,
     },
@@ -633,14 +633,14 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
 
 
   credentialLabel.htmlFor = 'wwc-settings-credential'
-  credentialLabel.textContent = '凭据引用'
+  credentialLabel.textContent = 'API Key'
   credential.id = 'wwc-settings-credential'
   credentialLabel.append(credential)
   concurrency.input.min = '1'
   concurrency.input.max = '10000'
   concurrency.input.step = '1'
   saveRoute.type = 'submit'
-  saveRoute.textContent = '保存模型路由'
+  saveRoute.textContent = '保存'
   saveRoute.dataset.wwcComponent = 'button'
   saveRoute.dataset.variant = 'primary'
   clearRoute.type = 'button'
@@ -677,12 +677,12 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
     if (createId.input.disabled !== true) createId.input.focus?.()
   })
 
-  createHelp.textContent = '本地密钥库定位符只提交一次，之后不再显示。'
+  createHelp.textContent = '密钥只提交一次，之后不再显示。'
   createHelp.hidden = true
   createSecret.input.autocomplete = 'new-password'
   createSecret.input.spellcheck = false
   createButton.type = 'submit'
-  createButton.textContent = '添加引用'
+  createButton.textContent = '添加'
   createButton.dataset.wwcComponent = 'button'
   createButton.dataset.variant = 'primary'
   createForm.append(
@@ -694,7 +694,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   )
   createPanel.content.append(createHelp, createForm)
 
-  referencesHelp.textContent = '仅显示不含敏感信息的生命周期元数据。'
+  referencesHelp.textContent = '只显示名称与状态，不显示密钥内容。'
   referencesHelp.hidden = true
   referencesPanel.content.append(referencesHelp, references, referencesEmpty.root)
 
@@ -1060,9 +1060,9 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   }
   const routeDraft = createEditableDraft<RouteDraftValues>()
   const routeFieldLabels: Readonly<Record<keyof RouteDraftValues, string>> = Object.freeze({
-    providerId: '模型服务商 ID',
+    providerId: '服务商',
     modelId: '模型 ID',
-    credentialReferenceId: '凭据引用',
+    credentialReferenceId: 'API Key',
     workerConcurrencyLimit: '执行并发数',
   })
   const editProvider = () => { routeDraft.edit('providerId', provider.input.value) }
@@ -1088,7 +1088,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
     update(choice, item) {
       choice.value = item.key
       choice.textContent = item.reference === null
-        ? '选择可用的凭据引用'
+        ? '选择可用的 API Key'
         : `${item.reference.displayName} · ${item.reference.providerId}`
     },
   })
@@ -1206,8 +1206,8 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
         redactFields: ['secretState'],
       })
       const terms = [
-        '引用 ID',
-        '模型服务商 ID',
+        '名称',
+        '服务商',
         '密钥状态',
         '轮换版本',
         '更新时间',
@@ -1363,7 +1363,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
       row.revoke.disabled = disabled || submissionPending
       row.conflict.hidden = !row.draft.state.revisionConflict
       row.conflictText.textContent = row.draft.state.revisionConflict
-        ? `此凭据引用已从修订版 ${String(
+        ? `此 API Key 已从修订版 ${String(
             row.draft.state.baseRevision,
           )} 更新为修订版 ${String(row.draft.state.serverRevision)}。`
         : ''

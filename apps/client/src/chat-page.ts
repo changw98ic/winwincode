@@ -12,7 +12,6 @@ import type {
   ModelRouteAvailabilityProjection,
   ProductSessionId,
   RepositoryScope,
-  Scope,
 } from './generated/contracts.js'
 import {
   ModelRouteAvailabilityReason,
@@ -142,13 +141,6 @@ function modelRouteReasonLabel(reason: ModelRouteAvailabilityReason): string {
     return '模型服务商或模型已停用'
   }
   return '请求池不可用'
-}
-
-function modelRouteSourceLabel(scope: Scope): string {
-  if (scope.kind === 'organization') return '组织范围'
-  if (scope.kind === 'workspace') return '工作区范围'
-  if (scope.kind === 'project') return '项目范围'
-  return '仓库范围'
 }
 
 function modelRouteIdentity(route: ModelRouteAvailabilityProjection['route']): string {
@@ -292,48 +284,6 @@ function deliveryConversionError(state: ChatDeliveryCreatorState): string | null
 }
 
 const CONVERSION_DIALOG_HEADING_ID = 'wwc-chat-convert-heading'
-const DIAGRAM_ARCHITECTURE_VIEW_ID = 'wwc-chat-diagram-architecture'
-const DIAGRAM_FLOW_VIEW_ID = 'wwc-chat-diagram-flow'
-
-type ChatDiagramTab = 'architecture' | 'flow'
-
-function diagramArchitectureNode(
-  document: Document,
-  glyphClass: string,
-  label: string,
-): HTMLElement {
-  const node = element(document, 'div', 'wwc-chat-diagram-node')
-  node.append(element(document, 'div', `wwc-chat-diagram-glyph ${glyphClass}`))
-  const name = element(document, 'span', 'wwc-chat-diagram-label')
-  name.textContent = label
-  node.append(name)
-  return node
-}
-
-function diagramFlowStep(document: Document, label: string): HTMLElement {
-  const step = element(document, 'div', 'wwc-chat-diagram-step')
-  step.textContent = label
-  return step
-}
-
-function diagramLink(document: Document, arrow: boolean): HTMLElement {
-  return element(document, 'div', arrow
-    ? 'wwc-chat-diagram-link wwc-chat-diagram-link-arrow'
-    : 'wwc-chat-diagram-link')
-}
-
-function diagramChain(
-  document: Document,
-  nodes: readonly HTMLElement[],
-  arrow: boolean,
-): HTMLElement {
-  const panel = element(document, 'div', 'wwc-chat-diagram-panel')
-  nodes.forEach((node, index) => {
-    if (index > 0) panel.append(diagramLink(document, arrow))
-    panel.append(node)
-  })
-  return panel
-}
 
 function focusableElement(value: Element | null | undefined): HTMLElement | null {
   if (value === null || typeof value !== 'object') return null
@@ -378,16 +328,6 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   const messages = element(document, 'ol', 'wwc-chat-messages')
   const empty = element(document, 'p', 'wwc-chat-empty')
   const loadEarlier = element(document, 'button', 'wwc-chat-load-earlier')
-  // Design page 03a: without a session the page centers the architecture and
-  // flow diagrams behind the「架构图 | 流程图」tabs.
-  const diagram = element(document, 'div', 'wwc-chat-diagram')
-  const diagramTabs = element(document, 'div', 'wwc-chat-diagram-tabs')
-  const architectureTab = element(document, 'button', 'wwc-chat-diagram-tab')
-  const flowTab = element(document, 'button', 'wwc-chat-diagram-tab')
-  const architectureView = element(document, 'div', 'wwc-chat-diagram-view')
-  const flowView = element(document, 'div', 'wwc-chat-diagram-view')
-  const architectureCaption = element(document, 'p', 'wwc-chat-diagram-caption')
-  const flowCaption = element(document, 'p', 'wwc-chat-diagram-caption')
   const decisionRoot = element(document, 'div', 'wwc-chat-decisions')
   decisionRoot.hidden = true
   decisionRoot.setAttribute('aria-hidden', 'true')
@@ -498,42 +438,6 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   messages.setAttribute('aria-relevant', 'additions text')
   loadEarlier.type = 'button'
   loadEarlier.textContent = '加载更早的消息'
-  architectureTab.type = 'button'
-  architectureTab.textContent = '架构图'
-  architectureTab.setAttribute('role', 'tab')
-  architectureTab.setAttribute('aria-controls', DIAGRAM_ARCHITECTURE_VIEW_ID)
-  flowTab.type = 'button'
-  flowTab.textContent = '流程图'
-  flowTab.setAttribute('role', 'tab')
-  flowTab.setAttribute('aria-controls', DIAGRAM_FLOW_VIEW_ID)
-  diagramTabs.setAttribute('role', 'tablist')
-  architectureView.id = DIAGRAM_ARCHITECTURE_VIEW_ID
-  architectureView.setAttribute('role', 'tabpanel')
-  flowView.id = DIAGRAM_FLOW_VIEW_ID
-  flowView.setAttribute('role', 'tabpanel')
-  architectureCaption.textContent = '项目架构示意'
-  flowCaption.textContent = '交付流程示意'
-  architectureView.append(
-    diagramChain(document, [
-      diagramArchitectureNode(document, 'wwc-chat-diagram-glyph-web', '网页界面'),
-      diagramArchitectureNode(document, 'wwc-chat-diagram-glyph-backend', '后端'),
-      diagramArchitectureNode(document, 'wwc-chat-diagram-glyph-client', '执行设备'),
-      diagramArchitectureNode(document, 'wwc-chat-diagram-glyph-worker', '执行进程'),
-    ], false),
-    architectureCaption,
-  )
-  flowView.append(
-    diagramChain(document, [
-      diagramFlowStep(document, '需求'),
-      diagramFlowStep(document, '方案'),
-      diagramFlowStep(document, '执行'),
-      diagramFlowStep(document, '验收'),
-    ], true),
-    flowCaption,
-  )
-  diagramTabs.append(architectureTab, flowTab)
-  diagram.append(diagramTabs, architectureView, flowView)
-  diagram.hidden = true
   composerLabel.htmlFor = 'wwc-chat-composer'
   composer.id = 'wwc-chat-composer'
   composer.rows = 3
@@ -693,7 +597,6 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
     conversion,
     error,
     loadEarlier,
-    diagram,
     messages,
     empty,
     receipt,
@@ -701,14 +604,6 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   )
   layout.append(conversation)
   options.root.replaceChildren(layout)
-
-  const setDiagramTab = (tab: ChatDiagramTab): void => {
-    architectureTab.setAttribute('aria-selected', String(tab === 'architecture'))
-    flowTab.setAttribute('aria-selected', String(tab === 'flow'))
-    architectureView.hidden = tab !== 'architecture'
-    flowView.hidden = tab !== 'flow'
-  }
-  setDiagramTab('architecture')
 
   type ModelOption =
     | { readonly key: 'empty' | 'placeholder'; readonly candidate: null }
@@ -727,11 +622,9 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
         return
       }
       const candidate = item.candidate
-      const source = modelRouteSourceLabel(candidate.catalogSource)
-      const defaultLabel = candidate.isDefault ? ' · 默认' : ''
-      option.textContent = `${source} · ${candidate.providerDisplayName} / `
-        + `${candidate.modelDisplayName}${defaultLabel} · `
-        + modelRouteReasonLabel(candidate.reason)
+      // Community: one model name is enough. Provider IDs, default flags, and
+      // availability jargon belong in Settings, not the Chat composer.
+      option.textContent = candidate.modelDisplayName
       option.disabled = !modelRouteReady(candidate)
     },
   })
@@ -808,7 +701,6 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
     }
     heading.hidden = state.session === null
     heading.textContent = state.session?.title ?? '新对话'
-    diagram.hidden = state.session !== null
     messages.hidden = state.session === null
     messages.setAttribute('aria-busy', String(presentation.messageListBusy))
     composerLabel.textContent = presentation.composerLabel
@@ -1070,8 +962,6 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
     if (readOnly) return
     void options.model.cancelSession('从对话页面停止。')
   }
-  const onArchitectureTab = () => { setDiagramTab('architecture') }
-  const onFlowTab = () => { setDiagramTab('flow') }
   const onRetry = () => { void options.model.refresh() }
   const onLoadEarlier = () => { void options.model.loadMoreMessages() }
 
@@ -1081,8 +971,6 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   form.addEventListener('submit', onComposerSubmit)
   conversionForm.addEventListener('submit', onConversionSubmit)
   conversion.addEventListener('keydown', onConversionKeyDown)
-  architectureTab.addEventListener('click', onArchitectureTab)
-  flowTab.addEventListener('click', onFlowTab)
   cancel.addEventListener('click', onCancel)
   retry.addEventListener('click', onRetry)
   loadEarlier.addEventListener('click', onLoadEarlier)
@@ -1106,8 +994,6 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
       form.removeEventListener('submit', onComposerSubmit)
       conversionForm.removeEventListener('submit', onConversionSubmit)
       conversion.removeEventListener('keydown', onConversionKeyDown)
-      architectureTab.removeEventListener('click', onArchitectureTab)
-      flowTab.removeEventListener('click', onFlowTab)
       cancel.removeEventListener('click', onCancel)
       retry.removeEventListener('click', onRetry)
       loadEarlier.removeEventListener('click', onLoadEarlier)

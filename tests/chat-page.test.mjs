@@ -517,7 +517,7 @@ test('presentation explains first-Chat model setup and bounded creation failures
   }
 })
 
-test('empty Chat centers the design diagrams and swaps the composer placeholder', () => {
+test('empty Chat does not show WinWinCode system diagrams as project data', () => {
   const document = new FakeDocument()
   const rootElement = document.createElement('main')
   const model = new FakeChatViewModel(state({
@@ -528,38 +528,17 @@ test('empty Chat centers the design diagrams and swaps the composer placeholder'
   }))
   const mounted = mountChatPage({ root: rootElement, model })
 
-  const diagram = findByClass(rootElement, 'wwc-chat-diagram')
-  assert.equal(diagram.hidden, false)
   assert.equal(findByClass(rootElement, 'wwc-chat-heading').hidden, true)
   assert.equal(findByClass(rootElement, 'wwc-chat-delegation-chip').hidden, true)
   assert.equal(findByClass(rootElement, 'wwc-chat-messages').hidden, true)
   assert.equal(findByClass(rootElement, 'wwc-chat-composer-input').placeholder,
     '描述你的想法，或输入 / 查看技能…')
-
-  const labels = findAllByClass(rootElement, 'wwc-chat-diagram-label')
-  assert.deepEqual(labels.map(label => label.textContent), [
-    '网页界面',
-    '后端',
-    '执行设备',
-    '执行进程',
-  ])
-  assert.match(findAllByClass(rootElement, 'wwc-chat-diagram-caption')[0].textContent,
-    /项目架构示意/u)
-
-  const [architectureTab, flowTab] = findAllByClass(rootElement, 'wwc-chat-diagram-tab')
-  assert.equal(architectureTab.getAttribute('aria-selected'), 'true')
-  assert.equal(flowTab.getAttribute('aria-selected'), 'false')
-  flowTab.emit('click')
-  assert.equal(flowTab.getAttribute('aria-selected'), 'true')
-  assert.equal(architectureTab.getAttribute('aria-selected'), 'false')
-  assert.match(findAllByClass(rootElement, 'wwc-chat-diagram-caption')[1].textContent,
-    /交付流程示意/u)
-  assert.deepEqual(findAllByClass(rootElement, 'wwc-chat-diagram-step').map(step => step.textContent), [
-    '需求',
-    '方案',
-    '执行',
-    '验收',
-  ])
+  // Project architecture/flow diagrams belong to Delivery solution review in
+  // StrongFlow, not the Chat empty state.
+  assert.equal(findAllByClass(rootElement, 'wwc-chat-diagram').length, 0)
+  assert.equal(findAllByClass(rootElement, 'wwc-chat-diagram-tab').length, 0)
+  assert.equal(findAllByClass(rootElement, 'wwc-chat-diagram-label').length, 0)
+  assert.equal(findAllByClass(rootElement, 'wwc-chat-diagram-step').length, 0)
 
   mounted.close()
   assert.deepEqual(model.calls.at(-1), ['close'])
@@ -682,8 +661,7 @@ test('mounted Chat page exposes accessible state and delegates every interaction
   assert.equal(messages.getAttribute('aria-busy'), 'false')
   assert.equal(messages.children[0].children[0].children[0].textContent, 'WinWinCode')
   assert.equal(messages.children[0].children[0].children[1].textContent, '<script>not markup</script>')
-  assert.match(modelSelect.children[0].textContent, /仓库范围.*Primary Provider/u)
-  assert.match(modelSelect.children[0].textContent, /Primary Model/u)
+  assert.equal(modelSelect.children[0].textContent, 'Primary Model')
   assert.doesNotMatch(modelSelect.children[0].textContent, /PRIVATE_REFERENCE/u)
 
   modelSelect.selectedIndex = 1
@@ -928,7 +906,7 @@ test('Chat page keeps an invalid route visible, blocks creation, and links to Se
   const settings = findByClass(rootElement, 'wwc-chat-model-settings')
   const notice = findByClass(rootElement, 'wwc-chat-model-notice')
   assert.equal(modelSelect.children[0].disabled, true)
-  assert.match(modelSelect.children[0].textContent, /凭据缺失或已撤销/u)
+  assert.equal(modelSelect.children[0].textContent, 'Primary Model')
   assert.equal(chip.hidden, true)
   assert.equal(settings.href, '#/settings')
   assert.equal(settings.hidden, false)

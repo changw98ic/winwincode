@@ -3592,7 +3592,7 @@
         "tag": "OPTION",
         "component": null,
         "role": null,
-        "text": "仓库范围 · Visual Provider / Visual Model · 默认 · 就绪",
+        "text": "Visual Model",
         "state": {},
         "style": {
           "border-bottom-color": "var(--wwc-color-text-muted)",
@@ -3900,7 +3900,7 @@
         "tag": "OPTION",
         "component": null,
         "role": null,
-        "text": "模型与服务商",
+        "text": "模型",
         "state": {},
         "style": {
           "background-color": "rgb(0, 0, 0)",
@@ -5853,7 +5853,7 @@
         "tag": "OPTION",
         "component": null,
         "role": null,
-        "text": "仓库范围 · Visual Provider / Visual Model · 默认 · 就绪",
+        "text": "Visual Model",
         "state": {},
         "style": {
           "border-bottom-color": "var(--wwc-color-text-muted)",
@@ -9570,7 +9570,7 @@
         "tag": "OPTION",
         "component": null,
         "role": null,
-        "text": "仓库范围 · Visual Provider / Visual Model · 默认 · 就绪",
+        "text": "Visual Model",
         "state": {},
         "style": {
           "border-bottom-color": "var(--wwc-color-text-muted)",
@@ -9878,7 +9878,7 @@
         "tag": "OPTION",
         "component": null,
         "role": null,
-        "text": "模型与服务商",
+        "text": "模型",
         "state": {},
         "style": {
           "background-color": "rgb(0, 0, 0)",
@@ -11832,7 +11832,7 @@
         "tag": "OPTION",
         "component": null,
         "role": null,
-        "text": "仓库范围 · Visual Provider / Visual Model · 默认 · 就绪",
+        "text": "Visual Model",
         "state": {},
         "style": {
           "border-bottom-color": "var(--wwc-color-text-muted)",

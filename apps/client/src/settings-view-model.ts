@@ -234,7 +234,7 @@ function checkedText(value: string, code: string, message: string): string {
 function checkedSecret(value: string): string {
   if (value.length === 0) throw clientFailure(
     'CREDENTIAL_SECRET_REQUIRED',
-    '提交凭据引用前，请选择本地密钥。',
+    '请填写 API Key。',
   )
   return value
 }
@@ -517,7 +517,7 @@ export function createSettingsViewModel(options: SettingsViewModelOptions): Sett
       if (settings === null) {
         interactionFailure(
           'SETTINGS_SNAPSHOT_REQUIRED',
-          '请刷新设置后再保存模型路由。',
+          '请刷新设置后再保存。',
           CommandName.SettingsUpdate,
         )
         return
@@ -542,7 +542,7 @@ export function createSettingsViewModel(options: SettingsViewModelOptions): Sett
           providerId = checkedText(
             input.defaultModelRoute.providerId,
             'SETTINGS_PROVIDER_REQUIRED',
-            '请输入模型服务商 ID。',
+            '请输入服务商。',
           )
           modelId = checkedText(
             input.defaultModelRoute.modelId,
@@ -569,7 +569,7 @@ export function createSettingsViewModel(options: SettingsViewModelOptions): Sett
         ) {
           interactionFailure(
             'SETTINGS_CREDENTIAL_ROUTE_INVALID',
-            '请选择该模型服务商的可用凭据引用。',
+            '请选择该服务商的 API Key。',
             CommandName.SettingsUpdate,
           )
           return
@@ -611,7 +611,7 @@ export function createSettingsViewModel(options: SettingsViewModelOptions): Sett
         providerId = checkedText(
           input.providerId,
           'CREDENTIAL_PROVIDER_REQUIRED',
-          '请输入凭据的模型服务商 ID。',
+          '请输入服务商。',
         )
         vaultLocator = checkedSecret(input.vaultLocator)
       } catch (error) {
@@ -642,7 +642,7 @@ export function createSettingsViewModel(options: SettingsViewModelOptions): Sett
         response => {
           if (response.result.id !== input.credentialReferenceId) throw clientFailure(
             'CREDENTIAL_CREATE_MISMATCH',
-            '控制平面返回了其他凭据引用。',
+            '服务器返回了其他 API Key。',
           )
           mergeCredential(response.result)
         },
@@ -653,7 +653,7 @@ export function createSettingsViewModel(options: SettingsViewModelOptions): Sett
       if (reference === undefined) {
         interactionFailure(
           'CREDENTIAL_REFERENCE_STALE',
-          '请刷新设置并选择当前凭据引用。',
+          '请刷新设置并重新选择 API Key。',
           CommandName.CredentialReferenceRotate,
         )
         return
@@ -689,7 +689,7 @@ export function createSettingsViewModel(options: SettingsViewModelOptions): Sett
       if (reference === undefined) {
         interactionFailure(
           'CREDENTIAL_REFERENCE_STALE',
-          '请刷新设置并选择当前凭据引用。',
+          '请刷新设置并重新选择 API Key。',
           CommandName.CredentialReferenceRevoke,
         )
         return
