@@ -161,10 +161,20 @@ fn load_production_startup() -> Result<ProductionStartup, Box<dyn std::error::Er
     let bootstrap_proof = required_environment("WWC_SERVER_BOOTSTRAP_PROOF")?;
     let model_route = LocalModelRoute::from_environment()?;
     let auth_bootstrap = AuthSessionBootstrap::new(bootstrap_proof)?;
+    // Community local loopback defaults to unlocked access; password auth is
+    // required for lock mode or any non-loopback listener.
+    let local_open = match env::var("WWC_SERVER_AUTH_MODE") {
+        Ok(mode) if mode == "local-open" => true,
+        Ok(mode) if mode == "password" => false,
+        Ok(_) => return Err("WWC_SERVER_AUTH_MODE must be local-open or password".into()),
+        Err(env::VarError::NotPresent) => config.bind_address().ip().is_loopback(),
+        Err(error) => return Err(error.into()),
+    };
     let auth_config = AuthSessionConfig::new(
         optional_duration_seconds("WWC_SERVER_BOOTSTRAP_WINDOW_SECONDS", 10 * 60)?,
         optional_duration_seconds("WWC_SERVER_SESSION_TTL_SECONDS", 8 * 60 * 60)?,
-    )?;
+    )?
+    .with_local_open(local_open);
     Ok(ProductionStartup {
         config,
         delivery,

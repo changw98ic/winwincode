@@ -1743,6 +1743,11 @@ async fn server_initialization(
         json!({
             "schemaVersion": SUPPORTED_SCHEMA_VERSION,
             "initialized": state.auth_sessions.initialized_owner().is_some(),
+            "authMode": if state.auth_sessions.local_open() {
+                "local-open"
+            } else {
+                "password"
+            },
         }),
         Some(&origin),
     );
@@ -1798,7 +1803,8 @@ async fn create_auth_session(
         Ok(issued) => issued,
         Err(error) => return auth_session_error(error, Some(origin)).into_response(),
     };
-    let Ok(cookie_text) = issued.set_cookie_header() else {
+    let cookie_secure = matches!(state.config.tls(), ServerTls::Pem { .. });
+    let Ok(cookie_text) = issued.set_cookie_header(cookie_secure) else {
         return auth_session_error(AuthSessionError::response_encoding(), Some(origin))
             .into_response();
     };
@@ -1847,11 +1853,12 @@ async fn close_auth_session(State(state): State<ServerState>, request: Request<B
     if let Err(error) = state.auth_sessions.revoke(&credentials) {
         return auth_session_error(error, Some(origin)).into_response();
     }
+    let cookie_secure = matches!(state.config.tls(), ServerTls::Pem { .. });
     let mut response = StatusCode::NO_CONTENT.into_response();
     apply_cors(response.headers_mut(), &origin);
     response.headers_mut().insert(
         SET_COOKIE,
-        HeaderValue::from_static(cleared_session_cookie_header()),
+        HeaderValue::from_static(cleared_session_cookie_header(cookie_secure)),
     );
     prevent_auth_session_caching(&mut response);
     response

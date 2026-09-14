@@ -87,7 +87,7 @@ function staticClientServer(cert, controlConfiguration) {
       if (path === '/') {
         response.writeHead(200, {
           'Content-Type': 'text/html; charset=utf-8',
-          'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; font-src 'self'; connect-src https: wss:; object-src 'none'; base-uri 'none'; form-action 'none'",
+          'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; font-src 'self'; connect-src https: wss: http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:*; object-src 'none'; base-uri 'none'; form-action 'none'",
         })
         response.end(productionIndex)
         return

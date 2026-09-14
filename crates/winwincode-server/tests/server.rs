@@ -384,13 +384,13 @@ fn session_cookie_from_response(response: &str) -> String {
     for attribute in [
         "Path=/",
         "HttpOnly",
-        "Secure",
-        "SameSite=None",
+        "SameSite=Lax",
         "Max-Age=",
         "Expires=",
     ] {
         assert!(set_cookie.contains(attribute), "{set_cookie}");
     }
+    assert!(!set_cookie.contains("Secure"), "{set_cookie}");
     let pair = set_cookie.split(';').next().expect("cookie pair");
     pair.strip_prefix("wwc_session=")
         .expect("session cookie name")
@@ -467,7 +467,7 @@ async fn assert_logout_revokes(address: SocketAddr, session_cookie: &str) {
     assert!(logout.starts_with("HTTP/1.1 204 No Content"), "{logout}");
     assert!(
         logout.contains(
-            "set-cookie: wwc_session=; Path=/; HttpOnly; Secure; SameSite=None; Max-Age=0;"
+            "set-cookie: wwc_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0;"
         )
     );
     assert!(logout.contains("cache-control: no-store"), "{logout}");

@@ -45,6 +45,8 @@ const MAX_SESSION_TTL_SECONDS: u64 = 365 * 24 * 60 * 60;
 pub struct AuthSessionConfig {
     bootstrap_window: Duration,
     session_ttl: Duration,
+    /// Community local: loopback browsers skip password login while unlocked.
+    local_open: bool,
 }
 
 impl AuthSessionConfig {
@@ -67,7 +69,19 @@ impl AuthSessionConfig {
         Ok(Self {
             bootstrap_window,
             session_ttl,
+            local_open: false,
         })
+    }
+
+    /// Community loopback default: no password until lock/remote auth.
+    #[must_use]
+    pub const fn with_local_open(self, local_open: bool) -> Self {
+        Self { local_open, ..self }
+    }
+
+    #[must_use]
+    pub const fn local_open(self) -> bool {
+        self.local_open
     }
 
     #[must_use]
@@ -86,6 +100,7 @@ impl Default for AuthSessionConfig {
         Self {
             bootstrap_window: Duration::from_mins(10),
             session_ttl: Duration::from_hours(8),
+            local_open: false,
         }
     }
 }
@@ -165,6 +180,8 @@ pub struct SqliteAuthSessionManager {
     config: AuthSessionConfig,
     clock: Arc<dyn AuthSessionClock>,
     token_generator: Arc<dyn AuthSessionTokenGenerator>,
+    /// Cached Owner identity for unlocked local loopback access.
+    local_principal: Mutex<Option<AuthenticatedPrincipal>>,
 }
 
 struct InitializationGate {
@@ -282,7 +299,7 @@ impl SqliteAuthSessionManager {
             .optional()
             .map_err(|_| AuthSessionError::storage())?
             .is_some();
-        Ok(Self {
+        let mut manager = Self {
             connection: Mutex::new(connection),
             initialization: Mutex::new(InitializationGate {
                 proofs: bootstraps
@@ -299,7 +316,72 @@ impl SqliteAuthSessionManager {
             config,
             clock,
             token_generator,
-        })
+            local_principal: Mutex::new(None),
+        };
+        if manager.config.local_open {
+            manager.ensure_local_owner()?;
+        }
+        Ok(manager)
+    }
+
+    /// Community local-open: create the first Owner without a browser bootstrap
+    /// and cache that principal for cookie-less loopback requests.
+    fn ensure_local_owner(&mut self) -> Result<(), AuthSessionError> {
+        if let Some(owner_id) = self.initialization_owner() {
+            self.cache_local_principal(&owner_id)?;
+            return Ok(());
+        }
+        let now = self.clock.unix_millis()?;
+        let occurred_at = instant_from_millis(now)?;
+        let mut secret = [0_u8; 32];
+        getrandom::fill(&mut secret).map_err(|_| AuthSessionError::entropy())?;
+        let password = URL_SAFE_NO_PAD.encode(secret);
+        let account = self
+            .accounts
+            .initialize_owner("local-owner", &password, &occurred_at)
+            .map_err(|_| AuthSessionError::storage())?;
+        self.connection
+            .lock()
+            .map_err(|_| AuthSessionError::storage())?
+            .execute(
+                "INSERT OR IGNORE INTO server_initialization (
+                   singleton, owner_user_id, initialized_at_millis
+                 ) VALUES (1, ?1, ?2)",
+                params![account.user_id.0, now],
+            )
+            .map_err(|_| AuthSessionError::storage())?;
+        if let Some(hook) = self.owner_hook.as_ref() {
+            let _ = hook.owner_initialized(&account.user_id);
+        }
+        self.cache_local_principal(&account.user_id)
+    }
+
+    fn cache_local_principal(&mut self, user_id: &UserId) -> Result<(), AuthSessionError> {
+        let actor = Actor::UserActor(UserActor {
+            kind: UserActorKind::User,
+            id: user_id.clone(),
+        });
+        let scopes = canonical_scopes(self.session_authority.clone())?;
+        let principal =
+            AuthenticatedPrincipal::new(actor, scopes).map_err(|_| AuthSessionError::storage())?;
+        *self
+            .local_principal
+            .get_mut()
+            .map_err(|_| AuthSessionError::storage())? = Some(principal);
+        Ok(())
+    }
+
+    /// True when the browser Client may skip password sign-in on loopback.
+    #[must_use]
+    pub const fn local_open(&self) -> bool {
+        self.config.local_open
+    }
+
+    fn local_principal(&self) -> Option<AuthenticatedPrincipal> {
+        self.local_principal
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
     }
 
     /// Returns the userId of the durable first Owner, or `None` while the
@@ -650,9 +732,19 @@ impl SqliteAuthSessionManager {
         if credentials.bearer().is_some() {
             return Err(AuthSessionError::authentication());
         }
-        let cookie = credentials
-            .session_cookie()
-            .ok_or_else(AuthSessionError::authentication)?;
+        let Some(cookie) = credentials.session_cookie() else {
+            // Community unlocked local: no cookie is the Owner session.
+            if self.config.local_open {
+                if let Some(principal) = self.local_principal() {
+                    let now = self.clock.unix_millis()?;
+                    let expires = now
+                        .checked_add(duration_millis(self.config.session_ttl)?)
+                        .ok_or_else(AuthSessionError::clock)?;
+                    return session_response(&principal, expires);
+                }
+            }
+            return Err(AuthSessionError::authentication());
+        };
         self.read_session(cookie)?.response()
     }
 
@@ -723,9 +815,15 @@ impl RequestAuthenticator for SqliteAuthSessionManager {
         if credentials.bearer().is_some() {
             return Err(AuthError::new("browser session authentication is required"));
         }
-        let cookie = credentials
-            .session_cookie()
-            .ok_or_else(|| AuthError::new("browser session authentication is required"))?;
+        let Some(cookie) = credentials.session_cookie() else {
+            // Community unlocked local loopback: cookie-less Owner access.
+            if self.config.local_open {
+                if let Some(principal) = self.local_principal() {
+                    return Ok(principal);
+                }
+            }
+            return Err(AuthError::new("browser session authentication is required"));
+        };
         self.read_session(cookie)
             .map(|session| session.principal)
             .map_err(|_| AuthError::new("browser session authentication failed"))
@@ -741,10 +839,20 @@ pub(crate) struct IssuedBrowserSession {
 }
 
 impl IssuedBrowserSession {
-    pub(crate) fn set_cookie_header(&self) -> Result<String, AuthSessionError> {
+    /// Builds the browser `Set-Cookie` header.
+    ///
+    /// TLS listeners keep `Secure; SameSite=None` for independent Client
+    /// origins. Community loopback HTTP drops `Secure` and uses `SameSite=Lax`
+    /// so the browser will actually store the session cookie.
+    pub(crate) fn set_cookie_header(&self, secure: bool) -> Result<String, AuthSessionError> {
         let expires = httpdate::fmt_http_date(self.expiry_system_time()?);
+        let attributes = if secure {
+            "Path=/; HttpOnly; Secure; SameSite=None"
+        } else {
+            "Path=/; HttpOnly; SameSite=Lax"
+        };
         Ok(format!(
-            "{SESSION_COOKIE_NAME}={}; Path=/; HttpOnly; Secure; SameSite=None; Max-Age={}; Expires={expires}",
+            "{SESSION_COOKIE_NAME}={}; {attributes}; Max-Age={}; Expires={expires}",
             self.cookie_value, self.max_age_seconds
         ))
     }
@@ -774,8 +882,12 @@ impl CurrentBrowserSession {
 }
 
 #[must_use]
-pub(crate) fn cleared_session_cookie_header() -> &'static str {
-    "wwc_session=; Path=/; HttpOnly; Secure; SameSite=None; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT"
+pub(crate) fn cleared_session_cookie_header(secure: bool) -> &'static str {
+    if secure {
+        "wwc_session=; Path=/; HttpOnly; Secure; SameSite=None; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT"
+    } else {
+        "wwc_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT"
+    }
 }
 
 /// Secret-free auth-session failure.
@@ -1143,7 +1255,7 @@ mod tests {
         assert_eq!(response.authorized_scopes, vec![scope(1), scope(2)]);
         assert!(
             issued
-                .set_cookie_header()
+                .set_cookie_header(true)
                 .expect("Set-Cookie")
                 .contains("Expires=Thu, 01 Jan 1970 00:01:01 GMT")
         );

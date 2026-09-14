@@ -8,7 +8,7 @@ const root = resolve(process.env.WWC_CLIENT_DIST ?? '/app/public')
 const host = process.env.HOST ?? '0.0.0.0'
 const port = Number.parseInt(process.env.PORT ?? '8080', 10)
 const serverUrl = process.env.WWC_SERVER_URL ?? ''
-const csp = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; font-src 'self'; connect-src https: wss:; object-src 'none'; base-uri 'none'; form-action 'none'"
+const csp = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; font-src 'self'; connect-src https: wss: http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:*; object-src 'none'; base-uri 'none'; form-action 'none'"
 const contentTypes = new Map([
   ['.css', 'text/css; charset=utf-8'],
   ['.html', 'text/html; charset=utf-8'],
@@ -23,8 +23,15 @@ if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
 }
 if (serverUrl !== '') {
   const url = new URL(serverUrl)
-  if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) {
-    throw new Error('WWC_SERVER_URL must be an HTTPS origin without credentials, query, or fragment')
+  const localHttp =
+    (url.protocol === 'http:' || url.protocol === 'https:') &&
+    (url.hostname === '127.0.0.1' ||
+      url.hostname === 'localhost' ||
+      url.hostname === 'control.localhost')
+  if (!localHttp || url.username || url.password || url.search || url.hash) {
+    throw new Error(
+      'WWC_SERVER_URL must be an HTTPS origin (loopback HTTP allowed for Community local) without credentials, query, or fragment',
+    )
   }
 }
 

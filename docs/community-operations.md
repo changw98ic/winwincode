@@ -50,7 +50,7 @@ systemctl --user enable --now winwincode-device-client.service
 
 ## 首次使用
 
-1. 启动 Server，在登录页用 `WWC_SERVER_BOOTSTRAP_PROOF` 创建唯一 Owner；初始化成功后不要继续分发该 proof。
+1. 启动 Server。本机 loopback 默认 `WWC_SERVER_AUTH_MODE=local-open`：自动创建唯一 Owner，浏览器免登录。锁定模式或非 loopback 监听用 `WWC_SERVER_AUTH_MODE=password`，此时在登录页用 `WWC_SERVER_BOOTSTRAP_PROOF` 创建 Owner；初始化成功后不要继续分发该 proof。
 2. 在代码机器启动 Device Client，浏览器的 Client 管理页输入本机一次性连接码完成 enrollment。CLI 的 `wwc device status --data-dir PATH` 只显示无秘密状态；`refresh-code` 才会显示一次明文连接码。管理 CLI 不会改写运行中 daemon 的实例身份。
 3. 用 `wwc repo add PATH --data-dir PATH` 注册代码仓库；非 Git 目录只有显式加 `--init` 才会初始化。
 4. 在设置页建立 Provider 与 Credential reference，并执行连接测试。失败时保持未就绪，不会把缺失凭据记成可用。
