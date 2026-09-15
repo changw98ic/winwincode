@@ -2670,6 +2670,22 @@
         ],
         "type": "object"
       },
+      "ChatArtifactProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "artifactId": {
+            "$ref": "#/components/schemas/ArtifactId"
+          },
+          "digest": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          }
+        },
+        "required": [
+          "artifactId",
+          "digest"
+        ],
+        "type": "object"
+      },
       "ChatInputInteractionProjection": {
         "additionalProperties": false,
         "description": "Secret-safe pending input projection. It excludes Worker envelopes, provider data, credentials, and raw tool payloads.",
@@ -2907,6 +2923,15 @@
         "additionalProperties": false,
         "description": "Secret-safe product message projection. It excludes provider requests, provider responses, tool payloads, credentials, and Codex internals.",
         "properties": {
+          "artifactRefs": {
+            "description": "Acknowledged project outputs from this exact Chat turn; absent when it produced no files.",
+            "items": {
+              "$ref": "#/components/schemas/ChatArtifactProjection"
+            },
+            "maxItems": 16,
+            "minItems": 1,
+            "type": "array"
+          },
           "content": {
             "maxLength": 1048576,
             "type": "string"
@@ -3820,6 +3845,18 @@
           },
           {
             "$ref": "#/components/schemas/ClientCredentialRotateMessage"
+          },
+          {
+            "$ref": "#/components/schemas/ClientProviderReportMessage"
+          },
+          {
+            "$ref": "#/components/schemas/ClientProviderApplyMessage"
+          },
+          {
+            "$ref": "#/components/schemas/ClientExtensionReportMessage"
+          },
+          {
+            "$ref": "#/components/schemas/ClientExtensionApplyMessage"
           }
         ],
         "title": "ClientControlMessage"
@@ -3858,7 +3895,11 @@
           "client.worker.stop",
           "client.candidate.apply",
           "client.client_lock",
-          "client.credential_rotate"
+          "client.credential_rotate",
+          "client.provider.report",
+          "client.provider.apply",
+          "client.extension.apply",
+          "client.extension.report"
         ],
         "title": "ClientControlMessageKind",
         "type": "string"
@@ -4057,6 +4098,115 @@
         "maximum": 9007199254740991,
         "minimum": 1,
         "type": "integer"
+      },
+      "ClientExtensionApplyMessage": {
+        "additionalProperties": false,
+        "description": "Device-owned Provider configuration with encrypted commands and public receipts.",
+        "properties": {
+          "clientInstanceId": {
+            "$ref": "#/components/schemas/ClientInstanceId"
+          },
+          "clientNodeId": {
+            "$ref": "#/components/schemas/ClientNodeId"
+          },
+          "encrypted": {
+            "$ref": "#/components/schemas/DeviceConfigurationEnvelope"
+          },
+          "expectedRevision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "idempotencyKey": {
+            "$ref": "#/components/schemas/IdempotencyKey"
+          },
+          "kind": {
+            "const": "client.extension.apply"
+          },
+          "messageId": {
+            "$ref": "#/components/schemas/ClientControlMessageId"
+          },
+          "occurredAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "sequence": {
+            "$ref": "#/components/schemas/ClientExchangeSequence"
+          }
+        },
+        "required": [
+          "kind",
+          "schemaVersion",
+          "messageId",
+          "clientNodeId",
+          "clientInstanceId",
+          "sequence",
+          "occurredAt",
+          "expectedRevision",
+          "idempotencyKey",
+          "encrypted"
+        ],
+        "title": "client.extension.apply",
+        "type": "object",
+        "x-authority": "device-provider",
+        "x-direction": "control-plane-to-client",
+        "x-message-class": "command"
+      },
+      "ClientExtensionReportMessage": {
+        "additionalProperties": false,
+        "description": "Device-owned Provider configuration with encrypted commands and public receipts.",
+        "properties": {
+          "clientInstanceId": {
+            "$ref": "#/components/schemas/ClientInstanceId"
+          },
+          "clientNodeId": {
+            "$ref": "#/components/schemas/ClientNodeId"
+          },
+          "kind": {
+            "const": "client.extension.report"
+          },
+          "messageId": {
+            "$ref": "#/components/schemas/ClientControlMessageId"
+          },
+          "occurredAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "receipt": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DeviceExtensionReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "sequence": {
+            "$ref": "#/components/schemas/ClientExchangeSequence"
+          },
+          "snapshot": {
+            "$ref": "#/components/schemas/DeviceExtensionSnapshot"
+          }
+        },
+        "required": [
+          "kind",
+          "schemaVersion",
+          "messageId",
+          "clientNodeId",
+          "clientInstanceId",
+          "sequence",
+          "occurredAt",
+          "snapshot",
+          "receipt"
+        ],
+        "title": "client.extension.report",
+        "type": "object",
+        "x-authority": "device-provider",
+        "x-direction": "client-to-control-plane",
+        "x-message-class": "report"
       },
       "ClientHeartbeatMessage": {
         "additionalProperties": false,
@@ -4866,6 +5016,115 @@
         ],
         "title": "ClientPlatformTarget",
         "type": "string"
+      },
+      "ClientProviderApplyMessage": {
+        "additionalProperties": false,
+        "description": "Device-owned Provider configuration with encrypted commands and public receipts.",
+        "properties": {
+          "clientInstanceId": {
+            "$ref": "#/components/schemas/ClientInstanceId"
+          },
+          "clientNodeId": {
+            "$ref": "#/components/schemas/ClientNodeId"
+          },
+          "encrypted": {
+            "$ref": "#/components/schemas/DeviceConfigurationEnvelope"
+          },
+          "expectedRevision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "idempotencyKey": {
+            "$ref": "#/components/schemas/IdempotencyKey"
+          },
+          "kind": {
+            "const": "client.provider.apply"
+          },
+          "messageId": {
+            "$ref": "#/components/schemas/ClientControlMessageId"
+          },
+          "occurredAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "sequence": {
+            "$ref": "#/components/schemas/ClientExchangeSequence"
+          }
+        },
+        "required": [
+          "kind",
+          "schemaVersion",
+          "messageId",
+          "clientNodeId",
+          "clientInstanceId",
+          "sequence",
+          "occurredAt",
+          "expectedRevision",
+          "idempotencyKey",
+          "encrypted"
+        ],
+        "title": "client.provider.apply",
+        "type": "object",
+        "x-authority": "device-provider",
+        "x-direction": "control-plane-to-client",
+        "x-message-class": "command"
+      },
+      "ClientProviderReportMessage": {
+        "additionalProperties": false,
+        "description": "Device-owned Provider configuration with encrypted commands and public receipts.",
+        "properties": {
+          "clientInstanceId": {
+            "$ref": "#/components/schemas/ClientInstanceId"
+          },
+          "clientNodeId": {
+            "$ref": "#/components/schemas/ClientNodeId"
+          },
+          "kind": {
+            "const": "client.provider.report"
+          },
+          "messageId": {
+            "$ref": "#/components/schemas/ClientControlMessageId"
+          },
+          "occurredAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "receipt": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DeviceProviderReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "sequence": {
+            "$ref": "#/components/schemas/ClientExchangeSequence"
+          },
+          "snapshot": {
+            "$ref": "#/components/schemas/DeviceProviderSnapshot"
+          }
+        },
+        "required": [
+          "kind",
+          "schemaVersion",
+          "messageId",
+          "clientNodeId",
+          "clientInstanceId",
+          "sequence",
+          "occurredAt",
+          "snapshot",
+          "receipt"
+        ],
+        "title": "client.provider.report",
+        "type": "object",
+        "x-authority": "device-provider",
+        "x-direction": "client-to-control-plane",
+        "x-message-class": "report"
       },
       "ClientRepositoryRemovedMessage": {
         "additionalProperties": false,
@@ -11288,6 +11547,503 @@
         ],
         "type": "object"
       },
+      "DeviceConfigurationEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "ciphertext": {
+            "maxLength": 65536,
+            "minLength": 1,
+            "type": "string"
+          },
+          "clientNodeId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "expectedRevision": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "nonce": {
+            "maxLength": 24,
+            "minLength": 1,
+            "type": "string"
+          },
+          "publicKey": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "requestId": {
+            "maxLength": 200,
+            "minLength": 8,
+            "type": "string"
+          }
+        },
+        "required": [
+          "clientNodeId",
+          "requestId",
+          "expectedRevision",
+          "publicKey",
+          "nonce",
+          "ciphertext"
+        ],
+        "type": "object"
+      },
+      "DeviceExtensionMcp": {
+        "additionalProperties": false,
+        "properties": {
+          "connectionStatus": {
+            "$ref": "#/components/schemas/DeviceExtensionMcpConnectionStatus"
+          },
+          "digest": {
+            "maxLength": 71,
+            "minLength": 1,
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "id": {
+            "maxLength": 64,
+            "minLength": 1,
+            "type": "string"
+          },
+          "toolNames": {
+            "items": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 128,
+            "type": "array"
+          },
+          "transport": {
+            "$ref": "#/components/schemas/DeviceExtensionMcpTransport"
+          }
+        },
+        "required": [
+          "id",
+          "enabled",
+          "transport",
+          "toolNames",
+          "connectionStatus",
+          "digest"
+        ],
+        "type": "object"
+      },
+      "DeviceExtensionMcpConnectionStatus": {
+        "enum": [
+          "untested",
+          "ready",
+          "failed"
+        ],
+        "type": "string"
+      },
+      "DeviceExtensionMcpTransport": {
+        "enum": [
+          "stdio",
+          "streamable_http"
+        ],
+        "type": "string"
+      },
+      "DeviceExtensionOutcome": {
+        "enum": [
+          "saved",
+          "deleted",
+          "tested",
+          "invalid_request",
+          "revision_conflict",
+          "connection_failed",
+          "interrupted"
+        ],
+        "type": "string"
+      },
+      "DeviceExtensionReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "outcome": {
+            "$ref": "#/components/schemas/DeviceExtensionOutcome"
+          },
+          "requestId": {
+            "maxLength": 200,
+            "minLength": 8,
+            "type": "string"
+          },
+          "revision": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "requestId",
+          "outcome",
+          "revision"
+        ],
+        "type": "object"
+      },
+      "DeviceExtensionReport": {
+        "additionalProperties": false,
+        "properties": {
+          "receipt": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DeviceExtensionReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "snapshot": {
+            "$ref": "#/components/schemas/DeviceExtensionSnapshot"
+          }
+        },
+        "required": [
+          "snapshot",
+          "receipt"
+        ],
+        "type": "object"
+      },
+      "DeviceExtensionSkill": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "type": "string"
+          },
+          "digest": {
+            "maxLength": 71,
+            "minLength": 1,
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "fileCount": {
+            "maximum": 256,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "id": {
+            "maxLength": 64,
+            "minLength": 1,
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 64,
+            "minLength": 1,
+            "type": "string"
+          },
+          "source": {
+            "maxLength": 2048,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "description",
+          "source",
+          "enabled",
+          "digest",
+          "fileCount"
+        ],
+        "type": "object"
+      },
+      "DeviceExtensionSnapshot": {
+        "additionalProperties": false,
+        "properties": {
+          "clientNodeId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "encryptionPublicKey": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "mcpServers": {
+            "items": {
+              "$ref": "#/components/schemas/DeviceExtensionMcp"
+            },
+            "maxItems": 100,
+            "type": "array"
+          },
+          "revision": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "skills": {
+            "items": {
+              "$ref": "#/components/schemas/DeviceExtensionSkill"
+            },
+            "maxItems": 100,
+            "type": "array"
+          }
+        },
+        "required": [
+          "clientNodeId",
+          "revision",
+          "encryptionPublicKey",
+          "skills",
+          "mcpServers"
+        ],
+        "type": "object"
+      },
+      "DeviceExtensionView": {
+        "additionalProperties": false,
+        "properties": {
+          "online": {
+            "type": "boolean"
+          },
+          "receipt": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DeviceExtensionReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "schemaVersion": {
+            "const": "winwincode/v1"
+          },
+          "snapshot": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DeviceExtensionSnapshot"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "online",
+          "snapshot",
+          "receipt"
+        ],
+        "type": "object"
+      },
+      "DeviceModelRouteParameters": {
+        "additionalProperties": false,
+        "properties": {
+          "productSessionId": {
+            "$ref": "#/components/schemas/ProductSessionId"
+          }
+        },
+        "type": "object"
+      },
+      "DeviceProviderConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "displayName": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "endpoint": {
+            "maxLength": 2048,
+            "minLength": 1,
+            "type": "string"
+          },
+          "modelIds": {
+            "items": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "protocol": {
+            "$ref": "#/components/schemas/DeviceProviderProtocol"
+          },
+          "providerId": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "providerId",
+          "displayName",
+          "endpoint",
+          "protocol",
+          "modelIds",
+          "enabled"
+        ],
+        "type": "object"
+      },
+      "DeviceProviderOutcome": {
+        "enum": [
+          "saved",
+          "deleted",
+          "tested",
+          "invalid_request",
+          "revision_conflict",
+          "provider_unavailable",
+          "interrupted"
+        ],
+        "type": "string"
+      },
+      "DeviceProviderProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "config": {
+            "$ref": "#/components/schemas/DeviceProviderConfig"
+          },
+          "credentialConfigured": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "config",
+          "credentialConfigured"
+        ],
+        "type": "object"
+      },
+      "DeviceProviderProtocol": {
+        "enum": [
+          "anthropic_messages",
+          "canonical"
+        ],
+        "type": "string"
+      },
+      "DeviceProviderReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "outcome": {
+            "$ref": "#/components/schemas/DeviceProviderOutcome"
+          },
+          "requestId": {
+            "maxLength": 200,
+            "minLength": 8,
+            "type": "string"
+          },
+          "revision": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "requestId",
+          "outcome",
+          "revision"
+        ],
+        "type": "object"
+      },
+      "DeviceProviderReport": {
+        "additionalProperties": false,
+        "properties": {
+          "receipt": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DeviceProviderReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "snapshot": {
+            "$ref": "#/components/schemas/DeviceProviderSnapshot"
+          }
+        },
+        "required": [
+          "snapshot",
+          "receipt"
+        ],
+        "type": "object"
+      },
+      "DeviceProviderSnapshot": {
+        "additionalProperties": false,
+        "properties": {
+          "clientNodeId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "encryptionPublicKey": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "providers": {
+            "items": {
+              "$ref": "#/components/schemas/DeviceProviderProjection"
+            },
+            "maxItems": 100,
+            "type": "array"
+          },
+          "revision": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "clientNodeId",
+          "revision",
+          "encryptionPublicKey",
+          "providers"
+        ],
+        "type": "object"
+      },
+      "DeviceProviderView": {
+        "additionalProperties": false,
+        "properties": {
+          "online": {
+            "type": "boolean"
+          },
+          "receipt": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DeviceProviderReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "snapshot": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DeviceProviderSnapshot"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "online",
+          "snapshot",
+          "receipt"
+        ],
+        "type": "object"
+      },
       "DiagnosticBaseline": {
         "additionalProperties": false,
         "description": "Canonical bounded diagnostics observed at one exact workspace tree.",
@@ -12426,6 +13182,9 @@
           "limits": {
             "$ref": "#/components/schemas/ExecutionLimits"
           },
+          "modelSelection": {
+            "$ref": "#/components/schemas/ExecutionModelSelection"
+          },
           "payloadDigest": {
             "$ref": "#/components/schemas/Sha256Digest"
           },
@@ -12585,6 +13344,27 @@
           "debug_probe"
         ],
         "type": "string"
+      },
+      "ExecutionModelSelection": {
+        "additionalProperties": false,
+        "description": "Public Provider/model selection; the Device supplies its own configuration and credential.",
+        "properties": {
+          "modelId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "providerId": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "providerId",
+          "modelId"
+        ],
+        "type": "object"
       },
       "ExecutionOutcome": {
         "additionalProperties": false,
@@ -14096,7 +14876,7 @@
             }
           }
         ],
-        "description": "Acknowledges model chunks and requests replay after a stream interruption.",
+        "description": "Acknowledges model chunks. Core progress stays inside the Device; server acknowledgements confirm durable public text projection.",
         "properties": {
           "ackSequence": {
             "$ref": "#/components/schemas/ExecutionAckSequence"
@@ -14149,12 +14929,12 @@
         ],
         "title": "model.ack",
         "type": "object",
-        "x-authority": "lease-write",
-        "x-direction": "worker-to-control-plane"
+        "x-authority": "control-command",
+        "x-direction": "control-plane-to-worker"
       },
       "ModelChunkMessage": {
         "additionalProperties": false,
-        "description": "Streams one opaque provider-neutral model response chunk.",
+        "description": "Inside the Device, streams canonical model responses to Core. On the server transport, publishes ordered public text only; non-public payloads are omitted.",
         "properties": {
           "error": {
             "$ref": "#/components/schemas/ExecutionPortError"
@@ -14207,8 +14987,8 @@
         ],
         "title": "model.chunk",
         "type": "object",
-        "x-authority": "control-command",
-        "x-direction": "control-plane-to-worker"
+        "x-authority": "lease-write",
+        "x-direction": "worker-to-control-plane"
       },
       "ModelExchangeId": {
         "description": "Identity of one provider-neutral model stream exchange.",
@@ -14237,7 +15017,7 @@
       },
       "ModelOpenMessage": {
         "additionalProperties": false,
-        "description": "Opens one provider-neutral model exchange through the Control Plane gateway.",
+        "description": "Opens a provider-neutral exchange inside the Device Worker. This request never crosses the server transport.",
         "properties": {
           "kind": {
             "const": "model.open"
@@ -14323,7 +15103,7 @@
           {
             "properties": {
               "parameters": {
-                "$ref": "#/components/schemas/EmptyParameters"
+                "$ref": "#/components/schemas/DeviceModelRouteParameters"
               },
               "query": {
                 "const": "model.route.availability.list"
@@ -14453,9 +15233,15 @@
           "catalogVersion": {
             "$ref": "#/components/schemas/Revision"
           },
+          "clientId": {
+            "description": "Device that owns this route; selecting the route selects its execution Device.",
+            "pattern": "^[0-9]{9,12}$",
+            "type": "string"
+          },
           "contextWindowTokens": {
+            "description": "Zero means the Device has not reported a context-window limit.",
             "maximum": 9007199254740991,
-            "minimum": 1,
+            "minimum": 0,
             "type": "integer"
           },
           "credentialRotationVersion": {
@@ -18701,7 +19487,8 @@
           "publication.get",
           "collaboration.activity.list",
           "collaboration.notification.list",
-          "collaboration.presence.list"
+          "collaboration.presence.list",
+          "session.artifact.get"
         ],
         "type": "string"
       },
@@ -18787,6 +19574,9 @@
           },
           {
             "$ref": "#/components/schemas/CollaborationPresenceListQuery"
+          },
+          {
+            "$ref": "#/components/schemas/SessionArtifactGetQuery"
           }
         ]
       },
@@ -18900,6 +19690,9 @@
           },
           {
             "$ref": "#/components/schemas/CollaborationPresenceListResultResponse"
+          },
+          {
+            "$ref": "#/components/schemas/SessionArtifactGetResultResponse"
           }
         ]
       },
@@ -20837,6 +21630,106 @@
       "ServiceAccountId": {
         "pattern": "^svc_[0-9A-HJKMNP-TV-Z]{26}$",
         "type": "string"
+      },
+      "SessionArtifactGetParameters": {
+        "additionalProperties": false,
+        "properties": {
+          "artifactId": {
+            "$ref": "#/components/schemas/ArtifactId"
+          },
+          "length": {
+            "maximum": 262144,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "offset": {
+            "maximum": 1073741824,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "productSessionId": {
+            "$ref": "#/components/schemas/ProductSessionId"
+          }
+        },
+        "required": [
+          "productSessionId",
+          "artifactId",
+          "offset",
+          "length"
+        ],
+        "type": "object"
+      },
+      "SessionArtifactGetQuery": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryEnvelope"
+          },
+          {
+            "properties": {
+              "parameters": {
+                "$ref": "#/components/schemas/SessionArtifactGetParameters"
+              },
+              "query": {
+                "const": "session.artifact.get"
+              },
+              "scope": {
+                "$ref": "#/components/schemas/RepositoryScope"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "SessionArtifactGetResult": {
+        "additionalProperties": false,
+        "properties": {
+          "artifactId": {
+            "$ref": "#/components/schemas/ArtifactId"
+          },
+          "dataBase64": {
+            "maxLength": 349528,
+            "type": "string"
+          },
+          "digest": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "offset": {
+            "maximum": 1073741824,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "totalSize": {
+            "maximum": 1073741824,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "artifactId",
+          "digest",
+          "offset",
+          "totalSize",
+          "dataBase64"
+        ],
+        "type": "object"
+      },
+      "SessionArtifactGetResultResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryResultEnvelope"
+          },
+          {
+            "properties": {
+              "query": {
+                "const": "session.artifact.get"
+              },
+              "result": {
+                "$ref": "#/components/schemas/SessionArtifactGetResult"
+              }
+            },
+            "type": "object"
+          }
+        ]
       },
       "SessionBindingMessage": {
         "additionalProperties": false,
@@ -25735,10 +26628,11 @@
     "https://schemas.winwincode.dev/winwincode/v1/client-control.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/control-plane-events.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/control-plane-http.schema.json",
+    "https://schemas.winwincode.dev/winwincode/v1/device-provider.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:85bdfac65fa5fe58a5ebe78fceade644992e254101f9ecd1d2ec0b1efcf0db9f",
+  "x-source-digest": "sha256:85ac57cab0e5629b27db99690fb2379f6ae6723ee1ad118be1b618e73f89cb55",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {

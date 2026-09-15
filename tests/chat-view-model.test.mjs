@@ -1254,3 +1254,52 @@ test('Chat view-model source has no second transport or legacy DSH Remote path',
   assert.match(source, /options\.client\.subscribe/u)
   assert.doesNotMatch(source, /\bfetch\s*\(|new\s+WebSocket|@deepseek-ai|dsh-typert|remote\./iu)
 })
+
+
+test('an empty restored Chat launches the selected device project and retries before submitting', async () => {
+  const client = new FakeClient()
+  client.responses.set('session.get', response('session.get', session(1, 'idle')))
+  client.responses.set('session.messages.list', response('session.messages.list', { kind: 'chat_message_page', items: [] }))
+  client.responses.set('model.route.availability.list', response('model.route.availability.list', routeAvailability([availableRoute(modelRoute, { clientId: '4113447224' })])))
+  const launches = []
+  const { model } = view(client, { async launchDeviceSession(input) {
+    launches.push(input)
+    if (launches.length === 1) throw new ControlPlaneClientError({kind:'network',code:'NETWORK_ERROR',message:'offline',requestId:null,retryable:true})
+  } })
+  await model.start()
+  await model.submitMessage('Build a galaxy', 'rbd_00000000000000000000000001')
+  assert.equal(model.state.interaction.status, 'error')
+  assert.equal(client.commandCalls.length, 0)
+  client.enqueueCommand('chat.submit', completed('chat.submit', session(2, 'running')))
+  await model.submitMessage('Build a galaxy', 'rbd_00000000000000000000000001')
+  assert.equal(client.commandCalls.at(-1).command, 'chat.submit')
+  assert.deepEqual(launches, Array(2).fill({clientId:'4113447224',repositoryBindingId:'rbd_00000000000000000000000001',productSessionId}))
+  model.close()
+})
+
+test('Chat downloads only its retained artifact and rejects a changed range', async () => {
+  const { client, model } = view()
+  const artifact = { artifactId: 'art_00000000000000000000000001', digest: `sha256:${'a'.repeat(64)}` }
+  client.responses.set('session.messages.list', response('session.messages.list', {
+    kind: 'chat_message_page', items: [{ ...message(2), artifactRefs: [artifact] }],
+  }))
+  const bytes = Buffer.alloc(262147, 42)
+  for (const offset of [0, 262144]) {
+    client.enqueue('session.artifact.get', response('session.artifact.get', {
+      ...artifact, offset, totalSize: bytes.length,
+      dataBase64: bytes.subarray(offset, offset + 262144).toString('base64'),
+    }))
+  }
+  await model.start()
+  const archive = await model.downloadArtifact(artifact.artifactId)
+  assert.deepEqual(Buffer.from(await archive.arrayBuffer()), bytes)
+  const downloads = client.calls.filter(call => call.query === 'session.artifact.get')
+  assert.deepEqual(downloads.map(call => call.parameters.offset), [0, 262144])
+  assert.ok(downloads.every(call => call.parameters.productSessionId === productSessionId))
+  await assert.rejects(model.downloadArtifact('art_00000000000000000000000002'))
+  client.enqueue('session.artifact.get', response('session.artifact.get', {
+    ...artifact, offset: 1, totalSize: 2, dataBase64: 'e30=',
+  }))
+  await assert.rejects(model.downloadArtifact(artifact.artifactId))
+  model.close()
+})

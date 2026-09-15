@@ -90,7 +90,7 @@
     },
     {
       "path": "schema/winwincode/v1/control-plane-http.schema.json",
-      "sha256": "bc6fe98bce529e2963b42d5d3f4330ebdb6c1c810781aaa16a1ba6d882460a46",
+      "sha256": "aad98d76f33a3ccce20a47a21e6269d05b280d1852105351eed7dc755cf67a7e",
       "facts": [
         "HTTP command envelope",
         "WorkItem and WorkRun commands, queries, and projections",
@@ -100,7 +100,7 @@
     },
     {
       "path": "schema/winwincode/v1/execution-port.schema.json",
-      "sha256": "e6ebbaaff57a81371ef62b1ca971714b48d1ac6b4b6de6c8bffa548b72a70d05",
+      "sha256": "e95f32a0df6593f128ef842630cd3d963c25b7ffac5d7445f0262a2008d5af67",
       "facts": [
         "Worker execution transport and fenced identity"
       ]
@@ -133,7 +133,7 @@
     },
     {
       "path": "scripts/generate-contracts.mjs",
-      "sha256": "88d29aa06e466ae42a02e318944248839aaa0d1b2235e0114b6a43686afbcb01",
+      "sha256": "0c5180682c228c6d34b4160c47104e232bf068507284b78e45904ffc5902fa3b",
       "facts": [
         "canonical schema to generated Rust/TypeScript/OpenAPI chain"
       ]

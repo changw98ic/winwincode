@@ -19,10 +19,10 @@ use winwincode_storage::{
     StorageErrorKind, StoredState,
 };
 
-use crate::credential_leak_gate::{
+use crate::{receipt_actor_key, receipt_scope_key};
+use winwincode_provider::credential_leak_gate::{
     CredentialLeakError, CredentialLeakGate, CredentialOutputBoundary,
 };
-use crate::{receipt_actor_key, receipt_scope_key};
 
 const STATE_SCHEMA: &str = "winwincode.provider-catalog.v2";
 const STREAM_PREFIX: &str = "provider-catalog:";

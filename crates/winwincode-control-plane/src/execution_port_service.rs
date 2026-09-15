@@ -529,7 +529,7 @@ impl<'storage> ExecutionPortService<'storage> {
         let after_sequence = runtime_ack_sequence_for_replay(
             self.storage,
             durable_job_event.receipt_identity().scope_key(),
-            &job.job_id,
+            &job,
         )?;
         let request = RuntimeReplayRequestMessage {
             after_sequence,

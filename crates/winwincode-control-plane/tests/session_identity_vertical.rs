@@ -1534,6 +1534,7 @@ mod session_binding_fixture {
             lease.expires_at.clone(),
         );
         let job = ExecutionJob {
+            model_selection: None,
             attempt: 1,
             execution_profile: "codex".into(),
             goal: "ProductSession runtime projection".into(),
@@ -1653,6 +1654,102 @@ mod session_binding_fixture {
         ));
         drop(captured);
 
+        // A later task in the same conversation starts its own ACK sequence,
+        // while the public resource revision continues monotonically.
+        let mut next_job = job.clone();
+        next_job.job_id = ExecutionJobId(canonical_id("job", seed + 1));
+        let mut next_command = command.clone();
+        next_command.request_id = RequestId(canonical_id("req", seed + 1));
+        next_command.expected_revision = Revision(1);
+        control_plane
+            .commit(
+                &next_command,
+                StateChange::new(
+                    product_session_catalog_stream_id(&scope),
+                    b"next-task".to_vec(),
+                    vec![NewOutboxEvent::internal(
+                        format!("execution-job:{}", next_job.job_id.0),
+                        "execution.job.dispatch",
+                        serde_json::to_vec(&next_job).expect("next job"),
+                    )],
+                ),
+            )
+            .expect("next Controller dispatch");
+        let mut next_runtime = runtime.clone();
+        next_runtime.lease.job_id = next_job.job_id.clone();
+        next_runtime.lease.lease_id = LeaseId(canonical_id("lse", seed + 1));
+        next_runtime.worker_session_id = WorkerSessionId(canonical_id("wsn", seed + 1));
+        next_runtime.codex_thread_id = CodexThreadId(canonical_id("cdx", seed + 1));
+        next_runtime.session_identity.worker_session_id = next_runtime.worker_session_id.clone();
+        next_runtime.session_identity.codex_thread_id = next_runtime.codex_thread_id.clone();
+        next_runtime.message_id = ExecutionMessageId(canonical_id("xmsg", seed + 101));
+        next_runtime.event.event_id = ExecutionEventId(canonical_id("xevt", seed + 101));
+        let next_authority = session_binding_authority(
+            active_lease_identity(
+                next_job.job_id.clone(),
+                1,
+                next_runtime.lease.lease_id.clone(),
+                next_runtime.lease.fencing_token.clone(),
+                next_runtime.lease.worker_id.clone(),
+                next_runtime.lease.worker_instance_id.clone(),
+                next_runtime.worker_session_id.clone(),
+            ),
+            next_runtime.lease.issued_at.clone(),
+            next_runtime.lease.expires_at.clone(),
+        );
+        let next_ack = control_plane
+            .accept_runtime_event(
+                &scope,
+                &next_runtime,
+                &next_authority,
+                &next_runtime.sent_at,
+            )
+            .expect("next task runtime");
+        assert_eq!(
+            next_ack.status,
+            LeaseWriteStatus::Accepted,
+            "{:?}",
+            next_ack.error
+        );
+        assert_eq!(next_ack.ack_sequence, ExecutionAckSequence(1));
+        let captured = events.lock().expect("events");
+        let invalidation = captured
+            .iter()
+            .rev()
+            .find(|event| event.topic == "runtime-projection.invalidated.v1")
+            .expect("next invalidation");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&invalidation.payload).expect("invalidation JSON");
+        assert_eq!(payload["projectionRevision"], 2);
+        assert_eq!(payload["lastProjectionSequence"], 2);
+        drop(captured);
+        let mut late = runtime.clone();
+        late.message_id = ExecutionMessageId(canonical_id("xmsg", seed + 102));
+        late.event.event_id = ExecutionEventId(canonical_id("xevt", seed + 102));
+        late.event.sequence = ExecutionSequence(2);
+        assert_eq!(
+            control_plane
+                .accept_runtime_event(&scope, &late, &authority, &late.sent_at)
+                .expect("late prior task")
+                .status,
+            LeaseWriteStatus::RejectedConflict
+        );
+        next_runtime.message_id = ExecutionMessageId(canonical_id("xmsg", seed + 103));
+        next_runtime.event.event_id = ExecutionEventId(canonical_id("xevt", seed + 103));
+        next_runtime.event.sequence = ExecutionSequence(2);
+        assert_eq!(
+            control_plane
+                .accept_runtime_event(
+                    &scope,
+                    &next_runtime,
+                    &next_authority,
+                    &next_runtime.sent_at
+                )
+                .expect("second event of next task")
+                .ack_sequence,
+            ExecutionAckSequence(2)
+        );
+
         control_plane.shutdown().expect("first shutdown");
         let mut restarted = ControlPlane::start_local(
             ControlPlaneConfig::local(&root),
@@ -1665,6 +1762,17 @@ mod session_binding_fixture {
         assert_eq!(replay.status, LeaseWriteStatus::Duplicate);
         assert_eq!(replay.ack_sequence, ExecutionAckSequence(1));
         assert!(replay.session_identity.work_run_id.is_none());
+
+        let next_replay = restarted
+            .accept_runtime_event(
+                &scope,
+                &next_runtime,
+                &next_authority,
+                &next_runtime.sent_at,
+            )
+            .expect("next task replay after restart");
+        assert_eq!(next_replay.status, LeaseWriteStatus::Duplicate);
+        assert_eq!(next_replay.ack_sequence, ExecutionAckSequence(2));
 
         restarted.shutdown().expect("second shutdown");
         fs::remove_dir_all(root).expect("database directory release");

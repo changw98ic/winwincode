@@ -3,7 +3,11 @@
 The standalone public network boundary for the embedded Control Plane. The
 main configured origin serves health, HTTP commands, HTTP queries, and
 WebSocket events; an optional separate origin serves short-lived previews.
-Worker execution and provider addresses are not part of this router.
+Device and Worker control use authenticated outbound exchange connections.
+The Device stores Provider configuration and API keys and makes model requests.
+Web settings encrypt each Provider command for the selected Device; the Server
+relays ciphertext and retains public configuration and Device receipts. A save
+or connection test succeeds in Web only after the Device confirms it.
 
 Runtime configuration is supplied through `ServerConfig`. TLS certificate and
 key paths, allowed browser origins, bind address, public URL, storage path, and
@@ -28,6 +32,7 @@ The binary reads these required values from its environment:
 - `WWC_SERVER_ALLOWED_ORIGINS`
 - `WWC_SERVER_BOOTSTRAP_PROOF`
 - `WWC_SERVER_REPOSITORY_ROOT`
+- `WWC_SERVER_CHECKOUT_REVISION`
 - `WWC_SERVER_ORGANIZATION_ID`
 - `WWC_SERVER_WORKSPACE_ID`
 - `WWC_SERVER_PROJECT_ID`
@@ -72,3 +77,8 @@ TLS additionally requires both `WWC_SERVER_TLS_CERTIFICATE` and
 Control Plane application services, and durable event hub over one configured
 SQLite authority. Unsupported state transitions fail through the generated
 canonical error envelope.
+
+The default execution lease lasts 900 seconds. The protocol does not renew it
+automatically; set `WWC_SERVER_EXECUTION_LEASE_SECONDS` before starting tasks
+that require a longer authorization window. Device Provider requests have a
+separate five-minute network deadline.

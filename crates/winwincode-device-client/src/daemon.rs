@@ -554,6 +554,7 @@ pub struct DeviceDaemon {
     enrolled: bool,
     enroll_frame_pending: bool,
     hello_announced: bool,
+    configuration_pending: Option<PendingConfigurationApply>,
     delivery_cursor: u64,
     downlink: AckCursor,
     heartbeat_interval: Duration,
@@ -656,6 +657,7 @@ impl DeviceDaemon {
             enrolled,
             enroll_frame_pending: false,
             hello_announced: false,
+            configuration_pending: None,
             delivery_cursor: 0,
             downlink: AckCursor::new(),
             heartbeat_interval,
@@ -755,6 +757,46 @@ impl DeviceDaemon {
         FrameOutbox::load(&mut self.store)
             .map_err(DaemonError::Store)
             .map(Option::unwrap_or_default)
+    }
+
+    fn provider_directory(&self) -> Result<PathBuf, DaemonError> {
+        self.store
+            .database_path()
+            .parent()
+            .map(|path| path.join("providers"))
+            .ok_or_else(|| {
+                DaemonError::Protocol("device Provider directory is unavailable".to_owned())
+            })
+    }
+
+    fn publish_provider_state(
+        &mut self,
+        receipt: Option<winwincode_api::generated::DeviceProviderReceipt>,
+    ) -> Result<(), DaemonError> {
+        let snapshot = winwincode_provider::DeviceProviderStore::open(&self.provider_directory()?)
+            .and_then(|store| store.snapshot(&self.node_id))
+            .map_err(|_| {
+                DaemonError::Protocol("device Provider state is unavailable".to_owned())
+            })?;
+        self.enqueue(ClientToServerMessage::ProviderReport(Box::new(
+            winwincode_api::generated::DeviceProviderReport { snapshot, receipt },
+        )))?;
+        Ok(())
+    }
+
+    fn publish_extension_state(
+        &mut self,
+        receipt: Option<winwincode_api::generated::DeviceExtensionReceipt>,
+    ) -> Result<(), DaemonError> {
+        let snapshot = winwincode_provider::DeviceProviderStore::open(&self.provider_directory()?)
+            .and_then(|store| store.extension_snapshot(&self.node_id))
+            .map_err(|_| {
+                DaemonError::Protocol("device extension state is unavailable".to_owned())
+            })?;
+        self.enqueue(ClientToServerMessage::ExtensionReport(Box::new(
+            winwincode_api::generated::DeviceExtensionReport { snapshot, receipt },
+        )))?;
+        Ok(())
     }
 
     /// Persists one client-to-server message into the durable outbox
@@ -1135,6 +1177,8 @@ impl DeviceDaemon {
                 lock_state: self.connection_policy.lock_state,
                 presence_state: PresenceState::Online,
             }))?;
+            self.publish_provider_state(None)?;
+            self.publish_extension_state(None)?;
             self.hello_announced = true;
             self.next_heartbeat_at = now + self.heartbeat_interval;
             return Ok(());
@@ -1278,6 +1322,7 @@ impl DeviceDaemon {
     /// occupancy commands (mirror advance with persist-before-send acks,
     /// release intents, force-fence overwrites). Commands owned by later
     /// lanes are counted without acting.
+    #[allow(clippy::too_many_lines)]
     fn ingest_downlink(
         &mut self,
         frames: &[serde_json::Value],
@@ -1290,6 +1335,96 @@ impl DeviceDaemon {
         for value in frames {
             let envelope: ServerToClientEnvelope =
                 decode_downlink_frame(&self.codec, value).map_err(DownlinkFailure::Retriable)?;
+            if matches!(
+                self.downlink.observe(envelope.sequence),
+                SequenceVerdict::Accept
+            ) && let ServerToClientMessage::ProviderApply(payload)
+            | ServerToClientMessage::ExtensionApply(payload) = &envelope.message
+            {
+                let extension =
+                    matches!(&envelope.message, ServerToClientMessage::ExtensionApply(_));
+                if envelope.client_node_id != self.node_id
+                    || envelope.client_instance_id != self.instance_id
+                    || payload.command.idempotency_key != payload.encrypted.request_id
+                    || i64::try_from(payload.command.expected_revision).ok()
+                        != Some(payload.encrypted.expected_revision)
+                {
+                    return Err(DownlinkFailure::Retriable(
+                        "Provider command belongs to another device instance".to_owned(),
+                    ));
+                }
+                if self.configuration_pending.as_ref().is_some_and(|pending| {
+                    pending.envelope != payload.encrypted || pending.extension != extension
+                }) {
+                    return Err(DownlinkFailure::Retriable(
+                        "Provider command changed while executing".to_owned(),
+                    ));
+                }
+                if self.configuration_pending.is_none() {
+                    let directory = self.provider_directory().map_err(DownlinkFailure::Fatal)?;
+                    let device = self.node_id.clone();
+                    let payload = payload.encrypted.clone();
+                    self.configuration_pending = Some(PendingConfigurationApply {
+                        envelope: payload.clone(),
+                        extension,
+                        worker: thread::Builder::new()
+                            .name("device-configuration".to_owned())
+                            .spawn(move || {
+                                winwincode_provider::DeviceProviderStore::open(&directory).and_then(
+                                    |mut store| {
+                                        if extension {
+                                            store
+                                                .apply_extension(&device, &payload)
+                                                .map(ConfigurationReceipt::Extension)
+                                        } else {
+                                            store
+                                                .apply(&device, &payload)
+                                                .map(ConfigurationReceipt::Provider)
+                                        }
+                                    },
+                                )
+                            })
+                            .map_err(|_| {
+                                DownlinkFailure::Retriable(
+                                    "device Provider command could not start".to_owned(),
+                                )
+                            })?,
+                    });
+                }
+                if !self
+                    .configuration_pending
+                    .as_ref()
+                    .is_some_and(|pending| pending.worker.is_finished())
+                {
+                    self.next_heartbeat_at = Instant::now() + Duration::from_millis(500);
+                    return Ok(accepted);
+                }
+                let receipt = self
+                    .configuration_pending
+                    .take()
+                    .ok_or_else(|| {
+                        DownlinkFailure::Retriable("device Provider command is missing".to_owned())
+                    })?
+                    .worker
+                    .join()
+                    .map_err(|_| {
+                        DownlinkFailure::Retriable(
+                            "device Provider command was interrupted".to_owned(),
+                        )
+                    })?
+                    .map_err(|_| {
+                        DownlinkFailure::Retriable("device Provider command failed".to_owned())
+                    })?;
+                match receipt {
+                    ConfigurationReceipt::Provider(receipt) => {
+                        self.publish_provider_state(Some(receipt))
+                    }
+                    ConfigurationReceipt::Extension(receipt) => {
+                        self.publish_extension_state(Some(receipt))
+                    }
+                }
+                .map_err(DownlinkFailure::Fatal)?;
+            }
             match self.downlink.observe(envelope.sequence) {
                 SequenceVerdict::Accept => {
                     self.downlink.advance(envelope.sequence).map_err(|error| {
@@ -1306,6 +1441,8 @@ impl DeviceDaemon {
                         })
                         .map_err(|error| DownlinkFailure::Fatal(DaemonError::Store(error)))?;
                     match envelope.message {
+                        ServerToClientMessage::ProviderApply(_)
+                        | ServerToClientMessage::ExtensionApply(_) => {}
                         ServerToClientMessage::EnrollmentAccepted(payload) => {
                             acceptance = Some(payload);
                         }
@@ -2428,4 +2565,15 @@ fn decode_worker_credential(material: &str) -> Option<[u8; 32]> {
         *slot = u8::from_str_radix(&material[index * 2..index * 2 + 2], 16).ok()?;
     }
     Some(secret)
+}
+
+enum ConfigurationReceipt {
+    Provider(winwincode_api::generated::DeviceProviderReceipt),
+    Extension(winwincode_api::generated::DeviceExtensionReceipt),
+}
+struct PendingConfigurationApply {
+    extension: bool,
+    envelope: winwincode_api::generated::DeviceConfigurationEnvelope,
+    worker:
+        thread::JoinHandle<Result<ConfigurationReceipt, winwincode_provider::DeviceProviderError>>,
 }

@@ -405,6 +405,7 @@ async fn spawn_listener(
     Ok(task)
 }
 
+#[allow(clippy::too_many_lines)]
 fn router(state: ServerState) -> Router {
     Router::new()
         .route("/health", get(health))
@@ -446,6 +447,26 @@ fn router(state: ServerState) -> Router {
         .route("/p/{access_id}/{token}", any(preview_root))
         .route("/p/{access_id}/{token}/{*path}", any(preview_path))
         .route("/api/v1/clients", get(list_clients).options(preflight))
+        .route(
+            "/api/v1/clients/{client_id}/extensions",
+            get(device_provider_get)
+                .post(device_provider_apply)
+                .options(preflight),
+        )
+        .route(
+            "/api/v1/clients/{client_id}/extensions/receipts/{request_id}",
+            get(device_provider_receipt).options(preflight),
+        )
+        .route(
+            "/api/v1/clients/{client_id}/providers",
+            get(device_provider_get)
+                .post(device_provider_apply)
+                .options(preflight),
+        )
+        .route(
+            "/api/v1/clients/{client_id}/providers/receipts/{request_id}",
+            get(device_provider_receipt).options(preflight),
+        )
         .route(
             "/api/v1/clients/connections",
             post(create_client_connection).options(preflight),
@@ -2871,3 +2892,136 @@ impl fmt::Display for ServerError {
 }
 
 impl std::error::Error for ServerError {}
+
+async fn device_provider_get(
+    State(state): State<ServerState>,
+    Path(client): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response {
+    device_provider_request(&state, &client, None, None, &headers, &uri)
+}
+
+async fn device_provider_receipt(
+    State(state): State<ServerState>,
+    Path((client, request)): Path<(String, String)>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response {
+    device_provider_request(&state, &client, Some(&request), None, &headers, &uri)
+}
+
+async fn device_provider_apply(
+    State(state): State<ServerState>,
+    Path(client): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Response {
+    let Ok(value) = serde_json::from_slice(&body) else {
+        return connect_error_response(
+            StatusCode::BAD_REQUEST,
+            "INVALID_REQUEST",
+            "invalid encrypted Provider command",
+            None,
+        );
+    };
+    device_provider_request(&state, &client, None, Some(value), &headers, &uri)
+}
+
+fn device_provider_request(
+    state: &ServerState,
+    client: &str,
+    request: Option<&str>,
+    mutation: Option<Value>,
+    headers: &HeaderMap,
+    uri: &Uri,
+) -> Response {
+    let (principal, origin, _) = match authorize(state, headers, uri) {
+        Ok(value) => value,
+        Err(error) => return error.into_response(),
+    };
+    if state.client_exchange.is_none() {
+        return connect_error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "DEVICE_UNAVAILABLE",
+            "device service is unavailable",
+            origin.as_ref(),
+        );
+    }
+    let Some(user) = principal.actor_user_id() else {
+        return connect_error_response(
+            StatusCode::FORBIDDEN,
+            "PERMISSION_DENIED",
+            "a signed-in user is required",
+            origin.as_ref(),
+        );
+    };
+    let now = SystemStandaloneApplicationClock.now_instant();
+    let kind = if uri.path().split('/').nth(5) == Some("extensions") {
+        crate::device_providers::ConfigurationKind::Extension
+    } else {
+        crate::device_providers::ConfigurationKind::Provider
+    };
+    let applying = mutation.is_some();
+    let result = match mutation {
+        Some(value) => crate::device_providers::apply(
+            state.config.data_directory(),
+            kind,
+            &user.0,
+            client,
+            value,
+            &now,
+        ),
+        None => crate::device_providers::read(
+            state.config.data_directory(),
+            kind,
+            &user.0,
+            client,
+            request,
+            &now,
+        ),
+    };
+    match result {
+        Ok(body) => json_response(
+            if applying {
+                StatusCode::ACCEPTED
+            } else {
+                StatusCode::OK
+            },
+            body,
+            origin.as_ref(),
+        ),
+        Err(error) => {
+            use crate::device_providers::ProviderRelayError;
+            let (status, code, message) = match error {
+                ProviderRelayError::Invalid => (
+                    StatusCode::BAD_REQUEST,
+                    "INVALID_REQUEST",
+                    "invalid encrypted Provider command",
+                ),
+                ProviderRelayError::Denied => (
+                    StatusCode::FORBIDDEN,
+                    "PERMISSION_DENIED",
+                    "device management permission is required",
+                ),
+                ProviderRelayError::Offline => (
+                    StatusCode::CONFLICT,
+                    "DEVICE_OFFLINE",
+                    "device is offline; Provider settings were not saved",
+                ),
+                ProviderRelayError::Conflict => (
+                    StatusCode::CONFLICT,
+                    "IDEMPOTENCY_CONFLICT",
+                    "Provider request identity was reused",
+                ),
+                ProviderRelayError::Unavailable => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "DEVICE_UNAVAILABLE",
+                    "device Provider service is unavailable",
+                ),
+            };
+            connect_error_response(status, code, message, origin.as_ref())
+        }
+    }
+}

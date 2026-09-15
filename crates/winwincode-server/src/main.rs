@@ -13,24 +13,11 @@ use winwincode_api::generated::{
     OrganizationScope, OrganizationScopeKind, ProjectScope, ProjectScopeKind, Scope,
     WorkspaceScope, WorkspaceScopeKind,
 };
-#[cfg(feature = "local-worker")]
-use winwincode_codex::{
-    ExecutionMode, HelperReleaseManifest, ObserverMode, ProductionCodexAdapter,
-    ProductionCodexConfig, ProductionCodexOptions,
-};
-#[cfg(feature = "local-worker")]
-use winwincode_control_plane::ControlPlaneInstanceRuntimeConfig;
 use winwincode_control_plane::{
     CollaborationService, ControlPlane, ControlPlaneConfig, DurableWorkerInteractionOutbound,
-    LocalDeliveryAdapterConfig, LocalModelPolicyAuthority, LocalModelPolicyAuthorityConfig,
-    LocalPublicationAdapterConfig, ModelAdmissionLimits, ModelAdmissionPolicyLayer,
-    ModelRequestPoolConfig, ModelRoutePolicyDecision, ProductSessionExecutionApplication,
-    ProductSessionExecutionConfig, ProviderAdmissionReservationConfig,
-    STRONGFLOW_DEVICE_WORKER_POOL_ID, StandaloneModelExecutionApplication,
-    StandaloneModelExecutionConfig, local_loopback_retry_policy,
+    LocalDeliveryAdapterConfig, LocalPublicationAdapterConfig, ProductSessionExecutionApplication,
+    ProductSessionExecutionConfig,
 };
-#[cfg(feature = "local-worker")]
-use winwincode_domain::Sha256Digest;
 use winwincode_domain::{
     CredentialReferenceId, OrganizationId, ProjectId, RepositoryId, RepositoryScope,
     RepositoryScopeKind, UserAccount, UserId, WorkerId, WorkerInstanceId, WorkspaceId,
@@ -40,37 +27,20 @@ use winwincode_execution_port::{
     generated::ExecutionPortMessage,
     transport::ExecutionPortCore,
 };
-#[cfg(feature = "local-worker")]
-use winwincode_execution_port::{
-    action_gateway::ExecutionEnvelopeToken,
-    generated::{
-        ModelGatewayRoute, WorkerCapabilityFeature, WorkerCapabilitySet,
-        WorkerCapabilitySetPlatform,
-    },
-};
-#[cfg(feature = "local-worker")]
-use winwincode_local::LocalLauncherConfig;
 use winwincode_server::{
     AuthSessionBootstrap, AuthSessionConfig, ClientExchangeApplication, ClientExchangeConfig,
-    ClientExchangePort, CompositeRemoteWorkerAuthenticator, DurableEventHub, DurableEventHubConfig,
-    DurableEventPublisher, FileRemoteWorkerAuthenticator, GeneratedContractDispatcher,
-    LocalModelRoute, OwnerInitializationHook, ProductionRemoteWorkerExchange,
-    RemoteWorkerExchangePort, RepositoryRuntimeScheduler, RequestAuthenticator, ServerConfig,
-    ServerExecutionPortCore, ServerTls, SqliteAuthSessionManager, StandaloneApplicationClock,
-    StandaloneControlPlaneApplication, SystemStandaloneApplicationClock, UserAccountService,
-    WorkerSessionRemoteAuthenticator, configure_local_model_authority,
-    start_server_with_remote_worker,
+    ClientExchangePort, DurableEventHub, DurableEventHubConfig, DurableEventPublisher,
+    GeneratedContractDispatcher, ProductionRemoteWorkerExchange, RemoteWorkerExchangePort,
+    RepositoryRuntimeScheduler, RequestAuthenticator, ServerConfig, ServerExecutionPortCore,
+    ServerTls, SqliteAuthSessionManager, StandaloneControlPlaneApplication, UserAccountService,
+    WorkerSessionRemoteAuthenticator, start_server_with_remote_worker,
 };
-#[cfg(feature = "local-worker")]
-use winwincode_server::{LocalRuntimeSupervisor, start_server};
 use winwincode_storage::{
     ProductStateStorage, SqliteStorage, WorkerOutboundQueueConfig, WorkerPoolId,
     WorkerRegistryScope,
 };
-#[cfg(feature = "local-worker")]
-use winwincode_worker::{WorkerConfig, workspace_runtime::ObservationModelConfiguration};
 
-const SERVER_TOKIO_WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
+const SERVER_TOKIO_WORKER_STACK_BYTES: usize = 32 * 1024 * 1024;
 
 fn main() {
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -85,21 +55,12 @@ fn main() {
     }
 }
 
-#[cfg(feature = "local-worker")]
-type ProductionExecutionPort = ServerExecutionPortCore<
-    ProductSessionExecutionApplication<StandaloneModelExecutionApplication>,
->;
-#[cfg(feature = "local-worker")]
-type ProductionSupervisor = LocalRuntimeSupervisor<ProductionExecutionPort, ProductionCodexAdapter>;
-
 struct ProductionStartup {
     config: ServerConfig,
     delivery: LocalDeliveryAdapterConfig,
     publication: LocalPublicationAdapterConfig,
     repository_scope: RepositoryScope,
-    source_root: PathBuf,
     execution_config: ProductSessionExecutionConfig,
-    model_route: LocalModelRoute,
     auth_bootstrap: AuthSessionBootstrap,
     auth_config: AuthSessionConfig,
 }
@@ -107,50 +68,14 @@ struct ProductionStartup {
 struct ProductionApplicationComposition {
     config: ServerConfig,
     repository_scope: RepositoryScope,
-    source_root: PathBuf,
-    model_route: LocalModelRoute,
     auth_sessions: Arc<SqliteAuthSessionManager>,
     owner: Option<UserAccount>,
     application: StandaloneControlPlaneApplication,
 }
 
-/// Runs the startup-time local model authority configuration once the first
-/// Owner account exists, closing the gap for Servers that were uninitialized
-/// when the process started.
-struct DeferredModelAuthority {
-    data_directory: PathBuf,
-    repository_scope: RepositoryScope,
-    model_route: LocalModelRoute,
-    secret_directory: PathBuf,
-}
-
-impl OwnerInitializationHook for DeferredModelAuthority {
-    fn owner_initialized(&self, owner: &UserId) -> Result<(), String> {
-        let mut storage =
-            SqliteStorage::open(&self.data_directory).map_err(|error| error.to_string())?;
-        let result = configure_local_model_authority(
-            &mut storage,
-            owner,
-            &self.repository_scope,
-            &self.model_route,
-            self.secret_directory.clone(),
-        );
-        let _ = Box::new(storage).close();
-        result.map_err(|error| error.to_string())
-    }
-}
-
 fn load_production_startup() -> Result<ProductionStartup, Box<dyn std::error::Error>> {
     let config = environment_config()?;
     let (delivery, publication, repository_scope) = local_production_configs()?;
-    let source_root = match env::var_os("WWC_SERVER_SOURCE_ROOT") {
-        Some(value) => PathBuf::from(value),
-        None => delivery
-            .repository_root()
-            .parent()
-            .map(PathBuf::from)
-            .ok_or("configured Delivery repository has no controlled source root")?,
-    };
     let execution_config = ProductSessionExecutionConfig::try_new(
         repository_scope.clone(),
         required_environment("WWC_SERVER_CHECKOUT_REVISION")?,
@@ -159,7 +84,6 @@ fn load_production_startup() -> Result<ProductionStartup, Box<dyn std::error::Er
         optional_i64("WWC_SERVER_MAX_ARTIFACT_BYTES", 1_073_741_824)?,
     )?;
     let bootstrap_proof = required_environment("WWC_SERVER_BOOTSTRAP_PROOF")?;
-    let model_route = LocalModelRoute::from_environment()?;
     let auth_bootstrap = AuthSessionBootstrap::new(bootstrap_proof)?;
     // Community local loopback defaults to unlocked access; password auth is
     // required for lock mode or any non-loopback listener.
@@ -180,9 +104,7 @@ fn load_production_startup() -> Result<ProductionStartup, Box<dyn std::error::Er
         delivery,
         publication,
         repository_scope,
-        source_root,
         execution_config,
-        model_route,
         auth_bootstrap,
         auth_config,
     })
@@ -195,8 +117,7 @@ type OpenedAccountsAuthority = (Arc<SqliteAuthSessionManager>, Option<UserAccoun
 #[allow(clippy::type_complexity)]
 fn open_accounts_authority(
     config: &ServerConfig,
-    repository_scope: RepositoryScope,
-    model_route: LocalModelRoute,
+    repository_scope: &RepositoryScope,
     auth_bootstrap: AuthSessionBootstrap,
     auth_config: AuthSessionConfig,
 ) -> Result<OpenedAccountsAuthority, Box<dyn std::error::Error>> {
@@ -204,15 +125,10 @@ fn open_accounts_authority(
     let auth_sessions = Arc::new(SqliteAuthSessionManager::open(
         config.data_directory().join("auth-sessions"),
         vec![auth_bootstrap],
-        local_session_authority(&repository_scope),
+        local_session_authority(repository_scope),
         auth_config,
         Arc::clone(&accounts),
-        Some(Arc::new(DeferredModelAuthority {
-            data_directory: config.data_directory().to_path_buf(),
-            repository_scope,
-            model_route,
-            secret_directory: PathBuf::from(required_environment("SECRET_DIRECTORY")?),
-        })),
+        None,
     )?);
     Ok((
         Arc::clone(&auth_sessions),
@@ -254,9 +170,7 @@ fn open_production_application(
         delivery,
         publication,
         repository_scope,
-        source_root,
         execution_config,
-        model_route,
         auth_bootstrap,
         auth_config,
     } = startup;
@@ -276,7 +190,7 @@ fn open_production_application(
             return Err(Box::new(error));
         }
     };
-    let mut storage = match SqliteStorage::open(config.data_directory()) {
+    let storage = match SqliteStorage::open(config.data_directory()) {
         Ok(storage) => storage,
         Err(error) => {
             let _ = control_plane.shutdown();
@@ -284,25 +198,8 @@ fn open_production_application(
             return Err(Box::new(error));
         }
     };
-    let (auth_sessions, owner) = open_accounts_authority(
-        &config,
-        repository_scope.clone(),
-        model_route.clone(),
-        auth_bootstrap,
-        auth_config,
-    )?;
-    // The durable first Owner is the single-subject authority for startup
-    // model configuration; an uninitialized Server defers that configuration
-    // to the OwnerInitializationHook.
-    if let Some(owner) = &owner {
-        configure_local_model_authority(
-            &mut storage,
-            &owner.user_id,
-            &repository_scope,
-            &model_route,
-            PathBuf::from(required_environment("SECRET_DIRECTORY")?),
-        )?;
-    }
+    let (auth_sessions, owner) =
+        open_accounts_authority(&config, &repository_scope, auth_bootstrap, auth_config)?;
     let worker_outbound_storage = match SqliteStorage::open(config.data_directory()) {
         Ok(storage) => storage,
         Err(error) => {
@@ -335,8 +232,6 @@ fn open_production_application(
     Ok(ProductionApplicationComposition {
         config,
         repository_scope,
-        source_root,
-        model_route,
         auth_sessions,
         owner,
         application,
@@ -369,21 +264,18 @@ async fn run_composed_server(
     let ProductionApplicationComposition {
         config,
         repository_scope,
-        source_root,
-        model_route,
         auth_sessions,
         owner,
         application,
     } = composition;
-    let model_execution = open_local_model_execution(&config, &model_route)?;
+
     let action_signing_key = configured_action_signing_key()?;
     let delegate = ProductSessionExecutionApplication::new_with_action_issuer(
-        model_execution,
+        DeviceModelBoundary,
         ActionEnforcementIssuer::new(action_signing_key.clone()),
     );
     let execution_port =
         ServerExecutionPortCore::from_application(&application, repository_scope.clone(), delegate);
-    let clock: Arc<dyn StandaloneApplicationClock> = Arc::new(SystemStandaloneApplicationClock);
     let worker_id = WorkerId(required_environment_or(
         "WWC_SERVER_WORKER_ID",
         "wrk_00000000000000000000000001",
@@ -404,116 +296,36 @@ async fn run_composed_server(
         worker_id.clone(),
         worker_instance_id.clone(),
         scheduler_generation,
-        optional_duration_seconds("WWC_SERVER_EXECUTION_LEASE_SECONDS", 30)?,
+        // ponytail: execution leases have a fixed deadline; tasks over 15 minutes
+        // need an explicit longer lease until protocol-level renewal is implemented.
+        optional_duration_seconds("WWC_SERVER_EXECUTION_LEASE_SECONDS", 900)?,
     )?
     .with_admission_identity(
         owner.as_ref().map(|owner| owner.user_id.clone()),
         worker_pool_id,
     )?;
-    let worker_mode = required_environment_or("WWC_SERVER_WORKER_MODE", "local")?;
-    if worker_mode != "local" && worker_mode != "remote" {
-        return Err("WWC_SERVER_WORKER_MODE must be local or remote".into());
-    }
-    if worker_mode == "remote" {
-        return Box::pin(run_remote_composition(RemoteRuntimeComposition {
-            config,
-            repository_scope,
-            auth_sessions,
-            application,
-            worker_id,
-            scheduler,
-            execution_port,
-            clock,
-        }))
-        .await;
-    }
-    #[cfg(feature = "local-worker")]
-    {
-        let capabilities = worker_capabilities()?;
-        let worker_config = WorkerConfig {
-            worker_id: worker_id.clone(),
-            worker_instance_id: worker_instance_id.clone(),
-            started_at: clock.now_instant(),
-            capabilities: capabilities.clone(),
-        };
-        let launcher_config = LocalLauncherConfig::try_new(
-            config.data_directory(),
-            source_root,
-            clock.now_millis(),
-            ControlPlaneInstanceRuntimeConfig::default(),
-            256,
-        )?;
-        let launcher_config = configured_local_launcher_observer(launcher_config)?;
-        Box::pin(run_local_composition(LocalRuntimeComposition {
-            config,
-            model_route,
-            auth_sessions,
-            application,
-            capabilities,
-            action_signing_key,
-            launcher_config,
-            worker_config,
-            execution_port,
-            scheduler,
-            clock,
-        }))
-        .await
-    }
-    #[cfg(not(feature = "local-worker"))]
-    {
-        let _ = source_root;
-        Err("this Server build supports WWC_SERVER_WORKER_MODE=remote only".into())
-    }
-}
-
-#[cfg(feature = "local-worker")]
-struct LocalRuntimeComposition {
-    config: ServerConfig,
-    model_route: LocalModelRoute,
-    auth_sessions: Arc<SqliteAuthSessionManager>,
-    application: StandaloneControlPlaneApplication,
-    capabilities: WorkerCapabilitySet,
-    action_signing_key: ActionEnforcementSigningKey,
-    launcher_config: LocalLauncherConfig,
-    worker_config: WorkerConfig,
-    execution_port: ProductionExecutionPort,
-    scheduler: RepositoryRuntimeScheduler,
-    clock: Arc<dyn StandaloneApplicationClock>,
-}
-
-#[cfg(feature = "local-worker")]
-async fn run_local_composition(
-    composition: LocalRuntimeComposition,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let LocalRuntimeComposition {
+    Box::pin(run_remote_composition(RemoteRuntimeComposition {
         config,
-        model_route,
+        repository_scope,
         auth_sessions,
         application,
-        capabilities,
-        action_signing_key,
-        launcher_config,
-        worker_config,
-        execution_port,
         scheduler,
-        clock,
-    } = composition;
-    let codex = open_production_codex(&config, &model_route, capabilities, action_signing_key)?;
-    let supervisor = Box::pin(LocalRuntimeSupervisor::start_with_scheduler(
-        launcher_config,
-        worker_config,
         execution_port,
-        codex,
-        Arc::clone(&clock),
-        Duration::from_millis(25),
-        Some(Box::new(scheduler)),
-    ))
-    .await?;
-    let application =
-        Arc::new(application.with_runtime_health(Arc::new(supervisor.health_handle())));
-    let api = Arc::new(GeneratedContractDispatcher::new(application));
-    let authenticator: Arc<dyn RequestAuthenticator> = auth_sessions.clone();
-    serve_runtime(config, auth_sessions, authenticator, api, supervisor).await
+    }))
+    .await
+}
+
+/// Model payloads and Provider credentials stay in the Device process.
+struct DeviceModelBoundary;
+impl winwincode_control_plane::DurableExecutionPortDelegate for DeviceModelBoundary {
+    fn accept(
+        &mut self,
+        _context: winwincode_control_plane::DurableExecutionPortContext<'_>,
+        _message: winwincode_control_plane::DurableExecutionPortSupplement<'_>,
+    ) -> Result<Vec<ExecutionPortMessage>, winwincode_control_plane::DurableExecutionPortError>
+    {
+        Err(winwincode_control_plane::DurableExecutionPortError::UnsupportedMessage)
+    }
 }
 
 struct RemoteRuntimeComposition<Core> {
@@ -521,10 +333,8 @@ struct RemoteRuntimeComposition<Core> {
     repository_scope: RepositoryScope,
     auth_sessions: Arc<SqliteAuthSessionManager>,
     application: StandaloneControlPlaneApplication,
-    worker_id: WorkerId,
     scheduler: RepositoryRuntimeScheduler,
     execution_port: Core,
-    clock: Arc<dyn StandaloneApplicationClock>,
 }
 
 async fn run_remote_composition<Core>(
@@ -539,10 +349,8 @@ where
         repository_scope,
         auth_sessions,
         application,
-        worker_id,
         scheduler,
         execution_port,
-        clock,
     } = composition;
     let remote_worker_scope = WorkerRegistryScope::Repository {
         organization_id: repository_scope.organization_id.clone(),
@@ -550,31 +358,11 @@ where
         project_id: repository_scope.project_id.clone(),
         repository_id: repository_scope.repository_id.clone(),
     };
-    let fleet_authenticator = FileRemoteWorkerAuthenticator::open(
-        PathBuf::from(required_environment(
-            "WWC_SERVER_REMOTE_WORKER_CREDENTIAL_FILE",
-        )?),
-        worker_id,
-        WorkerPoolId(required_environment_or(
-            "WWC_SERVER_WORKER_POOL_ID",
-            "wpl_00000000000000000000000001",
-        )?),
-        remote_worker_scope.clone(),
-        required_environment_or("WWC_SERVER_REMOTE_WORKER_ISSUER", "winwincode-server")?,
-        required_environment_or("WWC_SERVER_REMOTE_WORKER_SUBJECT", "remote-worker")?,
-        required_environment_or("WWC_SERVER_REMOTE_WORKER_SECURITY_ZONE", "default")?,
-        winwincode_domain::Instant(required_environment("WWC_SERVER_REMOTE_WORKER_EXPIRES_AT")?),
-        &clock.now_instant(),
-    )?;
     let session_authenticator = WorkerSessionRemoteAuthenticator::new(
         config.data_directory().to_path_buf(),
-        WorkerPoolId(STRONGFLOW_DEVICE_WORKER_POOL_ID.to_owned()),
         remote_worker_scope,
     );
-    let remote_authenticator = Arc::new(CompositeRemoteWorkerAuthenticator::new(
-        fleet_authenticator,
-        session_authenticator,
-    ));
+    let remote_authenticator = Arc::new(session_authenticator);
     let exchange: Arc<dyn RemoteWorkerExchangePort> =
         Arc::new(ProductionRemoteWorkerExchange::new(
             config.data_directory(),
@@ -621,243 +409,11 @@ async fn serve_remote_runtime(
     Ok(())
 }
 
-#[cfg(feature = "local-worker")]
-async fn serve_runtime(
-    config: ServerConfig,
-    auth_sessions: Arc<SqliteAuthSessionManager>,
-    authenticator: Arc<dyn RequestAuthenticator>,
-    api: Arc<GeneratedContractDispatcher>,
-    supervisor: ProductionSupervisor,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut running = match start_server(config, auth_sessions, authenticator, api).await {
-        Ok(running) => running,
-        Err(error) => {
-            let _ = Box::pin(supervisor.shutdown()).await;
-            return Err(Box::new(error));
-        }
-    };
-    if let Err(error) = tokio::signal::ctrl_c().await {
-        let _ = running.shutdown_listener().await;
-        let _ = Box::pin(supervisor.shutdown()).await;
-        let _ = running.shutdown_application();
-        return Err(Box::new(error));
-    }
-    let server_result = running.shutdown_listener().await;
-    let runtime_result = Box::pin(supervisor.shutdown()).await;
-    let application_result = running.shutdown_application();
-    server_result?;
-    runtime_result?;
-    application_result?;
-    Ok(())
-}
-
-fn open_local_model_execution(
-    config: &ServerConfig,
-    model_route: &LocalModelRoute,
-) -> Result<StandaloneModelExecutionApplication, Box<dyn std::error::Error>> {
-    let policy = LocalModelPolicyAuthority::try_new(LocalModelPolicyAuthorityConfig {
-        base: ModelAdmissionPolicyLayer::try_new(
-            "winwincode.server.local-policy.v1".to_owned(),
-            1,
-            "winwincode.server.local-budget.v1".to_owned(),
-            ModelRoutePolicyDecision::Allow,
-            ModelAdmissionLimits {
-                requests_per_minute: 1_000,
-                tokens_per_minute: 1_000_000,
-                concurrent_requests: 16,
-                token_budget: 10_000_000,
-                cost_budget_micros: 10_000_000,
-            },
-        )?,
-    })?;
-    let retry_policy = local_loopback_retry_policy()?;
-    let pool = local_model_request_pool_config();
-    Ok(StandaloneModelExecutionApplication::open(
-        StandaloneModelExecutionConfig {
-            data_directory: config.data_directory().to_path_buf(),
-            secret_directory: PathBuf::from(required_environment("SECRET_DIRECTORY")?),
-            providers: vec![model_route.provider_config()?],
-            admission: ProviderAdmissionReservationConfig::try_new(32_000, 10)?,
-            pool,
-            policy: Box::new(policy),
-            retry_policy: Box::new(retry_policy),
-        },
-    )?)
-}
-
-const fn local_model_request_pool_config() -> ModelRequestPoolConfig {
-    ModelRequestPoolConfig {
-        max_routes: 4,
-        max_active_per_route: 1,
-        max_waiting_per_route: 4,
-        max_exchange_records_per_route: 8,
-        max_buffered_frames_per_stream: 32,
-        max_buffered_bytes_per_stream: 64 * 1024,
-        resume_buffered_frames_per_stream: 8,
-        resume_buffered_bytes_per_stream: 16 * 1024,
-    }
-}
-
-#[cfg(feature = "local-worker")]
-fn open_production_codex(
-    config: &ServerConfig,
-    model_route: &LocalModelRoute,
-    capabilities: WorkerCapabilitySet,
-    action_signing_key: ActionEnforcementSigningKey,
-) -> Result<ProductionCodexAdapter, Box<dyn std::error::Error>> {
-    let execution_envelope = ExecutionEnvelopeToken {
-        version: 1,
-        digest: Sha256Digest(required_environment_or(
-            "WWC_SERVER_EXECUTION_ENVELOPE_DIGEST",
-            &format!("sha256:{}", "a".repeat(64)),
-        )?),
-    };
-    let helper_release_manifest_path =
-        PathBuf::from(required_environment("WWC_SERVER_HELPER_RELEASE_MANIFEST")?);
-    let codex_config = ProductionCodexConfig::try_new(ProductionCodexOptions {
-        data_directory: config.data_directory().join("worker-runtime"),
-        helper_executable: PathBuf::from(required_environment("WWC_SERVER_HELPER_EXECUTABLE")?),
-        helper_release_manifest: HelperReleaseManifest::from_file(&helper_release_manifest_path)?,
-        provider: model_route.provider.clone(),
-        model: model_route.model.clone(),
-        gateway_route: ModelGatewayRoute {
-            capability: "reasoning".to_owned(),
-            route: "embedded-canonical-loopback".to_owned(),
-        },
-        registered_capabilities: capabilities,
-        discovered_capabilities: Vec::new(),
-        action_signing_key,
-        execution_envelope,
-        execution_mode: configured_server_execution_mode()?,
-        observer_mode: configured_server_observer_mode()?,
-    })?;
-    Ok(ProductionCodexAdapter::open(codex_config)?)
-}
-
 fn configured_action_signing_key() -> Result<ActionEnforcementSigningKey, Box<dyn std::error::Error>>
 {
     Ok(ActionEnforcementSigningKey::from_bytes(parse_hex_key(
         &required_environment_or("WWC_SERVER_ACTION_SIGNING_KEY_HEX", &"1f".repeat(32))?,
     )?)?)
-}
-
-#[cfg(feature = "local-worker")]
-fn configured_server_execution_mode() -> Result<ExecutionMode, Box<dyn std::error::Error>> {
-    let mode = ExecutionMode::from_config(&required_environment_or(
-        "WWC_SERVER_EXECUTION_MODE",
-        "react",
-    )?)
-    .ok_or("WWC_SERVER_EXECUTION_MODE contains an unsupported execution mode")?;
-    released_server_execution_mode_required(mode)?;
-    Ok(mode)
-}
-
-#[cfg(feature = "local-worker")]
-fn released_server_execution_mode_required(mode: ExecutionMode) -> Result<(), &'static str> {
-    match mode {
-        ExecutionMode::React
-        | ExecutionMode::DelegatedPatchShadow
-        | ExecutionMode::DelegatedPatch => Ok(()),
-        ExecutionMode::DebugProbe => {
-            Err("WWC_SERVER_EXECUTION_MODE selects DebugProbe before runtime routing is available")
-        }
-    }
-}
-
-#[cfg(feature = "local-worker")]
-fn configured_server_observer_mode() -> Result<ObserverMode, Box<dyn std::error::Error>> {
-    let mode =
-        ObserverMode::from_config(&required_environment_or("WWC_SERVER_OBSERVER_MODE", "off")?)
-            .ok_or("WWC_SERVER_OBSERVER_MODE contains an unsupported observer mode")?;
-    released_server_observer_route_required(mode)?;
-    Ok(mode)
-}
-
-#[cfg(feature = "local-worker")]
-fn released_server_observer_route_required(mode: ObserverMode) -> Result<bool, &'static str> {
-    match mode {
-        ObserverMode::Off => Ok(false),
-        ObserverMode::AmbiguousOnly => Ok(true),
-        ObserverMode::Shadow | ObserverMode::Always => Err(
-            "WWC_SERVER_OBSERVER_MODE selects an Observer policy not implemented by this release",
-        ),
-    }
-}
-
-#[cfg(feature = "local-worker")]
-fn configured_local_observation_model(
-    observer_mode: ObserverMode,
-) -> Result<Option<ObservationModelConfiguration>, Box<dyn std::error::Error>> {
-    if !released_server_observer_route_required(observer_mode)? {
-        return Ok(None);
-    }
-    Ok(Some(ObservationModelConfiguration::try_new(
-        required_environment("WWC_SERVER_OBSERVER_MODEL_PROVIDER_ID")?,
-        required_environment("WWC_SERVER_OBSERVER_MODEL_ID")?,
-        ModelGatewayRoute {
-            capability: required_environment("WWC_SERVER_OBSERVER_MODEL_CAPABILITY")?,
-            route: required_environment("WWC_SERVER_OBSERVER_MODEL_ROUTE")?,
-        },
-    )?))
-}
-
-#[cfg(feature = "local-worker")]
-fn configured_local_launcher_observer(
-    launcher: LocalLauncherConfig,
-) -> Result<LocalLauncherConfig, Box<dyn std::error::Error>> {
-    let observer_mode = configured_server_observer_mode()?;
-    let launcher = launcher.with_observer_mode(observer_mode);
-    Ok(match configured_local_observation_model(observer_mode)? {
-        Some(model) => launcher.with_observation_model(model),
-        None => launcher,
-    })
-}
-
-#[cfg(all(test, feature = "local-worker"))]
-mod observer_tests {
-    use super::{ObserverMode, released_server_observer_route_required};
-
-    #[test]
-    fn observer_modes_have_one_closed_server_release_configuration() {
-        for (mode, expected_route) in [
-            (ObserverMode::Off, Ok(false)),
-            (ObserverMode::AmbiguousOnly, Ok(true)),
-            (ObserverMode::Shadow, Err(())),
-            (ObserverMode::Always, Err(())),
-        ] {
-            assert_eq!(
-                released_server_observer_route_required(mode).map_err(|_| ()),
-                expected_route,
-                "mode={mode:?}"
-            );
-        }
-    }
-}
-
-#[cfg(feature = "local-worker")]
-fn worker_capabilities() -> Result<WorkerCapabilitySet, Box<dyn std::error::Error>> {
-    let platform = match (env::consts::ARCH, env::consts::OS) {
-        ("aarch64", "macos") => WorkerCapabilitySetPlatform::Aarch64AppleDarwin,
-        ("x86_64", "macos") => WorkerCapabilitySetPlatform::X8664AppleDarwin,
-        ("aarch64", "linux") => WorkerCapabilitySetPlatform::Aarch64UnknownLinuxGnu,
-        ("x86_64", "linux") => WorkerCapabilitySetPlatform::X8664UnknownLinuxGnu,
-        _ => return Err("unsupported local Worker platform".into()),
-    };
-    Ok(WorkerCapabilitySet {
-        capability_digest: Sha256Digest(format!("sha256:{}", "0".repeat(64))),
-        features: vec![
-            WorkerCapabilityFeature::ArtifactStream,
-            WorkerCapabilityFeature::Approval,
-            WorkerCapabilityFeature::Git,
-            WorkerCapabilityFeature::InteractiveInput,
-            WorkerCapabilityFeature::Mcp,
-            WorkerCapabilityFeature::ModelProxy,
-            WorkerCapabilityFeature::Sandbox,
-            WorkerCapabilityFeature::Shell,
-        ],
-        max_concurrent_jobs: 1,
-        platform,
-    })
 }
 
 fn parse_hex_key(value: &str) -> Result<[u8; 32], Box<dyn std::error::Error>> {
@@ -912,8 +468,7 @@ fn compose_production_application(
         hub,
         collaboration,
         execution_config,
-    )?
-    .with_model_request_pool_config(local_model_request_pool_config())?;
+    )?;
     Ok(application)
 }
 
@@ -1038,44 +593,4 @@ fn optional_duration_seconds(
         Err(error) => return Err(error.into()),
     };
     Ok(Duration::from_secs(seconds))
-}
-
-#[cfg(all(test, feature = "local-worker"))]
-mod tests {
-    use super::{
-        ExecutionMode, ObserverMode, released_server_execution_mode_required,
-        released_server_observer_route_required,
-    };
-
-    #[test]
-    fn execution_modes_fail_closed_until_debug_probe_routing_exists() {
-        for (mode, expected) in [
-            (ExecutionMode::React, Ok(())),
-            (ExecutionMode::DelegatedPatchShadow, Ok(())),
-            (ExecutionMode::DelegatedPatch, Ok(())),
-            (ExecutionMode::DebugProbe, Err(())),
-        ] {
-            assert_eq!(
-                released_server_execution_mode_required(mode).map_err(|_| ()),
-                expected,
-                "mode={mode:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn observer_modes_have_one_closed_server_release_configuration() {
-        for (mode, expected_route) in [
-            (ObserverMode::Off, Ok(false)),
-            (ObserverMode::AmbiguousOnly, Ok(true)),
-            (ObserverMode::Shadow, Err(())),
-            (ObserverMode::Always, Err(())),
-        ] {
-            assert_eq!(
-                released_server_observer_route_required(mode).map_err(|_| ()),
-                expected_route,
-                "mode={mode:?}"
-            );
-        }
-    }
 }

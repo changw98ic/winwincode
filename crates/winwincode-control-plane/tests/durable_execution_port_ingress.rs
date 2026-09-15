@@ -448,6 +448,7 @@ fn workrun_job(seed: u64, delivery: &Delivery, scope: &RepositoryScope) -> Execu
         work_run_id: run_id,
     };
     ExecutionJob {
+        model_selection: None,
         attempt: 1,
         execution_profile: "executor".into(),
         goal: item.goal.clone(),
@@ -1103,6 +1104,7 @@ fn install_product_dispatch(fixture: &mut Fixture, seed: u64) -> ProductDispatch
         .expect("Worker registration");
     let product_session_id = ProductSessionId(canonical_id("psn", seed));
     let job = ExecutionJob {
+        model_selection: None,
         attempt: 1,
         execution_profile: "codex".to_owned(),
         goal: "Advance ProductSession chat".to_owned(),
@@ -1541,6 +1543,7 @@ fn accepted_dispatch_seals_product_session_runtime_and_replays_exactly() {
 
     let product_session_id = ProductSessionId(canonical_id("psn", seed));
     let job = ExecutionJob {
+        model_selection: None,
         attempt: 1,
         execution_profile: "codex".to_owned(),
         goal: "Advance ProductSession chat".to_owned(),

@@ -450,7 +450,7 @@ impl<'storage> WorkerSessionCredentialService<'storage> {
         now: &Instant,
     ) -> Result<WorkerSessionCredentialRecord, WorkerSessionCredentialError> {
         let record = self.lookup_verified(proof, now)?;
-        let identities_match = is_canonical_prefixed_id(worker_session_id, "ws_")
+        let identities_match = is_canonical_prefixed_id(worker_session_id, "wsn_")
             && is_canonical_prefixed_id(worker_id, "wrk_")
             && is_canonical_prefixed_id(worker_instance_id, "wki_")
             && record.worker_session_id == worker_session_id

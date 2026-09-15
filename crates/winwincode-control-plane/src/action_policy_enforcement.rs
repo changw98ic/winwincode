@@ -153,8 +153,20 @@ fn resolve_action_authority(
     let (durable, job) =
         crate::delivery_transaction::load_durable_execution_job(storage, &request.job_id)
             .map_err(|_| authority_rejected())?;
-    let authority = load_runtime_replay_authority(storage, &job, evaluated_at)
-        .map_err(|_| authority_rejected())?;
+    let authority = match &job.scope {
+        winwincode_execution_port::generated::ExecutionScope::ProductSessionExecutionScope(_) => {
+            crate::product_session_execution_application::load_chat_runtime_authority(
+                storage,
+                &job,
+                evaluated_at,
+            )
+            .map_err(|_| authority_rejected())?
+        }
+        winwincode_execution_port::generated::ExecutionScope::WorkRunExecutionScope(_) => {
+            load_runtime_replay_authority(storage, &job, evaluated_at)
+                .map_err(|_| authority_rejected())?
+        }
+    };
     if request.lease != lease_stamp(&authority.lease)
         || request.worker_session_id != authority.worker_session_id
         || request.session_identity != authority.session_identity

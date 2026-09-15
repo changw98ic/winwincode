@@ -8,6 +8,13 @@
 //! call. The Gateway owns no Codex conversation state and emits no durable
 //! events; streaming conversion belongs to the `ModelPort` layer.
 
+use winwincode_provider::{
+    ProviderAdapterError, ProviderAdapterErrorKind, ProviderAdapterInvocation,
+    ProviderAdapterOpenReceipt, ProviderAdapterPort, ProviderGatewayErrorKind,
+    ProviderGatewayOpenReceipt, ProviderGatewayTerminal, ProviderGatewayTerminalOutcome,
+    ProviderStreamControlAction,
+};
+
 use std::{collections::BTreeMap, fmt};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -32,41 +39,11 @@ use crate::{
     ModelSettingsErrorKind, ModelSettingsService, ModelSettingsTarget, ProviderAdmissionError,
     ProviderAdmissionErrorKind, ProviderAdmissionOpenRequest, ProviderCatalogError,
     ProviderCatalogErrorKind, ProviderCatalogService, ProviderGatewayAdmissionPort,
-    ProviderTokenUsage, ResolvedSecret, SecretStoreError, SecretStorePort,
+    SecretStoreError, SecretStorePort,
 };
 
 const MAX_PROVIDER_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 const MODEL_CANCELLATION_MESSAGE: &str = "model exchange cancelled by Worker";
-
-/// Stable Provider Gateway failure categories.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ProviderGatewayErrorKind {
-    InvalidRequest,
-    IdentityDenied,
-    IdentityUnavailable,
-    RouteUnavailable,
-    RouteMismatch,
-    ProviderNotFound,
-    ProviderDisabled,
-    ModelNotFound,
-    ModelDisabled,
-    StructuredOutputUnsupported,
-    CredentialUnavailable,
-    CredentialScopeMismatch,
-    AdapterNotRegistered,
-    AdapterRejected,
-    AdapterRateLimited,
-    AdapterUnavailable,
-    AdapterProtocol,
-    ExchangeConflict,
-    ExchangeNotFound,
-    TerminalConflict,
-    AdmissionDenied,
-    AdmissionUnavailable,
-    SettlementUnavailable,
-    CredentialLeak,
-    Storage,
-}
 
 /// Bounded Gateway error which never retains Provider diagnostics or secrets.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -234,206 +211,6 @@ pub trait ProviderGatewayIdentityPort: Send + Sync {
     ) -> Result<ProviderGatewayIdentity, ProviderGatewayIdentityError>;
 }
 
-/// Provider-neutral request exposed to exactly one selected adapter.
-///
-/// Serialization is intentionally absent and Debug always redacts the body.
-pub struct ProviderAdapterInvocation<'a> {
-    model_exchange_id: &'a ModelExchangeId,
-    request_id: &'a RequestId,
-    adapter_request_id: &'a str,
-    model_id: &'a str,
-    content_type: &'a str,
-    payload: &'a [u8],
-}
-
-impl ProviderAdapterInvocation<'_> {
-    #[must_use]
-    pub const fn model_exchange_id(&self) -> &ModelExchangeId {
-        self.model_exchange_id
-    }
-
-    #[must_use]
-    pub const fn request_id(&self) -> &RequestId {
-        self.request_id
-    }
-
-    /// Returns the precommitted Provider idempotency identity.
-    #[must_use]
-    pub const fn adapter_request_id(&self) -> &str {
-        self.adapter_request_id
-    }
-
-    #[must_use]
-    pub const fn model_id(&self) -> &str {
-        self.model_id
-    }
-
-    #[must_use]
-    pub const fn content_type(&self) -> &str {
-        self.content_type
-    }
-
-    /// Borrows the opaque request only for the adapter call.
-    #[must_use]
-    pub const fn payload(&self) -> &[u8] {
-        self.payload
-    }
-}
-
-impl fmt::Debug for ProviderAdapterInvocation<'_> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ProviderAdapterInvocation")
-            .field("model_exchange_id", self.model_exchange_id)
-            .field("request_id", self.request_id)
-            .field("adapter_request_id", &self.adapter_request_id)
-            .field("model_id", &self.model_id)
-            .field("content_type", &self.content_type)
-            .field("payload", &"[REDACTED]")
-            .finish()
-    }
-}
-
-/// Stable Provider adapter failure categories.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ProviderAdapterErrorKind {
-    Rejected,
-    RateLimited,
-    Unavailable,
-    Protocol,
-}
-
-/// Provider adapter error which cannot copy upstream response text.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ProviderAdapterError {
-    kind: ProviderAdapterErrorKind,
-    message: &'static str,
-}
-
-impl ProviderAdapterError {
-    #[must_use]
-    pub const fn rejected() -> Self {
-        Self {
-            kind: ProviderAdapterErrorKind::Rejected,
-            message: "Provider rejected the request",
-        }
-    }
-
-    #[must_use]
-    pub const fn rate_limited() -> Self {
-        Self {
-            kind: ProviderAdapterErrorKind::RateLimited,
-            message: "Provider rate limit rejected the request",
-        }
-    }
-
-    #[must_use]
-    pub const fn unavailable() -> Self {
-        Self {
-            kind: ProviderAdapterErrorKind::Unavailable,
-            message: "Provider adapter is unavailable",
-        }
-    }
-
-    #[must_use]
-    pub const fn protocol() -> Self {
-        Self {
-            kind: ProviderAdapterErrorKind::Protocol,
-            message: "Provider adapter response is invalid",
-        }
-    }
-
-    #[must_use]
-    pub const fn kind(&self) -> ProviderAdapterErrorKind {
-        self.kind
-    }
-}
-
-impl fmt::Display for ProviderAdapterError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.message)
-    }
-}
-
-impl std::error::Error for ProviderAdapterError {}
-
-/// Secret-free acknowledgement returned after the adapter accepts a request.
-#[derive(Clone, Eq, PartialEq)]
-pub struct ProviderAdapterOpenReceipt {
-    adapter_request_id: String,
-}
-
-impl ProviderAdapterOpenReceipt {
-    /// Constructs a bounded opaque upstream request identity.
-    ///
-    /// # Errors
-    ///
-    /// Rejects empty, oversized, or control-character-containing values.
-    pub fn try_new(adapter_request_id: String) -> Result<Self, ProviderAdapterError> {
-        validate_token(&adapter_request_id, 200).map_err(|_| ProviderAdapterError::protocol())?;
-        Ok(Self { adapter_request_id })
-    }
-
-    #[must_use]
-    pub fn adapter_request_id(&self) -> &str {
-        &self.adapter_request_id
-    }
-}
-
-impl fmt::Debug for ProviderAdapterOpenReceipt {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ProviderAdapterOpenReceipt")
-            .field("adapter_request_id", &"[REDACTED]")
-            .finish()
-    }
-}
-
-/// One Provider implementation selected by an exact catalog identifier.
-pub trait ProviderAdapterPort: Send + Sync {
-    /// Exact catalog Provider identifier owned by this adapter.
-    fn provider_id(&self) -> &str;
-
-    /// Opens an exchange. The Credential is borrowed only during this call.
-    /// `adapter_request_id` is the mandatory upstream idempotency key: exact
-    /// retries must recover the first request rather than start another.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable category without exposing Provider response text.
-    fn open(
-        &self,
-        invocation: &ProviderAdapterInvocation<'_>,
-        credential: &ResolvedSecret,
-    ) -> Result<ProviderAdapterOpenReceipt, ProviderAdapterError>;
-
-    /// Applies one transport-level stream control transition. The tuple
-    /// (`model_exchange_id`, `adapter_request_id`, `action`) is the mandatory
-    /// idempotency identity: exact repeats must return the original result
-    /// without applying the Provider effect twice. Cancel and Release for a
-    /// precommitted identity whose open side effect has not happened are
-    /// successful no-ops that fence any later open using that identity.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable adapter category without Provider response text.
-    fn control(
-        &self,
-        model_exchange_id: &ModelExchangeId,
-        adapter_request_id: &str,
-        action: ProviderStreamControlAction,
-    ) -> Result<(), ProviderAdapterError>;
-}
-
-/// Provider transport action owned by the selected adapter.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ProviderStreamControlAction {
-    Pause,
-    Resume,
-    Cancel,
-    Release,
-}
-
 /// Ordered durable checkpoint around each terminal external side effect.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ProviderGatewayTerminalProgressStage {
@@ -489,15 +266,6 @@ pub trait ProviderGatewayTerminalProgressPort: Send + Sync {
 pub struct ProviderStreamControlReceipt {
     pub action: ProviderStreamControlAction,
     pub replayed: bool,
-}
-
-/// Provider-neutral terminal outcome.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProviderGatewayTerminalOutcome {
-    Succeeded,
-    Failed,
-    Cancelled,
 }
 
 /// Safe terminal facts sent to the owner of billing or pool settlement.
@@ -593,60 +361,6 @@ pub trait ProviderGatewaySettlementPort: Send + Sync {
         settlement: &ProviderGatewaySettlement,
     ) -> Result<(), ProviderGatewaySettlementError>;
 }
-
-/// Secret-free result of opening an exchange.
-pub struct ProviderGatewayOpenReceipt {
-    pub model_exchange_id: ModelExchangeId,
-    pub request_id: RequestId,
-    pub route: ModelRoute,
-    pub adapter_request_id: String,
-    pub idempotent_replay: bool,
-    stream_leak_gate: CredentialLeakGate,
-}
-
-impl ProviderGatewayOpenReceipt {
-    pub(crate) fn stream_leak_gate(&self) -> CredentialLeakGate {
-        self.stream_leak_gate.fingerprint_snapshot()
-    }
-}
-
-impl Clone for ProviderGatewayOpenReceipt {
-    fn clone(&self) -> Self {
-        Self {
-            model_exchange_id: self.model_exchange_id.clone(),
-            request_id: self.request_id.clone(),
-            route: self.route.clone(),
-            adapter_request_id: self.adapter_request_id.clone(),
-            idempotent_replay: self.idempotent_replay,
-            stream_leak_gate: self.stream_leak_gate(),
-        }
-    }
-}
-
-impl fmt::Debug for ProviderGatewayOpenReceipt {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ProviderGatewayOpenReceipt")
-            .field("model_exchange_id", &self.model_exchange_id)
-            .field("request_id", &self.request_id)
-            .field("route", &self.route)
-            .field("adapter_request_id", &self.adapter_request_id)
-            .field("idempotent_replay", &self.idempotent_replay)
-            .finish_non_exhaustive()
-    }
-}
-
-impl PartialEq for ProviderGatewayOpenReceipt {
-    fn eq(&self, other: &Self) -> bool {
-        self.model_exchange_id == other.model_exchange_id
-            && self.request_id == other.request_id
-            && self.route == other.route
-            && self.adapter_request_id == other.adapter_request_id
-            && self.idempotent_replay == other.idempotent_replay
-    }
-}
-
-impl Eq for ProviderGatewayOpenReceipt {}
 
 /// Secret-free durable Gateway exchange authority used only for crash restore.
 #[derive(Clone)]
@@ -813,52 +527,6 @@ pub struct ProviderGatewayTerminalReceipt {
     pub admission: ModelReservationTerminalReceipt,
     pub settled_at: Instant,
     pub idempotent_replay: bool,
-}
-
-/// Trusted terminal command used by the unique stream coordinator.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ProviderGatewayTerminalCharge {
-    pub usage: ProviderTokenUsage,
-    pub actual_cost_micros: u64,
-}
-
-/// Trusted terminal command used by the unique stream coordinator.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ProviderGatewayTerminal {
-    Failed {
-        failure: ModelAttemptFailureFact,
-        charge: Option<ProviderGatewayTerminalCharge>,
-    },
-    Cancelled,
-    Completed {
-        usage: ProviderTokenUsage,
-        actual_cost_micros: u64,
-    },
-}
-
-impl ProviderGatewayTerminal {
-    #[must_use]
-    pub const fn outcome(self) -> ProviderGatewayTerminalOutcome {
-        match self {
-            Self::Failed { .. } => ProviderGatewayTerminalOutcome::Failed,
-            Self::Cancelled => ProviderGatewayTerminalOutcome::Cancelled,
-            Self::Completed { .. } => ProviderGatewayTerminalOutcome::Succeeded,
-        }
-    }
-
-    const fn charge(self) -> Option<ProviderGatewayTerminalCharge> {
-        match self {
-            Self::Failed { charge, .. } => charge,
-            Self::Completed {
-                usage,
-                actual_cost_micros,
-            } => Some(ProviderGatewayTerminalCharge {
-                usage,
-                actual_cost_micros,
-            }),
-            Self::Cancelled => None,
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -1151,7 +819,7 @@ impl<'a> ProviderGateway<'a> {
             model_exchange_id: message.model_exchange_id.clone(),
             request_id: message.request_id.clone(),
             route: resolved.route,
-            adapter_request_id: adapter_receipt.adapter_request_id,
+            adapter_request_id: adapter_receipt.adapter_request_id().to_owned(),
             idempotent_replay: resolved.admission.reservation.idempotent_replay,
             stream_leak_gate: leak_gate,
         };
@@ -1326,7 +994,7 @@ impl<'a> ProviderGateway<'a> {
         };
         let receipt_inspection = leak_gate.inspect_bytes(
             CredentialOutputBoundary::Serialization,
-            adapter_receipt.adapter_request_id.as_bytes(),
+            adapter_receipt.adapter_request_id().as_bytes(),
         );
         drop(credential);
         if let Err(error) = receipt_inspection {
@@ -1340,7 +1008,7 @@ impl<'a> ProviderGateway<'a> {
             admission_cleanup?;
             return Err(error.into());
         }
-        if adapter_receipt.adapter_request_id != adapter_request_id {
+        if adapter_receipt.adapter_request_id() != adapter_request_id {
             let provider_cleanup = self.cleanup_rejected_adapter_open(
                 &resolved.route.provider_id,
                 &message.model_exchange_id,

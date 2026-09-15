@@ -1539,7 +1539,7 @@ fn workrun_aggregate_bootstrap_reads_without_item_hint() {
     {
         let mut binding = f.device_binding.lock().expect("device binding");
         binding.as_mut().expect("binding facts").1.worker_session_id =
-            "ws_00000000000000000000000099".into();
+            "wsn_00000000000000000000000099".into();
     }
     StrongFlowProjectionQueryPort::workrun_get(&f.control_plane, &query)
         .expect("the launch session and execution session are distinct identities");

@@ -114,6 +114,7 @@ pub fn prepare_workrun_start(
         work_run_id: intent.work_run_id.clone(),
     };
     let job = ExecutionJob {
+        model_selection: None,
         attempt,
         execution_profile: intent.role.clone(),
         goal: intent.goal.clone(),
@@ -813,6 +814,7 @@ mod tests {
             work_contract_revision: winwincode_domain::Revision(2),
         };
         ExecutionJob {
+            model_selection: None,
             attempt: 1,
             execution_profile: role.into(),
             goal: "fixture".into(),

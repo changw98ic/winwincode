@@ -280,6 +280,7 @@ fn open_message(
 
 fn commit_execution_job(storage: &mut SqliteStorage, message: &ModelOpenMessage) {
     let job = ExecutionJob {
+        model_selection: None,
         attempt: message.lease.attempt,
         execution_profile: "executor".to_owned(),
         goal: "execute the authenticated model request".to_owned(),

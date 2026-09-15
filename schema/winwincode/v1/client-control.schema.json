@@ -3007,7 +3007,11 @@
         "client.worker.stop",
         "client.candidate.apply",
         "client.client_lock",
-        "client.credential_rotate"
+        "client.credential_rotate",
+        "client.provider.report",
+        "client.provider.apply",
+        "client.extension.apply",
+        "client.extension.report"
       ],
       "title": "ClientControlMessageKind",
       "description": "Every ClientControlPort message kind: sixteen client-to-control-plane kinds followed by eleven control-plane-to-client kinds, exactly as frozen by the ClientControlPort v1 plan."
@@ -3096,8 +3100,238 @@
         },
         {
           "$ref": "#/$defs/ClientCredentialRotateMessage"
+        },
+        {
+          "$ref": "#/$defs/ClientProviderReportMessage"
+        },
+        {
+          "$ref": "#/$defs/ClientProviderApplyMessage"
+        },
+        {
+          "$ref": "#/$defs/ClientExtensionReportMessage"
+        },
+        {
+          "$ref": "#/$defs/ClientExtensionApplyMessage"
         }
       ]
+    },
+    "ClientProviderReportMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "client.provider.report"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ClientControlMessageId"
+        },
+        "clientNodeId": {
+          "$ref": "#/$defs/ClientNodeId"
+        },
+        "clientInstanceId": {
+          "$ref": "#/$defs/ClientInstanceId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/ClientExchangeSequence"
+        },
+        "occurredAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "snapshot": {
+          "$ref": "./device-provider.schema.json#/$defs/DeviceProviderSnapshot"
+        },
+        "receipt": {
+          "anyOf": [
+            {
+              "$ref": "./device-provider.schema.json#/$defs/DeviceProviderReceipt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "clientNodeId",
+        "clientInstanceId",
+        "sequence",
+        "occurredAt",
+        "snapshot",
+        "receipt"
+      ],
+      "title": "client.provider.report",
+      "description": "Device-owned Provider configuration with encrypted commands and public receipts.",
+      "x-direction": "client-to-control-plane",
+      "x-authority": "device-provider",
+      "x-message-class": "report"
+    },
+    "ClientProviderApplyMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "client.provider.apply"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ClientControlMessageId"
+        },
+        "clientNodeId": {
+          "$ref": "#/$defs/ClientNodeId"
+        },
+        "clientInstanceId": {
+          "$ref": "#/$defs/ClientInstanceId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/ClientExchangeSequence"
+        },
+        "occurredAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "expectedRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "idempotencyKey": {
+          "$ref": "#/$defs/IdempotencyKey"
+        },
+        "encrypted": {
+          "$ref": "./device-provider.schema.json#/$defs/DeviceConfigurationEnvelope"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "clientNodeId",
+        "clientInstanceId",
+        "sequence",
+        "occurredAt",
+        "expectedRevision",
+        "idempotencyKey",
+        "encrypted"
+      ],
+      "title": "client.provider.apply",
+      "description": "Device-owned Provider configuration with encrypted commands and public receipts.",
+      "x-direction": "control-plane-to-client",
+      "x-authority": "device-provider",
+      "x-message-class": "command"
+    },
+    "ClientExtensionReportMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "client.extension.report"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ClientControlMessageId"
+        },
+        "clientNodeId": {
+          "$ref": "#/$defs/ClientNodeId"
+        },
+        "clientInstanceId": {
+          "$ref": "#/$defs/ClientInstanceId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/ClientExchangeSequence"
+        },
+        "occurredAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "snapshot": {
+          "$ref": "./device-provider.schema.json#/$defs/DeviceExtensionSnapshot"
+        },
+        "receipt": {
+          "anyOf": [
+            {
+              "$ref": "./device-provider.schema.json#/$defs/DeviceExtensionReceipt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "clientNodeId",
+        "clientInstanceId",
+        "sequence",
+        "occurredAt",
+        "snapshot",
+        "receipt"
+      ],
+      "title": "client.extension.report",
+      "description": "Device-owned Provider configuration with encrypted commands and public receipts.",
+      "x-direction": "client-to-control-plane",
+      "x-authority": "device-provider",
+      "x-message-class": "report"
+    },
+    "ClientExtensionApplyMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "client.extension.apply"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ClientControlMessageId"
+        },
+        "clientNodeId": {
+          "$ref": "#/$defs/ClientNodeId"
+        },
+        "clientInstanceId": {
+          "$ref": "#/$defs/ClientInstanceId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/ClientExchangeSequence"
+        },
+        "occurredAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "expectedRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "idempotencyKey": {
+          "$ref": "#/$defs/IdempotencyKey"
+        },
+        "encrypted": {
+          "$ref": "./device-provider.schema.json#/$defs/DeviceConfigurationEnvelope"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "clientNodeId",
+        "clientInstanceId",
+        "sequence",
+        "occurredAt",
+        "expectedRevision",
+        "idempotencyKey",
+        "encrypted"
+      ],
+      "title": "client.extension.apply",
+      "description": "Device-owned Provider configuration with encrypted commands and public receipts.",
+      "x-direction": "control-plane-to-client",
+      "x-authority": "device-provider",
+      "x-message-class": "command"
     }
   }
 }

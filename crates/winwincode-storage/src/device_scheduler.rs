@@ -211,7 +211,7 @@ impl DeviceSchedulerReservationRequest {
             "rbd_",
             "repository binding id",
         )?;
-        validate_crockford_id(&command.worker_session_id, "ws_", "worker session id")?;
+        validate_crockford_id(&command.worker_session_id, "wsn_", "worker session id")?;
         Ok(command)
     }
 

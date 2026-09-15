@@ -33,6 +33,16 @@ pub const CANDIDATE_MEDIA_TYPE: &str = "application/vnd.winwincode.git-candidate
 /// Canonical candidate product file name.
 pub const CANDIDATE_FILE_NAME: &str = "candidate.json";
 
+/// Chat exports the frozen project; Delivery retains its canonical manifest.
+#[must_use]
+pub fn candidate_artifact_format(profile: &str) -> (&'static str, &'static str) {
+    if profile == "codex-chat" {
+        ("project.zip", "application/zip")
+    } else {
+        (CANDIDATE_FILE_NAME, CANDIDATE_MEDIA_TYPE)
+    }
+}
+
 // Leaves ample room below EncodedPayload's base64 ceiling.
 const RAW_CHUNK_BYTES: usize = 3 * 1024 * 1024;
 const PENDING: &str = "pending";
@@ -326,12 +336,18 @@ impl CandidateArtifactOutbox {
         let artifact_id = match message {
             ExecutionPortMessage::ArtifactOpenMessage(open)
                 if open.artifact.kind == ArtifactKind::Candidate
-                    && open.artifact.media_type == CANDIDATE_MEDIA_TYPE =>
+                    && matches!(
+                        open.artifact.media_type.as_str(),
+                        CANDIDATE_MEDIA_TYPE | "application/zip"
+                    ) =>
             {
                 &open.artifact.artifact_id
             }
             ExecutionPortMessage::ArtifactChunkMessage(chunk)
-                if chunk.payload.content_type == CANDIDATE_MEDIA_TYPE =>
+                if matches!(
+                    chunk.payload.content_type.as_str(),
+                    CANDIDATE_MEDIA_TYPE | "application/zip"
+                ) =>
             {
                 &chunk.artifact_id
             }
@@ -435,12 +451,13 @@ impl StoredCandidateArtifact {
         ));
         let size_bytes =
             i64::try_from(upload.bytes.len()).map_err(|_| AdapterStoreError::Conflict)?;
+        let (file_name, media_type) = candidate_artifact_format(&upload.execution_profile);
         let descriptor = ArtifactDescriptor {
             artifact_id: artifact_id.clone(),
             digest: upload.digest.clone(),
-            file_name: Some(CANDIDATE_FILE_NAME.to_owned()),
+            file_name: Some(file_name.to_owned()),
             kind: ArtifactKind::Candidate,
-            media_type: CANDIDATE_MEDIA_TYPE.to_owned(),
+            media_type: media_type.to_owned(),
             size_bytes,
         };
         let open_message = ArtifactOpenMessage {
@@ -485,7 +502,7 @@ impl StoredCandidateArtifact {
                         &[artifact_id.0.as_bytes(), &sequence.to_be_bytes()],
                     )),
                     payload: EncodedPayload {
-                        content_type: CANDIDATE_MEDIA_TYPE.to_owned(),
+                        content_type: descriptor.media_type.clone(),
                         data_base64: BASE64_STANDARD.encode(bytes),
                         payload_digest,
                     },
@@ -541,8 +558,9 @@ impl StoredCandidateArtifact {
             || digest != self.descriptor.digest
             || self.descriptor.artifact_id.0 != exact_artifact_id
             || self.descriptor.kind != ArtifactKind::Candidate
-            || self.descriptor.media_type != CANDIDATE_MEDIA_TYPE
-            || self.descriptor.file_name.as_deref() != Some(CANDIDATE_FILE_NAME)
+            || self.descriptor.media_type != candidate_artifact_format(&self.execution_profile).1
+            || self.descriptor.file_name.as_deref()
+                != Some(candidate_artifact_format(&self.execution_profile).0)
             || usize::try_from(self.descriptor.size_bytes).ok() != Some(self.bytes.len())
             || self.open_message.artifact != self.descriptor
             || self.open_message.kind != ArtifactOpenMessageKind::ArtifactOpen
@@ -644,7 +662,7 @@ impl StoredCandidateArtifact {
                             ],
                         )
                     || chunk.is_final != (index + 1 == self.chunk_messages.len())
-                    || chunk.payload.content_type != CANDIDATE_MEDIA_TYPE
+                    || chunk.payload.content_type != self.descriptor.media_type
                     || chunk.payload.payload_digest.0
                         != format!("sha256:{:x}", Sha256::digest(&decoded))
                 {
@@ -840,7 +858,7 @@ fn validate_replacement_upload(
 fn candidate_artifact_role(profile: &str) -> bool {
     matches!(
         profile,
-        "executor" | "remediator" | "reviewer" | "verifier" | "adversarial-verifier"
+        "codex-chat" | "executor" | "remediator" | "reviewer" | "verifier" | "adversarial-verifier"
     )
 }
 
@@ -1292,54 +1310,83 @@ mod tests {
 
     #[test]
     fn retain_send_loss_and_restart_preserve_exact_candidate_bytes_and_identities() {
-        let root = test_root("retain-restart");
-        let upload = upload(br#"{"candidate":"exact"}"#.to_vec());
-        let original;
-        let retained;
-        {
-            let (candidate, execution) = open_ledgers(&root).expect("open ledgers");
-            retained = candidate.retain(&upload).expect("retain candidate");
-            assert_eq!(retained.deliveries.len(), 2);
-            assert!(!retained.already_accepted);
-            original = retained.deliveries.clone();
-            for delivery in &retained.deliveries {
-                execution
-                    .record_sent(&delivery.delivery_id)
-                    .expect("record sent attempt");
+        for chat in [false, true] {
+            let root = test_root("retain-restart");
+            let mut upload = upload(br#"{"candidate":"exact"}"#.to_vec());
+            if chat {
+                upload.execution_profile = "codex-chat".into();
+                upload.session_identity.work_run_id = None;
+                upload.scope = serde_json::from_value(serde_json::json!({
+                "kind":"product-session", "productSessionId": upload.session_identity.product_session_id,
+            })).expect("Chat scope");
             }
-            assert_eq!(execution.pending().expect("response-loss retry"), original);
-        }
-        {
-            let (candidate, execution) = open_ledgers(&root).expect("restart ledgers");
-            assert_eq!(execution.pending().expect("restart retry"), original);
-            let replay = candidate.retain(&upload).expect("exact retain replay");
-            assert_eq!(replay.artifact, retained.artifact);
-            assert!(replay.deliveries.is_empty());
-            assert!(!replay.already_accepted);
+            let original;
+            let retained;
+            {
+                let (candidate, execution) = open_ledgers(&root).expect("open ledgers");
+                retained = candidate.retain(&upload).expect("retain candidate");
+                assert_eq!(retained.deliveries.len(), 2);
+                for delivery in &retained.deliveries {
+                    assert!(
+                        candidate
+                            .delivery_allowed(&delivery.message)
+                            .expect("retained frame is eligible")
+                    );
+                }
+                let ExecutionPortMessage::ArtifactOpenMessage(open) =
+                    &retained.deliveries[0].message
+                else {
+                    panic!("artifact open")
+                };
+                assert_eq!(
+                    open.artifact.media_type,
+                    if chat {
+                        "application/zip"
+                    } else {
+                        CANDIDATE_MEDIA_TYPE
+                    }
+                );
+                assert!(!retained.already_accepted);
+                original = retained.deliveries.clone();
+                for delivery in &retained.deliveries {
+                    execution
+                        .record_sent(&delivery.delivery_id)
+                        .expect("record sent attempt");
+                }
+                assert_eq!(execution.pending().expect("response-loss retry"), original);
+            }
+            {
+                let (candidate, execution) = open_ledgers(&root).expect("restart ledgers");
+                assert_eq!(execution.pending().expect("restart retry"), original);
+                let replay = candidate.retain(&upload).expect("exact retain replay");
+                assert_eq!(replay.artifact, retained.artifact);
+                assert!(replay.deliveries.is_empty());
+                assert!(!replay.already_accepted);
 
-            let mut changed_bytes = upload.clone();
-            changed_bytes.bytes.push(b'!');
-            changed_bytes.digest =
-                Sha256Digest(format!("sha256:{:x}", Sha256::digest(&changed_bytes.bytes)));
-            assert_eq!(
-                candidate.retain(&changed_bytes),
-                Err(AdapterStoreError::Conflict)
-            );
-            let mut changed_job = upload.clone();
-            changed_job.job_digest =
-                Sha256Digest(format!("sha256:{:x}", Sha256::digest(b"foreign job")));
-            assert_eq!(
-                candidate.retain(&changed_job),
-                Err(AdapterStoreError::Conflict)
-            );
-            let mut changed_role = upload.clone();
-            changed_role.execution_profile = "remediator".into();
-            assert_eq!(
-                candidate.retain(&changed_role),
-                Err(AdapterStoreError::Conflict)
-            );
+                let mut changed_bytes = upload.clone();
+                changed_bytes.bytes.push(b'!');
+                changed_bytes.digest =
+                    Sha256Digest(format!("sha256:{:x}", Sha256::digest(&changed_bytes.bytes)));
+                assert_eq!(
+                    candidate.retain(&changed_bytes),
+                    Err(AdapterStoreError::Conflict)
+                );
+                let mut changed_job = upload.clone();
+                changed_job.job_digest =
+                    Sha256Digest(format!("sha256:{:x}", Sha256::digest(b"foreign job")));
+                assert_eq!(
+                    candidate.retain(&changed_job),
+                    Err(AdapterStoreError::Conflict)
+                );
+                let mut changed_role = upload.clone();
+                changed_role.execution_profile = "remediator".into();
+                assert_eq!(
+                    candidate.retain(&changed_role),
+                    Err(AdapterStoreError::Conflict)
+                );
+            }
+            std::fs::remove_dir_all(root).expect("remove fixture");
         }
-        std::fs::remove_dir_all(root).expect("remove fixture");
     }
 
     #[test]

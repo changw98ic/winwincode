@@ -36,7 +36,7 @@ const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const MAX_PROVIDER_ID_BYTES: usize = 128;
 /// Authority-owned endpoint size bound, shared with the Provider modules that
 /// must accept exactly the endpoints this adapter accepts.
-pub(crate) const MAX_ENDPOINT_BYTES: usize = 2_048;
+pub const MAX_ENDPOINT_BYTES: usize = 2_048;
 const MAX_ADAPTER_REQUEST_ID_BYTES: usize = 200;
 const AUTHORIZATION_PREFIX: &[u8] = b"Bearer ";
 const CONTROL_PAUSE: u8 = 1;
@@ -57,7 +57,6 @@ pub enum ProviderTlsRoots {
 #[derive(Clone, Copy, Debug)]
 pub struct HttpsSseProviderTimeouts {
     pub connect: Duration,
-    pub first_byte: Duration,
     pub idle: Duration,
     pub total: Duration,
 }
@@ -88,7 +87,6 @@ pub struct HttpsSseProviderConfig {
     provider_id: String,
     endpoint: String,
     connect_timeout: Duration,
-    first_byte_timeout: Duration,
     idle_timeout: Duration,
     total_timeout: Duration,
     max_response_bytes: usize,
@@ -121,7 +119,6 @@ impl HttpsSseProviderConfig {
             provider_id,
             endpoint,
             connect_timeout: timeouts.connect,
-            first_byte_timeout: timeouts.first_byte,
             idle_timeout: timeouts.idle,
             total_timeout: timeouts.total,
             max_response_bytes: limits.response_bytes,
@@ -187,11 +184,9 @@ impl HttpsSseProviderConfig {
             || self.endpoint.len() > MAX_ENDPOINT_BYTES
             || !canonical_https_endpoint(&self.endpoint)
             || self.connect_timeout.is_zero()
-            || self.first_byte_timeout.is_zero()
             || self.idle_timeout.is_zero()
             || self.total_timeout.is_zero()
             || self.connect_timeout > self.total_timeout
-            || self.first_byte_timeout > self.total_timeout
             || self.idle_timeout > self.total_timeout
             || self.max_event_bytes == 0
             || self.max_response_bytes < self.max_event_bytes
@@ -383,7 +378,8 @@ impl HttpsSseProviderAdapter {
             .max_redirects(0)
             .proxy(None)
             .timeout_connect(Some(config.connect_timeout))
-            .timeout_recv_response(Some(config.first_byte_timeout))
+            // ureq 3.1.4 also applies recv_response's deadline while reading the body.
+            // Let the global deadline bound both headers and the complete stream.
             .timeout_recv_body(Some(config.idle_timeout))
             .timeout_global(Some(config.total_timeout))
             .tls_config(tls)
@@ -1381,7 +1377,7 @@ fn authorization_value(secret: &[u8]) -> Result<String, ProviderAdapterError> {
 /// instead of rejecting it. Other Provider modules validate through this
 /// check, so an endpoint can never be accepted at preset time and rejected at
 /// request time, or the reverse.
-pub(crate) fn canonical_https_endpoint(value: &str) -> bool {
+pub fn canonical_https_endpoint(value: &str) -> bool {
     if value.trim() != value || value.contains('#') {
         return false;
     }
@@ -1458,6 +1454,10 @@ mod tests {
 
     impl TlsFixture {
         fn start(responses: Vec<TestResponse>) -> Self {
+            Self::start_streaming(responses, Duration::ZERO)
+        }
+
+        fn start_streaming(responses: Vec<TestResponse>, chunk_delay: Duration) -> Self {
             let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
             let CertifiedKey { cert, signing_key } =
                 generate_simple_self_signed(vec!["localhost".to_owned()])
@@ -1481,7 +1481,7 @@ mod tests {
                     let request = read_http_request(&mut stream);
                     request_tx.send(request).expect("record TLS request");
                     thread::sleep(response.delay);
-                    write_http_response(&mut stream, &response);
+                    write_http_response(&mut stream, &response, chunk_delay);
                 }
             });
             Self {
@@ -1518,17 +1518,23 @@ mod tests {
     fn write_http_response(
         stream: &mut StreamOwned<ServerConnection, TcpStream>,
         response: &TestResponse,
+        chunk_delay: Duration,
     ) {
         write!(
             stream,
-            "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             response.status,
             response.content_type,
             response.declared_length.unwrap_or(response.body.len()),
-            response.body
         )
         .expect("write TLS response");
         stream.flush().expect("flush TLS response");
+        for chunk in response.body.as_bytes().chunks(64) {
+            thread::sleep(chunk_delay);
+            if stream.write_all(chunk).is_err() || stream.flush().is_err() {
+                return;
+            }
+        }
     }
 
     fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -1565,7 +1571,6 @@ mod tests {
             fixture.endpoint.clone(),
             HttpsSseProviderTimeouts {
                 connect: Duration::from_secs(2),
-                first_byte: Duration::from_secs(2),
                 idle: Duration::from_secs(2),
                 total: Duration::from_secs(5),
             },
@@ -1613,6 +1618,44 @@ mod tests {
         match result {
             Ok(_) => panic!("expected SSE parsing failure"),
             Err(error) => error.kind(),
+        }
+    }
+
+    #[test]
+    fn slow_response_body_uses_the_total_request_deadline() {
+        for (total, succeeds) in [
+            (Duration::from_secs(3), true),
+            (Duration::from_millis(250), false),
+        ] {
+            let fixture = TlsFixture::start_streaming(
+                vec![TestResponse {
+                    status: "200 OK",
+                    content_type: "text/event-stream",
+                    body: successful_sse(),
+                    declared_length: None,
+                    delay: Duration::ZERO,
+                }],
+                Duration::from_millis(80),
+            );
+            let mut settings = config(&fixture);
+            settings.connect_timeout = total.min(Duration::from_secs(1));
+            settings.idle_timeout = Duration::from_millis(250);
+            settings.total_timeout = total;
+            let adapter = HttpsSseProviderAdapter::try_new(settings).expect("adapter");
+            let mut response = adapter
+                .shared
+                .agent
+                .post(&fixture.endpoint)
+                .send(PAYLOAD)
+                .expect("headers");
+            let mut body = Vec::new();
+            let result = response.body_mut().as_reader().read_to_end(&mut body);
+            assert_eq!(result.is_ok(), succeeds, "total={total:?}: {result:?}");
+            if succeeds {
+                assert_eq!(body, successful_sse().as_bytes());
+            }
+            drop(response);
+            assert_eq!(fixture.finish().len(), 1);
         }
     }
 
@@ -1829,7 +1872,6 @@ mod tests {
             "http://localhost/v1/model".to_owned(),
             HttpsSseProviderTimeouts {
                 connect: Duration::from_secs(1),
-                first_byte: Duration::from_secs(1),
                 idle: Duration::from_secs(1),
                 total: Duration::from_secs(2),
             },
@@ -1848,7 +1890,6 @@ mod tests {
             "https://user:secret@localhost/v1/model".to_owned(),
             HttpsSseProviderTimeouts {
                 connect: Duration::from_secs(1),
-                first_byte: Duration::from_secs(1),
                 idle: Duration::from_secs(1),
                 total: Duration::from_secs(2),
             },
@@ -1867,7 +1908,6 @@ mod tests {
             "https://localhost/v1/model#fragment".to_owned(),
             HttpsSseProviderTimeouts {
                 connect: Duration::from_secs(1),
-                first_byte: Duration::from_secs(1),
                 idle: Duration::from_secs(1),
                 total: Duration::from_secs(2),
             },

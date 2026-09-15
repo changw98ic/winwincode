@@ -1,0 +1,510 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.winwincode.dev/winwincode/v1/device-provider.schema.json",
+  "title": "Device-owned Provider configuration and encrypted control",
+  "description": "API keys are encrypted by WebCrypto for the selected Device. Only Device writes configuration and acknowledges completion.",
+  "x-license": "Apache-2.0",
+  "$defs": {
+    "DeviceProviderProtocol": {
+      "type": "string",
+      "enum": [
+        "anthropic_messages",
+        "canonical"
+      ]
+    },
+    "DeviceProviderConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "providerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "endpoint": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "protocol": {
+          "$ref": "#/$defs/DeviceProviderProtocol"
+        },
+        "modelIds": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "providerId",
+        "displayName",
+        "endpoint",
+        "protocol",
+        "modelIds",
+        "enabled"
+      ]
+    },
+    "DeviceProviderProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "config": {
+          "$ref": "#/$defs/DeviceProviderConfig"
+        },
+        "credentialConfigured": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "config",
+        "credentialConfigured"
+      ]
+    },
+    "DeviceConfigurationEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "clientNodeId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "requestId": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 200
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "publicKey": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "nonce": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 24
+        },
+        "ciphertext": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536
+        }
+      },
+      "required": [
+        "clientNodeId",
+        "requestId",
+        "expectedRevision",
+        "publicKey",
+        "nonce",
+        "ciphertext"
+      ]
+    },
+    "DeviceProviderOutcome": {
+      "type": "string",
+      "enum": [
+        "saved",
+        "deleted",
+        "tested",
+        "invalid_request",
+        "revision_conflict",
+        "provider_unavailable",
+        "interrupted"
+      ]
+    },
+    "DeviceProviderReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requestId": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 200
+        },
+        "outcome": {
+          "$ref": "#/$defs/DeviceProviderOutcome"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "requestId",
+        "outcome",
+        "revision"
+      ]
+    },
+    "DeviceProviderSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "clientNodeId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "encryptionPublicKey": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "providers": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/$defs/DeviceProviderProjection"
+          }
+        }
+      },
+      "required": [
+        "clientNodeId",
+        "revision",
+        "encryptionPublicKey",
+        "providers"
+      ]
+    },
+    "DeviceProviderReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "snapshot": {
+          "$ref": "#/$defs/DeviceProviderSnapshot"
+        },
+        "receipt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeviceProviderReceipt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "snapshot",
+        "receipt"
+      ]
+    },
+    "DeviceProviderView": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "online": {
+          "type": "boolean"
+        },
+        "snapshot": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeviceProviderSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "receipt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeviceProviderReceipt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "online",
+        "snapshot",
+        "receipt"
+      ]
+    },
+    "DeviceExtensionOutcome": {
+      "type": "string",
+      "enum": [
+        "saved",
+        "deleted",
+        "tested",
+        "invalid_request",
+        "revision_conflict",
+        "connection_failed",
+        "interrupted"
+      ]
+    },
+    "DeviceExtensionSkill": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "digest": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 71
+        },
+        "fileCount": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 256
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "description",
+        "source",
+        "enabled",
+        "digest",
+        "fileCount"
+      ]
+    },
+    "DeviceExtensionMcp": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "transport": {
+          "$ref": "#/$defs/DeviceExtensionMcpTransport"
+        },
+        "toolNames": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "connectionStatus": {
+          "$ref": "#/$defs/DeviceExtensionMcpConnectionStatus"
+        },
+        "digest": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 71
+        }
+      },
+      "required": [
+        "id",
+        "enabled",
+        "transport",
+        "toolNames",
+        "connectionStatus",
+        "digest"
+      ]
+    },
+    "DeviceExtensionReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requestId": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 200
+        },
+        "outcome": {
+          "$ref": "#/$defs/DeviceExtensionOutcome"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "requestId",
+        "outcome",
+        "revision"
+      ]
+    },
+    "DeviceExtensionSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "clientNodeId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "encryptionPublicKey": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "skills": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/$defs/DeviceExtensionSkill"
+          }
+        },
+        "mcpServers": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/$defs/DeviceExtensionMcp"
+          }
+        }
+      },
+      "required": [
+        "clientNodeId",
+        "revision",
+        "encryptionPublicKey",
+        "skills",
+        "mcpServers"
+      ]
+    },
+    "DeviceExtensionReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "snapshot": {
+          "$ref": "#/$defs/DeviceExtensionSnapshot"
+        },
+        "receipt": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/DeviceExtensionReceipt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "snapshot",
+        "receipt"
+      ]
+    },
+    "DeviceExtensionView": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "const": "winwincode/v1"
+        },
+        "online": {
+          "type": "boolean"
+        },
+        "snapshot": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/DeviceExtensionSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "receipt": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/DeviceExtensionReceipt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "online",
+        "snapshot",
+        "receipt"
+      ]
+    },
+    "DeviceExtensionMcpConnectionStatus": {
+      "type": "string",
+      "enum": [
+        "untested",
+        "ready",
+        "failed"
+      ]
+    },
+    "DeviceExtensionMcpTransport": {
+      "type": "string",
+      "enum": [
+        "stdio",
+        "streamable_http"
+      ]
+    }
+  },
+  "x-winwincode-http": {
+    "GET /api/v1/clients/{clientId}/providers": {
+      "response": "DeviceProviderView"
+    },
+    "POST /api/v1/clients/{clientId}/providers": {
+      "request": "DeviceConfigurationEnvelope",
+      "responseStatus": 202,
+      "completion": "Device receipt only"
+    },
+    "GET /api/v1/clients/{clientId}/providers/receipts/{requestId}": {
+      "response": "DeviceProviderView"
+    }
+  }
+}

@@ -6,8 +6,10 @@
 //! (`ACCESS_DENIED` otherwise) while the client stays occupied or draining
 //! (`OCCUPANCY_REQUIRED` otherwise) and the repository binding stays visible
 //! under the plan 13.4 dual-authorization projection (`BINDING_NOT_VISIBLE`
-//! otherwise). A session without a device anchor is not gated, so pure
-//! supervised local execution is unchanged.
+//! otherwise). A session without a Device anchor cannot dispatch.
+
+#[path = "support/device_provider.rs"]
+mod device_provider;
 
 use std::path::Path;
 use std::path::PathBuf;
@@ -175,6 +177,7 @@ fn stage_node(storage: &mut SqliteStorage, seed: u64) -> String {
     registry
         .update_presence(&node, ClientPresenceState::Online, 1)
         .expect("presence");
+    device_provider::stage(storage, &node);
     node
 }
 
@@ -287,7 +290,7 @@ fn stage_anchor(
         lease_id,
         fencing_token,
         binding,
-        format!("ws_{}", suffix(seed + 50)),
+        format!("wsn_{}", suffix(seed + 50)),
         format!("wrk_{}", suffix(seed + 51)),
         format!("wki_{}", suffix(seed + 52)),
         "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
@@ -303,7 +306,7 @@ fn stage_anchor(
 
 // ---- generated command helpers ---------------------------------------------
 
-fn session_create_request(request: u64, session: u64, user: &str) -> CommandRequest {
+fn session_create_request(request: u64, session: u64, user: &str, node: &str) -> CommandRequest {
     serde_json::from_value(serde_json::json!({
         "schemaVersion": "winwincode/v1",
         "requestId": id("req", request),
@@ -316,11 +319,7 @@ fn session_create_request(request: u64, session: u64, user: &str) -> CommandRequ
             "projectId": id("prj", 1),
             "repositoryId": id("rep", 1),
             "title": "Device-anchored session",
-            "modelRoute": {
-                "providerId": "provider-main",
-                "modelId": "model-main",
-                "credentialReferenceId": id("crd", 1)
-            }
+            "modelRoute": device_provider::route(node)
         }
     }))
     .expect("generated session.create command")
@@ -382,7 +381,7 @@ fn stage_anchored_session(
         .command(
             &principal(holder),
             CommandFamily::Session,
-            session_create_request(10 * seed, session, holder),
+            session_create_request(10 * seed, session, holder, &node),
         )
         .expect("create ProductSession");
 
@@ -529,7 +528,7 @@ fn an_anchored_turn_after_a_repository_grant_revocation_is_not_visible() {
 }
 
 #[test]
-fn a_session_without_a_device_anchor_is_not_gated() {
+fn a_session_without_a_device_anchor_cannot_dispatch() {
     let root = temporary_root("pass-through");
     let application = compose_application(&root);
     let user = id("usr", 1);
@@ -538,7 +537,7 @@ fn a_session_without_a_device_anchor_is_not_gated() {
         .command(
             &principal(&user),
             CommandFamily::Session,
-            session_create_request(15, 1, &user),
+            session_create_request(15, 1, &user, "cnd_00000000000000000000000001"),
         )
         .expect("create ProductSession");
     let submitted = application
@@ -547,9 +546,8 @@ fn a_session_without_a_device_anchor_is_not_gated() {
             CommandFamily::Session,
             chat_submit_request(16, 1, &user, 1),
         )
-        .expect("an unanchored session continues unchanged");
-    let body = completed(submitted);
-    assert_eq!(body["result"]["state"], "running");
+        .expect_err("unanchored sessions cannot dispatch");
+    assert_eq!(submitted.code(), "DEVICE_SESSION_REQUIRED");
 
     application.shutdown().expect("shutdown");
     let _ = std::fs::remove_dir_all(&root);

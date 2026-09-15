@@ -543,6 +543,9 @@
         },
         {
           "$ref": "#/$defs/CollaborationPresenceListQuery"
+        },
+        {
+          "$ref": "#/$defs/SessionArtifactGetQuery"
         }
       ]
     },
@@ -575,7 +578,8 @@
         "publication.get",
         "collaboration.activity.list",
         "collaboration.notification.list",
-        "collaboration.presence.list"
+        "collaboration.presence.list",
+        "session.artifact.get"
       ]
     },
     "OpaqueCursor": {
@@ -862,6 +866,9 @@
         },
         {
           "$ref": "#/$defs/CollaborationPresenceListResultResponse"
+        },
+        {
+          "$ref": "#/$defs/SessionArtifactGetResultResponse"
         }
       ],
       "description": "Exact query/result response union. A client can narrow result by query without accepting an unrelated projection."
@@ -7423,8 +7430,9 @@
         },
         "contextWindowTokens": {
           "type": "integer",
-          "minimum": 1,
-          "maximum": 9007199254740991
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "description": "Zero means the Device has not reported a context-window limit."
         },
         "maxOutputTokens": {
           "type": "integer",
@@ -7464,6 +7472,11 @@
         },
         "reason": {
           "$ref": "#/$defs/ModelRouteAvailabilityReason"
+        },
+        "clientId": {
+          "type": "string",
+          "pattern": "^[0-9]{9,12}$",
+          "description": "Device that owns this route; selecting the route selects its execution Device."
         }
       },
       "description": "One server-joined ModelRoute. It contains identities and display metadata only; Credential locators, secrets, and pool internals are excluded."
@@ -7569,7 +7582,7 @@
               "const": "model.route.availability.list"
             },
             "parameters": {
-              "$ref": "#/$defs/EmptyParameters"
+              "$ref": "#/$defs/DeviceModelRouteParameters"
             },
             "scope": {
               "$ref": "./domain.schema.json#/$defs/RepositoryScope"
@@ -8435,6 +8448,115 @@
         }
       },
       "description": "Exact requested subset of the current failed candidate. The Controller independently verifies WorkItem ownership, sealed Git hunks, current failed Evidence and durable rework history."
+    },
+    "DeviceModelRouteParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "productSessionId": {
+          "$ref": "./domain.schema.json#/$defs/ProductSessionId"
+        }
+      }
+    },
+    "SessionArtifactGetParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "productSessionId",
+        "artifactId",
+        "offset",
+        "length"
+      ],
+      "properties": {
+        "productSessionId": {
+          "$ref": "./domain.schema.json#/$defs/ProductSessionId"
+        },
+        "artifactId": {
+          "$ref": "./domain.schema.json#/$defs/ArtifactId"
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1073741824
+        },
+        "length": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 262144
+        }
+      }
+    },
+    "SessionArtifactGetQuery": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "const": "session.artifact.get"
+            },
+            "parameters": {
+              "$ref": "#/$defs/SessionArtifactGetParameters"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
+            }
+          }
+        }
+      ]
+    },
+    "SessionArtifactGetResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifactId",
+        "digest",
+        "offset",
+        "totalSize",
+        "dataBase64"
+      ],
+      "properties": {
+        "artifactId": {
+          "$ref": "./domain.schema.json#/$defs/ArtifactId"
+        },
+        "digest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1073741824
+        },
+        "totalSize": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1073741824
+        },
+        "dataBase64": {
+          "type": "string",
+          "maxLength": 349528
+        }
+      }
+    },
+    "SessionArtifactGetResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "properties": {
+            "query": {
+              "const": "session.artifact.get"
+            },
+            "result": {
+              "$ref": "#/$defs/SessionArtifactGetResult"
+            }
+          },
+          "type": "object"
+        }
+      ]
     }
   },
   "x-winwincode-openapi": {

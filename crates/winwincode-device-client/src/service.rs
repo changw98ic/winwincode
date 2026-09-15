@@ -294,7 +294,7 @@ fn wire_worker_lane(
 }
 
 fn canonical_worker_session_id(value: &str) -> bool {
-    value.strip_prefix("ws_").is_some_and(|suffix| {
+    value.strip_prefix("wsn_").is_some_and(|suffix| {
         suffix.len() == 26
             && suffix.bytes().all(|byte| {
                 byte.is_ascii_digit()

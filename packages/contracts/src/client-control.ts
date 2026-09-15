@@ -1,3 +1,6 @@
+import { DeviceExtensionOutcome, DeviceExtensionMcpTransport, DeviceExtensionMcpConnectionStatus, type DeviceExtensionReport, DeviceProviderOutcome, DeviceProviderProtocol, type DeviceConfigurationEnvelope,
+  type DeviceProviderReport, type DeviceProviderConfig } from './device-provider.generated.js'
+
 /**
  * ClientControlPort contracts for the shared device Client model.
  *
@@ -1688,7 +1691,25 @@ export interface ClientCredentialRotateMessage extends ClientControlMessageEnvel
 }
 
 /** Kind → message mapping for the Client → Server direction (16 kinds). */
+export interface ClientProviderReportMessage extends ClientControlMessageEnvelopeFields, DeviceProviderReport {
+  readonly kind: 'client.provider.report'
+}
+export interface ClientProviderApplyMessage extends ClientControlMessageEnvelopeFields, ClientControlCommandFields {
+  readonly kind: 'client.provider.apply'
+  readonly encrypted: DeviceConfigurationEnvelope
+}
+
+export interface ClientExtensionReportMessage extends ClientControlMessageEnvelopeFields, DeviceExtensionReport {
+  readonly kind: 'client.extension.report'
+}
+export interface ClientExtensionApplyMessage extends ClientControlMessageEnvelopeFields, ClientControlCommandFields {
+  readonly kind: 'client.extension.apply'
+  readonly encrypted: DeviceConfigurationEnvelope
+}
+
 export interface ClientToServerMessageByKind {
+  'client.provider.report': ClientProviderReportMessage
+  'client.extension.report': ClientExtensionReportMessage
   'client.enroll': ClientEnrollMessage
   'client.hello': ClientHelloMessage
   'client.heartbeat': ClientHeartbeatMessage
@@ -1709,6 +1730,8 @@ export interface ClientToServerMessageByKind {
 
 /** Kind → message mapping for the Server → Client direction (11 kinds). */
 export interface ServerToClientMessageByKind {
+  'client.provider.apply': ClientProviderApplyMessage
+  'client.extension.apply': ClientExtensionApplyMessage
   'client.enrollment_accepted': ClientEnrollmentAcceptedMessage
   'client.access.challenge': ClientAccessChallengeMessage
   'client.occupancy.offer': ClientOccupancyOfferMessage
@@ -1748,6 +1771,8 @@ export const CLIENT_TO_SERVER_MESSAGE_KINDS = Object.freeze([
   'client.candidate.retained',
   'client.candidate.apply_result',
   'client.command_ack',
+  'client.provider.report',
+  'client.extension.report',
 ] as const)
 
 /** §9.4 Server → Client message kinds, verbatim. */
@@ -1763,6 +1788,8 @@ export const SERVER_TO_CLIENT_MESSAGE_KINDS = Object.freeze([
   'client.candidate.apply',
   'client.client_lock',
   'client.credential_rotate',
+  'client.provider.apply',
+  'client.extension.apply',
 ] as const)
 
 /** Every ClientControlPort message kind, in schema ClientControlMessageKind order. */
@@ -1795,6 +1822,8 @@ export const CLIENT_CONTROL_COMMAND_MESSAGE_KINDS = Object.freeze([
   'client.candidate.apply',
   'client.client_lock',
   'client.credential_rotate',
+  'client.provider.apply',
+  'client.extension.apply',
 ] as const)
 
 /**
@@ -2786,6 +2815,10 @@ function parseClientToServerByKind(
       return parseClientCandidateApplyResultMessage(input, path)
     case 'client.command_ack':
       return parseClientCommandAckMessage(input, path)
+    case 'client.extension.report':
+      return parseExtensionReport(input, path)
+    case 'client.provider.report':
+      return parseProviderReport(input, path)
   }
 }
 
@@ -2817,6 +2850,10 @@ function parseServerToClientByKind(
       return parseClientLockMessage(input, path)
     case 'client.credential_rotate':
       return parseClientCredentialRotateMessage(input, path)
+    case 'client.extension.apply':
+      return parseConfigurationApply(input, path, 'client.extension.apply')
+    case 'client.provider.apply':
+      return parseConfigurationApply(input, path, 'client.provider.apply')
   }
 }
 
@@ -2867,3 +2904,86 @@ export function parseClientControlMessage(
 // The kind-list asserts are compile-time only; this export keeps the check in
 // the type graph without emitting runtime code.
 export type { ClientControlKindListsCheck }
+
+function providerText(value: unknown, path: string, max: number): string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > max) controlError('INVALID_VALUE', path, 'Provider text is outside its bound')
+  return value
+}
+
+function parseProviderConfig(value: unknown, path: string): DeviceProviderConfig {
+  const input = record(value, path)
+  exactKeys(input, ['providerId', 'displayName', 'endpoint', 'protocol', 'modelIds', 'enabled'], path)
+  const modelIds = boundedArray(input.modelIds, `${path}.modelIds`, 100).map(item => providerText(item, path, 128))
+  if (modelIds.length === 0 || new Set(modelIds).size !== modelIds.length) controlError('INVALID_VALUE', path, 'Provider models must be nonempty and unique')
+  return { providerId: providerText(input.providerId, path, 128), displayName: providerText(input.displayName, path, 200),
+    endpoint: providerText(input.endpoint, path, 2048), protocol: enumValue(input.protocol, Object.values(DeviceProviderProtocol), path),
+    modelIds, enabled: booleanValue(input.enabled, path) }
+}
+
+function parseProviderReport(input: Readonly<Record<string, unknown>>, path: string): ClientProviderReportMessage {
+  exactKeys(input, ['kind', 'schemaVersion', 'messageId', 'clientNodeId', 'clientInstanceId', 'sequence', 'occurredAt', 'snapshot', 'receipt'], path)
+  const snapshot = record(input.snapshot, `${path}.snapshot`)
+  exactKeys(snapshot, ['clientNodeId', 'revision', 'encryptionPublicKey', 'providers'], path)
+  const providers = boundedArray(snapshot.providers, path, 100).map(value => {
+    const entry = record(value, path)
+    exactKeys(entry, ['config', 'credentialConfigured'], path)
+    return { config: parseProviderConfig(entry.config, path), credentialConfigured: booleanValue(entry.credentialConfigured, path) }
+  })
+  const receipt = nullable(input.receipt, path, value => {
+    const receipt = record(value, path)
+    exactKeys(receipt, ['requestId', 'outcome', 'revision'], path)
+    return { requestId: providerText(receipt.requestId, path, 200), outcome: enumValue(receipt.outcome, Object.values(DeviceProviderOutcome), path), revision: revision(receipt.revision, path) }
+  })
+  const base = parseEnvelopeBase(input, path)
+  const clientNodeId = providerText(snapshot.clientNodeId, path, 200)
+  if (clientNodeId !== base.clientNodeId) controlError('RELATIONSHIP_MISMATCH', path, 'Provider report belongs to another Device')
+  return Object.freeze({ ...base, kind: 'client.provider.report', receipt,
+    snapshot: { clientNodeId, revision: revision(snapshot.revision, path), encryptionPublicKey: providerText(snapshot.encryptionPublicKey, path, 128), providers } })
+}
+
+function parseConfigurationApply(input: Readonly<Record<string, unknown>>, path: string, kind: 'client.provider.apply'): ClientProviderApplyMessage
+function parseConfigurationApply(input: Readonly<Record<string, unknown>>, path: string, kind: 'client.extension.apply'): ClientExtensionApplyMessage
+function parseConfigurationApply(input: Readonly<Record<string, unknown>>, path: string, kind: 'client.provider.apply' | 'client.extension.apply'): ClientProviderApplyMessage | ClientExtensionApplyMessage {
+  exactKeys(input, ['kind', 'schemaVersion', 'messageId', 'clientNodeId', 'clientInstanceId', 'sequence', 'occurredAt', 'expectedRevision', 'idempotencyKey', 'encrypted'], path)
+  const value = record(input.encrypted, path)
+  exactKeys(value, ['clientNodeId', 'requestId', 'expectedRevision', 'publicKey', 'nonce', 'ciphertext'], path)
+  const encrypted = { clientNodeId: providerText(value.clientNodeId, path, 200), requestId: providerText(value.requestId, path, 200),
+    expectedRevision: revision(value.expectedRevision, path), publicKey: providerText(value.publicKey, path, 128),
+    nonce: providerText(value.nonce, path, 24), ciphertext: providerText(value.ciphertext, path, 65536) }
+  const base = parseEnvelopeBase(input, path)
+  const command = parseCommandFields(input, path)
+  if (encrypted.clientNodeId !== base.clientNodeId || encrypted.requestId !== command.idempotencyKey || encrypted.expectedRevision !== command.expectedRevision) {
+    controlError('RELATIONSHIP_MISMATCH', path, 'Provider encrypted command context differs')
+  }
+  return Object.freeze({ ...base, ...command, kind, encrypted })
+}
+
+function parseExtensionReport(input: Readonly<Record<string, unknown>>, path: string): ClientExtensionReportMessage {
+  exactKeys(input, ['kind', 'schemaVersion', 'messageId', 'clientNodeId', 'clientInstanceId', 'sequence', 'occurredAt', 'snapshot', 'receipt'], path)
+  const snapshot = record(input.snapshot, path)
+  exactKeys(snapshot, ['clientNodeId', 'revision', 'encryptionPublicKey', 'skills', 'mcpServers'], path)
+  const skills = boundedArray(snapshot.skills, path, 100).map(value => {
+    const item = record(value, path)
+    exactKeys(item, ['id', 'name', 'description', 'source', 'enabled', 'digest', 'fileCount'], path)
+    const fileCount = revision(item.fileCount, path)
+    if (fileCount < 1 || fileCount > 256) controlError('INVALID_VALUE', path, 'Invalid skill file count')
+    return { id: providerText(item.id, path, 64), name: providerText(item.name, path, 64), description: providerText(item.description, path, 1024),
+      source: providerText(item.source, path, 2048), enabled: booleanValue(item.enabled, path), digest: providerText(item.digest, path, 71), fileCount }
+  })
+  const mcpServers = boundedArray(snapshot.mcpServers, path, 100).map(value => {
+    const item = record(value, path)
+    exactKeys(item, ['id', 'enabled', 'transport', 'toolNames', 'connectionStatus', 'digest'], path)
+    return { id: providerText(item.id, path, 64), enabled: booleanValue(item.enabled, path), transport: enumValue(item.transport, Object.values(DeviceExtensionMcpTransport), path),
+      toolNames: boundedArray(item.toolNames, path, 128).map(value => providerText(value, path, 128)),
+      connectionStatus: enumValue(item.connectionStatus, Object.values(DeviceExtensionMcpConnectionStatus), path), digest: providerText(item.digest, path, 71) }
+  })
+  const receipt = nullable(input.receipt, path, value => {
+    const item = record(value, path); exactKeys(item, ['requestId', 'outcome', 'revision'], path)
+    return { requestId: providerText(item.requestId, path, 200), outcome: enumValue(item.outcome, Object.values(DeviceExtensionOutcome), path), revision: revision(item.revision, path) }
+  })
+  const base = parseEnvelopeBase(input, path)
+  const clientNodeId = providerText(snapshot.clientNodeId, path, 200)
+  if (clientNodeId !== base.clientNodeId) controlError('RELATIONSHIP_MISMATCH', path, 'Extension report belongs to another Device')
+  return Object.freeze({ ...base, kind: 'client.extension.report', receipt,
+    snapshot: { clientNodeId, revision: revision(snapshot.revision, path), encryptionPublicKey: providerText(snapshot.encryptionPublicKey, path, 128), skills, mcpServers } })
+}

@@ -925,7 +925,8 @@ impl<'storage> WorkerLaunchGrantLedger<'storage> {
     }
 
     /// Counts the non-terminal (`issued` plus `consumed`) grants of one
-    /// client node — the durable reservation view capacity is judged against
+    /// client node under an active occupancy — released leases no longer reserve slots;
+    /// this is the durable reservation view capacity is judged against
     /// (plan 14.5).
     ///
     /// # Errors
@@ -939,8 +940,12 @@ impl<'storage> WorkerLaunchGrantLedger<'storage> {
         let connection = self.connection()?;
         let stored: i64 = connection
             .query_row(
-                "SELECT COUNT(*) FROM worker_launch_grants
-                 WHERE client_node_id = ?1 AND state IN ('issued', 'consumed')",
+                "SELECT COUNT(*) FROM worker_launch_grants g
+                 WHERE g.client_node_id = ?1 AND g.state IN ('issued', 'consumed')
+                   AND EXISTS (SELECT 1 FROM client_occupancy_leases l
+                     WHERE l.occupancy_lease_id = g.occupancy_lease_id
+                       AND l.fencing_token = g.occupancy_fencing_token
+                       AND l.state IN ('occupied', 'draining', 'recovery_pending'))",
                 [client_node_id],
                 |row| row.get::<_, i64>(0),
             )
@@ -1251,8 +1256,12 @@ fn ensure_capacity_and_session_uniqueness(
 ) -> Result<(), WorkerLaunchGrantStoreError> {
     let reserved: i64 = transaction
         .query_row(
-            "SELECT COUNT(*) FROM worker_launch_grants
-             WHERE client_node_id = ?1 AND state IN ('issued', 'consumed')",
+            "SELECT COUNT(*) FROM worker_launch_grants g
+             WHERE g.client_node_id = ?1 AND g.state IN ('issued', 'consumed')
+               AND EXISTS (SELECT 1 FROM client_occupancy_leases l
+                 WHERE l.occupancy_lease_id = g.occupancy_lease_id
+                   AND l.fencing_token = g.occupancy_fencing_token
+                   AND l.state IN ('occupied', 'draining', 'recovery_pending'))",
             [issuance.client_node_id.as_str()],
             |row| row.get::<_, i64>(0),
         )
@@ -1618,7 +1627,7 @@ fn validate_repository_binding_id(value: &str) -> Result<(), WorkerLaunchGrantSt
 }
 
 fn validate_worker_session_id(value: &str) -> Result<(), WorkerLaunchGrantStoreError> {
-    validate_crockford_id(value, "ws_", "worker session id")
+    validate_crockford_id(value, "wsn_", "worker session id")
 }
 
 fn validate_worker_id(value: &str) -> Result<(), WorkerLaunchGrantStoreError> {
@@ -1899,7 +1908,7 @@ mod tests {
     }
 
     fn session_id(seed: u64) -> String {
-        format!("ws_{}", crockford(seed))
+        format!("wsn_{}", crockford(seed))
     }
 
     fn user_id(seed: u64) -> String {
@@ -2226,6 +2235,50 @@ mod tests {
                 .expect("session lookup")
                 .is_some()
         );
+        storage
+            .worker_launch_grant_ledger()
+            .expect("ledger")
+            .settle_launch_ack(
+                &settlement(11, &lease_id, token, 20, true, None),
+                &unit_instant("2026-01-01T00:03:00.000Z"),
+            )
+            .expect("launch consumed");
+        storage
+            .client_occupancy_ledger()
+            .expect("occupancy")
+            .request_release(
+                &lease_id,
+                token,
+                0,
+                &unit_instant("2026-01-01T00:04:00.000Z"),
+            )
+            .expect("stopped device released");
+        assert_eq!(
+            storage
+                .worker_launch_grant_ledger()
+                .expect("ledger")
+                .non_terminal_count_for_node(&node)
+                .expect("released capacity"),
+            0
+        );
+        let (next_lease, next_token) = stage_occupied_lease(&mut storage, &node, &holder, 100);
+        storage
+            .worker_launch_grant_ledger()
+            .expect("ledger")
+            .issue(
+                &issuance(
+                    12,
+                    &node,
+                    &format!("cix_{}", crockford(2)),
+                    &holder,
+                    &next_lease,
+                    next_token,
+                    &binding,
+                    21,
+                ),
+                &unit_instant("2026-01-01T00:05:00.000Z"),
+            )
+            .expect("next launch is admitted");
     }
 
     #[test]

@@ -546,6 +546,7 @@ fn dispatch(suffix: char, goal: &str) -> JobDispatchMessage {
     let lease = lease(suffix);
     JobDispatchMessage {
         job: ExecutionJob {
+            model_selection: None,
             attempt: 1,
             execution_profile: "real-local-codex-fixture".to_owned(),
             goal: goal.to_owned(),

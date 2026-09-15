@@ -11,13 +11,6 @@ import type {
   CommandAcceptedResponse,
   CommandCompletedResponse,
   ControlPlaneWebSocketSubscriptionId,
-  CredentialReferenceCreateCompletedResponse,
-  CredentialReferenceId,
-  CredentialReferenceListResultResponse,
-  CredentialReferenceProjection,
-  CredentialReferenceRevokeCompletedResponse,
-  CredentialReferenceRotateCompletedResponse,
-  ModelRoute,
   OpaqueCursor,
   QueryResultResponse,
   RequestId,
@@ -33,8 +26,6 @@ import {
 } from './generated/contracts.js'
 
 const SCHEMA_VERSION = 'winwincode/v1' as const
-const CREDENTIAL_PAGE_SIZE = 200
-const MAX_CREDENTIAL_PAGES = 10
 
 export type SettingsViewStatus =
   | 'idle'
@@ -63,17 +54,12 @@ export interface SettingsInteractionState {
   readonly error: ControlPlaneClientError | null
 }
 
-export type SettingsOperation =
-  | 'settings.update'
-  | 'credential.reference.create'
-  | 'credential.reference.rotate'
-  | 'credential.reference.revoke'
+export type SettingsOperation = 'settings.update'
 
 export interface SettingsViewModelState {
   readonly status: SettingsViewStatus
   readonly realtime: SettingsRealtimeStatus
   readonly settings: SettingsProjection | null
-  readonly credentials: readonly CredentialReferenceProjection[]
   readonly interaction: SettingsInteractionState
   readonly error: ControlPlaneClientError | null
 }
@@ -89,22 +75,7 @@ export interface SettingsViewModelOptions {
 }
 
 export interface SettingsUpdateInput {
-  readonly defaultModelRoute: ModelRoute | null
   readonly workerConcurrencyLimit: number
-}
-
-export interface CredentialReferenceCreateInput {
-  readonly credentialReferenceId: CredentialReferenceId
-  readonly displayName: string
-  readonly providerId: string
-  /** Write-only local secret-store locator. */
-  readonly vaultLocator: string
-}
-
-export interface CredentialReferenceRotateInput {
-  readonly credentialReferenceId: CredentialReferenceId
-  /** Write-only local secret-store locator. */
-  readonly vaultLocator: string
 }
 
 export interface SettingsViewModel {
@@ -115,9 +86,6 @@ export interface SettingsViewModel {
   start(): Promise<void>
   refresh(): Promise<void>
   updateSettings(input: SettingsUpdateInput): Promise<void>
-  createCredentialReference(input: CredentialReferenceCreateInput): Promise<void>
-  rotateCredentialReference(input: CredentialReferenceRotateInput): Promise<void>
-  revokeCredentialReference(credentialReferenceId: CredentialReferenceId): Promise<void>
   cancelPending(): void
   reconnect(): void
   close(): void
@@ -125,14 +93,10 @@ export interface SettingsViewModel {
 
 interface SettingsQueryResponses {
   readonly [QueryName.SettingsGet]: SettingsGetResultResponse
-  readonly [QueryName.CredentialReferenceList]: CredentialReferenceListResultResponse
 }
 
 interface SettingsCommandResponses {
   readonly [CommandName.SettingsUpdate]: SettingsUpdateCompletedResponse
-  readonly [CommandName.CredentialReferenceCreate]: CredentialReferenceCreateCompletedResponse
-  readonly [CommandName.CredentialReferenceRotate]: CredentialReferenceRotateCompletedResponse
-  readonly [CommandName.CredentialReferenceRevoke]: CredentialReferenceRevokeCompletedResponse
 }
 
 function frozenInteraction(
@@ -148,7 +112,6 @@ function initialState(): SettingsViewModelState {
     status: 'idle',
     realtime: 'inactive',
     settings: null,
-    credentials: Object.freeze([]),
     interaction: frozenInteraction('idle'),
     error: null,
   })
@@ -217,29 +180,7 @@ function expectCompletedCommand<Command extends keyof SettingsCommandResponses>(
   return response as SettingsCommandResponses[Command]
 }
 
-function orderCredentials(
-  credentials: readonly CredentialReferenceProjection[],
-): readonly CredentialReferenceProjection[] {
-  return Object.freeze([...credentials].sort((left, right) => (
-    left.displayName.localeCompare(right.displayName) || left.id.localeCompare(right.id)
-  )))
-}
-
-function checkedText(value: string, code: string, message: string): string {
-  const result = value.trim()
-  if (result.length === 0) throw clientFailure(code, message)
-  return result
-}
-
-function checkedSecret(value: string): string {
-  if (value.length === 0) throw clientFailure(
-    'CREDENTIAL_SECRET_REQUIRED',
-    '请填写 API Key。',
-  )
-  return value
-}
-
-/** Build the local settings surface from generated Settings and Credential reference contracts. */
+/** Build the local settings surface from the generated execution settings contract. */
 export function createSettingsViewModel(options: SettingsViewModelOptions): SettingsViewModel {
   const queryCache = createQueryCacheLifecycle(options)
   const listeners = new Set<SettingsViewModelListener>()
@@ -286,44 +227,9 @@ export function createSettingsViewModel(options: SettingsViewModelOptions): Sett
     }
   }
 
-  async function credentialReferences(signal: AbortSignal): Promise<readonly CredentialReferenceProjection[]> {
-    const items: CredentialReferenceProjection[] = []
-    const seenCursors = new Set<OpaqueCursor>()
-    let cursor: OpaqueCursor | null = null
-    for (let pageIndex = 0; pageIndex < MAX_CREDENTIAL_PAGES; pageIndex += 1) {
-      const response: CredentialReferenceListResultResponse = expectQuery(await options.client.query({
-        ...requestBase(),
-        requestId: options.nextRequestId(),
-        query: QueryName.CredentialReferenceList,
-        parameters: { providerId: null },
-        page: page(cursor, CREDENTIAL_PAGE_SIZE),
-      }, { signal }), QueryName.CredentialReferenceList)
-      items.push(...response.result.items)
-      if (!response.page.hasMore) {
-        if (response.page.nextCursor !== null) throw clientFailure(
-          'CREDENTIAL_PAGE_INVALID',
-          '凭据列表末页返回了意外的游标。',
-        )
-        return orderCredentials(items)
-      }
-      const next: OpaqueCursor | null = response.page.nextCursor
-      if (next === null || seenCursors.has(next)) throw clientFailure(
-        'CREDENTIAL_CURSOR_INVALID',
-        '凭据列表返回了无效的续页游标。',
-      )
-      seenCursors.add(next)
-      cursor = next
-    }
-    throw clientFailure(
-      'CREDENTIAL_PAGE_LIMIT_EXCEEDED',
-      '凭据列表超过了分页上限。',
-    )
-  }
-
   async function snapshot(signal: AbortSignal): Promise<{
     readonly settings: SettingsProjection
-    readonly credentials: readonly CredentialReferenceProjection[]
-  }> {
+    }> {
     const settings = expectQuery(await options.client.query({
       ...requestBase(),
       requestId: options.nextRequestId(),
@@ -337,7 +243,6 @@ export function createSettingsViewModel(options: SettingsViewModelOptions): Sett
     )
     return Object.freeze({
       settings: settings.result,
-      credentials: await credentialReferences(signal),
     })
   }
 
@@ -350,7 +255,7 @@ export function createSettingsViewModel(options: SettingsViewModelOptions): Sett
     patch({
       status: replace ? 'loading' : 'refreshing',
       realtime: realtimeStatus,
-      ...(replace ? { settings: null, credentials: Object.freeze([]) } : {}),
+      ...(replace ? { settings: null } : {}),
       interaction: frozenInteraction('idle'),
       error: null,
     })
@@ -361,7 +266,6 @@ export function createSettingsViewModel(options: SettingsViewModelOptions): Sett
         status: 'ready',
         realtime: realtimeStatus === 'reloading' ? 'subscribed' : realtimeStatus,
         settings: value.settings,
-        credentials: value.credentials,
         interaction: frozenInteraction('idle'),
         error: null,
       })
@@ -391,8 +295,7 @@ export function createSettingsViewModel(options: SettingsViewModelOptions): Sett
       status: statusForError(error),
       realtime: 'access-revoked',
       settings: null,
-      credentials: Object.freeze([]),
-      interaction: frozenInteraction('error', null, error),
+        interaction: frozenInteraction('error', null, error),
       error,
     })
   }
@@ -486,15 +389,6 @@ export function createSettingsViewModel(options: SettingsViewModelOptions): Sett
     }
   }
 
-  function mergeCredential(reference: CredentialReferenceProjection): void {
-    patch({
-      credentials: orderCredentials([
-        ...currentState.credentials.filter(item => item.id !== reference.id),
-        reference,
-      ]),
-    })
-  }
-
   return {
     get state() { return currentState },
     draftScope,
@@ -534,52 +428,6 @@ export function createSettingsViewModel(options: SettingsViewModelOptions): Sett
         )
         return
       }
-      let route: ModelRoute | null = null
-      if (input.defaultModelRoute !== null) {
-        let providerId: string
-        let modelId: string
-        try {
-          providerId = checkedText(
-            input.defaultModelRoute.providerId,
-            'SETTINGS_PROVIDER_REQUIRED',
-            '请输入服务商。',
-          )
-          modelId = checkedText(
-            input.defaultModelRoute.modelId,
-            'SETTINGS_MODEL_REQUIRED',
-            '请输入模型 ID。',
-          )
-        } catch (error) {
-          patch({
-            interaction: frozenInteraction(
-              'error',
-              CommandName.SettingsUpdate,
-              normalizedError(error),
-            ),
-          })
-          return
-        }
-        const reference = currentState.credentials.find(
-          item => item.id === input.defaultModelRoute?.credentialReferenceId,
-        )
-        if (
-          reference === undefined
-          || reference.providerId !== providerId
-          || reference.secretState !== 'available'
-        ) {
-          interactionFailure(
-            'SETTINGS_CREDENTIAL_ROUTE_INVALID',
-            '请选择该服务商的 API Key。',
-            CommandName.SettingsUpdate,
-          )
-          return
-        }
-        route = {
-          providerId,
-          modelId,
-          credentialReferenceId: reference.id,
-        }
-      }
       await runCommand(
         CommandName.SettingsUpdate,
         settings.revision,
@@ -590,121 +438,12 @@ export function createSettingsViewModel(options: SettingsViewModelOptions): Sett
           expectedRevision: settings.revision,
           payload: {
             patch: {
-              defaultModelRoute: route,
+              defaultModelRoute: null,
               workerConcurrencyLimit: input.workerConcurrencyLimit,
             },
           },
         }),
         response => { patch({ settings: response.result }) },
-      )
-    },
-    async createCredentialReference(input) {
-      let displayName: string
-      let providerId: string
-      let vaultLocator: string
-      try {
-        displayName = checkedText(
-          input.displayName,
-          'CREDENTIAL_DISPLAY_NAME_REQUIRED',
-          '请输入凭据显示名称。',
-        )
-        providerId = checkedText(
-          input.providerId,
-          'CREDENTIAL_PROVIDER_REQUIRED',
-          '请输入服务商。',
-        )
-        vaultLocator = checkedSecret(input.vaultLocator)
-      } catch (error) {
-        patch({
-          interaction: frozenInteraction(
-            'error',
-            CommandName.CredentialReferenceCreate,
-            normalizedError(error),
-          ),
-        })
-        return
-      }
-      await runCommand(
-        CommandName.CredentialReferenceCreate,
-        0,
-        requestId => ({
-          ...requestBase(),
-          requestId,
-          command: CommandName.CredentialReferenceCreate,
-          expectedRevision: 0,
-          payload: {
-            credentialReferenceId: input.credentialReferenceId,
-            displayName,
-            providerId,
-            vaultLocator,
-          },
-        }),
-        response => {
-          if (response.result.id !== input.credentialReferenceId) throw clientFailure(
-            'CREDENTIAL_CREATE_MISMATCH',
-            '服务器返回了其他 API Key。',
-          )
-          mergeCredential(response.result)
-        },
-      )
-    },
-    async rotateCredentialReference(input) {
-      const reference = currentState.credentials.find(item => item.id === input.credentialReferenceId)
-      if (reference === undefined) {
-        interactionFailure(
-          'CREDENTIAL_REFERENCE_STALE',
-          '请刷新设置并重新选择 API Key。',
-          CommandName.CredentialReferenceRotate,
-        )
-        return
-      }
-      let vaultLocator: string
-      try {
-        vaultLocator = checkedSecret(input.vaultLocator)
-      } catch (error) {
-        patch({
-          interaction: frozenInteraction(
-            'error',
-            CommandName.CredentialReferenceRotate,
-            normalizedError(error),
-          ),
-        })
-        return
-      }
-      await runCommand(
-        CommandName.CredentialReferenceRotate,
-        reference.revision,
-        requestId => ({
-          ...requestBase(),
-          requestId,
-          command: CommandName.CredentialReferenceRotate,
-          expectedRevision: reference.revision,
-          payload: { credentialReferenceId: reference.id, vaultLocator },
-        }),
-        response => { mergeCredential(response.result) },
-      )
-    },
-    async revokeCredentialReference(credentialReferenceId) {
-      const reference = currentState.credentials.find(item => item.id === credentialReferenceId)
-      if (reference === undefined) {
-        interactionFailure(
-          'CREDENTIAL_REFERENCE_STALE',
-          '请刷新设置并重新选择 API Key。',
-          CommandName.CredentialReferenceRevoke,
-        )
-        return
-      }
-      await runCommand(
-        CommandName.CredentialReferenceRevoke,
-        reference.revision,
-        requestId => ({
-          ...requestBase(),
-          requestId,
-          command: CommandName.CredentialReferenceRevoke,
-          expectedRevision: reference.revision,
-          payload: { credentialReferenceId: reference.id },
-        }),
-        response => { mergeCredential(response.result) },
       )
     },
     cancelPending() {
@@ -750,8 +489,7 @@ export function createSettingsViewModel(options: SettingsViewModelOptions): Sett
         status: 'closed',
         realtime: 'closed',
         settings: null,
-        credentials: Object.freeze([]),
-        interaction: frozenInteraction('idle'),
+            interaction: frozenInteraction('idle'),
         error: null,
       })
       listeners.clear()

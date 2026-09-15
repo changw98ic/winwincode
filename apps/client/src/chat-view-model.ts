@@ -41,6 +41,7 @@ import type {
   SessionCreateCompletedResponse,
   SessionGetResultResponse,
   SessionMessagesListResultResponse,
+  SessionArtifactGetResultResponse,
 } from './generated/contracts.js'
 import {
   CommandName,
@@ -135,9 +136,11 @@ export interface ChatViewModelOptions {
   readonly interactionPageSize?: number
   /** Deterministic clock used to reject expired interaction bindings. */
   readonly nowMillis?: () => number
+  readonly launchDeviceSession?: (input: { readonly clientId: string; readonly repositoryBindingId: string; readonly productSessionId: ProductSessionId }) => Promise<void>
 }
 
 export interface ChatCreateSessionInput {
+  readonly repositoryBindingId?: string
   readonly productSessionId: ProductSessionId
   readonly title: string
 }
@@ -150,7 +153,7 @@ export interface ChatViewModel {
   selectSession(productSessionId: ProductSessionId): Promise<void>
   selectModelRoute(modelRoute: ModelRoute): void
   createSession(input: ChatCreateSessionInput): Promise<void>
-  submitMessage(message: string): Promise<void>
+  submitMessage(message: string, repositoryBindingId?: string): Promise<void>
   cancelSession(reason: string): Promise<void>
   respondToInput(
     inputRequestId: string,
@@ -163,6 +166,7 @@ export interface ChatViewModel {
     reason: string,
   ): Promise<void>
   loadMoreMessages(): Promise<void>
+  downloadArtifact(artifactId: string): Promise<Blob>
   cancelPending(): void
   reconnect(): void
   close(): void
@@ -276,6 +280,7 @@ interface ChatQueryResponses {
   ).SessionListResultResponse
   readonly [QueryName.SessionGet]: SessionGetResultResponse
   readonly [QueryName.SessionMessagesList]: SessionMessagesListResultResponse
+  readonly [QueryName.SessionArtifactGet]: SessionArtifactGetResultResponse
   readonly [QueryName.ModelRouteAvailabilityList]: ModelRouteAvailabilityListResultResponse
   readonly [QueryName.RuntimeProjectionGet]: RuntimeProjectionGetResultResponse
   readonly [QueryName.SessionInteractionsList]: ChatInteractionListResultResponse
@@ -541,6 +546,8 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
   let selectedModelRouteIdentity: string | null = null
   let modelRouteSelectionEstablished = false
   let modelRouteSelectionIssue: ModelRouteAvailabilityReason | null = null
+  let readyDeviceSessionId: ProductSessionId | null = null
+  let pendingDeviceSession: Parameters<NonNullable<ChatViewModelOptions['launchDeviceSession']>>[0] | null = null
   const nowMillis = options.nowMillis ?? Date.now
 
   currentState = Object.freeze({
@@ -647,7 +654,7 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
           ...requestBase(),
           requestId: options.nextRequestId(),
           query: QueryName.ModelRouteAvailabilityList,
-          parameters: {},
+          parameters: activeProductSessionId === null ? {} : { productSessionId: activeProductSessionId },
           page: requestPage(cursor, MODEL_ROUTE_PAGE_SIZE),
         }, { signal }), QueryName.ModelRouteAvailabilityList)
       assertPage(response.page, response.query)
@@ -1405,7 +1412,7 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
     }
   }
 
-  async function submitMessage(message: string): Promise<void> {
+  async function submitMessage(message: string, repositoryBindingId?: string): Promise<void> {
     const value = message.trim()
     if (value.length === 0) {
       interactionFailure('CHAT_MESSAGE_REQUIRED', '请输入消息后再发送。')
@@ -1421,6 +1428,19 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
     const active = controller()
     patch({ interaction: frozenInteraction('submitting') })
     try {
+      if (options.launchDeviceSession !== undefined && readyDeviceSessionId !== productSessionId && currentState.messages.length === 0) {
+        const route = currentState.modelRouteAvailability?.items.find(candidate =>
+          modelRouteIdentity(candidate.route) === (currentState.selectedModelRoute === null ? null : modelRouteIdentity(currentState.selectedModelRoute)))
+        if (pendingDeviceSession?.productSessionId !== productSessionId) {
+          if (route?.clientId === undefined || !repositoryBindingId) throw clientFailure('CHAT_DEVICE_REQUIRED', '请选择执行设备上的项目。')
+          pendingDeviceSession = { clientId: route.clientId, repositoryBindingId, productSessionId }
+        }
+      }
+      if (pendingDeviceSession !== null && options.launchDeviceSession !== undefined) {
+        await options.launchDeviceSession(pendingDeviceSession)
+        readyDeviceSessionId = pendingDeviceSession.productSessionId
+        pendingDeviceSession = null
+      }
       const response = await options.client.command({
         ...requestBase(),
         requestId: options.nextRequestId(),
@@ -1502,6 +1522,14 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
       activeProductSessionId = input.productSessionId
       applySessionMutation(completed.result)
       notifyActiveSession()
+      const route = currentState.modelRouteAvailability?.items.find(candidate => modelRouteIdentity(candidate.route) === modelRouteIdentity(modelRoute))
+      if (options.launchDeviceSession !== undefined) {
+        if (route?.clientId === undefined || !input.repositoryBindingId) throw clientFailure('CHAT_DEVICE_REQUIRED', '请选择执行设备上的项目。')
+        pendingDeviceSession = { clientId: route.clientId, repositoryBindingId: input.repositoryBindingId, productSessionId: input.productSessionId }
+        await options.launchDeviceSession(pendingDeviceSession)
+        readyDeviceSessionId = pendingDeviceSession.productSessionId
+        pendingDeviceSession = null
+      }
       await load(true)
     } catch (error) {
       if (!isCurrent(ownGeneration)) return
@@ -1745,8 +1773,8 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
     async createSession(input) {
       await createSession(input)
     },
-    async submitMessage(message) {
-      await submitMessage(message)
+    async submitMessage(message, repositoryBindingId) {
+      await submitMessage(message, repositoryBindingId)
     },
     async cancelSession(reason) {
       await cancelSession(reason)
@@ -1756,6 +1784,36 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
     },
     async decideApproval(approvalId, decision, reason) {
       await decideApproval(approvalId, decision, reason)
+    },
+    async downloadArtifact(artifactId) {
+      const productSessionId = requireActiveSession()
+      const artifact = currentState.messages.flatMap(message => message.artifactRefs ?? [])
+        .find(item => item.artifactId === artifactId)
+      if (artifact === undefined) throw clientFailure('CHAT_ARTIFACT_UNAVAILABLE', '此对话中没有这份项目文件。')
+      const parts: Uint8Array<ArrayBuffer>[] = []
+      let offset = 0
+      let totalSize: number | null = null
+      do {
+        const response = expectResponse(await options.client.query({
+          ...requestBase(), requestId: options.nextRequestId(), query: QueryName.SessionArtifactGet,
+          parameters: { productSessionId, artifactId: artifact.artifactId, offset, length: 262144 },
+          page: requestPage(null, 1),
+        }), QueryName.SessionArtifactGet)
+        const result = response.result
+        if (result.artifactId !== artifact.artifactId || result.digest !== artifact.digest
+          || result.offset !== offset || result.totalSize < 1 || result.totalSize > 64 * 1024 * 1024
+          || (totalSize !== null && totalSize !== result.totalSize)) {
+          throw clientFailure('CHAT_ARTIFACT_MISMATCH', '项目文件校验失败，请重试。')
+        }
+        totalSize = result.totalSize
+        const bytes = Uint8Array.from(atob(result.dataBase64), character => character.charCodeAt(0))
+        if (bytes.length !== Math.min(262144, totalSize - offset)) {
+          throw clientFailure('CHAT_ARTIFACT_MISMATCH', '项目文件未下载完整，请重试。')
+        }
+        parts.push(bytes)
+        offset += bytes.length
+      } while (offset < totalSize)
+      return new Blob(parts, { type: 'application/zip' })
     },
     async loadMoreMessages() {
       if (closed) throw clientFailure('CHAT_VIEW_MODEL_CLOSED', '对话视图已关闭。')

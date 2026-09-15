@@ -11,13 +11,12 @@ mod client_occupancy;
 mod client_repositories;
 mod client_sessions;
 mod config;
+mod device_providers;
 mod dispatcher;
 mod durable_event_hub;
 mod login_rate_limiter;
-mod model_authority;
 mod password_hash;
 mod preview;
-mod provider_onboarding;
 mod remote_worker_transport;
 mod runtime;
 mod server;
@@ -65,16 +64,6 @@ pub use dispatcher::{
 pub use durable_event_hub::{
     CommittedEventContext, DurableEventHub, DurableEventHubClock, DurableEventHubConfig,
     DurableEventHubError, DurableEventHubErrorCode, DurableEventPublisher,
-};
-pub use model_authority::{
-    LocalModelRoute, configure_local_model_authority, credential_create_command,
-};
-pub use provider_onboarding::{
-    ConnectionProbe, ConnectionTestReport, CreateCredentialRequest, CredentialReferenceOnboarded,
-    CredentialRotated, EstablishRouteRequest, HttpsConnectionProbe, ModelRouteEstablished,
-    OnboardProviderRequest, OnboardingSecretStore, ProbeOutcome, ProviderOnboarded,
-    ProviderOnboardingError, ProviderOnboardingErrorKind, ProviderOnboardingService,
-    RotateCredentialRequest, TestConnectionRequest,
 };
 pub use remote_worker_transport::{
     CompositeRemoteWorkerAuthenticator, FileRemoteWorkerAuthenticator,

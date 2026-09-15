@@ -78,25 +78,27 @@ fn production_main_uses_the_real_application_registry() {
 }
 
 #[test]
-fn production_main_attaches_one_supervised_local_runtime_to_the_api_registry() {
+fn production_main_routes_execution_to_device_workers() {
     let source = include_str!("../src/main.rs");
     for required_name in [
-        "LocalRuntimeSupervisor",
         "ServerExecutionPortCore",
         "RepositoryRuntimeScheduler",
         "ProductSessionExecutionConfig",
-        "ProductionCodexAdapter",
-        "with_runtime_health",
+        "WorkerSessionRemoteAuthenticator",
+        "DeviceModelBoundary",
     ] {
         assert!(
             source.contains(required_name),
-            "production Server composition must retain {required_name}",
+            "production composition must retain {required_name}"
         );
     }
-    assert!(
-        source.contains("start_with_scheduler") || source.contains("LocalRuntimeSupervisor::start"),
-        "production Server must start the supervised local runtime",
-    );
+    for retired in [
+        "LocalRuntimeSupervisor",
+        "ProductionCodexAdapter",
+        "configure_local_model_authority",
+    ] {
+        assert!(!source.contains(retired), "Server must not run {retired}");
+    }
 }
 
 #[test]
@@ -482,19 +484,17 @@ fn product_session_routes_replay_conflict_page_and_recover_after_restart() {
     let conflict = application
         .command(&principal, CommandFamily::Session, stale_chat)
         .expect_err("stale Chat revision");
-    assert_eq!(conflict.code(), "REVISION_CONFLICT");
+    assert_eq!(conflict.code(), "DEVICE_SESSION_REQUIRED");
     let submitted = application
         .command(
             &principal,
             CommandFamily::Session,
             chat_submit_request(22, 1),
         )
-        .expect("submit Chat message");
-    let submitted = completed_json(submitted);
-    assert_eq!(submitted["currentRevision"], 2);
-    assert_eq!(submitted["result"]["state"], "running");
+        .expect_err("a Device is required to submit Chat");
+    assert_eq!(submitted.code(), "DEVICE_SESSION_REQUIRED");
 
-    assert_chat_message(&application, &principal);
+    assert_empty_chat(&application, &principal);
 
     let cancel: CommandRequest = serde_json::from_value(serde_json::json!({
         "schemaVersion": "winwincode/v1",
@@ -502,7 +502,7 @@ fn product_session_routes_replay_conflict_page_and_recover_after_restart() {
         "command": "session.cancel",
         "actor": { "kind": "user", "id": id("usr", 1) },
         "scope": repository_scope_json(1),
-        "expectedRevision": 2,
+        "expectedRevision": 1,
         "payload": {
             "productSessionId": id("psn", 1),
             "reason": "user requested cancellation"
@@ -513,7 +513,7 @@ fn product_session_routes_replay_conflict_page_and_recover_after_restart() {
         .command(&principal, CommandFamily::Session, cancel)
         .expect("cancel ProductSession");
     let cancelled = completed_json(cancelled);
-    assert_eq!(cancelled["currentRevision"], 3);
+    assert_eq!(cancelled["currentRevision"], 2);
     assert_eq!(cancelled["result"]["state"], "cancelled");
 
     application.shutdown().expect("first shutdown");
@@ -522,7 +522,7 @@ fn product_session_routes_replay_conflict_page_and_recover_after_restart() {
         .query(&principal, QueryFamily::Session, session_get_request(25, 1))
         .expect("recover ProductSession");
     let recovered = serde_json::to_value(recovered).expect("encode recovered response");
-    assert_eq!(recovered["result"]["revision"], 3);
+    assert_eq!(recovered["result"]["revision"], 2);
     assert_eq!(recovered["result"]["state"], "cancelled");
     let foreign = restarted
         .query(
@@ -537,7 +537,7 @@ fn product_session_routes_replay_conflict_page_and_recover_after_restart() {
     fs::remove_dir_all(root).expect("remove temporary application directory");
 }
 
-fn assert_chat_message(
+fn assert_empty_chat(
     application: &StandaloneControlPlaneApplication,
     principal: &AuthenticatedPrincipal,
 ) {
@@ -555,8 +555,7 @@ fn assert_chat_message(
         .query(principal, QueryFamily::Session, query)
         .expect("read public Chat ledger");
     let response = serde_json::to_value(response).expect("encode messages response");
-    assert_eq!(response["result"]["items"][0]["content"], "Run the checks");
-    assert_eq!(response["result"]["items"][0]["role"], "user");
+    assert_eq!(response["result"]["items"], serde_json::json!([]));
 }
 
 fn repository_scope_json(seed: u64) -> serde_json::Value {

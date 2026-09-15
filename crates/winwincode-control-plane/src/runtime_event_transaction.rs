@@ -226,6 +226,28 @@ pub(crate) fn execute_at(
 
     let stream_id = phase.stream_id.clone();
     let ledger = match load_ledger(storage, &stream_id)? {
+        Some(previous)
+            if context.scope_kind == RuntimeScopeKind::ProductSession
+                && previous.execution_job_id != context.execution_job_id =>
+        {
+            // The Controller's immutable dispatch order permits advancing to a
+            // later task, never returning the session head to an older task.
+            let (prior_intent, prior_job) =
+                load_runtime_execution_job(storage, &previous.execution_job_id)?;
+            if prior_intent.stream_id() != durable.stream_id()
+                || prior_intent.revision() >= durable.revision()
+                || prior_job.scope != job.scope
+            {
+                return Ok(rejection_ack(
+                    message,
+                    0,
+                    Rejection::Conflict("runtime task is older than the current session task"),
+                ));
+            }
+            let mut next = RuntimeLedgerState::empty(&context, &message.lease, message);
+            next.sequence_offset = previous.revision();
+            next
+        }
         Some(ledger) => ledger,
         None => RuntimeLedgerState::empty(&context, &message.lease, message),
     };
@@ -252,7 +274,7 @@ pub(crate) fn execute_at(
         LedgerDecision::Accept => {}
     }
 
-    let expected_revision = ledger.highest_sequence;
+    let expected_revision = ledger.revision();
     let before_ledger_digest = if context.scope_kind == RuntimeScopeKind::WorkRun {
         Some(runtime_ledger_digest(&ledger)?)
     } else {
@@ -263,7 +285,15 @@ pub(crate) fn execute_at(
             "failed to encode accepted runtime event: {error}"
         )))
     })?;
+    let acknowledged_sequence = ledger.highest_sequence;
     let next = ledger.append(message.event.clone(), event_digest.clone())?;
+    if next.revision() > MAX_SAFE_INTEGER {
+        return Ok(rejection_ack(
+            message,
+            acknowledged_sequence,
+            Rejection::Conflict("runtime resource revision is out of range"),
+        ));
+    }
     let pending_audit_event = before_ledger_digest
         .map(|before| {
             let after = runtime_ledger_digest(&next)?;
@@ -291,7 +321,7 @@ pub(crate) fn execute_at(
             &context,
             scope,
             message,
-            next.highest_sequence,
+            next.revision(),
         )?,
     ];
     let mut commit = StateCommit::new(
@@ -320,7 +350,7 @@ pub(crate) fn execute_at(
         Err(error) if error.is_state_guard_conflict() => {
             return Ok(rejection_ack(
                 message,
-                expected_revision,
+                acknowledged_sequence,
                 Rejection::Conflict(
                     "runtime event Delivery state changed before the event was committed",
                 ),
@@ -346,6 +376,7 @@ pub(crate) fn execute_at(
         &context,
         message,
         &message.event,
+        next.revision(),
     )?;
     if context.scope_kind == RuntimeScopeKind::WorkRun {
         validate_runtime_audit_event(storage, &phase, &receipt, message, &context)?;
@@ -390,6 +421,13 @@ fn resolve_raced_append(
     let Some(ledger) = load_ledger(storage, &phase.stream_id)? else {
         return Err(StorageError::revision_conflict(0, 1).into());
     };
+    if ledger.execution_job_id != message.lease.job_id {
+        return Ok(rejection_ack(
+            message,
+            0,
+            Rejection::Conflict("runtime task changed during append"),
+        ));
+    }
     match ledger.classify(&message.event, digest) {
         LedgerDecision::Duplicate => Ok(accepted_ack(
             message,
@@ -440,7 +478,7 @@ fn prior_receipt_sequence(
         .ok_or_else(|| StorageError::invalid_input("runtime conflict receipt is missing"))?;
     let accepted_message: RuntimeEventMessage = serde_json::from_slice(&accepted_event.payload)
         .map_err(|_| StorageError::invalid_input("runtime conflict receipt is not canonical"))?;
-    if receipt.revision != u64::try_from(accepted_message.event.sequence.0).unwrap_or_default()
+    if !valid_receipt_sequence(&receipt, &accepted_message)
         || accepted_event.event_id
             != runtime_outbox_event_id(&phase.stream_id, &accepted_message.event)
     {
@@ -457,7 +495,7 @@ fn prior_receipt_sequence(
             StorageError::invalid_input("runtime conflict receipt invalidation is missing")
         })?;
     validate_replay_invalidation(invalidation, &receipt)?;
-    Ok(receipt.revision)
+    Ok(u64::try_from(accepted_message.event.sequence.0).unwrap_or_default())
 }
 
 /// Loads the immutable dispatch intent without imposing the Delivery-only
@@ -548,6 +586,10 @@ pub(crate) struct RuntimeLedgerState {
     pub(crate) fencing_token: FencingToken,
     pub(crate) worker_id: WorkerId,
     pub(crate) worker_instance_id: WorkerInstanceId,
+    /// Events from preceding tasks in this `ProductSession` resource stream.
+    /// Existing first-task snapshots have an offset of zero.
+    #[serde(default)]
+    pub(crate) sequence_offset: u64,
     pub(crate) highest_sequence: u64,
     pub(crate) events: Vec<RuntimeLedgerEvent>,
 }
@@ -560,6 +602,10 @@ pub(crate) struct RuntimeLedgerEvent {
 }
 
 impl RuntimeLedgerState {
+    pub(crate) fn revision(&self) -> u64 {
+        self.sequence_offset.saturating_add(self.highest_sequence)
+    }
+
     fn empty(
         context: &RuntimeContext,
         lease: &ExecutionLeaseStamp,
@@ -579,6 +625,7 @@ impl RuntimeLedgerState {
             fencing_token: lease.fencing_token.clone(),
             worker_id: lease.worker_id.clone(),
             worker_instance_id: lease.worker_instance_id.clone(),
+            sequence_offset: 0,
             highest_sequence: 0,
             events: Vec::new(),
         }
@@ -1132,7 +1179,9 @@ pub(crate) fn decode_runtime_ledger_state(
         StorageError::invalid_input(format!("runtime ledger state is invalid: {error}"))
     })?;
     if ledger.highest_sequence != ledger.events.len() as u64
-        || state.revision != ledger.highest_sequence
+        || ledger.revision() > MAX_SAFE_INTEGER
+        || (ledger.work_run_id.is_some() && ledger.sequence_offset != 0)
+        || state.revision != ledger.revision()
     {
         return Err(StorageError::invalid_input(
             "runtime ledger state sequence is not canonical",
@@ -1333,6 +1382,7 @@ fn validate_runtime_audit_event(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_receipt(
     receipt: &CommitReceipt,
     phase: &RuntimePhase,
@@ -1340,11 +1390,12 @@ fn validate_receipt(
     context: &RuntimeContext,
     message: &RuntimeEventMessage,
     event: &ExecutionEventRecord,
+    expected_revision: u64,
 ) -> Result<(), RuntimeMessageError> {
     if receipt.receipt_identity != phase.receipt_identity
         || receipt.command_digest != phase.command_digest
         || receipt.stream_id != stream_id
-        || receipt.revision != u64::try_from(event.sequence.0).unwrap_or_default()
+        || receipt.revision != expected_revision
         || receipt.events.len() != 2
         || !receipt
             .events
@@ -1402,6 +1453,18 @@ fn validate_receipt(
     Ok(())
 }
 
+fn valid_receipt_sequence(receipt: &CommitReceipt, message: &RuntimeEventMessage) -> bool {
+    let Ok(sequence) = u64::try_from(message.event.sequence.0) else {
+        return false;
+    };
+    sequence > 0
+        && if message.session_identity.work_run_id.is_some() {
+            receipt.revision == sequence
+        } else {
+            receipt.revision >= sequence && receipt.revision <= MAX_SAFE_INTEGER
+        }
+}
+
 fn replay_ack(
     receipt: &CommitReceipt,
     phase: &RuntimePhase,
@@ -1441,7 +1504,7 @@ fn replay_ack(
             "runtime event replay payload does not match the request",
         ));
     }
-    if receipt.revision != u64::try_from(accepted_message.event.sequence.0).unwrap_or_default()
+    if !valid_receipt_sequence(receipt, &accepted_message)
         || accepted_event.event_id
             != runtime_outbox_event_id(&phase.stream_id, &accepted_message.event)
     {
@@ -1459,7 +1522,7 @@ fn replay_ack(
     validate_replay_invalidation(invalidation, receipt)?;
     Ok(accepted_ack(
         message,
-        receipt.revision,
+        u64::try_from(accepted_message.event.sequence.0).unwrap_or_default(),
         LeaseWriteStatus::Duplicate,
         None,
     ))
@@ -1673,11 +1736,16 @@ pub(crate) fn runtime_stream_id_for_projection(
 pub(crate) fn runtime_ack_sequence_for_replay(
     storage: &dyn ProductStateStorage,
     scope_key: &ReceiptScopeKey,
-    job_id: &ExecutionJobId,
+    job: &ExecutionJob,
 ) -> Result<ExecutionAckSequence, StorageError> {
-    let stream_id = runtime_stream_id(scope_key, job_id);
+    let stream_id = match &job.scope {
+        ExecutionScope::ProductSessionExecutionScope(scope) => {
+            product_session_runtime_stream_id(&scope.product_session_id)
+        }
+        ExecutionScope::WorkRunExecutionScope(_) => runtime_stream_id(scope_key, &job.job_id),
+    };
     let sequence = match load_ledger(storage, &stream_id)? {
-        Some(ledger) if ledger.execution_job_id == *job_id => ledger.highest_sequence,
+        Some(ledger) if ledger.execution_job_id == job.job_id => ledger.highest_sequence,
         Some(_) => {
             return Err(StorageError::invalid_input(
                 "runtime replay ledger belongs to another ExecutionJob",

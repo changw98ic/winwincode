@@ -253,6 +253,7 @@ fn active_job() -> ActiveJob {
     let work_run_id = WorkRunId("wrn_01J00000000000000000000001".to_owned());
     ActiveJob {
         job: ExecutionJob {
+            model_selection: None,
             attempt: 1,
             execution_profile: "executor".to_owned(),
             goal: "Implement fixture".to_owned(),

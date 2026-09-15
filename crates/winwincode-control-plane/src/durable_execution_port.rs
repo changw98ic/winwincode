@@ -388,6 +388,9 @@ impl<'application> DurableExecutionPortIngress<'application> {
             ExecutionPortMessage::ArtifactChunkMessage(artifact) => {
                 self.delegate_job_scoped(&artifact.lease.job_id, message)
             }
+            ExecutionPortMessage::ModelChunkMessage(model) => {
+                self.delegate_job_scoped(&model.lease.job_id, message)
+            }
             ExecutionPortMessage::ModelOpenMessage(model) => {
                 self.delegate_job_scoped(&model.lease.job_id, message)
             }
@@ -761,6 +764,7 @@ fn delegated_message_authority(
         ExecutionPortMessage::ArtifactOpenMessage(message) => authority!(message),
         ExecutionPortMessage::ArtifactChunkMessage(message) => authority!(message),
         ExecutionPortMessage::ModelOpenMessage(message) => authority!(message),
+        ExecutionPortMessage::ModelChunkMessage(message) => authority!(message),
         ExecutionPortMessage::ModelAckMessage(message) => authority!(message),
         ExecutionPortMessage::InputRequestMessage(message) => authority!(message),
         ExecutionPortMessage::ApprovalRequestMessage(message) => authority!(message),

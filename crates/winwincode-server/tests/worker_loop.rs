@@ -24,6 +24,9 @@
 //! process registry, occupancy mirror, release intents, and exchange
 //! cursors.
 
+#[path = "support/device_provider.rs"]
+mod device_provider;
+
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -188,10 +191,13 @@ fn server_config(data_directory: &Path) -> ServerConfig {
 }
 
 fn open_auth(directory: &Path) -> Arc<SqliteAuthSessionManager> {
-    let scopes = vec![Scope::OrganizationScope(OrganizationScope {
-        kind: OrganizationScopeKind::Organization,
-        organization_id: OrganizationId("org_00000000000000000000000001".to_owned()),
-    })];
+    let scopes = vec![
+        Scope::OrganizationScope(OrganizationScope {
+            kind: OrganizationScopeKind::Organization,
+            organization_id: OrganizationId("org_00000000000000000000000001".to_owned()),
+        }),
+        serde_json::from_value(device_provider::chat_scope()).expect("repository scope"),
+    ];
     let accounts = Arc::new(
         UserAccountService::open(directory.join("auth-sessions")).expect("account service"),
     );
@@ -399,11 +405,12 @@ fn confirmed_cancel_body(client_id: &str) -> String {
     .to_string()
 }
 
-fn launch_body(client_id: &str, binding_id: &str) -> String {
+fn launch_body(client_id: &str, binding_id: &str, session: u64) -> String {
     json!({
         "schemaVersion": SCHEMA_VERSION,
         "clientId": client_id,
         "repositoryBindingId": binding_id,
+        "productSession": {"id":format!("psn_{session:026}"),"scope":device_provider::chat_scope()},
     })
     .to_string()
 }
@@ -972,12 +979,17 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
     // daemon fences it, spawns through the supervisor, and the launch ack
     // consumes the grant exactly once — then the 201 body delivers the
     // one-time worker credential material.
+    device_provider::stage_chat(&data_directory, &node_id, &owner_id, 100);
     let launch_request = cookie_post(
         "/api/v1/sessions",
-        &launch_body(&public_client_id, &binding_id),
+        &launch_body(&public_client_id, &binding_id, 100),
         &owner_cookie,
     );
-    let launch_task = tokio::spawn(async move { http_request(address, &launch_request).await });
+    let launch_task = tokio::spawn(async move {
+        let response = http_request(address, &launch_request).await;
+        assert_eq!(status_of(&response), "201", "launch response: {response}");
+        response
+    });
     // The signed launch frame is durable before the flow answers; capture
     // its grant id from the outbox while the daemon is still parked.
     let grant_one_id = wait_for_launch_grant(&data_directory, &node_id);
@@ -1173,12 +1185,17 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
     );
 
     // ---- Phase 6: the second launch and cancel_and_release -----------------
+    device_provider::stage_chat(&data_directory, &node_id, &owner_id, 101);
     let launch_request = cookie_post(
         "/api/v1/sessions",
-        &launch_body(&public_client_id, &binding_id),
+        &launch_body(&public_client_id, &binding_id, 101),
         &owner_cookie,
     );
-    let launch_task = tokio::spawn(async move { http_request(address, &launch_request).await });
+    let launch_task = tokio::spawn(async move {
+        let response = http_request(address, &launch_request).await;
+        assert_eq!(status_of(&response), "201", "launch response: {response}");
+        response
+    });
     let grant_two_id = wait_for_launch_grant(&data_directory, &node_id);
     drive_until(&mut daemon, "the second grant to be consumed", |daemon| {
         settled(daemon)

@@ -6,6 +6,24 @@
 //! durable event publication. It has no dependency on Codex Core, an HTTP
 //! server, or an Execution Worker runtime.
 
+pub use winwincode_provider::{
+    CanonicalModelStreamFrame, CredentialLeakError, CredentialLeakErrorKind, CredentialLeakGate,
+    CredentialOutputBoundary, DeviceProviderError, DeviceProviderStore, HttpsSseProviderAdapter,
+    HttpsSseProviderCompletion, HttpsSseProviderConfig, HttpsSseProviderError,
+    HttpsSseProviderErrorKind, HttpsSseProviderLimits, HttpsSseProviderTimeouts,
+    MAX_ENDPOINT_BYTES, ModelAttemptCharge, ModelAttemptFailureFact, ModelAttemptFailureKind,
+    ModelExecutionCertainty, ProviderAdapterError, ProviderAdapterErrorKind,
+    ProviderAdapterInvocation, ProviderAdapterOpenReceipt, ProviderAdapterPort,
+    ProviderFinishReason, ProviderGatewayErrorKind, ProviderGatewayOpenReceipt,
+    ProviderGatewayTerminal, ProviderGatewayTerminalCharge, ProviderGatewayTerminalOutcome,
+    ProviderStreamControlAction, ProviderStreamConversionError, ProviderStreamConversionErrorKind,
+    ProviderStreamConverter, ProviderStreamEvent, ProviderStreamFailure, ProviderStreamFailureKind,
+    ProviderTlsRoots, ProviderTokenPricing, ProviderTokenUsage, ProviderToolIdentity,
+    ProviderToolIdentityError, ProviderToolKind, ResolvedSecret, SecretStoreError,
+    SecretStoreErrorKind, canonical_https_endpoint, credential_leak_gate, model_failure,
+    provider_https_sse, provider_stream, public_model_chunk, valid_device_provider_config,
+};
+
 mod action_policy_enforcement;
 mod artifact_transaction;
 pub mod automation_recipe;
@@ -21,7 +39,6 @@ mod collaboration;
 mod collaboration_inbox;
 mod collaboration_inbox_production;
 mod control_plane_instance;
-pub mod credential_leak_gate;
 pub mod credential_reference;
 pub mod debug_hypothesis_ledger;
 mod delivery_application;
@@ -55,14 +72,11 @@ pub mod peer_collaboration;
 mod product_session_execution_application;
 mod product_session_service;
 mod provider_admission;
-mod provider_anthropic;
 pub mod provider_catalog;
 pub mod provider_gateway;
-mod provider_https_sse;
 mod provider_policy;
 pub mod provider_presets;
 mod provider_production;
-pub mod provider_stream;
 mod publication_application;
 mod publication_policy;
 mod publication_preparation;
@@ -143,13 +157,9 @@ pub use control_plane_instance::{
     ControlPlaneInstanceRuntime, ControlPlaneInstanceRuntimeConfig,
     ControlPlaneInstanceRuntimeError, ControlPlaneInstanceRuntimeErrorKind,
 };
-pub use credential_leak_gate::{
-    CredentialLeakError, CredentialLeakErrorKind, CredentialLeakGate, CredentialOutputBoundary,
-};
 pub use credential_reference::{
     CredentialReferenceError, CredentialReferenceErrorKind, CredentialReferenceResolution,
-    CredentialReferenceService, CredentialSecretResolutionError, ResolvedSecret, SecretStoreError,
-    SecretStoreErrorKind, SecretStorePort,
+    CredentialReferenceService, CredentialSecretResolutionError, SecretStorePort,
 };
 pub use delivery_application::{
     DeliveryApplicationError, DeliveryAttentionAuthority, DeliveryAuthorityError,
@@ -242,9 +252,8 @@ pub use model_retry_settlement::{
     ModelRetrySettlementReceipt,
 };
 pub use model_retry_usage::{
-    FrozenModelRetryPlan, ModelAttemptCharge, ModelAttemptCompletionCommand,
-    ModelAttemptFailureCommand, ModelAttemptFailureFact, ModelAttemptFailureKind,
-    ModelAttemptStartCommand, ModelAttemptStartReceipt, ModelExecutionCertainty, ModelRetryAction,
+    FrozenModelRetryPlan, ModelAttemptCompletionCommand, ModelAttemptFailureCommand,
+    ModelAttemptStartCommand, ModelAttemptStartReceipt, ModelRetryAction,
     ModelRetryDecisionReceipt, ModelRetryStep, ModelRetryUsageError, ModelRetryUsageErrorKind,
     ModelRetryUsageRequest, ModelRetryUsageService, ModelRouteResolutionReason,
     ModelRouteResolutionTrace, ModelUsageAttribution, ModelUsageFilter, ModelUsageReconciliation,
@@ -297,7 +306,6 @@ pub use provider_admission::{
     ProviderAdmissionOpenReceipt, ProviderAdmissionOpenRequest, ProviderAdmissionReservationConfig,
     ProviderGatewayAdmissionPort, SystemModelAdmissionClock,
 };
-pub use provider_anthropic::ProviderTokenPricing;
 pub use provider_catalog::{
     CatalogAvailability, ModelCapability, ModelCapabilityProjection, ModelCatalogVersion,
     ModelToolSupport, PROVIDER_CATALOG_VERSION_EVENT_TOPIC, ProviderCatalogChange,
@@ -307,20 +315,12 @@ pub use provider_catalog::{
     ResolvedModelCapability, StructuredOutputSupport,
 };
 pub use provider_gateway::{
-    ProviderAdapterError, ProviderAdapterErrorKind, ProviderAdapterInvocation,
-    ProviderAdapterOpenReceipt, ProviderAdapterPort, ProviderGateway,
-    ProviderGatewayDurableExchange, ProviderGatewayError, ProviderGatewayErrorKind,
-    ProviderGatewayIdentity, ProviderGatewayIdentityError, ProviderGatewayIdentityErrorKind,
-    ProviderGatewayIdentityPort, ProviderGatewayOpenReceipt, ProviderGatewaySettlement,
-    ProviderGatewaySettlementError, ProviderGatewaySettlementPort, ProviderGatewayTerminal,
-    ProviderGatewayTerminalCharge, ProviderGatewayTerminalOutcome, ProviderGatewayTerminalProgress,
-    ProviderGatewayTerminalProgressPort, ProviderGatewayTerminalProgressStage,
-    ProviderGatewayTerminalReceipt, ProviderStreamControlAction, ProviderStreamControlReceipt,
-};
-pub use provider_https_sse::{
-    HttpsSseProviderAdapter, HttpsSseProviderCompletion, HttpsSseProviderConfig,
-    HttpsSseProviderError, HttpsSseProviderErrorKind, HttpsSseProviderLimits,
-    HttpsSseProviderTimeouts, ProviderTlsRoots,
+    ProviderGateway, ProviderGatewayDurableExchange, ProviderGatewayError, ProviderGatewayIdentity,
+    ProviderGatewayIdentityError, ProviderGatewayIdentityErrorKind, ProviderGatewayIdentityPort,
+    ProviderGatewaySettlement, ProviderGatewaySettlementError, ProviderGatewaySettlementPort,
+    ProviderGatewayTerminalProgress, ProviderGatewayTerminalProgressPort,
+    ProviderGatewayTerminalProgressStage, ProviderGatewayTerminalReceipt,
+    ProviderStreamControlReceipt,
 };
 pub use provider_policy::{
     AgentProviderPolicy, ProviderModelSelector, ProviderPolicy, ProviderPolicyCandidate,
@@ -338,12 +338,6 @@ pub use provider_production::{
     StandaloneModelExecutionApplication, StandaloneModelExecutionConfig,
     StandaloneModelExecutionError, StandaloneModelExecutionErrorKind, StandaloneProviderConfig,
     local_loopback_retry_policy,
-};
-pub use provider_stream::{
-    CanonicalModelStreamFrame, ProviderFinishReason, ProviderStreamConversionError,
-    ProviderStreamConversionErrorKind, ProviderStreamConverter, ProviderStreamEvent,
-    ProviderStreamFailure, ProviderStreamFailureKind, ProviderTokenUsage, ProviderToolIdentity,
-    ProviderToolIdentityError, ProviderToolKind,
 };
 pub use publication_policy::PublicationCommandError;
 pub use publication_preparation::{PreparedPublication, PublicationPreparationError};
@@ -1720,11 +1714,8 @@ impl ControlPlane {
         )
         .map_err(CandidateResolutionError::Storage)?;
         let ExecutionScope::WorkRunExecutionScope(_job_scope) = &job.scope else {
-            return Err(CandidateResolutionError::Storage(
-                StorageError::invalid_input(
-                    "candidate Artifact retention requires a Delivery execution Job",
-                ),
-            ));
+            // Chat retains its candidate Git ref on the owning Device before upload.
+            return Ok(None);
         };
         let provenance = candidate_source::provenance_from_session_binding(authority)?;
         let scope_key = repository_scope_key(scope)?;

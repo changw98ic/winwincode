@@ -67,7 +67,8 @@
       "collaboration.activity.list",
       "collaboration.notification.list",
       "collaboration.presence.list",
-      "workrun.get"
+      "workrun.get",
+      "session.artifact.get"
     ],
     "websocketEvents": [
       "product-session.changed.v1",
@@ -680,7 +681,8 @@
         "create, resume, list, inspect, cancel, and close a ProductSession",
         "submit a Chat turn and receive persisted user and assistant messages",
         "dispatch default Chat without creating a hidden Delivery or StageRun",
-        "rebuild Chat and runtime projections after restart or WebSocket reset"
+        "rebuild Chat and runtime projections after restart or WebSocket reset",
+        "retain project ZIP files before workspace cleanup and download them from their exact Chat turn"
       ],
       "httpCommands": [
         "session.create",
@@ -693,7 +695,8 @@
         "session.get",
         "session.messages.list",
         "session.interactions.list",
-        "runtime.projection.get"
+        "runtime.projection.get",
+        "session.artifact.get"
       ],
       "websocketEvents": [
         "product-session.changed.v1",
@@ -712,7 +715,10 @@
         "job.cancel",
         "job.cancel_ack",
         "job.outcome",
-        "job.outcome_ack"
+        "job.outcome_ack",
+        "artifact.open",
+        "artifact.chunk",
+        "artifact.ack"
       ],
       "targetObservableOperations": []
     },

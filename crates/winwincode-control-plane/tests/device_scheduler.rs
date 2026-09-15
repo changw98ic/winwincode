@@ -197,7 +197,7 @@ fn scheduling_request(seed: u64, fixture: &Fixture) -> DeviceWorkerSchedulingReq
         fixture.holder.clone(),
         public_client_id_for(fixture),
         fixture.binding.clone(),
-        id("ws", seed + 8),
+        id("wsn", seed + 8),
         id("wrk", seed + 9),
         id("wki", seed + 10),
         DIGEST,
@@ -218,7 +218,7 @@ fn scheduling_request_for(
         holder,
         public_client_id_for(fixture),
         fixture.binding.clone(),
-        id("ws", seed + 8),
+        id("wsn", seed + 8),
         id("wrk", seed + 9),
         id("wki", seed + 10),
         DIGEST,
@@ -310,7 +310,7 @@ fn the_two_phase_schedule_reserves_a_slot_then_issues_the_worker_request() {
     assert_eq!(receipt.occupancy_lease_id, fixture.lease_id);
     assert_eq!(receipt.occupancy_fencing_token, fixture.fencing_token);
     assert_eq!(receipt.repository_binding_id, fixture.binding);
-    assert_eq!(receipt.worker_session_id, id("ws", seed + 28));
+    assert_eq!(receipt.worker_session_id, id("wsn", seed + 28));
     assert_eq!(receipt.worker_id, id("wrk", seed + 29));
     assert_eq!(receipt.worker_instance_id, id("wki", seed + 30));
     assert_eq!(receipt.product_session_id, Some(id("ps", seed + 31)));
@@ -423,7 +423,7 @@ fn a_non_holder_and_an_unreachable_client_are_refused() {
         &holder,
         "999999999",
         fixture.binding.clone(),
-        id("ws", seed + 68),
+        id("wsn", seed + 68),
         id("wrk", seed + 69),
         id("wki", seed + 70),
         DIGEST,
@@ -454,7 +454,7 @@ fn foreign_unauthorized_and_unknown_bindings_are_refused_uniformly() {
         &holder,
         public_client_id_for(&fixture),
         other.binding.clone(),
-        id("ws", seed + 28),
+        id("wsn", seed + 28),
         id("wrk", seed + 29),
         id("wki", seed + 30),
         DIGEST,
@@ -497,7 +497,7 @@ fn foreign_unauthorized_and_unknown_bindings_are_refused_uniformly() {
         &holder,
         public_client_id_for(&fixture),
         id("rbd", seed + 61),
-        id("ws", seed + 68),
+        id("wsn", seed + 68),
         id("wrk", seed + 69),
         id("wki", seed + 70),
         DIGEST,
@@ -575,7 +575,7 @@ fn a_failed_phase_two_releases_the_reservation_immediately() {
         &mut storage,
         seed + 15,
         &fixture,
-        &id("ws", seed + 28),
+        &id("wsn", seed + 28),
         &id("wrk", seed + 79),
         &id("wki", seed + 80),
     );
@@ -627,7 +627,7 @@ fn an_orphan_grant_of_a_crashed_attempt_is_adopted_idempotently() {
         fixture.lease_id.clone(),
         fixture.fencing_token,
         fixture.binding.clone(),
-        id("ws", seed + 28),
+        id("wsn", seed + 28),
     )
     .expect("reservation command");
     storage
@@ -639,7 +639,7 @@ fn an_orphan_grant_of_a_crashed_attempt_is_adopted_idempotently() {
         &mut storage,
         seed + 15,
         &fixture,
-        &id("ws", seed + 28),
+        &id("wsn", seed + 28),
         &id("wrk", seed + 29),
         &id("wki", seed + 30),
     );
@@ -682,7 +682,7 @@ fn replaying_one_request_identity_returns_the_original_receipt() {
         &holder,
         public_client_id_for(&fixture),
         fixture.binding.clone(),
-        id("ws", seed + 48),
+        id("wsn", seed + 48),
         id("wrk", seed + 49),
         id("wki", seed + 50),
         DIGEST,
@@ -763,7 +763,7 @@ fn the_sweep_reclaims_reservations_a_crashed_scheduler_never_settled() {
         fixture.lease_id.clone(),
         fixture.fencing_token,
         fixture.binding.clone(),
-        id("ws", seed + 28),
+        id("wsn", seed + 28),
     )
     .expect("reservation command");
     let pending = storage
@@ -816,7 +816,7 @@ fn scheduling_request_rejects_a_historical_stage_as_workrun() {
         id("usr", 901),
         "123456789".to_owned(),
         id("rbd", 901),
-        id("ws", 901),
+        id("wsn", 901),
         id("wrk", 901),
         id("wki", 901),
         DIGEST,

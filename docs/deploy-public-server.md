@@ -54,19 +54,19 @@ Device Client 是本地常驻进程，生产代码不开放入站监听。控制
 | `POST/DELETE /api/v1/previews/*`、`/p/*` | 浏览器预览 | 当前占用者签发/撤销五分钟访问地址；公开内容只在独立 Preview origin 提供 | `server.rs` `create_preview_access`、`revoke_preview_access`、`proxy_preview` |
 | `POST /internal/v1/execution-port/exchange` | 远程 Worker | Bearer 注册凭据；统一 401 | `server.rs` `remote_worker_exchange`；`remote_worker_transport.rs` `FileRemoteWorkerAuthenticator` |
 
-未挂载对应应用时 `/internal` 路由返回 404：本地组成模式（`WWC_SERVER_WORKER_MODE=local`，默认值）调用 `start_server` 时不附带 remote Worker 与 client exchange，两个 `/internal` 路由都不可达（`main.rs` `run_local_composition`、`serve_runtime`；`server.rs` `remote_worker_exchange`、`client_control_exchange` 的 `let Some(...) = ... else { 404 }`）。Device Client 拓扑要求 `WWC_SERVER_WORKER_MODE=remote`，此时两个 `/internal` 路由随同挂载（`main.rs` `run_remote_composition`）。
+生产 Server 固定挂载 Device exchange 和远程 Worker 执行通道；Worker 由用户连接的 Device 启动（`main.rs` `run_composed_server`、`run_remote_composition`）。Web 的 Provider 配置以密文经 Server 转发，密钥保存在 Device，实际模型 HTTPS 请求也由 Device 发起。Server 保留公开模型列表、任务状态及设备回执。
 
 ### 1.3 最小暴露端口
 
 - 公网侧只需放行一个 TCP 端口：`WWC_SERVER_BIND` 的监听端口（`main.rs` `environment_config`；`server.rs` `spawn_listener`）。
-- Device Client 零入站端口（见 1.1）；Worker 在 Device Client 本机或 Server 进程内执行，不产生额外公网监听（`device-client/lib.rs` `supervisor` 模块文档；`crates/winwincode-server/README.md`）。
+- Device Client 零入站端口（见 1.1）；Worker 在 Device Client 本机执行，不产生额外公网监听（`device-client/lib.rs` `supervisor` 模块文档；`crates/winwincode-server/README.md`）。
 - 防火墙/安全组默认拒绝其余全部入站端口。
 
 ### 1.4 TLS 终点必须放在 Server
 
 公网 Device Client 部署下，TLS 终点必须就是 Server 进程，这是唯一受支持的形态：
 
-- `WWC_SERVER_WORKER_MODE=remote` 且 TLS 关闭时启动直接失败："remote Worker exchange requires the Server TLS listener"（`server.rs` `start_server_with_remote_worker`）。
+- 生产 Worker exchange 在 TLS 关闭时启动直接失败："remote Worker exchange requires the Server TLS listener"（`server.rs` `start_server_with_remote_worker`）。
 - TLS 证书与私钥必须成对出现，只配置其一会启动失败（`main.rs` `environment_config`）；`WWC_SERVER_PUBLIC_URL` 的 scheme 必须与 TLS 模式一致，公网部署即 `https://`（`config.rs` `ServerConfig::new`）。
 - TLS 在启动时加载，证书或私钥无法加载即启动失败（`server.rs` `spawn_listener`，rustls PEM 加载）。
 - 会话 cookie 恒为 `Secure`（`auth_session.rs` `IssuedBrowserSession::set_cookie_header`），且 `SameSite=None` 依赖 `Secure` 才会被浏览器接受，明文 HTTP 上浏览器会丢弃 cookie——TLS 因此对浏览器登录同样是硬要求。
@@ -75,7 +75,7 @@ Device Client 是本地常驻进程，生产代码不开放入站监听。控制
 
 ### 1.5 参考进程守护（systemd）
 
-进程在收到 SIGINT（Ctrl-C）后走优雅停机路径：停止监听、排水 Worker 与事件、关闭应用（`main.rs` `serve_runtime`、`serve_remote_runtime` 等待 `tokio::signal::ctrl_c`；`server.rs` `RunningServer::shutdown_listener`、`shutdown_application`）。停机宽限为 30 秒（`main.rs` `environment_config` 传入 `Duration::from_secs(30)`；`server.rs` `RunningServer` 的 `shutdown_grace`）。systemd 默认发送 SIGTERM，不会进入该路径，因此单元文件显式指定 `KillSignal=SIGINT`，并把 `TimeoutStopSec` 设为大于 30 秒：
+进程在收到 SIGINT（Ctrl-C）后走优雅停机路径：停止监听、排水 Worker 与事件、关闭应用（`main.rs` `serve_remote_runtime` 等待 `tokio::signal::ctrl_c`；`server.rs` `RunningServer::shutdown_listener`、`shutdown_application`）。停机宽限为 30 秒（`main.rs` `environment_config` 传入 `Duration::from_secs(30)`；`server.rs` `RunningServer` 的 `shutdown_grace`）。systemd 默认发送 SIGTERM，不会进入该路径，因此单元文件显式指定 `KillSignal=SIGINT`，并把 `TimeoutStopSec` 设为大于 30 秒：
 
 ```ini
 [Unit]
@@ -154,12 +154,10 @@ WantedBy=multi-user.target
 | `GITHUB_REPOSITORY` | Delivery 发布绑定的 GitHub 仓库 | `main.rs` `local_production_configs` |
 | `GITHUB_CREDENTIAL_REFERENCE_ID` | Delivery 发布凭据引用 | `main.rs` `local_production_configs` |
 | `GITHUB_API_BASE_URL` | GitHub API 基址 | `main.rs` `local_production_configs` |
-| `SECRET_DIRECTORY` | 本地秘密库根目录 | `main.rs` `open_accounts_authority`、`open_local_model_execution`、`local_production_configs`、`compose_enterprise_identity_protocol` |
+| `SECRET_DIRECTORY` | 本地秘密库根目录 | `main.rs` `open_accounts_authority`、`local_production_configs`、`compose_enterprise_identity_protocol` |
 | `PUBLICATION_REQUESTERS` | 发布 requester（逗号分隔，至少一个） | `main.rs` `local_production_configs`、`comma_separated_environment` |
 | `PUBLICATION_APPROVERS` | 发布 approver（逗号分隔，至少一个） | `main.rs` `local_production_configs` |
 | `PUBLICATION_APPROVAL_MAX_AGE_MILLIS` | 发布批准最大有效期（毫秒） | `main.rs` `local_production_configs` |
-| `WWC_SERVER_HELPER_EXECUTABLE` | 内部 Kernel helper 可执行文件路径（local 组成模式） | `main.rs` `open_production_codex` |
-| `WWC_SERVER_HELPER_RELEASE_MANIFEST` | helper 签名清单文件路径（local 组成模式） | `main.rs` `open_production_codex` |
 
 ### 3.2 TLS（Device Client 公网拓扑必配）
 
@@ -168,48 +166,32 @@ WantedBy=multi-user.target
 | `WWC_SERVER_TLS_CERTIFICATE` | PEM 证书路径 | `main.rs` `environment_config` |
 | `WWC_SERVER_TLS_PRIVATE_KEY` | PEM 私钥路径 | `main.rs` `environment_config` |
 
-两者必须同时配置或同时缺省，只配一个即启动失败；Device Client 拓扑（remote 模式）下必须配置（见第 2 节第 2 行）。
+两者必须同时配置或同时缺省，只配一个即启动失败；Device Client 拓扑下必须配置（见第 2 节第 2 行）。
 
-### 3.3 Device Client 拓扑（`WWC_SERVER_WORKER_MODE=remote`）附加
+### 3.3 Device 与 Worker 凭据
 
-| 变量 | 必填性 | 用途 | 读取点 |
-| --- | --- | --- | --- |
-| `WWC_SERVER_REMOTE_WORKER_CREDENTIAL_FILE` | 必填 | 远程 Worker 注册凭据文件：仅加载 SHA-256 指纹；要求 0600（group/other 无位）、非空且不超过 16 KiB，否则启动失败 | `main.rs` `run_remote_composition`；`remote_worker_transport.rs` `FileRemoteWorkerAuthenticator::open`、`read_private_credential` |
-| `WWC_SERVER_REMOTE_WORKER_EXPIRES_AT` | 必填 | 凭据过期时间（RFC 3339），过期即启动失败，运行中到期即拒绝 | `main.rs` `run_remote_composition`；`remote_worker_transport.rs` `open`、`authenticate` |
-| `WWC_SERVER_REMOTE_WORKER_ISSUER` | 可选，默认 `winwincode-server` | Worker 主体 issuer | `main.rs` `run_remote_composition` |
-| `WWC_SERVER_REMOTE_WORKER_SUBJECT` | 可选，默认 `remote-worker` | Worker 主体 subject | `main.rs` `run_remote_composition` |
-| `WWC_SERVER_REMOTE_WORKER_SECURITY_ZONE` | 可选，默认 `default` | Worker 安全域 | `main.rs` `run_remote_composition` |
+Device 使用配对取得的凭据连接 Server。每次启动 Worker 时，Server 生成短期凭据并通过 Device exchange 交付到本机私有文件。Worker 凭据由 `WorkerSessionRemoteAuthenticator` 核验，必须属于对应启动记录及仍有效的设备占用。
+
+Provider 配置使用 Web「设置」中的设备选择、保存和测试按钮。设备离线时不能完成保存或测试；页面必须等到该设备的回执才显示成功。API Key 保存在 Device 数据目录的 `providers/providers.sqlite3`（目录 0700、文件 0600）；Server 不再读取模型环境变量。GitHub 发布凭据仍由其发布服务管理。
 
 ### 3.4 可选变量与默认值
 
 | 变量 | 默认值 | 用途 | 读取点 |
 | --- | --- | --- | --- |
-| `WWC_SERVER_WORKER_MODE` | `local`（仅允许 `local` 或 `remote`） | Device Client 拓扑必须为 `remote`，否则 `/internal` 路由 404 | `main.rs` `run_composed_server` |
 | `WWC_SERVER_BOOTSTRAP_WINDOW_SECONDS` | `600`（上限 86400） | 一次性初始化窗口 | `main.rs` `load_production_startup`；`auth_session.rs` `MAX_BOOTSTRAP_WINDOW_SECONDS` |
 | `WWC_SERVER_SESSION_TTL_SECONDS` | `28800`（上限 31536000） | 浏览器会话 TTL（活跃滑动续期） | `main.rs` `load_production_startup`；`auth_session.rs` `MAX_SESSION_TTL_SECONDS` |
 | `WWC_SERVER_EXECUTION_PROFILE` | `codex-chat` | 执行 profile | `main.rs` `load_production_startup` |
 | `WWC_SERVER_MAX_RUNTIME_SECONDS` | `3600` | 单次运行时长上限 | `main.rs` `load_production_startup` |
 | `WWC_SERVER_MAX_ARTIFACT_BYTES` | `1073741824` | 产物字节上限 | `main.rs` `load_production_startup` |
-| `WWC_SERVER_SOURCE_ROOT` | Delivery 仓库根的父目录 | 受控源码根 | `main.rs` `load_production_startup` |
-| `WWC_SERVER_WORKER_ID` | `wrk_00000000000000000000000001` | Server 内嵌 Worker 标识 | `main.rs` `run_composed_server` |
-| `WWC_SERVER_WORKER_POOL_ID` | `wpl_00000000000000000000000001` | Worker 池标识 | `main.rs` `run_composed_server`、`run_remote_composition` |
-| `WWC_SERVER_MODEL_PROVIDER_ID` | `winwincode-loopback` | 本地模型路由 Provider | `main.rs` `LocalModelRoute::from_environment` |
-| `WWC_SERVER_MODEL_ID` | `loopback-model` | 本地模型路由模型 | `main.rs` `LocalModelRoute::from_environment` |
-| `WWC_SERVER_MODEL_CREDENTIAL_REFERENCE_ID` | `crd_00000000000000000000000001` | 模型凭据引用 | `main.rs` `LocalModelRoute::from_environment` |
-| `WWC_SERVER_MODEL_ANTHROPIC_ENDPOINT` | 未设置 | 完整 HTTPS Anthropic Messages 地址（包括 `/v1/messages`）；设置后使用真实服务 | `model_authority.rs` `LocalModelRoute::provider_config` |
-| `WWC_SERVER_MODEL_API_KEY` | 未设置 | 真实模型服务密钥；设置上述地址时必填，启动时存入本地密钥存储 | `model_authority.rs` `store_local_credential_secret` |
-| `WWC_SERVER_EXECUTION_LEASE_SECONDS` | `30` | 单次执行的有效时长（秒）；真实模型任务应按任务耗时设置，例如 `600`，超时后仍拒绝执行请求 | `main.rs` `RepositoryRuntimeScheduler::from_application` |
-| `WWC_SERVER_ACTION_SIGNING_KEY_HEX` | `1f` x 32（开发默认） | Action Enforcement 签名密钥，64 位十六进制（32 字节），长度或字符非法即启动失败；生产必须显式替换 | `main.rs` `configured_action_signing_key`、`parse_hex_key` |
-| `WWC_SERVER_EXECUTION_ENVELOPE_DIGEST` | `sha256:` + 64 个 `a`（开发默认） | 执行信封摘要（local 组成模式读取） | `main.rs` `open_production_codex` |
+| `WWC_SERVER_EXECUTION_LEASE_SECONDS` | `900` | 单次执行授权时长（秒）；目前不会自动续租，长任务应提前按耗时调整，过期后拒绝新执行请求 | `main.rs` `RepositoryRuntimeScheduler::from_application` |
 
 ### 3.5 进程内身份变量（默认每次启动随机，勿固定）
 
 | 变量 | 缺省行为 | 读取点 |
 | --- | --- | --- |
-| `WWC_SERVER_WORKER_INSTANCE_ID` | 每次启动随机生成（`wki_` 前缀） | `main.rs` `run_composed_server`、`runtime_identity` |
 | `WWC_SERVER_SCHEDULER_GENERATION` | 每次启动随机生成（`gen_` 前缀） | `main.rs` `run_composed_server`、`runtime_identity` |
 
-这两个变量故意不提供稳定默认值：重启必须以新 Worker 实例与新 generation 进入调度器，否则会被当作前身进程并抑制仓库替换路径（`main.rs` `run_composed_server` 的注释）。部署时保持不设置即可。
+调度器 generation 在每次启动时生成。Device 管理各 Worker 的实例身份，部署时无需固定这些实例标识。
 
 ### 3.6 企业身份模式（可选，全有或全无）
 

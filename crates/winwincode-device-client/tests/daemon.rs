@@ -803,11 +803,13 @@ fn restart_recovers_unacked_frames_from_the_persistent_outbox() {
     assert_eq!(daemon.client_node_id(), ASSIGNED_NODE);
 
     // Enqueue three frames that are never exchanged: a crash-shaped state.
-    for _ in 0..3 {
-        daemon
-            .enqueue(heartbeat_message(&config.capacity))
-            .expect("enqueue before crash");
-    }
+    let sequences = (0..3)
+        .map(|_| {
+            daemon
+                .enqueue(heartbeat_message(&config.capacity))
+                .expect("enqueue before crash")
+        })
+        .collect::<Vec<_>>();
     let snapshot = daemon.outbox_snapshot().expect("snapshot");
     assert_eq!(
         snapshot
@@ -815,7 +817,7 @@ fn restart_recovers_unacked_frames_from_the_persistent_outbox() {
             .iter()
             .map(|frame| frame.sequence)
             .collect::<Vec<_>>(),
-        [3, 4, 5]
+        sequences
     );
     daemon.into_store().close().expect("crash close");
 
@@ -889,7 +891,7 @@ fn restart_recovers_unacked_frames_from_the_persistent_outbox() {
     assert!(
         replayed
             .iter()
-            .all(|frame| (3..=5).contains(&frame.sequence)
+            .all(|frame| sequences.contains(&frame.sequence)
                 && frame.instance == first_identity.current_instance_id()),
         "the three durable frames reach the server under their original instance: \
          {replayed:?}"
@@ -959,11 +961,13 @@ fn graceful_shutdown_keeps_taken_frames_durable() {
 
     // Enqueue three frames, then arm the transport and run the loop: the
     // first frame is taken (in flight) while the test shuts the daemon down.
-    for _ in 0..3 {
-        daemon
-            .enqueue(heartbeat_message(&config.capacity))
-            .expect("enqueue");
-    }
+    let sequences = (0..3)
+        .map(|_| {
+            daemon
+                .enqueue(heartbeat_message(&config.capacity))
+                .expect("enqueue")
+        })
+        .collect::<Vec<_>>();
     transport.armed.store(true, Ordering::SeqCst);
 
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -996,18 +1000,18 @@ fn graceful_shutdown_keeps_taken_frames_durable() {
         assert!(status.is_ok(), "graceful shutdown must not fail");
     });
 
-    // The in-flight frame (sequence 3) was acknowledged and confirmed; the
+    // The first in-flight frame was acknowledged and confirmed; the
     // frames the loop never reached stay durable exactly as they were taken.
     let snapshot = daemon.outbox_snapshot().expect("post-shutdown snapshot");
-    assert_eq!(snapshot.ack_sequence, 3);
-    assert_eq!(snapshot.highest_sequence, 5);
+    assert_eq!(snapshot.ack_sequence, sequences[0]);
+    assert_eq!(snapshot.highest_sequence, sequences[2]);
     assert_eq!(
         snapshot
             .frames
             .iter()
             .map(|frame| frame.sequence)
             .collect::<Vec<_>>(),
-        [4, 5],
+        sequences[1..],
         "unconfirmed frames survive shutdown untouched"
     );
 

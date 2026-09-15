@@ -906,6 +906,11 @@ export function mountWinWinCodeClient(
         actor: context.actor,
         scope: context.scope,
         productSessionId,
+        async launchDeviceSession(input) {
+          await clientOccupancy.claim({ clientId: input.clientId })
+          await workerSessions.launch({ clientId: input.clientId,
+            repositoryBindingId: input.repositoryBindingId, productSession: { id: input.productSessionId, scope: context.scope } })
+        },
         nextSubscriptionId: () => contractId(
           'sub',
           browser.crypto,
@@ -935,6 +940,7 @@ export function mountWinWinCodeClient(
       activeFeature = mountChatPage({
         root: slot,
         model,
+        listDeviceRepositories: clientId => clientDirectory.listRepositories({ clientId }),
         deliveryCreator,
         scope: context.scope,
         settingsHref: scopeHash(
@@ -1024,8 +1030,7 @@ export function mountWinWinCodeClient(
     }
   }
 
-  /** UI-EXT-100: the extensions hub is presentation-only until the control
-   *  plane exposes plugin, skill, and MCP inventories; no model is mounted. */
+  /** Device-owned extension configuration and confirmed execution capabilities. */
   async function renderExtensions(generation: number): Promise<void> {
     if (authenticatedRouteContext() === null) return
     const controller = new AbortController()
@@ -1036,7 +1041,7 @@ export function mountWinWinCodeClient(
         import('./extensions-page.js'),
       ])
       if (closed || generation !== renderGeneration || controller.signal.aborted) return
-      activeFeature = mountExtensionsPage({ root: slot })
+      activeFeature = mountExtensionsPage({ root: slot, serverUrl: controlPlane.serverUrl, fetch: browserTransport.fetch })
     } catch (error) {
       if (closed || generation !== renderGeneration || controller.signal.aborted) return
       showRouteFailure(error, 'EXTENSIONS_ROUTE_FAILURE')
@@ -1067,6 +1072,8 @@ export function mountWinWinCodeClient(
       })
       const page = mountSettingsPage({
         root: slot,
+        serverUrl: controlPlane.serverUrl,
+        fetch: browserTransport.fetch,
         model,
         readOnly: activeRouteReadOnly,
         // Design page 15: the 用量 tab lazily mounts the live Usage/Provider/

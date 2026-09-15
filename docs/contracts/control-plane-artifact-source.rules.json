@@ -73,7 +73,7 @@
     "required": [
       "durableExecutionJob",
       "exactRepositoryScope",
-      "activeDeliveryWorkRun",
+      "activeDeliveryWorkRunOrProductSessionJob",
       "completeSessionBinding",
       "workerSession",
       "leaseId",
@@ -158,7 +158,7 @@
         "retention_and_shared_content_prevent_early_or_cross_artifact_deletion",
         "local_git_resolver_ignores_inherited_repository_environment",
         "local_git_resolver_ignores_repository_replace_refs",
-        "local_git_resolver_rebuilds_identity_from_exact_candidate_artifact",
+        "local_git_resolver_imports_candidate_from_an_isolated_worker_repository",
         "local_git_resolver_rejects_a_noncanonical_candidate_manifest"
       ]
     },
@@ -208,5 +208,20 @@
     "secondArtifactStorePathRetained": false,
     "enterpriseObjectStorageClaimedComplete": false,
     "githubPublicationClaimedComplete": false
+  },
+  "chatOutputs": {
+    "executionProfile": "codex-chat",
+    "format": "application/zip",
+    "fileName": "project.zip",
+    "sourceRetention": "Device Git candidate ref before upload",
+    "cleanup": "after durable final artifact acknowledgement",
+    "downloadQuery": "session.artifact.get",
+    "downloadAuthority": [
+      "repositoryScope",
+      "ProductSession terminal artifact link",
+      "exact job provenance",
+      "digest"
+    ],
+    "maximumReadChunkBytes": 262144
   }
 }

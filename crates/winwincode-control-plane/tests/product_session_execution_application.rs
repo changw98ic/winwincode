@@ -1102,7 +1102,7 @@ fn assert_product_replacement_replays_after_expiry(
         )
         .expect("expired replacement binding replay");
     fixture
-        .accept(&ExecutionPortMessage::ModelOpenMessage(open), expired())
+        .accept(&model_binding_message(open), expired())
         .expect("expired replacement ModelOpen replay");
     let replayed = ProductSessionService::new(&mut fixture.storage)
         .get(&fixture.receipt_scope, &fixture.product_session_id)
@@ -1147,12 +1147,10 @@ fn prepared_provider_fixture(seed: u64) -> (Fixture, ModelOpenMessage) {
     let model_open = model_open_message(&fixture, &runtime, seed);
     assert!(
         fixture
-            .accept(
-                &ExecutionPortMessage::ModelOpenMessage(model_open.clone()),
-                at(10),
-            )
+            .accept(&model_binding_message(model_open.clone()), at(10),)
             .expect("attach model exchange")
-            .is_empty()
+            .iter()
+            .any(|message| matches!(message, ExecutionPortMessage::ModelAckMessage(_)))
     );
     configure_model_provider(&mut fixture, seed);
     DurableProviderGatewayIdentitySource::open(&fixture.root)
@@ -1269,9 +1267,10 @@ fn accepted_terminal_fixture(seed: u64) -> AcceptedTerminalFixture {
     let model_open = model_open_message(&fixture, &runtime, seed);
     assert!(
         fixture
-            .accept(&ExecutionPortMessage::ModelOpenMessage(model_open), at(10),)
+            .accept(&model_binding_message(model_open), at(10),)
             .expect("attach model exchange")
-            .is_empty()
+            .iter()
+            .any(|message| matches!(message, ExecutionPortMessage::ModelAckMessage(_)))
     );
     let outcome = successful_outcome(&fixture, &runtime, seed);
     let output = fixture
@@ -1338,7 +1337,7 @@ fn bound_scheduler_fixture(seed: u64) -> BoundSchedulerFixture {
         .expect("bound scheduler SessionBinding");
     let open = model_open_message(&fixture, &runtime, seed * 200 + 7);
     fixture
-        .accept(&ExecutionPortMessage::ModelOpenMessage(open), at(10))
+        .accept(&model_binding_message(open), at(10))
         .expect("bound scheduler ModelOpen");
     BoundSchedulerFixture {
         fixture,
@@ -1428,7 +1427,7 @@ fn failed_terminal_retry_dispatch_rebinds_product_session_and_fences_old_ingress
     let mut open = model_open_message(&fixture, &replacement_runtime, 12_510);
     open.sent_at = at(17);
     fixture
-        .accept(&ExecutionPortMessage::ModelOpenMessage(open), at(17))
+        .accept(&model_binding_message(open), at(17))
         .expect("retry ModelOpen");
 
     let record = ProductSessionService::new(&mut fixture.storage)
@@ -1480,10 +1479,7 @@ fn running_scheduler_replacement_rotates_one_product_session_binding_and_replays
         .expect("original ProductSession binding");
     let original_open = model_open_message(&fixture, &original_runtime, 6_107);
     fixture
-        .accept(
-            &ExecutionPortMessage::ModelOpenMessage(original_open),
-            at(10),
-        )
+        .accept(&model_binding_message(original_open), at(10))
         .expect("original ProductSession ModelOpen");
 
     register_worker_process(&mut fixture.storage, seed, seed + 1, 6_108, 11);
@@ -1513,10 +1509,7 @@ fn running_scheduler_replacement_rotates_one_product_session_binding_and_replays
     let mut replacement_open = model_open_message(&fixture, &replacement_runtime, 6_116);
     replacement_open.sent_at = at(28);
     fixture
-        .accept(
-            &ExecutionPortMessage::ModelOpenMessage(replacement_open.clone()),
-            at(28),
-        )
+        .accept(&model_binding_message(replacement_open.clone()), at(28))
         .expect("replacement ProductSession ModelOpen");
 
     let record = ProductSessionService::new(&mut fixture.storage)
@@ -1584,7 +1577,7 @@ fn accepted_dispatch_without_a_slot_replaces_with_a_fresh_product_session_bindin
     let mut open = model_open_message(&fixture, &runtime, 6_311);
     open.sent_at = at(28);
     fixture
-        .accept(&ExecutionPortMessage::ModelOpenMessage(open), at(28))
+        .accept(&model_binding_message(open), at(28))
         .expect("fresh successor ModelOpen");
 
     let record = ProductSessionService::new(&mut fixture.storage)
@@ -1623,6 +1616,7 @@ fn terminal_resource_close_then_expired_restart_keeps_binding_and_outcome_replay
         record.turn_intents()[0].terminal_outcome.as_ref(),
         Some(
             &winwincode_control_plane::ProductSessionTurnTerminalOutcome {
+                artifact_refs: None,
                 status: outcome.outcome.status.clone(),
                 usage: outcome.outcome.usage.clone(),
                 last_event_sequence: outcome.outcome.last_event_sequence.clone(),
@@ -1815,4 +1809,362 @@ fn restart_rejects_cross_authority_pool_request_route_and_terminal_facts() {
         );
         fixture.close();
     }
+}
+
+fn model_binding_message(open: ModelOpenMessage) -> ExecutionPortMessage {
+    let ExecutionPortMessage::ModelChunkMessage(mut chunk) = execution_message("model.chunk")
+    else {
+        panic!("chunk fixture")
+    };
+    chunk.lease = open.lease;
+    chunk.message_id = open.message_id;
+    chunk.worker_session_id = open.worker_session_id;
+    chunk.session_identity = open.session_identity;
+    chunk.model_exchange_id = open.model_exchange_id;
+    chunk.sequence = ExecutionSequence(1);
+    chunk.payload = None;
+    chunk.error = None;
+    chunk.is_final = false;
+    chunk.sent_at = open.sent_at;
+    ExecutionPortMessage::ModelChunkMessage(chunk)
+}
+
+#[test]
+fn device_model_calls_share_one_execution_binding_and_replay_after_restart() {
+    let (mut fixture, first) = prepared_provider_fixture(91);
+    let mut second = first.clone();
+    second.model_exchange_id = winwincode_domain::ModelExchangeId(id("mdl", 9191));
+    second.message_id = ExecutionMessageId(id("xmsg", 9191));
+    let second_frame = model_binding_message(second.clone());
+    fixture
+        .accept(&second_frame, at(11))
+        .expect("second tool-loop model call");
+    fixture = fixture.restart();
+    fixture
+        .accept(&second_frame, at(12))
+        .expect("second call replay");
+    fixture
+        .accept(&model_binding_message(first.clone()), at(13))
+        .expect("first call replay");
+    let record = ProductSessionService::new(&mut fixture.storage)
+        .get(&fixture.receipt_scope, &fixture.product_session_id)
+        .expect("read")
+        .expect("session");
+    assert_eq!(record.bindings().len(), 1);
+    let binding = &record.bindings()[0];
+    assert!(binding.includes_model_exchange(&first.model_exchange_id));
+    assert!(binding.includes_model_exchange(&second.model_exchange_id));
+    assert_eq!(binding.model_exchange_id(), &second.model_exchange_id);
+    let mut foreign = second;
+    foreign.worker_session_id = WorkerSessionId(id("wsn", 99999));
+    assert!(
+        fixture
+            .accept(&model_binding_message(foreign), at(14))
+            .is_err()
+    );
+    fixture.close();
+}
+
+#[test]
+fn worker_message_numbers_do_not_conflict_between_chat_jobs() {
+    let mut fixture = Fixture::open(950);
+    let mut messages = Vec::new();
+    for seed in [951, 952] {
+        fixture.product_session_id = ProductSessionId(id("psn", seed));
+        let job = create_chat_job(&mut fixture, seed);
+        let scope = execution_scope(&fixture);
+        register_worker(&mut fixture.storage, seed);
+        reserve_execution(&mut fixture.storage, &scope, &job, seed);
+        transition_job(
+            &mut fixture.storage,
+            &scope,
+            &job.job_id,
+            seed * 100 + 20,
+            1,
+            ExecutionJobState::Queued,
+            ExecutionJobState::Leased,
+        );
+        let runtime = claim_and_open_runtime(&mut fixture, &job, seed);
+        accept_dispatch(&mut fixture, &job, &runtime, seed);
+        let mut binding = binding_message(&fixture, &runtime, seed);
+        binding.message_id = ExecutionMessageId(id("xmsg", 3));
+        let message = ExecutionPortMessage::SessionBindingMessage(binding);
+        fixture
+            .accept(&message, at(9))
+            .expect("independent Worker binding");
+        messages.push(message);
+    }
+    let mut fixture = fixture.restart();
+    for message in messages {
+        fixture
+            .accept(&message, at(9))
+            .expect("exact binding replay after restart");
+    }
+    fixture.close();
+}
+
+#[test]
+fn chat_artifact_ingress_preserves_exact_session_binding_and_replays() {
+    let BoundSchedulerFixture {
+        mut fixture,
+        runtime,
+        ..
+    } = bound_scheduler_fixture(85);
+    let ExecutionPortMessage::ArtifactOpenMessage(mut open) = execution_message("artifact.open")
+    else {
+        panic!("artifact open")
+    };
+    open.lease = runtime.lease.clone();
+    open.worker_session_id = runtime.slot.worker_session_id.clone();
+    open.session_identity = session_identity(&fixture, &runtime);
+    open.sent_at = at(11);
+    let ExecutionPortMessage::ArtifactChunkMessage(mut chunk) = execution_message("artifact.chunk")
+    else {
+        panic!("artifact chunk")
+    };
+    chunk.lease = runtime.lease.clone();
+    chunk.worker_session_id = open.worker_session_id.clone();
+    chunk.session_identity = open.session_identity.clone();
+    chunk.sent_at = at(12);
+    open.artifact.digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(b"{}")));
+    open.artifact.media_type = "application/zip".into();
+    open.artifact.file_name = Some("project.zip".into());
+    chunk.payload.content_type = open.artifact.media_type.clone();
+    let artifact = winwincode_execution_port::generated::ArtifactReference {
+        artifact_id: open.artifact.artifact_id.clone(),
+        digest: open.artifact.digest.clone(),
+    };
+    chunk.payload.payload_digest = open.artifact.digest.clone();
+    let open = ExecutionPortMessage::ArtifactOpenMessage(open);
+    let chunk = ExecutionPortMessage::ArtifactChunkMessage(chunk);
+    for message in [&open, &chunk] {
+        let replies = fixture
+            .accept(message, at(13))
+            .expect("Chat artifact is acknowledged");
+        assert!(replies.iter().any(|reply| matches!(reply,
+            ExecutionPortMessage::ArtifactAckMessage(ack) if ack.status == LeaseWriteStatus::Accepted)));
+    }
+    let mut fixture = fixture.restart();
+    for message in [&open, &chunk] {
+        let replies = fixture.accept(message, at(14)).expect("artifact replay");
+        assert!(replies.iter().any(|reply| matches!(reply,
+            ExecutionPortMessage::ArtifactAckMessage(ack) if matches!(ack.status, LeaseWriteStatus::Accepted | LeaseWriteStatus::Duplicate))));
+    }
+    let mut outcome = successful_outcome(&fixture, &runtime, 85);
+    outcome.outcome.artifacts = vec![artifact.clone()];
+    let mut injected = outcome.clone();
+    injected.outcome.artifacts[0].digest = Sha256Digest(format!("sha256:{}", "0".repeat(64)));
+    assert!(
+        fixture
+            .accept(&ExecutionPortMessage::JobOutcomeMessage(injected), at(20))
+            .is_err()
+    );
+    fixture
+        .accept(&ExecutionPortMessage::JobOutcomeMessage(outcome), at(20))
+        .expect("Chat output links are durable");
+    let mut fixture = fixture.restart();
+    let mut query: winwincode_api::generated::SessionArtifactGetQuery = from_value(serde_json::json!({
+        "actor":{"id":id("usr",1),"kind":"user"}, "query":"session.artifact.get",
+        "parameters":{"productSessionId":fixture.product_session_id,"artifactId":artifact.artifact_id,"offset":0,"length":262_144},
+        "page":{"cursor":null,"limit":1}, "requestId":id("req",85999),"schemaVersion":"winwincode/v1","scope":fixture.repository_scope,
+    })).expect("download query");
+    let downloaded = fixture
+        .control_plane
+        .session_artifact_get(&mut fixture.storage, &query)
+        .expect("download after restart and terminal cleanup");
+    assert_eq!(
+        STANDARD
+            .decode(downloaded.result.data_base64)
+            .expect("base64"),
+        b"{}"
+    );
+    assert_eq!(downloaded.result.digest, artifact.digest);
+    query.parameters.product_session_id = ProductSessionId(id("psn", 85999));
+    assert!(
+        fixture
+            .control_plane
+            .session_artifact_get(&mut fixture.storage, &query)
+            .is_err()
+    );
+    fixture.close();
+}
+
+#[test]
+fn core_chat_approval_is_recorded_for_the_owner_and_survives_replay() {
+    let BoundSchedulerFixture {
+        mut fixture,
+        runtime,
+        ..
+    } = bound_scheduler_fixture(84);
+    let ExecutionPortMessage::ApprovalRequestMessage(mut request) =
+        execution_message("approval.request")
+    else {
+        panic!("approval fixture")
+    };
+    request.lease = runtime.lease.clone();
+    request.worker_session_id = runtime.slot.worker_session_id.clone();
+    request.session_identity = session_identity(&fixture, &runtime);
+    request.sent_at = at(11);
+    request.expires_at = at(24);
+    let message = ExecutionPortMessage::ApprovalRequestMessage(request.clone());
+    fixture
+        .accept(&message, at(12))
+        .expect("Core approval must reach Chat without a preseeded Gate fact");
+    let mut fixture = fixture.restart();
+    fixture
+        .accept(&message, at(13))
+        .expect("exact approval replay");
+    let query = from_value(serde_json::json!({
+        "actor": {"id": id("usr",1), "kind":"user"},
+        "page": {"cursor":null,"limit":1},
+        "parameters":{"approvalId":request.approval_id},
+        "query":"approval.get", "requestId":id("req",84999),
+        "schemaVersion":"winwincode/v1", "scope":fixture.repository_scope,
+    }))
+    .expect("approval query");
+    let response = winwincode_control_plane::ChatInteractionService::new(&mut fixture.storage)
+        .approval_get(&fixture.receipt_scope, &query, &at(14))
+        .expect("visible approval");
+    assert_eq!(response.result.state, "pending");
+    assert!(response.result.decision_enabled);
+    let command: winwincode_api::generated::ApprovalDecideCommand = from_value(serde_json::json!({
+        "actor": {"id": id("usr",1), "kind":"user"},
+        "command":"approval.decide", "expectedRevision":response.result.revision,
+        "payload":{"approvalId":request.approval_id,"binding":response.result.binding,
+            "decision":"approve","reason":"Install project dependencies"},
+        "requestId":id("req",84998),"schemaVersion":"winwincode/v1",
+        "scope":fixture.repository_scope,
+    }))
+    .expect("approval decision");
+    let mut context = command_context(&fixture.repository_scope, 84998, 1);
+    context.occurred_at = at(15);
+    let mut foreign = command.clone();
+    foreign.actor = from_value(serde_json::json!({"id":id("usr",2),"kind":"user"})).expect("actor");
+    assert!(
+        winwincode_control_plane::ChatInteractionService::new(&mut fixture.storage)
+            .decide_approval(&context, &foreign)
+            .is_err()
+    );
+    let mut expired_context = context.clone();
+    expired_context.occurred_at = at(25);
+    assert!(
+        winwincode_control_plane::ChatInteractionService::new(&mut fixture.storage)
+            .decide_approval(&expired_context, &command)
+            .is_err()
+    );
+    let receipt = winwincode_control_plane::ChatInteractionService::new(&mut fixture.storage)
+        .decide_approval(&context, &command)
+        .expect("owner approval");
+    assert_eq!(receipt.approval.state, "approved");
+    let decision = receipt.worker_decision.expect("Worker decision");
+    assert_eq!(decision.lease, runtime.lease);
+    assert_eq!(decision.session_identity, request.session_identity);
+    let mut fixture = fixture.restart();
+    let replay = winwincode_control_plane::ChatInteractionService::new(&mut fixture.storage)
+        .decide_approval(&context, &command)
+        .expect("decision replay");
+    assert!(replay.replayed);
+    assert_eq!(replay.worker_decision, Some(decision));
+    fixture.close();
+}
+
+#[test]
+fn chat_action_receipt_uses_chat_authority_and_rejects_foreign_or_expired_requests() {
+    use winwincode_execution_port::action_enforcement::{
+        ActionEnforcementIssuer, ActionEnforcementSigningKey,
+    };
+    let BoundSchedulerFixture {
+        mut fixture,
+        job,
+        runtime,
+        ..
+    } = bound_scheduler_fixture(81);
+    let ExecutionPortMessage::ActionEnforcementRequestMessage(mut request) =
+        execution_message("action.enforcement_request")
+    else {
+        panic!("action request fixture")
+    };
+    request.job_id = job.job_id.clone();
+    request.lease = runtime.lease.clone();
+    request.worker_session_id = runtime.slot.worker_session_id.clone();
+    request.session_identity = session_identity(&fixture, &runtime);
+    request.sent_at = at(11);
+    let issuer = ActionEnforcementIssuer::new(
+        ActionEnforcementSigningKey::from_bytes([11; 32]).expect("key"),
+    );
+    let first = winwincode_control_plane::issue_action_enforcement_receipt(
+        &mut fixture.storage,
+        &issuer,
+        &at(12),
+        &request,
+    )
+    .expect("Chat tool must receive its own signed action receipt");
+    issuer.verify_signature(&first).expect("valid signature");
+    assert_eq!(first.actor.id, UserId(id("usr", 1)));
+    assert_eq!(first.scope, fixture.repository_scope);
+    for mutate in 0..3 {
+        let mut changed = request.clone();
+        match mutate {
+            0 => changed.session_identity.product_session_id = ProductSessionId(id("psn", 999)),
+            1 => changed.lease.worker_instance_id = WorkerInstanceId(id("wki", 999)),
+            _ => {
+                changed.session_identity.codex_thread_id =
+                    CodexThreadId("foreign-thread".to_owned());
+            }
+        }
+        assert!(
+            winwincode_control_plane::issue_action_enforcement_receipt(
+                &mut fixture.storage,
+                &issuer,
+                &at(13),
+                &changed
+            )
+            .is_err()
+        );
+    }
+    assert!(
+        winwincode_control_plane::issue_action_enforcement_receipt(
+            &mut fixture.storage,
+            &issuer,
+            &expired(),
+            &request
+        )
+        .is_err()
+    );
+    let mut fixture = fixture.restart();
+    let replay = winwincode_control_plane::issue_action_enforcement_receipt(
+        &mut fixture.storage,
+        &issuer,
+        &at(13),
+        &request,
+    )
+    .expect("replay after restart");
+    assert_eq!(first, replay);
+    let scope = execution_scope(&fixture);
+    let revision = fixture
+        .storage
+        .load_execution_job_record(&job.job_id)
+        .expect("job read")
+        .expect("job")
+        .revision;
+    transition_job(
+        &mut fixture.storage,
+        &scope,
+        &job.job_id,
+        81999,
+        revision,
+        ExecutionJobState::Running,
+        ExecutionJobState::Failed,
+    );
+    assert!(
+        winwincode_control_plane::issue_action_enforcement_receipt(
+            &mut fixture.storage,
+            &issuer,
+            &at(14),
+            &request
+        )
+        .is_err(),
+        "terminal Chat cannot authorize another action"
+    );
+    fixture.close();
 }

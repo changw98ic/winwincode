@@ -73,6 +73,7 @@ struct WorkerBootstrap {
     worker_instance_id: WorkerInstanceId,
     started_at: Instant,
     data_directory: PathBuf,
+    provider_directory: PathBuf,
     source_directory: PathBuf,
     server_origin: String,
     credential_path: PathBuf,
@@ -98,12 +99,13 @@ async fn run_remote() -> Result<(), Box<dyn std::error::Error>> {
         worker_instance_id: WorkerInstanceId(required("WWC_WORKER_INSTANCE_ID")?),
         started_at: env::var("WWC_WORKER_STARTED_AT").map_or(now_instant()?, Instant),
         data_directory: PathBuf::from(required("WWC_WORKER_DATA_DIRECTORY")?),
+        provider_directory: PathBuf::from(required("WWC_DEVICE_PROVIDER_DIRECTORY")?),
         source_directory: PathBuf::from(required("WWC_WORKER_SOURCE_ROOT")?),
         server_origin: required("WWC_WORKER_SERVER_ORIGIN")?,
         credential_path: PathBuf::from(required("WWC_WORKER_CREDENTIAL_FILE")?),
         model_route: default_model_route(),
     };
-    run_worker(bootstrap).await
+    Box::pin(run_worker(bootstrap)).await
 }
 
 /// Managed entry (plan §14.4): identity and locality come only from the
@@ -126,11 +128,12 @@ async fn run_managed(config_path: &str) -> Result<(), Box<dyn std::error::Error>
         config.client_instance_id.0,
         credential.digest().0,
     );
-    run_worker(WorkerBootstrap {
+    Box::pin(run_worker(WorkerBootstrap {
         worker_id: config.worker_id.clone(),
         worker_instance_id: config.worker_instance_id.clone(),
         started_at: now_instant()?,
         data_directory: config.data_directory.clone(),
+        provider_directory: config.provider_directory.clone(),
         source_directory: config.source_directory.clone(),
         server_origin: config.server_origin.clone(),
         credential_path: credential.path().to_path_buf(),
@@ -138,7 +141,7 @@ async fn run_managed(config_path: &str) -> Result<(), Box<dyn std::error::Error>
             .model_route
             .clone()
             .unwrap_or_else(default_model_route),
-    })
+    }))
     .await
 }
 
@@ -151,6 +154,7 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
         worker_instance_id,
         started_at,
         data_directory,
+        provider_directory,
         source_directory,
         server_origin,
         credential_path,
@@ -170,6 +174,7 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
     )?;
     let codex = production_codex(
         &data_directory,
+        &provider_directory,
         model_route,
         capabilities.clone(),
         execution_mode,
@@ -187,6 +192,7 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
         capabilities,
     };
     let mut worker = WorkerMain::new(config, port, codex, workspaces)
+        .with_device_providers(&provider_directory)?
         .with_observer_mode(observer_mode)
         .with_registration_request_namespace(&worker_instance_id, &started_at);
     if let Some(observation_model) = observation_model {
@@ -196,7 +202,7 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
     while worker.lifecycle() == WorkerLifecycleState::Booting
         || worker.lifecycle() == WorkerLifecycleState::Registering
     {
-        if worker.start(started_at.clone()).await.is_ok() {
+        if Box::pin(worker.start(started_at.clone())).await.is_ok() {
             Box::pin(drain_controls(&mut worker, &handle)).await?;
         }
         if worker.lifecycle() != WorkerLifecycleState::Active {
@@ -211,7 +217,7 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
             _ = tokio::signal::ctrl_c() => break,
             _ = heartbeat.tick() => {
                 let now = now_instant()?;
-                if worker.heartbeat(now.clone()).await.is_ok() {
+                if Box::pin(worker.heartbeat(now.clone())).await.is_ok() {
                     Box::pin(drain_controls(&mut worker, &handle)).await?;
                 }
             }
@@ -263,6 +269,7 @@ where
 
 fn production_codex(
     data_directory: &std::path::Path,
+    provider_directory: &std::path::Path,
     model_route: ModelGatewayRoute,
     capabilities: WorkerCapabilitySet,
     execution_mode: ExecutionMode,
@@ -271,15 +278,41 @@ fn production_codex(
     let helper_release_manifest = HelperReleaseManifest::from_file(&PathBuf::from(required(
         "WWC_WORKER_HELPER_RELEASE_MANIFEST",
     )?))?;
+    let store = winwincode_provider::DeviceProviderStore::open(provider_directory)?;
+    let snapshot = store.snapshot("local")?;
+    let extensions = store.restore_extensions(&data_directory.join("codex-runtime/kernel-home"))?;
+    let mut discovered_capabilities = Vec::new();
+    for server in extensions {
+        for tool in server.tools {
+            discovered_capabilities.push(
+                winwincode_execution_port::capability_adapter::CapabilityDescriptor::mcp(
+                    &server.server,
+                    &tool,
+                    server.digest.trim_start_matches("sha256:"),
+                    winwincode_execution_port::capability_adapter::CapabilityHealth::Healthy,
+                    winwincode_execution_port::capability_adapter::CapabilityOrigin::CodexCoreMcp,
+                )?,
+            );
+        }
+    }
+    let default_provider = snapshot
+        .providers
+        .iter()
+        .find(|provider| provider.config.enabled && provider.credential_configured)
+        .ok_or("configure a Provider on this Device before starting a Worker")?;
+    let provider_id = env::var("WWC_WORKER_MODEL_PROVIDER_ID")
+        .unwrap_or_else(|_| default_provider.config.provider_id.clone());
+    let model_id = env::var("WWC_WORKER_MODEL_ID")
+        .unwrap_or_else(|_| default_provider.config.model_ids[0].clone());
     let options = ProductionCodexOptions {
         data_directory: data_directory.join("codex-runtime"),
         helper_executable: PathBuf::from(required("WWC_WORKER_HELPER_EXECUTABLE")?),
         helper_release_manifest,
-        provider: required("WWC_WORKER_MODEL_PROVIDER_ID")?,
-        model: required("WWC_WORKER_MODEL_ID")?,
+        provider: provider_id,
+        model: model_id,
         gateway_route: model_route,
         registered_capabilities: capabilities,
-        discovered_capabilities: Vec::new(),
+        discovered_capabilities,
         action_signing_key: ActionEnforcementSigningKey::from_bytes(parse_hex_key(&required(
             "WWC_WORKER_ACTION_SIGNING_KEY_HEX",
         )?)?)?,
@@ -290,9 +323,10 @@ fn production_codex(
         execution_mode,
         observer_mode,
     };
-    Ok(ProductionCodexAdapter::open(
-        ProductionCodexConfig::try_new(options)?,
-    )?)
+    Ok(
+        ProductionCodexAdapter::open(ProductionCodexConfig::try_new(options)?)?
+            .with_device_extensions(provider_directory.to_path_buf())?,
+    )
 }
 
 /// Canonical model route used when no managed config override exists —

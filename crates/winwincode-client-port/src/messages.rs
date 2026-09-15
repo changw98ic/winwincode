@@ -412,9 +412,15 @@ pub struct ClientCommandAckPayload {
 /// A client-to-server `ClientControlPort` message (plan section 9.3).
 ///
 /// Serialized as a `kind`/`payload` pair using the plan's exact kind strings.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "payload")]
 pub enum ClientToServerMessage {
+    /// Public Device Skills/MCP metadata and completion receipt.
+    #[serde(rename = "client.extension.report")]
+    ExtensionReport(Box<winwincode_api::generated::DeviceExtensionReport>),
+    /// Public configuration and durable completion from this Device.
+    #[serde(rename = "client.provider.report")]
+    ProviderReport(Box<winwincode_api::generated::DeviceProviderReport>),
     /// Enroll a fresh device with the server.
     #[serde(rename = "client.enroll")]
     Enroll(Box<ClientEnrollPayload>),
@@ -635,12 +641,26 @@ pub struct ServerCredentialRotatePayload {
     pub reason: ClientCredentialRotateReason,
 }
 
+/// Encrypted Provider command using the shared revision/idempotency fields.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ServerConfigurationApplyPayload {
+    #[serde(flatten)]
+    pub command: CommandContext,
+    pub encrypted: winwincode_api::generated::DeviceConfigurationEnvelope,
+}
+
 /// A server-to-client `ClientControlPort` message (plan section 9.4).
 ///
 /// Serialized as a `kind`/`payload` pair using the plan's exact kind strings.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "payload")]
 pub enum ServerToClientMessage {
+    /// Encrypted Skills/MCP mutation for the selected Device.
+    #[serde(rename = "client.extension.apply")]
+    ExtensionApply(Box<ServerConfigurationApplyPayload>),
+    /// End-to-end encrypted Provider mutation, bound to the selected Device.
+    #[serde(rename = "client.provider.apply")]
+    ProviderApply(Box<ServerConfigurationApplyPayload>),
     /// Device enrollment was accepted.
     #[serde(rename = "client.enrollment_accepted")]
     EnrollmentAccepted(ServerEnrollmentAcceptedPayload),
@@ -838,7 +858,7 @@ mod tests {
             repository_binding_id: "rb_01j2".to_owned(),
             product_session_id: "ps_01j2".to_owned(),
             work_run_id: Some("wrn_01j2".to_owned()),
-            worker_session_id: "ws_01j2".to_owned(),
+            worker_session_id: "wsn_01j2".to_owned(),
             worker_id: "worker_1".to_owned(),
             worker_instance_id: "winst_01j2".to_owned(),
             credential_digest: "sha256:dd44".to_owned(),
@@ -975,7 +995,7 @@ mod tests {
                     "repositoryBindingId": "rb_01j2",
                     "productSessionId": "ps_01j2",
                     "workRunId": "wrn_01j2",
-                    "workerSessionId": "ws_01j2",
+                    "workerSessionId": "wsn_01j2",
                     "workerId": "worker_1",
                     "workerInstanceId": "winst_01j2",
                     "credentialDigest": "sha256:dd44",
@@ -989,7 +1009,7 @@ mod tests {
         let ServerToClientMessage::WorkerLaunch(payload) = &envelope.message else {
             panic!("expected client.worker.launch");
         };
-        assert_eq!(payload.launch_grant.worker_session_id, "ws_01j2");
+        assert_eq!(payload.launch_grant.worker_session_id, "wsn_01j2");
         assert_eq!(payload.occupancy.occupancy_fencing_token, 7);
         assert_eq!(payload.launch_grant.occupancy_fencing_token, 7);
     }
@@ -1122,7 +1142,7 @@ mod tests {
                 ClientToServerMessage::WorkerLaunchAck(Box::new(ClientWorkerLaunchAckPayload {
                     occupancy: occupancy.clone(),
                     worker_launch_grant_id: "wlg_01j2".to_owned(),
-                    worker_session_id: "ws_01j2".to_owned(),
+                    worker_session_id: "wsn_01j2".to_owned(),
                     worker_id: "worker_1".to_owned(),
                     worker_instance_id: "winst_01j2".to_owned(),
                     status: WorkerLaunchAckStatus::Accepted,
@@ -1133,7 +1153,7 @@ mod tests {
                 "client.worker.state",
                 ClientToServerMessage::WorkerState(ClientWorkerStatePayload {
                     occupancy_lease_id: Some("lease_01j2".to_owned()),
-                    worker_session_id: "ws_01j2".to_owned(),
+                    worker_session_id: "wsn_01j2".to_owned(),
                     worker_instance_id: "winst_01j2".to_owned(),
                     state: ClientWorkerRunState::Running,
                     exit_code: None,
@@ -1145,7 +1165,7 @@ mod tests {
                 ClientToServerMessage::WorkerReconcile(ClientWorkerReconcilePayload {
                     occupancy_lease_id: Some("lease_01j2".to_owned()),
                     workers: vec![ClientWorkerReconciliation {
-                        worker_session_id: "ws_01j2".to_owned(),
+                        worker_session_id: "wsn_01j2".to_owned(),
                         worker_instance_id: "winst_01j2".to_owned(),
                         reconcile_state: WorkerReconcileState::StillRunning,
                         observed_at: "2026-01-02T12:06:00.000Z".to_owned(),
@@ -1156,7 +1176,7 @@ mod tests {
                 "client.candidate.retained",
                 ClientToServerMessage::CandidateRetained(ClientCandidateRetainedPayload {
                     occupancy: occupancy.clone(),
-                    worker_session_id: "ws_01j2".to_owned(),
+                    worker_session_id: "wsn_01j2".to_owned(),
                     receipt: candidate_receipt(),
                 }),
             ),
@@ -1248,7 +1268,7 @@ mod tests {
                 "client.worker.stop",
                 ServerToClientMessage::WorkerStop(ServerWorkerStopPayload {
                     occupancy: occupancy.clone(),
-                    worker_session_id: "ws_01j2".to_owned(),
+                    worker_session_id: "wsn_01j2".to_owned(),
                     worker_id: "worker_1".to_owned(),
                     reason: ClientWorkerStopReason::OccupantRequested,
                 }),

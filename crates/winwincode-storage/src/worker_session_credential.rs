@@ -1126,7 +1126,7 @@ fn validate_worker_session_credential_id(
 }
 
 fn validate_worker_session_id(value: &str) -> Result<(), WorkerSessionCredentialStoreError> {
-    validate_crockford_id(value, "ws_", "worker session id")
+    validate_crockford_id(value, "wsn_", "worker session id")
 }
 
 fn validate_worker_id(value: &str) -> Result<(), WorkerSessionCredentialStoreError> {

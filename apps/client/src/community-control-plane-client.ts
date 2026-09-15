@@ -45,6 +45,7 @@ import type {
   Actor,
   PageRequest,
   RepositoryScope,
+  ProductSessionId,
   WorkItemId,
   DeliveryId,
   DeliveryDetailProjection,
@@ -2537,11 +2538,10 @@ export interface ControlPlaneTaskPort {
   describe(taskId: string): ControlPlaneTaskAnchor | null
 }
 
-export interface ControlPlaneWorkerSessionLaunchInput {
+export type ControlPlaneWorkerSessionLaunchInput = {
   readonly clientId: string
   readonly repositoryBindingId: string
-  readonly workRunId: WorkRunId
-}
+} & ({ readonly workRunId: WorkRunId } | { readonly productSession: { readonly id: ProductSessionId; readonly scope: RepositoryScope } })
 
 export interface ControlPlaneWorkerSessionPort {
   launch(input: ControlPlaneWorkerSessionLaunchInput): Promise<void>
@@ -2572,7 +2572,7 @@ export function createControlPlaneWorkerSessionPort(options: {
             schemaVersion: 'winwincode/v1',
             clientId: input.clientId,
             repositoryBindingId: input.repositoryBindingId,
-            workRunId: input.workRunId,
+            ...("workRunId" in input ? { workRunId: input.workRunId } : { productSession: input.productSession }),
           }),
           redirect: 'error',
           cache: 'no-store',
@@ -2615,7 +2615,7 @@ export function createControlPlaneWorkerSessionPort(options: {
       if (typeof body !== 'object' || body === null
         || Reflect.get(body, 'clientId') !== input.clientId
         || Reflect.get(body, 'repositoryBindingId') !== input.repositoryBindingId
-        || Reflect.get(body, 'workRunId') !== input.workRunId) {
+        || ('workRunId' in input ? Reflect.get(body, 'workRunId') !== input.workRunId : Reflect.get(body, 'productSessionId') !== input.productSession.id)) {
         throw new ControlPlaneClientError({
           kind: 'protocol',
           code: 'INVALID_WORKER_SESSION_RESPONSE',

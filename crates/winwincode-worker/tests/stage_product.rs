@@ -291,6 +291,7 @@ fn active_job(repository_id: &RepositoryId, suffix: &str, role: &str) -> ActiveJ
     };
     ActiveJob {
         job: ExecutionJob {
+            model_selection: None,
             attempt: 1,
             execution_profile: role.to_owned(),
             goal: "produce one exact StrongFlow stage product".to_owned(),

@@ -924,6 +924,7 @@ mod tests {
             work_contract_revision: Revision(2),
         };
         ExecutionJob {
+            model_selection: None,
             attempt: 1,
             execution_profile: role.to_owned(),
             goal: "Implement fixture".to_owned(),

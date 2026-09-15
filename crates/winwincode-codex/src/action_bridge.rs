@@ -37,7 +37,7 @@ pub(crate) struct ExecutionPortActionGate {
 }
 
 struct ActionGateState {
-    catalog: WorkerCapabilityCatalog,
+    catalog: RwLock<WorkerCapabilityCatalog>,
     envelope: ExecutionEnvelopeToken,
     verifier: ActionEnforcementVerifier,
     receipt_store: Mutex<FileActionReceiptUseStore>,
@@ -111,7 +111,7 @@ impl ExecutionPortActionGate {
             .map_err(|_| ActionBridgeError::Unavailable)?;
         Ok(Self {
             state: Arc::new(ActionGateState {
-                catalog,
+                catalog: RwLock::new(catalog),
                 envelope,
                 verifier: signing_key.into_verifier(),
                 receipt_store: Mutex::new(receipt_store),
@@ -126,6 +126,18 @@ impl ExecutionPortActionGate {
                 request_transport: Mutex::new(None),
             }),
         })
+    }
+
+    pub(crate) fn replace_catalog(
+        &self,
+        catalog: WorkerCapabilityCatalog,
+    ) -> Result<(), ActionBridgeError> {
+        *self
+            .state
+            .catalog
+            .write()
+            .map_err(|_| ActionBridgeError::Unavailable)? = catalog;
+        Ok(())
     }
 
     pub(crate) fn install_request_transport(&self, transport: ActionRequestTransport) {
@@ -901,7 +913,7 @@ fn delegated_read_only_authorization(
     let Some(workspace) = workspace else {
         return Ok(None);
     };
-    if is_request_user_input(request) || is_process_output_poll(request) {
+    if is_core_control_tool(request) || is_process_output_poll(request) {
         return Ok(Some(bound_authorization(request, None)));
     }
     if let Some(executable) = explicit_read_only_shell_authorization(state, request, &workspace) {
@@ -910,12 +922,14 @@ fn delegated_read_only_authorization(
     Err(ActionBridgeError::Rejected)
 }
 
-fn is_request_user_input(request: &KernelActionRequest) -> bool {
-    request.tool_name == "request_user_input"
-        && request
-            .namespace
-            .as_deref()
-            .is_none_or(|namespace| namespace.is_empty() || namespace == "functions")
+fn is_core_control_tool(request: &KernelActionRequest) -> bool {
+    matches!(
+        request.tool_name.as_str(),
+        "request_user_input" | "update_plan"
+    ) && request
+        .namespace
+        .as_deref()
+        .is_none_or(|namespace| namespace.is_empty() || namespace == "functions")
         && matches!(request.payload, KernelActionPayload::Function { .. })
 }
 
@@ -1226,6 +1240,8 @@ fn authorize_capability(
             .map_err(|_| ActionBridgeError::UnknownCapability)?;
         state
             .catalog
+            .read()
+            .map_err(|_| ActionBridgeError::Unavailable)?
             .authorize(
                 &capability_id,
                 binding.authority.worker_session_id.clone(),
@@ -1277,18 +1293,14 @@ fn canonical_tool_requests(
     if is_process_output_poll(request) {
         return Ok(Vec::new());
     }
-    // `request_user_input` is a built-in control tool.  It has no side effect
-    // for the action gateway to authorize: the handler pauses the Kernel and
-    // emits the durable InputRequest frame, then waits for the corresponding
-    // InputResponse.  Keep the host identity/time checks in `authorize_action`
-    // and `revalidate_action`, but do not turn this control interaction into
-    // an ActionEnforcement request (which would reject it as an unknown
-    // capability before the handler can emit the input request).
-    if request.tool_name == "request_user_input"
-        && request
-            .namespace
-            .as_deref()
-            .is_none_or(|namespace| namespace.is_empty() || namespace == DEFAULT_FUNCTION_NAMESPACE)
+    // Core handles these control tools internally; host identity and time checks still apply.
+    if matches!(
+        request.tool_name.as_str(),
+        "request_user_input" | "update_plan"
+    ) && request
+        .namespace
+        .as_deref()
+        .is_none_or(|namespace| namespace.is_empty() || namespace == DEFAULT_FUNCTION_NAMESPACE)
     {
         return match request.payload {
             KernelActionPayload::Function { .. } => Ok(Vec::new()),
@@ -1311,7 +1323,10 @@ fn canonical_tool_requests(
         let value = serde_json::from_str(arguments)
             .unwrap_or_else(|_| serde_json::Value::String(arguments.clone()));
         return Ok(vec![ToolRequest::Mcp(McpRequest {
-            server: namespace.to_owned(),
+            server: namespace
+                .strip_prefix("mcp__")
+                .unwrap_or(namespace)
+                .to_owned(),
             tool: request.tool_name.clone(),
             arguments: value,
         })]);
@@ -1944,6 +1959,17 @@ mod tests {
                 arguments: r#"{"session_id":123,"chars":"","yield_time_ms":30000}"#.into(),
             },
         };
+        let mut plan = poll.clone();
+        plan.tool_name = "update_plan".into();
+        plan.payload = KernelActionPayload::Function {
+            arguments: r#"{"plan":[{"step":"Inspect","status":"in_progress"}]}"#.into(),
+        };
+        let permission = gate.authorize(plan.clone()).await.expect("Core plan tool");
+        gate.revalidate(plan.clone(), permission)
+            .await
+            .expect("plan retains active authority");
+        plan.session_id = "foreign-thread".into();
+        assert!(gate.authorize(plan).await.is_err());
         let permission = gate
             .authorize(poll.clone())
             .await
@@ -2353,5 +2379,78 @@ mod tests {
                 if file.operation == winwincode_execution_port::action_normalizer::FileOperation::Delete
                     && file.paths == ["/workspace/old.rs"]
         ));
+    }
+    #[test]
+    fn replacing_catalog_revokes_removed_mcp_tools() {
+        use winwincode_execution_port::capability_adapter::{
+            CapabilityDescriptor, CapabilityHealth, CapabilityOrigin,
+        };
+        let root = std::env::temp_dir().join(format!("wwc-mcp-reload-{}", std::process::id()));
+        let gate = ExecutionPortActionGate::open(
+            &root,
+            catalog(),
+            ExecutionEnvelopeToken {
+                version: 1,
+                digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+            },
+            signing_key(),
+        )
+        .expect("gate");
+        let request = super::canonical_tool_requests(&KernelActionRequest {
+            session_id: "session".into(),
+            turn_id: "turn".into(),
+            operation_id: "call".into(),
+            namespace: Some("mcp__live".into()),
+            tool_name: "proof".into(),
+            payload: KernelActionPayload::Function {
+                arguments: "{}".into(),
+            },
+        })
+        .expect("request")
+        .remove(0);
+        assert!(super::authorize_capability(&gate.state, &binding(), &request).is_err());
+        let enabled = WorkerCapabilityCatalog::discover(
+            &WorkerCapabilitySet {
+                capability_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+                features: vec![WorkerCapabilityFeature::Mcp],
+                max_concurrent_jobs: 1,
+                platform: WorkerCapabilitySetPlatform::Aarch64AppleDarwin,
+            },
+            vec![
+                CapabilityDescriptor::mcp(
+                    "live",
+                    "proof",
+                    &"b".repeat(64),
+                    CapabilityHealth::Healthy,
+                    CapabilityOrigin::CodexCoreMcp,
+                )
+                .expect("tool"),
+            ],
+        )
+        .expect("catalog");
+        gate.replace_catalog(enabled).expect("enable");
+        super::authorize_capability(&gate.state, &binding(), &request).expect("authorized");
+        gate.replace_catalog(catalog()).expect("disable");
+        assert!(super::authorize_capability(&gate.state, &binding(), &request).is_err());
+        drop(gate);
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn native_mcp_namespace_uses_configured_server_identity() {
+        let requests = super::canonical_tool_requests(&KernelActionRequest {
+            session_id: "session".to_owned(),
+            turn_id: "turn".to_owned(),
+            operation_id: "mcp".to_owned(),
+            namespace: Some("mcp__extension_check".to_owned()),
+            tool_name: "fetch_device_proof".to_owned(),
+            payload: KernelActionPayload::Function {
+                arguments: "{}".to_owned(),
+            },
+        })
+        .expect("MCP request");
+        assert!(
+            matches!(&requests[0], ToolRequest::Mcp(request) if request.server == "extension_check")
+        );
     }
 }

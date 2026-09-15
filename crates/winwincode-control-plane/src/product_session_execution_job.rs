@@ -140,6 +140,12 @@ impl ProductSessionExecutionConfig {
             workspace: &workspace,
         })?;
         let job = ExecutionJob {
+            model_selection: Some(
+                winwincode_execution_port::generated::ExecutionModelSelection {
+                    provider_id: model_route.provider_id.clone(),
+                    model_id: model_route.model_id.clone(),
+                },
+            ),
             attempt: 1,
             execution_profile: self.execution_profile.clone(),
             goal: message.to_owned(),

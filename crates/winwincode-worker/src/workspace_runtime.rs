@@ -1899,6 +1899,34 @@ impl JobWorkspaceRuntime {
         Ok(workspace.layout().checkout())
     }
 
+    pub(crate) fn has_source_changes(&self, active: &ActiveJob) -> Result<bool, JobWorkspaceError> {
+        let workspace = self
+            .active
+            .get(&active.job.job_id.0)
+            .ok_or_else(authority_error)?;
+        if !same_authority(workspace.provenance(), active) {
+            return Err(authority_error());
+        }
+        workspace.has_source_changes().map_err(Into::into)
+    }
+
+    pub(crate) fn retain_source_changes(
+        &mut self,
+        active: &ActiveJob,
+    ) -> Result<(), JobWorkspaceError> {
+        let workspace = self
+            .active
+            .get_mut(&active.job.job_id.0)
+            .ok_or_else(authority_error)?;
+        if !same_authority(workspace.provenance(), active) {
+            return Err(authority_error());
+        }
+        workspace
+            .snapshot_candidate()
+            .map(|_| ())
+            .map_err(Into::into)
+    }
+
     /// Returns the currently accepted tree that authorizes the next batch.
     ///
     /// # Errors

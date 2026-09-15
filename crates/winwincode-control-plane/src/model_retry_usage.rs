@@ -7,6 +7,8 @@
 //! for the separate organization billing ledger; this module does not own
 //! organization quota or cost allocation.
 
+use winwincode_provider::{ModelAttemptCharge, ModelAttemptFailureFact, ModelAttemptFailureKind};
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
@@ -24,9 +26,8 @@ use winwincode_storage::{
 
 use crate::{
     FrozenModelRouteAuthority, ModelReservationReceipt, ModelReservationTerminalOutcome,
-    ModelReservationTerminalReceipt, ModelRetrySettlementContext, ProviderGatewayErrorKind,
-    ProviderGatewaySettlement, ProviderGatewayTerminalOutcome, ProviderStreamFailureKind,
-    ProviderTokenUsage,
+    ModelReservationTerminalReceipt, ModelRetrySettlementContext, ProviderGatewaySettlement,
+    ProviderGatewayTerminalOutcome,
 };
 
 const STATE_SCHEMA: &str = "winwincode.model-retry-usage.v2";
@@ -311,135 +312,6 @@ impl FrozenModelRetryPlan {
     pub const fn resolution(&self) -> &ModelRouteResolutionTrace {
         &self.resolution
     }
-}
-
-/// Whether Provider acceptance or output can be ruled out.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ModelExecutionCertainty {
-    /// The request was proven not sent to a Provider.
-    NotSent,
-    /// The Provider explicitly rejected it before acceptance.
-    RejectedBeforeAcceptance,
-    /// Acceptance is unknown, so retry may duplicate work or cost.
-    AcceptanceUnknown,
-    /// At least one output fragment was observed.
-    OutputObserved,
-}
-
-/// Closed failure class used by retry policy.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ModelAttemptFailureKind {
-    Authentication,
-    InvalidRequest,
-    RateLimit,
-    Quota,
-    Timeout,
-    Transport,
-    Server,
-    ContextWindowExceeded,
-    ProviderUnavailable,
-    Protocol,
-    Cancelled,
-    Unknown,
-}
-
-/// Secret-free failure fact for one terminal attempt.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ModelAttemptFailureFact {
-    /// Stable failure category.
-    pub kind: ModelAttemptFailureKind,
-    /// Explicit Provider execution certainty.
-    pub certainty: ModelExecutionCertainty,
-}
-
-impl ModelAttemptFailureFact {
-    /// Maps a stable Gateway category without copying Provider diagnostics.
-    #[must_use]
-    pub const fn from_gateway(
-        kind: ProviderGatewayErrorKind,
-        certainty: ModelExecutionCertainty,
-    ) -> Self {
-        let kind = match kind {
-            ProviderGatewayErrorKind::AdapterRateLimited => ModelAttemptFailureKind::RateLimit,
-            ProviderGatewayErrorKind::AdapterUnavailable
-            | ProviderGatewayErrorKind::IdentityUnavailable
-            | ProviderGatewayErrorKind::RouteUnavailable
-            | ProviderGatewayErrorKind::AdmissionUnavailable
-            | ProviderGatewayErrorKind::SettlementUnavailable
-            | ProviderGatewayErrorKind::Storage => ModelAttemptFailureKind::ProviderUnavailable,
-            ProviderGatewayErrorKind::AdapterProtocol => ModelAttemptFailureKind::Protocol,
-            ProviderGatewayErrorKind::AdapterRejected
-            | ProviderGatewayErrorKind::InvalidRequest
-            | ProviderGatewayErrorKind::IdentityDenied
-            | ProviderGatewayErrorKind::RouteMismatch
-            | ProviderGatewayErrorKind::ProviderNotFound
-            | ProviderGatewayErrorKind::ProviderDisabled
-            | ProviderGatewayErrorKind::ModelNotFound
-            | ProviderGatewayErrorKind::ModelDisabled
-            | ProviderGatewayErrorKind::StructuredOutputUnsupported
-            | ProviderGatewayErrorKind::AdapterNotRegistered
-            | ProviderGatewayErrorKind::ExchangeConflict
-            | ProviderGatewayErrorKind::ExchangeNotFound
-            | ProviderGatewayErrorKind::TerminalConflict
-            | ProviderGatewayErrorKind::AdmissionDenied
-            | ProviderGatewayErrorKind::CredentialLeak => ModelAttemptFailureKind::InvalidRequest,
-            ProviderGatewayErrorKind::CredentialUnavailable
-            | ProviderGatewayErrorKind::CredentialScopeMismatch => {
-                ModelAttemptFailureKind::Authentication
-            }
-        };
-        Self { kind, certainty }
-    }
-
-    /// Maps a stable stream failure without copying Provider text or ids.
-    #[must_use]
-    pub const fn from_stream(
-        kind: ProviderStreamFailureKind,
-        certainty: ModelExecutionCertainty,
-    ) -> Self {
-        let kind = match kind {
-            ProviderStreamFailureKind::Authentication => ModelAttemptFailureKind::Authentication,
-            ProviderStreamFailureKind::InvalidRequest => ModelAttemptFailureKind::InvalidRequest,
-            ProviderStreamFailureKind::RateLimit => ModelAttemptFailureKind::RateLimit,
-            ProviderStreamFailureKind::Quota => ModelAttemptFailureKind::Quota,
-            ProviderStreamFailureKind::Timeout => ModelAttemptFailureKind::Timeout,
-            ProviderStreamFailureKind::Transport => ModelAttemptFailureKind::Transport,
-            ProviderStreamFailureKind::Server => ModelAttemptFailureKind::Server,
-            ProviderStreamFailureKind::ContextWindowExceeded => {
-                ModelAttemptFailureKind::ContextWindowExceeded
-            }
-            ProviderStreamFailureKind::Unknown => ModelAttemptFailureKind::Unknown,
-        };
-        Self { kind, certainty }
-    }
-
-    const fn safe_to_retry(self) -> bool {
-        matches!(
-            self.certainty,
-            ModelExecutionCertainty::NotSent | ModelExecutionCertainty::RejectedBeforeAcceptance
-        ) && matches!(
-            self.kind,
-            ModelAttemptFailureKind::RateLimit
-                | ModelAttemptFailureKind::Timeout
-                | ModelAttemptFailureKind::Transport
-                | ModelAttemptFailureKind::Server
-                | ModelAttemptFailureKind::ProviderUnavailable
-        )
-    }
-}
-
-/// Exact normalized charge attached to one Provider attempt.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ModelAttemptCharge {
-    /// Stable Provider usage identity, unique across every logical request.
-    pub provider_usage_id: String,
-    /// Provider-normalized token usage.
-    pub usage: ProviderTokenUsage,
-    /// Actual cost in micros.
-    pub cost_micros: u64,
 }
 
 /// One logical model request and its frozen attribution/plan.

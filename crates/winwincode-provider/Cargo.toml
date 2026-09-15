@@ -1,0 +1,41 @@
+[package]
+name = "winwincode-provider"
+description = "Device-owned provider transport, stream conversion, and secret handling"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+include = ["src/**", "tests/**", "Cargo.toml"]
+
+[dependencies]
+codex-config = { path = "../../third_party/codex/codex-rs/config" }
+codex-skills = { path = "../../third_party/codex/codex-rs/skills" }
+codex-rmcp-client = { path = "../../third_party/codex/codex-rs/rmcp-client" }
+codex-exec-server = { path = "../../third_party/codex/codex-rs/exec-server" }
+codex-http-client = { path = "../../third_party/codex/codex-rs/http-client" }
+rmcp = { version = "=3.1.2", default-features = false }
+futures.workspace = true
+tokio = { workspace = true, features = ["rt", "time"] }
+toml.workspace = true
+aes-gcm = "=0.10.3"
+hkdf = "=0.12.4"
+p256 = { version = "=0.13.2", features = ["ecdh"] }
+getrandom.workspace = true
+rusqlite.workspace = true
+base64.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+ureq = { version = "=3.1.4", default-features = false, features = ["rustls", "json"] }
+winwincode-api.workspace = true
+winwincode-domain.workspace = true
+winwincode-execution-port.workspace = true
+
+[dev-dependencies]
+rcgen.workspace = true
+rustls.workspace = true
+
+[lints]
+workspace = true

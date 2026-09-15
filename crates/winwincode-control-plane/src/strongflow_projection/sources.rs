@@ -826,13 +826,12 @@ impl TrustedRuntimeProjectionReadCutReader for SqliteStorageRuntimeProjectionRea
             lease_id: ledger.lease_id.clone(),
             attempt: ledger.attempt,
             fencing_token: ledger.fencing_token.clone(),
-            as_of_sequence: ledger.highest_sequence,
+            as_of_sequence: ledger.revision(),
         };
         let ledger_revision = Revision(
-            i64::try_from(ledger.highest_sequence)
-                .map_err(|_| TrustedProjectionReadError::Invalid)?,
+            i64::try_from(ledger.revision()).map_err(|_| TrustedProjectionReadError::Invalid)?,
         );
-        let accepted_sequence = ledger.highest_sequence;
+        let accepted_sequence = ledger.revision();
         let source_seal = runtime_source_seal(&cut);
         let expected_mismatch = request.expected().is_some_and(|expected| {
             expected.ledger_revision() != &ledger_revision
@@ -1631,8 +1630,8 @@ mod tests {
             RequestId(fixture.request_id.into()),
         )
         .expect("receipt identity");
-        let accepted_sequence = i64::try_from(fixture.ledger.highest_sequence)
-            .expect("fixture sequence in public range");
+        let accepted_sequence =
+            i64::try_from(fixture.ledger.revision()).expect("fixture sequence in public range");
         let payload = if let Some(delivery_id) = &fixture.ledger.delivery_id {
             let work_run_id = fixture
                 .ledger
@@ -1688,7 +1687,7 @@ mod tests {
                     fixture.command_digest.to_string().repeat(64)
                 )),
                 fixture.stream_id,
-                0,
+                fixture.ledger.revision() - 1,
                 serde_json::to_vec(fixture.ledger).expect("ledger JSON"),
                 vec![
                     NewOutboxEvent::public_projection(
@@ -1793,6 +1792,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn sqlite_storage_product_session_read_cut_rebuilds_runtime_projection() {
         let root = std::env::temp_dir().join(format!(
             "winwincode-control-plane-product-source-test-{}",
@@ -1827,6 +1827,7 @@ mod tests {
             fencing_token: lease.fencing_token.clone(),
             worker_id: lease.worker_id.clone(),
             worker_instance_id: lease.worker_instance_id.clone(),
+            sequence_offset: 0,
             highest_sequence: 1,
             events: vec![RuntimeLedgerEvent {
                 event,
@@ -1839,14 +1840,19 @@ mod tests {
             RuntimeFixtureCommit {
                 request_id: "req_source_product_fixture_0001",
                 command_digest: 'b',
-                stream_id,
+                stream_id: stream_id.clone(),
                 ledger: &ledger,
                 event_id: "evt_product_session_fixture_0001",
                 stream: ProjectionEventStream::ProductSession(product_session_id.clone()),
             },
         );
 
-        let request = ProductSessionRuntimeReadRequest::new(scope, product_session_id, None, 20);
+        let request = ProductSessionRuntimeReadRequest::new(
+            scope.clone(),
+            product_session_id.clone(),
+            None,
+            20,
+        );
         let read = SqliteStorageRuntimeProjectionReadCutReader
             .read_product_session_cut(&storage, &request)
             .expect("ProductSession runtime cut");
@@ -1863,6 +1869,35 @@ mod tests {
                 .is_some_and(|id| id == request.product_session_id())
         );
         assert!(read.runtime().snapshot().sessions.is_empty());
+        let mut next = ledger.clone();
+        next.sequence_offset = 1;
+        next.execution_job_id = ExecutionJobId("job_02J00000000000000000000000".into());
+        commit_runtime_fixture(
+            &mut storage,
+            &scope,
+            RuntimeFixtureCommit {
+                request_id: "req_source_product_fixture_0002",
+                command_digest: 'c',
+                stream_id,
+                ledger: &next,
+                event_id: "evt_product_session_fixture_0002",
+                stream: ProjectionEventStream::ProductSession(product_session_id),
+            },
+        );
+        let second = SqliteStorageRuntimeProjectionReadCutReader
+            .read_product_session_cut(&storage, &request)
+            .expect("next task read cut");
+        assert_eq!(second.runtime().ledger_revision(), &Revision(2));
+        assert_eq!(second.runtime().accepted_sequence(), 2);
+        assert_eq!(
+            second
+                .runtime()
+                .product_session_runtime
+                .as_ref()
+                .expect("runtime")
+                .execution_job_id,
+            next.execution_job_id
+        );
         Box::new(storage).close().expect("SQLite close");
         std::fs::remove_dir_all(root).expect("temporary source directory");
     }
@@ -1984,6 +2019,7 @@ mod tests {
             fencing_token,
             worker_id,
             worker_instance_id,
+            sequence_offset: 0,
             highest_sequence: 1,
             events: vec![RuntimeLedgerEvent {
                 event,

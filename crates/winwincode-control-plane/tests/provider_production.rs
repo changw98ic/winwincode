@@ -152,7 +152,6 @@ impl HttpsFixture {
             self.endpoint.clone(),
             HttpsSseProviderTimeouts {
                 connect: Duration::from_secs(2),
-                first_byte: Duration::from_secs(2),
                 idle: Duration::from_secs(2),
                 total: Duration::from_secs(5),
             },
@@ -397,6 +396,7 @@ fn configure_provider_authority(
 
 fn commit_execution_job(storage: &mut SqliteStorage, message: &ModelOpenMessage) {
     let job = ExecutionJob {
+        model_selection: None,
         attempt: message.lease.attempt,
         execution_profile: "executor".to_owned(),
         goal: "execute authenticated model request".to_owned(),
@@ -1049,7 +1049,7 @@ fn standalone_local_remote_restart_and_terminal_ack_share_one_durable_runtime() 
         &batch.chunks.last().expect("terminal chunk").sequence,
     );
     let ack_frame = TypedFrame::new(
-        FrameDirection::WorkerToControlPlane,
+        FrameDirection::ControlPlaneToWorker,
         ExecutionPortMessage::ModelAckMessage(acknowledgement),
     )
     .expect("typed final ModelAck");
@@ -1428,7 +1428,6 @@ fn run_live_anthropic_gate(config: &LiveAnthropicGate) {
         endpoint,
         HttpsSseProviderTimeouts {
             connect: Duration::from_secs(10),
-            first_byte: Duration::from_secs(30),
             idle: Duration::from_secs(30),
             total: Duration::from_mins(2),
         },

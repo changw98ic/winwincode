@@ -45,6 +45,8 @@ use winwincode_storage::{
 
 #[path = "product_session_api.rs"]
 mod api;
+#[path = "product_session_artifacts.rs"]
+mod artifacts;
 #[path = "product_session_chat.rs"]
 mod chat;
 #[path = "product_session_execution_job.rs"]
@@ -77,6 +79,22 @@ const PRODUCT_SESSION_RECEIPT_TOPIC: &str = "product-session.receipt.internal.v3
 /// record is an identity mismatch, never permission to infer a scope from the
 /// `ExecutionJobId`.
 pub trait ProductSessionPersistence: ProductStateStorage {
+    /// Reads exact queue revision for cancellation under the bound session scope.
+    /// # Errors
+    /// Returns a storage error when the queue cannot be read.
+    fn load_cancellation_job(
+        &mut self,
+        scope: &ExecutionQueueScope,
+        job: &ExecutionJobId,
+    ) -> Result<Option<ExecutionJobRecord>, StorageError>;
+    /// Persists the queue cancellation consumed by the Worker scheduler.
+    /// # Errors
+    /// Rejects stale queue revisions, changed replays, and storage failures.
+    fn request_product_session_cancellation(
+        &mut self,
+        request: &winwincode_storage::RepositorySchedulerCancellationRequest,
+    ) -> Result<(), StorageError>;
+
     /// Loads the immutable queue entry and proves its original submission
     /// receipt still names the same Chat request.
     ///
@@ -125,6 +143,46 @@ pub trait ProductSessionPersistence: ProductStateStorage {
 }
 
 impl ProductSessionPersistence for SqliteStorage {
+    fn load_cancellation_job(
+        &mut self,
+        scope: &ExecutionQueueScope,
+        job: &ExecutionJobId,
+    ) -> Result<Option<ExecutionJobRecord>, StorageError> {
+        self.execution_queue()?.load_job(scope, job)
+    }
+    fn request_product_session_cancellation(
+        &mut self,
+        request: &winwincode_storage::RepositorySchedulerCancellationRequest,
+    ) -> Result<(), StorageError> {
+        let receipt = self.repository_scheduler()?.request_cancellation(request)?;
+        if receipt.worker_session_id.is_none() {
+            let mut admission = self
+                .execution_admission()
+                .map_err(|error| StorageError::adapter(error.to_string()))?;
+            if let Some(reservation) = admission
+                .load_reservation_by_job(&request.job_id)
+                .map_err(|error| StorageError::adapter(error.to_string()))?
+                && matches!(
+                    reservation.state,
+                    ExecutionReservationState::Queued | ExecutionReservationState::Running
+                )
+            {
+                admission
+                    .release(&winwincode_storage::ExecutionReservationRelease {
+                        scope: reservation.scope,
+                        worker_pool_id: reservation.worker_pool_id,
+                        job_id: request.job_id.clone(),
+                        request_id: request.request_id.clone(),
+                        expected_revision: reservation.revision,
+                        reason: winwincode_storage::ExecutionReservationReleaseReason::Cancelled,
+                        released_at: request.requested_at.clone(),
+                    })
+                    .map_err(|error| StorageError::adapter(error.to_string()))?;
+            }
+        }
+        Ok(())
+    }
+
     fn load_product_session_execution_job(
         &mut self,
         scope: &ExecutionQueueScope,
@@ -383,6 +441,7 @@ pub struct DurableSessionBinding {
     execution_scope: ExecutionQueueScope,
     worker_pool_id: WorkerPoolId,
     model_exchange_id: ModelExchangeId,
+    previous_model_exchange_ids: Vec<ModelExchangeId>,
     bound_at: Instant,
 }
 
@@ -410,6 +469,11 @@ impl DurableSessionBinding {
     #[must_use]
     pub const fn model_exchange_id(&self) -> &ModelExchangeId {
         &self.model_exchange_id
+    }
+
+    #[must_use]
+    pub fn includes_model_exchange(&self, id: &ModelExchangeId) -> bool {
+        &self.model_exchange_id == id || self.previous_model_exchange_ids.contains(id)
     }
 
     #[must_use]
@@ -781,6 +845,7 @@ impl<'storage> ProductSessionService<'storage> {
             slot,
             reservation,
             model_exchange_id: command.model_exchange_id.clone(),
+            previous_model_exchange_ids: Vec::new(),
             bound_at: command.context.occurred_at.clone(),
         });
         if let Some(index) = pending_turn {
@@ -788,6 +853,88 @@ impl<'storage> ProductSessionService<'storage> {
             turn.state = PersistedTurnState::Bound;
             turn.model_exchange_id = Some(command.model_exchange_id.clone());
         }
+        let persisted = persisted.clone();
+        self.commit(
+            &command.context,
+            digest,
+            MutationKind::Continued,
+            catalog,
+            &command.product_session_id,
+            persisted,
+            None,
+        )
+    }
+
+    /// Attaches another model call to the same live execution; tools can trigger many calls.
+    pub(crate) fn continue_model_exchange(
+        &mut self,
+        command: &ContinueProductSessionCommand,
+    ) -> Result<ProductSessionMutationReceipt, ProductSessionServiceError> {
+        let digest = command_digest("continue", continue_digest_fields(command))?;
+        if let Some(replay) = self.replay(&command.context, &digest, MutationKind::Continued)? {
+            return Ok(replay);
+        }
+        validate_continue_shape(command)?;
+        let (slot, reservation) = self
+            .storage
+            .load_worker_binding_source(
+                &command.execution_scope,
+                &command.worker_pool_id,
+                &command.runtime_authority.worker_session_id,
+            )
+            .map_err(|error| storage_error(&error))?
+            .ok_or_else(|| binding_mismatch("model continuation has no Worker authority"))?;
+        validate_worker_source(command, &slot, &reservation)?;
+        let mut catalog = self.load_catalog(command.context.receipt_identity.scope_key())?;
+        let persisted = catalog
+            .sessions
+            .get_mut(&command.product_session_id.0)
+            .ok_or_else(not_found)?;
+        require_revision(&persisted.session, command.context.expected_revision)?;
+        if persisted.session.state() != ProductSessionState::Running {
+            return Err(binding_mismatch(
+                "model continuation requires a running session",
+            ));
+        }
+        let binding = persisted
+            .bindings
+            .iter_mut()
+            .find(|binding| {
+                binding.slot.authority == command.runtime_authority
+                    && binding.identity
+                        == PersistedBindingIdentity::from_domain(&command.binding_identity)
+            })
+            .ok_or_else(|| {
+                binding_mismatch("model continuation differs from the bound execution")
+            })?;
+        if binding.model_exchange_id == command.model_exchange_id
+            || binding
+                .previous_model_exchange_ids
+                .contains(&command.model_exchange_id)
+            || binding.previous_model_exchange_ids.len() >= 4096
+        {
+            return Err(binding_mismatch(
+                "model continuation reuses an exchange or exceeds the session limit",
+            ));
+        }
+        binding
+            .previous_model_exchange_ids
+            .push(binding.model_exchange_id.clone());
+        binding.model_exchange_id = command.model_exchange_id.clone();
+        for message in &mut persisted.messages {
+            if message.projection.role == "assistant" && message.projection.state == "streaming" {
+                "completed".clone_into(&mut message.projection.state);
+            }
+        }
+        let turn = persisted
+            .turn_intents
+            .iter_mut()
+            .find(|turn| {
+                turn.execution_job_id == command.runtime_authority.job_id
+                    && turn.state == PersistedTurnState::Bound
+            })
+            .ok_or_else(|| binding_mismatch("model continuation has no bound Chat turn"))?;
+        turn.model_exchange_id = Some(command.model_exchange_id.clone());
         let persisted = persisted.clone();
         self.commit(
             &command.context,
@@ -862,6 +1009,7 @@ impl<'storage> ProductSessionService<'storage> {
             slot,
             reservation,
             model_exchange_id: command.model_exchange_id.clone(),
+            previous_model_exchange_ids: Vec::new(),
             bound_at: command.context.occurred_at.clone(),
         };
         replace_bound_turn_exchange(persisted, command)?;
@@ -1289,6 +1437,8 @@ struct PersistedSessionBinding {
     slot: WorkerSlotRecord,
     reservation: ExecutionReservationRecord,
     model_exchange_id: ModelExchangeId,
+    #[serde(default)]
+    previous_model_exchange_ids: Vec<ModelExchangeId>,
     bound_at: Instant,
 }
 
@@ -1320,6 +1470,7 @@ impl PersistedSessionBinding {
             execution_scope: self.reservation.scope.clone(),
             worker_pool_id: self.reservation.worker_pool_id.clone(),
             model_exchange_id: self.model_exchange_id.clone(),
+            previous_model_exchange_ids: self.previous_model_exchange_ids.clone(),
             bound_at: self.bound_at.clone(),
         })
     }

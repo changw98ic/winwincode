@@ -27,15 +27,15 @@ use winwincode_storage::{
     StateCommit, StorageError, StorageErrorKind, StoredState,
 };
 
-use crate::credential_leak_gate::{
-    CredentialLeakError, CredentialLeakGate, CredentialOutputBoundary,
-};
 use crate::provider_catalog::{
     ProviderCatalogError, ProviderCatalogErrorKind, ProviderCatalogService,
 };
 use crate::{
     model_route_availability::model_route_availability_invalidated_event, receipt_actor_key,
     receipt_scope_key,
+};
+use winwincode_provider::credential_leak_gate::{
+    CredentialLeakError, CredentialLeakGate, CredentialOutputBoundary,
 };
 
 const STATE_SCHEMA: &str = "winwincode.model-settings.v1";

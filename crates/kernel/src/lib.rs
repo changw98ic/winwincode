@@ -57,7 +57,6 @@ use codex_core_api::TurnInputSubmission;
 use codex_core_api::TurnStartOptions;
 use codex_core_api::UserInput;
 use codex_core_api::build_models_manager;
-use codex_core_api::empty_extension_registry;
 use codex_core_api::init_state_db;
 use codex_core_api::local_agent_graph_store_from_state_db;
 use codex_core_api::resolve_installation_id;
@@ -965,6 +964,7 @@ impl Kernel {
         })
     }
 
+    #[allow(clippy::too_many_lines)]
     fn initialize_runtime(&self) -> BoxFuture<'_, KernelResult<Arc<Runtime>>> {
         Box::pin(async move {
             let mut config = ConfigBuilder::default()
@@ -1030,6 +1030,16 @@ impl Kernel {
             let user_instructions_provider = Arc::new(CodexHomeUserInstructionsProvider::new(
                 config.codex_home.clone(),
             ));
+            let mut extensions = codex_core_api::ExtensionRegistryBuilder::new();
+            codex_skills_extension::install(&mut extensions, |config: &Config| {
+                codex_skills_extension::SkillsExtensionConfig {
+                    include_instructions: config.include_skill_instructions,
+                    max_context_tokens: config.skill_max_context_tokens,
+                    bundled_skills_enabled: false,
+                    orchestrator_skills_enabled: false,
+                    shadow_selection_enabled: false,
+                }
+            });
             let manager = Arc::new(
                 ThreadManager::new(
                     &config,
@@ -1038,7 +1048,7 @@ impl Kernel {
                     CodexAppsToolsCache::default(),
                     SessionSource::Exec,
                     environment_manager,
-                    empty_extension_registry(),
+                    extensions.build().into(),
                     user_instructions_provider,
                     /* analytics_events_client */ None,
                     Arc::clone(&thread_store),
@@ -1070,7 +1080,7 @@ impl Kernel {
         })
     }
 
-    fn session_config(runtime: &Runtime, options: &SessionOptions) -> KernelResult<Config> {
+    async fn session_config(runtime: &Runtime, options: &SessionOptions) -> KernelResult<Config> {
         validate_agent_session_config(&options.agent_config).map_err(|_| {
             KernelFailure::new(
                 "INVALID_AGENT_CONFIG",
@@ -1085,6 +1095,27 @@ impl Kernel {
             ));
         }
         let mut config = runtime.base_config.clone();
+        // A Worker outlives a chat task. Read the newly installed user layer for
+        // each session while retaining host-owned model and permission settings.
+        // Resolve from the private home, as at startup: candidate repository
+        // config must not redirect a Device-authorized MCP server.
+        let current = ConfigBuilder::default()
+            .codex_home(config.codex_home.to_path_buf())
+            .fallback_cwd(Some(config.codex_home.to_path_buf()))
+            .strict_config(true)
+            .build()
+            .await
+            .map_err(|_| {
+                KernelFailure::new(
+                    "EXTENSION_CONFIG_UNAVAILABLE",
+                    "Device extension configuration could not be loaded",
+                )
+            })?;
+        config.config_layer_stack = config
+            .config_layer_stack
+            .with_user_layer_from(&current.config_layer_stack);
+        config.mcp_servers = current.mcp_servers;
+        runtime.manager.skills_service().clear_cache();
         set_workspace(&mut config, &options.cwd)?;
         let (provider, model) = model_route(&options.provider, &options.model)?;
         config.model_provider = kernel_provider_info(&provider);
@@ -1101,6 +1132,18 @@ impl Kernel {
                 ));
             }
             Self::apply_role_session_policy(&mut config, policy)?;
+        } else {
+            let workspace_write = match settings.sandbox.as_str() {
+                "candidate" => true,
+                "read-only" => false,
+                _ => {
+                    return Err(KernelFailure::new(
+                        "INVALID_AGENT_CONFIG",
+                        "Chat profile has an unsupported workspace mode",
+                    ));
+                }
+            };
+            Self::apply_workspace_permissions(&mut config, workspace_write)?;
         }
         Ok(config)
     }
@@ -1138,26 +1181,31 @@ impl Kernel {
         policy: &RoleSessionPolicy,
     ) -> KernelResult<()> {
         let canonical = Self::validate_role_session_policy(policy)?;
-        let permission_profile = if canonical.workspace_write {
+        Self::apply_workspace_permissions(config, canonical.workspace_write)?;
+        config.developer_instructions = Some(policy.developer_instructions.clone());
+        Ok(())
+    }
+
+    fn apply_workspace_permissions(config: &mut Config, workspace_write: bool) -> KernelResult<()> {
+        let permission_profile = if workspace_write {
             PermissionProfile::workspace_write()
         } else {
             PermissionProfile::read_only()
         };
         let mut permissions = Permissions::from_approval_and_profile(
-            Constrained::allow_only(if canonical.workspace_write {
+            Constrained::allow_only(if workspace_write {
                 AskForApproval::OnRequest
             } else {
-                // Independent observers must not escalate out of the frozen checkout.
+                // Read-only sessions must not escalate out of the frozen checkout.
                 AskForApproval::Never
             }),
             Constrained::allow_only(permission_profile),
         )
-        .map_err(|error| KernelFailure::new("ROLE_POLICY_UNAVAILABLE", error.to_string()))?;
+        .map_err(|error| KernelFailure::new("SESSION_POLICY_UNAVAILABLE", error.to_string()))?;
         permissions.set_workspace_roots(vec![config.cwd.clone()]);
         config.permissions = permissions;
         config.explicit_permission_profile_mode = true;
         config.approvals_reviewer = ApprovalsReviewer::User;
-        config.developer_instructions = Some(policy.developer_instructions.clone());
         Ok(())
     }
 
@@ -1170,7 +1218,7 @@ impl Kernel {
     pub async fn create_session(&self, options: SessionOptions) -> KernelResult<SessionInfo> {
         Self::guard(async {
             let runtime = self.runtime().await?;
-            let config = Self::session_config(&runtime, &options)?;
+            let config = Self::session_config(&runtime, &options).await?;
             let thread = runtime
                 .manager
                 .start_thread(StartThreadOptions::new(config.clone()))
@@ -1200,7 +1248,7 @@ impl Kernel {
                 ));
             }
             let runtime = self.runtime().await?;
-            let config = Self::session_config(&runtime, &options)?;
+            let config = Self::session_config(&runtime, &options).await?;
             let thread = Box::pin(runtime.manager.resume_thread_from_rollout(
                 config.clone(),
                 rollout_path,
@@ -1832,7 +1880,9 @@ fn restrict_private_tree(root: &Path) -> std::io::Result<()> {
             restrict_private_tree(&entry?.path())?;
         }
     } else if metadata.is_file() {
-        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o600))?;
+        // Imported skill scripts retain owner execution while remaining private.
+        let mode = 0o600 | (metadata.permissions().mode() & 0o100);
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(mode))?;
     } else {
         return Err(std::io::Error::other("private runtime path is not a file"));
     }
@@ -2253,6 +2303,10 @@ mod tests {
             .expect("widen home");
         std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o666))
             .expect("widen state");
+        let script = home.join("skill-script.sh");
+        std::fs::write(&script, "#!/bin/sh\nexit 0\n").expect("skill script");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("script mode");
         let kernel = Kernel::new(
             KernelOptions::new(
                 home.clone(),
@@ -2277,6 +2331,14 @@ mod tests {
                 .mode()
                 & 0o777,
             0o600
+        );
+        assert_eq!(
+            std::fs::metadata(&script)
+                .expect("script metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
         );
         drop(kernel);
         std::fs::remove_dir_all(home).expect("remove kernel home");
@@ -2416,6 +2478,107 @@ mod tests {
             assert_eq!(debug_probe.workspace_mode, "candidate-read-only", "{role}");
             assert!(!debug_probe.workspace_write, "{role}");
         }
+    }
+
+    #[tokio::test]
+    async fn chat_session_applies_its_declared_workspace_permissions() {
+        use winwincode_execution_port::agent_config::{
+            AgentProfileSettings, resolve_agent_session_config,
+        };
+
+        let root = std::env::temp_dir().join(format!(
+            "winwincode-chat-permissions-{}",
+            std::process::id()
+        ));
+        let workspace = root.join("workspace");
+        let home = root.join("home");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+        std::fs::create_dir_all(&home).expect("create home");
+        // Candidate-controlled config is outside the Device extension authority.
+        std::fs::create_dir_all(workspace.join(".git")).expect("repository marker");
+        std::fs::create_dir_all(workspace.join(".codex")).expect("repository config directory");
+        std::fs::write(workspace.join(".codex/config.toml"), "not valid TOML [")
+            .expect("candidate config");
+        let kernel = Kernel::new(
+            KernelOptions::new(home, std::env::current_exe().expect("test executable")),
+            Arc::new(UnusedModelPort),
+            Arc::new(RejectingKernelActionGate),
+        )
+        .expect("construct kernel");
+        let runtime = kernel.runtime().await.expect("initialize runtime");
+        let worker =
+            serde_json::from_value(serde_json::json!("wrk_chat_fixture")).expect("worker id");
+        let capabilities = serde_json::from_value(serde_json::json!({
+            "capabilityDigest": format!("sha256:{}", "a".repeat(64)),
+            "features": ["sandbox"],
+            "maxConcurrentJobs": 1,
+            "platform": "aarch64-apple-darwin"
+        }))
+        .expect("capabilities");
+
+        for (sandbox, writer) in [
+            ("candidate", true),
+            ("read-only", false),
+            ("unrestricted", false),
+        ] {
+            let agent_config = resolve_agent_session_config(
+                &worker,
+                &capabilities,
+                "codex-chat",
+                AgentProfileSettings {
+                    provider: "fixture-provider".into(),
+                    model: "fixture-model".into(),
+                    reasoning: "provider_default".into(),
+                    tools: vec!["worker:sandbox".into()],
+                    sandbox: sandbox.into(),
+                    instructions: None,
+                },
+            )
+            .expect("chat config");
+            let options = super::SessionOptions {
+                cwd: workspace.clone(),
+                provider: "fixture-provider".into(),
+                model: "fixture-model".into(),
+                role_policy: None,
+                agent_config,
+            };
+            // The same Kernel must pick up both adding and removing an MCP service.
+            std::fs::write(
+                runtime.base_config.codex_home.join("config.toml"),
+                if writer {
+                    "[mcp_servers.live]\ncommand = \"python3\"\n"
+                } else {
+                    ""
+                },
+            )
+            .expect("change Device config between tasks");
+            let result = Kernel::session_config(&runtime, &options).await;
+            if sandbox == "unrestricted" {
+                assert_eq!(
+                    result.expect_err("unknown sandbox").code(),
+                    "INVALID_AGENT_CONFIG"
+                );
+                continue;
+            }
+            let config = result.expect("session config");
+            assert_eq!(config.mcp_servers.get().contains_key("live"), writer);
+            let policy = config.permissions.file_system_sandbox_policy();
+            assert_eq!(
+                policy.can_write_path_with_cwd(
+                    config.cwd.join("package.json").as_path(),
+                    config.cwd.as_path(),
+                ),
+                writer,
+                "{sandbox}"
+            );
+            assert!(!policy.can_write_path_with_cwd(
+                std::path::Path::new("/outside-project.txt"),
+                config.cwd.as_path(),
+            ));
+        }
+        drop(runtime);
+        kernel.shutdown().await.expect("shutdown kernel");
+        std::fs::remove_dir_all(root).expect("remove chat fixture");
     }
 
     #[tokio::test]

@@ -90,11 +90,6 @@
       "pattern": "^xevt_[0-9A-HJKMNP-TV-Z]{26}$",
       "description": "Stable identity retained when a runtime event is replayed."
     },
-    "ArtifactId": {
-      "type": "string",
-      "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$",
-      "description": "Identity of one lease-scoped execution artifact."
-    },
     "ModelExchangeId": {
       "type": "string",
       "pattern": "^mdl_[0-9A-HJKMNP-TV-Z]{26}$",
@@ -508,6 +503,9 @@
         },
         "workInput": {
           "$ref": "#/$defs/WorkRunInput"
+        },
+        "modelSelection": {
+          "$ref": "#/$defs/ExecutionModelSelection"
         }
       },
       "required": [
@@ -609,7 +607,7 @@
       "additionalProperties": false,
       "properties": {
         "artifactId": {
-          "$ref": "#/$defs/ArtifactId"
+          "$ref": "./domain.schema.json#/$defs/ArtifactId"
         },
         "kind": {
           "$ref": "#/$defs/ArtifactKind"
@@ -646,7 +644,7 @@
       "additionalProperties": false,
       "properties": {
         "artifactId": {
-          "$ref": "#/$defs/ArtifactId"
+          "$ref": "./domain.schema.json#/$defs/ArtifactId"
         },
         "digest": {
           "$ref": "./domain.schema.json#/$defs/Sha256Digest"
@@ -1639,7 +1637,7 @@
           "$ref": "./domain.schema.json#/$defs/WorkerSessionId"
         },
         "artifactId": {
-          "$ref": "#/$defs/ArtifactId"
+          "$ref": "./domain.schema.json#/$defs/ArtifactId"
         },
         "sequence": {
           "$ref": "#/$defs/ExecutionSequence"
@@ -1695,7 +1693,7 @@
           "$ref": "./domain.schema.json#/$defs/WorkerSessionId"
         },
         "artifactId": {
-          "$ref": "#/$defs/ArtifactId"
+          "$ref": "./domain.schema.json#/$defs/ArtifactId"
         },
         "status": {
           "$ref": "#/$defs/LeaseWriteStatus"
@@ -1828,7 +1826,7 @@
         "sessionIdentity"
       ],
       "title": "model.open",
-      "description": "Opens one provider-neutral model exchange through the Control Plane gateway.",
+      "description": "Opens a provider-neutral exchange inside the Device Worker. This request never crosses the server transport.",
       "x-direction": "worker-to-control-plane",
       "x-authority": "lease-write"
     },
@@ -1886,9 +1884,9 @@
         "sessionIdentity"
       ],
       "title": "model.chunk",
-      "description": "Streams one opaque provider-neutral model response chunk.",
-      "x-direction": "control-plane-to-worker",
-      "x-authority": "control-command"
+      "description": "Inside the Device, streams canonical model responses to Core. On the server transport, publishes ordered public text only; non-public payloads are omitted.",
+      "x-direction": "worker-to-control-plane",
+      "x-authority": "lease-write"
     },
     "ModelAckMessage": {
       "type": "object",
@@ -1944,9 +1942,9 @@
         "sessionIdentity"
       ],
       "title": "model.ack",
-      "description": "Acknowledges model chunks and requests replay after a stream interruption.",
-      "x-direction": "worker-to-control-plane",
-      "x-authority": "lease-write",
+      "description": "Acknowledges model chunks. Core progress stays inside the Device; server acknowledgements confirm durable public text projection.",
+      "x-direction": "control-plane-to-worker",
+      "x-authority": "control-command",
       "allOf": [
         {
           "if": {
@@ -10238,6 +10236,27 @@
         "workContract",
         "workItem"
       ]
+    },
+    "ExecutionModelSelection": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "providerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "modelId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      },
+      "required": [
+        "providerId",
+        "modelId"
+      ],
+      "description": "Public Provider/model selection; the Device supplies its own configuration and credential."
     }
   }
 }

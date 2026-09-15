@@ -26,6 +26,7 @@ members = [
   "crates/winwincode-observability-core",
   "crates/winwincode-observability-sqlite",
   "crates/winwincode-s3-artifact-adapter",
+  "crates/winwincode-provider",
   "crates/winwincode-publication",
   "crates/winwincode-repository-context",
   "crates/winwincode-server",
@@ -92,6 +93,7 @@ winwincode-connector-linear = { path = "crates/winwincode-connector-linear" }
 winwincode-connector-slack = { path = "crates/winwincode-connector-slack" }
 winwincode-connector-teams = { path = "crates/winwincode-connector-teams" }
 winwincode-connector-webhook = { path = "crates/winwincode-connector-webhook" }
+winwincode-provider = { path = "crates/winwincode-provider" }
 winwincode-publication = { path = "crates/winwincode-publication" }
 winwincode-session = { path = "crates/winwincode-session" }
 winwincode-storage = { path = "crates/winwincode-storage" }

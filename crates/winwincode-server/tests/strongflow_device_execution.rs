@@ -369,7 +369,7 @@ fn work_run_anchor(
 ) -> AnchorLaunch {
     let mut storage = SqliteStorage::open(root).expect("open staging storage");
     let worker_launch_grant_id = ulid_id("wlg", seed);
-    let worker_session_id = ulid_id("ws", seed + 1);
+    let worker_session_id = ulid_id("wsn", seed + 1);
     let worker_id = ulid_id("wrk", seed + 2);
     let worker_instance_id = ulid_id("wki", seed + 3);
     let issuance = LaunchGrantIssuance::try_new(
@@ -746,7 +746,7 @@ fn an_unanchored_work_run_keeps_the_local_execution_path() {
             .is_none(),
         "an unanchored WorkRun job must not carry device facts"
     );
-    assert!(binding_snapshot(&mut storage, &ulid_id("ws", 105)).is_none());
+    assert!(binding_snapshot(&mut storage, &ulid_id("wsn", 105)).is_none());
     // The local embedded worker claims the WorkRun job exactly as before.
     let (worker_id, worker_instance_id) = register_local_worker(&mut storage, 700);
     assert_eq!(

@@ -281,6 +281,11 @@ impl ExecutionOutbox {
             )
             .map_err(|_| AdapterStoreError::Unavailable)?;
         if changed != 1 {
+            if matches!(acknowledgement, ExecutionPortMessage::ModelAckMessage(ack) if public_model_ack(ack))
+            {
+                return Ok(());
+            }
+
             if let ExecutionPortMessage::WorkerHeartbeatAckMessage(acknowledgement) =
                 acknowledgement
                 && acknowledgement.heartbeat_sequence.0 > 0
@@ -404,6 +409,7 @@ enum Family {
     Outcome,
     Artifact,
     ModelOpen,
+    ModelPublicFrame,
     ActionRequest,
     ApprovalRequest,
     InputRequest,
@@ -420,6 +426,7 @@ impl Family {
             Self::Outcome => "outcome",
             Self::Artifact => "artifact",
             Self::ModelOpen => "model_open",
+            Self::ModelPublicFrame => "model_public_frame",
             Self::ActionRequest => "action_request",
             Self::ApprovalRequest => "approval_request",
             Self::InputRequest => "input_request",
@@ -466,6 +473,16 @@ fn metadata(message: &ExecutionPortMessage, frame: &[u8]) -> Result<Metadata, Ad
             Family::Artifact,
             correlation(&(
                 &message.artifact_id,
+                &message.sequence,
+                &message.lease,
+                &message.worker_session_id,
+                &message.session_identity,
+            ))?,
+        ),
+        ExecutionPortMessage::ModelChunkMessage(message) => (
+            Family::ModelPublicFrame,
+            correlation(&(
+                &message.model_exchange_id,
                 &message.sequence,
                 &message.lease,
                 &message.worker_session_id,
@@ -582,6 +599,16 @@ fn response_target(
                 &message.session_identity,
             ))?,
         )),
+        ExecutionPortMessage::ModelAckMessage(message) if public_model_ack(message) => Some((
+            Family::ModelPublicFrame,
+            correlation(&(
+                &message.model_exchange_id,
+                &message.ack_sequence,
+                &message.lease,
+                &message.worker_session_id,
+                &message.session_identity,
+            ))?,
+        )),
         ExecutionPortMessage::ModelAckMessage(message) if canonical_terminal_model_ack(message) => {
             Some((
                 Family::ModelOpen,
@@ -661,9 +688,20 @@ fn accepted_response(message: &ExecutionPortMessage) -> bool {
         | ExecutionPortMessage::ActionEnforcementReceiptMessage(_)
         | ExecutionPortMessage::ApprovalDecisionMessage(_)
         | ExecutionPortMessage::InputResponseMessage(_) => true,
-        ExecutionPortMessage::ModelAckMessage(message) => canonical_terminal_model_ack(message),
+        ExecutionPortMessage::ModelAckMessage(message) => {
+            canonical_terminal_model_ack(message) || public_model_ack(message)
+        }
         _ => false,
     }
+}
+
+fn public_model_ack(message: &ModelAckMessage) -> bool {
+    matches!(
+        message.status,
+        LeaseWriteStatus::Accepted | LeaseWriteStatus::Duplicate
+    ) && message.ack_sequence.0 > 0
+        && message.error.is_none()
+        && message.replay_from_sequence.is_none()
 }
 
 fn canonical_terminal_model_ack(message: &ModelAckMessage) -> bool {

@@ -624,7 +624,6 @@ fn configure_live_model_application(
         endpoint.to_owned(),
         HttpsSseProviderTimeouts {
             connect: Duration::from_secs(10),
-            first_byte: Duration::from_mins(1),
             idle: Duration::from_mins(1),
             total: Duration::from_mins(3),
         },

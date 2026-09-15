@@ -672,7 +672,7 @@ async fn send_retained(
 ) {
     let retained = ClientToServerMessage::CandidateRetained(ClientCandidateRetainedPayload {
         occupancy: occupancy_stamp(lease_id, token, mirror_revision),
-        worker_session_id: "ws_000000000000000000000001".to_owned(),
+        worker_session_id: "wsn_000000000000000000000001".to_owned(),
         receipt: winwincode_client_port::domain::LocalCandidateReceipt {
             local_candidate_receipt_id: fresh_receipt_id("lcr_"),
             candidate_ref: format!("refs/winwincode/candidates/{commit}"),

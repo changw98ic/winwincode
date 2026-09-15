@@ -376,6 +376,7 @@ impl fmt::Debug for ProductionCodexInstallation {
 /// Sole production [`CodexCoreAdapter`] for `WorkerMain`.
 pub struct ProductionCodexAdapter {
     config: ProductionCodexConfig,
+    device_extension_directory: Option<PathBuf>,
     kernel: Arc<Kernel>,
     bridge: Arc<ExecutionPortModelBridge>,
     action_gate: Arc<ExecutionPortActionGate>,
@@ -461,6 +462,7 @@ impl ProductionCodexAdapter {
         );
         Ok(Self {
             config,
+            device_extension_directory: None,
             kernel,
             bridge,
             action_gate,
@@ -476,6 +478,58 @@ impl ProductionCodexAdapter {
             thread_to_run: HashMap::new(),
             last_duplicate_model_chunk_sequence: None,
         })
+    }
+
+    /// Reads Device-owned extensions before each new task on this Worker.
+    ///
+    /// # Errors
+    /// Rejects relative Device configuration paths.
+    pub fn with_device_extensions(
+        mut self,
+        directory: PathBuf,
+    ) -> Result<Self, ProductionCodexError> {
+        if !directory.is_absolute() {
+            return Err(invalid_configuration());
+        }
+        self.device_extension_directory = Some(directory);
+        Ok(self)
+    }
+
+    fn refresh_device_extensions(&mut self) -> Result<(), ProductionCodexError> {
+        let Some(directory) = &self.device_extension_directory else {
+            return Ok(());
+        };
+        // ponytail: production Workers run one Job at a time. Per-task homes/catalogs
+        // are required before enabling concurrent Jobs with live Device extensions.
+        if !self.runs.is_empty() {
+            return Err(conflict());
+        }
+        let extensions = winwincode_provider::DeviceProviderStore::open(directory)
+            .and_then(|store| store.refresh_extensions(&self.config.kernel_home))
+            .map_err(|_| unavailable())?;
+        let mut discovered = Vec::new();
+        for server in extensions {
+            for tool in server.tools {
+                discovered.push(CapabilityDescriptor::mcp(
+                    &server.server,
+                    &tool,
+                    server.digest.trim_start_matches("sha256:"),
+                    winwincode_execution_port::capability_adapter::CapabilityHealth::Healthy,
+                    winwincode_execution_port::capability_adapter::CapabilityOrigin::CodexCoreMcp,
+                ).map_err(|_| invalid_configuration())?);
+            }
+        }
+        let catalog = WorkerCapabilityCatalog::discover(
+            &self.config.registered_capabilities,
+            discovered.clone(),
+        )
+        .map_err(|_| invalid_configuration())?;
+        self.action_gate
+            .replace_catalog(catalog.clone())
+            .map_err(|_| unavailable())?;
+        self.config.discovered_capabilities = discovered;
+        self.installation.capability_catalog = catalog;
+        Ok(())
     }
 
     #[must_use]
@@ -2920,6 +2974,14 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         start: CodexThreadStart<'_>,
     ) -> Result<CodexThreadSession, Self::Error> {
         validate_start(start)?;
+        let run_key = start
+            .run_key
+            .canonical_digest()
+            .map_err(|_| unavailable())?
+            .0;
+        if !self.runs.contains_key(&run_key) && load_stored_run(&self.store, &run_key)?.is_none() {
+            self.refresh_device_extensions()?;
+        }
         let job_digest = stage_product_job_digest(start.job).map_err(|_| invalid_job())?;
         let role_policy = sealed_role_session_policy(start.job)?;
         let agent_config = production_agent_session_config(
@@ -2929,11 +2991,6 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             role_policy.as_ref(),
         )?;
         let workspace = canonical_workspace(start.workspace)?;
-        let run_key = start
-            .run_key
-            .canonical_digest()
-            .map_err(|_| unavailable())?
-            .0;
         self.register_performance_run(&run_key, start.job)?;
         if let Some(run) = self.runs.get(&run_key) {
             if run.record.job_digest == job_digest
@@ -4638,15 +4695,15 @@ fn session_identity(start: CodexThreadStart<'_>, thread_id: CodexThreadId) -> Se
 }
 
 fn session_options(
-    config: &ProductionCodexConfig,
+    _config: &ProductionCodexConfig,
     workspace: &Path,
     role_policy: Option<RoleSessionPolicy>,
     agent_config: AgentSessionConfigSnapshot,
 ) -> SessionOptions {
     SessionOptions {
         cwd: workspace.to_path_buf(),
-        provider: config.provider.clone(),
-        model: config.model.clone(),
+        provider: agent_config.profile.source.settings.provider.clone(),
+        model: agent_config.profile.source.settings.model.clone(),
         role_policy,
         agent_config,
     }
@@ -4691,8 +4748,14 @@ fn production_agent_session_config(
         &config.registered_capabilities,
         &job.execution_profile,
         AgentProfileSettings {
-            provider: config.provider.clone(),
-            model: config.model.clone(),
+            provider: job.model_selection.as_ref().map_or_else(
+                || config.provider.clone(),
+                |selection| selection.provider_id.clone(),
+            ),
+            model: job.model_selection.as_ref().map_or_else(
+                || config.model.clone(),
+                |selection| selection.model_id.clone(),
+            ),
             reasoning: "provider_default".to_owned(),
             tools,
             sandbox: sandbox.to_owned(),
@@ -6184,6 +6247,7 @@ mod tests {
             work_contract_revision: Revision(2),
         };
         ExecutionJob {
+            model_selection: None,
             attempt: 1,
             execution_profile: "executor".to_owned(),
             goal: "Implement fixture".to_owned(),

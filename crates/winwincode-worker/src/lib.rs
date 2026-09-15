@@ -14,6 +14,7 @@ pub mod change_batch_store;
 pub mod context_safety;
 pub mod debug_experiment;
 pub mod debug_probe_context;
+mod device_model;
 pub mod handoff_snapshot;
 pub mod managed_session;
 mod probe_evidence;
@@ -264,6 +265,12 @@ struct PendingCandidateCompletion {
 
 #[derive(Clone, Debug, PartialEq)]
 enum CandidateTerminalFact {
+    ChatTerminal {
+        status: ExecutionOutcomeStatus,
+        summary: String,
+        usage: Option<ExecutionOutcomeUsage>,
+        error: Option<ExecutionPortError>,
+    },
     ReactCompletion {
         summary: String,
         usage: ExecutionOutcomeUsage,
@@ -311,6 +318,7 @@ struct DelegatedFinalFreezeSeed {
 impl CandidateTerminalFact {
     fn outcome(&self) -> (&str, Option<ExecutionOutcomeUsage>) {
         match self {
+            Self::ChatTerminal { summary, usage, .. } => (summary, usage.clone()),
             Self::ReactCompletion { summary, usage } => (summary, Some(usage.clone())),
             Self::DelegatedFinalAccepted { .. } => {
                 ("final delegated ChangeBatch accepted and frozen", None)
@@ -321,6 +329,7 @@ impl CandidateTerminalFact {
 
 /// Single semantic Worker core shared by local and remote `ExecutionPort` IO.
 pub struct WorkerMain<Port, Codex> {
+    device_models: Option<device_model::DeviceModels>,
     config: WorkerConfig,
     port: Port,
     codex: Codex,
@@ -384,6 +393,19 @@ where
     Port: WorkerExecutionPort,
     Codex: CodexCoreAdapter + Send + 'static,
 {
+    /// Binds model execution to the launching Device's private Provider store.
+    /// Production launchers must set this before registering the Worker.
+    ///
+    /// # Errors
+    /// Rejects unavailable or unsafe device storage.
+    pub fn with_device_providers(
+        mut self,
+        directory: &std::path::Path,
+    ) -> Result<Self, winwincode_provider::DeviceProviderError> {
+        self.device_models = Some(device_model::DeviceModels::open(directory)?);
+        Ok(self)
+    }
+
     /// Creates a booting Worker without starting IO or Codex services.
     #[must_use]
     pub fn new(
@@ -396,6 +418,7 @@ where
         let heartbeat_sequence =
             recover_heartbeat_sequence(&mut codex, &config.worker_id, &config.worker_instance_id);
         Self {
+            device_models: None,
             config,
             port,
             codex,
@@ -668,7 +691,8 @@ where
                 self.flush_durable_execution_deliveries().await?;
                 self.flush_codex_execution_messages().await
             }
-            ExecutionPortMessage::RuntimeAckMessage(_)
+            ExecutionPortMessage::ModelAckMessage(_)
+            | ExecutionPortMessage::RuntimeAckMessage(_)
             | ExecutionPortMessage::JobOutcomeAckMessage(_)
             | ExecutionPortMessage::WorkerHeartbeatAckMessage(_) => {
                 self.codex
@@ -748,6 +772,35 @@ where
                 WorkerErrorCode::InvalidLifecycle,
                 "Codex polling requires an active Worker",
             ));
+        }
+        loop {
+            let chunk = match &mut self.device_models {
+                Some(models) => models.next_chunk().map_err(|_| codex_model_error())?,
+                None => None,
+            };
+            let Some(chunk) = chunk else {
+                break;
+            };
+            let result = async {
+                if chunk.session_identity.work_run_id.is_none() {
+                    let public = winwincode_provider::public_model_chunk(&chunk)
+                        .map_err(|_| codex_model_error())?;
+                    self.retain_and_send(ExecutionPortMessage::ModelChunkMessage(public))
+                        .await?;
+                }
+                Box::pin(self.accept_control(
+                    &ExecutionPortMessage::ModelChunkMessage(chunk.clone()),
+                    now.clone(),
+                ))
+                .await
+            }
+            .await;
+            if let Err(error) = result {
+                if let Some(models) = &mut self.device_models {
+                    models.retry_chunk(chunk);
+                }
+                return Err(error);
+            }
         }
         // A response can be delivered after the poll that sent its request,
         // and the response batch may also contain an acknowledgement for a
@@ -1560,10 +1613,8 @@ where
                 .await;
         }
         let exchange = open.model_exchange_id.0.clone();
-        self.port
-            .send(ExecutionPortMessage::ModelOpenMessage(open))
-            .await
-            .map_err(|_| execution_port_error())?;
+        self.send_execution_message(ExecutionPortMessage::ModelOpenMessage(open))
+            .await?;
         self.sent_observation_opens.insert(exchange);
         Ok(())
     }
@@ -1713,10 +1764,8 @@ where
             status,
             worker_session_id: chunk.worker_session_id.clone(),
         };
-        self.port
-            .send(ExecutionPortMessage::ModelAckMessage(acknowledgement))
-            .await
-            .map_err(|_| execution_port_error())?;
+        self.send_execution_message(ExecutionPortMessage::ModelAckMessage(acknowledgement))
+            .await?;
         if let Some((receipt, state)) = routed_terminal {
             self.route_delegated_terminal(&chunk.lease.job_id.0, receipt, state, now.clone())
                 .await?;
@@ -1886,6 +1935,14 @@ where
             .active
             .get(job_id)
             .is_some_and(|job| candidate_writer_role(&job.job.execution_profile));
+        if let Some(active) = self.active.get(job_id)
+            && active.job.execution_profile == "codex-chat"
+            && !completion.artifacts.is_empty()
+        {
+            return Err(candidate_artifact_error(
+                "Chat cannot inject unacknowledged project artifacts",
+            ));
+        }
         let verification_role = self
             .active
             .get(job_id)
@@ -2940,16 +2997,14 @@ where
             }
         }
         let (summary, usage) = pending.terminal_fact.outcome();
+        let (status, error) = match &pending.terminal_fact {
+            CandidateTerminalFact::ChatTerminal { status, error, .. } => {
+                (status.clone(), error.clone())
+            }
+            _ => (ExecutionOutcomeStatus::Succeeded, None),
+        };
         let result = self
-            .finish_job(
-                job_id,
-                ExecutionOutcomeStatus::Succeeded,
-                summary,
-                vec![artifact],
-                usage,
-                None,
-                now,
-            )
+            .finish_job(job_id, status, summary, vec![artifact], usage, error, now)
             .await;
         if result.is_ok() || !self.active.contains_key(job_id) {
             self.pending_candidates.remove(job_id);
@@ -3084,8 +3139,7 @@ where
             status: LeaseWriteStatus::RejectedConflict,
             worker_session_id: open.worker_session_id,
         };
-        self.port
-            .send(ExecutionPortMessage::ModelAckMessage(acknowledgement))
+        self.send_execution_message(ExecutionPortMessage::ModelAckMessage(acknowledgement))
             .await
             .map_err(|_| execution_port_error())
     }
@@ -3141,7 +3195,7 @@ where
         self.send_retained_delivery(delivery).await
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     async fn finish_job(
         &mut self,
         job_id: &str,
@@ -3152,14 +3206,41 @@ where
         error: Option<ExecutionPortError>,
         now: Instant,
     ) -> Result<(), WorkerError> {
+        // Keep the terminal future bounded at every caller, including recovery.
+        Box::pin(async move {
         let active = self.active.get(job_id).cloned().ok_or_else(|| {
             worker_error(
                 WorkerErrorCode::UnexpectedMessage,
                 "terminal result has no active Job",
             )
         })?;
-        if status == ExecutionOutcomeStatus::Succeeded
+        if active.job.execution_profile == "codex-chat" && artifacts.is_empty()
+            && self.workspaces.has_source_changes(&active).map_err(|_| workspace_error())?
+        {
+            if status == ExecutionOutcomeStatus::Cancelled {
+                self.workspaces.retain_source_changes(&active).map_err(|_| workspace_error())?;
+            } else {
+                let authority = candidate_artifact_authority(&active, self.dispatches.get(job_id)
+                    .and_then(|record| record.replacement_authority.clone()))?;
+                let pending = PendingCandidateCompletion {
+                    terminal_fact: CandidateTerminalFact::ChatTerminal { status, summary: summary.to_owned(), usage, error },
+                    authority: authority.clone(), artifact: None,
+                };
+                if self.pending_candidates.get(job_id).is_some_and(|existing| existing != &pending) {
+                    return Err(candidate_artifact_error("Chat terminal facts changed during project retention"));
+                }
+                self.pending_candidates.insert(job_id.to_owned(), pending);
+                if let Some(artifact) = self.codex.accepted_candidate_artifact(&authority).map_err(|_| codex_model_error())? {
+                    return Box::pin(self.finish_candidate_job(job_id, artifact, now)).await;
+                }
+                let prepared = self.workspaces.prepare_candidate(&active, RoleExecutionMode::React)
+                    .map_err(|_| workspace_error())?;
+                return Box::pin(self.retain_candidate_artifact(&active.job.job_id, prepared, now)).await;
+            }
+        }
+        if (status == ExecutionOutcomeStatus::Succeeded || active.job.execution_profile == "codex-chat")
             && candidate_artifact_role(&active.job.execution_profile)
+            && (active.job.execution_profile != "codex-chat" || !artifacts.is_empty())
         {
             let accepted = self
                 .pending_candidates
@@ -3218,6 +3299,7 @@ where
         let _ = self.codex.close_thread(&active.codex_thread_id).await;
         self.send_retained_delivery(delivery).await?;
         self.flush_codex_execution_messages().await
+        }).await
     }
 
     async fn send_dispatch_result(
@@ -3470,14 +3552,26 @@ where
         self.send_retained_delivery(delivery).await
     }
 
+    async fn send_execution_message(
+        &mut self,
+        message: ExecutionPortMessage,
+    ) -> Result<(), WorkerError> {
+        if let Some(models) = &mut self.device_models
+            && models.send(&message).map_err(|_| codex_model_error())?
+        {
+            return Ok(());
+        }
+        self.port
+            .send(message)
+            .await
+            .map_err(|_| execution_port_error())
+    }
+
     async fn send_retained_delivery(
         &mut self,
         delivery: DurableExecutionDelivery,
     ) -> Result<(), WorkerError> {
-        self.port
-            .send(delivery.message)
-            .await
-            .map_err(|_| execution_port_error())?;
+        self.send_execution_message(delivery.message).await?;
         self.codex
             .record_execution_delivery_sent(&delivery.delivery_id)
             .map_err(|_| codex_model_error())?;
@@ -3536,7 +3630,8 @@ where
                 && !self.active.contains_key(job_id)
             {
                 match &delivery.message {
-                    ExecutionPortMessage::RuntimeEventMessage(_) => {
+                    ExecutionPortMessage::RuntimeEventMessage(_)
+                    | ExecutionPortMessage::ModelChunkMessage(_) => {
                         blocked_inactive_jobs.insert(job_id.to_owned());
                         continue;
                     }
@@ -3689,6 +3784,7 @@ fn active_delivery_job_id(message: &ExecutionPortMessage) -> Option<&str> {
         ExecutionPortMessage::RuntimeEventMessage(event) => Some(&event.lease.job_id.0),
         ExecutionPortMessage::JobOutcomeMessage(outcome) => Some(&outcome.lease.job_id.0),
         ExecutionPortMessage::ModelOpenMessage(open) => Some(&open.lease.job_id.0),
+        ExecutionPortMessage::ModelChunkMessage(chunk) => Some(&chunk.lease.job_id.0),
         ExecutionPortMessage::ActionEnforcementRequestMessage(request) => Some(&request.job_id.0),
         ExecutionPortMessage::ApprovalRequestMessage(request) => Some(&request.lease.job_id.0),
         ExecutionPortMessage::InputRequestMessage(request) => Some(&request.lease.job_id.0),
@@ -4126,7 +4222,7 @@ fn verification_artifact_role(profile: &str) -> bool {
 }
 
 fn candidate_artifact_role(profile: &str) -> bool {
-    candidate_writer_role(profile) || verification_artifact_role(profile)
+    profile == "codex-chat" || candidate_writer_role(profile) || verification_artifact_role(profile)
 }
 
 fn scope_identity(

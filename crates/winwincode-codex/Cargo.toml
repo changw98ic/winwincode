@@ -25,6 +25,7 @@ time = { workspace = true, features = ["parsing"] }
 tokio = { workspace = true, features = ["macros"] }
 uuid.workspace = true
 winwincode-domain.workspace = true
+winwincode-provider.workspace = true
 winwincode-execution-port.workspace = true
 winwincode-kernel = { path = "../kernel" }
 

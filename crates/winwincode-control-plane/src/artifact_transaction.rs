@@ -184,12 +184,20 @@ fn metering_attribution(
             "Artifact storage attribution requires the authenticated User actor",
         ));
     };
-    let ExecutionScope::WorkRunExecutionScope(job_scope) = &job.scope else {
-        return Err(StorageError::invalid_input(
-            "Artifact storage attribution requires a Delivery stage",
-        ));
+    let (product_session_id, delivery_id) = match &job.scope {
+        ExecutionScope::WorkRunExecutionScope(scope) => (
+            &scope.product_session_id,
+            Some(DeliveryId(
+                durable
+                    .stream_id()
+                    .strip_prefix("delivery:")
+                    .unwrap_or(durable.stream_id())
+                    .to_owned(),
+            )),
+        ),
+        ExecutionScope::ProductSessionExecutionScope(scope) => (&scope.product_session_id, None),
     };
-    if session_identity.product_session_id != job_scope.product_session_id {
+    if &session_identity.product_session_id != product_session_id {
         return Err(StorageError::invalid_input(
             "Artifact storage attribution differs from the verified ProductSession",
         ));
@@ -199,13 +207,7 @@ fn metering_attribution(
         workspace_id: scope.workspace_id.clone(),
         project_id: scope.project_id.clone(),
         repository_id: scope.repository_id.clone(),
-        delivery_id: Some(DeliveryId(
-            durable
-                .stream_id()
-                .strip_prefix("delivery:")
-                .unwrap_or(durable.stream_id())
-                .to_owned(),
-        )),
+        delivery_id,
         product_session_id: Some(session_identity.product_session_id.clone()),
         user_id,
     })
@@ -550,6 +552,7 @@ impl ArtifactMessageContext {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn validate_current_binding(
     storage: &dyn ProductStateStorage,
     durable: &DurableOutboxEvent,
@@ -559,6 +562,16 @@ fn validate_current_binding(
     require_active_run: bool,
     require_authority: bool,
 ) -> Result<SessionIdentity, StorageError> {
+    if matches!(job.scope, ExecutionScope::ProductSessionExecutionScope(_)) {
+        return crate::product_session_execution_application::chat_artifact_session_identity(
+            storage,
+            job,
+            lease,
+            worker_session_id,
+            require_active_run,
+            require_authority,
+        );
+    }
     let ExecutionScope::WorkRunExecutionScope(job_scope) = &job.scope else {
         return Err(StorageError::invalid_input(
             "Artifact message requires a Delivery stage ExecutionJob",
@@ -773,10 +786,9 @@ fn validate_session_identity_shape(identity: &SessionIdentity) -> Result<(), Sto
         "psn_",
         "sessionIdentity.productSessionId",
     )?;
-    let work_run_id = identity.work_run_id.as_ref().ok_or_else(|| {
-        StorageError::invalid_input("sessionIdentity.workRunId is required for artifacts")
-    })?;
-    require_id(&work_run_id.0, "wrn_", "sessionIdentity.workRunId")?;
+    if let Some(work_run_id) = &identity.work_run_id {
+        require_id(&work_run_id.0, "wrn_", "sessionIdentity.workRunId")?;
+    }
     require_id(
         &identity.worker_session_id.0,
         "wsn_",

@@ -90,3 +90,10 @@ Control Plane 的组合入口是 `ControlPlane::start_local` 或
 
 本阶段没有保留调用方自报 commit/tree/diff/path 的旧候选路径，也没有声称企业对象存储或
 GitHub Publication 已经完成。后者由阶段 3 后续任务继续实现。
+
+
+## Chat 项目文件
+
+`codex-chat` 在任务成功或失败后，将已修改的项目保存为 Git 快照，并通过现有 `artifact.open/chunk/ack` 上传 `project.zip`。收到完整保存确认后才删除临时目录。取消时保留本地 Git 快照供恢复，不再继续上传。
+
+已确认的产物随该轮消息的 `artifactRefs` 返回，页面提供“下载项目文件”。`session.artifact.get` 接收 `productSessionId`、`artifactId`、`offset`、`length`，单次最多读取 256 KiB。服务端先核对产物属于该对话已结束的任务，再核对仓库、执行身份和内容摘要；其他对话的产物返回不可用。下载不修改用户项目文件。

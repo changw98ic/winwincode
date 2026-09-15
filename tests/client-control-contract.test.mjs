@@ -247,11 +247,17 @@ const KIND_EXTRA_FIELDS = Object.freeze({
   }),
   'client.client_lock': () => ({ lockState: 'locked' }),
   'client.credential_rotate': () => ({ reason: 'scheduled' }),
+  'client.extension.report': () => ({ snapshot: { clientNodeId: crockfordId('cnd'), revision: 4, encryptionPublicKey: 'BA==', skills: [], mcpServers: [] }, receipt: null }),
+  'client.extension.apply': () => ({ encrypted: { clientNodeId: crockfordId('cnd'), requestId: 'idem-client-extension-apply', expectedRevision: 4, publicKey: 'BA==', nonce: 'AA==', ciphertext: 'AA==' } }),
+  'client.provider.report': () => ({ snapshot: { clientNodeId: crockfordId('cnd'), revision: 4, encryptionPublicKey: 'BA==', providers: [] }, receipt: null }),
+  'client.provider.apply': () => ({ encrypted: { clientNodeId: crockfordId('cnd'), requestId: 'idem-client-provider-apply', expectedRevision: 4, publicKey: 'BA==', nonce: 'AA==', ciphertext: 'AA==' } }),
 })
 
 // The 8 non-command messages (reports, ack, response, request) and the 8
 // unfenced commands; the 11 fenced commands get their pair from the builders.
 const NON_COMMAND_KINDS = Object.freeze([
+  'client.provider.report',
+  'client.extension.report',
   'client.hello',
   'client.heartbeat',
   'client.worker.state',
@@ -299,10 +305,10 @@ test('schemaVersion is the string constant winwincode/v1', () => {
   assert.equal(typeof CLIENT_CONTROL_SCHEMA_VERSION, 'string')
 })
 
-test('kind registries match the schema verbatim: 16 + 11 = 27', () => {
-  assert.equal(CLIENT_TO_SERVER_MESSAGE_KINDS.length, 16)
-  assert.equal(SERVER_TO_CLIENT_MESSAGE_KINDS.length, 11)
-  assert.equal(CLIENT_CONTROL_MESSAGE_KINDS.length, 27)
+test('kind registries match the schema verbatim: 18 + 13 = 31', () => {
+  assert.equal(CLIENT_TO_SERVER_MESSAGE_KINDS.length, 18)
+  assert.equal(SERVER_TO_CLIENT_MESSAGE_KINDS.length, 13)
+  assert.equal(CLIENT_CONTROL_MESSAGE_KINDS.length, 31)
   assert.equal(Object.isFrozen(CLIENT_TO_SERVER_MESSAGE_KINDS), true)
   assert.equal(Object.isFrozen(SERVER_TO_CLIENT_MESSAGE_KINDS), true)
   assert.equal(Object.isFrozen(CLIENT_CONTROL_COMMAND_MESSAGE_KINDS), true)
@@ -313,8 +319,8 @@ test('kind registries match the schema verbatim: 16 + 11 = 27', () => {
   assert.deepEqual(overlap, [])
 })
 
-test('exactly 19 command kinds and 11 fenced kinds per the schema', () => {
-  assert.equal(CLIENT_CONTROL_COMMAND_MESSAGE_KINDS.length, 19)
+test('exactly 21 command kinds and 11 fenced kinds per the schema', () => {
+  assert.equal(CLIENT_CONTROL_COMMAND_MESSAGE_KINDS.length, 21)
   assert.equal(CLIENT_CONTROL_OCCUPANCY_FENCED_MESSAGE_KINDS.length, 11)
   assert.deepEqual(
     [...CLIENT_CONTROL_OCCUPANCY_FENCED_MESSAGE_KINDS],

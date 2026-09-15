@@ -29,15 +29,14 @@ use winwincode_control_plane::{
     ChatInteractionApiService, ChatInteractionServiceError, ChatInteractionServiceErrorCode,
     CollaborationClock, CollaborationClockError, CollaborationError, CollaborationErrorKind,
     CollaborationService, ControlPlane, DeliveryApplicationError, DurableWorkerInteractionOutbound,
-    ModelRequestPoolConfig, ModelRouteAvailabilityError, ModelRouteAvailabilityErrorKind,
-    ModelRouteAvailabilityService, ModelSettingsError, ModelSettingsErrorKind,
-    ModelSettingsService, ProductSessionApiClock, ProductSessionApiService,
-    ProductSessionExecutionConfig, ProductSessionServiceError, ProductSessionServiceErrorCode,
-    PublicationCommandError, QuickDeviceDispatchError, QuickDeviceDispatchErrorKind,
-    RepositoryExecutionScheduler, RepositoryExecutionSchedulerError, ScopeWorkerHealthEventPort,
-    StrongflowDeviceDispatchError, StrongflowDeviceDispatchErrorKind, WorkRunCancellationRequest,
-    WorkerManagementService, WorkerManagementServiceError, WorkerManagementServiceErrorKind,
-    dispatch_turn_to_device_worker, dispatch_work_run_to_device_worker, workrun_cancel_response,
+    ModelRequestPoolConfig, ModelSettingsError, ModelSettingsErrorKind, ModelSettingsService,
+    ProductSessionApiClock, ProductSessionApiService, ProductSessionExecutionConfig,
+    ProductSessionServiceError, ProductSessionServiceErrorCode, PublicationCommandError,
+    QuickDeviceDispatchError, QuickDeviceDispatchErrorKind, RepositoryExecutionScheduler,
+    RepositoryExecutionSchedulerError, ScopeWorkerHealthEventPort, StrongflowDeviceDispatchError,
+    StrongflowDeviceDispatchErrorKind, WorkRunCancellationRequest, WorkerManagementService,
+    WorkerManagementServiceError, WorkerManagementServiceErrorKind, dispatch_turn_to_device_worker,
+    dispatch_work_run_to_device_worker, workrun_cancel_response,
 };
 use winwincode_domain::{
     ControlPlaneWebSocketAuthorizationEpoch, Instant, ProductSessionId, Sha256Digest, WorkRunId,
@@ -357,17 +356,40 @@ impl StandaloneControlPlaneApplication {
         // Chat turn of a device-anchored session executes on the launched
         // Device WorkerSession instead of the local embedded worker.
         let device_dispatch = match &request {
-            CommandRequest::ChatSubmitCommand(command) => product_session_turn_gate(
-                &mut state.storage,
-                &command.actor,
-                &command.payload.product_session_id,
-            )?
-            .map(|_: DeviceSessionGateApproval| {
-                (
+            CommandRequest::ChatSubmitCommand(command) => Some(
+                product_session_turn_gate(
+                    &mut state.storage,
+                    &command.actor,
+                    &command.payload.product_session_id,
+                )?
+                .ok_or_else(|| {
+                    ApiError::new(
+                        409,
+                        "DEVICE_SESSION_REQUIRED",
+                        "Connect and launch a Device before sending a message",
+                    )
+                })?,
+            )
+            .map(|approval: DeviceSessionGateApproval| {
+                crate::device_providers::validate_session_route(
+                    &mut state.storage,
+                    &command.scope,
+                    &command.payload.product_session_id,
+                    &approval.client_node_id,
+                )
+                .map_err(|_| {
+                    ApiError::new(
+                        409,
+                        "DEVICE_MODEL_UNAVAILABLE",
+                        "Selected model is unavailable on this Device",
+                    )
+                })?;
+                Ok((
                     command.payload.product_session_id.clone(),
                     command.request_id.clone(),
-                )
-            }),
+                ))
+            })
+            .transpose()?,
             _ => None,
         };
         let dispatch_now = self.clock.now_instant();
@@ -417,6 +439,13 @@ impl StandaloneControlPlaneApplication {
     fn session_query(&self, request: QueryRequest) -> Result<QueryResultResponse, ApiError> {
         let mut guard = self.state()?;
         let state = guard.as_mut().ok_or_else(service_unavailable)?;
+        if let QueryRequest::SessionArtifactGetQuery(query) = &request {
+            return state
+                .control_plane
+                .session_artifact_get(&mut state.storage, query)
+                .map(QueryResultResponse::SessionArtifactGetResultResponse)
+                .map_err(|error| product_session_error(&error));
+        }
         let mut clock = ProductSessionClockAdapter(self.clock.as_ref());
         let service =
             ProductSessionApiService::new(&mut state.storage, &mut clock, &state.execution_config);
@@ -672,6 +701,13 @@ impl StandaloneControlPlaneApplication {
         let state = guard.as_mut().ok_or_else(service_unavailable)?;
         let response = match request {
             CommandRequest::SettingsUpdateCommand(command) => {
+                if command.payload.patch.default_model_route.is_some() {
+                    return Err(ApiError::new(
+                        400,
+                        "DEVICE_PROVIDER_SETTINGS_REQUIRED",
+                        "Configure Provider settings on the selected Device",
+                    ));
+                }
                 ModelSettingsService::new(&mut state.storage)
                     .update_generated(&command, occurred_at)
                     .map(CommandCompletedResponse::SettingsUpdateCompletedResponse)
@@ -694,13 +730,19 @@ impl StandaloneControlPlaneApplication {
                 .map(QueryResultResponse::SettingsGetResultResponse)
                 .map_err(|error| model_settings_error(&error)),
             QueryRequest::ModelRouteAvailabilityListQuery(query) => {
-                ModelRouteAvailabilityService::new(
+                crate::device_providers::model_routes(
                     &mut state.storage,
-                    state.model_request_pool_config,
+                    &query,
+                    &self.clock.now_instant(),
                 )
-                .list(&query)
                 .map(QueryResultResponse::ModelRouteAvailabilityListResultResponse)
-                .map_err(|error| model_route_availability_error(&error))
+                .map_err(|_| {
+                    ApiError::new(
+                        409,
+                        "DEVICE_MODELS_UNAVAILABLE",
+                        "Device model list changed or is unavailable",
+                    )
+                })
             }
             _ => Err(application_variant_mismatch()),
         }
@@ -1251,27 +1293,6 @@ fn model_settings_error(error: &ModelSettingsError) -> ApiError {
     }
 }
 
-fn model_route_availability_error(error: &ModelRouteAvailabilityError) -> ApiError {
-    match error.kind() {
-        ModelRouteAvailabilityErrorKind::InvalidRequest => ApiError::new(
-            400,
-            "INVALID_REQUEST",
-            "ModelRoute availability request is invalid",
-        ),
-        ModelRouteAvailabilityErrorKind::ScopeDenied => ApiError::new(
-            403,
-            "PERMISSION_DENIED",
-            "ModelRoute availability scope is not authorized",
-        ),
-        ModelRouteAvailabilityErrorKind::CredentialLeak
-        | ModelRouteAvailabilityErrorKind::Storage => ApiError::new(
-            503,
-            "TRUSTED_FACTS_UNAVAILABLE",
-            "ModelRoute availability facts are unavailable",
-        ),
-    }
-}
-
 fn delivery_application_error(error: &DeliveryApplicationError) -> ApiError {
     match error.code() {
         ErrorCode::InvalidRequest => {
@@ -1586,6 +1607,7 @@ mod tests {
 
     fn dispatch_event(job_id: &str, work_run_id: &str) -> OutboxEvent {
         let job = ExecutionJob {
+            model_selection: None,
             attempt: 1,
             execution_profile: "requirements".to_owned(),
             goal: "test".to_owned(),

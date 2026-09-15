@@ -179,20 +179,14 @@ impl RemoteWorkerAuthenticator for FileRemoteWorkerAuthenticator {
 /// Credential authority for Device Client-launched Worker sessions.
 pub struct WorkerSessionRemoteAuthenticator {
     data_directory: PathBuf,
-    worker_pool_id: WorkerPoolId,
     scope: WorkerRegistryScope,
 }
 
 impl WorkerSessionRemoteAuthenticator {
     #[must_use]
-    pub fn new(
-        data_directory: impl Into<PathBuf>,
-        worker_pool_id: WorkerPoolId,
-        scope: WorkerRegistryScope,
-    ) -> Self {
+    pub fn new(data_directory: impl Into<PathBuf>, scope: WorkerRegistryScope) -> Self {
         Self {
             data_directory: data_directory.into(),
-            worker_pool_id,
             scope,
         }
     }
@@ -209,10 +203,11 @@ impl RemoteWorkerAuthenticator for WorkerSessionRemoteAuthenticator {
         let record = WorkerSessionCredentialService::new(&mut storage)
             .verify_credential(credential.expose_for_verification(), now)
             .map_err(|error| session_authentication_error(&error))?;
+        let worker_pool_id = device_session_pool(&mut storage, &record)?;
         RemoteWorkerPrincipal::new_bound(
             WorkerId(record.worker_id),
             WorkerInstanceId(record.worker_instance_id),
-            self.worker_pool_id.clone(),
+            worker_pool_id,
             self.scope.clone(),
             "winwincode-server".to_owned(),
             format!("worker-session:{}", record.worker_session_id),
@@ -226,7 +221,7 @@ impl RemoteWorkerAuthenticator for WorkerSessionRemoteAuthenticator {
         principal: &RemoteWorkerPrincipal,
         now: &Instant,
     ) -> Result<(), RemoteWorkerAuthenticationError> {
-        if principal.worker_pool_id() != &self.worker_pool_id || principal.scope() != &self.scope {
+        if principal.scope() != &self.scope {
             return Err(RemoteWorkerAuthenticationError::revoked());
         }
         let mut storage = SqliteStorage::open(&self.data_directory)
@@ -237,7 +232,8 @@ impl RemoteWorkerAuthenticator for WorkerSessionRemoteAuthenticator {
             .find_by_digest(&principal.credential_fingerprint().0)
             .map_err(|_| RemoteWorkerAuthenticationError::unavailable())?
             .ok_or_else(RemoteWorkerAuthenticationError::revoked)?;
-        if record.state != WorkerSessionCredentialState::Active
+        if principal.worker_pool_id() != &device_session_pool(&mut storage, &record)?
+            || record.state != WorkerSessionCredentialState::Active
             || record.expires_at.0 <= now.0
             || record.worker_id != principal.worker_id().0
             || principal.worker_instance_id().map(|id| id.0.as_str())
@@ -247,6 +243,45 @@ impl RemoteWorkerAuthenticator for WorkerSessionRemoteAuthenticator {
         }
         Ok(())
     }
+}
+
+fn device_session_pool(
+    storage: &mut SqliteStorage,
+    record: &winwincode_storage::WorkerSessionCredentialRecord,
+) -> Result<WorkerPoolId, RemoteWorkerAuthenticationError> {
+    let grant = winwincode_control_plane::WorkerLaunchGrantService::new(storage)
+        .snapshot(&record.worker_launch_grant_id)
+        .map_err(|_| RemoteWorkerAuthenticationError::unavailable())?
+        .ok_or_else(RemoteWorkerAuthenticationError::revoked)?;
+    let lease = winwincode_control_plane::ClientOccupancyService::new(storage)
+        .active_lease_for_node(&grant.client_node_id)
+        .map_err(|_| RemoteWorkerAuthenticationError::unavailable())?
+        .ok_or_else(RemoteWorkerAuthenticationError::revoked)?;
+    if !grant.state.is_non_terminal()
+        || lease.occupancy_lease_id != grant.occupancy_lease_id
+        || lease.fencing_token != grant.occupancy_fencing_token
+        || !matches!(
+            lease.state,
+            winwincode_control_plane::OccupancyLeaseState::Occupied
+                | winwincode_control_plane::OccupancyLeaseState::Draining
+        )
+    {
+        return Err(RemoteWorkerAuthenticationError::revoked());
+    }
+    if grant.worker_session_id != record.worker_session_id
+        || grant.worker_id != record.worker_id
+        || grant.worker_instance_id != record.worker_instance_id
+    {
+        return Err(RemoteWorkerAuthenticationError::revoked());
+    }
+    Ok(WorkerPoolId(
+        if grant.work_run_id.is_some() {
+            winwincode_control_plane::STRONGFLOW_DEVICE_WORKER_POOL_ID
+        } else {
+            winwincode_control_plane::QUICK_DEVICE_WORKER_POOL_ID
+        }
+        .to_owned(),
+    ))
 }
 
 /// Keeps the configured fleet Worker and Device-launched Workers on the one
@@ -618,7 +653,6 @@ where
 mod tests {
     use std::os::unix::fs::PermissionsExt;
 
-    use winwincode_control_plane::STRONGFLOW_DEVICE_WORKER_POOL_ID;
     use winwincode_domain::{ExecutionSequence, SchemaVersion};
     use winwincode_execution_port::generated::{
         WorkerHeartbeatAckMessage, WorkerHeartbeatAckMessageKind, WorkerHeartbeatAckMessageStatus,
@@ -709,7 +743,7 @@ mod tests {
     }
 
     #[test]
-    fn device_worker_credential_authenticates_its_exact_process_and_revokes() {
+    fn device_worker_credential_requires_its_durable_launch_grant() {
         let root = std::env::temp_dir().join(format!(
             "winwincode-device-worker-credential-{}",
             std::process::id()
@@ -720,7 +754,7 @@ mod tests {
         let mut storage = SqliteStorage::open(&root).expect("storage");
         WorkerSessionCredentialService::new(&mut storage)
             .issue_for_launch(
-                "ws_00000000000000000000000001",
+                "wsn_00000000000000000000000001",
                 "wrk_00000000000000000000000001",
                 "wki_00000000000000000000000001",
                 "wlg_00000000000000000000000001",
@@ -729,39 +763,14 @@ mod tests {
             )
             .expect("issue session credential");
         drop(storage);
-        let authenticator = WorkerSessionRemoteAuthenticator::new(
-            &root,
-            WorkerPoolId(STRONGFLOW_DEVICE_WORKER_POOL_ID.to_owned()),
-            WorkerRegistryScope::local_default(),
-        );
+        let authenticator =
+            WorkerSessionRemoteAuthenticator::new(&root, WorkerRegistryScope::local_default());
         let proof = RemoteWorkerCredential::new(material.material().as_bytes().to_vec())
             .expect("credential proof");
-        let principal = authenticator
-            .authenticate(&proof, &now)
-            .expect("authenticate device worker");
-        assert_eq!(principal.worker_id().0, "wrk_00000000000000000000000001");
-        assert_eq!(
-            principal.worker_instance_id().map(|id| id.0.as_str()),
-            Some("wki_00000000000000000000000001")
-        );
-        authenticator
-            .ensure_active(&principal, &now)
-            .expect("credential remains active");
-
-        let mut storage = SqliteStorage::open(&root).expect("storage");
-        WorkerSessionCredentialService::new(&mut storage)
-            .revoke_for_session(
-                "ws_00000000000000000000000001",
-                "usr_00000000000000000000000001",
-                Some("test"),
-                &Instant("2026-09-12T00:01:00.000Z".to_owned()),
-            )
-            .expect("revoke credential");
-        drop(storage);
         assert_eq!(
             authenticator
-                .ensure_active(&principal, &Instant("2026-09-12T00:01:00.000Z".to_owned()))
-                .expect_err("revoked credential must fail")
+                .authenticate(&proof, &now)
+                .expect_err("orphaned credential must not register a Worker")
                 .kind(),
             winwincode_control_plane::RemoteWorkerAuthenticationErrorKind::Revoked
         );

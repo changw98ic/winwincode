@@ -13,6 +13,7 @@ path = "src/lib.rs"
 [dependencies]
 codex-api.workspace = true
 codex-core-api.workspace = true
+codex-skills-extension = { path = "../../third_party/codex/codex-rs/ext/skills" }
 codex-protocol.workspace = true
 codex-model-provider-info.workspace = true
 futures.workspace = true

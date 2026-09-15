@@ -181,6 +181,8 @@ pub enum ProductSessionTurnState {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProductSessionTurnTerminalOutcome {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_refs: Option<Vec<winwincode_api::generated::ChatArtifactProjection>>,
     pub status: ExecutionOutcomeStatus,
     pub usage: Option<ExecutionOutcomeUsage>,
     pub last_event_sequence: winwincode_domain::ExecutionAckSequence,
@@ -628,6 +630,7 @@ impl ProductSessionService<'_> {
             command.context.receipt_identity.request_id().0.as_bytes(),
         );
         let message = ChatMessageProjection {
+            artifact_refs: None,
             content: command.message.clone(),
             created_at: command.context.occurred_at.clone(),
             id: message_id.clone(),
@@ -773,6 +776,7 @@ impl ProductSessionService<'_> {
                 }
                 persisted.messages.push(PersistedChatMessage {
                     projection: ChatMessageProjection {
+                        artifact_refs: None,
                         content: command.public_text_delta.clone(),
                         created_at: command.context.occurred_at.clone(),
                         id: message_id,
@@ -888,6 +892,10 @@ impl ProductSessionService<'_> {
             {
                 public_state.clone_into(&mut message.projection.state);
                 message.projection.updated_at = command.context.occurred_at.clone();
+                message
+                    .projection
+                    .artifact_refs
+                    .clone_from(&command.terminal_outcome.artifact_refs);
             }
             Some(_) => return Err(stream_conflict()),
             None => {
@@ -896,6 +904,7 @@ impl ProductSessionService<'_> {
                 }
                 persisted.messages.push(PersistedChatMessage {
                     projection: ChatMessageProjection {
+                        artifact_refs: command.terminal_outcome.artifact_refs.clone(),
                         content: String::new(),
                         created_at: command.context.occurred_at.clone(),
                         id: message_id,
@@ -966,7 +975,9 @@ impl ProductSessionService<'_> {
     ) -> Result<ProductSessionCancellationReceipt, ProductSessionServiceError> {
         let digest = command_digest("cancel", cancel_digest_fields(command))?;
         if let Some(replay) = self.replay(&command.context, &digest, MutationKind::Cancelled)? {
-            return cancellation_receipt(replay, RouteWriteStatus::Duplicate);
+            let receipt = cancellation_receipt(replay, RouteWriteStatus::Duplicate)?;
+            self.persist_cancellation_routes(&command.context.public_scope, &receipt)?;
+            return Ok(receipt);
         }
         if actor_from_public(&command.context.public_actor) != command.actor {
             return Err(service_error(
@@ -1059,7 +1070,51 @@ impl ProductSessionService<'_> {
             persisted,
             None,
         )?;
-        cancellation_receipt(mutation, RouteWriteStatus::Applied)
+        let receipt = cancellation_receipt(mutation, RouteWriteStatus::Applied)?;
+        self.persist_cancellation_routes(&command.context.public_scope, &receipt)?;
+        Ok(receipt)
+    }
+
+    fn persist_cancellation_routes(
+        &mut self,
+        scope: &PublicEventScope,
+        receipt: &ProductSessionCancellationReceipt,
+    ) -> Result<(), ProductSessionServiceError> {
+        let PublicEventScope::Repository {
+            organization_id,
+            workspace_id,
+            project_id,
+            repository_id,
+        } = scope
+        else {
+            return Err(corrupt("session cancellation requires repository scope"));
+        };
+        for route in &receipt.routing.routes {
+            let digest = format!(
+                "{:X}",
+                Sha256::digest(format!(
+                    "{}:{}",
+                    receipt.routing.request_id.0, route.job.execution_job_id.0
+                ))
+            );
+            self.storage
+                .request_product_session_cancellation(
+                    &winwincode_storage::RepositorySchedulerCancellationRequest {
+                        scope: winwincode_storage::RepositorySchedulerScope {
+                            organization_id: organization_id.clone(),
+                            workspace_id: workspace_id.clone(),
+                            project_id: project_id.clone(),
+                            repository_id: repository_id.clone(),
+                        },
+                        job_id: route.job.execution_job_id.clone(),
+                        request_id: RequestId(format!("req_0{}", &digest[..25])),
+                        expected_revision: route.job.expected_revision,
+                        requested_at: receipt.mutation.record.session().updated_at().clone(),
+                    },
+                )
+                .map_err(|error| storage_error(&error))?;
+        }
+        Ok(())
     }
 
     /// Reads a stable filtered session page. A cursor from another scope,
@@ -1202,6 +1257,11 @@ impl ProductSessionService<'_> {
             })?;
         validate_persisted_runtime(binding, &current.0, &current.1)?;
         let identity = binding.identity.to_domain()?;
+        let job = self
+            .storage
+            .load_cancellation_job(&binding.reservation.scope, &binding.slot.authority.job_id)
+            .map_err(|error| storage_error(&error))?
+            .ok_or_else(|| binding_mismatch("session cancellation has no queue authority"))?;
         Ok(vec![ExecutionRoute {
             product_session_id: persisted.session.id().clone(),
             work_contract_id: identity.work_contract_id().cloned(),
@@ -1210,7 +1270,7 @@ impl ProductSessionService<'_> {
             work_item_revision: identity.work_item_revision().cloned(),
             work_run_id: identity.work_run_id().cloned(),
             execution_job_id: binding.slot.authority.job_id.clone(),
-            job_revision: current.1.revision,
+            job_revision: job.revision,
             runtime: Some(runtime_route(&current.0.authority)),
             worker_slot_revision: Some(current.0.revision),
             model_exchange_id: Some(binding.model_exchange_id.clone()),
@@ -1265,11 +1325,19 @@ impl ProductSessionService<'_> {
             )
             .map_err(|error| storage_error(&error))?
             .ok_or_else(|| binding_mismatch("queued Chat turn has no canonical ExecutionJob"))?;
-        if job.state != ExecutionJobState::Queued {
+        if !matches!(
+            job.state,
+            ExecutionJobState::Queued
+                | ExecutionJobState::Leased
+                | ExecutionJobState::Running
+                | ExecutionJobState::Cancelling
+        ) {
             return Err(binding_mismatch(
-                "unbound Chat turn is not a queued ExecutionJob",
+                "unbound Chat turn has no active ExecutionJob",
             ));
         }
+        // The scheduler owns any accepted Worker lease, including the interval before
+        // the first model call binds the public conversation. It resolves the cancel target.
         Ok(vec![ExecutionRoute {
             product_session_id: persisted.session.id().clone(),
             work_contract_id: None,
@@ -1635,7 +1703,10 @@ fn require_persisted_terminal_binding(
     let identity = PersistedBindingIdentity::from_domain(&command.binding_identity);
     if session.bindings.iter().any(|binding| {
         binding.identity == identity
-            && binding.model_exchange_id == command.model_exchange_id
+            && (binding.model_exchange_id == command.model_exchange_id
+                || binding
+                    .previous_model_exchange_ids
+                    .contains(&command.model_exchange_id))
             && binding.slot.authority == command.runtime_authority
             && binding.reservation.scope == command.execution_scope
             && binding.reservation.worker_pool_id == command.worker_pool_id
@@ -1665,7 +1736,10 @@ fn require_persisted_binding(
     let identity = PersistedBindingIdentity::from_domain(&command.binding_identity);
     let Some(binding) = session.bindings.iter().find(|binding| {
         binding.identity == identity
-            && binding.model_exchange_id == command.model_exchange_id
+            && (binding.model_exchange_id == command.model_exchange_id
+                || binding
+                    .previous_model_exchange_ids
+                    .contains(&command.model_exchange_id))
             && binding.slot.authority == command.runtime_authority
     }) else {
         return Err(binding_mismatch(

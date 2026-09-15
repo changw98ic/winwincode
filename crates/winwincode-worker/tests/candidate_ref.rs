@@ -316,6 +316,7 @@ fn active_job(repository_id: &RepositoryId, suffix: &str, attempt: i64) -> Activ
     };
     ActiveJob {
         job: ExecutionJob {
+            model_selection: None,
             attempt,
             execution_profile: "fixture".to_owned(),
             goal: "verify stable candidate refs".to_owned(),

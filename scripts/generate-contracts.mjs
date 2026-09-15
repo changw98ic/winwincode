@@ -680,6 +680,8 @@ function renderControlPlaneClient(context, digest) {
     'ControlPlaneWebSocketSubscriptionId',
     'ControlPlaneWebSocketSubscribeStartAt',
     'DeliveryDetailProjection',
+    'DeviceProviderView',
+    'DeviceExtensionView',
     'ControlPlaneWebSocketServerFrame',
     'ErrorEnvelope',
     'EventReadCursor',
@@ -3509,6 +3511,14 @@ function generate(options) {
   ])
   if (options.typescriptClientOutput !== undefined) {
     outputs.set(options.typescriptClientOutput, renderControlPlaneClient(context, digest))
+    const deviceTypes = [...context.registry.values()]
+      .filter(entry => (entry.name.startsWith('DeviceProvider') || entry.name.startsWith('DeviceExtension') || entry.name === 'DeviceConfigurationEnvelope') && !entry.name.endsWith('View'))
+      .sort((left, right) => left.name.localeCompare(right.name))
+      .map(entry => renderTypescriptDefinition(entry, context))
+    if (options.typescriptOutput === join(root, 'apps/client/src/generated/contracts.ts')) outputs.set(
+      join(root, 'packages/contracts/src/device-provider.generated.ts'),
+      ['// SPDX-License-Identifier: Apache-2.0', `// ${GENERATED_MARKER}`, '', deviceTypes.join('\n\n')].join('\n') + '\n',
+    )
   }
 
   if (options.check) {

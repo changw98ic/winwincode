@@ -177,7 +177,7 @@ fn issue_launch_grant(
     seed: u64,
     fixture: &Fixture,
 ) -> WorkerLaunchGrantRecord {
-    issue_launch_grant_for_session(storage, seed, fixture, &id("ws", seed + 8))
+    issue_launch_grant_for_session(storage, seed, fixture, &id("wsn", seed + 8))
 }
 
 /// Issues one live launch grant over the seeded fixture with an explicit
@@ -354,7 +354,7 @@ fn bind_persists_a_durable_traceable_binding_across_restart() {
             binding.work_run_id.as_deref(),
             grant.work_run_id.as_ref().map(|value| value.0.as_str())
         );
-        assert_eq!(binding.worker_session_id, id("ws", 1100 + 8));
+        assert_eq!(binding.worker_session_id, id("wsn", 1100 + 8));
         let snapshot = ledger
             .snapshot(&binding.worker_session_id)
             .expect("snapshot")
@@ -438,7 +438,7 @@ fn bind_refuses_mismatched_facts_unknown_or_terminal_grants() {
                 "expected_repository_binding_id",
                 id("rbd", 3999),
             ),
-            ("session", "expected_worker_session_id", id("ws", 3999)),
+            ("session", "expected_worker_session_id", id("wsn", 3999)),
         ];
         for (label, field, value) in guesses {
             let mut command = bind_command(3200, &grant);
@@ -485,7 +485,7 @@ fn bind_refuses_mismatched_facts_unknown_or_terminal_grants() {
             &fixture.lease_id,
             fixture.fencing_token,
             &fixture.binding_id,
-            id("ws", 3302),
+            id("wsn", 3302),
             None,
             None,
         )
@@ -962,7 +962,7 @@ fn a_non_canonical_command_is_rejected_before_any_durable_write() {
         id("ocl", 9506),
         1,
         id("rbd", 9507),
-        id("ws", 9508),
+        id("wsn", 9508),
         None,
         None,
     )
@@ -972,7 +972,7 @@ fn a_non_canonical_command_is_rejected_before_any_durable_write() {
         DeviceExecutionBindingStoreErrorKind::InvalidInput
     );
     let release =
-        DeviceExecutionBindingRelease::try_new(id("ws", 9510), id("req", 9511), 0, instant(T0))
+        DeviceExecutionBindingRelease::try_new(id("wsn", 9510), id("req", 9511), 0, instant(T0))
             .expect_err("zero revision");
     assert_eq!(
         release.kind(),
@@ -987,7 +987,7 @@ fn a_non_canonical_command_is_rejected_before_any_durable_write() {
     );
     assert!(
         ledger
-            .snapshot(&id("ws", 9600))
+            .snapshot(&id("wsn", 9600))
             .expect("snapshot")
             .is_none()
     );

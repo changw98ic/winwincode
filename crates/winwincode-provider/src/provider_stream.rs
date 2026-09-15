@@ -434,7 +434,7 @@ pub struct ProviderStreamConverter {
 
 impl ProviderStreamConverter {
     /// Binds conversion to the exact route and Credential fingerprint snapshot
-    /// returned by a successful [`crate::ProviderGateway::open`] call.
+    /// returned by a successful the device Provider runtime call.
     #[must_use]
     pub fn from_gateway_receipt(receipt: &ProviderGatewayOpenReceipt) -> Self {
         Self {

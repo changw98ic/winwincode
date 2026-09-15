@@ -59,6 +59,7 @@ const expectedKinds = [
 
 const domainDefinitions = [
   'ApprovalId',
+  'ArtifactId',
   'ChangeBatchId',
   'CodexThreadId',
   'DebugExperimentId',
@@ -352,7 +353,7 @@ test('ExecutionPort makes every job-scoped Worker write lease-bound', () => {
       'job.cancel_ack',
       'job.dispatch_result',
       'job.outcome',
-      'model.ack',
+      'model.chunk',
       'model.open',
       'runtime.event',
       'session.binding',

@@ -60,6 +60,7 @@ pub enum GateInteractionSubject {
 #[serde(rename_all = "snake_case")]
 pub enum RoutableGateDecisionKind {
     PlanDelta,
+    CoreApproval,
     Pause,
     Deny,
     Replan,
@@ -159,7 +160,7 @@ pub struct GateCandidateIdentity {
     pub candidate_revision: u64,
 }
 
-/// Exact action and policy-envelope fact produced by the Gate/Observer path.
+/// Exact action and envelope fact produced by the Gate/Observer or embedded Core path.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GateDecisionFact {
@@ -170,6 +171,32 @@ pub struct GateDecisionFact {
     pub envelope_digest: Sha256Digest,
     pub decision_revision: u64,
     pub candidate: Option<GateCandidateIdentity>,
+}
+
+impl GateDecisionFact {
+    /// Seals the embedded Core's approval envelope after ingress authenticated its Worker.
+    /// This requests a human decision; it does not grant execution permission.
+    pub(crate) fn from_core_approval(
+        request: &winwincode_execution_port::generated::ApprovalRequestMessage,
+    ) -> Result<Self, GateInteractionServiceError> {
+        let action = serde_json::to_vec(&request.action)
+            .map_err(|_| invalid("Core approval action cannot be encoded"))?;
+        let envelope = serde_json::to_vec(request)
+            .map_err(|_| invalid("Core approval envelope cannot be encoded"))?;
+        Ok(Self {
+            decision: RoutableGateDecision {
+                kind: RoutableGateDecisionKind::CoreApproval,
+                reason_sha256: sha256(&action),
+            },
+            action_id: format!("core-approval:{}", request.approval_id.0),
+            action_digest: sha256(&action),
+            // This digest binds the canonical winwincode/v1 approval.request envelope.
+            envelope_version: 1,
+            envelope_digest: sha256(&envelope),
+            decision_revision: 1,
+            candidate: None,
+        })
+    }
 }
 
 /// All execution facts that must remain exact while a human route is pending.
@@ -1012,7 +1039,7 @@ fn validate_subject_decision(
         (subject, kind),
         (
             GateInteractionSubject::Approval(_),
-            RoutableGateDecisionKind::PlanDelta
+            RoutableGateDecisionKind::PlanDelta | RoutableGateDecisionKind::CoreApproval
         ) | (
             GateInteractionSubject::Attention(_),
             RoutableGateDecisionKind::Pause

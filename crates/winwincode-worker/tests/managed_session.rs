@@ -40,6 +40,7 @@ fn valid_config_json() -> String {
         "workerInstanceId": "wri_01JCLI",
         "sourceDirectory": "/repo/winwincode",
         "dataDirectory": "/data/wrk_01JCLI",
+        "providerDirectory": "/data/providers",
         "serverOrigin": "https://127.0.0.1:1",
         "workerCredentialPath": "credential"
     })

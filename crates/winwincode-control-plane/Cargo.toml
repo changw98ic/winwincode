@@ -24,6 +24,7 @@ serde_json.workspace = true
 sha2.workspace = true
 ureq = { version = "=3.1.4", default-features = false, features = ["rustls", "json"] }
 winwincode-api.workspace = true
+winwincode-provider.workspace = true
 winwincode-audit.workspace = true
 winwincode-delivery = { path = "../winwincode-delivery" }
 winwincode-domain.workspace = true

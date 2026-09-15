@@ -146,7 +146,7 @@ impl ClientSessionsError {
     fn invalid_request() -> Self {
         Self::new(
             ClientSessionsErrorKind::InvalidRequest,
-            "launch request must carry a 9-12 digit clientId, a repositoryBindingId, and an optional workRunId",
+            "launch request must carry a 9-12 digit clientId, a repositoryBindingId, and either productSession or workRunId",
         )
     }
 
@@ -291,7 +291,7 @@ impl ClientSessionsApplication {
         let Some(fields) = request.as_object() else {
             return Err(ClientSessionsError::invalid_request());
         };
-        if !matches!(fields.len(), 3 | 4)
+        if fields.len() != 4
             || fields.get("schemaVersion").and_then(Value::as_str) != Some(SUPPORTED_SCHEMA_VERSION)
         {
             return Err(ClientSessionsError::invalid_request());
@@ -347,24 +347,79 @@ impl ClientSessionsApplication {
         if fields.contains_key("workRunId") && work_run_id.is_none() {
             return Err(ClientSessionsError::invalid_request());
         }
-        let product_session_id = match &work_run_id {
-            Some(work_run_id) => {
-                storage
-                    .load_active_execution_job_record_for_work_run(work_run_id)
-                    .map_err(|_| ClientSessionsError::unavailable())?
-                    .ok_or_else(|| {
-                        ClientSessionsError::new(
-                            ClientSessionsErrorKind::InvalidRequest,
-                            "workRunId does not name an active execution job",
-                        )
-                    })?
-                    .scope
-                    .product_session_id
-                    .0
+        let product_session_id = if let Some(work_run_id) = &work_run_id {
+            storage
+                .load_active_execution_job_record_for_work_run(work_run_id)
+                .map_err(|_| ClientSessionsError::unavailable())?
+                .ok_or_else(|| {
+                    ClientSessionsError::new(
+                        ClientSessionsErrorKind::InvalidRequest,
+                        "workRunId does not name an active execution job",
+                    )
+                })?
+                .scope
+                .product_session_id
+                .0
+        } else {
+            let session = fields
+                .get("productSession")
+                .and_then(Value::as_object)
+                .filter(|value| value.len() == 2)
+                .ok_or_else(ClientSessionsError::invalid_request)?;
+            let id: winwincode_domain::ProductSessionId = serde_json::from_value(
+                session
+                    .get("id")
+                    .cloned()
+                    .ok_or_else(ClientSessionsError::invalid_request)?,
+            )
+            .map_err(|_| ClientSessionsError::invalid_request())?;
+            let scope: winwincode_domain::RepositoryScope = serde_json::from_value(
+                session
+                    .get("scope")
+                    .cloned()
+                    .ok_or_else(ClientSessionsError::invalid_request)?,
+            )
+            .map_err(|_| ClientSessionsError::invalid_request())?;
+            let scope_key = crate::device_providers::repository_scope_key(&scope)
+                .map_err(|_| ClientSessionsError::invalid_request())?;
+            let record = winwincode_control_plane::ProductSessionService::new(&mut storage)
+                .get(&scope_key, &id)
+                .map_err(|_| ClientSessionsError::unavailable())?
+                .ok_or_else(ClientSessionsError::invalid_request)?;
+            if !matches!(record.owner_actor(), winwincode_storage::PublicEventActor::User { id } if id.0 == user_id)
+            {
+                return Err(ClientSessionsError::invalid_request());
             }
-            None => generate_prefixed_id("ps_")?,
+            crate::device_providers::validate_session_route(
+                &mut storage,
+                &scope,
+                &id,
+                &node.client_node_id,
+            )
+            .map_err(|_| ClientSessionsError::invalid_request())?;
+            id.0
         };
-        let worker_session_id = generate_prefixed_id("ws_")?;
+        if let Some(grant) = WorkerLaunchGrantService::new(&mut storage)
+            .newest_grant_for_product_session(&product_session_id)
+            .map_err(|_| ClientSessionsError::unavailable())?
+        {
+            if grant.client_node_id != node.client_node_id
+                || grant.repository_binding_id != repository_binding_id
+                || grant.occupancy_lease_id != lease.occupancy_lease_id
+                || grant.occupancy_fencing_token != lease.fencing_token
+            {
+                return Err(ClientSessionsError::invalid_request());
+            }
+            return Ok(PreparedLaunch {
+                node,
+                occupancy_lease_id: lease.occupancy_lease_id,
+                occupancy_fencing_token: lease.fencing_token,
+                grant,
+                product_session_id,
+                work_run_id: work_run_id.map(|id| id.0),
+            });
+        }
+        let worker_session_id = generate_prefixed_id("wsn_")?;
         let worker_id = generate_prefixed_id("wrk_")?;
         let worker_instance_id = generate_prefixed_id("wki_")?;
         let worker_launch_grant_id = generate_prefixed_id("wlg_")?;
@@ -806,7 +861,7 @@ mod tests {
 
     #[test]
     fn generated_ids_carry_the_launch_prefixes() {
-        for prefix in ["wlg_", "ws_", "wrk_", "wki_", "ps_", "run_", "msg_"] {
+        for prefix in ["wlg_", "wsn_", "wrk_", "wki_", "ps_", "run_", "msg_"] {
             let id = generate_prefixed_id(prefix).expect("entropy");
             assert_eq!(id.len(), prefix.len() + 26);
             assert!(id.starts_with(prefix));
@@ -829,14 +884,14 @@ mod tests {
     fn stop_message_carries_the_stamped_occupancy_context() {
         let message = worker_stop_message(
             occupancy_stamp(7, "ocl_A", 9, "idem_stop_wlg"),
-            "ws_A",
+            "wsn_A",
             "wrk_A",
             ClientWorkerStopReason::GrantRevoked,
         );
         let ServerToClientMessage::WorkerStop(payload) = &message else {
             panic!("worker stop message expected");
         };
-        assert_eq!(payload.worker_session_id, "ws_A");
+        assert_eq!(payload.worker_session_id, "wsn_A");
         assert_eq!(payload.worker_id, "wrk_A");
         assert_eq!(payload.reason, ClientWorkerStopReason::GrantRevoked);
         assert_eq!(payload.occupancy.occupancy_lease_id, "ocl_A");

@@ -31,9 +31,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use winwincode_domain::CredentialReferenceId;
 
-use crate::credential_reference::{
-    CredentialReferenceResolution, ResolvedSecret, SecretStoreError, SecretStorePort,
-};
+use winwincode_provider::{ResolvedSecret, SecretStoreError};
+
+use crate::credential_reference::{CredentialReferenceResolution, SecretStorePort};
 
 const DIRECTORY_MODE: u32 = 0o700;
 const FILE_MODE: u32 = 0o600;

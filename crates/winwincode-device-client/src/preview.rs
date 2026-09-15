@@ -492,7 +492,7 @@ mod tests {
     fn descriptor() -> PreviewSourceDescriptor {
         PreviewSourceDescriptor {
             source_id: "pvs_demo".to_owned(),
-            worker_session_id: "ws_demo".to_owned(),
+            worker_session_id: "wsn_demo".to_owned(),
             repository_binding_id: "rbd_demo".to_owned(),
             mode: PreviewSourceMode::Live,
             candidate_commit: None,

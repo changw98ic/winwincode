@@ -1129,7 +1129,9 @@ fn command_identity(
         ClientToServerMessage::CandidateApplyResult(payload) => {
             &payload.occupancy.command.idempotency_key
         }
-        ClientToServerMessage::Hello(_)
+        ClientToServerMessage::ProviderReport(_)
+        | ClientToServerMessage::ExtensionReport(_)
+        | ClientToServerMessage::Hello(_)
         | ClientToServerMessage::Heartbeat(_)
         | ClientToServerMessage::RepositoryStatus(_)
         | ClientToServerMessage::WorkerState(_)
@@ -1154,6 +1156,14 @@ fn apply_effect(
     now: &Instant,
 ) -> Result<(), ClientExchangeError> {
     match &envelope.message {
+        ClientToServerMessage::ExtensionReport(report) => {
+            crate::device_providers::observe_extensions(storage, node_id, report)
+                .map_err(|_| ClientExchangeError::unavailable())
+        }
+        ClientToServerMessage::ProviderReport(report) => {
+            crate::device_providers::observe(storage, node_id, report)
+                .map_err(|_| ClientExchangeError::unavailable())
+        }
         ClientToServerMessage::Hello(payload) => {
             let record = ClientRegistryService::new(storage)
                 .snapshot(node_id)
@@ -1873,7 +1883,7 @@ mod tests {
             .publish_worker_credential(WorkerCredentialDelivery {
                 client_node_id: "cnd_AAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned(),
                 worker_launch_grant_id: "wlg_AAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned(),
-                worker_session_id: "ws_AAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned(),
+                worker_session_id: "wsn_AAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned(),
                 credential_digest: digest.clone(),
                 worker_credential: material.clone(),
                 expires_at: Instant("2100-01-01T00:00:00.000Z".to_owned()),
@@ -1883,7 +1893,7 @@ mod tests {
             "kind": "client.worker.launch",
             "payload": {"launchGrant": {
                 "workerLaunchGrantId": "wlg_AAAAAAAAAAAAAAAAAAAAAAAAAA",
-                "workerSessionId": "ws_AAAAAAAAAAAAAAAAAAAAAAAAAA",
+                "workerSessionId": "wsn_AAAAAAAAAAAAAAAAAAAAAAAAAA",
                 "credentialDigest": digest,
             }}
         });
@@ -2000,7 +2010,7 @@ mod tests {
                 winwincode_client_port::messages::ClientWorkerLaunchAckPayload {
                     occupancy: occupancy.clone(),
                     worker_launch_grant_id: "wlg_1".to_owned(),
-                    worker_session_id: "ws_1".to_owned(),
+                    worker_session_id: "wsn_1".to_owned(),
                     worker_id: "worker_1".to_owned(),
                     worker_instance_id: "wki_1".to_owned(),
                     status: WorkerLaunchAckStatus::Accepted,
@@ -2009,7 +2019,7 @@ mod tests {
             )),
             ClientToServerMessage::CandidateRetained(ClientCandidateRetainedPayload {
                 occupancy: occupancy.clone(),
-                worker_session_id: "ws_1".to_owned(),
+                worker_session_id: "wsn_1".to_owned(),
                 receipt: winwincode_client_port::domain::LocalCandidateReceipt {
                     local_candidate_receipt_id: "lcr_1".to_owned(),
                     candidate_ref: "cand_1".to_owned(),
@@ -2084,7 +2094,7 @@ mod tests {
             ClientToServerMessage::WorkerState(
                 winwincode_client_port::messages::ClientWorkerStatePayload {
                     occupancy_lease_id: None,
-                    worker_session_id: "ws_1".to_owned(),
+                    worker_session_id: "wsn_1".to_owned(),
                     worker_instance_id: "wki_1".to_owned(),
                     state: winwincode_client_port::domain::ClientWorkerRunState::Running,
                     exit_code: None,

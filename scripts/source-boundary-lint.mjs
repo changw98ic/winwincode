@@ -295,11 +295,11 @@ function clientNetworkFindings() {
 }
 
 function providerNetworkFindings() {
-  const files = walk(join(root, 'crates/winwincode-control-plane/src'), { skip: ignoredSourceDirectoryNames })
+  const files = walk(join(root, 'crates/winwincode-provider/src'), { skip: ignoredSourceDirectoryNames })
     .filter(path => /\/provider_[^/]+\.rs$/u.test(path))
     .filter(path => /ureq::(?:Agent|Body|http)|ureq::tls/u.test(readText(path) ?? ''))
   const findings = files
-    .filter(path => relativePath(path) !== 'crates/winwincode-control-plane/src/provider_https_sse.rs')
+    .filter(path => relativePath(path) !== 'crates/winwincode-provider/src/provider_https_sse.rs')
     .map(path => Object.freeze({ marker: 'second-provider-network-authority', path: relativePath(path) }))
   if (files.length !== 1) {
     findings.push(Object.freeze({

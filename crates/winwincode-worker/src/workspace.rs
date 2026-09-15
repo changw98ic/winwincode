@@ -1216,6 +1216,11 @@ pub struct WorkerWorkspace {
 }
 
 impl WorkerWorkspace {
+    pub(crate) fn has_source_changes(&self) -> Result<bool, WorkspaceError> {
+        Ok(!workspace_checkout_clean(&self.layout.checkout)?
+            || rev_parse(&self.layout.checkout, "HEAD^{tree}")? != self.source_tree_id)
+    }
+
     /// Stable opaque workspace identity derived from source and lease authority.
     #[must_use]
     pub fn id(&self) -> &str {

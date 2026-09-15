@@ -1008,6 +1008,7 @@ fn dispatch(job_suffix: char, scope: ExecutionScope) -> JobDispatchMessage {
     let goal = "Perform the approved fixture change.";
     JobDispatchMessage {
         job: ExecutionJob {
+            model_selection: None,
             attempt: 1,
             execution_profile: if delivery_stage { "planner" } else { "fixture" }.to_owned(),
             goal: goal.to_owned(),
@@ -3208,6 +3209,153 @@ async fn writer_outcome_waits_for_one_exact_final_candidate_ack() {
         ExecutionOutcomeStatus::Succeeded
     );
     assert!(worker.active_jobs().is_empty());
+}
+
+#[tokio::test]
+async fn chat_files_survive_cleanup_and_wait_for_final_artifact_ack() {
+    for failed in [false, true] {
+        let port = RecordingPort::default();
+        let messages = Rc::clone(&port.messages);
+        let codex = FakeCodex::with_threads([thread('A')]);
+        let pump = codex.clone();
+        let mut worker = test_worker(worker_config(1), port, codex);
+        register(&mut worker).await;
+        worker
+            .accept_control(
+                &ExecutionPortMessage::JobDispatchMessage({
+                    let mut message = dispatch('A', product_scope('A'));
+                    message.job.execution_profile = "codex-chat".into();
+                    message.job.workspace.write_mode = ExecutionWorkspaceWriteMode::Candidate;
+                    message
+                }),
+                now(),
+            )
+            .await
+            .unwrap();
+        let active = worker.active_jobs()[0].clone();
+        let checkout = pump.workspace(&active.codex_thread_id);
+        let common = Command::new("git")
+            .arg("-C")
+            .arg(&checkout)
+            .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+            .output()
+            .expect("common Git directory");
+        assert!(common.status.success());
+        let common = PathBuf::from(String::from_utf8(common.stdout).expect("Git path").trim());
+        let user_file = common
+            .parent()
+            .expect("source repository")
+            .join("user-kept.txt");
+        std::fs::write(&user_file, "user edit").expect("unrelated user file");
+        std::fs::write(checkout.join("candidate.txt"), b"candidate\n")
+            .expect("write candidate in the Worker-owned checkout");
+        let injected = ArtifactReference {
+            artifact_id: ArtifactId(id("art", 'Z')),
+            digest: Sha256Digest(format!("sha256:{}", "f".repeat(64))),
+        };
+        pump.queue_poll(
+            &active.codex_thread_id,
+            Ok(CodexPoll::Completed(CodexTurnCompletion {
+                summary: secret_safe_runtime_summary("writer completed").unwrap(),
+                artifacts: vec![injected],
+                usage: measured_completion_usage(),
+            })),
+        );
+        let rejected = worker
+            .poll_codex_boxed()
+            .await
+            .expect_err("writer cannot inject an unacknowledged reference");
+        assert_eq!(rejected.code, WorkerErrorCode::CandidateArtifactMismatch);
+        assert_no_outcome(&messages);
+
+        pump.queue_poll(
+            &active.codex_thread_id,
+            Ok(if failed {
+                CodexPoll::Failed(
+                    secret_safe_runtime_summary("model failed after writing files").unwrap(),
+                )
+            } else {
+                CodexPoll::Completed(CodexTurnCompletion {
+                    summary: secret_safe_runtime_summary("writer completed").unwrap(),
+                    artifacts: Vec::new(),
+                    usage: measured_completion_usage(),
+                })
+            }),
+        );
+        worker.poll_codex_boxed().await.unwrap();
+        let artifact = observed_candidate_reference(&messages);
+        assert_eq!(
+            messages
+                .borrow()
+                .iter()
+                .filter(|message| matches!(
+                    message,
+                    ExecutionPortMessage::ArtifactOpenMessage(_)
+                        | ExecutionPortMessage::ArtifactChunkMessage(_)
+                ))
+                .count(),
+            2
+        );
+        assert_no_outcome(&messages);
+
+        let mut wrong = candidate_ack(&active, &artifact, 0, 'W');
+        wrong.artifact_id = ArtifactId(id("art", 'W'));
+        let rejected = worker
+            .accept_control(&ExecutionPortMessage::ArtifactAckMessage(wrong), now())
+            .await
+            .expect_err("foreign Artifact ack");
+        assert_eq!(rejected.code, WorkerErrorCode::CandidateArtifactMismatch);
+        assert_no_outcome(&messages);
+
+        acknowledge_candidate(&mut worker, &active, &artifact, 0, 'O')
+            .await
+            .expect("open acknowledgement");
+        assert_no_outcome(&messages);
+        acknowledge_candidate(&mut worker, &active, &artifact, 1, 'F')
+            .await
+            .expect("final candidate acknowledgement");
+
+        let outcomes = observed_outcomes(&messages);
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].outcome.artifacts, vec![artifact]);
+        assert_eq!(
+            outcomes[0].outcome.status,
+            if failed {
+                ExecutionOutcomeStatus::Failed
+            } else {
+                ExecutionOutcomeStatus::Succeeded
+            }
+        );
+        assert!(worker.active_jobs().is_empty());
+        assert!(
+            !checkout.exists(),
+            "temporary checkout is removed after acknowledgement"
+        );
+        let refs = Command::new("git")
+            .arg("--git-dir")
+            .arg(&common)
+            .args([
+                "for-each-ref",
+                "--format=%(refname)",
+                "refs/winwincode/candidates/",
+            ])
+            .output()
+            .expect("retained candidate");
+        assert!(refs.status.success());
+        let reference = String::from_utf8(refs.stdout).expect("ref name");
+        let content = Command::new("git")
+            .arg("--git-dir")
+            .arg(&common)
+            .args(["show", &format!("{}:candidate.txt", reference.trim())])
+            .output()
+            .expect("saved source after cleanup");
+        assert!(content.status.success());
+        assert_eq!(content.stdout, b"candidate\n");
+        assert_eq!(
+            std::fs::read_to_string(&user_file).expect("user file remains"),
+            "user edit"
+        );
+    }
 }
 
 #[tokio::test]

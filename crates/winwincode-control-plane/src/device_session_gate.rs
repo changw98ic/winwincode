@@ -481,7 +481,7 @@ mod tests {
             lease_id,
             token,
             binding,
-            format!("ws_{}", suffix(seed + 50)),
+            format!("wsn_{}", suffix(seed + 50)),
             format!("wrk_{}", suffix(seed + 51)),
             format!("wki_{}", suffix(seed + 52)),
             "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",

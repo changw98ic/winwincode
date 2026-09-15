@@ -555,6 +555,8 @@ test('Chat keeps the Session decisions on the first screen and retires the card 
 
   const card = findByClass(rootElement, 'wwc-contextual-decision')
   assert.equal(card.hidden, false)
+  assert.equal(findByClass(rootElement, 'wwc-chat-decisions').hidden, false)
+  assert.notEqual(findByClass(rootElement, 'wwc-chat-decisions').getAttribute('aria-hidden'), 'true')
   const items = findAllByClass(rootElement, 'wwc-contextual-decision-item')
   assert.equal(items.length, 2)
   // The blocking tool approval is the first row of the card.

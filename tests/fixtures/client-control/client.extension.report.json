@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "winwincode/v1",
+  "messageId": "cmsg_00000000000000000000000031",
+  "clientNodeId": "cnd_00000000000000000000000001",
+  "clientInstanceId": "cix_00000000000000000000000001",
+  "sequence": 428,
+  "occurredAt": "2026-09-01T09:30:15.000Z",
+  "kind": "client.extension.report",
+  "payload": {
+    "snapshot": {
+      "clientNodeId": "cnd_00000000000000000000000001",
+      "revision": 0,
+      "encryptionPublicKey": "BA==",
+      "skills": [],
+      "mcpServers": []
+    },
+    "receipt": null
+  }
+}

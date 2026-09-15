@@ -9,10 +9,11 @@ use std::{
 use winwincode_api::generated::{
     Actor, CredentialReferenceCreateCommand, CredentialReferenceCreateCommandCommand,
     CredentialReferenceCreatePayload, CredentialReferenceRevokeCommand,
-    CredentialReferenceRevokeCommandCommand, CredentialReferenceRevokePayload, EmptyParameters,
-    ModelRoute, ModelRouteAvailabilityListQuery, ModelRouteAvailabilityListQueryQuery,
-    ModelRouteAvailabilityReason, ModelRouteAvailabilityStatus, OrganizationScope,
-    OrganizationScopeKind, PageRequest, ProjectScope, ProjectScopeKind, Scope,
+    CredentialReferenceRevokeCommandCommand, CredentialReferenceRevokePayload,
+    DeviceModelRouteParameters, ModelRoute, ModelRouteAvailabilityListQuery,
+    ModelRouteAvailabilityListQueryQuery, ModelRouteAvailabilityReason,
+    ModelRouteAvailabilityStatus, OrganizationScope, OrganizationScopeKind, PageRequest,
+    ProjectScope, ProjectScopeKind, Scope,
 };
 use winwincode_control_plane::{
     CredentialReferenceService, ModelCapability, ModelRequestPoolConfig,
@@ -194,7 +195,9 @@ fn query(
     ModelRouteAvailabilityListQuery {
         actor: actor(1),
         page: PageRequest { cursor, limit },
-        parameters: EmptyParameters {},
+        parameters: DeviceModelRouteParameters {
+            product_session_id: None,
+        },
         query: ModelRouteAvailabilityListQueryQuery::ModelRouteAvailabilityList,
         request_id: RequestId(id("req", request_seed)),
         schema_version: SchemaVersion::WinwincodeV1,

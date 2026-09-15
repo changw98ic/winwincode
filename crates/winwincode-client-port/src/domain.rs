@@ -514,6 +514,18 @@ pub enum ClientControlErrorCode {
 /// `ClientControlMessageKind`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ClientControlMessageKind {
+    /// Public Device Skills/MCP metadata.
+    #[serde(rename = "client.extension.report")]
+    ExtensionReport,
+    /// Encrypted Skills/MCP mutation.
+    #[serde(rename = "client.extension.apply")]
+    ExtensionApply,
+    /// Public Device Provider state and receipt.
+    #[serde(rename = "client.provider.report")]
+    ProviderReport,
+    /// Encrypted Provider mutation.
+    #[serde(rename = "client.provider.apply")]
+    ProviderApply,
     /// `client.enroll`
     #[serde(rename = "client.enroll")]
     Enroll,
@@ -1245,7 +1257,7 @@ mod tests {
                 "repositoryBindingId": "rb_01j2",
                 "productSessionId": "ps_01j2",
                 "workRunId": "wrn_01j2",
-                "workerSessionId": "ws_01j2",
+                "workerSessionId": "wsn_01j2",
                 "workerId": "worker_1",
                 "workerInstanceId": "winst_01j2",
                 "credentialDigest": "sha256:dd44",
@@ -1263,7 +1275,7 @@ mod tests {
                 "workerLaunchGrantId":"wlg_01j2","clientNodeId":"node_01j2",
                 "clientInstanceId":"inst_01j2","occupancyLeaseId":"lease_01j2",
                 "occupancyFencingToken":"7","repositoryBindingId":"rb_01j2",
-                "productSessionId":"ps_01j2","workerSessionId":"ws_01j2",
+                "productSessionId":"ps_01j2","workerSessionId":"wsn_01j2",
                 "workerId":"worker_1","workerInstanceId":"winst_01j2",
                 "credentialDigest":"sha256:dd44","expiresAt":"2026-01-02T12:10:00.000Z",
                 "state":"issued","revision":1

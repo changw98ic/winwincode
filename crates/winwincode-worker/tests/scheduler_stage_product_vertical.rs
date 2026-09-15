@@ -994,6 +994,7 @@ fn stage_job(role: &str, seed: u64, revision: &str, candidate_ref: Option<&str>)
     };
     let payload = format!("scheduler-stage-product-{seed}-{role}");
     ExecutionJob {
+        model_selection: None,
         attempt: 1,
         execution_profile: role.to_owned(),
         goal,

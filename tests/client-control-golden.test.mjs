@@ -31,6 +31,8 @@ const CLIENT_TO_SERVER_KINDS = Object.freeze([
   'client.candidate.retained',
   'client.candidate.apply_result',
   'client.command_ack',
+  'client.provider.report',
+  'client.extension.report',
 ])
 
 const SERVER_TO_CLIENT_KINDS = Object.freeze([
@@ -45,6 +47,8 @@ const SERVER_TO_CLIENT_KINDS = Object.freeze([
   'client.candidate.apply',
   'client.client_lock',
   'client.credential_rotate',
+  'client.provider.apply',
+  'client.extension.apply',
 ])
 
 const ALL_KINDS = Object.freeze([
@@ -63,6 +67,8 @@ const KIND_TO_DIRECTION = Object.freeze(new Map([
 // expectedRevision + idempotencyKey.
 const FACT_KINDS = Object.freeze(new Set([
   'client.heartbeat',
+  'client.provider.report',
+  'client.extension.report',
   'client.hello',
   'client.worker.state',
   'client.worker.reconcile',
@@ -238,8 +244,8 @@ const invalidFiles = readdirSync(invalidDir, { withFileTypes: true })
   .sort()
 
 test('kind registry matches the ClientControlPort plan verbatim', () => {
-  assert.equal(CLIENT_TO_SERVER_KINDS.length, 16)
-  assert.equal(SERVER_TO_CLIENT_KINDS.length, 11)
+  assert.equal(CLIENT_TO_SERVER_KINDS.length, 18)
+  assert.equal(SERVER_TO_CLIENT_KINDS.length, 13)
   assert.equal(new Set(ALL_KINDS).size, ALL_KINDS.length)
 })
 

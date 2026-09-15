@@ -226,7 +226,7 @@ fn work_run_anchor(
         lease_id,
         fencing_token,
         binding,
-        ulid_id("ws", seed + 1),
+        ulid_id("wsn", seed + 1),
         ulid_id("wrk", seed + 2),
         ulid_id("wki", seed + 3),
         DIGEST,
@@ -264,6 +264,7 @@ fn work_run_role_job(
     let product_session_id = ProductSessionId(ulid_id("psn", seed + 2));
     let job_id = ExecutionJobId(ulid_id("job", seed + 3));
     let job = ExecutionJob {
+        model_selection: None,
         attempt: 1,
         execution_profile: role.to_owned(),
         goal: "Execute the exact sealed WorkRun goal.".to_owned(),

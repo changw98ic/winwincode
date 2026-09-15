@@ -900,6 +900,88 @@ impl RepositoryRuntimeScheduler {
         Ok(admission_ready)
     }
 
+    fn dispatch_cancellations(
+        &self,
+        state: &mut ApplicationState,
+        now: &Instant,
+        execution_port: &dyn RuntimeControlOutbound,
+    ) -> Result<(), RuntimeSupervisorError> {
+        let cancellations = {
+            let mut scheduler = RepositoryExecutionScheduler::new(&mut state.storage);
+            scheduler
+                .pending_cancellations(&self.scope)
+                .map_err(|error| {
+                    debug_scheduler_error("list pending cancellations", &error);
+                    scheduler_failure()
+                })?
+        };
+        for cancellation in cancellations {
+            let lease = state
+                .storage
+                .execution_registry()
+                .and_then(|registry| registry.load_lease(&cancellation.lease.job_id))
+                .map_err(|_| scheduler_failure())?;
+            let device_facts = state
+                .storage
+                .device_execution_binding_ledger()
+                .and_then(|ledger| ledger.facts(&cancellation.lease.job_id.0))
+                .map_err(|_| scheduler_failure())?;
+            let device_released = if let Some(facts) = device_facts {
+                state
+                    .storage
+                    .client_occupancy_ledger()
+                    .and_then(|ledger| ledger.snapshot(&facts.occupancy_lease_id))
+                    .map_err(|_| scheduler_failure())?
+                    .is_some_and(|occupancy| {
+                        occupancy.fencing_token == facts.occupancy_fencing_token
+                            && occupancy.state == winwincode_storage::OccupancyLeaseState::Released
+                    })
+            } else {
+                false
+            };
+            // A released Device lease confirms its Workers stopped and also revokes remote ingress.
+            if device_released
+                || lease
+                    .as_ref()
+                    .is_some_and(|lease| lease.expires_at.0 <= now.0)
+            {
+                let mut admission = state
+                    .storage
+                    .execution_admission()
+                    .map_err(|_| scheduler_failure())?;
+                if let Some(reservation) = admission
+                    .load_reservation_by_job(&cancellation.lease.job_id)
+                    .map_err(|_| scheduler_failure())?
+                    && matches!(
+                        reservation.state,
+                        ExecutionReservationState::Running | ExecutionReservationState::Queued
+                    )
+                {
+                    admission
+                        .release(&winwincode_storage::ExecutionReservationRelease {
+                            scope: reservation.scope,
+                            worker_pool_id: reservation.worker_pool_id,
+                            job_id: cancellation.lease.job_id.clone(),
+                            request_id: cancellation.request_id.clone(),
+                            expected_revision: reservation.revision,
+                            reason:
+                                winwincode_storage::ExecutionReservationReleaseReason::Cancelled,
+                            released_at: now.clone(),
+                        })
+                        .map_err(|_| scheduler_failure())?;
+                }
+                continue;
+            }
+            if cancellation.lease.worker_id != self.worker_id
+                || cancellation.lease.worker_instance_id != self.worker_instance_id
+            {
+                continue;
+            }
+            execution_port.enqueue_control(ExecutionPortMessage::JobCancelMessage(cancellation))?;
+        }
+        Ok(())
+    }
+
     fn dispatch_scheduler_messages(
         &mut self,
         state: &mut ApplicationState,
@@ -915,18 +997,7 @@ impl RepositoryRuntimeScheduler {
             )
         })?;
         let request_id = self.next_request_id(b"claim");
-        let cancellations = {
-            let mut scheduler = RepositoryExecutionScheduler::new(&mut state.storage);
-            scheduler
-                .pending_cancellations(&self.scope)
-                .map_err(|error| {
-                    debug_scheduler_error("list pending cancellations", &error);
-                    scheduler_failure()
-                })?
-        };
-        for cancellation in cancellations {
-            execution_port.enqueue_control(ExecutionPortMessage::JobCancelMessage(cancellation))?;
-        }
+        self.dispatch_cancellations(state, now, execution_port)?;
         // A queued Job may be waiting for an admission timestamp or for
         // ordinary concurrency/budget capacity.  Cancellation and interaction
         // traffic for already-running work must still flow while that queue
@@ -1989,6 +2060,7 @@ mod tests {
 
     fn queued_job_record(scope: &ExecutionQueueScope) -> (ExecutionJobRecord, ExecutionJob) {
         let job = ExecutionJob {
+            model_selection: None,
             attempt: 0,
             execution_profile: "codex-chat".to_owned(),
             goal: "admission regression fixture".to_owned(),

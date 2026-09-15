@@ -10,6 +10,10 @@
 //! (`NOT_HOLDER`, `OCCUPANCY_REQUIRED`), the binding visibility gate, the
 //! durable capacity view, and the expiry path of an unanswered grant.
 
+#[path = "support/device_provider.rs"]
+mod device_provider;
+use device_provider::chat_scope;
+
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::path::PathBuf;
@@ -556,6 +560,8 @@ fn stage_visible_binding(data_directory: &Path, node: &str, user_id: &str) -> St
             &Instant("2026-09-04T12:00:03.000Z".to_owned()),
         )
         .expect("repo grant");
+    drop(storage);
+    device_provider::stage_chat(data_directory, node, user_id, 100);
     binding_id
 }
 
@@ -832,6 +838,7 @@ fn launch_body(client_id: &str, binding_id: &str) -> String {
         "schemaVersion": SCHEMA_VERSION,
         "clientId": client_id,
         "repositoryBindingId": binding_id,
+        "productSession": {"id":"psn_00000000000000000000000100","scope":chat_scope()},
     })
     .to_string()
 }
@@ -947,7 +954,7 @@ async fn full_launch_chain_issues_consumes_and_is_idempotent_under_replays() {
         body["workerSessionId"]
             .as_str()
             .expect("session id")
-            .starts_with("ws_"),
+            .starts_with("wsn_"),
         "{body}"
     );
     assert!(
@@ -1297,6 +1304,7 @@ async fn an_unanswered_grant_times_out_keeps_the_frame_and_expires() {
         "schemaVersion": SCHEMA_VERSION,
         "clientId": public_client_id,
         "repositoryBindingId": binding_id,
+            "productSession":{"id":"psn_00000000000000000000000100","scope":chat_scope()},
     });
     let error = application
         .launch(&user_id, &request)
@@ -1437,7 +1445,7 @@ fn the_worker_stop_frame_round_trips_through_the_wire_codec() {
             occupancy_lease_id: "ocl_AAAAAAAAAAAAAAAAAAAAAAAA1".to_owned(),
             occupancy_fencing_token: 7,
         },
-        "ws_AAAAAAAAAAAAAAAAAAAAAAAAA1",
+        "wsn_AAAAAAAAAAAAAAAAAAAAAAAAA1",
         "wrk_AAAAAAAAAAAAAAAAAAAAAAAAA1",
         ClientWorkerStopReason::GrantRevoked,
     );
@@ -1456,7 +1464,7 @@ fn the_worker_stop_frame_round_trips_through_the_wire_codec() {
     assert_eq!(decoded["kind"], json!("client.worker.stop"));
     assert_eq!(
         decoded["payload"]["workerSessionId"],
-        json!("ws_AAAAAAAAAAAAAAAAAAAAAAAAA1")
+        json!("wsn_AAAAAAAAAAAAAAAAAAAAAAAAA1")
     );
     assert_eq!(
         decoded["payload"]["workerId"],

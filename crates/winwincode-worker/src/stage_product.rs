@@ -109,9 +109,19 @@ impl PreparedCandidateArtifact {
         ArtifactDescriptor {
             artifact_id,
             digest: self.digest.clone(),
-            file_name: Some(CANDIDATE_FILE_NAME.to_owned()),
+            file_name: Some(
+                winwincode_codex::candidate_artifact_outbox::candidate_artifact_format(
+                    &self.execution_profile,
+                )
+                .0
+                .to_owned(),
+            ),
             kind: ArtifactKind::Candidate,
-            media_type: CANDIDATE_MEDIA_TYPE.to_owned(),
+            media_type: winwincode_codex::candidate_artifact_outbox::candidate_artifact_format(
+                &self.execution_profile,
+            )
+            .1
+            .to_owned(),
             size_bytes: self.size_bytes,
         }
     }
@@ -159,7 +169,7 @@ pub fn prepare_candidate_artifact(
     }
     if !matches!(
         active.job.execution_profile.as_str(),
-        "executor" | "remediator"
+        "codex-chat" | "executor" | "remediator"
     ) {
         return Err(CandidateProductError::new(
             CandidateProductErrorCode::InvalidRole,
@@ -178,14 +188,28 @@ pub fn prepare_candidate_artifact(
             "candidate Job write mode does not match its execution mode",
         ));
     }
-    winwincode_codex::stage_product::role_session_policy(&active.job, execution_mode).map_err(
-        |_| {
-            CandidateProductError::new(
-                CandidateProductErrorCode::InvalidScope,
-                "candidate Job is missing its exact sealed stage input",
+    if active.job.execution_profile == "codex-chat" {
+        if execution_mode != RoleExecutionMode::React
+            || !matches!(
+                active.job.scope,
+                ExecutionScope::ProductSessionExecutionScope(_)
             )
-        },
-    )?;
+        {
+            return Err(CandidateProductError::new(
+                CandidateProductErrorCode::InvalidScope,
+                "Chat candidate requires its ProductSession execution scope",
+            ));
+        }
+    } else {
+        winwincode_codex::stage_product::role_session_policy(&active.job, execution_mode).map_err(
+            |_| {
+                CandidateProductError::new(
+                    CandidateProductErrorCode::InvalidScope,
+                    "candidate Job is missing its exact sealed stage input",
+                )
+            },
+        )?;
+    }
     let provenance = candidate_workspace_provenance(active, workspace)?;
 
     let snapshot = workspace
@@ -203,7 +227,15 @@ pub fn prepare_candidate_artifact(
             "candidate snapshot does not match its Job workspace",
         ));
     }
-    prepared_artifact(active, snapshot)
+    let bytes = if active.job.execution_profile == "codex-chat" {
+        crate::workspace::git_output(
+            workspace.layout().checkout(),
+            &["archive", "--format=zip", &snapshot.candidate_commit_id],
+        )?
+    } else {
+        snapshot.manifest_bytes().to_vec()
+    };
+    prepared_artifact(active, snapshot, bytes)
 }
 
 /// Captures the already-frozen candidate from a read-only verification
@@ -263,20 +295,27 @@ pub fn prepare_verification_artifact(
             "verification snapshot does not match its Job workspace",
         ));
     }
-    prepared_artifact(active, snapshot)
+    let bytes = snapshot.manifest_bytes().to_vec();
+    prepared_artifact(active, snapshot, bytes)
 }
 
 fn prepared_artifact(
     active: &ActiveJob,
     snapshot: CandidateSnapshot,
+    bytes: Vec<u8>,
 ) -> Result<PreparedCandidateArtifact, CandidateProductError> {
-    let bytes = snapshot.manifest_bytes().to_vec();
     let size_bytes = i64::try_from(bytes.len()).map_err(|_| {
         CandidateProductError::new(
             CandidateProductErrorCode::Workspace,
             "candidate manifest size is unsupported",
         )
     })?;
+    if size_bytes > active.job.limits.max_artifact_bytes {
+        return Err(CandidateProductError::new(
+            CandidateProductErrorCode::Workspace,
+            "candidate exceeds the Job artifact size limit",
+        ));
+    }
     let digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(&bytes)));
     let job_digest = winwincode_codex::stage_product::stage_product_job_digest(&active.job)
         .map_err(|_| {
@@ -313,11 +352,21 @@ fn candidate_workspace_provenance(
     active: &ActiveJob,
     workspace: &WorkerWorkspace,
 ) -> Result<WorkspaceProvenance, CandidateProductError> {
-    let ExecutionScope::WorkRunExecutionScope(scope) = &active.job.scope else {
-        return Err(CandidateProductError::new(
-            CandidateProductErrorCode::InvalidScope,
-            "candidate product requires a Delivery-stage execution scope",
-        ));
+    let (session_id, work_run_id) = match &active.job.scope {
+        ExecutionScope::WorkRunExecutionScope(scope) => {
+            (&scope.product_session_id, Some(&scope.work_run_id))
+        }
+        ExecutionScope::ProductSessionExecutionScope(scope)
+            if active.job.execution_profile == "codex-chat" =>
+        {
+            (&scope.product_session_id, None)
+        }
+        ExecutionScope::ProductSessionExecutionScope(_) => {
+            return Err(CandidateProductError::new(
+                CandidateProductErrorCode::InvalidScope,
+                "candidate product scope differs from its execution profile",
+            ));
+        }
     };
     let expected = WorkspaceProvenance::from_active_job(active).map_err(|_| {
         CandidateProductError::new(
@@ -325,8 +374,8 @@ fn candidate_workspace_provenance(
             "candidate Job authority is internally inconsistent",
         )
     })?;
-    if scope.product_session_id != active.session_identity.product_session_id
-        || active.session_identity.work_run_id.as_ref() != Some(&scope.work_run_id)
+    if session_id != &active.session_identity.product_session_id
+        || active.session_identity.work_run_id.as_ref() != work_run_id
         || workspace.provenance() != &expected
     {
         return Err(CandidateProductError::new(

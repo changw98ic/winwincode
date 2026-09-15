@@ -61,6 +61,7 @@ const QUERIES = Object.freeze([
   'collaboration.activity.list',
   'collaboration.notification.list',
   'collaboration.presence.list',
+  'session.artifact.get',
 ])
 
 const ERROR_STATUS = Object.freeze({
@@ -234,6 +235,7 @@ test('HTTP query contract covers every current read surface with an opaque stabl
     'collaboration.activity.list': '#/$defs/CollaborationActivityPage',
     'collaboration.notification.list': '#/$defs/CollaborationNotificationPage',
     'collaboration.presence.list': '#/$defs/CollaborationPresencePage',
+    'session.artifact.get': '#/$defs/SessionArtifactGetResult',
   })
   assert.deepEqual(
     [

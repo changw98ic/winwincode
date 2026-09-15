@@ -207,7 +207,7 @@ impl DeviceWorkerSchedulingRequest {
             "rbd_",
             "repository binding id",
         )?;
-        validate_prefixed(&request.worker_session_id, "ws_", "worker session id")?;
+        validate_prefixed(&request.worker_session_id, "wsn_", "worker session id")?;
         validate_prefixed(&request.worker_id, "wrk_", "worker id")?;
         validate_prefixed(&request.worker_instance_id, "wki_", "worker instance id")?;
         validate_credential_digest(&request.credential_digest)?;

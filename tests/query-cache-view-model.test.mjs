@@ -134,7 +134,6 @@ test('Settings public lifecycle coalesces invalidations and reloads after reconn
   assert.equal(model.state.status, 'ready')
   assert.equal(model.state.settings.revision, 1)
   assert.deepEqual(Object.fromEntries(queryCounts), {
-    'credential.reference.list': 1,
     'settings.get': 1,
   })
 
@@ -162,7 +161,7 @@ test('Settings public lifecycle coalesces invalidations and reloads after reconn
   assert.equal(model.state.realtime, 'subscribed')
   assert.equal(model.state.settings.revision, 2)
   assert.ok(queryCounts.get('settings.get') <= 3)
-  assert.ok(queryCounts.get('credential.reference.list') <= 2)
+  assert.equal(queryCounts.has('credential.reference.list'), false)
 
   eventGate = null
   settingsRevision = 3

@@ -10,6 +10,8 @@ publish = false
 include = ["src/**", "tests/**", "Cargo.toml"]
 
 [dependencies]
+winwincode-api.workspace = true
+winwincode-provider.workspace = true
 base64.workspace = true
 futures.workspace = true
 getrandom.workspace = true

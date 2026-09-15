@@ -700,7 +700,7 @@ mod tests {
         )
         .unwrap();
         let (sender, _receiver) = mpsc::channel(1);
-        let first = source("pvs_demo", "ws_old");
+        let first = source("pvs_demo", "wsn_old");
         application.register_connection(
             "cnd_demo",
             BTreeMap::from([(first.source_id.clone(), first.clone())]),
@@ -717,7 +717,7 @@ mod tests {
             },
         );
         let (sender, _receiver) = mpsc::channel(1);
-        let replacement = source("pvs_demo", "ws_new");
+        let replacement = source("pvs_demo", "wsn_new");
         application.register_connection(
             "cnd_demo",
             BTreeMap::from([(replacement.source_id.clone(), replacement)]),
@@ -757,7 +757,7 @@ mod tests {
         )
         .unwrap();
         let (sender, mut receiver) = mpsc::channel(1);
-        let source = source("pvs_demo", "ws_demo");
+        let source = source("pvs_demo", "wsn_demo");
         let generation = application.register_connection(
             "cnd_demo",
             BTreeMap::from([(source.source_id.clone(), source.clone())]),

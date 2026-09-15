@@ -4,7 +4,7 @@ import type {
   ChatViewModel,
   ChatViewModelState,
 } from './chat-view-model.js'
-import type { ControlPlaneClientError } from './community-control-plane-client.js'
+import type { ControlPlaneRepositorySummary, ControlPlaneClientError } from './community-control-plane-client.js'
 import { mountButton } from '@winwincode/browser-ui'
 import { mountFormField } from './components/form-field.js'
 import { mountKeyedCollection } from './components/keyed-collection.js'
@@ -40,6 +40,7 @@ export type {
 export interface ChatPageOptions {
   readonly root: HTMLElement
   readonly model: ChatViewModel
+  readonly listDeviceRepositories?: (clientId: string) => Promise<readonly ControlPlaneRepositorySummary[]>
   readonly nextProductSessionId?: () => ProductSessionId
   readonly deliveryCreator?: ChatDeliveryCreator
   readonly scope?: RepositoryScope
@@ -149,6 +150,7 @@ function modelRouteIdentity(route: ModelRouteAvailabilityProjection['route']): s
 
 function errorLabel(error: ControlPlaneClientError | null): string | null {
   if (error === null) return null
+  if (error.code === 'CHAT_DEVICE_REQUIRED') return '请选择执行设备上的项目。'
   if (error.code === 'IDEMPOTENCY_CONFLICT') {
     return '本次新对话请求与之前的请求冲突，请重新开一个新对话。'
   }
@@ -315,6 +317,7 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
       variant: 'primary',
       onActivate: () => {
         decisionRoot.hidden = !decisionRoot.hidden
+        decisionRoot.setAttribute('aria-hidden', String(decisionRoot.hidden))
       },
     },
   })
@@ -331,6 +334,36 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   const decisionRoot = element(document, 'div', 'wwc-chat-decisions')
   decisionRoot.hidden = true
   decisionRoot.setAttribute('aria-hidden', 'true')
+  const repositorySelect = document.createElement('select')
+  repositorySelect.id = 'wwc-chat-device-repository'
+  repositorySelect.setAttribute('aria-label', '设备上的项目')
+  const repositoryStatus = document.createElement('span')
+  repositoryStatus.setAttribute('role', 'status')
+  let repositoryDevice: string | undefined
+  let repositoryGeneration = 0
+  async function loadDeviceRepositories(clientId: string | undefined): Promise<void> {
+    if (clientId === repositoryDevice) return
+    repositoryDevice = clientId
+    const generation = ++repositoryGeneration
+    repositorySelect.replaceChildren()
+    repositorySelect.disabled = true
+    if (clientId === undefined || options.listDeviceRepositories === undefined) return
+    repositoryStatus.textContent = '正在读取设备项目…'
+    try {
+      const repositories = await options.listDeviceRepositories(clientId)
+      if (closed || generation !== repositoryGeneration) return
+      for (const repository of repositories.filter(item => item.availability === 'available')) {
+        const option = document.createElement('option')
+        option.value = repository.repositoryBindingId
+        option.textContent = repository.displayName
+        repositorySelect.append(option)
+      }
+      repositorySelect.disabled = readOnly || repositorySelect.children.length === 0
+      repositoryStatus.textContent = repositorySelect.children.length === 0 ? '请先在设备中添加并授权项目。' : ''
+    } catch {
+      if (!closed && generation === repositoryGeneration) repositoryStatus.textContent = '无法读取设备项目，请刷新。'
+    }
+  }
   const form = element(document, 'form', 'wwc-chat-composer')
   const composerLabel = element(document, 'label', 'wwc-chat-composer-label')
   const composer = element(document, 'textarea', 'wwc-chat-composer-input')
@@ -480,7 +513,7 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
 
   error.append(errorText, retry)
   modelLabel.append(modelSelect)
-  controls.append(attach, modelLabel, cancel, send)
+  controls.append(attach, modelLabel, repositorySelect, repositoryStatus, cancel, send)
   form.append(composerLabel, composer, controls, modelNotice, modelSettings)
   header.append(delegationChip.root)
   conversion.hidden = true
@@ -633,6 +666,7 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
     readonly role: HTMLElement
     readonly content: HTMLElement
     readonly badge: HTMLElement
+    readonly artifacts: HTMLElement
   }>()
   const messageCollection = mountKeyedCollection({
     parent: messages,
@@ -643,10 +677,11 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
       const role = document.createElement('h3')
       const content = document.createElement('p')
       const badge = document.createElement('span')
+      const artifacts = document.createElement('div')
       badge.className = 'wwc-chat-message-state'
-      article.append(role, content, badge)
+      article.append(role, content, badge, artifacts)
       item.append(article)
-      messageRows.set(item, { article, role, content, badge })
+      messageRows.set(item, { article, role, content, badge, artifacts })
       return item
     },
     update(item, message: ChatViewModelState['messages'][number]) {
@@ -662,6 +697,28 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
         : message.content
       row.badge.hidden = stateText === null
       row.badge.textContent = stateText ?? ''
+      row.artifacts.replaceChildren(...(message.artifactRefs ?? []).map(artifact => {
+        const download = document.createElement('button')
+        download.type = 'button'
+        download.textContent = '下载项目文件'
+        download.addEventListener('click', async () => {
+          download.disabled = true
+          download.textContent = '正在下载…'
+          try {
+            const blob = await options.model.downloadArtifact(artifact.artifactId)
+            const url = URL.createObjectURL(blob)
+            const link = document.createElement('a')
+            link.href = url
+            link.download = 'winwincode-project.zip'
+            link.click()
+            setTimeout(() => URL.revokeObjectURL(url), 1000)
+            download.textContent = '下载项目文件'
+          } catch {
+            download.textContent = '下载失败，点击重试'
+          } finally { download.disabled = false }
+        })
+        return download
+      }))
     },
     remove(item) { messageRows.delete(item) },
   })
@@ -671,6 +728,11 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   }
 
   function render(state: ChatViewModelState): void {
+    const selected = state.modelRouteAvailability?.items.find(item => state.selectedModelRoute !== null && modelRouteIdentity(item.route) === modelRouteIdentity(state.selectedModelRoute))
+    repositorySelect.hidden = state.messages.length > 0 || options.listDeviceRepositories === undefined
+    repositoryStatus.hidden = repositorySelect.hidden
+    void loadDeviceRepositories(selected?.clientId)
+
     if (closed) return
     const presentation = chatPagePresentation(state)
     if (conversionSessionId !== null && conversionSessionId !== state.session?.id) {
@@ -823,6 +885,8 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
       attention: [],
       nowMillis: nowMillis(),
     })
+    decisionRoot.hidden = decisions.items.length === 0
+    decisionRoot.setAttribute('aria-hidden', String(decisionRoot.hidden))
     decisionCard.update({
       view: decisions,
       presentation: contextualDecisionPresentation(decisions, {
@@ -916,17 +980,23 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
     const draft = composer.value.trim()
     if (draft.length === 0) return
     // 设计稿 03a:新对话空状态下,首条消息创建会话(标题取首行)后发送。
+    if (options.model.state.messages.length === 0 && options.listDeviceRepositories !== undefined && !repositorySelect.value) {
+      repositoryStatus.textContent = '请选择设备上的项目。'
+      repositorySelect.focus()
+      return
+    }
     const sessionId = options.nextProductSessionId?.() ?? null
     let submit: Promise<void>
     if (options.model.state.session === null && sessionId !== null) {
       submit = options.model
         .createSession({
           productSessionId: sessionId,
+          repositoryBindingId: repositorySelect.value,
           title: draft.split('\n')[0]?.trim().slice(0, 40) || '新对话',
         })
-        .then(() => options.model.submitMessage(draft))
+        .then(() => options.model.state.interaction.status === 'error' ? undefined : options.model.submitMessage(draft, repositorySelect.value))
     } else {
-      submit = options.model.submitMessage(draft)
+      submit = options.model.submitMessage(draft, repositorySelect.value)
     }
     void submit.then(() => {
       if (options.model.state.interaction.status !== 'error') {

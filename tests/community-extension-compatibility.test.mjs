@@ -94,9 +94,9 @@ test('MCP and frontend compatibility keep authority and failure boundaries expli
   assert.match(capability, /WorkerActionGateway/u)
 
   const page = readFileSync(join(root, 'apps/client/src/extensions-page.ts'), 'utf8')
-  assert.match(page, /presentation sample data/u)
-  assert.match(page, /No install\/add contract exists yet/u)
-  assert.match(page, /disabled: true/u)
+  assert.match(page, /encryptDeviceExtension/u)
+  assert.match(page, /result\.receipt/u)
+  assert.match(page, /test_mcp/u)
   assert.doesNotMatch(page, /submitCommand|WorkerActionGateway|innerHTML\s*=.*plugin/gu)
 
   const representatives = Object.fromEntries(

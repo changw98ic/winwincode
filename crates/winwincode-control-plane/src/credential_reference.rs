@@ -8,6 +8,8 @@
 //! is never copied into aggregate state, events, audit records, projections,
 //! resolutions, or errors.
 
+use winwincode_provider::{ResolvedSecret, SecretStoreError};
+
 use std::{collections::BTreeMap, fmt};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -42,14 +44,14 @@ use winwincode_storage::{
     StorageErrorKind, StoredState,
 };
 
-use crate::credential_leak_gate::{
-    CredentialLeakError, CredentialLeakGate, CredentialOutputBoundary,
-};
 use crate::session_binding_transaction::instant_millis;
 use crate::{
     StateChange, command_receipt,
     model_route_availability::model_route_availability_invalidated_event, receipt_scope_key,
     storage_commit,
+};
+use winwincode_provider::credential_leak_gate::{
+    CredentialLeakError, CredentialLeakGate, CredentialOutputBoundary,
 };
 
 const STATE_SCHEMA: &str = "winwincode.credential-reference.v1";
@@ -203,110 +205,6 @@ pub struct CredentialReferenceResolution {
     provider_id: String,
     rotation_version: u64,
 }
-
-/// Opaque secret bytes returned only across the `SecretStore` boundary.
-///
-/// Debug output is always redacted, serialization is intentionally absent,
-/// cloning is intentionally absent, and the owned buffer is cleared on drop.
-pub struct ResolvedSecret {
-    bytes: Vec<u8>,
-}
-
-impl ResolvedSecret {
-    /// Takes ownership of non-empty bytes loaded by a `SecretStore` adapter.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an empty secret without retaining it in an error.
-    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, SecretStoreError> {
-        if bytes.is_empty() {
-            return Err(SecretStoreError::corrupt());
-        }
-        Ok(Self { bytes })
-    }
-
-    /// Exposes bytes only at the provider-call boundary.
-    #[must_use]
-    pub fn expose(&self) -> &[u8] {
-        &self.bytes
-    }
-}
-
-impl fmt::Debug for ResolvedSecret {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("ResolvedSecret([REDACTED])")
-    }
-}
-
-impl Drop for ResolvedSecret {
-    fn drop(&mut self) {
-        self.bytes.fill(0);
-    }
-}
-
-/// Stable `SecretStore` failure categories. No adapter diagnostic or remote
-/// response is accepted into this public error.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SecretStoreErrorKind {
-    Missing,
-    VersionConflict,
-    Unavailable,
-    Corrupt,
-}
-
-/// Secret-safe failure returned by a [`SecretStorePort`] implementation.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SecretStoreError {
-    kind: SecretStoreErrorKind,
-    message: &'static str,
-}
-
-impl SecretStoreError {
-    #[must_use]
-    pub const fn missing() -> Self {
-        Self {
-            kind: SecretStoreErrorKind::Missing,
-            message: "Credential secret is missing",
-        }
-    }
-
-    #[must_use]
-    pub const fn version_conflict() -> Self {
-        Self {
-            kind: SecretStoreErrorKind::VersionConflict,
-            message: "Credential secret version does not match",
-        }
-    }
-
-    #[must_use]
-    pub const fn unavailable() -> Self {
-        Self {
-            kind: SecretStoreErrorKind::Unavailable,
-            message: "Credential secret store is unavailable",
-        }
-    }
-
-    #[must_use]
-    pub const fn corrupt() -> Self {
-        Self {
-            kind: SecretStoreErrorKind::Corrupt,
-            message: "Credential secret record is invalid",
-        }
-    }
-
-    #[must_use]
-    pub const fn kind(&self) -> SecretStoreErrorKind {
-        self.kind
-    }
-}
-
-impl fmt::Display for SecretStoreError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.message)
-    }
-}
-
-impl std::error::Error for SecretStoreError {}
 
 /// Port implemented by local and remote secret stores.
 ///

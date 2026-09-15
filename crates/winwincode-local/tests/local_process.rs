@@ -157,6 +157,7 @@ fn dispatch() -> JobDispatchMessage {
     };
     JobDispatchMessage {
         job: ExecutionJob {
+            model_selection: None,
             attempt: 1,
             execution_profile: "planner".to_owned(),
             goal: goal.clone(),

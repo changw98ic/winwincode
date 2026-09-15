@@ -27,7 +27,7 @@
     "unmanagedCapability": "deny",
     "fullCordisRuntime": "unsupported",
     "arbitraryDomOrAuthorityAccess": "unsupported",
-    "frontend": "presentation-only-no-extension-code-is-loaded",
+    "frontend": "device-configuration-management-no-extension-code-is-loaded",
     "serverAuthorizationDependsOnPluginUi": false
   },
   "classifications": [
@@ -173,5 +173,17 @@
       "implementation": "apps/client/src/extensions-page.ts",
       "boundary": "The current page renders local presentation samples only; install, plugin code, DOM access, and authority ports are not exposed."
     }
-  ]
+  ],
+  "deviceConfiguration": {
+    "issueId": "winwincode-ac5u",
+    "documentation": "docs/device-extensions.md",
+    "skills": "explicit-device-directory-or-skill-markdown-import",
+    "mcp": "native-stdio-or-streamable-http-discovery-and-core-invocation",
+    "storage": "device-private-encrypted-relay",
+    "activation": "next-task-in-same-chat",
+    "checks": [
+      "crates/winwincode-provider/tests/device_extensions.rs",
+      "tests/fixtures/extensions/mcp_server.py"
+    ]
+  }
 }

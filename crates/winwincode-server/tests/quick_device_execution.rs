@@ -9,6 +9,9 @@
 //! supervised local execution path unchanged. A permission-gate denial
 //! dispatches nothing.
 
+#[path = "support/device_provider.rs"]
+mod device_provider;
+
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -189,6 +192,7 @@ fn stage_node(storage: &mut SqliteStorage, seed: u64) -> String {
     registry
         .update_presence(&node, ClientPresenceState::Online, 1)
         .expect("presence");
+    device_provider::stage(storage, &node);
     node
 }
 
@@ -298,7 +302,7 @@ fn stage_anchor(
     product_session_id: &str,
 ) -> AnchorLaunch {
     let worker_launch_grant_id = format!("wlg_{}", suffix(seed));
-    let worker_session_id = format!("ws_{}", suffix(seed + 50));
+    let worker_session_id = format!("wsn_{}", suffix(seed + 50));
     let worker_id = format!("wrk_{}", suffix(seed + 51));
     let worker_instance_id = format!("wki_{}", suffix(seed + 52));
     let issuance = LaunchGrantIssuance::try_new(
@@ -354,7 +358,7 @@ fn settle_launch(storage: &mut SqliteStorage, anchor: &AnchorLaunch, lease_id: &
 
 // ---- generated command helpers ---------------------------------------------
 
-fn session_create_request(request: u64, session: u64, user: &str) -> CommandRequest {
+fn session_create_request(request: u64, session: u64, user: &str, node: &str) -> CommandRequest {
     serde_json::from_value(serde_json::json!({
         "schemaVersion": "winwincode/v1",
         "requestId": id("req", request),
@@ -367,11 +371,7 @@ fn session_create_request(request: u64, session: u64, user: &str) -> CommandRequ
             "projectId": id("prj", 1),
             "repositoryId": id("rep", 1),
             "title": "Quick device session",
-            "modelRoute": {
-                "providerId": "provider-main",
-                "modelId": "model-main",
-                "credentialReferenceId": id("crd", 1)
-            }
+            "modelRoute": device_provider::route(node)
         }
     }))
     .expect("generated session.create command")
@@ -495,7 +495,7 @@ fn a_device_anchored_turn_is_dispatched_to_the_launched_worker_session() {
             .command(
                 &principal(&holder),
                 CommandFamily::Session,
-                session_create_request(10, 1, &holder),
+                session_create_request(10, 1, &holder, &node),
             )
             .expect("create ProductSession");
         let mut storage = open_storage(&root);
@@ -528,7 +528,7 @@ fn a_device_anchored_turn_is_dispatched_to_the_launched_worker_session() {
         let job_id = queued_job_id(&mut storage);
         // The launch material is the device session's durable ExecutionPort
         // identity, and the job carries the exact device worker facts.
-        let bound = binding_snapshot(&mut storage, &format!("ws_{}", suffix(154)))
+        let bound = binding_snapshot(&mut storage, &format!("wsn_{}", suffix(154)))
             .expect("the device session is bound");
         assert_eq!(bound.state.as_str(), "bound");
         assert_eq!(bound.worker_launch_grant_id, format!("wlg_{}", suffix(104)));
@@ -537,7 +537,7 @@ fn a_device_anchored_turn_is_dispatched_to_the_launched_worker_session() {
             .facts(job_id.0.as_str())
             .expect("facts lookup")
             .expect("the job carries device facts");
-        assert_eq!(facts.worker_session_id, format!("ws_{}", suffix(154)));
+        assert_eq!(facts.worker_session_id, format!("wsn_{}", suffix(154)));
         assert_eq!(facts.worker_id, format!("wrk_{}", suffix(155)));
         assert_eq!(facts.worker_instance_id, format!("wki_{}", suffix(156)));
         assert_eq!(facts.holder_user_id, holder);
@@ -586,7 +586,7 @@ fn the_dispatch_replays_exactly_without_new_facts() {
             .command(
                 &principal(&holder),
                 CommandFamily::Session,
-                session_create_request(50, 1, &holder),
+                session_create_request(50, 1, &holder, &node),
             )
             .expect("create ProductSession");
         let mut storage = open_storage(&root);
@@ -621,7 +621,7 @@ fn the_dispatch_replays_exactly_without_new_facts() {
         .facts(job_id.0.as_str())
         .expect("facts lookup")
         .expect("the job carries device facts");
-    assert_eq!(facts.worker_session_id, format!("ws_{}", suffix(554)));
+    assert_eq!(facts.worker_session_id, format!("wsn_{}", suffix(554)));
     assert_eq!(facts.attached_at, instant("2027-01-15T08:00:00.000Z"));
 
     application.shutdown().expect("shutdown");
@@ -629,7 +629,7 @@ fn the_dispatch_replays_exactly_without_new_facts() {
 }
 
 #[test]
-fn an_unanchored_session_turn_keeps_the_local_execution_path() {
+fn an_unanchored_session_turn_cannot_dispatch() {
     let root = temporary_root("local-path");
     let application = compose_application(&root);
     let user = id("usr", 1);
@@ -637,7 +637,7 @@ fn an_unanchored_session_turn_keeps_the_local_execution_path() {
         .command(
             &principal(&user),
             CommandFamily::Session,
-            session_create_request(60, 1, &user),
+            session_create_request(60, 1, &user, "cnd_00000000000000000000000001"),
         )
         .expect("create ProductSession");
     let submitted = application
@@ -646,24 +646,13 @@ fn an_unanchored_session_turn_keeps_the_local_execution_path() {
             CommandFamily::Session,
             chat_submit_request(61, 1, &user, 1),
         )
-        .expect("unanchored turn continues unchanged");
-    let body = completed(submitted);
-    assert_eq!(body["result"]["state"], "running");
-
+        .expect_err("unanchored sessions cannot dispatch");
+    assert_eq!(submitted.code(), "DEVICE_SESSION_REQUIRED");
     let mut storage = open_storage(&root);
-    let job_id = queued_job_id(&mut storage);
-    assert!(
-        DeviceExecutionBindingService::new(&mut storage)
-            .facts(job_id.0.as_str())
-            .expect("facts lookup")
-            .is_none(),
-        "an unanchored turn must not carry device facts"
-    );
-    // The local embedded worker claims the turn exactly as before.
     let (worker_id, worker_instance_id) = register_local_worker(&mut storage, 700);
     assert_eq!(
         claim_locally(&mut storage, 701, &worker_id, &worker_instance_id),
-        Some(job_id)
+        None
     );
 
     application.shutdown().expect("shutdown");
@@ -687,7 +676,7 @@ fn a_gate_denial_dispatches_nothing() {
             .command(
                 &principal(&holder),
                 CommandFamily::Session,
-                session_create_request(80, 1, &holder),
+                session_create_request(80, 1, &holder, &node),
             )
             .expect("create ProductSession");
         let mut storage = open_storage(&root);
@@ -716,7 +705,7 @@ fn a_gate_denial_dispatches_nothing() {
     // No dispatch fact exists for the refused turn: the gate runs before the
     // turn is committed, so nothing was bound and nothing was queued.
     let mut storage = open_storage(&root);
-    assert!(binding_snapshot(&mut storage, &format!("ws_{}", suffix(854))).is_none());
+    assert!(binding_snapshot(&mut storage, &format!("wsn_{}", suffix(854))).is_none());
     let jobs = storage
         .repository_scheduler()
         .expect("scheduler")
@@ -744,7 +733,7 @@ fn an_ended_launch_refuses_the_dispatch_without_binding() {
             .command(
                 &principal(&holder),
                 CommandFamily::Session,
-                session_create_request(90, 1, &holder),
+                session_create_request(90, 1, &holder, &node),
             )
             .expect("create ProductSession");
         let mut storage = open_storage(&root);
@@ -781,7 +770,7 @@ fn an_ended_launch_refuses_the_dispatch_without_binding() {
 
     // The dead anchor never binds a worker session and never attaches facts.
     let mut storage = open_storage(&root);
-    assert!(binding_snapshot(&mut storage, &format!("ws_{}", suffix(954))).is_none());
+    assert!(binding_snapshot(&mut storage, &format!("wsn_{}", suffix(954))).is_none());
     let jobs = storage
         .repository_scheduler()
         .expect("scheduler")

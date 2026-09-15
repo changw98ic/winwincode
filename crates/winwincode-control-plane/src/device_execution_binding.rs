@@ -467,7 +467,7 @@ mod tests {
             &fixture.lease_id,
             fixture.fencing_token,
             &fixture.binding_id,
-            id("ws", seed + 8),
+            id("wsn", seed + 8),
             id("wrk", seed + 9),
             id("wki", seed + 10),
             DIGEST,
@@ -585,7 +585,7 @@ mod tests {
             id("ocl", 6),
             1,
             id("rbd", 7),
-            id("ws", 8),
+            id("wsn", 8),
             None,
             None,
         )
@@ -607,7 +607,7 @@ mod tests {
             id("ocl", 16),
             1,
             id("rbd", 17),
-            id("ws", 18),
+            id("wsn", 18),
             None,
             None,
         )
@@ -622,7 +622,7 @@ mod tests {
         let error = service
             .release(
                 &DeviceExecutionBindingRelease::try_new(
-                    id("ws", 20),
+                    id("wsn", 20),
                     id("req", 21),
                     1,
                     instant(T2),
@@ -650,7 +650,12 @@ mod tests {
             error.kind(),
             DeviceExecutionBindingServiceErrorKind::UnknownLaunchGrant
         );
-        assert!(service.snapshot(&id("ws", 30)).expect("snapshot").is_none());
+        assert!(
+            service
+                .snapshot(&id("wsn", 30))
+                .expect("snapshot")
+                .is_none()
+        );
         assert!(
             service
                 .snapshot_by_binding_id(&id("deb", 31))

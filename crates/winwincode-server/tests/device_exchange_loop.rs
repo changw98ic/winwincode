@@ -35,7 +35,8 @@ use winwincode_server::{
     UserAccountService, start_server_with_remote_worker,
 };
 use winwincode_storage::{
-    ClientExchangeCursors, ClientNodeRecord, ClientPresenceState, SqliteStorage,
+    ClientExchangeCursors, ClientNodeRecord, ClientPresenceState, ProductStateStorage,
+    SqliteStorage,
 };
 
 const BOOTSTRAP_PROOF: &str = "device-exchange-loop-test-bootstrap";
@@ -412,7 +413,7 @@ async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
         .enqueue(heartbeat_message())
         .expect("enqueue heartbeat");
     drive_until(&mut daemon, "the heartbeats to settle", |daemon| {
-        daemon.status().acked_through >= 4
+        daemon.status().acked_through >= 6
     });
     let record = node_snapshot(&data_directory, &node_id);
     assert_eq!(record.presence_state, ClientPresenceState::Online);
@@ -422,8 +423,16 @@ async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
     );
     assert_eq!(
         cursors(&data_directory, &node_id).client_to_server_ack_sequence,
-        4
+        6
     );
+    let storage = SqliteStorage::open(&data_directory).expect("projection store");
+    assert!(
+        storage
+            .load_state(&format!("device-extension:{node_id}"))
+            .expect("extension projection")
+            .is_some()
+    );
+    drop(storage);
     assert!(settled(&mut daemon), "the stream must be fully exchanged");
 
     // ---- Phase 3: staged outage, backoff, and durable redelivery -----------
@@ -445,7 +454,7 @@ async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
     assert_eq!(status.replays, 0, "an outage is a redelivery, not a gap");
     assert_eq!(
         cursors(&data_directory, &node_id).client_to_server_ack_sequence,
-        6,
+        8,
         "the durable frames survived the outage and settled once"
     );
 
@@ -461,22 +470,22 @@ async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
         .iter()
         .map(|frame| frame.sequence)
         .collect::<Vec<_>>();
-    assert_eq!(staged_sequences, [7, 8, 9]);
-    // The middle frame is lost in transit: the server cursor sits at 7 while
-    // sequence 9 arrives, so the response carries replayFromSequence = 8.
-    transport.drop_sequence.store(8, Ordering::SeqCst);
+    assert_eq!(staged_sequences, [9, 10, 11]);
+    // The middle frame is lost in transit: the server cursor sits at 9 while
+    // sequence 11 arrives, so the response carries replayFromSequence = 10.
+    transport.drop_sequence.store(10, Ordering::SeqCst);
     drive_until(&mut daemon, "the manufactured gap", |daemon| {
         daemon.status().replays >= 1
     });
     drive_until(&mut daemon, "the gap replay to settle", |daemon| {
-        settled(daemon) && daemon.status().acked_through >= 9
+        settled(daemon) && daemon.status().acked_through >= 11
     });
     let status = daemon.status().clone();
     assert_eq!(status.replays, 1);
-    assert_eq!(status.acked_through, 9);
+    assert_eq!(status.acked_through, 11);
     assert_eq!(
         cursors(&data_directory, &node_id).client_to_server_ack_sequence,
-        9
+        11
     );
     let record = node_snapshot(&data_directory, &node_id);
     assert!(
@@ -499,7 +508,7 @@ async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
             .iter()
             .map(|frame| frame.sequence)
             .collect::<Vec<_>>(),
-        [10, 11, 12]
+        [12, 13, 14]
     );
     daemon.into_store().close().expect("crash close");
 
@@ -552,12 +561,12 @@ async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
     // Outbox 不丢帧 + cursor 连续: the pending frames and the announcement
     // hello settle contiguously through the instance takeover.
     drive_until(&mut daemon, "the restarted daemon to settle", |daemon| {
-        settled(daemon) && daemon.status().acked_through >= 13
+        settled(daemon) && daemon.status().acked_through >= 17
     });
-    assert_eq!(daemon.status().acked_through, 13);
+    assert_eq!(daemon.status().acked_through, 17);
     assert_eq!(
         cursors(&data_directory, &node_id).client_to_server_ack_sequence,
-        13
+        17
     );
     let record = node_snapshot(&data_directory, &node_id);
     assert_eq!(
@@ -582,16 +591,16 @@ async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
     drive_until(
         &mut daemon,
         "the exchanges after the server restart to settle",
-        |daemon| settled(daemon) && daemon.status().acked_through >= 15,
+        |daemon| settled(daemon) && daemon.status().acked_through >= 19,
     );
     let status = daemon.status().clone();
     // The fresh session started at the device restart without any replay;
     // the server restart must not add one (both cursors are durable).
     assert_eq!(status.replays, 0, "a server restart replays nothing");
     assert_eq!(status.consecutive_failures, 0);
-    assert_eq!(status.acked_through, 15);
+    assert_eq!(status.acked_through, 19);
     let server_cursors = cursors(&data_directory, &node_id);
-    assert_eq!(server_cursors.client_to_server_ack_sequence, 15);
+    assert_eq!(server_cursors.client_to_server_ack_sequence, 19);
     assert_eq!(
         server_cursors.server_to_client_ack_sequence, 1,
         "the downlink cursor is durable across the server restart"

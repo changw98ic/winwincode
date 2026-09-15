@@ -75,7 +75,7 @@ fn crockford(seed: u64) -> String {
 }
 
 fn session_id(seed: u64) -> String {
-    format!("ws_{}", crockford(seed))
+    format!("wsn_{}", crockford(seed))
 }
 
 fn worker_id(seed: u64) -> String {
@@ -601,7 +601,7 @@ fn bound_verification_refuses_claimed_foreign_identities() {
             service
                 .verify_bound_credential(
                     material.as_bytes(),
-                    "ws_not_canonical",
+                    "wsn_not_canonical",
                     &worker_id(71),
                     &worker_instance_id(71),
                     &now_instant(),

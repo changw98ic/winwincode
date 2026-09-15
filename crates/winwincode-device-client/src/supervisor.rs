@@ -599,6 +599,11 @@ impl SessionSupervisor {
             worker_id,
             worker_instance_id,
             &credential_path,
+            &store
+                .database_path()
+                .parent()
+                .ok_or_else(|| SupervisorError::invalid("device data directory is unavailable"))?
+                .join("providers"),
         )?;
         write_private_file(&config_path, config_json.as_bytes())?;
 
@@ -1240,6 +1245,7 @@ fn managed_session_config_json(
     worker_id: &str,
     worker_instance_id: &str,
     credential_path: &Path,
+    provider_directory: &Path,
 ) -> Result<String, SupervisorError> {
     let local_path = |path: &Path, label: &str| -> Result<String, SupervisorError> {
         path.to_str()
@@ -1257,6 +1263,7 @@ fn managed_session_config_json(
         "workerInstanceId": worker_instance_id,
         "sourceDirectory": local_path(request.source_directory, "source directory")?,
         "dataDirectory": local_path(request.data_directory, "data directory")?,
+        "providerDirectory": local_path(provider_directory, "Provider directory")?,
         "serverOrigin": config.server_origin,
         "workerCredentialPath": local_path(credential_path, "worker credential path")?,
     });
@@ -1695,7 +1702,7 @@ mod tests {
     /// accepts (fail-closed `deny_unknown_fields` reader). If the Worker
     /// entry's contract moves, this pin fails and the config writer must
     /// move with it.
-    const WORKER_CONFIG_CONTRACT_FIELDS: [&str; 15] = [
+    const WORKER_CONFIG_CONTRACT_FIELDS: [&str; 16] = [
         "clientNodeId",
         "clientInstanceId",
         "occupancyLeaseId",
@@ -1708,6 +1715,7 @@ mod tests {
         "workerInstanceId",
         "sourceDirectory",
         "dataDirectory",
+        "providerDirectory",
         "serverOrigin",
         "workerCredentialPath",
         "modelRoute",
@@ -1725,6 +1733,7 @@ mod tests {
                 WORKER_ID,
                 WORKER_INSTANCE,
                 Path::new("/workspace/credential"),
+                Path::new("/workspace/providers"),
             )
             .expect("managed config");
             let value: serde_json::Value = serde_json::from_str(&encoded).expect("JSON");
@@ -1819,6 +1828,7 @@ mod tests {
             "workerInstanceId",
             "sourceDirectory",
             "dataDirectory",
+            "providerDirectory",
             "serverOrigin",
             "workerCredentialPath",
         ] {

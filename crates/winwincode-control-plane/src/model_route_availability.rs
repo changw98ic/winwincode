@@ -33,9 +33,6 @@ use winwincode_storage::{
     SqliteStorage, StateCommit, StorageError,
 };
 
-use crate::credential_leak_gate::{
-    CredentialLeakError, CredentialLeakGate, CredentialOutputBoundary,
-};
 use crate::credential_reference::{CredentialReferenceErrorKind, CredentialReferenceService};
 use crate::model_request_pool::{ModelRequestPool, ModelRequestPoolConfig, ModelRequestRouteKey};
 use crate::model_settings::{
@@ -48,6 +45,9 @@ use crate::provider_catalog::{
 use crate::{
     public_event_actor, public_event_scope, receipt_actor_key, receipt_scope_key,
     repository_scope_key,
+};
+use winwincode_provider::credential_leak_gate::{
+    CredentialLeakError, CredentialLeakGate, CredentialOutputBoundary,
 };
 
 const CURSOR_VERSION: u8 = 1;
@@ -453,6 +453,7 @@ impl<'storage> ModelRouteAvailabilityService<'storage> {
                         runtime_status,
                     );
                     candidates.push(ModelRouteAvailabilityProjection {
+                        client_id: None,
                         catalog_source: catalog_scope.clone(),
                         catalog_version: revision(catalog.catalog_version)?,
                         context_window_tokens: to_i64(model.context_window_tokens)?,

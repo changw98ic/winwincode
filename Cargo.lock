@@ -4104,6 +4104,7 @@ dependencies = [
  "ff",
  "generic-array",
  "group",
+ "hkdf 0.12.4",
  "pem-rfc7468",
  "pkcs8",
  "rand_core 0.6.4",
@@ -12601,17 +12602,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "winwincode-backup"
-version = "0.1.0-alpha.2"
-dependencies = [
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "winwincode-audit",
- "winwincode-domain",
-]
-
-[[package]]
 name = "winwincode-cli"
 version = "0.1.0-alpha.2"
 dependencies = [
@@ -12638,6 +12628,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "winwincode-api",
 ]
 
 [[package]]
@@ -12659,6 +12650,7 @@ dependencies = [
  "winwincode-domain",
  "winwincode-execution-port",
  "winwincode-kernel",
+ "winwincode-provider",
 ]
 
 [[package]]
@@ -12778,6 +12770,7 @@ dependencies = [
  "winwincode-delivery",
  "winwincode-domain",
  "winwincode-execution-port",
+ "winwincode-provider",
  "winwincode-publication",
  "winwincode-repository-context",
  "winwincode-session",
@@ -12822,7 +12815,9 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "ureq",
+ "winwincode-api",
  "winwincode-client-port",
+ "winwincode-provider",
  "winwincode-worker",
 ]
 
@@ -12834,19 +12829,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
-]
-
-[[package]]
-name = "winwincode-drill"
-version = "0.1.0-alpha.2"
-dependencies = [
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "winwincode-audit",
- "winwincode-backup",
- "winwincode-domain",
- "winwincode-storage",
 ]
 
 [[package]]
@@ -12901,6 +12883,7 @@ dependencies = [
  "codex-core-api",
  "codex-model-provider-info",
  "codex-protocol",
+ "codex-skills-extension",
  "futures",
  "serde",
  "serde_json",
@@ -12945,6 +12928,36 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "winwincode-observability-core",
+]
+
+[[package]]
+name = "winwincode-provider"
+version = "0.1.0-alpha.2"
+dependencies = [
+ "aes-gcm",
+ "base64 0.22.1",
+ "codex-config",
+ "codex-exec-server",
+ "codex-http-client",
+ "codex-rmcp-client",
+ "codex-skills",
+ "futures",
+ "getrandom 0.3.4",
+ "hkdf 0.12.4",
+ "p256",
+ "rcgen",
+ "rmcp",
+ "rusqlite",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "toml 0.9.11+spec-1.1.0",
+ "ureq",
+ "winwincode-api",
+ "winwincode-domain",
+ "winwincode-execution-port",
 ]
 
 [[package]]
@@ -13073,6 +13086,7 @@ dependencies = [
  "winwincode-domain",
  "winwincode-execution-port",
  "winwincode-kernel",
+ "winwincode-provider",
  "winwincode-storage",
 ]
 

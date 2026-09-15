@@ -1086,8 +1086,12 @@ fn application(root: &TestDirectory) -> StandaloneModelExecutionApplication {
 }
 
 fn typed(message: ExecutionPortMessage) -> TypedFrame {
-    TypedFrame::new(FrameDirection::WorkerToControlPlane, message)
-        .expect("typed Worker ExecutionPort frame")
+    let direction = if matches!(&message, ExecutionPortMessage::ModelAckMessage(_)) {
+        FrameDirection::ControlPlaneToWorker
+    } else {
+        FrameDirection::WorkerToControlPlane
+    };
+    TypedFrame::new(direction, message).expect("typed Worker ExecutionPort frame")
 }
 
 fn opened(receipt: ModelExecutionPortReceipt) -> ProviderGatewayOpenReceipt {
@@ -3067,13 +3071,14 @@ fn assert_verification_products(messages: &[ExecutionPortMessage], role: &str, c
         "{role} must retain direct command or test evidence"
     );
     let result = runtime_events.iter().find_map(|event| {
-        (event.event.category == ExecutionEventCategory::Activity).then(|| {
-            runtime_payload(event).filter(|payload| {
-                payload["protocol"] == "winwincode.independent-verification-result.v1"
-            })
+        if event.event.category != ExecutionEventCategory::Activity {
+            return None;
+        }
+        runtime_payload(event).filter(|payload| {
+            payload["protocol"] == "winwincode.independent-verification-result.v1"
         })
     });
-    let result = result.flatten().expect("verification result Activity");
+    let result = result.expect("verification result Activity");
     let event_id = result["findings"][0]["evidence_sources"][0]["event_id"]
         .as_str()
         .expect("verification result binds the evidence event identity");

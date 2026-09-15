@@ -189,6 +189,32 @@
         "cursor": null,
         "limit": 1
       }
+    },
+    "sessionArtifactGet": {
+      "schemaVersion": "winwincode/v1",
+      "requestId": "req_01J00000000000000000000007",
+      "query": "session.artifact.get",
+      "actor": {
+        "kind": "user",
+        "id": "usr_00000000000000000000000000"
+      },
+      "scope": {
+        "kind": "repository",
+        "organizationId": "org_00000000000000000000000000",
+        "workspaceId": "wsp_00000000000000000000000000",
+        "projectId": "prj_00000000000000000000000000",
+        "repositoryId": "rep_00000000000000000000000000"
+      },
+      "parameters": {
+        "productSessionId": "psn_00000000000000000000000000",
+        "artifactId": "art_00000000000000000000000001",
+        "offset": 0,
+        "length": 262144
+      },
+      "page": {
+        "cursor": null,
+        "limit": 50
+      }
     }
   },
   "idempotency": {

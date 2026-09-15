@@ -38,11 +38,11 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::credential_leak_gate::{
+use crate::provider_catalog::ModelToolSupport;
+use winwincode_provider::credential_leak_gate::{
     CredentialLeakError, CredentialLeakGate, CredentialOutputBoundary,
 };
-use crate::provider_catalog::ModelToolSupport;
-use crate::provider_https_sse::{MAX_ENDPOINT_BYTES, canonical_https_endpoint};
+use winwincode_provider::provider_https_sse::{MAX_ENDPOINT_BYTES, canonical_https_endpoint};
 
 /// Adapter implementation every preset routes through: the embedded Kernel
 /// `OpenAI`-compatible execution adapter.

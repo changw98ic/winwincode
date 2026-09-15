@@ -1009,9 +1009,16 @@ impl StandaloneModelExecutionApplication {
     ) -> Result<ModelExecutionPortReceipt, StandaloneModelExecutionError> {
         self.remember_loopback_profile(frame.message());
         self.with_runtime(|runtime| {
-            LocalWorkerAdapter::new(runtime, EndpointSide::ControlPlane)
-                .accept(frame)
-                .map_err(|error| adapter_error(&error))
+            LocalWorkerAdapter::new(
+                runtime,
+                if matches!(frame.message(), ExecutionPortMessage::ModelAckMessage(_)) {
+                    EndpointSide::Worker
+                } else {
+                    EndpointSide::ControlPlane
+                },
+            )
+            .accept(frame)
+            .map_err(|error| adapter_error(&error))
         })
     }
 
@@ -1024,11 +1031,18 @@ impl StandaloneModelExecutionApplication {
         &mut self,
         bytes: &[u8],
     ) -> Result<ModelExecutionPortReceipt, StandaloneModelExecutionError> {
-        if let Ok(frame) = RemoteTransportAdapter::<NoopModelExecutionCore>::decode(bytes) {
-            self.remember_loopback_profile(frame.message());
-        }
+        let frame =
+            RemoteTransportAdapter::<NoopModelExecutionCore>::decode(bytes).map_err(|_| {
+                StandaloneModelExecutionError::new(StandaloneModelExecutionErrorKind::Transport)
+            })?;
+        self.remember_loopback_profile(frame.message());
+        let side = if matches!(frame.message(), ExecutionPortMessage::ModelAckMessage(_)) {
+            EndpointSide::Worker
+        } else {
+            EndpointSide::ControlPlane
+        };
         self.with_runtime(|runtime| {
-            RemoteTransportAdapter::new(runtime, EndpointSide::ControlPlane)
+            RemoteTransportAdapter::new(runtime, side)
                 .accept(bytes)
                 .map_err(|error| adapter_error(&error))
         })

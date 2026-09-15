@@ -23,6 +23,7 @@ name = "production_vertical"
 required-features = ["test-support"]
 
 [dependencies]
+winwincode-provider.workspace = true
 base64.workspace = true
 codex-apply-patch = { path = "../../third_party/codex/codex-rs/apply-patch" }
 codex-exec-server = { path = "../../third_party/codex/codex-rs/exec-server" }

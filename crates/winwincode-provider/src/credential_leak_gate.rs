@@ -14,7 +14,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::StrongFlowReadCursor;
 
-use crate::credential_reference::ResolvedSecret;
+use crate::ResolvedSecret;
 
 const MAX_NESTING_DEPTH: usize = 64;
 const MAX_DURABLE_FINGERPRINT_BYTES: usize = 64 * 1024;
@@ -142,13 +142,16 @@ impl CredentialLeakGate {
 
     /// Copies only one-way fingerprints for another in-process output seam.
     /// Secret bytes remain owned by the canonical `ResolvedSecret` value.
-    pub(crate) fn fingerprint_snapshot(&self) -> Self {
+    #[must_use]
+    pub fn fingerprint_snapshot(&self) -> Self {
         Self {
             fingerprints: self.fingerprints.clone(),
         }
     }
 
-    pub(crate) fn to_durable_fingerprint_json(&self) -> Result<Vec<u8>, CredentialLeakError> {
+    /// # Errors
+    /// Rejects fingerprints that cannot be serialized.
+    pub fn to_durable_fingerprint_json(&self) -> Result<Vec<u8>, CredentialLeakError> {
         let durable = DurableSecretFingerprints {
             schema: DURABLE_FINGERPRINT_SCHEMA.to_owned(),
             fingerprints: self
@@ -163,7 +166,9 @@ impl CredentialLeakGate {
         serde_json::to_vec(&durable).map_err(|_| invalid_persisted_fingerprint())
     }
 
-    pub(crate) fn from_durable_fingerprint_json(bytes: &[u8]) -> Result<Self, CredentialLeakError> {
+    /// # Errors
+    /// Rejects malformed or unsupported persisted fingerprints.
+    pub fn from_durable_fingerprint_json(bytes: &[u8]) -> Result<Self, CredentialLeakError> {
         if bytes.is_empty() || bytes.len() > MAX_DURABLE_FINGERPRINT_BYTES {
             return Err(invalid_persisted_fingerprint());
         }

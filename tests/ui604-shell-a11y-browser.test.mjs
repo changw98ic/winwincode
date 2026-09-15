@@ -147,11 +147,6 @@ test('a real browser keeps one page heading, one live-region channel per page, a
     [
       ['H2', '模型'],
       ['H2', '模型设置不可用'],
-      ['H3', '默认模型'],
-      ['H3', '服务商'],
-      ['H3', '添加 API Key'],
-      ['H3', 'API Key'],
-      ['H3', '暂无 API Key'],
       ['H3', '备份与恢复'],
     ],
     'Settings must nest its page title above its panels without skipping a level',
@@ -178,19 +173,21 @@ test('a real browser keeps one page heading, one live-region channel per page, a
   assert.deepEqual(zoomed.collectionLiveRegions, [])
 
   const providerForm = await evaluate(devtools, sessionId, `(() => {
-    document.querySelector('.wwc-settings-add-provider').click()
-    const panel = document.querySelector('.wwc-settings-create-credential')
+    const panel = document.querySelector('.wwc-settings-route-form')
+    const key = document.querySelector('#wwc-device-provider-key')
     return {
-      visible: panel.checkVisibility(),
-      focus: document.activeElement.id,
-      id: document.querySelector('.wwc-settings-create-id').value,
-      model: document.querySelector('.wwc-settings-default-model').textContent,
+      present: panel !== null,
+      keyType: key.type,
+      keyDisabled: key.disabled,
+      keyLabel: key.labels[0].textContent.trim(),
+      unlabelled: [...panel.querySelectorAll('input, select')].filter(input => input.labels.length === 0).length,
     }
   })()`)
-  assert.equal(providerForm.visible, true, 'adding a provider must reveal the real form')
-  assert.equal(providerForm.focus, 'wwc-settings-create-name')
-  assert.match(providerForm.id, /^crd_[0-9A-HJKMNP-TV-Z]{26}$/u)
-  assert.equal(providerForm.model, '尚未配置默认模型')
+  assert.equal(providerForm.present, true, 'device Provider settings must render')
+  assert.equal(providerForm.keyType, 'password')
+  assert.equal(providerForm.keyDisabled, true, 'missing Device must disable credential input')
+  assert.equal(providerForm.keyLabel, 'API Key')
+  assert.equal(providerForm.unlabelled, 0, 'every Provider input needs an accessible label')
 
   await devtools.send('Emulation.setDeviceMetricsOverride', {
     width: 390, height: 844, deviceScaleFactor: 1, mobile: false,
@@ -220,10 +217,10 @@ test('a real browser keeps one page heading, one live-region channel per page, a
     return results
   })()`)
   assert.equal(extensions.length, 3)
-  for (const text of extensions) {
-    assert.match(text, /暂不可用/u)
-    assert.doesNotMatch(text, /已安装|已连接|Archify/u)
-  }
+  assert.match(extensions[0], /插件暂不可用/u)
+  assert.match(extensions[1], /添加技能/u)
+  assert.match(extensions[2], /添加 MCP 服务/u)
+  for (const text of extensions) assert.doesNotMatch(text, /已安装|已连接|Archify/u)
 
   const pairing = await evaluate(devtools, sessionId, `(async () => {
     const { mountOnboardingPage } = await import('/module/onboarding-page.js')

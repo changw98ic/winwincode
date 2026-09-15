@@ -1656,7 +1656,7 @@ fn validate_repository_binding_id(value: &str) -> Result<(), DeviceExecutionBind
 }
 
 fn validate_worker_session_id(value: &str) -> Result<(), DeviceExecutionBindingStoreError> {
-    validate_crockford_id(value, "ws_", "worker session id")
+    validate_crockford_id(value, "wsn_", "worker session id")
 }
 
 fn validate_worker_launch_grant_id(value: &str) -> Result<(), DeviceExecutionBindingStoreError> {

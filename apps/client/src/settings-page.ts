@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type { ControlPlaneClientError } from './community-control-plane-client.js'
+import type { ControlPlaneClientError, ControlPlaneClientTransport } from './community-control-plane-client.js'
 import {
   mountButton,
   mountErrorState,
@@ -10,16 +10,7 @@ import {
   type StatusTone,
 } from '@winwincode/browser-ui'
 import { mountEmptyState, mountTabs } from './components/index.js'
-import { mountKeyedCollection } from './components/keyed-collection.js'
-import {
-  createEditableDraft,
-  settleDraftSubmission,
-  type EditableDraft,
-} from './editable-draft.js'
-import type {
-  CredentialReferenceId,
-  CredentialReferenceProjection,
-} from './generated/contracts.js'
+import { mountDeviceProviderPanel } from './device-provider-panel.js'
 import type {
   SettingsViewModel,
   SettingsViewModelState,
@@ -33,6 +24,8 @@ export interface SettingsUsagePanel {
 export interface SettingsPageOptions {
   readonly root: HTMLElement
   readonly model: SettingsViewModel
+  readonly serverUrl: string
+  readonly fetch?: ControlPlaneClientTransport['fetch']
   /**
    * Mounts the live Usage & health panel into the 用量 tab.  Wired by the
    * shell; invoked once when the tab is first opened, and the returned
@@ -168,20 +161,6 @@ function labelledInput(
   return Object.freeze({ label, input })
 }
 
-function lifecycleLabel(reference: CredentialReferenceProjection): string {
-  if (reference.secretState === 'revoked') return '已撤销'
-  if (reference.secretState === 'missing') return '密钥缺失'
-  return '可用'
-}
-
-/** ADR-0029 §5: every warning also carries a non-color icon beside its text. */
-function conflictWarningIcon(document: Document, className: string): HTMLElement {
-  const icon = element(document, 'span', className)
-  icon.setAttribute('aria-hidden', 'true')
-  icon.textContent = '!'
-  return icon
-}
-
 // --- 本地草稿(无控制面契约的偏好) -------------------------------------------
 
 type SettingsCategoryId = 'general' | 'providers' | 'execution' | 'storage' | 'diagnostics'
@@ -256,11 +235,10 @@ function fillSelect(
  * Design pages 12-16 and 15: one settings page with a 设置分类 dropdown in the
  * top-right corner. 通用与个人 / 执行与强流程 / 数据与存储 / 诊断与用量 carry
  * presentation-only preferences stored as local drafts; 模型与 Provider keeps
- * the existing control-plane-backed route and Credential controls.
+ * Device-owned Provider configuration controls.
  */
 export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   const document = options.root.ownerDocument
-  const pageDraftScope = options.model.draftScope
   const generalDraft = new Map<string, string>()
   const executionDraft = new Map<string, string>()
   const layout = element(document, 'section', 'wwc-settings')
@@ -317,7 +295,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
     props: {
       label: '重试快照',
       className: 'wwc-settings-retry',
-      onActivate: () => { void options.model.refresh() },
+      onActivate: () => { void options.model.refresh(); void deviceProviders.refresh() },
     },
   })
   const retry = retryButton.root
@@ -504,210 +482,10 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   providersSection.dataset.category = 'providers'
   providersSection.hidden = true
 
-  const routePanel = mountPanel({
-    document,
-    props: {
-      id: 'wwc-settings-route',
-      headingLevel: 3,
-      title: '默认模型',
-      description: '更改后用于新创建的会话。',
-      className: 'wwc-settings-route',
-    },
-  })
-  const routeSection = routePanel.root
-  const routeHeading = routePanel.title
-  routeHeading.className = 'wwc-settings-section-heading'
-  // 设计稿 13:面板描述即下拉下方的灰说明,不在标题下。
-  if (routePanel.description !== undefined) {
-    routePanel.description.className = 'wwc-settings-section-note'
-  }
-  const defaultModel = element(document, 'p', 'wwc-settings-default-model')
-  defaultModel.id = 'wwc-settings-default-model'
-  const routeForm = element(document, 'form', 'wwc-settings-route-form')
-  const provider = labelledInput(document, 'wwc-settings-provider', '服务商', 'wwc-settings-provider')
-  const model = labelledInput(document, 'wwc-settings-model', '模型', 'wwc-settings-model')
-  const credentialLabel = element(document, 'label', 'wwc-settings-credential-label')
-  const credential = element(document, 'select', 'wwc-settings-credential')
-  const concurrency = labelledInput(
-    document,
-    'wwc-settings-concurrency',
-    '执行并发数',
-    'wwc-settings-concurrency',
-    'number',
-  )
-  const routeControls = element(document, 'div', 'wwc-settings-route-controls')
-  const saveRoute = element(document, 'button', 'wwc-settings-save-route')
-  const clearRoute = element(document, 'button', 'wwc-settings-clear-route')
-  const routeConflict = element(document, 'div', 'wwc-settings-route-conflict')
-  const routeConflictIcon = conflictWarningIcon(
-    document,
-    'wwc-settings-route-conflict-icon',
-  )
-  const routeConflictText = element(document, 'p', 'wwc-settings-route-conflict-text')
-  const keepRouteDraft = element(document, 'button', 'wwc-settings-route-keep-draft')
-  const useServerRoute = element(document, 'button', 'wwc-settings-route-use-server')
-
-  const providerListPanel = mountPanel({
-    document,
-    props: {
-      id: 'wwc-settings-provider-list',
-      headingLevel: 3,
-      title: '服务商',
-      description: '',
-      className: 'wwc-settings-provider-list',
-    },
-  })
-  const providerListSection = providerListPanel.root
-  const providerListHeading = providerListPanel.title
-  providerListHeading.className = 'wwc-settings-section-heading'
-  const providerListRows = element(document, 'ul', 'wwc-settings-provider-rows')
-  const providerListEmpty = element(document, 'p', 'wwc-settings-provider-list-empty')
-  providerListEmpty.textContent = '还没有服务商。点下面「添加 API Key」。'
-  const addProvider = element(document, 'button', 'wwc-settings-add-provider')
-  addProvider.type = 'button'
-  addProvider.dataset.wwcComponent = 'button'
-  addProvider.dataset.variant = 'primary'
-  addProvider.textContent = '添加 API Key'
-  providerListPanel.content.append(providerListRows, providerListEmpty, addProvider)
-
-  const createPanel = mountPanel({
-    document,
-    props: {
-      id: 'wwc-settings-create-credential',
-      headingLevel: 3,
-      title: '添加 API Key',
-      description: '密钥只提交一次，之后不再显示。',
-      className: 'wwc-settings-create-credential',
-    },
-  })
-  const createSection = createPanel.root
-  createSection.hidden = true
-  addProvider.setAttribute('aria-controls', createSection.id)
-  addProvider.setAttribute('aria-expanded', 'false')
-  const createHeading = createPanel.title
-  createHeading.className = 'wwc-settings-section-heading'
-  const createHelp = element(document, 'p', 'wwc-settings-secret-help')
-  const createForm = element(document, 'form', 'wwc-settings-create-form')
-  const createId = labelledInput(document, 'wwc-settings-create-id', '名称', 'wwc-settings-create-id')
-  createId.label.hidden = true
-  const createName = labelledInput(document, 'wwc-settings-create-name', '显示名称', 'wwc-settings-create-name')
-  const createProvider = labelledInput(
-    document,
-    'wwc-settings-create-provider',
-    '服务商',
-    'wwc-settings-create-provider',
-  )
-  const createSecret = labelledInput(
-    document,
-    'wwc-settings-create-secret',
-    'API Key',
-    'wwc-settings-create-secret',
-    'password',
-  )
-  const createButton = element(document, 'button', 'wwc-settings-create-submit')
-
-  const referencesPanel = mountPanel({
-    document,
-    props: {
-      id: 'wwc-settings-credentials',
-      headingLevel: 3,
-      title: 'API Key',
-      description: '只显示名称与状态，不显示密钥内容。',
-      className: 'wwc-settings-credentials',
-    },
-  })
-  const referencesSection = referencesPanel.root
-  referencesSection.hidden = true
-  const referencesHeading = referencesPanel.title
-  referencesHeading.className = 'wwc-settings-section-heading'
-  const referencesHelp = element(document, 'p', 'wwc-settings-credential-help')
-  const references = element(document, 'ul', 'wwc-settings-credential-list')
-  const referencesEmpty = mountEmptyState({
-    document,
-    props: {
-      title: '暂无 API Key',
-      detail: '先添加服务商的 API Key，再选默认模型。',
-      className: 'wwc-settings-credential-empty',
-      headingLevel: 3,
-    },
-  })
   let closed = false
-
-
-  credentialLabel.htmlFor = 'wwc-settings-credential'
-  credentialLabel.textContent = 'API Key'
-  credential.id = 'wwc-settings-credential'
-  credentialLabel.append(credential)
-  concurrency.input.min = '1'
-  concurrency.input.max = '10000'
-  concurrency.input.step = '1'
-  saveRoute.type = 'submit'
-  saveRoute.textContent = '保存'
-  saveRoute.dataset.wwcComponent = 'button'
-  saveRoute.dataset.variant = 'primary'
-  clearRoute.type = 'button'
-  clearRoute.textContent = '清除默认路由'
-  clearRoute.dataset.wwcComponent = 'button'
-  clearRoute.dataset.variant = 'destructive'
-  routeConflict.setAttribute('role', 'alert')
-  routeConflict.hidden = true
-  keepRouteDraft.type = 'button'
-  keepRouteDraft.textContent = '保留我的草稿'
-  useServerRoute.type = 'button'
-  useServerRoute.textContent = '使用服务器值'
-  routeConflict.append(routeConflictIcon, routeConflictText, keepRouteDraft, useServerRoute)
-  routeControls.append(saveRoute, clearRoute)
-  routeForm.append(
-    provider.label,
-    model.label,
-    credentialLabel,
-    concurrency.label,
-    routeConflict,
-    routeControls,
-  )
-  const routeNote = routePanel.description
-  routePanel.content.append(defaultModel)
-  if (routeNote !== undefined) routePanel.content.append(routeNote)
-  const routeDetails = element(document, 'details', 'wwc-settings-route-details')
-  const routeSummary = element(document, 'summary', 'wwc-settings-route-summary')
-  routeSummary.textContent = '编辑默认模型'
-  routeDetails.append(routeSummary, routeForm)
-  routePanel.content.append(routeDetails)
-
-  // 设计稿 13:「添加 Provider」指向真实的添加凭据引用表单,不假造新增动作。
-  addProvider.addEventListener('click', () => {
-    if (createId.input.value === '') {
-      createId.input.value = `crd_${crypto.randomUUID().replaceAll('-', '').slice(0, 26).toUpperCase()}`
-      createDraft.edit('credentialReferenceId', createId.input.value)
-    }
-    createSection.hidden = false
-    addProvider.setAttribute('aria-expanded', 'true')
-    createSection.scrollIntoView?.({ block: 'nearest' })
-    if (createName.input.disabled !== true) createName.input.focus?.()
-  })
-
-  createHelp.textContent = '密钥只提交一次，之后不再显示。'
-  createHelp.hidden = true
-  createSecret.input.autocomplete = 'new-password'
-  createSecret.input.spellcheck = false
-  createButton.type = 'submit'
-  createButton.textContent = '添加'
-  createButton.dataset.wwcComponent = 'button'
-  createButton.dataset.variant = 'primary'
-  createForm.append(
-    createId.label,
-    createName.label,
-    createProvider.label,
-    createSecret.label,
-    createButton,
-  )
-  createPanel.content.append(createHelp, createForm)
-
-  referencesHelp.textContent = '只显示名称与状态，不显示密钥内容。'
-  referencesHelp.hidden = true
-  referencesPanel.content.append(referencesHelp, references, referencesEmpty.root)
-
-  providersSection.append(routeSection, providerListSection, createSection, referencesSection)
+  const deviceProviders = mountDeviceProviderPanel({ root: providersSection, serverUrl: options.serverUrl,
+    ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
+    ...(options.readOnly === undefined ? {} : { readOnly: options.readOnly }) })
 
   // --- 执行与强流程(设计稿 14;本地草稿) -------------------------------------
 
@@ -718,6 +496,22 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   )
   executionSection.dataset.category = 'execution'
   executionSection.hidden = true
+  const concurrencyForm = document.createElement('form')
+  const concurrencyInput = document.createElement('input')
+  concurrencyInput.type = 'number'; concurrencyInput.min = '1'; concurrencyInput.max = '10000'; concurrencyInput.required = true
+  concurrencyInput.id = 'wwc-settings-worker-concurrency'
+  const concurrencyLabel = document.createElement('label')
+  concurrencyLabel.htmlFor = concurrencyInput.id; concurrencyLabel.textContent = '执行并发上限'
+  const concurrencySave = document.createElement('button')
+  concurrencySave.type = 'submit'; concurrencySave.textContent = '保存并发上限'
+  concurrencyForm.append(concurrencyLabel, concurrencyInput, concurrencySave)
+  concurrencyForm.addEventListener('submit', event => {
+    event.preventDefault()
+    if (options.readOnly !== true && !settingsPagePresentation(options.model.state).mutationsDisabled && concurrencyForm.reportValidity()) {
+      void options.model.updateSettings({ workerConcurrencyLimit: Number(concurrencyInput.value) })
+    }
+  })
+  executionSection.append(concurrencyForm)
   const executionMode = element(document, 'select', 'wwc-settings-execution-mode')
   executionMode.id = 'wwc-settings-execution-mode'
   fillSelect(document, executionMode, [
@@ -918,7 +712,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
       label: '运行检查',
       variant: 'primary',
       className: 'wwc-settings-diagnostics-run-check',
-      onActivate: () => { void options.model.refresh() },
+      onActivate: () => { void options.model.refresh(); void deviceProviders.refresh() },
     },
   })
   const recordsContent = element(document, 'div', 'wwc-settings-diagnostics-records')
@@ -1027,377 +821,15 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   layout.append(headerRow, status, error, generalSection, providersSection, executionSection, storageSection, diagnosticsSection)
   options.root.replaceChildren(layout)
 
-  interface CredentialChoice {
-    readonly key: string
-    readonly reference: CredentialReferenceProjection | null
-  }
-  interface CredentialRow {
-    current: CredentialReferenceProjection
-    readonly item: HTMLLIElement
-    readonly title: HTMLElement
-    readonly descriptions: readonly HTMLElement[]
-    readonly rotateForm: HTMLFormElement
-    readonly rotateSecret: HTMLInputElement
-    readonly rotate: HTMLButtonElement
-    readonly revoke: HTMLButtonElement
-    readonly conflict: HTMLElement
-    readonly conflictText: HTMLElement
-    readonly keepDraft: HTMLButtonElement
-    readonly useServer: HTMLButtonElement
-    readonly draft: EditableDraft<RotateDraftValues>
-    readonly onRotate: (event: SubmitEvent) => void
-    readonly onRevoke: () => void
-    readonly onSecretInput: () => void
-    readonly onKeepDraft: () => void
-    readonly onUseServer: () => void
-  }
-  type CreateDraftValues = {
-    readonly credentialReferenceId: string
-    readonly displayName: string
-    readonly providerId: string
-  }
-  type RotateDraftValues = {
-    readonly secretState: string
-    readonly rotationVersion: string
-  }
-  const createDraft = createEditableDraft<CreateDraftValues>()
-  type RouteDraftValues = {
-    readonly providerId: string
-    readonly modelId: string
-    readonly credentialReferenceId: string
-    readonly workerConcurrencyLimit: string
-  }
-  const routeDraft = createEditableDraft<RouteDraftValues>()
-  const routeFieldLabels: Readonly<Record<keyof RouteDraftValues, string>> = Object.freeze({
-    providerId: '服务商',
-    modelId: '模型 ID',
-    credentialReferenceId: 'API Key',
-    workerConcurrencyLimit: '执行并发数',
-  })
-  const editProvider = () => { routeDraft.edit('providerId', provider.input.value) }
-  const editModel = () => { routeDraft.edit('modelId', model.input.value) }
-  const editCredential = () => {
-    routeDraft.edit('credentialReferenceId', credential.value)
-  }
-  const editConcurrency = () => {
-    routeDraft.edit('workerConcurrencyLimit', concurrency.input.value)
-  }
-  const credentialOptions = mountKeyedCollection<CredentialChoice, string, HTMLOptionElement>({
-    parent: credential,
-    key: choice => choice.key,
-    create: () => document.createElement('option'),
-    update(choice, item) {
-      choice.value = item.key
-      choice.textContent = item.reference === null
-        ? '选择可用的 API Key'
-        : `${item.reference.displayName} · ${item.reference.providerId}`
-    },
-  })
-  const providerManageRows = new WeakMap<HTMLLIElement, {
-    readonly name: HTMLElement
-    readonly provider: HTMLElement
-    readonly state: HTMLElement
-    readonly stateText: HTMLElement
-    readonly manage: HTMLButtonElement
-    readonly onManage: () => void
-  }>()
-  const providerRowsCollection = mountKeyedCollection<
-    CredentialReferenceProjection,
-    string,
-    HTMLLIElement
-  >({
-    parent: providerListRows,
-    key: reference => reference.id,
-    create(reference: CredentialReferenceProjection) {
-      const item = element(document, 'li', 'wwc-settings-provider-row')
-      const info = element(document, 'div', 'wwc-settings-provider-info')
-      const name = element(document, 'p', 'wwc-settings-provider-name')
-      const providerId = element(document, 'p', 'wwc-settings-provider-id')
-      info.append(name, providerId)
-      const state = element(document, 'p', 'wwc-settings-provider-state')
-      const dot = element(document, 'span', 'wwc-settings-provider-dot')
-      dot.setAttribute('aria-hidden', 'true')
-      const stateText = element(document, 'span', 'wwc-settings-provider-state-text')
-      state.append(dot, stateText)
-      const manage = element(document, 'button', 'wwc-settings-provider-manage')
-      manage.type = 'button'
-      manage.dataset.wwcComponent = 'button'
-      manage.dataset.variant = 'default'
-      manage.textContent = '管理'
-      const onManage = () => {
-        referencesSection.hidden = false
-        const items = references.children ?? []
-        for (const candidate of items) {
-          if (candidate.getAttribute?.('data-reference-id') === reference.id) {
-            candidate.scrollIntoView?.({ block: 'nearest' })
-            return
-          }
-        }
-      }
-      manage.addEventListener('click', onManage)
-      item.append(info, state, manage)
-      providerManageRows.set(item, {
-        name,
-        provider: providerId,
-        state,
-        stateText,
-        manage,
-        onManage,
-      })
-      return item
-    },
-    update(item, reference: CredentialReferenceProjection) {
-      const row = providerManageRows.get(item)
-      if (row === undefined) return
-      row.name.textContent = reference.displayName
-      row.provider.textContent = reference.providerId
-      const connected = reference.secretState === 'available'
-      const revoked = reference.secretState === 'revoked'
-      item.dataset.tone = connected ? 'success' : revoked ? 'danger' : 'neutral'
-      row.state.dataset.tone = connected ? 'success' : revoked ? 'danger' : 'neutral'
-      row.stateText.textContent = connected ? '密钥已保存' : revoked ? '已吊销' : '未配置'
-      row.manage.textContent = connected ? '管理' : '配置'
-    },
-    remove(item) {
-      const row = providerManageRows.get(item)
-      if (row === undefined) return
-      row.manage.removeEventListener('click', row.onManage)
-      providerManageRows.delete(item)
-    },
-  })
-  const credentialRows = new WeakMap<HTMLLIElement, CredentialRow>()
-  const credentialReferences = mountKeyedCollection({
-    parent: references,
-    key: (reference: CredentialReferenceProjection) => reference.id,
-    create(reference: CredentialReferenceProjection) {
-      const item = element(document, 'li', 'wwc-settings-credential-item')
-      item.dataset.referenceId = reference.id
-      const title = element(document, 'h3', 'wwc-settings-credential-title')
-      const metadata = element(document, 'dl', 'wwc-settings-credential-metadata')
-      const rotateForm = element(document, 'form', 'wwc-settings-rotate-form')
-      const rotateSecret = labelledInput(
-        document,
-        `wwc-settings-rotate-${reference.id}`,
-        `${reference.displayName} 的新本地密钥`,
-        'wwc-settings-rotate-secret',
-        'password',
-      )
-      const rotate = element(document, 'button', 'wwc-settings-rotate')
-      const revoke = element(document, 'button', 'wwc-settings-revoke')
-      const conflict = element(document, 'div', 'wwc-settings-rotate-conflict')
-      const conflictIcon = conflictWarningIcon(
-        document,
-        'wwc-settings-rotate-conflict-icon',
-      )
-      const conflictText = element(document, 'p', 'wwc-settings-rotate-conflict-text')
-      const keepDraft = element(document, 'button', 'wwc-settings-rotate-keep-draft')
-      const useServer = element(document, 'button', 'wwc-settings-rotate-use-server')
-      const draft = createEditableDraft<RotateDraftValues>({
-        revisionSensitive: true,
-        redactFields: ['secretState'],
-      })
-      const terms = [
-        '名称',
-        '服务商',
-        '密钥状态',
-        '轮换版本',
-        '更新时间',
-        '上次轮换时间',
-        '撤销时间',
-      ] as const
-      const descriptions = terms.map(term => {
-        const dt = document.createElement('dt')
-        const dd = document.createElement('dd')
-        dt.textContent = term
-        metadata.append(dt, dd)
-        return dd
-      })
-      rotateSecret.input.autocomplete = 'new-password'
-      rotateSecret.input.spellcheck = false
-      rotate.type = 'submit'
-      rotate.textContent = '轮换密钥'
-      rotate.dataset.wwcComponent = 'button'
-      rotate.dataset.variant = 'default'
-      revoke.type = 'button'
-      revoke.textContent = '吊销引用'
-      revoke.dataset.wwcComponent = 'button'
-      revoke.dataset.variant = 'destructive'
-      conflict.setAttribute('role', 'alert')
-      conflict.hidden = true
-      keepDraft.type = 'button'
-      keepDraft.textContent = '保留本地密钥'
-      useServer.type = 'button'
-      useServer.textContent = '丢弃本地密钥'
-      conflict.append(conflictIcon, conflictText, keepDraft, useServer)
-      const onRotate = (event: SubmitEvent) => {
-        event.preventDefault()
-        if (options.readOnly === true) return
-        const row = credentialRows.get(item)
-        if (row === undefined) return
-        const secret = row.rotateSecret.value
-        row.draft.edit('secretState', secret.length === 0 ? '' : 'present')
-        const submission = row.draft.beginSubmission()
-        if (submission === null) return
-        void options.model.rotateCredentialReference({
-          credentialReferenceId: row.current.id,
-          vaultLocator: secret,
-        })
-      }
-      const onRevoke = () => {
-        if (options.readOnly === true) return
-        const row = credentialRows.get(item)
-        if (row !== undefined) void options.model.revokeCredentialReference(row.current.id)
-      }
-      const onSecretInput = () => {
-        draft.edit('secretState', rotateSecret.input.value.length === 0 ? '' : 'present')
-      }
-      const onKeepDraft = () => {
-        draft.resolveConflicts('keep-draft')
-        render(options.model.state)
-      }
-      const onUseServer = () => {
-        draft.resolveConflicts('use-server')
-        rotateSecret.input.value = ''
-        render(options.model.state)
-      }
-      rotateForm.addEventListener('submit', onRotate)
-      revoke.addEventListener('click', onRevoke)
-      rotateSecret.input.addEventListener('input', onSecretInput)
-      keepDraft.addEventListener('click', onKeepDraft)
-      useServer.addEventListener('click', onUseServer)
-      rotateForm.append(rotateSecret.label, rotate)
-      item.append(title, metadata, rotateForm, conflict, revoke)
-      credentialRows.set(item, {
-        current: reference,
-        item,
-        title,
-        descriptions,
-        rotateForm,
-        rotateSecret: rotateSecret.input,
-        rotate,
-        revoke,
-        conflict,
-        conflictText,
-        keepDraft,
-        useServer,
-        draft,
-        onRotate,
-        onRevoke,
-        onSecretInput,
-        onKeepDraft,
-        onUseServer,
-      })
-      return item
-    },
-    update(item, reference: CredentialReferenceProjection) {
-      const row = credentialRows.get(item)
-      if (row === undefined) return
-      row.current = reference
-      const state = options.model.state
-      if (row.draft.state.scope !== null && row.draft.state.submission === null) {
-        row.draft.edit('secretState', row.rotateSecret.value.length === 0 ? '' : 'present')
-      }
-      if (state.interaction.error?.kind === 'cancelled') {
-        row.draft.edit('secretState', '')
-        row.rotateSecret.value = ''
-      }
-      row.draft.synchronize({
-        scope: `${pageDraftScope}:${reference.id}`,
-        revision: reference.revision,
-        values: {
-          secretState: '',
-          rotationVersion: String(reference.rotationVersion),
-        },
-      })
-      const rotateSubmission = row.draft.state.submission
-      const rotateConfirmed = rotateSubmission !== null
-        && reference.rotationVersion > Number(rotateSubmission.values.rotationVersion)
-      const rotateRefuted = rotateSubmission !== null
-        && reference.secretState === 'revoked'
-      const rotateOutcome = settleDraftSubmission(rotateSubmission, {
-        busy: settingsPagePresentation(state).busy,
-        failed: state.interaction.status === 'error'
-          && (
-            state.interaction.operation === 'credential.reference.rotate'
-            || state.interaction.operation === null
-        ),
-        cancelled: state.interaction.error?.kind === 'cancelled',
-        confirmed: rotateConfirmed,
-        refuted: rotateRefuted,
-      })
-      if (rotateOutcome !== 'in-flight') {
-        row.draft.finishSubmission(rotateOutcome)
-        if (rotateOutcome === 'success') row.rotateSecret.value = ''
-      }
-      row.title.textContent = reference.displayName
-      const values = [
-        reference.id,
-        reference.providerId,
-        lifecycleLabel(reference),
-        String(reference.rotationVersion),
-        reference.updatedAt,
-        reference.lastRotatedAt ?? '从未轮换',
-        reference.revokedAt ?? '未撤销',
-      ] as const
-      values.forEach((value, index) => {
-        const description = row.descriptions[index]
-        if (description !== undefined && description.textContent !== value) {
-          description.textContent = value
-        }
-      })
-      const disabled = options.readOnly === true
-        || settingsPagePresentation(options.model.state).mutationsDisabled
-        || reference.secretState === 'revoked'
-      const submissionPending = row.draft.state.submission !== null
-      row.rotate.disabled = disabled || submissionPending || row.draft.state.revisionConflict
-      row.rotateSecret.disabled = disabled || submissionPending
-      row.revoke.disabled = disabled || submissionPending
-      row.conflict.hidden = !row.draft.state.revisionConflict
-      row.conflictText.textContent = row.draft.state.revisionConflict
-        ? `此 API Key 已从修订版 ${String(
-            row.draft.state.baseRevision,
-          )} 更新为修订版 ${String(row.draft.state.serverRevision)}。`
-        : ''
-      row.keepDraft.disabled = disabled || submissionPending
-      row.useServer.disabled = disabled || submissionPending
-    },
-    remove(item) {
-      const row = credentialRows.get(item)
-      if (row === undefined) return
-      row.rotateSecret.value = ''
-      row.rotateForm.removeEventListener('submit', row.onRotate)
-      row.revoke.removeEventListener('click', row.onRevoke)
-      row.rotateSecret.removeEventListener('input', row.onSecretInput)
-      row.keepDraft.removeEventListener('click', row.onKeepDraft)
-      row.useServer.removeEventListener('click', row.onUseServer)
-      row.draft.reset()
-      credentialRows.delete(item)
-    },
-  })
-
   function renderDiagnostics(state: SettingsViewModelState, presentation: SettingsPagePresentation): void {
-    const connectedRealtime = state.realtime === 'subscribed'
-      || state.realtime === 'reloading'
-    const deviceOk = connectedRealtime
-    const deviceState = connectedRealtime
-      ? '已连接'
-      : state.realtime === 'reconnecting'
-        ? '重连中'
-        : state.realtime === 'access-revoked'
-          ? '访问已撤销'
-          : '未连接'
-    const modelOk = state.settings !== null
-      && (state.status === 'ready' || state.status === 'refreshing')
-    const modelState = modelOk
-      ? '可用'
-      : state.status === 'authentication-required'
-        ? '需登录'
-        : state.status === 'authorization-denied'
-          ? '无权限'
-          : state.status === 'error'
-            ? '不可用'
-            : '读取中'
+    const deviceOk = deviceProviders.online
+    const deviceState = deviceOk ? '已连接' : '未连接'
+    const modelOk = deviceProviders.configured
+    const modelState = modelOk ? '已配置（请运行连接测试）' : '未配置'
     const concurrency = state.settings?.workerConcurrencyLimit ?? null
+    if (document.activeElement !== concurrencyInput) concurrencyInput.value = concurrency === null ? '' : String(concurrency)
+    concurrencyInput.disabled = options.readOnly === true || presentation.mutationsDisabled
+    concurrencySave.disabled = concurrencyInput.disabled
     const tasksOk = concurrency !== null
     const tasksState = tasksOk ? `正常 · 并发上限 ${String(concurrency)}` : '未知'
     const allOk = deviceOk && modelOk && tasksOk
@@ -1431,93 +863,6 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   function render(state: SettingsViewModelState): void {
     if (closed) return
     const presentation = settingsPagePresentation(state)
-    const route = state.settings?.defaultModelRoute ?? null
-    if (createDraft.state.scope !== null && createDraft.state.submission === null) {
-      createDraft.edit('credentialReferenceId', createId.input.value)
-      createDraft.edit('displayName', createName.input.value)
-      createDraft.edit('providerId', createProvider.input.value)
-    }
-    if (state.interaction.error?.kind === 'cancelled') {
-      createSecret.input.value = ''
-    }
-    createDraft.synchronize(state.settings === null
-      ? null
-      : {
-          scope: `${pageDraftScope}:credential-reference-create`,
-          revision: 0,
-          values: {
-            credentialReferenceId: '',
-            displayName: '',
-            providerId: '',
-          },
-        })
-    const createSubmission = createDraft.state.submission
-    const submittedReference = createSubmission === null
-      ? undefined
-      : state.credentials.find(reference => (
-          reference.id === createSubmission.values.credentialReferenceId
-        ))
-    const createConfirmed = createSubmission !== null
-      && submittedReference !== undefined
-      && (
-        submittedReference.id === createSubmission.values.credentialReferenceId
-        && submittedReference.displayName === createSubmission.values.displayName.trim()
-        && submittedReference.providerId === createSubmission.values.providerId.trim()
-      )
-    const createRefuted = createSubmission !== null
-      && submittedReference !== undefined
-      && !createConfirmed
-    const createOutcome = settleDraftSubmission(createSubmission, {
-      busy: presentation.busy,
-      failed: state.interaction.status === 'error'
-        && (
-          state.interaction.operation === 'credential.reference.create'
-          || state.interaction.operation === null
-      ),
-      cancelled: state.interaction.error?.kind === 'cancelled',
-      confirmed: createConfirmed,
-      refuted: createRefuted,
-    })
-    if (createOutcome !== 'in-flight') {
-      createDraft.finishSubmission(createOutcome)
-      if (createOutcome === 'success') createSecret.input.value = ''
-    }
-    routeDraft.synchronize(state.settings === null
-      ? null
-      : {
-          scope: `${pageDraftScope}:settings`,
-          revision: state.settings.revision,
-          values: {
-            providerId: route?.providerId ?? '',
-            modelId: route?.modelId ?? '',
-            credentialReferenceId: route?.credentialReferenceId ?? '',
-            workerConcurrencyLimit: String(state.settings.workerConcurrencyLimit),
-          },
-        })
-    const submittedRoute = routeDraft.state.submission
-    const routeSubmissionSucceeded = submittedRoute !== null
-      && state.settings !== null
-      && state.settings.revision > submittedRoute.revision
-      && (route?.providerId ?? '') === submittedRoute.values.providerId.trim()
-      && (route?.modelId ?? '') === submittedRoute.values.modelId.trim()
-      && (route?.credentialReferenceId ?? '') === submittedRoute.values.credentialReferenceId
-      && String(state.settings.workerConcurrencyLimit)
-        === submittedRoute.values.workerConcurrencyLimit
-    const routeOutcome = settleDraftSubmission(submittedRoute, {
-      busy: presentation.busy,
-      failed: state.interaction.status === 'error'
-        && (
-          state.interaction.operation === 'settings.update'
-          || state.interaction.operation === null
-      ),
-      cancelled: state.interaction.error?.kind === 'cancelled',
-      confirmed: routeSubmissionSucceeded,
-      refuted: submittedRoute !== null
-        && state.settings !== null
-        && state.settings.revision > submittedRoute.revision
-        && !routeSubmissionSucceeded,
-    })
-    if (routeOutcome !== 'in-flight') routeDraft.finishSubmission(routeOutcome)
     const tone: StatusTone = presentation.errorText !== null
       ? 'danger'
       : state.realtime === 'reconnecting'
@@ -1543,150 +888,9 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
     })
     retry.hidden = !presentation.retryVisible
     reconnect.hidden = !presentation.reconnectVisible
-    const credentialChoices: readonly CredentialChoice[] = [
-      { key: '', reference: null },
-      ...state.credentials
-        .filter(reference => reference.secretState === 'available')
-        .map(reference => ({ key: reference.id, reference })),
-    ]
-    credentialOptions.update(credentialChoices)
-    defaultModel.textContent = state.settings?.defaultModelRoute?.modelId ?? '尚未配置默认模型'
-    const routeValues = routeDraft.state.values
-    const routeProviderId = routeValues.providerId ?? ''
-    const routeModelId = routeValues.modelId ?? ''
-    const routeCredentialId = routeValues.credentialReferenceId ?? ''
-    const routeConcurrency = routeValues.workerConcurrencyLimit ?? ''
-    if (provider.input.value !== routeProviderId) provider.input.value = routeProviderId
-    if (model.input.value !== routeModelId) model.input.value = routeModelId
-    if (concurrency.input.value !== routeConcurrency) {
-      concurrency.input.value = routeConcurrency
-    }
-    if (credential.value !== routeCredentialId) {
-      credential.value = routeCredentialId
-    }
-    const routeConflicts = routeDraft.state.conflicts
-    routeConflict.hidden = routeConflicts.length === 0
-    routeConflictText.textContent = routeConflicts.length === 0
-      ? ''
-      : `服务器已更改此草稿。${routeConflicts.map(conflict => (
-          `${routeFieldLabels[conflict.field as keyof RouteDraftValues]}：`
-          + `服务器值“${conflict.serverValue}”；你的草稿“${conflict.draftValue}”。`
-        )).join(' ')}`
-    const mutationsDisabled = options.readOnly === true || presentation.mutationsDisabled
-    const routeSubmissionPending = routeDraft.state.submission !== null
-    provider.input.disabled = mutationsDisabled || routeSubmissionPending
-    model.input.disabled = mutationsDisabled || routeSubmissionPending
-    credential.disabled = mutationsDisabled || routeSubmissionPending
-    concurrency.input.disabled = mutationsDisabled || routeSubmissionPending
-    saveRoute.disabled = mutationsDisabled
-      || routeSubmissionPending
-      || routeDraft.state.revisionConflict
-    clearRoute.disabled = mutationsDisabled
-      || routeSubmissionPending
-      || route === null
-      || routeDraft.state.revisionConflict
-    keepRouteDraft.disabled = mutationsDisabled || routeSubmissionPending
-    useServerRoute.disabled = mutationsDisabled || routeSubmissionPending
-    const createSubmissionPending = createDraft.state.submission !== null
-    createId.input.disabled = mutationsDisabled || createSubmissionPending
-    createName.input.disabled = mutationsDisabled || createSubmissionPending
-    createProvider.input.disabled = mutationsDisabled || createSubmissionPending
-    createSecret.input.disabled = mutationsDisabled || createSubmissionPending
-    createButton.disabled = mutationsDisabled || createSubmissionPending
-    const createValues = createDraft.state.values
-    if (createId.input.value !== (createValues.credentialReferenceId ?? '')) {
-      createId.input.value = createValues.credentialReferenceId ?? ''
-    }
-    if (createName.input.value !== (createValues.displayName ?? '')) {
-      createName.input.value = createValues.displayName ?? ''
-    }
-    if (createProvider.input.value !== (createValues.providerId ?? '')) {
-      createProvider.input.value = createValues.providerId ?? ''
-    }
-    credentialReferences.update(state.credentials)
-    references.hidden = state.credentials.length === 0
-    referencesEmpty.root.hidden = state.credentials.length !== 0
-    providerRowsCollection.update(state.credentials)
-    providerListRows.hidden = state.credentials.length === 0
-    providerListEmpty.hidden = state.credentials.length !== 0
     renderDiagnostics(state, presentation)
   }
 
-  const onRouteSubmit = (event: SubmitEvent) => {
-    event.preventDefault()
-    if (options.readOnly === true) return
-    const submission = routeDraft.beginSubmission()
-    if (submission === null) {
-      render(options.model.state)
-      return
-    }
-    void options.model.updateSettings({
-      defaultModelRoute: {
-        providerId: submission.values.providerId,
-        modelId: submission.values.modelId,
-        credentialReferenceId: submission.values.credentialReferenceId as CredentialReferenceId,
-      },
-      workerConcurrencyLimit: Number(submission.values.workerConcurrencyLimit),
-    })
-  }
-  const onClearRoute = () => {
-    if (options.readOnly === true) return
-    routeDraft.edit('providerId', '')
-    routeDraft.edit('modelId', '')
-    routeDraft.edit('credentialReferenceId', '')
-    const submission = routeDraft.beginSubmission()
-    if (submission === null) {
-      render(options.model.state)
-      return
-    }
-    void options.model.updateSettings({
-      defaultModelRoute: null,
-      workerConcurrencyLimit: Number(submission.values.workerConcurrencyLimit),
-    })
-  }
-  const onKeepRouteDraft = () => {
-    routeDraft.resolveConflicts('keep-draft')
-    render(options.model.state)
-  }
-  const onUseServerRoute = () => {
-    routeDraft.resolveConflicts('use-server')
-    render(options.model.state)
-  }
-  const onCreateCredential = (event: SubmitEvent) => {
-    event.preventDefault()
-    if (options.readOnly === true) return
-    createDraft.edit('credentialReferenceId', createId.input.value)
-    createDraft.edit('displayName', createName.input.value)
-    createDraft.edit('providerId', createProvider.input.value)
-    const secret = createSecret.input.value
-    const submission = createDraft.beginSubmission()
-    if (submission === null) return
-    void options.model.createCredentialReference({
-      credentialReferenceId: submission.values.credentialReferenceId as CredentialReferenceId,
-      displayName: submission.values.displayName,
-      providerId: submission.values.providerId,
-      vaultLocator: secret,
-    })
-  }
-  const onCreateIdInput = () => {
-    createDraft.edit('credentialReferenceId', createId.input.value)
-  }
-  const onCreateNameInput = () => { createDraft.edit('displayName', createName.input.value) }
-  const onCreateProviderInput = () => {
-    createDraft.edit('providerId', createProvider.input.value)
-  }
-  provider.input.addEventListener('input', editProvider)
-  model.input.addEventListener('input', editModel)
-  credential.addEventListener('change', editCredential)
-  concurrency.input.addEventListener('input', editConcurrency)
-  routeForm.addEventListener('submit', onRouteSubmit)
-  clearRoute.addEventListener('click', onClearRoute)
-  keepRouteDraft.addEventListener('click', onKeepRouteDraft)
-  useServerRoute.addEventListener('click', onUseServerRoute)
-  createForm.addEventListener('submit', onCreateCredential)
-  createId.input.addEventListener('input', onCreateIdInput)
-  createName.input.addEventListener('input', onCreateNameInput)
-  createProvider.input.addEventListener('input', onCreateProviderInput)
   showCategory(selectedCategory)
   showDiagnosticsTab('run')
   const unsubscribe = options.model.subscribe(render)
@@ -1696,31 +900,11 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
       if (closed) return
       closed = true
       unsubscribe()
-      provider.input.removeEventListener('input', editProvider)
-      model.input.removeEventListener('input', editModel)
-      credential.removeEventListener('change', editCredential)
-      concurrency.input.removeEventListener('input', editConcurrency)
+      deviceProviders.close()
       categorySelect.removeEventListener('change', onCategoryChange)
-      routeForm.removeEventListener('submit', onRouteSubmit)
-      clearRoute.removeEventListener('click', onClearRoute)
-      keepRouteDraft.removeEventListener('click', onKeepRouteDraft)
-      useServerRoute.removeEventListener('click', onUseServerRoute)
-      createForm.removeEventListener('submit', onCreateCredential)
-      createId.input.removeEventListener('input', onCreateIdInput)
-      createName.input.removeEventListener('input', onCreateNameInput)
-      createProvider.input.removeEventListener('input', onCreateProviderInput)
-      createSecret.input.value = ''
       generalName.input.removeEventListener('input', onGeneralNameInput)
-      providerRowsCollection.close()
-      credentialReferences.close()
-      credentialOptions.close()
       diagnosticsTabs.close()
       runCheck.close()
-      referencesEmpty.close()
-      referencesPanel.close()
-      providerListPanel.close()
-      createPanel.close()
-      routePanel.close()
       storagePanel.close()
       usageBinding?.close()
       statusBadge.close()

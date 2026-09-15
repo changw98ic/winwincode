@@ -92,7 +92,7 @@ mod tests {
             schema_version: PREVIEW_TUNNEL_SCHEMA_VERSION.to_owned(),
             sources: vec![PreviewSourceDescriptor {
                 source_id: "pvs_demo".to_owned(),
-                worker_session_id: "ws_demo".to_owned(),
+                worker_session_id: "wsn_demo".to_owned(),
                 repository_binding_id: "rbd_demo".to_owned(),
                 mode: PreviewSourceMode::FrozenCandidate,
                 candidate_commit: Some("a".repeat(40)),

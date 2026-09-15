@@ -210,6 +210,8 @@ fn local_git_resolver_imports_candidate_from_an_isolated_worker_repository() {
             .arg("-C")
             .arg(&repository)
             .args(["cat-file", "-e", &format!("{candidate_commit}^{{commit}}")])
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
             .output()
             .expect("candidate absence probe")
             .status
@@ -541,7 +543,7 @@ fn local_git_resolver_ignores_inherited_repository_environment() {
     let output = Command::new(std::env::current_exe().expect("current test executable"))
         .args([
             "--exact",
-            "local_git_resolver_rebuilds_identity_from_exact_candidate_artifact",
+            "local_git_resolver_imports_candidate_from_an_isolated_worker_repository",
             "--nocapture",
         ])
         .env("GIT_DIR", foreign_repository.join(".git"))
@@ -554,5 +556,6 @@ fn local_git_resolver_ignores_inherited_repository_environment() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
     fs::remove_dir_all(root).expect("fixture release");
 }

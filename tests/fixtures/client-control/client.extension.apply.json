@@ -1,0 +1,22 @@
+{
+  "schemaVersion": "winwincode/v1",
+  "messageId": "cmsg_00000000000000000000000030",
+  "clientNodeId": "cnd_00000000000000000000000001",
+  "clientInstanceId": "cix_00000000000000000000000001",
+  "sequence": 429,
+  "occurredAt": "2026-09-01T09:30:15.000Z",
+  "kind": "client.extension.apply",
+  "payload": {
+    "encrypted": {
+      "clientNodeId": "cnd_00000000000000000000000001",
+      "requestId": "extension-test-command",
+      "expectedRevision": 0,
+      "publicKey": "BA==",
+      "nonce": "AA==",
+      "ciphertext": "AA=="
+    },
+    "idempotencyKey": "extension-test-command"
+  },
+  "expectedRevision": 0,
+  "idempotencyKey": "provider_test_request"
+}

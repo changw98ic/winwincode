@@ -75,6 +75,7 @@ impl QueryFamily {
             QueryName::SessionList
             | QueryName::SessionGet
             | QueryName::SessionMessagesList
+            | QueryName::SessionArtifactGet
             | QueryName::SessionInteractionsList => Self::Session,
             QueryName::RuntimeProjectionGet | QueryName::WorkRunGet => Self::Runtime,
             QueryName::DeliveryList

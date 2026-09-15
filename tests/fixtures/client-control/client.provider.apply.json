@@ -1,0 +1,21 @@
+{
+  "schemaVersion": "winwincode/v1",
+  "messageId": "cmsg_00000000000000000000000029",
+  "clientNodeId": "cnd_00000000000000000000000001",
+  "clientInstanceId": "cix_00000000000000000000000001",
+  "sequence": 429,
+  "occurredAt": "2026-09-01T09:30:15.000Z",
+  "kind": "client.provider.apply",
+  "payload": {
+    "encrypted": {
+      "clientNodeId": "cnd_00000000000000000000000001",
+      "requestId": "provider_test_request",
+      "expectedRevision": 0,
+      "publicKey": "BA==",
+      "nonce": "AA==",
+      "ciphertext": "AA=="
+    }
+  },
+  "expectedRevision": 0,
+  "idempotencyKey": "provider_test_request"
+}

@@ -348,28 +348,78 @@ fn prepare_slot_for_job(
             })
             .expect("admission start");
     }
-    let lease = ExecutionLeaseClaim {
-        expires_at: at(50),
-        fencing_token: FencingToken(job_seed.to_string()),
-        issued_at: at(5),
-        job_id,
-        lease_id: LeaseId(id("lse", job_seed)),
-        message_id: ExecutionMessageId(id("xmsg", request_seed + 2)),
-        payload_digest: Sha256Digest(format!("sha256:{}", "b".repeat(64))),
-        request_id: RequestId(id("req", request_seed + 2)),
-        worker_id: WorkerId(id("wrk", 1)),
-        worker_instance_id: WorkerInstanceId(id("wki", 1)),
-        attempt: 1,
+    let queued = storage
+        .execution_queue()
+        .expect("queue")
+        .load_job(&scope, &job_id)
+        .expect("job lookup")
+        .is_some();
+    let lease = if queued {
+        let dispatch = winwincode_control_plane::RepositoryExecutionScheduler::new(storage)
+            .claim_next(&winwincode_storage::RepositorySchedulerClaimRequest {
+                scope: winwincode_storage::RepositorySchedulerScope {
+                    organization_id: scope.organization_id.clone(),
+                    workspace_id: scope.workspace_id.clone(),
+                    project_id: scope.project_id.clone(),
+                    repository_id: scope.repository_id.clone(),
+                },
+                request_id: RequestId(id("req", request_seed + 2)),
+                scheduler_generation: "test-generation".into(),
+                worker_id: WorkerId(id("wrk", 1)),
+                worker_instance_id: WorkerInstanceId(id("wki", 1)),
+                issued_at: at(5),
+                expires_at: at(50),
+            })
+            .expect("queue claim")
+            .expect("dispatch");
+        let domain_scope = RepositoryScope {
+            kind: RepositoryScopeKind::Repository,
+            organization_id: scope.organization_id.clone(),
+            workspace_id: scope.workspace_id.clone(),
+            project_id: scope.project_id.clone(),
+            repository_id: scope.repository_id.clone(),
+        };
+        winwincode_control_plane::RepositoryExecutionScheduler::new(storage).record_dispatch_result(&domain_scope,&winwincode_execution_port::generated::JobDispatchResultMessage {
+            error:None,job_id:job_id.clone(),kind:winwincode_execution_port::generated::JobDispatchResultMessageKind::JobDispatchResult,lease:dispatch.lease.clone(),message_id:ExecutionMessageId(id("xmsg",request_seed+10)),payload_digest:dispatch.job.payload_digest.clone(),request_id:RequestId(id("req",request_seed+10)),schema_version:winwincode_domain::SchemaVersion::WinwincodeV1,sent_at:at(5),status:winwincode_execution_port::generated::JobDispatchResultMessageStatus::Accepted,worker_session_id:Some(WorkerSessionId(id("wsn",worker_session))),
+        },&at(5)).expect("accepted dispatch");
+        ExecutionLeaseClaim {
+            expires_at: dispatch.lease.expires_at,
+            fencing_token: dispatch.lease.fencing_token,
+            issued_at: dispatch.lease.issued_at,
+            job_id,
+            lease_id: dispatch.lease.lease_id,
+            message_id: dispatch.message_id,
+            payload_digest: dispatch.job.payload_digest,
+            request_id: dispatch.request_id,
+            worker_id: dispatch.lease.worker_id,
+            worker_instance_id: dispatch.lease.worker_instance_id,
+            attempt: 1,
+        }
+    } else {
+        let lease = ExecutionLeaseClaim {
+            expires_at: at(50),
+            fencing_token: FencingToken(job_seed.to_string()),
+            issued_at: at(5),
+            job_id,
+            lease_id: LeaseId(id("lse", job_seed)),
+            message_id: ExecutionMessageId(id("xmsg", request_seed + 2)),
+            payload_digest: Sha256Digest(format!("sha256:{}", "b".repeat(64))),
+            request_id: RequestId(id("req", request_seed + 2)),
+            worker_id: WorkerId(id("wrk", 1)),
+            worker_instance_id: WorkerInstanceId(id("wki", 1)),
+            attempt: 1,
+        };
+        assert_eq!(
+            storage
+                .execution_registry()
+                .expect("registry")
+                .claim_execution_job(&lease)
+                .expect("lease")
+                .status,
+            LeaseWriteStatus::Accepted
+        );
+        lease
     };
-    assert_eq!(
-        storage
-            .execution_registry()
-            .expect("registry")
-            .claim_execution_job(&lease)
-            .expect("lease")
-            .status,
-        LeaseWriteStatus::Accepted
-    );
     let authority = WorkerSlotAuthority {
         worker_id: lease.worker_id,
         worker_instance_id: lease.worker_instance_id,
@@ -476,6 +526,7 @@ fn assistant_command(
         terminal_outcome: match state {
             AssistantMessageState::Streaming => None,
             AssistantMessageState::Completed => Some(ProductSessionTurnTerminalOutcome {
+                artifact_refs: None,
                 status: ExecutionOutcomeStatus::Succeeded,
                 usage: Some(ExecutionOutcomeUsage {
                     runtime_millis: 15,
@@ -488,6 +539,7 @@ fn assistant_command(
                 finished_at: at(20 + request % 20),
             }),
             AssistantMessageState::Cancelled => Some(ProductSessionTurnTerminalOutcome {
+                artifact_refs: None,
                 status: ExecutionOutcomeStatus::Cancelled,
                 usage: None,
                 last_event_sequence: ExecutionAckSequence(
@@ -496,6 +548,7 @@ fn assistant_command(
                 finished_at: at(20 + request % 20),
             }),
             AssistantMessageState::Failed => Some(ProductSessionTurnTerminalOutcome {
+                artifact_refs: None,
                 status: ExecutionOutcomeStatus::Failed,
                 usage: None,
                 last_event_sequence: ExecutionAckSequence(
@@ -1108,7 +1161,7 @@ fn cancellation_routes_exact_current_authority_replays_and_remains_distinct_from
     assert_eq!(accepted.routing.routes.len(), 1);
     let route = &accepted.routing.routes[0];
     assert_eq!(route.job.execution_job_id, authority.job_id);
-    assert_eq!(route.job.expected_revision, 2);
+    assert_eq!(route.job.expected_revision, 3);
     assert_eq!(
         route
             .worker
@@ -1255,4 +1308,53 @@ fn session_list_cursor_is_scope_filter_and_revision_bound_across_restart() {
             .code(),
         ProductSessionServiceErrorCode::CursorInvalid
     );
+}
+
+#[test]
+fn cancellation_before_the_first_model_reply_reaches_the_running_job() {
+    let directory = TestDirectory::new("cancel-before-model");
+    let scope_key = repository_scope_key();
+    let mut storage = SqliteStorage::open(&directory.0).expect("storage");
+    let job = {
+        let mut service = ProductSessionService::new(&mut storage);
+        service
+            .create(&create_command(
+                &scope_key,
+                51,
+                80,
+                "Cancel before model",
+                1,
+            ))
+            .expect("session create");
+        service
+            .submit_chat(&submit_command(&scope_key, 51, 81, 1, "Run task", 2))
+            .expect("submit")
+            .turn_intent
+            .execution_job_id
+    };
+    prepare_worker(&mut storage, 1);
+    let (scope, _) = prepare_slot_for_job(&mut storage, 51, None, job.clone(), 51, 51, 51, 800);
+    let command = CancelProductSessionCommand {
+        context: context(&scope_key, 82, 2, 10),
+        product_session_id: ProductSessionId(id("psn", 51)),
+        actor: AuthenticatedActor::User(UserId(id("usr", 1))),
+        reason: "stop during model startup".into(),
+    };
+    ProductSessionService::new(&mut storage)
+        .cancel_session(&command)
+        .expect("cancel without model binding");
+    let record = storage
+        .execution_queue()
+        .expect("queue")
+        .load_job(&scope, &job)
+        .expect("job")
+        .expect("submitted job");
+    assert_eq!(
+        record.state,
+        winwincode_storage::ExecutionJobState::Cancelling
+    );
+    assert!(record.cancellation.is_some());
+    ProductSessionService::new(&mut storage)
+        .cancel_session(&command)
+        .expect("exact replay");
 }
