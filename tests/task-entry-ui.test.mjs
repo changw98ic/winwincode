@@ -951,6 +951,21 @@ test('the production run identity port joins the canonical WorkItem detail cut',
   ])
 })
 
+test('Worker launch preserves the capacity error for an actionable Chat message', async () => {
+  const workerSessions = createControlPlaneWorkerSessionPort({
+    client: { serverUrl: 'https://control.example' },
+    transport: { async fetch() {
+      return { ok: false, status: 409, async text() {
+        return JSON.stringify({ error: { code: 'CAPACITY_EXHAUSTED', message: 'No free slot', retryable: false } })
+      } }
+    } },
+  })
+  await assert.rejects(workerSessions.launch({
+    clientId: '123456789012', repositoryBindingId: 'rbd_00000000000000000000000042',
+    productSession: { id: 'psn_00000000000000000000000042', scope: {} },
+  }), error => error.code === 'CAPACITY_EXHAUSTED' && error.kind === 'protocol')
+})
+
 function runFixture({
   devices = [device({ ...OCCUPIED })],
   byDevice,

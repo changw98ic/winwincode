@@ -316,6 +316,7 @@ fn active_job(repository_id: &RepositoryId, suffix: &str, attempt: i64) -> Activ
     };
     ActiveJob {
         job: ExecutionJob {
+            attachments: None,
             model_selection: None,
             attempt,
             execution_profile: "fixture".to_owned(),

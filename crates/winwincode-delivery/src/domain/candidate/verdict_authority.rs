@@ -11,7 +11,7 @@ use serde_json::Value;
 use winwincode_domain::{ExecutionEventId, ExecutionSequence, Sha256Digest};
 
 use super::{
-    DurableCandidateSourceInput, FrozenDeliveryCandidate, freeze_delivery_candidate_from_source,
+    DurableCandidateSourceInput, FrozenDeliveryCandidate, assert_frozen_candidate_current,
     validated_git_snapshot_from_candidate, validated_git_snapshot_from_source,
 };
 use crate::domain::evidence::{
@@ -205,11 +205,10 @@ impl Error for ProductionVerdictResolutionError {}
 /// Git identity drift.
 pub fn resolve_production_verdict(
     delivery: &Delivery,
-    writer_source: &DurableCandidateSourceInput,
-    writer_terminal: &DeliveryTerminalOutcomeFacts,
+    candidate: FrozenDeliveryCandidate,
     verification: Vec<ProductionVerificationRuntime>,
 ) -> Result<ProductionVerdictFacts, ProductionVerdictResolutionError> {
-    let candidate = freeze_delivery_candidate_from_source(delivery, writer_source, writer_terminal)
+    assert_frozen_candidate_current(delivery, &candidate)
         .map_err(|error_value| resolution_error(&error_value))?;
     let mut sessions = Vec::with_capacity(verification.len());
     let mut evidence = Vec::new();

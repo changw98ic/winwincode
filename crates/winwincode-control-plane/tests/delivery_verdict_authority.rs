@@ -155,6 +155,7 @@ struct SeedRuntimeLedger<'ledger> {
     fencing_token: &'ledger winwincode_domain::FencingToken,
     worker_id: &'ledger winwincode_domain::WorkerId,
     worker_instance_id: &'ledger winwincode_domain::WorkerInstanceId,
+    sequence_offset: u64,
     highest_sequence: u64,
     events: Vec<SeedRuntimeLedgerEvent>,
 }
@@ -985,6 +986,7 @@ fn seed_runtime(
             fencing_token: binding.fencing_token.as_ref().expect("fence"),
             worker_id: binding.worker_id.as_ref().expect("Worker"),
             worker_instance_id: binding.worker_instance_id.as_ref().expect("WorkerInstance"),
+            sequence_offset: 0,
             highest_sequence: highest as u64,
             events: events[..highest].to_vec(),
         };

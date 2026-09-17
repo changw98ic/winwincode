@@ -12,7 +12,7 @@ use winwincode_delivery::{
         candidate::{
             ProductionRuntimeEvent, ProductionRuntimeEventCategory, ProductionRuntimePayload,
             ProductionVerificationRuntime, freeze_delivery_candidate_from_source,
-            resolve_production_verdict,
+            freeze_rework_candidate_from_sources, resolve_production_verdict,
         },
         verification::VerificationRole,
     },
@@ -49,8 +49,18 @@ pub(crate) fn resolve(
         scope,
         delivery,
         &writer_terminal,
+        &delivery.snapshot().spec.base_revision,
     )?;
     let delivery_writer_source = winwincode_storage::delivery_candidate_source(&writer_source);
+    let candidate = freeze_source(
+        storage,
+        artifacts,
+        source_resolver,
+        scope,
+        delivery,
+        &writer_source,
+        &writer_terminal,
+    )?;
     let mut verification = Vec::new();
     for binding in current_verification_bindings(delivery)? {
         let terminal = load_terminal(storage, delivery, &binding.execution_job_id)?;
@@ -68,13 +78,8 @@ pub(crate) fn resolve(
             events,
         ));
     }
-    let resolved = resolve_production_verdict(
-        delivery,
-        &delivery_writer_source,
-        &writer_terminal,
-        verification,
-    )
-    .map_err(|error| authority_error(&error))?;
+    let resolved = resolve_production_verdict(delivery, candidate, verification)
+        .map_err(|error| authority_error(&error))?;
     let (candidate, verification, evidence, produced_at_millis) = resolved.into_parts();
     Ok(DeliveryVerdictAuthority {
         candidate,
@@ -137,14 +142,134 @@ pub(crate) fn resolve_current_candidate_with_source(
         return Ok(None);
     }
     let terminal = load_terminal(storage, delivery, &writer.execution_job_id)?;
-    let source = source_for_terminal(artifacts, source_resolver, scope, delivery, &terminal)?;
-    let candidate = freeze_delivery_candidate_from_source(
+    let source = source_for_terminal(
+        artifacts,
+        source_resolver,
+        scope,
         delivery,
-        &winwincode_storage::delivery_candidate_source(&source),
         &terminal,
+        &delivery.snapshot().spec.base_revision,
+    )?;
+    let candidate = freeze_source(
+        storage,
+        artifacts,
+        source_resolver,
+        scope,
+        delivery,
+        &source,
+        &terminal,
+    )?;
+    Ok(Some((candidate, source)))
+}
+
+/// One candidate authority join shared by terminal replay, review reads and verdicts.
+pub(crate) fn freeze_source(
+    storage: &dyn ProductStateStorage,
+    artifacts: &ArtifactStore,
+    source_resolver: &dyn GitSourceResolver,
+    scope: &RepositoryScope,
+    delivery: &Delivery,
+    source: &ValidatedGitSourceArtifact,
+    terminal: &DeliveryTerminalOutcomeFacts,
+) -> Result<winwincode_delivery::domain::FrozenDeliveryCandidate, DeliveryAuthorityError> {
+    use winwincode_delivery::{
+        domain::rework::{
+            CurrentReworkScope, PreciseReworkAnnotation, ReworkDecision, decide_precise_rework,
+        },
+        store::DeliveryStore,
+    };
+    use winwincode_execution_port::generated::ExecutionScope;
+    let job_id = terminal.authority().active_lease().execution_job_id();
+    let remediator = delivery.snapshot().session_bindings.iter().any(|binding| {
+        binding.execution_job_id == *job_id
+            && binding.execution_profile.as_deref() == Some("remediator")
+    });
+    let input = winwincode_storage::delivery_candidate_source(source);
+    if !remediator {
+        return freeze_delivery_candidate_from_source(delivery, &input, terminal)
+            .map_err(|error| authority_error(&error));
+    }
+    let (durable, job) = crate::delivery_transaction::load_durable_execution_job(storage, job_id)
+        .map_err(|error| storage_error(&error))?;
+    let ExecutionScope::WorkRunExecutionScope(job_scope) = &job.scope else {
+        return Err(DeliveryAuthorityError::new(
+            "remediator has no WorkRun scope",
+        ));
+    };
+    let sealed = job_scope
+        .rework_authorization
+        .as_ref()
+        .ok_or_else(|| DeliveryAuthorityError::new("remediator has no sealed rework scope"))?;
+    let key = crate::delivery_transaction::delivery_journal_key(delivery.id())
+        .map_err(|error| authority_error(&error))?;
+    let loaded = storage
+        .load_journal(&key)
+        .map_err(|error| storage_error(&error))?;
+    let journal =
+        crate::delivery_transaction::StagedDeliveryJournal::new(delivery.id().clone(), loaded);
+    let (previous, history) = DeliveryStore::borrowed(&journal)
+        .rework_dispatch_source(delivery.id(), durable.receipt_identity().request_id())
+        .map_err(|error| authority_error(&error))?;
+    if previous.revision() >= delivery.revision() {
+        return Err(DeliveryAuthorityError::new(
+            "rework source revision is not earlier than its output",
+        ));
+    }
+    let (candidate, previous_source) = resolve_current_candidate_with_source(
+        storage,
+        artifacts,
+        source_resolver,
+        scope,
+        &previous,
+    )?
+    .ok_or_else(|| DeliveryAuthorityError::new("rework source candidate is missing"))?;
+    let allowed = CurrentReworkScope::from_candidate(&previous, &candidate)
+        .map_err(|error| authority_error(&error))?;
+    let annotations = sealed
+        .targets
+        .iter()
+        .map(|target| PreciseReworkAnnotation {
+            candidate_ref: sealed.candidate_ref.clone(),
+            diff_sha256: sealed.diff_sha256.clone(),
+            work_item_id: target.work_item_id.clone(),
+            file_path: target.file_path.clone(),
+            hunk_sha256: target.source_hunk_sha256.clone(),
+            evidence_ref_ids: target.evidence_ref_ids.clone(),
+        })
+        .collect::<Vec<_>>();
+    let ReworkDecision::Start(authorization) =
+        decide_precise_rework(&previous, &candidate, &allowed, &annotations, &history)
+            .map_err(|error| authority_error(&error))?
+    else {
+        return Err(DeliveryAuthorityError::new(
+            "stored rework no longer derives an execution authorization",
+        ));
+    };
+    if authorization.authorization_digest() != &sealed.authorization_digest
+        || candidate.candidate_commit_id() != sealed.source_candidate_commit_id
+        || candidate.candidate_tree_id() != sealed.source_candidate_tree_id
+        || !sealed.requires_full_reverification
+    {
+        return Err(DeliveryAuthorityError::new(
+            "rework output differs from its durable authorization",
+        ));
+    }
+    let delta = source_for_terminal(
+        artifacts,
+        source_resolver,
+        scope,
+        delivery,
+        terminal,
+        candidate.candidate_commit_id(),
+    )?;
+    let delta = winwincode_storage::delivery_rework_candidate_source(
+        source_resolver,
+        &previous_source,
+        &delta,
     )
     .map_err(|error| authority_error(&error))?;
-    Ok(Some((candidate, source)))
+    freeze_rework_candidate_from_sources(delivery, &authorization, &input, &delta, terminal)
+        .map_err(|error| authority_error(&error))
 }
 
 fn current_writer(delivery: &Delivery) -> Result<&SessionBinding, DeliveryAuthorityError> {
@@ -235,6 +360,7 @@ fn source_for_terminal(
     scope: &RepositoryScope,
     delivery: &Delivery,
     terminal: &DeliveryTerminalOutcomeFacts,
+    base_revision: &str,
 ) -> Result<ValidatedGitSourceArtifact, DeliveryAuthorityError> {
     let active = terminal.authority().active_lease();
     let provenance = ArtifactProvenance::execution_job(
@@ -265,7 +391,7 @@ fn source_for_terminal(
             .resolve_candidate(
                 &object,
                 &delivery.snapshot().spec.repository.locator,
-                &delivery.snapshot().spec.base_revision,
+                base_revision,
             )
             .map_err(|error| DeliveryAuthorityError::new(error.to_string()))?;
         if candidate.replace(resolved).is_some() {

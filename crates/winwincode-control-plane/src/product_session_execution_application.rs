@@ -1292,11 +1292,20 @@ fn accept_terminal(
         .iter()
         .find(|turn| turn.execution_job_id == job.job_id)
         .ok_or_else(|| storage_ingress("ProductSession outcome turn is missing"))?;
-    let binding = record
+    let Some(binding) = record
         .bindings()
         .iter()
         .find(|binding| binding.binding().identity().execution_job_id() == &job.job_id)
-        .ok_or_else(|| storage_ingress("ProductSession outcome binding is missing"))?;
+    else {
+        return accept_unstarted_terminal(
+            context,
+            job,
+            dispatch,
+            message,
+            turn.session_revision,
+            turn.terminal_outcome.is_some(),
+        );
+    };
     if record.session().state() == winwincode_session::ProductSessionState::Cancelled
         && message.outcome.status == ExecutionOutcomeStatus::Cancelled
     {
@@ -1380,6 +1389,77 @@ fn accept_terminal(
         &binding.slot().authority,
     )?;
     Ok(product_session_outcome_output(message, replayed))
+}
+
+fn accept_unstarted_terminal(
+    context: &mut DurableExecutionPortContext<'_>,
+    job: &ExecutionJob,
+    dispatch: &ExecutionDispatchAuthority,
+    message: &JobOutcomeMessage,
+    revision: u64,
+    already_terminal: bool,
+) -> Result<Vec<ExecutionPortMessage>, DurableExecutionPortError> {
+    if message.outcome.status == ExecutionOutcomeStatus::Succeeded
+        || !message.outcome.artifacts.is_empty()
+    {
+        return Err(storage_ingress(
+            "unstarted Chat execution cannot deliver a result",
+        ));
+    }
+    let staged = load_staged_binding(context.storage(), &binding_stream_id(&job.job_id))?;
+    let authority = &staged.runtime_authority;
+    if authority.job_id != job.job_id
+        || authority.worker_id != message.lease.worker_id
+        || authority.worker_instance_id != message.lease.worker_instance_id
+        || authority.worker_session_id != message.worker_session_id
+        || authority.lease_id != message.lease.lease_id
+        || Some(authority.attempt) != u64::try_from(message.lease.attempt).ok()
+        || authority.fencing_token != message.lease.fencing_token
+        || authority.codex_thread_id != message.session_identity.codex_thread_id
+        || Some(&authority.codex_thread_id) != message.outcome.codex_thread_id.as_ref()
+        || staged.product_session_id != message.session_identity.product_session_id
+        || message.session_identity.work_run_id.is_some()
+    {
+        return Err(storage_ingress(
+            "unstarted outcome differs from staged Worker authority",
+        ));
+    }
+    if !already_terminal {
+        context.validate_first_seen_dispatch(dispatch)?;
+    }
+    let command_context = internal_context(
+        context.repository_scope(),
+        &execution_message_request_id(
+            TERMINAL_RECEIPT_NAMESPACE,
+            &message.lease,
+            &message.message_id,
+        ),
+        revision,
+        context.server_time(),
+    )
+    .map_err(application_ingress)?;
+    let receipt = ProductSessionService::new(context.storage())
+        .record_unstarted_terminal(
+            &command_context,
+            &staged.product_session_id,
+            &job.job_id,
+            &ProductSessionTurnTerminalOutcome {
+                artifact_refs: None,
+                status: message.outcome.status.clone(),
+                usage: message.outcome.usage.clone(),
+                last_event_sequence: message.outcome.last_event_sequence.clone(),
+                finished_at: message.outcome.finished_at.clone(),
+            },
+        )
+        .map_err(|error| product_session_ingress(&error))?;
+    finish_execution_resources(
+        context.storage(),
+        message,
+        &staged.execution_scope,
+        &staged.worker_pool_id,
+        authority,
+    )?;
+    Ok(product_session_outcome_output(message, receipt.replayed))
 }
 
 pub(crate) fn finish_execution_resources(

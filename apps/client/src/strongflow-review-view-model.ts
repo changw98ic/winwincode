@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { createQueryCacheLifecycle } from '@winwincode/browser-core/query-cache'
 import {
   ControlPlaneClientError,
   type ControlPlaneClient,
@@ -118,6 +119,8 @@ export interface ReviewActivitySegment {
   readonly workRunId: string | null
   readonly sessionBindingId: string
   readonly attempt: number
+  readonly role: string | null
+  readonly state: string | null
   /** The projection stops at 100 activities per session; the cut is shown. */
   readonly truncated: boolean
   readonly activities: readonly ReviewActivity[]
@@ -235,6 +238,7 @@ export interface StrongFlowReviewViewModel {
   subscribe(listener: StrongFlowReviewListener): () => void
   start(): Promise<void>
   refresh(): Promise<void>
+  acceptDelivery(candidateCommitId: string): Promise<void>
   continueFiles(): Promise<void>
   openPreview(path: string): Promise<void>
   continuePreview(path: string): Promise<void>
@@ -466,6 +470,7 @@ export function createStrongFlowReviewViewModel(
   options: StrongFlowReviewViewModelOptions,
 ): StrongFlowReviewViewModel {
   const listeners = new Set<StrongFlowReviewListener>()
+  const cacheLifecycle = createQueryCacheLifecycle(options)
   const controllers = new Set<AbortController>()
   let currentState = emptyState()
   let nextFileCursor: string | null = null
@@ -618,7 +623,7 @@ export function createStrongFlowReviewViewModel(
 
   function readWorkRun(
     atCursor: StrongFlowReadCursor,
-    workRunId: string,
+    workRunId: string | null,
   ): Promise<WorkRunGetResponse['result']> {
     return read<WorkRunGetResponse>(() => ({
       ...requestBase(),
@@ -726,6 +731,7 @@ export function createStrongFlowReviewViewModel(
 
   function activitySegments(
     snapshot: RuntimeProjectionSnapshot,
+    state: string | null,
   ): readonly ReviewActivitySegment[] {
     return Object.freeze(snapshot.sessions.slice(0, REVIEW_SESSION_LIMIT).map(session => {
       const key = `${session.productSessionId}:${session.sessionBindingId}`
@@ -735,6 +741,8 @@ export function createStrongFlowReviewViewModel(
         workRunId: session.workRunId,
         sessionBindingId: session.sessionBindingId,
         attempt: session.attempt,
+        role: session.runtimeContext?.agentIdentity.role ?? null,
+        state,
         truncated: session.activities.length >= MAX_ACTIVITIES_PER_SESSION,
         activities: Object.freeze(session.activities.slice(0, MAX_ACTIVITIES_PER_SESSION).map(activity => Object.freeze({
           callId: activity.callId,
@@ -775,21 +783,16 @@ export function createStrongFlowReviewViewModel(
       nextFileCursor = fileResult?.nextCursor ?? null
       const filesTruncated = nextFileCursor !== null
 
-      const workRunIds = [...new Set([
-        ...(candidate === null ? [] : [candidate.producerWorkRunId]),
-        ...detail.evidence.map(entry => entry.workRunId),
-      ])].slice(0, REVIEW_SESSION_LIMIT)
-      const aggregates = await Promise.all(
-        workRunIds.map(workRunId => readWorkRun(atCursor, workRunId).catch(() => null)),
-      )
-      const runtimeTargets = aggregates.flatMap(aggregate => aggregate?.runs ?? [])
-        .filter(run => run.productSessionId !== null && workRunIds.includes(run.id))
-        .map(run => ({ workRunId: run.id, productSessionId: run.productSessionId as string }))
+      const aggregate = await readWorkRun(atCursor, null).catch(() => null)
+      const runtimeTargets = (aggregate?.runs ?? [])
+        .filter(run => run.productSessionId !== null)
+        .slice(-REVIEW_SESSION_LIMIT)
+        .map(run => ({ workRunId: run.id, productSessionId: run.productSessionId as string, state: run.state }))
       const snapshots = await Promise.all(
         runtimeTargets.map(target => readRuntimeWorkRun(atCursor, target).catch(() => null)),
       )
-      const segments = snapshots.flatMap(snapshot => (
-        snapshot === null ? [] : activitySegments(snapshot)
+      const segments = snapshots.flatMap((snapshot, index) => (
+        snapshot === null ? [] : activitySegments(snapshot, runtimeTargets[index]?.state ?? null)
       ))
 
       patch({
@@ -878,22 +881,38 @@ export function createStrongFlowReviewViewModel(
       })
       return
     }
+    const isCurrentRead = (): boolean => {
+      const currentDetail = currentState.detail
+      const currentCandidate = currentDetail?.currentCandidate
+      return currentDetail?.readCursor.token === detail.readCursor.token
+        && currentCandidate?.candidateRef === candidate.candidateRef
+        && currentCandidate.candidateTreeId === candidate.candidateTreeId
+        && currentCandidate.diffSha256 === candidate.diffSha256
+    }
     try {
       const chunk = await readDiffChunk(detail.readCursor, candidate, path, offset)
+      if (!isCurrentRead()) return
       const addition = chunkPreviewState(file, chunk)
       if (chunk.path !== path || chunk.offset !== offset) {
         throw reviewFailure('STRONGFLOW_REVIEW_CHUNK_MISMATCH', 'The Candidate diff chunk does not match the requested range.')
       }
-      const merged: ReviewPreviewState = file.preview === null
+      // A tab selection and its file button can both open offset 0 while the
+      // first request is in flight. Re-read state after the await and keep one
+      // chunk per offset so that duplicate responses cannot duplicate output.
+      const currentFile = currentState.files.find(entry => entry.path === path)
+      if (currentFile === undefined) return
+      if (currentFile.preview?.chunks.some(existing => existing.offset === offset) === true) return
+      const merged: ReviewPreviewState = currentFile.preview === null
         ? addition
         : Object.freeze({
-            ...file.preview,
-            chunks: Object.freeze([...file.preview.chunks, ...addition.chunks]),
-            returnedBytes: file.preview.returnedBytes + chunk.returnedBytes,
+            ...currentFile.preview,
+            chunks: Object.freeze([...currentFile.preview.chunks, ...addition.chunks]),
+            returnedBytes: currentFile.preview.returnedBytes + chunk.returnedBytes,
             nextOffset: chunk.nextOffset,
           })
       updateFile(path, { preview: merged, previewError: null })
     } catch (error) {
+      if (!isCurrentRead()) return
       const message = error instanceof Error ? error.message : 'preview read failed'
       updateFile(path, { previewError: message })
     }
@@ -979,7 +998,29 @@ export function createStrongFlowReviewViewModel(
     },
 
     async refresh(): Promise<void> {
+      cacheLifecycle.refresh()
       await load('refreshing')
+    },
+
+    async acceptDelivery(candidateCommitId: string): Promise<void> {
+      requireOpen()
+      const detail = currentState.detail
+      if (currentState.status !== 'ready' || detail?.currentCandidate?.candidateCommitId !== candidateCommitId
+        || detail.verdict?.status !== 'pass' || detail.verdict.candidateRef !== detail.currentCandidate.candidateRef) {
+        throw reviewFailure('DELIVERY_APPROVAL_STALE', '版本或验收结果已变化，请重新检查。')
+      }
+      const attention = detail.attention.find(item => item.type === 'delivery_approval' && item.status === 'open')
+      if (attention === undefined) return
+      const request = { ...requestBase(), requestId: options.nextRequestId(),
+        command: CommandName.DeliveryResolveAttention, expectedRevision: detail.deliveryRevision,
+        payload: { attentionItemId: attention.id, deliveryId: options.deliveryId,
+          decision: 'resolve', remediation: null, resolution: '已检查当前版本、验收证据与变更，确认交付并应用到项目。' },
+      } as CommandRequest
+      const response = await options.client.command(request)
+      if (response.requestId !== request.requestId || response.command !== request.command || response.outcome !== 'completed') {
+        throw reviewFailure('DELIVERY_APPROVAL_PENDING', '交付确认尚未完成，请刷新后重试。')
+      }
+      await viewModel.refresh()
     },
 
     async continueFiles(): Promise<void> {
@@ -1032,6 +1073,7 @@ export function createStrongFlowReviewViewModel(
           detail,
           entry.evidence,
         )
+        if (currentState.detail?.readCursor.token !== detail.readCursor.token) return
         const access = result.artifactAccess
         patch({
           evidence: Object.freeze(currentState.evidence.map(item => (
@@ -1057,6 +1099,7 @@ export function createStrongFlowReviewViewModel(
         })
       } catch (error) {
         const message = error instanceof Error ? error.message : 'evidence read failed'
+        if (currentState.detail?.readCursor.token !== detail.readCursor.token) return
         patch({
           evidence: Object.freeze(currentState.evidence.map(item => (
             item.evidence.id !== evidenceId
@@ -1189,6 +1232,7 @@ export function createStrongFlowReviewViewModel(
       closed = true
       nextFileCursor = null
       abortRequests()
+      cacheLifecycle.close()
       listeners.clear()
       publish({ ...currentState, status: 'closed' })
     },

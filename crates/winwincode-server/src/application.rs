@@ -355,6 +355,7 @@ impl StandaloneControlPlaneApplication {
         // FLOW-100.4: the approval is the dispatch trigger — an approved
         // Chat turn of a device-anchored session executes on the launched
         // Device WorkerSession instead of the local embedded worker.
+        let mut execution_config = state.execution_config.clone();
         let device_dispatch = match &request {
             CommandRequest::ChatSubmitCommand(command) => Some(
                 product_session_turn_gate(
@@ -371,6 +372,16 @@ impl StandaloneControlPlaneApplication {
                 })?,
             )
             .map(|approval: DeviceSessionGateApproval| {
+                let binding = state
+                    .storage
+                    .repository_binding_ledger()
+                    .map_err(|_| service_unavailable())?
+                    .snapshot(&approval.repository_binding_id)
+                    .map_err(|_| service_unavailable())?
+                    .ok_or_else(service_unavailable)?;
+                execution_config = execution_config
+                    .with_checkout_revision(binding.head_commit.ok_or_else(service_unavailable)?)
+                    .map_err(|error| product_session_error(&error))?;
                 crate::device_providers::validate_session_route(
                     &mut state.storage,
                     &command.scope,
@@ -395,11 +406,8 @@ impl StandaloneControlPlaneApplication {
         let dispatch_now = self.clock.now_instant();
         let response = {
             let mut clock = ProductSessionClockAdapter(self.clock.as_ref());
-            let mut service = ProductSessionApiService::new(
-                &mut state.storage,
-                &mut clock,
-                &state.execution_config,
-            );
+            let mut service =
+                ProductSessionApiService::new(&mut state.storage, &mut clock, &execution_config);
             match request {
                 CommandRequest::SessionCreateCommand(command) => service
                     .create(command)
@@ -410,6 +418,9 @@ impl StandaloneControlPlaneApplication {
                 CommandRequest::SessionCancelCommand(command) => service
                     .cancel(command)
                     .map(CommandCompletedResponse::SessionCancelCompletedResponse),
+                CommandRequest::SessionUpdateCommand(command) => service
+                    .update_metadata(command)
+                    .map(CommandCompletedResponse::SessionUpdateCompletedResponse),
                 CommandRequest::SessionCloseCommand(command) => service
                     .close(command)
                     .map(CommandCompletedResponse::SessionCloseCompletedResponse),
@@ -447,9 +458,20 @@ impl StandaloneControlPlaneApplication {
                 .map_err(|error| product_session_error(&error));
         }
         let mut clock = ProductSessionClockAdapter(self.clock.as_ref());
+        let context_user = match &request {
+            QueryRequest::SessionGetQuery(query) => match &query.actor {
+                Actor::UserActor(user) => Some(user.id.0.clone()),
+                _ => None,
+            },
+            QueryRequest::SessionListQuery(query) => match &query.actor {
+                Actor::UserActor(user) => Some(user.id.0.clone()),
+                _ => None,
+            },
+            _ => None,
+        };
         let service =
             ProductSessionApiService::new(&mut state.storage, &mut clock, &state.execution_config);
-        match request {
+        let mut response = match request {
             QueryRequest::SessionGetQuery(query) => service
                 .get(query)
                 .map(QueryResultResponse::SessionGetResultResponse),
@@ -461,7 +483,43 @@ impl StandaloneControlPlaneApplication {
                 .map(QueryResultResponse::SessionMessagesListResultResponse),
             _ => return Err(application_variant_mismatch()),
         }
-        .map_err(|error| product_session_error(&error))
+        .map_err(|error| product_session_error(&error))?;
+        let sessions = match &mut response {
+            QueryResultResponse::SessionGetResultResponse(result) => {
+                std::slice::from_mut(&mut result.result)
+            }
+            QueryResultResponse::SessionListResultResponse(result) => {
+                result.result.items.as_mut_slice()
+            }
+            _ => &mut [],
+        };
+        for session in sessions {
+            if let Some(user) = &context_user
+                && let Some(grant) =
+                    winwincode_control_plane::WorkerLaunchGrantService::new(&mut state.storage)
+                        .newest_grant_for_product_session(&session.id.0)
+                        .map_err(|_| service_unavailable())?
+                && let Some(node) =
+                    winwincode_control_plane::ClientRegistryService::new(&mut state.storage)
+                        .snapshot(&grant.client_node_id)
+                        .map_err(|_| service_unavailable())?
+                && let Some(repository) =
+                    winwincode_control_plane::RepositoryBindingService::new(&mut state.storage)
+                        .visible_bindings(&user, &node.client_node_id)
+                        .map_err(|_| service_unavailable())?
+                        .into_iter()
+                        .find(|binding| {
+                            binding.repository_binding_id == grant.repository_binding_id
+                        })
+            {
+                session.device_context = Some(serde_json::from_value(serde_json::json!({
+                "clientId": node.public_client_id, "deviceName": node.display_name,
+                "repositoryBindingId": repository.repository_binding_id, "repositoryName": repository.display_name,
+                "branch": repository.default_branch.unwrap_or_default(), "headCommit": repository.head_commit.unwrap_or_default(),
+            })).map_err(|_| service_unavailable())?);
+            }
+        }
+        Ok(response)
     }
 
     fn interaction_command(
@@ -1607,6 +1665,7 @@ mod tests {
 
     fn dispatch_event(job_id: &str, work_run_id: &str) -> OutboxEvent {
         let job = ExecutionJob {
+            attachments: None,
             model_selection: None,
             attempt: 1,
             execution_profile: "requirements".to_owned(),

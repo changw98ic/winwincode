@@ -870,8 +870,13 @@ impl RepositoryRuntimeScheduler {
             };
             let matches = match device_facts {
                 None => {
-                    self.worker_pool_id.0
-                        != winwincode_control_plane::STRONGFLOW_DEVICE_WORKER_POOL_ID
+                    let job: ExecutionJob = serde_json::from_slice(&record.dispatch_payload)
+                        .map_err(|_| scheduler_failure())?;
+                    job.work_input
+                        .as_ref()
+                        .is_none_or(|input| input.device_target.is_none())
+                        && self.worker_pool_id.0
+                            != winwincode_control_plane::STRONGFLOW_DEVICE_WORKER_POOL_ID
                 }
                 Some(facts) => {
                     facts.worker_id == self.worker_id.0
@@ -927,15 +932,25 @@ impl RepositoryRuntimeScheduler {
                 .and_then(|ledger| ledger.facts(&cancellation.lease.job_id.0))
                 .map_err(|_| scheduler_failure())?;
             let device_released = if let Some(facts) = device_facts {
-                state
+                let worker_stopped = state
                     .storage
-                    .client_occupancy_ledger()
-                    .and_then(|ledger| ledger.snapshot(&facts.occupancy_lease_id))
+                    .device_execution_binding_ledger()
+                    .and_then(|ledger| ledger.snapshot(&facts.worker_session_id))
                     .map_err(|_| scheduler_failure())?
-                    .is_some_and(|occupancy| {
-                        occupancy.fencing_token == facts.occupancy_fencing_token
-                            && occupancy.state == winwincode_storage::OccupancyLeaseState::Released
-                    })
+                    .is_some_and(|binding| {
+                        binding.state == winwincode_storage::DeviceExecutionBindingState::Released
+                    });
+                worker_stopped
+                    || state
+                        .storage
+                        .client_occupancy_ledger()
+                        .and_then(|ledger| ledger.snapshot(&facts.occupancy_lease_id))
+                        .map_err(|_| scheduler_failure())?
+                        .is_some_and(|occupancy| {
+                            occupancy.fencing_token == facts.occupancy_fencing_token
+                                && occupancy.state
+                                    == winwincode_storage::OccupancyLeaseState::Released
+                        })
             } else {
                 false
             };
@@ -2060,6 +2075,7 @@ mod tests {
 
     fn queued_job_record(scope: &ExecutionQueueScope) -> (ExecutionJobRecord, ExecutionJob) {
         let job = ExecutionJob {
+            attachments: None,
             model_selection: None,
             attempt: 0,
             execution_profile: "codex-chat".to_owned(),

@@ -270,6 +270,7 @@ fn execution_job(delivery: &Delivery, scope: &RepositoryScope) -> ExecutionJob {
         .find(|binding| binding.work_run_id == run.id)
         .expect("exact active binding");
     ExecutionJob {
+        attachments: None,
         model_selection: None,
         attempt: 1,
         execution_profile: binding.execution_profile.clone().expect("accepted profile"),
@@ -301,6 +302,7 @@ fn execution_job(delivery: &Delivery, scope: &RepositoryScope) -> ExecutionJob {
             work_run_id: binding.work_run_id.clone(),
         }),
         work_input: Some(winwincode_execution_port::generated::WorkRunInput {
+            device_target: None,
             delivery_spec_id: delivery.snapshot().spec.id.0.clone(),
             delivery_spec_revision: Revision(
                 i64::try_from(delivery.snapshot().spec.revision)

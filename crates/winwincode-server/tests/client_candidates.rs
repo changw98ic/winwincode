@@ -1317,7 +1317,7 @@ async fn apply_chain_settles_both_outcomes_and_repeats_the_original_receipt() {
     assert_eq!(status_of(&response), "201", "{response}");
     let value = response_body(&response);
     assert_eq!(value["receipt"]["result"], json!("applied"));
-    assert_eq!(value["receipt"]["strategy"], json!("cherry_pick"));
+    assert_eq!(value["receipt"]["strategy"], json!("merge"));
     assert_eq!(value["receipt"]["targetBranch"], json!("main"));
     assert_eq!(value["receipt"]["resultingCommit"], json!(RESULTING_COMMIT));
     let receipt_id = value["receipt"]["localApplyReceiptId"]

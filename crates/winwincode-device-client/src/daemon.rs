@@ -554,6 +554,7 @@ pub struct DeviceDaemon {
     enrolled: bool,
     enroll_frame_pending: bool,
     hello_announced: bool,
+    reported_worker_exits: std::collections::HashSet<String>,
     configuration_pending: Option<PendingConfigurationApply>,
     delivery_cursor: u64,
     downlink: AckCursor,
@@ -657,6 +658,7 @@ impl DeviceDaemon {
             enrolled,
             enroll_frame_pending: false,
             hello_announced: false,
+            reported_worker_exits: std::collections::HashSet::new(),
             configuration_pending: None,
             delivery_cursor: 0,
             downlink: AckCursor::new(),
@@ -1179,6 +1181,7 @@ impl DeviceDaemon {
             }))?;
             self.publish_provider_state(None)?;
             self.publish_extension_state(None)?;
+            self.publish_worker_exits()?;
             self.hello_announced = true;
             self.next_heartbeat_at = now + self.heartbeat_interval;
             return Ok(());
@@ -1197,7 +1200,44 @@ impl DeviceDaemon {
                     .map(|mirror| mirror.occupancy_lease_id.clone()),
             }))?;
             self.status.heartbeats_enqueued += 1;
+            self.publish_worker_exits()?;
             self.next_heartbeat_at = now + self.heartbeat_interval;
+        }
+        Ok(())
+    }
+
+    fn publish_worker_exits(&mut self) -> Result<(), DaemonError> {
+        // The registry survives a restart; enqueue before marking a report sent.
+        // ponytail: scans process history per heartbeat; add a terminal cursor if history grows large.
+        for worker in self.store.worker_processes()? {
+            use winwincode_client_port::domain::ClientWorkerRunState;
+            let state = match worker.state.as_str() {
+                "exited" => ClientWorkerRunState::Stopped,
+                "crashed" => ClientWorkerRunState::Crashed,
+                "missing" => ClientWorkerRunState::Missing,
+                _ => continue,
+            };
+            if self
+                .reported_worker_exits
+                .contains(&worker.worker_instance_id)
+            {
+                continue;
+            }
+            let retained =
+                crate::candidate_registry::retain_worker_candidates(self, &worker).is_ok();
+            self.enqueue(ClientToServerMessage::WorkerState(
+                winwincode_client_port::messages::ClientWorkerStatePayload {
+                    occupancy_lease_id: Some(worker.occupancy_lease_id),
+                    worker_session_id: worker.worker_session_id,
+                    worker_instance_id: worker.worker_instance_id.clone(),
+                    state,
+                    exit_code: worker.exit_code.and_then(|code| i32::try_from(code).ok()),
+                    observed_at: worker.last_observed_at,
+                },
+            ))?;
+            if retained {
+                self.reported_worker_exits.insert(worker.worker_instance_id);
+            }
         }
         Ok(())
     }
@@ -1338,6 +1378,45 @@ impl DeviceDaemon {
             if matches!(
                 self.downlink.observe(envelope.sequence),
                 SequenceVerdict::Accept
+            ) && let ServerToClientMessage::CandidateApply(payload) = &envelope.message
+            {
+                if envelope.client_node_id != self.node_id
+                    || envelope.client_instance_id != self.instance_id
+                {
+                    return Err(DownlinkFailure::Retriable(
+                        "candidate command belongs to another device instance".into(),
+                    ));
+                }
+                self.apply_candidate_command(payload)
+                    .map_err(DownlinkFailure::Fatal)?;
+            }
+            if matches!(
+                self.downlink.observe(envelope.sequence),
+                SequenceVerdict::Accept
+            ) && let ServerToClientMessage::RepositoryRegister(payload) = &envelope.message
+            {
+                if envelope.client_node_id != self.node_id
+                    || envelope.client_instance_id != self.instance_id
+                {
+                    return Err(DownlinkFailure::Retriable(
+                        "repository command belongs to another device instance".to_owned(),
+                    ));
+                }
+                let directory = self.provider_directory().map_err(DownlinkFailure::Fatal)?;
+                let receipt = repository_exchange::apply_repository_registration(
+                    &mut self.store,
+                    &directory,
+                    &self.node_id,
+                    &self.instance_id,
+                    payload,
+                )
+                .map_err(DownlinkFailure::Fatal)?;
+                self.enqueue(ClientToServerMessage::RepositoryRegistered { receipt })
+                    .map_err(DownlinkFailure::Fatal)?;
+            }
+            if matches!(
+                self.downlink.observe(envelope.sequence),
+                SequenceVerdict::Accept
             ) && let ServerToClientMessage::ProviderApply(payload)
             | ServerToClientMessage::ExtensionApply(payload) = &envelope.message
             {
@@ -1442,6 +1521,8 @@ impl DeviceDaemon {
                         .map_err(|error| DownlinkFailure::Fatal(DaemonError::Store(error)))?;
                     match envelope.message {
                         ServerToClientMessage::ProviderApply(_)
+                        | ServerToClientMessage::CandidateApply(_)
+                        | ServerToClientMessage::RepositoryRegister(_)
                         | ServerToClientMessage::ExtensionApply(_) => {}
                         ServerToClientMessage::EnrollmentAccepted(payload) => {
                             acceptance = Some(payload);
@@ -1475,7 +1556,7 @@ impl DeviceDaemon {
                                 .map_err(DownlinkFailure::Fatal)?;
                         }
                         _ => {
-                            // Worker stop, candidate apply, and credential
+                            // Worker stop and credential
                             // commands are owned by later device-client lanes;
                             // the skeleton records them without acting. The cursor has
                             // already advanced, so the skipped frame never
@@ -1524,6 +1605,72 @@ impl DeviceDaemon {
         }
         self.status.downlink_accepted_through = self.downlink.ack_sequence();
         Ok(accepted)
+    }
+
+    fn apply_candidate_command(
+        &mut self,
+        payload: &winwincode_client_port::messages::ServerCandidateApplyPayload,
+    ) -> Result<(), DaemonError> {
+        let stamp = &payload.occupancy;
+        let mirror = self
+            .occupancy_mirror()
+            .ok_or_else(|| DaemonError::Protocol("candidate command has no occupancy".into()))?;
+        if mirror.holder_user_id.as_deref() != Some(payload.requester_user_id.as_str())
+            || mirror.mirror_revision != stamp.command.expected_revision
+        {
+            return Err(DaemonError::Protocol(
+                "candidate command has a stale holder or revision".into(),
+            ));
+        }
+        match self.fencing_guard().authorize_command(
+            FencedCommandKind::CandidateApply,
+            &stamp.occupancy_lease_id,
+            stamp.occupancy_fencing_token,
+        ) {
+            FencingVerdict::Authorized(_) => {}
+            FencingVerdict::Rejected(reason) => {
+                return Err(DaemonError::Protocol(format!(
+                    "candidate command rejected: {reason:?}"
+                )));
+            }
+        }
+        if payload.strategy == winwincode_client_port::domain::ApplyStrategy::CreateBranch {
+            crate::candidate_branch::create_candidate_branch(
+                self,
+                &crate::candidate_branch::BranchCreationRequest {
+                    repository_binding_id: payload.repository_binding_id.clone(),
+                    candidate_ref: payload.candidate_ref.clone(),
+                    task_slug: "delivery".into(),
+                    requested_branch_name: Some(payload.target_branch.clone()),
+                    requested_at: now_rfc3339(),
+                },
+            )
+            .map_err(|error| DaemonError::Protocol(error.to_string()))?;
+        } else {
+            let root = self
+                .store
+                .database_path()
+                .parent()
+                .ok_or_else(|| {
+                    DaemonError::Protocol("candidate integration directory is unavailable".into())
+                })?
+                .join("candidate-integration");
+            crate::apply_engine::apply_candidate_to_branch(
+                self,
+                &crate::apply_engine::CandidateApplyRequest {
+                    repository_binding_id: payload.repository_binding_id.clone(),
+                    candidate_ref: payload.candidate_ref.clone(),
+                    target_branch: payload.target_branch.clone(),
+                    expected_head: payload.expected_head.clone(),
+                    strategy: payload.strategy,
+                    occupancy_lease_id: stamp.occupancy_lease_id.clone(),
+                    occupancy_fencing_token: stamp.occupancy_fencing_token,
+                },
+                &root,
+            )
+            .map_err(|error| DaemonError::Protocol(error.to_string()))?;
+        }
+        Ok(())
     }
 
     fn ingest_worker_credentials(

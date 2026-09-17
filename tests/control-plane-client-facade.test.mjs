@@ -29,6 +29,30 @@ const {
 } = facade
 
 const schemaVersion = 'winwincode/v1'
+
+test('repository registration uses the configured transport and rejects unrelated or incomplete receipts', async () => {
+  const calls = []
+  let receipt = { requestId: 'repository_test', outcome: 'registered', repositoryBindingId: 'rbd_00000000000000000000000001' }
+  let status = 200
+  const api = facade.createControlPlaneRepositoryRegistration({ serverUrl: 'https://control.example.test', transport: {
+    async fetch(url, init) { calls.push({ url, init }); return response(status, { online: true, receipt }) },
+  } })
+  const envelope = JSON.parse(readFileSync(resolve(root, 'tests/fixtures/client-control/client.repository.register.json'), 'utf8')).payload.encrypted
+  const signal = new AbortController().signal
+  await api.submit('4113447224', envelope, signal)
+  assert.equal(calls[0].url, 'https://control.example.test/api/v1/clients/4113447224/repositories')
+  assert.equal(calls[0].init.credentials, 'include')
+  assert.equal(calls[0].init.redirect, 'error')
+  assert.equal(calls[0].init.signal, signal)
+  assert.deepEqual(JSON.parse(calls[0].init.body), envelope)
+  assert.deepEqual((await api.receipt('4113447224', 'repository_test', signal)).receipt, receipt)
+  receipt = { ...receipt, requestId: 'other_request' }
+  await assert.rejects(api.receipt('4113447224', 'repository_test', signal), /其他请求/u)
+  receipt = { ...receipt, requestId: 'repository_test', repositoryBindingId: null }
+  await assert.rejects(api.receipt('4113447224', 'repository_test', signal), /仓库身份/u)
+  status = 403
+  await assert.rejects(api.submit('4113447224', envelope, signal), /权限/u)
+})
 const actor = { id: 'usr_00000000000000000000000001', kind: 'user' }
 const scope = {
   kind: 'repository',

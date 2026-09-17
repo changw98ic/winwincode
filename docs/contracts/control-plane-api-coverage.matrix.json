@@ -16,6 +16,7 @@
   "contracts": {
     "httpCommands": [
       "session.create",
+      "session.update",
       "chat.submit",
       "input.respond",
       "session.cancel",
@@ -682,10 +683,12 @@
         "submit a Chat turn and receive persisted user and assistant messages",
         "dispatch default Chat without creating a hidden Delivery or StageRun",
         "rebuild Chat and runtime projections after restart or WebSocket reset",
-        "retain project ZIP files before workspace cleanup and download them from their exact Chat turn"
+        "retain project ZIP files before workspace cleanup and download them from their exact Chat turn",
+        "rename and archive durable sessions while preserving in-flight execution"
       ],
       "httpCommands": [
         "session.create",
+        "session.update",
         "chat.submit",
         "session.cancel",
         "session.close"

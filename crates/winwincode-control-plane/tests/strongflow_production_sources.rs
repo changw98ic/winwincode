@@ -135,6 +135,7 @@ fn create_command(
         payload: DeliveryCreatePayload {
             delivery_id: delivery_id.clone(),
             spec: DeliverySpecInput {
+                verification_command: None,
                 acceptance_criteria: vec![AcceptanceCriterionInput {
                     id: "criterion-1".to_owned(),
                     required: true,

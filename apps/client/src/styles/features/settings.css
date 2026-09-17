@@ -69,7 +69,6 @@
 /* Category bodies: one visible section, one row after another. */
 .wwc-settings-category {
   display: none;
-  max-width: var(--wwc-content-max);
 }
 
 .wwc-settings-category:not([hidden]) {
@@ -103,13 +102,13 @@
 }
 
 .wwc-settings select,
-.wwc-settings input {
+.wwc-settings input:not([type='checkbox']):not([type='radio']) {
   width: 100%;
   max-width: 100%;
 }
 
 .wwc-settings-row select,
-.wwc-settings-row input {
+.wwc-settings-row input:not([type='checkbox']):not([type='radio']) {
   width: min(28rem, 100%);
   padding: var(--wwc-space-2) var(--wwc-space-3);
   border: var(--wwc-border-width-control) solid var(--wwc-color-border-control);

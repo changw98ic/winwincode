@@ -291,6 +291,7 @@ fn active_job(repository_id: &RepositoryId, suffix: &str, role: &str) -> ActiveJ
     };
     ActiveJob {
         job: ExecutionJob {
+            attachments: None,
             model_selection: None,
             attempt: 1,
             execution_profile: role.to_owned(),
@@ -314,6 +315,7 @@ fn active_job(repository_id: &RepositoryId, suffix: &str, role: &str) -> ActiveJ
                 work_run_id: work_run_id.clone(),
             }),
             work_input: Some(WorkRunInput {
+                device_target: None,
                 delivery_spec_id: "spec-fixture".into(),
                 delivery_spec_revision: Revision(2),
                 schema_version: SchemaVersion::WinwincodeV1,

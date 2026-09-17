@@ -547,7 +547,7 @@ test('the monitor badges approval, attention, failure, and completion counts wit
     failure: 0,
   })
   assert.equal(badgeTarget.dataset.wwcBadge, '3')
-  assert.equal(badgeTarget.getAttribute('aria-label'), '任务看板 · 3 项待处理')
+  assert.equal(badgeTarget.getAttribute('aria-label'), '任务看板 · 任务动态：3 项（核查 2、审批 1、完成 0、失败 0）')
   assert.equal(badgeTarget.children.length, 1)
   assert.equal(badgeTarget.children[0].textContent, '3')
   assert.equal(document.title, '(3) WinWinCode')

@@ -15,6 +15,7 @@ test-support = []
 base64.workspace = true
 codex-apply-patch = { path = "../../third_party/codex/codex-rs/apply-patch" }
 codex-protocol.workspace = true
+codex-shell-command.workspace = true
 ed25519-dalek.workspace = true
 futures.workspace = true
 rusqlite.workspace = true

@@ -75,6 +75,7 @@ pub(super) fn delivery_detail(
     let read_cursor = cursor(read)?;
     let publication = publication(read, &read_cursor)?;
     Ok(api::DeliveryDetailProjection {
+        rework_attempts_used: Some(count(source.rework_attempts_used() as u64, "rework count")?),
         kind: api::DeliveryDetailProjectionKind::DeliveryDetail,
         schema_version: SchemaVersion::WinwincodeV1,
         read_cursor,

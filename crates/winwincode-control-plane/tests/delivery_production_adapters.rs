@@ -50,12 +50,8 @@ fn local_authority_dispatches_once_and_restart_replays_exact_command() {
         scope.clone(),
         ExecutionMode::DelegatedPatch,
     );
-    let canonical_repository_source_root = std::fs::canonicalize(
-        repository
-            .parent()
-            .expect("configured repository has a source root"),
-    )
-    .expect("canonical source root");
+    let canonical_repository_source_root =
+        std::fs::canonicalize(data.join("delivery-sources")).expect("canonical source root");
     assert_eq!(
         first.git_repository_root(),
         Some(canonical_repository_source_root.as_path())
@@ -338,6 +334,7 @@ fn create_command(
         payload: DeliveryCreatePayload {
             delivery_id,
             spec: DeliverySpecInput {
+                verification_command: None,
                 acceptance_criteria: vec![AcceptanceCriterionInput {
                     id: canonical_id("crt", 1),
                     required: true,

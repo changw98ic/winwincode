@@ -1397,6 +1397,8 @@ mod runtime_router_fixture {
             &result.delivery.snapshot().spec,
             &intent,
             DeliveryExecutionConfig {
+                device_target: None,
+                model_selection: None,
                 payload_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
                 candidate_ref: None,
                 workspace: ExecutionWorkspace {

@@ -75,6 +75,21 @@ pub struct CurrentReworkScope {
 }
 
 impl CurrentReworkScope {
+    /// Returns the complete repair scope derived from the current failed evidence and Git hunks.
+    #[must_use]
+    pub fn annotations(&self) -> Vec<PreciseReworkAnnotation> {
+        self.targets
+            .iter()
+            .map(|target| PreciseReworkAnnotation {
+                candidate_ref: self.candidate_ref.clone(),
+                diff_sha256: self.diff_sha256.clone(),
+                work_item_id: target.work_item_id.clone(),
+                file_path: target.file_path.clone(),
+                hunk_sha256: target.hunk_sha256.clone(),
+                evidence_ref_ids: target.evidence_ref_ids.clone(),
+            })
+            .collect()
+    }
     /// Derives allowed targets exclusively from the sealed current candidate
     /// and the current failing Verdict, never from request-supplied paths.
     ///

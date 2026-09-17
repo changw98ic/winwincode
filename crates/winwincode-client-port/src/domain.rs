@@ -517,6 +517,10 @@ pub enum ClientControlMessageKind {
     /// Public Device Skills/MCP metadata.
     #[serde(rename = "client.extension.report")]
     ExtensionReport,
+    #[serde(rename = "client.repository.register")]
+    RepositoryRegister,
+    #[serde(rename = "client.repository.registered")]
+    RepositoryRegistered,
     /// Encrypted Skills/MCP mutation.
     #[serde(rename = "client.extension.apply")]
     ExtensionApply,

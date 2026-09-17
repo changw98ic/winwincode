@@ -466,6 +466,15 @@ fn fast_forward_applies_the_candidate_commit_to_the_target_branch() {
         "only the user's worktree remains: {worktree_lines}"
     );
 
+    let replay = apply_candidate_to_branch(
+        &mut daemon,
+        &request(&candidate, "main", &base, ApplyStrategy::FastForward),
+        &integration_root,
+    )
+    .expect("pending receipt survives downlink replay");
+    assert_eq!(replay.receipt, outcome.receipt);
+    assert_eq!(replay.frame_sequence, outcome.frame_sequence);
+
     // The durable apply_result frame carries the receipt under the mirrored
     // lease, with no local path.
     let mut store = daemon.into_store();
@@ -1093,14 +1102,13 @@ fn a_missing_or_drifted_candidate_ref_settles_candidate_missing() {
 }
 
 #[test]
-fn a_target_branch_checked_out_anywhere_is_never_moved() {
+fn applies_to_the_bound_checkout_and_protects_other_worktrees() {
     let (repo, base) = init_repository("checked-out");
     let integration_root = temporary_directory("checked-out-root");
     let candidate = candidate_commit_on_main(&repo, "checked-out", "1");
     let workspace_head = git(&repo, &["rev-parse", "workspace"]);
     let workspace_content = fs::read_to_string(repo.join("file.txt")).expect("workspace file");
-    // A second worktree holds another branch; both checked-out targets must
-    // be refused.
+    // Another worktree remains protected; only the bound checkout is updated.
     let linked = temporary_directory("checked-out-linked");
     git(
         &repo,
@@ -1121,8 +1129,8 @@ fn a_target_branch_checked_out_anywhere_is_never_moved() {
     write_candidate_ref(&repo, &candidate);
 
     for (label, target) in [
-        ("the bound checkout's branch", "workspace"),
         ("a linked worktree's branch", "other"),
+        ("the bound checkout's branch", "workspace"),
     ] {
         let settled = apply_candidate_to_branch(
             &mut daemon,
@@ -1130,14 +1138,33 @@ fn a_target_branch_checked_out_anywhere_is_never_moved() {
             &integration_root,
         )
         .expect("the checked-out target settles a result");
-        assert_eq!(settled.receipt.result, ApplyResult::Failed, "{label}");
+        let current = target == "workspace";
+        assert_eq!(
+            settled.receipt.result,
+            if current {
+                ApplyResult::Applied
+            } else {
+                ApplyResult::Failed
+            },
+            "{label}"
+        );
         assert_eq!(
             git(&repo, &["rev-parse", target]),
-            base,
-            "{label}: the checked-out branch never moved"
+            if current {
+                candidate.as_str()
+            } else {
+                base.as_str()
+            },
+            "{label}: only the bound checkout may move"
         );
     }
-    user_tree_is_untouched(&repo, &workspace_head, &workspace_content);
+    assert_ne!(git(&repo, &["rev-parse", "HEAD"]), workspace_head);
+    assert_eq!(
+        fs::read_to_string(repo.join("file.txt")).unwrap(),
+        workspace_content
+    );
+    assert_eq!(git(&repo, &["status", "--porcelain"]), "");
+    assert!(repo.join("candidate.txt").exists());
     assert_eq!(
         git(&linked, &["rev-parse", "HEAD"]),
         base,
@@ -1370,5 +1397,107 @@ fn an_unusable_integration_root_settles_permission_denied() {
     store.close().expect("store should close");
     cleanup(&root);
     cleanup(&integration_root);
+    cleanup(&repo);
+}
+
+#[test]
+fn daemon_applies_the_complete_reworked_candidate_from_its_downlink() {
+    use winwincode_client_port::messages::{
+        CommandContext, OccupancyCommandContext, ServerCandidateApplyPayload,
+        ServerToClientEnvelope, ServerToClientMessage,
+    };
+    use winwincode_device_client::{ExchangeRequest, ExchangeResponse};
+    struct ApplyTransport {
+        candidate: String,
+        base: String,
+    }
+    impl ExchangeTransport for ApplyTransport {
+        fn exchange(
+            &self,
+            _: Option<&str>,
+            bytes: &[u8],
+        ) -> Result<Vec<u8>, ExchangeTransportError> {
+            let request: ExchangeRequest = serde_json::from_slice(bytes).unwrap();
+            let first = &request.frames[0];
+            let envelope = ServerToClientEnvelope {
+                schema_version: "winwincode/v1".into(),
+                message_id: "apply-command".into(),
+                client_node_id: first["clientNodeId"].as_str().unwrap().into(),
+                client_instance_id: first["clientInstanceId"].as_str().unwrap().into(),
+                sequence: 1,
+                occurred_at: STAMP.into(),
+                message: ServerToClientMessage::CandidateApply(ServerCandidateApplyPayload {
+                    occupancy: OccupancyCommandContext {
+                        command: CommandContext {
+                            expected_revision: 1,
+                            idempotency_key: "apply-command".into(),
+                        },
+                        occupancy_lease_id: LEASE.into(),
+                        occupancy_fencing_token: TOKEN,
+                    },
+                    candidate_ref: format!("refs/winwincode/candidates/{}", self.candidate),
+                    repository_binding_id: BINDING.into(),
+                    target_branch: "workspace".into(),
+                    expected_head: self.base.clone(),
+                    requester_user_id: "usr_HOLDER0000000000000000000".into(),
+                    strategy: ApplyStrategy::Merge,
+                }),
+            };
+            Ok(serde_json::to_vec(&ExchangeResponse {
+                schema_version: "winwincode/v1".into(),
+                ack_sequence: request.frames.last().unwrap()["sequence"].as_u64().unwrap(),
+                replay_from_sequence: None,
+                frames: vec![serde_json::to_value(envelope).unwrap()],
+                enrollment: None,
+                worker_credentials: vec![],
+            })
+            .unwrap())
+        }
+    }
+    let (repo, base) = init_repository("daemon-apply");
+    let first = candidate_commit_on_main(&repo, "daemon-apply", "1");
+    git(&repo, &["checkout", "--detach", &first]);
+    fs::write(repo.join("candidate.txt"), "repaired\n").unwrap();
+    let candidate = commit_everything(&repo, "repair candidate");
+    git(&repo, &["checkout", "workspace"]);
+    let root = temporary_directory("daemon-apply-store");
+    let mut daemon = started_daemon("daemon-apply", &root);
+    bind(daemon.store_mut(), &repo);
+    retain_candidate(daemon.store_mut(), &candidate);
+    write_candidate_ref(&repo, &candidate);
+    let store = daemon.into_store();
+    let identity = load_device_identity(&store).unwrap().unwrap();
+    let mut daemon = DeviceDaemon::start(
+        daemon_config("daemon-apply"),
+        store,
+        Arc::new(ApplyTransport {
+            candidate: candidate.clone(),
+            base,
+        }),
+        &identity,
+    )
+    .unwrap();
+    daemon
+        .tick(std::time::Instant::now())
+        .expect("downlink invokes apply engine");
+    assert_eq!(
+        git(&repo, &["rev-parse", "HEAD^{tree}"]),
+        git(&repo, &["rev-parse", &format!("{candidate}^{{tree}}")])
+    );
+    assert_eq!(
+        fs::read_to_string(repo.join("candidate.txt")).unwrap(),
+        "repaired\n"
+    );
+    assert_eq!(git(&repo, &["status", "--porcelain"]), "");
+    let frames = apply_result_frames(daemon.store_mut());
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].2.receipt.result, ApplyResult::Applied);
+    let head = git(&repo, &["rev-parse", "HEAD"]);
+    daemon
+        .tick(std::time::Instant::now() + Duration::from_secs(1))
+        .expect("duplicate downlink is acknowledged");
+    assert_eq!(git(&repo, &["rev-parse", "HEAD"]), head);
+    daemon.into_store().close().unwrap();
+    cleanup(&root);
     cleanup(&repo);
 }

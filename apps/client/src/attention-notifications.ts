@@ -301,13 +301,15 @@ export function createAttentionNotificationMonitor(
       }
       delete target.dataset.wwcBadge
       target.removeAttribute('aria-label')
+      target.title = ''
       return
     }
     target.dataset.wwcBadge = String(total)
     target.setAttribute(
       'aria-label',
-      `任务看板 · ${String(total)} 项待处理`,
+      `任务看板 · 任务动态：${String(total)} 项（核查 ${String(currentState.badge.attention)}、审批 ${String(currentState.badge.approval)}、完成 ${String(currentState.badge.completion)}、失败 ${String(currentState.badge.failure)}）`,
     )
+    target.title = `任务动态：${String(total)} 项；核查 ${String(currentState.badge.attention)}、审批 ${String(currentState.badge.approval)}、完成 ${String(currentState.badge.completion)}、失败 ${String(currentState.badge.failure)}`
     if (badgeNode === null) {
       badgeNode = target.ownerDocument.createElement('span')
       target.append(badgeNode)

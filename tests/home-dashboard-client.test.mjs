@@ -49,6 +49,7 @@ const {
   createHomeDashboardViewModel,
   homeDashboardState,
   homeDeliveryCards,
+  homeDecisionCards,
   homeDeliverySection,
   orderedHomeBacklogCards,
   orderedHomeRunningCards,
@@ -391,6 +392,29 @@ function decisionCard(overrides = {}) {
   }
 }
 
+test('home decision cards merge one Delivery while retaining actionable item count', () => {
+  const first = decisionCard({
+    kind: 'attention',
+    id: attentionItemId,
+    title: '核查证据',
+    urgency: 'blocking',
+    productSessionId: null,
+    deliveryId,
+    deliveryTitle: '同一交付',
+  })
+  const second = { ...first, id: 'att_00000000000000000000000002', title: '确认验收' }
+  const approvalItem = decisionCard({ id: approvalId, kind: 'approval', title: '批准工具调用' })
+  const cards = homeDecisionCards([
+    { ...first, blocking: true, expired: false, bindingValid: true, candidateBound: false, executionJobId: null, revision: 1 },
+    { ...second, blocking: false, expired: false, bindingValid: true, candidateBound: false, executionJobId: null, revision: 2 },
+    { ...approvalItem, blocking: false, expired: false, bindingValid: true, candidateBound: false, executionJobId: null, revision: 1 },
+  ])
+  assert.equal(cards.length, 2)
+  assert.equal(cards.find(card => card.deliveryId === deliveryId)?.attentionCount, 2)
+  assert.equal(cards.find(card => card.id === approvalId)?.kind, 'approval')
+  assert.equal(cards.find(card => card.deliveryId === deliveryId)?.actionDisabled, false)
+})
+
 test('Chat is the canonical default surface and every product entry stays reachable', () => {
   // 设计稿侧栏:新对话排首位并是默认落地页,任务看板紧随其后。
   assert.equal(CLIENT_SURFACES[0]?.id, 'chat')
@@ -527,7 +551,7 @@ test('the dashboard groups Delivery projections into bounded, ordered sections',
   assert.equal(bounded.failed.length, 1)
   assert.equal(bounded.counts.running, 1)
   assert.equal(bounded.counts.validating, 1)
-  assert.equal(bounded.counts.completed, 2)
+  assert.equal(bounded.counts.completed, 1)
 })
 
 test('every canonical WorkItem state lands in exactly one board section', () => {
@@ -1109,7 +1133,7 @@ test('the Home page mounts the task board chrome, one polite live region, and ex
   const decisionsSection = descendants(page).find(node => node.dataset?.section === 'decisions')
   assert.notEqual(decisionsSection, undefined)
   assert.equal(byClass(decisionsSection, 'wwc-home-section-heading').textContent, '待我处理')
-  assert.equal(byClass(decisionsSection, 'wwc-home-section-count').textContent, '3')
+  assert.equal(byClass(decisionsSection, 'wwc-home-section-count').textContent, '3 个任务 · 3 项待处理')
 
   const decisionCards = allByClass(rootElement, 'wwc-home-card')
     .filter(card => card.dataset.kind === 'decision')
@@ -1127,7 +1151,7 @@ test('the Home page mounts the task board chrome, one polite live region, and ex
   assert.equal(byClass(inputCard, 'wwc-home-card-status').textContent, '方案待审核')
   assert.equal(byClass(inputCard, 'wwc-home-card-action').textContent, '审核方案')
   const attentionCard = decisionCards.find(card => card.dataset.urgency === 'blocking')
-  assert.equal(byClass(attentionCard, 'wwc-home-card-status').textContent, '阻塞 · 需要立即决策')
+  assert.equal(byClass(attentionCard, 'wwc-home-card-status').textContent, 'Review the proposed delivery scope')
   assert.equal(byClass(attentionCard, 'wwc-home-card-action').textContent, '验收交付')
 
   // Running cards: 强流程 + the mapped status text; the action opens the run
@@ -1169,7 +1193,11 @@ test('the Home page mounts the task board chrome, one polite live region, and ex
   // canonical history groups render as collapsed hairline rows.
   assert.equal(allByClass(rootElement, 'wwc-usage-health').length, 0)
   assert.equal(allByClass(rootElement, 'wwc-home-first-use').length, 0)
-  for (const id of ['backlog', 'ready', 'waiting', 'validating', 'failed', 'completed', 'visited']) {
+  const validatingSection = descendants(page).find(node => node.dataset?.section === 'validating')
+  assert.notEqual(validatingSection, undefined)
+  assert.equal(allByClass(validatingSection, 'wwc-home-section-toggle').length, 0)
+  assert.equal(byClass(validatingSection, 'wwc-home-cards').hidden, false)
+  for (const id of ['backlog', 'ready', 'waiting', 'failed', 'completed', 'visited']) {
     const section = descendants(page).find(node => node.dataset?.section === id)
     assert.notEqual(section, undefined)
     const toggle = byClass(section, 'wwc-home-section-toggle')

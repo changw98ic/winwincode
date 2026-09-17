@@ -2807,19 +2807,9 @@ fn candidate_manifest(
             format!("candidate bundle ref is invalid: {error}"),
         )
     })?;
-    // A verification Job seals the workspace source commit itself. That commit
-    // may be a repository root with no parent, so the bundle must not require
-    // `^{parent}` exclusion in that case.
-    let bundle = match rev_parse(repository, &format!("{candidate_commit_id}^")) {
-        Ok(parent) => {
-            let exclude_parent = format!("^{parent}");
-            git_output(
-                repository,
-                &["bundle", "create", "-", &reference, &exclude_parent],
-            )?
-        }
-        Err(_) => git_output(repository, &["bundle", "create", "-", &reference])?,
-    };
+    // The Server rebuilds the candidate independently of the Device filesystem.
+    // ponytail: include history within the artifact byte limit; use negotiated incremental bundles if transfer cost warrants it.
+    let bundle = git_output(repository, &["bundle", "create", "-", &reference])?;
     GitCandidateArtifactManifest::new(candidate_commit_id, bundle)
         .and_then(|manifest| manifest.encode())
         .map_err(|error| WorkspaceError::io("candidate manifest cannot be encoded", error))

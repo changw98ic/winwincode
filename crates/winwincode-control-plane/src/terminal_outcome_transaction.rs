@@ -189,7 +189,7 @@ impl TerminalPhase {
         let receipt_identity = ReceiptIdentity::new(
             execution_message_actor_key(&message.message_id)?,
             repository_scope_key(scope)?,
-            execution_message_request_id(&message.message_id, TERMINAL_PHASE)?,
+            execution_message_request_id(&message.message_id, &message.lease, TERMINAL_PHASE)?,
         )?;
         let encoded = serde_json::to_vec(message).map_err(|error| {
             StorageError::adapter(format!("failed to encode job.outcome: {error}"))

@@ -747,6 +747,8 @@ fn pending_workrun_execution(
         &transition.delivery.snapshot().spec,
         intent,
         DeliveryExecutionConfig {
+            device_target: None,
+            model_selection: None,
             payload_digest: digest('b'),
             candidate_ref: read_only.then(|| FIXTURE_CANDIDATE_REF.to_owned()),
             workspace: ExecutionWorkspace {
@@ -1286,6 +1288,7 @@ fn input_dispatch(root: &TestDirectory) -> JobDispatchMessage {
     .expect("build ProductSession submit context");
     let receipt = service
         .submit_chat(&SubmitChatMessageCommand {
+            attachments: Vec::new(),
             context: submit_context,
             product_session_id: product_session_id.clone(),
             message: "Reply with the selected input.".to_owned(),

@@ -273,6 +273,7 @@ fn create_chat_job(fixture: &mut Fixture, seed: u64) -> ExecutionJob {
     .expect("execution config");
     let receipt = service
         .submit_chat(&SubmitChatMessageCommand {
+            attachments: Vec::new(),
             context: command_context(&fixture.repository_scope, seed * 100 + 1, 1),
             product_session_id: fixture.product_session_id.clone(),
             message: "run the canonical Chat turn".to_owned(),
@@ -2165,6 +2166,67 @@ fn chat_action_receipt_uses_chat_authority_and_rejects_foreign_or_expired_reques
         )
         .is_err(),
         "terminal Chat cannot authorize another action"
+    );
+    fixture.close();
+}
+
+#[test]
+fn failure_before_first_model_call_settles_and_replays_after_metadata_change() {
+    let seed = 90;
+    let mut fixture = Fixture::open(seed);
+    let job = create_chat_job(&mut fixture, seed);
+    let scope = execution_scope(&fixture);
+    register_worker(&mut fixture.storage, seed);
+    reserve_execution(&mut fixture.storage, &scope, &job, seed);
+    transition_job(
+        &mut fixture.storage,
+        &scope,
+        &job.job_id,
+        seed * 100 + 20,
+        1,
+        ExecutionJobState::Queued,
+        ExecutionJobState::Leased,
+    );
+    let runtime = claim_and_open_runtime(&mut fixture, &job, seed);
+    accept_dispatch(&mut fixture, &job, &runtime, seed);
+    let binding = binding_message(&fixture, &runtime, seed);
+    fixture
+        .accept(&ExecutionPortMessage::SessionBindingMessage(binding), at(9))
+        .unwrap();
+    ProductSessionService::new(&mut fixture.storage)
+        .update_metadata(
+            &command_context(&fixture.repository_scope, 9099, 2),
+            &fixture.product_session_id,
+            "Renamed before failure",
+            true,
+        )
+        .unwrap();
+    let mut outcome = successful_outcome(&fixture, &runtime, seed);
+    outcome.outcome.status = ExecutionOutcomeStatus::Failed;
+    outcome.outcome.usage = None;
+    let message = ExecutionPortMessage::JobOutcomeMessage(outcome);
+    let accepted = fixture
+        .accept(&message, at(20))
+        .expect("early failure accepted");
+    assert_eq!(
+        outcome_status(&accepted),
+        JobOutcomeAckMessageStatus::Accepted
+    );
+    let record = ProductSessionService::new(&mut fixture.storage)
+        .get(&fixture.receipt_scope, &fixture.product_session_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        record.session().state(),
+        winwincode_session::ProductSessionState::Failed
+    );
+    assert!(record.bindings().is_empty());
+    assert!(record.turn_intents()[0].terminal_outcome.is_some());
+    assert_eq!(record.messages().len(), 1);
+    let mut fixture = fixture.restart();
+    assert_eq!(
+        outcome_status(&fixture.accept(&message, at(700)).unwrap()),
+        JobOutcomeAckMessageStatus::Duplicate
     );
     fixture.close();
 }

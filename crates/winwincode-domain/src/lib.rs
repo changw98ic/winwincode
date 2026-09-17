@@ -41,3 +41,6 @@ pub fn is_canonical_prefixed_id(value: &str, prefix: &str) -> bool {
             })
     })
 }
+
+mod chat_attachment;
+pub use chat_attachment::validate_chat_attachments;

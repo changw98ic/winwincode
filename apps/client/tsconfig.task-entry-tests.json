@@ -16,7 +16,8 @@
     "tsBuildInfoFile": "../../.cache/tsbuild/task-entry-tests.tsbuildinfo"
   },
   "include": [
-    "src/**/*.ts"
+    "src/**/*.ts",
+    "src/**/*.tsx"
   ],
   "references": [
     {

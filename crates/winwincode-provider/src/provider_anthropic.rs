@@ -812,15 +812,16 @@ fn translate_message(
     let mut blocks = Vec::with_capacity(content.len());
     for value in content {
         let value = object(value)?;
-        exact_keys(value, &["type", "text"])?;
         match string(value, "type")? {
             "input_text" | "output_text" => {
+                exact_keys(value, &["type", "text"])?;
                 let text = string(value, "text")?;
                 validate_text(text)?;
                 if !text.is_empty() {
                     blocks.push(json!({"type":"text", "text":text}));
                 }
             }
+            "input_image" if role == "user" => blocks.push(image_block(value)?),
             _ => return Err(AnthropicCodecError::invalid_request()),
         }
     }
@@ -845,6 +846,30 @@ fn translate_message(
         _ => return Err(AnthropicCodecError::invalid_request()),
     }
     Ok(())
+}
+
+// Anthropic Messages image source: https://platform.claude.com/docs/en/build-with-claude/vision
+fn image_block(value: &Map<String, Value>) -> Result<Value, AnthropicCodecError> {
+    exact_keys(value, &["type", "image_url", "detail"])?;
+    if value.get("detail").is_some_and(|detail| {
+        !detail.is_null() && !matches!(detail.as_str(), Some("auto" | "low" | "high"))
+    }) {
+        return Err(AnthropicCodecError::invalid_request());
+    }
+    let (media_type, data) = string(value, "image_url")?
+        .strip_prefix("data:")
+        .and_then(|url| url.split_once(";base64,"))
+        .ok_or_else(AnthropicCodecError::invalid_request)?;
+    if !matches!(media_type, "image/png" | "image/jpeg" | "image/webp") {
+        return Err(AnthropicCodecError::invalid_request());
+    }
+    winwincode_domain::validate_chat_attachments(&[winwincode_domain::ChatAttachment {
+        name: "image".to_owned(),
+        media_type: media_type.to_owned(),
+        content: data.to_owned(),
+    }])
+    .map_err(|_| AnthropicCodecError::invalid_request())?;
+    Ok(json!({"type":"image", "source":{"type":"base64", "media_type":media_type, "data":data}}))
 }
 
 fn tool_output(value: &Value) -> Result<Value, AnthropicCodecError> {
@@ -1669,6 +1694,44 @@ mod tests {
             }
         }))
         .expect("canonical request JSON")
+    }
+
+    #[test]
+    fn image_input_preserves_bytes_and_rejects_remote_or_malformed_sources() {
+        let mut request: Value = serde_json::from_slice(&canonical_request()).unwrap();
+        let image = json!({"type":"input_image", "image_url":"data:image/png;base64,iVBORw0KGgo=", "detail":null});
+        request["request"]["input"][1]["content"]
+            .as_array_mut()
+            .unwrap()
+            .push(image);
+        let prepared = prepare_anthropic_request(
+            &serde_json::to_vec(&request).unwrap(),
+            "vision-model",
+            options(),
+        )
+        .unwrap();
+        let body: Value = serde_json::from_slice(&prepared.body).unwrap();
+        assert_eq!(
+            body["messages"][0]["content"][1],
+            json!({
+                "type":"image", "source":{"type":"base64", "media_type":"image/png", "data":"iVBORw0KGgo="}
+            })
+        );
+        for source in [
+            "https://example.com/image.png",
+            "data:text/plain;base64,aGVsbG8=",
+            "data:image/png;base64,broken",
+        ] {
+            request["request"]["input"][1]["content"][1]["image_url"] = json!(source);
+            assert!(
+                prepare_anthropic_request(
+                    &serde_json::to_vec(&request).unwrap(),
+                    "vision-model",
+                    options()
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]

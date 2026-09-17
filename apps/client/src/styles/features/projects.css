@@ -9,6 +9,68 @@
   min-width: 0;
 }
 
+.wwc-projects-register:not([hidden]) {
+  display: grid;
+  gap: var(--wwc-space-3);
+  padding: var(--wwc-space-4);
+  border: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
+  border-radius: var(--wwc-radius-md);
+  background: var(--wwc-color-surface);
+}
+
+.wwc-projects-register label {
+  display: grid;
+  gap: var(--wwc-space-2);
+  min-width: 0;
+}
+
+.wwc-projects-register label:has(input[type="checkbox"]) {
+  display: flex;
+  align-items: center;
+}
+
+.wwc-projects-register :is(input:not([type="checkbox"]), select, button) {
+  min-width: 0;
+  min-height: var(--wwc-control-min-height);
+  padding: var(--wwc-space-2) var(--wwc-space-3);
+  border: var(--wwc-border-width) solid var(--wwc-color-border-control);
+  border-radius: var(--wwc-radius-md);
+  background: var(--wwc-color-surface);
+  color: inherit;
+  font: inherit;
+}
+
+.wwc-projects-register button {
+  background: var(--wwc-color-surface);
+  color: var(--wwc-color-text);
+}
+
+.wwc-projects-register-actions button[type='submit'] {
+  background: var(--wwc-color-accent);
+  font-weight: var(--wwc-font-weight-strong);
+  color: var(--wwc-color-on-accent);
+}
+
+.wwc-projects-register-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--wwc-space-3);
+  align-items: center;
+}
+
+.wwc-projects-register-actions a,
+.wwc-projects-register > a {
+  color: var(--wwc-color-text);
+  font-weight: var(--wwc-font-weight-medium);
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+.wwc-projects-register-actions a:hover,
+.wwc-projects-register > a:hover {
+  color: var(--wwc-color-accent-strong);
+}
+
 .wwc-projects-header {
   display: flex;
   flex-wrap: wrap;
@@ -24,26 +86,21 @@
 
 /* The accent primary action of the page, top-right beside the title. */
 .wwc-projects-add {
-  min-height: 3.5rem;
-  padding: var(--wwc-space-4) var(--wwc-space-8);
-  font-size: var(--wwc-font-size-lg);
   border: var(--wwc-border-width-control) solid var(--wwc-color-border);
-  border-radius: var(--wwc-radius-md);
   color: var(--wwc-color-text);
-  background: var(--wwc-color-accent);
-  font-weight: var(--wwc-font-weight-strong);
+  background: var(--wwc-color-surface);
   text-decoration: none;
   white-space: nowrap;
-  box-shadow: var(--wwc-shadow-hard);
+  min-height: 36px;
+  padding: 6px 14px;
+  border-radius: var(--wwc-radius-button);
+  font-size: 14px;
+  line-height: 22px;
+  font-weight: var(--wwc-font-weight-medium);
 }
 
 .wwc-projects-add:hover {
-  background: var(--wwc-color-accent-strong);
-}
-
-.wwc-projects-add:active {
-  box-shadow: var(--wwc-shadow-hard-sm);
-  translate: 2px 2px;
+  background: var(--wwc-color-surface-subtle);
 }
 
 .wwc-projects-status {
@@ -62,7 +119,7 @@
 
 .wwc-projects-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   column-gap: var(--wwc-space-6);
   min-width: 0;
@@ -74,6 +131,29 @@
   display: grid;
   gap: var(--wwc-space-2);
   min-width: 0;
+}
+
+.wwc-projects-row-actions,
+.wwc-projects-row-name-editor {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--wwc-space-2);
+  align-items: center;
+}
+
+.wwc-projects-row-name-editor input {
+  width: min(18rem, 100%);
+}
+
+.wwc-projects-row-name-feedback {
+  flex-basis: 100%;
+  color: var(--wwc-color-danger-text);
+  font-size: var(--wwc-font-size-sm);
+}
+
+.wwc-projects-row-name-help {
+  color: var(--wwc-color-text-muted);
+  font-size: var(--wwc-font-size-sm);
 }
 
 .wwc-projects-row-name {
@@ -90,33 +170,23 @@
   overflow-wrap: anywhere;
 }
 
-/* 新对话 keeps the outlined control look; ⋯ sits at the row's right end. */
+/* Keep the project action visually separate from its name and context. */
 .wwc-projects-row-chat {
-  padding: var(--wwc-space-3) var(--wwc-space-6);
-  font-size: var(--wwc-font-size-md);
   border: var(--wwc-border-width-control) solid var(--wwc-color-border);
-  border-radius: var(--wwc-radius-md);
   color: var(--wwc-color-text);
   background: var(--wwc-color-surface);
-  font-weight: var(--wwc-font-weight-strong);
   text-decoration: none;
   white-space: nowrap;
+  min-height: 36px;
+  padding: 6px 14px;
+  border-radius: var(--wwc-radius-button);
+  font-size: 14px;
+  line-height: 22px;
+  font-weight: var(--wwc-font-weight-medium);
 }
 
 .wwc-projects-row-chat:hover {
   background: var(--wwc-color-surface-subtle);
-}
-
-.wwc-projects-row-more {
-  min-width: var(--wwc-control-min-height);
-  padding: var(--wwc-space-2);
-  border: 0;
-  background: transparent;
-  color: var(--wwc-color-text);
-  font-size: var(--wwc-font-size-lg);
-  font-weight: var(--wwc-font-weight-strong);
-  letter-spacing: 0.1em;
-  cursor: pointer;
 }
 
 @media (max-width: 48rem) {
@@ -125,8 +195,13 @@
     row-gap: var(--wwc-space-3);
   }
 
-  .wwc-projects-row-chat,
-  .wwc-projects-row-more {
+  .wwc-projects-row-chat {
     justify-self: start;
+    min-height: 36px;
+    padding: 6px 14px;
+    border-radius: var(--wwc-radius-button);
+    font-size: 14px;
+    line-height: 22px;
+    font-weight: var(--wwc-font-weight-medium);
   }
 }

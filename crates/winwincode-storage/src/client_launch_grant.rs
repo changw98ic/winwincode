@@ -938,19 +938,7 @@ impl<'storage> WorkerLaunchGrantLedger<'storage> {
     ) -> Result<u64, WorkerLaunchGrantStoreError> {
         validate_client_node_id(client_node_id)?;
         let connection = self.connection()?;
-        let stored: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM worker_launch_grants g
-                 WHERE g.client_node_id = ?1 AND g.state IN ('issued', 'consumed')
-                   AND EXISTS (SELECT 1 FROM client_occupancy_leases l
-                     WHERE l.occupancy_lease_id = g.occupancy_lease_id
-                       AND l.fencing_token = g.occupancy_fencing_token
-                       AND l.state IN ('occupied', 'draining', 'recovery_pending'))",
-                [client_node_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .map_err(|sql| sql_error(&sql))?;
-        from_sql_integer(stored, "non-terminal launch grant count")
+        reserved_worker_sessions(connection, client_node_id)
     }
 
     /// Returns every durable launch audit entry of one grant, oldest first.
@@ -1010,11 +998,36 @@ impl<'storage> WorkerLaunchGrantLedger<'storage> {
     }
 }
 
+/// Shared durable capacity count for the claim, binding and launch gates.
+pub(crate) fn reserved_worker_sessions(
+    connection: &rusqlite::Connection,
+    client_node_id: &str,
+) -> Result<u64, WorkerLaunchGrantStoreError> {
+    let stored: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM worker_launch_grants g
+                 WHERE g.client_node_id = ?1 AND g.state IN ('issued', 'consumed')
+                   AND NOT EXISTS (SELECT 1 FROM device_execution_bindings b
+                     WHERE b.worker_launch_grant_id = g.worker_launch_grant_id AND b.state = 'released')
+                   AND EXISTS (SELECT 1 FROM client_occupancy_leases l
+                     WHERE l.occupancy_lease_id = g.occupancy_lease_id
+                       AND l.fencing_token = g.occupancy_fencing_token
+                       AND l.state IN ('occupied', 'draining', 'recovery_pending'))",
+                [client_node_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|sql| sql_error(&sql))?;
+    from_sql_integer(stored, "non-terminal launch grant count")
+}
+
 fn ensure_worker_launch_grant_schema(
     connection: &rusqlite::Connection,
 ) -> Result<(), WorkerLaunchGrantStoreError> {
     connection
         .execute_batch(WORKER_LAUNCH_GRANT_SCHEMA)
+        .map_err(|sql| sql_error(&sql))?;
+    connection
+        .execute_batch(crate::device_execution_binding::DEVICE_EXECUTION_BINDINGS_SCHEMA)
         .map_err(|sql| sql_error(&sql))?;
     Ok(())
 }
@@ -1254,19 +1267,7 @@ fn ensure_capacity_and_session_uniqueness(
     issuance: &LaunchGrantIssuance,
     max_slots: u64,
 ) -> Result<(), WorkerLaunchGrantStoreError> {
-    let reserved: i64 = transaction
-        .query_row(
-            "SELECT COUNT(*) FROM worker_launch_grants g
-             WHERE g.client_node_id = ?1 AND g.state IN ('issued', 'consumed')
-               AND EXISTS (SELECT 1 FROM client_occupancy_leases l
-                 WHERE l.occupancy_lease_id = g.occupancy_lease_id
-                   AND l.fencing_token = g.occupancy_fencing_token
-                   AND l.state IN ('occupied', 'draining', 'recovery_pending'))",
-            [issuance.client_node_id.as_str()],
-            |row| row.get::<_, i64>(0),
-        )
-        .map_err(|sql| sql_error(&sql))?;
-    let reserved = from_sql_integer(reserved, "reserved worker session count")?;
+    let reserved = reserved_worker_sessions(transaction, &issuance.client_node_id)?;
     if reserved.saturating_add(1) > max_slots {
         return Err(error(
             WorkerLaunchGrantStoreErrorKind::CapacityExhausted,

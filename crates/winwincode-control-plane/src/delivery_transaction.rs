@@ -59,6 +59,7 @@ impl DeliveryExecutionTransaction for AtomicDeliveryExecutionTransaction<'_, '_>
         pending: &PendingDeliveryExecution,
     ) -> Result<DeliveryExecutionCommitReceipt, DeliveryExecutionPortError> {
         validate_command(self.command, pending)?;
+        validate_device_target(self.storage, self.command, pending)?;
         let outbox_event_id = execution_job_event_id(pending.job());
         let job_payload = serde_json::to_vec(pending.job()).map_err(port_error)?;
         let changed_event = delivery_changed_event(
@@ -140,6 +141,62 @@ impl DeliveryExecutionTransaction for AtomicDeliveryExecutionTransaction<'_, '_>
     }
 }
 
+fn validate_device_target(
+    storage: &dyn ProductStateStorage,
+    command: &CommandEnvelope,
+    pending: &PendingDeliveryExecution,
+) -> Result<(), DeliveryExecutionPortError> {
+    let spec = &pending.delivery().snapshot().spec;
+    let target = pending
+        .job()
+        .work_input
+        .as_ref()
+        .and_then(|input| input.device_target.as_ref());
+    let Some(target) = target else {
+        return if spec.repository.locator.starts_with("devices/") {
+            Err(DeliveryExecutionPortError::new(
+                "Device delivery requires its sealed execution target",
+            ))
+        } else {
+            Ok(())
+        };
+    };
+    if spec.repository.locator
+        != format!(
+            "devices/{}/{}",
+            target.client_node_id, target.repository_binding_id
+        )
+    {
+        return Err(DeliveryExecutionPortError::new(
+            "Device target differs from the confirmed repository",
+        ));
+    }
+    let source = spec.source_product_session_id.as_ref().ok_or_else(|| {
+        DeliveryExecutionPortError::new("Device delivery requires a source session")
+    })?;
+    let winwincode_api::generated::Scope::RepositoryScope(scope) = &command.scope else {
+        return Err(DeliveryExecutionPortError::new(
+            "Device target requires repository scope",
+        ));
+    };
+    let scope = crate::repository_scope_key(scope).map_err(port_error)?;
+    let session = crate::product_session_service::load_product_session_authority_seal(
+        storage, &scope, source,
+    )
+    .map_err(port_error)?;
+    let route = session.record.model_route();
+    if !matches!(session.record.owner_actor(), winwincode_storage::PublicEventActor::User { id } if id.0 == target.user_id)
+        || pending.job().model_selection.as_ref().is_none_or(|model| {
+            model.provider_id != route.provider_id || model.model_id != route.model_id
+        })
+    {
+        return Err(DeliveryExecutionPortError::new(
+            "Device execution owner or model differs from the source session",
+        ));
+    }
+    Ok(())
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "Keep all request-to-sealed-intent comparisons in one validation boundary"
@@ -208,7 +265,7 @@ fn validate_command(
                 .sort_by(|left, right| left.0.cmp(&right.0));
         }
     }
-    if requested_rework != expected_rework {
+    if requested_rework.is_some() && requested_rework != expected_rework {
         return Err(DeliveryExecutionPortError::new(
             "requested rework scope differs from the sealed dispatch authorization",
         ));
@@ -219,6 +276,12 @@ fn validate_command(
         &pending.delivery().snapshot().spec,
         intent,
         crate::delivery_execution::DeliveryExecutionConfig {
+            device_target: pending
+                .job()
+                .work_input
+                .as_ref()
+                .and_then(|input| input.device_target.clone()),
+            model_selection: pending.job().model_selection.clone(),
             payload_digest: pending.job().payload_digest.clone(),
             candidate_ref: pending
                 .job()

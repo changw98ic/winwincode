@@ -49,15 +49,17 @@
 }
 
 .wwc-home-new-task {
-  padding: var(--wwc-space-2) var(--wwc-space-4);
   border: var(--wwc-border-width-control) solid var(--wwc-color-border);
-  border-radius: var(--wwc-radius-md);
   background: var(--wwc-color-surface);
   color: var(--wwc-color-text);
-  font-size: var(--wwc-font-size-sm);
-  font-weight: var(--wwc-font-weight-strong);
   text-decoration: none;
   white-space: nowrap;
+  min-height: 36px;
+  padding: 6px 14px;
+  border-radius: var(--wwc-radius-button);
+  font-size: 14px;
+  line-height: 22px;
+  font-weight: var(--wwc-font-weight-medium);
 }
 
 .wwc-home-new-task:hover {
@@ -66,16 +68,18 @@
 
 /* 设计评审 P0-1:仅看待处理筛选开关,与项目范围/新建任务同排。 */
 .wwc-home-attention-only {
-  padding: var(--wwc-space-2) var(--wwc-space-3);
   border: var(--wwc-border-width-control) solid var(--wwc-color-border);
-  border-radius: var(--wwc-radius-md);
   background: var(--wwc-color-surface);
   color: var(--wwc-color-text);
   font: inherit;
-  font-size: var(--wwc-font-size-sm);
-  font-weight: var(--wwc-font-weight-strong);
   white-space: nowrap;
   cursor: pointer;
+  min-height: 36px;
+  padding: 6px 14px;
+  border-radius: var(--wwc-radius-button);
+  font-size: 14px;
+  line-height: 22px;
+  font-weight: var(--wwc-font-weight-medium);
 }
 
 .wwc-home-attention-only:hover {
@@ -86,6 +90,7 @@
 .wwc-home-attention-only[data-active='true'] {
   background: var(--wwc-color-accent);
   border-color: var(--wwc-color-border);
+  color: var(--wwc-color-on-accent);
 }
 
 /* Design page 04: the polite status line stays for announcements but renders
@@ -141,18 +146,34 @@
 .wwc-home-sections [data-section='backlog'],
 .wwc-home-sections [data-section='ready'],
 .wwc-home-sections [data-section='waiting'],
-.wwc-home-sections [data-section='validating'],
 .wwc-home-sections [data-section='failed'],
 .wwc-home-sections [data-section='completed'],
 .wwc-home-sections [data-section='visited'] {
   grid-column: 1 / -1;
 }
 
+.wwc-home[data-running-empty='true'] .wwc-home-sections [data-section='running'],
+.wwc-home[data-running-empty='true'] .wwc-home-sections [data-section='decisions'] {
+  grid-column: 1 / -1;
+  grid-row: auto;
+}
+
+@media (min-width: 64.01rem) {
+  .wwc-home[data-running-empty='true'] .wwc-home-sections [data-section='decisions'] .wwc-home-cards {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.wwc-home[data-running-empty='true'] [data-section='running'] {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+}
+
 /* Collapsed history rows: bold heading + gray count on one hairline row. */
 .wwc-home-sections [data-section='backlog'],
 .wwc-home-sections [data-section='ready'],
 .wwc-home-sections [data-section='waiting'],
-.wwc-home-sections [data-section='validating'],
 .wwc-home-sections [data-section='failed'],
 .wwc-home-sections [data-section='completed'],
 .wwc-home-sections [data-section='visited'] {
@@ -197,7 +218,6 @@
 .wwc-home-sections [data-section='backlog'] .wwc-home-section-count::before,
 .wwc-home-sections [data-section='ready'] .wwc-home-section-count::before,
 .wwc-home-sections [data-section='waiting'] .wwc-home-section-count::before,
-.wwc-home-sections [data-section='validating'] .wwc-home-section-count::before,
 .wwc-home-sections [data-section='failed'] .wwc-home-section-count::before,
 .wwc-home-sections [data-section='completed'] .wwc-home-section-count::before,
 .wwc-home-sections [data-section='visited'] .wwc-home-section-count::before {
@@ -207,18 +227,23 @@
 }
 
 .wwc-home-section-toggle {
+  display: flex;
+  align-items: center;
+  width: 100%;
   min-width: var(--wwc-control-min-height);
-  margin-left: auto;
+  margin-left: 0;
   padding: var(--wwc-space-1) var(--wwc-space-2);
   border: 0;
   background: transparent;
   color: var(--wwc-color-text);
-  font-size: var(--wwc-font-size-lg);
+  font-size: var(--wwc-font-size-sm);
+  text-align: left;
   line-height: 1;
 }
 
 .wwc-home-section-toggle::after {
   content: '›';
+  margin-left: auto;
 }
 
 .wwc-home-section-toggle[aria-expanded='true']::after {
@@ -275,6 +300,10 @@
 }
 
 .wwc-home-card[data-urgency='blocking'] .wwc-home-card-status {
+  color: var(--wwc-color-warning-text);
+}
+
+.wwc-home-card[data-urgency='failure'] .wwc-home-card-status {
   color: var(--wwc-color-danger-text);
 }
 
@@ -310,26 +339,24 @@
   display: none;
 }
 
-/* Delivery cards carry the white 查看进度 action; decision cards the accent one. */
+/* Reading a task is a secondary action; decisions are confirmed in its detail. */
 .wwc-home-card-action {
-  padding: var(--wwc-space-2) var(--wwc-space-4);
   border: var(--wwc-border-width-control) solid var(--wwc-color-border);
-  border-radius: var(--wwc-radius-md);
   color: var(--wwc-color-text);
   background: var(--wwc-color-surface);
-  font-weight: var(--wwc-font-weight-strong);
   text-decoration: none;
   white-space: nowrap;
+  min-height: 36px;
+  padding: 6px 14px;
+  border-radius: var(--wwc-radius-button);
+  font-size: 14px;
+  line-height: 22px;
+  font-weight: var(--wwc-font-weight-medium);
 }
 
 .wwc-home-card-action::after {
   content: '›';
   margin-left: var(--wwc-space-2);
-}
-
-.wwc-home-card[data-kind='decision'] .wwc-home-card-action {
-  border-color: var(--wwc-color-border);
-  background: var(--wwc-color-accent);
 }
 
 .wwc-home-card-action[aria-disabled='true'] {
@@ -342,10 +369,6 @@
 }
 
 @media (max-width: 48rem) {
-  .wwc-home-mobile-capability {
-    display: block;
-  }
-
   .wwc-home-sections {
     grid-template-columns: minmax(0, 1fr);
     gap: var(--wwc-space-3);
@@ -363,7 +386,13 @@
 
   .wwc-home-card-action {
     justify-self: start;
-  }
+    min-height: 36px;
+  padding: 6px 14px;
+  border-radius: var(--wwc-radius-button);
+  font-size: 14px;
+  line-height: 22px;
+  font-weight: var(--wwc-font-weight-medium);
+}
 }
 
 /* UI-100.2: the §16.6 new-task form and the §16.7 run page mount in the Home
@@ -625,23 +654,18 @@
   gap: var(--wwc-space-4);
 }
 
-/* 设计稿 05:主 CTA 为大号黄底黑边硬阴影按钮。 */
+/* Primary delivery action. */
 .wwc-task-run-actions .wwc-task-run-approve {
-  min-height: 3.25rem;
-  padding: var(--wwc-space-4) var(--wwc-space-6);
   border: var(--wwc-border-width-control) solid var(--wwc-color-text);
-  border-radius: var(--wwc-radius-md);
   background: var(--wwc-color-accent);
-  color: var(--wwc-color-text);
+  color: var(--wwc-color-on-accent);
   font: inherit;
-  font-size: var(--wwc-font-size-md);
-  font-weight: var(--wwc-font-weight-strong);
-  box-shadow: var(--wwc-shadow-hard);
-}
-
-.wwc-task-run-actions .wwc-task-run-approve:active:not(:disabled) {
-  box-shadow: var(--wwc-shadow-hard-sm);
-  translate: 2px 2px;
+  min-height: 36px;
+  padding: 6px 14px;
+  border-radius: var(--wwc-radius-button);
+  font-size: 14px;
+  line-height: 22px;
+  font-weight: var(--wwc-font-weight-medium);
 }
 
 .wwc-task-run-request-change {

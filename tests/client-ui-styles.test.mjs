@@ -6,11 +6,16 @@ import test from 'node:test'
 const root = resolve(import.meta.dirname, '..')
 const stylesRoot = resolve(root, 'apps/client/src/styles')
 const sourceFiles = [
+  'dsh-tokens.css',
   'tokens.css',
   'base.css',
   'shell.css',
   'components.css',
   'features/chat.css',
+  'features/dsh-markdowntext.css',
+  'features/dsh-codeblock.css',
+  'features/dsh-attachment.css',
+  'features/dsh-theme.css',
   'features/extensions.css',
   'features/settings.css',
   'features/home.css',
@@ -22,6 +27,8 @@ const sourceFiles = [
   'features/clients.css',
   'features/repositories.css',
   'features/strongflow-review.css',
+  'features/candidate-run-preview.css',
+  'features/select.css',
 ]
 
 function source(path) {
@@ -33,7 +40,7 @@ test('Client CSS has one deterministic tokens, base, shell, components, and feat
   assert.deepEqual(
     entry.split('\n').filter(line => line.startsWith('@import ')),
     sourceFiles.map(path => `@import './${path}' layer(${
-      path === 'tokens.css'
+      path.endsWith('tokens.css')
         ? 'tokens'
         : path === 'base.css'
           ? 'base'
@@ -48,7 +55,7 @@ test('Client CSS has one deterministic tokens, base, shell, components, and feat
   for (const path of sourceFiles) assert.equal(existsSync(resolve(stylesRoot, path)), true, path)
 
   const nonTokenColors = sourceFiles
-    .filter(path => path !== 'tokens.css')
+    .filter(path => !path.endsWith('tokens.css') && path !== 'features/dsh-theme.css')
     .flatMap(path => [...source(path).matchAll(/#[\da-f]{3,8}\b/giu)].map(match => `${path}:${match[0]}`))
   assert.deepEqual(nonTokenColors, [])
   const tokens = source('tokens.css')

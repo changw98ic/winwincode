@@ -113,7 +113,7 @@ test('a real browser opens 新对话 as the first screen and the board one click
   assert.equal(section('running').cards.length, 0)
   assert.equal(section('failed').cards.length, 1)
   assert.equal(section('completed').cards.length, 1)
-  assert.equal(section('decisions').cards[0].title, 'Review the proposed delivery scope')
+  assert.equal(section('decisions').cards[0].title, 'Delivery of repository 1')
   assert.match(section('failed').cards[0].title, /repository 1/u)
   assert.equal(home.firstUse.hidden, true)
   // Design page 04 removed the usage/health panel from the board.
@@ -139,13 +139,13 @@ test('a real browser opens 新对话 as the first screen and the board one click
   )
   // Delivery review cards open the exact Delivery-bound review surface.
   assert.equal(
-    decisionByTitle('Review the proposed delivery scope')?.action.href,
+    decisionByTitle('Delivery of repository 1')?.action.href,
     `#/home/review?delivery=dlv_00000000000000000000000001&organizationId=${identity}`
       + `&workspaceId=${workspaceId}&projectId=${projectId}&repositoryId=${repositoryOne}`,
     JSON.stringify(decisionCards),
   )
-  // 设计稿 04:交付卡的动作是「查看进度」,打开运行页。
-  const runHref = `#/home/task-run?organizationId=${identity}`
+  // Every delivery card preserves its identity when opening task details.
+  const runHref = `#/home/review?delivery=dlv_00000000000000000000000001&organizationId=${identity}`
     + `&workspaceId=${workspaceId}&projectId=${projectId}&repositoryId=${repositoryOne}`
   assert.equal(section('failed').cards[0]?.action.href, runHref)
   assert.equal(
@@ -175,7 +175,7 @@ test('a real browser opens 新对话 as the first screen and the board one click
     1,
   )
   // The switched Scope's cards keep the 查看进度 action scoped to the new repo.
-  const switchedRunHref = `#/home/task-run?organizationId=${identity}`
+  const switchedRunHref = `#/home/review?delivery=dlv_00000000000000000000000002&organizationId=${identity}`
     + `&workspaceId=${workspaceId}&projectId=${projectId}&repositoryId=${repositoryTwo}`
   assert.equal(
     switchedDashboard.sections.find(section => section.id === 'failed')

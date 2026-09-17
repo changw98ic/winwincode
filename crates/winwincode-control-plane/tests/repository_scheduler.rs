@@ -78,6 +78,7 @@ fn queue_scope() -> ExecutionQueueScope {
 
 fn execution_job() -> ExecutionJob {
     ExecutionJob {
+        attachments: None,
         model_selection: None,
         attempt: 1,
         execution_profile: "local-codex".into(),

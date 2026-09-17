@@ -108,13 +108,10 @@ fn repository_fixture(root: &Path) -> (String, String) {
     (base, candidate)
 }
 
-fn candidate_manifest(repository: &Path, base: &str, candidate: &str) -> Vec<u8> {
+fn candidate_manifest(repository: &Path, _base: &str, candidate: &str) -> Vec<u8> {
     let reference = format!("refs/winwincode/candidates/{candidate}");
     git(repository, &["update-ref", &reference, candidate]);
-    let bundle = git(
-        repository,
-        &["bundle", "create", "-", &reference, &format!("^{base}")],
-    );
+    let bundle = git(repository, &["bundle", "create", "-", &reference]);
     GitCandidateArtifactManifest::new(candidate, bundle)
         .expect("candidate source manifest")
         .encode()
@@ -271,6 +268,38 @@ fn local_git_resolver_imports_candidate_from_an_isolated_worker_repository() {
         .resolve_candidate(&object, "project-one", &base_commit)
         .expect("rebuilt candidate source");
 
+    let cache_root = root.join("device-artifact-cache");
+    let cache = LocalGitSourceResolver::open_artifact_cache(&cache_root).unwrap();
+    let rebuilt = cache
+        .resolve_candidate(&object, "devices/node/binding", &base_commit)
+        .unwrap();
+    assert_eq!(rebuilt.candidate_commit_id(), source.candidate_commit_id());
+    assert_eq!(rebuilt.diff_sha256(), source.diff_sha256());
+    assert_eq!(rebuilt.changed_paths(), source.changed_paths());
+    let reopened = LocalGitSourceResolver::open_artifact_cache(&cache_root).unwrap();
+    assert_eq!(
+        reopened
+            .resolve_candidate(&object, "devices/node/binding", &base_commit)
+            .unwrap(),
+        rebuilt
+    );
+    assert!(
+        reopened
+            .resolve_candidate(&object, "../escape", &base_commit)
+            .is_err()
+    );
+    #[cfg(unix)]
+    {
+        let outside = root.join("outside-cache");
+        fs::create_dir(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, cache_root.join("escape")).unwrap();
+        assert!(
+            reopened
+                .resolve_candidate(&object, "escape/new-repository", &base_commit)
+                .is_err()
+        );
+        assert!(!outside.join("new-repository").exists());
+    }
     assert_eq!(source.base_commit_id(), base_commit);
     assert_eq!(source.candidate_commit_id(), candidate_commit);
     assert_eq!(

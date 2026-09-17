@@ -415,6 +415,11 @@ pub struct ClientCommandAckPayload {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "payload")]
 pub enum ClientToServerMessage {
+    /// Result of a browser-requested repository registration.
+    #[serde(rename = "client.repository.registered")]
+    RepositoryRegistered {
+        receipt: winwincode_api::generated::DeviceRepositoryRegistrationReceipt,
+    },
     /// Public Device Skills/MCP metadata and completion receipt.
     #[serde(rename = "client.extension.report")]
     ExtensionReport(Box<winwincode_api::generated::DeviceExtensionReport>),
@@ -655,6 +660,9 @@ pub struct ServerConfigurationApplyPayload {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "payload")]
 pub enum ServerToClientMessage {
+    /// Encrypted path to register on this device.
+    #[serde(rename = "client.repository.register")]
+    RepositoryRegister(Box<ServerConfigurationApplyPayload>),
     /// Encrypted Skills/MCP mutation for the selected Device.
     #[serde(rename = "client.extension.apply")]
     ExtensionApply(Box<ServerConfigurationApplyPayload>),

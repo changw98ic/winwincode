@@ -24,6 +24,44 @@ const MAX_GOAL_BYTES: usize = 20_000;
 const MAX_RUNTIME_SECONDS: i64 = 604_800;
 const MAX_ARTIFACT_BYTES: i64 = 1_099_511_627_776;
 
+/// Restore conversation context when a Device starts a fresh Worker for a turn.
+pub(super) fn chat_goal<'a>(
+    message: &str,
+    history: impl DoubleEndedIterator<Item = &'a winwincode_api::generated::ChatMessageProjection>,
+) -> String {
+    const PREFIX: &str = "Recent conversation (JSON records; older messages may be omitted):\n";
+    const CURRENT: &str = "\n\nCurrent user message:\n";
+    let mut remaining = MAX_GOAL_BYTES.saturating_sub(PREFIX.len() + CURRENT.len() + message.len());
+    let mut entries = Vec::new();
+    // ponytail: keep the newest complete messages within the existing 20 KB
+    // execution goal; add context retrieval when longer history is needed.
+    for previous in history.rev() {
+        let text_files = previous
+            .attachments
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .filter(|attachment| attachment.media_type == "text/plain")
+            .collect::<Vec<_>>();
+        let entry = serde_json::json!({
+            "role": previous.role,
+            "content": previous.content,
+            "textFiles": text_files,
+        })
+        .to_string();
+        if entry.len() + 1 > remaining {
+            break;
+        }
+        remaining -= entry.len() + 1;
+        entries.push(entry);
+    }
+    if entries.is_empty() {
+        return message.to_owned();
+    }
+    entries.reverse();
+    format!("{PREFIX}{}{CURRENT}{message}", entries.join("\n"))
+}
+
 /// Trusted repository snapshot and bounded execution policy installed by the
 /// production composition root.
 #[derive(Clone, Debug, PartialEq)]
@@ -36,6 +74,22 @@ pub struct ProductSessionExecutionConfig {
 }
 
 impl ProductSessionExecutionConfig {
+    /// Pins a turn to the HEAD reported by its authorized Device repository.
+    ///
+    /// # Errors
+    /// Rejects an invalid revision using the execution policy's constructor.
+    pub fn with_checkout_revision(
+        &self,
+        revision: String,
+    ) -> Result<Self, ProductSessionServiceError> {
+        Self::try_new(
+            self.repository_scope.clone(),
+            revision,
+            self.execution_profile.clone(),
+            self.max_runtime_seconds,
+            self.max_artifact_bytes,
+        )
+    }
     /// Builds one immutable Chat execution policy.
     ///
     /// # Errors
@@ -78,11 +132,13 @@ impl ProductSessionExecutionConfig {
         &self.repository_scope
     }
 
+    #[allow(clippy::too_many_lines)]
     pub(super) fn prepare(
         &self,
         context: &ProductSessionCommandContext,
         product_session_id: &ProductSessionId,
         message: &str,
+        attachments: &[winwincode_domain::ChatAttachment],
         model_route: &ModelRoute,
     ) -> Result<PreparedProductSessionExecution, ProductSessionServiceError> {
         if message.is_empty() || message.len() > MAX_GOAL_BYTES {
@@ -134,12 +190,14 @@ impl ProductSessionExecutionConfig {
             request_id: &context.receipt_identity.request_id().0,
             product_session_id,
             message,
+            attachments,
             model_route,
             execution_profile: &self.execution_profile,
             limits: &limits,
             workspace: &workspace,
         })?;
         let job = ExecutionJob {
+            attachments: Some(attachments.to_vec()),
             model_selection: Some(
                 winwincode_execution_port::generated::ExecutionModelSelection {
                     provider_id: model_route.provider_id.clone(),
@@ -165,6 +223,12 @@ impl ProductSessionExecutionConfig {
                 "ProductSession ExecutionJob cannot be encoded",
             )
         })?;
+        if dispatch_payload.len() > 224 * 1024 {
+            return Err(service_error(
+                ProductSessionServiceErrorCode::MessageLimitExceeded,
+                "Chat message and attachments exceed the execution frame bound",
+            ));
+        }
         let submission = ExecutionJobSubmission {
             scope: ExecutionQueueScope {
                 organization_id: self.repository_scope.organization_id.clone(),
@@ -199,6 +263,7 @@ struct ExecutionPayloadDigestInput<'input> {
     request_id: &'input str,
     product_session_id: &'input ProductSessionId,
     message: &'input str,
+    attachments: &'input [winwincode_domain::ChatAttachment],
     model_route: &'input ModelRoute,
     execution_profile: &'input str,
     limits: &'input ExecutionLimits,
@@ -243,4 +308,41 @@ pub(crate) fn chat_turn_execution_job_id(
     product_session_id: &ProductSessionId,
 ) -> ExecutionJobId {
     deterministic_job_id(request_id.0.as_bytes(), product_session_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn conversation_context_keeps_recent_text_files_within_the_utf8_goal_bound() {
+        let message = |content: String| winwincode_api::generated::ChatMessageProjection {
+            artifact_refs: None,
+            attachments: Some(vec![winwincode_domain::ChatAttachment {
+                name: "context.ts".into(),
+                media_type: "text/plain".into(),
+                content: "const marker = 731".into(),
+            }]),
+            content,
+            created_at: winwincode_domain::Instant("2026-09-16T00:00:00Z".into()),
+            updated_at: winwincode_domain::Instant("2026-09-16T00:00:00Z".into()),
+            id: winwincode_domain::ChatMessageId("cmsg_fixture".into()),
+            product_session_id: ProductSessionId("psn_fixture".into()),
+            role: "user".into(),
+            sequence: 1,
+            state: "completed".into(),
+        };
+        let history = [
+            message("旧消息".repeat(10_000)),
+            message("检查这份文件".into()),
+        ];
+        let goal = chat_goal("刚才的值？", history.iter());
+        assert!(goal.len() <= MAX_GOAL_BYTES);
+        assert!(goal.contains("检查这份文件"));
+        assert!(goal.contains("const marker = 731"));
+        assert!(!goal.contains("旧消息"));
+        assert!(goal.ends_with("Current user message:\n刚才的值？"));
+        let full_message = "x".repeat(MAX_GOAL_BYTES);
+        assert_eq!(chat_goal(&full_message, history.iter()), full_message);
+    }
 }

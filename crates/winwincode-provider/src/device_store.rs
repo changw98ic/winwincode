@@ -282,7 +282,11 @@ impl DeviceProviderStore {
         self.decrypt_configuration(envelope, CONTEXT)
     }
 
-    pub(crate) fn decrypt_configuration<T: serde::de::DeserializeOwned>(
+    /// Opens a configuration encrypted for this Device and operation namespace.
+    ///
+    /// # Errors
+    /// Rejects invalid keys, altered payloads, and invalid decoded data.
+    pub fn decrypt_configuration<T: serde::de::DeserializeOwned>(
         &self,
         envelope: &DeviceConfigurationEnvelope,
         context: &str,

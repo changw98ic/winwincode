@@ -428,6 +428,7 @@ fn create_command(
         payload: DeliveryCreatePayload {
             delivery_id: delivery_id.clone(),
             spec: DeliverySpecInput {
+                verification_command: None,
                 acceptance_criteria: vec![AcceptanceCriterionInput {
                     id: "criterion-live-provider".to_owned(),
                     required: true,
@@ -462,6 +463,7 @@ fn update_spec_command(
         payload: DeliveryUpdateSpecPayload {
             delivery_id: delivery.id().clone(),
             spec: DeliverySpecInput {
+                verification_command: None,
                 acceptance_criteria: vec![AcceptanceCriterionInput {
                     id: "criterion-live-provider".to_owned(),
                     required: true,

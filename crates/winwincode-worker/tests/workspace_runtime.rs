@@ -253,6 +253,7 @@ fn active_job() -> ActiveJob {
     let work_run_id = WorkRunId("wrn_01J00000000000000000000001".to_owned());
     ActiveJob {
         job: ExecutionJob {
+            attachments: None,
             model_selection: None,
             attempt: 1,
             execution_profile: "executor".to_owned(),
@@ -276,6 +277,7 @@ fn active_job() -> ActiveJob {
                 work_run_id: WorkRunId("wrn_01J00000000000000000000001".to_owned()),
             }),
             work_input: Some(WorkRunInput {
+                device_target: None,
                 delivery_spec_id: "spec-fixture".into(),
                 delivery_spec_revision: Revision(2),
                 candidate_ref: None,

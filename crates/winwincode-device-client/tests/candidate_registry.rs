@@ -847,3 +847,63 @@ fn startup_rejects_a_pre_v6_database_instead_of_migrating() {
     );
     cleanup(&root);
 }
+
+#[test]
+fn daemon_recovers_a_frozen_candidate_and_reports_exit_after_restart() {
+    let (repository, _) = init_repository("worker-freeze");
+    let message =
+        r#"{"originProvenance":{"workerId":"wrk_WRITER","workerInstanceId":"wki_WRITER"}}"#;
+    let commit = add_commit(&repository, message);
+    git(
+        &repository,
+        &[
+            "update-ref",
+            &format!("refs/winwincode/candidates/{commit}"),
+            &commit,
+        ],
+    );
+    let root = temporary_directory("worker-freeze");
+    let (mut store, _) = open_enrolled(&root);
+    mirror_the_lease(&mut store);
+    store
+        .put_path_mapping(&PathMappingRecord {
+            repository_binding_id: BINDING.into(),
+            canonical_path: repository.to_str().unwrap().into(),
+            git_common_directory: None,
+            last_canonicalized_at: None,
+            local_state: "ready".into(),
+        })
+        .unwrap();
+    store
+        .put_worker_process(&winwincode_device_client::WorkerProcessRecord {
+            worker_session_id: SESSION.into(),
+            worker_id: "wrk_WRITER".into(),
+            worker_instance_id: "wki_WRITER".into(),
+            pid: 1,
+            process_start_identity: "observed-exit".into(),
+            repository_binding_id: BINDING.into(),
+            occupancy_lease_id: LEASE.into(),
+            launch_grant_id: "wlg_WRITER".into(),
+            data_directory: root.to_str().unwrap().into(),
+            state: "exited".into(),
+            exit_code: Some(0),
+            last_observed_at: STAMP.into(),
+        })
+        .unwrap();
+    drop(store);
+    for _ in 0..2 {
+        let mut daemon = resumed_daemon("worker-freeze", &root);
+        let _ = daemon.tick(std::time::Instant::now()).unwrap();
+        let rows = retained_candidates(daemon.store_mut()).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].candidate_commit, commit);
+        assert!(
+            pending_frames(daemon.store_mut())
+                .iter()
+                .any(|(kind, _)| kind == "client.worker.state")
+        );
+        drop(daemon);
+    }
+    cleanup(&root);
+    cleanup(&repository);
+}

@@ -15,6 +15,7 @@
     "tsBuildInfoFile": "../../.cache/tsbuild/attention-notifications-tests.tsbuildinfo"
   },
   "include": [
-    "src/**/*.ts"
+    "src/**/*.ts",
+    "src/**/*.tsx"
   ]
 }

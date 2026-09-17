@@ -1130,6 +1130,7 @@ fn command_identity(
             &payload.occupancy.command.idempotency_key
         }
         ClientToServerMessage::ProviderReport(_)
+        | ClientToServerMessage::RepositoryRegistered { .. }
         | ClientToServerMessage::ExtensionReport(_)
         | ClientToServerMessage::Hello(_)
         | ClientToServerMessage::Heartbeat(_)
@@ -1156,6 +1157,13 @@ fn apply_effect(
     now: &Instant,
 ) -> Result<(), ClientExchangeError> {
     match &envelope.message {
+        ClientToServerMessage::WorkerState(payload) => {
+            settle_worker_exit(storage, node_id, payload, now)
+        }
+        ClientToServerMessage::RepositoryRegistered { receipt } => {
+            crate::device_providers::observe_repository_registration(storage, node_id, receipt)
+                .map_err(|_| ClientExchangeError::unavailable())
+        }
         ClientToServerMessage::ExtensionReport(report) => {
             crate::device_providers::observe_extensions(storage, node_id, report)
                 .map_err(|_| ClientExchangeError::unavailable())
@@ -1446,6 +1454,55 @@ fn repository_availability(value: WireRepositoryAvailability) -> RepositoryAvail
         WireRepositoryAvailability::PermissionDenied => RepositoryAvailability::PermissionDenied,
         WireRepositoryAvailability::ScanFailed => RepositoryAvailability::ScanFailed,
     }
+}
+
+fn settle_worker_exit(
+    storage: &mut SqliteStorage,
+    node_id: &str,
+    payload: &winwincode_client_port::messages::ClientWorkerStatePayload,
+    now: &Instant,
+) -> Result<(), ClientExchangeError> {
+    use winwincode_client_port::domain::ClientWorkerRunState;
+    use winwincode_control_plane::DeviceExecutionBindingService;
+    use winwincode_storage::{DeviceExecutionBindingRelease, DeviceExecutionBindingState};
+    if !matches!(
+        payload.state,
+        ClientWorkerRunState::Stopped
+            | ClientWorkerRunState::Crashed
+            | ClientWorkerRunState::Missing
+    ) {
+        return Ok(());
+    }
+    let Some(binding) = DeviceExecutionBindingService::new(storage)
+        .snapshot(&payload.worker_session_id)
+        .map_err(|_| ClientExchangeError::unavailable())?
+    else {
+        return Ok(());
+    };
+    let Some(grant) = WorkerLaunchGrantService::new(storage)
+        .snapshot(&binding.worker_launch_grant_id)
+        .map_err(|_| ClientExchangeError::unavailable())?
+    else {
+        return Ok(());
+    };
+    if binding.state == DeviceExecutionBindingState::Released
+        || binding.client_node_id != node_id
+        || payload.occupancy_lease_id.as_deref() != Some(binding.occupancy_lease_id.as_str())
+        || payload.worker_instance_id != grant.worker_instance_id
+    {
+        return Ok(());
+    }
+    let release = DeviceExecutionBindingRelease::try_new(
+        &binding.worker_session_id,
+        binding.device_execution_binding_id.replace("deb_", "req_"),
+        binding.revision,
+        now.clone(),
+    )
+    .map_err(|_| ClientExchangeError::unavailable())?;
+    DeviceExecutionBindingService::new(storage)
+        .release(&release, now)
+        .map_err(|_| ClientExchangeError::unavailable())?;
+    Ok(())
 }
 
 const fn repository_dirty_state(value: WireRepositoryDirtyState) -> RepositoryDirtyState {

@@ -15,6 +15,7 @@
     "tsBuildInfoFile": "../../.cache/tsbuild/home-dashboard-tests.tsbuildinfo"
   },
   "include": [
-    "src/**/*.ts"
+    "src/**/*.ts",
+    "src/**/*.tsx"
   ]
 }

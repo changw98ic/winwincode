@@ -150,6 +150,7 @@ fn generated_product_session_commands_and_queries_share_one_durable_service() {
             command: ChatSubmitCommandCommand::ChatSubmit,
             expected_revision: Revision(1),
             payload: ChatSubmitPayload {
+                attachments: None,
                 message: "Persist this public message".to_owned(),
                 product_session_id: ProductSessionId(id("psn", 1)),
             },

@@ -10,8 +10,8 @@ HTTP、WebSocket 和 ExecutionPort 合同。`tests/control-plane-api-coverage.te
 
 | 边界 | 分支数 | 用途 |
 | --- | ---: | --- |
-| HTTP Command | 24 | Community 中会改变产品状态的用户操作 |
-| HTTP Query | 27 | 列表、详情、Chat 历史和可重建运行投影 |
+| HTTP Command | 25 | Community 中会改变产品状态的用户操作 |
+| HTTP Query | 28 | 列表、详情、Chat 历史和可重建运行投影 |
 | WebSocket Event | 12 | 已保存的产品、消息、运行、审批、协作和 Worker 投影 |
 | ExecutionPort Message | 28 | Worker 注册、Job/Lease、运行、产物、模型、输入、审批、取消和结果 |
 
@@ -35,3 +35,17 @@ HTTP、WebSocket 和 ExecutionPort 合同。`tests/control-plane-api-coverage.te
 公共错误的 `details` 仍可携带递归的机器可读事实，但每层对象都应用同一份敏感字段
 拒绝规则。合同样本包含直接和嵌套泄露两类反例，生成的 Rust 与 TypeScript 类型也必须
 能够编译这一递归结构。
+
+## Chat 与会话管理
+
+`session.update` 使用 `productSessionId`、`title`、`archived` 和当前 revision 保存会话名称及归档状态。
+`session.list` 与 `session.get` 返回归档状态和可访问的设备/项目上下文；运行中的改名和归档保留当前执行身份。
+
+`chat.submit.attachments` 最多 4 项，支持 UTF-8 文本/代码与 PNG、JPEG、WebP 图片。
+每份文本最多 32 KiB，附件解码后合计最多 128 KiB；客户端会压缩较大的图片。
+消息历史保留附件，文本送入本轮上下文，图片作为 Codex 原生图片输入送到所选设备。
+Server 和 Worker 均校验大小、格式与内容；无法提交时保留输入草稿。
+
+续聊把当前会话中最新的完整消息及文本附件写入本轮执行目标，连同当前输入合计不超过 20 KB。
+历史图片不重复发送；再次分析原图时需重新附图。历史记录本身仍完整保存在 Server。
+Device 执行进程在交回本轮结果与产物后退出并释放容量，下一轮由同一项目重新启动。

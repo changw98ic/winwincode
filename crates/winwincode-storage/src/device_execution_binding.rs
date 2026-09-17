@@ -82,7 +82,7 @@ CREATE INDEX IF NOT EXISTS device_execution_reservation_facts_by_client
     ON device_execution_reservation_facts (client_node_id);
 ";
 
-const DEVICE_EXECUTION_BINDINGS_SCHEMA: &str = r"
+pub(crate) const DEVICE_EXECUTION_BINDINGS_SCHEMA: &str = r"
 CREATE TABLE IF NOT EXISTS device_execution_bindings (
     device_execution_binding_id TEXT PRIMARY KEY NOT NULL,
     worker_session_id TEXT NOT NULL,
@@ -954,16 +954,8 @@ impl<'storage> DeviceExecutionBindingLedger<'storage> {
         client_node_id: &str,
     ) -> Result<u64, DeviceExecutionBindingStoreError> {
         validate_client_node_id(client_node_id)?;
-        let stored: i64 = self
-            .connection()?
-            .query_row(
-                "SELECT COUNT(*) FROM worker_launch_grants
-                 WHERE client_node_id = ?1 AND state IN ('issued', 'consumed')",
-                [client_node_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .map_err(|sql| sql_error(&sql))?;
-        from_sql_integer(stored, "reserved worker session count")
+        crate::client_launch_grant::reserved_worker_sessions(self.connection()?, client_node_id)
+            .map_err(dependency_error)
     }
 
     fn transaction(

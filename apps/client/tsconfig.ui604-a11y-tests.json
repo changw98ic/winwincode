@@ -15,6 +15,7 @@
     "tsBuildInfoFile": "../../.cache/tsbuild/ui604-a11y-tests.tsbuildinfo"
   },
   "include": [
-    "src/**/*.ts"
+    "src/**/*.ts",
+    "src/**/*.tsx"
   ]
 }

@@ -1,0 +1,56 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+
+.wwc-chat-messages, .wwc-chat-composer {
+  --dsw-font-family: var(--wwc-font-family);
+  --dsw-shadow-lv2: 0 4px 12px rgb(0 0 0 / 2%), 0 2px 8px rgb(0 0 0 / 4%);
+  --ds-font-family-code: var(--wwc-font-family-mono);
+  --ds-transition-duration: 120ms;
+  --ds-ease-in-out: ease-in-out;
+  --dsw-font-xs-13: 13px/20px var(--dsw-font-family);
+  --dsw-font-markdown-base: 16px/28px var(--dsw-font-family);
+  --dsw-font-markdown-base-strong: 600 16px/28px var(--dsw-font-family);
+  --dsw-font-markdown-h1: 700 24px/34px var(--dsw-font-family);
+  --dsw-font-markdown-h2: 700 22px/32px var(--dsw-font-family);
+  --dsw-font-markdown-h3: 700 20px/30px var(--dsw-font-family);
+  --dsw-font-markdown-h4: 600 16px/28px var(--dsw-font-family);
+  --dsw-font-markdown-code: 14px/22px var(--ds-font-family-code);
+  --dsw-font-markdown-code-block: 13px/22px var(--ds-font-family-code);
+  --dsw-font-markdown-table: 15px/25px var(--dsw-font-family);
+  --dsw-font-markdown-table-head: 500 15px/25px var(--dsw-font-family);
+  --shiki-color-text: var(--wwc-color-text);
+  --shiki-color-background: var(--wwc-color-surface-subtle);
+  --shiki-token-constant: #005cc5;
+  --shiki-token-string: #237a38;
+  --shiki-token-comment: var(--wwc-color-text-muted);
+  --shiki-token-keyword: #a626a4;
+  --shiki-token-parameter: var(--wwc-color-text);
+  --shiki-token-function: #795e26;
+  --shiki-token-string-expression: #237a38;
+  --shiki-token-punctuation: var(--wwc-color-text-secondary);
+  --shiki-token-link: #005cc5;
+}
+
+.wwc-dsh-markdowntext-markdown > :first-child { margin-top: 0; }
+.wwc-dsh-markdowntext-markdown > :last-child { margin-bottom: 0; }
+.wwc-dsh-codeblock-block :where(pre) { white-space: pre; word-break: normal; }
+
+[data-theme='dark'] .wwc-chat-messages {
+  --shiki-token-constant: #90bfff;
+  --shiki-token-string: #9ddbad;
+  --shiki-token-keyword: #e5a5ed;
+  --shiki-token-function: #e9cb8c;
+  --shiki-token-string-expression: #9ddbad;
+  --shiki-token-link: #90bfff;
+}
+
+/* Shiki token classes keep highlighting within the app CSP. */
+.wwc-syntax-color-text { color: var(--shiki-color-text); }
+.wwc-syntax-token-constant { color: var(--shiki-token-constant); }
+.wwc-syntax-token-string { color: var(--shiki-token-string); }
+.wwc-syntax-token-comment { color: var(--shiki-token-comment); }
+.wwc-syntax-token-keyword { color: var(--shiki-token-keyword); }
+.wwc-syntax-token-parameter { color: var(--shiki-token-parameter); }
+.wwc-syntax-token-function { color: var(--shiki-token-function); }
+.wwc-syntax-token-string-expression { color: var(--shiki-token-string-expression); }
+.wwc-syntax-token-punctuation { color: var(--shiki-token-punctuation); }
+.wwc-syntax-token-link { color: var(--shiki-token-link); }

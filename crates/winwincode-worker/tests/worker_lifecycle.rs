@@ -1008,6 +1008,7 @@ fn dispatch(job_suffix: char, scope: ExecutionScope) -> JobDispatchMessage {
     let goal = "Perform the approved fixture change.";
     JobDispatchMessage {
         job: ExecutionJob {
+            attachments: None,
             model_selection: None,
             attempt: 1,
             execution_profile: if delivery_stage { "planner" } else { "fixture" }.to_owned(),
@@ -1024,6 +1025,7 @@ fn dispatch(job_suffix: char, scope: ExecutionScope) -> JobDispatchMessage {
             )),
             scope,
             work_input: delivery_stage.then(|| WorkRunInput {
+                device_target: None,
                 delivery_spec_id: "spec-fixture".into(),
                 delivery_spec_revision: Revision(2),
                 schema_version: SchemaVersion::WinwincodeV1,
@@ -3220,6 +3222,10 @@ async fn chat_files_survive_cleanup_and_wait_for_final_artifact_ack() {
         let pump = codex.clone();
         let mut worker = test_worker(worker_config(1), port, codex);
         register(&mut worker).await;
+        assert!(
+            !worker.work_drained(),
+            "a new Worker waits for its first job"
+        );
         worker
             .accept_control(
                 &ExecutionPortMessage::JobDispatchMessage({
@@ -3233,6 +3239,10 @@ async fn chat_files_survive_cleanup_and_wait_for_final_artifact_ack() {
             .await
             .unwrap();
         let active = worker.active_jobs()[0].clone();
+        assert!(
+            !worker.work_drained(),
+            "running work keeps the Worker alive"
+        );
         let checkout = pump.workspace(&active.codex_thread_id);
         let common = Command::new("git")
             .arg("-C")
@@ -3311,6 +3321,10 @@ async fn chat_files_survive_cleanup_and_wait_for_final_artifact_ack() {
             .await
             .expect("open acknowledgement");
         assert_no_outcome(&messages);
+        assert!(
+            !worker.work_drained(),
+            "artifacts must reach the Server before exit"
+        );
         acknowledge_candidate(&mut worker, &active, &artifact, 1, 'F')
             .await
             .expect("final candidate acknowledgement");
@@ -3327,6 +3341,10 @@ async fn chat_files_survive_cleanup_and_wait_for_final_artifact_ack() {
             }
         );
         assert!(worker.active_jobs().is_empty());
+        assert!(
+            worker.work_drained(),
+            "success and failure both release the managed Worker"
+        );
         assert!(
             !checkout.exists(),
             "temporary checkout is removed after acknowledgement"
@@ -4084,5 +4102,37 @@ async fn product_session_dispatch_binds_without_a_stage_run() {
             ),
             format!("submit:{}", thread('A').0),
         ]
+    );
+}
+
+#[tokio::test]
+async fn a_lost_binding_response_resumes_the_prepared_turn_once() {
+    let port = RecordingPort::default();
+    let failures = Rc::clone(&port.failures_remaining);
+    let codex = FakeCodex::with_threads([thread('A')]);
+    let calls = codex.clone();
+    let mut worker = test_worker(worker_config(1), port, codex);
+    register(&mut worker).await;
+    failures.set(2);
+    let message = ExecutionPortMessage::JobDispatchMessage(dispatch('A', delivery_scope('A')));
+    worker
+        .accept_control(&message, now())
+        .await
+        .expect_err("binding response unavailable");
+    worker
+        .poll_codex(now())
+        .await
+        .expect("resume after reconnect");
+    worker
+        .poll_codex(now())
+        .await
+        .expect("poll without duplicate submission");
+    assert_eq!(
+        calls
+            .calls()
+            .iter()
+            .filter(|call| call.starts_with("submit:"))
+            .count(),
+        1
     );
 }

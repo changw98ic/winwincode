@@ -634,6 +634,8 @@ pub struct SubmissionInfo {
 /// fallback.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TurnSubmissionOptions {
+    /// Validated user images forwarded as native Codex image input.
+    pub image_urls: Vec<String>,
     /// Exact JSON Schema passed to Codex Core for the final model output.
     /// Ordinary React turns use `None`.
     pub final_output_json_schema: Option<Value>,
@@ -1904,11 +1906,15 @@ pub const fn descriptor() -> KernelDescriptor {
 }
 
 fn user_text_request(text: String, options: &TurnSubmissionOptions) -> TurnInputRequest {
-    TurnInputRequest::user_input(vec![UserInput::Text {
+    let mut input = vec![UserInput::Text {
         text,
         text_elements: Vec::new(),
-    }])
-    .on_start(TurnStartOptions {
+    }];
+    input.extend(options.image_urls.iter().map(|url| UserInput::Image {
+        image_url: url.clone(),
+        detail: None,
+    }));
+    TurnInputRequest::user_input(input).on_start(TurnStartOptions {
         final_output_json_schema: options.final_output_json_schema.clone(),
         submit_change_batch: options.submit_change_batch,
         ..TurnStartOptions::default()
@@ -2406,9 +2412,24 @@ mod tests {
         let request = user_text_request(
             "return structured output".to_owned(),
             &TurnSubmissionOptions {
+                image_urls: Vec::new(),
                 final_output_json_schema: Some(schema.clone()),
                 submit_change_batch: false,
             },
+        );
+        let image_url = "data:image/png;base64,aW1hZ2U=".to_owned();
+        let image_request = user_text_request(
+            "inspect".to_owned(),
+            &TurnSubmissionOptions {
+                image_urls: vec![image_url.clone()],
+                ..TurnSubmissionOptions::default()
+            },
+        );
+        let codex_core_api::TurnInput::UserInput { content, .. } = image_request.input else {
+            panic!("expected user input")
+        };
+        assert!(
+            matches!(&content[1], codex_core_api::UserInput::Image { image_url: actual, .. } if actual == &image_url)
         );
         assert_eq!(request.start.final_output_json_schema, Some(schema));
         assert_eq!(

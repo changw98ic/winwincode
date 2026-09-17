@@ -6,10 +6,7 @@ use std::fmt;
 
 use winwincode_delivery::{
     application::workrun_execution::DeliveryTerminalOutcomeFacts,
-    domain::{
-        Delivery, DeliveryValidationError, FrozenDeliveryCandidate,
-        candidate::freeze_delivery_candidate_from_source,
-    },
+    domain::{Delivery, DeliveryValidationError, FrozenDeliveryCandidate},
 };
 use winwincode_domain::RepositoryScope;
 use winwincode_domain::{ArtifactId, DeliveryId, Sha256Digest};
@@ -101,12 +98,16 @@ pub(crate) fn resolve(
         )
         .into());
     }
-    freeze_delivery_candidate_from_source(
+    crate::delivery_verdict_authority::freeze_source(
+        storage,
+        artifacts,
+        source_resolver,
+        scope,
         &delivery,
-        &winwincode_storage::delivery_candidate_source(&source),
+        &source,
         terminal_facts,
     )
-    .map_err(Into::into)
+    .map_err(|error| CandidateResolutionError::Storage(StorageError::adapter(error.to_string())))
 }
 
 /// Rebuilds a candidate source from a complete Artifact and the current

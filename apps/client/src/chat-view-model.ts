@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import type { ChatAttachment } from './generated/contracts.js'
+
 import {
   ControlPlaneClientError,
   type ControlPlaneClient,
@@ -126,6 +128,7 @@ export interface ChatViewModelOptions {
   readonly actor: Actor
   readonly scope: RepositoryScope
   readonly productSessionId: ProductSessionId | null
+  readonly clientId?: string
   readonly nextSubscriptionId: () => ControlPlaneWebSocketSubscriptionId
   readonly nextRequestId: () => RequestId
   /** Keep the browser route bound to the ProductSession selected by this view-model. */
@@ -153,7 +156,7 @@ export interface ChatViewModel {
   selectSession(productSessionId: ProductSessionId): Promise<void>
   selectModelRoute(modelRoute: ModelRoute): void
   createSession(input: ChatCreateSessionInput): Promise<void>
-  submitMessage(message: string, repositoryBindingId?: string): Promise<void>
+  submitMessage(message: string, repositoryBindingId?: string, attachments?: readonly ChatAttachment[]): Promise<void>
   cancelSession(reason: string): Promise<void>
   respondToInput(
     inputRequestId: string,
@@ -546,7 +549,6 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
   let selectedModelRouteIdentity: string | null = null
   let modelRouteSelectionEstablished = false
   let modelRouteSelectionIssue: ModelRouteAvailabilityReason | null = null
-  let readyDeviceSessionId: ProductSessionId | null = null
   let pendingDeviceSession: Parameters<NonNullable<ChatViewModelOptions['launchDeviceSession']>>[0] | null = null
   const nowMillis = options.nowMillis ?? Date.now
 
@@ -568,9 +570,12 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
     availability: ModelRouteAvailabilityPage,
   ): ModelRoute | null {
     if (!modelRouteSelectionEstablished) {
-      const defaultRoute = availability.items.find(candidate => (
-        candidate.isDefault && isReadyModelRoute(candidate)
+      const routes = availability.items.filter(candidate => (
+        isReadyModelRoute(candidate)
+        && (options.clientId === undefined || candidate.clientId === options.clientId)
       ))
+      const defaultRoute = routes.find(candidate => candidate.isDefault)
+        ?? (options.clientId === undefined ? undefined : routes[0])
       if (defaultRoute === undefined) return null
       selectedModelRouteIdentity = modelRouteIdentity(defaultRoute.route)
       modelRouteSelectionEstablished = true
@@ -580,8 +585,10 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
     if (selectedModelRouteIdentity === null) return null
     const matching = availability.items.find(candidate => (
       modelRouteIdentity(candidate.route) === selectedModelRouteIdentity
+      && (options.clientId === undefined || candidate.clientId === options.clientId)
     ))
-    if (matching === undefined || !isReadyModelRoute(matching)) {
+    if (matching === undefined || !isReadyModelRoute(matching)
+      || (options.clientId !== undefined && matching.clientId !== options.clientId)) {
       modelRouteSelectionIssue = matching?.reason ?? availability.reason
       selectedModelRouteIdentity = null
       return null
@@ -692,7 +699,7 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
         '模型路由可用性分页响应在读取期间发生了变化。',
       )
       for (const item of response.result.items) {
-        const identity = modelRouteIdentity(item.route)
+        const identity = JSON.stringify([item.clientId ?? null, modelRouteIdentity(item.route)])
         if (identities.has(identity)) throw clientFailure(
           'CHAT_MODEL_ROUTE_DUPLICATE',
           '模型路由可用性页面包含重复路由。',
@@ -862,6 +869,10 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
     snapshot: ChatSnapshot,
     realtimeStatus: ChatRealtimeStatus,
   ): void {
+    if (snapshot.session?.modelRoute !== undefined) {
+      selectedModelRouteIdentity = modelRouteIdentity(snapshot.session.modelRoute)
+      modelRouteSelectionEstablished = true
+    }
     const selectedModelRoute = reconcileSelectedModelRoute(
       snapshot.modelRouteAvailability,
     )
@@ -1412,7 +1423,7 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
     }
   }
 
-  async function submitMessage(message: string, repositoryBindingId?: string): Promise<void> {
+  async function submitMessage(message: string, repositoryBindingId?: string, attachments?: readonly ChatAttachment[]): Promise<void> {
     const value = message.trim()
     if (value.length === 0) {
       interactionFailure('CHAT_MESSAGE_REQUIRED', '请输入消息后再发送。')
@@ -1428,17 +1439,19 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
     const active = controller()
     patch({ interaction: frozenInteraction('submitting') })
     try {
-      if (options.launchDeviceSession !== undefined && readyDeviceSessionId !== productSessionId && currentState.messages.length === 0) {
+      if (options.launchDeviceSession !== undefined) {
         const route = currentState.modelRouteAvailability?.items.find(candidate =>
-          modelRouteIdentity(candidate.route) === (currentState.selectedModelRoute === null ? null : modelRouteIdentity(currentState.selectedModelRoute)))
+          modelRouteIdentity(candidate.route) === (currentState.selectedModelRoute === null ? null : modelRouteIdentity(currentState.selectedModelRoute))
+          && (options.clientId === undefined || candidate.clientId === options.clientId))
         if (pendingDeviceSession?.productSessionId !== productSessionId) {
-          if (route?.clientId === undefined || !repositoryBindingId) throw clientFailure('CHAT_DEVICE_REQUIRED', '请选择执行设备上的项目。')
-          pendingDeviceSession = { clientId: route.clientId, repositoryBindingId, productSessionId }
+          const clientId = session.deviceContext?.clientId ?? route?.clientId
+          const bindingId = session.deviceContext?.repositoryBindingId ?? repositoryBindingId
+          if (clientId === undefined || !bindingId) throw clientFailure('CHAT_DEVICE_REQUIRED', '请选择执行设备上的项目。')
+          pendingDeviceSession = { clientId, repositoryBindingId: bindingId, productSessionId }
         }
       }
       if (pendingDeviceSession !== null && options.launchDeviceSession !== undefined) {
         await options.launchDeviceSession(pendingDeviceSession)
-        readyDeviceSessionId = pendingDeviceSession.productSessionId
         pendingDeviceSession = null
       }
       const response = await options.client.command({
@@ -1446,7 +1459,7 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
         requestId: options.nextRequestId(),
         command: CommandName.ChatSubmit,
         expectedRevision: session.revision,
-        payload: { productSessionId, message: value },
+        payload: { productSessionId, message: value, attachments: attachments ?? [] },
       }, { signal: active.signal })
       if (!isCurrent(ownGeneration)) return
       const completed = expectCompletedCommand(response, CommandName.ChatSubmit)
@@ -1522,13 +1535,11 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
       activeProductSessionId = input.productSessionId
       applySessionMutation(completed.result)
       notifyActiveSession()
-      const route = currentState.modelRouteAvailability?.items.find(candidate => modelRouteIdentity(candidate.route) === modelRouteIdentity(modelRoute))
+      const route = currentState.modelRouteAvailability?.items.find(candidate => modelRouteIdentity(candidate.route) === modelRouteIdentity(modelRoute)
+        && (options.clientId === undefined || candidate.clientId === options.clientId))
       if (options.launchDeviceSession !== undefined) {
         if (route?.clientId === undefined || !input.repositoryBindingId) throw clientFailure('CHAT_DEVICE_REQUIRED', '请选择执行设备上的项目。')
         pendingDeviceSession = { clientId: route.clientId, repositoryBindingId: input.repositoryBindingId, productSessionId: input.productSessionId }
-        await options.launchDeviceSession(pendingDeviceSession)
-        readyDeviceSessionId = pendingDeviceSession.productSessionId
-        pendingDeviceSession = null
       }
       await load(true)
     } catch (error) {
@@ -1752,6 +1763,7 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
       const identity = modelRouteIdentity(modelRoute)
       const selected = currentState.modelRouteAvailability?.items.find(candidate => (
         isReadyModelRoute(candidate)
+        && (options.clientId === undefined || candidate.clientId === options.clientId)
         && modelRouteIdentity(candidate.route) === identity
       ))
       if (selected === undefined) {
@@ -1773,8 +1785,8 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
     async createSession(input) {
       await createSession(input)
     },
-    async submitMessage(message, repositoryBindingId) {
-      await submitMessage(message, repositoryBindingId)
+    async submitMessage(message, repositoryBindingId, attachments) {
+      await submitMessage(message, repositoryBindingId, attachments)
     },
     async cancelSession(reason) {
       await cancelSession(reason)

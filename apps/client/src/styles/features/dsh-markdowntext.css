@@ -1,0 +1,267 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* Adapted from DeepSeek Harness (c) 2026 DeepSeek, MIT. */
+/* Visual baseline: deepsuite `@deepseek/md` markdown.css, adapted to CSS
+   Modules. Cite pills, header anchors, and thinking-small variants are
+   intentionally absent (no matching DOM). Token names match that sheet. */
+
+.wwc-dsh-markdowntext-markdown {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font: var(--dsw-font-markdown-base);
+  color: var(--dsw-alias-label-primary);
+}
+
+.wwc-dsh-markdowntext-markdown strong {
+  font-weight: 600;
+}
+
+.wwc-dsh-markdowntext-markdown h1 {
+  font: var(--dsw-font-markdown-h1);
+  margin: 32px 0 16px;
+}
+
+.wwc-dsh-markdowntext-markdown h2 {
+  font: var(--dsw-font-markdown-h2);
+  margin: 32px 0 16px;
+}
+
+.wwc-dsh-markdowntext-markdown h3 {
+  font: var(--dsw-font-markdown-h3);
+  margin: 32px 0 16px;
+}
+
+.wwc-dsh-markdowntext-markdown h4 {
+  font: var(--dsw-font-markdown-h4);
+  margin: 16px 0;
+}
+
+.wwc-dsh-markdowntext-markdown :where(h5, h6) {
+  font: var(--dsw-font-markdown-base-strong);
+  margin: 16px 0;
+}
+
+.wwc-dsh-markdowntext-markdown :where(h1, h2, h3, h4, h5, h6) strong {
+  font-weight: inherit;
+}
+
+.wwc-dsh-markdowntext-markdown p {
+  margin: 16px 0;
+}
+
+/* Tighten h4–h6 against a following list (design: 8px gap). */
+.wwc-dsh-markdowntext-markdown :where(h4, h5, h6) + :where(ul, ol) {
+  margin-top: 8px;
+}
+
+.wwc-dsh-markdowntext-markdown :where(h4, h5, h6):has(+ :where(ul, ol)) {
+  margin-bottom: 8px;
+}
+
+.wwc-dsh-markdowntext-markdown a {
+  /* deepsuite markdown.css uses brand-text (blue in newDesign); this sheet
+     keeps design-platform brand-text as near-black, so links use the blue
+     business-primary alias instead. */
+  color: var(--dsw-alias-state-business-primary);
+  transition: box-shadow var(--ds-transition-duration) var(--ds-ease-in-out);
+  position: relative;
+  text-decoration: none;
+  /* Transparent hit-area padding; literal zero-alpha only (no painted color). */
+  border-left: 3px solid rgb(255 255 255 / 0);
+  border-right: 3px solid rgb(255 255 255 / 0);
+  border-top: 2px solid rgb(255 255 255 / 0);
+  border-bottom: 2px solid rgb(255 255 255 / 0);
+  margin-left: -3px;
+  margin-right: -3px;
+}
+
+.wwc-dsh-markdowntext-markdown a:hover,
+.wwc-dsh-markdowntext-markdown a:focus {
+  outline: none;
+  text-decoration: underline var(--dsw-alias-state-business-primary);
+}
+
+.wwc-dsh-markdowntext-markdown a:focus-visible {
+  box-shadow: 0 0 0 2px var(--dsw-alias-state-business-primary);
+}
+
+.wwc-dsh-markdowntext-markdown :where(ul, ol) {
+  margin: 16px 0;
+  padding-left: 18px;
+}
+
+.wwc-dsh-markdowntext-markdown li:not(:first-child) {
+  margin-top: 6px;
+}
+
+.wwc-dsh-markdowntext-markdown li > :where(ul, ol) {
+  margin-top: 4px;
+}
+
+.wwc-dsh-markdowntext-markdown li::marker {
+  line-height: 28px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+/* Nested ol under ul/ol: markers inside (models sometimes emit this shape). */
+.wwc-dsh-markdowntext-markdown :where(ul, ol) ol {
+  list-style-position: inside;
+  padding-left: 0;
+}
+
+.wwc-dsh-markdowntext-markdown :where(ul, ol) ol li p {
+  display: inline;
+}
+
+.wwc-dsh-markdowntext-markdown li > p {
+  margin: 8px 0;
+}
+
+.wwc-dsh-markdowntext-markdown li > *:first-child {
+  margin-top: 0;
+}
+
+/* Keep list-nested code-block vertical margins (design: +4px vs other last children). */
+.wwc-dsh-markdowntext-markdown li > *:last-child:not(.md-code-block) {
+  margin-bottom: 0;
+}
+
+.wwc-dsh-markdowntext-markdown hr {
+  display: block;
+  border: none;
+  height: 1px;
+  margin: 32px 0;
+  background: var(--dsw-alias-border-l2);
+}
+
+.wwc-dsh-markdowntext-markdown blockquote {
+  border-left: 2px solid var(--dsw-alias-label-caption);
+  margin: 16px 0 0;
+  padding-left: 14px;
+}
+
+.wwc-dsh-markdowntext-markdown pre {
+  margin: 16px 0;
+  font-family: var(--ds-font-family-code);
+  overflow: auto;
+}
+
+.wwc-dsh-markdowntext-markdown :not(pre) > code {
+  display: inline-flex;
+  align-items: center;
+  box-sizing: border-box;
+  font: var(--dsw-font-markdown-code);
+  font-family: var(--ds-font-family-code);
+  font-size: 0.875em !important;
+  background-color: var(--dsw-alias-markdown-inline-code);
+  border-radius: 6px;
+  padding: 0 5px;
+}
+
+.wwc-dsh-markdowntext-markdown :where(h1, h2, h3, h4, h5, h6) code {
+  font: inherit;
+  font-family: var(--ds-font-family-code);
+}
+
+.wwc-dsh-markdowntext-markdown .katex-display {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.wwc-dsh-markdowntext-markdown input[type='checkbox'] {
+  margin: 0 8px 0 0;
+  accent-color: var(--dsw-alias-label-secondary);
+}
+
+.wwc-dsh-markdowntext-tableScroll {
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+
+.wwc-dsh-markdowntext-tableScroll table {
+  border-collapse: collapse;
+  width: max-content;
+  max-width: max-content;
+}
+
+.wwc-dsh-markdowntext-tableScroll th {
+  text-align: start;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--dsw-alias-border-l3);
+  border-top: none;
+  font: var(--dsw-font-markdown-table-head);
+  max-width: 320px;
+  max-width: min(30vw, 320px);
+  min-width: 100px;
+}
+
+.wwc-dsh-markdowntext-tableScroll td {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+  font: var(--dsw-font-markdown-table);
+  max-width: 320px;
+  max-width: min(30vw, 320px);
+  min-width: 100px;
+}
+
+.wwc-dsh-markdowntext-tableScroll th:first-child,
+.wwc-dsh-markdowntext-tableScroll td:first-child {
+  padding-left: 0;
+}
+
+.wwc-dsh-markdowntext-tableScroll td:last-child {
+  padding-right: 0;
+}
+
+.wwc-dsh-markdowntext-tableScroll table code {
+  font-size: 13px;
+}
+
+.wwc-dsh-markdowntext-markdown > *:first-child,
+.wwc-dsh-markdowntext-markdown p:first-child {
+  margin-top: 0 !important;
+}
+
+.wwc-dsh-markdowntext-markdown > *:last-child,
+.wwc-dsh-markdowntext-markdown p:last-child {
+  margin-bottom: 0 !important;
+}
+
+.wwc-dsh-markdowntext-imageAlt {
+  color: var(--dsw-alias-label-tertiary);
+  font-style: italic;
+}
+
+.wwc-dsh-markdowntext-image {
+  display: block;
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  margin: 0;
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-base);
+  object-fit: contain;
+}
+
+/* Inline file mention: the same link language this sheet gives anchors (and
+   thereby URL-promoted inline code) — link-blue at rest, underline only on
+   hover/focus. An underline at rest reads badly inside the code chip, where
+   it collides with monospace descenders and the pill background. */
+.wwc-dsh-markdowntext-fileMention {
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: var(--dsw-alias-state-business-primary);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.wwc-dsh-markdowntext-fileMention:hover,
+.wwc-dsh-markdowntext-fileMention:focus {
+  outline: none;
+  text-decoration: underline var(--dsw-alias-state-business-primary);
+  text-underline-offset: 3px;
+}

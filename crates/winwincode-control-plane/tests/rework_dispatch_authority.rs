@@ -193,6 +193,9 @@ fn precise_rework_dispatch_authority_is_sealed_and_work_item_scoped() {
     assert!(dispatch(&changed, intent, Some(auth.clone()), "remediator").is_err());
 
     let config = DeliveryExecutionConfig {
+        device_target: None,
+
+        model_selection: None,
         payload_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
         candidate_ref: Some(auth.candidate_ref().into()),
         workspace: ExecutionWorkspace {

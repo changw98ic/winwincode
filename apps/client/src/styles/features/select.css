@@ -1,0 +1,117 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* Menu and option styling adapted from DSH ModelSelect.module.css,
+   Copyright (c) 2026 DeepSeek, MIT; see THIRD_PARTY_NOTICES.md. */
+
+.wwc-shell select:not([multiple]) {
+  appearance: none;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 40px;
+  padding: 8px 36px 8px 12px;
+  border: 1px solid var(--wwc-color-border-subtle);
+  border-radius: 8px;
+  background-color: var(--wwc-color-surface);
+  background-image: linear-gradient(45deg, transparent 50%, var(--wwc-color-text-muted) 50%), linear-gradient(135deg, var(--wwc-color-text-muted) 50%, transparent 50%);
+  background-position: calc(100% - 17px) 50%, calc(100% - 13px) 50%;
+  background-size: 4px 4px;
+  background-repeat: no-repeat;
+  color: var(--wwc-color-text);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 20px;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.wwc-shell select:not([multiple]):hover:not(:disabled) {
+  background-color: var(--wwc-color-surface-subtle);
+  border-color: var(--wwc-color-border-control);
+}
+
+.wwc-shell select:not([multiple]):focus-visible {
+  outline: 2px solid var(--wwc-color-focus);
+  outline-offset: 2px;
+}
+
+.wwc-shell select:disabled {
+  color: var(--wwc-color-text-muted);
+  cursor: not-allowed;
+}
+
+.wwc-chat-composer select:not([multiple]) {
+  min-height: 36px;
+  border-radius: 24px;
+  background-color: var(--wwc-color-surface-subtle);
+}
+
+/* Native selection keeps keyboard, labels and form behavior in one control. */
+@supports (appearance: base-select) {
+  .wwc-shell select:not([multiple]),
+  .wwc-shell select:not([multiple])::picker(select) {
+    appearance: base-select;
+  }
+
+  .wwc-shell select:not([multiple]) {
+    padding-right: 12px;
+    background-image: none;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .wwc-shell select:not([multiple])::picker-icon {
+    content: '';
+    width: 7px;
+    height: 7px;
+    margin: 0 2px 3px 8px;
+    border-right: 1.5px solid currentcolor;
+    border-bottom: 1.5px solid currentcolor;
+    color: var(--wwc-color-text-muted);
+    rotate: 45deg;
+  }
+
+  .wwc-shell select:open::picker-icon { rotate: 225deg; }
+
+  .wwc-shell select:not([multiple])::picker(select) {
+    min-width: anchor-size(width);
+    max-width: calc(100vw - 24px);
+    max-height: min(360px, 60dvh);
+    overflow: auto;
+    margin-block: 6px;
+    padding: 4px;
+    border: 1px solid var(--wwc-color-border-subtle);
+    border-radius: 12px;
+    background: var(--wwc-color-surface);
+    color: var(--wwc-color-text);
+    box-shadow: 0 8px 28px rgb(0 0 0 / 18%);
+  }
+
+  .wwc-shell select:not([multiple]) option {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-height: 38px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--wwc-color-text);
+    font-size: 14px;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    cursor: pointer;
+  }
+
+  .wwc-shell select:not([multiple]) option:hover,
+  .wwc-shell select:not([multiple]) option:focus-visible {
+    background: var(--wwc-color-surface-subtle);
+    outline: none;
+  }
+
+  .wwc-shell select:not([multiple]) option:checked {
+    background: var(--wwc-color-selection);
+    font-weight: 600;
+  }
+
+  .wwc-shell select:not([multiple]) option::checkmark { order: 1; margin-left: auto; }
+  .wwc-shell select:not([multiple]) option:disabled { color: var(--wwc-color-text-muted); cursor: not-allowed; }
+}

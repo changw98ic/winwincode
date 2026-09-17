@@ -12638,6 +12638,7 @@ dependencies = [
  "base64 0.22.1",
  "codex-apply-patch",
  "codex-protocol",
+ "codex-shell-command",
  "ed25519-dalek",
  "futures",
  "rusqlite",

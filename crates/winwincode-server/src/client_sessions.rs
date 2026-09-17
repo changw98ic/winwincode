@@ -199,6 +199,49 @@ pub struct ClientSessionsApplication {
 }
 
 impl ClientSessionsApplication {
+    pub(crate) fn resume_delivery_launches(&self) -> Result<(), ClientSessionsError> {
+        let jobs = self
+            .open_storage()?
+            .repository_scheduler()
+            .map_err(|_| ClientSessionsError::unavailable())?
+            .pending_device_launches()
+            .map_err(|_| ClientSessionsError::unavailable())?;
+        for payload in jobs {
+            let job: winwincode_execution_port::generated::ExecutionJob =
+                serde_json::from_slice(&payload).map_err(|_| ClientSessionsError::unavailable())?;
+            let winwincode_execution_port::generated::ExecutionScope::WorkRunExecutionScope(scope) =
+                &job.scope
+            else {
+                continue;
+            };
+            let Some(target) = job
+                .work_input
+                .as_ref()
+                .and_then(|input| input.device_target.as_ref())
+            else {
+                continue;
+            };
+            // Each pass advances every queued role once; an offline Device does not delay other jobs.
+            let prepared = self.prepare(
+                &target.user_id,
+                &json!({
+                    "schemaVersion": SUPPORTED_SCHEMA_VERSION,
+                    "clientId": target.client_id,
+                    "repositoryBindingId": target.repository_binding_id,
+                    "workRunId": scope.work_run_id,
+                }),
+            );
+            if let Ok(prepared) = prepared
+                && matches!(
+                    self.poll(&prepared.grant.worker_launch_grant_id),
+                    Ok(PollOutcome::Consumed)
+                )
+            {
+                self.route_work_run(&target.user_id, &prepared)?;
+            }
+        }
+        Ok(())
+    }
     /// Composes the launch application over one product-state directory.
     ///
     /// # Errors
@@ -348,7 +391,7 @@ impl ClientSessionsApplication {
             return Err(ClientSessionsError::invalid_request());
         }
         let product_session_id = if let Some(work_run_id) = &work_run_id {
-            storage
+            let record = storage
                 .load_active_execution_job_record_for_work_run(work_run_id)
                 .map_err(|_| ClientSessionsError::unavailable())?
                 .ok_or_else(|| {
@@ -356,10 +399,22 @@ impl ClientSessionsApplication {
                         ClientSessionsErrorKind::InvalidRequest,
                         "workRunId does not name an active execution job",
                     )
-                })?
-                .scope
-                .product_session_id
-                .0
+                })?;
+            let job: winwincode_execution_port::generated::ExecutionJob =
+                serde_json::from_slice(&record.dispatch_payload)
+                    .map_err(|_| ClientSessionsError::unavailable())?;
+            if let Some(target) = job
+                .work_input
+                .as_ref()
+                .and_then(|input| input.device_target.as_ref())
+                && (target.user_id != user_id
+                    || target.client_node_id != node.client_node_id
+                    || target.client_id != public_client_id
+                    || target.repository_binding_id != repository_binding_id)
+            {
+                return Err(ClientSessionsError::invalid_request());
+            }
+            record.scope.product_session_id.0
         } else {
             let session = fields
                 .get("productSession")
@@ -405,19 +460,50 @@ impl ClientSessionsApplication {
         {
             if grant.client_node_id != node.client_node_id
                 || grant.repository_binding_id != repository_binding_id
-                || grant.occupancy_lease_id != lease.occupancy_lease_id
-                || grant.occupancy_fencing_token != lease.fencing_token
+                || grant.holder_user_id != user_id
             {
                 return Err(ClientSessionsError::invalid_request());
             }
-            return Ok(PreparedLaunch {
-                node,
-                occupancy_lease_id: lease.occupancy_lease_id,
-                occupancy_fencing_token: lease.fencing_token,
-                grant,
-                product_session_id,
-                work_run_id: work_run_id.map(|id| id.0),
-            });
+            let ended_chat_worker = work_run_id.is_none()
+                && grant.work_run_id.is_none()
+                && storage
+                    .device_execution_binding_ledger()
+                    .map_err(|_| ClientSessionsError::unavailable())?
+                    .snapshot(&grant.worker_session_id)
+                    .map_err(|_| ClientSessionsError::unavailable())?
+                    .is_some_and(|binding| {
+                        binding.state == winwincode_storage::DeviceExecutionBindingState::Released
+                    });
+            if !ended_chat_worker {
+                if grant.occupancy_lease_id != lease.occupancy_lease_id
+                    || grant.occupancy_fencing_token != lease.fencing_token
+                {
+                    return Err(ClientSessionsError::invalid_request());
+                }
+                return Ok(PreparedLaunch {
+                    node,
+                    occupancy_lease_id: lease.occupancy_lease_id,
+                    occupancy_fencing_token: lease.fencing_token,
+                    grant,
+                    product_session_id,
+                    work_run_id: work_run_id.map(|id| id.0),
+                });
+            }
+            let mut credentials = WorkerSessionCredentialService::new(&mut storage);
+            if credentials
+                .status_for_session(&grant.worker_session_id)
+                .map_err(|_| ClientSessionsError::unavailable())?
+                .is_some()
+            {
+                credentials
+                    .revoke_for_session(
+                        &grant.worker_session_id,
+                        user_id,
+                        Some("released Chat worker replaced"),
+                        &now,
+                    )
+                    .map_err(|_| ClientSessionsError::unavailable())?;
+            }
         }
         let worker_session_id = generate_prefixed_id("wsn_")?;
         let worker_id = generate_prefixed_id("wrk_")?;

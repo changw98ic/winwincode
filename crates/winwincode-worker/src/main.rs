@@ -69,6 +69,7 @@ fn print_identity() {
 /// provider model selection, action signing, execution envelope) stays on
 /// the existing process environment for both entries.
 struct WorkerBootstrap {
+    exit_after_work: bool,
     worker_id: WorkerId,
     worker_instance_id: WorkerInstanceId,
     started_at: Instant,
@@ -95,6 +96,7 @@ fn run_worker_process(future: impl Future<Output = Result<(), Box<dyn std::error
 
 async fn run_remote() -> Result<(), Box<dyn std::error::Error>> {
     let bootstrap = WorkerBootstrap {
+        exit_after_work: false,
         worker_id: WorkerId(required("WWC_WORKER_ID")?),
         worker_instance_id: WorkerInstanceId(required("WWC_WORKER_INSTANCE_ID")?),
         started_at: env::var("WWC_WORKER_STARTED_AT").map_or(now_instant()?, Instant),
@@ -129,6 +131,7 @@ async fn run_managed(config_path: &str) -> Result<(), Box<dyn std::error::Error>
         credential.digest().0,
     );
     Box::pin(run_worker(WorkerBootstrap {
+        exit_after_work: true,
         worker_id: config.worker_id.clone(),
         worker_instance_id: config.worker_instance_id.clone(),
         started_at: now_instant()?,
@@ -150,6 +153,7 @@ async fn run_managed(config_path: &str) -> Result<(), Box<dyn std::error::Error>
 /// [`RemoteWorkerPort::open`]; only the [`WorkerBootstrap`] source differs.
 async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error::Error>> {
     let WorkerBootstrap {
+        exit_after_work,
         worker_id,
         worker_instance_id,
         started_at,
@@ -225,6 +229,7 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
                 let now = now_instant()?;
                 Box::pin(drain_controls(&mut worker, &handle)).await?;
                 let _ = Box::pin(worker.poll_codex(now)).await;
+                if exit_after_work && worker.work_drained() { break; }
             }
         }
     }
@@ -260,6 +265,9 @@ where
                     );
                 }
                 handle.retry(&delivery_id)?;
+                if error.code == winwincode_worker::WorkerErrorCode::ExecutionPort {
+                    return Ok(());
+                }
                 return Err(Box::new(error));
             }
         }

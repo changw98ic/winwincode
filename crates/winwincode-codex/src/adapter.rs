@@ -4855,11 +4855,25 @@ fn submission_input_digest(
         serde_json::to_vec(&options.final_output_json_schema).map_err(|_| unavailable())?;
     digest.update((schema.len() as u64).to_be_bytes());
     digest.update(schema);
+    if !options.image_urls.is_empty() {
+        let images = serde_json::to_vec(&options.image_urls).map_err(|_| unavailable())?;
+        digest.update((images.len() as u64).to_be_bytes());
+        digest.update(images);
+    }
     Ok(Sha256Digest(format!("sha256:{:x}", digest.finalize())))
 }
 
 fn turn_submission_options(record: &StoredRun) -> TurnSubmissionOptions {
     TurnSubmissionOptions {
+        image_urls: record
+            .job
+            .attachments
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .filter(|item| item.media_type.starts_with("image/"))
+            .map(|item| format!("data:{};base64,{}", item.media_type, item.content))
+            .collect(),
         final_output_json_schema: is_delegated_composer(record)
             .then(change_batch_proposal_json_schema),
         submit_change_batch: is_delegated_composer(record),
@@ -6247,6 +6261,7 @@ mod tests {
             work_contract_revision: Revision(2),
         };
         ExecutionJob {
+            attachments: None,
             model_selection: None,
             attempt: 1,
             execution_profile: "executor".to_owned(),
@@ -6270,6 +6285,7 @@ mod tests {
                 work_run_id: WorkRunId("wrn_00000000000000000000000001".to_owned()),
             }),
             work_input: Some(WorkRunInput {
+                device_target: None,
                 delivery_spec_id: "spec-fixture".into(),
                 delivery_spec_revision: Revision(2),
                 candidate_ref: None,
@@ -6521,6 +6537,7 @@ mod tests {
     fn submission_digest_seals_the_exact_input_bytes() {
         let react = TurnSubmissionOptions::default();
         let delegated = TurnSubmissionOptions {
+            image_urls: Vec::new(),
             final_output_json_schema: Some(
                 crate::stage_product::change_batch_proposal_json_schema(),
             ),

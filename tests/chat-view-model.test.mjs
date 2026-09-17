@@ -569,7 +569,8 @@ test('message submit and stop commands use the current revision then publish ser
     { kind: 'chat_message_page', items: [message(1), message(2), message(3)] },
   ))
 
-  await model.submitMessage('  continue with the fix  ')
+  const attachments = [{ name: 'code.ts', mediaType: 'text/plain', content: 'export const answer = 42' }]
+  await model.submitMessage('  continue with the fix  ', undefined, attachments)
   assert.deepEqual(client.commandCalls[0], {
     schemaVersion,
     requestId: client.commandCalls[0].requestId,
@@ -580,6 +581,7 @@ test('message submit and stop commands use the current revision then publish ser
     payload: {
       productSessionId,
       message: 'continue with the fix',
+      attachments,
     },
   })
   assert.equal(model.state.session.revision, 2)
@@ -1256,10 +1258,10 @@ test('Chat view-model source has no second transport or legacy DSH Remote path',
 })
 
 
-test('an empty restored Chat launches the selected device project and retries before submitting', async () => {
+for (const history of [[], [message(1)]]) test(`a restored Chat with ${history.length} messages checks its device before submitting`, async () => {
   const client = new FakeClient()
   client.responses.set('session.get', response('session.get', session(1, 'idle')))
-  client.responses.set('session.messages.list', response('session.messages.list', { kind: 'chat_message_page', items: [] }))
+  client.responses.set('session.messages.list', response('session.messages.list', { kind: 'chat_message_page', items: history }))
   client.responses.set('model.route.availability.list', response('model.route.availability.list', routeAvailability([availableRoute(modelRoute, { clientId: '4113447224' })])))
   const launches = []
   const { model } = view(client, { async launchDeviceSession(input) {
@@ -1274,6 +1276,27 @@ test('an empty restored Chat launches the selected device project and retries be
   await model.submitMessage('Build a galaxy', 'rbd_00000000000000000000000001')
   assert.equal(client.commandCalls.at(-1).command, 'chat.submit')
   assert.deepEqual(launches, Array(2).fill({clientId:'4113447224',repositoryBindingId:'rbd_00000000000000000000000001',productSessionId}))
+  model.close()
+})
+
+test('project selection keeps identical model names on two devices bound to the chosen device', async () => {
+  const client = new FakeClient()
+  client.responses.set('session.get', response('session.get', { ...session(1, 'idle'), modelRoute }))
+  client.responses.set('session.messages.list', response('session.messages.list', { kind: 'chat_message_page', items: [] }))
+  client.responses.set('model.route.availability.list', response('model.route.availability.list', routeAvailability([
+    availableRoute(modelRoute, { clientId: '4113447224', isDefault: true }),
+    availableRoute(modelRoute, { clientId: '4113447225', isDefault: false }),
+  ])))
+  const launches = []
+  const { model } = view(client, { clientId: '4113447225', async launchDeviceSession(input) { launches.push(input) } })
+  await model.start()
+  assert.deepEqual(model.state.selectedModelRoute, modelRoute)
+  await model.refresh()
+  assert.deepEqual(model.state.selectedModelRoute, modelRoute)
+  client.enqueueCommand('chat.submit', completed('chat.submit', session(2, 'running')))
+  await model.submitMessage('Use this project', 'rbd_00000000000000000000000001')
+  assert.equal(launches.length, 1)
+  assert.equal(launches[0].clientId, '4113447225')
   model.close()
 })
 
@@ -1301,5 +1324,21 @@ test('Chat downloads only its retained artifact and rejects a changed range', as
     ...artifact, offset: 1, totalSize: 2, dataBase64: 'e30=',
   }))
   await assert.rejects(model.downloadArtifact(artifact.artifactId))
+  model.close()
+})
+
+
+test('restored session uses its saved Device context when the project picker is refreshing', async () => {
+  const client = new FakeClient()
+  const deviceContext = { clientId: '4113447224', deviceName: 'Test device', repositoryBindingId: 'rbd_00000000000000000000000001', repositoryName: 'Test project', branch: 'main', headCommit: 'a'.repeat(40) }
+  client.responses.set('session.get', response('session.get', { ...session(1, 'idle'), deviceContext }))
+  const launches = []
+  const { model } = view(client, { async launchDeviceSession(input) { launches.push(input) } })
+  await model.start()
+  client.enqueueCommand('chat.submit', completed('chat.submit', session(2, 'running')))
+  await model.submitMessage('Use saved project', '')
+  assert.equal(client.commandCalls.at(-1).command, 'chat.submit')
+  assert.equal(launches[0].repositoryBindingId, deviceContext.repositoryBindingId)
+  assert.equal(launches[0].clientId, deviceContext.clientId)
   model.close()
 })

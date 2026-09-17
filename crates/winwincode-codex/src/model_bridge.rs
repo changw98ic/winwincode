@@ -1162,13 +1162,26 @@ impl ExecutionPortModelBridge {
     ) -> Result<OpenStreamPreparation, ModelPortFailure> {
         let envelope: KernelRequestEnvelope = serde_json::from_str(&request.payload_json)
             .map_err(|_| model_failure(BridgeError::InvalidPayload))?;
-        if envelope.request_id != request.request_id
-            || envelope.provider != self.expected_provider
-            || !envelope.request.is_object()
-        {
+        if envelope.request_id != request.request_id || !envelope.request.is_object() {
             return Err(model_failure(BridgeError::InvalidPayload));
         }
         let binding = self.binding_for(&envelope).map_err(model_failure)?;
+        // A session can select a different configured provider from the Worker
+        // default. Root and child requests use the same sealed run settings.
+        let stored = self
+            .ordinal_store
+            .load_run::<serde_json::Value>(&binding.run_key)
+            .map_err(model_store_failure)?;
+        let provider = match stored.as_ref() {
+            Some(run) => run
+                .pointer("/agentConfig/profile/source/settings/provider")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| model_failure(BridgeError::InvalidPayload))?,
+            None => &self.expected_provider,
+        };
+        if envelope.provider != provider {
+            return Err(model_failure(BridgeError::InvalidPayload));
+        }
         // Child bindings can be restored from the durable lineage table while
         // the Kernel is already processing the replayed model response.  Put
         // the exact binding in the action gate before Core can authorize a
@@ -1986,6 +1999,30 @@ mod tests {
             )
         }));
         std::fs::remove_dir_all(root).expect("remove terminal duplicate store");
+    }
+
+    #[test]
+    fn model_provider_is_bound_to_the_selected_run_instead_of_the_worker_default() {
+        let (root, store, binding, route, mut request, _) = child_model_fixture();
+        store.save_run(&binding.run_key, &json!({
+            "agentConfig": { "profile": { "source": { "settings": { "provider": "selected" } } } }
+        })).expect("persist selected provider");
+        let bridge = ExecutionPortModelBridge::new(
+            store.clone(),
+            ExecutionOutbox::open(store).unwrap(),
+            route,
+            "loopback".to_owned(),
+            SharedAuthoritySource::default(),
+        );
+        bridge.install_binding(binding).unwrap();
+        let mut payload: serde_json::Value = serde_json::from_str(&request.payload_json).unwrap();
+        payload["provider"] = json!("selected");
+        request.payload_json = payload.to_string();
+        assert!(bridge.prepare_open_stream(&request).is_ok());
+        payload["provider"] = json!("loopback");
+        request.payload_json = payload.to_string();
+        assert!(bridge.prepare_open_stream(&request).is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn child_model_fixture() -> (

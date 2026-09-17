@@ -556,7 +556,7 @@ impl RuntimePhase {
         let receipt_identity = ReceiptIdentity::new(
             execution_message_actor_key(&message.message_id)?,
             scope_key.clone(),
-            execution_message_request_id(&message.message_id, RUNTIME_PHASE)?,
+            execution_message_request_id(&message.message_id, &message.lease, RUNTIME_PHASE)?,
         )?;
         let encoded = serde_json::to_vec(&message.event).map_err(|error| {
             StorageError::adapter(format!("failed to encode runtime event record: {error}"))

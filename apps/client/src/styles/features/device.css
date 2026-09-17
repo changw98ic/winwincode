@@ -118,24 +118,21 @@
 .wwc-device-manage {
   justify-self: start;
   width: fit-content;
-  padding: var(--wwc-space-3) var(--wwc-space-6);
   border: var(--wwc-border-width-control) solid var(--wwc-color-border);
-  border-radius: var(--wwc-radius-md);
-  color: var(--wwc-color-text);
+  color: var(--wwc-color-on-accent);
   background: var(--wwc-color-accent);
-  font-weight: var(--wwc-font-weight-strong);
   text-decoration: none;
   white-space: nowrap;
-  box-shadow: var(--wwc-shadow-hard);
+  min-height: 36px;
+  padding: 6px 14px;
+  border-radius: var(--wwc-radius-button);
+  font-size: 14px;
+  line-height: 22px;
+  font-weight: var(--wwc-font-weight-medium);
 }
 
 .wwc-device-manage:hover {
   background: var(--wwc-color-accent-strong);
-}
-
-.wwc-device-manage:active {
-  box-shadow: var(--wwc-shadow-hard-sm);
-  translate: 2px 2px;
 }
 
 /* Collapsed 运行中的任务 / 连接记录 rows: bold label + trailing ›. */

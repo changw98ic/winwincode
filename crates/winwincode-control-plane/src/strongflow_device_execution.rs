@@ -242,6 +242,18 @@ pub fn dispatch_work_run_to_device_worker(
         // supervised local execution path unchanged.
         return Ok(None);
     };
+    if let Some(target) = job
+        .work_input
+        .as_ref()
+        .and_then(|input| input.device_target.as_ref())
+        && (target.client_node_id != anchor.client_node_id
+            || target.repository_binding_id != anchor.repository_binding_id
+            || target.user_id != anchor.holder_user_id)
+    {
+        return Err(StrongflowDeviceDispatchError::corrupt(
+            "launch differs from the sealed Device target",
+        ));
+    }
     let binding = ensure_work_run_binding(storage, &anchor, now)?;
     let facts = ensure_work_run_facts(storage, &record, &anchor, role, now)?;
     Ok(Some(StrongflowDeviceDispatch { binding, facts }))

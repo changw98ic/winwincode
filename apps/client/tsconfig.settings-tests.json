@@ -15,6 +15,7 @@
     "tsBuildInfoFile": "../../.cache/tsbuild/settings-tests.tsbuildinfo"
   },
   "include": [
-    "src/**/*.ts"
+    "src/**/*.ts",
+    "src/**/*.tsx"
   ]
 }

@@ -367,6 +367,7 @@ impl ValidatedGitSourceArtifact {
 /// Resolves only repository locators below one configured root.
 pub struct LocalGitSourceResolver {
     allowed_root: PathBuf,
+    artifact_cache: bool,
 }
 
 impl LocalGitSourceResolver {
@@ -387,7 +388,22 @@ impl LocalGitSourceResolver {
                 "controlled repository root is not a directory",
             ));
         }
-        Ok(Self { allowed_root })
+        Ok(Self {
+            allowed_root,
+            artifact_cache: false,
+        })
+    }
+
+    /// Opens a private Git cache reconstructed only from authenticated candidate Artifacts.
+    ///
+    /// # Errors
+    /// Fails if the cache directory cannot be created or opened.
+    pub fn open_artifact_cache(root: impl AsRef<Path>) -> Result<Self, ArtifactError> {
+        fs::create_dir_all(root.as_ref())
+            .map_err(|error| ArtifactError::adapter(error.to_string()))?;
+        let mut resolver = Self::open(root)?;
+        resolver.artifact_cache = true;
+        Ok(resolver)
     }
 
     /// Rebuilds one candidate identity from a complete, exact candidate
@@ -407,6 +423,36 @@ impl LocalGitSourceResolver {
         let manifest = candidate_manifest(artifact)?;
         bounded_locator(repository_locator)?;
         bounded_revision(base_revision)?;
+        if self.artifact_cache {
+            let mut directory = self.allowed_root.clone();
+            for component in Path::new(repository_locator).components() {
+                directory.push(component);
+                if let Err(error) = fs::create_dir(&directory)
+                    && error.kind() != std::io::ErrorKind::AlreadyExists
+                {
+                    return Err(ArtifactError::adapter(error.to_string()));
+                }
+                directory = controlled_repository(
+                    &self.allowed_root,
+                    directory
+                        .to_str()
+                        .ok_or_else(|| ArtifactError::invalid("cache path is not UTF-8"))?,
+                )?;
+            }
+            let directory = controlled_repository(&self.allowed_root, repository_locator)?;
+            if !directory.join(".git").exists() {
+                let format = if manifest.candidate_commit_id().len() == 64 {
+                    "--object-format=sha256"
+                } else {
+                    "--object-format=sha1"
+                };
+                git_output(
+                    &directory,
+                    &["init".into(), "--quiet".into(), format.into()],
+                    "candidate cache initialization",
+                )?;
+            }
+        }
         let repository = controlled_repository(&self.allowed_root, repository_locator)?;
         assert_git_repository(&repository)?;
         import_candidate_bundle(&repository, &manifest)?;
@@ -1139,6 +1185,13 @@ fn decode_paths(bytes: &[u8]) -> Result<Vec<String>, ArtifactError> {
 }
 
 fn hunk_digests(diff: &[u8]) -> Result<Vec<String>, ArtifactError> {
+    Ok(hunk_sections(diff)?
+        .into_iter()
+        .map(|hunk| format!("{:x}", Sha256::digest(hunk)))
+        .collect())
+}
+
+fn hunk_sections(diff: &[u8]) -> Result<Vec<&[u8]>, ArtifactError> {
     if diff.is_empty() {
         return Err(ArtifactError::corrupt(
             "candidate changed path has no exact Git diff bytes",
@@ -1155,16 +1208,67 @@ fn hunk_digests(diff: &[u8]) -> Result<Vec<String>, ArtifactError> {
         .filter(|start| diff[*start..].starts_with(b"@@ "))
         .collect::<Vec<_>>();
     if hunk_starts.is_empty() {
-        return Ok(vec![format!("{:x}", Sha256::digest(diff))]);
+        return Ok(vec![diff]);
     }
     Ok(hunk_starts
         .iter()
         .enumerate()
         .map(|(index, start)| {
             let end = hunk_starts.get(index + 1).copied().unwrap_or(diff.len());
-            format!("{:x}", Sha256::digest(&diff[*start..end]))
+            &diff[*start..end]
         })
         .collect())
+}
+
+/// Maps replacement hunks to one containing source hunk using trusted Git ranges.
+// ponytail: require whole-hunk containment; add changed-line mapping if wider
+// Git context prevents an otherwise in-scope repair from being accepted.
+pub(crate) fn rework_hunk_origins(
+    previous: &[u8],
+    delta: &[u8],
+) -> Result<Vec<(String, String)>, ArtifactError> {
+    fn range(hunk: &[u8], index: usize, sign: char) -> Result<(u64, u64), ArtifactError> {
+        let header = hunk.split(|byte| *byte == b'\n').next().unwrap_or_default();
+        let field = std::str::from_utf8(header)
+            .ok()
+            .filter(|line| line.starts_with("@@ "))
+            .and_then(|line| line.split_ascii_whitespace().nth(index))
+            .and_then(|field| field.strip_prefix(sign))
+            .ok_or_else(|| ArtifactError::invalid("rework requires text Git hunks"))?;
+        let (start, count) = field.split_once(',').unwrap_or((field, "1"));
+        let start = start
+            .parse::<u64>()
+            .map_err(|_| ArtifactError::invalid("invalid Git hunk start"))?;
+        let count = count
+            .parse::<u64>()
+            .map_err(|_| ArtifactError::invalid("invalid Git hunk length"))?;
+        Ok((
+            start,
+            start
+                .checked_add(count)
+                .ok_or_else(|| ArtifactError::invalid("Git hunk range overflow"))?,
+        ))
+    }
+    let sources = hunk_sections(previous)?
+        .into_iter()
+        .map(|hunk| Ok((format!("{:x}", Sha256::digest(hunk)), range(hunk, 2, '+')?)))
+        .collect::<Result<Vec<_>, ArtifactError>>()?;
+    hunk_sections(delta)?
+        .into_iter()
+        .map(|hunk| {
+            let (start, end) = range(hunk, 1, '-')?;
+            let matches = sources
+                .iter()
+                .filter(|(_, (left, right))| *left <= start && end <= *right)
+                .collect::<Vec<_>>();
+            let [source] = matches.as_slice() else {
+                return Err(ArtifactError::conflict(
+                    "replacement hunk escapes or ambiguously overlaps its source scope",
+                ));
+            };
+            Ok((format!("{:x}", Sha256::digest(hunk)), source.0.clone()))
+        })
+        .collect()
 }
 
 fn git_output(
@@ -1283,4 +1387,17 @@ fn git_object_id(value: &str, field: &str) -> Result<(), ArtifactError> {
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod rework_hunk_tests {
+    use super::rework_hunk_origins;
+    #[test]
+    fn maps_only_an_exact_contained_source_range() {
+        let source = b"@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n";
+        let delta = b"@@ -1,3 +1,3 @@\n a\n-B\n+C\n c\n";
+        assert_eq!(rework_hunk_origins(source, delta).unwrap().len(), 1);
+        assert!(rework_hunk_origins(source, b"@@ -8,3 +8,3 @@\n-x\n+y\n").is_err());
+        assert!(rework_hunk_origins(source, b"Binary files differ\n").is_err());
+    }
 }

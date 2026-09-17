@@ -9,6 +9,43 @@
   min-width: 0;
 }
 
+.wwc-extensions-note,
+.wwc-extensions-mcp-info p,
+.wwc-extensions-empty {
+  margin: 0;
+  color: var(--wwc-color-text-muted);
+  overflow-wrap: anywhere;
+}
+
+.wwc-extensions-empty {
+  display: grid;
+  gap: var(--wwc-space-1);
+  padding-block: var(--wwc-space-3);
+}
+
+.wwc-extensions-empty strong {
+  color: var(--wwc-color-text);
+  font-weight: var(--wwc-font-weight-strong);
+}
+
+.wwc-extensions summary {
+  width: fit-content;
+  padding-block: var(--wwc-space-2);
+  cursor: pointer;
+}
+
+.wwc-extensions form label:has(input[type='checkbox']) {
+  display: flex;
+  align-items: center;
+  gap: var(--wwc-space-2);
+  white-space: nowrap;
+}
+
+.wwc-extensions form input[type='checkbox'] {
+  width: auto;
+  flex: 0 0 auto;
+}
+
 .wwc-extensions-header {
   display: flex;
   flex-wrap: wrap;
@@ -40,7 +77,6 @@
 
 .wwc-extensions .wwc-extensions-panel {
   display: none;
-  max-width: var(--wwc-content-max);
 }
 
 .wwc-extensions .wwc-extensions-panel:not([hidden]) {
@@ -132,6 +168,7 @@
   border-radius: 999px;
   background: var(--wwc-color-accent);
   cursor: pointer;
+  color: var(--wwc-color-on-accent);
 }
 
 .wwc-extensions-switch-knob {
@@ -157,10 +194,17 @@
 
 /* 技能与指令: scope selector plus a four-column inventory table. */
 .wwc-extensions-scope-row {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: auto minmax(12rem, 16rem) auto minmax(0, 1fr);
   gap: var(--wwc-space-2) var(--wwc-space-4);
   align-items: center;
+}
+
+.wwc-extensions-scope-status {
+  min-width: 0;
+  margin: 0;
+  color: var(--wwc-color-text-muted);
+  overflow-wrap: anywhere;
 }
 
 .wwc-extensions-scope-label {
@@ -168,7 +212,7 @@
 }
 
 .wwc-extensions-scope-select {
-  width: min(16rem, 100%);
+  width: 100%;
   padding: var(--wwc-space-2) var(--wwc-space-3);
   border: var(--wwc-border-width-control) solid var(--wwc-color-border-control);
   border-radius: var(--wwc-radius-sm);
@@ -246,6 +290,14 @@
 }
 
 @media (max-width: 48rem) {
+  .wwc-extensions-scope-row {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
+  .wwc-extensions-scope-status {
+    grid-column: 1 / -1;
+  }
+
   .wwc-extensions-table-head {
     display: none;
   }

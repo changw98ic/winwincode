@@ -32,6 +32,7 @@ impl CommandFamily {
             | CommandName::ChatSubmit
             | CommandName::InputRespond
             | CommandName::SessionCancel
+            | CommandName::SessionUpdate
             | CommandName::SessionClose => Self::Session,
             CommandName::DeliveryCreate
             | CommandName::DeliveryUpdateSpec

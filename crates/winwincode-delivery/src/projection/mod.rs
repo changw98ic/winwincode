@@ -116,9 +116,15 @@ pub struct DeliveryProjection {
     evidence: Vec<EvidenceProjection>,
     current_candidate: Option<CurrentCandidateProjection>,
     verdict: Option<VerdictProjection>,
+    rework_attempts_used: usize,
 }
 
 impl DeliveryProjection {
+    #[must_use]
+    pub const fn rework_attempts_used(&self) -> usize {
+        self.rework_attempts_used
+    }
+
     #[must_use]
     pub fn delivery_id(&self) -> &winwincode_domain::DeliveryId {
         &self.delivery_id
@@ -205,6 +211,13 @@ pub fn project_delivery_detail(
         .map(solution::project_current_solution_review);
 
     Ok(DeliveryProjection {
+        rework_attempts_used: input
+            .delivery
+            .snapshot()
+            .session_bindings
+            .iter()
+            .filter(|binding| binding.execution_profile.as_deref() == Some("remediator"))
+            .count(),
         delivery_id: input.delivery.id().clone(),
         delivery_revision: input.delivery.revision(),
         status: input.delivery.snapshot().work_run_aggregate.summary_state(

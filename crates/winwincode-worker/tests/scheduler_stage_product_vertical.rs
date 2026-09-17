@@ -957,6 +957,7 @@ fn stage_job(role: &str, seed: u64, revision: &str, candidate_ref: Option<&str>)
         work_run_id: WorkRunId(format!("wrn_01J000000000000000000000{:02}", seed % 100)),
     });
     let input = WorkRunInput {
+        device_target: None,
         delivery_spec_id: "spec-scheduler-vertical".into(),
         delivery_spec_revision: Revision(1),
         candidate_ref: candidate_ref.map(str::to_owned),
@@ -994,6 +995,7 @@ fn stage_job(role: &str, seed: u64, revision: &str, candidate_ref: Option<&str>)
     };
     let payload = format!("scheduler-stage-product-{seed}-{role}");
     ExecutionJob {
+        attachments: None,
         model_selection: None,
         attempt: 1,
         execution_profile: role.to_owned(),

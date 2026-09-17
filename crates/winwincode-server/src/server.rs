@@ -312,7 +312,7 @@ pub async fn start_server_with_remote_worker(
     // `offline` and their active occupancy leases to `recovery_pending`
     // (plan 12.5). Each iteration opens and closes its own storage
     // connection; the task holds no lock across awaits.
-    let background_tasks = match &client_occupancy {
+    let mut background_tasks = match &client_occupancy {
         Some(application) => {
             let sweep_application = Arc::clone(application);
             let sweep_interval = ClientOccupancyConfig::default().sweep_interval;
@@ -325,6 +325,15 @@ pub async fn start_server_with_remote_worker(
         }
         None => Vec::new(),
     };
+    if let Some(application) = &client_sessions {
+        let application = Arc::clone(application);
+        background_tasks.push(tokio::spawn(async move {
+            loop {
+                let _ = application.resume_delivery_launches();
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }));
+    }
     let state = ServerState {
         config: Arc::clone(&config),
         auth_sessions,
@@ -447,6 +456,14 @@ fn router(state: ServerState) -> Router {
         .route("/p/{access_id}/{token}", any(preview_root))
         .route("/p/{access_id}/{token}/{*path}", any(preview_path))
         .route("/api/v1/clients", get(list_clients).options(preflight))
+        .route(
+            "/api/v1/clients/{client_id}/repositories",
+            post(device_provider_apply).options(preflight),
+        )
+        .route(
+            "/api/v1/clients/{client_id}/repositories/receipts/{request_id}",
+            get(device_provider_receipt).options(preflight),
+        )
         .route(
             "/api/v1/clients/{client_id}/extensions",
             get(device_provider_get)
@@ -2958,10 +2975,10 @@ fn device_provider_request(
         );
     };
     let now = SystemStandaloneApplicationClock.now_instant();
-    let kind = if uri.path().split('/').nth(5) == Some("extensions") {
-        crate::device_providers::ConfigurationKind::Extension
-    } else {
-        crate::device_providers::ConfigurationKind::Provider
+    let kind = match uri.path().split('/').nth(5) {
+        Some("extensions") => crate::device_providers::ConfigurationKind::Extension,
+        Some("repositories") => crate::device_providers::ConfigurationKind::Repository,
+        _ => crate::device_providers::ConfigurationKind::Provider,
     };
     let applying = mutation.is_some();
     let result = match mutation {

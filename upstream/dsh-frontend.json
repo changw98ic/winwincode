@@ -1,0 +1,141 @@
+{
+  "repository": "https://github.com/deepseek-ai/deepseek-harness",
+  "commit": "141eb6fef83422698aef7a981029e843e8161534",
+  "tag": "dsh-v0.1.0-rc.8",
+  "license": "MIT",
+  "files": [
+    {
+      "source": "packages/client/ui-primitives/src/markdown/MarkdownText.module.css",
+      "target": "apps/client/src/styles/features/dsh-markdowntext.css",
+      "upstreamSha256": "3e4ed740dd404ca75c786f675e7611de6c8fe6da66ddf05da7b670b196ebe2d0"
+    },
+    {
+      "source": "packages/client/ui-primitives/src/markdown/CodeBlock.module.css",
+      "target": "apps/client/src/styles/features/dsh-codeblock.css",
+      "upstreamSha256": "cdc295dff342fbcc33db61d8260938228a29245da72e987287db870cc3a95821"
+    },
+    {
+      "source": "packages/client/ui-primitives/src/markdown/MarkdownText.tsx",
+      "target": "apps/client/src/dsh/markdown/MarkdownText.tsx",
+      "upstreamSha256": "b0ce4cf0986cadf624436136186b16f108ed2365aec0350b195f02dae036017a"
+    },
+    {
+      "source": "packages/client/ui-primitives/src/markdown/render.tsx",
+      "target": "apps/client/src/dsh/markdown/render.tsx",
+      "upstreamSha256": "f607d0bc8d8cd21ad4ba5ce84cf8246f6bf4b5c7bdbdb06f494c155b4dc90a23"
+    },
+    {
+      "source": "packages/client/ui-primitives/src/markdown/incremental.ts",
+      "target": "apps/client/src/dsh/markdown/incremental.ts",
+      "upstreamSha256": "2975a332ac74b931a7cb489e2eea28469aa3d9596328d5a474d41379b6c7b640"
+    },
+    {
+      "source": "packages/client/ui-primitives/src/markdown/parse.ts",
+      "target": "apps/client/src/dsh/markdown/parse.ts",
+      "upstreamSha256": "6be57559995c4e717d6d704207eb2fec86db9714c2a4bcc5b0c3f6648c8990f0"
+    },
+    {
+      "source": "packages/client/ui-primitives/src/markdown/CodeBlock.tsx",
+      "target": "apps/client/src/dsh/markdown/CodeBlock.tsx",
+      "upstreamSha256": "ae9db6dbf6dd6f0c7528bc1d878b5ccffc76ad9bd6172e577c6c88938c2293f6"
+    },
+    {
+      "source": "packages/client/ui-primitives/src/markdown/highlight.ts",
+      "target": "apps/client/src/dsh/markdown/highlight.ts",
+      "upstreamSha256": "2a091572a23ec461007cc8a4ad5edc7230b7ff6c99d43e7dbd60a22b858f9ef3"
+    },
+    {
+      "source": "packages/client/ui-primitives/src/markdown/cjkFriendlyStrong.ts",
+      "target": "apps/client/src/dsh/markdown/cjkFriendlyStrong.ts",
+      "upstreamSha256": "bc4adf3183f7d0feea17e3a176e7c4b1db5bdddc29e7fc87261f627ff8a39b53"
+    },
+    {
+      "source": "packages/client/ui-primitives/src/clipboard.ts",
+      "target": "apps/client/src/dsh/clipboard.ts",
+      "upstreamSha256": "f3c5ff3d5ac550adda2366e245d33cf4d91d219bfb8692ef1943866d83748a0f"
+    },
+    {
+      "source": "packages/client/ui-attachment/src/AttachmentRail.tsx",
+      "target": "apps/client/src/dsh/AttachmentRail.tsx",
+      "upstreamSha256": "0c422b19a6e07fe49595114ee5f1d8714ad1d940b26089576057c662a04a80aa"
+    },
+    {
+      "source": "packages/client/ui-attachment/src/AttachmentRail.module.css",
+      "target": "apps/client/src/styles/features/dsh-attachment.css",
+      "upstreamSha256": "4b660be7c28453212cf7a7ce3bed7d43c336d5d560a832a9ddde2f912dd91325"
+    },
+    {
+      "source": "packages/client/ui-workspace/src/client/tree.ts",
+      "target": "apps/client/src/dsh/SessionBrowser.tsx",
+      "upstreamSha256": "8511885c482e12b192e19528f6753fd09cba468f3a698da8ca36ecacf879c61b",
+      "section": "title/project search and ordering"
+    },
+    {
+      "source": "packages/client/ui-workspace/src/client/rows/Rows.tsx",
+      "target": "apps/client/src/dsh/SessionBrowser.tsx",
+      "upstreamSha256": "7295ece89ab58869e0a102dc9c2f4c51677c96c2a2d712dc037534d6f55b1ff5",
+      "section": "SessionNodeItem selection and menu, simplified for product data and native details"
+    },
+    {
+      "source": "packages/client/ui-theme/src/theme-settings.ts",
+      "target": "apps/client/src/preferences.ts",
+      "upstreamSha256": "0ec3e2d37f6d0b51cc215c340d008c1f59d249b4e2c915c87d0f1ff81a705ab1",
+      "section": "theme preference list, default and validator"
+    },
+    {
+      "source": "packages/client/ui-model-selection/src/client/ModelSelect.module.css",
+      "target": "apps/client/src/styles/features/select.css",
+      "upstreamSha256": "f280cf038a226843553d90b449e55cd00fb1a16edd52b5d55217c00b0a809e3a",
+      "section": "menu, option and trigger styling mapped to native select"
+    },
+    {
+      "source": "packages/client/ui-theme/src/styles/design-platform.css",
+      "target": "apps/client/src/styles/dsh-tokens.css",
+      "upstreamSha256": "7fbb81d2b7879c75c9fb6a9a5ec15435df9f916036fa925a70ca197a78bee42c",
+      "section": "theme palette; root selectors match the existing theme preference"
+    },
+    {
+      "source": "packages/client/ui-theme/src/styles/base.css",
+      "target": "apps/client/src/styles/tokens.css",
+      "upstreamSha256": "85f8970d2650108ad47d66da1db3ba00ebbe3f26aaec00551cfa69dd029347a3",
+      "section": "system and code font families"
+    },
+    {
+      "source": "packages/client/ui-primitives/src/Button.module.css",
+      "target": "apps/client/src/styles/components.css",
+      "upstreamSha256": "4666bf191abc8b6bcfd4e22355bab0c2f04391b85c2e918bd882a37ff68ef2b9",
+      "section": "capsule geometry and primary, outline and ghost appearances"
+    },
+    {
+      "source": "packages/client/ui-conversation/src/client/skeleton/InputBar.module.css",
+      "target": "apps/client/src/styles/features/chat.css",
+      "upstreamSha256": "5aa87ea48556405bd81c342410aff2b2bc6bc9d1f5e5a3b739e8c321d5b09c51",
+      "section": "composer card, toolbar and circular send control"
+    },
+    {
+      "source": "packages/client/ui-conversation/src/client/chat/MessageItem.module.css",
+      "target": "apps/client/src/styles/features/chat.css",
+      "upstreamSha256": "32f2c4efb89afa4b47be18907d92de0a0b4b678d9fde3d1e2155baeb90626a10",
+      "section": "user bubble geometry and theme"
+    },
+    {
+      "source": "packages/client/ui-sidebar/src/client/SidebarRoot.module.css",
+      "target": "apps/client/src/styles/shell.css",
+      "upstreamSha256": "4b2b7d0c097a5bec6afb17738a22c75174f94099a90e979065b847d0a4d882e8",
+      "section": "sidebar typography, padding and neutral fill"
+    },
+    {
+      "source": "packages/client/ui-theme/src/styles/gradient-shadow-text.css",
+      "target": "apps/client/src/styles/features/dsh-theme.css",
+      "upstreamSha256": "4f06e45acf54d416802fc35391f233199a0ff0da731d75f3c489384d8a9b7ebc",
+      "section": "Markdown typography and elevation shadow"
+    }
+  ],
+  "adaptations": [
+    "ESM output imports and current TypeScript configuration",
+    "CSS module classes mapped to stable scoped styles",
+    "GFM rendering and incremental updates retained; code blocks use the existing Shiki implementation",
+    "GFM-only renderer; math/KaTeX and MDX grammar omitted; unsupported grammar labels render as plain text",
+    "Shiki token colors emitted as stylesheet classes to satisfy the existing CSP; unused line-token API omitted"
+  ]
+}

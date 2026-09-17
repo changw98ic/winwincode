@@ -2,8 +2,8 @@
 
 //! The target-branch safe apply engine (GIT-100.4, plan 15.4/15.5).
 //!
-//! One call applies a retained candidate onto a target branch without ever
-//! writing the user's current working tree:
+//! One call integrates a retained candidate in an isolated worktree, then
+//! updates the target branch and, when selected, its bound clean checkout:
 //!
 //! 1. **Preflight** (fail closed, in order): request shapes, the candidate
 //!    registry row (identity match, non-terminal), the occupancy fencing
@@ -12,7 +12,7 @@
 //!    checkout ([`ConfinedRoot`]), the candidate ref through Git, the
 //!    `expectedHead == target HEAD` equality, the dirty policy of the
 //!    user's working tree, and the guard against a target branch that is
-//!    checked out in any worktree.
+//!    checked out in another worktree.
 //! 2. **Isolated execution**: a detached *integration worktree* is created
 //!    from the validated target tip inside a device-local integration root —
 //!    never inside the user's checkout — and the requested strategy
@@ -23,15 +23,15 @@
 //!    compare-and-swap `git update-ref refs/heads/<target> <new>
 //!    <expectedHead>` — Git itself refuses when the branch moved during the
 //!    apply, which answers the drift case (`base_stale`) without a race.
-//!    Plumbing `update-ref` would happily move a branch that is checked out
-//!    in a worktree (silently re-staging the user's tree), which is exactly
-//!    why preflight refuses such targets outright.
-//! 4. **Durable record**: the candidate registry row transitions to
+//!    The bound checkout uses Git's worktree-aware fast-forward instead;
+//!    other checked-out worktrees remain protected.
+//! 4. **Durable record**: the result enters the outbox before the registry transitions to
 //!    `applied` (success) or `failed` (every fail-closed result, retryable),
 //!    and one `client.candidate.apply_result` frame carrying the
 //!    `LocalApplyReceipt` is appended to the durable outbox. Every attempt
 //!    settles exactly one receipt with a fresh `lar_` id — a retry appends a
-//!    new receipt instead of rewriting history, matching the Control Plane's
+//!    new receipt instead of rewriting history; a pending successful receipt
+//!    replays unchanged after restart, matching the Control Plane's
 //!    append-only ledger (GIT-100.6).
 //!
 //! Result-code mapping (the frozen ten-code vocabulary): `candidate_missing`
@@ -42,7 +42,7 @@
 //! conflict artifact reference), `permission_denied` (the operating system
 //! refused the local Git work), `failed` (every other execution failure,
 //! including a non-fast-forward candidate under the `fast_forward` strategy
-//! and a target branch checked out in a worktree), `applied` (success, with
+//! and a target branch checked out in another worktree), `applied` (success, with
 //! `resulting_commit`). `retained`, `branch_created`, and `discarded` are
 //! not produced by this engine: branch creation belongs to the
 //! `candidate_branch` engine (GIT-100.3) and discarding is the later discard
@@ -363,8 +363,11 @@ pub fn apply_candidate_to_branch(
     integration_root: &Path,
 ) -> Result<CandidateApplyOutcome, CandidateApplyError> {
     validate_request(request)?;
-    let record = load_candidate_for_request(daemon.store_mut(), request)?;
     let ticket = authorize_fencing(daemon, request)?;
+    if let Some(replay) = pending_apply_result(daemon, request)? {
+        return Ok(replay);
+    }
+    let record = load_candidate_for_request(daemon.store_mut(), request)?;
     let receipt_id = generate_prefixed_id("lar_")
         .map_err(|error| CandidateApplyError::store(format!("apply receipt id: {error}")))?;
 
@@ -381,16 +384,13 @@ pub fn apply_candidate_to_branch(
         AttemptStop::Settled(settled) => settled,
     };
 
-    // Durable record: registry transition first (the local ledger
-    // equivalent), then the durable outbox frame (the uplink). A failure
-    // after the ref moved leaves a truthful retryable state; the next
-    // attempt re-settles it.
+    // Persist the result before the terminal registry transition so a pending
+    // successful receipt can restore that transition during downlink replay.
     let target_state = if settled.result == ApplyResult::Applied {
         "applied"
     } else {
         "failed"
     };
-    transition_candidate_state(daemon.store_mut(), &record.candidate_id, target_state)?;
     let receipt = LocalApplyReceipt {
         local_apply_receipt_id: receipt_id,
         candidate_ref: request.candidate_ref.clone(),
@@ -405,10 +405,58 @@ pub fn apply_candidate_to_branch(
         revision: 1,
     };
     let frame_sequence = enqueue_apply_result(daemon, &ticket, &receipt)?;
+    transition_candidate_state(daemon.store_mut(), &record.candidate_id, target_state)?;
     Ok(CandidateApplyOutcome {
         receipt,
         frame_sequence,
     })
+}
+
+fn pending_apply_result(
+    daemon: &mut DeviceDaemon,
+    request: &CandidateApplyRequest,
+) -> Result<Option<CandidateApplyOutcome>, CandidateApplyError> {
+    let snapshot = daemon
+        .outbox_snapshot()
+        .map_err(|error| CandidateApplyError::store(error.to_string()))?;
+    for frame in snapshot.frames.iter().rev() {
+        let envelope: winwincode_client_port::messages::ClientToServerEnvelope =
+            serde_json::from_slice(&frame.frame)
+                .map_err(|error| CandidateApplyError::store(error.to_string()))?;
+        let ClientToServerMessage::CandidateApplyResult(payload) = envelope.message else {
+            continue;
+        };
+        let receipt = payload.receipt;
+        if receipt.result == ApplyResult::Applied
+            && payload.occupancy.occupancy_lease_id == request.occupancy_lease_id
+            && payload.occupancy.occupancy_fencing_token == request.occupancy_fencing_token
+            && receipt.repository_binding_id == request.repository_binding_id
+            && receipt.candidate_ref == request.candidate_ref
+            && receipt.target_branch == request.target_branch
+            && receipt.expected_head == request.expected_head
+            && receipt.strategy == request.strategy
+        {
+            let id = candidate_id_from_ref(&request.candidate_ref)?;
+            if crate::candidate_registry::candidate_local_ref(daemon.store_mut(), &id)?
+                .is_some_and(|record| record.local_state != LocalCandidateState::Applied)
+            {
+                transition_candidate_state(
+                    daemon.store_mut(),
+                    &id,
+                    if receipt.result == ApplyResult::Applied {
+                        "applied"
+                    } else {
+                        "failed"
+                    },
+                )?;
+            }
+            return Ok(Some(CandidateApplyOutcome {
+                receipt,
+                frame_sequence: frame.sequence,
+            }));
+        }
+    }
+    Ok(None)
 }
 
 /// Combines two or more retained Peer candidates in a detached worktree.
@@ -906,17 +954,13 @@ fn run_attempt(
         }
     }
 
-    // Preflight: the target branch must not be checked out anywhere.
-    // Plumbing update-ref would silently move such a branch and turn the
-    // user's tree into phantom staged changes — never acceptable.
+    // Only this bound checkout can be updated through Git's worktree-aware
+    // fast-forward. A branch checked out elsewhere remains protected.
     match worktrees_holding(&repository, &target_ref) {
-        Ok(count) if count > 0 => {
+        Ok(count) if count > 0 && !(count == 1 && is_current_branch(&repository, &target_ref)) => {
             return AttemptStop::Settled(SettledAttempt::refused(
                 ApplyResult::Failed,
-                format!(
-                    "the target branch is checked out in {count} worktree(s); the engine \
-                     never moves a user's checked-out branch"
-                ),
+                format!("the target branch is checked out in {count} other worktree(s)"),
             ));
         }
         Ok(_) => {}
@@ -1172,18 +1216,33 @@ fn publish_resulting_commit(
     resulting_commit: String,
 ) -> SettledAttempt {
     let target_ref = format!("refs/heads/{}", request.target_branch);
-    let status = git_command(repository)
-        .arg("update-ref")
-        .arg("-m")
-        .arg(format!(
-            "{APPLY_REF_MESSAGE_PREFIX} {} ({receipt_id})",
-            request.candidate_ref
-        ))
-        .arg("--")
-        .arg(&target_ref)
-        .arg(&resulting_commit)
-        .arg(&request.expected_head)
-        .output();
+    let mut command = git_command(repository);
+    if is_current_branch(repository, &target_ref) {
+        if !working_tree_dirty(repository).is_ok_and(|dirty| !dirty)
+            || read_git_ref(repository, "HEAD").ok().flatten().as_deref()
+                != Some(request.expected_head.as_str())
+        {
+            cleanup_attempt(repository, attempt_directory, worktree);
+            return SettledAttempt::refused(
+                ApplyResult::BaseStale,
+                "the checkout changed during integration",
+            );
+        }
+        command.args(["merge", "--ff-only", "--no-edit", "--", &resulting_commit]);
+    } else {
+        command
+            .arg("update-ref")
+            .arg("-m")
+            .arg(format!(
+                "{APPLY_REF_MESSAGE_PREFIX} {} ({receipt_id})",
+                request.candidate_ref
+            ))
+            .arg("--")
+            .arg(&target_ref)
+            .arg(&resulting_commit)
+            .arg(&request.expected_head);
+    }
+    let status = command.output();
     let settled = match status {
         Ok(output) if output.status.success() => SettledAttempt {
             result: ApplyResult::Applied,
@@ -1209,6 +1268,15 @@ fn publish_resulting_commit(
     };
     cleanup_attempt(repository, attempt_directory, worktree);
     settled
+}
+
+fn is_current_branch(repository: &Path, target_ref: &str) -> bool {
+    git_command(repository)
+        .args(["symbolic-ref", "--quiet", "HEAD"])
+        .output()
+        .is_ok_and(|output| {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == target_ref
+        })
 }
 
 /// Keeps the conflicted integration worktree as the conflict artifact: the

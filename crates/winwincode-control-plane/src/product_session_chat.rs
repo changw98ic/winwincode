@@ -27,7 +27,8 @@ use super::{
     WorkerCancellationRoute, WorkerPoolId, WorkerSessionId, WorkerSlotAuthority, WorkerSlotRecord,
     WorkerSlotState, binding_mismatch, canonical_id, command_digest, context_digest_fields,
     corrupt, domain_error, inspect_public_output, not_found, product_session_command_context,
-    require_revision, service_error, session_state_label, storage_error,
+    require_execution_revision, require_revision, service_error, session_state_label,
+    storage_error,
 };
 
 const MAX_MESSAGE_BYTES: usize = 1_048_576;
@@ -41,6 +42,7 @@ pub struct SubmitChatMessageCommand {
     pub context: ProductSessionCommandContext,
     pub product_session_id: ProductSessionId,
     pub message: String,
+    pub attachments: Vec<winwincode_domain::ChatAttachment>,
     pub execution_config: ProductSessionExecutionConfig,
 }
 
@@ -68,6 +70,7 @@ impl SubmitChatMessageCommand {
             context,
             product_session_id: command.payload.product_session_id,
             message: command.payload.message,
+            attachments: command.payload.attachments.unwrap_or_default(),
             execution_config: execution_config.clone(),
         })
     }
@@ -362,7 +365,7 @@ pub(super) struct PersistedTurnIntent {
     product_session_id: ProductSessionId,
     user_message_id: ChatMessageId,
     pub(super) execution_job_id: ExecutionJobId,
-    session_revision: u64,
+    pub(super) session_revision: u64,
     model_route: ModelRoute,
     pub(super) model_exchange_id: Option<ModelExchangeId>,
     requested_at: Instant,
@@ -587,6 +590,10 @@ impl ProductSessionService<'_> {
             self.require_chat_execution_replay(&command.context, &receipt.turn_intent)?;
             return Ok(receipt);
         }
+        winwincode_domain::validate_chat_attachments(&command.attachments).map_err(|message| {
+            service_error(ProductSessionServiceErrorCode::InvalidInput, message)
+        })?;
+        inspect_public_output(&self.output_gate, &command.attachments)?;
         validate_message_text(&command.message, false)?;
         inspect_public_output(&self.output_gate, &command.message)?;
         let mut catalog = self.load_catalog(command.context.receipt_identity.scope_key())?;
@@ -595,10 +602,15 @@ impl ProductSessionService<'_> {
             .get_mut(&command.product_session_id.0)
             .ok_or_else(not_found)?;
         require_revision(&persisted.session, command.context.expected_revision)?;
+        let goal = super::execution_job::chat_goal(
+            &command.message,
+            persisted.messages.iter().map(|message| &message.projection),
+        );
         let execution = command.execution_config.prepare(
             &command.context,
             &command.product_session_id,
-            &command.message,
+            &goal,
+            &command.attachments,
             &persisted.model_route,
         )?;
         if persisted.messages.len() >= MAX_MESSAGES_PER_SESSION {
@@ -631,6 +643,7 @@ impl ProductSessionService<'_> {
         );
         let message = ChatMessageProjection {
             artifact_refs: None,
+            attachments: Some(command.attachments.clone()),
             content: command.message.clone(),
             created_at: command.context.occurred_at.clone(),
             id: message_id.clone(),
@@ -753,7 +766,11 @@ impl ProductSessionService<'_> {
             .sessions
             .get_mut(&command.product_session_id.0)
             .ok_or_else(not_found)?;
-        require_revision(&persisted.session, command.context.expected_revision)?;
+        require_execution_revision(
+            persisted,
+            &command.runtime_authority.job_id,
+            command.context.expected_revision,
+        )?;
         if persisted.session.state() != ProductSessionState::Running {
             return Err(service_error(
                 ProductSessionServiceErrorCode::InvalidState,
@@ -776,6 +793,7 @@ impl ProductSessionService<'_> {
                 }
                 persisted.messages.push(PersistedChatMessage {
                     projection: ChatMessageProjection {
+                        attachments: None,
                         artifact_refs: None,
                         content: command.public_text_delta.clone(),
                         created_at: command.context.occurred_at.clone(),
@@ -874,7 +892,11 @@ impl ProductSessionService<'_> {
             .sessions
             .get_mut(&command.product_session_id.0)
             .ok_or_else(not_found)?;
-        require_revision(&persisted.session, command.context.expected_revision)?;
+        require_execution_revision(
+            persisted,
+            &command.runtime_authority.job_id,
+            command.context.expected_revision,
+        )?;
         require_persisted_terminal_binding(persisted, command)?;
         let public_state = terminal_public_state(&command.terminal_outcome.status);
         let message_id =
@@ -904,6 +926,7 @@ impl ProductSessionService<'_> {
                 }
                 persisted.messages.push(PersistedChatMessage {
                     projection: ChatMessageProjection {
+                        attachments: None,
                         artifact_refs: command.terminal_outcome.artifact_refs.clone(),
                         content: String::new(),
                         created_at: command.context.occurred_at.clone(),
@@ -931,6 +954,81 @@ impl ProductSessionService<'_> {
             None,
         )?;
         assistant_receipt(mutation, &command.model_exchange_id)
+    }
+
+    /// Records a failed/cancelled execution that never opened a model exchange.
+    /// The ingress has already checked the staged Worker binding and dispatch.
+    pub(crate) fn record_unstarted_terminal(
+        &mut self,
+        context: &ProductSessionCommandContext,
+        session_id: &ProductSessionId,
+        job_id: &ExecutionJobId,
+        outcome: &ProductSessionTurnTerminalOutcome,
+    ) -> Result<ProductSessionMutationReceipt, ProductSessionServiceError> {
+        let digest = command_digest(
+            "unstarted_terminal",
+            serde_json::json!({
+                "context": context_digest_fields(context), "session": session_id,
+                "job": job_id, "outcome": outcome,
+            }),
+        )?;
+        if let Some(receipt) = self.replay(context, &digest, MutationKind::AssistantUpdated)? {
+            return Ok(receipt);
+        }
+        if outcome.status == ExecutionOutcomeStatus::Succeeded || outcome.artifact_refs.is_some() {
+            return Err(binding_mismatch(
+                "unstarted execution cannot deliver a result",
+            ));
+        }
+        validate_terminal_usage(outcome)?;
+        let mut catalog = self.load_catalog(context.receipt_identity.scope_key())?;
+        let persisted = catalog
+            .sessions
+            .get_mut(&session_id.0)
+            .ok_or_else(not_found)?;
+        require_execution_revision(persisted, job_id, context.expected_revision)?;
+        let turn = persisted
+            .turn_intents
+            .iter_mut()
+            .find(|turn| &turn.execution_job_id == job_id)
+            .ok_or_else(|| binding_mismatch("unstarted execution has no Chat turn"))?;
+        if turn.model_exchange_id.is_some()
+            || !matches!(
+                turn.state,
+                PersistedTurnState::Pending | PersistedTurnState::Cancelled
+            )
+        {
+            return Err(binding_mismatch(
+                "unstarted terminal differs from its Chat turn",
+            ));
+        }
+        let cancelled = outcome.status == ExecutionOutcomeStatus::Cancelled;
+        turn.state = if cancelled {
+            PersistedTurnState::Cancelled
+        } else {
+            PersistedTurnState::Failed
+        };
+        turn.terminal_outcome = Some(outcome.clone());
+        if persisted.session.state() != ProductSessionState::Cancelled {
+            if cancelled {
+                persisted.session.complete_turn(context.occurred_at.clone())
+            } else {
+                persisted
+                    .session
+                    .fail("model_stream_failed", context.occurred_at.clone())
+            }
+            .map_err(|error| domain_error(&error))?;
+        }
+        let persisted = persisted.clone();
+        self.commit(
+            context,
+            digest,
+            MutationKind::AssistantUpdated,
+            catalog,
+            session_id,
+            persisted,
+            None,
+        )
     }
 
     pub(crate) fn replay_assistant_terminal(
@@ -1450,10 +1548,19 @@ fn require_terminal_message(
     turn: &PersistedTurnIntent,
     expected_state: &str,
 ) -> Result<(), ProductSessionServiceError> {
-    let exchange = turn
-        .model_exchange_id
-        .as_ref()
-        .ok_or_else(|| corrupt("terminal ProductSession turn has no model exchange"))?;
+    let Some(exchange) = turn.model_exchange_id.as_ref() else {
+        if matches!(expected_state, "failed" | "cancelled")
+            && turn
+                .terminal_outcome
+                .as_ref()
+                .is_some_and(|outcome| outcome.artifact_refs.is_none())
+        {
+            return Ok(());
+        }
+        return Err(corrupt(
+            "terminal ProductSession turn has no model exchange",
+        ));
+    };
     if session.messages.iter().any(|message| {
         message.projection.role == "assistant"
             && message.projection.state == expected_state
@@ -1535,6 +1642,7 @@ fn submit_digest_fields(command: &SubmitChatMessageCommand) -> serde_json::Value
         "context": context_digest_fields(&command.context),
         "productSessionId": command.product_session_id.0,
         "message": command.message,
+        "attachments": command.attachments,
     })
 }
 

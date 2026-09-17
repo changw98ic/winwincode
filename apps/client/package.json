@@ -22,12 +22,31 @@
     "access": "public"
   },
   "dependencies": {
-    "@winwincode/browser-ui": "0.1.0-alpha.2",
+    "@shikijs/langs": "4.3.1",
     "@winwincode/browser-core": "0.1.0-alpha.2",
-    "@winwincode/control-plane-client": "0.1.0-alpha.2"
+    "@winwincode/browser-ui": "0.1.0-alpha.2",
+    "@winwincode/control-plane-client": "0.1.0-alpha.2",
+    "clsx": "2.1.1",
+    "mdast-util-from-markdown": "2.0.3",
+    "mdast-util-gfm": "3.1.0",
+    "micromark-core-commonmark": "2.0.3",
+    "micromark-extension-gfm": "3.0.0",
+    "micromark-util-character": "2.1.1",
+    "micromark-util-classify-character": "2.0.1",
+    "micromark-util-sanitize-uri": "2.0.1",
+    "micromark-util-symbol": "2.0.1",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "shiki": "4.3.1"
   },
   "scripts": {
     "build": "node scripts/build.mjs",
     "typecheck": "tsc -p tsconfig.json --pretty false"
+  },
+  "devDependencies": {
+    "@types/mdast": "4.0.4",
+    "@types/react": "18.3.31",
+    "@types/react-dom": "18.3.7",
+    "micromark-util-types": "2.0.2"
   }
 }

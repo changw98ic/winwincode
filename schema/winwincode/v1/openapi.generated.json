@@ -2686,6 +2686,32 @@
         ],
         "type": "object"
       },
+      "ChatAttachment": {
+        "additionalProperties": false,
+        "description": "User attachment: UTF-8 text (32 KiB each) or base64 PNG/JPEG/WebP. Up to four and 128 KiB decoded total per message.",
+        "properties": {
+          "content": {
+            "maxLength": 174764,
+            "minLength": 1,
+            "type": "string"
+          },
+          "mediaType": {
+            "pattern": "^(text/plain|image/png|image/jpeg|image/webp)$",
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 255,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "mediaType",
+          "content"
+        ],
+        "type": "object"
+      },
       "ChatInputInteractionProjection": {
         "additionalProperties": false,
         "description": "Secret-safe pending input projection. It excludes Worker envelopes, provider data, credentials, and raw tool payloads.",
@@ -2932,6 +2958,13 @@
             "minItems": 1,
             "type": "array"
           },
+          "attachments": {
+            "items": {
+              "$ref": "#/components/schemas/ChatAttachment"
+            },
+            "maxItems": 4,
+            "type": "array"
+          },
           "content": {
             "maxLength": 1048576,
             "type": "string"
@@ -3024,6 +3057,13 @@
       "ChatSubmitPayload": {
         "additionalProperties": false,
         "properties": {
+          "attachments": {
+            "items": {
+              "$ref": "#/components/schemas/ChatAttachment"
+            },
+            "maxItems": 4,
+            "type": "array"
+          },
           "message": {
             "maxLength": 1048576,
             "minLength": 1,
@@ -3857,6 +3897,12 @@
           },
           {
             "$ref": "#/components/schemas/ClientExtensionApplyMessage"
+          },
+          {
+            "$ref": "#/components/schemas/ClientRepositoryRegisterMessage"
+          },
+          {
+            "$ref": "#/components/schemas/ClientRepositoryRegisteredMessage"
           }
         ],
         "title": "ClientControlMessage"
@@ -3899,7 +3945,9 @@
           "client.provider.report",
           "client.provider.apply",
           "client.extension.apply",
-          "client.extension.report"
+          "client.extension.report",
+          "client.repository.register",
+          "client.repository.registered"
         ],
         "title": "ClientControlMessageKind",
         "type": "string"
@@ -5125,6 +5173,104 @@
         "x-authority": "device-provider",
         "x-direction": "client-to-control-plane",
         "x-message-class": "report"
+      },
+      "ClientRepositoryRegisteredMessage": {
+        "additionalProperties": false,
+        "description": "Device result for one encrypted repository registration.",
+        "properties": {
+          "clientInstanceId": {
+            "$ref": "#/components/schemas/ClientInstanceId"
+          },
+          "clientNodeId": {
+            "$ref": "#/components/schemas/ClientNodeId"
+          },
+          "kind": {
+            "const": "client.repository.registered"
+          },
+          "messageId": {
+            "$ref": "#/components/schemas/ClientControlMessageId"
+          },
+          "occurredAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "receipt": {
+            "$ref": "#/components/schemas/DeviceRepositoryRegistrationReceipt"
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "sequence": {
+            "$ref": "#/components/schemas/ClientExchangeSequence"
+          }
+        },
+        "required": [
+          "kind",
+          "schemaVersion",
+          "messageId",
+          "clientNodeId",
+          "clientInstanceId",
+          "sequence",
+          "occurredAt",
+          "receipt"
+        ],
+        "title": "client.repository.registered",
+        "type": "object",
+        "x-authority": "device-repository",
+        "x-direction": "client-to-control-plane",
+        "x-message-class": "report"
+      },
+      "ClientRepositoryRegisterMessage": {
+        "additionalProperties": false,
+        "description": "Register an encrypted device-local directory using the existing repository checks.",
+        "properties": {
+          "clientInstanceId": {
+            "$ref": "#/components/schemas/ClientInstanceId"
+          },
+          "clientNodeId": {
+            "$ref": "#/components/schemas/ClientNodeId"
+          },
+          "encrypted": {
+            "$ref": "#/components/schemas/DeviceConfigurationEnvelope"
+          },
+          "expectedRevision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "idempotencyKey": {
+            "$ref": "#/components/schemas/IdempotencyKey"
+          },
+          "kind": {
+            "const": "client.repository.register"
+          },
+          "messageId": {
+            "$ref": "#/components/schemas/ClientControlMessageId"
+          },
+          "occurredAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "sequence": {
+            "$ref": "#/components/schemas/ClientExchangeSequence"
+          }
+        },
+        "required": [
+          "kind",
+          "schemaVersion",
+          "messageId",
+          "clientNodeId",
+          "clientInstanceId",
+          "sequence",
+          "occurredAt",
+          "expectedRevision",
+          "idempotencyKey",
+          "encrypted"
+        ],
+        "title": "client.repository.register",
+        "type": "object",
+        "x-authority": "device-repository",
+        "x-direction": "control-plane-to-client",
+        "x-message-class": "command"
       },
       "ClientRepositoryRemovedMessage": {
         "additionalProperties": false,
@@ -6461,6 +6607,9 @@
             "$ref": "#/components/schemas/SessionCloseCompletedResponse"
           },
           {
+            "$ref": "#/components/schemas/SessionUpdateCompletedResponse"
+          },
+          {
             "$ref": "#/components/schemas/DeliveryCreateCompletedResponse"
           },
           {
@@ -6563,6 +6712,7 @@
           "input.respond",
           "session.cancel",
           "session.close",
+          "session.update",
           "delivery.create",
           "delivery.update_spec",
           "workrun.start",
@@ -6601,6 +6751,9 @@
           },
           {
             "$ref": "#/components/schemas/SessionCloseCommand"
+          },
+          {
+            "$ref": "#/components/schemas/SessionUpdateCommand"
           },
           {
             "$ref": "#/components/schemas/DeliveryCreateCommand"
@@ -10168,6 +10321,22 @@
         ],
         "type": "object"
       },
+      "DeliveryAcceptanceProgressProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "passed": {
+            "$ref": "#/components/schemas/Count"
+          },
+          "total": {
+            "$ref": "#/components/schemas/Count"
+          }
+        },
+        "required": [
+          "passed",
+          "total"
+        ],
+        "type": "object"
+      },
       "DeliveryAttentionOptionProjection": {
         "additionalProperties": false,
         "properties": {
@@ -10485,6 +10654,9 @@
           },
           "requirements": {
             "$ref": "#/components/schemas/DeliveryRequirementsProjection"
+          },
+          "reworkAttemptsUsed": {
+            "$ref": "#/components/schemas/Count"
           },
           "schemaVersion": {
             "$ref": "#/components/schemas/SchemaVersion"
@@ -10831,6 +11003,9 @@
       "DeliveryProjection": {
         "additionalProperties": false,
         "properties": {
+          "acceptance": {
+            "$ref": "#/components/schemas/DeliveryAcceptanceProgressProjection"
+          },
           "activeWorkRunId": {
             "oneOf": [
               {
@@ -10853,8 +11028,15 @@
           "revision": {
             "$ref": "#/components/schemas/Revision"
           },
+          "reworkAttemptsUsed": {
+            "$ref": "#/components/schemas/Count"
+          },
           "schemaVersion": {
             "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "sourceProductSessionId": {
+            "$ref": "#/components/schemas/ProductSessionId",
+            "description": "Present when this delivery was delegated from a chat session."
           },
           "status": {
             "$ref": "#/components/schemas/WorkItemState"
@@ -11352,6 +11534,12 @@
           },
           "title": {
             "maxLength": 500,
+            "minLength": 1,
+            "type": "string"
+          },
+          "verificationCommand": {
+            "description": "User-confirmed verification command, required for a Device repository delivery.",
+            "maxLength": 4096,
             "minLength": 1,
             "type": "string"
           }
@@ -12041,6 +12229,44 @@
           "online",
           "snapshot",
           "receipt"
+        ],
+        "type": "object"
+      },
+      "DeviceRepositoryRegistrationReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "outcome": {
+            "enum": [
+              "registered",
+              "invalid_request",
+              "invalid_git",
+              "permission_denied",
+              "moved",
+              "scan_failed",
+              "unavailable"
+            ],
+            "type": "string"
+          },
+          "repositoryBindingId": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RepositoryBindingId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "requestId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "requestId",
+          "outcome",
+          "repositoryBindingId"
         ],
         "type": "object"
       },
@@ -13005,6 +13231,39 @@
         "minimum": 0,
         "type": "integer"
       },
+      "ExecutionDeviceTarget": {
+        "additionalProperties": false,
+        "description": "Server-sealed Device destination inherited from the confirmed source session. Pending jobs may only run on this Device.",
+        "properties": {
+          "clientId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "clientNodeId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "repositoryBindingId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "userId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "clientNodeId",
+          "clientId",
+          "repositoryBindingId",
+          "userId"
+        ],
+        "type": "object"
+      },
       "ExecutionEventCategory": {
         "enum": [
           "lifecycle",
@@ -13161,6 +13420,13 @@
           }
         ],
         "properties": {
+          "attachments": {
+            "items": {
+              "$ref": "#/components/schemas/ChatAttachment"
+            },
+            "maxItems": 4,
+            "type": "array"
+          },
           "attempt": {
             "maximum": 1000,
             "minimum": 1,
@@ -18677,8 +18943,47 @@
       "ProductSessionProjection": {
         "additionalProperties": false,
         "properties": {
+          "archived": {
+            "type": "boolean"
+          },
+          "deviceContext": {
+            "additionalProperties": false,
+            "properties": {
+              "branch": {
+                "type": "string"
+              },
+              "clientId": {
+                "pattern": "^[0-9]{9,12}$",
+                "type": "string"
+              },
+              "deviceName": {
+                "type": "string"
+              },
+              "headCommit": {
+                "type": "string"
+              },
+              "repositoryBindingId": {
+                "type": "string"
+              },
+              "repositoryName": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "clientId",
+              "deviceName",
+              "repositoryBindingId",
+              "repositoryName",
+              "branch",
+              "headCommit"
+            ],
+            "type": "object"
+          },
           "id": {
             "$ref": "#/components/schemas/ProductSessionId"
+          },
+          "modelRoute": {
+            "$ref": "#/components/schemas/ModelRoute"
           },
           "projectId": {
             "$ref": "#/components/schemas/ProjectId"
@@ -22208,6 +22513,67 @@
             "type": "object"
           }
         ]
+      },
+      "SessionUpdateCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "session.update"
+              },
+              "payload": {
+                "$ref": "#/components/schemas/SessionUpdatePayload"
+              },
+              "scope": {
+                "$ref": "#/components/schemas/RepositoryScope"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "SessionUpdateCompletedResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandCompletedEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "session.update"
+              },
+              "result": {
+                "$ref": "#/components/schemas/ProductSessionProjection"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "SessionUpdatePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "archived": {
+            "type": "boolean"
+          },
+          "productSessionId": {
+            "$ref": "#/components/schemas/ProductSessionId"
+          },
+          "title": {
+            "maxLength": 500,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "productSessionId",
+          "title",
+          "archived"
+        ],
+        "type": "object"
       },
       "SettingsGetQuery": {
         "allOf": [
@@ -26034,6 +26400,9 @@
           "deliverySpecRevision": {
             "$ref": "#/components/schemas/Revision"
           },
+          "deviceTarget": {
+            "$ref": "#/components/schemas/ExecutionDeviceTarget"
+          },
           "schemaVersion": {
             "$ref": "#/components/schemas/SchemaVersion"
           },
@@ -26139,7 +26508,7 @@
           },
           "rework": {
             "$ref": "#/components/schemas/DeliveryReworkInput",
-            "description": "Required only for remediator dispatch; rejected for every other profile."
+            "description": "Optional explicit scope for remediator dispatch; when omitted, the authority derives the complete allowed scope from current evidence and changed hunks. Rejected for every other profile."
           }
         },
         "required": [
@@ -26632,7 +27001,7 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:85ac57cab0e5629b27db99690fb2379f6ae6723ee1ad118be1b618e73f89cb55",
+  "x-source-digest": "sha256:b91be8d38875390b4d7c083c794e67d42166951faaa288b2f5f18b640decec49",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {

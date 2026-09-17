@@ -521,6 +521,7 @@ impl SessionSupervisor {
     /// Returns the store failure when the read fails.
     pub fn running_worker_sessions(&self) -> Result<u32, SupervisorError> {
         self.reap()?;
+        self.reconcile()?;
         let running = self.count_worker_processes_in_state(WORKER_STATE_RUNNING)?;
         Ok(u32::try_from(running).unwrap_or(u32::MAX))
     }
@@ -1044,14 +1045,13 @@ impl SessionSupervisor {
 impl WorkerCapacitySource for SessionSupervisor {
     fn worker_capacity(&self) -> WorkerCapacitySnapshot {
         // Best effort: a supervision hiccup must not block the exchange
-        // loop, so failures report the conservative zero facts.
-        let _ = self.reap();
+        // loop, so an unobservable process keeps its slot reserved.
         let running = self
-            .count_worker_processes_in_state(WORKER_STATE_RUNNING)
-            .unwrap_or(0);
+            .running_worker_sessions()
+            .unwrap_or(self.config().max_concurrent_worker_sessions);
         let reserved = self.reserved_worker_slots().unwrap_or(0);
         WorkerCapacitySnapshot {
-            running_worker_sessions: u32::try_from(running).unwrap_or(u32::MAX),
+            running_worker_sessions: running,
             reserved_worker_sessions: reserved,
         }
     }

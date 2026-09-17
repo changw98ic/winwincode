@@ -568,6 +568,52 @@ pub fn freeze_delivery_candidate_from_source(
     )
 }
 
+/// Freezes remediator output only after checking its authorized old-to-new Git delta.
+///
+/// # Errors
+/// Rejects changed Artifact identity, foreign source lineage, or changes outside authorization.
+pub fn freeze_rework_candidate_from_sources(
+    delivery: &Delivery,
+    authorization: &super::rework::ReworkAuthorization,
+    source: &DurableCandidateSourceInput,
+    delta: &DurableCandidateSourceInput,
+    terminal_facts: &DeliveryTerminalOutcomeFacts,
+) -> Result<FrozenDeliveryCandidate, DeliveryValidationError> {
+    let (git_snapshot, terminal_outcome) =
+        validated_git_snapshot_from_source(delivery, source, terminal_facts)?;
+    if delta.repository_locator != source.repository_locator
+        || delta.artifact != source.artifact
+        || delta.requested_base_revision != authorization.previous_candidate().candidate_commit_id()
+        || delta.candidate_commit_id != source.candidate_commit_id
+        || delta.candidate_tree_id != source.candidate_tree_id
+    {
+        return Err(invalid_candidate(
+            "replacement delta differs from its authenticated candidate Artifact",
+        ));
+    }
+    let mut replacement_delta = git_snapshot.clone();
+    replacement_delta
+        .base_commit_id
+        .clone_from(&delta.base_commit_id);
+    replacement_delta
+        .base_tree_id
+        .clone_from(&delta.base_tree_id);
+    replacement_delta.diff_sha256.clone_from(&delta.diff_sha256);
+    replacement_delta.changed_paths = source_path_facts(delta);
+    replacement_delta.changed_hunks = source_hunk_facts(delta);
+    validate_git_snapshot_shape(&replacement_delta)?;
+    replacement_delta.validation_seal = seal_git_snapshot(&replacement_delta)?;
+    super::rework::freeze_rework_replacement_candidate(
+        delivery,
+        authorization,
+        &FreezeCandidateFacts {
+            git_snapshot,
+            terminal_outcome,
+        },
+        &replacement_delta,
+    )
+}
+
 pub(super) fn validated_git_snapshot_from_source(
     delivery: &Delivery,
     source: &DurableCandidateSourceInput,

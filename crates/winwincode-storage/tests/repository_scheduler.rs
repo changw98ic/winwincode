@@ -224,6 +224,45 @@ fn cancellation_request(
 }
 
 #[test]
+fn pending_device_launch_cannot_be_claimed_locally_even_after_restart() {
+    let root = directory("device-pending");
+    let mut storage = SqliteStorage::open(&root).unwrap();
+    storage
+        .execution_queue()
+        .unwrap()
+        .submit(&ExecutionJobSubmission {
+            scope: queue_scope(10),
+            job_id: ExecutionJobId(id("job", 10)),
+            request_id: RequestId(id("req", 10)),
+            payload_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+            dispatch_payload: br#"{"workInput":{"deviceTarget":{"clientId":"device"}}}"#.to_vec(),
+            attempt: 1,
+            dependencies: vec![],
+            work_run_id: None,
+            submitted_at: at(1),
+        })
+        .unwrap();
+    let (worker, instance) = register(&mut storage);
+    for (request, generation) in [(100, "first"), (101, "restarted")] {
+        let mut reopened = SqliteStorage::open(&root).unwrap();
+        let mut scheduler = reopened.repository_scheduler().unwrap();
+        assert_eq!(scheduler.pending_device_launches().unwrap().len(), 1);
+        assert!(
+            scheduler
+                .claim_next(&claim_request(
+                    request,
+                    generation,
+                    worker.clone(),
+                    instance.clone()
+                ))
+                .unwrap()
+                .is_none()
+        );
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn repository_claim_is_fair_receipt_first_and_restart_reoffers_exact_dispatch() {
     let root = directory("fair-restart");
     let mut storage = SqliteStorage::open(&root).expect("storage");

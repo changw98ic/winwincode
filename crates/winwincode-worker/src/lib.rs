@@ -232,6 +232,7 @@ struct DispatchRecord {
     codex_thread_id: CodexThreadId,
     replacement_authority: Option<ExecutionJobReplacementAuthority>,
     terminal: bool,
+    submission_started: bool,
 }
 
 struct PreparedDispatch {
@@ -513,6 +514,19 @@ where
         let mut jobs = self.active.values().collect::<Vec<_>>();
         jobs.sort_by(|left, right| left.job.job_id.0.cmp(&right.job.job_id.0));
         jobs
+    }
+
+    /// True only after accepted work and every retained terminal delivery have drained.
+    #[must_use]
+    pub fn work_drained(&mut self) -> bool {
+        !self.dispatches.is_empty()
+            && self.dispatches.values().all(|record| record.terminal)
+            && self.active.is_empty()
+            && self.pending_candidates.is_empty()
+            && self
+                .codex
+                .pending_execution_deliveries()
+                .is_ok_and(|pending| pending.is_empty())
     }
 
     /// Builds a bounded recovery hint for one active task.
@@ -812,6 +826,21 @@ where
             self.flush_durable_execution_deliveries().await?;
         } else {
             self.flush_recovered_durable_execution_deliveries().await?;
+        }
+        // A lost binding response must not strand a prepared Core turn.
+        let pending = self
+            .active
+            .values()
+            .filter(|active| {
+                self.dispatches
+                    .get(&active.job.job_id.0)
+                    .is_some_and(|record| !record.submission_started)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for active in pending {
+            self.start_bound_job(&active.job, &active.codex_thread_id, now.clone())
+                .await?;
         }
         let mut job_ids = self.active.keys().cloned().collect::<Vec<_>>();
         job_ids.sort();
@@ -2504,6 +2533,15 @@ where
             now.clone(),
         )
         .await?;
+        self.start_bound_job(&dispatch.job, &thread_id, now).await
+    }
+
+    async fn start_bound_job(
+        &mut self,
+        job: &ExecutionJob,
+        thread_id: &CodexThreadId,
+        now: Instant,
+    ) -> Result<(), WorkerError> {
         // Synchronize the adapter's trusted clock after the binding is
         // installed but before replay or submission can cause a Provider
         // request.  This closes the gap where a lease expires between
@@ -2511,23 +2549,23 @@ where
         if let Err(_error) = self.codex.observe_now(&now) {
             return Err(codex_model_error());
         }
-        if self.recovered_core_interaction_pending(&dispatch.job.job_id.0)? {
+        if self.recovered_core_interaction_pending(&job.job_id.0)? {
             self.deferred_core_interaction_jobs
-                .insert(dispatch.job.job_id.0.clone());
+                .insert(job.job_id.0.clone());
         }
         // A restart can leave response-bearing approval/input frames in the
         // adapter outbox while the in-memory Worker has no active Job yet.
         // Flush again after installing this dispatch so those exact retained
         // frames are replayed before a recovered Core turn is submitted.
         self.flush_recovered_durable_execution_deliveries().await?;
-        if let Some(active) = self.active.get(&dispatch.job.job_id.0).cloned()
+        if let Some(active) = self.active.get(&job.job_id.0).cloned()
             && let Some(open) = self
                 .workspaces
                 .pending_observation_model_open(&active)
                 .map_err(|_| workspace_error())?
         {
             self.send_observation_open(open).await?;
-            if !self.active.contains_key(&dispatch.job.job_id.0) {
+            if !self.active.contains_key(&job.job_id.0) {
                 return Ok(());
             }
         }
@@ -2541,13 +2579,16 @@ where
                 "test process stopped before submission intent",
             ));
         }
-        let submitted = match winwincode_codex::stage_product::stage_product_prompt(&dispatch.job) {
-            Ok(prompt) => match self.codex.submit_turn(&thread_id, &prompt).await {
+        let submitted = match winwincode_codex::stage_product::stage_product_prompt(job) {
+            Ok(prompt) => match self.codex.submit_turn(thread_id, &prompt).await {
                 Ok(()) => true,
                 Err(_error) => false,
             },
             Err(_error) => false,
         };
+        if let Some(record) = self.dispatches.get_mut(&job.job_id.0) {
+            record.submission_started = true;
+        }
         self.flush_codex_execution_messages().await?;
         if !submitted {
             #[cfg(feature = "test-support")]
@@ -2559,7 +2600,7 @@ where
             }
             self.flush_durable_execution_deliveries().await?;
             self.finish_job(
-                &dispatch.job.job_id.0,
+                &job.job_id.0,
                 ExecutionOutcomeStatus::InfrastructureError,
                 "embedded Codex turn did not start",
                 Vec::new(),
@@ -2672,16 +2713,23 @@ where
                 codex_thread_id: thread_id.clone(),
                 replacement_authority: dispatch.replacement_authority.clone(),
                 terminal: false,
+                submission_started: false,
             },
         );
-        self.send_dispatch_result(
-            dispatch,
-            JobDispatchResultMessageStatus::Accepted,
-            Some(worker_session_id.clone()),
-            None,
-            now.clone(),
-        )
-        .await?;
+        let result = self
+            .send_dispatch_result(
+                dispatch,
+                JobDispatchResultMessageStatus::Accepted,
+                Some(worker_session_id.clone()),
+                None,
+                now.clone(),
+            )
+            .await;
+        if let Err(error) = result
+            && error.code != WorkerErrorCode::ExecutionPort
+        {
+            return Err(error);
+        }
         let binding = SessionBindingMessage {
             attempt: dispatch.job.attempt,
             bound_at: now.clone(),

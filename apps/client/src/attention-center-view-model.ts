@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { attentionTitle } from './display-labels.js'
+
 import {
   ControlPlaneClientError,
   type ControlPlaneClient,
@@ -367,7 +369,7 @@ function attentionItems(
       const item: AttentionCenterItem = {
         kind: 'attention',
         id: projection.id,
-        title: projection.title,
+        title: attentionTitle(projection.title),
         blocking: projection.blocking,
         expired: false,
         bindingValid: true,

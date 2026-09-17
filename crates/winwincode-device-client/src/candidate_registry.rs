@@ -367,6 +367,69 @@ pub fn retain_candidate(
     })
 }
 
+/// Reconciles frozen Git refs with the process that produced their sealed commit.
+/// Called after process exit and replayed on Device restart.
+pub(crate) fn retain_worker_candidates(
+    daemon: &mut DeviceDaemon,
+    worker: &crate::store::WorkerProcessRecord,
+) -> Result<(), CandidateRegistryError> {
+    if daemon
+        .occupancy_mirror()
+        .is_none_or(|mirror| mirror.occupancy_lease_id != worker.occupancy_lease_id)
+    {
+        return Ok(());
+    }
+    let Some(mapping) = daemon
+        .store_mut()
+        .path_mapping(&worker.repository_binding_id)?
+    else {
+        return Ok(());
+    };
+    let git = |args: &[&str]| -> Result<Vec<u8>, CandidateRegistryError> {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&mapping.canonical_path)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .args(args)
+            .output()
+            .map_err(|error| CandidateRegistryError::store(error.to_string()))?;
+        if !output.status.success() {
+            return Err(CandidateRegistryError::store(
+                "Cannot inspect frozen candidate refs",
+            ));
+        }
+        Ok(output.stdout)
+    };
+    let refs = git(&[
+        "for-each-ref",
+        "--format=%(objectname)",
+        CANDIDATE_REF_PREFIX,
+    ])?;
+    for commit in String::from_utf8_lossy(&refs).lines() {
+        let message = git(&["show", "-s", "--format=%B", commit])?;
+        let Ok(binding) = serde_json::from_slice::<serde_json::Value>(&message) else {
+            continue;
+        };
+        let provenance = &binding["originProvenance"];
+        if provenance["workerId"].as_str() != Some(worker.worker_id.as_str())
+            || provenance["workerInstanceId"].as_str() != Some(worker.worker_instance_id.as_str())
+        {
+            continue;
+        }
+        retain_candidate(
+            daemon,
+            &CandidateRetention {
+                candidate_commit: commit.to_owned(),
+                repository_binding_id: worker.repository_binding_id.clone(),
+                worker_session_id: worker.worker_session_id.clone(),
+                local_git_ref: format!("{CANDIDATE_REF_PREFIX}{commit}"),
+                retained_at: worker.last_observed_at.clone(),
+            },
+        )?;
+    }
+    Ok(())
+}
+
 /// Builds the deterministic canonical `lcr_` receipt id for a candidate.
 fn deterministic_lcr_id(candidate_id: &str) -> String {
     let hex: String = candidate_id

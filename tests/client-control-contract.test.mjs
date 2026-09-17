@@ -129,6 +129,8 @@ function workerLaunchGrant() {
 // Minimal schema-valid extra fields for every kind; the command base and the
 // fencing pair are added by the builders below according to the schema.
 const KIND_EXTRA_FIELDS = Object.freeze({
+  'client.repository.register': () => ({ encrypted: { clientNodeId: crockfordId('cnd'), requestId: 'idem-client-repository-register', expectedRevision: 4, publicKey: 'A'.repeat(88), nonce: 'A'.repeat(16), ciphertext: 'A'.repeat(24) } }),
+  'client.repository.registered': () => ({ receipt: { requestId: 'repository-test', outcome: 'registered', repositoryBindingId: crockfordId('rbd') } }),
   'client.enroll': () => ({
     displayName: 'Wen-ge MacBook Pro',
     platform: 'aarch64-apple-darwin',
@@ -258,6 +260,7 @@ const KIND_EXTRA_FIELDS = Object.freeze({
 const NON_COMMAND_KINDS = Object.freeze([
   'client.provider.report',
   'client.extension.report',
+  'client.repository.registered',
   'client.hello',
   'client.heartbeat',
   'client.worker.state',
@@ -305,10 +308,10 @@ test('schemaVersion is the string constant winwincode/v1', () => {
   assert.equal(typeof CLIENT_CONTROL_SCHEMA_VERSION, 'string')
 })
 
-test('kind registries match the schema verbatim: 18 + 13 = 31', () => {
-  assert.equal(CLIENT_TO_SERVER_MESSAGE_KINDS.length, 18)
-  assert.equal(SERVER_TO_CLIENT_MESSAGE_KINDS.length, 13)
-  assert.equal(CLIENT_CONTROL_MESSAGE_KINDS.length, 31)
+test('kind registries match the schema verbatim: 19 + 14 = 33', () => {
+  assert.equal(CLIENT_TO_SERVER_MESSAGE_KINDS.length, 19)
+  assert.equal(SERVER_TO_CLIENT_MESSAGE_KINDS.length, 14)
+  assert.equal(CLIENT_CONTROL_MESSAGE_KINDS.length, 33)
   assert.equal(Object.isFrozen(CLIENT_TO_SERVER_MESSAGE_KINDS), true)
   assert.equal(Object.isFrozen(SERVER_TO_CLIENT_MESSAGE_KINDS), true)
   assert.equal(Object.isFrozen(CLIENT_CONTROL_COMMAND_MESSAGE_KINDS), true)
@@ -319,8 +322,8 @@ test('kind registries match the schema verbatim: 18 + 13 = 31', () => {
   assert.deepEqual(overlap, [])
 })
 
-test('exactly 21 command kinds and 11 fenced kinds per the schema', () => {
-  assert.equal(CLIENT_CONTROL_COMMAND_MESSAGE_KINDS.length, 21)
+test('exactly 22 command kinds and 11 fenced kinds per the schema', () => {
+  assert.equal(CLIENT_CONTROL_COMMAND_MESSAGE_KINDS.length, 22)
   assert.equal(CLIENT_CONTROL_OCCUPANCY_FENCED_MESSAGE_KINDS.length, 11)
   assert.deepEqual(
     [...CLIENT_CONTROL_OCCUPANCY_FENCED_MESSAGE_KINDS],

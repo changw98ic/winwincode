@@ -82,6 +82,8 @@ fn workrun_dispatch(seed: u64) -> WorkRunStartResult {
 
 fn execution_config(seed: u64) -> DeliveryExecutionConfig {
     DeliveryExecutionConfig {
+        device_target: None,
+        model_selection: None,
         payload_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
         candidate_ref: None,
         workspace: ExecutionWorkspace {

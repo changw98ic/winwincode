@@ -157,6 +157,14 @@ impl ProductSession {
         &self.updated_at
     }
 
+    /// Updates display metadata without changing the execution lifecycle.
+    pub fn rename(&mut self, title: String, now: Instant) -> Result<(), ProductSessionError> {
+        validate_title(&title)?;
+        self.transition(self.state, "rename", now, |_| true)?;
+        self.title = title;
+        Ok(())
+    }
+
     /// Starts a Chat turn from an idle or failed session.
     pub fn begin_turn(&mut self, now: Instant) -> Result<(), ProductSessionError> {
         self.transition(ProductSessionState::Running, "begin_turn", now, |state| {

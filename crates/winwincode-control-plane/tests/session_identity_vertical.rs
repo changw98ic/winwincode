@@ -143,6 +143,8 @@ mod session_binding_fixture {
             &result.delivery.snapshot().spec,
             intent,
             DeliveryExecutionConfig {
+                device_target: None,
+                model_selection: None,
                 payload_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
                 candidate_ref: None,
                 workspace: ExecutionWorkspace {
@@ -1534,6 +1536,7 @@ mod session_binding_fixture {
             lease.expires_at.clone(),
         );
         let job = ExecutionJob {
+            attachments: None,
             model_selection: None,
             attempt: 1,
             execution_profile: "codex".into(),

@@ -15,6 +15,7 @@
 body {
   min-width: 20rem;
   margin: var(--wwc-space-0);
+  font-size: 14px;
 }
 
 button,
@@ -23,6 +24,30 @@ select,
 textarea {
   min-width: 0;
   font: inherit;
+}
+
+button {
+  padding: 6px 14px;
+  border: 1px solid var(--wwc-color-border-control);
+  border-radius: var(--wwc-radius-button);
+  background: transparent;
+  color: var(--wwc-color-text);
+  font-size: 14px;
+  line-height: 22px;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) { background: var(--wwc-color-surface-subtle); }
+button:disabled { cursor: not-allowed; opacity: var(--wwc-opacity-disabled); }
+input, textarea { accent-color: var(--wwc-color-action); }
+input[type='checkbox'], input[type='radio'] { width: auto; flex: 0 0 auto; }
+
+input:not([type='checkbox'], [type='radio']), textarea {
+  padding: 8px 12px;
+  border: 1px solid var(--wwc-color-border-control);
+  border-radius: var(--wwc-radius-sm);
+  background: var(--wwc-color-surface);
+  color: var(--wwc-color-text);
 }
 
 button,

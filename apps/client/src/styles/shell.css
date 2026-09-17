@@ -1,8 +1,7 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /*
  * Shell layout: a left sidebar (brand, vertical navigation, connection footer)
- * beside the routed main area. The DOM keeps the historical classes — the grid
- * places .wwc-header and .wwc-connection-bar into the sidebar column.
+ * beside the routed main area. Connection status shares the compact mobile bar.
  */
 
 .wwc-shell {
@@ -15,12 +14,14 @@
 }
 
 .wwc-header {
+  min-height: 0;
+  overflow: hidden;
   grid-column: 1;
-  grid-row: 1;
+  grid-row: 1 / span 2;
   display: flex;
   flex-direction: column;
-  gap: var(--wwc-space-8);
-  padding: var(--wwc-space-6) var(--wwc-space-4);
+  gap: var(--wwc-space-6);
+  padding: var(--wwc-space-4) var(--wwc-space-3);
   border-right: var(--wwc-border-width-strong) solid var(--wwc-color-border);
   color: var(--wwc-color-on-header);
   background: var(--wwc-color-header);
@@ -31,7 +32,7 @@
   flex-direction: column;
   gap: var(--wwc-space-1);
   padding: var(--wwc-space-2) var(--wwc-space-2) var(--wwc-space-0);
-  font-size: var(--wwc-font-size-lg);
+  font-size: 18px;
   font-weight: var(--wwc-font-weight-display);
   letter-spacing: -0.01em;
 }
@@ -42,6 +43,19 @@
   color: var(--wwc-color-text-muted);
 }
 
+.wwc-navigation-toggle {
+  display: none;
+  margin-left: auto;
+  min-height: 40px;
+  padding: 8px 12px;
+  border: 1px solid var(--wwc-color-border-subtle);
+  border-radius: 8px;
+  background: var(--wwc-color-surface);
+  color: var(--wwc-color-text);
+  font: inherit;
+  cursor: pointer;
+}
+
 /* UI-604: the skip link is the keyboard bypass for the sidebar navigation.  It
    stays visually hidden until focused so pointer users see no change. */
 .wwc-skip-link {
@@ -50,7 +64,7 @@
   z-index: var(--wwc-layer-toast);
   padding: var(--wwc-space-2) var(--wwc-space-3);
   border: var(--wwc-border-width-control) solid var(--wwc-color-border);
-  color: var(--wwc-color-text);
+  color: var(--wwc-color-on-accent);
   background: var(--wwc-color-accent);
   clip-path: inset(50%);
   white-space: nowrap;
@@ -70,17 +84,17 @@
 .wwc-navigation-link {
   padding: var(--wwc-space-2) var(--wwc-space-3);
   border: var(--wwc-border-width-control) solid transparent;
+  border-radius: var(--wwc-radius-md);
   color: var(--wwc-color-text);
   font-weight: var(--wwc-font-weight-medium);
   text-decoration: none;
 }
 
 .wwc-navigation-link:hover {
-  border-color: var(--wwc-color-border);
+  background: var(--dsw-specific-sidebar-nav-item-hover);
 }
 
 .wwc-navigation-link[aria-current='page'] {
-  border-color: var(--wwc-color-border);
   background: var(--wwc-color-header-active);
 }
 
@@ -102,9 +116,9 @@
   min-width: var(--wwc-space-4);
   margin-left: var(--wwc-space-2);
   padding: var(--wwc-space-0) var(--wwc-space-1);
-  border: var(--wwc-border-width) solid var(--wwc-color-border);
+  border-radius: var(--wwc-radius-button);
   color: var(--wwc-color-text);
-  background: var(--wwc-color-accent);
+  background: var(--wwc-color-header-active);
   font-size: var(--wwc-font-size-xs);
   font-weight: var(--wwc-font-weight-strong);
   line-height: var(--wwc-line-height-tight);
@@ -115,10 +129,9 @@
    components layer, this only places it in the grid. 它与侧栏同列同底色,
    右侧描边与 header 贯通,读起来是侧栏的一部分而非独立浮块。 */
 .wwc-connection-bar {
-  grid-column: 1;
-  grid-row: 2;
+  flex: 0 0 auto;
+  margin: auto calc(-1 * var(--wwc-space-3)) calc(-1 * var(--wwc-space-4));
   border-top: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
-  border-right: var(--wwc-border-width-strong) solid var(--wwc-color-border);
   background: var(--wwc-color-header);
   color: var(--wwc-color-on-header);
 }
@@ -126,11 +139,11 @@
 .wwc-main {
   grid-column: 2;
   grid-row: 1 / span 2;
-  max-width: var(--wwc-content-max);
+  min-width: 0;
   width: 100%;
   height: 100%;
-  margin: var(--wwc-space-0) auto;
-  padding: var(--wwc-space-12) var(--wwc-space-16);
+  margin: 0;
+  padding: var(--wwc-space-6);
   overflow-y: auto;
 }
 
@@ -180,6 +193,8 @@
   margin: var(--wwc-space-2) var(--wwc-space-0) var(--wwc-space-6);
   color: var(--wwc-color-text-muted);
 }
+
+.wwc-surface-description:empty { display: none; }
 
 .wwc-surface-read-only,
 .wwc-surface-route-denied {
@@ -282,10 +297,9 @@
   width: 100%;
   margin-top: var(--wwc-space-6);
   border: var(--wwc-border-width-control) solid var(--wwc-color-border);
-  color: var(--wwc-color-text);
+  color: var(--wwc-color-on-accent);
   background: var(--wwc-color-accent);
   font-weight: var(--wwc-font-weight-strong);
-  box-shadow: var(--wwc-shadow-hard);
 }
 
 .wwc-login-submit:hover:not(:disabled) {
@@ -324,33 +338,47 @@
 }
 
 @media (max-width: 64rem) {
-  .wwc-shell {
+  .wwc-shell,
+  .wwc-shell:has(.wwc-main[data-surface='chat']) {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto auto minmax(0, 1fr);
-    height: auto;
+    grid-template-rows: auto minmax(0, 1fr);
+    height: 100dvh;
   }
 
   .wwc-main {
     grid-column: 1;
-    grid-row: 3;
-    height: auto;
+    grid-row: 2;
+    min-height: 0;
+    height: 100%;
     padding: var(--wwc-space-4);
-    overflow-y: visible;
+    overflow-y: auto;
   }
 
   .wwc-header {
     grid-column: 1;
     grid-row: 1;
-    flex-direction: row;
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
     align-items: center;
-    gap: var(--wwc-space-3);
-    padding: var(--wwc-space-3) var(--wwc-space-4);
+    gap: var(--wwc-space-2);
+    max-height: 65dvh;
+    overflow-y: auto;
+    padding: var(--wwc-space-2) var(--wwc-space-3);
     border-right: none;
     border-bottom: var(--wwc-border-width-strong) solid var(--wwc-color-border);
   }
 
+  .wwc-brand { grid-column: 1; grid-row: 1; padding: 0; font-size: var(--wwc-font-size-sm); }
+  .wwc-brand-edition { display: none; }
+  .wwc-navigation-toggle { display: block; grid-column: 3; grid-row: 1; padding: 6px 10px; }
+
+  .wwc-header:not(.wwc-header-expanded) .wwc-navigation,
+  .wwc-header:not(.wwc-header-expanded) .wwc-recent-chats { display: none; }
+
+  .wwc-header .wwc-recent-chats { grid-column: 1 / -1; }
+
   .wwc-navigation {
+    grid-column: 1 / -1;
     flex: 1 1 100%;
     flex-direction: row;
     flex-wrap: wrap;
@@ -362,10 +390,7 @@
     margin-top: var(--wwc-space-0);
   }
 
-  .wwc-connection-bar {
-    grid-column: 1;
-    grid-row: 2;
-  }
+
 }
 
 /* Design shell: nav links are icon + label rows in the sidebar. */
@@ -399,7 +424,10 @@
 
 /* Design sidebar 「最近对话」 section under the navigation. */
 .wwc-recent-chats {
-  margin-top: var(--wwc-space-8);
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  margin-top: 0;
   padding-top: var(--wwc-space-4);
   border-top: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
 }
@@ -428,9 +456,9 @@
   flex: 0 0 auto;
 }
 
-/* 设计稿 03b:当前打开的会话行使用黄色高亮。 */
+/* The active session uses the same neutral selection as the navigation. */
 .wwc-sidebar-recent-item-active {
-  background: var(--wwc-color-accent);
+  background: var(--wwc-color-header-active);
 }
 
 /* 设计稿 03b:会话打开时「新对话」不再重复高亮。 */
@@ -467,3 +495,25 @@
   color: var(--wwc-color-text-muted);
   text-align: center;
 }
+
+.wwc-session-browser { display: flex; flex-direction: column; width: 100%; gap: 8px; min-height: 0; }
+.wwc-session-browser header { display: flex; align-items: center; justify-content: space-between; color: var(--wwc-color-text-muted); font-size: 12px; }
+.wwc-session-browser input[type='search'], .wwc-session-browser select { width: 100%; min-width: 0; padding: 7px; color: var(--wwc-color-text); background: var(--wwc-color-surface); border: 1px solid var(--wwc-color-border-subtle); }
+.wwc-session-archived { display: flex; gap: 6px; font-size: 12px; align-items: center; }
+.wwc-session-filters { color: var(--wwc-color-text-muted); font-size: var(--wwc-font-size-xs); }
+.wwc-session-filters summary { padding: 4px 0; cursor: pointer; overflow-wrap: anywhere; }
+.wwc-session-filters select { margin: 4px 0 8px; }
+.wwc-session-browser .wwc-sidebar-recent { overflow-y: auto; min-height: 0; align-content: start; }
+.wwc-session-browser .wwc-sidebar-recent-item { display: flex; position: relative; align-items: start; padding: 0; overflow: visible; }
+.wwc-session-browser .wwc-sidebar-recent-item-link { display: grid; flex: 1; min-width: 0; gap: 3px; padding: 8px; }
+.wwc-session-browser .wwc-sidebar-recent-item-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wwc-session-browser small { font-size: 11px; color: var(--wwc-color-text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wwc-session-browser button, .wwc-session-actions summary { padding: 4px 8px; cursor: pointer; color: var(--wwc-color-text-secondary); background: transparent; border: 0; border-radius: 8px; }
+.wwc-session-actions { flex: 0; margin-top: 6px; }
+.wwc-session-actions[open] { position: absolute; right: 0; z-index: 2; background: var(--wwc-color-surface); padding: 4px; border: 1px solid var(--wwc-color-border); border-radius: 12px; box-shadow: var(--wwc-shadow-dialog); }
+.wwc-session-actions button { display: block; width: 100%; white-space: nowrap; }
+.wwc-session-browser form { display: flex; gap: 3px; flex-wrap: wrap; padding: 6px; }
+.wwc-session-browser form input { width: 100%; min-width: 0; }
+
+.wwc-session-actions summary { list-style: none; }
+.wwc-session-actions summary::-webkit-details-marker { display: none; }

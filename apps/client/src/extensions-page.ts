@@ -45,9 +45,11 @@ export function mountExtensionsPage(options: ExtensionsPageOptions): ExtensionsP
   const devices = node('select'); devices.id = 'wwc-extension-device'; devices.className = 'wwc-extensions-scope-select'
   const label = node('label', '配置设备'); label.htmlFor = devices.id
   const refresh = button('刷新设备', () => { void directory() })
-  const deviceRow = node('div'); deviceRow.className = 'wwc-extensions-scope-row'; deviceRow.append(label, devices, refresh)
   const status = node('p', '正在读取设备…'); status.setAttribute('role', 'status')
-  const note = node('p', '技能和 MCP 保存在所选设备。修改后，同一聊天的下一次任务即可使用；正在执行的任务完成后切换。')
+  status.className = 'wwc-extensions-scope-status'
+  const deviceRow = node('div'); deviceRow.className = 'wwc-extensions-scope-row'; deviceRow.append(label, devices, refresh, status)
+  const note = node('p', '扩展保存在这台设备上，保存后从下一次任务开始使用。')
+  note.className = 'wwc-extensions-note'
   const panels = TABS.map(tab => {
     const panel = node('section'); panel.id = tab.panelId; panel.className = 'wwc-extensions-panel'
     panel.setAttribute('role', 'tabpanel'); panel.setAttribute('aria-label', tab.label); panel.tabIndex = 0
@@ -66,27 +68,34 @@ export function mountExtensionsPage(options: ExtensionsPageOptions): ExtensionsP
       if (input.tagName === 'TEXTAREA') { (input as HTMLTextAreaElement).rows = 10; input.spellcheck = false }
       const label = node('label', title); label.htmlFor = input.id; label.append(input); form.append(label); managed.push(input); return input
     }
-    const id = field('标识（字母、数字、下划线或短横线）', 'id') as HTMLInputElement
-    id.pattern = '[A-Za-z0-9_-]{1,64}'; id.required = true
+    const id = kind === 'mcp' ? field('连接名称（英文）', 'id') as HTMLInputElement : null
+    if (id !== null) { id.pattern = '[A-Za-z0-9_-]{1,64}'; id.required = true; id.placeholder = '例如 github，支持字母、数字、下划线和短横线' }
     const source = kind === 'skill' ? field('设备上的技能目录（绝对路径）', 'source') : null
     if (source !== null) source.placeholder = '/absolute/path/my-skill'
     const content = field(kind === 'skill' ? '或粘贴 SKILL.md 内容' : 'MCP 配置（JSON）', 'content', true)
     content.required = kind === 'mcp'
     content.placeholder = kind === 'skill' ? '---\nname: my-skill\ndescription: 何时使用此技能\n---\n具体指令…' : '{"command":"node","args":["/absolute/path/server.js"]}'
+    if (kind === 'skill' && content.parentElement !== null) {
+      const paste = node('details')
+      paste.append(node('summary', '或粘贴技能内容'), content.parentElement)
+      form.append(paste)
+    }
     const enabled = node('input'); enabled.type = 'checkbox'; enabled.defaultChecked = true; enabled.id = `wwc-extension-${kind}-enabled`
     const enabledLabel = node('label', '启用'); enabledLabel.htmlFor = enabled.id; enabledLabel.append(enabled); form.append(enabledLabel); managed.push(enabled)
-    form.append(node('p', kind === 'skill' ? '目录导入会复制 SKILL.md 和配套资源；粘贴内容与目录二选一。' : '支持 stdio 和 Streamable HTTP。密钥可放在 env 或 http_headers 中，配置加密发送到设备。连接测试会启动此服务并读取工具列表。'))
+    form.append(node('p', kind === 'skill' ? '导入包含 SKILL.md 的目录，技能名称和说明会自动读取。也可以直接粘贴文件内容。' : '粘贴服务提供方给出的 MCP 配置。保存后会在所选设备上启动连接并读取工具。'))
     const saveView = mountButton({ document, props: { label: kind === 'skill' ? '保存技能' : '保存并连接', type: 'submit', variant: 'primary' } }); buttons.push(saveView)
-    const save = saveView.root; managed.push(save); form.append(save)
-    const add = button(kind === 'skill' ? '添加技能' : '添加 MCP 服务', () => { form.reset(); form.hidden = false; id.focus() }); managed.push(add); add.className = 'wwc-settings-local-save'
+    const save = saveView.root; managed.push(save)
+    const cancel = button('取消', () => { form.reset(); form.hidden = true; add.focus() }); managed.push(cancel)
+    const actions = node('div'); actions.className = 'wwc-settings-route-controls'; actions.append(save, cancel); form.append(actions)
+    const add = button(kind === 'skill' ? '添加技能' : '添加 MCP 服务', () => { form.reset(); form.hidden = false; (source ?? id)?.focus() }); managed.push(add); add.className = 'wwc-settings-local-save'
     panel.append(add, list, form)
     form.addEventListener('submit', event => {
       event.preventDefault()
       if (!form.reportValidity()) return
       if (kind === 'skill' && (source?.value.trim() === '') === (content.value.trim() === '')) { status.textContent = '请填写技能目录或 SKILL.md 内容，二选一。'; return }
       const mutation: DeviceExtensionMutation = kind === 'skill'
-        ? { operation: 'save_skill', id: id.value, enabled: enabled.checked, ...(source?.value.trim() ? { sourcePath: source.value.trim() } : { content: content.value }) }
-        : { operation: 'save_mcp', id: id.value, enabled: enabled.checked, configuration: content.value }
+        ? { operation: 'save_skill', id: `skill_${crypto.randomUUID().replaceAll('-', '')}`, enabled: enabled.checked, ...(source?.value.trim() ? { sourcePath: source.value.trim() } : { content: content.value }) }
+        : { operation: 'save_mcp', id: id!.value, enabled: enabled.checked, configuration: content.value }
       void run(async () => {
         if (await apply(mutation)) {
           content.value = ''; form.hidden = true
@@ -102,7 +111,7 @@ export function mountExtensionsPage(options: ExtensionsPageOptions): ExtensionsP
   }
   const tabs = mountTabs({ document, props: { id: 'wwc-extensions-tabs', label: '扩展分类', tabs: TABS, selectedId: 'skills', onSelect: select } })
   select('skills')
-  layout.append(header.root, deviceRow, status, note, tabs.root, ...panels); options.root.replaceChildren(layout)
+  layout.append(header.root, deviceRow, note, tabs.root, ...panels); options.root.replaceChildren(layout)
 
   function show(): void {
     const disabled = busy || view?.online !== true || view.snapshot === null
@@ -115,9 +124,13 @@ export function mountExtensionsPage(options: ExtensionsPageOptions): ExtensionsP
       for (const entry of entries) {
         const item = node('li'); item.className = 'wwc-extensions-mcp-row'
         const info = node('div'); info.className = 'wwc-extensions-mcp-info'
-        info.append(node('strong', entry.id), node('p', 'name' in entry ? `${entry.name} · ${entry.description}`
-          : `${entry.transport} · ${{ untested: '尚未测试连接', ready: '上次连接成功', failed: '连接失败' }[entry.connectionStatus]} · ${entry.toolNames.length} 个工具`))
-        if ('toolNames' in entry && entry.toolNames.length > 0) info.append(node('p', entry.toolNames.join('、')))
+        info.append(node('strong', 'name' in entry ? entry.name : entry.id), node('p', 'name' in entry ? entry.description
+          : `${{ untested: '尚未测试连接', ready: '上次连接成功', failed: '连接失败' }[entry.connectionStatus]} · ${entry.toolNames.length} 个工具`))
+        if ('toolNames' in entry && entry.toolNames.length > 0) {
+          const tools = node('details')
+          tools.append(node('summary', '查看可用工具'), node('p', entry.toolNames.join('、')))
+          info.append(tools)
+        }
         const controls = node('div'); controls.className = 'wwc-settings-route-controls'
         controls.append(node('span', entry.enabled ? '已启用' : '已停用'))
         const actions = [button(entry.enabled ? '停用' : '启用', () => { void run(() => apply({ operation: 'set_enabled', kind, id: entry.id, enabled: !entry.enabled })) }, true),
@@ -126,7 +139,12 @@ export function mountExtensionsPage(options: ExtensionsPageOptions): ExtensionsP
         for (const action of actions) { action.disabled = disabled; controls.append(action) }
         item.append(info, controls); list.append(item)
       }
-      if (entries.length === 0) list.append(node('li', kind === 'skill' ? '此设备还没有导入技能。' : '此设备还没有配置 MCP 服务。'))
+      if (entries.length === 0) {
+        const empty = node('li'); empty.className = 'wwc-extensions-empty'
+        empty.append(node('strong', kind === 'skill' ? '此设备还没有导入技能。' : '此设备还没有配置 MCP 服务。'))
+        empty.append(node('span', kind === 'skill' ? '导入技能后，任务可以按需使用对应的指令。' : '添加 MCP 服务后，任务可以调用它提供的工具。'))
+        list.append(empty)
+      }
     }
   }
   async function request(path: string, body?: unknown): Promise<unknown> {
@@ -156,7 +174,7 @@ export function mountExtensionsPage(options: ExtensionsPageOptions): ExtensionsP
       const result = await request('/api/v1/clients') as { clients: { clientId: string; displayName: string }[] }
       if (closed) return
       const previous = devices.value; devices.replaceChildren()
-      for (const device of result.clients) { const option = node('option', `${device.displayName} · ${device.clientId}`); option.value = device.clientId; devices.append(option) }
+      for (const device of result.clients) { const option = node('option', device.displayName); option.value = device.clientId; devices.append(option) }
       if (result.clients.some(device => device.clientId === previous)) devices.value = previous
       await load()
     } catch (error) { if (!closed) status.textContent = error instanceof Error ? error.message : '读取失败。' }

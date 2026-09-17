@@ -136,6 +136,21 @@ lease authority、ProductSession、Provider 或 Credential。authority 与 durab
 
 ## Worker 注册与重启
 
+### Device 交付接续
+
+从 Device 会话确认的交付，将来源设备、仓库绑定和用户封存在
+`workInput.deviceTarget`，Provider/model 同时继承来源会话的选择。
+尚未建立 Device 执行绑定的 Job 不能被 Server 本地 Worker 领取。
+实现、审查、验证和预算内返工使用各自的 WorkRun，由 Server 接续启动同一设备上的 Worker。
+
+Device 交付必须提供 `verificationCommand`。审查与验证逐条原样执行确认过的命令，
+以实际工具调用及命令摘要绑定证据。完整 Git bundle 随候选 Artifact 上传，Server 在
+独立的 `delivery-sources` 缓存重建候选，不依赖其本地项目包含 Device 的提交。
+Worker 退出后，Device 保留对应候选并上报进程终态；Server 释放该会话的执行容量。
+
+只有失败结论中的全部阻塞项都允许有界返工时，Server 才自动启动 remediator。
+证据缺失、冲突或预算耗尽继续保留待处理项。每个新候选都重新审查、验证后才能确认交付。
+
 `workerId` 表示可调度 Worker 身份；`workerInstanceId` 表示一次进程启动。每次进程重启
 都生成新的 `workerInstanceId`。注册结果中的 `leaseRecovery` 明确返回：
 

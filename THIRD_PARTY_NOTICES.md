@@ -29,13 +29,13 @@ The complete Bubblewrap license is included in Linux artifacts at
 `codex-resources/bwrap.LICENSE`. The corresponding source is available in this
 repository at `third_party/codex/codex-rs/vendor/bubblewrap`.
 
-## Ratatui and historical DeepSeek Harness MIT terms
+## Ratatui and DeepSeek Harness MIT terms
 
-Current WinWinCode artifacts use the project-owned Client and the Rust
-Server/Worker/Local path. They do not ship or execute DeepSeek Harness or Cordis
-packages. The immutable DeepSeek Harness `0.1.0-rc.8` source identity remains in
-`upstream/sources.lock.json` only to preserve attribution for the earlier design
-evaluation. Its MIT notice is retained here as historical third-party notice.
+The Client incorporates adapted DeepSeek Harness frontend components from
+`dsh-v0.1.0-rc.8`, commit `141eb6fef83422698aef7a981029e843e8161534`.
+`upstream/dsh-frontend.json` records source files and their immutable hashes.
+The MIT terms below apply to these adapted portions as well as Ratatui.
+WinWinCode execution uses its Rust Server/Device and embedded Codex kernel.
 
 DeepSeek Harness
 Copyright (c) 2026 DeepSeek

@@ -73,6 +73,7 @@ const canonicalTestFiles = Object.freeze([
   'tests/pnpm-pack-report.test.mjs',
   'tests/query-cache.test.mjs',
   'tests/query-cache-view-model.test.mjs',
+  'tests/repository-display-labels.test.mjs',
   'tests/readiness-application.test.mjs',
   'tests/readiness-browser.test.mjs',
   'tests/readiness-page.test.mjs',

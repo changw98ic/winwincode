@@ -15,6 +15,7 @@
     "tsBuildInfoFile": "../../.cache/tsbuild/ui605-large-data-tests.tsbuildinfo"
   },
   "include": [
-    "src/**/*.ts"
+    "src/**/*.ts",
+    "src/**/*.tsx"
   ]
 }

@@ -59,6 +59,49 @@ import type {
   QueryResultResponse,
   RequestId,
 } from './generated/contracts.js'
+import type { DeviceProviderView, DeviceRepositoryRegistrationReceipt, DeviceConfigurationEnvelope } from './generated/contracts.js'
+
+export interface ControlPlaneRepositoryRegistration {
+  readDevice(clientId: string, signal: AbortSignal): Promise<DeviceProviderView>
+  submit(clientId: string, envelope: DeviceConfigurationEnvelope, signal: AbortSignal): Promise<void>
+  receipt(clientId: string, requestId: string, signal: AbortSignal): Promise<{ online: boolean; receipt: DeviceRepositoryRegistrationReceipt | null }>
+}
+
+export function createControlPlaneRepositoryRegistration(options: {
+  readonly serverUrl: string
+  readonly transport: ControlPlaneClientTransport
+}): ControlPlaneRepositoryRegistration {
+  const location = parseControlPlaneServerUrl(options.serverUrl)
+  const transportFetch = options.transport.fetch
+  async function request(path: string, signal: AbortSignal, body?: DeviceConfigurationEnvelope): Promise<unknown> {
+    if (transportFetch === undefined) throw new Error('项目接入服务不可用。')
+    const response = await transportFetch(`${location.serverUrl}${path}`, {
+      method: body === undefined ? 'GET' : 'POST', credentials: 'include', cache: 'no-store', redirect: 'error', signal,
+      headers: { 'Content-Type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    })
+    if (!response.ok) throw new Error(response.status === 401 ? '请重新登录。' : response.status === 403 ? '没有管理该设备的权限。' : '设备请求未完成，请检查连接后重试。')
+    return JSON.parse(await response.text()) as unknown
+  }
+  return {
+    async readDevice(clientId, signal) {
+      const result = await request(`/api/v1/clients/${encodeURIComponent(clientId)}/providers`, signal)
+      if (!matchesCanonicalSchema('DeviceProviderView', result)) throw new Error('设备配置读取失败。')
+      return result as DeviceProviderView
+    },
+    async submit(clientId, envelope, signal) {
+      await request(`/api/v1/clients/${encodeURIComponent(clientId)}/repositories`, signal, envelope)
+    },
+    async receipt(clientId, requestId, signal) {
+      const result = await request(`/api/v1/clients/${encodeURIComponent(clientId)}/repositories/receipts/${encodeURIComponent(requestId)}`, signal)
+      if (!isRecord(result) || typeof result.online !== 'boolean'
+        || (result.receipt !== null && !matchesCanonicalSchema('DeviceRepositoryRegistrationReceipt', result.receipt))) throw new Error('设备返回了无效的项目结果。')
+      const receipt = result.receipt as DeviceRepositoryRegistrationReceipt | null
+      if (receipt !== null && receipt.requestId !== requestId) throw new Error('设备返回了其他请求的结果。')
+      if (receipt !== null && (receipt.outcome === 'registered') !== (receipt.repositoryBindingId !== null)) throw new Error('项目结果缺少对应的仓库身份。')
+      return { online: result.online, receipt }
+    },
+  }
+}
 
 export {
   ControlPlaneClientError,
@@ -2590,7 +2633,8 @@ export function createControlPlaneWorkerSessionPort(options: {
         })
       }
       const source = await response.text()
-      if (!response.ok || response.status !== 201) {
+      if (!response.ok) throw clientOccupancyBoundaryError(response.status, source)
+      if (response.status !== 201) {
         throw new ControlPlaneClientError({
           kind: response.status === 401 ? 'authentication' : 'protocol',
           code: 'WORKER_SESSION_LAUNCH_FAILED',

@@ -415,6 +415,7 @@ impl LiveConfigFile {
             payload: DeliveryCreatePayload {
                 delivery_id: DeliveryId(self.delivery.delivery_id),
                 spec: DeliverySpecInput {
+                    verification_command: None,
                     acceptance_criteria: vec![AcceptanceCriterionInput {
                         id: "github-issue-accepted".to_owned(),
                         required: true,

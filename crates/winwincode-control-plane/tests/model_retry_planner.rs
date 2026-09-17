@@ -240,6 +240,7 @@ fn alternate_authority(root: &std::path::Path) -> FrozenModelRouteAuthority {
 
 fn execution_job(seed: u64, repository_seed: u64) -> ExecutionJob {
     ExecutionJob {
+        attachments: None,
         model_selection: None,
         attempt: 1,
         execution_profile: "executor".to_owned(),

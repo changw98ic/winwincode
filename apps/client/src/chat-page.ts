@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { mountChatAttachments, showChatAttachment } from './chat-attachments.js'
+import { readPreferences } from './preferences.js'
+
+import { repositoryDisplayName } from './display-labels.js'
+import { mountChatMarkdown } from './dsh-ui.js'
+
 import type {
   ChatViewModel,
   ChatViewModelState,
@@ -8,11 +14,13 @@ import type { ControlPlaneRepositorySummary, ControlPlaneClientError } from './c
 import { mountButton } from '@winwincode/browser-ui'
 import { mountFormField } from './components/form-field.js'
 import { mountKeyedCollection } from './components/keyed-collection.js'
+import type { HomeDeliveryListViewModel } from './home-dashboard-view-model.js'
 import type {
   ModelRouteAvailabilityProjection,
   ProductSessionId,
   RepositoryScope,
 } from './generated/contracts.js'
+import { scopeHash } from '@winwincode/browser-core/scope-context'
 import {
   ModelRouteAvailabilityReason,
   ModelRouteAvailabilityStatus,
@@ -41,8 +49,11 @@ export interface ChatPageOptions {
   readonly root: HTMLElement
   readonly model: ChatViewModel
   readonly listDeviceRepositories?: (clientId: string) => Promise<readonly ControlPlaneRepositorySummary[]>
+  readonly project?: { readonly clientId: string; readonly deviceName: string; readonly repository: ControlPlaneRepositorySummary }
+  readonly onProjectChange?: (clientId: string, repositoryBindingId: string) => void
   readonly nextProductSessionId?: () => ProductSessionId
   readonly deliveryCreator?: ChatDeliveryCreator
+  readonly deliveries?: HomeDeliveryListViewModel
   readonly scope?: RepositoryScope
   readonly settingsHref?: string
   /** Deterministic clock for the contextual decision card; defaults to Date.now. */
@@ -57,6 +68,8 @@ export interface ChatPage {
 
 export interface ChatComposerKey {
   readonly key: string
+  readonly ctrlKey?: boolean
+  readonly metaKey?: boolean
   readonly shiftKey: boolean
   readonly isComposing: boolean
 }
@@ -75,9 +88,10 @@ export interface ChatPagePresentation {
   readonly cancelVisible: boolean
 }
 
-export function chatComposerKeyAction(key: ChatComposerKey): ChatComposerKeyAction {
+export function chatComposerKeyAction(key: ChatComposerKey, sendKey: 'enter' | 'mod-enter' = 'enter'): ChatComposerKeyAction {
   if (key.key !== 'Enter') return 'ignore'
   if (key.isComposing || key.shiftKey) return 'newline'
+  if (sendKey === 'mod-enter' && !key.ctrlKey && !key.metaKey) return 'newline'
   return 'submit'
 }
 
@@ -150,6 +164,7 @@ function modelRouteIdentity(route: ModelRouteAvailabilityProjection['route']): s
 
 function errorLabel(error: ControlPlaneClientError | null): string | null {
   if (error === null) return null
+  if (error.code === 'CAPACITY_EXHAUSTED') return '设备正在处理其他对话，请等待它结束后重试。'
   if (error.code === 'CHAT_DEVICE_REQUIRED') return '请选择执行设备上的项目。'
   if (error.code === 'IDEMPOTENCY_CONFLICT') {
     return '本次新对话请求与之前的请求冲突，请重新开一个新对话。'
@@ -299,12 +314,15 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   const readOnly = options.readOnly === true
   const nowMillis = options.nowMillis ?? Date.now
   const document = options.root.ownerDocument
+  const scopedHref = (href: string): string => options.scope === undefined ? href : scopeHash(href, options.scope)
   const layout = element(document, 'div', 'wwc-chat')
   const conversation = element(document, 'section', 'wwc-chat-conversation')
   // Design pages 03a/03b: the page header carries only the delegation entry
   // chip; the 「winwincode ∨」 project dropdown at the top left is the shell's
   // Scope selector, not a second Chat-owned control.
   const header = element(document, 'header', 'wwc-chat-page-header')
+  const projectContext = element(document, 'a', 'wwc-chat-project-context')
+  projectContext.href = scopedHref('#/projects')
   const heading = element(document, 'h2', 'wwc-chat-heading')
   const status = element(document, 'p', 'wwc-chat-status')
   // Design page 03b: the delegation entry is the accent chip on the top right.
@@ -312,7 +330,7 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
     document,
     props: {
       className: 'wwc-chat-delegation-chip',
-      label: '委托任务 0 · 待审核 ∨',
+      label: '委托任务 … ∨',
       type: 'button',
       variant: 'primary',
       onActivate: () => {
@@ -329,9 +347,22 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   const errorText = element(document, 'span', 'wwc-chat-error-text')
   const retry = element(document, 'button', 'wwc-chat-retry')
   const messages = element(document, 'ol', 'wwc-chat-messages')
-  const empty = element(document, 'p', 'wwc-chat-empty')
+  const empty = element(document, 'div', 'wwc-chat-empty')
   const loadEarlier = element(document, 'button', 'wwc-chat-load-earlier')
   const decisionRoot = element(document, 'div', 'wwc-chat-decisions')
+  const delegationPanel = element(document, 'section', 'wwc-chat-delegations')
+  delegationPanel.hidden = true
+  delegationPanel.setAttribute('aria-label', '当前对话的委托任务')
+  const delegationStatus = element(document, 'p', 'wwc-chat-delegations-status')
+  delegationStatus.setAttribute('role', 'status')
+  const delegationList = element(document, 'ul', 'wwc-chat-delegations-list')
+  const delegationRefresh = element(document, 'button', 'wwc-chat-delegations-refresh')
+  delegationRefresh.type = 'button'
+  delegationRefresh.textContent = '刷新任务'
+  delegationRefresh.addEventListener('click', () => { void options.deliveries?.refresh() })
+  const newDelegation = mountButton({ document, props: { className: 'wwc-chat-new-delegation', label: '新建委托', type: 'button' } })
+  delegationPanel.id = 'wwc-chat-delegations'
+  delegationPanel.append(delegationStatus, delegationList, delegationRefresh, newDelegation.root)
   decisionRoot.hidden = true
   decisionRoot.setAttribute('aria-hidden', 'true')
   const repositorySelect = document.createElement('select')
@@ -341,6 +372,7 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   repositoryStatus.setAttribute('role', 'status')
   let repositoryDevice: string | undefined
   let repositoryGeneration = 0
+  let deviceRepositories: readonly ControlPlaneRepositorySummary[] = []
   async function loadDeviceRepositories(clientId: string | undefined): Promise<void> {
     if (clientId === repositoryDevice) return
     repositoryDevice = clientId
@@ -352,14 +384,17 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
     try {
       const repositories = await options.listDeviceRepositories(clientId)
       if (closed || generation !== repositoryGeneration) return
-      for (const repository of repositories.filter(item => item.availability === 'available')) {
+      deviceRepositories = repositories
+      for (const repository of repositories.filter(item => item.availability === 'available' || item.availability === 'dirty')) {
         const option = document.createElement('option')
         option.value = repository.repositoryBindingId
-        option.textContent = repository.displayName
+        option.textContent = repositoryDisplayName(repository.displayName, repository.repositoryBindingId, document.defaultView)
         repositorySelect.append(option)
       }
-      repositorySelect.disabled = readOnly || repositorySelect.children.length === 0
+      if (options.project !== undefined) repositorySelect.value = options.project.repository.repositoryBindingId
+      repositorySelect.disabled = readOnly || options.project !== undefined || repositorySelect.children.length === 0
       repositoryStatus.textContent = repositorySelect.children.length === 0 ? '请先在设备中添加并授权项目。' : ''
+      render(options.model.state)
     } catch {
       if (!closed && generation === repositoryGeneration) repositoryStatus.textContent = '无法读取设备项目，请刷新。'
     }
@@ -367,9 +402,27 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   const form = element(document, 'form', 'wwc-chat-composer')
   const composerLabel = element(document, 'label', 'wwc-chat-composer-label')
   const composer = element(document, 'textarea', 'wwc-chat-composer-input')
+  const emptyMessage = element(document, 'p', 'wwc-chat-empty-message')
+  const starterList = element(document, 'div', 'wwc-chat-starters')
+  const starters = [
+    ['修复一个问题', '帮我定位并修复一个问题'],
+    ['实现一个功能', '帮我实现一个功能'],
+    ['解释一段代码', '请解释这段代码的作用'],
+  ] as const
+  for (const [label, value] of starters) {
+    const button = element(document, 'button', 'wwc-chat-starter')
+    button.type = 'button'
+    button.textContent = label
+    button.addEventListener('click', () => {
+      composer.value = value
+      resizeComposer()
+      composer.focus()
+      onComposerInput()
+    })
+    starterList.append(button)
+  }
+  empty.append(emptyMessage, starterList)
   const controls = element(document, 'div', 'wwc-chat-composer-controls')
-  // Design page 03b: the composer bar carries an attach entry. No upload
-  // contract exists yet, so the control renders disabled with its reason.
   const attach = element(document, 'button', 'wwc-chat-composer-attach')
   const cancel = element(document, 'button', 'wwc-chat-cancel')
   const send = element(document, 'button', 'wwc-chat-send')
@@ -394,6 +447,9 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   const conversionOutOfScope = element(document, 'textarea', 'wwc-chat-convert-out-of-scope')
   const conversionConstraints = element(document, 'textarea', 'wwc-chat-convert-constraints')
   const conversionCriteria = element(document, 'textarea', 'wwc-chat-convert-criteria')
+  const conversionVerification = element(document, 'input', 'wwc-chat-convert-verification')
+  conversionVerification.required = true
+  conversionVerification.placeholder = '例如：npm test'
   const confirmationLabel = element(document, 'label', 'wwc-chat-convert-confirm-label')
   const confirmation = element(document, 'input', 'wwc-chat-convert-confirm')
   const confirmationText = element(document, 'span', 'wwc-chat-convert-confirm-text')
@@ -416,6 +472,15 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
     },
   })
   let closed = false
+  let followMessages = true
+  const onMessagesScroll = () => {
+    followMessages = messages.scrollHeight - messages.clientHeight - messages.scrollTop < 48
+  }
+  messages.addEventListener('scroll', onMessagesScroll)
+  const messageObserver = new MutationObserver(() => {
+    if (followMessages && !closed) messages.scrollTop = messages.scrollHeight
+  })
+  messageObserver.observe(messages, { childList: true, characterData: true, subtree: true })
   let conversionOpen = false
   let conversionSessionId: ProductSessionId | null = null
   let conversionFocusReturn: HTMLElement | null = null
@@ -473,14 +538,14 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   loadEarlier.textContent = '加载更早的消息'
   composerLabel.htmlFor = 'wwc-chat-composer'
   composer.id = 'wwc-chat-composer'
-  composer.rows = 3
+  composer.rows = 1
   composer.autocomplete = 'off'
   composer.placeholder = '描述你的想法…'
   attach.type = 'button'
-  attach.disabled = true
+  attach.disabled = readOnly
   attach.textContent = '+'
-  attach.setAttribute('aria-label', '附加上下文（暂不可用）')
-  attach.title = '附件暂不可用'
+  attach.setAttribute('aria-label', '添加图片或文件')
+  attach.title = '添加图片、文本或代码文件，也可粘贴图片或拖入文件'
   cancel.type = 'button'
   cancel.textContent = '停止'
   send.type = 'submit'
@@ -507,7 +572,7 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   else send.textContent = '➤'
   send.setAttribute('aria-label', '发送')
   receipt.hidden = true
-  receiptLink.href = '#/home/task-run'
+  receiptLink.href = scopedHref('#/home')
   receiptLink.textContent = '查看'
   receipt.append(receiptText, receiptLink)
 
@@ -515,7 +580,7 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   modelLabel.append(modelSelect)
   controls.append(attach, modelLabel, repositorySelect, repositoryStatus, cancel, send)
   form.append(composerLabel, composer, controls, modelNotice, modelSettings)
-  header.append(delegationChip.root)
+  header.append(projectContext, delegationChip.root, delegationPanel)
   conversion.hidden = true
   // UI-604: the panel is a dialog in fact but was announced as plain page content,
   // opened without moving focus, and could only be dismissed with the pointer.
@@ -523,7 +588,9 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   conversion.setAttribute('aria-modal', 'false')
   conversionHeading.id = CONVERSION_DIALOG_HEADING_ID
   conversion.setAttribute('aria-labelledby', CONVERSION_DIALOG_HEADING_ID)
-  delegationChip.root.setAttribute('aria-controls', CONVERSION_DIALOG_HEADING_ID)
+  delegationChip.root.setAttribute('aria-controls', delegationPanel.id)
+  newDelegation.root.setAttribute('aria-controls', CONVERSION_DIALOG_HEADING_ID)
+  newDelegation.root.setAttribute('aria-expanded', 'false')
   delegationChip.root.setAttribute('aria-expanded', 'false')
   conversionHeading.textContent = '确认 StrongFlow 交付'
   conversionDetail.textContent = '创建交付前，请核对已确认的需求与确切的仓库上下文。'
@@ -614,8 +681,18 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
       },
     }),
   ]
+  const contextDetails = element(document, 'details', 'wwc-chat-convert-context')
+  const contextSummary = document.createElement('summary')
+  contextSummary.textContent = '查看执行上下文与基准提交'
+  contextDetails.append(contextSummary, ...conversionFields.slice(2, 6).map(field => field.root))
   conversionForm.append(
-    ...conversionFields.map(field => field.root),
+    ...conversionFields.slice(0, 2).map(field => field.root),
+    ...conversionFields.slice(6).map(field => field.root),
+    mountFormField({ document, props: {
+      id: 'chat-convert-verification', label: '验收命令', required: true,
+      help: '在所选项目内运行，审查与验证会保留执行结果作为证据。', control: conversionVerification,
+    } }).root,
+    contextDetails,
     confirmationLabel,
     conversionError,
     conversionSubmit.root,
@@ -637,6 +714,13 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   )
   layout.append(conversation)
   options.root.replaceChildren(layout)
+  const attachments = mountChatAttachments(form, attach, () => render(options.model.state))
+  const attachmentHint = form.querySelector('small')
+  const onAttachmentButtonClick = () => { if (attachmentHint !== null) attachmentHint.hidden = false }
+  if (attachmentHint !== null) {
+    attachmentHint.hidden = true
+    attach.addEventListener('click', onAttachmentButtonClick)
+  }
 
   type ModelOption =
     | { readonly key: 'empty' | 'placeholder'; readonly candidate: null }
@@ -667,21 +751,23 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
     readonly content: HTMLElement
     readonly badge: HTMLElement
     readonly artifacts: HTMLElement
+    readonly markdown: ReturnType<typeof mountChatMarkdown> | null
   }>()
   const messageCollection = mountKeyedCollection({
     parent: messages,
     key: (message: ChatViewModelState['messages'][number]) => message.id,
-    create() {
+    create(message) {
       const item = document.createElement('li')
       const article = document.createElement('article')
       const role = document.createElement('h3')
-      const content = document.createElement('p')
+      const content = document.createElement(message.role === 'assistant' ? 'div' : 'p')
       const badge = document.createElement('span')
       const artifacts = document.createElement('div')
       badge.className = 'wwc-chat-message-state'
       article.append(role, content, badge, artifacts)
       item.append(article)
-      messageRows.set(item, { article, role, content, badge, artifacts })
+      const markdown = message.role === 'assistant' ? mountChatMarkdown(content) : null
+      messageRows.set(item, { article, role, content, badge, artifacts, markdown })
       return item
     },
     update(item, message: ChatViewModelState['messages'][number]) {
@@ -691,10 +777,12 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
       row.article.dataset.role = message.role
       row.article.dataset.state = message.state
       row.article.setAttribute('aria-busy', String(message.state === 'streaming'))
-      row.role.textContent = message.role === 'user' ? '你' : 'WinWinCode'
-      row.content.textContent = message.content.length === 0 && message.state === 'streaming'
+      row.role.textContent = message.role === 'user' ? readPreferences(document.defaultView).displayName || '你' : 'WinWinCode'
+      const text = message.content.length === 0 && message.state === 'streaming'
         ? '正在回复…'
         : message.content
+      if (row.markdown === null) row.content.textContent = text
+      else row.markdown.update(text, message.state === 'streaming')
       row.badge.hidden = stateText === null
       row.badge.textContent = stateText ?? ''
       row.artifacts.replaceChildren(...(message.artifactRefs ?? []).map(artifact => {
@@ -719,19 +807,36 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
         })
         return download
       }))
+      for (const attachment of message.attachments ?? []) {
+        const preview = document.createElement('button')
+        preview.type = 'button'
+        preview.className = 'wwc-chat-attached-file'
+        preview.textContent = attachment.name
+        preview.addEventListener('click', () => showChatAttachment(document, attachment))
+        if (attachment.mediaType.startsWith('image/')) {
+          const thumbnail = document.createElement('img')
+          thumbnail.src = `data:${attachment.mediaType};base64,${attachment.content}`
+          thumbnail.alt = ''
+          preview.prepend(thumbnail)
+        }
+        row.artifacts.append(preview)
+      }
     },
-    remove(item) { messageRows.delete(item) },
+    remove(item) { messageRows.get(item)?.markdown?.close(); messageRows.delete(item) },
   })
 
-  function pendingDelegationCount(): number {
-    return options.deliveryCreator?.state.status === 'created' ? 1 : 0
-  }
-
   function render(state: ChatViewModelState): void {
-    const selected = state.modelRouteAvailability?.items.find(item => state.selectedModelRoute !== null && modelRouteIdentity(item.route) === modelRouteIdentity(state.selectedModelRoute))
+    const selected = state.modelRouteAvailability?.items.find(item => state.selectedModelRoute !== null && modelRouteIdentity(item.route) === modelRouteIdentity(state.selectedModelRoute)
+      && (options.project === undefined || item.clientId === options.project.clientId))
     repositorySelect.hidden = state.messages.length > 0 || options.listDeviceRepositories === undefined
     repositoryStatus.hidden = repositorySelect.hidden
     void loadDeviceRepositories(selected?.clientId)
+    const repository = deviceRepositories.find(item => item.repositoryBindingId === repositorySelect.value)
+      ?? options.project?.repository
+    const projectName = repository === undefined ? undefined : repositoryDisplayName(repository.displayName, repository.repositoryBindingId, document.defaultView)
+    const deviceName = options.project?.deviceName ?? state.session?.deviceContext?.deviceName ?? '待确认'
+    projectContext.textContent = repository === undefined ? '选择项目'
+      : `项目：${projectName} · 设备：${deviceName} · 分支：${repository.defaultBranch}`
 
     if (closed) return
     const presentation = chatPagePresentation(state)
@@ -745,6 +850,7 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
       conversionOutOfScope.value = ''
       conversionConstraints.value = ''
       conversionCriteria.value = ''
+      conversionVerification.value = ''
       confirmation.checked = false
     }
     status.textContent = presentation.statusText
@@ -768,22 +874,28 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
     composerLabel.textContent = presentation.composerLabel
     composer.placeholder = presentation.composerPlaceholder
     composer.disabled = readOnly || presentation.composerDisabled
-    send.disabled = readOnly || presentation.composerDisabled || composer.value.trim().length === 0
+    attach.disabled = readOnly || presentation.composerDisabled
+    send.disabled = (options.listDeviceRepositories !== undefined && !repositorySelect.value) || readOnly || presentation.composerDisabled || attachments.busy || (composer.value.trim().length === 0 && attachments.items.length === 0)
     send.setAttribute('aria-label', presentation.sendLabel)
     cancel.hidden = !presentation.cancelVisible
     cancel.disabled = readOnly || state.interaction.status === 'cancelling'
     // Design page 03a keeps the empty canvas clean; setup guidance only
     // appears when no ready model route exists to start from.
-    empty.hidden = state.messages.length > 0
-      || (state.session === null && readyModelRoutes(state).length > 0)
-    empty.textContent = presentation.emptyText
+    empty.hidden = state.status === 'loading' || state.status === 'refreshing'
+      || state.messages.length > 0
+    emptyMessage.textContent = state.session === null && readyModelRoutes(state).length > 0
+      ? '你想先完成什么？'
+      : presentation.emptyText
+    starterList.hidden = state.session !== null || readyModelRoutes(state).length === 0
     loadEarlier.hidden = !state.messagePagination.hasMore
     loadEarlier.disabled = state.messagePagination.status === 'loading'
     error.hidden = presentation.errorText === null
     errorText.textContent = presentation.errorText ?? ''
     retry.hidden = presentation.errorText === null
 
-    const renderedModelRoutes = state.modelRouteAvailability?.items ?? Object.freeze([])
+    const renderedModelRoutes = (state.modelRouteAvailability?.items ?? []).filter(candidate => (
+      options.project === undefined || candidate.clientId === options.project.clientId
+    ))
     const availableRoutes = renderedModelRoutes.filter(modelRouteReady)
     const selectedIdentity = state.selectedModelRoute === null
       ? null
@@ -814,19 +926,51 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
       || state.status === 'cancelled'
       || state.status === 'error'
       || ['submitting', 'cancelling'].includes(state.interaction.status)
-    modelSelect.disabled = availableRoutes.length === 0 || pageUnavailable
-    modelSettings.hidden = availableRoutes.length > 0
+    modelSelect.disabled = state.session !== null || availableRoutes.length === 0 || pageUnavailable
+    modelSettings.hidden = state.modelRouteAvailability === null || availableRoutes.length > 0
     modelNotice.hidden = state.modelRouteSelectionIssue === null
     modelNotice.textContent = state.modelRouteSelectionIssue === null
       ? ''
       : '先前选择的模型路由已不可用：'
         + `${modelRouteReasonLabel(state.modelRouteSelectionIssue)}。`
         + '请选择一个已启用的路由。'
+    const delegated = options.deliveries?.state.visible.filter(item => item.sourceProductSessionId === state.session?.id) ?? []
+    const deliveryListReady = options.deliveries?.state.status === 'ready'
+    const labels: Record<string, string> = { backlog: '准备方案', ready: '等待执行', in_progress: '执行中', waiting_dependency: '等待前置任务', waiting_human: '需要确认', candidate_ready: '等待验收', validating: '验证中', rework: '自动修复中', done: '已完成', failed: '失败', cancelled: '已取消' }
+    delegationList.replaceChildren(...delegated.map(item => {
+      const row = element(document, 'li', 'wwc-chat-delegation-row')
+      const link = element(document, 'a', 'wwc-chat-delegation-link')
+      link.href = scopedHref(`#/home/review?delivery=${encodeURIComponent(item.deliveryId)}`)
+      const status = item.status === 'candidate_ready' && item.activeWorkRunId !== null
+        ? '审查与验证' : labels[item.status] ?? item.status
+      link.textContent = `${item.title} · ${status}`
+      row.append(link)
+      const facts = element(document, 'p', 'wwc-chat-delegation-facts')
+      facts.textContent = [item.acceptance === undefined ? '' : `验收通过 ${item.acceptance.passed}/${item.acceptance.total}`,
+        item.reworkAttemptsUsed ? `已返工 ${item.reworkAttemptsUsed} 次` : '',
+        item.openAttentionCount ? `${item.openAttentionCount} 项需要处理` : '',
+      ].filter(Boolean).join(' · ')
+      row.append(facts)
+      return row
+    }))
+    delegationStatus.textContent = options.deliveries?.state.status === 'error'
+      ? '任务列表暂时无法更新，请重试。'
+      : !deliveryListReady ? '正在读取委托任务…' : delegated.length === 0 ? '当前对话还没有委托任务。' : `当前对话共 ${delegated.length} 项委托`
     delegationChip.update({
       className: 'wwc-chat-delegation-chip',
-      label: `委托任务 ${pendingDelegationCount()} · 待审核 ∨`,
+      label: `委托任务 ${deliveryListReady ? delegated.length : '…'} ∨`,
       type: 'button',
-      variant: 'primary',
+      variant: delegated.length === 0 ? 'ghost' : 'primary',
+      onActivate() {
+        delegationPanel.hidden = !delegationPanel.hidden
+        delegationChip.root.setAttribute('aria-expanded', String(!delegationPanel.hidden))
+        if (!delegationPanel.hidden) void options.deliveries?.refresh()
+      },
+    })
+    newDelegation.update({
+      className: 'wwc-chat-new-delegation',
+      label: '新建委托',
+      type: 'button',
       disabled: readOnly || options.deliveryCreator === undefined
         || options.scope === undefined
         || state.session === null
@@ -841,6 +985,7 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
           || session === null
           || requirement === null
         ) return
+        options.deliveryCreator.reset?.()
         if (conversionSessionId !== session.id) {
           conversionSessionId = session.id
           conversionTitle.value = session.title
@@ -856,11 +1001,12 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
           conversionModel.value = route === null
             ? '模型上下文不可用'
             : `${route.providerId} / ${route.modelId}`
-          conversionBaseline.value = ''
+          conversionBaseline.value = repository?.headCommit ?? ''
           conversionDeliveryScope.value = requirement
           conversionOutOfScope.value = ''
           conversionConstraints.value = ''
           conversionCriteria.value = ''
+          conversionVerification.value = ''
           confirmation.checked = false
         }
         conversionOpen = true
@@ -876,8 +1022,10 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
     const deliveryCreated = options.deliveryCreator?.state.status === 'created'
     receipt.hidden = !deliveryCreated || state.session === null
     receiptText.textContent = deliveryCreated && state.session !== null
-      ? `已委托 「${state.session.title}」`
+      ? `已委托「${conversionTitle.value || state.session.title}」，已进入所选设备的执行队列。`
       : ''
+    const createdId = options.deliveryCreator?.state.deliveryId
+    receiptLink.href = scopedHref(createdId === undefined ? '#/home' : `#/home/review?delivery=${encodeURIComponent(createdId)}`)
 
     const decisions = contextualDecisions({
       inputs: state.pendingInputs,
@@ -911,7 +1059,7 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
     const busy = state.status === 'submitting' || state.status === 'waiting'
     const wasOpen = !conversion.hidden
     conversion.hidden = !conversionOpen
-    delegationChip.root.setAttribute('aria-expanded', String(conversionOpen))
+    newDelegation.root.setAttribute('aria-expanded', String(conversionOpen))
     if (conversionOpen && !wasOpen) {
       // UI-604: a keyboard user activating the trigger has to land inside the
       // dialog, and the trigger has to be remembered so closing restores them.
@@ -954,9 +1102,16 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
     event.preventDefault()
     closeConversion()
   }
+  function resizeComposer(): void {
+    composer.style.height = 'auto'
+    const maxHeight = 224
+    composer.style.height = `${Math.min(Math.max(composer.scrollHeight, 56), maxHeight)}px`
+  }
+
   const onComposerInput = () => {
-    send.disabled = readOnly || chatPagePresentation(options.model.state).composerDisabled
-      || composer.value.trim().length === 0
+    resizeComposer()
+    send.disabled = (options.listDeviceRepositories !== undefined && !repositorySelect.value) || readOnly || chatPagePresentation(options.model.state).composerDisabled
+      || attachments.busy || (composer.value.trim().length === 0 && attachments.items.length === 0)
   }
   const onModelRouteChange = () => {
     const selectedOption = modelSelect.children[modelSelect.selectedIndex] as
@@ -964,20 +1119,23 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
       | undefined
     const selected = options.model.state.modelRouteAvailability?.items.find(candidate => (
       modelRouteIdentity(candidate.route) === selectedOption?.value
+      && (options.project === undefined || candidate.clientId === options.project.clientId)
     ))
     if (selected === undefined || !modelRouteReady(selected)) return
     options.model.selectModelRoute(selected.route)
   }
   const onComposerKeydown = (event: KeyboardEvent) => {
     if (readOnly) return
-    if (chatComposerKeyAction(event) !== 'submit') return
+    if (chatComposerKeyAction(event, readPreferences(document.defaultView).sendKey) !== 'submit') return
     event.preventDefault()
     form.requestSubmit()
   }
   const onComposerSubmit = (event: SubmitEvent) => {
     event.preventDefault()
     if (readOnly) return
-    const draft = composer.value.trim()
+    if (attachments.busy) return
+    const attached = [...attachments.items]
+    const draft = composer.value.trim() || (attached.length > 0 ? '请查看附件。' : '')
     if (draft.length === 0) return
     // 设计稿 03a:新对话空状态下,首条消息创建会话(标题取首行)后发送。
     if (options.model.state.messages.length === 0 && options.listDeviceRepositories !== undefined && !repositorySelect.value) {
@@ -985,22 +1143,25 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
       repositorySelect.focus()
       return
     }
+    if (repositoryDevice !== undefined && repositorySelect.value !== '') options.onProjectChange?.(repositoryDevice, repositorySelect.value)
+    const repositoryBindingId = repositorySelect.value
     const sessionId = options.nextProductSessionId?.() ?? null
     let submit: Promise<void>
     if (options.model.state.session === null && sessionId !== null) {
       submit = options.model
         .createSession({
           productSessionId: sessionId,
-          repositoryBindingId: repositorySelect.value,
+          repositoryBindingId,
           title: draft.split('\n')[0]?.trim().slice(0, 40) || '新对话',
         })
-        .then(() => options.model.state.interaction.status === 'error' ? undefined : options.model.submitMessage(draft, repositorySelect.value))
+        .then(() => options.model.state.interaction.status === 'error' ? undefined : options.model.submitMessage(draft, repositoryBindingId, attached))
     } else {
-      submit = options.model.submitMessage(draft, repositorySelect.value)
+      submit = options.model.submitMessage(draft, repositoryBindingId, attached)
     }
     void submit.then(() => {
       if (options.model.state.interaction.status !== 'error') {
         composer.value = ''
+        attachments.clear()
         render(options.model.state)
       }
     })
@@ -1026,6 +1187,7 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
       constraints: conversionConstraints.value.split(/\r?\n/u),
       sourceProductSessionId: conversionSessionId,
       acceptanceCriteria: conversionCriteria.value.split(/\r?\n/u),
+      verificationCommand: conversionVerification.value,
     })
   }
   const onCancel = () => {
@@ -1040,6 +1202,13 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   composer.addEventListener('keydown', onComposerKeydown)
   form.addEventListener('submit', onComposerSubmit)
   conversionForm.addEventListener('submit', onConversionSubmit)
+  delegationPanel.addEventListener('keydown', event => {
+    if (event.key !== 'Escape') return
+    event.preventDefault()
+    delegationPanel.hidden = true
+    delegationChip.root.setAttribute('aria-expanded', 'false')
+    delegationChip.root.focus()
+  })
   conversion.addEventListener('keydown', onConversionKeyDown)
   cancel.addEventListener('click', onCancel)
   retry.addEventListener('click', onRetry)
@@ -1047,18 +1216,34 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
 
   const unsubscribe = options.model.subscribe(render)
   const unsubscribeDeliveryCreator = options.deliveryCreator?.subscribe(next => {
+    if (next.status === 'created') {
+      conversionOpen = false
+      delegationPanel.hidden = false
+      void options.deliveries?.refresh()
+    }
     renderConversion(next)
     render(options.model.state)
   })
+  const unsubscribeDeliveries = options.deliveries?.subscribe(() => render(options.model.state))
+  void options.deliveries?.start()
+  const deliveryTimer = options.deliveries === undefined ? null : setInterval(() => {
+    if (document.visibilityState !== 'hidden') void options.deliveries?.refresh()
+  }, 5000)
   void options.model.start()
 
   return {
     close() {
       if (closed) return
       closed = true
+      messageObserver.disconnect()
+      messages.removeEventListener('scroll', onMessagesScroll)
       unsubscribe()
       unsubscribeDeliveryCreator?.()
+      unsubscribeDeliveries?.()
+      if (deliveryTimer !== null) clearInterval(deliveryTimer)
+      options.deliveries?.close()
       composer.removeEventListener('input', onComposerInput)
+      attach.removeEventListener('click', onAttachmentButtonClick)
       modelSelect.removeEventListener('change', onModelRouteChange)
       composer.removeEventListener('keydown', onComposerKeydown)
       form.removeEventListener('submit', onComposerSubmit)
@@ -1070,9 +1255,11 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
       for (const field of conversionFields) field.close()
       decisionCard.close()
       delegationChip.close()
+      newDelegation.close()
       conversionSubmit.close()
       conversionCancel.close()
       options.deliveryCreator?.close()
+      attachments.close()
       messageCollection.close()
       modelOptions.close()
       options.model.close()

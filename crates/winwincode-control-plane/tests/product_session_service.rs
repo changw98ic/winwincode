@@ -490,6 +490,7 @@ fn submit_command(
     second: u64,
 ) -> SubmitChatMessageCommand {
     SubmitChatMessageCommand {
+        attachments: Vec::new(),
         context: context(scope, request, expected_revision, second),
         product_session_id: ProductSessionId(id("psn", session)),
         message: message.into(),
@@ -952,6 +953,14 @@ fn assistant_public_stream_is_ordered_bounded_restart_safe_and_stably_paged() {
             .turn_intent
             .execution_job_id
     };
+    ProductSessionService::new(&mut storage)
+        .update_metadata(
+            &context(&scope_key, 160, 2, 3),
+            &ProductSessionId(id("psn", 40)),
+            "Renamed while starting",
+            false,
+        )
+        .expect("rename pending turn");
     prepare_worker(&mut storage, 1);
     let (execution_scope, authority) =
         prepare_slot_for_job(&mut storage, 40, None, execution_job_id, 40, 40, 40, 600);
@@ -1027,6 +1036,14 @@ fn assistant_public_stream_is_ordered_bounded_restart_safe_and_stably_paged() {
             ProductSessionServiceErrorCode::CredentialLeak
         );
 
+        service
+            .update_metadata(
+                &context(&scope_key, 161, 3, 4),
+                &ProductSessionId(id("psn", 40)),
+                "Archived while streaming",
+                true,
+            )
+            .expect("archive streaming turn");
         let final_delta = assistant_command(
             &scope_key,
             40,
@@ -1047,7 +1064,7 @@ fn assistant_public_stream_is_ordered_bounded_restart_safe_and_stably_paged() {
             completed.mutation.record.session().state(),
             ProductSessionState::Idle
         );
-        assert_eq!(completed.mutation.record.session().revision(), 3);
+        assert_eq!(completed.mutation.record.session().revision(), 5);
         assert_eq!(
             completed.mutation.record.turn_intents()[0].state,
             ProductSessionTurnState::Completed
@@ -1102,6 +1119,31 @@ fn assistant_public_stream_is_ordered_bounded_restart_safe_and_stably_paged() {
             .code(),
         ProductSessionServiceErrorCode::NotFound
     );
+    let follow_up = ProductSessionService::new(&mut reopened)
+        .submit_chat(&submit_command(
+            &scope_key,
+            40,
+            170,
+            5,
+            "Repeat the greeting",
+            12,
+        ))
+        .expect("continue after restart");
+    let queued = reopened
+        .execution_queue()
+        .expect("queue")
+        .load_job(&execution_scope, &follow_up.turn_intent.execution_job_id)
+        .expect("job read")
+        .expect("queued follow-up");
+    let job: winwincode_execution_port::generated::ExecutionJob =
+        serde_json::from_slice(&queued.dispatch_payload).expect("dispatch");
+    assert!(job.goal.contains("Hello, world!"));
+    assert!(job.goal.contains("Say hello"));
+    assert!(
+        job.goal
+            .ends_with("Current user message:\nRepeat the greeting")
+    );
+    assert!(job.goal.len() <= 20_000);
 }
 
 #[test]
@@ -1357,4 +1399,89 @@ fn cancellation_before_the_first_model_reply_reaches_the_running_job() {
     ProductSessionService::new(&mut storage)
         .cancel_session(&command)
         .expect("exact replay");
+}
+
+#[test]
+fn metadata_and_attachments_survive_restart_and_preserve_execution() {
+    let directory = TestDirectory::new("metadata-attachments");
+    let scope = repository_scope_key();
+    let session_id = ProductSessionId(id("psn", 1));
+    let attachment = winwincode_domain::ChatAttachment {
+        name: "answer.ts".into(),
+        media_type: "text/plain".into(),
+        content: "export const answer = 42".into(),
+    };
+    {
+        let mut storage = SqliteStorage::open(&directory.0).expect("storage");
+        let mut service = ProductSessionService::new(&mut storage);
+        service
+            .create(&create_command(&scope, 1, 1, "Before", 1))
+            .expect("create");
+        let mut command = submit_command(&scope, 1, 2, 1, "Inspect attached code", 2);
+        command.attachments = vec![attachment.clone()];
+        let sent = service.submit_chat(&command).expect("submit attachment");
+        assert_eq!(
+            sent.mutation.record.messages()[0].attachments.as_deref(),
+            Some(std::slice::from_ref(&attachment))
+        );
+        let update = context(&scope, 3, 2, 3);
+        let archived = service
+            .update_metadata(&update, &session_id, "Renamed", true)
+            .expect("archive running session");
+        assert_eq!(
+            archived.record.session().state(),
+            ProductSessionState::Running
+        );
+        assert_eq!(
+            archived.record.projection().expect("projection").archived,
+            Some(true)
+        );
+        assert!(
+            service
+                .update_metadata(&update, &session_id, "Renamed", true)
+                .expect("replay")
+                .replayed
+        );
+        assert!(
+            service
+                .update_metadata(&context(&scope, 4, 2, 4), &session_id, "Stale", false)
+                .is_err()
+        );
+        assert!(
+            service
+                .update_metadata(
+                    &context(&other_scope_key(), 5, 3, 5),
+                    &session_id,
+                    "Wrong scope",
+                    false
+                )
+                .is_err()
+        );
+    }
+    let mut storage = SqliteStorage::open(&directory.0).expect("reopen");
+    let mut service = ProductSessionService::new(&mut storage);
+    let record = service
+        .get(&scope, &session_id)
+        .expect("get")
+        .expect("session");
+    assert_eq!(record.session().title(), "Renamed");
+    assert_eq!(
+        record.messages()[0].attachments.as_deref(),
+        Some(std::slice::from_ref(&attachment))
+    );
+    assert_eq!(
+        record.projection().expect("projection").archived,
+        Some(true)
+    );
+    let restored = service
+        .update_metadata(&context(&scope, 6, 3, 6), &session_id, "Renamed", false)
+        .expect("restore");
+    assert_eq!(
+        restored.record.projection().expect("projection").archived,
+        Some(false)
+    );
+    assert_eq!(
+        restored.record.session().state(),
+        ProductSessionState::Running
+    );
 }

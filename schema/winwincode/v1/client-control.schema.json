@@ -3011,7 +3011,9 @@
         "client.provider.report",
         "client.provider.apply",
         "client.extension.apply",
-        "client.extension.report"
+        "client.extension.report",
+        "client.repository.register",
+        "client.repository.registered"
       ],
       "title": "ClientControlMessageKind",
       "description": "Every ClientControlPort message kind: sixteen client-to-control-plane kinds followed by eleven control-plane-to-client kinds, exactly as frozen by the ClientControlPort v1 plan."
@@ -3112,6 +3114,12 @@
         },
         {
           "$ref": "#/$defs/ClientExtensionApplyMessage"
+        },
+        {
+          "$ref": "#/$defs/ClientRepositoryRegisterMessage"
+        },
+        {
+          "$ref": "#/$defs/ClientRepositoryRegisteredMessage"
         }
       ]
     },
@@ -3332,6 +3340,142 @@
       "x-direction": "control-plane-to-client",
       "x-authority": "device-provider",
       "x-message-class": "command"
+    },
+    "ClientRepositoryRegisterMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "client.repository.register"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ClientControlMessageId"
+        },
+        "clientNodeId": {
+          "$ref": "#/$defs/ClientNodeId"
+        },
+        "clientInstanceId": {
+          "$ref": "#/$defs/ClientInstanceId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/ClientExchangeSequence"
+        },
+        "occurredAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "expectedRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "idempotencyKey": {
+          "$ref": "#/$defs/IdempotencyKey"
+        },
+        "encrypted": {
+          "$ref": "./device-provider.schema.json#/$defs/DeviceConfigurationEnvelope"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "clientNodeId",
+        "clientInstanceId",
+        "sequence",
+        "occurredAt",
+        "expectedRevision",
+        "idempotencyKey",
+        "encrypted"
+      ],
+      "title": "client.repository.register",
+      "description": "Register an encrypted device-local directory using the existing repository checks.",
+      "x-direction": "control-plane-to-client",
+      "x-authority": "device-repository",
+      "x-message-class": "command"
+    },
+    "DeviceRepositoryRegistrationReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requestId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "registered",
+            "invalid_request",
+            "invalid_git",
+            "permission_denied",
+            "moved",
+            "scan_failed",
+            "unavailable"
+          ]
+        },
+        "repositoryBindingId": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/RepositoryBindingId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "requestId",
+        "outcome",
+        "repositoryBindingId"
+      ]
+    },
+    "ClientRepositoryRegisteredMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "client.repository.registered"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ClientControlMessageId"
+        },
+        "clientNodeId": {
+          "$ref": "#/$defs/ClientNodeId"
+        },
+        "clientInstanceId": {
+          "$ref": "#/$defs/ClientInstanceId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/ClientExchangeSequence"
+        },
+        "occurredAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "receipt": {
+          "$ref": "#/$defs/DeviceRepositoryRegistrationReceipt"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "clientNodeId",
+        "clientInstanceId",
+        "sequence",
+        "occurredAt",
+        "receipt"
+      ],
+      "title": "client.repository.registered",
+      "description": "Device result for one encrypted repository registration.",
+      "x-direction": "client-to-control-plane",
+      "x-authority": "device-repository",
+      "x-message-class": "report"
     }
   }
 }

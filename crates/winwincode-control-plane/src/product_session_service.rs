@@ -486,6 +486,7 @@ impl DurableSessionBinding {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProductSessionRecord {
     session: ProductSession,
+    archived_at: Option<Instant>,
     owner_actor: PublicEventActor,
     forked_from: Option<ProductSessionId>,
     model_route: ModelRoute,
@@ -555,6 +556,9 @@ impl ProductSessionRecord {
     /// Returns corruption when the durable revision exceeds the public integer range.
     pub fn projection(&self) -> Result<ProductSessionProjection, ProductSessionServiceError> {
         Ok(ProductSessionProjection {
+            archived: Some(self.archived_at.is_some()),
+            model_route: Some(self.model_route.clone()),
+            device_context: None,
             id: self.session.id().clone(),
             project_id: self.session.project_id().clone(),
             repository_id: self.session.repository_id().clone(),
@@ -754,6 +758,7 @@ impl<'storage> ProductSessionService<'storage> {
         .map_err(|error| domain_error(&error))?;
         let persisted = PersistedProductSession {
             session,
+            archived_at: None,
             owner_actor: command.context.public_actor.clone(),
             forked_from: None,
             model_route: command.model_route.clone(),
@@ -823,7 +828,11 @@ impl<'storage> ProductSessionService<'storage> {
                 "execution scope does not match the ProductSession project and repository",
             ));
         }
-        require_revision(&persisted.session, command.context.expected_revision)?;
+        require_execution_revision(
+            persisted,
+            &command.runtime_authority.job_id,
+            command.context.expected_revision,
+        )?;
         let pending_turn = persisted
             .turn_intents
             .iter()
@@ -890,7 +899,11 @@ impl<'storage> ProductSessionService<'storage> {
             .sessions
             .get_mut(&command.product_session_id.0)
             .ok_or_else(not_found)?;
-        require_revision(&persisted.session, command.context.expected_revision)?;
+        require_execution_revision(
+            persisted,
+            &command.runtime_authority.job_id,
+            command.context.expected_revision,
+        )?;
         if persisted.session.state() != ProductSessionState::Running {
             return Err(binding_mismatch(
                 "model continuation requires a running session",
@@ -1001,7 +1014,11 @@ impl<'storage> ProductSessionService<'storage> {
             .sessions
             .get_mut(&command.product_session_id.0)
             .ok_or_else(not_found)?;
-        require_revision(&persisted.session, command.context.expected_revision)?;
+        require_execution_revision(
+            persisted,
+            &command.runtime_authority.job_id,
+            command.context.expected_revision,
+        )?;
         let binding_index = replacement_binding_index(persisted, command)?;
         validate_replacement_predecessor(&persisted.bindings[binding_index], command)?;
         persisted.bindings[binding_index] = PersistedSessionBinding {
@@ -1089,6 +1106,7 @@ impl<'storage> ProductSessionService<'storage> {
         let model_route = source.model_route.clone();
         let persisted = PersistedProductSession {
             session,
+            archived_at: None,
             owner_actor: command.context.public_actor.clone(),
             forked_from: Some(command.source_product_session_id.clone()),
             model_route,
@@ -1147,6 +1165,51 @@ impl<'storage> ProductSessionService<'storage> {
             MutationKind::Closed,
             catalog,
             &command.product_session_id,
+            persisted,
+            None,
+        )
+    }
+
+    /// Updates title and archive visibility in the same durable revision.
+    ///
+    /// # Errors
+    /// Rejects stale revisions, invalid titles, missing sessions and storage failures.
+    pub fn update_metadata(
+        &mut self,
+        context: &ProductSessionCommandContext,
+        product_session_id: &ProductSessionId,
+        title: &str,
+        archived: bool,
+    ) -> Result<ProductSessionMutationReceipt, ProductSessionServiceError> {
+        let digest = command_digest(
+            "update",
+            serde_json::json!({
+                "context": context_digest_fields(context),
+                "productSessionId": product_session_id.0,
+                "title": title, "archived": archived,
+            }),
+        )?;
+        if let Some(replay) = self.replay(context, &digest, MutationKind::Updated)? {
+            return Ok(replay);
+        }
+        let mut catalog = self.load_catalog(context.receipt_identity.scope_key())?;
+        let persisted = catalog
+            .sessions
+            .get_mut(&product_session_id.0)
+            .ok_or_else(not_found)?;
+        require_revision(&persisted.session, context.expected_revision)?;
+        persisted
+            .session
+            .rename(title.trim().to_owned(), context.occurred_at.clone())
+            .map_err(|error| domain_error(&error))?;
+        persisted.archived_at = archived.then(|| context.occurred_at.clone());
+        let persisted = persisted.clone();
+        self.commit(
+            context,
+            digest,
+            MutationKind::Updated,
+            catalog,
+            product_session_id,
             persisted,
             None,
         )
@@ -1311,6 +1374,7 @@ enum MutationKind {
     ExecutionBindingReplaced,
     Forked,
     ChatSubmitted,
+    Updated,
     AssistantUpdated,
     Cancelled,
     Closed,
@@ -1370,6 +1434,7 @@ impl PersistedProductSessionCatalog {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PersistedProductSession {
     session: ProductSession,
+    archived_at: Option<Instant>,
     owner_actor: PublicEventActor,
     forked_from: Option<ProductSessionId>,
     model_route: ModelRoute,
@@ -1394,6 +1459,7 @@ impl PersistedProductSession {
         chat::validate_persisted_chat(self)?;
         Ok(ProductSessionRecord {
             session: self.session.clone(),
+            archived_at: self.archived_at.clone(),
             owner_actor: self.owner_actor.clone(),
             forked_from: self.forked_from.clone(),
             model_route: self.model_route.clone(),
@@ -1991,6 +2057,27 @@ fn derived_public_event_id(base: &ControlPlaneEventId, namespace: &str) -> Contr
     );
     let encoded = format!("{digest:X}");
     ControlPlaneEventId(format!("evt_{}", &encoded[..26]))
+}
+
+// Metadata revisions do not replace an in-flight execution's sealed turn.
+fn require_execution_revision(
+    persisted: &PersistedProductSession,
+    job_id: &ExecutionJobId,
+    expected_revision: u64,
+) -> Result<(), ProductSessionServiceError> {
+    if let Some(turn) = persisted
+        .turn_intents
+        .iter()
+        .find(|turn| &turn.execution_job_id == job_id)
+    {
+        if turn.session_revision == expected_revision && turn.terminal_outcome.is_none() {
+            return Ok(());
+        }
+        return Err(binding_mismatch(
+            "runtime revision differs from its sealed Chat turn",
+        ));
+    }
+    require_revision(&persisted.session, expected_revision)
 }
 
 fn require_revision(

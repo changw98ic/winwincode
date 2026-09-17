@@ -45,12 +45,13 @@
   },
   "devDependencies": {
     "@types/node": "24.13.3",
+    "@winwincode/browser-core": "0.1.0-alpha.2",
+    "@winwincode/browser-ui": "0.1.0-alpha.2",
+    "@winwincode/control-plane-client": "0.1.0-alpha.2",
     "ajv": "8.20.0",
     "ajv-formats": "3.0.1",
     "esbuild": "0.28.2",
-    "typescript": "6.0.3",
-    "@winwincode/browser-ui": "0.1.0-alpha.2",
-    "@winwincode/browser-core": "0.1.0-alpha.2",
-    "@winwincode/control-plane-client": "0.1.0-alpha.2"
+    "jsdom": "29.1.1",
+    "typescript": "6.0.3"
   }
 }

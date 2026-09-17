@@ -31,6 +31,8 @@ const LOG_FILE: &str = "device-client.log";
 const OLD_LOG_FILE: &str = "device-client.log.1";
 const LOG_LIMIT_BYTES: u64 = 1024 * 1024;
 const CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(200);
+// Keep the conversation available while one delegated role runs. Roles release their slot on completion.
+const MAX_WORKER_SESSIONS: u32 = 2;
 const EXCHANGE_PATH: &str = "/internal/v1/client/exchange";
 const TLS_ROOT_DER_ENVIRONMENT: &str = "WWC_DEVICE_TLS_ROOT_DER_FILE";
 
@@ -196,7 +198,7 @@ fn run_device_service_until(
                 initial_backoff: Duration::from_secs(1),
                 max_backoff: Duration::from_secs(30),
                 capacity: ClientCapacityReport {
-                    max_concurrent_worker_sessions: 1,
+                    max_concurrent_worker_sessions: MAX_WORKER_SESSIONS,
                     running_worker_sessions: 0,
                     reserved_worker_sessions: 0,
                     draining_worker_sessions: 0,
@@ -278,7 +280,7 @@ fn wire_worker_lane(
             server_origin: server_origin.to_owned(),
             model_route: None,
             worker_binary_path: None,
-            max_concurrent_worker_sessions: 1,
+            max_concurrent_worker_sessions: MAX_WORKER_SESSIONS,
             stop_grace_period: Duration::from_secs(10),
         },
         DeviceStore::open(data_directory)?,

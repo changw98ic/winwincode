@@ -681,6 +681,7 @@ function renderControlPlaneClient(context, digest) {
     'ControlPlaneWebSocketSubscribeStartAt',
     'DeliveryDetailProjection',
     'DeviceProviderView',
+    'DeviceRepositoryRegistrationReceipt',
     'DeviceExtensionView',
     'ControlPlaneWebSocketServerFrame',
     'ErrorEnvelope',

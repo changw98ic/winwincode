@@ -287,6 +287,7 @@ fn seed_product_session(
     .expect("execution config");
     let receipt = service
         .submit_chat(&SubmitChatMessageCommand {
+            attachments: Vec::new(),
             context: command_context(repository_scope, seed * 100 + 1, 1),
             product_session_id: product_session_id.clone(),
             message: "project canonical Provider output".to_owned(),

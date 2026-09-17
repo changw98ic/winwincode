@@ -1470,14 +1470,16 @@ fn phase_request_id(
     message: &SessionBindingMessage,
     phase: &'static str,
 ) -> Result<RequestId, StorageError> {
-    execution_message_request_id(&message.message_id, phase)
+    execution_message_request_id(&message.message_id, &message.lease, phase)
 }
 
 pub(crate) fn execution_message_request_id(
     message_id: &ExecutionMessageId,
+    lease: &winwincode_execution_port::generated::ExecutionLeaseStamp,
     phase: &'static str,
 ) -> Result<RequestId, StorageError> {
-    // The generated message identity owns a stable two-slot idempotency key.
+    // Message counters are local to a Worker process. Include its execution
+    // identity so independent roles never share a receipt key.
     // Mutable message and durable-job facts belong in the phase digest so a
     // changed payload reaches storage as a request conflict instead of a new
     // request.
@@ -1485,6 +1487,8 @@ pub(crate) fn execution_message_request_id(
     bytes.extend_from_slice(b"winwincode.session-binding-phase-request.v2\0");
     append_phase_fact(&mut bytes, phase.as_bytes());
     append_phase_fact(&mut bytes, message_id.0.as_bytes());
+    append_phase_fact(&mut bytes, lease.job_id.0.as_bytes());
+    append_phase_fact(&mut bytes, lease.worker_instance_id.0.as_bytes());
     let digest = Sha256::digest(bytes);
     let mut value_bytes = [0_u8; 16];
     value_bytes.copy_from_slice(&digest[..16]);
@@ -1677,4 +1681,21 @@ fn days_from_civil(year: u64, month: u64, day: u64) -> Result<u64, StorageError>
     let since_epoch = era * 146_097 + day_of_era - 719_468;
     u64::try_from(since_epoch)
         .map_err(|_| StorageError::invalid_input("SessionBinding Instant predates Unix epoch"))
+}
+
+#[cfg(test)]
+mod receipt_identity_tests {
+    use super::*;
+
+    #[test]
+    fn equal_message_counters_from_independent_workers_have_distinct_receipts() {
+        let mut message: SessionBindingMessage = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/contracts/session-binding.work-run.valid.json"
+        ))
+        .expect("canonical binding");
+        let original = phase_request_id(&message, "worker").expect("first receipt");
+        assert_eq!(original, phase_request_id(&message, "worker").unwrap());
+        message.lease.worker_instance_id.0 = "wki_00000000000000000000000003".into();
+        assert_ne!(original, phase_request_id(&message, "worker").unwrap());
+    }
 }

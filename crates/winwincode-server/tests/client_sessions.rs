@@ -1041,6 +1041,88 @@ async fn full_launch_chain_issues_consumes_and_is_idempotent_under_replays() {
         vec![("issued".to_owned(), None), ("consumed".to_owned(), None),]
     );
 
+    let repeated = http_request(
+        address,
+        &cookie_post(
+            "/api/v1/sessions",
+            &launch_body(&public_client_id, &binding_id),
+            &cookie,
+        ),
+    )
+    .await;
+    assert_eq!(status_of(&repeated), "201", "{repeated}");
+    assert_eq!(
+        response_body(&repeated)["workerSessionId"],
+        body["workerSessionId"]
+    );
+
+    // A terminal worker keeps its history, while the same Chat gets a fresh
+    // worker on continuation. A live launch above remains idempotent.
+    {
+        use winwincode_control_plane::DeviceExecutionBindingService;
+        use winwincode_storage::{DeviceExecutionBindingIssuance, DeviceExecutionBindingRelease};
+        let mut storage = SqliteStorage::open(&data_directory).expect("storage");
+        let now = grant.consumed_at.clone().expect("consumed time");
+        let command = DeviceExecutionBindingIssuance::try_new(
+            "deb_00000000000000000000000100",
+            "req_00000000000000000000000100",
+            &grant.worker_launch_grant_id,
+            &grant.client_node_id,
+            &grant.client_instance_id,
+            &grant.holder_user_id,
+            &grant.occupancy_lease_id,
+            grant.occupancy_fencing_token,
+            &grant.repository_binding_id,
+            &grant.worker_session_id,
+            grant.product_session_id.clone(),
+            None,
+        )
+        .expect("binding command");
+        let mut bindings = DeviceExecutionBindingService::new(&mut storage);
+        let bound = bindings.bind(&command, &now).expect("bind").binding;
+        let release = DeviceExecutionBindingRelease::try_new(
+            &grant.worker_session_id,
+            "req_00000000000000000000000101",
+            bound.revision,
+            now.clone(),
+        )
+        .expect("release command");
+        bindings.release(&release, &now).expect("worker exit");
+    }
+    let resumed = http_request(
+        address,
+        &cookie_post(
+            "/api/v1/sessions",
+            &launch_body(&public_client_id, &binding_id),
+            &cookie,
+        ),
+    )
+    .await;
+    assert_eq!(status_of(&resumed), "201", "{resumed}");
+    let resumed = response_body(&resumed);
+    assert_ne!(resumed["workerSessionId"], body["workerSessionId"]);
+    assert_ne!(resumed["workerLaunchGrantId"], body["workerLaunchGrantId"]);
+    let replacement = launch_grant(
+        &data_directory,
+        resumed["workerLaunchGrantId"].as_str().expect("new grant"),
+    );
+    assert_eq!(replacement.product_session_id, grant.product_session_id);
+    assert_eq!(
+        replacement.repository_binding_id,
+        grant.repository_binding_id
+    );
+    assert_eq!(replacement.holder_user_id, grant.holder_user_id);
+    assert_eq!(replacement.state, WorkerLaunchGrantState::Consumed);
+    {
+        let mut storage = SqliteStorage::open(&data_directory).expect("storage");
+        assert!(
+            winwincode_server::WorkerSessionCredentialService::new(&mut storage)
+                .status_for_session(&grant.worker_session_id)
+                .expect("old credential")
+                .is_none()
+        );
+    }
+
     responder.abort();
     running.shutdown().await.expect("shutdown");
     let _ = std::fs::remove_dir_all(&data_directory);

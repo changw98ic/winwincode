@@ -264,6 +264,7 @@ fn work_run_role_job(
     let product_session_id = ProductSessionId(ulid_id("psn", seed + 2));
     let job_id = ExecutionJobId(ulid_id("job", seed + 3));
     let job = ExecutionJob {
+        attachments: None,
         model_selection: None,
         attempt: 1,
         execution_profile: role.to_owned(),

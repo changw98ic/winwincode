@@ -197,7 +197,7 @@ struct PreparedCommand {
 enum CommandKind {
     /// Create the candidate's local branch (`strategy: create_branch`).
     Branch,
-    /// Apply the candidate onto a target branch (`strategy: cherry_pick`).
+    /// Apply the complete candidate history onto a target branch (`strategy: merge`).
     Apply,
 }
 
@@ -293,7 +293,7 @@ impl ClientCandidatesApplication {
             .await
     }
 
-    /// Runs the target-branch apply flow: the durable `cherry_pick` command
+    /// Runs the target-branch apply flow: the durable `merge` command
     /// downlink with the expected head passed through, then the bounded wait
     /// for the device's apply receipt (`applied`, `base_stale`, or another
     /// frozen result code — the receipt carries the outcome).
@@ -374,7 +374,7 @@ impl ClientCandidatesApplication {
         };
         let strategy = match kind {
             CommandKind::Branch => LocalApplyStrategy::CreateBranch,
-            CommandKind::Apply => LocalApplyStrategy::CherryPick,
+            CommandKind::Apply => LocalApplyStrategy::Merge,
         };
         let (target_branch, expected_head) = match kind {
             CommandKind::Branch => (
@@ -549,7 +549,7 @@ fn idempotent_replay(
         CommandKind::Apply => {
             let receipt = history.iter().find(|receipt| {
                 receipt.result == LocalApplyResult::Applied
-                    && receipt.strategy == LocalApplyStrategy::CherryPick
+                    && receipt.strategy == LocalApplyStrategy::Merge
                     && receipt.target_branch == target_branch
                     && receipt.expected_head == expected_head
             })?;

@@ -159,7 +159,99 @@ pub struct LocalDeliveryAuthority {
     source_resolver: LocalGitSourceResolver,
 }
 
+struct DeviceDeliveryTarget {
+    target: winwincode_execution_port::generated::ExecutionDeviceTarget,
+    model: winwincode_execution_port::generated::ExecutionModelSelection,
+    head: String,
+}
+
+impl DeviceDeliveryTarget {
+    fn locator(&self) -> String {
+        format!(
+            "devices/{}/{}",
+            self.target.client_node_id, self.target.repository_binding_id
+        )
+    }
+}
+
 impl LocalDeliveryAuthority {
+    fn device_target(
+        &mut self,
+        source: Option<&ProductSessionId>,
+    ) -> Result<Option<DeviceDeliveryTarget>, DeliveryAuthorityError> {
+        let Some(source) = source else {
+            return Ok(None);
+        };
+        let failure = |error: &dyn fmt::Display| DeliveryAuthorityError::new(error.to_string());
+        let Some(grant) = crate::WorkerLaunchGrantService::new(&mut self.storage)
+            .newest_grant_for_product_session(&source.0)
+            .map_err(|e| failure(&e))?
+        else {
+            return Ok(None);
+        };
+        crate::device_session_gate::authorize_device_session(
+            &mut self.storage,
+            &crate::device_session_gate::DeviceSessionGateInput {
+                user_id: &grant.holder_user_id,
+                client_node_id: &grant.client_node_id,
+                repository_binding_id: &grant.repository_binding_id,
+            },
+        )
+        .map_err(|e| failure(&e))?;
+        let binding = self
+            .storage
+            .repository_binding_ledger()
+            .map_err(|e| failure(&e))?
+            .snapshot(&grant.repository_binding_id)
+            .map_err(|e| failure(&e))?
+            .ok_or_else(|| DeliveryAuthorityError::new("Device repository is unavailable"))?;
+        let node = crate::ClientRegistryService::new(&mut self.storage)
+            .snapshot(&grant.client_node_id)
+            .map_err(|e| failure(&e))?
+            .ok_or_else(|| DeliveryAuthorityError::new("Device is unavailable"))?;
+        let scope =
+            crate::repository_scope_key(&self.config.repository_scope).map_err(|e| failure(&e))?;
+        let session = crate::product_session_service::load_product_session_authority_seal(
+            &self.storage,
+            &scope,
+            source,
+        )
+        .map_err(|e| failure(&e))?;
+        let route = session.record.model_route();
+        Ok(Some(DeviceDeliveryTarget {
+            target: winwincode_execution_port::generated::ExecutionDeviceTarget {
+                client_node_id: grant.client_node_id,
+                client_id: node.public_client_id,
+                repository_binding_id: grant.repository_binding_id,
+                user_id: grant.holder_user_id,
+            },
+            head: binding.head_commit.ok_or_else(|| {
+                DeliveryAuthorityError::new("Device repository has no verified HEAD")
+            })?,
+            model: winwincode_execution_port::generated::ExecutionModelSelection {
+                provider_id: route.provider_id.clone(),
+                model_id: route.model_id.clone(),
+            },
+        }))
+    }
+
+    fn require_delivery_repository(
+        &mut self,
+        delivery: &Delivery,
+    ) -> Result<Option<DeviceDeliveryTarget>, DeliveryAuthorityError> {
+        let device =
+            self.device_target(delivery.snapshot().spec.source_product_session_id.as_ref())?;
+        let locator = device.as_ref().map_or_else(
+            || self.repository_locator.clone(),
+            DeviceDeliveryTarget::locator,
+        );
+        if delivery.snapshot().spec.repository.locator != locator {
+            return Err(DeliveryAuthorityError::new(
+                "Delivery repository differs from its confirmed execution target",
+            ));
+        }
+        Ok(device)
+    }
     /// Opens one exact canonical Git checkout as the repository authority.
     ///
     /// # Errors
@@ -181,15 +273,7 @@ impl LocalDeliveryAuthority {
                 "configured Delivery repository is not a Git worktree",
             ));
         }
-        let repository_source_root =
-            repository_root
-                .parent()
-                .map(Path::to_path_buf)
-                .ok_or_else(|| {
-                    LocalDeliveryAdapterError::new(
-                        "configured Delivery repository has no controlled parent",
-                    )
-                })?;
+        let repository_source_root = data_directory.join("delivery-sources");
         let repository_locator = portable_repository_locator(&repository_root)?;
         let storage = SqliteStorage::open(data_directory).map_err(|error| {
             LocalDeliveryAdapterError::new(format!(
@@ -209,8 +293,8 @@ impl LocalDeliveryAuthority {
                         "failed to open Delivery Artifact catalog: {error}"
                     ))
                 })?;
-        let source_resolver =
-            LocalGitSourceResolver::open(&repository_source_root).map_err(|error| {
+        let source_resolver = LocalGitSourceResolver::open_artifact_cache(&repository_source_root)
+            .map_err(|error| {
                 LocalDeliveryAdapterError::new(format!(
                     "failed to open Delivery Git source authority: {error}"
                 ))
@@ -286,7 +370,7 @@ impl LocalDeliveryAuthority {
     }
 
     fn execution_config(
-        &self,
+        &mut self,
         delivery: &Delivery,
         transition: &WorkRunStartResult,
         now_millis: u64,
@@ -304,11 +388,13 @@ impl LocalDeliveryAuthority {
             .ok_or_else(|| {
                 DeliveryAuthorityError::new("Delivery execution deadline exceeds the range")
             })?;
+        let device = self.require_delivery_repository(delivery)?;
         let payload = serde_json::to_vec(&(
             &self.config.repository_scope,
             delivery.id(),
             delivery.revision(),
             &transition.delivery,
+            device.as_ref().map(|value| (&value.target, &value.model)),
         ))
         .map_err(|error| DeliveryAuthorityError::new(error.to_string()))?;
         let (candidate_ref, checkout_revision) = match &transition.effect {
@@ -363,6 +449,8 @@ impl LocalDeliveryAuthority {
             ExecutionWorkspaceWriteMode::ReadOnly
         };
         Ok(Some(DeliveryExecutionConfig {
+            device_target: device.as_ref().map(|device| device.target.clone()),
+            model_selection: device.map(|device| device.model),
             payload_digest: Sha256Digest(format!("sha256:{:x}", Sha256::digest(payload))),
             candidate_ref,
             workspace: ExecutionWorkspace {
@@ -399,22 +487,14 @@ impl DeliveryAuthorityPort for LocalDeliveryAuthority {
         request: DeliveryAuthorityRequest<'_>,
     ) -> Result<DeliverySpecificationAuthority, DeliveryAuthorityError> {
         self.require_scope(&request)?;
-        let (baseline, repository_id, criteria) = match request.command().command {
+        let spec = match request.command().command {
             CommandName::DeliveryCreate => {
                 let payload: DeliveryCreatePayload = decode_payload(request.command())?;
-                (
-                    payload.spec.base_revision,
-                    payload.spec.repository_id,
-                    payload.spec.acceptance_criteria,
-                )
+                payload.spec
             }
             CommandName::DeliveryUpdateSpec => {
                 let payload: DeliveryUpdateSpecPayload = decode_payload(request.command())?;
-                (
-                    payload.spec.base_revision,
-                    payload.spec.repository_id,
-                    payload.spec.acceptance_criteria,
-                )
+                payload.spec
             }
             _ => {
                 return Err(DeliveryAuthorityError::new(
@@ -422,21 +502,55 @@ impl DeliveryAuthorityPort for LocalDeliveryAuthority {
                 ));
             }
         };
-        if repository_id != self.config.repository_scope.repository_id {
+        if spec.repository_id != self.config.repository_scope.repository_id {
             return Err(DeliveryAuthorityError::new(
                 "Delivery specification names another repository",
             ));
         }
-        let context = self.inspect(&baseline)?;
-        let verification = select_verification_command(&context)?;
+        let device = self.device_target(spec.source_product_session_id.as_ref())?;
+        let (repository, verification) = if let Some(device) = device {
+            if device.head != spec.base_revision {
+                return Err(DeliveryAuthorityError::new(
+                    "Refresh the Device repository: the confirmed baseline differs from its HEAD",
+                ));
+            }
+            let command = spec
+                .verification_command
+                .filter(|command| !command.trim().is_empty())
+                .ok_or_else(|| {
+                    DeliveryAuthorityError::new(
+                        "Device delivery requires a confirmed verification command",
+                    )
+                })?;
+            if winwincode_domain::verification_method_digest(&command).is_none() {
+                return Err(DeliveryAuthorityError::new(
+                    "Verification command is invalid",
+                ));
+            }
+            (
+                RepositoryRef {
+                    schema_version: DELIVERY_SCHEMA_VERSION,
+                    kind: RepositoryKind::LocalGit,
+                    locator: device.locator(),
+                },
+                command,
+            )
+        } else {
+            let context = self.inspect(&spec.base_revision)?;
+            (
+                self.repository_ref(),
+                select_verification_command(&context)?,
+            )
+        };
         Ok(DeliverySpecificationAuthority {
             now_millis: Self::now_millis(request.delivery())?,
-            repository: self.repository_ref(),
+            repository,
             source_ref: request
                 .delivery()
                 .and_then(|delivery| delivery.snapshot().spec.source_ref.clone()),
             max_rework_attempts: self.config.max_rework_attempts,
-            criterion_verification_methods: criteria
+            criterion_verification_methods: spec
+                .acceptance_criteria
                 .into_iter()
                 .map(|criterion| (criterion.id, verification.clone()))
                 .collect(),
@@ -461,20 +575,19 @@ impl DeliveryAuthorityPort for LocalDeliveryAuthority {
         let delivery = request
             .delivery()
             .ok_or_else(|| DeliveryAuthorityError::new("current Delivery is missing"))?;
-        if payload.delivery_id != *delivery.id()
-            || delivery.snapshot().spec.repository.locator != self.repository_locator
-        {
+        self.require_delivery_repository(delivery)?;
+        if payload.delivery_id != *delivery.id() {
             return Err(DeliveryAuthorityError::new(
                 "Delivery advance does not match the configured repository",
             ));
         }
         validate_dispatch_profile(&payload.dispatch_profile)?;
-        if (payload.dispatch_profile == "remediator") != payload.rework.is_some() {
+        if payload.dispatch_profile != "remediator" && payload.rework.is_some() {
             return Err(DeliveryAuthorityError::new(
                 "remediator requires exact rework targets; other profiles reject them",
             ));
         }
-        let rework_authorization = if let Some(input) = &payload.rework {
+        let rework_authorization = if payload.dispatch_profile == "remediator" {
             let candidate = crate::delivery_verdict_authority::resolve_current_candidate(
                 &self.storage,
                 &self.artifacts,
@@ -487,18 +600,23 @@ impl DeliveryAuthorityPort for LocalDeliveryAuthority {
             })?;
             let scope = CurrentReworkScope::from_candidate(delivery, &candidate)
                 .map_err(|error| DeliveryAuthorityError::new(error.to_string()))?;
-            let annotations = input
-                .targets
-                .iter()
-                .map(|target| PreciseReworkAnnotation {
-                    candidate_ref: input.candidate_ref.clone(),
-                    diff_sha256: input.diff_sha256.clone(),
-                    work_item_id: target.work_item_id.clone(),
-                    file_path: target.file_path.clone(),
-                    hunk_sha256: target.source_hunk_sha256.clone(),
-                    evidence_ref_ids: target.evidence_ref_ids.clone(),
-                })
-                .collect::<Vec<_>>();
+            let annotations = payload.rework.as_ref().map_or_else(
+                || scope.annotations(),
+                |input| {
+                    input
+                        .targets
+                        .iter()
+                        .map(|target| PreciseReworkAnnotation {
+                            candidate_ref: input.candidate_ref.clone(),
+                            diff_sha256: input.diff_sha256.clone(),
+                            work_item_id: target.work_item_id.clone(),
+                            file_path: target.file_path.clone(),
+                            hunk_sha256: target.source_hunk_sha256.clone(),
+                            evidence_ref_ids: target.evidence_ref_ids.clone(),
+                        })
+                        .collect::<Vec<_>>()
+                },
+            );
             let key = crate::delivery_transaction::delivery_journal_key(delivery.id())
                 .map_err(|error| DeliveryAuthorityError::new(error.to_string()))?;
             let loaded = self
@@ -516,10 +634,31 @@ impl DeliveryAuthorityPort for LocalDeliveryAuthority {
                 .map_err(|error| DeliveryAuthorityError::new(error.to_string()))?
             {
                 ReworkDecision::Start(authorization) => Some(authorization),
-                ReworkDecision::Clarify(_) => {
-                    return Err(DeliveryAuthorityError::new(
-                        "rework policy requires clarification before another writer",
-                    ));
+                decision @ ReworkDecision::Clarify(_) => {
+                    let producer = delivery
+                        .snapshot()
+                        .work_run_aggregate
+                        .runs
+                        .iter()
+                        .find(|run| &run.id == candidate.producer_work_run_id())
+                        .ok_or_else(|| DeliveryAuthorityError::new("rework producer is missing"))?;
+                    let transition = winwincode_delivery::application::workrun_execution::advance_rework(delivery,
+                        &winwincode_delivery::application::workrun_execution::ReworkAdvanceInput {
+                            expected_revision: delivery.revision(),
+                            product_session_id: producer.product_session_id.clone().ok_or_else(|| DeliveryAuthorityError::new("rework source session is missing"))?,
+                            identities: NewWorkRunIdentities {
+                                work_contract_id: producer.work_contract_id.clone(), work_contract_revision: producer.contract_revision.clone(),
+                                work_item_id: producer.work_item_id.clone(), work_item_revision: producer.work_item_revision.clone(),
+                                work_run_id: producer.id.clone(), execution_job_id: producer.execution_job_id.clone(),
+                            }, review: None, previous_outcome: None, current_lease: None, rework_authorization: None,
+                            now_millis: Self::now_millis(Some(delivery))?,
+                        }, decision).map_err(|e| DeliveryAuthorityError::new(e.to_string()))?;
+                    return Ok(WorkRunStartAuthority {
+                        repository: delivery.snapshot().spec.repository.clone(),
+                        source_ref: delivery.snapshot().spec.source_ref.clone(),
+                        transition,
+                        execution: None,
+                    });
                 }
             }
         } else {
@@ -674,11 +813,7 @@ impl DeliveryAuthorityPort for LocalDeliveryAuthority {
         let delivery = request
             .delivery()
             .ok_or_else(|| DeliveryAuthorityError::new("current Delivery is missing"))?;
-        if delivery.snapshot().spec.repository.locator != self.repository_locator {
-            return Err(DeliveryAuthorityError::new(
-                "Delivery verdict does not match the configured repository",
-            ));
-        }
+        self.require_delivery_repository(delivery)?;
         crate::delivery_verdict_authority::resolve(
             &self.storage,
             &self.artifacts,
@@ -852,8 +987,8 @@ impl ControlPlane {
         // one composition step below.
         let repository_source_root = authority.repository_source_root.clone();
         let dispatcher = LocalExecutionJobDispatcher::open(data_directory, repository_scope)?;
-        let source_resolver =
-            LocalGitSourceResolver::open(&repository_source_root).map_err(|error| {
+        let source_resolver = LocalGitSourceResolver::open_artifact_cache(&repository_source_root)
+            .map_err(|error| {
                 LocalDeliveryAdapterError::new(format!(
                     "failed to open the local Git candidate resolver: {error}"
                 ))

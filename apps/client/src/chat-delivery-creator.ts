@@ -2,6 +2,8 @@
 
 import {
   ControlPlaneClientError,
+  queryWorkRunAggregate,
+  workItemsCreateCommand,
   type ControlPlaneClient,
 } from './community-control-plane-client.js'
 import type {
@@ -15,6 +17,9 @@ import type {
   ProductSessionId,
   RepositoryScope,
   RequestId,
+  WorkItemsCreateCommand,
+  WorkRunStartCommand,
+  WorkItemId,
 } from './generated/contracts.js'
 import { CommandName } from './generated/contracts.js'
 
@@ -29,11 +34,13 @@ export interface ChatDeliveryCreateInput {
   readonly constraints: readonly string[]
   readonly sourceProductSessionId: ProductSessionId | null
   readonly acceptanceCriteria: readonly string[]
+  readonly verificationCommand?: string
 }
 
 export interface ChatDeliveryCreatorState {
   readonly status: 'idle' | 'submitting' | 'waiting' | 'created' | 'error' | 'closed'
   readonly error: ControlPlaneClientError | null
+  readonly deliveryId?: DeliveryId
 }
 
 /**
@@ -45,6 +52,7 @@ export interface ChatDeliveryCreator {
   readonly state: ChatDeliveryCreatorState
   subscribe(listener: (state: ChatDeliveryCreatorState) => void): () => void
   create(input: ChatDeliveryCreateInput): Promise<void>
+  reset(): void
   cancelPending(): void
   close(): void
 }
@@ -123,10 +131,14 @@ export function createChatDeliveryCreator(
     readonly inputKey: string
     readonly createRequest: DeliveryCreateCommand
     created: DeliveryProjection | null
+    itemsRequest?: WorkItemsCreateCommand
+    startRequest?: WorkRunStartCommand
   } | null = null
 
   function publish(status: ChatDeliveryCreatorState['status'], error: ControlPlaneClientError | null): void {
-    currentState = Object.freeze({ status, error })
+    currentState = Object.freeze({ status, error,
+      ...(attempt?.created === null || attempt === null ? {} : { deliveryId: attempt.created.deliveryId }),
+    })
     for (const listener of listeners) listener(currentState)
   }
 
@@ -201,6 +213,7 @@ export function createChatDeliveryCreator(
       constraints,
       sourceProductSessionId: input.sourceProductSessionId,
       acceptanceCriteria,
+      verificationCommand: input.verificationCommand?.trim() ?? '',
     })
     if (attempt !== null && attempt.inputKey !== inputKey) {
       invalid(
@@ -230,6 +243,7 @@ export function createChatDeliveryCreator(
                 title: criterion,
               })),
               baseRevision,
+              ...(input.verificationCommand?.trim() ? { verificationCommand: input.verificationCommand.trim() } : {}),
               constraints,
               goal,
               outOfScope,
@@ -269,6 +283,31 @@ export function createChatDeliveryCreator(
         }
         currentAttempt.created = created
       }
+      if (currentAttempt.itemsRequest === undefined) {
+        const aggregate = await queryWorkRunAggregate(options.client, {
+          actor: options.actor, scope: options.scope, requestId: options.nextRequestId(),
+          deliveryId, workItemId: null,
+        }, { signal: controller.signal })
+        currentAttempt.itemsRequest = workItemsCreateCommand({
+          actor: options.actor, scope: options.scope, requestId: options.nextRequestId(), deliveryId,
+          expectedRevision: currentAttempt.created.revision,
+          contractRevision: aggregate.contract.revision,
+          items: [{ id: deliveryId.replace(/^dlv_/u, 'wit_') as WorkItemId,
+            title, goal, criterionIds: aggregate.contract.criteria.map(criterion => criterion.id), dependsOn: [] }],
+        })
+      }
+      if (currentAttempt.startRequest === undefined) {
+        const response = await options.client.command(currentAttempt.itemsRequest, { signal: controller.signal })
+        if (response.command !== 'workitems.create' || response.requestId !== currentAttempt.itemsRequest.requestId || response.outcome !== 'completed') throw clientFailure('DELIVERY_ITEMS_PENDING', '任务拆解尚未完成，请重试。')
+        currentAttempt.startRequest = {
+          schemaVersion: SCHEMA_VERSION, actor: options.actor, scope: options.scope,
+          requestId: options.nextRequestId(), command: 'workrun.start', expectedRevision: response.currentRevision,
+          payload: { deliveryId, dispatchProfile: 'executor' },
+        }
+      }
+      const started = await options.client.command(currentAttempt.startRequest, { signal: controller.signal })
+      if (started.command !== 'workrun.start' || started.requestId !== currentAttempt.startRequest.requestId || started.outcome !== 'completed') throw clientFailure('DELIVERY_START_PENDING', '委托正在启动，请重试。')
+      if (closed || active !== controller) return
       publish('created', null)
       options.onCreated(deliveryId)
     } catch (error) {
@@ -290,6 +329,11 @@ export function createChatDeliveryCreator(
     },
     async create(input) {
       await create(input)
+    },
+    reset() {
+      if (closed || currentState.status !== 'created') return
+      attempt = null
+      publish('idle', null)
     },
     cancelPending() {
       if (closed) return

@@ -22,6 +22,116 @@ use crate::repository::{
 };
 use crate::store::DeviceStore;
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Registration {
+    path: String,
+    confirm_git_init: bool,
+}
+
+/// Register a browser-selected path; retain the result before acknowledging the command.
+pub(crate) fn apply_repository_registration(
+    store: &mut DeviceStore,
+    provider_directory: &std::path::Path,
+    node: &str,
+    instance: &str,
+    payload: &winwincode_client_port::messages::ServerConfigurationApplyPayload,
+) -> Result<winwincode_api::generated::DeviceRepositoryRegistrationReceipt, crate::DaemonError> {
+    use sha2::{Digest, Sha256};
+    use std::{fs, path::Path};
+    use winwincode_api::generated::DeviceRepositoryRegistrationReceipt;
+    let failure =
+        || crate::DaemonError::Protocol("device repository registration failed".to_owned());
+    let encrypted = &payload.encrypted;
+    if encrypted.client_node_id != node
+        || encrypted.request_id != payload.command.idempotency_key
+        || i64::try_from(payload.command.expected_revision).ok()
+            != Some(encrypted.expected_revision)
+        || encrypted.request_id.is_empty()
+        || encrypted.request_id.len() > 200
+        || !encrypted
+            .request_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
+    {
+        return Err(failure());
+    }
+    let digest = format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(encrypted).map_err(|_| failure())?)
+    );
+    let directory = store
+        .database_path()
+        .parent()
+        .ok_or_else(failure)?
+        .join("repository-receipts");
+    fs::create_dir_all(&directory).map_err(|_| failure())?;
+    let receipt_path = directory.join(format!("{}.json", encrypted.request_id));
+    match fs::read(&receipt_path) {
+        Ok(bytes) => {
+            let (previous, receipt): (String, DeviceRepositoryRegistrationReceipt) =
+                serde_json::from_slice(&bytes).map_err(|_| failure())?;
+            return if previous == digest {
+                Ok(receipt)
+            } else {
+                Err(failure())
+            };
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(failure()),
+    }
+    let provider = winwincode_provider::DeviceProviderStore::open(provider_directory)
+        .map_err(|_| failure())?;
+    let mutation = provider
+        .decrypt_configuration::<Registration>(encrypted, "winwincode.device-repository.v1");
+    let mut receipt = DeviceRepositoryRegistrationReceipt {
+        request_id: encrypted.request_id.clone(),
+        outcome: "invalid_request".to_owned(),
+        repository_binding_id: None,
+    };
+    if let Ok(mutation) = mutation
+        && !mutation.path.is_empty()
+        && mutation.path.len() <= 4096
+        && Path::new(&mutation.path).is_absolute()
+    {
+        let binding = match crate::repository::register_repository(
+            store,
+            node,
+            instance,
+            Path::new(&mutation.path),
+            &crate::repository::RegistrationOptions {
+                confirm_git_init: mutation.confirm_git_init,
+            },
+            OffsetDateTime::now_utc(),
+        ) {
+            Ok(result) => Some(result.repository_binding_id),
+            Err(RepositoryRegistryError::AlreadyRegistered {
+                repository_binding_id,
+            }) => Some(repository_binding_id),
+            Err(RepositoryRegistryError::Rejected(reason)) => {
+                crate::availability_wire_name(reason.availability).clone_into(&mut receipt.outcome);
+                None
+            }
+            Err(_) => return Err(failure()),
+        };
+        if let Some(binding) = binding {
+            "registered".clone_into(&mut receipt.outcome);
+            receipt.repository_binding_id = Some(
+                serde_json::from_value(serde_json::Value::String(binding))
+                    .map_err(|_| failure())?,
+            );
+        }
+    }
+    let temporary = receipt_path.with_extension("tmp");
+    fs::write(
+        &temporary,
+        serde_json::to_vec(&(digest, &receipt)).map_err(|_| failure())?,
+    )
+    .map_err(|_| failure())?;
+    fs::rename(temporary, receipt_path).map_err(|_| failure())?;
+    Ok(receipt)
+}
+
 /// Result of one consumed repository rescan command.
 #[derive(Debug)]
 pub struct RepositoryRescanApplication {
@@ -222,6 +332,147 @@ mod tests {
             repository_binding_id: binding_id.to_owned(),
             reason: ClientRepositoryRescanReason::Policy,
         }
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "One encrypted registration scenario verifies rejection, retry and durable identity together"
+    )]
+    fn encrypted_registration_checks_paths_and_replays_the_same_result() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let (root, mut store, _) = fixture("web-register");
+        let provider_directory = root.join("provider");
+        let provider =
+            winwincode_provider::DeviceProviderStore::open(&provider_directory).expect("provider");
+        let snapshot = provider.snapshot(NODE_ID).expect("public key");
+        let encrypt = |id: &str, path: &Path| {
+            let mut child = Command::new("node").args(["--input-type=module", "-e", r"
+                import { readFileSync } from 'node:fs';
+                import { pathToFileURL } from 'node:url';
+                const { encryptDeviceRepository } = await import(pathToFileURL(process.argv[1]));
+                const {snapshot, id, path} = JSON.parse(readFileSync(0, 'utf8'));
+                process.stdout.write(JSON.stringify(await encryptDeviceRepository(snapshot, id, {path, confirmGitInit:false})));
+            "]).arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/client/src/device-provider-encryption.ts"))
+                .stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().expect("WebCrypto");
+            child
+                .stdin
+                .take()
+                .expect("stdin")
+                .write_all(
+                    &serde_json::to_vec(
+                        &serde_json::json!({"snapshot":snapshot,"id":id,"path":path}),
+                    )
+                    .expect("input"),
+                )
+                .expect("write");
+            let output = child.wait_with_output().expect("encrypt");
+            assert!(output.status.success());
+            let encrypted = serde_json::from_slice(&output.stdout).expect("envelope");
+            winwincode_client_port::messages::ServerConfigurationApplyPayload {
+                command: CommandContext {
+                    expected_revision: 0,
+                    idempotency_key: id.to_owned(),
+                },
+                encrypted,
+            }
+        };
+        let path = root.join("missing");
+        let missing = encrypt("repository_missing", &path);
+        let rejected = apply_repository_registration(
+            &mut store,
+            &provider_directory,
+            NODE_ID,
+            INSTANCE_ID,
+            &missing,
+        )
+        .expect("receipt");
+        assert_ne!(rejected.outcome, "registered");
+        fs::create_dir_all(&path).expect("directory");
+        assert_eq!(
+            apply_repository_registration(
+                &mut store,
+                &provider_directory,
+                NODE_ID,
+                INSTANCE_ID,
+                &missing
+            )
+            .expect("replay"),
+            rejected
+        );
+        let not_git = encrypt("repository_not_git", &path);
+        assert_eq!(
+            apply_repository_registration(
+                &mut store,
+                &provider_directory,
+                NODE_ID,
+                INSTANCE_ID,
+                &not_git
+            )
+            .expect("non-Git")
+            .outcome,
+            "invalid_git"
+        );
+        git(&path, &["init"]);
+        git(
+            &path,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "initial",
+            ],
+        );
+        let registered = encrypt("repository_registered", &path);
+        let receipt = apply_repository_registration(
+            &mut store,
+            &provider_directory,
+            NODE_ID,
+            INSTANCE_ID,
+            &registered,
+        )
+        .expect("register");
+        assert_eq!(receipt.outcome, "registered");
+        assert!(receipt.repository_binding_id.is_some());
+        assert_eq!(list_bindings(&store).expect("bindings").len(), 2);
+        assert_eq!(
+            apply_repository_registration(
+                &mut store,
+                &provider_directory,
+                NODE_ID,
+                INSTANCE_ID,
+                &registered
+            )
+            .expect("replay"),
+            receipt
+        );
+        let mut changed = registered.clone();
+        changed.encrypted.ciphertext.push('A');
+        assert!(
+            apply_repository_registration(
+                &mut store,
+                &provider_directory,
+                NODE_ID,
+                INSTANCE_ID,
+                &changed
+            )
+            .is_err()
+        );
+        assert!(
+            !serde_json::to_string(&receipt)
+                .expect("receipt JSON")
+                .contains(&path.to_string_lossy().to_string())
+        );
+        drop(store);
+        drop(provider);
+        fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[test]

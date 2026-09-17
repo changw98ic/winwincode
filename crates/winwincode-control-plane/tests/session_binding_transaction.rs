@@ -2586,12 +2586,14 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
     // retention ledger has durably reached Pinned and the stable ref points
     // at the exact candidate commit.  Re-open the canonical store here to
     // exercise the same restart/recovery boundary used by a fresh process.
+    let candidate_cache = root.join("delivery-sources");
+    let retained_repository = candidate_cache.join("project-one");
     let pin = {
         let mut retention_storage =
             SqliteStorage::open(&root).expect("candidate retention storage");
         let pin = {
             let mut retention = retention_storage
-                .git_candidate_retention(&repositories)
+                .git_candidate_retention(&candidate_cache)
                 .expect("candidate retention");
             retention
                 .load_by_artifact(&artifact_id)
@@ -2610,7 +2612,7 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
     assert_eq!(pin.delivery_id(), initial.id());
     assert_eq!(
         git_text(git(
-            &repository,
+            &retained_repository,
             &["rev-parse", "--verify", pin.reference_name()]
         )),
         candidate_commit
@@ -2628,7 +2630,7 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
         .expect_err("release requires a durable Delivery terminal/read-closure receipt");
     assert_eq!(
         git_text(git(
-            &repository,
+            &retained_repository,
             &["rev-parse", "--verify", pin.reference_name()]
         )),
         candidate_commit
@@ -2638,14 +2640,17 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
     // The stable retention ref is the only authority that keeps this commit
     // available for later verification/rework checkout.
     git(
-        &repository,
+        &retained_repository,
         &["update-ref", "refs/heads/main", base_commit.as_str()],
     );
-    git(&repository, &["reflog", "expire", "--expire=now", "--all"]);
-    git(&repository, &["gc", "--prune=now"]);
+    git(
+        &retained_repository,
+        &["reflog", "expire", "--expire=now", "--all"],
+    );
+    git(&retained_repository, &["gc", "--prune=now"]);
     assert_eq!(
         git_text(git(
-            &repository,
+            &retained_repository,
             &["rev-parse", "--verify", pin.reference_name()]
         )),
         candidate_commit
@@ -2672,7 +2677,7 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
             SqliteStorage::open(&root).expect("candidate replay retention storage");
         let pin = {
             let mut retention = retention_storage
-                .git_candidate_retention(&repositories)
+                .git_candidate_retention(&candidate_cache)
                 .expect("candidate replay retention");
             retention
                 .load_by_artifact(&artifact_id)
@@ -2694,7 +2699,7 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
     // duplicate final frame therefore fails before another acknowledgement is
     // returned and leaves the foreign ref untouched.
     git(
-        &repository,
+        &retained_repository,
         &["update-ref", pin.reference_name(), base_commit.as_str()],
     );
     let tampered = control_plane
@@ -2703,13 +2708,13 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
     assert!(matches!(tampered, ArtifactMessageError::Storage(_)));
     assert_eq!(
         git_text(git(
-            &repository,
+            &retained_repository,
             &["rev-parse", "--verify", pin.reference_name()]
         )),
         base_commit
     );
     git(
-        &repository,
+        &retained_repository,
         &[
             "update-ref",
             pin.reference_name(),
@@ -3206,7 +3211,7 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
     assert!(
         !Command::new("git")
             .arg("-C")
-            .arg(&repository)
+            .arg(&retained_repository)
             .args(["rev-parse", "--verify", pin.reference_name()])
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -3216,7 +3221,8 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
             .success()
     );
     for verification_artifact_id in [&verification_artifact_id, &second_verification_artifact_id] {
-        let verification_pin = load_candidate_pin(&root, &repositories, verification_artifact_id);
+        let verification_pin =
+            load_candidate_pin(&root, &candidate_cache, verification_artifact_id);
         let verification_release = control_plane
             .release_candidate_git_after_delivery_reads_closed(&verification_pin, &reads_closed)
             .expect("receipt-first verification candidate release");
@@ -3227,7 +3233,7 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
         assert!(
             !Command::new("git")
                 .arg("-C")
-                .arg(&repository)
+                .arg(&retained_repository)
                 .args(["rev-parse", "--verify", verification_pin.reference_name()])
                 .env("GIT_CONFIG_NOSYSTEM", "1")
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")

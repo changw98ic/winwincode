@@ -330,6 +330,7 @@ fn update_command(
 
 fn spec(scope: &RepositoryScope, title: &str) -> DeliverySpecInput {
     DeliverySpecInput {
+        verification_command: None,
         acceptance_criteria: vec![AcceptanceCriterionInput {
             id: "criterion-1".to_owned(),
             required: true,

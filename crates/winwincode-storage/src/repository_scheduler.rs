@@ -455,6 +455,24 @@ impl<'storage> RepositoryScheduler<'storage> {
         list_repository_jobs(self.storage.connection()?, scope, states)
     }
 
+    /// Reads queued Device launches from the same durable job that fences local claims.
+    ///
+    /// # Errors
+    /// Rejects corrupt dispatch payloads or unavailable storage.
+    pub fn pending_device_launches(&self) -> Result<Vec<Vec<u8>>, StorageError> {
+        let mut statement = self.storage.connection()?.prepare(
+            "SELECT dispatch_payload FROM scheduler_execution_jobs j
+             WHERE state = 'queued' AND cancellation_request_id IS NULL
+             AND json_extract(CASE WHEN json_valid(CAST(dispatch_payload AS TEXT)) THEN CAST(dispatch_payload AS TEXT) ELSE '{}' END, '$.workInput.deviceTarget') IS NOT NULL
+             AND NOT EXISTS (SELECT 1 FROM device_execution_reservation_facts f WHERE f.job_id = j.job_id)
+             ORDER BY submitted_at, job_id LIMIT 100"
+        ).map_err(sql_error)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, Vec<u8>>(0))
+            .map_err(sql_error)?;
+        rows.map(|row| row.map_err(sql_error)).collect()
+    }
+
     /// Resolves the repository owner of one globally unique durable Job.
     ///
     /// # Errors
@@ -1560,10 +1578,10 @@ fn select_ready_job(
                           OR dependency.cancellation_request_id IS NOT NULL)
                )
                AND (
-                   NOT EXISTS (
+                   (json_extract(CASE WHEN json_valid(CAST(j.dispatch_payload AS TEXT)) THEN CAST(j.dispatch_payload AS TEXT) ELSE '{}' END, '$.workInput.deviceTarget') IS NULL AND NOT EXISTS (
                        SELECT 1 FROM device_execution_reservation_facts device_dispatch
                        WHERE device_dispatch.job_id = j.job_id
-                   )
+                   ))
                    OR EXISTS (
                        SELECT 1 FROM device_execution_reservation_facts device_dispatch
                        WHERE device_dispatch.job_id = j.job_id

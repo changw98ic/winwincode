@@ -23,6 +23,9 @@ export function encryptDeviceProvider(snapshot: DeviceProviderSnapshot, requestI
 export function encryptDeviceExtension(snapshot: ConfigurationSnapshot, requestId: string, mutation: DeviceExtensionMutation, crypto: Crypto = globalThis.crypto): Promise<DeviceConfigurationEnvelope> {
   return encryptConfiguration('winwincode.device-extensions.v1', snapshot, requestId, mutation, crypto)
 }
+export function encryptDeviceRepository(snapshot: ConfigurationSnapshot, requestId: string, mutation: { readonly path: string; readonly confirmGitInit: boolean }, crypto: Crypto = globalThis.crypto): Promise<DeviceConfigurationEnvelope> {
+  return encryptConfiguration('winwincode.device-repository.v1', snapshot, requestId, mutation, crypto)
+}
 const encode = (bytes: Uint8Array): string => btoa(String.fromCharCode(...bytes))
 const decode = (value: string): Uint8Array<ArrayBuffer> => Uint8Array.from(atob(value), character => character.charCodeAt(0))
 
@@ -31,7 +34,7 @@ async function encryptConfiguration(
   context: string,
   snapshot: ConfigurationSnapshot,
   requestId: string,
-  mutation: DeviceProviderMutation | DeviceExtensionMutation,
+  mutation: DeviceProviderMutation | DeviceExtensionMutation | { readonly path: string; readonly confirmGitInit: boolean },
   crypto: Crypto = globalThis.crypto,
 ): Promise<DeviceConfigurationEnvelope> {
   const encoder = new TextEncoder()

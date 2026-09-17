@@ -20,7 +20,7 @@
 }
 
 .wwc-page-header-title {
-  font-size: var(--wwc-font-size-xl);
+  font-size: var(--wwc-font-size-display);
   line-height: var(--wwc-line-height-tight);
 }
 
@@ -57,13 +57,19 @@
 }
 
 [data-wwc-component='button'] {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
   min-height: var(--wwc-control-min-height);
-  padding: var(--wwc-space-2) var(--wwc-space-3);
-  border: var(--wwc-border-width-control) solid var(--wwc-color-border-strong);
-  border-radius: var(--wwc-radius-md);
+  padding: 6px 14px;
+  border: var(--wwc-border-width) solid var(--wwc-color-border-control);
+  border-radius: var(--wwc-radius-button);
   color: var(--wwc-color-text);
   background: var(--wwc-color-surface);
   font-weight: var(--wwc-font-weight-medium);
+  font-size: 14px;
+  line-height: 22px;
   cursor: pointer;
   transition: background var(--wwc-transition-fast), border-color var(--wwc-transition-fast);
 }
@@ -72,22 +78,16 @@
   background: var(--wwc-color-surface-subtle);
 }
 
-/* Primary actions carry the reference hard shadow; pressing settles the offset. */
+/* DSH primary capsule: contrasting ink, with a quiet hover fill. */
 [data-wwc-component='button'][data-variant='primary'] {
-  border-color: var(--wwc-color-border);
-  color: var(--wwc-color-text);
+  border-color: transparent;
+  color: var(--wwc-color-on-accent);
   background: var(--wwc-color-accent);
   font-weight: var(--wwc-font-weight-strong);
-  box-shadow: var(--wwc-shadow-hard);
 }
 
 [data-wwc-component='button'][data-variant='primary']:hover:not(:disabled) {
   background: var(--wwc-color-accent-strong);
-}
-
-[data-wwc-component='button'][data-variant='primary']:active:not(:disabled) {
-  box-shadow: var(--wwc-shadow-hard-sm);
-  translate: 2px 2px;
 }
 
 [data-wwc-component='button'][data-variant='destructive'] {
@@ -199,6 +199,7 @@
   flex: 0 0 auto;
   padding: var(--wwc-space-2) var(--wwc-space-3);
   border: 0;
+  border-radius: 0;
   border-bottom: var(--wwc-focus-width) solid transparent;
   color: var(--wwc-color-text-muted);
   background: transparent;
@@ -404,7 +405,6 @@
   display: grid;
   gap: var(--wwc-space-6);
   min-width: 0;
-  padding: var(--wwc-space-6);
 }
 
 [data-wwc-page='management'] > [data-wwc-component='page-header'] {
@@ -432,7 +432,7 @@
   font-weight: var(--wwc-font-weight-medium);
 }
 
-[data-wwc-page='management'] input,
+[data-wwc-page='management'] input:not([type='checkbox']):not([type='radio']),
 [data-wwc-page='management'] select,
 [data-wwc-page='management'] textarea {
   width: 100%;
@@ -573,6 +573,31 @@
 }
 
 @media (max-width: 64rem) {
+  .wwc-header [data-wwc-component='connection-bar'] {
+    grid-column: 2;
+    grid-row: 1;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    align-items: center;
+    justify-content: flex-end;
+    margin: 0;
+    padding: 0;
+    border: 0;
+  }
+
+  .wwc-connection-device-link { min-width: 0; }
+  .wwc-connection-bar [data-wwc-component='status-badge'] { max-width: 100%; font-size: var(--wwc-font-size-xs); }
+  .wwc-connection-bar .wwc-status-badge-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .wwc-connection-bar .wwc-navigation-link { flex: 0 0 auto; padding: 8px; }
+  .wwc-connection-bar .wwc-navigation-text { display: none; }
+  .wwc-header .wwc-connection-bar:not([data-connection-status='connected']) {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    padding: var(--wwc-space-2);
+    border-radius: var(--wwc-radius-sm);
+  }
   .wwc-readiness-header {
     flex-direction: column;
     align-items: stretch;
@@ -586,13 +611,6 @@
 }
 
 @media (max-width: 48rem) {
-  [data-wwc-component='connection-bar'] {
-    flex-direction: row;
-    flex-wrap: wrap;
-    align-items: center;
-    padding: var(--wwc-space-3) var(--wwc-space-4);
-  }
-
   .wwc-connection-actions,
   .wwc-client-error-boundary .wwc-error-state-actions {
     display: grid;
@@ -601,7 +619,6 @@
 
   [data-wwc-page='management'] {
     gap: var(--wwc-space-4);
-    padding: var(--wwc-space-4);
   }
 
   .wwc-readiness {
@@ -670,11 +687,6 @@
   grid-column: 1;
   grid-row: 1;
   display: block;
-}
-
-/* 设计稿 03a/03b:对话是宽幅工作面,内容列不参与 90rem 居中。 */
-.wwc-shell:has([data-winwincode-surface='chat']) .wwc-main {
-  max-width: none;
 }
 
 /* The signed-out shell keeps only the brand in the header, as page 01 does. */

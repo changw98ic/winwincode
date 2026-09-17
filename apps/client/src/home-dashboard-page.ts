@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { formatInstant } from './format-instant.js'
+import { attentionTitle } from './display-labels.js'
 import {
   mountPageHeader,
   mountStatusBadge,
@@ -123,7 +124,6 @@ const PRESENTATION_SPEC: HomeDashboardPresentation = {
     'backlog',
     'ready',
     'waiting',
-    'validating',
     'failed',
     'completed',
     'visited',
@@ -397,6 +397,12 @@ export function mountHomeDashboardPage(
     ].filter((entry): entry is string => entry !== null && entry !== ''))
   }
 
+  function decisionContextEntries(card: HomeDecisionCard): readonly string[] {
+    return card.attentionCount !== undefined && card.attentionCount > 1
+      ? Object.freeze([`${String(card.attentionCount)} 项待处理`])
+      : Object.freeze([])
+  }
+
   function setAction(parts: CardParts, href: string, label: string): void {
     parts.action.href = href
     parts.action.textContent = label
@@ -417,11 +423,13 @@ export function mountHomeDashboardPage(
     parts.node.dataset.kind = 'decision'
     parts.node.dataset.urgency = card.urgency
     parts.node.dataset.disabled = String(card.actionDisabled)
-    parts.title.textContent = card.title
-    parts.status.textContent = homeDecisionStatusText(card)
+    parts.title.textContent = card.kind === 'attention' ? card.deliveryTitle ?? card.title : card.title
+    parts.status.textContent = card.kind === 'attention' && !card.actionDisabled
+      ? attentionTitle(card.title)
+      : homeDecisionStatusText(card)
     // Design page 04: the pending card face carries the name and the status
     // line only; the Chat session stays reachable through the quiet link.
-    updateContextList(parts.context, [])
+    updateContextList(parts.context, decisionContextEntries(card))
     parts.chat.hidden = card.actionDisabled || card.productSessionId === null
     if (card.productSessionId !== null && !card.actionDisabled) {
       parts.chat.href = homeChatHash(card.productSessionId, options.scopeSelection)
@@ -462,7 +470,11 @@ export function mountHomeDashboardPage(
   function fillDeliveryCard(parts: CardParts, card: HomeDeliveryCard): void {
     parts.node.dataset.kind = 'delivery'
     parts.node.dataset.status = card.status
-    parts.node.dataset.urgency = ''
+    parts.node.dataset.urgency = card.failedTasks > 0 || card.blockedTasks > 0
+      || card.status === WorkItemStateVocabulary.Failed
+      || card.status === WorkItemStateVocabulary.Cancelled
+      ? 'failure'
+      : ''
     delete parts.node.dataset.disabled
     parts.title.textContent = card.title
     parts.status.textContent = `${presentation.strongFlowLabel} · ${
@@ -474,7 +486,7 @@ export function mountHomeDashboardPage(
     // Design page 04: the running card's action opens the run page (查看进度).
     setAction(
       parts,
-      surfaceHash('/home/task-run', options.scopeSelection),
+      scopeHash(`#/home/review?delivery=${encodeURIComponent(card.deliveryId)}`, options.scopeSelection),
       presentation.deliveryProgressLabel,
     )
   }
@@ -515,6 +527,20 @@ export function mountHomeDashboardPage(
   }
   const sections = new Map<HomeSectionId, SectionParts>()
   const sectionsRoot = element(document, 'div', 'wwc-home-sections')
+  function decisionCountLabel(state: HomeDashboardState): string {
+    const items = state.decisions.reduce(
+      (total, card) => total + (card.attentionCount ?? 1),
+      0,
+    )
+    return `${String(state.decisions.length)} 个任务 · ${String(items)} 项待处理`
+  }
+
+  function sectionCountLabel(id: HomeSectionId, count: number, state?: HomeDashboardState): string {
+    return id === 'decisions' && state !== undefined
+      ? decisionCountLabel(state)
+      : id === 'decisions' ? `${String(count)} 个任务`
+        : presentation.countLabel(count)
+  }
 
   // The canonical WWC-ER-1001 board order: the two live columns first, then
   // the collapsed history rows of design page 04.
@@ -564,7 +590,7 @@ export function mountHomeDashboardPage(
         const liveTotal = options.model.state.counts[id === 'visited' ? 'visited' : id]
         toggleButton.textContent = expanded
           ? `${presentation.sectionHeading[id]} · ${presentation.collapseLabel}`
-          : `${presentation.sectionHeading[id]} · ${presentation.countLabel(liveTotal)}`
+          : `${presentation.sectionHeading[id]} · ${sectionCountLabel(id, liveTotal, options.model.state)}`
         cards.hidden = expanded
         empty.hidden = expanded ? true : !renderedEmpty(id)
       })
@@ -638,6 +664,7 @@ export function mountHomeDashboardPage(
 
   function render(state: HomeDashboardState): void {
     if (closed) return
+    layout.dataset.runningEmpty = String(state.running.length === 0)
     const tone: StatusTone = state.status === 'error'
       ? 'danger'
       : state.status === 'partial'
@@ -682,14 +709,14 @@ export function mountHomeDashboardPage(
                   : id === 'failed' ? state.counts.failed
                     : id === 'completed' ? state.counts.completed
                       : state.counts.visited
-      section.count.textContent = presentation.countLabel(total)
+      section.count.textContent = sectionCountLabel(id, total, state)
       // Design 04: the collapsed hairline is a count row driven by the home
       // projection — never a silent empty strip.
       if (section.toggle !== null) {
         const expandedNow = section.toggle.getAttribute('aria-expanded') === 'true'
         section.toggle.textContent = expandedNow
           ? `${presentation.sectionHeading[id]} · ${presentation.collapseLabel}`
-          : `${presentation.sectionHeading[id]} · ${presentation.countLabel(total)}`
+          : `${presentation.sectionHeading[id]} · ${sectionCountLabel(id, total, state)}`
         // Hide empty history rows; a zero count is noise, not a queue.
         if (total === 0 && !expandedNow) {
           section.root.hidden = true

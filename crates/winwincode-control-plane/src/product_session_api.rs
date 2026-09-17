@@ -2,6 +2,7 @@
 
 //! Generated HTTP-contract adapter for the canonical `ProductSession` service.
 
+use super::product_session_command_context;
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
     Actor, ChatSubmitCommand, ChatSubmitCompletedResponse, ChatSubmitCompletedResponseCommand,
@@ -14,6 +15,10 @@ use winwincode_api::generated::{
     SessionGetResultResponseQuery, SessionListQuery, SessionListResultResponse,
     SessionListResultResponseQuery, SessionMessagesListQuery, SessionMessagesListResultResponse,
     SessionMessagesListResultResponseQuery,
+};
+use winwincode_api::generated::{
+    SessionUpdateCommand, SessionUpdateCompletedResponse, SessionUpdateCompletedResponseCommand,
+    SessionUpdateCompletedResponseOutcome,
 };
 use winwincode_domain::RepositoryScope;
 use winwincode_domain::{ControlPlaneEventId, Instant, RequestId};
@@ -215,6 +220,46 @@ impl<'storage, 'clock, 'execution> ProductSessionApiService<'storage, 'clock, 'e
             request_id,
             result,
             schema_version,
+        })
+    }
+
+    /// Persists the title and archive state, independently from turn execution.
+    ///
+    /// # Errors
+    /// Rejects stale revisions and invalid or unauthorized session metadata.
+    pub fn update_metadata(
+        &mut self,
+        command: SessionUpdateCommand,
+    ) -> Result<SessionUpdateCompletedResponse, ProductSessionServiceError> {
+        let event_id = deterministic_event_id(
+            "session.update",
+            &command.actor,
+            &command.scope,
+            &command.request_id,
+        )?;
+        let context = product_session_command_context(
+            &command.actor,
+            &command.scope,
+            command.request_id.clone(),
+            &command.expected_revision,
+            event_id,
+            self.clock.now(),
+        )?;
+        let receipt = self.service.update_metadata(
+            &context,
+            &command.payload.product_session_id,
+            &command.payload.title,
+            command.payload.archived,
+        )?;
+        let result = receipt.record.projection()?;
+        Ok(SessionUpdateCompletedResponse {
+            command: SessionUpdateCompletedResponseCommand::SessionUpdate,
+            current_revision: result.revision.clone(),
+            outcome: SessionUpdateCompletedResponseOutcome::Completed,
+            previous_revision: command.expected_revision,
+            request_id: command.request_id,
+            result,
+            schema_version: command.schema_version,
         })
     }
 

@@ -733,6 +733,13 @@ mod tests {
                 .expect("snapshot")
                 .expect("binding");
             assert_eq!(by_id, release.binding);
+            let capacity = service
+                .capacity_snapshot(&fixture.node)
+                .expect("released capacity")
+                .expect("node");
+            assert_eq!(capacity.reserved_worker_sessions, 0);
+            assert_eq!(capacity.bound_bindings, 0);
+            assert_eq!(capacity.free_worker_sessions, 4);
             assert!(
                 service
                     .facts(&job)

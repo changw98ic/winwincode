@@ -16,7 +16,7 @@ import { DeviceExtensionOutcome, DeviceExtensionMcpTransport, DeviceExtensionMcp
  * - no field carries a local filesystem path; repository bindings resolve only
  *   inside the Device Client and the Server never sees or stores a path;
  * - `ClientConnectCode` carries only `codeDigest`, never connect-code plaintext;
- * - exactly the 19 command-class messages carry `expectedRevision` plus
+ * - exactly the 22 command-class messages carry `expectedRevision` plus
  *   `idempotencyKey` on the message envelope; the 8 non-command messages
  *   (heartbeat, hello, worker.state, worker.reconcile, and repository.status
  *   reports, the command ack, enrollment_accepted, and access.challenge)
@@ -1485,7 +1485,7 @@ export interface ClientControlMessageEnvelopeFields {
 }
 
 /**
- * Command base carried by exactly the 19 command-class messages: an
+ * Command base carried by exactly the 22 command-class messages: an
  * optimistic-concurrency Revision plus a replay-safe idempotency key.
  */
 export interface ClientControlCommandFields {
@@ -1707,7 +1707,17 @@ export interface ClientExtensionApplyMessage extends ClientControlMessageEnvelop
   readonly encrypted: DeviceConfigurationEnvelope
 }
 
+export interface ClientRepositoryRegisteredMessage extends ClientControlMessageEnvelopeFields {
+  readonly kind: 'client.repository.registered'
+  readonly receipt: { readonly requestId: string; readonly outcome: string; readonly repositoryBindingId: RepositoryBindingId | null }
+}
+export interface ClientRepositoryRegisterMessage extends ClientControlMessageEnvelopeFields, ClientControlCommandFields {
+  readonly kind: 'client.repository.register'
+  readonly encrypted: DeviceConfigurationEnvelope
+}
+
 export interface ClientToServerMessageByKind {
+  'client.repository.registered': ClientRepositoryRegisteredMessage
   'client.provider.report': ClientProviderReportMessage
   'client.extension.report': ClientExtensionReportMessage
   'client.enroll': ClientEnrollMessage
@@ -1730,6 +1740,7 @@ export interface ClientToServerMessageByKind {
 
 /** Kind → message mapping for the Server → Client direction (11 kinds). */
 export interface ServerToClientMessageByKind {
+  'client.repository.register': ClientRepositoryRegisterMessage
   'client.provider.apply': ClientProviderApplyMessage
   'client.extension.apply': ClientExtensionApplyMessage
   'client.enrollment_accepted': ClientEnrollmentAcceptedMessage
@@ -1773,6 +1784,7 @@ export const CLIENT_TO_SERVER_MESSAGE_KINDS = Object.freeze([
   'client.command_ack',
   'client.provider.report',
   'client.extension.report',
+  'client.repository.registered',
 ] as const)
 
 /** §9.4 Server → Client message kinds, verbatim. */
@@ -1790,6 +1802,7 @@ export const SERVER_TO_CLIENT_MESSAGE_KINDS = Object.freeze([
   'client.credential_rotate',
   'client.provider.apply',
   'client.extension.apply',
+  'client.repository.register',
 ] as const)
 
 /** Every ClientControlPort message kind, in schema ClientControlMessageKind order. */
@@ -1799,7 +1812,7 @@ export const CLIENT_CONTROL_MESSAGE_KINDS = Object.freeze([
 ] as const)
 
 /**
- * Exactly the 19 command-class messages per the schema `x-message-class`.
+ * Exactly the 22 command-class messages per the schema `x-message-class`.
  * Each carries `expectedRevision` + `idempotencyKey` on the envelope.
  */
 export const CLIENT_CONTROL_COMMAND_MESSAGE_KINDS = Object.freeze([
@@ -1824,6 +1837,7 @@ export const CLIENT_CONTROL_COMMAND_MESSAGE_KINDS = Object.freeze([
   'client.credential_rotate',
   'client.provider.apply',
   'client.extension.apply',
+  'client.repository.register',
 ] as const)
 
 /**
@@ -2815,6 +2829,17 @@ function parseClientToServerByKind(
       return parseClientCandidateApplyResultMessage(input, path)
     case 'client.command_ack':
       return parseClientCommandAckMessage(input, path)
+    case 'client.repository.registered': {
+      exactKeys(input, ['kind', 'schemaVersion', 'messageId', 'clientNodeId', 'clientInstanceId', 'sequence', 'occurredAt', 'receipt'], path)
+      const value = record(input.receipt, path)
+      exactKeys(value, ['requestId', 'outcome', 'repositoryBindingId'], path)
+      const outcome = providerText(value.outcome, path, 100)
+      if (!['registered', 'invalid_request', 'invalid_git', 'permission_denied', 'moved', 'scan_failed', 'unavailable'].includes(outcome)) controlError('INVALID_VALUE', path, 'Unknown registration outcome')
+      return Object.freeze({ ...parseEnvelopeBase(input, path), kind: 'client.repository.registered', receipt: Object.freeze({
+        requestId: providerText(value.requestId, path, 200), outcome,
+        repositoryBindingId: value.repositoryBindingId === null ? null : REPOSITORY_BINDING_ID(value.repositoryBindingId, path),
+      }) })
+    }
     case 'client.extension.report':
       return parseExtensionReport(input, path)
     case 'client.provider.report':
@@ -2850,6 +2875,8 @@ function parseServerToClientByKind(
       return parseClientLockMessage(input, path)
     case 'client.credential_rotate':
       return parseClientCredentialRotateMessage(input, path)
+    case 'client.repository.register':
+      return parseConfigurationApply(input, path, 'client.repository.register')
     case 'client.extension.apply':
       return parseConfigurationApply(input, path, 'client.extension.apply')
     case 'client.provider.apply':
@@ -2941,9 +2968,10 @@ function parseProviderReport(input: Readonly<Record<string, unknown>>, path: str
     snapshot: { clientNodeId, revision: revision(snapshot.revision, path), encryptionPublicKey: providerText(snapshot.encryptionPublicKey, path, 128), providers } })
 }
 
+function parseConfigurationApply(input: Readonly<Record<string, unknown>>, path: string, kind: 'client.repository.register'): ClientRepositoryRegisterMessage
 function parseConfigurationApply(input: Readonly<Record<string, unknown>>, path: string, kind: 'client.provider.apply'): ClientProviderApplyMessage
 function parseConfigurationApply(input: Readonly<Record<string, unknown>>, path: string, kind: 'client.extension.apply'): ClientExtensionApplyMessage
-function parseConfigurationApply(input: Readonly<Record<string, unknown>>, path: string, kind: 'client.provider.apply' | 'client.extension.apply'): ClientProviderApplyMessage | ClientExtensionApplyMessage {
+function parseConfigurationApply(input: Readonly<Record<string, unknown>>, path: string, kind: 'client.provider.apply' | 'client.extension.apply' | 'client.repository.register'): ClientProviderApplyMessage | ClientExtensionApplyMessage | ClientRepositoryRegisterMessage {
   exactKeys(input, ['kind', 'schemaVersion', 'messageId', 'clientNodeId', 'clientInstanceId', 'sequence', 'occurredAt', 'expectedRevision', 'idempotencyKey', 'encrypted'], path)
   const value = record(input.encrypted, path)
   exactKeys(value, ['clientNodeId', 'requestId', 'expectedRevision', 'publicKey', 'nonce', 'ciphertext'], path)

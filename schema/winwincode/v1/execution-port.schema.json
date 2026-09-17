@@ -506,6 +506,13 @@
         },
         "modelSelection": {
           "$ref": "#/$defs/ExecutionModelSelection"
+        },
+        "attachments": {
+          "type": "array",
+          "maxItems": 4,
+          "items": {
+            "$ref": "./domain.schema.json#/$defs/ChatAttachment"
+          }
         }
       },
       "required": [
@@ -10227,6 +10234,9 @@
         "candidateRef": {
           "type": "string",
           "pattern": "^git-candidate:sha256:[0-9a-f]{64}$"
+        },
+        "deviceTarget": {
+          "$ref": "#/$defs/ExecutionDeviceTarget"
         }
       },
       "required": [
@@ -10257,6 +10267,39 @@
         "modelId"
       ],
       "description": "Public Provider/model selection; the Device supplies its own configuration and credential."
+    },
+    "ExecutionDeviceTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Server-sealed Device destination inherited from the confirmed source session. Pending jobs may only run on this Device.",
+      "properties": {
+        "clientNodeId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "clientId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "repositoryBindingId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      },
+      "required": [
+        "clientNodeId",
+        "clientId",
+        "repositoryBindingId",
+        "userId"
+      ]
     }
   }
 }

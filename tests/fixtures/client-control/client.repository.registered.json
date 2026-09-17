@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "winwincode/v1",
+  "messageId": "cmsg_00000000000000000000000033",
+  "clientNodeId": "cnd_00000000000000000000000001",
+  "clientInstanceId": "cix_00000000000000000000000001",
+  "sequence": 428,
+  "occurredAt": "2026-09-01T09:30:15.000Z",
+  "kind": "client.repository.registered",
+  "payload": {
+    "receipt": {
+      "requestId": "repository_test",
+      "outcome": "registered",
+      "repositoryBindingId": "rbd_AAAAAAAAAAAAAAAAAAAAAAAAAA"
+    }
+  }
+}

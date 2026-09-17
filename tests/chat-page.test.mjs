@@ -4,6 +4,10 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import test from 'node:test'
+import { JSDOM } from 'jsdom'
+import { createRequire } from 'node:module'
+const clientRequire = createRequire(new URL('../apps/client/package.json', import.meta.url))
+const { flushSync } = clientRequire('react-dom')
 
 const root = resolve(import.meta.dirname, '..')
 const compiler = spawnSync(
@@ -27,16 +31,23 @@ assert.equal(
   `Chat page did not compile:\n${compiler.stdout}${compiler.stderr}`,
 )
 
+const bundle = spawnSync('corepack', ['pnpm', 'exec', 'esbuild', 'apps/client/src/chat-page.ts', '--bundle', '--format=esm', '--platform=browser', '--external:react', '--external:react-dom', '--external:react-dom/*', '--outfile=apps/client/.cache/chat-page-test.js'], { cwd: root, encoding: 'utf8' })
+assert.equal(bundle.status, 0, bundle.stderr)
+const initialDom = new JSDOM('<!doctype html><body></body>', { url: 'https://client.test' })
+globalThis.window = initialDom.window
+globalThis.document = initialDom.window.document
+globalThis.MutationObserver = initialDom.window.MutationObserver
 const page = await import(`${pathToFileURL(resolve(
   root,
-  '.cache/chat-page-tests/chat-page.js',
+  'apps/client/.cache/chat-page-test.js',
 )).href}?run=${String(Date.now())}`)
 
 const {
   chatComposerKeyAction,
   chatPagePresentation,
-  mountChatPage,
+  mountChatPage: mountPage,
 } = page
+const mountChatPage = options => { let mounted; flushSync(() => { mounted = mountPage(options) }); return mounted }
 const productSessionId = 'psn_00000000000000000000000001'
 const otherProductSessionId = 'psn_00000000000000000000000002'
 const scope = {
@@ -216,111 +227,26 @@ function controlPlaneError(kind, message, code = 'TEST_ERROR') {
   }
 }
 
-class FakeElement {
-  constructor(ownerDocument, tagName) {
-    this.ownerDocument = ownerDocument
-    this.tagName = tagName.toUpperCase()
-  }
-
-  attributes = new Map()
-  children = []
-  parentNode = null
-  listeners = new Map()
-  dataset = {}
-  className = ''
-  disabled = false
-  hidden = false
-  type = ''
-  id = ''
-  htmlFor = ''
-  rows = 0
-  autocomplete = ''
-  selectedIndex = -1
-  value = ''
-  #textContent = ''
-
-  get textContent() {
-    return this.#textContent
-  }
-
-  set textContent(value) {
-    this.#textContent = String(value)
-    this.replaceChildren()
-  }
-
-  get childNodes() { return this.children }
-
-  append(...children) {
-    for (const child of children) this.insertBefore(child, null)
-  }
-
-  replaceChildren(...children) {
-    for (const child of [...this.children]) child.remove()
-    for (const child of children) this.insertBefore(child, null)
-  }
-
-  insertBefore(child, reference) {
-    child.remove?.()
-    const index = reference === null ? this.children.length : this.children.indexOf(reference)
-    this.children.splice(index < 0 ? this.children.length : index, 0, child)
-    child.parentNode = this
-    return child
-  }
-
-  remove() {
-    if (this.parentNode === null) return
-    const index = this.parentNode.children.indexOf(this)
-    if (index >= 0) this.parentNode.children.splice(index, 1)
-    this.parentNode = null
-  }
-
-  setAttribute(name, value) {
-    this.attributes.set(name, String(value))
-  }
-
-  getAttribute(name) {
-    return this.attributes.get(name) ?? null
-  }
-
-  removeAttribute(name) {
-    this.attributes.delete(name)
-  }
-
-  addEventListener(name, listener) {
-    const listeners = this.listeners.get(name) ?? []
-    listeners.push(listener)
-    this.listeners.set(name, listeners)
-  }
-
-  removeEventListener(name, listener) {
-    const listeners = this.listeners.get(name) ?? []
-    this.listeners.set(name, listeners.filter(candidate => candidate !== listener))
-  }
-
-  emit(name, values = {}) {
-    let prevented = false
-    const event = {
-      preventDefault() { prevented = true },
-      ...values,
-    }
-    for (const listener of this.listeners.get(name) ?? []) listener(event)
-    return prevented
-  }
-
-  requestSubmit() {
-    this.emit('submit')
-  }
-
-  focus() {
-    this.ownerDocument.activeElement = this
-  }
-}
-
 class FakeDocument {
-  activeElement = null
-
-  createElement(tagName) {
-    return new FakeElement(this, tagName)
+  constructor() {
+    const dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'https://client.test' })
+    const { window } = dom
+    globalThis.window = window
+    globalThis.document = window.document
+    window.HTMLElement.prototype.emit = function(name, values = {}) {
+      const event = new window.Event(name, { bubbles: true, cancelable: true })
+      for (const [key, value] of Object.entries(values)) Object.defineProperty(event, key, { value })
+      flushSync(() => this.dispatchEvent(event))
+      return event.defaultPrevented
+    }
+    window.HTMLFormElement.prototype.requestSubmit = function() { this.emit('submit') }
+    const create = window.document.createElement.bind(window.document)
+    window.document.createElement = function(tag) {
+      const element = create(tag)
+      if (tag === 'main') window.document.body.append(element)
+      return element
+    }
+    return window.document
   }
 }
 
@@ -391,7 +317,7 @@ class FakeChatViewModel {
 
   publish(next) {
     this.state = next
-    this.listener?.(next)
+    flushSync(() => this.listener?.(next))
   }
 }
 
@@ -408,7 +334,7 @@ class FakeDeliveryCreator {
 
   publish(next) {
     this.state = next
-    this.listener?.(next)
+    flushSync(() => this.listener?.(next))
   }
 
   async create(input) { this.calls.push(['create', input]) }
@@ -544,6 +470,26 @@ test('empty Chat does not show WinWinCode system diagrams as project data', () =
   assert.deepEqual(model.calls.at(-1), ['close'])
 })
 
+test('new Chat offers task starters that fill the composer without submitting', () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const model = new FakeChatViewModel(state({
+    activeProductSessionId: null,
+    sessions: [],
+    session: null,
+    messages: [],
+    modelRouteAvailability: modelRouteAvailability(),
+  }))
+  const mounted = mountChatPage({ root: rootElement, model })
+  const starters = findAllByClass(rootElement, 'wwc-chat-starter')
+  assert.equal(starters.length, 3)
+  assert.equal(findByClass(rootElement, 'wwc-chat-empty').hidden, false)
+  starters[1].emit('click')
+  assert.equal(findByClass(rootElement, 'wwc-chat-composer-input').value, '帮我实现一个功能')
+  assert.equal(model.calls.some(([name]) => name === 'submitMessage'), false)
+  mounted.close()
+})
+
 test('Chat keeps the Session decisions on the first screen and retires the card when they close', () => {
   const document = new FakeDocument()
   const rootElement = document.createElement('main')
@@ -653,7 +599,7 @@ test('mounted Chat page exposes accessible state and delegates every interaction
 
   assert.equal(findByClass(rootElement, 'wwc-chat-session-list'), null)
   assert.equal(chip.hidden, false)
-  assert.match(chip.textContent, /委托任务 .* 待审核/u)
+  assert.match(chip.textContent, /委托任务 .* ∨/u)
   assert.equal(composer.placeholder, '继续当前对话…')
   assert.equal(status.getAttribute('role'), 'status')
   assert.equal(status.getAttribute('aria-live'), 'polite')
@@ -696,7 +642,7 @@ test('mounted Chat page exposes accessible state and delegates every interaction
 
   mounted.close()
   assert.deepEqual(model.calls.at(-1), ['close'])
-  assert.deepEqual(rootElement.children, [])
+  assert.equal(rootElement.children.length, 0)
 })
 
 test('read-only Chat keeps reads available and blocks every write action', async () => {
@@ -727,7 +673,6 @@ test('read-only Chat keeps reads available and blocks every write action', async
 
 test('Chat keyed updates retain session, message, model, composer, focus, and scroll identity', () => {
   const document = new FakeDocument()
-  document.activeElement = null
   const rootElement = document.createElement('main')
   const model = new FakeChatViewModel(state())
   const mounted = mountChatPage({ root: rootElement, model })
@@ -739,7 +684,7 @@ test('Chat keyed updates retain session, message, model, composer, focus, and sc
   composer.value = 'dirty composer'
   composer.selectionStart = 7
   composer.scrollTop = 31
-  document.activeElement = composer
+  composer.focus()
   messages.scrollTop = 72
 
   for (let index = 0; index < 200; index += 1) {
@@ -781,7 +726,7 @@ test('Chat confirms one editable requirement draft before converting it to Stron
     scope,
   })
 
-  const open = findByClass(rootElement, 'wwc-chat-delegation-chip')
+  const open = findByClass(rootElement, 'wwc-chat-new-delegation')
   assert.equal(open.disabled, false)
   assert.equal(open.getAttribute('aria-expanded'), 'false')
   assert.notEqual(open.getAttribute('aria-controls'), null)
@@ -826,6 +771,7 @@ test('Chat confirms one editable requirement draft before converting it to Stron
   outOfScope.value = 'Replace Chat.'
   constraints.value = 'Keep the repository binding.'
   criteria.value = 'The confirmed result is delivered.\nThe real snapshot is subscribed.'
+  findByClass(rootElement, 'wwc-chat-convert-verification').value = 'node --test'
   form.emit('submit')
   assert.equal(deliveryCreator.calls.length, 0, 'explicit confirmation is required')
   confirmation.checked = true
@@ -839,6 +785,7 @@ test('Chat confirms one editable requirement draft before converting it to Stron
     outOfScope: ['Replace Chat.'],
     constraints: ['Keep the repository binding.'],
     sourceProductSessionId: productSessionId,
+    verificationCommand: 'node --test',
     acceptanceCriteria: [
       'The confirmed result is delivered.',
       'The real snapshot is subscribed.',
@@ -846,19 +793,23 @@ test('Chat confirms one editable requirement draft before converting it to Stron
   }])
 
   // A created Delivery surfaces as the in-flow receipt line of design 03b.
-  deliveryCreator.publish({ status: 'created', error: null })
+  deliveryCreator.publish({ status: 'created', error: null, deliveryId: 'dlv_00000000000000000000000001' })
   const receipt = findByClass(rootElement, 'wwc-chat-delegation-receipt')
   assert.equal(receipt.hidden, false)
   assert.match(
     findByClass(rootElement, 'wwc-chat-delegation-receipt-text').textContent,
-    /已委托 「Primary Chat」/u,
+    /已委托「.+」，已进入所选设备的执行队列。/u,
   )
-  assert.equal(findByClass(rootElement, 'wwc-chat-delegation-receipt-link').href, '#/home/task-run')
+  const receiptParameters = new URLSearchParams(findByClass(rootElement, 'wwc-chat-delegation-receipt-link').href.split('?')[1])
+  assert.equal(receiptParameters.get('delivery'), 'dlv_00000000000000000000000001')
+  assert.equal(receiptParameters.get('repositoryId'), scope.repositoryId)
+  assert.equal(receiptParameters.get('projectId'), scope.projectId)
 
   deliveryCreator.publish({
     status: 'error',
     error: controlPlaneError('authorization', 'private permission detail', 'PERMISSION_DENIED'),
   })
+  open.emit('click')
   assert.equal(goal.value, 'Implement the requirement confirmed in this Chat.')
   assert.equal(baseline.value, '0123456789abcdef0123456789abcdef01234567')
   assert.match(findByClass(rootElement, 'wwc-chat-convert-error').textContent, /权限/u)
@@ -910,11 +861,34 @@ test('Chat page keeps an invalid route visible, blocks creation, and links to Se
   assert.equal(modelSelect.children[0].disabled, true)
   assert.equal(modelSelect.children[0].textContent, 'Primary Model')
   assert.equal(chip.hidden, true)
-  assert.equal(settings.href, '#/settings')
+  assert.equal(settings.getAttribute('href'), '#/settings')
   assert.equal(settings.hidden, false)
   assert.match(notice.textContent, /先前选择的模型路由.*凭据/u)
   assert.equal(notice.hidden, false)
   mounted.close()
+})
+
+test('project context labels names and never substitutes an internal repository identity', () => {
+  for (const [displayName, expectedName] of [
+    ['sum-demo', 'sum-demo'],
+    [scope.repositoryId, '项目名称未设置'],
+  ]) {
+    const document = new FakeDocument()
+    const rootElement = document.createElement('main')
+    const model = new FakeChatViewModel(state())
+    const mounted = mountChatPage({
+      root: rootElement, model, scope,
+      project: {
+        clientId: '1234567890', deviceName: '开发机',
+        repository: { repositoryBindingId: 'rbd_00000000000000000000000001',
+          displayName, defaultBranch: 'main', headCommit: 'a'.repeat(40),
+          dirtyState: 'clean', availability: 'available' },
+      },
+    })
+    assert.equal(findByClass(rootElement, 'wwc-chat-project-context').textContent,
+      `项目：${expectedName} · 设备：开发机 · 分支：main`)
+    mounted.close()
+  }
 })
 
 test('Chat page source has no transport, legacy Remote, secret rendering, or HTML injection path', () => {
@@ -922,8 +896,8 @@ test('Chat page source has no transport, legacy Remote, secret rendering, or HTM
   assert.match(source, /aria-live', 'polite'/u)
   assert.match(source, /aria-live', 'assertive'/u)
   assert.match(source, /aria-busy/u)
-  assert.match(source, /event\.isComposing|chatComposerKeyAction\(event\)/u)
-  assert.match(source, /event\.shiftKey|chatComposerKeyAction\(event\)/u)
+  assert.match(source, /event\.isComposing|chatComposerKeyAction\(event[,)]/u)
+  assert.match(source, /event\.shiftKey|chatComposerKeyAction\(event[,)]/u)
   assert.match(source, /form\.requestSubmit\(\)/u)
   assert.match(source, /options\.model\.submitMessage/u)
   assert.doesNotMatch(
@@ -931,4 +905,20 @@ test('Chat page source has no transport, legacy Remote, secret rendering, or HTM
     /\bfetch\s*\(|new\s+WebSocket|@deepseek-ai|dsh-typert|remote\.|\.query\s*\(|\.command\s*\(|innerHTML/iu,
   )
   assert.doesNotMatch(source, /https?:\/\/|wss?:\/\/|worker\.internal|CREDENTIAL_SECRET/iu)
+})
+
+
+test('DSH renders safe Markdown, highlighted code and user attachments in the conversation', () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const model = new FakeChatViewModel(state({ messages: [{ ...message(), state: 'completed', content: '## 已完成\n\n**通过** [文档](https://example.com) [拒绝](javascript:alert(1))\n\n```ts\nconst answer = 42;\n```\n\n| 项目 | 结果 |\n| --- | --- |\n| 测试 | 通过 |\n\n<script>alert(1)</script>' }] }))
+  const mounted = mountChatPage({ root: rootElement, model })
+  assert.equal(rootElement.querySelector('.wwc-chat-messages h2').textContent, '已完成')
+  assert.equal(rootElement.querySelector('.wwc-chat-messages strong').textContent, '通过')
+  assert.equal(rootElement.querySelectorAll('.wwc-chat-messages a').length, 1)
+  assert.equal(rootElement.querySelectorAll('.wwc-chat-messages script').length, 0)
+  assert.equal(rootElement.querySelectorAll('.wwc-chat-messages table').length, 1)
+  assert.ok(rootElement.querySelector('.wwc-chat-messages pre .wwc-syntax-token-keyword'))
+  assert.equal(rootElement.querySelectorAll('.wwc-chat-messages pre [style]').length, 0)
+  mounted.close()
 })

@@ -10,13 +10,16 @@
 use std::{collections::HashMap, fmt};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use codex_shell_command::bash::{
+    extract_bash_command, try_parse_shell, try_parse_word_only_commands_sequence,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 use winwincode_domain::{
     ExecutionEventId, ExecutionMessageId, ExecutionSequence, Instant, SchemaVersion,
     SessionIdentity, Sha256Digest, WorkerSessionId, observed_verification_command_digest,
-    observed_verification_command_is_test,
+    observed_verification_command_is_test, verification_method_digest,
 };
 use winwincode_execution_port::{
     generated::{
@@ -212,7 +215,7 @@ impl WorkRunRuntimeProjector {
             command_end.status,
             command_end.exit_code,
             command_end.call_id,
-            &observed_verification_command_digest(command_end.command)
+            &verification_command_digest(job, command_end)
                 .ok_or(WorkRunRuntimeProjectionError::InvalidEvidence)?,
         )
         .map_err(WorkRunRuntimeProjectionError::Product)?;
@@ -648,6 +651,78 @@ fn decode_payload(payload: &EncodedPayload) -> Option<Vec<u8>> {
     (digest == payload.payload_digest).then_some(bytes)
 }
 
+/// Bind a successful check after literal inspection commands to the approved
+/// method. The original Core invocation remains in the source call's rollout.
+fn verification_command_digest(
+    job: &ExecutionJob,
+    end: StageCommandEnd<'_>,
+) -> Option<Sha256Digest> {
+    let original = observed_verification_command_digest(end.command)?;
+    let approved = |digest: &Sha256Digest| {
+        job.work_input.as_ref().is_some_and(|input| {
+            input.work_contract.criteria.iter().any(|criterion| {
+                criterion
+                    .verification_method
+                    .as_deref()
+                    .and_then(verification_method_digest)
+                    .as_ref()
+                    == Some(digest)
+            })
+        })
+    };
+    if approved(&original)
+        || end.status != VerificationEvidenceStatus::Completed
+        || end.exit_code != 0
+    {
+        return Some(original);
+    }
+    let matched = inspection_tail_digest(end.command).filter(approved);
+    Some(matched.unwrap_or(original))
+}
+
+fn inspection_tail_digest(command: &[String]) -> Option<Sha256Digest> {
+    let (_, script) = extract_bash_command(command)?;
+    let tree = try_parse_shell(script)?;
+    let commands = try_parse_word_only_commands_sequence(&tree, script)?;
+    let (_, inspections) = commands.split_last()?;
+    if inspections.is_empty() || !inspections.iter().all(|words| is_literal_inspection(words)) {
+        return None;
+    }
+    // ponytail: only literal inspection prefixes qualify. General shell flow
+    // needs per-process completion facts, not guesses from a shell exit code.
+    let mut pending = vec![tree.root_node()];
+    let mut last_command = None;
+    let mut last_start = 0;
+    while let Some(node) = pending.pop() {
+        match node.kind() {
+            "pipeline" | "||" => return None,
+            "command" if last_command.is_none() || node.start_byte() > last_start => {
+                last_command = Some(node);
+                last_start = node.start_byte();
+            }
+            _ => {}
+        }
+        let mut cursor = node.walk();
+        pending.extend(node.children(&mut cursor));
+    }
+    verification_method_digest(last_command?.utf8_text(script.as_bytes()).ok()?)
+}
+
+fn is_literal_inspection(words: &[String]) -> bool {
+    match words {
+        [tool, ..]
+            if matches!(
+                tool.as_str(),
+                "cat" | "head" | "tail" | "ls" | "pwd" | "echo"
+            ) =>
+        {
+            true
+        }
+        [tool, format, ..] if tool == "printf" => matches!(format.as_str(), "%s" | "%s\\n"),
+        _ => false,
+    }
+}
+
 fn classify_evidence(command: &[String]) -> VerificationEvidenceKind {
     if observed_verification_command_is_test(command) {
         VerificationEvidenceKind::Test
@@ -924,6 +999,7 @@ mod tests {
             work_contract_revision: Revision(2),
         };
         ExecutionJob {
+            attachments: None,
             model_selection: None,
             attempt: 1,
             execution_profile: role.to_owned(),
@@ -947,6 +1023,7 @@ mod tests {
                 work_run_id: WorkRunId("wrn_00000000000000000000000001".to_owned()),
             }),
             work_input: Some(WorkRunInput {
+                device_target: None,
                 delivery_spec_id: "spec-fixture".into(),
                 delivery_spec_revision: Revision(2),
                 candidate_ref: (role != "planner").then(|| CANDIDATE_REF.to_owned()),
@@ -1091,6 +1168,148 @@ mod tests {
                     },
                 )
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn verification_matching_requires_a_successful_unmasked_approved_check() {
+        let mut job = job("reviewer");
+        let method = "node sum.test.mjs";
+        job.work_input
+            .as_mut()
+            .expect("work input")
+            .work_contract
+            .criteria[0]
+            .verification_method = Some(method.to_owned());
+        let expected = verification_method_digest(method);
+        for (script, matches) in [
+            ("cat sum.mjs; node sum.test.mjs", true),
+            ("cat sum.mjs && node sum.test.mjs", true),
+            ("cat sum.mjs\nnode sum.test.mjs", true),
+            ("printf '%s\\n' 'quoted ; || text'; node sum.test.mjs", true),
+            ("cat sum.mjs || node sum.test.mjs", false),
+            ("cat sum.mjs | node sum.test.mjs", false),
+            ("cat sum.mjs; node sum.test.mjs || true", false),
+            ("node sum.test.mjs; echo done", false),
+            ("printf '%s' 'node sum.test.mjs'", false),
+            ("exit 0; node sum.test.mjs", false),
+            ("cd other; node sum.test.mjs", false),
+            ("node() { true; }; node sum.test.mjs", false),
+            ("cat sum.mjs; node sum.test.mjs &", false),
+            ("cat sum.mjs; node sum.test.mjs > result.txt", false),
+            ("cat sum.mjs; node other.test.mjs", false),
+            ("cat $(touch side-effect); node sum.test.mjs", false),
+        ] {
+            for (status, exit_code) in [
+                (VerificationEvidenceStatus::Completed, 0),
+                (VerificationEvidenceStatus::Completed, 1),
+                (VerificationEvidenceStatus::Failed, 1),
+                (VerificationEvidenceStatus::TimedOut, 0),
+                (VerificationEvidenceStatus::Cancelled, 0),
+            ] {
+                let command = ["/bin/sh".to_owned(), "-c".to_owned(), script.to_owned()];
+                let actual = verification_command_digest(
+                    &job,
+                    StageCommandEnd {
+                        command: &command,
+                        turn_id: "turn-review",
+                        call_id: "call-test",
+                        status,
+                        exit_code,
+                    },
+                );
+                let accepted =
+                    matches && status == VerificationEvidenceStatus::Completed && exit_code == 0;
+                assert_eq!(
+                    actual == expected,
+                    accepted,
+                    "{script}, {status:?}, {exit_code}"
+                );
+                if !accepted {
+                    assert_eq!(
+                        actual,
+                        observed_verification_command_digest(&command),
+                        "retain original identity"
+                    );
+                }
+            }
+        }
+        let compound = "cat sum.mjs; node sum.test.mjs";
+        job.work_input
+            .as_mut()
+            .expect("work input")
+            .work_contract
+            .criteria[0]
+            .verification_method = Some(compound.to_owned());
+        assert_eq!(
+            verification_command_digest(
+                &job,
+                StageCommandEnd {
+                    command: &["sh".to_owned(), "-c".to_owned(), compound.to_owned()],
+                    turn_id: "turn-review",
+                    call_id: "call-test",
+                    status: VerificationEvidenceStatus::Completed,
+                    exit_code: 0,
+                }
+            ),
+            verification_method_digest(compound)
+        );
+    }
+
+    #[test]
+    fn inspection_followed_by_approved_test_retains_matching_evidence() {
+        let fixture = fixture();
+        let mut store = MemoryStore::default();
+        let projector = WorkRunRuntimeProjector::new();
+        let mut job = job("reviewer");
+        for criterion in &mut job
+            .work_input
+            .as_mut()
+            .expect("work input")
+            .work_contract
+            .criteria
+        {
+            criterion.verification_method = Some("node sum.test.mjs".to_owned());
+        }
+        projector
+            .retain_turn_started(
+                &mut store,
+                &AllowAuthority,
+                fixture.context(),
+                &job,
+                "turn-review",
+            )
+            .expect("policy");
+        let command = [
+            "/bin/zsh".to_owned(),
+            "-lc".to_owned(),
+            "printf '%s\\n' '--- sum.mjs ---'; cat sum.mjs; printf '%s\\n' '--- sum.test.mjs ---'; cat sum.test.mjs; printf '%s\\n' '--- test run ---'; node sum.test.mjs".to_owned(),
+        ];
+        let event = ready(
+            projector
+                .retain_exec_command_end(
+                    &mut store,
+                    &AllowAuthority,
+                    fixture.context(),
+                    &job,
+                    StageCommandEnd {
+                        command: &command,
+                        turn_id: "turn-review",
+                        call_id: "call-test",
+                        status: VerificationEvidenceStatus::Completed,
+                        exit_code: 0,
+                    },
+                )
+                .expect("evidence"),
+        );
+        let bytes = STANDARD
+            .decode(&event.event.payload.expect("payload").data_base64)
+            .expect("base64");
+        let payload: Value = serde_json::from_slice(&bytes).expect("JSON");
+        assert_eq!(
+            payload["command_digest"],
+            serde_json::to_value(verification_method_digest("node sum.test.mjs").expect("method"))
+                .expect("digest")
         );
     }
 

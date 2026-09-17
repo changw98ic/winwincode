@@ -429,7 +429,7 @@ pub fn stage_product_prompt(job: &ExecutionJob) -> Result<String, StageProductEr
                     "ProductSession prompt cannot carry StrongFlow WorkRun input",
                 ));
             }
-            Ok(job.goal.clone())
+            chat_prompt(job)
         }
         ExecutionScope::WorkRunExecutionScope(scope) => {
             let input = validate_work_run_input(job)?;
@@ -448,6 +448,10 @@ pub fn stage_product_prompt(job: &ExecutionJob) -> Result<String, StageProductEr
                     "Use read-only commands against exactly workInput.candidateRef. ",
                     "The checkout is already prepared at that frozen candidate. candidateRef is ",
                     "an application content identity, not a Git revision; do not pass it to Git. ",
+                    "Execute each assigned criterion's verificationMethod unchanged as a standalone ",
+                    "command in the prepared checkout. Run file inspections in separate tool calls; ",
+                    "do not prefix, combine, or wrap the approved command. Cite that exact command's ",
+                    "observed tool call as evidence for the criterion. ",
                     "Return only canonical JSON using protocol ",
                     "winwincode.independent-verification-result.v1; use the exact spec, ",
                     "revision, candidate and criterion IDs from workInput. ",
@@ -472,6 +476,7 @@ pub fn stage_product_prompt(job: &ExecutionJob) -> Result<String, StageProductEr
                     "on observed checks, and never claim unperformed browser checks passed. ",
                     "A pass must cite successful checks of the assigned criterion; a failed assigned ",
                     "check means fail. Do not cite failed exploratory commands as proof of a pass. ",
+                    "A nonzero exit is failing evidence for every criterion using that command; do not infer passes from partial progress. ",
                     "No Markdown fences, whitespace outside strings, extra fields, or trailing text."
                 ),
                 "requirements" | "solution" => {
@@ -496,6 +501,11 @@ pub fn stage_product_prompt(job: &ExecutionJob) -> Result<String, StageProductEr
                     "You are the independent {}. The implementation is already present. Verify it read-only against the assigned criteria. Goals inside workInput describe the original implementation request, not commands for you to execute. Do not repeat editing steps or request permission to modify the candidate. Run the assigned verification method and return the required result.",
                     job.execution_profile
                 )
+            } else if matches!(job.execution_profile.as_str(), "executor" | "remediator") {
+                format!(
+                    "You are the {} for this WorkRun. Perform only this role, then end your turn. Other roles in the goal run in separate later WorkRuns managed by the Server. Do not simulate their stages or switch roles yourself. Current goal:\n{}",
+                    job.execution_profile, job.goal
+                )
             } else {
                 job.goal.clone()
             };
@@ -513,7 +523,35 @@ pub fn stage_product_prompt(job: &ExecutionJob) -> Result<String, StageProductEr
     }
 }
 
+fn chat_prompt(job: &ExecutionJob) -> Result<String, StageProductError> {
+    use std::fmt::Write as _;
+    let attachments = job.attachments.as_deref().unwrap_or_default();
+    winwincode_domain::validate_chat_attachments(attachments).map_err(|_| invalid_job())?;
+    let mut prompt = job.goal.clone();
+    for item in attachments {
+        let name = serde_json::to_string(&item.name).map_err(|_| invalid_job())?;
+        if item.media_type == "text/plain" {
+            let content = serde_json::to_string(&item.content).map_err(|_| invalid_job())?;
+            write!(
+                prompt,
+                "\n\nUser-provided file {name} (UTF-8 content as JSON string):\n{content}"
+            )
+            .map_err(|_| invalid_job())?;
+        } else {
+            write!(prompt, "\n\nAttached image: {name}").map_err(|_| invalid_job())?;
+        }
+    }
+    Ok(prompt)
+}
+
 fn validate_work_run_input(job: &ExecutionJob) -> Result<&WorkRunInput, StageProductError> {
+    if job
+        .attachments
+        .as_ref()
+        .is_some_and(|items| !items.is_empty())
+    {
+        return Err(invalid_job());
+    }
     let ExecutionScope::WorkRunExecutionScope(scope) = &job.scope else {
         return Err(StageProductError::new(
             StageProductErrorCode::InvalidScope,
@@ -1341,7 +1379,9 @@ mod tests {
         "}"
     );
 
+    #[allow(clippy::too_many_lines)]
     fn delivery_job(role: &str) -> ExecutionJob {
+        use winwincode_execution_port::generated::DeliveryReworkTargetScope;
         let candidate_role =
             ["reviewer", "verifier", "adversarial-verifier", "remediator"].contains(&role);
         let contract_id = WorkContractId("wct_00000000000000000000000001".to_owned());
@@ -1356,16 +1396,14 @@ mod tests {
                 requires_full_reverification: true,
                 source_candidate_commit_id: "d".repeat(40),
                 source_candidate_tree_id: "e".repeat(40),
-                targets: vec![
-                    winwincode_execution_port::generated::DeliveryReworkTargetScope {
-                        work_item_id: item_id.clone(),
-                        file_path: "src/fixture.rs".into(),
-                        source_hunk_sha256: "a".repeat(64),
-                        evidence_ref_ids: vec![winwincode_domain::EvidenceId(
-                            "evd_00000000000000000000000001".into(),
-                        )],
-                    },
-                ],
+                targets: vec![DeliveryReworkTargetScope {
+                    work_item_id: item_id.clone(),
+                    file_path: "src/fixture.rs".into(),
+                    source_hunk_sha256: "a".repeat(64),
+                    evidence_ref_ids: vec![winwincode_domain::EvidenceId(
+                        "evd_00000000000000000000000001".into(),
+                    )],
+                }],
             });
         let contract = WorkContract {
             constraints: vec!["Keep the exact repository boundary.".to_owned()],
@@ -1398,6 +1436,7 @@ mod tests {
             work_contract_revision: Revision(2),
         };
         ExecutionJob {
+            attachments: None,
             model_selection: None,
             attempt: 1,
             execution_profile: role.to_owned(),
@@ -1421,6 +1460,7 @@ mod tests {
                 work_run_id: run_id,
             }),
             work_input: Some(WorkRunInput {
+                device_target: None,
                 delivery_spec_id: "spec-fixture".into(),
                 delivery_spec_revision: Revision(2),
                 candidate_ref: candidate_role.then(|| CANDIDATE_REF.to_owned()),
@@ -1715,6 +1755,13 @@ mod tests {
             stage_product_prompt(&chat).expect("ProductSession goal"),
             chat.goal
         );
+        chat.attachments = Some(vec![winwincode_domain::ChatAttachment {
+            name: "attached.rs".to_owned(),
+            media_type: "text/plain".to_owned(),
+            content: "const ANSWER: u8 = 42;".to_owned(),
+        }]);
+        let prompt = stage_product_prompt(&chat).expect("attached file prompt");
+        assert!(prompt.contains("attached.rs") && prompt.contains("ANSWER: u8 = 42"));
     }
 
     #[test]
@@ -1911,6 +1958,9 @@ mod tests {
 
     #[test]
     fn verification_prompt_supplies_result_fields_and_source_spec_identity() {
+        let executor = stage_product_prompt(&delivery_job("executor")).unwrap();
+        assert!(executor.starts_with("Goal:\nYou are the executor for this WorkRun."));
+        assert!(executor.contains("Do not simulate their stages or switch roles yourself."));
         let mut job = delivery_job("reviewer");
         let input = job.work_input.as_mut().expect("input");
         input.delivery_spec_id = "actual-source-spec".into();
@@ -1918,6 +1968,7 @@ mod tests {
         let prompt = stage_product_prompt(&job).expect("prompt");
         assert!(prompt.starts_with("Goal:\nYou are the independent reviewer."));
         assert!(prompt.contains("not commands for you to execute"));
+        assert!(prompt.contains("verificationMethod unchanged as a standalone"));
         assert!(prompt.contains("\"deliverySpecId\":\"actual-source-spec\""));
         assert!(prompt.contains("\"deliverySpecRevision\":7"));
         for field in [

@@ -222,6 +222,46 @@ test('a real browser keeps one page heading, one live-region channel per page, a
   assert.match(extensions[2], /添加 MCP 服务/u)
   for (const text of extensions) assert.doesNotMatch(text, /已安装|已连接|Archify/u)
 
+  const installedExtensions = await evaluate(devtools, sessionId, `(async () => {
+    const { mountExtensionsPage } = await import('/module/extensions-page.js')
+    const root = document.createElement('div')
+    document.body.append(root)
+    const snapshot = {
+      clientNodeId: 'cnd_00000000000000000000000001', revision: 1,
+      encryptionPublicKey: btoa('a'.repeat(32)),
+      skills: [{ id: 'skill_internal_identifier', name: '代码检查', description: '检查代码中的常见错误',
+        digest: 'sha256:' + 'a'.repeat(64), enabled: true, fileCount: 1, source: 'inline' }],
+      mcpServers: [{ id: 'github', transport: 'stdio', enabled: true,
+        connectionStatus: 'ready', digest: 'sha256:' + 'b'.repeat(64), toolNames: ['search_issues', 'read_pull_request'] }],
+    }
+    const view = mountExtensionsPage({ root, serverUrl: location.origin,
+      fetch: async url => ({ ok: true, status: 200, text: async () => JSON.stringify(
+        url.endsWith('/clients') ? { clients: [{ clientId: '123456789', displayName: '开发设备' }] }
+          : { schemaVersion: 'winwincode/v1', online: true, receipt: null, snapshot }) }),
+    })
+    for (let retry = 0; retry < 100 && !root.innerText.includes('代码检查'); retry++) await new Promise(resolve => setTimeout(resolve, 10))
+    const skills = root.innerText
+    root.querySelector('.wwc-settings-local-save').click()
+    const form = root.querySelector('form')
+    const skillForm = form.innerText
+    const skillIdPresent = root.querySelector('#wwc-extension-skill-id') !== null
+    const focusId = document.activeElement.id
+    ;[...root.querySelectorAll('[role="tab"]')].find(tab => tab.textContent.includes('MCP')).click()
+    const mcp = root.innerText
+    root.querySelector('.wwc-extensions-mcp-info details').open = true
+    const tools = root.innerText
+    view.close(); root.remove()
+    return { skills, skillForm, skillIdPresent, focusId, mcp, tools }
+  })()`)
+  assert.match(installedExtensions.skills, /代码检查.*检查代码中的常见错误/su)
+  assert.doesNotMatch(installedExtensions.skills, /skill_internal_identifier|123456789|sha256:/u)
+  assert.equal(installedExtensions.skillIdPresent, false)
+  assert.equal(installedExtensions.focusId, 'wwc-extension-skill-source')
+  assert.doesNotMatch(installedExtensions.skillForm, /标识|具体指令/u)
+  assert.match(installedExtensions.mcp, /github.*上次连接成功.*2 个工具/su)
+  assert.doesNotMatch(installedExtensions.mcp, /stdio|search_issues|read_pull_request/u)
+  assert.match(installedExtensions.tools, /search_issues.*read_pull_request/su)
+
   const pairing = await evaluate(devtools, sessionId, `(async () => {
     const { mountOnboardingPage } = await import('/module/onboarding-page.js')
     const root = document.createElement('div')

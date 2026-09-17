@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict'
+import { createQueryCache } from '@winwincode/browser-core/query-cache'
 import { spawnSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 import { resolve } from 'node:path'
 import test from 'node:test'
+import { JSDOM } from 'jsdom'
 
 const root = resolve(import.meta.dirname, '..')
 const compiled = spawnSync('corepack', [
@@ -22,6 +24,8 @@ const {
   solutionReviewDecisionResolution,
 } = reviewModule
 const { deliveryReportText } = detailModule
+const { candidateCanApply } = await import(pathToFileURL(resolve(cache, 'candidate-application.js')).href)
+const { diffLines, renderDiff } = await import(pathToFileURL(resolve(cache, 'diff-preview.js')).href)
 const { createStrongFlowReviewAnnotations } = annotationsModule
 
 const deliveryId = 'dlv_00000000000000000000000042'
@@ -111,6 +115,24 @@ const solutionReview = {
     criterionIds: ['criterion-one'], dependsOn: [],
   }],
 }
+
+test('applying requires current candidate, current specification and resolvable passing evidence', () => {
+  const state = { status: 'ready', detail: {
+    requirements: { deliverySpecId: 'spec-review', deliverySpecRevision: 1, acceptanceCriteria },
+    currentCandidate: candidate, evidence: [evidence],
+    verdict: { ...verdict, status: 'pass', unresolvedFindings: [], criteria: verdict.criteria.map(item => ({ ...item, verdict: 'pass' })) },
+  } }
+  assert.equal(candidateCanApply(state), true)
+  for (const changed of [
+    { ...state, status: 'refreshing' },
+    { ...state, detail: { ...state.detail, evidence: [] } },
+    { ...state, detail: { ...state.detail, currentCandidate: { ...candidate, deliverySpecRevision: 2 } } },
+    { ...state, detail: { ...state.detail, verdict } },
+    { ...state, detail: { ...state.detail, verdict: { ...state.detail.verdict, candidateRef: 'other-version' } } },
+    { ...state, detail: { ...state.detail, verdict: { ...state.detail.verdict, criteria: [state.detail.verdict.criteria[0]] } } },
+    { ...state, detail: { ...state.detail, evidence: [{ ...evidence, candidateRef: 'other-version' }] } },
+  ]) assert.equal(candidateCanApply(changed), false)
+})
 
 function response(query, result, page = { hasMore: false, nextCursor: null }) {
   return { schemaVersion: 'winwincode/v1', requestId: 'req_1', query, result, page }
@@ -398,6 +420,9 @@ test('review reads bounded current facts, continues ranges, and preserves histor
   assert.equal(model.state.files.length, 3)
   assert.equal(model.state.filesTruncated, false)
   assert.equal(model.state.segments.length, 4)
+  const workRunReads = client.calls.filter(call => call.query === 'workrun.get')
+  assert.equal(workRunReads.length, 1)
+  assert.equal(workRunReads[0].parameters.workRunId, null, 'include active review runs before they produce evidence')
   assert.equal(model.state.segments[0].activities.length, 100)
   assert.equal(model.state.segments[0].truncated, true)
   assert.deepEqual(model.state.progress, {
@@ -409,6 +434,8 @@ test('review reads bounded current facts, continues ranges, and preserves histor
 
   await model.openPreview('src/main.ts')
   assert.equal(model.previewText('src/main.ts'), 'abc', 'the first chunk is not duplicated')
+  await Promise.all([model.openPreview('src/main.ts'), model.openPreview('src/main.ts')])
+  assert.equal(model.previewText('src/main.ts'), 'abc', 'overlapping first-chunk reads are deduplicated')
   await model.continuePreview('src/main.ts')
   assert.equal(model.previewText('src/main.ts'), 'abcdef')
   await model.openPreview('report.svg')
@@ -429,6 +456,90 @@ test('review reads bounded current facts, continues ranges, and preserves histor
   model.close()
 })
 
+test('review refresh invalidates cached delivery progress', async () => {
+  const fixture = fixtureClient()
+  let title = '执行中'
+  const cache = createQueryCache({ client: { close() {}, async query(request) {
+    const result = await fixture.query(request)
+    return { ...result, requestId: request.requestId, result: request.query === 'delivery.get'
+      ? { ...result.result, requirements: { ...result.result.requirements, title } } : result.result }
+  } } })
+  let request = 0
+  const model = createStrongFlowReviewViewModel({ client: cache.client,
+    actor: { kind: 'human', id: 'hum_00000000000000000000000001' }, scope, deliveryId,
+    nextRequestId: () => `req_${String(++request).padStart(26, '0')}` })
+  await model.start()
+  assert.equal(model.state.detail.requirements.title, '执行中')
+  title = '验收通过'
+  await model.refresh()
+  assert.equal(model.state.detail.requirements.title, '验收通过')
+  model.close()
+  cache.close()
+})
+
+test('stale preview responses do not enter a refreshed candidate', async () => {
+  const fixture = fixtureClient()
+  let deliveryReads = 0
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  const client = { async query(request) {
+    if (request.query === 'candidate.diff.get' && request.parameters.offset === 0) await gate
+    const response = await fixture.query(request)
+    if (request.query === 'delivery.get' && ++deliveryReads > 1) {
+      response.result = { ...response.result, readCursor: {
+        ...response.result.readCursor,
+        token: `sfread_${'2'.padStart(32, '0')}`,
+      } }
+    }
+    return response
+  } }
+  let request = 0
+  const model = createStrongFlowReviewViewModel({ client,
+    actor: { kind: 'human', id: 'hum_00000000000000000000000001' }, scope, deliveryId,
+    nextRequestId: () => `req_${String(++request).padStart(26, '0')}` })
+  await model.start()
+  const pending = model.openPreview('src/main.ts')
+  await Promise.resolve()
+  await model.refresh()
+  release()
+  await pending
+  assert.equal(model.previewText('src/main.ts'), null)
+  model.close()
+})
+
+test('application confirmation accepts only the current passing candidate', async () => {
+  const fixture = fixtureClient()
+  const commands = []
+  let accepted = false
+  const client = {
+    async query(request) {
+      const response = await fixture.query(request)
+      if (request.query === 'delivery.get') response.result = { ...response.result,
+        verdict: { ...verdict, status: 'pass' },
+        attention: accepted ? [] : [{ id: 'att_1', type: 'delivery_approval', status: 'open' }] }
+      return response
+    },
+    async command(request) {
+      commands.push(request); accepted = true
+      return { requestId: request.requestId, command: request.command, outcome: 'completed' }
+    },
+  }
+  let request = 0
+  const model = createStrongFlowReviewViewModel({ client,
+    actor: { kind: 'human', id: 'hum_00000000000000000000000001' }, scope, deliveryId,
+    nextRequestId: () => `req_${String(++request).padStart(26, '0')}` })
+  await model.start()
+  await assert.rejects(model.acceptDelivery('foreign-commit'), /版本或验收结果已变化/u)
+  assert.equal(commands.length, 0)
+  await model.acceptDelivery(candidate.candidateCommitId)
+  assert.equal(commands[0].command, 'delivery.resolve_attention')
+  assert.equal(commands[0].expectedRevision, 2)
+  assert.equal(commands[0].payload.attentionItemId, 'att_1')
+  await model.acceptDelivery(candidate.candidateCommitId)
+  assert.equal(commands.length, 1, 'completed approval is not submitted again')
+  model.close()
+})
+
 test('review pins are bounded and error citations retain their source identity', () => {
   const annotations = createStrongFlowReviewAnnotations()
   annotations.pin({ key: `artifact:${artifactId}`, kind: 'artifact', label: 'failure.log', retention: 'available' })
@@ -441,4 +552,46 @@ test('review pins are bounded and error citations retain their source identity',
   assert.equal(result.attached, true)
   assert.equal(annotations.state.snippets[0].snippet.sourceRef, 'runtime:command:42')
   annotations.close()
+})
+
+
+test('unified diff numbering distinguishes headers, hunks, additions and removals', () => {
+  const source = [
+    'diff --git a/file b/file', '--- a/file', '+++ b/file',
+    '@@ -8,2 +8,3 @@', ' unchanged', '-removed', '+added', '+++literal source',
+    '\\ No newline at end of file', '@@ -20,0 +22,1 @@', '+new line',
+    'diff --git a/other b/other', '--- a/other', '+++ b/other',
+    '@@ -1 +0,0 @@', '-deleted', '',
+  ].join('\n')
+  const lines = diffLines(source)
+  assert.deepEqual(lines.filter(line => ['context', 'added', 'removed'].includes(line.kind))
+    .map(({ kind, before, after }) => [kind, before, after]), [
+      ['context', 8, 8], ['removed', 9, null], ['added', null, 9], ['added', null, 10],
+      ['added', null, 22], ['removed', 1, null],
+    ])
+  assert.equal(lines.find(line => line.text === '+++ b/file').kind, 'meta')
+  assert.equal(lines.find(line => line.text === '+++literal source').kind, 'added')
+  assert.equal(lines.find(line => line.text.startsWith('\\ No newline')).kind, 'meta')
+})
+
+test('rendered diff marks line changes while keeping code text inert', () => {
+  const dom = new JSDOM('<!doctype html><body></body>')
+  const code = renderDiff(dom.window.document, [
+    '@@ -1,2 +1,2 @@',
+    ' context <safe>',
+    '-const value = "old"',
+    '+const value = "new"',
+  ].join(String.fromCharCode(10)))
+  const rows = [...code.querySelectorAll('.wwc-diff-line')]
+  assert.equal(rows.filter(row => row.dataset.diffKind === 'context').length, 1)
+  assert.equal(rows.find(row => row.dataset.diffKind === 'removed').querySelector('.wwc-diff-marker').textContent, '−')
+  assert.equal(rows.find(row => row.dataset.diffKind === 'added').querySelector('.wwc-diff-marker').textContent, '+')
+  assert.equal(code.querySelectorAll('.wwc-diff-inline-change').length, 2)
+  assert.equal(code.querySelector('.wwc-diff-inline-change').textContent, 'old')
+  assert.match(code.textContent, /context <safe>/u)
+  assert.equal(code.querySelector('script'), null)
+  const standalone = renderDiff(dom.window.document, '@@ -1 +1 @@\n-remove\n keep\n+add\n')
+  assert.deepEqual([...standalone.querySelectorAll('.wwc-diff-content')].map(row => row.textContent), [
+    ' @@ -1 +1 @@\n', '−remove\n', ' keep\n', '+add\n',
+  ])
 })

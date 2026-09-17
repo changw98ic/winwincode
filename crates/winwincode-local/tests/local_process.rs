@@ -157,6 +157,7 @@ fn dispatch() -> JobDispatchMessage {
     };
     JobDispatchMessage {
         job: ExecutionJob {
+            attachments: None,
             model_selection: None,
             attempt: 1,
             execution_profile: "planner".to_owned(),
@@ -180,6 +181,7 @@ fn dispatch() -> JobDispatchMessage {
                 work_run_id: WorkRunId(id("wrn", 'L')),
             }),
             work_input: Some(WorkRunInput {
+                device_target: None,
                 candidate_ref: None,
                 delivery_spec_id: "spec-local-fixture".to_owned(),
                 delivery_spec_revision: Revision(1),

@@ -439,6 +439,9 @@ impl ControlPlane {
                     "Delivery Controller receipt belongs to another stream",
                 )));
             }
+            if matches!(action, DeliveryControllerAction::SubmitVerdict) {
+                self.continue_device_rework(scope, &actor, delivery_id)?;
+            }
             return Ok(());
         }
         let delivery = load_current_delivery(self.storage_ref()?, delivery_id)?;
@@ -909,6 +912,11 @@ impl ControlPlane {
         if let Some((receipt, delivery)) =
             self.delivery_replay(&mapped, &command.scope, &command.payload.delivery_id)?
         {
+            self.continue_device_rework(
+                &command.scope,
+                &command.actor,
+                &command.payload.delivery_id,
+            )?;
             return verdict_response(command, &receipt, &delivery);
         }
         ensure_catalog_membership(
@@ -948,7 +956,93 @@ impl ControlPlane {
             &command.payload.delivery_id,
             receipt.revision,
         )?;
+        self.continue_device_rework(&command.scope, &command.actor, &command.payload.delivery_id)?;
         verdict_response(command, &receipt, &delivery)
+    }
+
+    fn continue_device_rework(
+        &mut self,
+        scope: &RepositoryScope,
+        actor: &Actor,
+        delivery_id: &DeliveryId,
+    ) -> Result<(), DeliveryApplicationError> {
+        let mut delivery = load_current_delivery(self.storage_ref()?, delivery_id)?;
+        if !delivery
+            .snapshot()
+            .spec
+            .repository
+            .locator
+            .starts_with("devices/")
+            || delivery.snapshot().verdict.as_ref().is_none_or(|verdict| {
+                verdict.status != winwincode_delivery::domain::CriterionVerdict::Fail
+            })
+        {
+            return Ok(());
+        }
+        let attention = delivery
+            .snapshot()
+            .attention_items
+            .iter()
+            .filter(|item| item.status == AttentionItemStatus::Open && item.blocking)
+            .cloned()
+            .collect::<Vec<_>>();
+        // Only the policy-derived bounded repair decision is automatic. Conflicts,
+        // missing evidence and exhausted budgets retain their explicit user action.
+        if attention.iter().any(|item| {
+            serde_json::from_str::<serde_json::Value>(&item.context)
+                .ok()
+                .and_then(|value| value.get("action").cloned())
+                != Some(serde_json::json!("start_rework"))
+        }) {
+            return Ok(());
+        }
+        for item in attention {
+            self.delivery_resolve_attention(&DeliveryResolveAttentionCommand {
+                actor: actor.clone(), scope: scope.clone(), schema_version: SchemaVersion::WinwincodeV1,
+                command: winwincode_api::generated::DeliveryResolveAttentionCommandCommand::DeliveryResolveAttention,
+                expected_revision: Revision(i64::try_from(delivery.revision()).map_err(|e| DeliveryApplicationError::InvalidRequest(e.to_string()))?),
+                request_id: delivery_controller_attention_request_id(&item.id),
+                payload: winwincode_api::generated::DeliveryResolveAttentionPayload {
+                    attention_item_id: item.id, delivery_id: delivery_id.clone(), decision: "resolve".into(),
+                    remediation: None, resolution: "按已确认验收标准，在预算内自动修复当前候选并重新验证。".into(),
+                },
+            })?;
+            delivery = load_current_delivery(self.storage_ref()?, delivery_id)?;
+        }
+        if delivery.snapshot().status != DeliveryStatus::Reworking {
+            return Ok(());
+        }
+        let Some(writer) = delivery
+            .snapshot()
+            .session_bindings
+            .iter()
+            .rev()
+            .find(|binding| {
+                matches!(
+                    binding.execution_profile.as_deref(),
+                    Some("executor" | "remediator")
+                )
+            })
+        else {
+            return Ok(());
+        };
+        self.workrun_start(&WorkRunStartCommand {
+            actor: actor.clone(),
+            scope: scope.clone(),
+            schema_version: SchemaVersion::WinwincodeV1,
+            command: WorkRunStartCommandCommand::WorkRunStart,
+            expected_revision: Revision(
+                i64::try_from(delivery.revision())
+                    .map_err(|e| DeliveryApplicationError::InvalidRequest(e.to_string()))?,
+            ),
+            request_id: delivery_controller_request_id("remediator", &writer.execution_job_id),
+            payload: WorkRunStartPayload {
+                delivery_id: delivery_id.clone(),
+                dispatch_profile: "remediator".into(),
+                rework: None,
+            },
+        })?;
+        Ok(())
     }
 
     /// Lists Delivery summaries only through the repository-scoped catalog
@@ -1445,6 +1539,21 @@ fn delivery_projection(
             .count()
     };
     Ok(DeliveryProjection {
+        acceptance: Some(winwincode_api::generated::DeliveryAcceptanceProgressProjection {
+            total: count(snapshot.spec.acceptance_criteria.len())?,
+            passed: count(snapshot.spec.acceptance_criteria.iter().filter(|criterion| {
+                snapshot.verdict.as_ref().is_some_and(|verdict| {
+                    verdict.delivery_spec_id == snapshot.spec.id
+                        && verdict.criteria.iter().any(|result| {
+                            result.criterion_id == criterion.id
+                                && result.verdict == winwincode_delivery::domain::verdict::CriterionVerdict::Pass
+                        })
+                })
+            }).count())?,
+        }),
+        rework_attempts_used: Some(count(snapshot.session_bindings.iter()
+            .filter(|binding| binding.execution_profile.as_deref() == Some("remediator")).count())?),
+        source_product_session_id: snapshot.spec.source_product_session_id.clone(),
         active_work_run_id,
         delivery_id: delivery.id().clone(),
         open_attention_count: count(open_attention)?,

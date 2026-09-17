@@ -1,10 +1,15 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 
+@import './dsh-tokens.css' layer(tokens);
 @import './tokens.css' layer(tokens);
 @import './base.css' layer(base);
 @import './shell.css' layer(shell);
 @import './components.css' layer(components);
 @import './features/chat.css' layer(features);
+@import './features/dsh-markdowntext.css' layer(features);
+@import './features/dsh-codeblock.css' layer(features);
+@import './features/dsh-attachment.css' layer(features);
+@import './features/dsh-theme.css' layer(features);
 @import './features/extensions.css' layer(features);
 @import './features/settings.css' layer(features);
 @import './features/home.css' layer(features);
@@ -17,3 +22,4 @@
 @import './features/repositories.css' layer(features);
 @import './features/strongflow-review.css' layer(features);
 @import './features/candidate-run-preview.css' layer(features);
+@import './features/select.css' layer(features);

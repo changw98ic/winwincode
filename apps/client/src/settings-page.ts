@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { readPreferences, savePreferences, isThemePreference } from './preferences.js'
 import type { ControlPlaneClientError, ControlPlaneClientTransport } from './community-control-plane-client.js'
 import {
   mountButton,
@@ -175,7 +176,7 @@ const SETTINGS_CATEGORIES: readonly {
     id: 'general',
     label: '通用与个人',
     title: '通用与个人',
-    description: '显示名称、界面语言、外观与发送偏好,保存后写入本地草稿。',
+    description: '外观和发送方式保存后立即生效，并保留在此浏览器。',
   }),
   Object.freeze({
     id: 'providers',
@@ -239,7 +240,7 @@ function fillSelect(
  */
 export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   const document = options.root.ownerDocument
-  const generalDraft = new Map<string, string>()
+  const generalPreferences = readPreferences(document.defaultView)
   const executionDraft = new Map<string, string>()
   const layout = element(document, 'section', 'wwc-settings')
   layout.dataset.wwcPage = 'management'
@@ -261,20 +262,17 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   const categorySelect = element(document, 'select', 'wwc-settings-category-select')
   categorySelect.id = 'wwc-settings-category'
   categorySelect.setAttribute('aria-label', '设置分类')
-  // 设计稿 12:收起态文案固定为「设置分类」(首选项),当前分类显示在页面标题里。
-  const CATEGORY_SELECT_LABEL = '__label__'
   fillSelect(
     document,
     categorySelect,
     [
-      { value: CATEGORY_SELECT_LABEL, label: '设置分类' },
       ...SETTINGS_CATEGORIES.map(category => ({
         value: category.id,
         label: category.label,
       })),
     ],
   )
-  categorySelect.value = CATEGORY_SELECT_LABEL
+  categorySelect.value = selectedCategory
   const headerActions = element(document, 'div', 'wwc-settings-header-actions')
   headerActions.append(categorySelect)
   const headerRow = element(document, 'div', 'wwc-settings-header')
@@ -404,7 +402,6 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   generalLanguage.id = 'wwc-settings-general-language'
   fillSelect(document, generalLanguage, [
     { value: 'zh-Hans', label: '简体中文' },
-    { value: 'en', label: 'English' },
   ])
   const generalAppearance = element(document, 'select', 'wwc-settings-general-appearance')
   generalAppearance.id = 'wwc-settings-general-appearance'
@@ -423,18 +420,19 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   const generalMoreEmpty = element(document, 'p', 'wwc-settings-general-more-empty')
   generalMoreEmpty.textContent = '其余偏好暂无可配置项。'
   generalMoreContent.append(generalMoreEmpty)
-  generalName.input.value = generalDraft.get('displayName') ?? ''
-  if (generalDraft.has('language')) generalLanguage.value = generalDraft.get('language') ?? ''
-  if (generalDraft.has('appearance')) {
-    generalAppearance.value = generalDraft.get('appearance') ?? ''
-  }
-  if (generalDraft.has('sendKey')) generalSend.value = generalDraft.get('sendKey') ?? ''
+  generalName.input.value = generalPreferences.displayName
+  generalName.input.maxLength = 80
+  generalAppearance.value = generalPreferences.appearance
+  generalSend.value = generalPreferences.sendKey
   const generalSave = localSaveRow('wwc-settings-general-save', () => {
-    generalDraft.set('displayName', generalName.input.value)
-    generalDraft.set('language', generalLanguage.value)
-    generalDraft.set('appearance', generalAppearance.value)
-    generalDraft.set('sendKey', generalSend.value)
-    generalSave.feedback.textContent = LOCAL_DRAFT_SAVED_TEXT
+    try {
+      savePreferences(document.defaultView, {
+        displayName: generalName.input.value.trim(),
+        appearance: isThemePreference(generalAppearance.value) ? generalAppearance.value : 'system',
+        sendKey: generalSend.value === 'mod-enter' ? 'mod-enter' : 'enter',
+      })
+      generalSave.feedback.textContent = '已保存并生效'
+    } catch { generalSave.feedback.textContent = '保存失败，请检查浏览器是否允许存储。' }
   })
   const onGeneralNameInput = () => { generalSave.feedback.textContent = '' }
   generalName.input.addEventListener('input', onGeneralNameInput)
@@ -797,8 +795,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
       headingLevel: 2,
       className: 'wwc-settings-heading',
     })
-    // 收起态文案固定为「设置分类」,不回写分类名。
-    categorySelect.value = CATEGORY_SELECT_LABEL
+    categorySelect.value = next
     for (const candidate of SETTINGS_CATEGORIES) {
       const section = candidate.id === 'general'
         ? generalSection
@@ -813,8 +810,6 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   const onCategoryChange = () => {
     const next = categorySelect.value as SettingsCategoryId
     if (SETTINGS_CATEGORIES.some(candidate => candidate.id === next)) showCategory(next)
-    // 切换完成后收起态回到「设置分类」占位文案。
-    categorySelect.value = CATEGORY_SELECT_LABEL
   }
   categorySelect.addEventListener('change', onCategoryChange)
 

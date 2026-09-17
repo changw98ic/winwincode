@@ -178,20 +178,10 @@ fn durable_sources_resolve_one_replay_stable_production_verdict() {
         })
         .collect::<Vec<_>>();
 
-    let first = resolve_production_verdict(
-        &delivery,
-        &writer_source.source,
-        &writer_source.terminal,
-        verification.clone(),
-    )
-    .expect("production verdict");
-    let replay = resolve_production_verdict(
-        &delivery,
-        &writer_source.source,
-        &writer_source.terminal,
-        verification,
-    )
-    .expect("restart replay");
+    let first = resolve_production_verdict(&delivery, candidate.clone(), verification.clone())
+        .expect("production verdict");
+    let replay = resolve_production_verdict(&delivery, candidate.clone(), verification)
+        .expect("restart replay");
     assert_eq!(first, replay);
     let (candidate, verification, evidence, produced_at_millis) = first.into_parts();
     assert_eq!(candidate.candidate_commit_id(), candidate_commit);
@@ -217,13 +207,8 @@ fn durable_sources_resolve_one_replay_stable_production_verdict() {
             )
         })
         .collect::<Vec<_>>();
-    resolve_production_verdict(
-        &delivery,
-        &writer_source.source,
-        &writer_source.terminal,
-        stale_runtime,
-    )
-    .expect_err("runtime bound to another candidate fails closed");
+    resolve_production_verdict(&delivery, candidate.clone(), stale_runtime)
+        .expect_err("runtime bound to another candidate fails closed");
 
     let missing_evidence = verification_sources
         .iter()
@@ -238,26 +223,16 @@ fn durable_sources_resolve_one_replay_stable_production_verdict() {
             )
         })
         .collect::<Vec<_>>();
-    resolve_production_verdict(
-        &delivery,
-        &writer_source.source,
-        &writer_source.terminal,
-        missing_evidence,
-    )
-    .expect_err("finding that cites non-JSON runtime Evidence fails closed");
+    resolve_production_verdict(&delivery, candidate.clone(), missing_evidence)
+        .expect_err("finding that cites non-JSON runtime Evidence fails closed");
 
     let mut stale_delivery = delivery.clone().into_snapshot();
     stale_delivery.spec.revision += 1;
     stale_delivery.revision += 1;
     stale_delivery.updated_at_millis += 1;
     let stale_delivery = Delivery::try_from_snapshot(stale_delivery).expect("stale Delivery");
-    resolve_production_verdict(
-        &stale_delivery,
-        &writer_source.source,
-        &writer_source.terminal,
-        Vec::new(),
-    )
-    .expect_err("stale candidate/spec fails closed");
+    resolve_production_verdict(&stale_delivery, candidate.clone(), Vec::new())
+        .expect_err("stale candidate/spec fails closed");
 
     artifacts.close().expect("Artifact close");
     fs::remove_dir_all(root).expect("fixture cleanup");

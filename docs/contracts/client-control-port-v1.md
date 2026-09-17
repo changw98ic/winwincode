@@ -33,8 +33,9 @@ Device Client 不代理 runtime、artifact 或 model frame，避免再造一层�
 - Worker 拥有执行事实，经 ExecutionPort 上报。本端口不携带 `runtime.event`、
   `artifact.*`、`model.*`、`input.*`、`approval.*` 或 `job.outcome`。
 
-消息只引用公开 ID 和投影。Server 不提交绝对路径，路径映射永不上传；消息不包含
-长期 Provider Credential，也不包含 Codex 的 Turn、Plan 或 Agent 内部对象。
+消息使用公开 ID、投影和设备公钥加密的配置封套。路径映射仅保存在 Device；
+浏览器提交的注册路径和 Provider 凭据仅由 Device 解密。Server 保存并转发密文，
+不接收明文路径或长期 Provider Credential。消息不包含 Codex 的 Turn、Plan 或 Agent 内部对象。
 
 ## 传输：POST /internal/v1/client/exchange
 
@@ -110,7 +111,7 @@ occupancyFencingToken
 ## Client → Server 消息
 
 强制字段标记（与 `client-control.schema.json` 的 `x-message-class` 一致）：
-`C` 命令，必带 `expectedRevision` + `idempotencyKey`（共 19 条）；`C + L` 命令再加
+`C` 命令，必带 `expectedRevision` + `idempotencyKey`（共 22 条）；`C + L` 命令再加
 占用盖章 `occupancyLeaseId` + `occupancyFencingToken`（共 11 条）；`—` 非命令事实
 （report/ack/response/request），不带命令字段。
 
@@ -132,6 +133,9 @@ occupancyFencingToken
 | `client.candidate.retained` | Client → Server | candidateRef、repositoryBindingId、candidateCommit、localRefName、diff 摘要与 Evidence 引用、receipt revision | 冻结完成、稳定 candidate ref 创建并清理 Worktree 前发送；相同身份重发幂等 | `C + L` |
 | `client.candidate.apply_result` | Client → Server | localApplyReceiptId、candidateRef、repositoryBindingId、targetBranch、expectedHead、strategy、result、resultingCommit、conflictArtifactRef、revision | 回应 `client.candidate.apply`；本地 receipt 持久化后发送，支持重试与审计 | `C + L` |
 | `client.command_ack` | Client → Server | 被确认命令的 messageId、status（applied、rejected）、reason、生效 revision | 确认无专用 ack 的 Server → Client 命令（release、force_fence、rescan、client_lock、credential_rotate）；确认涉及占用的命令时必须回显盖章 | — |
+| `client.repository.registered` | Client → Server | requestId、outcome、repositoryBindingId；无路径 | 注册结果在 Device 保存后发送；相同请求重放同一结果 | — |
+| `client.provider.report` | Client → Server | Provider 安全配置快照与操作回执 | 上报设备公钥、模型和配置状态 | — |
+| `client.extension.report` | Client → Server | 扩展安全快照与操作回执 | 上报设备上的 Skills、MCP 与操作状态 | — |
 
 ## Server → Client 消息
 
@@ -142,6 +146,9 @@ occupancyFencingToken
 | `client.occupancy.offer` | Server → Client | occupancyLeaseId、新 occupancyFencingToken、holderUserId、claimRequestId、idleExpiresAt | 原子检查通过并创建 reserving Lease 后发送；Client 持久化占用镜像后回 `client.occupancy.ack`。offer 本身携带的新 Lease 与 token 即被 ACK 回显的盖章值 | `C + L` |
 | `client.occupancy.release` | Server → Client | occupancyLeaseId、occupancyFencingToken、mode（release、drain、cancel_and_release）、reason | 占用者释放、drain 完成或取消全部任务并释放时发送；Client 停止接受新 WorkerSession，cancel 模式下停止现有 worker | `C + L` |
 | `client.occupancy.force_fence` | Server → Client | occupancyLeaseId、更高 occupancyFencingToken、reason、要求的本地清理动作 | 管理员或原占用者安全清理路径发送；Client 以新 token 覆盖镜像并立即拒绝一切旧 token 命令 | `C + L` |
+| `client.repository.register` | Server → Client | encrypted（DeviceConfigurationEnvelope） | 管理用户在前端选择设备和路径后发送；Device 解密并检查路径、权限与 Git，回复 `client.repository.registered` | C |
+| `client.provider.apply` | Server → Client | encrypted（DeviceConfigurationEnvelope） | Device 解密并应用 Provider 配置，回复 `client.provider.report` | C |
+| `client.extension.apply` | Server → Client | encrypted（DeviceConfigurationEnvelope） | Device 解密并应用扩展配置，回复 `client.extension.report` | C |
 | `client.repository.rescan` | Server → Client | repositoryBindingId（或全部绑定）、reason | 投影过期或占用者请求刷新时发送；Client 重新 canonicalize 并回报 `client.repository.status` | C |
 | `client.worker.launch` | Server → Client | WorkerLaunchGrant 全部身份字段（workerLaunchGrantId、workerSessionId、workerId、workerInstanceId、repositoryBindingId、productSessionId、workRunId、userId、occupancyLeaseId、occupancyFencingToken、credentialDigest、expiresAt）；不含绝对路径 | Scheduler 完成 durable ExecutionReservation 后发送；Client 校验 fencing、repo、容量与本地状态后写入 launch intent 并 spawn `winwincode-worker --managed-session` | `C + L` |
 | `client.worker.stop` | Server → Client | workerSessionId、occupancyLeaseId、occupancyFencingToken、mode、reason | 占用者或管理员停止任务、drain 取消时发送；Client 校验 fencing 后停止进程，回报 `client.worker.state` 与 `client.command_ack` | `C + L` |
@@ -170,7 +177,7 @@ Device Client 对以下命令强制校验（§12.6）：
 | Worker launch | `client.worker.launch` | 盖章与镜像完全一致；grant 绑定当前 clientInstanceId；RepositoryBinding 重新 canonicalize 并满足路径与软链接规则；本地容量可用 | `client.worker.launch_ack`（accepted=false），不写 launch intent，不 spawn |
 | Worker stop | `client.worker.stop` | 盖章与镜像完全一致 | `client.command_ack`（rejected，stale fencing token），进程继续 |
 | Candidate apply | `client.candidate.apply` | 盖章与镜像一致；candidate ref 仍存在；目标 HEAD 等于 expectedHead；目标工作树满足策略；用户有 repo 权限 | `client.candidate.apply_result`（failed，stale fencing token），写入 LocalApplyReceipt 供审计 |
-| Repository mutation | 本地 repository 注册/移除/变更（经 `client.repository.upsert`、`client.repository.removed` 上报；v1 无 Server 发起的 repository 变更消息） | 占用期间的本地变更须由当前占用授权驱动，Device Client 校验本地占用镜像未被更高 token 取代；上报消息本身不携带盖章 | 镜像已被更高 token 取代时拒绝执行本地变更 |
+| Repository mutation | 本地注册/移除/变更经 `client.repository.upsert`、`client.repository.removed` 上报；前端注册由管理授权下的 `client.repository.register` 请求触发 | 占用期间的本地变更须由当前占用授权驱动，Device Client 校验本地占用镜像未被更高 token 取代；上报消息本身不携带盖章 | 镜像已被更高 token 取代时拒绝执行本地变更 |
 
 盖章一致指 occupancyLeaseId 与 occupancyFencingToken 都与本地镜像完全一致；更低或
 不匹配的 token 一律拒绝。Control Plane 对每条带盖章的 Client → Server 消息同样校验
@@ -203,3 +210,25 @@ outbox/replay 在恢复后上报，控制面只报告"状态暂不可确认"，�
 
 四类凭据不得相互复用。Client ID 公开、不保密，但永远不作为凭据；连接失败不得泄露
 Client 是否属于某个用户。所有授权、撤销与轮换进入 Audit。
+
+## 前端接入设备上的项目
+
+前提：浏览器已登录，用户有该 Device 的管理权限，Device 在线且已上报加密公钥。
+浏览器通过 `GET /api/v1/clients/{clientId}/providers` 读取 `DeviceProviderView` 中的
+`snapshot.encryptionPublicKey`，在本地将 `{path, confirmGitInit}` 加密为
+`DeviceConfigurationEnvelope`。注册使用 `winwincode.device-repository.v1` 加密上下文。
+
+| HTTP 接口 | 行为 |
+| --- | --- |
+| `POST /api/v1/clients/{clientId}/repositories` | 接收加密封套，保存命令并转发给 Device；HTTP 接受表示已排队，尚未表示接入成功 |
+| `GET /api/v1/clients/{clientId}/repositories/receipts/{requestId}` | 返回 `online` 和可空的 `receipt`；结果类型为 `DeviceRepositoryRegistrationReceipt` |
+| `GET /api/v1/clients/{clientId}/repositories` | 返回用户可见的仓库绑定；前端按回执中的绑定 ID 找到项目后再提供“开始对话” |
+
+`requestId` 在同一 Device 上标识一次注册。完全相同的加密请求可重放；复用 ID
+提交不同密文会被拒绝。Device 保存已处理的结果，重试返回同一回执。
+
+`outcome=registered` 必须带仓库绑定 ID，其他结果的绑定 ID 为 `null`。
+失败状态包括 `invalid_request`、`invalid_git`、`permission_denied`、`moved`、
+`scan_failed`、`unavailable`。本地检查详情和绝对路径不进入回执。
+已有 Git 仓库可以直接接入；新目录初始化 Git 必须由用户显式勾选 `confirmGitInit`。
+未收到回执时，前端显示等待或离线状态，并允许用户刷新项目列表确认。

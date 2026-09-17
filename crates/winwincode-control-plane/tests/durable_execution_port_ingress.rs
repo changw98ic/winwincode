@@ -448,6 +448,7 @@ fn workrun_job(seed: u64, delivery: &Delivery, scope: &RepositoryScope) -> Execu
         work_run_id: run_id,
     };
     ExecutionJob {
+        attachments: None,
         model_selection: None,
         attempt: 1,
         execution_profile: "executor".into(),
@@ -461,6 +462,7 @@ fn workrun_job(seed: u64, delivery: &Delivery, scope: &RepositoryScope) -> Execu
         payload_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
         scope: ExecutionScope::WorkRunExecutionScope(wr_scope),
         work_input: Some(winwincode_execution_port::generated::WorkRunInput {
+            device_target: None,
             delivery_spec_id: "spec-fixture".into(),
             delivery_spec_revision: Revision(2),
             candidate_ref: None,
@@ -1104,6 +1106,7 @@ fn install_product_dispatch(fixture: &mut Fixture, seed: u64) -> ProductDispatch
         .expect("Worker registration");
     let product_session_id = ProductSessionId(canonical_id("psn", seed));
     let job = ExecutionJob {
+        attachments: None,
         model_selection: None,
         attempt: 1,
         execution_profile: "codex".to_owned(),
@@ -1543,6 +1546,7 @@ fn accepted_dispatch_seals_product_session_runtime_and_replays_exactly() {
 
     let product_session_id = ProductSessionId(canonical_id("psn", seed));
     let job = ExecutionJob {
+        attachments: None,
         model_selection: None,
         attempt: 1,
         execution_profile: "codex".to_owned(),

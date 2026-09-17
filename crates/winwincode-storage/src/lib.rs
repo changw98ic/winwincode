@@ -82,6 +82,7 @@ pub use control_plane_instances::{
 };
 pub use delivery::{
     delivery_candidate_source, delivery_dispatch_authority, delivery_execution_replacement,
+    delivery_rework_candidate_source,
 };
 pub use device_execution_binding::{
     DeviceBindingReceipt, DeviceExecutionBindingIssuance, DeviceExecutionBindingLedger,

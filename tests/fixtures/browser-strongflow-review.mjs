@@ -96,8 +96,8 @@ const controlPlane = {
       case 'delivery.get':
         return response(request, {
           kind: 'delivery_detail', schemaVersion: 'winwincode/v1', deliveryId,
-          deliveryRevision: 2, readCursor, status: 'ready',
-          ownership: scope, requirements: { title: '审核真实产物', acceptanceCriteria, maxReworkAttempts: 2 },
+          deliveryRevision: 2, readCursor, status: 'ready', reworkAttemptsUsed: 0,
+          ownership: scope, requirements: { title: '审核真实产物', goal: '修复加法计算并保留现有调用方式。', scope: ['修正 sum 函数', '验证正数与负数相加'], constraints: [], outOfScope: [], acceptanceCriteria, maxReworkAttempts: 2 },
           attention: [
             { id: 'att_1', title: '处理失败命令', status: 'open' },
             { id: currentSolutionReview.attentionItemId, title: '审核当前方案',
@@ -115,7 +115,10 @@ const controlPlane = {
       case 'candidate.files.list':
         return response(request, {
           kind: 'candidate_file_page', readCursor, candidate,
-          items: [{ path: 'report.svg', oldPath: null, status: 'added', encoding: 'utf-8', binary: false, additions: 1, deletions: 0 }],
+          items: [
+            { path: 'report.svg', oldPath: null, status: 'added', encoding: 'utf-8', binary: false, additions: 1, deletions: 0 },
+            { path: 'sum.mjs', oldPath: null, status: 'modified', encoding: 'utf-8', binary: false, additions: 1, deletions: 1 },
+          ],
         })
       case 'workrun.get':
         return response(request, { runs: [{ id: workRunId, productSessionId: 'psn_00000000000000000000000042' }] })
@@ -134,6 +137,16 @@ const controlPlane = {
           }],
         }] })
       case 'candidate.diff.get':
+        if (request.parameters.path === 'sum.mjs') {
+          const text = '@@ -1 +1 @@\n-export const sum = (a, b) => a - b;\n+export const sum = (a, b) => a + b;\n@@ -4 +4 @@\n-<script>globalThis.pwned=true</script>\n+// removed unsafe example\n'
+          return response(request, {
+            kind: 'candidate_diff_chunk', candidate, path: 'sum.mjs', oldPath: null,
+            status: 'modified', binary: false, contentEncoding: 'utf-8', encoding: 'base64',
+            dataBase64: btoa(text), mediaType: 'application/vnd.winwincode.git-diff',
+            fileDiffSha256: 'sha256:' + 'f'.repeat(64), readCursor, offset: 0,
+            returnedBytes: text.length, totalBytes: text.length, nextOffset: null,
+          })
+        }
         return response(request, {
           kind: 'candidate_diff_chunk', candidate, path: 'report.svg', oldPath: null,
           status: 'added', binary: false, contentEncoding: 'utf-8', encoding: 'base64',
@@ -192,8 +205,21 @@ const waitFor = async predicate => {
 }
 globalThis.reviewReady = () => model.state.status === 'ready'
 globalThis.exerciseReview = async () => {
-  document.querySelector('.wwc-review-file-open').click()
+  const initialVisible = document.querySelector('.wwc-review').innerText
+  const initialTabs = [...document.querySelectorAll('.wwc-review [role=tab]')].map(node => ({ label: node.textContent, selected: node.getAttribute('aria-selected') }))
+  document.querySelector('.wwc-review-criterion details').open = true
+  document.querySelector('#wwc-review-tabs-changes').click()
   await waitFor(() => model.state.files[0].preview !== null)
+  document.querySelector('[data-review-path="sum.mjs"] .wwc-review-file-open').click()
+  await waitFor(() => model.state.files[1].preview !== null)
+  const diff = [...document.querySelectorAll('.wwc-diff-line')].map(row => ({
+    kind: row.dataset.diffKind, before: row.children[0].textContent, after: row.children[1].textContent,
+    text: row.querySelector('.wwc-diff-content').textContent,
+    background: getComputedStyle(row).backgroundColor,
+  }))
+  document.querySelector('#wwc-review-tabs-acceptance').click()
+  const acceptanceVisible = document.querySelector('#wwc-review-panel-acceptance').hidden === false
+  const taskHidden = document.querySelector('#wwc-review-panel-task').hidden
   document.querySelector('.wwc-review-activity-cite').click()
   document.querySelector('.wwc-review-evidence-detail').click()
   await waitFor(() => model.state.evidence[0].artifacts.length === 1)
@@ -204,11 +230,14 @@ globalThis.exerciseReview = async () => {
   await waitFor(() => model.state.history[0].review !== null)
   document.querySelector('.wwc-review-report-download').click()
   const beforeDecision = {
+    initialVisible, initialTabs, diff, acceptanceVisible, taskHidden,
+    expandedAfterRefresh: document.querySelector('.wwc-review-criterion details').open,
     fileClass: document.querySelector('.wwc-review-preview').dataset.reviewClass,
     fileDegraded: document.querySelector('.wwc-review-preview-degraded')?.textContent ?? '',
     artifactClass: document.querySelector('.wwc-review-artifact').dataset.reviewArtifactClass,
     artifactDegraded: document.querySelector('.wwc-review-artifact-degraded')?.textContent ?? '',
     citation: document.querySelector('.wwc-review-annotations-snippet-source')?.textContent ?? '',
+    evidenceResult: document.querySelector('.wwc-review-evidence-result')?.textContent ?? '',
     history: document.querySelector('.wwc-review-history-review')?.textContent ?? '',
     currentAuthorization: document.querySelector('.wwc-review-history-review')?.dataset.reviewCurrentAuthorization,
     progress: document.querySelector('.wwc-review-progress')?.textContent ?? '',

@@ -88,7 +88,7 @@ interface HomeDeliveryListOptions {
  * Refresh swaps the whole loaded window only after the rebuild completes; a
  * first load publishes growing prefixes of the same page chain.
  */
-function createHomeDeliveryListViewModel(
+export function createHomeDeliveryListViewModel(
   options: HomeDeliveryListOptions,
 ): HomeDeliveryListViewModel {
   let listener: ((state: HomeDeliveryListState) => void) | null = null
@@ -181,15 +181,15 @@ function createHomeDeliveryListViewModel(
   }
 
   function scheduleRebuild(nextStatus: 'loading' | 'refreshing'): Promise<void> {
-    generation += 1
+    const ownGeneration = ++generation
     status = nextStatus
     publish()
     const firstLoad = nextStatus === 'loading'
     const chain = rebuildChain
     const run = (async () => {
       await chain.catch(() => undefined)
-      if (superseded(generation)) return
-      await rebuild(generation, firstLoad)
+      if (superseded(ownGeneration)) return
+      await rebuild(ownGeneration, firstLoad)
     })()
     rebuildChain = run
     return run
@@ -260,6 +260,8 @@ export interface HomeDecisionCard {
   readonly deliveryId: AttentionCenterItem['deliveryId']
   readonly deliveryTitle: string | null
   readonly workRunId: AttentionCenterItem['workRunId']
+  /** Number of open Attention items represented by one Delivery card. */
+  readonly attentionCount?: number
 }
 
 /** 设计稿 04 折叠行之外的浏览器本地区块:最近打开过的交付。 */
@@ -494,6 +496,51 @@ export function homeDeliveryCards(
   })))
 }
 
+/** Keep one actionable card per Delivery while retaining every Attention item in its count. */
+export function homeDecisionCards(
+  items: readonly AttentionCenterItem[],
+): readonly HomeDecisionCard[] {
+  const cards: HomeDecisionCard[] = []
+  const attentionByDelivery = new Map<DeliveryId, number>()
+  const cardIndexByDelivery = new Map<DeliveryId, number>()
+  for (const item of orderedAttentionCenterItems(items)) {
+    const card: HomeDecisionCard = {
+      kind: item.kind,
+      id: item.id,
+      title: item.title,
+      urgency: item.urgency,
+      createdAt: item.createdAt,
+      expiresAt: item.expiresAt,
+      actionDisabled: item.urgency === 'expired' || item.urgency === 'binding-invalid',
+      productSessionId: item.productSessionId,
+      sessionTitle: item.sessionTitle,
+      deliveryId: item.deliveryId,
+      deliveryTitle: item.deliveryTitle,
+      workRunId: item.workRunId,
+    }
+    if (item.kind !== 'attention' || item.deliveryId === null) {
+      cards.push(Object.freeze(card))
+      continue
+    }
+    const existingIndex = cardIndexByDelivery.get(item.deliveryId)
+    const count = (attentionByDelivery.get(item.deliveryId) ?? 0) + 1
+    attentionByDelivery.set(item.deliveryId, count)
+    if (existingIndex === undefined) {
+      cardIndexByDelivery.set(item.deliveryId, cards.length)
+      cards.push(Object.freeze({ ...card, attentionCount: count }))
+    } else {
+      const existing = cards[existingIndex]
+      if (existing === undefined) continue
+      cards[existingIndex] = Object.freeze({
+        ...existing,
+        attentionCount: count,
+        actionDisabled: existing.actionDisabled && card.actionDisabled,
+      })
+    }
+  }
+  return Object.freeze(cards)
+}
+
 function sourceState(
   status: 'idle' | 'loading' | 'ready' | 'refreshing' | string,
   failed: readonly string[],
@@ -580,7 +627,15 @@ export function homeDashboardState(input: {
   const failed = orderedHomeFailedCards(sections.failed)
   const completed = orderedHomeCompletedCards(sections.completed)
   const visited = visitedCards(byId, input.visits ?? [])
-  const decisions = orderedAttentionCenterItems(input.attention.items)
+  const decisions = homeDecisionCards(input.attention.items)
+  const visibleDecisions = decisions.slice(0, limits.decisions)
+  const visibleBacklog = backlog.slice(0, limits.deliveries)
+  const visibleRunning = running.slice(0, limits.deliveries)
+  const visibleReady = ready.slice(0, limits.deliveries)
+  const visibleWaiting = waiting.slice(0, limits.deliveries)
+  const visibleValidating = validating.slice(0, limits.deliveries)
+  const visibleFailed = failed.slice(0, limits.deliveries)
+  const visibleCompleted = completed.slice(0, limits.deliveries)
   const sources: Readonly<Record<HomeDashboardSource, HomeDashboardSourceState>> = Object.freeze({
     delivery: deliverySourceState(input.deliveries),
     attention: attentionSourceState(input.attention),
@@ -588,37 +643,24 @@ export function homeDashboardState(input: {
   })
   return Object.freeze({
     status: dashboardStatus(sources),
-    decisions: Object.freeze(decisions.slice(0, limits.decisions).map(item => Object.freeze({
-      kind: item.kind,
-      id: item.id,
-      title: item.title,
-      urgency: item.urgency,
-      createdAt: item.createdAt,
-      expiresAt: item.expiresAt,
-      actionDisabled: item.urgency === 'expired' || item.urgency === 'binding-invalid',
-      productSessionId: item.productSessionId,
-      sessionTitle: item.sessionTitle,
-      deliveryId: item.deliveryId,
-      deliveryTitle: item.deliveryTitle,
-      workRunId: item.workRunId,
-    }))),
-    backlog: Object.freeze(backlog.slice(0, limits.deliveries)),
-    running: Object.freeze(running.slice(0, limits.deliveries)),
-    ready: Object.freeze(ready.slice(0, limits.deliveries)),
-    waiting: Object.freeze(waiting.slice(0, limits.deliveries)),
-    validating: Object.freeze(validating.slice(0, limits.deliveries)),
-    failed: Object.freeze(failed.slice(0, limits.deliveries)),
-    completed: Object.freeze(completed.slice(0, limits.deliveries)),
+    decisions: Object.freeze(visibleDecisions),
+    backlog: Object.freeze(visibleBacklog),
+    running: Object.freeze(visibleRunning),
+    ready: Object.freeze(visibleReady),
+    waiting: Object.freeze(visibleWaiting),
+    validating: Object.freeze(visibleValidating),
+    failed: Object.freeze(visibleFailed),
+    completed: Object.freeze(visibleCompleted),
     visited: Object.freeze(visited.slice(0, limits.visits)),
     counts: Object.freeze({
-      decisions: decisions.length,
-      backlog: backlog.length,
-      running: running.length,
-      ready: ready.length,
-      waiting: waiting.length,
-      validating: validating.length,
-      failed: failed.length,
-      completed: completed.length,
+      decisions: visibleDecisions.length,
+      backlog: visibleBacklog.length,
+      running: visibleRunning.length,
+      ready: visibleReady.length,
+      waiting: visibleWaiting.length,
+      validating: visibleValidating.length,
+      failed: visibleFailed.length,
+      completed: visibleCompleted.length,
       visited: visited.length,
     }),
     sources,

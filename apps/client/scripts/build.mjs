@@ -134,6 +134,20 @@ try {
     'pnpm',
     'exec',
     'esbuild',
+    'src/dsh-ui.tsx',
+    '--bundle',
+    '--splitting',
+    '--format=esm',
+    '--platform=browser',
+    '--target=es2023',
+    '--minify',
+    '--chunk-names=dsh-[hash]',
+    '--outdir=dist/module',
+  ], packageRoot)
+  run('corepack', [
+    'pnpm',
+    'exec',
+    'esbuild',
     'src/boot.ts',
     '--bundle',
     '--splitting',
@@ -156,6 +170,7 @@ try {
     '--outfile=dist/public/assets/client.css',
     '--banner:css=/* SPDX-License-Identifier: Apache-2.0 */',
   ], packageRoot)
+  cpSync(join(repositoryRoot, 'THIRD_PARTY_NOTICES.md'), join(publicOutputRoot, 'THIRD_PARTY_NOTICES.md'))
   cpSync(join(packageRoot, 'public'), publicOutputRoot, { recursive: true, force: true })
 
   const version = Object.freeze({

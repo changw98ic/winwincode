@@ -403,6 +403,9 @@
           "$ref": "#/$defs/SessionCloseCommand"
         },
         {
+          "$ref": "#/$defs/SessionUpdateCommand"
+        },
+        {
           "$ref": "#/$defs/DeliveryCreateCommand"
         },
         {
@@ -691,6 +694,9 @@
         },
         {
           "$ref": "#/$defs/SessionCloseCompletedResponse"
+        },
+        {
+          "$ref": "#/$defs/SessionUpdateCompletedResponse"
         },
         {
           "$ref": "#/$defs/DeliveryCreateCompletedResponse"
@@ -1068,6 +1074,12 @@
               "type": "null"
             }
           ]
+        },
+        "verificationCommand": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "description": "User-confirmed verification command, required for a Device repository delivery."
         }
       }
     },
@@ -1241,6 +1253,13 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 1048576
+        },
+        "attachments": {
+          "type": "array",
+          "maxItems": 4,
+          "items": {
+            "$ref": "./domain.schema.json#/$defs/ChatAttachment"
+          }
         }
       }
     },
@@ -1404,7 +1423,7 @@
         },
         "rework": {
           "$ref": "#/$defs/DeliveryReworkInput",
-          "description": "Required only for remediator dispatch; rejected for every other profile."
+          "description": "Optional explicit scope for remediator dispatch; when omitted, the authority derives the complete allowed scope from current evidence and changed hunks. Rejected for every other profile."
         }
       }
     },
@@ -2689,6 +2708,45 @@
         },
         "updatedAt": {
           "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "modelRoute": {
+          "$ref": "#/$defs/ModelRoute"
+        },
+        "deviceContext": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "clientId": {
+              "type": "string",
+              "pattern": "^[0-9]{9,12}$"
+            },
+            "deviceName": {
+              "type": "string"
+            },
+            "repositoryBindingId": {
+              "type": "string"
+            },
+            "repositoryName": {
+              "type": "string"
+            },
+            "branch": {
+              "type": "string"
+            },
+            "headCommit": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "clientId",
+            "deviceName",
+            "repositoryBindingId",
+            "repositoryName",
+            "branch",
+            "headCommit"
+          ]
+        },
+        "archived": {
+          "type": "boolean"
         }
       }
     },
@@ -4654,6 +4712,9 @@
               "type": "null"
             }
           ]
+        },
+        "reworkAttemptsUsed": {
+          "$ref": "./domain.schema.json#/$defs/Count"
         }
       },
       "description": "StrongFlow detail read model. It is a closed projection, not a mutable Delivery entity."
@@ -8557,6 +8618,67 @@
           "type": "object"
         }
       ]
+    },
+    "SessionUpdateCommand": {
+      "allOf": [
+        {
+          "$ref": "./domain.schema.json#/$defs/CommandEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "const": "session.update"
+            },
+            "payload": {
+              "$ref": "#/$defs/SessionUpdatePayload"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
+            }
+          }
+        }
+      ]
+    },
+    "SessionUpdateCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "properties": {
+            "command": {
+              "const": "session.update"
+            },
+            "result": {
+              "$ref": "#/$defs/ProductSessionProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "SessionUpdatePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "productSessionId",
+        "title",
+        "archived"
+      ],
+      "properties": {
+        "productSessionId": {
+          "$ref": "./domain.schema.json#/$defs/ProductSessionId"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "archived": {
+          "type": "boolean"
+        }
+      }
     }
   },
   "x-winwincode-openapi": {

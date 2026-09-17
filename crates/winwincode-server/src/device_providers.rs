@@ -19,12 +19,14 @@ use winwincode_storage::{
 pub(crate) enum ConfigurationKind {
     Provider,
     Extension,
+    Repository,
 }
 impl ConfigurationKind {
     const fn namespace(self) -> &'static str {
         match self {
             Self::Provider => "device-provider",
             Self::Extension => "device-extension",
+            Self::Repository => "device-repository",
         }
     }
     fn message(
@@ -34,6 +36,7 @@ impl ConfigurationKind {
         match self {
             Self::Provider => ServerToClientMessage::ProviderApply(payload),
             Self::Extension => ServerToClientMessage::ExtensionApply(payload),
+            Self::Repository => ServerToClientMessage::RepositoryRegister(payload),
         }
     }
 }
@@ -383,6 +386,39 @@ fn observe_configuration(
         } else {
             write_state(storage, &stream, &payload)?;
         }
+    }
+    Ok(())
+}
+
+pub(crate) fn observe_repository_registration(
+    storage: &mut SqliteStorage,
+    node_id: &str,
+    receipt: &winwincode_api::generated::DeviceRepositoryRegistrationReceipt,
+) -> Result<(), ProviderRelayError> {
+    if (receipt.outcome == "registered") != receipt.repository_binding_id.is_some() {
+        return Err(ProviderRelayError::Invalid);
+    }
+    if !valid_request_id(&receipt.request_id) {
+        return Err(ProviderRelayError::Invalid);
+    }
+    let namespace = ConfigurationKind::Repository.namespace();
+    if storage
+        .load_state(&format!(
+            "{namespace}-command:{node_id}:{}",
+            receipt.request_id
+        ))?
+        .is_none()
+    {
+        return Err(ProviderRelayError::Invalid);
+    }
+    let stream = format!("{namespace}-receipt:{node_id}:{}", receipt.request_id);
+    let payload = serde_json::to_vec(receipt)?;
+    if let Some(previous) = storage.load_state(&stream)? {
+        if previous.payload != payload {
+            return Err(ProviderRelayError::Conflict);
+        }
+    } else {
+        write_state(storage, &stream, &payload)?;
     }
     Ok(())
 }

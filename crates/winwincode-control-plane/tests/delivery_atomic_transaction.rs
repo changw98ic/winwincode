@@ -122,6 +122,8 @@ fn pending_execution(seed: u64, checkout_revision: &str) -> PendingDeliveryExecu
         &result.delivery.snapshot().spec,
         intent,
         DeliveryExecutionConfig {
+            device_target: None,
+            model_selection: None,
             payload_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
             candidate_ref: None,
             workspace: ExecutionWorkspace {
@@ -200,6 +202,8 @@ fn pending_rework(
         &transition.delivery.snapshot().spec,
         intent,
         DeliveryExecutionConfig {
+            device_target: None,
+            model_selection: None,
             payload_digest: Sha256Digest(format!("sha256:{}", digest_byte.to_string().repeat(64))),
             candidate_ref: Some(fixture.candidate_ref.clone()),
             workspace: ExecutionWorkspace {
@@ -1584,6 +1588,8 @@ fn prepared_dispatch_rejects_reusing_an_accepted_run_or_job() {
             &pending.delivery().snapshot().spec,
             intent,
             DeliveryExecutionConfig {
+                device_target: None,
+                model_selection: None,
                 payload_digest: pending.job().payload_digest.clone(),
                 candidate_ref: None,
                 workspace: pending.job().workspace.clone(),

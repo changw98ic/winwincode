@@ -2,6 +2,7 @@
   "extends": "./tsconfig.base.json",
   "compilerOptions": {
     "declaration": false,
+    "jsx": "react-jsx",
     "declarationMap": false,
     "lib": [
       "DOM",
@@ -14,6 +15,7 @@
   },
   "include": [
     "apps/client/src/**/*.ts",
+    "apps/client/src/**/*.tsx",
     "packages/browser-ui/src/**/*.ts",
     "packages/control-plane-client/src/**/*.ts",
     "packages/browser-core/src/**/*.ts",

@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { mountPreferences } from './preferences.js'
+import { REPOSITORY_NAME_CHANGED_EVENT } from './display-labels.js'
+
 import {
   ControlPlaneClientError,
   createControlPlaneClient,
   createControlPlaneClientCandidates,
   createControlPlaneClientDirectory,
+  createControlPlaneRepositoryRegistration,
   createControlPlaneTaskPort,
   createControlPlaneTaskFake,
   createControlPlaneWorkerSessionPort,
@@ -15,7 +19,7 @@ import {
   type ControlPlaneClientTransport,
   type ControlPlaneTaskAnchor,
 } from './community-control-plane-client.js'
-import type { WorkItemId } from './generated/contracts.js'
+import { QueryName, type WorkItemId } from './generated/contracts.js'
 import { createClientOccupancyFacade } from './client-occupancy-facade.js'
 import { mountClientErrorBoundary } from './components/client-error-boundary.js'
 import { mountConnectionBar } from './components/connection-bar.js'
@@ -34,11 +38,9 @@ import {
   type ConnectionMonitor,
   type ConnectionSnapshot,
 } from './core/connection-state.js'
-import {
-  loadRecentChats,
-  recordRecentChat,
-  type RecentChatEntry,
-} from './recent-chats.js'
+import { mountSessionBrowser } from './dsh-ui.js'
+import { CommandName } from './generated/contracts.js'
+import type { ProductSessionProjection, OpaqueCursor } from './generated/contracts.js'
 import { createQueryCache } from '@winwincode/browser-core/query-cache'
 import {
   resolveScopeContext,
@@ -175,6 +177,7 @@ export function mountWinWinCodeClient(
 ): WinWinCodeClientApplication {
   const browser = options.window ?? window
   const document = options.root.ownerDocument
+  const closePreferences = mountPreferences(browser, document)
   const now = options.now ?? (() => new Date().toISOString())
   const connection = createConnectionMonitor({ now })
   const browserIsOnline = () => {
@@ -517,6 +520,7 @@ export function mountWinWinCodeClient(
     text.textContent = surface.label
     link.append(icon, text)
     link.dataset.surface = surface.id
+    link.setAttribute('aria-label', surface.label)
     link.hidden = true
     link.addEventListener('click', event => {
       if (link.getAttribute('aria-disabled') !== 'true') return
@@ -529,54 +533,90 @@ export function mountWinWinCodeClient(
   // not inside the top navigation group.
   connectionBar.root.append(links.get('settings')!)
 
-  // Design sidebar 「最近对话」: browser-local session titles written by the
-  // Chat page; the shell only renders the titles.
-  const recentChatsLabel = element(document, 'p', 'wwc-sidebar-section-label')
-  recentChatsLabel.textContent = '最近对话'
-  const recentChatsList = element(document, 'ul', 'wwc-sidebar-recent')
   const recentChatsRoot = element(document, 'div', 'wwc-recent-chats')
-  recentChatsRoot.append(recentChatsLabel, recentChatsList)
+  navigation.id = 'wwc-navigation'
+  recentChatsRoot.id = 'wwc-recent-chats'
+  const navigationToggle = element(document, 'button', 'wwc-navigation-toggle')
+  navigationToggle.type = 'button'
+  navigationToggle.textContent = '导航'
+  navigationToggle.setAttribute('aria-label', '导航与历史')
+  navigationToggle.setAttribute('aria-controls', `${navigation.id} ${recentChatsRoot.id}`)
+  navigationToggle.setAttribute('aria-expanded', 'false')
+  navigationToggle.addEventListener('click', () => {
+    const expanded = header.classList.toggle('wwc-header-expanded')
+    navigationToggle.setAttribute('aria-expanded', String(expanded))
+  })
+  const sessionBrowser = mountSessionBrowser(recentChatsRoot)
+  let historySessions: readonly ProductSessionProjection[] = []
+  let historyScope = ''
+  let historyLoading = false
+  let historyError = ''
+  let historyGeneration = 0
   function renderRecentChats(): void {
-    const entries = loadRecentChats(browser.localStorage ?? null)
-    const activeSession = new URLSearchParams(
-      browser.location.hash.split('?')[1] ?? '',
-    ).get('session')
-    recentChatsList.replaceChildren(...entries.map(entry => {
-      const row = element(document, 'li', 'wwc-sidebar-recent-item')
-      // 最近对话是可点链接:打开对应会话(带当前 Scope 参数)。
-      const link = element(document, 'a', 'wwc-sidebar-recent-item-link')
-      link.href = surfaceHash(
-        `/chat?session=${encodeURIComponent(entry.sessionKey)}`,
-        scopeSelectionFromHash(browser.location.hash),
-      )
-      const icon = element(document, 'span', 'wwc-sidebar-recent-item-icon')
-      icon.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" width="16" height="16"><path d="M4 5h16v11H8l-4 4z"/></svg>`
-      const text = element(document, 'span', 'wwc-sidebar-recent-item-text')
-      text.textContent = entry.title
-      link.append(icon, text)
-      row.dataset.sessionKey = entry.sessionKey
-      row.append(link)
-      // 设计稿 03b:当前打开的会话在侧栏高亮。
-      const active = entry.sessionKey.length > 0 && entry.sessionKey === activeSession
-      row.classList.toggle('wwc-sidebar-recent-item-active', active)
-      if (active) {
-        row.setAttribute('aria-current', 'page')
-        link.setAttribute('aria-current', 'page')
-      } else {
-        row.removeAttribute('aria-current')
-        link.removeAttribute('aria-current')
-      }
-      return row
-    }))
-    recentChatsRoot.hidden = entries.length === 0
+    sessionBrowser.update({
+      sessions: historySessions, loading: historyLoading, error: historyError,
+      currentId: routeParameters(browser.location.hash).get('session'),
+      href: session => {
+        const params = new URLSearchParams({ session: session.id })
+        if (session.deviceContext !== undefined) {
+          params.set('client', session.deviceContext.clientId)
+          params.set('repositoryBinding', session.deviceContext.repositoryBindingId)
+        }
+        return surfaceHash(`/chat?${params}`, scopeSelectionFromHash(browser.location.hash))
+      },
+      refresh: () => { void refreshRecentChats(true) },
+      async update(session, title, archived) {
+        const context = authenticatedRouteContext()
+        if (context === null) throw new Error('请先登录')
+        await controlPlane.command({
+          schemaVersion: 'winwincode/v1', ...context,
+          requestId: contractId('req', browser.crypto) as RequestId,
+          command: CommandName.SessionUpdate, expectedRevision: session.revision,
+          payload: { productSessionId: session.id, title, archived },
+        })
+        await refreshRecentChats(true)
+      },
+    })
   }
-  renderRecentChats()
-  if (typeof window !== 'undefined') {
-    window.addEventListener('wwc:recent-chats-changed', renderRecentChats)
+  async function refreshRecentChats(force = false): Promise<void> {
+    const session = authSession.state.session
+    const resolution = currentScopeResolution
+    const scope = resolution?.status === 'selected' && resolution.scope.kind === 'repository' ? resolution.scope : null
+    if (session === null || scope === null) {
+      historyGeneration += 1; historySessions = []; historyScope = ''; historyLoading = false
+      recentChatsRoot.hidden = true
+      renderRecentChats()
+      return
+    }
+    recentChatsRoot.hidden = false
+    const identity = JSON.stringify([session.actor, scope])
+    if (identity === historyScope && (!force || historyLoading)) { renderRecentChats(); return }
+    if (identity !== historyScope) historySessions = []
+    historyScope = identity
+    const own = ++historyGeneration
+    historyLoading = true; historyError = ''; renderRecentChats()
+    try {
+      const rows: ProductSessionProjection[] = []
+      let cursor: OpaqueCursor | null = null
+      do {
+        const response = await controlPlane.query({
+          schemaVersion: 'winwincode/v1', actor: session.actor, scope,
+          requestId: contractId('req', browser.crypto) as RequestId,
+          query: QueryName.SessionList, parameters: { states: [] }, page: { cursor, limit: 200 },
+        })
+        if (response.query !== QueryName.SessionList) throw new Error('对话读取失败')
+        rows.push(...response.result.items)
+        cursor = response.page.nextCursor
+      } while (cursor !== null && own === historyGeneration)
+      if (own === historyGeneration) historySessions = rows
+    } catch { if (own === historyGeneration) historyError = '读取对话失败，请点击刷新。' }
+    finally { if (own === historyGeneration) { historyLoading = false; renderRecentChats() } }
   }
+  const historyTimer = browser.setInterval(() => { void refreshRecentChats(true) }, 30_000)
+  browser.addEventListener(REPOSITORY_NAME_CHANGED_EVENT, renderRecentChats)
 
 
-  header.append(skipLink, brand, navigation, recentChatsRoot, authRoot)
+  header.append(skipLink, brand, navigationToggle, navigation, recentChatsRoot, authRoot, connectionBar.root)
   authRoot.hidden = true
   main.append(
     scopeNotice,
@@ -590,7 +630,7 @@ export function mountWinWinCodeClient(
     errorBoundary.root,
     slot,
   )
-  shell.append(header, connectionBar.root, main)
+  shell.append(header, main)
   options.root.replaceChildren(shell)
   const authPage: AuthSessionPage = mountAuthSessionPage({
     root: authRoot,
@@ -891,14 +931,52 @@ export function mountWinWinCodeClient(
     try {
       const parameters = routeParameters(browser.location.hash)
       const productSessionId = parameters.get('session') as ProductSessionId | null
+      let selectedClientId = parameters.get('client')
+      let selectedBindingId = parameters.get('repositoryBinding')
+      if (productSessionId !== null) {
+        const session = await controlPlane.query({
+          schemaVersion: 'winwincode/v1', requestId: contractId('req', browser.crypto) as RequestId,
+          actor: context.actor, scope: context.scope, query: QueryName.SessionGet,
+          parameters: { productSessionId }, page: { cursor: null, limit: 1 },
+        }, { signal: controller.signal }) as import('./generated/contracts.js').SessionGetResultResponse
+        if (closed || generation !== renderGeneration || controller.signal.aborted) return
+        if (session.result.deviceContext !== undefined) {
+          selectedClientId = session.result.deviceContext.clientId
+          selectedBindingId = session.result.deviceContext.repositoryBindingId
+        } else if (session.result.state !== 'idle') {
+          selectedClientId = null
+          selectedBindingId = null
+        }
+      }
+      let project: import('./chat-page.js').ChatPageOptions['project']
+      if (selectedClientId !== null || selectedBindingId !== null) {
+        if (selectedClientId === null || selectedBindingId === null) {
+          routeUnavailable('项目链接缺少设备或仓库信息，请从项目页重新打开。')
+          return
+        }
+        const [devices, repositories] = await Promise.all([
+          clientDirectory.listClients({ signal: controller.signal }),
+          clientDirectory.listRepositories({ clientId: selectedClientId }, { signal: controller.signal }),
+        ])
+        if (closed || generation !== renderGeneration || controller.signal.aborted) return
+        const device = devices.find(item => item.clientId === selectedClientId)
+        const repository = repositories.find(item => item.repositoryBindingId === selectedBindingId)
+        if (device === undefined || repository === undefined) {
+          routeUnavailable('该设备或项目已不可用，请从项目页重新选择。')
+          return
+        }
+        project = { clientId: selectedClientId, deviceName: device.displayName, repository }
+      }
       const [
         { createChatViewModel },
         { mountChatPage },
         { createChatDeliveryCreator },
+        { createHomeDeliveryListViewModel },
       ] = await Promise.all([
         import('./chat-view-model.js'),
         import('./chat-page.js'),
         import('./chat-delivery-creator.js'),
+        import('./home-dashboard-view-model.js'),
       ])
       if (closed || generation !== renderGeneration || controller.signal.aborted) return
       const model = createChatViewModel({
@@ -906,6 +984,7 @@ export function mountWinWinCodeClient(
         actor: context.actor,
         scope: context.scope,
         productSessionId,
+        ...(project === undefined ? {} : { clientId: project.clientId }),
         async launchDeviceSession(input) {
           await clientOccupancy.claim({ clientId: input.clientId })
           await workerSessions.launch({ clientId: input.clientId,
@@ -918,10 +997,9 @@ export function mountWinWinCodeClient(
         nextRequestId: () => contractId('req', browser.crypto) as RequestId,
         onActiveSessionChange(nextProductSessionId) {
           if (closed || generation !== renderGeneration || controller.signal.aborted) return
-          replaceHash(scopeHash(
-            `#/chat?session=${encodeURIComponent(nextProductSessionId)}`,
-            scopeSelectionFromHash(browser.location.hash),
-          ))
+          const parameters = routeParameters(browser.location.hash)
+          parameters.set('session', nextProductSessionId)
+          replaceHash(`#/chat?${parameters.toString()}`)
         },
       })
       // Design page 03b: a confirmed draft becomes the first Delivery; the
@@ -941,7 +1019,18 @@ export function mountWinWinCodeClient(
         root: slot,
         model,
         listDeviceRepositories: clientId => clientDirectory.listRepositories({ clientId }),
+        ...(project === undefined ? {} : { project }),
+        onProjectChange(clientId, repositoryBindingId) {
+          const parameters = routeParameters(browser.location.hash)
+          parameters.set('client', clientId)
+          parameters.set('repositoryBinding', repositoryBindingId)
+          replaceHash(`#/chat?${parameters.toString()}`)
+        },
         deliveryCreator,
+        deliveries: createHomeDeliveryListViewModel({
+          client: controlPlane, actor: context.actor, scope: context.scope,
+          nextRequestId: () => contractId('req', browser.crypto) as RequestId,
+        }),
         scope: context.scope,
         settingsHref: scopeHash(
           '#/settings',
@@ -953,18 +1042,16 @@ export function mountWinWinCodeClient(
           browser.crypto,
         ) as ProductSessionId,
       })
-      // Design shell 03: opening a session writes the title into the shell
-      // sidebar source so 「最近对话」 reflects real chat activity.
-      let lastRecordedSession: string | null = productSessionId
+      let lastHistoryRevision = ''
       const unsubscribeRecentChats = model.subscribe(state => {
         const session = state.session
-        if (session === null || session.id === lastRecordedSession) return
-        lastRecordedSession = session.id
-        recordRecentChat(browser.localStorage ?? null, {
-          sessionKey: session.id,
-          title: session.title.length > 0 ? session.title : '新对话',
-          at: Date.now(),
-        })
+        if (session === null) return
+        const identity = `${session.id}:${session.revision}`
+        if (lastHistoryRevision === identity) return
+        lastHistoryRevision = identity
+        historySessions = [session, ...historySessions.filter(item => item.id !== session.id)]
+        renderRecentChats()
+        void refreshRecentChats(true)
       })
       const chatPage = activeFeature
       activeFeature = {
@@ -995,7 +1082,11 @@ export function mountWinWinCodeClient(
       activeFeature = renderProjectsPage({
         root: slot,
         clientDirectory,
-        newChatHref: '#/chat',
+        registration: createControlPlaneRepositoryRegistration({ serverUrl: controlPlane.serverUrl, transport: browserTransport }),
+        newChatHref: (clientId, repository) => scopeHash(`#/chat?${new URLSearchParams({
+          client: clientId,
+          repositoryBinding: repository.repositoryBindingId,
+        }).toString()}`, scopeSelectionFromHash(browser.location.hash)),
         deviceHref: '#/device',
         requestOptions: () => undefined,
       })
@@ -1447,16 +1538,13 @@ export function mountWinWinCodeClient(
         deliveryId,
         nextRequestId: () => contractId('req', browser.crypto) as RequestId,
       })
-      activeFeature = {
-        close() {
-          annotations.close()
-          model.close()
-        },
-      }
-      mountStrongFlowReviewDetail({
+      const page = mountStrongFlowReviewDetail({
         root: slot,
         model,
         annotations,
+        candidateActions: { candidates: clientCandidates, directory: clientDirectory,
+          claim: clientId => clientOccupancy.claim({ clientId }),
+        },
         onDownload(fileName, bytes, mediaType) {
           const url = URL.createObjectURL(new Blob([Uint8Array.from(bytes)], { type: mediaType }))
           const anchor = element(document, 'a', 'wwc-review-download-anchor')
@@ -1466,6 +1554,7 @@ export function mountWinWinCodeClient(
           URL.revokeObjectURL(url)
         },
       })
+      activeFeature = { close() { page.close(); annotations.close(); model.close() } }
       await model.start()
     } catch (error) {
       if (closed || generation !== renderGeneration || controller.signal.aborted) return
@@ -1565,8 +1654,7 @@ export function mountWinWinCodeClient(
     recordHomeVisit(browser.location.hash)
     const chatSessionActive = activeSurface.id === 'chat'
       && browser.location.hash.includes('session=')
-    // 路由切换会改变「当前会话」的有效性,最近对话的高亮随之重算。
-    renderRecentChats()
+    void refreshRecentChats()
     for (const [id, link] of links) {
       const current = id === activeSurface.id
       if (current) link.setAttribute('aria-current', 'page')
@@ -1692,7 +1780,14 @@ export function mountWinWinCodeClient(
     }
   }
 
-  const onHashChange = () => { render() }
+  const onHashChange = () => {
+    if (header.classList.contains('wwc-header-expanded')) {
+      header.classList.remove('wwc-header-expanded')
+      navigationToggle.setAttribute('aria-expanded', 'false')
+      main.focus()
+    }
+    render()
+  }
   const onOffline = () => { connection.offline() }
   // Returning to the tab revalidates the badge so it never shows stale counts.
   const onFocus = () => { void attentionMonitor?.refresh().catch(() => {}) }
@@ -1766,6 +1861,11 @@ export function mountWinWinCodeClient(
     close() {
       if (closed) return
       closed = true
+      closePreferences()
+      historyGeneration += 1
+      browser.clearInterval(historyTimer)
+      browser.removeEventListener(REPOSITORY_NAME_CHANGED_EVENT, renderRecentChats)
+      sessionBrowser.close()
       browser.removeEventListener('hashchange', onHashChange)
       browser.removeEventListener('offline', onOffline)
       browser.removeEventListener('online', onOnline)

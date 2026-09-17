@@ -606,6 +606,47 @@ impl<'journal> DeliveryStore<'journal> {
         }
     }
 
+    /// Restores the exact source and history of a committed rework dispatch.
+    ///
+    /// # Errors
+    /// Rejects a missing dispatch, a corrupt journal, or a non-reworking source.
+    pub fn rework_dispatch_source(
+        &self,
+        delivery_id: &DeliveryId,
+        request_id: &RequestId,
+    ) -> Result<(Delivery, ValidatedReworkHistoryFact), DeliveryStoreError> {
+        let stored = self.read(delivery_id)?;
+        let index = stored
+            .records
+            .iter()
+            .position(|record| {
+                record.request_id == *request_id
+                    && record.operation == DeliveryMutationOperation::WorkRunDispatchStarted
+            })
+            .filter(|index| *index > 0)
+            .ok_or_else(|| {
+                store_error(
+                    DeliveryStoreErrorCode::StoreCorrupt,
+                    "rework dispatch is missing from its journal",
+                )
+            })?;
+        let source = &stored.records[index - 1].snapshot;
+        if source.snapshot().status != DeliveryStatus::Reworking {
+            return Err(store_error(
+                DeliveryStoreErrorCode::StoreCorrupt,
+                "dispatch source is not reworking",
+            ));
+        }
+        let history = stored.records[..index - 1]
+            .iter()
+            .map(|record| record.snapshot.snapshot().clone())
+            .collect::<Vec<_>>();
+        let history = derive_validated_rework_history(source, &history).map_err(|error| {
+            store_error(DeliveryStoreErrorCode::StoreCorrupt, error.to_string())
+        })?;
+        Ok((source.clone(), history))
+    }
+
     fn journal(&self) -> &dyn DeliveryJournalPort {
         match &self.journal {
             DeliveryJournalHandle::Borrowed(journal) => *journal,

@@ -33,6 +33,7 @@ use winwincode_execution_port::generated::{
 ///
 /// # Errors
 /// Rejects stale identities, invalid role/workspace bindings or malformed request/job fields.
+#[allow(clippy::too_many_lines)]
 pub fn prepare_workrun_start(
     request_id: &RequestId,
     aggregate: &winwincode_delivery::application::workrun::WorkRunAggregate,
@@ -114,7 +115,8 @@ pub fn prepare_workrun_start(
         work_run_id: intent.work_run_id.clone(),
     };
     let job = ExecutionJob {
-        model_selection: None,
+        attachments: None,
+        model_selection: config.model_selection,
         attempt,
         execution_profile: intent.role.clone(),
         goal: intent.goal.clone(),
@@ -123,6 +125,7 @@ pub fn prepare_workrun_start(
         payload_digest: config.payload_digest,
         scope: ExecutionScope::WorkRunExecutionScope(scope),
         work_input: Some(WorkRunInput {
+            device_target: config.device_target,
             delivery_spec_id: spec.id.0.clone(),
             delivery_spec_revision: winwincode_domain::Revision(
                 i64::try_from(spec.revision).map_err(|_| {
@@ -278,6 +281,8 @@ fn workrun_role_write_mode_valid(job: &ExecutionJob) -> bool {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeliveryExecutionConfig {
+    pub device_target: Option<winwincode_execution_port::generated::ExecutionDeviceTarget>,
+    pub model_selection: Option<winwincode_execution_port::generated::ExecutionModelSelection>,
     pub payload_digest: Sha256Digest,
     /// Exact frozen source candidate for verification and authorized rework Jobs.
     pub candidate_ref: Option<String>,
@@ -814,6 +819,7 @@ mod tests {
             work_contract_revision: winwincode_domain::Revision(2),
         };
         ExecutionJob {
+            attachments: None,
             model_selection: None,
             attempt: 1,
             execution_profile: role.into(),
@@ -839,6 +845,7 @@ mod tests {
                 work_run_id: WorkRunId("wrn_00000000000000000000000001".into()),
             }),
             work_input: Some(WorkRunInput {
+                device_target: None,
                 delivery_spec_id: "spec-fixture".into(),
                 delivery_spec_revision: winwincode_domain::Revision(2),
                 candidate_ref: None,
