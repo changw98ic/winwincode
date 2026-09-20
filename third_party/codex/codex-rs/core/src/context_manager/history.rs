@@ -2,6 +2,7 @@ use crate::context::ContextualUserFragment;
 use crate::context::ModelSwitchInstructions;
 use crate::context::world_state::WorldState;
 use crate::context::world_state::WorldStateSnapshot;
+use crate::context_manager::deterministic_gc;
 use crate::context_manager::normalize;
 use crate::event_mapping::has_non_contextual_dev_message_content;
 use crate::event_mapping::is_contextual_dev_message_content;
@@ -209,6 +210,8 @@ impl ContextManager {
         mut self,
         input_modalities: &[InputModality],
     ) -> Vec<ResponseItemEnvelope> {
+        // Exact lifecycle rules run before any semantic/Jev GC and before prompt normalization.
+        deterministic_gc::compact(Arc::make_mut(&mut self.items));
         self.normalize_history(input_modalities);
         Arc::unwrap_or_clone(self.items)
     }

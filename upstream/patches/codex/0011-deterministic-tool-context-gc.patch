@@ -1,0 +1,573 @@
+diff --git a/codex-rs/core/src/context_manager/history.rs b/codex-rs/core/src/context_manager/history.rs
+index 96ceff8d..7838e4ed 100644
+--- a/codex-rs/core/src/context_manager/history.rs
++++ b/codex-rs/core/src/context_manager/history.rs
+@@ -2,6 +2,7 @@ use crate::context::ContextualUserFragment;
+ use crate::context::ModelSwitchInstructions;
+ use crate::context::world_state::WorldState;
+ use crate::context::world_state::WorldStateSnapshot;
++use crate::context_manager::deterministic_gc;
+ use crate::context_manager::normalize;
+ use crate::event_mapping::has_non_contextual_dev_message_content;
+ use crate::event_mapping::is_contextual_dev_message_content;
+@@ -209,6 +210,8 @@ impl ContextManager {
+         mut self,
+         input_modalities: &[InputModality],
+     ) -> Vec<ResponseItemEnvelope> {
++        // Exact lifecycle rules run before any semantic/Jev GC and before prompt normalization.
++        deterministic_gc::compact(Arc::make_mut(&mut self.items));
+         self.normalize_history(input_modalities);
+         Arc::unwrap_or_clone(self.items)
+     }
+diff --git a/codex-rs/core/src/context_manager/mod.rs b/codex-rs/core/src/context_manager/mod.rs
+index f2bdd89c..d73d7922 100644
+--- a/codex-rs/core/src/context_manager/mod.rs
++++ b/codex-rs/core/src/context_manager/mod.rs
+@@ -1,3 +1,4 @@
++mod deterministic_gc;
+ mod history;
+ mod normalize;
+ pub(crate) mod updates;
+diff --git a/codex-rs/core/src/context_manager/deterministic_gc.rs b/codex-rs/core/src/context_manager/deterministic_gc.rs
+new file mode 100644
+index 00000000..f8202d24
+--- /dev/null
++++ b/codex-rs/core/src/context_manager/deterministic_gc.rs
+@@ -0,0 +1,537 @@
++use codex_history::ResponseItemEnvelope;
++use codex_protocol::models::LocalShellAction;
++use codex_protocol::models::ResponseItem;
++use serde_json::Value;
++use std::collections::HashMap;
++use std::collections::HashSet;
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub(crate) enum ToolResultKind {
++    Shell,
++    FileRead,
++    FileWrite,
++    Grep,
++    Search,
++    Test,
++    Build,
++    Lint,
++    Git,
++    Browser,
++    Mcp,
++    Agent,
++}
++
++#[derive(Clone, Debug, Eq, Hash, PartialEq)]
++enum LifecycleKey {
++    Latest(String),
++    Test(String, Option<bool>),
++}
++
++struct ToolRecord {
++    call_index: usize,
++    output_index: usize,
++    evidence_ids: Vec<String>,
++    lifecycle_key: Option<LifecycleKey>,
++}
++
++/// Removes tool results whose replacement is certain while leaving the durable rollout intact.
++///
++/// This is the first prompt-GC stage. Semantic/Jev decisions must run on its output, never before
++/// it, so identical histories always present Jev with identical candidates.
++pub(crate) fn compact(items: &mut Vec<ResponseItemEnvelope>) {
++    let outputs = output_positions(items);
++    let records = items
++        .iter()
++        .enumerate()
++        .filter_map(|(call_index, envelope)| record(call_index, &envelope.item, items, &outputs))
++        .collect::<Vec<_>>();
++    let mut seen = HashSet::new();
++    let mut drop_positions = HashSet::new();
++
++    for record in records.into_iter().rev() {
++        let Some(key) = record.lifecycle_key.as_ref() else {
++            continue;
++        };
++        if !seen.insert(key.clone()) && !referenced_later(items, &record) {
++            drop_positions.insert(record.call_index);
++            drop_positions.insert(record.output_index);
++        }
++    }
++
++    if !drop_positions.is_empty() {
++        let mut position = 0;
++        items.retain(|_| {
++            let retain = !drop_positions.contains(&position);
++            position += 1;
++            retain
++        });
++    }
++}
++
++fn record(
++    call_index: usize,
++    item: &ResponseItem,
++    items: &[ResponseItemEnvelope],
++    outputs: &HashMap<&str, (usize, Option<bool>)>,
++) -> Option<ToolRecord> {
++    let call = tool_call(item)?;
++    let &(output_index, success) = outputs.get(call.call_id.as_str())?;
++    if output_index <= call_index {
++        return None;
++    }
++    let (kind, lifecycle_key) = classify(&call.name, &call.arguments);
++    let lifecycle_key = match kind {
++        ToolResultKind::FileRead | ToolResultKind::Grep | ToolResultKind::Search => {
++            lifecycle_key.map(LifecycleKey::Latest)
++        }
++        ToolResultKind::Test => lifecycle_key.map(|key| LifecycleKey::Test(key, success)),
++        ToolResultKind::Shell | ToolResultKind::Git => lifecycle_key.map(LifecycleKey::Latest),
++        ToolResultKind::FileWrite
++        | ToolResultKind::Build
++        | ToolResultKind::Lint
++        | ToolResultKind::Browser
++        | ToolResultKind::Mcp
++        | ToolResultKind::Agent => None,
++    };
++    let mut evidence_ids = vec![call.call_id];
++    if let Some(id) = item.id() {
++        evidence_ids.push(id.to_string());
++    }
++    if let Some(id) = items[output_index].item.id() {
++        evidence_ids.push(id.to_string());
++    }
++    Some(ToolRecord {
++        call_index,
++        output_index,
++        evidence_ids,
++        lifecycle_key,
++    })
++}
++
++struct ToolCall {
++    call_id: String,
++    name: String,
++    arguments: Value,
++}
++
++fn tool_call(item: &ResponseItem) -> Option<ToolCall> {
++    match item {
++        ResponseItem::FunctionCall {
++            call_id,
++            name,
++            arguments,
++            ..
++        } => Some(ToolCall {
++            call_id: call_id.clone(),
++            name: name.clone(),
++            arguments: serde_json::from_str(arguments)
++                .unwrap_or_else(|_| Value::String(arguments.clone())),
++        }),
++        ResponseItem::CustomToolCall {
++            call_id,
++            name,
++            input,
++            ..
++        } => Some(ToolCall {
++            call_id: call_id.clone(),
++            name: name.clone(),
++            arguments: serde_json::from_str(input).unwrap_or_else(|_| Value::String(input.clone())),
++        }),
++        ResponseItem::ToolSearchCall {
++            call_id: Some(call_id),
++            arguments,
++            ..
++        } => Some(ToolCall {
++            call_id: call_id.clone(),
++            name: "tool_search".to_string(),
++            arguments: arguments.clone(),
++        }),
++        ResponseItem::LocalShellCall {
++            call_id: Some(call_id),
++            action: LocalShellAction::Exec(action),
++            ..
++        } => Some(ToolCall {
++            call_id: call_id.clone(),
++            name: "exec_command".to_string(),
++            arguments: serde_json::json!({
++                "cmd": action.command.join(" "),
++                "workdir": action.working_directory,
++            }),
++        }),
++        _ => None,
++    }
++}
++
++fn output_positions(items: &[ResponseItemEnvelope]) -> HashMap<&str, (usize, Option<bool>)> {
++    let mut outputs = HashMap::new();
++    for (index, envelope) in items.iter().enumerate() {
++        match &envelope.item {
++            ResponseItem::FunctionCallOutput {
++                call_id, output, ..
++            }
++            | ResponseItem::CustomToolCallOutput {
++                call_id, output, ..
++            } => {
++                outputs.insert(call_id.as_str(), (index, output.success));
++            }
++            ResponseItem::ToolSearchOutput {
++                call_id: Some(call_id),
++                status,
++                ..
++            } => {
++                outputs.insert(
++                    call_id.as_str(),
++                    (index, Some(status.eq_ignore_ascii_case("completed"))),
++                );
++            }
++            _ => {}
++        }
++    }
++    outputs
++}
++
++fn classify(name: &str, arguments: &Value) -> (ToolResultKind, Option<String>) {
++    let lower_name = name.to_ascii_lowercase();
++    if matches!(
++        lower_name.as_str(),
++        "exec_command" | "shell_command" | "shell"
++    ) {
++        return classify_shell(arguments);
++    }
++    let kind = if lower_name.contains("browser") || lower_name.contains("chrome") {
++        ToolResultKind::Browser
++    } else if lower_name.contains("mcp") {
++        ToolResultKind::Mcp
++    } else if lower_name.contains("agent") || lower_name == "send_message" {
++        ToolResultKind::Agent
++    } else if lower_name.contains("write") || lower_name.contains("patch") {
++        ToolResultKind::FileWrite
++    } else if lower_name.contains("grep") {
++        ToolResultKind::Grep
++    } else if lower_name.contains("search") || lower_name == "find" {
++        ToolResultKind::Search
++    } else if lower_name.contains("read") || lower_name == "cat" {
++        ToolResultKind::FileRead
++    } else if lower_name.contains("test") {
++        ToolResultKind::Test
++    } else if lower_name.contains("build") {
++        ToolResultKind::Build
++    } else if lower_name.contains("lint") || lower_name.contains("format") {
++        ToolResultKind::Lint
++    } else if lower_name.starts_with("git") {
++        ToolResultKind::Git
++    } else {
++        ToolResultKind::Shell
++    };
++
++    let key = match kind {
++        ToolResultKind::FileRead => file_identity(arguments),
++        ToolResultKind::Grep | ToolResultKind::Search => search_identity(arguments),
++        ToolResultKind::Test => shell_identity(arguments).or_else(|| Some(arguments.to_string())),
++        ToolResultKind::Shell | ToolResultKind::Git => classify_shell(arguments).1,
++        ToolResultKind::FileWrite
++        | ToolResultKind::Build
++        | ToolResultKind::Lint
++        | ToolResultKind::Browser
++        | ToolResultKind::Mcp
++        | ToolResultKind::Agent => None,
++    };
++    (kind, key)
++}
++
++fn classify_shell(arguments: &Value) -> (ToolResultKind, Option<String>) {
++    let Some(identity) = shell_identity(arguments) else {
++        return (ToolResultKind::Shell, None);
++    };
++    let command = arguments
++        .get("cmd")
++        .and_then(Value::as_str)
++        .or_else(|| arguments.as_str())
++        .unwrap_or_default();
++    let normalized = command.split_whitespace().collect::<Vec<_>>().join(" ");
++    let words = normalized.split_whitespace().collect::<Vec<_>>();
++    let starts = |prefix: &[&str]| words.starts_with(prefix);
++
++    if is_test_command(&words) {
++        (ToolResultKind::Test, Some(identity))
++    } else if starts(&["cargo", "build"])
++        || starts(&["pnpm", "build"])
++        || starts(&["npm", "run", "build"])
++    {
++        (ToolResultKind::Build, None)
++    } else if words
++        .iter()
++        .any(|word| matches!(*word, "lint" | "clippy" | "fmt" | "format"))
++    {
++        (ToolResultKind::Lint, None)
++    } else if starts(&["git", "status"]) {
++        (ToolResultKind::Git, Some(identity))
++    } else if words.first() == Some(&"cat") {
++        // ponytail: exact single-command reads only; add a shell parser if partial-read coverage
++        // becomes valuable enough to justify parsing quoting, pipes, and command chaining.
++        (ToolResultKind::FileRead, Some(identity))
++    } else if words
++        .first()
++        .is_some_and(|word| matches!(*word, "grep" | "rg"))
++    {
++        (ToolResultKind::Grep, Some(identity))
++    } else if normalized == "pwd"
++        || words.first() == Some(&"ls")
++        || starts(&["npm", "list"])
++        || starts(&["pnpm", "list"])
++        || starts(&["yarn", "list"])
++        || starts(&["cargo", "tree"])
++    {
++        (ToolResultKind::Shell, Some(identity))
++    } else {
++        (ToolResultKind::Shell, None)
++    }
++}
++
++fn is_test_command(words: &[&str]) -> bool {
++    words.starts_with(&["cargo", "test"])
++        || words.starts_with(&["pnpm", "test"])
++        || words.starts_with(&["npm", "test"])
++        || words.starts_with(&["go", "test"])
++        || words
++            .first()
++            .is_some_and(|word| matches!(*word, "pytest" | "jest" | "vitest" | "ctest"))
++        || words.windows(2).any(|words| words == ["node", "--test"])
++}
++
++fn shell_identity(arguments: &Value) -> Option<String> {
++    let command = arguments
++        .get("cmd")
++        .and_then(Value::as_str)
++        .or_else(|| arguments.as_str())?;
++    let command = command.split_whitespace().collect::<Vec<_>>().join(" ");
++    let workdir = arguments
++        .get("workdir")
++        .and_then(Value::as_str)
++        .unwrap_or_default();
++    Some(format!("shell:{workdir}:{command}"))
++}
++
++fn file_identity(arguments: &Value) -> Option<String> {
++    let path = ["path", "file_path"]
++        .iter()
++        .find_map(|name| arguments.get(*name))?;
++    let workdir = arguments.get("workdir");
++    Some(format!(
++        "file:{}",
++        serde_json::to_string(&(workdir, path)).ok()?
++    ))
++}
++
++fn search_identity(arguments: &Value) -> Option<String> {
++    let needle = ["pattern", "query", "q"]
++        .iter()
++        .find_map(|name| arguments.get(*name))?;
++    let scope = ["path", "root", "ref_id"]
++        .iter()
++        .find_map(|name| arguments.get(*name));
++    Some(format!(
++        "search:{}",
++        serde_json::to_string(&(needle, scope)).ok()?
++    ))
++}
++
++fn referenced_later(items: &[ResponseItemEnvelope], record: &ToolRecord) -> bool {
++    items[record.output_index + 1..].iter().any(|envelope| {
++        if tool_call(&envelope.item).is_some() || is_tool_output(&envelope.item) {
++            return false;
++        }
++        let serialized = serde_json::to_string(&envelope.item).unwrap_or_default();
++        record.evidence_ids.iter().any(|id| serialized.contains(id))
++    })
++}
++
++fn is_tool_output(item: &ResponseItem) -> bool {
++    matches!(
++        item,
++        ResponseItem::FunctionCallOutput { .. }
++            | ResponseItem::CustomToolCallOutput { .. }
++            | ResponseItem::ToolSearchOutput { .. }
++    )
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use codex_protocol::models::ContentItem;
++    use codex_protocol::models::FunctionCallOutputPayload;
++
++    fn call(id: &str, name: &str, arguments: Value, success: bool) -> [ResponseItemEnvelope; 2] {
++        [
++            ResponseItemEnvelope::new(ResponseItem::FunctionCall {
++                id: None,
++                name: name.to_string(),
++                namespace: None,
++                arguments: arguments.to_string(),
++                encrypted_function_args: None,
++                call_id: id.to_string(),
++                internal_chat_message_metadata_passthrough: None,
++            }),
++            ResponseItemEnvelope::new(ResponseItem::FunctionCallOutput {
++                id: None,
++                call_id: id.to_string(),
++                output: FunctionCallOutputPayload {
++                    body: codex_protocol::models::FunctionCallOutputBody::Text(id.to_string()),
++                    success: Some(success),
++                },
++                internal_chat_message_metadata_passthrough: None,
++            }),
++        ]
++    }
++
++    #[test]
++    fn deterministic_gc_keeps_latest_lifecycles_and_referenced_evidence_in_order() {
++        for (name, arguments, expected) in [
++            (
++                "exec_command",
++                serde_json::json!({"cmd":"pwd"}),
++                ToolResultKind::Shell,
++            ),
++            (
++                "read_file",
++                serde_json::json!({"path":"a"}),
++                ToolResultKind::FileRead,
++            ),
++            (
++                "apply_patch",
++                serde_json::json!({}),
++                ToolResultKind::FileWrite,
++            ),
++            (
++                "grep",
++                serde_json::json!({"pattern":"a"}),
++                ToolResultKind::Grep,
++            ),
++            (
++                "search",
++                serde_json::json!({"query":"a"}),
++                ToolResultKind::Search,
++            ),
++            (
++                "exec_command",
++                serde_json::json!({"cmd":"cargo test"}),
++                ToolResultKind::Test,
++            ),
++            (
++                "exec_command",
++                serde_json::json!({"cmd":"cargo build"}),
++                ToolResultKind::Build,
++            ),
++            (
++                "exec_command",
++                serde_json::json!({"cmd":"cargo clippy"}),
++                ToolResultKind::Lint,
++            ),
++            (
++                "exec_command",
++                serde_json::json!({"cmd":"git status"}),
++                ToolResultKind::Git,
++            ),
++            (
++                "browser_click",
++                serde_json::json!({}),
++                ToolResultKind::Browser,
++            ),
++            (
++                "read_mcp_resource",
++                serde_json::json!({}),
++                ToolResultKind::Mcp,
++            ),
++            ("spawn_agent", serde_json::json!({}), ToolResultKind::Agent),
++        ] {
++            assert_eq!(classify(name, &arguments).0, expected, "{name}");
++        }
++
++        let mut items = Vec::new();
++        items.extend(call(
++            "pwd-referenced",
++            "exec_command",
++            serde_json::json!({"cmd":"pwd"}),
++            true,
++        ));
++        items.extend(call(
++            "pwd-latest",
++            "exec_command",
++            serde_json::json!({"cmd":"pwd"}),
++            true,
++        ));
++        items.push(ResponseItemEnvelope::new(ResponseItem::Message {
++            id: None,
++            role: "assistant".to_string(),
++            content: vec![ContentItem::OutputText {
++                text: "decision uses evidence pwd-referenced".to_string(),
++            }],
++            phase: None,
++            internal_chat_message_metadata_passthrough: None,
++        }));
++        items.extend(call(
++            "read-v1",
++            "read_file",
++            serde_json::json!({"path":"src/lib.rs"}),
++            true,
++        ));
++        items.extend(call(
++            "read-v2",
++            "read_file",
++            serde_json::json!({"path":"src/lib.rs"}),
++            true,
++        ));
++        items.extend(call(
++            "test-fail-old",
++            "exec_command",
++            serde_json::json!({"cmd":"cargo test -p sample"}),
++            false,
++        ));
++        items.extend(call(
++            "test-pass",
++            "exec_command",
++            serde_json::json!({"cmd":"cargo test -p sample"}),
++            true,
++        ));
++        items.extend(call(
++            "test-fail-latest",
++            "exec_command",
++            serde_json::json!({"cmd":"cargo test -p sample"}),
++            false,
++        ));
++        items.extend(call(
++            "grep-old",
++            "grep",
++            serde_json::json!({"pattern":"CHECK_FN","path":"src"}),
++            true,
++        ));
++        items.extend(call(
++            "search-new",
++            "search",
++            serde_json::json!({"query":"CHECK_FN","path":"src"}),
++            true,
++        ));
++
++        compact(&mut items);
++
++        let retained = items
++            .iter()
++            .filter_map(|item| match &item.item {
++                ResponseItem::FunctionCall { call_id, .. } => Some(call_id.as_str()),
++                _ => None,
++            })
++            .collect::<Vec<_>>();
++        assert_eq!(
++            retained,
++            [
++                "pwd-referenced",
++                "pwd-latest",
++                "read-v2",
++                "test-pass",
++                "test-fail-latest",
++                "search-new",
++            ]
++        );
++        assert_eq!(items.len(), retained.len() * 2 + 1);
++    }
++}

@@ -354,6 +354,17 @@
         "codex-rs/protocol/src/protocol.rs",
         "codex-rs/protocol/src/turn_input.rs"
       ]
+    },
+    {
+      "id": "codex-deterministic-tool-context-gc",
+      "file": "upstream/patches/codex/0011-deterministic-tool-context-gc.patch",
+      "planned": false,
+      "patchSha256": "29872c789e48ebfdc9213670e3a2f2d9ea36bd4039790e836364e1e56076aa7c",
+      "targets": [
+        "codex-rs/core/src/context_manager/deterministic_gc.rs",
+        "codex-rs/core/src/context_manager/history.rs",
+        "codex-rs/core/src/context_manager/mod.rs"
+      ]
     }
   ],
   "licenseObligations": {
