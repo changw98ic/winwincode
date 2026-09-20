@@ -5,7 +5,11 @@ import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import test from 'node:test'
 
-import { BenchmarkError, evaluateRealTaskBenchmark } from '../scripts/evaluate-real-task-benchmark.mjs'
+import {
+  BenchmarkError,
+  evaluateRealTaskBenchmark,
+  evaluateSessionReplayBenchmark,
+} from '../scripts/evaluate-real-task-benchmark.mjs'
 
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
 const canonicalId = (prefix, index) => `${prefix}_${index.toString(10).padStart(26, '0')}`
@@ -76,4 +80,81 @@ test('synthetic tasks, missing coverage, and evidence drift fail closed', async 
   await assert.rejects(evaluateRealTaskBenchmark(dataset, root), error => (
     error instanceof BenchmarkError && error.code === 'EVIDENCE_MISMATCH'
   ))
+})
+
+test('session replay report is reproducible and never passes unavailable modes', async t => {
+  const root = await mkdtemp(resolve(tmpdir(), 'wwc-session-replay-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const evidence = Buffer.from('production-session-replay-evidence\n')
+  await writeFile(resolve(root, 'replay.json'), evidence)
+  const modes = ['baseline', 'jev', 'jev+memory', 'jev+rotation']
+  const runs = modes.map((mode, index) => ({
+    mode,
+    status: 'available',
+    provenance: 'production',
+    sourceCommit: 'a'.repeat(40),
+    configurationSha256: 'b'.repeat(64),
+    workItemId: canonicalId('wit', 100),
+    workRunId: canonicalId('wrn', 100 + index),
+    measurements: {
+      tokens: {
+        rawInput: mode === 'baseline' ? 100 : 80,
+        cachedInput: 0,
+        uncachedInput: mode === 'baseline' ? 100 : 80,
+        output: 20,
+        reasoning: 5,
+        jevInput: mode === 'baseline' ? 0 : 10,
+      },
+      context: { active: 80, removed: 20, archived: 0, bootstrap: 10 },
+      agent: { turns: 2, toolCalls: 10, fileReads: 2, greps: 1, tests: 1, repeatToolCalls: mode === 'baseline' ? 10 : 8 },
+      perf: { ttftMs: 100, latencyMs: 1_000, jevLatencyMs: mode === 'baseline' ? null : 10, rotations: 0 },
+      quality: {
+        success: true,
+        verificationPassed: true,
+        regression: false,
+        contextFailure: false,
+        forgottenConstraint: false,
+        criticalRecall: mode === 'baseline' ? null : { recalled: 99, total: 100 },
+      },
+      cost: [{
+        provider: 'fixture-provider',
+        inputUsd: mode === 'baseline' ? 1 : 0.8,
+        cacheUsd: 0,
+        outputUsd: 0,
+        jevUsd: mode === 'baseline' ? 0 : 0.02,
+        retryUsd: 0,
+      }],
+    },
+    evidence: [{ path: 'replay.json', sha256: sha256(evidence) }],
+  }))
+  const dataset = {
+    schemaVersion: 1,
+    kind: 'winwincode.session-replay-benchmark.v1',
+    tasks: [{ id: 'production-task-1', runs }],
+  }
+
+  const report = await evaluateSessionReplayBenchmark(dataset, root)
+  assert.equal(report.modes.baseline.metrics.tokens.uncachedInput.total, 100)
+  assert.equal(report.modes.jev.metrics.cost['fixture-provider'].jevUsd.total, 0.02)
+  assert.equal(report.gate.status, 'pass')
+  assert.deepEqual(Object.fromEntries(Object.entries(report.gate.checks).map(([name, check]) => [name, check.status])), {
+    selectedModesAvailable: 'pass',
+    billedInputReduction: 'pass',
+    repeatToolReduction: 'pass',
+    jevCostShareOfSavings: 'pass',
+    taskSuccessNotBelowBaseline: 'pass',
+    verificationNotBelowBaseline: 'pass',
+    memoryRegression: 'pass',
+    criticalRecall: 'pass',
+  })
+
+  dataset.tasks[0].runs[1] = {
+    mode: 'jev',
+    status: 'unavailable',
+    unavailable: { code: 'DEPENDENCY_UNAVAILABLE', detail: 'BD-01 is not ready' },
+  }
+  const unavailableReport = await evaluateSessionReplayBenchmark(dataset, root)
+  assert.equal(unavailableReport.modes.jev.unavailableRuns, 1)
+  assert.equal(unavailableReport.gate.status, 'unknown')
+  assert.equal(unavailableReport.gate.checks.billedInputReduction.status, 'unknown')
 })
