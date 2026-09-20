@@ -45,8 +45,10 @@ pub use spec::{
     delivery_id_for_github_issue_source,
 };
 pub use verdict::{
-    ComputedDeliveryVerdict, CriterionResult, CriterionVerdict, DeliveryVerdict,
-    DeliveryVerdictStatus, compute_delivery_verdict,
+    AnalyzerClaimFixture, CanonicalDecision, ComputedDeliveryVerdict, CriterionResult,
+    CriterionVerdict, DecisionAuthority, DeliveryVerdict, DeliveryVerdictStatus,
+    FusionAnalysisFixture, adjudicate_canonical_decision,
+    adjudicate_canonical_decision_from_analysis, compute_delivery_verdict,
 };
 pub use winwincode_domain::{AttentionItemId, DeliveryId, EvidenceId, WorkItemId, WorkRunId};
 

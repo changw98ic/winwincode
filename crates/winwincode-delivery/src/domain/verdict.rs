@@ -17,7 +17,7 @@ use super::{
     AcceptanceCriterion, AcceptanceCriterionId, AttentionItemStatus, AttentionItemType,
     CriterionResultId, Delivery, DeliverySpecId, DeliveryStatus, DeliveryValidationError,
     DeliveryValidationErrorCode, DeliveryVerdictId, EvidenceRef, EvidenceRefType,
-    FrozenDeliveryCandidate, MAX_REFERENCE_LENGTH, MAX_TEXT_LENGTH,
+    FrozenDeliveryCandidate, MAX_REFERENCE_LENGTH, MAX_SAFE_INTEGER, MAX_TEXT_LENGTH,
     assert_frozen_candidate_current, bounded_text, collection_length, duplicate_ids,
     portable_identifier, safe_non_negative, schema_version, unique_texts, validation_error,
 };
@@ -90,6 +90,297 @@ impl ComputedDeliveryVerdict {
     pub(crate) fn into_parts(self) -> (Vec<EvidenceRef>, DeliveryVerdict) {
         (self.evidence, self.verdict)
     }
+}
+
+/// Highest-authority input that determined a [`CanonicalDecision`].
+///
+/// Priority is strict and never inverted:
+/// Verified Fact > Tool Observation > Model Consensus > Single Model Claim.
+/// Fusion and analyzer output have no authority to override Verifier real
+/// test results.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecisionAuthority {
+    VerifiedFact,
+    ToolObservation,
+    ModelConsensus,
+    SingleModelClaim,
+    NoDecision,
+}
+
+/// Read-only adjudication over existing Delivery facts and Evidence.
+///
+/// This projection has no identity or deserializer and is never a second
+/// canonical store. Its references point back to the current Delivery,
+/// candidate, verdict, and Evidence that produced it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalDecision {
+    delivery_id: DeliveryId,
+    candidate_ref: String,
+    outcome: CriterionVerdict,
+    authority: DecisionAuthority,
+    canonical_verdict_id: Option<DeliveryVerdictId>,
+    evidence_refs: Vec<EvidenceId>,
+}
+
+impl CanonicalDecision {
+    #[must_use]
+    pub fn delivery_id(&self) -> &DeliveryId {
+        &self.delivery_id
+    }
+
+    #[must_use]
+    pub fn candidate_ref(&self) -> &str {
+        &self.candidate_ref
+    }
+
+    #[must_use]
+    pub const fn outcome(&self) -> CriterionVerdict {
+        self.outcome
+    }
+
+    #[must_use]
+    pub const fn authority(&self) -> DecisionAuthority {
+        self.authority
+    }
+
+    #[must_use]
+    pub fn canonical_verdict_id(&self) -> Option<&DeliveryVerdictId> {
+        self.canonical_verdict_id.as_ref()
+    }
+
+    #[must_use]
+    pub fn evidence_refs(&self) -> &[EvidenceId] {
+        &self.evidence_refs
+    }
+}
+
+/// One host-mapped model claim shaped from analyzer output.
+///
+/// Control-plane owns `FusionAnalysis` (FUSION-03). Delivery accepts this
+/// fixture so adjudication never imports the analyzer crate and never creates
+/// a dependency cycle. Analyzer evidence quality never becomes Delivery
+/// [`DecisionAuthority::VerifiedFact`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnalyzerClaimFixture {
+    pub candidate_id: String,
+    pub outcome: CriterionVerdict,
+}
+
+/// Analyzer-shaped fixture consumed by [`adjudicate_canonical_decision_from_analysis`].
+///
+/// Hosts map real `FusionAnalysis` findings into this shape: unanimous
+/// consensus outcomes, evidence-ranked conflict positions, and unsupported
+/// model claims all become adjudication model claims. Candidate counts never
+/// raise authority above tool observation or verified facts.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FusionAnalysisFixture {
+    pub consensus_outcomes: Vec<CriterionVerdict>,
+    pub conflict_outcomes: Vec<CriterionVerdict>,
+    pub unsupported_model_claims: Vec<CriterionVerdict>,
+}
+
+impl FusionAnalysisFixture {
+    #[must_use]
+    pub fn from_claims(claims: &[AnalyzerClaimFixture]) -> Self {
+        let mut fixture = Self::default();
+        // Hosts may tag consensus later; default fixture keeps every claim in
+        // the model-claim tier so verified facts still outrank them.
+        for claim in claims {
+            fixture.unsupported_model_claims.push(claim.outcome);
+        }
+        fixture
+    }
+
+    /// Maps this fixture into adjudicator model claims.
+    #[must_use]
+    pub fn model_claims(&self) -> Vec<CriterionVerdict> {
+        let mut claims = self.consensus_outcomes.clone();
+        claims.extend(self.conflict_outcomes.iter().copied());
+        claims.extend(self.unsupported_model_claims.iter().copied());
+        claims
+    }
+}
+
+/// Adjudicates without granting model output any canonical-state write power.
+///
+/// Binds Repo State ([`FrozenDeliveryCandidate`]), Canonical State
+/// ([`Delivery`]), Tests and Tool Evidence ([`ResolvedDeliveryEvidence`]),
+/// and Verifier Evidence ([`ComputedDeliveryVerdict`] or a persisted
+/// [`DeliveryVerdict`]).
+///
+/// Priority is strict: a persisted or freshly computed verifier verdict,
+/// sealed test Evidence, sealed tool Evidence, unanimous model claims, then a
+/// single model claim. An inconclusive verifier verdict remains authoritative;
+/// lower tiers cannot turn a verification dispute into a pass.
+///
+/// This function never invents a verifier pass. When no verifier or sealed
+/// test fact exists, authority is not [`DecisionAuthority::VerifiedFact`].
+///
+/// # Errors
+///
+/// Rejects stale repository, canonical, verifier, or Evidence bindings.
+pub fn adjudicate_canonical_decision(
+    delivery: &Delivery,
+    candidate: &FrozenDeliveryCandidate,
+    verifier_evidence: Option<&ComputedDeliveryVerdict>,
+    evidence: &[ResolvedDeliveryEvidence],
+    model_claims: &[CriterionVerdict],
+) -> Result<CanonicalDecision, DeliveryValidationError> {
+    assert_frozen_candidate_current(delivery, candidate)?;
+    collection_length(model_claims.len(), "adjudication.modelClaims")?;
+    validate_resolved_evidence(delivery, candidate, evidence, MAX_SAFE_INTEGER)?;
+
+    if let Some(verdict) = delivery.snapshot().verdict.as_ref() {
+        if verdict.candidate_ref != candidate.candidate_ref() {
+            return Err(invalid_computation(
+                "canonical verdict belongs to another repository candidate",
+            ));
+        }
+        return Ok(decision_from_verdict(delivery, verdict));
+    }
+
+    if let Some(computed) = verifier_evidence {
+        let verdict = computed.verdict();
+        if verdict.produced_at_millis < delivery.snapshot().updated_at_millis
+            || verdict.candidate_ref != candidate.candidate_ref()
+        {
+            return Err(invalid_computation(
+                "verifier verdict is stale for the current canonical or repository state",
+            ));
+        }
+        validate_computed_facts(
+            delivery,
+            computed.evidence(),
+            verdict,
+            verdict.produced_at_millis,
+        )?;
+        return Ok(decision_from_verdict(delivery, verdict));
+    }
+
+    if let Some((outcome, evidence_refs)) = evidence_outcome(evidence, true) {
+        return Ok(decision(
+            delivery,
+            candidate,
+            outcome,
+            DecisionAuthority::VerifiedFact,
+            evidence_refs,
+        ));
+    }
+    if let Some((outcome, evidence_refs)) = evidence_outcome(evidence, false) {
+        return Ok(decision(
+            delivery,
+            candidate,
+            outcome,
+            DecisionAuthority::ToolObservation,
+            evidence_refs,
+        ));
+    }
+
+    let (outcome, authority) = match model_claims {
+        [claim] => (*claim, DecisionAuthority::SingleModelClaim),
+        [first, rest @ ..] if rest.iter().all(|claim| claim == first) => {
+            (*first, DecisionAuthority::ModelConsensus)
+        }
+        _ => (
+            CriterionVerdict::Inconclusive,
+            DecisionAuthority::NoDecision,
+        ),
+    };
+    Ok(decision(delivery, candidate, outcome, authority, vec![]))
+}
+
+/// Adjudicates from analyzer-shaped fixture data plus sealed Delivery facts.
+///
+/// Control-plane maps `analyze_fusion` output into [`FusionAnalysisFixture`].
+/// Delivery never imports that analyzer crate. Verifier and sealed test facts
+/// still outrank every mapped model claim.
+///
+/// # Errors
+///
+/// Rejects stale repository, canonical, verifier, or Evidence bindings.
+pub fn adjudicate_canonical_decision_from_analysis(
+    delivery: &Delivery,
+    candidate: &FrozenDeliveryCandidate,
+    verifier_evidence: Option<&ComputedDeliveryVerdict>,
+    evidence: &[ResolvedDeliveryEvidence],
+    analysis: &FusionAnalysisFixture,
+) -> Result<CanonicalDecision, DeliveryValidationError> {
+    let model_claims = analysis.model_claims();
+    adjudicate_canonical_decision(
+        delivery,
+        candidate,
+        verifier_evidence,
+        evidence,
+        &model_claims,
+    )
+}
+
+fn decision_from_verdict(delivery: &Delivery, verdict: &DeliveryVerdict) -> CanonicalDecision {
+    let mut evidence_refs = verdict
+        .criteria
+        .iter()
+        .flat_map(|criterion| criterion.evidence_refs.iter().cloned())
+        .collect::<Vec<_>>();
+    evidence_refs.sort_by(|left, right| left.0.cmp(&right.0));
+    evidence_refs.dedup();
+    CanonicalDecision {
+        delivery_id: delivery.id().clone(),
+        candidate_ref: verdict.candidate_ref.clone(),
+        outcome: verdict.status,
+        authority: DecisionAuthority::VerifiedFact,
+        canonical_verdict_id: Some(verdict.id.clone()),
+        evidence_refs,
+    }
+}
+
+fn decision(
+    delivery: &Delivery,
+    candidate: &FrozenDeliveryCandidate,
+    outcome: CriterionVerdict,
+    authority: DecisionAuthority,
+    evidence_refs: Vec<EvidenceId>,
+) -> CanonicalDecision {
+    CanonicalDecision {
+        delivery_id: delivery.id().clone(),
+        candidate_ref: candidate.candidate_ref().into(),
+        outcome,
+        authority,
+        canonical_verdict_id: None,
+        evidence_refs,
+    }
+}
+
+fn evidence_outcome(
+    evidence: &[ResolvedDeliveryEvidence],
+    tests: bool,
+) -> Option<(CriterionVerdict, Vec<EvidenceId>)> {
+    let mut outcomes = Vec::new();
+    let mut evidence_refs = Vec::new();
+    for resolved in evidence
+        .iter()
+        .filter(|resolved| (resolved.evidence().evidence_type == EvidenceRefType::Test) == tests)
+    {
+        let outcome = match resolved.outcome() {
+            VerifiedEvidenceOutcome::Observed => continue,
+            VerifiedEvidenceOutcome::Succeeded => CriterionVerdict::Pass,
+            VerifiedEvidenceOutcome::Failed => CriterionVerdict::Fail,
+            VerifiedEvidenceOutcome::TimedOut
+            | VerifiedEvidenceOutcome::PolicyDenied
+            | VerifiedEvidenceOutcome::InfrastructureFailed
+            | VerifiedEvidenceOutcome::Cancelled => CriterionVerdict::InfraError,
+        };
+        outcomes.push(outcome);
+        evidence_refs.push(resolved.evidence().id.clone());
+    }
+    let first = *outcomes.first()?;
+    let outcome = if outcomes.iter().all(|outcome| *outcome == first) {
+        first
+    } else {
+        CriterionVerdict::Inconclusive
+    };
+    evidence_refs.sort_by(|left, right| left.0.cmp(&right.0));
+    evidence_refs.dedup();
+    Some((outcome, evidence_refs))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1115,7 +1406,11 @@ mod tests {
         CodexThreadId, ExecutionJobId, ProductSessionId, WorkRunState, WorkerSessionId,
     };
 
-    use super::compute_delivery_verdict;
+    use super::{
+        AnalyzerClaimFixture, DecisionAuthority, FusionAnalysisFixture,
+        adjudicate_canonical_decision, adjudicate_canonical_decision_from_analysis,
+        compute_delivery_verdict,
+    };
     use crate::domain::candidate::test_support::frozen_candidate;
     use crate::domain::evidence::{
         EvidenceRefType, VerifiedEvidenceOutcome,
@@ -1731,6 +2026,307 @@ mod tests {
             assert_eq!(computed.verdict().status, CriterionVerdict::Inconclusive);
             assert_ne!(computed.verdict().status, CriterionVerdict::Pass);
         }
+    }
+
+    #[test]
+    fn model_majority_cannot_override_failed_tests_or_verifier() {
+        let delivery = verdict_delivery();
+        let candidate = candidate(&delivery);
+        let verification = independent_verification(
+            &delivery,
+            &candidate,
+            VerificationFixtureState::SettledFail,
+            VerificationFixtureState::SettledFail,
+        );
+        let failed_tests = [VerificationRole::Reviewer, VerificationRole::Verifier]
+            .into_iter()
+            .map(|role| {
+                role_evidence(
+                    &delivery,
+                    &candidate,
+                    role,
+                    EvidenceRefType::Test,
+                    VerifiedEvidenceOutcome::Failed,
+                )
+            })
+            .collect::<Vec<_>>();
+        let verified = compute_delivery_verdict(
+            &delivery,
+            &candidate,
+            &verification,
+            &failed_tests,
+            PRODUCED_AT_MILLIS,
+        )
+        .expect("failed tests and verifier facts produce a canonical verdict");
+        let successful_tool_observation = role_evidence(
+            &delivery,
+            &candidate,
+            VerificationRole::Reviewer,
+            EvidenceRefType::Command,
+            VerifiedEvidenceOutcome::Succeeded,
+        );
+
+        let decision = adjudicate_canonical_decision(
+            &delivery,
+            &candidate,
+            Some(&verified),
+            &[successful_tool_observation],
+            &[
+                CriterionVerdict::Pass,
+                CriterionVerdict::Pass,
+                CriterionVerdict::Pass,
+                CriterionVerdict::Pass,
+                CriterionVerdict::Pass,
+            ],
+        )
+        .expect("current facts are adjudicated");
+
+        assert_eq!(decision.outcome(), CriterionVerdict::Fail);
+        assert_eq!(decision.authority(), DecisionAuthority::VerifiedFact);
+        assert_eq!(
+            decision.canonical_verdict_id(),
+            Some(&verified.verdict().id)
+        );
+    }
+
+    fn tool_only(
+        delivery: &Delivery,
+        candidate: &FrozenDeliveryCandidate,
+        outcome: VerifiedEvidenceOutcome,
+    ) -> Vec<crate::domain::evidence::ResolvedDeliveryEvidence> {
+        vec![role_evidence(
+            delivery,
+            candidate,
+            VerificationRole::Reviewer,
+            EvidenceRefType::Command,
+            outcome,
+        )]
+    }
+
+    fn test_only(
+        delivery: &Delivery,
+        candidate: &FrozenDeliveryCandidate,
+        outcome: VerifiedEvidenceOutcome,
+    ) -> Vec<crate::domain::evidence::ResolvedDeliveryEvidence> {
+        vec![role_evidence(
+            delivery,
+            candidate,
+            VerificationRole::Reviewer,
+            EvidenceRefType::Test,
+            outcome,
+        )]
+    }
+
+    #[test]
+    fn priority_order_verified_fact_then_tool_then_models() {
+        let delivery = verdict_delivery();
+        let candidate = candidate(&delivery);
+        let pass_models = [
+            CriterionVerdict::Pass,
+            CriterionVerdict::Pass,
+            CriterionVerdict::Pass,
+        ];
+
+        let failed_tests = test_only(&delivery, &candidate, VerifiedEvidenceOutcome::Failed);
+        let tools = tool_only(&delivery, &candidate, VerifiedEvidenceOutcome::Succeeded);
+        let decision = adjudicate_canonical_decision(
+            &delivery,
+            &candidate,
+            None,
+            &failed_tests
+                .iter()
+                .chain(tools.iter())
+                .cloned()
+                .collect::<Vec<_>>(),
+            &pass_models,
+        )
+        .expect("current facts adjudicate");
+        assert_eq!(decision.outcome(), CriterionVerdict::Fail);
+        assert_eq!(decision.authority(), DecisionAuthority::VerifiedFact);
+
+        let decision =
+            adjudicate_canonical_decision(&delivery, &candidate, None, &tools, &pass_models)
+                .expect("tool observation adjudicates");
+        assert_eq!(decision.outcome(), CriterionVerdict::Pass);
+        assert_eq!(decision.authority(), DecisionAuthority::ToolObservation);
+
+        let decision =
+            adjudicate_canonical_decision(&delivery, &candidate, None, &[], &pass_models)
+                .expect("model consensus adjudicates");
+        assert_eq!(decision.outcome(), CriterionVerdict::Pass);
+        assert_eq!(decision.authority(), DecisionAuthority::ModelConsensus);
+
+        let decision = adjudicate_canonical_decision(
+            &delivery,
+            &candidate,
+            None,
+            &[],
+            &[CriterionVerdict::Fail],
+        )
+        .expect("single model claim adjudicates");
+        assert_eq!(decision.outcome(), CriterionVerdict::Fail);
+        assert_eq!(decision.authority(), DecisionAuthority::SingleModelClaim);
+
+        let decision = adjudicate_canonical_decision(
+            &delivery,
+            &candidate,
+            None,
+            &[],
+            &[CriterionVerdict::Pass, CriterionVerdict::Fail],
+        )
+        .expect("conflicting models adjudicate");
+        assert_eq!(decision.outcome(), CriterionVerdict::Inconclusive);
+        assert_eq!(decision.authority(), DecisionAuthority::NoDecision);
+
+        let decision = adjudicate_canonical_decision(&delivery, &candidate, None, &[], &[])
+            .expect("empty inputs adjudicate");
+        assert_eq!(decision.outcome(), CriterionVerdict::Inconclusive);
+        assert_eq!(decision.authority(), DecisionAuthority::NoDecision);
+        assert!(decision.canonical_verdict_id().is_none());
+    }
+
+    #[test]
+    fn does_not_invent_verifier_pass_without_verifier_evidence() {
+        let delivery = verdict_delivery();
+        let candidate = candidate(&delivery);
+        let decision = adjudicate_canonical_decision(
+            &delivery,
+            &candidate,
+            None,
+            &[],
+            &[
+                CriterionVerdict::Pass,
+                CriterionVerdict::Pass,
+                CriterionVerdict::Pass,
+            ],
+        )
+        .expect("model claims adjudicate without verifier facts");
+
+        assert_ne!(decision.authority(), DecisionAuthority::VerifiedFact);
+        assert!(decision.canonical_verdict_id().is_none());
+        assert_eq!(decision.authority(), DecisionAuthority::ModelConsensus);
+        assert_eq!(decision.outcome(), CriterionVerdict::Pass);
+    }
+
+    #[test]
+    fn analyzer_fixture_cannot_override_failed_tests_or_verifier() {
+        let delivery = verdict_delivery();
+        let candidate = candidate(&delivery);
+        let verification = independent_verification(
+            &delivery,
+            &candidate,
+            VerificationFixtureState::SettledFail,
+            VerificationFixtureState::SettledFail,
+        );
+        let failed_tests = [VerificationRole::Reviewer, VerificationRole::Verifier]
+            .into_iter()
+            .map(|role| {
+                role_evidence(
+                    &delivery,
+                    &candidate,
+                    role,
+                    EvidenceRefType::Test,
+                    VerifiedEvidenceOutcome::Failed,
+                )
+            })
+            .collect::<Vec<_>>();
+        let verified = compute_delivery_verdict(
+            &delivery,
+            &candidate,
+            &verification,
+            &failed_tests,
+            PRODUCED_AT_MILLIS,
+        )
+        .expect("failed tests and verifier facts produce a canonical verdict");
+        let analysis = FusionAnalysisFixture {
+            consensus_outcomes: vec![CriterionVerdict::Pass, CriterionVerdict::Pass],
+            conflict_outcomes: vec![CriterionVerdict::Pass],
+            unsupported_model_claims: vec![CriterionVerdict::Pass, CriterionVerdict::Pass],
+        };
+
+        let decision = adjudicate_canonical_decision_from_analysis(
+            &delivery,
+            &candidate,
+            Some(&verified),
+            &tool_only(&delivery, &candidate, VerifiedEvidenceOutcome::Succeeded),
+            &analysis,
+        )
+        .expect("analyzer fixture adjudicates against sealed facts");
+
+        assert_eq!(decision.outcome(), CriterionVerdict::Fail);
+        assert_eq!(decision.authority(), DecisionAuthority::VerifiedFact);
+        assert_eq!(
+            decision.canonical_verdict_id(),
+            Some(&verified.verdict().id)
+        );
+    }
+
+    #[test]
+    fn analyzer_fixture_maps_into_model_claim_tiers_only() {
+        let delivery = verdict_delivery();
+        let candidate = candidate(&delivery);
+        let claims = vec![
+            AnalyzerClaimFixture {
+                candidate_id: "a".into(),
+                outcome: CriterionVerdict::Pass,
+            },
+            AnalyzerClaimFixture {
+                candidate_id: "b".into(),
+                outcome: CriterionVerdict::Pass,
+            },
+        ];
+        let analysis = FusionAnalysisFixture::from_claims(&claims);
+        assert_eq!(
+            analysis.model_claims(),
+            vec![CriterionVerdict::Pass, CriterionVerdict::Pass]
+        );
+
+        let decision = adjudicate_canonical_decision_from_analysis(
+            &delivery,
+            &candidate,
+            None,
+            &[],
+            &analysis,
+        )
+        .expect("fixture analysis adjudicates");
+        assert_eq!(decision.authority(), DecisionAuthority::ModelConsensus);
+        assert_eq!(decision.outcome(), CriterionVerdict::Pass);
+
+        let mixed = FusionAnalysisFixture {
+            consensus_outcomes: vec![CriterionVerdict::Pass],
+            conflict_outcomes: vec![CriterionVerdict::Fail],
+            unsupported_model_claims: Vec::new(),
+        };
+        let decision =
+            adjudicate_canonical_decision_from_analysis(&delivery, &candidate, None, &[], &mixed)
+                .expect("mixed fixture adjudicates");
+        assert_eq!(decision.outcome(), CriterionVerdict::Inconclusive);
+        assert_eq!(decision.authority(), DecisionAuthority::NoDecision);
+    }
+
+    #[test]
+    fn failed_tests_without_computed_verifier_still_beat_model_pass_claims() {
+        let delivery = verdict_delivery();
+        let candidate = candidate(&delivery);
+        let failed_tests = test_only(&delivery, &candidate, VerifiedEvidenceOutcome::Failed);
+        let decision = adjudicate_canonical_decision(
+            &delivery,
+            &candidate,
+            None,
+            &failed_tests,
+            &[
+                CriterionVerdict::Pass,
+                CriterionVerdict::Pass,
+                CriterionVerdict::Pass,
+                CriterionVerdict::Pass,
+                CriterionVerdict::Pass,
+            ],
+        )
+        .expect("sealed failed tests adjudicate");
+
+        assert_eq!(decision.outcome(), CriterionVerdict::Fail);
+        assert_eq!(decision.authority(), DecisionAuthority::VerifiedFact);
+        assert!(decision.canonical_verdict_id().is_none());
     }
 
     #[test]
