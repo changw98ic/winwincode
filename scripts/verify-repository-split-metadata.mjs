@@ -20,8 +20,17 @@ const EXPECTED_ENTERPRISE_DIRECT_PATHS = 103
 // This is the reviewed Community tree from which the split inventory was audited.
 // Keep this independent from the inventory: changing every recorded pin must not
 // move the source of truth used by this verifier.
-const AUDITED_COMMUNITY_HEAD = '52f2eda69fd0b03e6f42b980be3b9a4965092497'
-const AUDITED_COMMUNITY_TREE = '2a49c265e95d4160016618ba0cf17377849a134f'
+// 2026-09-20 documented re-audit: accepted Community head is main c622e0c1
+// (managed-app/00os product landings + docs pages). Ownership lockstep covers
+// scoped managed-app/00os paths; jev-runtime-spec/ and winwincode-bd-tracks/
+// remain out-of-scope support/docs roots outside includedRoots.
+const AUDITED_COMMUNITY_HEAD = 'c622e0c185288395fa82db17287c0995ed6f64d4'
+const AUDITED_COMMUNITY_TREE = '0b35596548ada043ff517ea9848a843d1a5f8271'
+// vault_kms_network migrate-out sources remain recoverable from the pre-prune
+// Community tree that still contained those paths. This pin is intentionally
+// distinct from the live audited Community head after the prune commit landed.
+const AUDITED_MIGRATE_OUT_RECOVERY_HEAD = '52f2eda69fd0b03e6f42b980be3b9a4965092497'
+const AUDITED_MIGRATE_OUT_RECOVERY_TREE = '2a49c265e95d4160016618ba0cf17377849a134f'
 const SPLIT_METADATA_ALLOWLIST = new Set([
   'docs/decisions/0031-repository-split.inventory.json',
   'scripts/verify-repository-split-metadata.mjs',
@@ -736,8 +745,8 @@ function validateCommunityDisposition(inventory, ownership, mixedPaths, errors, 
         `migration-review disposition ${path}.recoverableSource`,
         errors,
       )
-      if (recoverable?.gitHead !== AUDITED_COMMUNITY_HEAD) {
-        errors.push(`migrate-out disposition ${path} recoverableSource.gitHead must pin the audited Community HEAD`)
+      if (recoverable?.gitHead !== AUDITED_MIGRATE_OUT_RECOVERY_HEAD) {
+        errors.push(`migrate-out disposition ${path} recoverableSource.gitHead must pin the audited migrate-out recovery HEAD`)
       }
       if (typeof recoverable?.method !== 'string' || recoverable.method.length === 0) {
         errors.push(`migrate-out disposition ${path} must record a recoverableSource.method`)

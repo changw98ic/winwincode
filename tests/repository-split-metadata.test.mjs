@@ -78,6 +78,11 @@ const EXPECTED_VALIDATION_RESULT = {
   communityPrunePermission: 'community-owned-ready-for-1.1-freeze',
 }
 
+// Documented re-audit pins (keep lockstep with scripts/verify-repository-split-metadata.mjs)
+const AUDITED_COMMUNITY_HEAD = 'c622e0c185288395fa82db17287c0995ed6f64d4'
+const AUDITED_MIGRATE_OUT_RECOVERY_HEAD = '52f2eda69fd0b03e6f42b980be3b9a4965092497'
+const AUDITED_CURRENT_HEAD_TRACKED_FILE_COUNT = 1213
+
 test('current repository split documents agree on repositories, tasks, and source counts', () => {
   assert.deepEqual(validateRepositorySplitMetadata(fixture()), EXPECTED_VALIDATION_RESULT)
 })
@@ -89,7 +94,11 @@ test('current HEAD tracked paths have exactly one ownership bucket', () => {
 test('target evidence is seam-scoped and cannot authorize Community deletion', () => {
   const inventory = fixture().inventory
   const evidence = inventory.currentHeadTargetEvidence
-  assert.equal(inventory.currentHead.trackedFileCount, 1203)
+  assert.equal(
+    inventory.currentHead.trackedFileCount,
+    AUDITED_CURRENT_HEAD_TRACKED_FILE_COUNT,
+  )
+  assert.equal(inventory.currentHead.gitHead, AUDITED_COMMUNITY_HEAD)
   assert.deepEqual(inventory.currentHead.includedRoots, [
     'apps', 'packages', 'crates', 'schema', 'scripts', 'tests', 'docs',
   ])
@@ -141,7 +150,7 @@ test('community-owned disposition freezes retain / rewrite / migrate-out scopes'
   assert.equal(mr['crates/winwincode-control-plane/src/vault_kms_network.rs'].action, 'migrate-out')
   assert.equal(
     mr['crates/winwincode-control-plane/src/vault_kms_network.rs'].recoverableSource.gitHead,
-    '52f2eda69fd0b03e6f42b980be3b9a4965092497',
+    AUDITED_MIGRATE_OUT_RECOVERY_HEAD,
   )
   assert.equal(
     mr['crates/winwincode-control-plane/src/vault_kms_network.rs'].execution.state,
@@ -162,7 +171,7 @@ test('community-owned disposition freezes retain / rewrite / migrate-out scopes'
   assert.deepEqual(permission.currentMigrateOutPathsStillPresent, [])
   assert.equal(
     permission.pruneExecution.status,
-    'migrate-out-executed-community-surface-narrowed-protocol-scope-keys-retained-localdefault-identity',
+    'migrate-out-executed-community-surface-narrowed-protocol-scope-keys-retained-localdefault-identity-clean-checkout-reaudit-metadata-lockstep',
   )
   assert.equal(
     permission.pruneExecution.residualProtocolScopeKeyDecision.decision,
@@ -172,6 +181,25 @@ test('community-owned disposition freezes retain / rewrite / migrate-out scopes'
     permission.pruneExecution.cleanCheckoutReadiness.requiresCommitForAcPass,
     true,
   )
+  assert.equal(
+    permission.pruneExecution.cleanCheckoutReadiness.acceptedCommunityHead,
+    AUDITED_COMMUNITY_HEAD,
+  )
+  assert.deepEqual(
+    permission.pruneExecution.cleanCheckoutReadiness.ownershipLockstepPathsAdded,
+    [
+      'apps/client/src/public-redaction.ts',
+      'crates/winwincode-client-port/src/managed_app.rs',
+      'crates/winwincode-codex/src/diagnostic_artifact_outbox.rs',
+      'crates/winwincode-control-plane/src/page_annotation_delivery.rs',
+      'crates/winwincode-device-client/src/managed_app.rs',
+      'crates/winwincode-storage/src/managed_app.rs',
+      'scripts/device-production-fixture.mjs',
+      'scripts/run-00os-device-live-vertical.mjs',
+      'tests/api-production-device-prerequisites.test.mjs',
+      'tests/projects-page-ui.test.mjs',
+    ],
+  )
   assert.deepEqual(
     permission.pruneExecution.executedMigrateOut.map(entry => entry.path),
     [
@@ -180,8 +208,9 @@ test('community-owned disposition freezes retain / rewrite / migrate-out scopes'
     ],
   )
   assert.equal(permission.historicalMigrateOutAlreadyAbsentCount, 89)
-  assert.equal(disposition.worktreeIncrements.untrackedProductCandidates.length, 7)
-  assert.match(disposition.worktreeIncrements.policy, /unfinished features are not complete/u)
+  assert.equal(disposition.worktreeIncrements.untrackedProductCandidates.length, 10)
+  assert.match(disposition.worktreeIncrements.policy, /unfinished features are not complete/iu)
+  assert.equal(disposition.auditedHead.gitHead, AUDITED_COMMUNITY_HEAD)
 })
 
 test('community prune permission gaps are rejected', async t => {
@@ -336,15 +365,23 @@ function cloneRepository() {
 test('metadata-only commit may advance live HEAD while audited product tree stays fixed', () => {
   const { parent, repositoryRoot } = cloneRepository()
   try {
-    // Align the clone index with authorized Community migrate-out execution
-    // (.1.2). Removals stay staged/uncommitted so the audited product tree at
-    // 52f2eda6 remains the committed baseline while tracked-path coverage uses
-    // the post-prune index recorded in inventory.
+    // Documented re-audit: accepted Community head c622e0c1 already contains the
+    // authorized vault_kms_network migrate-out removals and managed-app/00os
+    // ownership landings. Clone HEAD product tree (outside split-metadata
+    // allowlist) must already match the audited Community baseline; only the
+    // allowlisted inventory file may advance live HEAD in this scenario.
+    assert.equal(
+      execFileSync('git', ['-C', repositoryRoot, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
+      AUDITED_COMMUNITY_HEAD,
+    )
     for (const path of [
       'crates/winwincode-control-plane/src/vault_kms_network.rs',
       'crates/winwincode-control-plane/tests/vault_kms_network.rs',
     ]) {
-      execFileSync('git', ['-C', repositoryRoot, 'rm', '-f', path], { stdio: 'ignore' })
+      assert.throws(
+        () => execFileSync('git', ['-C', repositoryRoot, 'cat-file', '-e', `HEAD:${path}`]),
+        /exit|fatal|Missing/u,
+      )
     }
     appendFileSync(
       join(repositoryRoot, 'docs/decisions/0031-repository-split.inventory.json'),
@@ -359,7 +396,7 @@ test('metadata-only commit may advance live HEAD while audited product tree stay
     ])
     assert.notEqual(
       execFileSync('git', ['-C', repositoryRoot, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
-      '52f2eda69fd0b03e6f42b980be3b9a4965092497',
+      AUDITED_COMMUNITY_HEAD,
     )
     assert.deepEqual(validateRepositorySplitMetadata({
       ...fixture(),

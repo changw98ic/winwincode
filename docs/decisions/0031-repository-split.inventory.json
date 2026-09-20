@@ -59,22 +59,22 @@
     "cloudZeroMoveMeaning": "No current tracked path is safely Cloud-only. Cloud must start from a clean repository; shared or mixed candidates remain in migration-review until split."
   },
   "summary": {
-    "classifiedPathCount": 1203,
+    "classifiedPathCount": 1213,
     "classifiedPathCountByBucket": {
-      "winwincode": 953,
+      "winwincode": 963,
       "winwincode-cloud": 0,
       "winwincode-enterprise": 0,
       "migration-review": 250
     },
     "classifiedPathCountByBucketAndRoot": {
       "winwincode": {
-        "apps": 110,
-        "crates": 539,
+        "apps": 111,
+        "crates": 544,
         "docs": 55,
         "packages": 25,
         "schema": 12,
-        "scripts": 29,
-        "tests": 183
+        "scripts": 31,
+        "tests": 185
       },
       "winwincode-cloud": {},
       "winwincode-enterprise": {},
@@ -93,8 +93,8 @@
     "migrationReviewPathCount": 250,
     "highRiskMixedPathCount": 12,
     "historicalHighRiskMixedPathCount": 5,
-    "currentHeadTrackedPathCount": 1203,
-    "currentHeadTrackedPathListSha256": "9349812eb9af596bf77fd08f9c9f178a44e0598d3f652be7ccce31f18ff3a158",
+    "currentHeadTrackedPathCount": 1213,
+    "currentHeadTrackedPathListSha256": "808a50a5ae939663931dbb6a8c3108a6de4aa08b639d65e81020184afacc95d7",
     "targetEvidenceRequiredPathCount": 12,
     "targetEvidenceRequiredByRepository": {
       "winwincode-cloud": 12,
@@ -176,6 +176,7 @@
       "apps/client/src/page-annotation-view-model.ts",
       "apps/client/src/preferences.ts",
       "apps/client/src/projects-page.ts",
+      "apps/client/src/public-redaction.ts",
       "apps/client/src/readiness-page.ts",
       "apps/client/src/readiness-view-model.ts",
       "apps/client/src/solution-diagram.ts",
@@ -248,6 +249,7 @@
       "crates/winwincode-client-port/src/exchange/outbox.rs",
       "crates/winwincode-client-port/src/exchange/sequence.rs",
       "crates/winwincode-client-port/src/lib.rs",
+      "crates/winwincode-client-port/src/managed_app.rs",
       "crates/winwincode-client-port/src/messages.rs",
       "crates/winwincode-client-port/src/preview.rs",
       "crates/winwincode-client-port/src/wire.rs",
@@ -257,6 +259,7 @@
       "crates/winwincode-codex/src/adapter.rs",
       "crates/winwincode-codex/src/candidate_artifact_outbox.rs",
       "crates/winwincode-codex/src/contract.rs",
+      "crates/winwincode-codex/src/diagnostic_artifact_outbox.rs",
       "crates/winwincode-codex/src/helper_release.rs",
       "crates/winwincode-codex/src/lib.rs",
       "crates/winwincode-codex/src/model_bridge.rs",
@@ -335,6 +338,7 @@
       "crates/winwincode-control-plane/src/model_settings.rs",
       "crates/winwincode-control-plane/src/model_stream_flow_control.rs",
       "crates/winwincode-control-plane/src/observer_decision_service.rs",
+      "crates/winwincode-control-plane/src/page_annotation_delivery.rs",
       "crates/winwincode-control-plane/src/peer_collaboration.rs",
       "crates/winwincode-control-plane/src/product_session_api.rs",
       "crates/winwincode-control-plane/src/product_session_artifacts.rs",
@@ -505,6 +509,7 @@
       "crates/winwincode-device-client/src/http.rs",
       "crates/winwincode-device-client/src/identity.rs",
       "crates/winwincode-device-client/src/lib.rs",
+      "crates/winwincode-device-client/src/managed_app.rs",
       "crates/winwincode-device-client/src/path_confinement.rs",
       "crates/winwincode-device-client/src/preview.rs",
       "crates/winwincode-device-client/src/repository_exchange.rs",
@@ -700,6 +705,7 @@
       "crates/winwincode-storage/src/git_candidate_retention.rs",
       "crates/winwincode-storage/src/git_source.rs",
       "crates/winwincode-storage/src/local_candidate.rs",
+      "crates/winwincode-storage/src/managed_app.rs",
       "crates/winwincode-storage/src/provider_exchange.rs",
       "crates/winwincode-storage/src/publication.rs",
       "crates/winwincode-storage/src/repository_binding.rs",
@@ -868,10 +874,12 @@
       "scripts/clean.mjs",
       "scripts/cpb-boundary-contract.mjs",
       "scripts/credential-leak-gate.mjs",
+      "scripts/device-production-fixture.mjs",
       "scripts/evaluate-real-task-benchmark.mjs",
       "scripts/finalize-community-core-release.mjs",
       "scripts/lint-workspace.mjs",
       "scripts/pnpm-pack-report.mjs",
+      "scripts/run-00os-device-live-vertical.mjs",
       "scripts/run-device-task-vertical.mjs",
       "scripts/run-glm-ui-rework.mjs",
       "scripts/run-provider-dsh-rust-differential.mjs",
@@ -885,6 +893,7 @@
       "scripts/verify-cpb-boundary.mjs",
       "scripts/verify-repository-split-metadata.mjs",
       "tests/api-production-cancel.test.mjs",
+      "tests/api-production-device-prerequisites.test.mjs",
       "tests/api-production-resource-release.test.mjs",
       "tests/api-production-vertical-runner.test.mjs",
       "tests/api-production-vertical.test.mjs",
@@ -1035,6 +1044,7 @@
       "tests/page-annotation-ui.test.mjs",
       "tests/pnpm-pack-report.test.mjs",
       "tests/product-repository-boundary.test.mjs",
+      "tests/projects-page-ui.test.mjs",
       "tests/provider-dsh-rust-differential-gate.test.mjs",
       "tests/query-cache-browser.test.mjs",
       "tests/query-cache-view-model.test.mjs",
@@ -2309,9 +2319,9 @@
     "crossRepositoryAcceptanceRequiredForCommunityPrune": false
   },
   "currentHead": {
-    "snapshotKind": "mutable-git-head-inventory-post-community-prune-1.2",
-    "gitHead": "52f2eda69fd0b03e6f42b980be3b9a4965092497",
-    "gitTree": "2a49c265e95d4160016618ba0cf17377849a134f",
+    "snapshotKind": "mutable-git-head-inventory-post-community-prune-1.2-clean-checkout-reaudit",
+    "gitHead": "c622e0c185288395fa82db17287c0995ed6f64d4",
+    "gitTree": "0b35596548ada043ff517ea9848a843d1a5f8271",
     "indexMode": "external-local-code-index-file-inventory",
     "indexAvailable": true,
     "indexFresh": true,
@@ -2327,17 +2337,17 @@
       "tests",
       "docs"
     ],
-    "trackedFileCount": 1203,
+    "trackedFileCount": 1213,
     "trackedFileCountByRoot": {
-      "apps": 150,
-      "crates": 647,
+      "apps": 151,
+      "crates": 652,
       "docs": 88,
       "packages": 29,
       "schema": 22,
-      "scripts": 41,
-      "tests": 226
+      "scripts": 43,
+      "tests": 228
     },
-    "trackedPathListSha256": "9349812eb9af596bf77fd08f9c9f178a44e0598d3f652be7ccce31f18ff3a158",
+    "trackedPathListSha256": "808a50a5ae939663931dbb6a8c3108a6de4aa08b639d65e81020184afacc95d7",
     "ownershipScope": "tracked paths under includedRoots; exactly one ownership bucket per path",
     "excludedTrackedPathPolicy": {
       "status": "out-of-scope",
@@ -2362,6 +2372,7 @@
         "CONTRIBUTING.md",
         "deploy",
         "design-qa.md",
+        "jev-runtime-spec",
         "LICENSE",
         "NOTICE",
         "package.json",
@@ -2377,30 +2388,31 @@
         "tsconfig.base.json",
         "tsconfig.check.json",
         "tsconfig.json",
-        "upstream"
+        "upstream",
+        "winwincode-bd-tracks"
       ]
     },
-    "pruneExecutionNote": "Tracked-path inventory is live git index coverage after authorized Community migrate-out removal of vault_kms_network paths. Audited freeze baseline remains currentHeadCommunityDisposition.auditedHead at 52f2eda6."
+    "pruneExecutionNote": "Tracked-path inventory is live git index coverage at accepted Community head c622e0c185288395fa82db17287c0995ed6f64d4 after authorized migrate-out removal of vault_kms_network paths and after ownership lockstep for managed-app/00os/docs landings. Migrate-out recoverable source remains pinned at 52f2eda69fd0b03e6f42b980be3b9a4965092497. Documented re-audit 2026-09-20."
   },
   "currentHeadClassification": {
-    "status": "current-head-ownership-complete-community-prune-migrate-out-executed-cross-repo-evidence-observational",
-    "trackedPathCount": 1203,
-    "classifiedPathCount": 1203,
+    "status": "current-head-ownership-complete-community-prune-migrate-out-executed-clean-checkout-reaudit-c622e0c1",
+    "trackedPathCount": 1213,
+    "classifiedPathCount": 1213,
     "classifiedPathCountByBucket": {
-      "winwincode": 953,
+      "winwincode": 963,
       "winwincode-cloud": 0,
       "winwincode-enterprise": 0,
       "migration-review": 250
     },
     "classifiedPathCountByBucketAndRoot": {
       "winwincode": {
-        "apps": 110,
-        "crates": 539,
+        "apps": 111,
+        "crates": 544,
         "docs": 55,
         "packages": 25,
         "schema": 12,
-        "scripts": 29,
-        "tests": 183
+        "scripts": 31,
+        "tests": 185
       },
       "winwincode-cloud": {},
       "winwincode-enterprise": {},
@@ -2414,7 +2426,7 @@
         "tests": 43
       }
     },
-    "communityRetainedPathCount": 953,
+    "communityRetainedPathCount": 963,
     "cloudDirectMigrationPathCount": 0,
     "enterpriseDirectMigrationPathCount": 0,
     "migrationReviewPathCount": 250,
@@ -2457,9 +2469,9 @@
     "status": "cross-repository-reconciliation-with-gaps",
     "source": {
       "repository": "winwincode",
-      "gitHead": "52f2eda69fd0b03e6f42b980be3b9a4965092497",
-      "gitTree": "2a49c265e95d4160016618ba0cf17377849a134f",
-      "scopedTrackedPathCount": 1205
+      "gitHead": "c622e0c185288395fa82db17287c0995ed6f64d4",
+      "gitTree": "0b35596548ada043ff517ea9848a843d1a5f8271",
+      "scopedTrackedPathCount": 1213
     },
     "sourcePins": {
       "cloud": {
@@ -2468,10 +2480,10 @@
         "targetHead": "85f975678a89f53265ca35d317e35c5cc8c9de4f",
         "targetTree": "54cbce94ac290cdb23ea58d1461acf0d40c1f2d8",
         "sourceAudit": {
-          "gitHead": "52f2eda69fd0b03e6f42b980be3b9a4965092497",
-          "gitTree": "2a49c265e95d4160016618ba0cf17377849a134f",
-          "scopedTrackedPathCount": 1205,
-          "trackedPathListSha256": "15f77aa423b2512075fac2c6f9ae9dba2926c32efdb2a25b122dbe9002a77fc0"
+          "gitHead": "c622e0c185288395fa82db17287c0995ed6f64d4",
+          "gitTree": "0b35596548ada043ff517ea9848a843d1a5f8271",
+          "scopedTrackedPathCount": 1213,
+          "trackedPathListSha256": "808a50a5ae939663931dbb6a8c3108a6de4aa08b639d65e81020184afacc95d7"
         },
         "sourceHeadMatches": true,
         "sourceScopeMatches": true
@@ -2482,8 +2494,8 @@
         "targetHead": "ca81171217489959b5f89de4440cd7567bd5d090",
         "targetTree": "6edc986ff7ac2d7ecf1b4c763ce98665375a1bcf",
         "sourcePin": {
-          "gitHead": "52f2eda69fd0b03e6f42b980be3b9a4965092497",
-          "gitTree": "2a49c265e95d4160016618ba0cf17377849a134f"
+          "gitHead": "c622e0c185288395fa82db17287c0995ed6f64d4",
+          "gitTree": "0b35596548ada043ff517ea9848a843d1a5f8271"
         },
         "sourceHeadMatches": true
       }
@@ -2525,8 +2537,8 @@
           "enterprise": "ENTERPRISE-SEAM-001"
         },
         "sourceHead": {
-          "gitHead": "52f2eda69fd0b03e6f42b980be3b9a4965092497",
-          "gitTree": "2a49c265e95d4160016618ba0cf17377849a134f",
+          "gitHead": "c622e0c185288395fa82db17287c0995ed6f64d4",
+          "gitTree": "0b35596548ada043ff517ea9848a843d1a5f8271",
           "cloudAuditMatches": true,
           "enterpriseProvenanceMatches": true
         },
@@ -2569,8 +2581,8 @@
           "enterprise": "ENTERPRISE-SEAM-002"
         },
         "sourceHead": {
-          "gitHead": "52f2eda69fd0b03e6f42b980be3b9a4965092497",
-          "gitTree": "2a49c265e95d4160016618ba0cf17377849a134f",
+          "gitHead": "c622e0c185288395fa82db17287c0995ed6f64d4",
+          "gitTree": "0b35596548ada043ff517ea9848a843d1a5f8271",
           "cloudAuditMatches": true,
           "enterpriseProvenanceMatches": true
         },
@@ -2615,8 +2627,8 @@
           "enterprise": "ENTERPRISE-SEAM-003"
         },
         "sourceHead": {
-          "gitHead": "52f2eda69fd0b03e6f42b980be3b9a4965092497",
-          "gitTree": "2a49c265e95d4160016618ba0cf17377849a134f",
+          "gitHead": "c622e0c185288395fa82db17287c0995ed6f64d4",
+          "gitTree": "0b35596548ada043ff517ea9848a843d1a5f8271",
           "cloudAuditMatches": true,
           "enterpriseProvenanceMatches": true
         },
@@ -2659,8 +2671,8 @@
           "enterprise": "ENTERPRISE-SEAM-004"
         },
         "sourceHead": {
-          "gitHead": "52f2eda69fd0b03e6f42b980be3b9a4965092497",
-          "gitTree": "2a49c265e95d4160016618ba0cf17377849a134f",
+          "gitHead": "c622e0c185288395fa82db17287c0995ed6f64d4",
+          "gitTree": "0b35596548ada043ff517ea9848a843d1a5f8271",
           "cloudAuditMatches": true,
           "enterpriseProvenanceMatches": true
         },
@@ -2703,8 +2715,8 @@
           "enterprise": "ENTERPRISE-SEAM-005"
         },
         "sourceHead": {
-          "gitHead": "52f2eda69fd0b03e6f42b980be3b9a4965092497",
-          "gitTree": "2a49c265e95d4160016618ba0cf17377849a134f",
+          "gitHead": "c622e0c185288395fa82db17287c0995ed6f64d4",
+          "gitTree": "0b35596548ada043ff517ea9848a843d1a5f8271",
           "cloudAuditMatches": true,
           "enterpriseProvenanceMatches": true
         },
@@ -2747,8 +2759,8 @@
           "enterprise": "ENTERPRISE-SEAM-006"
         },
         "sourceHead": {
-          "gitHead": "52f2eda69fd0b03e6f42b980be3b9a4965092497",
-          "gitTree": "2a49c265e95d4160016618ba0cf17377849a134f",
+          "gitHead": "c622e0c185288395fa82db17287c0995ed6f64d4",
+          "gitTree": "0b35596548ada043ff517ea9848a843d1a5f8271",
           "cloudAuditMatches": true,
           "enterpriseProvenanceMatches": true
         },
@@ -2791,8 +2803,8 @@
           "enterprise": "ENTERPRISE-SEAM-007"
         },
         "sourceHead": {
-          "gitHead": "52f2eda69fd0b03e6f42b980be3b9a4965092497",
-          "gitTree": "2a49c265e95d4160016618ba0cf17377849a134f",
+          "gitHead": "c622e0c185288395fa82db17287c0995ed6f64d4",
+          "gitTree": "0b35596548ada043ff517ea9848a843d1a5f8271",
           "cloudAuditMatches": true,
           "enterpriseProvenanceMatches": true
         },
@@ -2835,8 +2847,8 @@
           "enterprise": "ENTERPRISE-SEAM-008"
         },
         "sourceHead": {
-          "gitHead": "52f2eda69fd0b03e6f42b980be3b9a4965092497",
-          "gitTree": "2a49c265e95d4160016618ba0cf17377849a134f",
+          "gitHead": "c622e0c185288395fa82db17287c0995ed6f64d4",
+          "gitTree": "0b35596548ada043ff517ea9848a843d1a5f8271",
           "cloudAuditMatches": true,
           "enterpriseProvenanceMatches": true
         },
@@ -2879,8 +2891,8 @@
           "enterprise": "ENTERPRISE-SEAM-009"
         },
         "sourceHead": {
-          "gitHead": "52f2eda69fd0b03e6f42b980be3b9a4965092497",
-          "gitTree": "2a49c265e95d4160016618ba0cf17377849a134f",
+          "gitHead": "c622e0c185288395fa82db17287c0995ed6f64d4",
+          "gitTree": "0b35596548ada043ff517ea9848a843d1a5f8271",
           "cloudAuditMatches": true,
           "enterpriseProvenanceMatches": true
         },
@@ -2923,8 +2935,8 @@
           "enterprise": "ENTERPRISE-SEAM-010"
         },
         "sourceHead": {
-          "gitHead": "52f2eda69fd0b03e6f42b980be3b9a4965092497",
-          "gitTree": "2a49c265e95d4160016618ba0cf17377849a134f",
+          "gitHead": "c622e0c185288395fa82db17287c0995ed6f64d4",
+          "gitTree": "0b35596548ada043ff517ea9848a843d1a5f8271",
           "cloudAuditMatches": true,
           "enterpriseProvenanceMatches": true
         },
@@ -2969,8 +2981,8 @@
           "enterprise": "ENTERPRISE-SEAM-011"
         },
         "sourceHead": {
-          "gitHead": "52f2eda69fd0b03e6f42b980be3b9a4965092497",
-          "gitTree": "2a49c265e95d4160016618ba0cf17377849a134f",
+          "gitHead": "c622e0c185288395fa82db17287c0995ed6f64d4",
+          "gitTree": "0b35596548ada043ff517ea9848a843d1a5f8271",
           "cloudAuditMatches": true,
           "enterpriseProvenanceMatches": true
         },
@@ -3013,8 +3025,8 @@
           "enterprise": "ENTERPRISE-SEAM-012"
         },
         "sourceHead": {
-          "gitHead": "52f2eda69fd0b03e6f42b980be3b9a4965092497",
-          "gitTree": "2a49c265e95d4160016618ba0cf17377849a134f",
+          "gitHead": "c622e0c185288395fa82db17287c0995ed6f64d4",
+          "gitTree": "0b35596548ada043ff517ea9848a843d1a5f8271",
           "cloudAuditMatches": true,
           "enterpriseProvenanceMatches": true
         },
@@ -3112,10 +3124,20 @@
       ]
     },
     "auditedHead": {
-      "gitHead": "52f2eda69fd0b03e6f42b980be3b9a4965092497",
-      "gitTree": "2a49c265e95d4160016618ba0cf17377849a134f",
-      "trackedPathCount": 1205,
-      "trackedPathListSha256": "15f77aa423b2512075fac2c6f9ae9dba2926c32efdb2a25b122dbe9002a77fc0"
+      "gitHead": "c622e0c185288395fa82db17287c0995ed6f64d4",
+      "gitTree": "0b35596548ada043ff517ea9848a843d1a5f8271",
+      "trackedPathCount": 1213,
+      "trackedPathListSha256": "808a50a5ae939663931dbb6a8c3108a6de4aa08b639d65e81020184afacc95d7",
+      "reAudit": {
+        "status": "documented-reaudit-on-accepted-community-head",
+        "date": "2026-09-20",
+        "acceptedCommunityHead": "c622e0c185288395fa82db17287c0995ed6f64d4",
+        "acceptedCommunityTree": "0b35596548ada043ff517ea9848a843d1a5f8271",
+        "priorAuditedHead": "52f2eda69fd0b03e6f42b980be3b9a4965092497",
+        "priorAuditedTree": "2a49c265e95d4160016618ba0cf17377849a134f",
+        "migrateOutRecoverableSourceHead": "52f2eda69fd0b03e6f42b980be3b9a4965092497",
+        "reason": "Community.1.2 clean-checkout gates 02/03 require inventory ownership + AUDITED_COMMUNITY_HEAD lockstep on the accepted Community head (main c622e0c1). Managed-app/00os paths landed in f15e9f8e without ownership; docs pages in c622e0c1 are outside includedRoots."
+      }
     },
     "dispositionCounts": {
       "ownershipRetainWinwincode": 953,
@@ -6694,8 +6716,8 @@
       "policy": "Already-removed Cloud/Enterprise product paths stay out of Community. Recovery is from audited HEAD git history and this inventory; do not recreate dual copies in Community."
     },
     "worktreeIncrements": {
-      "status": "classified-not-in-HEAD-prune-set",
-      "policy": "Worktree dirty/untracked product increments are not HEAD inventory paths. They are Community-owned candidates until committed; unfinished features are not complete.",
+      "status": "previously-untracked-product-candidates-committed-into-community-ownership-at-c622e0c1",
+      "policy": "Previously untracked managed-app/00os product increments landed in accepted Community head c622e0c1 and are now ownership.winwincode paths. Unfinished features are not complete; dirty state does not authorize deletion.",
       "splitMetadataDirty": [
         "docs/decisions/0031-repository-split.inventory.json",
         "scripts/verify-repository-split-metadata.mjs",
@@ -6705,37 +6727,52 @@
         {
           "path": "apps/client/src/public-redaction.ts",
           "proposedAction": "retain",
-          "reason": "Community client redaction helper for local open-source surface."
+          "reason": "Community client redaction helper for local open-source surface (managed-app/00os landing)."
         },
         {
           "path": "crates/winwincode-client-port/src/managed_app.rs",
           "proposedAction": "retain",
-          "reason": "Community client-port managed app protocol increment."
+          "reason": "Community client-port managed app protocol (managed-app landing)."
         },
         {
           "path": "crates/winwincode-codex/src/diagnostic_artifact_outbox.rs",
           "proposedAction": "retain",
-          "reason": "Community Codex Core diagnostic artifact outbox increment."
+          "reason": "Community Codex Core diagnostic artifact outbox (00os/managed-app landing)."
         },
         {
           "path": "crates/winwincode-control-plane/src/page_annotation_delivery.rs",
           "proposedAction": "retain",
-          "reason": "Community StrongFlow/page annotation delivery increment."
+          "reason": "Community StrongFlow page annotation delivery (managed-app landing)."
         },
         {
           "path": "crates/winwincode-device-client/src/managed_app.rs",
           "proposedAction": "retain",
-          "reason": "Community Device Client managed app increment."
+          "reason": "Community Device Client managed app (00os Device vertical landing)."
         },
         {
           "path": "crates/winwincode-storage/src/managed_app.rs",
           "proposedAction": "retain",
-          "reason": "Community local SQLite managed app storage increment."
+          "reason": "Community local SQLite managed app storage (managed-app landing)."
+        },
+        {
+          "path": "scripts/device-production-fixture.mjs",
+          "proposedAction": "retain",
+          "reason": "Community device production fixture script (00os Device vertical)."
+        },
+        {
+          "path": "scripts/run-00os-device-live-vertical.mjs",
+          "proposedAction": "retain",
+          "reason": "Community 00os device live vertical runner script."
+        },
+        {
+          "path": "tests/api-production-device-prerequisites.test.mjs",
+          "proposedAction": "retain",
+          "reason": "Community API production device prerequisites test."
         },
         {
           "path": "tests/projects-page-ui.test.mjs",
           "proposedAction": "retain",
-          "reason": "Community projects page UI test increment."
+          "reason": "Community projects page UI test."
         }
       ],
       "dirtyMixedSeams": [
@@ -6752,7 +6789,7 @@
         "crates/winwincode-api/src/generated.rs",
         "docs/contracts/control-plane-api-coverage.matrix.json"
       ],
-      "note": "Worktree dirty/untracked product increments remain Community-owned candidates. Dirty state does not authorize deletion and is not treated as completed rewrite. Migrate-out vault_kms_network paths were executed under freeze authority in .1.2."
+      "note": "All managed-app/00os/docs landing paths under includedRoots are now ownership.winwincode. c622e0c1 docs pages under jev-runtime-spec/ and winwincode-bd-tracks/ are outside includedRoots (out-of-scope support/docs roots) and are recorded in currentHead.excludedTrackedPathPolicy."
     },
     "communityPrunePermission": {
       "status": "community-owned-ready-for-1.1-freeze",
@@ -6808,7 +6845,7 @@
         "clean-checkout Community build/typecheck/test/product-release gates after an accepted commit"
       ],
       "pruneExecution": {
-        "status": "migrate-out-executed-community-surface-narrowed-protocol-scope-keys-retained-localdefault-identity",
+        "status": "migrate-out-executed-community-surface-narrowed-protocol-scope-keys-retained-localdefault-identity-clean-checkout-reaudit-metadata-lockstep",
         "bead": "winwincode-community.1.2",
         "worktreeBranch": "agent/priority-20260919",
         "authority": "user-decision-2026-09-19-community-first + freeze community-owned-ready-for-1.1-freeze",
@@ -7005,36 +7042,13 @@
         "cleanCheckoutReadiness": {
           "requiresCommitForAcPass": true,
           "acRequirement": "winwincode-community.1.2 acceptance criterion requires clean-checkout Community build/test/boundary/product-release checks. A dirty worktree cannot honestly satisfy that criterion.",
-          "policyThisPass": "Default no-commit. Prepare exact community-owned path list + verification script run plan. Leave winwincode-community.1.2 IN_PROGRESS until a later accepted commit runs the clean-checkout gates.",
+          "policyThisPass": "Metadata lockstep applied in dedicated worktree community-clean-20260920 on accepted head c622e0c1. Default no commit/push. Gates 02/03 + local community tests re-run on this worktree. Release-artifact 4-platform remains CI ship gate — not faked locally.",
           "communityOwnedCommitPathList": [
-            "crates/winwincode-control-plane/src/vault_kms_network.rs",
-            "crates/winwincode-control-plane/tests/vault_kms_network.rs",
-            "crates/winwincode-control-plane/src/lib.rs",
-            "crates/winwincode-audit/README.md",
-            "crates/winwincode-audit/src/lib.rs",
-            "crates/winwincode-storage/src/lib.rs",
-            "crates/winwincode-server/src/password_hash.rs",
-            "apps/client/src/application.ts",
-            "apps/client/src/navigation-capability.ts",
-            "apps/client/src/core/connection-state.ts",
-            "schema/winwincode/v1/domain.schema.json",
-            "schema/winwincode/v1/README.md",
-            "schema/winwincode/v1/control-plane-http.schema.json",
-            "schema/winwincode/v1/openapi.generated.json",
-            "schema/winwincode/v1/schema-collection.generated.json",
-            "crates/winwincode-domain/src/generated.rs",
-            "crates/winwincode-api/src/generated.rs",
-            "apps/client/src/generated/contracts.ts",
-            "apps/client/src/generated/control-plane-client.ts",
-            "docs/accessibility-audit.md",
-            "docs/contracts/control-plane-api-coverage.matrix.json",
             "docs/decisions/0031-repository-split.inventory.json",
-            "tests/repository-split-metadata.test.mjs",
-            "scripts/check-no-absolute-paths.mjs",
-            "Cargo.toml",
-            "Cargo.lock"
+            "scripts/verify-repository-split-metadata.mjs",
+            "tests/repository-split-metadata.test.mjs"
           ],
-          "comingleRisk": "Several paths are also dirty from concurrent general-8/9 server/device/worker work in the same worktree (generated contracts, control-plane lib.rs, Cargo.toml/lock, schema http/openapi). A path-scoped commit of this list still carries any concurrent edits that landed in those files. Preferred close path: wait until concurrent control-plane/server/device work settles, then commit the accepted Community tree and run clean-checkout from that commit.",
+          "comingleRisk": "Only the three split-metadata allowlist files are dirty on top of accepted head c622e0c1. Product tree outside allowlist matches audited baseline.",
           "preferredIsolationOption": "After user-accepted commit SHA C: git worktree add /tmp/winwincode-community-clean C --detach && corepack pnpm install --frozen-lockfile && run verificationScriptRunPlan in that worktree. Do not claim clean-checkout from a dirty sibling worktree.",
           "fallbackNoCommitOption": "If user still prefers no-commit, run as much of verificationScriptRunPlan as possible in the priority worktree, record gate evidence, and keep winwincode-community.1.2 open with remainingGate=clean-checkout-on-accepted-commit.",
           "verificationScriptRunPlan": [
@@ -7058,11 +7072,26 @@
             "bash -lc 'cargo test -p winwincode-storage --test user_accounts -p winwincode-domain --lib --locked --offline'",
             "node scripts/verify-release-artifacts.mjs --expected-commit <accepted-commit> --source-date-epoch <epoch> --evidence <evidence-dir> --output <report-path>"
           ],
-          "remainingGate": "clean-checkout-on-accepted-commit",
+          "remainingGate": "commit-split-metadata-then-fresh-clean-checkout-reenable-gates-02-03",
           "notClaimed": [
-            "false clean-checkout pass on dirty worktree",
-            "Community product release artifact verification without a commit",
+            "false clean-checkout pass on uncommitted metadata",
+            "Community product release artifact verification without CI 4-platform evidence",
             "type-level removal of OrganizationId/OrganizationScope"
+          ],
+          "reAuditDate": "2026-09-20",
+          "acceptedCommunityHead": "c622e0c185288395fa82db17287c0995ed6f64d4",
+          "acceptedCommunityTree": "0b35596548ada043ff517ea9848a843d1a5f8271",
+          "ownershipLockstepPathsAdded": [
+            "apps/client/src/public-redaction.ts",
+            "crates/winwincode-client-port/src/managed_app.rs",
+            "crates/winwincode-codex/src/diagnostic_artifact_outbox.rs",
+            "crates/winwincode-control-plane/src/page_annotation_delivery.rs",
+            "crates/winwincode-device-client/src/managed_app.rs",
+            "crates/winwincode-storage/src/managed_app.rs",
+            "scripts/device-production-fixture.mjs",
+            "scripts/run-00os-device-live-vertical.mjs",
+            "tests/api-production-device-prerequisites.test.mjs",
+            "tests/projects-page-ui.test.mjs"
           ]
         }
       },
