@@ -1,0 +1,754 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>WinWinCode Jev Context &amp; Memory Runtime</title>
+    <meta
+      name="description"
+      content="WinWinCode 长程 Agent 的 Context & Memory Runtime 架构规格：Deterministic GC、Jev 决策模型、Memory、Materializer、Thread Rotation。"
+    />
+    <link rel="stylesheet" href="css/styles.css" />
+  </head>
+  <body>
+    <a class="skip" href="#main">跳到正文</a>
+    <header class="top">
+      <div class="top-brand">WinWinCode · Spec</div>
+      <p class="top-title">Jev Context &amp; Memory Runtime</p>
+      <div class="top-meta">Beads: community.4 · Phase 1 BD-01–04</div>
+    </header>
+
+    <div class="shell">
+      <nav class="nav" aria-label="规格目录">
+        <p class="nav-label">导航</p>
+        <ul class="nav-list">
+          <li><a href="#thesis">核心分层</a></li>
+          <li><a href="#pipeline">总体架构</a></li>
+          <li><a href="#decisions">决策与阈值</a></li>
+          <li><a href="#epics">EPIC 地图</a></li>
+          <li><a href="#gc">确定性 GC</a></li>
+          <li><a href="#memory">Memory</a></li>
+          <li><a href="#materializer">Materializer</a></li>
+          <li><a href="#rotation">Thread Rotation</a></li>
+          <li><a href="#compact">Compact 协同</a></li>
+          <li><a href="#safety">安全与恢复</a></li>
+          <li><a href="#benchmark">Benchmark</a></li>
+          <li><a href="#phases">阶段规划</a></li>
+          <li><a href="#batches">第一批 BD</a></li>
+          <li><a href="#config">配置示意</a></li>
+          <li><a href="#dod">Definition of Done</a></li>
+        </ul>
+      </nav>
+
+      <main class="main" id="main">
+        <header class="hero" id="top">
+          <p class="eyebrow">Context &amp; Memory Runtime · Architecture Spec</p>
+          <h1>长程 Agent 只关注现在重要的信息，但不真正遗忘已验证的事实</h1>
+          <p class="lede">
+            Jev 不是「又一个 compaction 插件」。它是 WinWinCode 独立的
+            Context &amp; Memory Runtime：Deterministic GC + Jev
+            <strong>决策模型</strong> + Working/Long-term Memory + Context
+            Materializer + Provider Policy + Thread Rotation。Compact 只回答「窗口快满了怎么办」。
+          </p>
+
+          <div class="thesis" id="thesis">
+            <div class="thesis-item">
+              <strong>Canonical State</strong>
+              系统事实（Conversation ≠ Task State）
+            </div>
+            <div class="thesis-item">
+              <strong>Memory</strong>
+              可检索历史知识（Context ≠ Memory）
+            </div>
+            <div class="thesis-item">
+              <strong>Context</strong>
+              当前模型工作集
+            </div>
+            <div class="thesis-item">
+              <strong>Thread</strong>
+              可替换计算载体（≠ Task lifetime）
+            </div>
+          </div>
+
+          <div class="pipeline" id="pipeline" aria-label="总体架构管线">
+            <svg viewBox="0 0 720 340" xmlns="http://www.w3.org/2000/svg" role="img">
+              <title>Jev Runtime 管线</title>
+              <defs>
+                <marker id="ah" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+                  <path d="M0,0 L6,3 L0,6 Z" fill="#2a322e" />
+                </marker>
+              </defs>
+              <rect width="720" height="340" fill="#f2efe6" />
+              <text x="24" y="28" font-family="ui-monospace,monospace" font-size="11" fill="#5c665e">EVENT STREAM</text>
+              <rect x="24" y="40" width="200" height="36" fill="#121614" rx="3" />
+              <text x="124" y="62" text-anchor="middle" fill="#c6f24a" font-family="system-ui,sans-serif" font-size="13">Event Stream</text>
+
+              <line x1="124" y1="76" x2="124" y2="96" stroke="#2a322e" stroke-width="1" marker-end="url(#ah)" />
+              <rect x="24" y="96" width="200" height="36" fill="#fffef9" stroke="#c4bfb0" rx="3" />
+              <text x="124" y="118" text-anchor="middle" fill="#121614" font-family="system-ui,sans-serif" font-size="13">Deterministic GC</text>
+
+              <line x1="124" y1="132" x2="124" y2="152" stroke="#2a322e" stroke-width="1" marker-end="url(#ah)" />
+              <rect x="24" y="152" width="200" height="44" fill="#c6f24a" rx="3" />
+              <text x="124" y="172" text-anchor="middle" fill="#121614" font-family="system-ui,sans-serif" font-size="14" font-weight="600">Jev Runtime</text>
+              <text x="124" y="188" text-anchor="middle" fill="#2a322e" font-family="ui-monospace,monospace" font-size="10">decision model</text>
+
+              <line x1="224" y1="174" x2="280" y2="80" stroke="#2a322e" stroke-width="1" marker-end="url(#ah)" />
+              <line x1="224" y1="174" x2="280" y2="174" stroke="#2a322e" stroke-width="1" marker-end="url(#ah)" />
+              <line x1="224" y1="174" x2="280" y2="250" stroke="#2a322e" stroke-width="1" marker-end="url(#ah)" />
+
+              <rect x="280" y="56" width="150" height="48" fill="#fffef9" stroke="#2f6fed" rx="3" />
+              <text x="355" y="76" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12" fill="#121614">Context Decision</text>
+              <text x="355" y="92" text-anchor="middle" font-family="ui-monospace,monospace" font-size="10" fill="#5c665e">KEEP/TRUNCATE…</text>
+
+              <rect x="280" y="150" width="150" height="48" fill="#fffef9" stroke="#b8860b" rx="3" />
+              <text x="355" y="170" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12" fill="#121614">Memory Decision</text>
+              <text x="355" y="186" text-anchor="middle" font-family="ui-monospace,monospace" font-size="10" fill="#5c665e">working / long</text>
+
+              <rect x="280" y="226" width="150" height="48" fill="#e6e2d6" stroke="#c4bfb0" rx="3" />
+              <text x="355" y="254" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12" fill="#5c665e">Ignore</text>
+
+              <line x1="430" y1="80" x2="470" y2="120" stroke="#2a322e" stroke-width="1" marker-end="url(#ah)" />
+              <line x1="430" y1="174" x2="470" y2="130" stroke="#2a322e" stroke-width="1" marker-end="url(#ah)" />
+
+              <rect x="470" y="100" width="220" height="44" fill="#121614" rx="3" />
+              <text x="580" y="118" text-anchor="middle" fill="#c6f24a" font-family="system-ui,sans-serif" font-size="13">Context Materializer</text>
+              <text x="580" y="134" text-anchor="middle" fill="#a8b0a8" font-family="ui-monospace,monospace" font-size="10">provider-aware policy</text>
+
+              <line x1="580" y1="144" x2="580" y2="168" stroke="#2a322e" stroke-width="1" marker-end="url(#ah)" />
+              <rect x="470" y="168" width="220" height="40" fill="#fffef9" stroke="#c4bfb0" rx="3" />
+              <text x="580" y="192" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12" fill="#121614">Coding Agent · Astra/Sol/Opus/GLM…</text>
+
+              <line x1="580" y1="208" x2="580" y2="228" stroke="#2a322e" stroke-width="1" marker-end="url(#ah)" />
+              <rect x="470" y="228" width="220" height="36" fill="#e6e2d6" stroke="#c4bfb0" rx="3" />
+              <text x="580" y="250" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12" fill="#121614">Thread Rotation → Bootstrap</text>
+
+              <text x="24" y="320" font-family="ui-monospace,monospace" font-size="11" fill="#5c665e">
+                Fail-open · Jev 故障不得停 Worker · Critical Recall ≥ 99%
+              </text>
+            </svg>
+
+            <div class="threshold-bar" aria-label="占用阈值">
+              <div class="t-row">
+                <span class="t-label">50–60%</span>
+                <div class="t-track"><div class="t-fill" style="width: 55%"></div></div>
+                <span class="t-label">启动 Jev GC · 关闭默认 compact</span>
+              </div>
+              <div class="t-row">
+                <span class="t-label">70–75%</span>
+                <div class="t-track"><div class="t-fill" style="width: 72%"></div></div>
+                <span class="t-label">aggressive GC</span>
+              </div>
+              <div class="t-row">
+                <span class="t-label">80–85%</span>
+                <div class="t-track"><div class="t-fill hot" style="width: 82%"></div></div>
+                <span class="t-label">thread rotation（轮转上下文）</span>
+              </div>
+              <div class="t-row">
+                <span class="t-label">+16K–32K</span>
+                <div class="t-track"><div class="t-fill" style="width: 40%"></div></div>
+                <span class="t-label">token 增长唤醒 Background Jev</span>
+              </div>
+            </div>
+          </div>
+        </header>
+
+        <section id="decisions">
+          <div class="section-head">
+            <p class="sec-id">JEV DECISIONS</p>
+            <h2>Jev 模型做什么、不做什么</h2>
+          </div>
+          <div class="prose">
+            <p>
+              Jev 是<strong>专门做决策的模型</strong>（如 OpenJev NLI：premise + hypothesis →
+              entailment / contradiction / neutral）。业务层不得绑死某一家 Provider。Jev
+              不改验证结论、不绕过 Controller、不杀 Worker。
+            </p>
+          </div>
+          <div class="actions" aria-label="决策动作">
+            <span class="chip pin">PIN 钉住不可回收</span>
+            <span class="chip keep">KEEP 完整保留</span>
+            <span class="chip trunc">TRUNCATE compact 主路径</span>
+            <span class="chip drop">DROP 丢弃</span>
+            <span class="chip arch">ARCHIVE 归档</span>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>模式</th>
+                <th>行为</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>token compact 默认</code></td>
+                <td><strong>默认开启</strong>——常规路径上的压缩</td>
+              </tr>
+              <tr>
+                <td>Jev GC 启动（50–60%）</td>
+                <td><strong>关闭默认 compact</strong>，改由 Jev 模型决策回收</td>
+              </tr>
+              <tr>
+                <td>压力回落后</td>
+                <td>恢复默认 compact（实现时写清恢复条件）</td>
+              </tr>
+              <tr>
+                <td>低置信度</td>
+                <td>默认 <strong>KEEP</strong>，绝不默认 DROP</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="epics">
+          <div class="section-head">
+            <p class="sec-id">EPIC MAP · JEV-01 … JEV-18</p>
+            <h2>规格全景（可筛选）</h2>
+          </div>
+          <div class="filter-bar" id="epic-filter" role="group" aria-label="按泳道筛选">
+            <button type="button" data-filter="all" aria-pressed="true">全部</button>
+            <button type="button" data-filter="runtime" aria-pressed="false">Runtime</button>
+            <button type="button" data-filter="decision" aria-pressed="false">Decision</button>
+            <button type="button" data-filter="gc" aria-pressed="false">GC / Context</button>
+            <button type="button" data-filter="memory" aria-pressed="false">Memory</button>
+            <button type="button" data-filter="ops" aria-pressed="false">Rotation / Policy / Obs</button>
+            <button type="button" data-filter="quality" aria-pressed="false">Safety / Bench / Data</button>
+          </div>
+
+          <div class="grid" id="epic-grid">
+            <article class="card" data-epic-card data-lane="runtime">
+              <span class="tag signal">JEV-01</span>
+              <h3>Jev Runtime 抽象层</h3>
+              <p>统一 <code>JevProvider</code>：evaluate / batch / health / capabilities。Local OpenJev、Remote API、Mock、未来模型可替换。</p>
+              <ul>
+                <li>JEV-001 Interface</li>
+                <li>JEV-002 OpenJev Adapter（hypothesis scoring）</li>
+                <li>JEV-003 Remote + fallback / skip</li>
+              </ul>
+            </article>
+
+            <article class="card" data-epic-card data-lane="decision">
+              <span class="tag signal">JEV-02</span>
+              <h3>Jev Decision Engine</h3>
+              <p>NLI 概率 + 系统 policy → 决策。不让模型吐分类字符串。</p>
+              <ul>
+                <li>Context Retention PIN/KEEP/TRUNCATE/DROP/ARCHIVE</li>
+                <li>Memory Write / Importance / Supersede / Rerank</li>
+              </ul>
+            </article>
+
+            <article class="card" data-epic-card data-lane="gc">
+              <span class="tag signal">JEV-03</span>
+              <h3>Deterministic Context GC</h3>
+              <p>确定能删的不浪费 Jev：tool result 分类生命周期、文件去重、shell/test/grep 规则。</p>
+            </article>
+
+            <article class="card" data-epic-card data-lane="memory">
+              <span class="tag signal">JEV-04 / 05</span>
+              <h3>Working &amp; Long-term Memory</h3>
+              <p>独立于 Conversation 的 Working Memory schema；provenance、confidence、pinning；episodic/semantic、versioning、memory GC。</p>
+            </article>
+
+            <article class="card" data-epic-card data-lane="gc">
+              <span class="tag signal">JEV-06</span>
+              <h3>Context Materializer</h3>
+              <p>Jev 只判断，模型最终看到什么由 Materializer 决定：budget、P0–P4 优先级、关键字段 verbatim 保留。</p>
+            </article>
+
+            <article class="card" data-epic-card data-lane="ops">
+              <span class="tag signal">JEV-07</span>
+              <h3>Provider-aware Policy</h3>
+              <p>不同模型不共用同一阈值：capability profile、动态 GC、cache-aware（分类可频繁、mutation 必须低频）。</p>
+            </article>
+
+            <article class="card" data-epic-card data-lane="ops">
+              <span class="tag signal">JEV-08</span>
+              <h3>Thread Rotation</h3>
+              <p>Task lifetime ≠ Conversation lifetime。Generation 模型、事务性切换、bootstrap 10K–30K、失败保留旧 thread。</p>
+            </article>
+
+            <article class="card" data-epic-card data-lane="ops">
+              <span class="tag signal">JEV-09</span>
+              <h3>Auto Compact 协同</h3>
+              <p>不删除原生 compact。模式 native / jev / hybrid / disabled；Jev-first：先 GC，回到安全区则 skip native compact。</p>
+            </article>
+
+            <article class="card" data-epic-card data-lane="quality">
+              <span class="tag drop">JEV-10</span>
+              <h3>Benchmark 系统</h3>
+              <p>Session Replay + 指标 + 成本模型 + 24h soak。拒绝「感觉 token 好像少了」。</p>
+            </article>
+
+            <article class="card" data-epic-card data-lane="ops">
+              <span class="tag signal">JEV-11 / 12</span>
+              <h3>Observability / UI</h3>
+              <p>Jev Trace、Context/Memory Timeline、Token Saving Dashboard；Session 页 Context 占用与 Inspector。</p>
+            </article>
+
+            <article class="card" data-epic-card data-lane="quality">
+              <span class="tag drop">JEV-13</span>
+              <h3>Safety &amp; Failure Recovery</h3>
+              <p>Fail-open、低置信 KEEP、Critical 永不删、GC/Rotation 前 snapshot、rollback 旧 Generation。</p>
+            </article>
+
+            <article class="card" data-epic-card data-lane="runtime">
+              <span class="tag">JEV-14 / 15</span>
+              <h3>本地推理与数据集</h3>
+              <p>CUDA/MPS/CPU、量化决策精度、Warm Pool 禁止每次 load 4B；真实 session 标注后再考虑 WinWinCode-Jev 微调。</p>
+            </article>
+
+            <article class="card" data-epic-card data-lane="ops">
+              <span class="tag">JEV-16 / 17</span>
+              <h3>配置与 Feature Flags</h3>
+              <p><code>contextRuntime</code> yaml；独立开关 jev.contextGc / memoryWrite / rotation / nativeCompactInterception 便于 A/B。</p>
+            </article>
+
+            <article class="card" data-epic-card data-lane="quality">
+              <span class="tag">JEV-18</span>
+              <h3>测试矩阵</h3>
+              <p>Unit / Integration / Failure（timeout、crash、OOM、rotation 失败）/ Regression：被 DROP 内容不得导致任务失败。</p>
+            </article>
+          </div>
+          <p class="empty-note" id="epic-empty">当前筛选下没有 EPIC。</p>
+        </section>
+
+        <section id="gc">
+          <div class="section-head">
+            <p class="sec-id">JEV-03 · DETERMINISTIC</p>
+            <h2>确定性 Tool Context GC</h2>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>类型</th>
+                <th>确定性规则</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>file_read</td>
+                <td>v1 在 v2 之后默认失效；保留 latest snapshot + 必要 diff</td>
+              </tr>
+              <tr>
+                <td>shell</td>
+                <td>删除重复 pwd / ls / git status / package listing</td>
+              </tr>
+              <tr>
+                <td>test</td>
+                <td>保留最新失败、最新成功、关键 regression；旧失败 → archive</td>
+              </tr>
+              <tr>
+                <td>search / grep</td>
+                <td>被新结果覆盖 → archive/drop；保留后续决策引用的 evidence</td>
+              </tr>
+              <tr>
+                <td>其余 tool 类型</td>
+                <td>shell / write / build / lint / git / browser / mcp / agent 各自策略</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="memory">
+          <div class="section-head">
+            <p class="sec-id">JEV-04 / 05 · MEMORY</p>
+            <h2>Working Memory 与长期记忆</h2>
+          </div>
+          <div class="grid">
+            <article class="card">
+              <span class="tag">Schema</span>
+              <h3>Working Memory 字段</h3>
+              <p>
+                <code>task</code> <code>goal</code> <code>acceptanceCriteria</code>
+                <code>constraints</code> <code>decisions</code> <code>currentPlan</code>
+                <code>currentState</code> <code>modifiedFiles</code> <code>activeErrors</code>
+                <code>verifiedFacts</code> <code>failedAttempts</code> <code>pendingWork</code>
+                <code>openQuestions</code> <code>activeRisks</code>
+              </p>
+            </article>
+            <article class="card">
+              <span class="tag">Provenance</span>
+              <h3>可追溯</h3>
+              <p>
+                来源：conversation / tool / file / test / verifier / user / system / agent；
+                记录 event id、thread id、workrun id、timestamp。禁止无来源「AI 记忆」。
+              </p>
+            </article>
+            <article class="card">
+              <span class="tag">Confidence</span>
+              <h3>置信分级</h3>
+              <p>
+                USER_ASSERTED · SYSTEM_VERIFIED · TOOL_OBSERVED · AGENT_INFERRED · UNKNOWN。
+                系统验证优先于模型推测。
+              </p>
+            </article>
+            <article class="card">
+              <span class="tag drop">Supersede</span>
+              <h3>不物理删除</h3>
+              <p>
+                B supersedes A 时写
+                <code>{ status: "superseded", supersededBy: "memory-b" }</code>，
+                保留决策演化。
+              </p>
+            </article>
+          </div>
+        </section>
+
+        <section id="materializer">
+          <div class="section-head">
+            <p class="sec-id">JEV-06 · MATERIALIZE</p>
+            <h2>Context Budget 与优先级</h2>
+          </div>
+          <pre><code>contextBudget:
+  system: 5%
+  task: 10%
+  pinnedMemory: 10%
+  workingMemory: 15%
+  recentHistory: 30%
+  retrievedEvidence: 20%
+  buffer: 10%</code></pre>
+          <table>
+            <thead>
+              <tr>
+                <th>优先级</th>
+                <th>内容</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>P0</td>
+                <td>System · User Constraint · Acceptance Criteria</td>
+              </tr>
+              <tr>
+                <td>P1</td>
+                <td>Current Goal / Plan / Failure · Latest Verification</td>
+              </tr>
+              <tr>
+                <td>P2</td>
+                <td>Relevant Memory · Recent Tool Result</td>
+              </tr>
+              <tr>
+                <td>P3</td>
+                <td>Historical Evidence</td>
+              </tr>
+              <tr>
+                <td>P4</td>
+                <td>Old Logs（超限先删）</td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="gate">
+            <strong>Verbatim 禁止 summary：</strong>
+            exact error、文件路径、行号、测试名、CLI 命令、API response、关键用户原话、验收标准。
+          </div>
+        </section>
+
+        <section id="rotation">
+          <div class="section-head">
+            <p class="sec-id">JEV-08 · ROTATION</p>
+            <h2>Thread Rotation（80–85%）</h2>
+          </div>
+          <div class="prose">
+            <p>
+              Task 拥有多个 Thread Generation。触发：context 阈值、阶段边界、质量下降、
+              provider 限额、手动。新 Thread bootstrap 目标
+              <strong>10K–30K</strong>，而不是把 Jev KEEP 的几十万 token 全塞回去。
+            </p>
+          </div>
+          <pre><code>FREEZE → Snapshot → Build Bootstrap → Validate
+→ Create New Thread → Inject → Verify State
+→ Switch Active Thread → UNFREEZE
+# 任一步失败：old thread remains active</code></pre>
+          <div class="gate">
+            <strong>Worker 独立性：</strong>
+            Rotation 不得杀死 Worker / Sub-Agent，不得丢掉 Tool Job、Approval、WorkRun，不得改 Git Worktree 或 Task 状态。
+          </div>
+        </section>
+
+        <section id="compact">
+          <div class="section-head">
+            <p class="sec-id">JEV-09 · COMPACT</p>
+            <h2>与原生 Auto Compact 协同</h2>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>模式</th>
+                <th>含义</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>native</td>
+                <td>仅原生 compact</td>
+              </tr>
+              <tr>
+                <td>jev</td>
+                <td>Jev 接管（GC 启动时关默认 compact）</td>
+              </tr>
+              <tr>
+                <td>hybrid</td>
+                <td>Jev-first：Deterministic → Jev → 重算；安全区内 skip native</td>
+              </tr>
+              <tr>
+                <td>disabled</td>
+                <td>关闭（仅测试/对照）</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="safety">
+          <div class="section-head">
+            <p class="sec-id">JEV-13 · SAFETY</p>
+            <h2>Fail-open 与保护项</h2>
+          </div>
+          <div class="grid">
+            <article class="card">
+              <h3>Fail-open</h3>
+              <p>Jev 不可用 → Coding Agent <strong>继续运行</strong>；禁止 Worker failed。</p>
+            </article>
+            <article class="card">
+              <h3>Low confidence</h3>
+              <p><code>confidence &lt; threshold</code> → 默认 <strong>KEEP</strong>。</p>
+            </article>
+            <article class="card">
+              <h3>永不自动删除</h3>
+              <p>
+                user constraint、acceptance criteria、system instruction、active blocker、
+                latest verification、pending approval。
+              </p>
+            </article>
+            <article class="card">
+              <h3>Snapshot / Rollback</h3>
+              <p>GC/Rotation 前 snapshot；bootstrap 失败立即切回旧 Generation。</p>
+            </article>
+          </div>
+        </section>
+
+        <section id="benchmark">
+          <div class="section-head">
+            <p class="sec-id">JEV-10 · GATE</p>
+            <h2>Benchmark 与 Phase 1 门槛</h2>
+          </div>
+          <p class="prose" style="margin: 0 0 0.75rem">
+            对比：baseline vs jev vs jev+memory vs jev+memory+rotation。24h 级 soak 才算长程验证。
+          </p>
+          <table>
+            <thead>
+              <tr>
+                <th>指标</th>
+                <th>Phase 1 目标</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>主模型 billed input</td>
+                <td>↓ ≥ 15%</td>
+              </tr>
+              <tr>
+                <td>重复 Tool Calls</td>
+                <td>↓ ≥ 15%</td>
+              </tr>
+              <tr>
+                <td>Jev 额外成本</td>
+                <td>≤ 主模型节省的 10%</td>
+              </tr>
+              <tr>
+                <td>Task Success / Verification</td>
+                <td>不得低于 baseline</td>
+              </tr>
+              <tr>
+                <td>Critical Context Recall</td>
+                <td><strong>≥ 99%</strong>（应 KEEP 被 DROP ≤ 1%）</td>
+              </tr>
+              <tr>
+                <td>Memory-related Regression</td>
+                <td>&lt; 2%</td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="gate">
+            第一批必须先回答：<em>OpenJev 对真实 Coding Agent Context 的 KEEP/DROP 准确率够不够。</em>
+            垃圾误 KEEP 可接受；应保留却被 DROP 危险。系统天然<strong>宁愿多留，不要错删</strong>。
+          </div>
+        </section>
+
+        <section id="phases">
+          <div class="section-head">
+            <p class="sec-id">ROADMAP</p>
+            <h2>开发阶段</h2>
+          </div>
+          <div class="phase-rail">
+            <div class="phase">
+              <div class="phase-n">Phase 1</div>
+              <div>
+                <h3>PoC</h3>
+                <p>证明 OpenJev 能可靠判断 Tool Result relevance。JEV-001/002/010/020–024/090–091。</p>
+              </div>
+            </div>
+            <div class="phase">
+              <div class="phase-n">Phase 2</div>
+              <div>
+                <h3>Context GC MVP</h3>
+                <p>Det GC + Jev GC + Materializer + Trace + Flag。<strong>暂不做 Memory</strong>。</p>
+              </div>
+            </div>
+            <div class="phase">
+              <div class="phase-n">Phase 3</div>
+              <div>
+                <h3>Memory MVP</h3>
+                <p>Working Memory、Write、Supersede、Rerank、Memory GC。</p>
+              </div>
+            </div>
+            <div class="phase">
+              <div class="phase-n">Phase 4</div>
+              <div>
+                <h3>Thread Rotation</h3>
+                <p>Task lifetime ≠ Conversation lifetime——24h+ 长程关键。</p>
+              </div>
+            </div>
+            <div class="phase">
+              <div class="phase-n">Phase 5</div>
+              <div>
+                <h3>Provider-aware</h3>
+                <p>Astra/Sol/Fable/Opus/GLM/Kimi/Qwen 按 cache/长度/定价/compact 动态策略。</p>
+              </div>
+            </div>
+            <div class="phase">
+              <div class="phase-n">Phase 6</div>
+              <div>
+                <h3>24h 验证</h3>
+                <p>Baseline vs Jev GC vs +Memory vs +Rotation；禁止用 20 分钟任务证明「24h 优化成功」。</p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="batches">
+          <div class="section-head">
+            <p class="sec-id">BEADS · FIRST BATCH</p>
+            <h2>第一批开工任务（已建）</h2>
+          </div>
+          <div class="batch">
+            <div class="batch-tier">
+              <h3>第一批 · 并行可开</h3>
+              <p>Beads epic：<code>winwincode-community.4</code> [JEV] Context &amp; Memory Runtime</p>
+              <div class="bd-list">
+                <div class="bd">
+                  <strong>community.4.1 · BD-01</strong>
+                  OpenJev Runtime Adapter
+                </div>
+                <div class="bd">
+                  <strong>community.4.2 · BD-02</strong>
+                  Jev Decision Engine
+                </div>
+                <div class="bd">
+                  <strong>community.4.3 · BD-03</strong>
+                  Deterministic Tool Context GC
+                </div>
+                <div class="bd">
+                  <strong>community.4.4 · BD-04</strong>
+                  Session Replay Benchmark Harness
+                </div>
+              </div>
+              <div class="gate">
+                完成后必须回答：OpenJev KEEP/DROP 准确率是否够用（Critical Recall ≥ 99%）。
+              </div>
+            </div>
+            <div class="batch-tier">
+              <h3>第二批 · Phase 1 数据成立后</h3>
+              <div class="bd-list">
+                <div class="bd"><strong>BD-05</strong>Context Materializer</div>
+                <div class="bd"><strong>BD-06</strong>Working Memory</div>
+                <div class="bd"><strong>BD-07</strong>Memory Write / Supersede</div>
+                <div class="bd"><strong>BD-08</strong>Memory Retrieval Reranker</div>
+                <div class="bd"><strong>BD-09</strong>Jev Trace</div>
+              </div>
+            </div>
+            <div class="batch-tier">
+              <h3>第三批</h3>
+              <div class="bd-list">
+                <div class="bd"><strong>BD-10</strong>Thread Rotation</div>
+                <div class="bd"><strong>BD-11</strong>Provider-aware Policy</div>
+                <div class="bd"><strong>BD-12</strong>Native Compact Integration</div>
+                <div class="bd"><strong>BD-13</strong>Context / Memory UI</div>
+                <div class="bd"><strong>BD-14</strong>24h Soak Benchmark</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="config">
+          <div class="section-head">
+            <p class="sec-id">JEV-16 · CONFIG</p>
+            <h2>配置示意</h2>
+          </div>
+          <pre><code>contextRuntime:
+  enabled: true
+  jev:
+    provider: openjev
+    model:
+      id: AlexWortega/openjev
+      device: auto
+    batchSize: 16
+  gc:
+    enabled: true
+    observeEveryTokens: 24000
+    lowConfidenceAction: keep
+  memory:
+    enabled: true
+    workingMemory: true
+    episodicMemory: true
+    semanticMemory: true
+  rotation:
+    enabled: true
+    bootstrapMaxTokens: 24000
+  compact:
+    mode: hybrid   # 默认 token compact 开启；Jev GC 时关闭默认 compact</code></pre>
+          <div class="prose" style="margin-top: 0.75rem">
+            <p>
+              Feature flags（独立开关便于 A/B）：
+              <code>jev.contextGc</code> ·
+              <code>jev.memoryWrite</code> ·
+              <code>jev.memoryRerank</code> ·
+              <code>jev.memoryGc</code> ·
+              <code>jev.rotation</code> ·
+              <code>jev.nativeCompactInterception</code>
+            </p>
+          </div>
+        </section>
+
+        <section id="dod">
+          <div class="section-head">
+            <p class="sec-id">DEFINITION OF DONE</p>
+            <h2>不能以「已经接入 Jev」收工</h2>
+          </div>
+          <ul class="dod">
+            <li>OpenJev 本地运行</li>
+            <li>Remote Jev fallback</li>
+            <li>Context GC 工作</li>
+            <li>Memory 分类 / 生命周期工作</li>
+            <li>Memory Retrieval 工作</li>
+            <li>Thread Rotation 不丢 Task State</li>
+            <li>Provider-aware policy 工作</li>
+            <li>Jev 故障不影响 Worker</li>
+            <li>所有 Decision 可审计</li>
+            <li>24h Coding Session 成功完成</li>
+            <li>Critical Context Recall ≥ 99%</li>
+            <li>Task Success 不低于 baseline</li>
+            <li>billed prompt token 至少下降 15%</li>
+            <li>重复 Tool Operation 至少下降 15%</li>
+            <li>无新增不可恢复状态错误</li>
+          </ul>
+        </section>
+
+        <footer class="footer">
+          WinWinCode · Jev Context &amp; Memory Runtime Spec · Beads
+          winwincode-community.4 · compact issue community.3 · 规格页 jev-runtime-spec/
+          · 未实现代码 · 默认不 commit 业务实现直至 claim 并验收
+        </footer>
+      </main>
+    </div>
+    <script src="js/main.js"></script>
+  </body>
+</html>

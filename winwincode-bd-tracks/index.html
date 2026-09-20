@@ -1,0 +1,617 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>WinWinCode BD 重整 · 三轨开发计划</title>
+    <meta
+      name="description"
+      content="WinWinCode Beads 三轨重整：P0 Community Release、P1 Jev Context Runtime、P1 Model Dynasty Fusion。"
+    />
+    <link rel="stylesheet" href="css/styles.css" />
+  </head>
+  <body>
+    <a class="skip" href="#main">跳到正文</a>
+    <header class="top">
+      <div class="top-brand">WinWinCode · BD Tracks</div>
+      <p class="top-title">BD 重整方案（已写入 Beads）</p>
+      <div class="top-meta">P0 Release · P1 Jev · P1 Fusion</div>
+    </header>
+
+    <div class="shell">
+      <nav class="nav" aria-label="目录">
+        <p class="nav-label">导航</p>
+        <ul class="nav-list">
+          <li><a href="#tracks">三轨总览</a></li>
+          <li><a href="#principle">总原则</a></li>
+          <li><a href="#release">P0 Community</a></li>
+          <li><a href="#jev">P1 Jev</a></li>
+          <li><a href="#fusion">P1 Fusion</a></li>
+          <li><a href="#bdmap">BD 地图</a></li>
+          <li><a href="#boundary">权责边界</a></li>
+          <li><a href="#e13">E13 冻结</a></li>
+          <li><a href="#worktrees">Worktree</a></li>
+          <li><a href="#gates">阶段门禁</a></li>
+          <li><a href="#brand">品牌定位</a></li>
+        </ul>
+      </nav>
+
+      <main class="main" id="main">
+        <header class="hero" id="tracks">
+          <p class="eyebrow">Repository Contract · Beads Restructure</p>
+          <h1>三条互不污染的主线</h1>
+          <p class="lede">
+            Community 先可发布；Jev 与 Fusion 可以并行研发，但不得成为 Community
+            首版发布阻塞项，也不得继续塞进 E13。
+          </p>
+
+          <div class="brand-line">
+            <strong>品牌语言</strong>
+            WinWinCode：统御模型王朝的长程 Agent Runtime。<br />
+            Jev 专职掌控记忆与上下文，Fusion 汇聚最高智能。
+          </div>
+
+          <div class="track-pipe" aria-label="三轨架构">
+            <svg viewBox="0 0 720 300" xmlns="http://www.w3.org/2000/svg" role="img">
+              <title>WinWinCode 三轨架构</title>
+              <defs>
+                <marker id="ah" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+                  <path d="M0,0 L6,3 L0,6 Z" fill="#1c2430" />
+                </marker>
+              </defs>
+              <rect width="720" height="300" fill="#f4f1ea" />
+              <rect x="250" y="16" width="220" height="40" fill="#101418" rx="3" />
+              <text x="360" y="41" text-anchor="middle" fill="#c6f24a" font-family="system-ui,sans-serif" font-size="14">WinWinCode Community</text>
+
+              <line x1="360" y1="56" x2="360" y2="78" stroke="#1c2430" stroke-width="1" marker-end="url(#ah)" />
+
+              <rect x="40" y="78" width="200" height="56" fill="#f8e4df" stroke="#d4543c" rx="3" />
+              <text x="140" y="100" text-anchor="middle" fill="#d4543c" font-family="ui-monospace,monospace" font-size="11">P0</text>
+              <text x="140" y="118" text-anchor="middle" fill="#101418" font-family="system-ui,sans-serif" font-size="13">Community Release</text>
+
+              <rect x="260" y="78" width="200" height="56" fill="#e3f3ec" stroke="#2f8f6b" rx="3" />
+              <text x="360" y="100" text-anchor="middle" fill="#2f8f6b" font-family="ui-monospace,monospace" font-size="11">P1</text>
+              <text x="360" y="118" text-anchor="middle" fill="#101418" font-family="system-ui,sans-serif" font-size="13">Context &amp; Memory · Jev</text>
+
+              <rect x="480" y="78" width="200" height="56" fill="#f7edd4" stroke="#b8860b" rx="3" />
+              <text x="580" y="100" text-anchor="middle" fill="#b8860b" font-family="ui-monospace,monospace" font-size="11">P1</text>
+              <text x="580" y="118" text-anchor="middle" fill="#101418" font-family="system-ui,sans-serif" font-size="13">Model Dynasty · Fusion</text>
+
+              <line x1="140" y1="134" x2="140" y2="160" stroke="#1c2430" stroke-width="1" marker-end="url(#ah)" />
+              <line x1="360" y1="134" x2="360" y2="160" stroke="#1c2430" stroke-width="1" marker-end="url(#ah)" />
+              <line x1="580" y1="134" x2="580" y2="160" stroke="#1c2430" stroke-width="1" marker-end="url(#ah)" />
+
+              <rect x="30" y="160" width="220" height="100" fill="#fffef9" stroke="#c8c2b0" rx="3" />
+              <text x="140" y="182" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12" fill="#101418">Repository Cleanup</text>
+              <text x="140" y="202" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12" fill="#101418">Provider Local Runtime</text>
+              <text x="140" y="222" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12" fill="#101418">E13 Release Gate</text>
+              <text x="140" y="244" text-anchor="middle" font-family="ui-monospace,monospace" font-size="10" fill="#5a635c">community · .1 · ge4r · qv1.3.3</text>
+
+              <rect x="250" y="160" width="220" height="100" fill="#fffef9" stroke="#c8c2b0" rx="3" />
+              <text x="360" y="182" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12" fill="#101418">Context GC / Memory</text>
+              <text x="360" y="202" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12" fill="#101418">Thread Lifecycle</text>
+              <text x="360" y="222" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12" fill="#101418">Materialization</text>
+              <text x="360" y="244" text-anchor="middle" font-family="ui-monospace,monospace" font-size="10" fill="#5a635c">community.4 [JEV-…]</text>
+
+              <rect x="470" y="160" width="220" height="100" fill="#fffef9" stroke="#c8c2b0" rx="3" />
+              <text x="580" y="182" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12" fill="#101418">Blind Panel</text>
+              <text x="580" y="202" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12" fill="#101418">Consensus / Conflict</text>
+              <text x="580" y="222" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12" fill="#101418">Evidence Adjudication</text>
+              <text x="580" y="244" text-anchor="middle" font-family="ui-monospace,monospace" font-size="10" fill="#5a635c">community.5 [FUSION-…]</text>
+
+              <text x="24" y="286" font-family="ui-monospace,monospace" font-size="11" fill="#5a635c">
+                Community 先可发布 · Jev/Fusion 并行 · 不阻塞 P0 · 不进 E13
+              </text>
+            </svg>
+          </div>
+        </header>
+
+        <section id="principle">
+          <div class="section-head">
+            <p class="sec-id">01 · PRINCIPLE</p>
+            <h2>总原则</h2>
+          </div>
+          <div class="principle">
+            <strong>Community 先可发布 → Jev / Fusion 可以并行研发 → 但不得成为 Community
+            首版发布阻塞项。</strong>
+            Jev 和 Fusion 也不得继续塞入 E13。
+          </div>
+        </section>
+
+        <section id="release">
+          <div class="section-head">
+            <p class="sec-id">02 · P0 RELEASE TRACK</p>
+            <h2>Community Release Track</h2>
+          </div>
+          <div class="grid">
+            <article class="card">
+              <span class="tag rel">P0 EPIC</span>
+              <h3><code>winwincode-community</code></h3>
+              <p>
+                [REPO-SPLIT-100] 仅保留：产品边界、独立构建、发布、基础运行能力。
+              </p>
+              <ul>
+                <li>禁止承载 Cloud / Enterprise</li>
+                <li>禁止承载 Fusion / Jev 实现细节</li>
+                <li>禁止承载独立 Core 发布</li>
+              </ul>
+            </article>
+            <article class="card">
+              <span class="tag p0">P0 CLEANUP</span>
+              <h3><code>community.1</code> Repository Cleanup</h3>
+              <p>
+                边界 + 删除许可 + 干净检出 + 构建/测试。Cloud/Enterprise
+                不再作为删除前置。
+              </p>
+              <ul>
+                <li>status: open</li>
+                <li>labels 含 <code>blocked</code></li>
+                <li>阻塞用依赖表达，不单靠 notes</li>
+              </ul>
+            </article>
+            <article class="card">
+              <span class="tag p1">P1 INFRA</span>
+              <h3><code>ge4r</code> Provider Local Runtime</h3>
+              <p>Web 配置入口 · Device Secret/Provider 真实出网 · Backend 脱敏投影。</p>
+              <ul>
+                <li>剩余：<code>00os</code> 生产验收迁移</li>
+                <li>Fusion 只消费，不写入本轨</li>
+              </ul>
+            </article>
+            <article class="card">
+              <span class="tag p0">P0 GATE</span>
+              <h3><code>qv1.3.3</code> E13</h3>
+              <p>Packaging / Release / E2E / Real Task Benchmark / Metrics / Ops Docs。</p>
+              <ul>
+                <li>边界已冻结</li>
+                <li>目标：尽快结束</li>
+              </ul>
+            </article>
+          </div>
+          <div class="gate rel-gate">
+            Release 完成条件只看 Community：边界、干净检出、构建测试、发布物与 E13
+            真实任务门。研究轨不挡发布。
+          </div>
+        </section>
+
+        <section id="jev">
+          <div class="section-head">
+            <p class="sec-id">03 · P1 LONG-HORIZON RUNTIME</p>
+            <h2>Jev · Context &amp; Memory Runtime</h2>
+          </div>
+          <div class="prose" style="max-width: 70ch">
+            <p>
+              Epic <code>winwincode-community.4</code>。Jev 负责高频、廉价、闭集判断：
+              Context relevance、Memory relevance、Retention、Supersede、Rerank、GC。
+            </p>
+            <p>
+              <strong>不负责：</strong>复杂推理、多模型共识、Fusion、模型裁决、代码执行。
+            </p>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>标题</th>
+                <th>状态</th>
+                <th>要点</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>community.4.1</code></td>
+                <td>[JEV-01] OpenJev Runtime Adapter</td>
+                <td>in progress</td>
+                <td>local/remote provider、interface、batch、fallback；故障不阻塞 Worker</td>
+              </tr>
+              <tr>
+                <td><code>community.4.2</code></td>
+                <td>[JEV-02] Decision Engine</td>
+                <td>closed</td>
+                <td>PIN/KEEP/TRUNCATE/DROP/ARCHIVE + Memory 决策；Critical Recall ≥ 99%</td>
+              </tr>
+              <tr>
+                <td><code>community.4.3</code></td>
+                <td>[JEV-03] Deterministic Context GC</td>
+                <td>closed</td>
+                <td>Rule first, Jev second</td>
+              </tr>
+              <tr>
+                <td><code>community.4.4</code></td>
+                <td>[JEV-04] Session Replay Benchmark</td>
+                <td>in progress</td>
+                <td>Baseline vs Det GC vs GC+Jev；Phase1 Gate</td>
+              </tr>
+              <tr>
+                <td><code>4.5–4.11</code></td>
+                <td>[JEV-05…11] Phase2</td>
+                <td>deferred</td>
+                <td>Materializer / Memory / Rerank / Rotation / Policy / Obs / 24h Soak</td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="gate">
+            <strong>JEV Phase1 Gate：</strong>
+            Critical Recall ≥ 99% 且 Task Success ≥ baseline，才能继续扩建 Jev Runtime。
+          </div>
+        </section>
+
+        <section id="fusion">
+          <div class="section-head">
+            <p class="sec-id">04 · P1 MODEL DYNASTY</p>
+            <h2>Fusion · Adaptive Intelligence Runtime</h2>
+          </div>
+          <div class="principle" style="border-left-color: var(--fusion); background: #faf4e4">
+            Fusion <strong>不是</strong>「Planner=A / Coder=B / Verifier=C」的 Multi-Agent
+            分角色。定义是：同一问题、同一 Canonical Context，多模型
+            <strong>Blind Independent Reasoning</strong>，再抽取 Consensus / Conflict /
+            Unique Insight，并基于证据裁决。
+          </div>
+          <pre><code>Canonical Question
+       │
+       ├──────────────┐
+       ▼              ▼
+     Model A        Model B
+       │              │
+       ├──── Model C ──┤
+       ▼              ▼
+ Independent Answers
+       ▼
+ Fusion Analyzer
+   Consensus / Conflict / Unique
+       ▼
+ Evidence Adjudicator
+       ▼
+ Canonical Decision</code></pre>
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>标题</th>
+                <th>状态</th>
+                <th>要点</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>community.5</code></td>
+                <td>[MODEL-DYNASTY] Adaptive Intelligence &amp; Fusion Runtime</td>
+                <td>open epic</td>
+                <td>P1；parent=community</td>
+              </tr>
+              <tr>
+                <td><code>5.1</code></td>
+                <td>[FUSION-01] Contract &amp; Blind Panel</td>
+                <td>open</td>
+                <td>≥3 Provider；上下文隔离；timeout 不拖死 panel</td>
+              </tr>
+              <tr>
+                <td><code>5.2</code></td>
+                <td>[FUSION-02] Parallel Model Runner</td>
+                <td>open</td>
+                <td>partial success；1 模型失败 ≠ Fusion 失败</td>
+              </tr>
+              <tr>
+                <td><code>5.3</code></td>
+                <td>[FUSION-03] Consensus/Conflict/Unique</td>
+                <td>open</td>
+                <td>禁简单投票；观点数量 ≠ 证据质量；可用 fixture</td>
+              </tr>
+              <tr>
+                <td><code>5.4</code></td>
+                <td>[FUSION-04] Evidence Adjudicator</td>
+                <td>open</td>
+                <td>Verified Fact &gt; Tool &gt; Consensus &gt; Single Claim</td>
+              </tr>
+              <tr>
+                <td><code>5.5–5.12</code></td>
+                <td>[FUSION-05…12] Phase2</td>
+                <td>deferred</td>
+                <td>Router / Escalation / Jev·Memory / Bootstrap / Cost / Bench / Obs</td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="gate fusion-gate">
+            <strong>Fusion Phase1 Gate：</strong>
+            Fusion quality &gt; best single-model baseline（architecture review / root
+            cause / plan review / verification dispute）。只有「回答更长」不算收益，不进默认路径。
+          </div>
+        </section>
+
+        <section id="bdmap">
+          <div class="section-head">
+            <p class="sec-id">05 · BEADS TREE</p>
+            <h2>BD 地图（可筛选）</h2>
+          </div>
+          <div class="filter-bar" id="bd-filter" role="group" aria-label="按轨道筛选">
+            <button type="button" data-filter="all" aria-pressed="true">全部</button>
+            <button type="button" data-filter="release" aria-pressed="false">P0 Release</button>
+            <button type="button" data-filter="jev" aria-pressed="false">Jev</button>
+            <button type="button" data-filter="fusion" aria-pressed="false">Fusion</button>
+          </div>
+          <div class="grid">
+            <article class="card" data-bd data-track="release">
+              <span class="tag rel">P0</span>
+              <h3>community</h3>
+              <p>Community Release epic</p>
+            </article>
+            <article class="card" data-bd data-track="release">
+              <span class="tag p0">P0</span>
+              <h3>community.1</h3>
+              <p>Repository Cleanup · blocked label</p>
+            </article>
+            <article class="card" data-bd data-track="release">
+              <span class="tag p0">P0</span>
+              <h3>community.1.2</h3>
+              <p>执行裁剪与干净检出（in progress）</p>
+            </article>
+            <article class="card" data-bd data-track="release">
+              <span class="tag p1">P1</span>
+              <h3>ge4r → 00os</h3>
+              <p>Provider Local Runtime + 生产验收迁移</p>
+            </article>
+            <article class="card" data-bd data-track="release">
+              <span class="tag p0">P0</span>
+              <h3>qv1.3.3 E13</h3>
+              <p>打包发布真实验收 · 边界冻结</p>
+            </article>
+            <article class="card" data-bd data-track="jev">
+              <span class="tag jev">P1</span>
+              <h3>community.4 [JEV]</h3>
+              <p>Context &amp; Memory Runtime epic</p>
+            </article>
+            <article class="card" data-bd data-track="jev">
+              <span class="tag jev">JEV-01</span>
+              <h3>community.4.1</h3>
+              <p>OpenJev Runtime Adapter</p>
+            </article>
+            <article class="card" data-bd data-track="jev">
+              <span class="tag jev">JEV-04</span>
+              <h3>community.4.4</h3>
+              <p>Session Replay Benchmark（Phase1 门禁）</p>
+            </article>
+            <article class="card" data-bd data-track="jev">
+              <span class="tag p2">deferred</span>
+              <h3>community.4.5–4.11</h3>
+              <p>Materializer → 24h Soak（Phase2）</p>
+            </article>
+            <article class="card" data-bd data-track="fusion">
+              <span class="tag fusion">P1</span>
+              <h3>community.5 [MODEL-DYNASTY]</h3>
+              <p>Adaptive Intelligence &amp; Fusion epic</p>
+            </article>
+            <article class="card" data-bd data-track="fusion">
+              <span class="tag fusion">FUSION-01–04</span>
+              <h3>community.5.1–5.4</h3>
+              <p>Blind Panel · Runner · Analyzer · Adjudicator</p>
+            </article>
+            <article class="card" data-bd data-track="fusion">
+              <span class="tag p2">deferred</span>
+              <h3>community.5.5–5.12</h3>
+              <p>Router / Escalation / Integration / Bench / Obs</p>
+            </article>
+          </div>
+          <p class="empty-note" id="bd-empty">当前筛选下没有任务。</p>
+        </section>
+
+        <section id="boundary">
+          <div class="section-head">
+            <p class="sec-id">06 · RESPONSIBILITY</p>
+            <h2>Jev / Single / Fusion / Verifier 权责</h2>
+          </div>
+          <div class="boundary">
+            <div class="bound" style="border-top: 3px solid var(--jev)">
+              <h3>Jev</h3>
+              <ul>
+                <li>高频、廉价、闭集判断</li>
+                <li>Context / Memory relevance</li>
+                <li>Retention · Supersede · Rerank · GC</li>
+              </ul>
+            </div>
+            <div class="bound" style="border-top: 3px solid var(--p1)">
+              <h3>Single Model</h3>
+              <ul>
+                <li>常规 coding</li>
+                <li>analysis / planning</li>
+                <li>tool use</li>
+              </ul>
+            </div>
+            <div class="bound" style="border-top: 3px solid var(--fusion)">
+              <h3>Fusion</h3>
+              <ul>
+                <li>低频、高价值、高不确定</li>
+                <li>architecture / root cause</li>
+                <li>critical plan / verification dispute</li>
+                <li>bootstrap validation / high-risk</li>
+              </ul>
+            </div>
+            <div class="bound" style="border-top: 3px solid var(--p0)">
+              <h3>Verifier</h3>
+              <ul>
+                <li>事实验收</li>
+                <li><strong>Fusion 无权覆盖</strong>真实测试结果</li>
+              </ul>
+            </div>
+          </div>
+        </section>
+
+        <section id="e13">
+          <div class="section-head">
+            <p class="sec-id">07 · E13 FREEZE</p>
+            <h2>E13 任务边界冻结</h2>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>只负责</th>
+                <th>禁止再合入</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>
+                  Packaging · Release · E2E · Real Task Benchmark · Product Metrics ·
+                  Operations Docs
+                </td>
+                <td>
+                  Jev · Fusion · Memory Runtime · Context Compiler · Model Router ·
+                  新 Agent Research
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="gate rel-gate">
+            E13 目标是尽快结束，不再成为任务黑洞。研究轨在
+            <code>community.4</code> / <code>community.5</code> 并行演进。
+          </div>
+        </section>
+
+        <section id="worktrees">
+          <div class="section-head">
+            <p class="sec-id">08 · PARALLEL</p>
+            <h2>当前建议 Worktree（最大并行）</h2>
+          </div>
+          <div class="wt-grid">
+            <div class="wt jev"><strong>WT-A · 4.1</strong>OpenJev Adapter</div>
+            <div class="wt jev"><strong>WT-B · 4.2</strong>Decision Engine（已关，可复用坑位）</div>
+            <div class="wt jev"><strong>WT-C · 4.3</strong>Deterministic GC（已关）</div>
+            <div class="wt jev"><strong>WT-D · 4.4</strong>Session Replay Benchmark</div>
+            <div class="wt fusion"><strong>WT-E · 5.1</strong>Fusion Contract</div>
+            <div class="wt fusion"><strong>WT-F · 5.2</strong>Parallel Model Runner</div>
+            <div class="wt fusion"><strong>WT-G · 5.3</strong>Fusion Analyzer（可用 fixture）</div>
+            <div class="wt fusion"><strong>WT-H · 5.4</strong>Evidence Adjudicator</div>
+          </div>
+          <div class="prose" style="margin-top: 0.75rem; max-width: 70ch">
+            <p>
+              不要一次开二十个。Fusion 的 5.3 / 5.4 可先用 fixture candidate，不必等真实
+              Runner 全完成。默认：改代码前确认是否新建隔离 worktree。
+            </p>
+          </div>
+        </section>
+
+        <section id="gates">
+          <div class="section-head">
+            <p class="sec-id">09 · PRIORITY &amp; GATES</p>
+            <h2>优先级与依赖门</h2>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>优先级</th>
+                <th>内容</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>P0</strong></td>
+                <td>Community Release（boundary / cleanup / ge4r / E13）</td>
+              </tr>
+              <tr>
+                <td><strong>P1</strong></td>
+                <td>Jev Runtime · Fusion Runtime（独立 worktree 演进）</td>
+              </tr>
+              <tr>
+                <td><strong>P2</strong></td>
+                <td>Jev/Fusion 高级优化（Router、24h Soak、Dynasty Obs 等）</td>
+              </tr>
+            </tbody>
+          </table>
+          <table>
+            <thead>
+              <tr>
+                <th>跨 Epic 依赖（第二批）</th>
+                <th>depends on</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>5.5 Intelligence Router</td>
+                <td>4.2 + 5.1–5.4</td>
+              </tr>
+              <tr>
+                <td>5.7 Fusion × Jev</td>
+                <td>4.2 + 4.4 + 5.4</td>
+              </tr>
+              <tr>
+                <td>5.8 Fusion Memory</td>
+                <td>4.6 + 5.4</td>
+              </tr>
+              <tr>
+                <td>5.9 Bootstrap Validation</td>
+                <td>4.8 + 5.4</td>
+              </tr>
+              <tr>
+                <td>5.10 Provider Policy</td>
+                <td>ge4r + 5.2</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="brand">
+          <div class="section-head">
+            <p class="sec-id">10 · POSITIONING</p>
+            <h2>最终 Model Dynasty 架构与定位</h2>
+          </div>
+          <pre><code>                    WinWinCode
+                         │
+                Intelligence Router
+                         │
+       ┌─────────────────┼──────────────────┐
+       ▼                 ▼                  ▼
+ Deterministic          Jev            Single Model
+                                              │
+                                      uncertainty/risk
+                                              ▼
+                                           Fusion
+                                              ▼
+                                    Canonical Decision
+                                              ▼
+                                    Worker → Executor → Verifier
+
+旁路：Event Stream → Context & Memory Runtime
+      (Det GC · Jev · Memory · Compiler · Rotation)</code></pre>
+          <div class="brand-line" style="margin-top: 1.25rem">
+            <strong>技术语言</strong>
+            Adaptive Long-Horizon Multi-Model Agent Runtime
+          </div>
+          <div class="prose" style="max-width: 68ch">
+            <p>
+              核心不是「支持很多模型」，而是 WinWinCode
+              决定：什么时候不需要模型、什么时候用 Jev、什么时候用单模型、什么时候召集整个
+              Fusion Council。
+            </p>
+            <p>
+              <strong>最终目标：</strong>不是寻找一个永远最强的模型，而是建立一个比任何单模型更会使用模型的
+              Runtime。
+            </p>
+          </div>
+
+          <h3 style="margin-top: 1.5rem; font-size: 1rem">Fusion Epic 最终 DoD（非第一批）</h3>
+          <ul class="dod">
+            <li>Blind Independent Panel</li>
+            <li>Consensus / Conflict / Unique 分析</li>
+            <li>Evidence-based adjudication</li>
+            <li>Partial provider failure 可恢复</li>
+            <li>Intelligence Router</li>
+            <li>Risk-aware escalation</li>
+            <li>Jev integration</li>
+            <li>Memory integration</li>
+            <li>Thread bootstrap review</li>
+            <li>Provider-aware cost policy</li>
+            <li>Fusion 全链路可审计</li>
+            <li>Fusion benchmark 优于 single-model baseline</li>
+            <li>不因 Fusion 引入新的 Canonical State 写权</li>
+          </ul>
+        </section>
+
+        <footer class="footer">
+          WinWinCode BD Tracks · 已写入 Beads（community / .1 / ge4r / qv1.3.3 / .4 JEV /
+          .5 MODEL-DYNASTY）· 规格页 winwincode-bd-tracks/ · 默认不自动 git push · bd dolt
+          同步需明确授权
+        </footer>
+      </main>
+    </div>
+    <script src="js/main.js"></script>
+  </body>
+</html>
