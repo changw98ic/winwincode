@@ -20,6 +20,10 @@ use winwincode_api::generated::{
     Actor, CommandName, DeliveryCreatePayload, DeliveryResolveAttentionPayload,
     DeliveryUpdateSpecPayload, Scope, WorkRunStartPayload,
 };
+use winwincode_client_port::managed_app::{
+    MANAGED_APP_RUN_CONFIG_SCHEMA_VERSION, MANAGED_APP_RUN_TEMPLATE_SCHEMA_VERSION, ManagedAppMode,
+    ManagedAppRunConfig, ManagedAppRunTemplate,
+};
 use winwincode_delivery::{
     application::{
         attention::{AttentionDecision, ResolveAttentionInput, resolve_attention},
@@ -62,7 +66,6 @@ const DEFAULT_MAX_RUNTIME_SECONDS: i64 = 3_600;
 const DEFAULT_MAX_ARTIFACT_BYTES: i64 = 1_073_741_824;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const CROCKFORD_BASE32: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-
 /// Exact local repository and tenant scope installed at process startup.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LocalDeliveryAdapterConfig {
@@ -175,6 +178,77 @@ impl DeviceDeliveryTarget {
 }
 
 impl LocalDeliveryAuthority {
+    fn managed_app_run_config(
+        &self,
+        device: &DeviceDeliveryTarget,
+        intent: &winwincode_delivery::application::workrun_execution::ExecutionIntent,
+        frozen_candidate_commit: Option<&str>,
+    ) -> Result<Option<ManagedAppRunConfig>, DeliveryAuthorityError> {
+        let Some(record) = self
+            .storage
+            .load_managed_app_run_template(&device.target.repository_binding_id)
+            .map_err(|error| DeliveryAuthorityError::new(error.to_string()))?
+        else {
+            return Ok(None);
+        };
+        let template: ManagedAppRunTemplate = serde_json::from_slice(&record.template_json)
+            .map_err(|error| DeliveryAuthorityError::new(error.to_string()))?;
+        if template.schema_version != MANAGED_APP_RUN_TEMPLATE_SCHEMA_VERSION {
+            return Err(DeliveryAuthorityError::new(
+                "managed-app template schema version is not supported",
+            ));
+        }
+        template
+            .validate()
+            .map_err(|_| DeliveryAuthorityError::new("managed-app template is invalid"))?;
+        if !is_managed_app_source_role(template.mode, &intent.role) {
+            return Ok(None);
+        }
+        let candidate_commit = match template.mode {
+            ManagedAppMode::Live => None,
+            ManagedAppMode::FrozenCandidate => {
+                // Writers and remediators have no frozen output at dispatch
+                // time. Their checkout is the base/source revision, so a
+                // managed app must wait for terminal candidate authority.
+                // The verifier is the single product-owned acceptance stage
+                // for the managed app. Reviewer and adversarial-verifier
+                // still read the same candidate, but must not create a second
+                // config for the same candidate/run projection.
+                Some(
+                    frozen_candidate_commit
+                        .ok_or_else(|| {
+                            DeliveryAuthorityError::new(
+                                "frozen managed app requires an exact candidate commit",
+                            )
+                        })?
+                        .to_owned(),
+                )
+            }
+        };
+        let config = ManagedAppRunConfig {
+            schema_version: MANAGED_APP_RUN_CONFIG_SCHEMA_VERSION.to_owned(),
+            run_id: intent.work_run_id.0.clone(),
+            repository_binding_id: device.target.repository_binding_id.clone(),
+            template_revision: u64::try_from(record.revision).map_err(|_| {
+                DeliveryAuthorityError::new("managed-app template revision is invalid")
+            })?,
+            attempt: u32::try_from(intent.attempt)
+                .map_err(|_| DeliveryAuthorityError::new("WorkRun attempt exceeds config range"))?,
+            mode: template.mode,
+            candidate_commit,
+            cwd: template.cwd,
+            argv: template.argv,
+            env: std::collections::BTreeMap::new(),
+            health_check: template.health_check,
+            listen_port: template.listen_port,
+            source_id: intent.execution_job_id.0.clone(),
+        };
+        config.validate().map_err(|_| {
+            DeliveryAuthorityError::new("managed-app template produced invalid config")
+        })?;
+        Ok(Some(config))
+    }
+
     fn device_target(
         &mut self,
         source: Option<&ProductSessionId>,
@@ -369,6 +443,10 @@ impl LocalDeliveryAuthority {
         }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Keep candidate checkout and managed-app dispatch authority together"
+    )]
     fn execution_config(
         &mut self,
         delivery: &Delivery,
@@ -397,7 +475,7 @@ impl LocalDeliveryAuthority {
             device.as_ref().map(|value| (&value.target, &value.model)),
         ))
         .map_err(|error| DeliveryAuthorityError::new(error.to_string()))?;
-        let (candidate_ref, checkout_revision) = match &transition.effect {
+        let (candidate_ref, checkout_revision, frozen_candidate_commit) = match &transition.effect {
             WorkRunStartEffect::Dispatch(intent)
                 if matches!(
                     intent.role.as_str(),
@@ -419,6 +497,7 @@ impl LocalDeliveryAuthority {
                 (
                     Some(candidate.candidate_ref().to_owned()),
                     candidate.candidate_commit_id().to_owned(),
+                    Some(candidate.candidate_commit_id().to_owned()),
                 )
             }
             WorkRunStartEffect::Dispatch(intent) if intent.role == "remediator" => {
@@ -433,9 +512,21 @@ impl LocalDeliveryAuthority {
                         .previous_candidate()
                         .candidate_commit_id()
                         .into(),
+                    Some(
+                        authorization
+                            .previous_candidate()
+                            .candidate_commit_id()
+                            .to_owned(),
+                    ),
                 )
             }
-            _ => (None, delivery.snapshot().spec.base_revision.clone()),
+            _ => (None, delivery.snapshot().spec.base_revision.clone(), None),
+        };
+        let managed_app_run_config = match device.as_ref() {
+            Some(device) => {
+                self.managed_app_run_config(device, intent, frozen_candidate_commit.as_deref())?
+            }
+            None => None,
         };
         let structured_read_only = match self.config.execution_mode {
             ExecutionMode::React | ExecutionMode::DelegatedPatchShadow => false,
@@ -464,6 +555,7 @@ impl LocalDeliveryAuthority {
                 max_artifact_bytes: self.config.max_artifact_bytes,
                 max_runtime_seconds: self.config.max_runtime_seconds,
             },
+            managed_app_run_config,
         }))
     }
 }
@@ -478,6 +570,13 @@ fn validate_dispatch_profile(profile: &str) -> Result<(), DeliveryAuthorityError
         Err(DeliveryAuthorityError::new(
             "Delivery dispatch profile is not canonical",
         ))
+    }
+}
+
+fn is_managed_app_source_role(mode: ManagedAppMode, role: &str) -> bool {
+    match mode {
+        ManagedAppMode::Live => role == "executor",
+        ManagedAppMode::FrozenCandidate => role == "verifier",
     }
 }
 
@@ -1189,7 +1288,9 @@ fn dispatch_error(error: &StorageError) -> DeliveryExecutionPortError {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_SAFE_INTEGER, bounded_authority_time};
+    use super::{
+        MAX_SAFE_INTEGER, ManagedAppMode, bounded_authority_time, is_managed_app_source_role,
+    };
 
     #[test]
     fn authority_clock_rejects_a_delivery_at_the_durable_limit() {
@@ -1198,6 +1299,35 @@ mod tests {
         assert_eq!(
             bounded_authority_time(100, Some(99)).expect("bounded authority time"),
             100
+        );
+    }
+
+    #[test]
+    fn delivery_roles_have_one_managed_app_source_per_mode() {
+        let roles = [
+            "executor",
+            "reviewer",
+            "verifier",
+            "adversarial-verifier",
+            "remediator",
+        ];
+        assert_eq!(
+            roles
+                .iter()
+                .filter(|role| is_managed_app_source_role(ManagedAppMode::Live, role))
+                .copied()
+                .collect::<Vec<_>>(),
+            vec!["executor"]
+        );
+        assert_eq!(
+            roles
+                .iter()
+                .filter(|role| {
+                    is_managed_app_source_role(ManagedAppMode::FrozenCandidate, role)
+                })
+                .copied()
+                .collect::<Vec<_>>(),
+            vec!["verifier"]
         );
     }
 }

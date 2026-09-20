@@ -199,6 +199,8 @@ export interface TaskRunIdentityFacts {
   readonly evidence: readonly TaskRunEvidenceItemFacts[]
   readonly candidate: TaskRunCandidateFacts | null
   readonly apply: TaskRunApplyFacts | null
+  /** Preview route anchor derived only after the canonical projection has a candidate. */
+  readonly previewHref: string | null
 }
 
 export type TaskRunZoneStatus = 'loading' | 'ready' | 'unavailable'
@@ -335,7 +337,10 @@ const WORK_RUN_STATE_TO_SESSION_STATE = Object.freeze({
   cancelled: 'stopped',
 })
 
-function identityFacts(projection: ControlPlaneRunIdentityProjection): TaskRunIdentityFacts {
+function identityFacts(
+  projection: ControlPlaneRunIdentityProjection,
+  previewHref: ((projection: ControlPlaneRunIdentityProjection) => string) | undefined,
+): TaskRunIdentityFacts {
   const workRun = projection.workRun
   const candidate = projection.candidate
   const state = WORK_RUN_STATE_TO_SESSION_STATE[workRun.state] ?? ('stopped' as ControlPlaneRunWorkerSessionState)
@@ -385,6 +390,7 @@ function identityFacts(projection: ControlPlaneRunIdentityProjection): TaskRunId
           branchName: candidate.branchName,
         }),
     apply: candidate === null ? null : applyFacts(candidate.history),
+    previewHref: candidate === null || previewHref === undefined ? null : previewHref(projection),
   })
 }
 
@@ -406,6 +412,7 @@ export function createTaskRunViewModel(options: {
   readonly clients: ClientsViewModel
   readonly repositories: RepositoriesViewModel
   readonly identity: ControlPlaneRunIdentityPort
+  readonly candidatePreviewHref?: (projection: ControlPlaneRunIdentityProjection) => string
 }): TaskRunViewModel {
   const clients = options.clients
   const repositories = options.repositories
@@ -497,7 +504,7 @@ export function createTaskRunViewModel(options: {
         await repositories.showDevice(projection.clientId)
       }
       if (closed || epoch !== identityEpoch) return
-      identity = identityFacts(projection)
+      identity = identityFacts(projection, options.candidatePreviewHref)
       identityStatus = 'ready'
     } catch {
       if (closed || epoch !== identityEpoch) return

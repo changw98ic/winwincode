@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Authenticated remote Worker connections over the canonical registry.
+//!
+//! Community product boundary: Worker connections serve the single local
+//! Owner. Organization-shaped scope keys in this module are protocol encodings
+//! for registry locality, not multi-tenant product administration.
 
 use std::fmt;
 

@@ -445,8 +445,42 @@ impl ControlPlane {
             return Ok(());
         }
         let delivery = load_current_delivery(self.storage_ref()?, delivery_id)?;
-        if delivery.revision() != terminal_revision {
+        if delivery.revision() < terminal_revision {
             return Ok(());
+        }
+        if delivery.revision() != terminal_revision {
+            // Exact revision equality is too strict when a durable candidate
+            // pin or projection commit lands after the WorkRun terminal
+            // revision. Proceed only when the completed WorkRun is still a
+            // successful terminal producer and no next-stage WorkRun is
+            // already active. The Controller receipt above still makes a
+            // duplicate dispatch a no-op.
+            let Some(completed) = delivery
+                .snapshot()
+                .work_run_aggregate
+                .runs
+                .iter()
+                .find(|run| run.execution_job_id == *completed_job_id)
+            else {
+                return Ok(());
+            };
+            if !matches!(
+                completed.state,
+                winwincode_domain::WorkRunState::CandidateReady
+                    | winwincode_domain::WorkRunState::Settled
+            ) {
+                return Ok(());
+            }
+            if delivery.snapshot().work_run_aggregate.runs.iter().any(|run| {
+                matches!(
+                    run.state,
+                    winwincode_domain::WorkRunState::Queued
+                        | winwincode_domain::WorkRunState::Leased
+                        | winwincode_domain::WorkRunState::Running
+                )
+            }) {
+                return Ok(());
+            }
         }
         let expected_revision = Revision(i64::try_from(delivery.revision()).map_err(|_| {
             DeliveryApplicationError::InvalidRequest(
@@ -712,11 +746,13 @@ impl ControlPlane {
                     config.clone(),
                 )
                 .map_err(DeliveryApplicationError::Execution)?;
+                let managed_app_run_config = config.managed_app_run_config.clone();
                 let pending = PendingDeliveryExecution::from_workrun(
                     command.request_id.clone(),
                     transition,
                     workrun_job,
-                );
+                )
+                .with_managed_app_run_config(managed_app_run_config);
                 let mut dispatcher = self.delivery_dispatcher.take().ok_or_else(|| {
                     DeliveryApplicationError::TrustedFactsUnavailable(
                         "Delivery execution dispatcher is not installed".to_owned(),

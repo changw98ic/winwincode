@@ -843,6 +843,19 @@ fn launch_body(client_id: &str, binding_id: &str) -> String {
     .to_string()
 }
 
+fn managed_app_query_body() -> String {
+    json!({
+        "schemaVersion": "winwincode/managed-app-run-v1",
+        "operation": "query",
+        "idempotencyKey": "idem_query_app",
+        "occupancyLeaseId": "ocl_A",
+        "occupancyFencingToken": 1,
+        "config": null,
+        "runId": "run_A",
+    })
+    .to_string()
+}
+
 /// Reads the durable launch grant audit actions of one grant, oldest first.
 fn audit_actions(data_directory: &Path, grant_id: &str) -> Vec<(String, Option<String>)> {
     let mut storage = SqliteStorage::open(data_directory).expect("storage");
@@ -894,6 +907,28 @@ async fn launch_routes_require_a_signed_in_session() {
         &plain_post(
             "/api/v1/sessions",
             &launch_body("927351842", "rbd_00000000000000000000000001"),
+        ),
+    )
+    .await;
+    assert_eq!(status_of(&response), "401", "{response}");
+
+    running.shutdown().await.expect("shutdown");
+    let _ = std::fs::remove_dir_all(&data_directory);
+    let _ = std::fs::remove_dir_all(&auth_directory);
+}
+
+#[tokio::test]
+async fn managed_app_route_requires_a_signed_in_session() {
+    let data_directory = test_directory("managed-app-auth");
+    let auth_directory = test_directory("managed-app-auth-sessions");
+    let running = start_server(&data_directory, &auth_directory).await;
+    let address = running.local_address();
+
+    let response = http_request(
+        address,
+        &plain_post(
+            "/api/v1/clients/927351842/managed-app",
+            &managed_app_query_body(),
         ),
     )
     .await;
@@ -1123,6 +1158,465 @@ async fn full_launch_chain_issues_consumes_and_is_idempotent_under_replays() {
         );
     }
 
+    responder.abort();
+    running.shutdown().await.expect("shutdown");
+    let _ = std::fs::remove_dir_all(&data_directory);
+    let _ = std::fs::remove_dir_all(&auth_directory);
+}
+
+/// Releases every active occupancy lease of a client through durable storage
+/// (simulates an occupancy rewrite after cancel_and_release / abnormal exit).
+fn release_all_occupancy(data_directory: &Path) {
+    let connection = rusqlite::Connection::open(data_directory.join("control-plane.sqlite3"))
+        .expect("open database");
+    connection
+        .execute(
+            "UPDATE client_occupancy_leases
+             SET state = 'released', release_reason = 'holder_released',
+                 revision = revision + 1
+             WHERE state IN ('reserving', 'occupied', 'draining', 'recovery_pending')",
+            [],
+        )
+        .expect("release occupancy leases");
+}
+
+/// Cancels the staged chat ProductSession through the durable service.
+fn cancel_staged_product_session(data_directory: &Path, user_id: &str, session: u64) {
+    use winwincode_control_plane::{CancelProductSessionCommand, ProductSessionCommandContext};
+    let mut storage = SqliteStorage::open(data_directory).expect("storage");
+    let public_scope = winwincode_storage::PublicEventScope::Repository {
+        organization_id: winwincode_domain::OrganizationId(
+            "org_00000000000000000000000001".to_owned(),
+        ),
+        workspace_id: winwincode_domain::WorkspaceId(
+            "wsp_00000000000000000000000001".to_owned(),
+        ),
+        project_id: winwincode_domain::ProjectId("prj_00000000000000000000000001".to_owned()),
+        repository_id: winwincode_domain::RepositoryId(
+            "rep_00000000000000000000000001".to_owned(),
+        ),
+    };
+    let scope_key = winwincode_storage::receipt_scope_key(&public_scope).expect("scope key");
+    let public_actor = winwincode_storage::PublicEventActor::User {
+        id: winwincode_domain::UserId(user_id.to_owned()),
+    };
+    let actor_key = winwincode_storage::receipt_actor_key(&public_actor).expect("actor key");
+    let request_id = winwincode_domain::RequestId(format!("req_{:026}", session + 900));
+    let context = ProductSessionCommandContext {
+        receipt_identity: winwincode_storage::ReceiptIdentity::new(
+            actor_key,
+            scope_key,
+            request_id,
+        )
+        .expect("receipt identity"),
+        expected_revision: 1,
+        event_id: winwincode_domain::ControlPlaneEventId(format!("evt_{:026}", session + 900)),
+        occurred_at: winwincode_domain::Instant("2026-09-04T12:05:00.000Z".to_owned()),
+        public_actor,
+        public_scope,
+    };
+    let cancel = CancelProductSessionCommand {
+        context,
+        product_session_id: winwincode_domain::ProductSessionId(format!("psn_{session:026}")),
+        actor: winwincode_session::AuthenticatedActor::User(winwincode_domain::UserId(
+            user_id.to_owned(),
+        )),
+        reason: "staged cancel for launch truthfulness".into(),
+    };
+    winwincode_control_plane::ProductSessionService::new(&mut storage)
+        .cancel_session(&cancel)
+        .expect("cancel staged ProductSession");
+}
+
+/// Binds a Device execution binding and opens a running Worker session slot
+/// so launch can prove a live worker.
+fn bind_live_device_worker(
+    data_directory: &Path,
+    grant: &winwincode_storage::WorkerLaunchGrantRecord,
+) {
+    use winwincode_control_plane::DeviceExecutionBindingService;
+    use winwincode_storage::DeviceExecutionBindingIssuance;
+    let mut storage = SqliteStorage::open(data_directory).expect("storage");
+    let now = winwincode_domain::Instant("2026-09-04T12:03:00.000Z".to_owned());
+    let command = DeviceExecutionBindingIssuance::try_new(
+        "deb_00000000000000000000000200",
+        "req_00000000000000000000000200",
+        &grant.worker_launch_grant_id,
+        &grant.client_node_id,
+        &grant.client_instance_id,
+        &grant.holder_user_id,
+        &grant.occupancy_lease_id,
+        grant.occupancy_fencing_token,
+        &grant.repository_binding_id,
+        &grant.worker_session_id,
+        grant.product_session_id.clone(),
+        None,
+    )
+    .expect("binding command");
+    DeviceExecutionBindingService::new(&mut storage)
+        .bind(&command, &now)
+        .expect("bind device worker");
+}
+
+/// Stages a terminal Worker-session slot as durable abnormal-exit evidence
+/// without walking the full admission/lease open path.
+fn mark_worker_slot_exited(
+    data_directory: &Path,
+    grant: &winwincode_storage::WorkerLaunchGrantRecord,
+) {
+    let connection = rusqlite::Connection::open(data_directory.join("control-plane.sqlite3"))
+        .expect("open database");
+    connection
+        .execute(
+            "INSERT OR REPLACE INTO worker_session_slots (
+                worker_session_id, codex_thread_id, job_id, worker_id, worker_instance_id,
+                lease_id, attempt, fencing_token, state, event_cursor,
+                memory_bytes, disk_bytes, process_slots, opened_at, updated_at,
+                cancellation_requested_at, terminal_at, revision
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, 'completed', 0,
+                       0, 0, 1, ?8, ?8, NULL, ?8, 2)",
+            rusqlite::params![
+                grant.worker_session_id,
+                "cdx_00000000000000000000000200",
+                "job_00000000000000000000000200",
+                grant.worker_id,
+                grant.worker_instance_id,
+                "lse_00000000000000000000000200",
+                "200",
+                "2026-09-04T12:04:00.000Z",
+            ],
+        )
+        .expect("stage terminal worker slot");
+}
+
+fn close_device_worker_slot(
+    data_directory: &Path,
+    grant: &winwincode_storage::WorkerLaunchGrantRecord,
+) {
+    mark_worker_slot_exited(data_directory, grant);
+}
+
+#[tokio::test]
+async fn live_worker_duplicate_start_maps_to_same_worker() {
+    let data_directory = test_directory("sessions-live-dup");
+    let auth_directory = test_directory("sessions-live-dup-sessions");
+    let running = start_server(&data_directory, &auth_directory).await;
+    let address = running.local_address();
+    let (cookie, user_id) = initialize_and_login_owner(address).await;
+    let (node, public_client_id, credential) =
+        enroll_online_device(address, &data_directory).await;
+    let code = publish_connect_code(&data_directory, &node, "77112233");
+    consume_code_as(&data_directory, &node, &code, &user_id);
+    let binding_id = stage_visible_binding(&data_directory, &node, &user_id);
+    stage_occupied_lease(&data_directory, &node, &user_id);
+    let responder = spawn_device_responder(
+        data_directory.clone(),
+        address,
+        node.clone(),
+        credential.clone(),
+        downlink_ack_cursor(&data_directory, &node),
+        next_client_sequence(&data_directory, &node),
+        LaunchVerdict::Accept,
+    );
+    let response = http_request(
+        address,
+        &cookie_post(
+            "/api/v1/sessions",
+            &launch_body(&public_client_id, &binding_id),
+            &cookie,
+        ),
+    )
+    .await;
+    assert_eq!(status_of(&response), "201", "{response}");
+    let first = response_body(&response);
+    let grant = launch_grant(
+        &data_directory,
+        first["workerLaunchGrantId"].as_str().expect("grant"),
+    );
+    // Device-bound under the current occupancy without a release report:
+    // duplicate start must keep mapping to the same worker.
+    bind_live_device_worker(&data_directory, &grant);
+
+    let repeated = http_request(
+        address,
+        &cookie_post(
+            "/api/v1/sessions",
+            &launch_body(&public_client_id, &binding_id),
+            &cookie,
+        ),
+    )
+    .await;
+    assert_eq!(status_of(&repeated), "201", "{repeated}");
+    let repeated_body = response_body(&repeated);
+    assert_eq!(
+        repeated_body["workerSessionId"],
+        first["workerSessionId"],
+        "duplicate start on a live worker maps to the same worker"
+    );
+    assert_eq!(
+        repeated_body["workerLaunchGrantId"],
+        first["workerLaunchGrantId"]
+    );
+    responder.abort();
+    running.shutdown().await.expect("shutdown");
+    let _ = std::fs::remove_dir_all(&data_directory);
+    let _ = std::fs::remove_dir_all(&auth_directory);
+}
+
+#[tokio::test]
+async fn exited_worker_reopen_returns_restart_evidence_not_fake_start() {
+    let data_directory = test_directory("sessions-exited-restart");
+    let auth_directory = test_directory("sessions-exited-restart-sessions");
+    let running = start_server(&data_directory, &auth_directory).await;
+    let address = running.local_address();
+    let (cookie, user_id) = initialize_and_login_owner(address).await;
+    let (node, public_client_id, credential) =
+        enroll_online_device(address, &data_directory).await;
+    let code = publish_connect_code(&data_directory, &node, "77223344");
+    consume_code_as(&data_directory, &node, &code, &user_id);
+    let binding_id = stage_visible_binding(&data_directory, &node, &user_id);
+    stage_occupied_lease(&data_directory, &node, &user_id);
+    let responder = spawn_device_responder(
+        data_directory.clone(),
+        address,
+        node.clone(),
+        credential.clone(),
+        downlink_ack_cursor(&data_directory, &node),
+        next_client_sequence(&data_directory, &node),
+        LaunchVerdict::Accept,
+    );
+    let response = http_request(
+        address,
+        &cookie_post(
+            "/api/v1/sessions",
+            &launch_body(&public_client_id, &binding_id),
+            &cookie,
+        ),
+    )
+    .await;
+    assert_eq!(status_of(&response), "201", "{response}");
+    let first = response_body(&response);
+    let grant = launch_grant(
+        &data_directory,
+        first["workerLaunchGrantId"].as_str().expect("grant"),
+    );
+    // Bind then stage a terminal slot without a device release report:
+    // abnormal exit under the *same* occupancy.
+    bind_live_device_worker(&data_directory, &grant);
+    mark_worker_slot_exited(&data_directory, &grant);
+
+    let reopened = http_request(
+        address,
+        &cookie_post(
+            "/api/v1/sessions",
+            &launch_body(&public_client_id, &binding_id),
+            &cookie,
+        ),
+    )
+    .await;
+    assert_eq!(status_of(&reopened), "201", "{reopened}");
+    let restarted = response_body(&reopened);
+    assert_ne!(
+        restarted["workerSessionId"],
+        first["workerSessionId"],
+        "restart-with-evidence must mint a new worker session, not fake-reuse the dead one"
+    );
+    assert_ne!(
+        restarted["workerLaunchGrantId"],
+        first["workerLaunchGrantId"]
+    );
+    let replacement = launch_grant(
+        &data_directory,
+        restarted["workerLaunchGrantId"].as_str().expect("new grant"),
+    );
+    assert_eq!(replacement.product_session_id, grant.product_session_id);
+    assert_eq!(replacement.state, WorkerLaunchGrantState::Consumed);
+    responder.abort();
+    running.shutdown().await.expect("shutdown");
+    let _ = std::fs::remove_dir_all(&data_directory);
+    let _ = std::fs::remove_dir_all(&auth_directory);
+}
+
+#[tokio::test]
+async fn cancelled_product_session_reopen_is_wrong_state_not_fake_start() {
+    let data_directory = test_directory("sessions-cancelled-reopen");
+    let auth_directory = test_directory("sessions-cancelled-reopen-sessions");
+    let running = start_server(&data_directory, &auth_directory).await;
+    let address = running.local_address();
+    let (cookie, user_id) = initialize_and_login_owner(address).await;
+    let (node, public_client_id, credential) =
+        enroll_online_device(address, &data_directory).await;
+    let code = publish_connect_code(&data_directory, &node, "77334455");
+    consume_code_as(&data_directory, &node, &code, &user_id);
+    let binding_id = stage_visible_binding(&data_directory, &node, &user_id);
+    stage_occupied_lease(&data_directory, &node, &user_id);
+    let responder = spawn_device_responder(
+        data_directory.clone(),
+        address,
+        node.clone(),
+        credential.clone(),
+        downlink_ack_cursor(&data_directory, &node),
+        next_client_sequence(&data_directory, &node),
+        LaunchVerdict::Accept,
+    );
+    let response = http_request(
+        address,
+        &cookie_post(
+            "/api/v1/sessions",
+            &launch_body(&public_client_id, &binding_id),
+            &cookie,
+        ),
+    )
+    .await;
+    assert_eq!(status_of(&response), "201", "{response}");
+    let first = response_body(&response);
+    cancel_staged_product_session(&data_directory, &user_id, 100);
+
+    let reopened = http_request(
+        address,
+        &cookie_post(
+            "/api/v1/sessions",
+            &launch_body(&public_client_id, &binding_id),
+            &cookie,
+        ),
+    )
+    .await;
+    assert_eq!(status_of(&reopened), "409", "{reopened}");
+    assert_eq!(
+        wire_code(&reopened),
+        "WRONG_STATE",
+        "cancelled sessions must not fake-start or claim the id is merely occupied"
+    );
+    // The prior grant remains the only grant; no fake replacement was issued.
+    let newest = {
+        let mut storage = SqliteStorage::open(&data_directory).expect("storage");
+        winwincode_control_plane::WorkerLaunchGrantService::new(&mut storage)
+            .newest_grant_for_product_session(
+                first["productSessionId"].as_str().expect("session id"),
+            )
+            .expect("newest grant")
+            .expect("grant exists")
+    };
+    assert_eq!(
+        newest.worker_launch_grant_id,
+        first["workerLaunchGrantId"],
+        "cancelled reopen does not issue a replacement grant"
+    );
+    responder.abort();
+    running.shutdown().await.expect("shutdown");
+    let _ = std::fs::remove_dir_all(&data_directory);
+    let _ = std::fs::remove_dir_all(&auth_directory);
+}
+
+#[tokio::test]
+async fn occupancy_rewrite_with_still_bound_worker_does_not_restart() {
+    let data_directory = test_directory("sessions-occupancy-rewrite");
+    let auth_directory = test_directory("sessions-occupancy-rewrite-sessions");
+    let running = start_server(&data_directory, &auth_directory).await;
+    let address = running.local_address();
+    let (cookie, user_id) = initialize_and_login_owner(address).await;
+    let (node, public_client_id, credential) =
+        enroll_online_device(address, &data_directory).await;
+    let code = publish_connect_code(&data_directory, &node, "77445566");
+    consume_code_as(&data_directory, &node, &code, &user_id);
+    let binding_id = stage_visible_binding(&data_directory, &node, &user_id);
+    stage_occupied_lease(&data_directory, &node, &user_id);
+    let responder = spawn_device_responder(
+        data_directory.clone(),
+        address,
+        node.clone(),
+        credential.clone(),
+        downlink_ack_cursor(&data_directory, &node),
+        next_client_sequence(&data_directory, &node),
+        LaunchVerdict::Accept,
+    );
+    let response = http_request(
+        address,
+        &cookie_post(
+            "/api/v1/sessions",
+            &launch_body(&public_client_id, &binding_id),
+            &cookie,
+        ),
+    )
+    .await;
+    assert_eq!(status_of(&response), "201", "{response}");
+    let first = response_body(&response);
+    let grant = launch_grant(
+        &data_directory,
+        first["workerLaunchGrantId"].as_str().expect("grant"),
+    );
+    // Worker still bound; occupancy is rewritten under the same user.
+    bind_live_device_worker(&data_directory, &grant);
+    release_all_occupancy(&data_directory);
+    stage_occupied_lease(&data_directory, &node, &user_id);
+
+    let reopened = http_request(
+        address,
+        &cookie_post(
+            "/api/v1/sessions",
+            &launch_body(&public_client_id, &binding_id),
+            &cookie,
+        ),
+    )
+    .await;
+    assert_eq!(status_of(&reopened), "409", "{reopened}");
+    assert_eq!(
+        wire_code(&reopened),
+        "WRONG_STATE",
+        "a still-bound prior worker must not restart under a rewritten occupancy"
+    );
+
+    // After the prior worker is proven released, the same reopen restarts
+    // with evidence under the new occupancy.
+    {
+        use winwincode_control_plane::DeviceExecutionBindingService;
+        use winwincode_storage::DeviceExecutionBindingRelease;
+        let mut storage = SqliteStorage::open(&data_directory).expect("storage");
+        let mut bindings = DeviceExecutionBindingService::new(&mut storage);
+        let snapshot = bindings
+            .snapshot(&grant.worker_session_id)
+            .expect("binding snapshot")
+            .expect("bound worker");
+        let release = DeviceExecutionBindingRelease::try_new(
+            &grant.worker_session_id,
+            "req_00000000000000000000000210",
+            snapshot.revision,
+            winwincode_domain::Instant("2026-09-04T12:06:00.000Z".to_owned()),
+        )
+        .expect("release command");
+        bindings
+            .release(
+                &release,
+                &winwincode_domain::Instant("2026-09-04T12:06:00.000Z".to_owned()),
+            )
+            .expect("release prior worker");
+    }
+    close_device_worker_slot(&data_directory, &grant);
+
+    let restarted = http_request(
+        address,
+        &cookie_post(
+            "/api/v1/sessions",
+            &launch_body(&public_client_id, &binding_id),
+            &cookie,
+        ),
+    )
+    .await;
+    assert_eq!(status_of(&restarted), "201", "{restarted}");
+    let restarted = response_body(&restarted);
+    assert_ne!(
+        restarted["workerSessionId"],
+        first["workerSessionId"],
+        "restart under the new occupancy mints a new worker"
+    );
+    let replacement = launch_grant(
+        &data_directory,
+        restarted["workerLaunchGrantId"].as_str().expect("new grant"),
+    );
+    assert_ne!(
+        replacement.occupancy_lease_id, grant.occupancy_lease_id,
+        "the replacement grant is stamped with the new occupancy lease"
+    );
     responder.abort();
     running.shutdown().await.expect("shutdown");
     let _ = std::fs::remove_dir_all(&data_directory);

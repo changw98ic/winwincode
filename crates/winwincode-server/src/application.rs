@@ -13,8 +13,9 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
     Actor, CommandCompletedResponse, CommandEnvelope, CommandRequest,
-    ControlPlaneWebSocketClientFrame, ErrorCode, QueryRequest, QueryResultResponse, Scope,
-    WorkRunCancelCommand, WorkRunStartCommand,
+    ControlPlaneWebSocketClientFrame, ErrorCode,
+    ManagedAppRunControlProjection as ApiManagedAppRunConfig, QueryRequest, QueryResultResponse,
+    Scope, WorkRunAggregateProjection, WorkRunCancelCommand, WorkRunStartCommand,
 };
 use winwincode_control_plane::credential_reference::{
     CredentialReferenceError, CredentialReferenceErrorKind, CredentialReferenceService,
@@ -28,8 +29,12 @@ use winwincode_control_plane::strongflow_projection::{
 use winwincode_control_plane::{
     ChatInteractionApiService, ChatInteractionServiceError, ChatInteractionServiceErrorCode,
     CollaborationClock, CollaborationClockError, CollaborationError, CollaborationErrorKind,
-    CollaborationService, ControlPlane, DeliveryApplicationError, DurableWorkerInteractionOutbound,
-    ModelRequestPoolConfig, ModelSettingsError, ModelSettingsErrorKind, ModelSettingsService,
+    CollaborationInboxAudience, CollaborationInboxCommandContext, CollaborationInboxErrorKind,
+    CollaborationInboxFilter, CollaborationInboxItemId, CollaborationInboxListRequest,
+    CollaborationInboxService, CollaborationService, ControlPlane, DeliveryApplicationError,
+    DurableWorkerInteractionOutbound, ModelRequestPoolConfig, ModelSettingsError,
+    ModelSettingsErrorKind, ModelSettingsService, PageAnnotationAction, PageAnnotationArtifactRef,
+    PageAnnotationCandidateIdentity, PageAnnotationCommand, PageAnnotationId, PageAnnotationTarget,
     ProductSessionApiClock, ProductSessionApiService, ProductSessionExecutionConfig,
     ProductSessionServiceError, ProductSessionServiceErrorCode, PublicationCommandError,
     QuickDeviceDispatchError, QuickDeviceDispatchErrorKind, RepositoryExecutionScheduler,
@@ -39,7 +44,8 @@ use winwincode_control_plane::{
     dispatch_work_run_to_device_worker, workrun_cancel_response,
 };
 use winwincode_domain::{
-    ControlPlaneWebSocketAuthorizationEpoch, Instant, ProductSessionId, Sha256Digest, WorkRunId,
+    ApprovalId, AttentionItemId, ControlPlaneWebSocketAuthorizationEpoch, Instant,
+    ProductSessionId, Sha256Digest, WorkRunId,
 };
 use winwincode_storage::{ProductStateStorage, RepositorySchedulerScope, SqliteStorage};
 
@@ -108,6 +114,7 @@ pub(crate) struct ApplicationState {
 
 struct ApplicationComposition {
     collaboration: Arc<CollaborationService>,
+    page_annotations: Option<Arc<Mutex<CollaborationInboxService>>>,
     execution_config: ProductSessionExecutionConfig,
 }
 
@@ -117,6 +124,7 @@ pub struct StandaloneControlPlaneApplication {
     hub: Arc<DurableEventHub>,
     clock: Arc<dyn StandaloneApplicationClock>,
     collaboration: Arc<CollaborationService>,
+    page_annotations: Option<Arc<Mutex<CollaborationInboxService>>>,
     runtime: Arc<dyn RuntimeHealthPort>,
 }
 
@@ -167,6 +175,37 @@ impl StandaloneControlPlaneApplication {
             Arc::new(SystemStandaloneApplicationClock),
             ApplicationComposition {
                 collaboration,
+                page_annotations: None,
+                execution_config,
+            },
+        )
+    }
+
+    /// Composes the optional durable page-annotation controller. The caller
+    /// must build it from the same product-state database and the canonical
+    /// responsibility authority.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a service connection not opened on the expected authoritative database path.
+    pub fn new_with_collaboration_and_page_annotations(
+        control_plane: ControlPlane,
+        storage: SqliteStorage,
+        worker_outbound: DurableWorkerInteractionOutbound,
+        hub: Arc<DurableEventHub>,
+        collaboration: Arc<CollaborationService>,
+        page_annotations: Arc<Mutex<CollaborationInboxService>>,
+        execution_config: ProductSessionExecutionConfig,
+    ) -> Result<Self, ApiError> {
+        Self::compose(
+            control_plane,
+            storage,
+            worker_outbound,
+            hub,
+            Arc::new(SystemStandaloneApplicationClock),
+            ApplicationComposition {
+                collaboration,
+                page_annotations: Some(page_annotations),
                 execution_config,
             },
         )
@@ -201,6 +240,7 @@ impl StandaloneControlPlaneApplication {
             clock,
             ApplicationComposition {
                 collaboration,
+                page_annotations: None,
                 execution_config,
             },
         )
@@ -231,6 +271,7 @@ impl StandaloneControlPlaneApplication {
             hub,
             clock,
             collaboration: composition.collaboration,
+            page_annotations: composition.page_annotations,
             runtime: Arc::new(HealthyRuntimeHealth),
         })
     }
@@ -505,7 +546,7 @@ impl StandaloneControlPlaneApplication {
                         .map_err(|_| service_unavailable())?
                 && let Some(repository) =
                     winwincode_control_plane::RepositoryBindingService::new(&mut state.storage)
-                        .visible_bindings(&user, &node.client_node_id)
+                        .visible_bindings(user, &node.client_node_id)
                         .map_err(|_| service_unavailable())?
                         .into_iter()
                         .find(|binding| {
@@ -806,6 +847,184 @@ impl StandaloneControlPlaneApplication {
         }
     }
 
+    fn page_annotation_submit(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        command: winwincode_api::generated::CollaborationPageAnnotationSubmitCommand,
+    ) -> Result<CommandCompletedResponse, ApiError> {
+        let Some(service) = &self.page_annotations else {
+            return Err(service_unavailable());
+        };
+        let scope = command.scope.clone();
+        let Some(viewer) = principal.actor_user_id() else {
+            return Err(ApiError::new(
+                403,
+                "PERMISSION_DENIED",
+                "page annotation requires a user actor",
+            ));
+        };
+        let item_id = page_annotation_item_id(&command.payload.item_id)?;
+        let candidate = page_annotation_candidate(&command.payload.candidate)?;
+        let target = serde_json::from_value::<PageAnnotationTarget>(
+            serde_json::to_value(&command.payload.target).map_err(|_| invalid_request())?,
+        )
+        .map_err(|_| invalid_request())?;
+        let screenshot_artifact = command
+            .payload
+            .screenshot_artifact
+            .map(serde_json::from_value::<PageAnnotationArtifactRef>)
+            .transpose()
+            .map_err(|_| invalid_request())?;
+        let context = CollaborationInboxCommandContext {
+            actor: command.actor.clone(),
+            authenticated_scopes: principal.authorized_scopes().to_vec(),
+            scope,
+            audience: CollaborationInboxAudience::Personal(viewer),
+            request_id: command.request_id.clone(),
+            expected_revision: revision_u64(&command.expected_revision)?,
+        };
+        let request = PageAnnotationCommand {
+            context,
+            item_id,
+            annotation_id: PageAnnotationId(command.payload.annotation_id),
+            action: PageAnnotationAction::Upsert {
+                candidate,
+                target,
+                body: command.payload.body,
+                screenshot_artifact,
+            },
+        };
+        let receipt = service
+            .lock()
+            .map_err(|_| service_unavailable())?
+            .apply_page_annotation(&request)
+            .map_err(|error| page_annotation_error(error.kind()))?;
+        let winwincode_control_plane::CollaborationInboxReceipt::PageAnnotation {
+            annotation,
+            catalog_revision,
+            replayed,
+        } = receipt
+        else {
+            return Err(ApiError::new(
+                500,
+                "INTERNAL_ERROR",
+                "page annotation receipt is invalid",
+            ));
+        };
+        let annotation = serde_json::from_value(
+            serde_json::to_value(&annotation).map_err(|_| invalid_request())?,
+        )
+        .map_err(|_| {
+            ApiError::new(
+                500,
+                "INTERNAL_ERROR",
+                "page annotation projection is invalid",
+            )
+        })?;
+        Ok(CommandCompletedResponse::CollaborationPageAnnotationSubmitCompletedResponse(
+            winwincode_api::generated::CollaborationPageAnnotationSubmitCompletedResponse {
+                command: winwincode_api::generated::CollaborationPageAnnotationSubmitCompletedResponseCommand::CollaborationPageAnnotationSubmit,
+                current_revision: winwincode_domain::Revision(i64::try_from(catalog_revision).map_err(|_| invalid_request())?),
+                outcome: winwincode_api::generated::CollaborationPageAnnotationSubmitCompletedResponseOutcome::Completed,
+                previous_revision: winwincode_domain::Revision(i64::try_from(catalog_revision.saturating_sub(1)).map_err(|_| invalid_request())?),
+                request_id: command.request_id,
+                result: winwincode_api::generated::CollaborationPageAnnotationSubmitResult {
+                    annotation,
+                    catalog_revision: i64::try_from(catalog_revision).map_err(|_| invalid_request())?,
+                    replayed,
+                },
+                schema_version: command.schema_version,
+            },
+        ))
+    }
+
+    fn page_annotation_list(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        query: winwincode_api::generated::CollaborationPageAnnotationListQuery,
+    ) -> Result<QueryResultResponse, ApiError> {
+        let Some(service) = &self.page_annotations else {
+            return Err(service_unavailable());
+        };
+        let scope = query.scope.clone();
+        let Some(viewer) = principal.actor_user_id() else {
+            return Err(ApiError::new(
+                403,
+                "PERMISSION_DENIED",
+                "page annotation requires a user actor",
+            ));
+        };
+        let limit = usize::try_from(query.page.limit)
+            .map_err(|_| invalid_request())?
+            .min(200);
+        let list_request = CollaborationInboxListRequest {
+            actor: query.actor.clone(),
+            authenticated_scopes: principal.authorized_scopes().to_vec(),
+            scope,
+            audience: CollaborationInboxAudience::Personal(viewer),
+            filter: CollaborationInboxFilter::default(),
+            limit,
+            cursor: query.page.cursor,
+        };
+        // The Inbox cursor pages source items before overlays are projected.
+        // Walk those pages until the requested Delivery page is full (or the
+        // stable Inbox cut ends), otherwise unrelated Deliveries can hide
+        // annotations beyond the first 200 source items.
+        let mut request = list_request;
+        let mut filtered = Vec::new();
+        let mut catalog_revision = None;
+        let (has_more, next_cursor) = loop {
+            let page = service
+                .lock()
+                .map_err(|_| service_unavailable())?
+                .list(&request)
+                .map_err(|error| page_annotation_error(error.kind()))?;
+            catalog_revision.get_or_insert(page.catalog_revision);
+            filtered.extend(
+                page.items
+                    .into_iter()
+                    .flat_map(|item| item.page_annotations)
+                    .filter(|annotation| {
+                        annotation.candidate.delivery_id == query.parameters.delivery_id
+                    })
+                    .map(|annotation| {
+                        serde_json::from_value(
+                            serde_json::to_value(&annotation).map_err(|_| invalid_request())?,
+                        )
+                        .map_err(|_| {
+                            ApiError::new(
+                                500,
+                                "INTERNAL_ERROR",
+                                "page annotation projection is invalid",
+                            )
+                        })
+                    })
+                    .collect::<Result<Vec<_>, ApiError>>()?,
+            );
+            if filtered.len() >= limit || !page.has_more {
+                break (page.has_more, page.next_cursor);
+            }
+            request.cursor = page.next_cursor;
+        };
+        let items = filtered;
+        Ok(QueryResultResponse::CollaborationPageAnnotationListResultResponse(
+            winwincode_api::generated::CollaborationPageAnnotationListResultResponse {
+                page: winwincode_api::generated::PageInfo {
+                    has_more,
+                    next_cursor,
+                },
+                query: winwincode_api::generated::CollaborationPageAnnotationListResultResponseQuery::CollaborationPageAnnotationList,
+                request_id: query.request_id,
+                result: winwincode_api::generated::CollaborationPageAnnotationPage {
+                    catalog_revision: winwincode_domain::Revision(i64::try_from(catalog_revision.unwrap_or_default()).map_err(|_| invalid_request())?),
+                    items,
+                    kind: winwincode_api::generated::CollaborationPageAnnotationPageKind::CollaborationPageAnnotationPage,
+                },
+                schema_version: query.schema_version,
+            },
+        ))
+    }
+
     fn collaboration_command(
         &self,
         principal: &AuthenticatedPrincipal,
@@ -815,14 +1034,18 @@ impl StandaloneControlPlaneApplication {
             CommandRequest::CollaborationNotificationAckCommand(command) => self
                 .collaboration
                 .notification_ack(principal.authorized_scopes(), &command)
-                .map(CommandCompletedResponse::CollaborationNotificationAckCompletedResponse),
+                .map(CommandCompletedResponse::CollaborationNotificationAckCompletedResponse)
+                .map_err(|error| collaboration_error(&error)),
             CommandRequest::CollaborationPresenceUpdateCommand(command) => self
                 .collaboration
                 .presence_update(principal.authorized_scopes(), &command)
-                .map(CommandCompletedResponse::CollaborationPresenceUpdateCompletedResponse),
-            _ => return Err(application_variant_mismatch()),
-        }
-        .map_err(|error| collaboration_error(&error))?;
+                .map(CommandCompletedResponse::CollaborationPresenceUpdateCompletedResponse)
+                .map_err(|error| collaboration_error(&error)),
+            CommandRequest::CollaborationPageAnnotationSubmitCommand(command) => {
+                self.page_annotation_submit(principal, command)
+            }
+            _ => Err(application_variant_mismatch()),
+        }?;
         let mut guard = self.state()?;
         let state = guard.as_mut().ok_or_else(service_unavailable)?;
         self.hub
@@ -840,18 +1063,23 @@ impl StandaloneControlPlaneApplication {
             QueryRequest::CollaborationActivityListQuery(query) => self
                 .collaboration
                 .activity_list(principal.authorized_scopes(), &query)
-                .map(QueryResultResponse::CollaborationActivityListResultResponse),
+                .map(QueryResultResponse::CollaborationActivityListResultResponse)
+                .map_err(|error| collaboration_error(&error)),
             QueryRequest::CollaborationNotificationListQuery(query) => self
                 .collaboration
                 .notification_list(principal.authorized_scopes(), &query)
-                .map(QueryResultResponse::CollaborationNotificationListResultResponse),
+                .map(QueryResultResponse::CollaborationNotificationListResultResponse)
+                .map_err(|error| collaboration_error(&error)),
             QueryRequest::CollaborationPresenceListQuery(query) => self
                 .collaboration
                 .presence_list(principal.authorized_scopes(), &query)
-                .map(QueryResultResponse::CollaborationPresenceListResultResponse),
-            _ => return Err(application_variant_mismatch()),
+                .map(QueryResultResponse::CollaborationPresenceListResultResponse)
+                .map_err(|error| collaboration_error(&error)),
+            QueryRequest::CollaborationPageAnnotationListQuery(query) => {
+                self.page_annotation_list(principal, query)
+            }
+            _ => Err(application_variant_mismatch()),
         }
-        .map_err(|error| collaboration_error(&error))
     }
 
     fn strongflow_query(&self, request: QueryRequest) -> Result<QueryResultResponse, ApiError> {
@@ -866,10 +1094,17 @@ impl StandaloneControlPlaneApplication {
                 .control_plane
                 .runtime_projection_get(&query)
                 .map_err(|error| strongflow_error(&error)),
-            QueryRequest::WorkRunGetQuery(query) => state
-                .control_plane
-                .workrun_get(&query)
-                .map_err(|error| strongflow_error(&error)),
+            QueryRequest::WorkRunGetQuery(query) => {
+                let mut response = state
+                    .control_plane
+                    .workrun_get(&query)
+                    .map_err(|error| strongflow_error(&error))?;
+                if let QueryResultResponse::WorkRunGetResultResponse(result) = &mut response {
+                    result.result.managed_app_run_configs =
+                        project_managed_app_run_configs(&state.storage, &result.result)?;
+                }
+                Ok(response)
+            }
             QueryRequest::CandidateFilesListQuery(query) => state
                 .control_plane
                 .candidate_files_list(&query)
@@ -877,6 +1112,10 @@ impl StandaloneControlPlaneApplication {
             QueryRequest::CandidateDiffGetQuery(query) => state
                 .control_plane
                 .candidate_diff_get(&query)
+                .map_err(|error| strongflow_error(&error)),
+            QueryRequest::CandidateFileContentGetQuery(query) => state
+                .control_plane
+                .candidate_file_content_get(&query)
                 .map_err(|error| strongflow_error(&error)),
             QueryRequest::CandidateHistoryListQuery(query) => state
                 .control_plane
@@ -902,6 +1141,61 @@ impl StandaloneControlPlaneApplication {
             _ => Err(application_variant_mismatch()),
         }
     }
+}
+
+fn project_managed_app_run_configs(
+    storage: &SqliteStorage,
+    aggregate: &WorkRunAggregateProjection,
+) -> Result<Vec<ApiManagedAppRunConfig>, ApiError> {
+    aggregate
+        .runs
+        .iter()
+        .filter_map(|run| {
+            let record = match storage.load_managed_app_run_config_for_work_run(&run.id.0) {
+                Ok(Some(record)) => record,
+                Ok(None) => return None,
+                Err(_) => return Some(Err(service_unavailable())),
+            };
+            if record.work_run_id != run.id.0
+                || record.attempt != run.attempt
+                || !aggregate.device_bindings.iter().any(|binding| {
+                    binding.work_run_id == run.id
+                        && binding.repository_binding_id.0 == record.repository_binding_id
+                })
+            {
+                return None;
+            }
+            let config: winwincode_client_port::managed_app::ManagedAppRunConfig =
+                match serde_json::from_slice(&record.config_json) {
+                    Ok(config) => config,
+                    Err(_) => return None,
+                };
+            if config.validate().is_err()
+                || config.run_id != run.id.0
+                || config.source_id != run.execution_job_id.0
+                || config.run_id != record.run_id
+                || config.repository_binding_id != record.repository_binding_id
+                || i64::from(config.attempt) != record.attempt
+            {
+                return None;
+            }
+            Some(Ok(ApiManagedAppRunConfig {
+                schema_version:
+                    winwincode_api::generated::ManagedAppRunControlProjectionSchemaVersion::WinwincodeManagedAppRunV1,
+                run_id: WorkRunId(config.run_id),
+                attempt: i64::from(config.attempt),
+                mode: match config.mode {
+                    winwincode_client_port::managed_app::ManagedAppMode::Live => {
+                        winwincode_api::generated::ManagedAppMode::Live
+                    }
+                    winwincode_client_port::managed_app::ManagedAppMode::FrozenCandidate => {
+                        winwincode_api::generated::ManagedAppMode::FrozenCandidate
+                    }
+                },
+                candidate_commit: config.candidate_commit,
+            }))
+        })
+        .collect()
 }
 
 impl TypedControlPlaneApiPort for StandaloneControlPlaneApplication {
@@ -1394,6 +1688,16 @@ fn delivery_application_error(error: &DeliveryApplicationError) -> ApiError {
             "TRUSTED_FACTS_UNAVAILABLE",
             "Delivery trusted facts are unavailable",
         ),
+        ErrorCode::DeviceSessionRequired => ApiError::new(
+            409,
+            "DEVICE_SESSION_REQUIRED",
+            "A Device worker session is required for this operation",
+        ),
+        ErrorCode::DeviceModelUnavailable => ApiError::new(
+            409,
+            "DEVICE_MODEL_UNAVAILABLE",
+            "The Device model provider is unavailable",
+        ),
         ErrorCode::ServiceUnavailable | ErrorCode::InternalError => service_unavailable(),
     }
 }
@@ -1444,6 +1748,16 @@ fn publication_error(error: &PublicationCommandError) -> ApiError {
             503,
             "TRUSTED_FACTS_UNAVAILABLE",
             "Publication trusted facts are unavailable",
+        ),
+        ErrorCode::DeviceSessionRequired => ApiError::new(
+            409,
+            "DEVICE_SESSION_REQUIRED",
+            "A Device worker session is required for this operation",
+        ),
+        ErrorCode::DeviceModelUnavailable => ApiError::new(
+            409,
+            "DEVICE_MODEL_UNAVAILABLE",
+            "The Device model provider is unavailable",
         ),
         ErrorCode::ServiceUnavailable | ErrorCode::InternalError => service_unavailable(),
     }
@@ -1603,6 +1917,89 @@ fn service_unavailable() -> ApiError {
         "SERVICE_UNAVAILABLE",
         "application service is temporarily unavailable",
     )
+}
+
+fn invalid_request() -> ApiError {
+    ApiError::new(400, "INVALID_REQUEST", "page annotation request is invalid")
+}
+
+fn revision_u64(revision: &winwincode_domain::Revision) -> Result<u64, ApiError> {
+    u64::try_from(revision.0).map_err(|_| invalid_request())
+}
+
+fn page_annotation_item_id(
+    item: &winwincode_api::generated::CollaborationPageAnnotationItemId,
+) -> Result<CollaborationInboxItemId, ApiError> {
+    match item.kind.as_str() {
+        "approval" => Ok(CollaborationInboxItemId::Approval(ApprovalId(
+            item.id.clone(),
+        ))),
+        "gate_attention" => Ok(CollaborationInboxItemId::GateAttention(AttentionItemId(
+            item.id.clone(),
+        ))),
+        "delivery_attention" => Ok(CollaborationInboxItemId::DeliveryAttention(
+            AttentionItemId(item.id.clone()),
+        )),
+        _ => Err(invalid_request()),
+    }
+}
+
+fn page_annotation_candidate(
+    candidate: &winwincode_api::generated::CollaborationPageAnnotationCandidate,
+) -> Result<PageAnnotationCandidateIdentity, ApiError> {
+    Ok(PageAnnotationCandidateIdentity {
+        delivery_id: candidate.delivery_id.clone(),
+        delivery_spec_id: candidate.delivery_spec_id.clone(),
+        delivery_spec_revision: u64::try_from(candidate.delivery_spec_revision)
+            .map_err(|_| invalid_request())?,
+        candidate_ref: candidate.candidate_ref.clone(),
+        candidate_digest: candidate.candidate_digest.clone(),
+        candidate_tree_id: candidate.candidate_tree_id.clone(),
+        diff_sha256: candidate.diff_sha256.clone(),
+        work_run_id: candidate.work_run_id.clone(),
+        attempt: u64::try_from(candidate.attempt).map_err(|_| invalid_request())?,
+        session_binding_id: candidate.session_binding_id.clone(),
+    })
+}
+
+fn page_annotation_error(kind: CollaborationInboxErrorKind) -> ApiError {
+    match kind {
+        CollaborationInboxErrorKind::Unauthorized => ApiError::new(
+            403,
+            "PERMISSION_DENIED",
+            "page annotation is not authorized",
+        ),
+        CollaborationInboxErrorKind::NotFound => ApiError::new(
+            404,
+            "RESOURCE_NOT_FOUND",
+            "page annotation source was not found",
+        ),
+        CollaborationInboxErrorKind::CandidateChanged => {
+            ApiError::new(409, "CANDIDATE_STALE", "page annotation candidate is stale")
+        }
+        CollaborationInboxErrorKind::RevisionConflict => {
+            ApiError::new(409, "REVISION_CONFLICT", "page annotation revision changed")
+        }
+        CollaborationInboxErrorKind::RequestConflict => ApiError::new(
+            409,
+            "IDEMPOTENCY_CONFLICT",
+            "page annotation request conflicts",
+        ),
+        CollaborationInboxErrorKind::WrongState => ApiError::new(
+            409,
+            "WRONG_STATE",
+            "page annotation source is no longer active",
+        ),
+        CollaborationInboxErrorKind::Invalid | CollaborationInboxErrorKind::Corrupt => {
+            invalid_request()
+        }
+        CollaborationInboxErrorKind::CursorExpired => {
+            ApiError::new(409, "READ_CURSOR_EXPIRED", "page annotation cursor expired")
+        }
+        CollaborationInboxErrorKind::AuthorityUnavailable
+        | CollaborationInboxErrorKind::SourceUnavailable
+        | CollaborationInboxErrorKind::Storage => service_unavailable(),
+    }
 }
 
 fn application_configuration_invalid() -> ApiError {

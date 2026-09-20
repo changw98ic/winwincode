@@ -4,6 +4,7 @@ import type {
   ClarificationState,
   ClarificationViewModel,
 } from './decision-clarification-view-model.js'
+import { redactPublicText } from './public-redaction.js'
 
 export interface DecisionClarificationPageOptions {
   readonly root: HTMLElement
@@ -24,6 +25,12 @@ function element<K extends keyof HTMLElementTagNameMap>(
   const node = document.createElement(tag)
   node.className = className
   return node
+}
+
+function publicText(value: string | null, fallback: string): string {
+  if (value === null) return fallback
+  const redacted = redactPublicText(value)
+  return /\[(?:INTERNAL ID|CANDIDATE|SOURCE REF)\]/u.test(redacted) ? fallback : redacted
 }
 
 const FIELD_OPTIONS = Object.freeze([
@@ -123,7 +130,7 @@ export function mountDecisionClarificationPage(
 
   function renderCriteria(state: ClarificationState): void {
     criteria.replaceChildren()
-    for (const criterion of state.criteria) {
+    for (const [index, criterion] of state.criteria.entries()) {
       const row = element(document, 'fieldset', 'wwc-decision-clarification-criterion')
       const legend = element(document, 'legend', 'wwc-decision-clarification-criterion-id')
       const label = element(document, 'label', 'wwc-decision-clarification-label')
@@ -132,8 +139,8 @@ export function mountDecisionClarificationPage(
       const required = element(document, 'input', 'wwc-decision-clarification-required-input')
       const method = element(document, 'p', 'wwc-decision-clarification-method')
       const remove = element(document, 'button', 'wwc-decision-clarification-remove')
-      const inputId = `wwc-decision-criterion-${criterion.id}`
-      legend.textContent = criterion.id
+      const inputId = `wwc-decision-criterion-${String(index)}`
+      legend.textContent = `验收条件 ${String(index + 1)}`
       label.htmlFor = inputId
       label.textContent = '验收描述'
       title.id = inputId
@@ -148,7 +155,7 @@ export function mountDecisionClarificationPage(
       requiredLabel.append(required)
       method.textContent = criterion.verificationMethod === null
         ? '验证方式：由服务端在提交时确认'
-        : `验证方式：${criterion.verificationMethod}`
+        : `验证方式：${publicText(criterion.verificationMethod, '由服务端确认')}`
       remove.type = 'button'
       remove.textContent = '删除'
       remove.addEventListener('click', () => options.model.removeCriterion(criterion.id))
@@ -163,7 +170,7 @@ export function mountDecisionClarificationPage(
     const candidate = element(document, 'p', 'wwc-decision-clarification-impact-warning')
     candidate.textContent = state.snapshot?.candidateRef === null || state.snapshot === null
       ? '提交会创建新的规范与工作契约修订。'
-      : `提交会创建新的规范与工作契约修订；当前候选 ${state.snapshot.candidateRef} 将保留为历史记录，但不再授权当前执行。`
+      : '提交会创建新的规范与工作契约修订；当前候选版本将保留为历史记录，但不再授权当前执行。'
     impact.append(candidate)
     if (state.changes.length === 0) {
       const empty = element(document, 'p', 'wwc-decision-clarification-impact-empty')
@@ -174,7 +181,9 @@ export function mountDecisionClarificationPage(
     const list = element(document, 'ul', 'wwc-decision-clarification-change-list')
     for (const change of state.changes) {
       const item = element(document, 'li', 'wwc-decision-clarification-change')
-      item.textContent = `${change.label}：${change.before || '（空）'} → ${change.after || '（空）'}`
+      item.textContent = `${change.label}：${publicText(change.before, '已隐藏')} → ${
+        publicText(change.after, '已隐藏')
+      }`
       list.append(item)
     }
     impact.append(list)
@@ -189,7 +198,9 @@ export function mountDecisionClarificationPage(
     const list = element(document, 'ul', 'wwc-decision-clarification-conflict-list')
     for (const conflict of state.conflicts) {
       const item = element(document, 'li', 'wwc-decision-clarification-conflict')
-      item.textContent = `${conflict.field}：服务端“${conflict.serverValue}”，本页“${conflict.draftValue}”`
+      item.textContent = `${conflict.field}：服务端“${publicText(conflict.serverValue, '已隐藏')}”，本页“${
+        publicText(conflict.draftValue, '已隐藏')
+      }”`
       list.append(item)
     }
     const keep = element(document, 'button', 'wwc-decision-clarification-keep')
@@ -206,7 +217,7 @@ export function mountDecisionClarificationPage(
   function render(state: ClarificationState): void {
     if (closed) return
     notice.hidden = state.notice === null
-    notice.textContent = state.notice ?? ''
+    notice.textContent = publicText(state.notice, '')
     form.hidden = state.status !== 'editing'
     refresh.disabled = state.busy
     submit.disabled = !state.dirty || state.busy || state.offline || state.conflicts.length > 0
@@ -214,12 +225,8 @@ export function mountDecisionClarificationPage(
     binding.hidden = state.snapshot === null
     if (state.snapshot !== null) {
       binding.textContent = [
-        state.snapshot.actorId,
-        state.snapshot.productSessionId ?? '无产品会话',
         `交付修订 ${String(state.snapshot.deliveryRevision)}`,
         `规范修订 ${String(state.snapshot.deliverySpecRevision)}`,
-        state.snapshot.candidateRef ?? '无当前候选',
-        state.lastRequestId ?? '尚未提交',
       ].join(' · ')
     }
     if (state.status === 'editing' && state.formRevision !== renderedFormRevision) {

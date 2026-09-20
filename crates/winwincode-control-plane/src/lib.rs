@@ -2,6 +2,15 @@
 
 //! Application lifecycle host for the `WinWinCode` Control Plane.
 //!
+//! Community product boundary: WinWinCode Community is a single local Owner
+//! product with an embedded Codex Core execution kernel, local Device
+//! Client/Worker, and local SQLite product state. This crate root exports
+//! Community local execution control-plane modules only. Network Vault/KMS
+//! composition and Cloud/Enterprise management modules are not Community
+//! product surface. Organization/tenant identifiers that remain in internal
+//! scope keys are protocol encodings mapped by bootstrap to the single local
+//! Owner.
+//!
 //! This crate owns application composition, Delivery persistence adapters, and
 //! durable event publication. It has no dependency on Codex Core, an HTTP
 //! server, or an Execution Worker runtime.
@@ -68,6 +77,7 @@ mod model_route_availability;
 pub mod model_settings;
 mod model_stream_flow_control;
 mod observer_decision_service;
+mod page_annotation_delivery;
 pub mod peer_collaboration;
 mod product_session_execution_application;
 mod product_session_service;
@@ -95,7 +105,6 @@ mod strongflow_device_execution;
 pub mod strongflow_projection;
 mod temporary_root_lease;
 mod terminal_outcome_transaction;
-mod vault_kms_network;
 mod vault_secret_store;
 mod verdict_transaction;
 mod work_items_transaction;
@@ -149,10 +158,15 @@ pub use collaboration_inbox::{
     CollaborationInboxListRequest, CollaborationInboxPage, CollaborationInboxReceipt,
     CollaborationInboxService, CollaborationInboxSourceError, CollaborationInboxSourceItem,
     CollaborationInboxSourcePort, CollaborationInboxSourceSnapshot,
-    CollaborationResponsibilityEntitlement, FormalCollaborationCommandRoute,
+    CollaborationResponsibilityEntitlement, FormalCollaborationCommandRoute, PageAnnotation,
+    PageAnnotationAction, PageAnnotationArtifactRef, PageAnnotationCandidateIdentity,
+    PageAnnotationCommand, PageAnnotationElement, PageAnnotationId, PageAnnotationRegion,
+    PageAnnotationState, PageAnnotationTarget, PageAnnotationViewport,
     SystemCollaborationInboxClock,
 };
-pub use collaboration_inbox_production::DurableCollaborationInboxSource;
+pub use collaboration_inbox_production::{
+    DurableCollaborationInboxSource, LocalOwnerCollaborationInboxAuthority,
+};
 pub use control_plane_instance::{
     ControlPlaneInstanceRuntime, ControlPlaneInstanceRuntimeConfig,
     ControlPlaneInstanceRuntimeError, ControlPlaneInstanceRuntimeErrorKind,
@@ -296,10 +310,10 @@ pub use product_session_service::{
     ProductSessionCommandContext, ProductSessionExecutionConfig, ProductSessionMessagePage,
     ProductSessionMutationReceipt, ProductSessionPageRead, ProductSessionPageRequest,
     ProductSessionPersistence, ProductSessionRecord, ProductSessionService,
-    ProductSessionServiceError, ProductSessionServiceErrorCode, ProductSessionTurnIntent,
-    ProductSessionTurnState, ProductSessionTurnTerminalOutcome, RecordAssistantTerminalCommand,
-    SubmitChatMessageCommand, load_product_session_authority_seal, product_session_command_context,
-    product_session_state_filters,
+    ProductSessionServiceError, ProductSessionServiceErrorCode, ProductSessionState,
+    ProductSessionTurnIntent, ProductSessionTurnState, ProductSessionTurnTerminalOutcome,
+    RecordAssistantTerminalCommand, SubmitChatMessageCommand, load_product_session_authority_seal,
+    product_session_command_context, product_session_state_filters,
 };
 pub use provider_admission::{
     DurableProviderGatewayAdmission, ProviderAdmissionError, ProviderAdmissionErrorKind,
@@ -393,12 +407,6 @@ pub use temporary_root_lease::{
     TemporaryRootLease, TemporaryRootLeaseConfig, TemporaryRootLeaseError,
     TemporaryRootLeaseErrorKind, TemporaryRootLeaseManager, TemporaryRootLeaseRuntime,
     TemporaryRootReclaimReport, TemporaryRootTarget,
-};
-pub use vault_kms_network::{
-    VaultKmsNetworkAdapter, VaultKmsNetworkConfig, VaultKmsNetworkKeyRotationReceipt,
-    VaultKmsNetworkLeaseReceipt, VaultKmsNetworkLeasedSecret, VaultKmsNetworkRevocationReceipt,
-    VaultKmsNetworkTimeouts, VaultKmsNetworkTlsRoots, VaultKmsNetworkWriteReceipt,
-    VaultKmsWorkloadCredential, VaultKmsWorkloadIdentityPort,
 };
 pub use vault_secret_store::{
     SystemVaultKmsClock, VaultKmsClock, VaultKmsClockError, VaultKmsKeyMaterial, VaultKmsKeyring,
@@ -969,6 +977,20 @@ pub struct ControlPlane {
 }
 
 impl ControlPlane {
+    /// Loads the durable managed-app configuration attached to one `WorkRun`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the storage error when the Control Plane is closed or the
+    /// projection store cannot be read.
+    pub fn load_managed_app_run_config_for_work_run(
+        &self,
+        work_run_id: &winwincode_domain::WorkRunId,
+    ) -> Result<Option<winwincode_storage::ManagedAppRunConfigRecord>, StorageError> {
+        self.storage_ref()?
+            .load_managed_app_run_config_for_work_run(work_run_id)
+    }
+
     /// Opens and migrates the local `SQLite` database, replays durable outbox
     /// events, and only then returns a running Control Plane.
     ///
@@ -1130,6 +1152,28 @@ impl ControlPlane {
             }
         };
         Self::start_with_resources(storage, None, None, None, publisher, temporary_root)
+    }
+
+    /// Installs the production Artifact store used by Worker
+    /// `artifact.open` / `artifact.chunk` ingress. Production
+    /// `start_local` composition leaves this unset; without it every
+    /// diagnostic/candidate Artifact frame fails the HTTP exchange and the
+    /// Worker durable outbox stays pending forever.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StartError`] when an Artifact store is already installed.
+    pub fn install_artifact_store(
+        &mut self,
+        artifact_store: ArtifactStore,
+    ) -> Result<(), StartError> {
+        if self.artifact_store.is_some() {
+            // Production start_local paths may already open the catalog.
+            let _ = artifact_store.close();
+            return Ok(());
+        }
+        self.artifact_store = Some(artifact_store);
+        Ok(())
     }
 
     /// Composes the application with explicit product-state and Artifact adapters.
@@ -1668,6 +1712,7 @@ impl ControlPlane {
     ) -> Result<Option<CandidateGitPinReceipt>, CandidateResolutionError> {
         if !chunk.is_final
             || chunk.artifact_id != acknowledgement.artifact_id
+            || chunk.payload.content_type != "application/vnd.winwincode.git-candidate+json"
             || !matches!(
                 acknowledgement.status,
                 execution_port::LeaseWriteStatus::Accepted
@@ -1676,6 +1721,10 @@ impl ControlPlane {
             || acknowledgement.error.is_some()
             || acknowledgement.replay_from_sequence.is_some()
         {
+            // Diagnostic verification artifacts (command stdout, etc.) share
+            // the Artifact channel but are not Delivery candidates. Pinning
+            // them as Git candidates fails the chunk acknowledgement and
+            // leaves the Worker durable outbox pending forever.
             return Ok(None);
         }
         if acknowledgement.lease != chunk.lease
@@ -1713,6 +1762,16 @@ impl ControlPlane {
             &acknowledgement.lease.job_id,
         )
         .map_err(CandidateResolutionError::Storage)?;
+        if matches!(
+            job.execution_profile.as_str(),
+            "reviewer" | "verifier" | "adversarial-verifier"
+        ) {
+            // Verification roles re-upload the already-frozen candidate checkout.
+            // The writer owns the Delivery Git pin; pinning the verification
+            // re-upload can fail the already-accepted chunk ack and strand the
+            // Worker durable outbox (and therefore JobOutcome/verdict).
+            return Ok(None);
+        }
         let ExecutionScope::WorkRunExecutionScope(_job_scope) = &job.scope else {
             // Chat retains its candidate Git ref on the owning Device before upload.
             return Ok(None);

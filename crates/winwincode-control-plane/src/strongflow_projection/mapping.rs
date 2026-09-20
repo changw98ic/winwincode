@@ -22,6 +22,7 @@ use super::{
     StrongFlowProjectionError, application::EstablishedDeliveryRead,
     sources::TrustedProductSessionRuntimeSession,
 };
+use crate::ControlPlane;
 
 const CROCKFORD_BASE32: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
@@ -32,16 +33,24 @@ pub(super) fn cursor(
 }
 
 pub(super) fn workrun_aggregate(
+    control_plane: &ControlPlane,
     aggregate: &WorkRunAggregate,
     device_bindings: Vec<api::WorkRunDeviceBindingProjection>,
     read_cursor: api::StrongFlowReadCursor,
-) -> api::WorkRunAggregateProjection {
-    api::WorkRunAggregateProjection {
+) -> Result<api::WorkRunAggregateProjection, StrongFlowProjectionError> {
+    let managed_app_run_configs = aggregate
+        .runs
+        .iter()
+        .map(|run| managed_app_run_projection(control_plane, run, &device_bindings))
+        .collect::<Result<Vec<_>, _>>()?;
+    let managed_app_run_configs = managed_app_run_configs.into_iter().flatten().collect();
+    Ok(api::WorkRunAggregateProjection {
         schema_version: aggregate.schema_version.clone(),
         contract: aggregate.contract.clone(),
         items: aggregate.items.clone(),
         runs: aggregate.runs.clone(),
         device_bindings,
+        managed_app_run_configs,
         graph_items: aggregate
             .items
             .iter()
@@ -65,7 +74,62 @@ pub(super) fn workrun_aggregate(
             })
             .collect(),
         read_cursor,
+    })
+}
+
+fn managed_app_run_projection(
+    control_plane: &ControlPlane,
+    run: &winwincode_domain::WorkRun,
+    device_bindings: &[api::WorkRunDeviceBindingProjection],
+) -> Result<Option<api::ManagedAppRunControlProjection>, StrongFlowProjectionError> {
+    let Some(record) = control_plane
+        .load_managed_app_run_config_for_work_run(&run.id)
+        .map_err(|error| StrongFlowProjectionError::ServiceUnavailable(error.to_string()))?
+    else {
+        return Ok(None);
+    };
+    if record.work_run_id != run.id.0
+        || record.attempt != run.attempt
+        || !device_bindings.iter().any(|binding| {
+            binding.work_run_id == run.id
+                && binding.repository_binding_id.0 == record.repository_binding_id
+        })
+    {
+        return Ok(None);
     }
+    let config =
+        serde_json::from_slice::<winwincode_client_port::managed_app::ManagedAppRunConfig>(
+            &record.config_json,
+        )
+        .map_err(|_| {
+            StrongFlowProjectionError::TrustedFactsUnavailable(
+                "managed-app configuration is malformed".to_owned(),
+            )
+        })?;
+    config.validate().map_err(|_| {
+        StrongFlowProjectionError::TrustedFactsUnavailable(
+            "managed-app configuration is malformed".to_owned(),
+        )
+    })?;
+    if config.run_id != run.id.0
+        || config.source_id != run.execution_job_id.0
+        || i64::from(config.attempt) != run.attempt
+        || config.repository_binding_id != record.repository_binding_id
+    {
+        return Ok(None);
+    }
+    Ok(Some(api::ManagedAppRunControlProjection {
+        schema_version: api::ManagedAppRunControlProjectionSchemaVersion::WinwincodeManagedAppRunV1,
+        run_id: winwincode_domain::WorkRunId(config.run_id),
+        attempt: i64::from(config.attempt),
+        mode: match config.mode {
+            winwincode_client_port::managed_app::ManagedAppMode::Live => api::ManagedAppMode::Live,
+            winwincode_client_port::managed_app::ManagedAppMode::FrozenCandidate => {
+                api::ManagedAppMode::FrozenCandidate
+            }
+        },
+        candidate_commit: config.candidate_commit,
+    }))
 }
 
 pub(super) fn delivery_detail(

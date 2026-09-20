@@ -10,6 +10,19 @@ import {
   treeNodeCount,
 } from './fixtures/ui601-keyed-dom.mjs'
 
+globalThis.MutationObserver = class {
+  observe() {}
+  disconnect() {}
+}
+
+function mountTestAttachments() {
+  return { items: [], busy: false, clear() {}, close() {} }
+}
+
+function mountTestMarkdown(root) {
+  return { update(text) { root.textContent = text }, close() {} }
+}
+
 const validationRoot = resolve(import.meta.dirname, '..')
 const targetRoot = resolve(process.env.UI601_TARGET_ROOT ?? validationRoot)
 const compiler = spawnSync(
@@ -35,7 +48,7 @@ assert.equal(
 
 const { mountChatPage } = await import(`${pathToFileURL(resolve(
   targetRoot,
-  '.cache/chat-page-tests/chat-page.js',
+  'apps/client/node_modules/.cache/chat-page-tests/chat-page.js',
 )).href}?ui601-validation=${String(Date.now())}`)
 
 const firstSessionId = 'psn_00000000000000000000000001'
@@ -197,6 +210,8 @@ test('100 Chat updates retain message and model identity, user state, bounded no
     model,
     modelRoutes: [secondRoute],
     nextProductSessionId: () => 'psn_00000000000000000000000003',
+    mountAttachments: mountTestAttachments,
+    mountMarkdown: mountTestMarkdown,
   })
 
   const messageList = findByClass(root, 'wwc-chat-messages')

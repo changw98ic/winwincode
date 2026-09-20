@@ -100,5 +100,7 @@ test('published TypeScript packages contain no retired StageRun surface', () => 
   assert.doesNotMatch(contracts, /delivery|stage/iu)
   assert.doesNotMatch(strongflow, /delivery|stage/iu)
   assert.match(chatDeliveryCreator, /CommandName\.DeliveryCreate/u)
-  assert.doesNotMatch(chatDeliveryCreator, /WorkRunStart|dispatchProfile|planner/u)
+  assert.match(chatDeliveryCreator, /command: 'workrun\.start'/u)
+  assert.match(chatDeliveryCreator, /dispatchProfile: 'executor'/u)
+  assert.doesNotMatch(chatDeliveryCreator, /planner/u)
 })

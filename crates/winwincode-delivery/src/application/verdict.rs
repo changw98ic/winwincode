@@ -9,7 +9,7 @@ use winwincode_domain::{AttentionItemId, EvidenceId, WorkItemId, WorkItemState, 
 use crate::domain::{
     AttentionItem, AttentionItemStatus, AttentionItemType, AttentionOption, CriterionResult,
     CriterionVerdict, DELIVERY_SCHEMA_VERSION, Delivery, DeliverySnapshot, DeliveryStatus,
-    DeliveryVerdict, DeliveryVerdictId, EvidenceRef, FrozenDeliveryCandidate,
+    DeliveryVerdict, DeliveryVerdictId, EvidenceRef, EvidenceRefType, FrozenDeliveryCandidate,
     evidence::ResolvedDeliveryEvidence,
     rework::VerdictAttentionAction,
     verification::{IndependentVerification, VerificationRole},
@@ -701,6 +701,19 @@ fn event_from_transition(
     verdict: DeliveryVerdict,
     attention_items: Vec<AttentionItem>,
 ) -> DeliveryVerdictSubmittedEvent {
+    // The durable outbox event carries only criterion-cited Evidence. Extra
+    // sealed facts such as producer Commit Evidence remain on the Delivery
+    // snapshot for preview source authority.
+    let cited = verdict
+        .criteria
+        .iter()
+        .flat_map(|criterion| criterion.evidence_refs.iter())
+        .map(|evidence_id| evidence_id.0.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let evidence = evidence
+        .into_iter()
+        .filter(|reference| cited.contains(reference.id.0.as_str()))
+        .collect::<Vec<_>>();
     DeliveryVerdictSubmittedEvent {
         schema_version: 1,
         delivery_id: delivery.id().clone(),
@@ -752,18 +765,42 @@ fn validate_transition_delta(
         ));
     }
     let appended_evidence = &after.evidence[before.evidence.len()..];
-    let expected_appended = transition
+    let event_evidence_ids = transition
         .event
         .evidence
         .iter()
-        .filter(|evidence| {
-            !before
-                .evidence
-                .iter()
-                .any(|stored| stored.id == evidence.id)
+        .map(|evidence| evidence.id.0.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    // Every outbox-cited Evidence must be one exact newly appended fact.
+    // The Delivery snapshot may also retain sealed producer Commit Evidence
+    // that preview source authority reads but no criterion cites.
+    let event_evidence_exact = transition.event.evidence.iter().all(|reference| {
+        appended_evidence
+            .iter()
+            .any(|appended| appended == reference)
+    });
+    let current_writer = after
+        .session_bindings
+        .iter()
+        .filter(|binding| {
+            matches!(
+                binding.execution_profile.as_deref(),
+                Some("executor" | "remediator")
+            )
         })
-        .cloned()
-        .collect::<Vec<_>>();
+        .max_by_key(|binding| (binding.bound_at_millis, binding.attempt));
+    let extra_appended_are_producer_commit = appended_evidence
+        .iter()
+        .filter(|evidence| !event_evidence_ids.contains(evidence.id.0.as_str()))
+        .all(|evidence| {
+            evidence.evidence_type == EvidenceRefType::Commit
+                && evidence.source_ref.starts_with("git_commit:")
+                && evidence.candidate_ref == transition.candidate_ref
+                && current_writer.is_some_and(|binding| {
+                    evidence.work_run_id == binding.work_run_id
+                        && evidence.session_binding_id == binding.id
+                })
+        });
     let appended_attention = &after.attention_items[before.attention_items.len()..];
     let work_item_states = after
         .work_run_aggregate
@@ -774,7 +811,8 @@ fn validate_transition_delta(
             state: item.state.clone(),
         })
         .collect::<Vec<_>>();
-    if appended_evidence != expected_appended
+    if !event_evidence_exact
+        || !extra_appended_are_producer_commit
         || appended_attention != transition.event.attention_items
         || work_item_states != transition.event.work_item_states
         || after.work_run_aggregate.contract != before.work_run_aggregate.contract

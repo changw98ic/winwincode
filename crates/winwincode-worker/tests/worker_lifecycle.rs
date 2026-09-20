@@ -46,11 +46,12 @@ use winwincode_execution_port::transport::{
 };
 use winwincode_worker::validation_artifact::DurableValidationArtifactStore;
 use winwincode_worker::{
-    CandidateArtifactAckOutcome, CandidateArtifactAuthority, CandidateArtifactUpload,
-    CodexCoreAdapter, CodexPoll, CodexRunKey, CodexThreadSession, CodexThreadStart,
-    CodexTurnCompletion, DelegatedLoopStopFact, DelegatedObserverPreflight,
-    DelegatedObserverPreflightOutcome, DelegatedPollOutcome, DurableExecutionDelivery,
-    RetainedCandidateArtifact, WorkerConfig, WorkerErrorCode, WorkerExecutionPort,
+    ArtifactAckOutcome, CandidateArtifactAckOutcome, CandidateArtifactAuthority,
+    CandidateArtifactUpload, CodexCoreAdapter, CodexPoll, CodexRunKey, CodexThreadSession,
+    CodexThreadStart, CodexTurnCompletion, DelegatedLoopStopFact, DelegatedObserverPreflight,
+    DelegatedObserverPreflightOutcome, DelegatedPollOutcome, DiagnosticArtifactAuthority,
+    DiagnosticArtifactUpload, DurableExecutionDelivery, RetainedCandidateArtifact,
+    RetainedDiagnosticArtifact, WorkerConfig, WorkerErrorCode, WorkerExecutionPort,
     WorkerLifecycleState, WorkerMain, secret_safe_runtime_summary,
     workspace_runtime::{
         ChangeBatchExecutionRequest, ChangeBatchExecutionResult, ChangeBatchExecutor,
@@ -184,6 +185,10 @@ impl RecordingPort {
             failures_remaining: Rc::new(Cell::new(1)),
         }
     }
+
+    fn failures_handle(&self) -> Rc<Cell<usize>> {
+        Rc::clone(&self.failures_remaining)
+    }
 }
 
 impl WorkerExecutionPort for RecordingPort {
@@ -214,6 +219,7 @@ struct CodexState {
     durable_deliveries: Vec<DurableExecutionDelivery>,
     pending_delivery_ids: HashSet<String>,
     candidate_delivery_ids: HashSet<String>,
+    queued_execution_messages: Vec<ExecutionPortMessage>,
     candidate_upload: Option<CandidateArtifactUpload>,
     candidate_reference: Option<ArtifactReference>,
     accepted_candidate: Option<ArtifactReference>,
@@ -359,6 +365,48 @@ impl FakeCodex {
             .expect("FakeCodex state")
             .final_freezes
             .clone()
+    }
+
+    /// Injects one durable pending delivery (used to model frames retained
+    /// while the Server exchange was down / restarting).
+    fn inject_pending_delivery(&self, message: ExecutionPortMessage) {
+        let delivery = fixture_delivery(&message);
+        let mut state = self.state.lock().expect("FakeCodex state");
+        state
+            .pending_delivery_ids
+            .insert(delivery.delivery_id.clone());
+        state.durable_deliveries.push(delivery);
+    }
+
+    /// Queues a Core execution message for `take_execution_messages`
+    /// (the production path that can emit runtime.event after Job teardown).
+    fn queue_execution_message(&self, message: ExecutionPortMessage) {
+        self.state
+            .lock()
+            .expect("FakeCodex state")
+            .queued_execution_messages
+            .push(message);
+    }
+
+    fn pending_kinds(&self) -> Vec<String> {
+        let state = self.state.lock().expect("FakeCodex state");
+        state
+            .durable_deliveries
+            .iter()
+            .filter(|delivery| state.pending_delivery_ids.contains(&delivery.delivery_id))
+            .map(|delivery| match &delivery.message {
+                ExecutionPortMessage::RuntimeEventMessage(_) => "runtime.event".to_owned(),
+                ExecutionPortMessage::ArtifactChunkMessage(_) => "artifact.chunk".to_owned(),
+                ExecutionPortMessage::ArtifactOpenMessage(_) => "artifact.open".to_owned(),
+                ExecutionPortMessage::JobOutcomeMessage(_) => "job.outcome".to_owned(),
+                ExecutionPortMessage::ModelChunkMessage(_) => "model.chunk".to_owned(),
+                ExecutionPortMessage::WorkerHeartbeatMessage(_) => "worker.heartbeat".to_owned(),
+                ExecutionPortMessage::JobDispatchResultMessage(_) => {
+                    "job.dispatch_result".to_owned()
+                }
+                _ => "other".to_owned(),
+            })
+            .collect()
     }
 }
 
@@ -802,6 +850,36 @@ impl CodexCoreAdapter for FakeCodex {
         }
     }
 
+    fn accept_artifact_ack(
+        &mut self,
+        acknowledgement: &ArtifactAckMessage,
+    ) -> Result<ArtifactAckOutcome, Self::Error> {
+        self.accept_candidate_artifact_ack(acknowledgement)
+            .map(|outcome| match outcome {
+                CandidateArtifactAckOutcome::Pending => ArtifactAckOutcome::Pending,
+                CandidateArtifactAckOutcome::Replay(deliveries) => {
+                    ArtifactAckOutcome::Replay(deliveries)
+                }
+                CandidateArtifactAckOutcome::Accepted(reference) => {
+                    ArtifactAckOutcome::Accepted(reference)
+                }
+            })
+    }
+
+    fn retain_diagnostic_artifact(
+        &mut self,
+        _upload: &DiagnosticArtifactUpload,
+    ) -> Result<RetainedDiagnosticArtifact, Self::Error> {
+        Err(())
+    }
+
+    fn accepted_diagnostic_artifacts(
+        &mut self,
+        _authority: &DiagnosticArtifactAuthority,
+    ) -> Result<Vec<ArtifactReference>, Self::Error> {
+        Err(())
+    }
+
     fn accepted_candidate_artifact(
         &mut self,
         authority: &CandidateArtifactAuthority,
@@ -866,7 +944,8 @@ impl CodexCoreAdapter for FakeCodex {
     }
 
     fn take_execution_messages(&mut self) -> Result<Vec<ExecutionPortMessage>, Self::Error> {
-        Ok(Vec::new())
+        let mut state = self.state.lock().expect("FakeCodex state");
+        Ok(std::mem::take(&mut state.queued_execution_messages))
     }
 
     fn interrupt(
@@ -3795,10 +3874,15 @@ async fn cancelling_delegated_job_rejects_late_batch_after_interrupt_failure() {
     assert_no_candidate_product(&messages);
     assert_no_outcome(&messages);
 
+    let diagnostic = ArtifactReference {
+        artifact_id: ArtifactId(id("art", 'D')),
+        digest: Sha256Digest(format!("sha256:{}", "d".repeat(64))),
+    };
     pump.queue_poll(
         &active.codex_thread_id,
-        Ok(CodexPoll::Cancelled(
+        Ok(CodexPoll::CancelledWithDiagnostics(
             secret_safe_runtime_summary("embedded Codex turn cancelled").unwrap(),
+            vec![diagnostic.clone()],
         )),
     );
     worker
@@ -3811,7 +3895,7 @@ async fn cancelling_delegated_job_rejects_late_batch_after_interrupt_failure() {
         outcomes[0].outcome.status,
         ExecutionOutcomeStatus::Cancelled
     );
-    assert!(outcomes[0].outcome.artifacts.is_empty());
+    assert_eq!(outcomes[0].outcome.artifacts, vec![diagnostic]);
     assert!(calls.lock().expect("batch calls").is_empty());
 }
 
@@ -4134,5 +4218,238 @@ async fn a_lost_binding_response_resumes_the_prepared_turn_once() {
             .filter(|call| call.starts_with("submit:"))
             .count(),
         1
+    );
+}
+
+#[tokio::test]
+async fn pending_runtime_and_diagnostic_artifact_flush_after_server_restart_window() {
+    // Models the RUN-03 residual: Core produces verification evidence while
+    // the Worker→Server exchange is down (Server restart / Connection
+    // refused). After the in-memory Job is gone, the durable outbox must
+    // still flush runtime.event + diagnostic artifact.chunk + JobOutcome on
+    // the same exchange protocol when the Server returns.
+    let port = RecordingPort::default();
+    let messages = Rc::clone(&port.messages);
+    let failures = port.failures_handle();
+    let codex = FakeCodex::with_threads([thread('A')]);
+    let pump = codex.clone();
+    let mut worker = test_worker(worker_config(1), port, codex);
+    register(&mut worker).await;
+
+    worker
+        .accept_control(
+            &ExecutionPortMessage::JobDispatchMessage(dispatch('A', delivery_scope('A'))),
+            now(),
+        )
+        .await
+        .unwrap();
+    let active = worker.active_jobs()[0].clone();
+    let trace = RuntimeEventMessage {
+        codex_thread_id: active.codex_thread_id.clone(),
+        event: ExecutionEventRecord {
+            category: ExecutionEventCategory::Command,
+            event_id: ExecutionEventId(id("evt", 'V')),
+            occurred_at: now(),
+            payload: None,
+            sequence: ExecutionSequence(1),
+            summary: "verification command produced direct evidence".to_owned(),
+        },
+        kind: RuntimeEventMessageKind::RuntimeEvent,
+        lease: active.lease.clone(),
+        message_id: ExecutionMessageId(id("msg", 'V')),
+        schema_version: SchemaVersion::WinwincodeV1,
+        sent_at: now(),
+        session_identity: active.session_identity.clone(),
+        worker_session_id: active.worker_session_id.clone(),
+    };
+    // Diagnostic (non-candidate) artifact chunk — the exact class that used to
+    // be skipped by `_ => continue` once the in-memory Job was gone.
+    let diagnostic_chunk = ExecutionPortMessage::ArtifactChunkMessage(ArtifactChunkMessage {
+        artifact_id: ArtifactId(id("art", 'D')),
+        is_final: true,
+        kind: ArtifactChunkMessageKind::ArtifactChunk,
+        lease: active.lease.clone(),
+        message_id: ExecutionMessageId(id("msg", 'D')),
+        payload: EncodedPayload {
+            content_type: "text/plain; charset=utf-8".to_owned(),
+            data_base64: "dmVyaWZ5Cg==".to_owned(),
+            payload_digest: Sha256Digest(format!("sha256:{:x}", Sha256::digest(b"verify\n"))),
+        },
+        schema_version: SchemaVersion::WinwincodeV1,
+        sent_at: now(),
+        sequence: ExecutionSequence(1),
+        session_identity: active.session_identity.clone(),
+        worker_session_id: active.worker_session_id.clone(),
+    });
+
+    // Simulate Server restart: every outbound send fails while Core finishes.
+    failures.set(usize::MAX);
+    pump.queue_poll(
+        &active.codex_thread_id,
+        Ok(CodexPoll::RuntimeTrace(Box::new(trace))),
+    );
+    pump.queue_poll(
+        &active.codex_thread_id,
+        Ok(CodexPoll::Completed(CodexTurnCompletion {
+            summary: secret_safe_runtime_summary("Codex turn completed").unwrap(),
+            artifacts: Vec::new(),
+            usage: measured_completion_usage(),
+        })),
+    );
+    pump.inject_pending_delivery(diagnostic_chunk);
+
+    let first = worker.poll_codex_boxed().await;
+    assert!(first.is_err(), "runtime send must fail while Server is down");
+    let second = worker.poll_codex_boxed().await;
+    assert!(
+        second.is_err(),
+        "terminal outcome send must fail while Server is down"
+    );
+    assert!(
+        worker.active_jobs().is_empty(),
+        "finish_job must drop the in-memory Job even when transport fails"
+    );
+    assert!(
+        worker.has_pending_durable_evidence(),
+        "durable evidence must remain pending after a failed Server exchange"
+    );
+    assert!(
+        !worker.work_drained(),
+        "Worker must not report drained while evidence is pending"
+    );
+    let pending_before = pump.pending_kinds();
+    assert!(
+        pending_before.iter().any(|kind| kind == "runtime.event"),
+        "runtime.event must stay pending, got {pending_before:?}"
+    );
+    assert!(
+        pending_before.iter().any(|kind| kind == "artifact.chunk"),
+        "diagnostic artifact.chunk must stay pending, got {pending_before:?}"
+    );
+    assert!(
+        pending_before.iter().any(|kind| kind == "job.outcome"),
+        "JobOutcome must stay pending, got {pending_before:?}"
+    );
+
+    // Server returns: heartbeat/poll flush must send every pending evidence
+    // frame even though the in-memory Job is already gone.
+    failures.set(0);
+    worker
+        .heartbeat(now())
+        .await
+        .expect("heartbeat flush after Server restart");
+    let pending_after = pump.pending_kinds();
+    assert!(
+        !pending_after.iter().any(|kind| matches!(
+            kind.as_str(),
+            "runtime.event" | "artifact.chunk" | "job.outcome"
+        )),
+        "pending evidence must flush after Server returns, still pending {pending_after:?}"
+    );
+    assert!(
+        worker.work_drained(),
+        "Worker may drain only after durable evidence flushed"
+    );
+
+    let captured = messages.borrow();
+    assert!(
+        captured.iter().any(|message| matches!(
+            message,
+            ExecutionPortMessage::RuntimeEventMessage(event)
+                if event.event.summary.contains("verification command")
+        )),
+        "runtime.event must reach the Server port after reconnect"
+    );
+    assert!(
+        captured.iter().any(|message| matches!(
+            message,
+            ExecutionPortMessage::ArtifactChunkMessage(chunk)
+                if chunk.payload.content_type.starts_with("text/plain")
+        )),
+        "diagnostic artifact.chunk must reach the Server port after reconnect"
+    );
+    assert!(
+        captured
+            .iter()
+            .any(|message| matches!(message, ExecutionPortMessage::JobOutcomeMessage(_))),
+        "JobOutcome must reach the Server port after reconnect"
+    );
+}
+
+#[tokio::test]
+async fn forward_runtime_trace_retains_and_sends_when_in_memory_job_is_gone() {
+    let port = RecordingPort::default();
+    let messages = Rc::clone(&port.messages);
+    let failures = port.failures_handle();
+    let codex = FakeCodex::with_threads([thread('A')]);
+    let pump = codex.clone();
+    let mut worker = test_worker(worker_config(1), port, codex);
+    register(&mut worker).await;
+    worker
+        .accept_control(
+            &ExecutionPortMessage::JobDispatchMessage(dispatch('A', delivery_scope('A'))),
+            now(),
+        )
+        .await
+        .unwrap();
+    let active = worker.active_jobs()[0].clone();
+    let lease = active.lease.clone();
+    let session_identity = active.session_identity.clone();
+    let worker_session_id = active.worker_session_id.clone();
+    let codex_thread_id = active.codex_thread_id.clone();
+
+    // Drop the Job while transport is down (finish without a live Job).
+    failures.set(usize::MAX);
+    pump.queue_poll(
+        &codex_thread_id,
+        Ok(CodexPoll::InfrastructureFailed(
+            secret_safe_runtime_summary("embedded Codex infrastructure failure").unwrap(),
+        )),
+    );
+    let _ = worker.poll_codex_boxed().await;
+    assert!(worker.active_jobs().is_empty());
+
+    // A late Core runtime frame for the already-closed Job must still retain
+    // and send once the Server is reachable — not hard-fail with
+    // RuntimeTraceMismatch and never leave the process.
+    let late = RuntimeEventMessage {
+        codex_thread_id: codex_thread_id.clone(),
+        event: ExecutionEventRecord {
+            category: ExecutionEventCategory::Command,
+            event_id: ExecutionEventId(id("evt", 'L')),
+            occurred_at: now(),
+            payload: None,
+            sequence: ExecutionSequence(2),
+            summary: "late verification runtime frame".to_owned(),
+        },
+        kind: RuntimeEventMessageKind::RuntimeEvent,
+        lease: lease.clone(),
+        message_id: ExecutionMessageId(id("msg", 'L')),
+        schema_version: SchemaVersion::WinwincodeV1,
+        sent_at: now(),
+        session_identity,
+        worker_session_id,
+    };
+    pump.queue_execution_message(ExecutionPortMessage::RuntimeEventMessage(late));
+    // poll_codex requires Active lifecycle; the Worker is still Active after
+    // finish_job. Transport is still down, so the late frame stays pending.
+    let _ = worker.poll_codex_boxed().await;
+    assert!(
+        worker.has_pending_durable_evidence(),
+        "late runtime frame for a gone Job must be retained durably"
+    );
+
+    failures.set(0);
+    worker
+        .flush_durable_outbox()
+        .await
+        .expect("flush late runtime frame after Server returns");
+    assert!(
+        messages.borrow().iter().any(|message| matches!(
+            message,
+            ExecutionPortMessage::RuntimeEventMessage(event)
+                if event.event.summary.contains("late verification")
+        )),
+        "late runtime frame must flush after Server returns"
     );
 }

@@ -43,6 +43,21 @@ import { tmpdir } from 'node:os'
 import { pathToFileURL } from 'node:url'
 
 import { projectSourceDigest } from './product-build-contract.mjs'
+import {
+  DEVICE_ONLY_PREREQUISITES,
+  FORBIDDEN_SERVER_MODEL_ENVIRONMENT_KEYS,
+  assertDeviceSecretsNeverOnServer,
+  assertServerEnvironmentIsDeviceOnly,
+  configuredDeviceModelRoute,
+  deterministicDeviceProvider,
+  deviceCredentialReferenceId,
+  deviceOnlyServerEnvironment,
+  deviceProviderSecretBundle,
+  establishDeviceOnlyExecutionPath,
+  seedDeviceLocalProvider,
+  startDeterministicDeviceModelServer,
+  encryptDeviceProviderEnvelope,
+} from './device-production-fixture.mjs'
 
 const ROOT = resolve(import.meta.dirname, '..')
 const SCHEMA_VERSION = 'winwincode/v1'
@@ -50,6 +65,21 @@ const DEFAULT_TIMEOUT_MILLIS = 240_000
 const POLL_INTERVAL_MILLIS = 50
 const SERVER_GRACEFUL_STOP_TIMEOUT_MILLIS = 30_000
 export const DELIVERY_TRANSITION_DIAGNOSTIC_CAPACITY = 64
+export {
+  DEVICE_ONLY_PREREQUISITES,
+  FORBIDDEN_SERVER_MODEL_ENVIRONMENT_KEYS,
+  assertDeviceSecretsNeverOnServer,
+  assertServerEnvironmentIsDeviceOnly,
+  configuredDeviceModelRoute,
+  deterministicDeviceProvider,
+  deviceCredentialReferenceId,
+  deviceOnlyServerEnvironment,
+  deviceProviderSecretBundle,
+  establishDeviceOnlyExecutionPath,
+  seedDeviceLocalProvider,
+  startDeterministicDeviceModelServer,
+  encryptDeviceProviderEnvelope,
+}
 const HELPER_RELEASE_MANIFEST_NAME = 'winwincode-kernel-helper.release.json'
 const HELPER_RELEASE_BINARY_NAME = 'winwincode-kernel-helper'
 const HELPER_RELEASE_BINARY_MODE = 0o755
@@ -126,14 +156,39 @@ const SCOPE = Object.freeze({
   repositoryId: IDS.repository,
 })
 
-function configuredModelRoute(serverEnvironment = {}) {
-  return {
-    providerId: serverEnvironment.WWC_SERVER_MODEL_PROVIDER_ID ?? 'winwincode-loopback',
-    modelId: serverEnvironment.WWC_SERVER_MODEL_ID ?? 'loopback-model',
-    credentialReferenceId:
-      serverEnvironment.WWC_SERVER_MODEL_CREDENTIAL_REFERENCE_ID ?? IDS.credential,
+/**
+ * Device-local model route for production acceptance.
+ *
+ * Production Server execution is Device-only. The route is bound to the
+ * Device Provider credential reference, not Server model environment
+ * variables. Callers must pass the enrolled Device client node id (or the
+ * public client id used by the Device Provider projection) after pairing.
+ */
+function configuredModelRoute(deviceRoute = {}) {
+  if (
+    typeof deviceRoute.clientNodeId === 'string'
+    && deviceRoute.clientNodeId.length > 0
+  ) {
+    return configuredDeviceModelRoute({
+      clientNodeId: deviceRoute.clientNodeId,
+      providerId: deviceRoute.providerId
+        ?? process.env.WWC_DEVICE_PROVIDER_ID
+        ?? 'winwincode-device-deterministic',
+      modelId: deviceRoute.modelId
+        ?? process.env.WWC_DEVICE_MODEL_ID
+        ?? 'device-deterministic-model',
+    })
   }
+  // Pre-pairing placeholder. chat.submit is rejected with the public
+  // DEVICE_SESSION_REQUIRED code until Device prerequisites exist.
+  return configuredDeviceModelRoute({
+    clientNodeId: 'cix_device_session_required_placeholder',
+    providerId: 'winwincode-device-deterministic',
+    modelId: 'device-deterministic-model',
+  })
 }
+
+export { configuredModelRoute }
 
 function fail(message) {
   throw new Error(message)
@@ -736,7 +791,23 @@ class ApiClient {
     return value
   }
 
-  async bootstrap(proof, { login = false } = {}) {
+  async bootstrap(proof, { login = false, localOpen = false } = {}) {
+    const mode = process.env.WWC_SERVER_AUTH_MODE ?? 'local-open'
+    const useLocalOpen = localOpen || mode === 'local-open'
+    if (useLocalOpen) {
+      // Community local-open: the Server caches a loopback Owner principal and
+      // session GET returns it without password or bootstrap proof.
+      const response = await requestJson(`${this.baseUrl}/api/v1/auth/session`, {
+        origin: this.origin,
+      })
+      assert.equal(response.status, 200, `local-open API bootstrap must return 200: ${response.text}`)
+      this.cookie = responseSetCookie(response.headers)
+      assert.equal(response.json?.schemaVersion, SCHEMA_VERSION)
+      assert.equal(response.json?.actor?.kind, 'user')
+      this.actor = response.json.actor
+      this.session = response.json
+      return response.json
+    }
     const response = await requestJson(`${this.baseUrl}/api/v1/auth/session`, {
       method: 'POST',
       origin: this.origin,
@@ -1028,13 +1099,16 @@ function spawnStandaloneServer({
     detached: process.platform !== 'win32',
     env: {
       ...process.env,
+      // Community loopback production Server: local-open initializes the Owner
+      // at process start. Password mode requires a pre-seeded Owner and is not
+      // the isolated vertical path.
+      WWC_SERVER_AUTH_MODE: serverEnvironment.WWC_SERVER_AUTH_MODE ?? 'local-open',
       ...serverEnvironment,
       WWC_SERVER_BIND: `127.0.0.1:${String(port)}`,
       WWC_SERVER_PUBLIC_URL: `https://control.localhost:${String(port)}`,
       WWC_SERVER_DATA_DIRECTORY: resolve(directory, 'server-data'),
       WWC_SERVER_ALLOWED_ORIGINS: origin,
       WWC_SERVER_BOOTSTRAP_PROOF: proof,
-      WWC_SERVER_AUTH_MODE: 'password',
       WWC_SERVER_REPOSITORY_ROOT: repositoryRoot,
       WWC_SERVER_SOURCE_ROOT: sourceRoot,
       WWC_SERVER_CHECKOUT_REVISION: checkoutRevision,
@@ -1042,7 +1116,6 @@ function spawnStandaloneServer({
       WWC_SERVER_HELPER_RELEASE_MANIFEST: helperReleaseManifest,
       WWC_SERVER_ACTION_SIGNING_KEY_HEX: '1f'.repeat(32),
       WWC_SERVER_EXECUTION_ENVELOPE_DIGEST: `sha256:${'a'.repeat(64)}`,
-      WWC_SERVER_MODEL_CREDENTIAL_REFERENCE_ID: IDS.credential,
       WWC_SERVER_ORGANIZATION_ID: IDS.organization,
       WWC_SERVER_WORKSPACE_ID: IDS.workspace,
       WWC_SERVER_PROJECT_ID: IDS.project,
@@ -1264,6 +1337,7 @@ async function runChat(
     create = true,
     modelRoute = configuredModelRoute(),
     productSessionId = IDS.session,
+    beforeSubmit = null,
   } = {},
 ) {
   if (create) {
@@ -1276,6 +1350,9 @@ async function runChat(
     })
     assertCompleted(created, 'session.create', 0)
     assert.equal(created.result.id, productSessionId)
+  }
+  if (beforeSubmit !== null) {
+    await beforeSubmit({ productSessionId, modelRoute })
   }
   const submitted = await client.command('chat.submit', 1, {
     productSessionId,
@@ -1313,7 +1390,11 @@ async function runChat(
   }
 }
 
-async function runCancelledSession(client, modelRoute = configuredModelRoute()) {
+async function runCancelledSession(
+  client,
+  modelRoute = configuredModelRoute(),
+  beforeCancel = null,
+) {
   const created = await client.command('session.create', 0, {
     productSessionId: IDS.cancelSession,
     projectId: IDS.project,
@@ -1323,6 +1404,9 @@ async function runCancelledSession(client, modelRoute = configuredModelRoute()) 
   })
   assertCompleted(created, 'session.create', 0)
   assert.equal(created.result.id, IDS.cancelSession)
+  if (beforeCancel !== null) {
+    await beforeCancel({ productSessionId: IDS.cancelSession, modelRoute })
+  }
   const cancelled = await client.command('session.cancel', 1, {
     productSessionId: IDS.cancelSession,
     reason: 'API production cancellation evidence',
@@ -1343,7 +1427,8 @@ async function runCancelledSession(client, modelRoute = configuredModelRoute()) 
   }
 }
 
-function deliverySpec(baseRevision) {
+function deliverySpec(baseRevision, options = {}) {
+  const sourceProductSessionId = options.sourceProductSessionId ?? null
   return {
     acceptanceCriteria: [{
       id: 'api-terminal-criterion',
@@ -1357,7 +1442,11 @@ function deliverySpec(baseRevision) {
     publicationTarget: null,
     repositoryId: IDS.repository,
     scope: ['canonical local API chat and StrongFlow workflow'],
-    sourceProductSessionId: null,
+    sourceProductSessionId,
+    // Device-bound Delivery requires a confirmed verification command on the
+    // sealed Device repository. Keep it repository-truthful (no fake verdict).
+    verificationCommand: options.verificationCommand
+      ?? (sourceProductSessionId === null ? undefined : 'git rev-parse --verify HEAD'),
     title: 'API production StrongFlow',
   }
 }
@@ -1472,6 +1561,7 @@ export async function driveDelivery(
   timeoutMillis,
   modelRoute = configuredModelRoute(),
   now = Date.now,
+  hooks = {},
 ) {
   const transitionTrace = { observations: [], totalTransitionCount: 0 }
   const actions = []
@@ -1516,6 +1606,16 @@ export async function driveDelivery(
     if (activeWorkRuns.length > 0) {
       // The Controller owns active WorkRuns (executor → reviewer → verifier →
       // submit_verdict, and retry verification after a resolved Attention).
+      // Device execution still requires one Client launch anchor per WorkRun;
+      // the caller supplies that product-authority step via hooks.
+      if (typeof hooks.onActiveWorkRuns === 'function') {
+        try {
+          await hooks.onActiveWorkRuns(activeWorkRuns)
+        } catch (error) {
+          if (hooks.strictLaunchAnchor === true) throw error
+          // Launch anchors can lag WorkRun creation; keep polling.
+        }
+      }
       idlePolls = 0
       await new Promise(resolvePromise => setTimeout(resolvePromise, POLL_INTERVAL_MILLIS))
       continue
@@ -1696,11 +1796,22 @@ export async function runApiProductionVertical({
   restart = true,
   repeat = true,
   includeStrongFlow = true,
+  continueOnStrongFlowFailure = false,
   serverEnvironment = {},
+  deviceRoute = null,
+  devicePrerequisites = true,
+  wwcBinary = null,
+  deviceProviderSecrets = [],
   scenario = null,
   timeoutMillis = DEFAULT_TIMEOUT_MILLIS,
 } = {}) {
-  const modelRoute = configuredModelRoute(serverEnvironment)
+  assertServerEnvironmentIsDeviceOnly(serverEnvironment)
+  assertDeviceSecretsNeverOnServer(serverEnvironment, deviceProviderSecrets)
+  const modelRoute = configuredModelRoute(deviceRoute ?? {})
+  const deviceProvider = deterministicDeviceProvider()
+  const plannedDevicePrerequisites = devicePrerequisites
+    ? [...DEVICE_ONLY_PREREQUISITES]
+    : null
   const binary = serverBinary ?? resolve(serverTargetDirectory(root), 'debug/winwincode-server')
   const remoteWorkerBinary = workerBinary === null
     ? null
@@ -1790,7 +1901,8 @@ export async function runApiProductionVertical({
         WWC_SERVER_REMOTE_WORKER_EXPIRES_AT: '2099-01-01T00:00:00Z',
       }
   const proof = randomBytes(32).toString('base64url')
-  const proofs = [proof, serverEnvironment.WWC_SERVER_MODEL_API_KEY].filter(Boolean)
+  // Bootstrap proof only. Device Provider secrets are never Server proofs.
+  const proofs = [proof].filter(Boolean)
   const controlledRepository = prepareControlledRepository({
     fixtureDirectory,
     files: scenario?.files,
@@ -1799,12 +1911,22 @@ export async function runApiProductionVertical({
   let started = null
   let workerStarted = null
   let api = null
+  let devicePath = null
   let serverOutput = ''
   let workerOutput = ''
   let remoteWorkerHeartbeatAt = null
   let failure = null
   const report = {
     schemaVersion: 'winwincode.api-production-vertical.v1',
+    execution: 'device-worker-only',
+    devicePrerequisites: plannedDevicePrerequisites,
+    deviceProvider: devicePrerequisites
+      ? {
+        providerId: deviceProvider.providerId,
+        modelId: deviceProvider.modelId,
+        secretPlacement: 'device-local-only',
+      }
+      : null,
     artifacts: {
       sourceSeal: {
         gitHead: sourceSeal.seal.gitHead,
@@ -1821,6 +1943,8 @@ export async function runApiProductionVertical({
     restart: null,
     deterministic: null,
     remoteWorker: null,
+    devicePath: null,
+    errorCodeTruthfulness: null,
   }
 
   const stableServerPort = remoteWorkerBinary === null ? null : await freePort()
@@ -1845,6 +1969,61 @@ export async function runApiProductionVertical({
     api = new ApiClient(started.controlUrl, started.origin)
     await api.bootstrap(proof)
 
+    // Live public-error truthfulness: without Device prerequisites the Server
+    // must reject chat with a dedicated Device terminal code, not WRONG_STATE.
+    if (devicePrerequisites) {
+      const probeSessionId = 'psn_01J00000000000000000000099'
+      const probe = {
+        probeSessionId,
+        sessionCreate: null,
+        chatSubmit: null,
+        truthfulDeviceCodes: false,
+        notWrongStateDisguise: false,
+      }
+      try {
+        const created = await api.command('session.create', 0, {
+          productSessionId: probeSessionId,
+          projectId: IDS.project,
+          repositoryId: IDS.repository,
+          title: 'Device gate truthfulness probe',
+          modelRoute: configuredModelRoute({}),
+        })
+        probe.sessionCreate = {
+          outcome: created.outcome,
+          revision: created.currentRevision,
+        }
+        try {
+          await api.command('chat.submit', 1, {
+            productSessionId: probeSessionId,
+            message: 'probe without Device prerequisites',
+          })
+          probe.chatSubmit = { accepted: true, code: null, status: 200 }
+          probe.truthfulDeviceCodes = false
+          probe.notWrongStateDisguise = true
+        } catch (error) {
+          probe.chatSubmit = {
+            accepted: false,
+            code: error.code ?? null,
+            status: error.status ?? null,
+            message: error.message,
+          }
+          probe.truthfulDeviceCodes = error.code === 'DEVICE_SESSION_REQUIRED'
+            || error.code === 'DEVICE_MODEL_UNAVAILABLE'
+          probe.notWrongStateDisguise = error.code !== 'WRONG_STATE'
+        }
+      } catch (error) {
+        probe.sessionCreate = {
+          outcome: 'error',
+          code: error.code ?? null,
+          message: error.message,
+        }
+        probe.truthfulDeviceCodes = error.code === 'DEVICE_SESSION_REQUIRED'
+          || error.code === 'DEVICE_MODEL_UNAVAILABLE'
+        probe.notWrongStateDisguise = error.code !== 'WRONG_STATE'
+      }
+      report.errorCodeTruthfulness = probe
+    }
+
     if (remoteWorkerBinary !== null) {
       workerStarted = spawnStandaloneWorker({
         controlUrl: started.controlUrl,
@@ -1868,11 +2047,81 @@ export async function runApiProductionVertical({
       remoteWorkerHeartbeatAt = readyWorker.lastHeartbeatAt
     }
 
+    if (devicePrerequisites) {
+      const wwc = wwcBinary
+        ?? resolve(serverTargetDirectory(root), 'debug/wwc')
+      if (!existsSync(wwc)) {
+        fail(
+          'Device-only production vertical requires the wwc CLI '
+          + `(missing ${wwc}). Build winwincode-cli and re-run; `
+          + 'Server-local model execution is not a fallback.',
+        )
+      }
+      devicePath = await establishDeviceOnlyExecutionPath({
+        api,
+        wwc,
+        directory: fixtureDirectory,
+        repository: controlledRepository.repository,
+        schemaVersion: SCHEMA_VERSION,
+        certificatePath: certificate.cert,
+        privateKeyPath: certificate.key,
+        helperReleaseManifest,
+        helperExecutable,
+        modelRouteSource: modelRoute,
+        timeoutMillis,
+        deviceProvider,
+        deviceSecret: deviceProviderSecrets[0] ?? null,
+        seedDeviceProvider: true,
+        repositoryScope: {
+          organizationId: IDS.organization,
+          workspaceId: IDS.workspace,
+          projectId: IDS.project,
+          repositoryId: IDS.repository,
+        },
+      })
+      report.devicePath = {
+        complete: devicePath.steps.length > 0,
+        publicClientId: devicePath.publicClientId,
+        repositoryBindingId: devicePath.repositoryBindingId,
+        steps: [...devicePath.steps],
+        modelRoute: devicePath.modelRoute,
+        deviceProvider: devicePath.deviceProvider ?? null,
+        modelServerEndpoint: devicePath.modelServer?.endpoint ?? null,
+        modelServerRequestCount: devicePath.modelServer?.requests?.length ?? 0,
+        providerRoute: {
+          providerId: devicePath.modelRoute.providerId,
+          modelId: devicePath.modelRoute.modelId,
+          credentialReferenceId: devicePath.modelRoute.credentialReferenceId,
+        },
+      }
+      // Prefer the Device-bound model route after pairing.
+      Object.assign(modelRoute, devicePath.modelRoute)
+    }
+
     if (scenario !== null) {
-      report.flow.scenario = await scenario.run({ api, repository: controlledRepository.repository, baseline, modelRoute })
+      report.flow.scenario = await scenario.run({
+        api,
+        repository: controlledRepository.repository,
+        baseline,
+        modelRoute,
+        devicePath,
+        deviceProvider,
+      })
       return report
     }
-    const chat = await runChat(api, timeoutMillis, { modelRoute })
+    if (devicePrerequisites && devicePath === null) {
+      fail('Device-only production vertical could not establish Device prerequisites')
+    }
+    const launchForProductSession = devicePath === null
+      ? null
+      : async ({ productSessionId }) => {
+        await devicePath.launchAnchor({ productSessionId })
+        report.devicePath.steps = [...devicePath.steps]
+      }
+    const chat = await runChat(api, timeoutMillis, {
+      modelRoute,
+      beforeSubmit: launchForProductSession,
+    })
     report.flow.chat = {
       assistant: {
         content: chat.assistant.content,
@@ -1917,6 +2166,11 @@ export async function runApiProductionVertical({
       const repeated = await runChat(api, timeoutMillis, {
         modelRoute,
         productSessionId: IDS.repeatSession,
+        beforeSubmit: devicePath === null
+          ? null
+          : async ({ productSessionId }) => {
+            await devicePath.launchAnchor({ productSessionId })
+          },
       })
       assert.equal(
         repeated.assistant.content,
@@ -1933,86 +2187,174 @@ export async function runApiProductionVertical({
       }
     }
 
-    report.flow.cancel = await runCancelledSession(api, modelRoute)
-
+    // StrongFlow runs before cancel so Device WorkerSession capacity stays
+    // available for Controller-dispatched role WorkRuns.
     let delivery = null
     if (includeStrongFlow) {
-      const deliveryCreated = await commandEventually(api, 'delivery.create', 0, {
-        deliveryId: IDS.delivery,
-        spec: deliverySpec(baseline),
-      }, timeoutMillis)
-      assertCompleted(deliveryCreated, 'delivery.create', 0)
-      const workRunBeforeDispatch = await api.query('workrun.get', {
-        deliveryId: IDS.delivery,
-        workItemId: null,
-        atCursor: null,
-      })
-      const workItemPayload = workItemCreatePayload(
-        workRunBeforeDispatch.result,
-        deliveryCreated.currentRevision,
-      )
-      if (workItemPayload !== null) {
-        const workItemsCreated = await commandEventually(
-          api,
-          'workitems.create',
+      try {
+        // Device StrongFlow is sealed to an already-launched Device
+        // ProductSession so Controller-dispatched role jobs carry the Device
+        // target and model route. Chat already launched IDS.session.
+        const strongFlowSourceSessionId = devicePath === null ? null : IDS.session
+        const deliveryCreated = await commandEventually(api, 'delivery.create', 0, {
+          deliveryId: IDS.delivery,
+          spec: deliverySpec(baseline, {
+            sourceProductSessionId: strongFlowSourceSessionId,
+          }),
+        }, timeoutMillis)
+        assertCompleted(deliveryCreated, 'delivery.create', 0)
+        const workRunBeforeDispatch = await api.query('workrun.get', {
+          deliveryId: IDS.delivery,
+          workItemId: null,
+          atCursor: null,
+        })
+        const workItemPayload = workItemCreatePayload(
+          workRunBeforeDispatch.result,
           deliveryCreated.currentRevision,
-          workItemPayload,
+        )
+        if (workItemPayload !== null) {
+          const workItemsCreated = await commandEventually(
+            api,
+            'workitems.create',
+            deliveryCreated.currentRevision,
+            workItemPayload,
+            timeoutMillis,
+          )
+          assertCompleted(
+            workItemsCreated,
+            'workitems.create',
+            deliveryCreated.currentRevision,
+          )
+          assert.equal(workItemsCreated.result.items.length, 1)
+          assert.equal(workItemsCreated.result.items[0].id, IDS.workItem)
+          assert.deepEqual(
+            workItemsCreated.result.items[0].criterionIds,
+            workItemPayload.items[0].criterionIds,
+          )
+        }
+        const deliveryBeforeDispatch = await api.query('delivery.get', {
+          deliveryId: IDS.delivery,
+        })
+        const deliveryAdvanced = await commandEventually(
+          api,
+          'workrun.start',
+          deliveryBeforeDispatch.result.deliveryRevision,
+          {
+            deliveryId: IDS.delivery,
+            dispatchProfile: 'executor',
+          },
           timeoutMillis,
         )
         assertCompleted(
-          workItemsCreated,
-          'workitems.create',
-          deliveryCreated.currentRevision,
+          deliveryAdvanced,
+          'workrun.start',
+          deliveryBeforeDispatch.result.deliveryRevision,
         )
-        assert.equal(workItemsCreated.result.items.length, 1)
-        assert.equal(workItemsCreated.result.items[0].id, IDS.workItem)
-        assert.deepEqual(
-          workItemsCreated.result.items[0].criterionIds,
-          workItemPayload.items[0].criterionIds,
-        )
-      }
-      const deliveryBeforeDispatch = await api.query('delivery.get', {
-        deliveryId: IDS.delivery,
-      })
-      const deliveryAdvanced = await commandEventually(
-        api,
-        'workrun.start',
-        deliveryBeforeDispatch.result.deliveryRevision,
-        {
+        assert.equal(deliveryAdvanced.result.deliveryId, IDS.delivery)
+        // Device product authority: each StrongFlow WorkRun needs its own
+        // WorkerLaunchGrant before Device execution can dispatch. Controller
+        // owns role sequencing; the Client owns launch anchors.
+        const anchoredWorkRunIds = new Set()
+        const anchorWorkRun = async workRunId => {
+          if (devicePath === null || typeof workRunId !== 'string' || workRunId.length === 0) {
+            return false
+          }
+          if (anchoredWorkRunIds.has(workRunId)) return false
+          await devicePath.launchAnchor({ workRunId })
+          anchoredWorkRunIds.add(workRunId)
+          report.devicePath.steps = [...devicePath.steps]
+          return true
+        }
+        const executorWorkRunId = deliveryAdvanced.result?.activeWorkRunId
+          ?? deliveryAdvanced.result?.workRunId
+          ?? null
+        await anchorWorkRun(executorWorkRunId)
+        delivery = await driveDelivery(api, timeoutMillis, modelRoute, Date.now, {
+          onActiveWorkRuns: async activeWorkRuns => {
+            for (const run of activeWorkRuns) {
+              await anchorWorkRun(run.id)
+            }
+          },
+        })
+        const workRunRuntime = await runtimeWorkRunEvidence(api, delivery.detail)
+        report.flow.strongflow = {
+          actions: delivery.actions,
           deliveryId: IDS.delivery,
-          dispatchProfile: 'executor',
-        },
-        timeoutMillis,
-      )
-      assertCompleted(
-        deliveryAdvanced,
-        'workrun.start',
-        deliveryBeforeDispatch.result.deliveryRevision,
-      )
-      assert.equal(deliveryAdvanced.result.deliveryId, IDS.delivery)
-      delivery = await driveDelivery(api, timeoutMillis, modelRoute)
-      const workRunRuntime = await runtimeWorkRunEvidence(api, delivery.detail)
-      report.flow.strongflow = {
-        actions: delivery.actions,
-        deliveryId: IDS.delivery,
-        evidenceCount: delivery.detail.evidence.length,
-        providerRoute: modelRoute,
-        candidateArtifact: candidateArtifactSummary(delivery.detail.currentCandidate),
-        observations: delivery.observations,
-        totalTransitionCount: delivery.totalTransitionCount,
-        workRunStates: delivery.workRunAggregate.runs.map(run => run.state),
-        workRunRuntime: workRunRuntime.map(item => ({
-          workRunId: item.workRunId,
-          asOfSequence: item.session.asOfSequence,
-          executionJobId: item.session.executionJobId,
-          workerSessionId: item.session.workerSessionId,
-          codexThreadId: item.session.codexThreadId,
-        })),
-        status: delivery.detail.status,
-        workItemStates: delivery.workRunAggregate.items.map(item => item.state),
-        verdictStatus: delivery.detail.verdict.status,
+          evidenceCount: delivery.detail.evidence.length,
+          providerRoute: modelRoute,
+          candidateArtifact: candidateArtifactSummary(delivery.detail.currentCandidate),
+          observations: delivery.observations,
+          totalTransitionCount: delivery.totalTransitionCount,
+          workRunStates: delivery.workRunAggregate.runs.map(run => run.state),
+          workRunRuntime: workRunRuntime.map(item => ({
+            workRunId: item.workRunId,
+            asOfSequence: item.session.asOfSequence,
+            executionJobId: item.session.executionJobId,
+            workerSessionId: item.session.workerSessionId,
+            codexThreadId: item.session.codexThreadId,
+          })),
+          status: delivery.detail.status,
+          workItemStates: delivery.workRunAggregate.items.map(item => item.state),
+          verdictStatus: delivery.detail.verdict.status,
+          stalled: false,
+          coupledTo72t361: false,
+        }
+      } catch (error) {
+        // StrongFlow can stall after Controller dispatch: Device reviewer/
+        // verifier execution may still fail (72t.36.1 residual) even when
+        // role WorkRuns were created. Record the exact subset and continue
+        // when the caller asked for Device-path chat/cancel/restart evidence.
+        let detail = null
+        let failedWorkRunStates = []
+        try {
+          detail = (await api.query('delivery.get', { deliveryId: IDS.delivery })).result
+        } catch {
+          detail = null
+        }
+        try {
+          const aggregate = (await api.query('workrun.get', {
+            deliveryId: IDS.delivery,
+            workItemId: null,
+            atCursor: null,
+          })).result
+          failedWorkRunStates = Array.isArray(aggregate?.runs)
+            ? aggregate.runs.map(run => ({ id: run.id, state: run.state }))
+            : []
+        } catch {
+          failedWorkRunStates = []
+        }
+        report.flow.strongflowError = error instanceof Error
+          ? error.message
+          : String(error)
+        report.flow.strongflow = {
+          deliveryId: IDS.delivery,
+          providerRoute: modelRoute,
+          status: detail?.status ?? null,
+          verdictStatus: detail?.verdict?.status ?? null,
+          evidenceCount: Array.isArray(detail?.evidence) ? detail.evidence.length : 0,
+          candidateArtifact: candidateArtifactSummary(detail?.currentCandidate),
+          currentCandidateStatus: detail?.currentCandidate?.status ?? null,
+          workRunStates: failedWorkRunStates,
+          stalled: true,
+          controllerDispatchedReviewer: failedWorkRunStates.some(
+            run => run.state === 'failed' || run.state === 'candidate_ready' || run.state === 'settled',
+          ) && failedWorkRunStates.length > 1,
+          coupledTo72t361: true,
+        }
+        if (continueOnStrongFlowFailure !== true) throw error
       }
     }
+
+    report.flow.cancel = await runCancelledSession(
+      api,
+      modelRoute,
+      devicePath === null
+        ? null
+        : async ({ productSessionId }) => {
+          await devicePath.launchAnchor({ productSessionId })
+          report.devicePath.steps = [...devicePath.steps]
+        },
+    )
 
     if (restart) {
       const firstDeliveryBytes = delivery === null ? null : JSON.stringify(delivery.detail)
@@ -2041,7 +2383,7 @@ export async function runApiProductionVertical({
       // namespace for new work after restart while retaining the original ids
       // only for the explicit terminal replay assertion below.
       const restartedApi = new ApiClient(started.controlUrl, started.origin, 1_000_001)
-      await restartedApi.bootstrap(restartProof, { login: true })
+      await restartedApi.bootstrap(restartProof, { login: true, localOpen: true })
       if (workerStarted !== null) {
         report.remoteWorker.survivedServerRestartPid = workerStarted.child.pid
         const readyWorker = await waitForRemoteWorker(
@@ -2054,6 +2396,11 @@ export async function runApiProductionVertical({
         const reconnected = await runChat(restartedApi, timeoutMillis, {
           modelRoute,
           productSessionId: IDS.reconnectSession,
+          beforeSubmit: devicePath === null
+            ? null
+            : async ({ productSessionId }) => {
+              await devicePath.launchAnchor({ productSessionId })
+            },
         })
         assert.equal(reconnected.assistant.state, 'completed')
         report.remoteWorker.terminalAfterServerRestart = true
@@ -2096,6 +2443,10 @@ export async function runApiProductionVertical({
   } catch (error) {
     failure = error
   } finally {
+    if (devicePath !== null) {
+      devicePath.stop?.()
+      serverOutput += ''
+    }
     if (workerStarted !== null) {
       await stopWorker(workerStarted.child).catch(() => {})
       workerOutput += workerStarted.errors.join('')
@@ -2159,6 +2510,17 @@ function parseArguments(arguments_) {
     }
     if (argument === '--no-repeat') {
       options.repeat = false
+      continue
+    }
+    if (argument === '--device-prerequisites') {
+      options.devicePrerequisites = true
+      continue
+    }
+    if (argument === '--wwc-binary') {
+      const value = arguments_[index + 1]
+      if (value === undefined || value.startsWith('--')) fail(`${argument} requires a value`)
+      options.wwcBinary = resolve(value)
+      index += 1
       continue
     }
     if (

@@ -71,10 +71,12 @@ use winwincode_storage::{
     WorkerSlotResourceLimits, WorkerSlotResources, WorkerSlotState,
 };
 use winwincode_worker::{
-    CandidateArtifactAckOutcome, CandidateArtifactAuthority, CandidateArtifactUpload,
-    CodexCoreAdapter, CodexPoll, CodexThreadSession, CodexThreadStart, CodexTurnCompletion,
-    DurableExecutionDelivery, RetainedCandidateArtifact, WorkerConfig, WorkerExecutionPort,
-    WorkerMain, secret_safe_runtime_summary, workspace_runtime::JobWorkspaceRuntime,
+    ArtifactAckOutcome, CandidateArtifactAckOutcome, CandidateArtifactAuthority,
+    CandidateArtifactUpload, CodexCoreAdapter, CodexPoll, CodexThreadSession, CodexThreadStart,
+    CodexTurnCompletion, DiagnosticArtifactAuthority, DiagnosticArtifactUpload,
+    DurableExecutionDelivery, RetainedCandidateArtifact, RetainedDiagnosticArtifact, WorkerConfig,
+    WorkerExecutionPort, WorkerMain, secret_safe_runtime_summary,
+    workspace_runtime::JobWorkspaceRuntime,
 };
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -818,6 +820,36 @@ impl CodexCoreAdapter for ScriptedStageProductAdapter {
         &mut self,
         _acknowledgement: &ArtifactAckMessage,
     ) -> Result<CandidateArtifactAckOutcome, Self::Error> {
+        Err(())
+    }
+
+    fn accept_artifact_ack(
+        &mut self,
+        acknowledgement: &ArtifactAckMessage,
+    ) -> Result<ArtifactAckOutcome, Self::Error> {
+        self.accept_candidate_artifact_ack(acknowledgement)
+            .map(|outcome| match outcome {
+                CandidateArtifactAckOutcome::Pending => ArtifactAckOutcome::Pending,
+                CandidateArtifactAckOutcome::Replay(deliveries) => {
+                    ArtifactAckOutcome::Replay(deliveries)
+                }
+                CandidateArtifactAckOutcome::Accepted(reference) => {
+                    ArtifactAckOutcome::Accepted(reference)
+                }
+            })
+    }
+
+    fn retain_diagnostic_artifact(
+        &mut self,
+        _upload: &DiagnosticArtifactUpload,
+    ) -> Result<RetainedDiagnosticArtifact, Self::Error> {
+        Err(())
+    }
+
+    fn accepted_diagnostic_artifacts(
+        &mut self,
+        _authority: &DiagnosticArtifactAuthority,
+    ) -> Result<Vec<ArtifactReference>, Self::Error> {
         Err(())
     }
 

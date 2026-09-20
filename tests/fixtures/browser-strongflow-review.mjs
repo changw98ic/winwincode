@@ -242,7 +242,7 @@ globalThis.exerciseReview = async () => {
     currentAuthorization: document.querySelector('.wwc-review-history-review')?.dataset.reviewCurrentAuthorization,
     progress: document.querySelector('.wwc-review-progress')?.textContent ?? '',
     criteria: [...document.querySelectorAll('.wwc-review-criterion')].map(node => ({
-      id: node.dataset.reviewCriterionId,
+      id: node.dataset.reviewCriterionIndex,
       result: node.dataset.reviewCriterionResult,
       text: node.textContent,
     })),

@@ -137,6 +137,7 @@ fn pending_execution(seed: u64, checkout_revision: &str) -> PendingDeliveryExecu
                 max_artifact_bytes: 10_000_000,
                 max_runtime_seconds: 3_600,
             },
+            managed_app_run_config: None,
         },
     )
     .expect("pending execution");
@@ -217,6 +218,7 @@ fn pending_rework(
                 max_artifact_bytes: 10_000_000,
                 max_runtime_seconds,
             },
+            managed_app_run_config: None,
         },
     )
     .expect("pending authorized rework");
@@ -1594,6 +1596,7 @@ fn prepared_dispatch_rejects_reusing_an_accepted_run_or_job() {
                 candidate_ref: None,
                 workspace: pending.job().workspace.clone(),
                 limits: pending.job().limits.clone(),
+                managed_app_run_config: None,
             },
         )
         .expect_err("accepted identity must not be reused for a new dispatch");

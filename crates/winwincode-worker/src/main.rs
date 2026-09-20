@@ -195,10 +195,12 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
         started_at: started_at.clone(),
         capabilities,
     };
+    let intake_log = data_directory.join("codex-runtime").join("model-intake.log");
     let mut worker = WorkerMain::new(config, port, codex, workspaces)
         .with_device_providers(&provider_directory)?
         .with_observer_mode(observer_mode)
-        .with_registration_request_namespace(&worker_instance_id, &started_at);
+        .with_registration_request_namespace(&worker_instance_id, &started_at)
+        .with_model_intake_log(&intake_log);
     if let Some(observation_model) = observation_model {
         worker = worker.with_observation_model(observation_model);
     }
@@ -228,6 +230,15 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
             _ = drive.tick() => {
                 let now = now_instant()?;
                 Box::pin(drain_controls(&mut worker, &handle)).await?;
+                // Retry pending Worker→Server evidence every drive tick so a
+                // Server restart / Connection-refused window cannot strand
+                // runtime.event / artifact.chunk / JobOutcome in the outbox.
+                if worker.lifecycle() == WorkerLifecycleState::Active
+                    && Box::pin(worker.flush_durable_outbox()).await.is_err()
+                    && env::var_os("WWC_WORKER_POLL_DEBUG").is_some()
+                {
+                    eprintln!("winwincode-worker: durable outbox flush retry failed");
+                }
                 let _ = Box::pin(worker.poll_codex(now)).await;
                 if exit_after_work && worker.work_drained() { break; }
             }
@@ -266,6 +277,19 @@ where
                 }
                 handle.retry(&delivery_id)?;
                 if error.code == winwincode_worker::WorkerErrorCode::ExecutionPort {
+                    return Ok(());
+                }
+                // Keep the process alive while durable Worker→Server evidence
+                // is still pending. Exiting here after a Server restart or a
+                // transient control reject strands verification frames that
+                // never reach the Control Plane verdict path.
+                if worker.has_pending_durable_evidence() {
+                    if env::var_os("WWC_WORKER_POLL_DEBUG").is_some() {
+                        eprintln!(
+                            "remote Worker control rejected with pending durable evidence; retrying kind category={:?}",
+                            error.code
+                        );
+                    }
                     return Ok(());
                 }
                 return Err(Box::new(error));

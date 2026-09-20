@@ -3,6 +3,14 @@
 这一目录冻结 TypeScript Web、Rust Control Plane 与 Rust Execution Worker 共用的第一版
 公开合同。
 
+## Community 产品身份
+
+WinWinCode Community 是单本机 Owner 产品。公开合同里的 `OrganizationId` /
+`OrganizationScope` / 分层 Scope 仍是协议 scope key 词汇，不是多租户组织管理界面。
+Community 产品身份固定为 `LocalDefaultScope`（`org_/wsp_/prj_/rep_` 全零常量）。schema
+与生成物注释只说明协议键，不会把 Cloud/Enterprise 的组织/成员管理面算作 Community
+产品表面。
+
 ## 唯一入口
 
 | 路由 | 用途 |
@@ -80,7 +88,8 @@ schema。生成文件带统一来源摘要，重复生成相同输入不会改�
 - `requestId`：同一 Actor 和 Scope 内的重试身份；
 - `expectedRevision`：执行写入前必须匹配的资源版本；
 - `actor`：必须与认证后的调用者一致；
-- `scope`：调用者必须有权访问的组织、工作区、项目或仓库范围。
+- `scope`：调用者必须有权访问的协议范围键。Community 运行时固定使用
+  `LocalDefaultScope`，不是可切换的多租户组织。
 
 相同 `requestId` 和完全相同的输入再次提交时，服务返回第一次保存的 HTTP
 状态和响应正文，不重复执行。相同 `requestId` 对应不同输入时返回

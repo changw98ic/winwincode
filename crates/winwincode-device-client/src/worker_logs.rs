@@ -445,6 +445,9 @@ impl StreamPending {
 struct RecorderState {
     logs_root: PathBuf,
     config: WorkerLogConfig,
+    // ponytail: one recorder-wide lock keeps file and meta updates atomic;
+    // shard by session only if measured log throughput makes this a bottleneck.
+    operation_lock: Mutex<()>,
     pending: Mutex<BTreeMap<String, StreamPending>>,
 }
 
@@ -486,6 +489,7 @@ impl WorkerLogRecorder {
             state: Arc::new(RecorderState {
                 logs_root: logs_root.to_path_buf(),
                 config,
+                operation_lock: Mutex::new(()),
                 pending: Mutex::new(BTreeMap::new()),
             }),
         })
@@ -525,6 +529,7 @@ impl WorkerLogRecorder {
     ) -> Result<WorkerLogAppendStats, WorkerLogError> {
         validate_session_id(worker_session_id)?;
         parse_stamp(stamp)?;
+        let _operation_guard = self.lock_operations();
         let mut meta = self.load_or_create_meta(worker_session_id, worker_instance_id, stamp)?;
         stamp.clone_into(&mut meta.last_activity_at);
         if !worker_instance_id.is_empty() {
@@ -617,6 +622,7 @@ impl WorkerLogRecorder {
             ));
         }
         let observed_at = parse_stamp(stamp)?;
+        let _operation_guard = self.lock_operations();
         let mut meta = self.load_or_create_meta(worker_session_id, worker_instance_id, stamp)?;
         if meta
             .terminal
@@ -681,6 +687,7 @@ impl WorkerLogRecorder {
         &self,
         worker_session_id: &str,
     ) -> Result<Option<WorkerLogSummary>, WorkerLogError> {
+        let _operation_guard = self.lock_operations();
         let Some(meta) = self.load_meta(worker_session_id)? else {
             return Ok(None);
         };
@@ -722,6 +729,7 @@ impl WorkerLogRecorder {
         &self,
         worker_session_id: &str,
     ) -> Result<Option<WorkerLogCrashReference>, WorkerLogError> {
+        let _operation_guard = self.lock_operations();
         let Some(meta) = self.load_meta(worker_session_id)? else {
             return Ok(None);
         };
@@ -746,6 +754,11 @@ impl WorkerLogRecorder {
     ///
     /// Reports storage failures.
     pub fn session_ids(&self) -> Result<Vec<String>, WorkerLogError> {
+        let _operation_guard = self.lock_operations();
+        self.session_ids_unlocked()
+    }
+
+    fn session_ids_unlocked(&self) -> Result<Vec<String>, WorkerLogError> {
         let mut sessions = Vec::new();
         let entries = fs::read_dir(&self.state.logs_root)
             .map_err(|_| WorkerLogError::io("logs root read"))?;
@@ -779,7 +792,9 @@ impl WorkerLogRecorder {
     /// Rejects an unparsable RFC 3339 `now` stamp and reports storage
     /// failures.
     pub fn prune(&self, now: &str) -> Result<usize, WorkerLogError> {
-        self.prune_with(parse_stamp(now)?)
+        let now = parse_stamp(now)?;
+        let _operation_guard = self.lock_operations();
+        self.prune_with(now)
     }
 
     fn prune_with(&self, now: OffsetDateTime) -> Result<usize, WorkerLogError> {
@@ -787,7 +802,7 @@ impl WorkerLogRecorder {
             i64::try_from(self.state.config.retention_window.as_secs()).unwrap_or(i64::MAX);
         let mut removed = 0usize;
         let mut retained: Vec<(String, i64)> = Vec::new();
-        for session in self.session_ids()? {
+        for session in self.session_ids_unlocked()? {
             match self.load_meta(&session) {
                 Ok(Some(meta)) => {
                     let last = if let Ok(stamp) = parse_stamp(&meta.last_activity_at) {
@@ -832,6 +847,13 @@ impl WorkerLogRecorder {
     fn lock_pending(&self) -> MutexGuard<'_, BTreeMap<String, StreamPending>> {
         self.state
             .pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn lock_operations(&self) -> MutexGuard<'_, ()> {
+        self.state
+            .operation_lock
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
     }

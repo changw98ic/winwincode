@@ -1,4 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
+//
+// Community product boundary: WinWinCode Community is a single local Owner
+// product. This application graph mounts DSH, StrongFlow, local Owner
+// login/session, Device Client, and Repository surfaces only. Cloud/Enterprise
+// management routes and organization/member administration navigation are not
+// Community product surface. Scope query keys that still carry organizationId
+// use LocalDefaultScope singleton values.
 
 import { mountPreferences } from './preferences.js'
 import { REPOSITORY_NAME_CHANGED_EVENT } from './display-labels.js'
@@ -9,12 +16,14 @@ import {
   createControlPlaneClientCandidates,
   createControlPlaneClientDirectory,
   createControlPlaneRepositoryRegistration,
+  createControlPlaneManagedAppTemplatePort,
   createControlPlaneTaskPort,
   createControlPlaneTaskFake,
   createControlPlaneWorkerSessionPort,
   createControlPlaneRunIdentityPort,
   createControlPlaneRunIdentityFake,
   queryWorkRunAggregate,
+  queryDeliveryDetail,
   type ControlPlaneClient,
   type ControlPlaneClientTransport,
   type ControlPlaneTaskAnchor,
@@ -41,6 +50,10 @@ import {
 import { mountSessionBrowser } from './dsh-ui.js'
 import { CommandName } from './generated/contracts.js'
 import type { ProductSessionProjection, OpaqueCursor } from './generated/contracts.js'
+import type {
+  CollaborationPageAnnotationProjection,
+  CollaborationPageAnnotationSubmitCompletedResponse,
+} from './generated/contracts.js'
 import { createQueryCache } from '@winwincode/browser-core/query-cache'
 import {
   resolveScopeContext,
@@ -113,6 +126,8 @@ export interface WinWinCodeClientApplicationOptions {
   readonly controlPlane?: ControlPlaneClient
   /** Secret-safe clipboard seam for browser hosts and deterministic fixtures. */
   readonly copyText?: (value: string) => Promise<void> | void
+  /** Session history renderer seam for hosts with a non-DOM test document. */
+  readonly mountSessionBrowser?: (root: HTMLElement) => ReturnType<typeof mountSessionBrowser>
   readonly now?: () => string
   /** Server/deployment facts projected into navigation presentation only. */
   readonly navigationCapabilities?: Readonly<NavigationCapabilityFacts>
@@ -546,7 +561,7 @@ export function mountWinWinCodeClient(
     const expanded = header.classList.toggle('wwc-header-expanded')
     navigationToggle.setAttribute('aria-expanded', String(expanded))
   })
-  const sessionBrowser = mountSessionBrowser(recentChatsRoot)
+  const sessionBrowser = (options.mountSessionBrowser ?? mountSessionBrowser)(recentChatsRoot)
   let historySessions: readonly ProductSessionProjection[] = []
   let historyScope = ''
   let historyLoading = false
@@ -1083,6 +1098,7 @@ export function mountWinWinCodeClient(
         root: slot,
         clientDirectory,
         registration: createControlPlaneRepositoryRegistration({ serverUrl: controlPlane.serverUrl, transport: browserTransport }),
+        managedAppTemplate: createControlPlaneManagedAppTemplatePort({ serverUrl: controlPlane.serverUrl, transport: browserTransport }),
         newChatHref: (clientId, repository) => scopeHash(`#/chat?${new URLSearchParams({
           client: clientId,
           repositoryBinding: repository.repositoryBindingId,
@@ -1269,21 +1285,17 @@ export function mountWinWinCodeClient(
   function taskRunRouteAnchor(): {
     readonly taskId: WorkItemId
     readonly deliveryId: DeliveryId
-    readonly clientId: string
-    readonly repositoryBindingId: string
   } | null {
     const parameters = routeParameters(browser.location.hash)
     const taskId = parameters.get('task')
     const deliveryId = parameters.get('delivery')
-    const clientId = parameters.get('client') ?? ''
-    const repositoryBindingId = parameters.get('repository') ?? ''
     if (
       taskId === null || !matchesCanonicalSchema('WorkItemId', taskId)
       || deliveryId === null || !matchesCanonicalSchema('DeliveryId', deliveryId)
     ) {
       return null
     }
-    return { taskId: taskId as WorkItemId, deliveryId: deliveryId as DeliveryId, clientId, repositoryBindingId }
+    return { taskId: taskId as WorkItemId, deliveryId: deliveryId as DeliveryId }
   }
 
   /**
@@ -1316,8 +1328,6 @@ export function mountWinWinCodeClient(
           if (closed || generation !== renderGeneration || controller.signal.aborted) return
           const parameters = new URLSearchParams({
             task: anchor.taskId,
-            client: anchor.clientId,
-            repository: anchor.repositoryBindingId,
           })
           const deliveryId = routeParameters(browser.location.hash).get('delivery')
           if (deliveryId !== null) parameters.set('delivery', deliveryId)
@@ -1358,7 +1368,9 @@ export function mountWinWinCodeClient(
       if (closed || generation !== renderGeneration || controller.signal.aborted) return
       const knownAnchor = taskPort.describe(anchorFacts.taskId)
       const anchor: ControlPlaneTaskAnchor = knownAnchor ?? Object.freeze({
-        ...anchorFacts,
+        taskId: anchorFacts.taskId,
+        clientId: '',
+        repositoryBindingId: '',
         baseBranch: '',
         description: '',
         modelRouteId: '',
@@ -1376,6 +1388,13 @@ export function mountWinWinCodeClient(
           deliveryId: () => anchorFacts.deliveryId,
           nextRequestId: () => contractId('req', browser.crypto) as RequestId,
         }),
+        candidatePreviewHref: () => scopeHash(
+          `#/home/preview?${new URLSearchParams({
+            delivery: anchorFacts.deliveryId,
+            task: anchorFacts.taskId,
+          }).toString()}`,
+          scopeSelectionFromHash(browser.location.hash),
+        ),
       })
       activeFeature = mountTaskRunPage({
         root: slot,
@@ -1443,12 +1462,36 @@ export function mountWinWinCodeClient(
 
   /**
    * WWX-RUN-04: the candidate run preview main surface under `#/home/preview`.
-   * Identity comes from the route query when present; a missing source still
-   * mounts so the page can name the gap instead of inventing a run.
+   * The preview source comes from the canonical WorkRun projection; query
+   * parameters only identify the Delivery and WorkItem anchor.
    */
   async function renderCandidateRunPreview(generation: number): Promise<void> {
     const context = authenticatedRouteContext()
     if (context === null) return
+    const parameters = routeParameters(browser.location.hash)
+    const allowedParameters = new Set([
+      'delivery',
+      'task',
+      'organizationId',
+      'workspaceId',
+      'projectId',
+      'repositoryId',
+    ])
+    for (const key of parameters.keys()) {
+      if (!allowedParameters.has(key)) {
+        routeUnavailable('预览链接只接受交付和任务锚点，请从运行中的任务重新打开。')
+        return
+      }
+    }
+    const taskId = parameters.get('task')
+    const deliveryId = parameters.get('delivery')
+    if (
+      taskId === null || !matchesCanonicalSchema('WorkItemId', taskId)
+      || deliveryId === null || !matchesCanonicalSchema('DeliveryId', deliveryId)
+    ) {
+      routeUnavailable('预览链接缺少有效的交付或任务锚点。请从运行中的任务重新打开。')
+      return
+    }
     const controller = new AbortController()
     featureController = controller
     routeLoading('正在加载候选运行预览…')
@@ -1456,7 +1499,7 @@ export function mountWinWinCodeClient(
       const [
         { createCandidatePreviewViewModel },
         { mountCandidateRunPreviewPage },
-        { createControlPlaneCandidatePreviewPort },
+        { candidatePreviewFileContextFromIdentity, createControlPlaneCandidatePreviewPort },
         { createPageAnnotationViewModel },
       ] = await Promise.all([
         import('./candidate-run-preview-view-model.js'),
@@ -1465,45 +1508,219 @@ export function mountWinWinCodeClient(
         import('./page-annotation-view-model.js'),
       ])
       if (closed || generation !== renderGeneration || controller.signal.aborted) return
-      const parameters = routeParameters(browser.location.hash)
-      const sourceId = parameters.get('source')
-      const mode = parameters.get('mode') === 'live' ? 'live' as const : 'frozen-candidate' as const
-      const commit = parameters.get('commit')
-      const clientId = parameters.get('client')
-      const workerSessionId = parameters.get('worker')
-      const repositoryBindingId = parameters.get('repository')
-      if (sourceId === null || clientId === null || workerSessionId === null || repositoryBindingId === null) {
-        routeUnavailable('预览链接缺少 Client、来源或运行身份。请从候选任务重新打开。')
+      const knownAnchor = taskPort.describe(taskId as WorkItemId)
+      const anchor: ControlPlaneTaskAnchor = knownAnchor ?? Object.freeze({
+        taskId: taskId as WorkItemId,
+        clientId: '',
+        repositoryBindingId: '',
+        baseBranch: '',
+        description: '',
+        modelRouteId: '',
+      })
+      const identityPort = createControlPlaneRunIdentityPort({
+        client: controlPlane,
+        candidates: clientCandidates,
+        actor: () => context.actor,
+        scope: () => context.scope,
+        deliveryId: () => deliveryId as DeliveryId,
+        nextRequestId: () => contractId('req', browser.crypto) as RequestId,
+      })
+      const projection = await identityPort.read(anchor)
+      if (closed || generation !== renderGeneration || controller.signal.aborted) return
+      if (projection.candidate === null) {
+        routeUnavailable('当前任务没有可预览的候选结果。请等待候选生成后重试。')
         return
       }
-      const identity = {
-        mode,
-        clientId,
-        sourceId,
-        workerSessionId,
-        repositoryBindingId,
-        taskId: parameters.get('task'),
-        attempt: parameters.get('attempt') === null ? null : Number(parameters.get('attempt')),
-        candidateCommit: commit,
-        candidateTreeId: parameters.get('tree'),
-        runConfigVersion: parameters.get('config'),
+      const fileContext = candidatePreviewFileContextFromIdentity(projection)
+      if (fileContext === null) {
+        routeUnavailable('当前候选缺少规范文件读取上下文，暂不能打开预览。')
+        return
       }
+      const previewRun = projection.managedAppSourceRun ?? projection.workRun
+      const identity = Object.freeze({
+        mode: 'frozen-candidate' as const,
+        clientId: projection.clientId,
+        sourceId: previewRun.executionJobId,
+        workRunId: previewRun.id,
+        repositoryBindingId: projection.repositoryBindingId,
+        taskId: projection.taskId,
+        attempt: previewRun.attempt,
+        candidateCommit: projection.candidate.candidateCommitId,
+        candidateTreeId: projection.candidate.candidateTreeId,
+        runConfigVersion: projection.managedAppRunConfig?.schemaVersion ?? null,
+      })
       const model = createCandidatePreviewViewModel({
         port: createControlPlaneCandidatePreviewPort({
           serverUrl: controlPlane.serverUrl,
           fetch: browserTransport.fetch,
           identity,
+          client: controlPlane,
+          actor: context.actor,
+          scope: context.scope,
+          fileContext,
+          runIdentityProjection: () => identityPort.read(anchor),
+          occupancyStatus: clientId => clientOccupancy.getStatus({ clientId }),
+          ...(projection.managedAppRunConfig === null
+            ? {}
+            : { managedAppRunConfig: projection.managedAppRunConfig }),
+          nextRequestId: () => contractId('req', browser.crypto) as RequestId,
         }),
         nextRequestId: () => contractId('req', browser.crypto) as RequestId,
       })
-      activeFeature = mountCandidateRunPreviewPage({
+      const routeContext = context
+      function persistedAnnotation(item: CollaborationPageAnnotationProjection) {
+        const targetElement = item.target.element ?? null
+        return {
+          id: item.id,
+          body: item.body,
+          candidateRef: item.candidate.candidateRef,
+          workRunId: item.candidate.workRunId,
+          target: {
+            pagePath: item.target.pagePath,
+            viewport: item.target.viewport,
+            element: targetElement === null ? null : {
+              tagName: targetElement.tagName,
+              role: targetElement.role ?? null,
+              accessibleName: targetElement.accessibleName ?? null,
+              locator: targetElement.locator,
+              bounds: {
+                x: targetElement.x,
+                y: targetElement.y,
+                width: targetElement.width,
+                height: targetElement.height,
+              },
+            },
+            region: item.target.region,
+          },
+          updatedAt: new Date(item.updatedAt).toISOString(),
+        }
+      }
+      async function annotationFacts() {
+        const current = await identityPort.read(anchor)
+        if (current.deliveryId !== deliveryId || current.candidate === null || current.contract === null) {
+          throw new Error('当前候选身份已变化，请刷新预览后重试。')
+        }
+        const delivery = await queryDeliveryDetail(controlPlane, {
+          actor: routeContext.actor,
+          scope: routeContext.scope,
+          deliveryId: deliveryId as DeliveryId,
+          requestId: contractId('req', browser.crypto) as RequestId,
+        })
+        const attention = delivery.attention.find(item =>
+          item.status === 'open' && item.workRunId === current.workRun.id)
+        if (attention === undefined) throw new Error('当前任务没有可接收页面批注的处理项。')
+        const contract = current.contract
+        const candidate = current.candidate
+        const evidence = current.evidence.find(item =>
+          item.workRunId === current.workRun.id && item.candidateRef === candidate.candidateRef)
+        const candidateDigest = candidate.candidateRef.replace(/^git-candidate:/u, '')
+        return { current, contract, candidate, attention, evidence, candidateDigest }
+      }
+      const annotationTransport = {
+        async list(input: { readonly deliveryId: string }) {
+          const items: CollaborationPageAnnotationProjection[] = []
+          let cursor: OpaqueCursor | null = null
+          let catalogRevision = 0
+          do {
+            const response = await controlPlane.query({
+              schemaVersion: 'winwincode/v1',
+              actor: routeContext.actor,
+              scope: routeContext.scope,
+              requestId: contractId('req', browser.crypto) as RequestId,
+              query: QueryName.CollaborationPageAnnotationList,
+              parameters: { deliveryId: input.deliveryId as DeliveryId },
+              page: { cursor, limit: 200 },
+            })
+            if (response.query !== QueryName.CollaborationPageAnnotationList) throw new Error('页面批注读取失败。')
+            items.push(...response.result.items)
+            catalogRevision = Number(response.result.catalogRevision)
+            cursor = response.page.nextCursor
+          } while (cursor !== null)
+          return {
+            items: items.map(persistedAnnotation),
+            catalogRevision,
+          }
+        },
+        async submit(input: { readonly draft: import('./page-annotation-view-model.js').PageAnnotationDraft; readonly expectedRevision: number }) {
+          const { current, contract, candidate, attention, evidence, candidateDigest } = await annotationFacts()
+          const draft = input.draft
+          const target = {
+            pagePath: draft.pagePath,
+            viewport: draft.viewport,
+            element: draft.element === null ? null : {
+              tagName: draft.element.tagName,
+              role: draft.element.role,
+              accessibleName: draft.element.accessibleName,
+              locator: draft.element.locator,
+              x: draft.element.bounds.x,
+              y: draft.element.bounds.y,
+              width: draft.element.bounds.width,
+              height: draft.element.bounds.height,
+            },
+            region: draft.region ?? {
+              x: 0,
+              y: 0,
+              width: draft.viewport.width,
+              height: draft.viewport.height,
+            },
+          }
+          const response = await controlPlane.command({
+            schemaVersion: 'winwincode/v1',
+            actor: routeContext.actor,
+            scope: routeContext.scope,
+            requestId: contractId('req', browser.crypto) as RequestId,
+            command: CommandName.CollaborationPageAnnotationSubmit,
+            expectedRevision: input.expectedRevision,
+            payload: {
+              annotationId: draft.id,
+              itemId: { id: attention.id, kind: 'delivery_attention' },
+              candidate: {
+                deliveryId: deliveryId as DeliveryId,
+                deliverySpecId: contract.id,
+                deliverySpecRevision: Number(contract.revision),
+                candidateRef: candidate.candidateRef,
+                candidateDigest,
+                candidateTreeId: candidate.candidateTreeId,
+                diffSha256: candidate.diffSha256,
+                workRunId: current.workRun.id,
+                attempt: current.workRun.attempt,
+                sessionBindingId: evidence?.sessionBindingId ?? current.workRun.workerSessionId,
+              },
+              target,
+              body: draft.comment,
+              screenshotArtifact: null,
+            },
+          })
+          if (response.command !== CommandName.CollaborationPageAnnotationSubmit
+            || !('result' in response)) throw new Error('页面批注提交失败。')
+          const completed = response as unknown as CollaborationPageAnnotationSubmitCompletedResponse
+          return {
+            annotation: persistedAnnotation(completed.result.annotation),
+            catalogRevision: Number(completed.result.catalogRevision),
+          }
+        },
+      }
+      const annotations = createPageAnnotationViewModel({
+        appOrigin: browser.location.origin,
+        transport: annotationTransport,
+      })
+      const page = mountCandidateRunPreviewPage({
         root: slot,
         model,
-        annotations: createPageAnnotationViewModel({ appOrigin: browser.location.origin }),
+          annotations,
         appOrigin: browser.location.origin,
         devicePixelRatio: browser.devicePixelRatio,
-        taskHref: surfaceHash('/home', scopeSelectionFromHash(browser.location.hash)),
+        deliveryId,
+        taskHref: scopeHash(
+          `#/home/run?${new URLSearchParams({
+            delivery: deliveryId,
+            task: taskId,
+          }).toString()}`,
+          scopeSelectionFromHash(browser.location.hash),
+        ),
       })
+      activeFeature = { close() { page.close(); annotations.close(); model.close() } }
+      await model.start()
     } catch (error) {
       if (closed || generation !== renderGeneration || controller.signal.aborted) return
       showRouteFailure(error, 'CANDIDATE_PREVIEW_ROUTE_FAILURE')

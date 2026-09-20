@@ -55,9 +55,10 @@ export interface NavigationCapabilityProjection {
 }
 
 /**
- * Deployment-management queries require an organization-hierarchy Scope.  The
- * value stays a deployment fact; the community client exposes no management
- * surface for it.
+ * Deployment-management queries require an organization-hierarchy Scope.
+ * Those scope kinds remain protocol keys. WinWinCode Community product identity
+ * is LocalDefaultScope; the community client exposes no organization/member
+ * management surface for hierarchy values.
  */
 function hasHierarchyScope(scopes: readonly Scope[]): boolean {
   return scopes.some(scope => scope.kind === 'organization'

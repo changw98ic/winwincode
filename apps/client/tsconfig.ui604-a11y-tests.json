@@ -9,10 +9,10 @@
       "ES2023"
     ],
     "noEmit": false,
-    "outDir": "../../.cache/ui604-a11y-tests",
+    "outDir": "node_modules/.cache/ui604-a11y-tests",
     "rootDir": "src",
     "sourceMap": false,
-    "tsBuildInfoFile": "../../.cache/tsbuild/ui604-a11y-tests.tsbuildinfo"
+    "tsBuildInfoFile": "node_modules/.cache/tsbuild/ui604-a11y-tests.tsbuildinfo"
   },
   "include": [
     "src/**/*.ts",

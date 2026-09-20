@@ -63,17 +63,24 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 use time::OffsetDateTime;
 
 use crate::daemon::{LeaseWorkerController, WorkerCapacitySnapshot, WorkerCapacitySource};
 use crate::fencing::{FencedCommandKind, FencingGuard, FencingRejection, FencingVerdict};
 use crate::store::{DeviceStore, DeviceStoreError, WorkerProcessRecord};
+use crate::worker_logs::{
+    WorkerLogConfig, WorkerLogContentKind, WorkerLogRecorder, WorkerLogStream,
+};
 
 /// Registry lifecycle state of a supervised, believed-live worker process.
 pub const WORKER_STATE_RUNNING: &str = "running";
@@ -303,6 +310,8 @@ pub enum SupervisorError {
     WorkerBinary { path: PathBuf, reason: String },
     /// The worker process could not be spawned.
     Spawn { reason: String },
+    /// The local worker log recorder could not be opened.
+    WorkerLogs(String),
     /// The platform could not supply the process-boot identity the registry
     /// binding requires (plan 8.2: a bare pid is never sufficient).
     ProcessIdentityUnavailable { pid: u32 },
@@ -348,6 +357,7 @@ impl fmt::Display for SupervisorError {
                 write!(formatter, "worker binary {}: {reason}", path.display())
             }
             Self::Spawn { reason } => write!(formatter, "worker process spawn failed: {reason}"),
+            Self::WorkerLogs(reason) => write!(formatter, "worker log recorder failure: {reason}"),
             Self::ProcessIdentityUnavailable { pid } => write!(
                 formatter,
                 "the platform could not supply the boot identity of process {pid}"
@@ -361,6 +371,12 @@ impl std::error::Error for SupervisorError {}
 impl From<DeviceStoreError> for SupervisorError {
     fn from(error: DeviceStoreError) -> Self {
         Self::Store(error)
+    }
+}
+
+impl From<crate::worker_logs::WorkerLogError> for SupervisorError {
+    fn from(error: crate::worker_logs::WorkerLogError) -> Self {
+        Self::WorkerLogs(error.to_string())
     }
 }
 
@@ -398,6 +414,7 @@ enum ProcessProbe {
 /// identity facts; the bookkeeping only needs the process itself.
 struct TrackedChild {
     child: Child,
+    log_readers: Vec<thread::JoinHandle<()>>,
 }
 
 /// Shared state of one supervisor handle.
@@ -405,6 +422,7 @@ struct SupervisorInner {
     config: SupervisorConfig,
     store: Mutex<DeviceStore>,
     children: Mutex<BTreeMap<String, TrackedChild>>,
+    worker_logs: WorkerLogRecorder,
 }
 
 /// The Device Client's local worker supervisor.
@@ -443,11 +461,18 @@ impl SessionSupervisor {
     /// can never be refused by its reader).
     pub fn new(config: SupervisorConfig, store: DeviceStore) -> Result<Self, SupervisorError> {
         validate_config(&config)?;
+        let logs_root = store
+            .database_path()
+            .parent()
+            .ok_or_else(|| SupervisorError::invalid("device data directory is unavailable"))?
+            .join("worker-logs");
+        let worker_logs = WorkerLogRecorder::open(&logs_root, WorkerLogConfig::default())?;
         Ok(Self {
             inner: Arc::new(SupervisorInner {
                 config,
                 store: Mutex::new(store),
                 children: Mutex::new(BTreeMap::new()),
+                worker_logs,
             }),
         })
     }
@@ -609,16 +634,27 @@ impl SessionSupervisor {
         write_private_file(&config_path, config_json.as_bytes())?;
 
         let mut child = self.launch_process(&config_path, request)?;
-        let record = self.register_child(
+        let log_readers = self.start_log_readers(&mut child, request);
+        let record = match self.register_child(
             &mut store,
             request,
             &mut child,
             worker_id.to_owned(),
             worker_instance_id.to_owned(),
             &stamp,
-        )?;
-        self.lock_children()
-            .insert(request.worker_session_id.to_owned(), TrackedChild { child });
+        ) {
+            Ok(record) => record,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                join_log_readers(log_readers);
+                return Err(error);
+            }
+        };
+        self.lock_children().insert(
+            request.worker_session_id.to_owned(),
+            TrackedChild { child, log_readers },
+        );
 
         Ok(SpawnOutcome::Started(WorkerHandle {
             worker_session_id: record.worker_session_id,
@@ -678,9 +714,60 @@ impl SessionSupervisor {
         command
             .arg(MANAGED_SESSION_ARG)
             .arg(config_path)
-            .current_dir(request.worker_root);
+            .current_dir(request.worker_root)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        // Every managed Worker owns a fresh process group. A stop can then
+        // terminate the complete Worker tree without touching an unrelated
+        // process that happens to be outside this session.
+        #[cfg(unix)]
+        command.process_group(0);
         command.spawn().map_err(|error| SupervisorError::Spawn {
             reason: format!("{}: {error}", binary.display()),
+        })
+    }
+
+    fn start_log_readers(
+        &self,
+        child: &mut Child,
+        request: SpawnRequest<'_>,
+    ) -> Vec<thread::JoinHandle<()>> {
+        let mut readers = Vec::with_capacity(2);
+        if let Some(pipe) = child.stdout.take() {
+            readers.push(self.start_log_reader(pipe, WorkerLogStream::Stdout, request));
+        }
+        if let Some(pipe) = child.stderr.take() {
+            readers.push(self.start_log_reader(pipe, WorkerLogStream::Stderr, request));
+        }
+        readers
+    }
+
+    fn start_log_reader<R: Read + Send + 'static>(
+        &self,
+        mut pipe: R,
+        stream: WorkerLogStream,
+        request: SpawnRequest<'_>,
+    ) -> thread::JoinHandle<()> {
+        let supervisor = Arc::clone(&self.inner);
+        let session = request.worker_session_id.to_owned();
+        let instance = request.worker_instance_id.to_owned();
+        thread::spawn(move || {
+            let mut buffer = [0_u8; 8192];
+            loop {
+                match pipe.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(bytes) => {
+                        let _ = supervisor.worker_logs.append(
+                            &session,
+                            &instance,
+                            stream,
+                            WorkerLogContentKind::Diagnostic,
+                            &buffer[..bytes],
+                            &now_rfc3339(),
+                        );
+                    }
+                }
+            }
         })
     }
 
@@ -710,6 +797,15 @@ impl SessionSupervisor {
                 return Err(SupervisorError::ProcessIdentityUnavailable { pid });
             }
         };
+        match observe_process_group_id(pid) {
+            Some(group) if group == pid => {}
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                self.lock_children().remove(request.worker_session_id);
+                return Err(SupervisorError::ProcessIdentityUnavailable { pid });
+            }
+        }
 
         let record = WorkerProcessRecord {
             worker_session_id: request.worker_session_id.to_owned(),
@@ -758,6 +854,50 @@ impl SessionSupervisor {
         worker_session_id: &str,
         graceful: bool,
     ) -> Result<WorkerProcessRecord, SupervisorError> {
+        self.stop_with_fencing(worker_session_id, graceful, true)
+    }
+
+    /// Completes a stop intent that was authorized and durably recorded
+    /// before a Device Client restart. The intent's session and lease binding
+    /// are checked, while the live occupancy mirror is deliberately bypassed:
+    /// a newer fencing update cannot undo an already accepted local stop.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the durable worker identity or occupancy lease
+    /// does not match the registered worker, or when stopping the process
+    /// cannot be verified.
+    pub fn stop_recovered(
+        &self,
+        worker_session_id: &str,
+        worker_id: &str,
+        occupancy_lease_id: &str,
+        graceful: bool,
+    ) -> Result<WorkerProcessRecord, SupervisorError> {
+        let record =
+            self.worker_process(worker_session_id)?
+                .ok_or_else(|| SupervisorError::NotFound {
+                    worker_session_id: worker_session_id.to_owned(),
+                })?;
+        if record.occupancy_lease_id != occupancy_lease_id {
+            return Err(SupervisorError::InvalidInput(
+                "recovered worker stop lease does not match the registry row".to_owned(),
+            ));
+        }
+        if record.worker_id != worker_id {
+            return Err(SupervisorError::InvalidInput(
+                "recovered worker stop identity does not match the registry row".to_owned(),
+            ));
+        }
+        self.stop_with_fencing(worker_session_id, graceful, false)
+    }
+
+    fn stop_with_fencing(
+        &self,
+        worker_session_id: &str,
+        graceful: bool,
+        enforce_fencing: bool,
+    ) -> Result<WorkerProcessRecord, SupervisorError> {
         let stamp = now_rfc3339();
         let mut store = self.lock_store();
         let record =
@@ -766,28 +906,38 @@ impl SessionSupervisor {
                 .ok_or_else(|| SupervisorError::NotFound {
                     worker_session_id: worker_session_id.to_owned(),
                 })?;
+        // A terminal row is a local read-only no-op: no PID can be signalled,
+        // and the daemon has already fenced any remote WorkerStop command.
         if record.state != WORKER_STATE_RUNNING {
             return Ok(record);
         }
 
-        // Plan 12.6: the stop must carry the current mirror stamp of the
-        // worker's own lease. The mirror is the only current-token source;
-        // a force-fenced or released lease can no longer stop its workers.
-        let mirror = store.occupancy_mirror()?;
-        let token = mirror.as_ref().map_or(0, |record| record.fencing_token);
-        let guard = FencingGuard::new(mirror);
-        if let FencingVerdict::Rejected(rejection) = guard.authorize_command(
-            FencedCommandKind::WorkerStop,
-            &record.occupancy_lease_id,
-            token,
-        ) {
-            return Err(SupervisorError::Fencing(rejection));
+        // Plan 12.6: stopping a live process requires the current mirror stamp
+        // of the worker's own lease. A force-fenced or released lease can no
+        // longer signal its workers.
+        if enforce_fencing {
+            let mirror = store.occupancy_mirror()?;
+            let token = mirror.as_ref().map_or(0, |record| record.fencing_token);
+            let guard = FencingGuard::new(mirror);
+            if let FencingVerdict::Rejected(rejection) = guard.authorize_command(
+                FencedCommandKind::WorkerStop,
+                &record.occupancy_lease_id,
+                token,
+            ) {
+                return Err(SupervisorError::Fencing(rejection));
+            }
         }
-        drop(guard);
 
         let tracked = self.lock_children().remove(worker_session_id);
         let observation = if let Some(mut tracked) = tracked {
-            let status = stop_tracked_child(&mut tracked.child, graceful, self.stop_grace());
+            let (status, _target) =
+                stop_tracked_child(&mut tracked.child, graceful, self.stop_grace()).map_err(
+                    |()| SupervisorError::UnverifiableExisting {
+                        worker_session_id: record.worker_session_id.clone(),
+                        pid: record.pid,
+                    },
+                )?;
+            join_log_readers(tracked.log_readers);
             stop_observation(status)
         } else {
             match stop_registered_process(&record, graceful, self.stop_grace()) {
@@ -802,6 +952,7 @@ impl SessionSupervisor {
             }
         };
         store.mark_worker_process_state(worker_session_id, observation.0, observation.1, &stamp)?;
+        self.record_log_exit(&record, observation.0, observation.1, &stamp)?;
         Ok(store.worker_process(worker_session_id)?.unwrap_or(record))
     }
 
@@ -826,7 +977,9 @@ impl SessionSupervisor {
                 finished.push((worker_session_id.clone(), state, exit_code));
             }
             for (worker_session_id, _, _) in &finished {
-                children.remove(worker_session_id);
+                if let Some(tracked) = children.remove(worker_session_id) {
+                    join_log_readers(tracked.log_readers);
+                }
             }
         }
         let mut reaped = Vec::with_capacity(finished.len());
@@ -837,6 +990,7 @@ impl SessionSupervisor {
         for (worker_session_id, state, exit_code) in finished {
             store.mark_worker_process_state(&worker_session_id, state, exit_code, &stamp)?;
             if let Some(record) = store.worker_process(&worker_session_id)? {
+                self.record_log_exit(&record, state, exit_code, &stamp)?;
                 reaped.push(ReapedWorker {
                     worker_session_id: record.worker_session_id,
                     worker_instance_id: record.worker_instance_id,
@@ -922,6 +1076,11 @@ impl SessionSupervisor {
             let mut store = self.lock_store();
             for (worker_session_id, state, exit_code) in updates {
                 store.mark_worker_process_state(&worker_session_id, state, exit_code, &stamp)?;
+                if state != WORKER_STATE_RUNNING
+                    && let Some(record) = store.worker_process(&worker_session_id)?
+                {
+                    self.record_log_exit(&record, state, exit_code, &stamp)?;
+                }
             }
         }
         Ok(reports)
@@ -976,6 +1135,23 @@ impl SessionSupervisor {
 
     fn stop_grace(&self) -> Duration {
         self.inner.config.stop_grace_period
+    }
+
+    fn record_log_exit(
+        &self,
+        record: &WorkerProcessRecord,
+        state: &str,
+        exit_code: Option<i64>,
+        stamp: &str,
+    ) -> Result<(), SupervisorError> {
+        self.inner.worker_logs.record_exit(
+            &record.worker_session_id,
+            &record.worker_instance_id,
+            state,
+            exit_code,
+            stamp,
+        )?;
+        Ok(())
     }
 
     /// Whether the session's tracked child is still live, removing an
@@ -1203,7 +1379,6 @@ fn create_directory(path: &Path, label: &str) -> Result<(), SupervisorError> {
 /// group/other bit).
 #[cfg(unix)]
 fn write_private_file(path: &Path, contents: &[u8]) -> Result<(), SupervisorError> {
-    use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::fs::PermissionsExt;
 
@@ -1407,6 +1582,12 @@ fn terminal_observation(status: Option<ExitStatus>) -> (&'static str, Option<i64
     }
 }
 
+fn join_log_readers(readers: Vec<thread::JoinHandle<()>>) {
+    for reader in readers {
+        let _ = reader.join();
+    }
+}
+
 /// Terminal registry state for one exit observed while *stopping*: this
 /// supervisor is the deliberate terminator, so a signal death — including
 /// one landing on a worker that had not finished installing its handlers —
@@ -1424,6 +1605,7 @@ fn stop_observation(status: Option<ExitStatus>) -> (&'static str, Option<i64>) {
 }
 
 /// Outcome of stopping a process by its registered pid.
+#[derive(PartialEq, Eq)]
 enum StopOutcome {
     /// The stop landed and the process is gone.
     Stopped,
@@ -1433,29 +1615,46 @@ enum StopOutcome {
     Unverifiable,
 }
 
-/// Stops a worker this supervisor process does not own (post-restart row):
-/// the pid is re-confirmed against its boot identity, then the terminate
-/// (or kill) signal goes out via the platform executable — this crate denies
-/// `unsafe`, so there is no direct `kill(2)` call. A signal to a reused pid
-/// is prevented by the identity probe immediately before it; the residual
-/// milliseconds-wide window is the platform's own race, not a registry one.
+/// Stops a worker this supervisor process does not own (post-restart row).
+/// The boot identity and the live process group are checked against the root
+/// before a group signal is sent. Rows whose root is not its own group fail
+/// closed rather than risking a broad negative-pid signal.
 fn stop_registered_process(
     record: &WorkerProcessRecord,
     graceful: bool,
     grace: Duration,
 ) -> StopOutcome {
+    // ponytail: /bin/ps identity checks and /bin/kill cannot be atomic; a
+    // pidfd-style platform handle is the upgrade path for closing the tiny
+    // PID-reuse window without adding a larger process-control abstraction.
     if probe_process(record.pid, &record.process_start_identity) != ProcessProbe::Alive {
         return StopOutcome::AlreadyGone;
     }
+    let Some(target) = validated_process_group_target(record.pid) else {
+        return StopOutcome::Unverifiable;
+    };
     let terminate_signal = if graceful { "TERM" } else { "KILL" };
-    if !signal_process(record.pid, terminate_signal) {
-        return StopOutcome::AlreadyGone;
+    if !signal_process(target, terminate_signal) {
+        return StopOutcome::Unverifiable;
     }
     let deadline = Instant::now() + grace;
     loop {
         match probe_process(record.pid, &record.process_start_identity) {
-            ProcessProbe::Gone => return StopOutcome::Stopped,
-            ProcessProbe::Unknown => return StopOutcome::Unverifiable,
+            ProcessProbe::Gone => {
+                // The root may have honored TERM while a descendant ignored
+                // it. Clear the process group before reporting the tree gone.
+                if !signal_process(target, "KILL") {
+                    return if process_group_is_empty(target) == Some(true) {
+                        StopOutcome::Stopped
+                    } else {
+                        StopOutcome::Unverifiable
+                    };
+                }
+                return wait_for_group_empty(target, Instant::now() + grace);
+            }
+            ProcessProbe::Unknown => {
+                return StopOutcome::Unverifiable;
+            }
             ProcessProbe::Alive => {}
         }
         if Instant::now() >= deadline {
@@ -1463,13 +1662,17 @@ fn stop_registered_process(
         }
         thread::sleep(STOP_POLL_INTERVAL);
     }
-    if !signal_process(record.pid, "KILL") {
-        return StopOutcome::Stopped;
+    if !signal_process(target, "KILL") && process_group_is_empty(target) != Some(true) {
+        return StopOutcome::Unverifiable;
     }
     loop {
         match probe_process(record.pid, &record.process_start_identity) {
-            ProcessProbe::Gone => return StopOutcome::Stopped,
-            ProcessProbe::Unknown => return StopOutcome::Unverifiable,
+            ProcessProbe::Gone => {
+                return wait_for_group_empty(target, deadline + grace);
+            }
+            ProcessProbe::Unknown => {
+                return StopOutcome::Unverifiable;
+            }
             ProcessProbe::Alive => {}
         }
         if Instant::now() >= deadline + grace {
@@ -1482,20 +1685,102 @@ fn stop_registered_process(
     }
 }
 
-/// Sends one signal through `/bin/kill` (present on every supported
-/// Darwin/Linux target without `unsafe`). `false` means the
-/// signal could not be delivered — usually a process that is already gone.
+#[derive(Clone, Copy)]
+enum ProcessSignalTarget {
+    Group(u32),
+}
+
+/// Resolves a worker's process group only after proving it is a fresh group
+/// led by the worker root. Legacy rows whose process is not its own group
+/// fail closed rather than falling back to a potentially broad signal.
+fn validated_process_group_target(pid: u32) -> Option<ProcessSignalTarget> {
+    (observe_process_group_id(pid) == Some(pid)).then_some(ProcessSignalTarget::Group(pid))
+}
+
+/// Confirms that a validated worker group has no remaining members. A
+/// successful `kill` only means the signal was delivered; it is not proof
+/// that descendants have exited.
+fn wait_for_group_empty(target: ProcessSignalTarget, deadline: Instant) -> StopOutcome {
+    loop {
+        match process_group_is_empty(target) {
+            Some(true) => return StopOutcome::Stopped,
+            Some(false) if Instant::now() < deadline => {
+                thread::sleep(STOP_POLL_INTERVAL);
+            }
+            Some(false) | None => return StopOutcome::Unverifiable,
+        }
+    }
+}
+
+/// Reads the root's current process group through the platform text tool.
+/// This keeps the crate's `unsafe` prohibition while making a negative-PID
+/// signal conditional on an observed live group match.
 #[cfg(unix)]
-fn signal_process(pid: u32, signal: &str) -> bool {
+fn observe_process_group_id(pid: u32) -> Option<u32> {
+    let output = Command::new("/bin/ps")
+        .args(["-o", "pgid=", "-p"])
+        .arg(pid.to_string())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    output
+        .stdout
+        .split(u8::is_ascii_whitespace)
+        .find(|field| !field.is_empty())
+        .and_then(|field| std::str::from_utf8(field).ok())
+        .and_then(|field| field.parse::<u32>().ok())
+        .filter(|group| *group > 0)
+}
+
+#[cfg(not(unix))]
+fn observe_process_group_id(_pid: u32) -> Option<u32> {
+    None
+}
+
+#[cfg(unix)]
+fn process_group_is_empty(target: ProcessSignalTarget) -> Option<bool> {
+    let ProcessSignalTarget::Group(group) = target;
+    let output = Command::new("/bin/ps")
+        .args(["-axo", "pid=,pgid=,stat="])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let group = group.to_string();
+    Some(output.stdout.split(|byte| *byte == b'\n').all(|line| {
+        let mut fields = line
+            .split(u8::is_ascii_whitespace)
+            .filter(|field| !field.is_empty());
+        let (Some(_pid), Some(pgid), Some(stat)) = (fields.next(), fields.next(), fields.next())
+        else {
+            return true;
+        };
+        pgid != group.as_bytes() || stat.first() == Some(&b'Z')
+    }))
+}
+
+#[cfg(not(unix))]
+fn process_group_is_empty(_target: ProcessSignalTarget) -> Option<bool> {
+    None
+}
+
+/// Sends one signal to a validated root or process group.
+#[cfg(unix)]
+fn signal_process(target: ProcessSignalTarget, signal: &str) -> bool {
+    let ProcessSignalTarget::Group(group) = target;
     Command::new("/bin/kill")
         .arg(format!("-{signal}"))
-        .arg(pid.to_string())
+        .arg(format!("-{group}"))
+        .stderr(Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
 }
 
 #[cfg(not(unix))]
-fn signal_process(_pid: u32, _signal: &str) -> bool {
+fn signal_process(_target: ProcessSignalTarget, _signal: &str) -> bool {
     false
 }
 
@@ -1503,18 +1788,51 @@ fn signal_process(_pid: u32, _signal: &str) -> bool {
 /// wait, then the hard kill (`Child::kill`) — always collecting the exit
 /// status so no zombie remains. `None` when the status could not be
 /// collected.
-fn stop_tracked_child(child: &mut Child, graceful: bool, grace: Duration) -> Option<ExitStatus> {
+fn stop_tracked_child(
+    child: &mut Child,
+    graceful: bool,
+    grace: Duration,
+) -> Result<(Option<ExitStatus>, ProcessSignalTarget), ()> {
+    let Some(target) = validated_process_group_target(child.id()) else {
+        return Err(());
+    };
     if let Ok(Some(status)) = child.try_wait() {
-        return Some(status);
+        match process_group_is_empty(target) {
+            Some(true) => return Ok((Some(status), target)),
+            Some(false) => {}
+            None => return Err(()),
+        }
+        if !signal_process(target, "KILL") && process_group_is_empty(target) != Some(true) {
+            return Err(());
+        }
+        if wait_for_group_empty(target, Instant::now() + grace) != StopOutcome::Stopped {
+            return Err(());
+        }
+        return Ok((Some(status), target));
     }
     if graceful {
-        signal_process(child.id(), "TERM");
+        if !signal_process(target, "TERM") {
+            return Err(());
+        }
         let deadline = Instant::now() + grace;
         loop {
             match child.try_wait() {
-                Ok(Some(status)) => return Some(status),
+                Ok(Some(status)) => {
+                    // The root may have honored TERM while a descendant
+                    // ignored it; clear the process group before returning.
+                    if !signal_process(target, "KILL")
+                        && process_group_is_empty(target) != Some(true)
+                    {
+                        return Err(());
+                    }
+                    if wait_for_group_empty(target, Instant::now() + grace) != StopOutcome::Stopped
+                    {
+                        return Err(());
+                    }
+                    return Ok((Some(status), target));
+                }
                 Ok(None) => {}
-                Err(_) => return None,
+                Err(_) => return Err(()),
             }
             if Instant::now() >= deadline {
                 break;
@@ -1522,8 +1840,14 @@ fn stop_tracked_child(child: &mut Child, graceful: bool, grace: Duration) -> Opt
             thread::sleep(STOP_POLL_INTERVAL);
         }
     }
-    let _ = child.kill();
-    child.wait().ok()
+    if !signal_process(target, "KILL") && process_group_is_empty(target) != Some(true) {
+        return Err(());
+    }
+    let status = child.wait().map_err(|_| ())?;
+    if wait_for_group_empty(target, Instant::now() + grace) != StopOutcome::Stopped {
+        return Err(());
+    }
+    Ok((Some(status), target))
 }
 
 #[cfg(test)]
@@ -1534,6 +1858,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use crate::store::OccupancyMirrorUpdate;
+    use crate::worker_logs::{WorkerLogConfig, WorkerLogRecorder};
 
     static NEXT_TEMP_ROOT: AtomicU64 = AtomicU64::new(1);
 
@@ -1557,8 +1882,17 @@ mod tests {
     const LONG_RUNNING_BODY: &str = "trap 'exit 0' TERM\n\
          echo ready > \"$(dirname \"$2\")/worker-ready\"\n\
          while :; do sleep 0.1; done";
+    /// A worker tree test double: the shell starts a child that outlives the
+    /// shell unless the supervisor signals the worker's process group.
+    const TREE_RUNNING_BODY: &str = "(trap '' TERM; while :; do sleep 1; done) &\n\
+         echo $! > \"$(dirname \"$2\")/child-pid\"\n\
+         trap 'exit 0' TERM\n\
+         echo ready > \"$(dirname \"$2\")/worker-ready\"\n\
+         while :; do sleep 0.1; done";
     /// A crashing worker test double: dies immediately with status 3.
     const CRASH_BODY: &str = "exit 3";
+    const LOGGING_CRASH_BODY: &str =
+        "printf 'worker stdout\n'; printf 'worker stderr\n' >&2; printf '%*s\\n' 1500 x; exit 3";
 
     /// Waits until the worker test double signals readiness (its handler
     /// loop is running) — bounded, so a failure cannot hang the suite.
@@ -1572,6 +1906,15 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    fn process_alive(pid: u32) -> bool {
+        Command::new("/bin/kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
     }
 
     fn temp_root(name: &str) -> PathBuf {
@@ -1879,9 +2222,89 @@ mod tests {
                 .expect("count"),
             0
         );
-        // Idempotent: stopping a terminal row returns it unchanged.
+        supervisor
+            .lock_store()
+            .advance_occupancy_mirror(&mirror_update("ocl_BBBBBBBBBBBBBBBBBBBBBBBBBB", 8))
+            .expect("a later occupancy advances the mirror");
+        // Idempotent local cleanup: a terminal row returns unchanged even
+        // after its lease is no longer current because no signal can be sent.
         let again = supervisor.stop("wss_ONE", true).expect("second stop");
         assert_eq!(again.state, WORKER_STATE_EXITED);
+    }
+
+    #[test]
+    fn stop_terminates_the_worker_tree_but_leaves_an_unrelated_process_alive() {
+        let bin_root = temp_root("process-group");
+        let binary = bin_root.join("winwincode-worker");
+        write_executable_script(&binary, TREE_RUNNING_BODY);
+        let (supervisor, root) = supervisor_with_mirror("process-group", &binary, LEASE, 7);
+        let source = root.join("repo");
+        let data = root.join("data");
+        let worker_root = root.join("worker-root");
+        let mut unrelated = Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("unrelated process starts");
+
+        let outcome = supervisor
+            .spawn(spawn_request(
+                "wss_TREE",
+                WORKER_INSTANCE,
+                &source,
+                &data,
+                &worker_root,
+            ))
+            .expect("spawn starts");
+        let SpawnOutcome::Started(handle) = outcome else {
+            panic!("tree worker must start");
+        };
+        wait_for_ready_marker(&data, "wss_TREE");
+        let child_pid = fs::read_to_string(data.join("child-pid"))
+            .expect("child pid")
+            .trim()
+            .parse::<u32>()
+            .expect("numeric child pid");
+        assert!(
+            process_alive(child_pid),
+            "worker child must be alive before stop"
+        );
+        assert!(
+            process_alive(handle.pid),
+            "worker root must be alive before stop"
+        );
+        assert!(
+            process_alive(unrelated.id()),
+            "unrelated process must be alive before stop"
+        );
+
+        let registered = supervisor
+            .worker_process("wss_TREE")
+            .expect("registry read")
+            .expect("worker row");
+        assert_eq!(registered.pid, handle.pid);
+        assert_eq!(observe_process_group_id(handle.pid), Some(handle.pid));
+        drop(supervisor);
+        let restarted = SessionSupervisor::new(
+            test_config(&binary),
+            DeviceStore::open(&root).expect("store reopens"),
+        )
+        .expect("restarted supervisor builds");
+        let stopped = restarted.stop("wss_TREE", true).expect("tree stop");
+        assert_eq!(stopped.state, WORKER_STATE_EXITED);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while process_alive(child_pid) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !process_alive(child_pid),
+            "stop must terminate the worker child"
+        );
+        assert!(
+            process_alive(unrelated.id()),
+            "stop must leave unrelated process alive"
+        );
+        let _ = unrelated.kill();
+        let _ = unrelated.wait();
     }
 
     #[test]
@@ -2112,6 +2535,50 @@ mod tests {
                 .expect("count"),
             0
         );
+    }
+
+    #[test]
+    fn real_worker_output_is_bound_and_bounded_per_session() {
+        let bin_root = temp_root("logs-bin");
+        let binary = bin_root.join("winwincode-worker");
+        write_executable_script(&binary, LOGGING_CRASH_BODY);
+        let (supervisor, root) = supervisor_with_mirror("logs", &binary, LEASE, 7);
+        let source = root.join("repo");
+        let data = root.join("data");
+        let worker_root = root.join("worker-root");
+        let session = "wss_LOGS1";
+        supervisor
+            .spawn(spawn_request(
+                session,
+                WORKER_INSTANCE,
+                &source,
+                &data,
+                &worker_root,
+            ))
+            .expect("spawn starts");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while supervisor.reap().expect("reap").is_empty() {
+            assert!(Instant::now() < deadline, "worker did not exit");
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let logs = WorkerLogRecorder::open(&root.join("worker-logs"), WorkerLogConfig::default())
+            .expect("logs open");
+        let summary = logs
+            .summary(session)
+            .expect("summary reads")
+            .expect("session is bound");
+        assert_eq!(summary.worker_session_id, session);
+        assert_eq!(summary.worker_instance_id.as_deref(), Some(WORKER_INSTANCE));
+        assert_eq!(summary.stderr_lines, 1);
+        assert!(summary.stdout_lines >= 1);
+        assert_eq!(summary.lines_omitted_oversize, 1);
+        let reference = logs
+            .crash_reference(session)
+            .expect("crash reference reads")
+            .expect("crash reference exists");
+        assert_eq!(reference.worker_session_id, session);
+        assert_eq!(reference.exit_code, Some(3));
     }
 
     #[test]

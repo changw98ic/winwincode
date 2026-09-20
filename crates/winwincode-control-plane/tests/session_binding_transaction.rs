@@ -2505,6 +2505,76 @@ fn generated_artifact_messages_use_the_exact_durable_job_and_binding_authority()
     fs::remove_dir_all(root).expect("database directory release");
 }
 
+/// Production diagnostic command output uses `text/plain; charset=utf-8`.
+/// `start_local` must accept both the open and the matching final chunk;
+/// rejecting charset parameters after open leaves the Worker outbox pending.
+#[test]
+fn start_local_accepts_diagnostic_open_and_charset_chunk() {
+    let seed = 1_403;
+    let (root, mut control_plane, _pending, authority, binding_message) =
+        running_fixture(seed, "diagnostic-charset-chunk");
+    control_plane
+        .commit_delivery_session_binding(&binding_message, &authority, &binding_message.sent_at)
+        .expect("complete SessionBinding");
+    let Scope::RepositoryScope(scope) = workrun_start_command(seed).scope else {
+        panic!("fixture must use repository scope");
+    };
+
+    let media_type = "text/plain; charset=utf-8";
+    let bytes = b"[stdout]\n\n> verify\n> node verify.mjs\n\n[stderr]\n";
+    let digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(bytes)));
+    let open = ArtifactOpenMessage {
+        artifact: ArtifactDescriptor {
+            artifact_id: ArtifactId(canonical_id("art", seed)),
+            digest: digest.clone(),
+            file_name: Some("command_output.log".into()),
+            kind: ArtifactKind::CommandOutput,
+            media_type: media_type.into(),
+            size_bytes: i64::try_from(bytes.len()).expect("diagnostic size"),
+        },
+        kind: ArtifactOpenMessageKind::ArtifactOpen,
+        lease: binding_message.lease.clone(),
+        message_id: ExecutionMessageId(canonical_id("xmsg", seed)),
+        request_id: RequestId(canonical_id("req", seed)),
+        schema_version: SchemaVersion::WinwincodeV1,
+        sent_at: binding_message.sent_at.clone(),
+        session_identity: binding_message.session_identity.clone(),
+        worker_session_id: binding_message.worker_session_id.clone(),
+    };
+    let opened = control_plane
+        .accept_artifact_open(&scope, &open, &authority)
+        .expect("diagnostic artifact.open");
+    assert_eq!(opened.status, LeaseWriteStatus::Accepted);
+    assert_eq!(opened.ack_sequence.0, 0);
+
+    let chunk = ArtifactChunkMessage {
+        artifact_id: open.artifact.artifact_id.clone(),
+        is_final: true,
+        kind: ArtifactChunkMessageKind::ArtifactChunk,
+        lease: binding_message.lease.clone(),
+        message_id: ExecutionMessageId(canonical_id("xmsg", seed + 2)),
+        payload: EncodedPayload {
+            content_type: media_type.into(),
+            data_base64: STANDARD.encode(bytes),
+            payload_digest: digest,
+        },
+        schema_version: SchemaVersion::WinwincodeV1,
+        sent_at: Instant("2027-01-15T08:00:08.000Z".into()),
+        sequence: ExecutionSequence(1),
+        session_identity: binding_message.session_identity.clone(),
+        worker_session_id: binding_message.worker_session_id.clone(),
+    };
+    let accepted = control_plane
+        .accept_artifact_chunk(&scope, &chunk, &authority)
+        .expect("diagnostic artifact.chunk with media-type parameters");
+    assert_eq!(accepted.status, LeaseWriteStatus::Accepted);
+    assert_eq!(accepted.ack_sequence, ExecutionAckSequence(1));
+    assert!(accepted.error.is_none());
+
+    control_plane.shutdown().expect("shutdown");
+    fs::remove_dir_all(root).expect("database directory release");
+}
+
 #[test]
 #[allow(clippy::too_many_lines)]
 fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_outcome() {

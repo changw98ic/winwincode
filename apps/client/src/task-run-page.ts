@@ -90,6 +90,7 @@ export function mountTaskRunPage(options: TaskRunPageOptions): TaskRunPage {
   const topbarActions = element(document, 'div', 'wwc-task-run-topbar-actions')
   const recordSlot = element(document, 'span', 'wwc-task-run-topbar-record')
   const reviewLink = element(document, 'a', 'wwc-task-run-review-link')
+  const previewLink = element(document, 'a', 'wwc-task-run-preview-link')
   const clarificationLink = element(document, 'a', 'wwc-task-run-clarification-link')
   const separator = element(document, 'span', 'wwc-task-run-topbar-separator')
   const moreSlot = element(document, 'span', 'wwc-task-run-topbar-more')
@@ -117,12 +118,12 @@ export function mountTaskRunPage(options: TaskRunPageOptions): TaskRunPage {
   section.setAttribute('aria-labelledby', heading.id)
   statusLine.textContent = statusLineText(options.model.state)
   description.hidden = true
-  zone.setAttribute('aria-label', '完整运行身份')
+  zone.setAttribute('aria-label', '运行详情')
   identityToggle.type = 'button'
   identityToggle.setAttribute('aria-expanded', 'false')
   identityToggle.setAttribute('aria-controls', 'wwc-task-run-rows')
-  const expandedToggleText = `展开完整运行身份 · ${String(ROW_TERMS.length)} 行`
-  const collapsedToggleText = `收起完整运行身份 · ${String(ROW_TERMS.length)} 行`
+  const expandedToggleText = `展开运行详情 · ${String(ROW_TERMS.length)} 项`
+  const collapsedToggleText = `收起运行详情 · ${String(ROW_TERMS.length)} 项`
   identityToggle.textContent = expandedToggleText
   identityToggle.addEventListener('click', () => {
     const expanded = identityToggle.getAttribute('aria-expanded') === 'true'
@@ -138,6 +139,8 @@ export function mountTaskRunPage(options: TaskRunPageOptions): TaskRunPage {
   reviewLink.textContent = '查看审核产物'
   if (options.reviewHref !== undefined) reviewLink.href = options.reviewHref
   else reviewLink.hidden = true
+  previewLink.textContent = '打开候选预览'
+  previewLink.hidden = true
   clarificationLink.textContent = '编辑需求与验收'
   if (options.clarificationHref !== undefined) clarificationLink.href = options.clarificationHref
   else clarificationLink.hidden = true
@@ -197,13 +200,13 @@ export function mountTaskRunPage(options: TaskRunPageOptions): TaskRunPage {
   rows.hidden = true
   rows.append(...ROW_TERMS.map(term => (rowsByTerm.get(term) as RowRefs).row))
   zone.append(identityToggle, rows, identityNotice)
-  topbarActions.append(recordSlot, clarificationLink, reviewLink, separator, moreSlot)
+  topbarActions.append(recordSlot, clarificationLink, reviewLink, previewLink, separator, moreSlot)
   topbar.append(back, topbarActions)
   actions.append(approve, requestChange)
-  changesLine.textContent = options.anchor?.changes ?? ''
-  changesLine.hidden = options.anchor?.changes === undefined
-  acceptanceLine.textContent = options.anchor?.acceptance ?? ''
-  acceptanceLine.hidden = options.anchor?.acceptance === undefined
+  changesLine.textContent = ''
+  changesLine.hidden = true
+  acceptanceLine.textContent = ''
+  acceptanceLine.hidden = true
   section.append(topbar, heading, statusLine, description, changesLine, acceptanceLine, zone, actions)
   options.root.replaceChildren(section)
 
@@ -250,18 +253,13 @@ export function mountTaskRunPage(options: TaskRunPageOptions): TaskRunPage {
 
   function renderWorkerSessions(sessions: readonly TaskRunWorkerSessionFacts[]): string {
     if (sessions.length === 0) return '没有正在运行的执行会话。'
-    return sessions.map(session => [
-      session.workerSessionId,
-      session.stateText,
-      session.startedAt === null ? null : `启动于 ${session.startedAt}`,
-    ].filter(part => part !== null).join(' · ')).join('; ')
+    const states = [...new Set(sessions.map(session => session.stateText))]
+    return `${String(sessions.length)} 个执行会话 · ${states.join('、')}`
   }
 
   function renderCandidate(candidate: TaskRunCandidateFacts | null): string | null {
     if (candidate === null) return null
-    return [candidate.candidateRef, candidate.branchName]
-      .filter(part => part !== null)
-      .join(' · ')
+    return candidate.branchName === null ? '候选结果已生成' : `候选分支 · ${candidate.branchName}`
   }
 
   function renderApply(apply: TaskRunApplyFacts | null): { value: string; detail: string | null } | null {
@@ -270,10 +268,19 @@ export function mountTaskRunPage(options: TaskRunPageOptions): TaskRunPage {
     return {
       value: apply.resultText,
       detail: [
-        `策略 ${apply.strategy}`,
+        `方式 ${applyStrategyText(apply.strategy)}`,
         `目标分支 ${apply.targetBranch}`,
         commit === null ? null : `结果 HEAD ${commit}`,
       ].filter(part => part !== null).join(' · '),
+    }
+  }
+
+  function applyStrategyText(strategy: TaskRunApplyFacts['strategy']): string {
+    switch (strategy) {
+      case 'create_branch': return '创建分支'
+      case 'fast_forward': return '快进应用'
+      case 'cherry_pick': return '拣选提交'
+      case 'merge': return '合并应用'
     }
   }
 
@@ -296,10 +303,11 @@ export function mountTaskRunPage(options: TaskRunPageOptions): TaskRunPage {
     readonly detail: string
   } | null {
     if (evidence.length === 0) return null
+    const counts = new Map<string, number>()
+    for (const entry of evidence) counts.set(entry.typeText, (counts.get(entry.typeText) ?? 0) + 1)
     return {
       value: `${String(evidence.length)} 条`,
-      detail: evidence.map(entry =>
-        `${entry.typeText} ${entry.evidenceId} · ${entry.sourceRef}`).join('\n'),
+      detail: [...counts.entries()].map(([type, count]) => `${type} ${String(count)} 条`).join(' · '),
     }
   }
 
@@ -312,7 +320,7 @@ export function mountTaskRunPage(options: TaskRunPageOptions): TaskRunPage {
       null,
       identity?.contract === null || identity?.contract === undefined
         ? null
-        : `${identity.contract.contractId} · 修订 ${String(identity.contract.revision)} · ${identity.contract.authorityText}`,
+        : identity.contract.authorityText,
       '正在加载工作契约…',
     )
     const criteria = identity === null ? null : renderCriteria(identity.criteria)
@@ -334,7 +342,9 @@ export function mountTaskRunPage(options: TaskRunPageOptions): TaskRunPage {
       dependenciesRow,
       identity === null
         ? null
-        : identity.dependencies.length === 0 ? '没有依赖项。' : identity.dependencies.join(' · '),
+        : identity.dependencies.length === 0
+          ? '没有依赖项。'
+          : `${String(identity.dependencies.length)} 项依赖`,
       identity === null || identity.graphState === null || identity.graphStateText === null
         ? null
         : { text: identity.graphStateText, tone: runWorkGraphStateTone(identity.graphState) },
@@ -345,7 +355,9 @@ export function mountTaskRunPage(options: TaskRunPageOptions): TaskRunPage {
       blockersRow,
       identity === null
         ? null
-        : identity.blockers.length === 0 ? '没有阻塞项。' : identity.blockers.join(' · '),
+        : identity.blockers.length === 0
+          ? '没有阻塞项。'
+          : `${String(identity.blockers.length)} 项阻塞`,
       null,
       null,
       '正在加载阻塞项…',
@@ -389,6 +401,7 @@ export function mountTaskRunPage(options: TaskRunPageOptions): TaskRunPage {
   function render(snapshot: TaskRunState): void {
     if (closed) return
     section.setAttribute('aria-busy', String(snapshot.status === 'loading'))
+    heading.textContent = options.anchor?.title ?? snapshot.taskDescription ?? '运行中的任务'
     statusLine.textContent = statusLineText(snapshot)
     if (snapshot.taskDescription !== null) {
       description.textContent = snapshot.taskDescription
@@ -425,6 +438,23 @@ export function mountTaskRunPage(options: TaskRunPageOptions): TaskRunPage {
       '正在加载占用信息…',
     )
     renderIdentity(snapshot.identity)
+    const criteria = snapshot.identity === null ? null : renderCriteria(snapshot.identity.criteria)
+    const acceptance = options.anchor?.acceptance ?? criteria?.detail ?? null
+    acceptanceLine.textContent = acceptance === null
+      ? ''
+      : acceptance.startsWith('验收：') ? acceptance : `验收：${acceptance}`
+    acceptanceLine.hidden = acceptance === null
+    const changes = options.anchor?.changes ?? null
+    changesLine.textContent = snapshot.identity?.candidate === null || snapshot.identity?.candidate === undefined
+      || changes === null
+      ? ''
+      : changes
+    changesLine.hidden = snapshot.identity?.candidate === null || snapshot.identity?.candidate === undefined
+      || changes === null
+    const previewHref = snapshot.identity?.previewHref ?? null
+    previewLink.hidden = previewHref === null
+    if (previewHref === null) previewLink.removeAttribute('href')
+    else previewLink.href = previewHref
     identityNotice.hidden = snapshot.identityStatus !== 'unavailable'
     identityNotice.textContent = snapshot.identityStatus === 'unavailable'
       ? '任务详情当前不可达。执行设备、仓库与占用状态保留最后已知值。'

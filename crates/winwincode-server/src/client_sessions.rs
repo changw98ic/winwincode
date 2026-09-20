@@ -25,7 +25,7 @@
 //! fencing context so the device rejects any stop carrying a stale token.
 
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -35,9 +35,14 @@ use winwincode_client_port::domain::WorkerLaunchGrant;
 use winwincode_client_port::domain::WorkerLaunchGrantState as WireGrantState;
 use winwincode_client_port::exchange::DEFAULT_MAX_FRAME_BYTES;
 use winwincode_client_port::exchange::FrameCodec;
+use winwincode_client_port::managed_app::{
+    MANAGED_APP_RUN_CONFIG_SCHEMA_VERSION, ManagedAppCommand, ManagedAppOperation,
+    ManagedAppRunConfig, ManagedAppState, ManagedAppStatus,
+};
 use winwincode_client_port::messages::CLIENT_CONTROL_PORT_SCHEMA_VERSION;
 use winwincode_client_port::messages::CommandContext;
 use winwincode_client_port::messages::OccupancyCommandContext;
+use winwincode_client_port::messages::ServerManagedAppCommandPayload;
 use winwincode_client_port::messages::ServerToClientEnvelope;
 use winwincode_client_port::messages::ServerToClientMessage;
 use winwincode_client_port::messages::ServerWorkerLaunchPayload;
@@ -46,15 +51,20 @@ use winwincode_control_plane::ClientOccupancyService;
 use winwincode_control_plane::ClientRegistryService;
 use winwincode_control_plane::LaunchGrantState;
 use winwincode_control_plane::OccupancyLeaseState;
+use winwincode_control_plane::ProductSessionState;
 use winwincode_control_plane::ProductStateStorage;
 use winwincode_control_plane::WorkerLaunchGrantService;
 use winwincode_control_plane::WorkerLaunchGrantServiceErrorKind;
 use winwincode_control_plane::dispatch_work_run_to_device_worker;
 use winwincode_domain::{Instant, WorkRunId};
+use winwincode_execution_port::generated::ExecutionJob;
 use winwincode_storage::ClientDownlinkAppend;
 use winwincode_storage::ClientNodeRecord;
 use winwincode_storage::ClientPresenceState;
+use winwincode_storage::DeviceExecutionBindingState;
+use winwincode_storage::ExecutionJobState;
 use winwincode_storage::SqliteStorage;
+use winwincode_storage::WorkerSlotState;
 
 use crate::client_exchange::{
     ClientExchangeApplication, ClientExchangeConfig, ClientExchangePort, WorkerCredentialDelivery,
@@ -119,6 +129,10 @@ pub enum ClientSessionsErrorKind {
     /// The Device Client did not answer within the bounded wait; the grant
     /// stays `issued` until its expiry.
     LaunchAckTimeout,
+    /// The ProductSession or its prior Device Worker cannot be started in the
+    /// current durable state. Callers must recover/stop the prior worker or
+    /// reopen a live conversation; this is never a fake success.
+    SessionNotLaunchable,
     /// Durable state or storage failed; nothing was decided.
     Unavailable,
 }
@@ -207,7 +221,7 @@ impl ClientSessionsApplication {
             .pending_device_launches()
             .map_err(|_| ClientSessionsError::unavailable())?;
         for payload in jobs {
-            let job: winwincode_execution_port::generated::ExecutionJob =
+            let job: ExecutionJob =
                 serde_json::from_slice(&payload).map_err(|_| ClientSessionsError::unavailable())?;
             let winwincode_execution_port::generated::ExecutionScope::WorkRunExecutionScope(scope) =
                 &job.scope
@@ -323,6 +337,53 @@ impl ClientSessionsApplication {
         }
     }
 
+    /// Schedules one Device-owned managed application command and returns the
+    /// latest status projection known from the Client exchange.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable client-session error when the run, device, occupancy,
+    /// or durable managed-app authority is unavailable or invalid.
+    pub fn manage_managed_app(
+        &self,
+        user_id: &str,
+        public_client_id: &str,
+        request: &Value,
+    ) -> Result<Value, ClientSessionsError> {
+        let mut command: ManagedAppCommand = serde_json::from_value(request.clone())
+            .map_err(|_| ClientSessionsError::invalid_request())?;
+        let mut storage = self.open_storage()?;
+        let node = Self::lookup_node(&mut storage, public_client_id)?;
+        let authoritative =
+            load_authoritative_managed_app_config(&storage, &command.run_id, command.operation)?;
+        // The browser can select only the operation and run identity. The
+        // Server attaches the durable executable config immediately before
+        // enqueueing so argv, cwd and env never cross the public query or
+        // command request boundary.
+        if matches!(
+            command.operation,
+            ManagedAppOperation::Start | ManagedAppOperation::Restart
+        ) {
+            if command.config.is_some() {
+                return Err(ClientSessionsError::invalid_request());
+            }
+            command.config = Some(authoritative.clone());
+        }
+        validate_managed_app_command_against_authority(&command, &authoritative)?;
+        enqueue_managed_app_command(
+            &self.data_directory,
+            &mut storage,
+            &node,
+            user_id,
+            command.clone(),
+            &now_instant(),
+        )?;
+        let status = self
+            .client_exchange
+            .managed_app_status(&node.client_node_id, &command.run_id);
+        Ok(managed_app_response(&command, status.as_ref()))
+    }
+
     /// Validates the request and durable preconditions, issues the launch
     /// grant, and enqueues the `client.worker.launch` downlink frame.
     #[allow(clippy::too_many_lines)]
@@ -400,9 +461,8 @@ impl ClientSessionsApplication {
                         "workRunId does not name an active execution job",
                     )
                 })?;
-            let job: winwincode_execution_port::generated::ExecutionJob =
-                serde_json::from_slice(&record.dispatch_payload)
-                    .map_err(|_| ClientSessionsError::unavailable())?;
+            let job: ExecutionJob = serde_json::from_slice(&record.dispatch_payload)
+                .map_err(|_| ClientSessionsError::unavailable())?;
             if let Some(target) = job
                 .work_input
                 .as_ref()
@@ -445,6 +505,15 @@ impl ClientSessionsApplication {
             {
                 return Err(ClientSessionsError::invalid_request());
             }
+            if matches!(
+                record.session().state(),
+                ProductSessionState::Cancelled | ProductSessionState::Closed
+            ) {
+                return Err(ClientSessionsError::new(
+                    ClientSessionsErrorKind::SessionNotLaunchable,
+                    "the ProductSession is cancelled or closed; reopen a live conversation before launching a Device Worker",
+                ));
+            }
             crate::device_providers::validate_session_route(
                 &mut storage,
                 &scope,
@@ -464,22 +533,51 @@ impl ClientSessionsApplication {
             {
                 return Err(ClientSessionsError::invalid_request());
             }
-            let ended_chat_worker = work_run_id.is_none()
+            let binding = storage
+                .device_execution_binding_ledger()
+                .map_err(|_| ClientSessionsError::unavailable())?
+                .snapshot(&grant.worker_session_id)
+                .map_err(|_| ClientSessionsError::unavailable())?;
+            let slot = storage
+                .worker_session_slots()
+                .map_err(|_| ClientSessionsError::unavailable())?
+                .load(&winwincode_domain::WorkerSessionId(
+                    grant.worker_session_id.clone(),
+                ))
+                .map_err(|_| ClientSessionsError::unavailable())?;
+            let occupancy_matches = grant.occupancy_lease_id == lease.occupancy_lease_id
+                && grant.occupancy_fencing_token == lease.fencing_token;
+            let binding_state = binding.as_ref().map(|record| record.state);
+            let slot_state = slot.as_ref().map(|record| record.state);
+            // Device-reported release is the strongest evidence the prior
+            // Chat worker ended under the current occupancy.
+            let device_reported_released = work_run_id.is_none()
                 && grant.work_run_id.is_none()
-                && storage
-                    .device_execution_binding_ledger()
-                    .map_err(|_| ClientSessionsError::unavailable())?
-                    .snapshot(&grant.worker_session_id)
-                    .map_err(|_| ClientSessionsError::unavailable())?
-                    .is_some_and(|binding| {
-                        binding.state == winwincode_storage::DeviceExecutionBindingState::Released
-                    });
-            if !ended_chat_worker {
-                if grant.occupancy_lease_id != lease.occupancy_lease_id
-                    || grant.occupancy_fencing_token != lease.fencing_token
-                {
-                    return Err(ClientSessionsError::invalid_request());
-                }
+                && binding_state == Some(DeviceExecutionBindingState::Released);
+            // A terminal Worker-session slot after a bind means the worker
+            // process exited without a release report (abnormal exit).
+            let slot_exited = slot_state.is_some_and(|state| {
+                matches!(
+                    state,
+                    WorkerSlotState::Completed
+                        | WorkerSlotState::Failed
+                        | WorkerSlotState::Cancelled
+                        | WorkerSlotState::RecoveryFailed
+                )
+            });
+            // Live-worker evidence for a consumed grant under the current
+            // occupancy: the Device has not reported release and the Worker
+            // slot is not known to be terminal. A still-running slot is the
+            // strongest form; a missing slot still maps to the same grant
+            // because the Device accepted the launch under this occupancy.
+            let reuse_same_worker = occupancy_matches
+                && matches!(
+                    grant.state,
+                    LaunchGrantState::Issued | LaunchGrantState::Consumed
+                )
+                && !device_reported_released
+                && !slot_exited;
+            if reuse_same_worker {
                 return Ok(PreparedLaunch {
                     node,
                     occupancy_lease_id: lease.occupancy_lease_id,
@@ -489,6 +587,27 @@ impl ClientSessionsApplication {
                     work_run_id: work_run_id.map(|id| id.0),
                 });
             }
+            // A binding still bound under a prior occupancy stamp cannot be
+            // proven released. Restarting under the new lease would escalate
+            // occupancy privilege; require recovery/stop first.
+            let bound_under_foreign_occupancy =
+                binding_state == Some(DeviceExecutionBindingState::Bound) && !occupancy_matches;
+            if bound_under_foreign_occupancy {
+                return Err(ClientSessionsError::new(
+                    ClientSessionsErrorKind::SessionNotLaunchable,
+                    "the previous Device Worker is still bound under a prior occupancy; recover or stop it before restarting this conversation",
+                ));
+            }
+            if matches!(grant.state, LaunchGrantState::Issued) && !occupancy_matches {
+                return Err(ClientSessionsError::new(
+                    ClientSessionsErrorKind::OccupancyRequired,
+                    "the occupancy behind the pending launch grant is gone",
+                ));
+            }
+            // Restart-with-evidence: the prior worker is not live (device
+            // reported release, abnormal exit, or occupancy rewrite without a
+            // still-bound foreign binding). Replace the old credential under
+            // the *current* occupancy and issue a fresh grant.
             let mut credentials = WorkerSessionCredentialService::new(&mut storage);
             if credentials
                 .status_for_session(&grant.worker_session_id)
@@ -499,7 +618,11 @@ impl ClientSessionsApplication {
                     .revoke_for_session(
                         &grant.worker_session_id,
                         user_id,
-                        Some("released Chat worker replaced"),
+                        Some(if device_reported_released {
+                            "released Chat worker replaced"
+                        } else {
+                            "exited Device Worker replaced with restart evidence"
+                        }),
                         &now,
                     )
                     .map_err(|_| ClientSessionsError::unavailable())?;
@@ -794,6 +917,32 @@ fn session_body(prepared: &PreparedLaunch) -> Value {
     })
 }
 
+fn managed_app_response(command: &ManagedAppCommand, status: Option<&ManagedAppStatus>) -> Value {
+    let phase = status.map_or(
+        match command.operation {
+            ManagedAppOperation::Start | ManagedAppOperation::Restart => "starting",
+            ManagedAppOperation::Stop => "exited",
+            ManagedAppOperation::Query => "idle",
+        },
+        |value| match value.state {
+            ManagedAppState::Starting => "starting",
+            ManagedAppState::Healthy => "ready",
+            ManagedAppState::Unhealthy | ManagedAppState::Missing => "failed",
+            ManagedAppState::Stopped | ManagedAppState::Exited => "exited",
+        },
+    );
+    json!({
+        "schemaVersion": MANAGED_APP_RUN_CONFIG_SCHEMA_VERSION,
+        "runId": command.run_id,
+        "leaseId": command.occupancy_lease_id,
+        "phase": phase,
+        "startedAt": Value::Null,
+        "exitedAt": Value::Null,
+        "exitCode": status.as_ref().and_then(|value| value.exit_code),
+        "failureReason": (phase == "failed").then_some("设备未能让受管应用就绪"),
+    })
+}
+
 /// Builds the occupancy fencing stamp every occupancy-backed downlink
 /// command carries (contract `client-control-port-v1.md`, `C + L`).
 #[must_use]
@@ -811,6 +960,242 @@ pub fn occupancy_stamp(
         occupancy_lease_id: occupancy_lease_id.to_owned(),
         occupancy_fencing_token: fencing_token,
     }
+}
+
+/// Builds one managed application command only when its command lease and
+/// fencing token are exactly the occupancy context selected by the Server.
+/// The Device performs the same check against its durable mirror before it
+/// starts, stops, restarts, or queries the local process.
+///
+/// # Errors
+///
+/// Returns an invalid request for malformed commands or an occupancy error for
+/// a stale lease or fencing token.
+pub fn managed_app_command_message(
+    occupancy: &OccupancyCommandContext,
+    command: ManagedAppCommand,
+) -> Result<ServerToClientMessage, ClientSessionsError> {
+    command
+        .validate()
+        .map_err(|_| ClientSessionsError::invalid_request())?;
+    if command.occupancy_lease_id != occupancy.occupancy_lease_id
+        || command.occupancy_fencing_token != occupancy.occupancy_fencing_token
+    {
+        return Err(ClientSessionsError::new(
+            ClientSessionsErrorKind::OccupancyRequired,
+            "managed application command has a stale occupancy stamp",
+        ));
+    }
+    Ok(ServerToClientMessage::ManagedAppCommand(
+        ServerManagedAppCommandPayload { command },
+    ))
+}
+
+fn load_authoritative_managed_app_config(
+    storage: &SqliteStorage,
+    run_id: &str,
+    operation: ManagedAppOperation,
+) -> Result<ManagedAppRunConfig, ClientSessionsError> {
+    let record = storage
+        .load_managed_app_run_config(run_id)
+        .map_err(|_| ClientSessionsError::unavailable())?
+        .ok_or_else(ClientSessionsError::invalid_request)?;
+    if record.run_id != run_id {
+        return Err(ClientSessionsError::invalid_request());
+    }
+    let config: ManagedAppRunConfig = serde_json::from_slice(&record.config_json)
+        .map_err(|_| ClientSessionsError::unavailable())?;
+    config
+        .validate()
+        .map_err(|_| ClientSessionsError::unavailable())?;
+    if config.run_id != record.run_id
+        || config.repository_binding_id != record.repository_binding_id
+        || i64::from(config.attempt) != record.attempt
+    {
+        return Err(ClientSessionsError::unavailable());
+    }
+    validate_config_against_job(storage, &config, operation)?;
+    Ok(config)
+}
+
+fn validate_config_against_job(
+    storage: &SqliteStorage,
+    config: &ManagedAppRunConfig,
+    operation: ManagedAppOperation,
+) -> Result<(), ClientSessionsError> {
+    let work_run_id = WorkRunId(config.run_id.clone());
+    let source_job_id = winwincode_domain::ExecutionJobId(config.source_id.clone());
+    let job_record = storage
+        .load_execution_job_record(&source_job_id)
+        .map_err(|_| ClientSessionsError::unavailable())?
+        .ok_or_else(ClientSessionsError::invalid_request)?;
+    if job_record.job_id != source_job_id
+        || job_record.work_run_id.as_ref() != Some(&work_run_id)
+        || job_record.attempt != u64::from(config.attempt)
+    {
+        return Err(ClientSessionsError::invalid_request());
+    }
+    let job: ExecutionJob = serde_json::from_slice(&job_record.dispatch_payload)
+        .map_err(|_| ClientSessionsError::unavailable())?;
+    if job.job_id != job_record.job_id
+        || job.attempt != i64::try_from(job_record.attempt).unwrap_or(-1)
+    {
+        return Err(ClientSessionsError::unavailable());
+    }
+    let winwincode_execution_port::generated::ExecutionScope::WorkRunExecutionScope(scope) =
+        &job.scope
+    else {
+        return Err(ClientSessionsError::invalid_request());
+    };
+    if scope.work_run_id != work_run_id
+        || scope.attempt != i64::try_from(job_record.attempt).unwrap_or(-1)
+    {
+        return Err(ClientSessionsError::invalid_request());
+    }
+    let Some(target) = job
+        .work_input
+        .as_ref()
+        .and_then(|input| input.device_target.as_ref())
+    else {
+        return Err(ClientSessionsError::invalid_request());
+    };
+    if target.repository_binding_id != config.repository_binding_id {
+        return Err(ClientSessionsError::invalid_request());
+    }
+    if config.mode == winwincode_client_port::managed_app::ManagedAppMode::FrozenCandidate
+        && config.candidate_commit.as_deref() != Some(job.workspace.checkout_revision.as_str())
+    {
+        return Err(ClientSessionsError::invalid_request());
+    }
+    if matches!(
+        (operation, config.mode),
+        (
+            ManagedAppOperation::Stop | ManagedAppOperation::Query,
+            winwincode_client_port::managed_app::ManagedAppMode::FrozenCandidate,
+        )
+    ) {
+        let source = winwincode_client_port::preview::PreviewSourceDescriptor {
+            source_id: config.source_id.clone(),
+            work_run_id: config.run_id.clone(),
+            repository_binding_id: config.repository_binding_id.clone(),
+            mode: winwincode_client_port::preview::PreviewSourceMode::FrozenCandidate,
+            candidate_commit: config.candidate_commit.clone(),
+        };
+        crate::preview::authorize_current_frozen_candidate(
+            storage,
+            &job_record,
+            &work_run_id,
+            &source,
+            config,
+            &job,
+        )
+        .map_err(|_| ClientSessionsError::invalid_request())?;
+    }
+    let allowed = match (operation, config.mode) {
+        (ManagedAppOperation::Stop | ManagedAppOperation::Query, _) => true,
+        (
+            ManagedAppOperation::Start | ManagedAppOperation::Restart,
+            winwincode_client_port::managed_app::ManagedAppMode::Live,
+        ) => matches!(
+            job_record.state,
+            ExecutionJobState::Queued | ExecutionJobState::Leased | ExecutionJobState::Running
+        ),
+        (
+            ManagedAppOperation::Start | ManagedAppOperation::Restart,
+            winwincode_client_port::managed_app::ManagedAppMode::FrozenCandidate,
+        ) => job_record.state == ExecutionJobState::Completed,
+    };
+    if allowed {
+        Ok(())
+    } else {
+        Err(ClientSessionsError::invalid_request())
+    }
+}
+
+fn validate_managed_app_command_against_authority(
+    command: &ManagedAppCommand,
+    authoritative: &ManagedAppRunConfig,
+) -> Result<(), ClientSessionsError> {
+    if command.run_id != authoritative.run_id {
+        return Err(ClientSessionsError::invalid_request());
+    }
+    match command.operation {
+        ManagedAppOperation::Start | ManagedAppOperation::Restart => {
+            if command.config.as_ref() != Some(authoritative) {
+                return Err(ClientSessionsError::invalid_request());
+            }
+        }
+        ManagedAppOperation::Stop | ManagedAppOperation::Query => {
+            if command.config.is_some() {
+                return Err(ClientSessionsError::invalid_request());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Enqueues one managed-app command after checking the durable occupancy
+/// holder, lifecycle state, lease id, fencing token, and Device mirror
+/// revision. The append is the Server scheduling point; the Device repeats
+/// the checks before touching a local process.
+///
+/// # Errors
+///
+/// Returns a stable client-session error when any durable authority or
+/// occupancy check fails.
+pub fn enqueue_managed_app_command(
+    data_directory: &Path,
+    storage: &mut SqliteStorage,
+    node: &ClientNodeRecord,
+    user_id: &str,
+    command: ManagedAppCommand,
+    now: &Instant,
+) -> Result<(), ClientSessionsError> {
+    let authoritative =
+        load_authoritative_managed_app_config(storage, &command.run_id, command.operation)?;
+    validate_managed_app_command_against_authority(&command, &authoritative)?;
+    let lease = ClientOccupancyService::new(storage)
+        .active_lease_for_node(&node.client_node_id)
+        .map_err(|_| ClientSessionsError::unavailable())?
+        .ok_or_else(|| {
+            ClientSessionsError::new(
+                ClientSessionsErrorKind::OccupancyRequired,
+                "the client is not occupied; claim occupancy before managing an application",
+            )
+        })?;
+    if lease.holder_user_id != user_id {
+        return Err(ClientSessionsError::new(
+            ClientSessionsErrorKind::NotHolder,
+            "only the occupancy holder may manage an application",
+        ));
+    }
+    if !matches!(
+        lease.state,
+        OccupancyLeaseState::Occupied | OccupancyLeaseState::Draining
+    ) {
+        return Err(ClientSessionsError::new(
+            ClientSessionsErrorKind::OccupancyRequired,
+            "the occupancy is not confirmed by the device",
+        ));
+    }
+    if command.occupancy_lease_id != lease.occupancy_lease_id
+        || command.occupancy_fencing_token != lease.fencing_token
+    {
+        return Err(ClientSessionsError::new(
+            ClientSessionsErrorKind::OccupancyRequired,
+            "managed application command has a stale occupancy stamp",
+        ));
+    }
+    let mirror_revision = client_mirror_revision_view(data_directory, &node.client_node_id)
+        .map_err(|_| ClientSessionsError::unavailable())?;
+    let occupancy = occupancy_stamp(
+        mirror_revision,
+        &lease.occupancy_lease_id,
+        lease.fencing_token,
+        &command.idempotency_key,
+    );
+    let message = managed_app_command_message(&occupancy, command)?;
+    enqueue_frame(storage, node, message, now)
 }
 
 /// Builds one `client.worker.stop` downlink message (contract
@@ -984,5 +1369,115 @@ mod tests {
         assert_eq!(payload.occupancy.occupancy_fencing_token, 9);
         assert_eq!(payload.occupancy.command.expected_revision, 7);
         assert_eq!(payload.occupancy.command.idempotency_key, "idem_stop_wlg");
+    }
+
+    #[test]
+    fn managed_app_command_requires_the_current_occupancy_stamp() {
+        let command = ManagedAppCommand {
+            schema_version: MANAGED_APP_RUN_CONFIG_SCHEMA_VERSION.to_owned(),
+            operation: ManagedAppOperation::Query,
+            idempotency_key: "idem_query_app".to_owned(),
+            occupancy_lease_id: "ocl_A".to_owned(),
+            occupancy_fencing_token: 9,
+            config: None,
+            run_id: "run_A".to_owned(),
+        };
+        let occupancy = occupancy_stamp(7, "ocl_A", 9, "idem_query_app");
+        let message = managed_app_command_message(&occupancy, command.clone())
+            .expect("current lease is accepted");
+        assert!(matches!(
+            message,
+            ServerToClientMessage::ManagedAppCommand(_)
+        ));
+        let foreign_occupancy = occupancy_stamp(7, "ocl_B", 9, "idem_query_app");
+        let error = managed_app_command_message(&foreign_occupancy, command)
+            .expect_err("foreign lease is rejected");
+        assert_eq!(error.kind(), ClientSessionsErrorKind::OccupancyRequired);
+    }
+
+    #[test]
+    fn managed_app_response_projects_device_health_for_the_browser() {
+        let command = ManagedAppCommand {
+            schema_version: MANAGED_APP_RUN_CONFIG_SCHEMA_VERSION.to_owned(),
+            operation: ManagedAppOperation::Start,
+            idempotency_key: "idem_start_app".to_owned(),
+            occupancy_lease_id: "ocl_A".to_owned(),
+            occupancy_fencing_token: 9,
+            config: Some(test_managed_app_config("run_A")),
+            run_id: "run_A".to_owned(),
+        };
+        let status = ManagedAppStatus {
+            schema_version: MANAGED_APP_RUN_CONFIG_SCHEMA_VERSION.to_owned(),
+            run_id: "run_A".to_owned(),
+            state: ManagedAppState::Healthy,
+            pid: Some(42),
+            process_start_identity: Some("pid-start".to_owned()),
+            exit_code: None,
+            source_id: "src_A".to_owned(),
+        };
+        let response = managed_app_response(&command, Some(&status));
+        assert_eq!(
+            response["schemaVersion"],
+            MANAGED_APP_RUN_CONFIG_SCHEMA_VERSION
+        );
+        assert_eq!(response["runId"], "run_A");
+        assert_eq!(response["leaseId"], "ocl_A");
+        assert_eq!(response["phase"], "ready");
+    }
+
+    #[test]
+    fn managed_app_commands_use_the_persisted_run_config() {
+        let directory = std::env::temp_dir().join(format!(
+            "winwincode-server-managed-app-{}",
+            std::process::id()
+        ));
+        let mut storage = SqliteStorage::open(&directory).expect("storage");
+        let config = test_managed_app_config("run_A");
+        storage
+            .save_managed_app_run_config(&winwincode_storage::ManagedAppRunConfigRecord {
+                run_id: config.run_id.clone(),
+                work_run_id: config.run_id.clone(),
+                repository_binding_id: config.repository_binding_id.clone(),
+                attempt: i64::from(config.attempt),
+                config_json: serde_json::to_vec(&config).expect("config json"),
+            })
+            .expect("persist config");
+        let authority = config.clone();
+        let mut command = ManagedAppCommand {
+            schema_version: MANAGED_APP_RUN_CONFIG_SCHEMA_VERSION.to_owned(),
+            operation: ManagedAppOperation::Start,
+            idempotency_key: "idem_start_app".to_owned(),
+            occupancy_lease_id: "ocl_A".to_owned(),
+            occupancy_fencing_token: 9,
+            config: Some(authority.clone()),
+            run_id: "run_A".to_owned(),
+        };
+        validate_managed_app_command_against_authority(&command, &authority)
+            .expect("stored config accepted");
+        command.config.as_mut().expect("config").listen_port += 1;
+        assert!(validate_managed_app_command_against_authority(&command, &authority).is_err());
+        drop(storage);
+        std::fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    fn test_managed_app_config(run_id: &str) -> ManagedAppRunConfig {
+        ManagedAppRunConfig {
+            schema_version: MANAGED_APP_RUN_CONFIG_SCHEMA_VERSION.to_owned(),
+            run_id: run_id.to_owned(),
+            repository_binding_id: "rb_A".to_owned(),
+            template_revision: 1,
+            attempt: 1,
+            mode: winwincode_client_port::managed_app::ManagedAppMode::Live,
+            candidate_commit: None,
+            cwd: "web".to_owned(),
+            argv: vec!["node".to_owned(), "server.js".to_owned()],
+            env: std::collections::BTreeMap::new(),
+            health_check: winwincode_client_port::managed_app::ManagedAppHealthCheck {
+                path: "/".to_owned(),
+                timeout_ms: 5_000,
+            },
+            listen_port: 4_311,
+            source_id: "src_A".to_owned(),
+        }
     }
 }

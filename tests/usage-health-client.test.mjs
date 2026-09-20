@@ -726,9 +726,11 @@ test('Session and Agent team rows expose frozen runtime facts and live health', 
     'recovering',
     'offline',
   ])
-  assert.match(teamRows[0].textContent, /AgentIdentity agt_/u)
-  assert.match(teamRows[0].textContent, /Provider openai · Model gpt-5/u)
-  assert.match(teamRows[0].textContent, /Workspace rep_.*git-tree:/u)
+  assert.match(teamRows[0].textContent, /执行身份 agent-1 · 角色 executor/u)
+  assert.match(teamRows[0].textContent, /服务商 openai · 模型 gpt-5/u)
+  assert.match(teamRows[0].textContent, /工作区写入模式 candidate/u)
+  assert.match(teamRows[0].textContent, /会话尝试 1/u)
+  assert.equal(/(?:agt_|wrk_|wss_|thr_|rep_|git-tree:|runtime:|\[INTERNAL ID\]|\[SOURCE REF\])/u.test(teamRows[0].textContent), false)
   assert.match(teamRows[0].textContent, /当前活动 执行验证/u)
   assert.match(teamRows[0].textContent, /自动恢复成功/u)
   assert.match(teamRows[1].textContent, /新 Session 已接手/u)
@@ -818,8 +820,7 @@ test('unknown and stale facts carry explicit non-color markers', async () => {
   assert.equal(marked.length > 0, true)
   for (const value of marked) assert.equal(value, 'true')
 
-  const missingUsage = rows(rootElement, 'wwc-usage-health-work-run')
-    .find(node => node.dataset.key === workRunThree)
+  const missingUsage = rows(rootElement, 'wwc-usage-health-work-run').at(-1)
   assert.equal(missingUsage.dataset.unknown, 'true')
 
   const noUsageNote = rows(rootElement, 'wwc-usage-health-note')
@@ -878,8 +879,8 @@ test('the summary opens no second live region and reuses row identity across equ
   const before = rows(rootElement, 'wwc-usage-health-delivery')
   await model.refresh()
   const after = rows(rootElement, 'wwc-usage-health-delivery')
-  assert.deepEqual(after.map(node => node.dataset.key), before.map(node => node.dataset.key))
   assert.deepEqual(after, before)
+  for (const node of descendants(rootElement)) assert.equal(node.dataset.key, undefined)
 })
 
 test('refresh asks the shared query cache to discard this Scope reads before reloading', async () => {

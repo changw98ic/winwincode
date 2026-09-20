@@ -23,8 +23,8 @@ use winwincode_domain::{
 };
 use winwincode_execution_port::{
     generated::{
-        EncodedPayload, ExecutionEventCategory, ExecutionEventRecord, ExecutionJob,
-        ExecutionLeaseStamp, RuntimeEventMessage, RuntimeEventMessageKind,
+        ArtifactReference, EncodedPayload, ExecutionEventCategory, ExecutionEventRecord,
+        ExecutionJob, ExecutionLeaseStamp, RuntimeEventMessage, RuntimeEventMessageKind,
     },
     replay::{ReplayAuthority, ReplayDecision, ReplaySnapshot, ReplayStore},
     runtime_replay::{RuntimeReplayError, RuntimeReplayIdentity, RuntimeReplayResponder},
@@ -32,7 +32,7 @@ use winwincode_execution_port::{
 
 use crate::stage_product::{
     PreparedStageProduct, StageProductError, VerificationEvidenceKind, VerificationEvidenceStatus,
-    prepare_planner_solution_activity, prepare_verification_command_evidence,
+    prepare_planner_solution_activity, prepare_verification_command_evidence_with_artifact,
     prepare_verification_policy_attestation, prepare_verification_result_activity,
     stage_product_job_digest,
 };
@@ -59,6 +59,7 @@ pub struct StageCommandEnd<'source> {
     pub call_id: &'source str,
     pub status: VerificationEvidenceStatus,
     pub exit_code: i64,
+    pub artifact: Option<&'source ArtifactReference>,
 }
 
 /// Trusted fields from one completed Codex turn.
@@ -209,7 +210,7 @@ impl WorkRunRuntimeProjector {
         if !snapshot_has_policy(&snapshot, &policy_id) {
             return Err(WorkRunRuntimeProjectionError::InvalidEvidence);
         }
-        let product = prepare_verification_command_evidence(
+        let product = prepare_verification_command_evidence_with_artifact(
             job,
             classify_evidence(command_end.command),
             command_end.status,
@@ -217,6 +218,7 @@ impl WorkRunRuntimeProjector {
             command_end.call_id,
             &verification_command_digest(job, command_end)
                 .ok_or(WorkRunRuntimeProjectionError::InvalidEvidence)?,
+            command_end.artifact,
         )
         .map_err(WorkRunRuntimeProjectionError::Product)?;
         self.retain_product_with_snapshot(
@@ -507,24 +509,28 @@ fn bind_verification_evidence<AuthorityError, StoreError>(
         .findings
         .into_iter()
         .map(|finding| {
+            let mut cited_outcomes = Vec::with_capacity(finding.evidence_sources.len());
             let evidence_sources = finding
                 .evidence_sources
-                .into_iter()
+                .iter()
                 .map(|source| {
                     let evidence = catalog
                         .get(&source.source_id)
                         .ok_or(WorkRunRuntimeProjectionError::InvalidEvidence)?;
+                    cited_outcomes.push(evidence.outcome);
                     Ok(BoundVerificationEvidenceSource {
                         evidence_type: evidence.kind,
                         event_id: evidence.event_id.clone(),
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
+            let (verdict, explanation) =
+                sealed_finding_verdict(finding.verdict, finding.explanation, &cited_outcomes);
             Ok(BoundVerificationFinding {
                 finding_id: finding.finding_id,
                 criterion_id: finding.criterion_id,
-                verdict: finding.verdict,
-                explanation: finding.explanation,
+                verdict,
+                explanation,
                 evidence_sources,
             })
         })
@@ -537,6 +543,70 @@ fn bind_verification_evidence<AuthorityError, StoreError>(
         findings,
     })
     .map_err(|_| WorkRunRuntimeProjectionError::InvalidEvidence)
+}
+
+/// Reconciles one model finding with the sealed runtime outcomes it cites.
+///
+/// Product authority must not ship an agent conclusion that conflicts with
+/// direct command/test evidence for the same source identity. Successful
+/// sealed evidence supports `pass`; any sealed failure forces `fail`.
+/// Unobserved outcomes keep the agent claim so Delivery authority can still
+/// fail-closed on incomplete evidence.
+fn sealed_finding_verdict(
+    agent_verdict: String,
+    agent_explanation: String,
+    cited: &[BoundEvidenceOutcome],
+) -> (String, String) {
+    if cited.is_empty() {
+        return (agent_verdict, agent_explanation);
+    }
+    if cited
+        .iter()
+        .any(|outcome| matches!(outcome, BoundEvidenceOutcome::Failed))
+    {
+        return (
+            "fail".to_owned(),
+            "Sealed runtime command or test evidence for this finding failed.".to_owned(),
+        );
+    }
+    if cited
+        .iter()
+        .all(|outcome| matches!(outcome, BoundEvidenceOutcome::Succeeded))
+    {
+        return (
+            "pass".to_owned(),
+            "Sealed runtime command or test evidence for this finding succeeded.".to_owned(),
+        );
+    }
+    (agent_verdict, agent_explanation)
+}
+
+fn sealed_command_outcome(value: &Value) -> BoundEvidenceOutcome {
+    let status = value
+        .get("status")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("outcome").and_then(Value::as_str))
+        .map(|value| value.to_ascii_lowercase().replace('_', "-"));
+    let exit_code = value
+        .get("exit_code")
+        .or_else(|| value.get("exitCode"))
+        .and_then(Value::as_i64);
+    match status.as_deref() {
+        Some("timed-out" | "timeout" | "cancelled" | "canceled" | "interrupted") => {
+            BoundEvidenceOutcome::Failed
+        }
+        Some("policy-denied" | "sandbox-denied" | "declined" | "denied") => {
+            BoundEvidenceOutcome::Failed
+        }
+        Some("infrastructure-error" | "infrastructure-failed") => BoundEvidenceOutcome::Failed,
+        Some("failed") => BoundEvidenceOutcome::Failed,
+        Some("completed" | "succeeded" | "exited") if exit_code.unwrap_or(0) == 0 => {
+            BoundEvidenceOutcome::Succeeded
+        }
+        _ if exit_code == Some(0) => BoundEvidenceOutcome::Succeeded,
+        _ if exit_code.is_some_and(|code| code != 0) => BoundEvidenceOutcome::Failed,
+        _ => BoundEvidenceOutcome::Unobserved,
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -597,10 +667,18 @@ enum EvidenceKind {
     Test,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BoundEvidenceOutcome {
+    Succeeded,
+    Failed,
+    Unobserved,
+}
+
 #[derive(Debug)]
 struct EvidenceBinding {
     kind: EvidenceKind,
     event_id: String,
+    outcome: BoundEvidenceOutcome,
 }
 
 fn evidence_catalog<AuthorityError, StoreError>(
@@ -636,6 +714,7 @@ fn evidence_catalog<AuthorityError, StoreError>(
             EvidenceBinding {
                 kind,
                 event_id: message.event.event_id.0,
+                outcome: sealed_command_outcome(&value),
             },
         );
         if previous.is_some() {
@@ -1085,6 +1164,7 @@ mod tests {
                             call_id,
                             status: VerificationEvidenceStatus::Completed,
                             exit_code: 0,
+                            artifact: None,
                         },
                     )
                     .expect("retain verification evidence"),
@@ -1216,6 +1296,7 @@ mod tests {
                         call_id: "call-test",
                         status,
                         exit_code,
+                        artifact: None,
                     },
                 );
                 let accepted =
@@ -1250,6 +1331,7 @@ mod tests {
                     call_id: "call-test",
                     status: VerificationEvidenceStatus::Completed,
                     exit_code: 0,
+                    artifact: None,
                 }
             ),
             verification_method_digest(compound)
@@ -1298,6 +1380,7 @@ mod tests {
                         call_id: "call-test",
                         status: VerificationEvidenceStatus::Completed,
                         exit_code: 0,
+                        artifact: None,
                     },
                 )
                 .expect("evidence"),
@@ -1331,6 +1414,7 @@ mod tests {
                     call_id: "call-test",
                     status: VerificationEvidenceStatus::Completed,
                     exit_code: 0,
+                    artifact: None,
                 },
             ),
             Err(WorkRunRuntimeProjectionError::InvalidEvidence)
@@ -1423,6 +1507,7 @@ mod tests {
                         call_id: "call-command",
                         status: VerificationEvidenceStatus::Completed,
                         exit_code: 0,
+                        artifact: None,
                     },
                 )
                 .expect("retain evidence"),
@@ -1440,6 +1525,7 @@ mod tests {
                         call_id: "call-command",
                         status: VerificationEvidenceStatus::Failed,
                         exit_code: 1,
+                        artifact: None,
                     },
                 )
                 .expect("changed duplicate is a typed conflict"),
@@ -1499,6 +1585,130 @@ mod tests {
         assert_eq!(
             classify_evidence(&["printf".to_owned(), "npm test".to_owned()]),
             VerificationEvidenceKind::Command
+        );
+    }
+
+    #[test]
+    fn bind_reconciles_agent_finding_with_sealed_runtime_outcome() {
+        let (pass, pass_explanation) = sealed_finding_verdict(
+            "fail".to_owned(),
+            "agent saw no exit code".to_owned(),
+            &[BoundEvidenceOutcome::Succeeded],
+        );
+        assert_eq!(pass, "pass");
+        assert!(pass_explanation.contains("succeeded"));
+
+        let (fail, fail_explanation) = sealed_finding_verdict(
+            "pass".to_owned(),
+            "agent claimed success".to_owned(),
+            &[BoundEvidenceOutcome::Failed],
+        );
+        assert_eq!(fail, "fail");
+        assert!(fail_explanation.contains("failed"));
+
+        let (kept, kept_explanation) = sealed_finding_verdict(
+            "fail".to_owned(),
+            "agent saw no exit code".to_owned(),
+            &[BoundEvidenceOutcome::Unobserved],
+        );
+        assert_eq!(kept, "fail");
+        assert_eq!(kept_explanation, "agent saw no exit code");
+
+        assert_eq!(
+            sealed_command_outcome(
+                &serde_json::json!({"status":"completed","exit_code":0,"source_id":"call"})
+            ),
+            BoundEvidenceOutcome::Succeeded
+        );
+        assert_eq!(
+            sealed_command_outcome(
+                &serde_json::json!({"status":"failed","exit_code":2,"source_id":"call"})
+            ),
+            BoundEvidenceOutcome::Failed
+        );
+    }
+
+    #[test]
+    fn bind_rewrites_conflicting_agent_verdict_before_stage_product() {
+        let fixture = fixture();
+        let mut store = MemoryStore::default();
+        let projector = WorkRunRuntimeProjector::new();
+        let job = job("verifier");
+        ready(
+            projector
+                .retain_turn_started(
+                    &mut store,
+                    &AllowAuthority,
+                    fixture.context(),
+                    &job,
+                    "turn-verifier",
+                )
+                .expect("retain policy"),
+        );
+        for (command, call_id) in [
+            (["cargo".to_owned(), "test".to_owned()], "call-test"),
+            (["git".to_owned(), "status".to_owned()], "call-command"),
+        ] {
+            ready(
+                projector
+                    .retain_exec_command_end(
+                        &mut store,
+                        &AllowAuthority,
+                        fixture.context(),
+                        &job,
+                        StageCommandEnd {
+                            command: &command,
+                            turn_id: "turn-verifier",
+                            call_id,
+                            status: VerificationEvidenceStatus::Completed,
+                            exit_code: 0,
+                            artifact: None,
+                        },
+                    )
+                    .expect("retain verification evidence"),
+            );
+        }
+        let conflicting = VERIFICATION_RESULT
+            .replace("\"verdict\":\"pass\"", "\"verdict\":\"fail\"")
+            .replace(
+                "\"explanation\":\"Direct command and test evidence passed.\"",
+                "\"explanation\":\"The observed command did not report exit code 0.\"",
+            );
+        let retained = ready(
+            projector
+                .retain_turn_completed(
+                    &mut store,
+                    &AllowAuthority,
+                    fixture.context(),
+                    &job,
+                    StageTurnCompletion {
+                        turn_id: "turn-verifier",
+                        final_message: Some(&conflicting),
+                        failed: false,
+                    },
+                )
+                .expect("bound conflicting product"),
+        );
+        let payload = retained
+            .event
+            .payload
+            .as_ref()
+            .expect("result payload");
+        let bytes = STANDARD
+            .decode(&payload.data_base64)
+            .expect("result bytes");
+        let json: Value = serde_json::from_slice(&bytes).expect("result JSON");
+        assert_eq!(json["findings"][0]["verdict"], "pass");
+        assert!(
+            json["findings"][0]["explanation"]
+                .as_str()
+                .expect("explanation")
+                .contains("succeeded")
+        );
+        assert_eq!(json["findings"][0]["evidence_sources"][0]["type"], "test");
+        assert_eq!(
+            json["findings"][0]["evidence_sources"][1]["type"],
+            "command"
         );
     }
 }

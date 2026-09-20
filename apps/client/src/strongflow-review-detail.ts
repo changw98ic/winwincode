@@ -20,6 +20,7 @@ import { solutionDiagram } from './solution-diagram.js'
 import { attentionTitle } from './display-labels.js'
 import { mountTabs } from './components/tabs.js'
 import { renderDiff } from './diff-preview.js'
+import { redactPublicText } from './public-redaction.js'
 
 export interface StrongFlowReviewDetailOptions {
   readonly root: HTMLElement
@@ -307,22 +308,22 @@ function renderSegments(
     segments.append(empty)
     return
   }
-  for (const segment of state.segments) {
-    segments.append(renderSegment(document, segment, selectedAttention, options))
+  for (const [index, segment] of state.segments.entries()) {
+    segments.append(renderSegment(document, segment, index, selectedAttention, options))
   }
 }
 
 function renderSegment(
   document: Document,
   segment: ReviewActivitySegment,
+  segmentIndex: number,
   selectedAttention: StrongFlowReviewAttentionAnchor | null,
   options: StrongFlowReviewDetailOptions,
 ): HTMLElement {
   const item = element(document, 'li', 'wwc-review-segment')
-  item.dataset.reviewSegmentKey = segment.key
+  item.dataset.reviewSegmentIndex = String(segmentIndex + 1)
   const head = element(document, 'p', 'wwc-review-segment-head')
-  head.textContent = `${ROLE_LABEL[segment.role ?? ''] ?? '执行'} · 会话 ${segment.productSessionId} · 尝试 ${segment.attempt}`
-    + (segment.workRunId === null ? '' : ` · WorkRun ${segment.workRunId}`)
+  head.textContent = `${ROLE_LABEL[segment.role ?? ''] ?? '执行'} · 第 ${String(segment.attempt)} 次运行`
     + (segment.truncated ? ' · 已达单会话活动上限（仅展示前 100 条）' : '')
   const list = element(document, 'ul', 'wwc-review-activities')
   if (segment.activities.length === 0) {
@@ -330,18 +331,17 @@ function renderSegment(
     empty.textContent = '该会话暂无活动。'
     list.append(empty)
   }
-  for (const activity of segment.activities) {
+  for (const [activityIndex, activity] of segment.activities.entries()) {
     const row = element(document, 'li', 'wwc-review-activity')
-    row.dataset.reviewCallId = activity.callId
+    row.dataset.reviewActivityIndex = String(activityIndex + 1)
     row.dataset.reviewOutcome = activity.outcome
-    row.dataset.reviewSourceRef = activity.sourceRef
     const command = element(document, 'span', 'wwc-review-activity-command')
-    command.textContent = activity.command ?? `(${activity.activityType})`
+    command.textContent = redactPublicText(activity.command ?? `(${activity.activityType})`)
     const fact = element(document, 'span', 'wwc-review-activity-fact')
     fact.textContent = `${activity.status} · outcome ${activity.outcome}`
       + (activity.exitCode === null ? '' : ` · 退出码 ${activity.exitCode}`)
     const source = element(document, 'span', 'wwc-review-activity-source')
-    source.textContent = `来源 ${activity.sourceRef}`
+    source.textContent = '执行结果来源已绑定当前运行'
     row.append(command, fact, source)
     if (activity.outcome === 'task-failed' || activity.outcome === 'timed-out') {
       row.append(button(
@@ -368,7 +368,6 @@ function renderEvidenceArtifact(
   options: StrongFlowReviewDetailOptions,
 ): HTMLElement {
   const box = element(document, 'div', 'wwc-review-artifact')
-  box.dataset.reviewArtifactId = artifact.descriptor.artifactId
   box.dataset.reviewArtifactClass = artifact.previewClass
   const name = element(document, 'p', 'wwc-review-artifact-name')
   name.textContent = artifact.descriptor.fileName ?? '验收附件'
@@ -376,16 +375,34 @@ function renderEvidenceArtifact(
   facts.textContent = `${artifact.descriptor.kind} · ${artifact.descriptor.mediaType} · ${String(artifact.totalBytes)} 字节`
   box.append(name, facts)
 
+  if (artifact.previewClass === 'image' && artifact.nextOffset === null && artifact.error === null) {
+    const download = options.model.artifactDownload(evidenceId, artifact.descriptor.artifactId)
+    if (download !== null) {
+      let binary = ''
+      for (let offset = 0; offset < download.bytes.length; offset += 0x8000) {
+        binary += String.fromCharCode(...download.bytes.subarray(offset, offset + 0x8000))
+      }
+      const preview = document.createElement('img')
+      preview.className = 'wwc-review-artifact-image'
+      preview.alt = '页面批注截图'
+      preview.src = `data:${download.mediaType};base64,${btoa(binary)}`
+      box.append(preview)
+    }
+  }
+
   if (artifact.previewClass === 'inline-text' && artifact.chunks.length > 0) {
     const preview = element(document, 'pre', 'wwc-review-artifact-preview')
     const code = element(document, 'code', 'wwc-review-artifact-preview-code')
-    code.textContent = artifact.chunks.map(chunk => chunk.text ?? '').join('')
+    code.textContent = redactPublicText(artifact.chunks.map(chunk => chunk.text ?? '').join(''))
     preview.append(code)
     box.append(preview)
-  } else if (artifact.previewClass !== 'inline-text') {
+  } else if (artifact.previewClass !== 'inline-text'
+    && !(artifact.previewClass === 'image' && artifact.chunks.length > 0)) {
     const degraded = element(document, 'p', 'wwc-review-artifact-degraded')
     degraded.dataset.degraded = 'true'
-    degraded.textContent = artifact.previewClass === 'executable-document'
+    degraded.textContent = artifact.previewClass === 'image'
+      ? '截图已读取，但当前浏览器无法预览。'
+      : artifact.previewClass === 'executable-document'
       ? 'HTML/SVG 不与管理界面同源执行；内容仅可按原媒体类型下载。'
       : '二进制或不支持内联的内容不进入页面；仅提供有界读取后下载。'
     box.append(degraded)
@@ -678,7 +695,7 @@ export function mountStrongFlowReviewDetail(
     }
     label.textContent = '错误引用关联到：'
     attentionBar.append(label)
-    for (const item of open) {
+    for (const [attentionIndex, item] of open.entries()) {
       const choice = button(
         document,
         'wwc-review-attention-target',
@@ -688,7 +705,7 @@ export function mountStrongFlowReviewDetail(
           render(options.model.state)
         },
       )
-      choice.dataset.reviewAttentionId = item.id
+      choice.dataset.reviewAttentionIndex = String(attentionIndex + 1)
       choice.dataset.reviewAttentionSelected = selectedAttention() === null
         ? 'false'
         : (selectedAttention()?.id === item.id ? 'true' : 'false')
@@ -846,13 +863,13 @@ export function mountStrongFlowReviewDetail(
     const findings = state.detail?.verdict?.unresolvedFindings ?? []
     if (findings.length > 0) {
       const raw = element(document, 'p', 'wwc-review-diagnostic-findings')
-      raw.textContent = findings.join('\n')
+      raw.textContent = redactPublicText(findings.join('\n'))
       progress.append(disclosure(document, '审查问题原始记录', raw))
     }
   }
 
   function renderCriteria(state: StrongFlowReviewState): void {
-    const expanded = new Set([...criteriaList.querySelectorAll<HTMLDetailsElement>('details[open]')].map(item => item.dataset.reviewCriterionId))
+    const expanded = new Set([...criteriaList.querySelectorAll<HTMLDetailsElement>('details[open]')].map(item => item.dataset.reviewCriterionIndex))
     criteriaList.replaceChildren()
     const detail = state.detail
     if (detail === null || detail.requirements.acceptanceCriteria.length === 0) {
@@ -863,11 +880,11 @@ export function mountStrongFlowReviewDetail(
     }
     const results = new Map((detail.verdict?.criteria ?? []).map(result => [result.criterionId, result]))
     const evidence = new Map(state.evidence.map(entry => [entry.evidence.id, entry]))
-    for (const criterion of detail.requirements.acceptanceCriteria) {
+    for (const [criterionIndex, criterion] of detail.requirements.acceptanceCriteria.entries()) {
       const result = results.get(criterion.id)
       const verdict = result?.verdict ?? 'pending'
       const item = element(document, 'li', 'wwc-review-criterion')
-      item.dataset.reviewCriterionId = criterion.id
+      item.dataset.reviewCriterionIndex = String(criterionIndex + 1)
       item.dataset.reviewCriterionResult = verdict
       item.dataset.reviewCriterionRequired = criterion.required ? 'true' : 'false'
       const head = element(document, 'h4', 'wwc-review-criterion-head')
@@ -879,8 +896,8 @@ export function mountStrongFlowReviewDetail(
         ? '验证方式未配置；该项不会因此视为通过。'
         : `验证方式：${criterion.verificationMethod}`
       const explanationSection = disclosure(document, '结论与对应证据', method)
-      explanationSection.dataset.reviewCriterionId = criterion.id
-      explanationSection.open = expanded.has(criterion.id) || verdict !== 'pass'
+      explanationSection.dataset.reviewCriterionIndex = String(criterionIndex + 1)
+      explanationSection.open = expanded.has(String(criterionIndex + 1)) || verdict !== 'pass'
       explanationSection.addEventListener('toggle', () => {
         if (!explanationSection.open || !explanationSection.isConnected) return
         for (const evidenceId of result?.evidenceRefs ?? []) {
@@ -900,9 +917,9 @@ export function mountStrongFlowReviewDetail(
       } else {
         const explanation = element(document, 'p', 'wwc-review-criterion-explanation')
         explanation.textContent = result.explanation.includes('direct Evidence does not match the approved verification method')
-          ? '现有证据与确认的验证方式不一致，需要核查后重新验证。'
-          : result.explanation.includes('is supported by current direct Evidence')
-            ? '判定有当前版本的执行证据支持。' : `判定说明：${result.explanation}`
+            ? '现有证据与确认的验证方式不一致，需要核查后重新验证。'
+            : result.explanation.includes('is supported by current direct Evidence')
+              ? '判定有当前版本的执行证据支持。' : `判定说明：${redactPublicText(result.explanation)}`
         const evaluated = element(document, 'p', 'wwc-review-criterion-evaluated')
         evaluated.textContent = `判定时间：${new Date(result.evaluatedAt).toLocaleString('zh-CN')}`
         body.append(explanation, evaluated)
@@ -990,15 +1007,15 @@ export function mountStrongFlowReviewDetail(
       evidenceList.append(empty)
       return
     }
-    for (const entry of state.evidence) {
+    for (const [evidenceIndex, entry] of state.evidence.entries()) {
       const item = element(document, 'li', 'wwc-review-evidence')
-      item.dataset.reviewEvidenceId = entry.evidence.id
+      item.dataset.reviewEvidenceIndex = String(evidenceIndex + 1)
       item.dataset.reviewEvidenceType = entry.evidence.type
       if (entry.outcome !== null) item.dataset.reviewOutcome = entry.outcome
       const head = element(document, 'span', 'wwc-review-evidence-head')
-      head.textContent = `${EVIDENCE_LABEL[entry.evidence.type] ?? '验收'}证据 ${state.evidence.indexOf(entry) + 1}`
+      head.textContent = `${EVIDENCE_LABEL[entry.evidence.type] ?? '验收'}证据 ${String(evidenceIndex + 1)}`
       const workRun = element(document, 'span', 'wwc-review-evidence-run')
-      workRun.textContent = `证据：${entry.evidence.id} · 执行：${entry.evidence.workRunId} · 来源：${entry.evidence.sourceRef}`
+      workRun.textContent = '执行结果已绑定当前验收范围'
       const artifacts = element(document, 'span', 'wwc-review-evidence-artifacts')
       artifacts.dataset.reviewArtifactState = entry.artifactState ?? 'unknown'
       artifacts.textContent = entry.artifactState === null
@@ -1013,6 +1030,27 @@ export function mountStrongFlowReviewDetail(
         },
       ))
       item.append(disclosure(document, '来源详情', workRun))
+      if (entry.pageAnnotation !== null) {
+        const annotation = entry.pageAnnotation
+        const source = element(document, 'div', 'wwc-review-page-annotation')
+        const body = element(document, 'p', 'wwc-review-page-annotation-body')
+        body.textContent = annotation.body
+        const page = element(document, 'p', 'wwc-review-page-annotation-page')
+        const viewport = annotation.target.viewport
+        page.textContent = `${annotation.target.pagePath} · 视口 ${String(viewport.width)}×${String(viewport.height)} · DPR ${String(viewport.devicePixelRatio)}`
+        const region = annotation.target.region
+        const location = element(document, 'p', 'wwc-review-page-annotation-location')
+        location.textContent = `区域 ${String(region.x)},${String(region.y)} · ${String(region.width)}×${String(region.height)}`
+        source.append(body, page, location)
+        if (annotation.target.element !== null && annotation.target.element !== undefined) {
+          const picked = annotation.target.element
+          const elementLocation = element(document, 'p', 'wwc-review-page-annotation-element')
+          const label = picked.accessibleName ?? picked.role
+          elementLocation.textContent = `元素 ${picked.tagName}${label === null ? '' : ` · ${label}`} · ${String(picked.x)},${String(picked.y)} · ${String(picked.width)}×${String(picked.height)}`
+          source.append(elementLocation)
+        }
+        item.append(source)
+      }
       if (entry.outcome !== null) {
         const result = element(document, 'p', 'wwc-review-evidence-result')
         const label = {
@@ -1063,19 +1101,19 @@ export function mountStrongFlowReviewDetail(
       historyList.append(empty)
       return
     }
-    for (const entry of state.history) {
+    for (const [historyIndex, entry] of state.history.entries()) {
       const pinKey = `candidate:${entry.candidateRef}`
       if (options.annotations.isPinned(pinKey)) {
         options.annotations.setPinRetention(pinKey, entry.availability)
       }
       const item = element(document, 'li', 'wwc-review-history')
-      item.dataset.reviewCandidateRef = entry.candidateRef
+      item.dataset.reviewHistoryIndex = String(historyIndex + 1)
       item.dataset.reviewAvailability = entry.availability
       item.dataset.reviewCurrent = entry.isCurrentAtReadCursor ? 'true' : 'false'
       const head = element(document, 'span', 'wwc-review-history-head')
       head.textContent = entry.isCurrentAtReadCursor
-        ? `版本 ${state.history.indexOf(entry) + 1} · 当前版本`
-        : `版本 ${state.history.indexOf(entry) + 1}`
+        ? `版本 ${String(historyIndex + 1)} · 当前版本`
+        : `版本 ${String(historyIndex + 1)}`
       const availability = element(document, 'span', 'wwc-review-history-availability')
       availability.dataset.reviewAvailability = entry.availability
       availability.textContent = AVAILABILITY_LABEL[entry.availability] ?? retentionLabel(null)

@@ -611,6 +611,12 @@ pub enum ClientControlMessageKind {
     /// `client.credential_rotate`
     #[serde(rename = "client.credential_rotate")]
     CredentialRotate,
+    /// Managed application lifecycle command.
+    #[serde(rename = "client.managed_app.command")]
+    ManagedAppCommand,
+    /// Managed application lifecycle status report.
+    #[serde(rename = "client.managed_app.status")]
+    ManagedAppStatus,
 }
 
 /// A registered client node (device) projection (plan 7.2).

@@ -7,12 +7,16 @@ use base64::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::path::Path;
 use winwincode_api::generated::{
     Actor, CandidateDiffChunkProjection, CandidateDiffChunkProjectionEncoding,
     CandidateDiffChunkProjectionKind, CandidateDiffChunkProjectionMediaType, CandidateDiffGetQuery,
-    CandidateDiffGetResultResponse, CandidateDiffGetResultResponseQuery, CandidateFileEncoding,
-    CandidateFilePage, CandidateFilePageKind, CandidateFileProjection, CandidateFileStatus,
-    CandidateFilesListQuery, CandidateFilesListResultResponse,
+    CandidateDiffGetResultResponse, CandidateDiffGetResultResponseQuery,
+    CandidateFileContentChunkProjection, CandidateFileContentChunkProjectionEncoding,
+    CandidateFileContentChunkProjectionKind, CandidateFileContentGetQuery,
+    CandidateFileContentGetResultResponse, CandidateFileContentGetResultResponseQuery,
+    CandidateFileEncoding, CandidateFilePage, CandidateFilePageKind, CandidateFileProjection,
+    CandidateFileStatus, CandidateFilesListQuery, CandidateFilesListResultResponse,
     CandidateFilesListResultResponseQuery, PageInfo, QueryResultResponse,
 };
 use winwincode_domain::{Count, OpaqueCursor, RepositoryScope, SchemaVersion, Sha256Digest};
@@ -26,6 +30,8 @@ use crate::ControlPlane;
 
 const MAX_DIFF_CHUNK_BYTES: usize = 256 * 1024;
 const MAX_DIFF_BYTES: usize = 256 * 1024 * 1024;
+const MAX_CONTENT_CHUNK_BYTES: usize = 256 * 1024;
+const MAX_CONTENT_BYTES: usize = 256 * 1024 * 1024;
 const CURSOR_VERSION: u8 = 1;
 
 #[derive(Serialize)]
@@ -236,6 +242,104 @@ pub(super) fn diff_get(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(super) fn file_content_get(
+    control_plane: &ControlPlane,
+    query: &CandidateFileContentGetQuery,
+) -> Result<QueryResultResponse, StrongFlowProjectionError> {
+    application::validate_scope(&query.scope)?;
+    application::validate_limit(query.page.limit)?;
+    if query.page.cursor.is_some() {
+        return Err(StrongFlowProjectionError::InvalidRequest(
+            "Candidate file content reads do not accept a page cursor".to_owned(),
+        ));
+    }
+    validate_path(&query.parameters.path)?;
+    let offset = usize::try_from(query.parameters.offset).map_err(|_| {
+        StrongFlowProjectionError::InvalidRequest(
+            "Candidate file content offset is outside the supported range".to_owned(),
+        )
+    })?;
+    let length = usize::try_from(query.parameters.length).map_err(|_| {
+        StrongFlowProjectionError::InvalidRequest(
+            "Candidate file content length is outside the supported range".to_owned(),
+        )
+    })?;
+    if length == 0 || length > MAX_CONTENT_CHUNK_BYTES || offset > MAX_CONTENT_BYTES {
+        return Err(StrongFlowProjectionError::InvalidRequest(
+            "Candidate file content range is outside the supported bounds".to_owned(),
+        ));
+    }
+    let current = current_candidate_source(
+        control_plane,
+        &query.actor,
+        &query.scope,
+        &query.parameters.delivery_id,
+        &query.parameters.at_cursor,
+        &query.parameters.candidate_ref,
+        &query.parameters.candidate_tree_id,
+        &query.parameters.diff_sha256,
+        query.parameters.read_page_limit,
+    )?;
+    let resolver = control_plane
+        .git_source_resolver
+        .as_deref()
+        .ok_or_else(|| {
+            StrongFlowProjectionError::TrustedFactsUnavailable(
+                "trusted Git Candidate file reads are unavailable".to_owned(),
+            )
+        })?;
+    let content = resolver
+        .candidate_file_content(&current.source, &query.parameters.path)
+        .map_err(|error| candidate_source_error(&error))?;
+    if content.path() != query.parameters.path || content.bytes().len() > MAX_CONTENT_BYTES {
+        return Err(StrongFlowProjectionError::CandidateStale(
+            "Candidate file content identity changed while the read was rebuilt".to_owned(),
+        ));
+    }
+    if offset > content.bytes().len() || (content.bytes().is_empty() && offset != 0) {
+        return Err(StrongFlowProjectionError::InvalidRequest(
+            "Candidate file content offset is outside the selected file".to_owned(),
+        ));
+    }
+    let end = offset.saturating_add(length).min(content.bytes().len());
+    let returned = &content.bytes()[offset..end];
+    let next_offset = (end < content.bytes().len())
+        .then(|| public_integer(end, "Candidate file content next offset"))
+        .transpose()?;
+    Ok(QueryResultResponse::CandidateFileContentGetResultResponse(
+        CandidateFileContentGetResultResponse {
+            schema_version: SchemaVersion::WinwincodeV1,
+            request_id: query.request_id.clone(),
+            query: CandidateFileContentGetResultResponseQuery::CandidateFileContentGet,
+            result: CandidateFileContentChunkProjection {
+                candidate: current.summary,
+                content_encoding: encoding(content.encoding()),
+                data_base64: STANDARD.encode(returned),
+                encoding: CandidateFileContentChunkProjectionEncoding::Base64,
+                kind: CandidateFileContentChunkProjectionKind::CandidateFileContentChunk,
+                media_type: content_media_type(content.path(), content.encoding()).to_owned(),
+                next_offset,
+                offset: public_integer(offset, "Candidate file content offset")?,
+                path: content.path().to_owned(),
+                read_cursor: current.cursor,
+                returned_bytes: public_integer(
+                    returned.len(),
+                    "Candidate file content returned bytes",
+                )?,
+                total_bytes: public_integer(
+                    content.bytes().len(),
+                    "Candidate file content total bytes",
+                )?,
+            },
+            page: PageInfo {
+                has_more: false,
+                next_cursor: None,
+            },
+        },
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn current_candidate_source(
     control_plane: &ControlPlane,
     actor: &Actor,
@@ -388,6 +492,29 @@ const fn encoding(value: GitCandidateReviewFileEncoding) -> CandidateFileEncodin
         GitCandidateReviewFileEncoding::Utf8 => CandidateFileEncoding::Utf8,
         GitCandidateReviewFileEncoding::Binary => CandidateFileEncoding::Binary,
         GitCandidateReviewFileEncoding::Unknown8Bit => CandidateFileEncoding::Unknown8bit,
+    }
+}
+
+fn content_media_type(path: &str, encoding: GitCandidateReviewFileEncoding) -> &'static str {
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase);
+    match extension.as_deref() {
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("avif") => "image/avif",
+        Some("html" | "htm") => "text/html",
+        // SVG is executable document content; callers must use the isolated
+        // preview path and must never treat it as an inline image data URL.
+        Some("svg") => "application/octet-stream",
+        _ => match encoding {
+            GitCandidateReviewFileEncoding::Utf8 => "text/plain",
+            GitCandidateReviewFileEncoding::Binary
+            | GitCandidateReviewFileEncoding::Unknown8Bit => "application/octet-stream",
+        },
     }
 }
 
@@ -556,4 +683,25 @@ fn public_count(value: u64, label: &str) -> Result<Count, StrongFlowProjectionEr
             "{label} exceeds the public integer range"
         ))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GitCandidateReviewFileEncoding, content_media_type};
+
+    #[test]
+    fn media_type_allowlist_keeps_images_previewable_and_svg_isolated() {
+        assert_eq!(
+            content_media_type("assets/PHOTO.JpEg", GitCandidateReviewFileEncoding::Binary),
+            "image/jpeg"
+        );
+        assert_eq!(
+            content_media_type("assets/icon.svg", GitCandidateReviewFileEncoding::Utf8),
+            "application/octet-stream"
+        );
+        assert_eq!(
+            content_media_type("README.md", GitCandidateReviewFileEncoding::Utf8),
+            "text/plain"
+        );
+    }
 }

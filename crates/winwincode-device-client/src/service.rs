@@ -2,6 +2,8 @@
 
 //! Foreground Device Client service and its local CLI control files.
 
+use std::collections::BTreeSet;
+use std::ffi::OsStr;
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Write};
@@ -19,8 +21,10 @@ use winwincode_client_port::domain::{
 };
 
 use crate::{
-    DaemonConfig, DaemonError, DeviceDaemon, DeviceIdentitySeed, DeviceStore, DeviceStoreError,
-    HttpExchangeTransport, LeaseWorkerController, SessionSupervisor, SupervisorConfig,
+    AuthorizedPreviewSourceRegistry, DaemonConfig, DaemonError, DeviceDaemon, DeviceIdentitySeed,
+    DeviceStore, DeviceStoreError, HttpExchangeTransport, IdentityRecord, LeaseWorkerController,
+    ManagedAppError, ManagedAppRepositorySource, ManagedAppSupervisor, ManagedAppSupervisorConfig,
+    PreviewTunnelError, PreviewTunnelSupervisor, SessionSupervisor, SupervisorConfig,
     SupervisorError, TickOutcome, WorkerCapacitySource, WorkerLaunchDirectories,
     WorkerLaunchMaterialSource, ensure_device_identity, load_device_identity,
 };
@@ -32,9 +36,16 @@ const OLD_LOG_FILE: &str = "device-client.log.1";
 const LOG_LIMIT_BYTES: u64 = 1024 * 1024;
 const CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(200);
 // Keep the conversation available while one delegated role runs. Roles release their slot on completion.
-const MAX_WORKER_SESSIONS: u32 = 2;
+/// Device concurrent WorkerSession slots. Production StrongFlow dispatches
+/// executor→reviewer→verifier as distinct WorkRun sessions while chat/cancel
+/// ProductSessions may still hold launch anchors; capacity 2 exhausted that
+/// chain. Server acceptance fixtures already assume 4.
+const MAX_WORKER_SESSIONS: u32 = 4;
 const EXCHANGE_PATH: &str = "/internal/v1/client/exchange";
+const PREVIEW_TUNNEL_PATH: &str = "/internal/v1/preview/tunnel";
 const TLS_ROOT_DER_ENVIRONMENT: &str = "WWC_DEVICE_TLS_ROOT_DER_FILE";
+const MANAGED_APP_EXECUTABLE_ALLOWLIST_ENVIRONMENT: &str =
+    "WWC_DEVICE_MANAGED_APP_EXECUTABLE_ALLOWLIST";
 
 /// Runtime configuration supplied by the native service manager.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -64,6 +75,8 @@ pub enum DeviceServiceError {
     Store(DeviceStoreError),
     Daemon(DaemonError),
     Supervisor(SupervisorError),
+    ManagedApp(ManagedAppError),
+    Preview(PreviewTunnelError),
 }
 
 impl fmt::Display for DeviceServiceError {
@@ -78,6 +91,8 @@ impl fmt::Display for DeviceServiceError {
             Self::Store(error) => write!(formatter, "device service store: {error}"),
             Self::Daemon(error) => write!(formatter, "device service daemon: {error}"),
             Self::Supervisor(error) => write!(formatter, "device service worker: {error}"),
+            Self::ManagedApp(error) => write!(formatter, "device service managed app: {error}"),
+            Self::Preview(error) => write!(formatter, "device service preview tunnel: {error}"),
         }
     }
 }
@@ -105,6 +120,18 @@ impl From<DaemonError> for DeviceServiceError {
 impl From<SupervisorError> for DeviceServiceError {
     fn from(error: SupervisorError) -> Self {
         Self::Supervisor(error)
+    }
+}
+
+impl From<ManagedAppError> for DeviceServiceError {
+    fn from(error: ManagedAppError) -> Self {
+        Self::ManagedApp(error)
+    }
+}
+
+impl From<PreviewTunnelError> for DeviceServiceError {
+    fn from(error: PreviewTunnelError) -> Self {
+        Self::Preview(error)
     }
 }
 
@@ -143,6 +170,15 @@ impl WorkerLaunchMaterialSource for ServiceWorkerLaunchMaterial {
     }
 }
 
+impl ManagedAppRepositorySource for ServiceWorkerLaunchMaterial {
+    fn repository_root(&self, repository_binding_id: &str) -> Option<PathBuf> {
+        let store = DeviceStore::open(&self.data_directory).ok()?;
+        let mapping = store.path_mapping(repository_binding_id).ok()??;
+        let root = PathBuf::from(mapping.canonical_path);
+        root.is_dir().then_some(root)
+    }
+}
+
 /// Runs the Device Client in the foreground until its native service manager
 /// stops the process. A local restart request rotates only the daemon session;
 /// durable outbox and occupancy state stay in the same SQLite store.
@@ -169,6 +205,14 @@ fn run_device_service_until(
         fs::remove_file(&restart_path)?;
     }
     append_log(&config.data_directory, "service started")?;
+    let preview_tls_root_der = match std::env::var_os(TLS_ROOT_DER_ENVIRONMENT) {
+        Some(path) => Some(fs::read(path)?),
+        None => None,
+    };
+    // The registry is deliberately empty until the managed-run contract can
+    // publish an authorized candidate HTTP socket. Worker PID/data facts are
+    // not sufficient evidence and must never be converted into a port.
+    let preview_registry = AuthorizedPreviewSourceRegistry::default();
 
     loop {
         let mut store = DeviceStore::open(&config.data_directory)?;
@@ -209,6 +253,7 @@ fn run_device_service_until(
             &identity,
         )?;
         let mut worker_lane_wired = false;
+        let mut preview_tunnel = None;
         if identity.identity().is_enrolled() {
             wire_worker_lane(
                 &mut daemon,
@@ -216,18 +261,27 @@ fn run_device_service_until(
                 &origin,
                 identity.identity().client_node_id(),
                 identity.current_instance_id(),
+                preview_registry.clone(),
             )?;
             worker_lane_wired = true;
+            preview_tunnel = Some(start_preview_tunnel(
+                &origin,
+                &identity,
+                preview_registry.clone(),
+                preview_tls_root_der.as_deref(),
+            )?);
         }
         let mut last_retry = None;
         loop {
             if should_stop() {
+                drop(preview_tunnel.take());
                 append_log(&config.data_directory, "service stopped")?;
                 return Ok(());
             }
             if restart_path.exists() {
                 fs::remove_file(&restart_path)?;
                 append_log(&config.data_directory, "daemon session restarted")?;
+                drop(preview_tunnel.take());
                 break;
             }
             let ready_in = match daemon.tick(Instant::now())? {
@@ -257,13 +311,57 @@ fn run_device_service_until(
                     &origin,
                     enrolled.identity().client_node_id(),
                     enrolled.current_instance_id(),
+                    preview_registry.clone(),
                 )?;
                 worker_lane_wired = true;
+                let enrolled = load_device_identity(&DeviceStore::open(&config.data_directory)?)?
+                    .ok_or_else(|| {
+                    DeviceServiceError::InvalidConfig(
+                        "enrolled daemon has no local identity".to_owned(),
+                    )
+                })?;
+                preview_tunnel = Some(start_preview_tunnel(
+                    &origin,
+                    &enrolled,
+                    preview_registry.clone(),
+                    preview_tls_root_der.as_deref(),
+                )?);
                 append_log(&config.data_directory, "local worker lane ready")?;
             }
             thread::sleep(ready_in.min(CONTROL_POLL_INTERVAL));
         }
     }
+}
+
+fn start_preview_tunnel(
+    origin: &str,
+    identity: &IdentityRecord,
+    registry: AuthorizedPreviewSourceRegistry,
+    tls_root_der: Option<&[u8]>,
+) -> Result<PreviewTunnelSupervisor, DeviceServiceError> {
+    PreviewTunnelSupervisor::start_with_tls_root_der(
+        preview_tunnel_endpoint(origin)?,
+        identity.identity().client_node_id().to_owned(),
+        identity.credential().material_hex(),
+        registry,
+        tls_root_der.map(<[u8]>::to_vec),
+    )
+    .map_err(DeviceServiceError::from)
+}
+
+fn preview_tunnel_endpoint(server_url: &str) -> Result<String, DeviceServiceError> {
+    let uri = http::Uri::from_str(server_url).map_err(|_| {
+        DeviceServiceError::InvalidConfig("server URL is not a valid URI".to_owned())
+    })?;
+    if uri.scheme_str() != Some("https") || uri.authority().is_none() {
+        return Err(DeviceServiceError::InvalidConfig(
+            "preview tunnel requires an https server origin".to_owned(),
+        ));
+    }
+    Ok(format!(
+        "wss://{}{PREVIEW_TUNNEL_PATH}",
+        uri.authority().expect("authority checked")
+    ))
 }
 
 fn wire_worker_lane(
@@ -272,6 +370,7 @@ fn wire_worker_lane(
     server_origin: &str,
     client_node_id: &str,
     client_instance_id: &str,
+    preview_sources: AuthorizedPreviewSourceRegistry,
 ) -> Result<(), DeviceServiceError> {
     let supervisor = SessionSupervisor::new(
         SupervisorConfig {
@@ -286,13 +385,78 @@ fn wire_worker_lane(
         DeviceStore::open(data_directory)?,
     )?;
     daemon.set_worker_supervisor(supervisor.clone());
+    daemon.recover_worker_stop_intents()?;
     daemon
         .set_worker_capacity_source(Arc::new(supervisor.clone()) as Arc<dyn WorkerCapacitySource>);
     daemon.set_lease_worker_controller(Arc::new(supervisor) as Arc<dyn LeaseWorkerController>);
     daemon.set_worker_launch_material_source(Arc::new(ServiceWorkerLaunchMaterial {
         data_directory: data_directory.to_path_buf(),
     }));
+    let managed_app = ManagedAppSupervisor::open(ManagedAppSupervisorConfig {
+        data_directory: data_directory.join("managed-app"),
+        executable_allowlist: managed_app_executable_allowlist()?,
+        preview_sources,
+    })?;
+    managed_app.reconcile()?;
+    daemon.set_managed_app_supervisor(
+        managed_app,
+        Arc::new(ServiceWorkerLaunchMaterial {
+            data_directory: data_directory.to_path_buf(),
+        }),
+    );
     Ok(())
+}
+
+fn managed_app_executable_allowlist() -> Result<BTreeSet<String>, DeviceServiceError> {
+    managed_app_executable_allowlist_from(
+        std::env::var_os(MANAGED_APP_EXECUTABLE_ALLOWLIST_ENVIRONMENT).as_deref(),
+    )
+    .map_err(DeviceServiceError::InvalidConfig)
+}
+
+fn managed_app_executable_allowlist_from(
+    custom: Option<&OsStr>,
+) -> Result<BTreeSet<String>, String> {
+    let mut allowlist = BTreeSet::new();
+    for default in [
+        "/usr/bin/node",
+        "/usr/local/bin/node",
+        "/opt/homebrew/bin/node",
+    ] {
+        if let Ok(path) = canonical_executable(Path::new(default)) {
+            allowlist.insert(path);
+        }
+    }
+    if let Some(custom) = custom {
+        for path in std::env::split_paths(custom) {
+            allowlist.insert(canonical_executable(&path)?);
+        }
+    }
+    Ok(allowlist)
+}
+
+fn canonical_executable(path: &Path) -> Result<String, String> {
+    if !path.is_absolute() {
+        return Err(format!(
+            "managed app executable must be absolute: {}",
+            path.display()
+        ));
+    }
+    let canonical = path
+        .canonicalize()
+        .map_err(|_| format!("managed app executable is unavailable: {}", path.display()))?;
+    let metadata = fs::metadata(&canonical)
+        .map_err(|_| format!("managed app executable is unavailable: {}", path.display()))?;
+    if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+        return Err(format!(
+            "managed app executable is not executable: {}",
+            path.display()
+        ));
+    }
+    canonical
+        .to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| "managed app executable path is not UTF-8".to_owned())
 }
 
 fn canonical_worker_session_id(value: &str) -> bool {
@@ -629,5 +793,18 @@ mod tests {
             "https://server.example:8443/internal/v1/client/exchange"
         );
         assert!(exchange_endpoint("https://server.example:8443/other").is_err());
+    }
+
+    #[test]
+    fn managed_app_allowlist_canonicalizes_device_paths_and_rejects_relative() {
+        let executable = std::env::current_exe().expect("test executable");
+        let canonical = executable.canonicalize().expect("canonical executable");
+        let executable_text = executable.to_str().expect("test executable path");
+        let allowlist = managed_app_executable_allowlist_from(Some(OsStr::new(executable_text)))
+            .expect("absolute executable");
+        assert!(allowlist.contains(canonical.to_str().expect("canonical path")));
+        let error = managed_app_executable_allowlist_from(Some(OsStr::new("node")))
+            .expect_err("relative executable must be rejected");
+        assert!(error.contains("must be absolute"));
     }
 }

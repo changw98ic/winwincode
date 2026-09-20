@@ -2,6 +2,11 @@
 
 //! Generated Worker management commands and queries over the canonical registry.
 //!
+//! Community product boundary: this is local Device Client/Worker management
+//! for the single local Owner, not Cloud/Enterprise multi-user administration.
+//! Scope keys may still carry organization-shaped protocol identifiers; they
+//! are not a Community org-admin product surface.
+//!
 //! [`WorkerManagementService`] maps public DTOs to the single durable
 //! [`ExecutionRegistry`](winwincode_storage::ExecutionRegistry). Public event
 //! construction is injected so the storage adapter and this application seam

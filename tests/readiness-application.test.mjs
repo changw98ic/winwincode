@@ -28,7 +28,7 @@ assert.equal(
 
 const applicationModule = await import(`${pathToFileURL(resolve(
   root,
-  '.cache/readiness-tests/application.js',
+  'apps/client/node_modules/.cache/readiness-tests/application.js',
 )).href}`)
 const { mountWinWinCodeClient } = applicationModule
 
@@ -221,6 +221,7 @@ class FakeElement {
       if (force) names.push(name)
       this.className = names.join(' ')
     },
+    contains: name => this.className.split(/\s+/u).includes(name),
   }
   disabled = false
   hidden = false
@@ -307,6 +308,8 @@ class FakeWindow {
       (this.listeners.get(name) ?? []).filter(candidate => candidate !== listener),
     )
   }
+  setInterval() { return 0 }
+  clearInterval() {}
 
   emit(name) {
     for (const listener of this.listeners.get(name) ?? []) listener({})
@@ -336,6 +339,7 @@ function mount(hash) {
     serverUrl: client.serverUrl,
     window: browser,
     controlPlane: client,
+    mountSessionBrowser: () => ({ update() {}, close() {} }),
   })
   return { application, browser, client, rootElement }
 }
@@ -374,7 +378,6 @@ test('the shell mounts the first-run checklist and reuses the shared query cache
     'credential.reference.list',
     'model.route.availability.list',
     'worker.list',
-    'session.list',
     'delivery.list',
   ]) {
     assert.equal(
@@ -383,6 +386,11 @@ test('the shell mounts the first-run checklist and reuses the shared query cache
       `${name} should be read once through the shared cache`,
     )
   }
+  assert.equal(
+    fixture.client.queries.filter(query => query.query === 'session.list').length,
+    2,
+    'session.list is read by readiness and the shell history consumer',
+  )
 
   const serialized = JSON.stringify(readinessSection(fixture.rootElement).textContent)
   assert.equal(serialized.includes('crd_'), false)
@@ -441,8 +449,8 @@ test('recheck after completing the steps reports ready and issues fresh reads', 
   )
   assert.equal(
     fixture.client.queries.filter(query => query.query === 'session.list').length,
-    2,
-    'recheck re-reads session presence',
+    3,
+    'recheck re-reads readiness presence while preserving the shell history read',
   )
 
   const toggle = descendants(readinessSection(fixture.rootElement)).find(node => (

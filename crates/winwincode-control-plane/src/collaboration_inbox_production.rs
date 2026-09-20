@@ -6,16 +6,19 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
+use winwincode_api::generated::{Actor, Scope};
 use winwincode_delivery::domain::{AttentionItemStatus, AttentionItemType};
-use winwincode_domain::{Instant, RepositoryScope, Sha256Digest};
+use winwincode_domain::{Instant, RepositoryScope, Sha256Digest, UserId};
 
 use crate::{
-    CollaborationCandidateIdentity, CollaborationInboxItemId, CollaborationInboxItemKind,
-    CollaborationInboxItemState, CollaborationInboxSourceError, CollaborationInboxSourceItem,
-    CollaborationInboxSourcePort, CollaborationInboxSourceSnapshot,
-    FormalCollaborationCommandRoute, ProductSessionPersistence, ResponsibilityReviewKind,
-    ResponsibilityRole, ResponsibilityTarget,
-    chat_interaction_application::collaboration_approval_snapshot,
+    CollaborationCandidateIdentity, CollaborationInboxAudience, CollaborationInboxAuthorityError,
+    CollaborationInboxAuthorityPort, CollaborationInboxAuthoritySnapshot, CollaborationInboxItemId,
+    CollaborationInboxItemKind, CollaborationInboxItemState, CollaborationInboxSourceError,
+    CollaborationInboxSourceItem, CollaborationInboxSourcePort, CollaborationInboxSourceSnapshot,
+    CollaborationResponsibilityEntitlement, FormalCollaborationCommandRoute,
+    ProductSessionPersistence, ResponsibilityAssignment, ResponsibilityAssignmentId,
+    ResponsibilityAssignmentState, ResponsibilityReviewKind, ResponsibilityRole,
+    ResponsibilityTarget, chat_interaction_application::collaboration_approval_snapshot,
     delivery_application::collaboration_delivery_snapshot, repository_scope_key,
     session_binding_transaction::instant_millis,
 };
@@ -23,6 +26,93 @@ use crate::{
 /// Durable scope-wide Approval and Attention source backed by canonical state.
 pub struct DurableCollaborationInboxSource {
     storage: Box<dyn ProductSessionPersistence>,
+}
+
+/// Local production authority for the single Owner account.
+///
+/// The local Server has one repository and one durable Owner. Its Inbox
+/// authority is derived from the same canonical Approval/Delivery source cut,
+/// so page annotations cannot outlive the Delivery state they reference.
+pub struct LocalOwnerCollaborationInboxAuthority {
+    source: DurableCollaborationInboxSource,
+    owner: UserId,
+}
+
+impl LocalOwnerCollaborationInboxAuthority {
+    #[must_use]
+    pub fn new(storage: Box<dyn ProductSessionPersistence>, owner: UserId) -> Self {
+        Self {
+            source: DurableCollaborationInboxSource::new(storage),
+            owner,
+        }
+    }
+}
+
+impl CollaborationInboxAuthorityPort for LocalOwnerCollaborationInboxAuthority {
+    fn authorize(
+        &mut self,
+        actor: &Actor,
+        scopes: &[Scope],
+        scope: &RepositoryScope,
+        audience: &CollaborationInboxAudience,
+    ) -> Result<CollaborationInboxAuthoritySnapshot, CollaborationInboxAuthorityError> {
+        let Actor::UserActor(user) = actor else {
+            return Err(CollaborationInboxAuthorityError);
+        };
+        if user.id != self.owner
+            || !scopes.contains(&Scope::RepositoryScope(scope.clone()))
+            || !matches!(audience, CollaborationInboxAudience::Personal(viewer) if viewer == &self.owner)
+        {
+            return Err(CollaborationInboxAuthorityError);
+        }
+        let source = self
+            .source
+            .snapshot(scope)
+            .map_err(|_| CollaborationInboxAuthorityError)?;
+        let mut assignments = Vec::with_capacity(source.items.len());
+        let mut guards = Vec::new();
+        let mut guard_ids = std::collections::BTreeSet::new();
+        for item in &source.items {
+            assignments.push(CollaborationResponsibilityEntitlement {
+                assignment: ResponsibilityAssignment {
+                    id: ResponsibilityAssignmentId(format!("local-owner:{}", item.source_sha256.0)),
+                    scope: scope.clone(),
+                    target: item.target.clone(),
+                    role: item.responsibility_role,
+                    principal_user_id: self.owner.clone(),
+                    state: ResponsibilityAssignmentState::Active,
+                    revision: 1,
+                    assigned_by: actor.clone(),
+                    assigned_at_millis: item.opened_at_millis,
+                    accepted_at_millis: Some(item.opened_at_millis),
+                    expires_at_millis: None,
+                    ended_at_millis: None,
+                    target_revision: item.source_revision,
+                    target_sha256: item.source_sha256.clone(),
+                    rbac_revision: source.revision,
+                    rbac_sha256: source.snapshot_sha256.clone(),
+                },
+            });
+            if let Some(item_guards) = source.item_state_guards.get(&item.id) {
+                for guard in item_guards {
+                    if guard_ids.insert(guard.stream_id().to_owned()) {
+                        guards.push(guard.clone());
+                    }
+                }
+            }
+        }
+        if guards.is_empty() {
+            return Err(CollaborationInboxAuthorityError);
+        }
+        Ok(CollaborationInboxAuthoritySnapshot {
+            scope: scope.clone(),
+            viewer_user_id: self.owner.clone(),
+            assignments,
+            authority_revision: source.revision,
+            authority_sha256: source.snapshot_sha256,
+            state_guards: guards,
+        })
+    }
 }
 
 impl DurableCollaborationInboxSource {
@@ -101,6 +191,7 @@ fn source_snapshot(
         for attention in &record.delivery.snapshot().attention_items {
             let (target, responsibility_role) =
                 attention_responsibility(attention.item_type, &attention.delivery_id);
+            let candidate = attention_candidate(&record.delivery, attention);
             let id = CollaborationInboxItemId::DeliveryAttention(attention.id.clone());
             items.push(CollaborationInboxSourceItem {
                 id: id.clone(),
@@ -113,7 +204,7 @@ fn source_snapshot(
                 opened_at_millis: attention.created_at_millis,
                 expires_at_millis: None,
                 state: attention_state(attention.status),
-                candidate: None,
+                candidate,
                 command_route: FormalCollaborationCommandRoute::DeliveryResolveAttention {
                     attention_item_id: attention.id.clone(),
                     delivery_id: attention.delivery_id.clone(),
@@ -129,6 +220,31 @@ fn source_snapshot(
         snapshot_sha256: digest(&items)?,
         item_state_guards,
         items,
+    })
+}
+
+fn attention_candidate(
+    delivery: &winwincode_delivery::domain::Delivery,
+    attention: &winwincode_delivery::domain::AttentionItem,
+) -> Option<CollaborationCandidateIdentity> {
+    let work_run_id = attention.work_run_id.as_ref()?;
+    let evidence = delivery
+        .snapshot()
+        .evidence
+        .iter()
+        .rev()
+        .find(|evidence| &evidence.work_run_id == work_run_id)?;
+    let candidate_digest = evidence
+        .candidate_ref
+        .strip_prefix("git-candidate:")?
+        .to_owned();
+    if !candidate_digest.starts_with("sha256:") {
+        return None;
+    }
+    Some(CollaborationCandidateIdentity {
+        candidate_ref: evidence.candidate_ref.clone(),
+        candidate_digest: Sha256Digest(candidate_digest),
+        candidate_revision: delivery.revision(),
     })
 }
 

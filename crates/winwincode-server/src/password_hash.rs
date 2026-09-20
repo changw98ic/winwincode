@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Argon2id password hashing for the multi-user login surface.
+//! Argon2id password hashing for the single local Owner login surface.
 //!
 //! Plaintext passwords exist only as call arguments. The stored form is the
 //! opaque PHC string produced by Argon2id, which is also the only form the

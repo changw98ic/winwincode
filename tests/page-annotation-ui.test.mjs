@@ -95,6 +95,7 @@ test('RUN-09 revoked or non-injectable never claims pickable', () => {
 test('screenshot draft works without element pick', () => {
   const model = createPageAnnotationViewModel({ appOrigin: APP_ORIGIN })
   model.prepare({
+    bindingKey: 'candidate-1',
     pageUrl: 'https://cdn.example.test/doc',
     pagePath: '/doc',
     access: 'authorized',
@@ -133,6 +134,7 @@ test('element pick draft keeps locator and bounds on injectable surface', () => 
     nextDraftId: () => 'ann_1',
   })
   model.prepare({
+    bindingKey: 'candidate-1',
     pageUrl: `${APP_ORIGIN}/preview`,
     pagePath: '/preview',
     access: 'authorized',
@@ -157,11 +159,38 @@ test('element pick draft keeps locator and bounds on injectable surface', () => 
   }
 })
 
+test('annotation drafts stay bound to one candidate identity', () => {
+  const model = createPageAnnotationViewModel({ appOrigin: APP_ORIGIN })
+  const input = {
+    bindingKey: 'candidate-1',
+    pageUrl: `${APP_ORIGIN}/preview`,
+    pagePath: '/preview',
+    access: 'authorized',
+    injectable: true,
+    viewport: { width: 390, height: 844, devicePixelRatio: 2 },
+  }
+  model.prepare(input)
+  model.markScreenshotRegion({ x: 1, y: 1, width: 10, height: 10 })
+  model.setComment('候选一批注')
+  model.addDraft()
+  assert.equal(model.state.status, 'ready')
+  if (model.state.status !== 'ready') return
+  assert.equal(model.state.drafts.length, 1)
+  model.prepare({ ...input, pagePath: '/other' })
+  assert.equal(model.state.status, 'ready')
+  if (model.state.status !== 'ready') return
+  assert.equal(model.state.drafts.length, 1)
+  model.prepare({ ...input, bindingKey: 'candidate-2' })
+  assert.equal(model.state.status, 'ready')
+  if (model.state.status === 'ready') assert.equal(model.state.drafts.length, 0)
+})
+
 test('page element pick uses only the host bridge result', () => {
   const document = new TrackedDocument()
   const rootElement = document.createElement('div')
   const model = createPageAnnotationViewModel({ appOrigin: APP_ORIGIN })
   model.prepare({
+    bindingKey: 'candidate-1',
     pageUrl: `${APP_ORIGIN}/preview`,
     pagePath: '/preview',
     access: 'authorized',
@@ -194,6 +223,7 @@ test('page mounts degradation copy for cross-origin', async () => {
   const rootElement = document.createElement('div')
   const model = createPageAnnotationViewModel({ appOrigin: APP_ORIGIN })
   model.prepare({
+    bindingKey: 'candidate-1',
     pageUrl: 'https://evil.example.test/',
     pagePath: '/',
     access: 'authorized',
@@ -232,4 +262,53 @@ test('page mounts degradation copy for cross-origin', async () => {
   assert.equal(items.length, 1)
   assert.match(items[0].textContent, /screenshot-coordinate/)
   page.close()
+})
+
+test('page annotation transport restores persisted drafts and advances the catalog revision', async () => {
+  const submitted = []
+  const persisted = {
+    id: 'ann_persisted',
+    body: '恢复后的页面批注',
+    candidateRef: 'git-candidate:sha256:abc',
+    workRunId: 'wrn_1',
+    target: {
+      pagePath: '/checkout',
+      viewport: { width: 390, height: 844, devicePixelRatio: 2 },
+      element: null,
+      region: { x: 4, y: 8, width: 120, height: 40 },
+    },
+    updatedAt: '2026-09-18T00:00:00.000Z',
+  }
+  const model = createPageAnnotationViewModel({
+    appOrigin: APP_ORIGIN,
+    transport: {
+      async list() {
+        return { items: [persisted], catalogRevision: 7 }
+      },
+      async submit(input) {
+        submitted.push(input)
+        return { annotation: persisted, catalogRevision: 8 }
+      },
+    },
+  })
+  model.prepare({
+    bindingKey: 'candidate-1',
+    pageUrl: `${APP_ORIGIN}/preview`,
+    pagePath: '/checkout',
+    access: 'authorized',
+    injectable: false,
+    viewport: { width: 390, height: 844, devicePixelRatio: 2 },
+    deliveryId: 'dlv_1',
+    candidateRef: persisted.candidateRef,
+    workRunId: persisted.workRunId,
+  })
+  await flush()
+  assert.equal(model.state.status, 'ready')
+  if (model.state.status !== 'ready') return
+  assert.equal(model.state.drafts.length, 1)
+  model.submit()
+  await flush()
+  assert.equal(submitted.length, 1)
+  assert.equal(submitted[0].expectedRevision, 7)
+  assert.equal(model.state.status, 'submitted')
 })

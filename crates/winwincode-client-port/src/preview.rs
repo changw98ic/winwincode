@@ -11,6 +11,15 @@ pub const MAX_PREVIEW_BODY_BYTES: usize = 8 * 1024 * 1024;
 /// Largest header count accepted in either direction.
 pub const MAX_PREVIEW_HEADERS: usize = 64;
 
+/// Returns whether `value` is a full lowercase SHA-1 or SHA-256 Git object id.
+#[must_use]
+pub fn is_canonical_git_commit(value: &str) -> bool {
+    matches!(value.len(), 40 | 64)
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 /// Stable identity of one locally authorized application service.
 ///
 /// Local host names and ports never cross the tunnel. The Device Client maps
@@ -20,8 +29,8 @@ pub const MAX_PREVIEW_HEADERS: usize = 64;
 pub struct PreviewSourceDescriptor {
     #[serde(rename = "sourceId")]
     pub source_id: String,
-    #[serde(rename = "workerSessionId")]
-    pub worker_session_id: String,
+    #[serde(rename = "workRunId")]
+    pub work_run_id: String,
     #[serde(rename = "repositoryBindingId")]
     pub repository_binding_id: String,
     pub mode: PreviewSourceMode,
@@ -92,7 +101,7 @@ mod tests {
             schema_version: PREVIEW_TUNNEL_SCHEMA_VERSION.to_owned(),
             sources: vec![PreviewSourceDescriptor {
                 source_id: "pvs_demo".to_owned(),
-                worker_session_id: "wsn_demo".to_owned(),
+                work_run_id: "wrn_demo".to_owned(),
                 repository_binding_id: "rbd_demo".to_owned(),
                 mode: PreviewSourceMode::FrozenCandidate,
                 candidate_commit: Some("a".repeat(40)),
@@ -103,6 +112,8 @@ mod tests {
         assert!(!json.contains("127.0.0.1"));
         assert!(!json.contains("169.254.169.254"));
         assert!(!json.contains("port"));
+        assert!(json.contains("\"workRunId\":\"wrn_demo\""));
+        assert!(!json.contains("workerSessionId"));
         assert_eq!(
             serde_json::from_str::<DevicePreviewFrame>(&json).expect("parses"),
             frame

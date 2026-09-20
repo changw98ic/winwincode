@@ -31,7 +31,7 @@ assert.equal(
   `Chat page did not compile:\n${compiler.stdout}${compiler.stderr}`,
 )
 
-const bundle = spawnSync('corepack', ['pnpm', 'exec', 'esbuild', 'apps/client/src/chat-page.ts', '--bundle', '--format=esm', '--platform=browser', '--external:react', '--external:react-dom', '--external:react-dom/*', '--outfile=apps/client/.cache/chat-page-test.js'], { cwd: root, encoding: 'utf8' })
+const bundle = spawnSync('corepack', ['pnpm', 'exec', 'esbuild', 'apps/client/src/chat-page.ts', '--bundle', '--format=esm', '--platform=browser', '--external:react', '--external:react-dom', '--external:react-dom/*', '--outfile=apps/client/node_modules/.cache/chat-page-test.js'], { cwd: root, encoding: 'utf8' })
 assert.equal(bundle.status, 0, bundle.stderr)
 const initialDom = new JSDOM('<!doctype html><body></body>', { url: 'https://client.test' })
 globalThis.window = initialDom.window
@@ -39,7 +39,7 @@ globalThis.document = initialDom.window.document
 globalThis.MutationObserver = initialDom.window.MutationObserver
 const page = await import(`${pathToFileURL(resolve(
   root,
-  'apps/client/.cache/chat-page-test.js',
+  'apps/client/node_modules/.cache/chat-page-test.js',
 )).href}?run=${String(Date.now())}`)
 
 const {

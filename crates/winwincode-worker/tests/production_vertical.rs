@@ -765,6 +765,7 @@ fn pending_workrun_execution(
                 max_artifact_bytes: 1_000_000,
                 max_runtime_seconds: 240,
             },
+            managed_app_run_config: None,
         },
     )
     .expect("prepare canonical WorkRun job");

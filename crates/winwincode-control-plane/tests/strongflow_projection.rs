@@ -1,21 +1,41 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
+#[path = "../../../tests/support/git_candidate.rs"]
+mod git_candidate;
+use git_candidate::candidate_bundle;
 use winwincode_api::generated::{
-    Actor, ControlPlaneWebSocketSubscribeStartAt, DeliveryGetParameters, DeliveryGetQuery,
-    DeliveryGetQueryQuery, EventReadCursor, PageRequest,
+    Actor, CandidateFileContentGetParameters, CandidateFileContentGetQuery,
+    CandidateFileContentGetQueryQuery, ControlPlaneWebSocketSubscribeStartAt,
+    DeliveryGetParameters, DeliveryGetQuery, DeliveryGetQueryQuery, EventReadCursor,
+    EvidenceGetQuery, EvidenceGetQueryQuery, EvidenceReadBinding, PageRequest,
     ProductSessionRuntimeProjectionGetParameters, ProductSessionRuntimeProjectionGetParametersKind,
     QueryResultResponse, RuntimeProjectionEventCursor, RuntimeProjectionGetParameters,
     RuntimeProjectionGetQuery, RuntimeProjectionGetQueryQuery, StrongFlowReadCursor,
     WorkRunRuntimeProjectionGetParameters, WorkRunRuntimeProjectionGetParametersKind,
 };
 use winwincode_control_plane::{
-    AggregateJournalKey, AggregateJournalRecord, CommitReceipt, ControlPlane, EventPublishError,
-    EventPublisher, LoadedAggregateJournal, NewOutboxEvent, OutboxEvent, ProductStateStorage,
-    ProjectionEventCursor, ProjectionEventStream, ProjectionEventStreamKey, StorageError,
-    StoredState,
+    AggregateJournalKey, AggregateJournalRecord, CollaborationCandidateIdentity,
+    CollaborationInboxAudience, CollaborationInboxAuthorityError, CollaborationInboxAuthorityPort,
+    CollaborationInboxAuthoritySnapshot, CollaborationInboxClock, CollaborationInboxClockError,
+    CollaborationInboxCommandContext, CollaborationInboxItemId, CollaborationInboxItemKind,
+    CollaborationInboxItemState, CollaborationInboxService, CollaborationInboxSourceError,
+    CollaborationInboxSourceItem, CollaborationInboxSourcePort, CollaborationInboxSourceSnapshot,
+    CollaborationResponsibilityEntitlement, CommitReceipt, ControlPlane, EventPublishError,
+    EventPublisher, FormalCollaborationCommandRoute, LoadedAggregateJournal, NewOutboxEvent,
+    OutboxEvent, PageAnnotationAction, PageAnnotationCandidateIdentity, PageAnnotationCommand,
+    PageAnnotationId, PageAnnotationRegion, PageAnnotationTarget, PageAnnotationViewport,
+    ProductStateStorage, ProjectionEventCursor, ProjectionEventStream, ProjectionEventStreamKey,
+    ResponsibilityAssignment, ResponsibilityAssignmentId, ResponsibilityAssignmentState,
+    ResponsibilityRole, ResponsibilityTarget, StorageError, StoredState,
     strongflow_projection::{
         DeliveryRuntimeReadRequest, ProductSessionRuntimeReadRequest,
         SqliteTrustedRuntimeProjectionAdapter, StrongFlowProjectionError,
@@ -27,14 +47,24 @@ use winwincode_control_plane::{
 };
 use winwincode_delivery::{
     application::attention::{AttentionDecision, ResolveAttentionInput, resolve_attention},
+    application::verdict::test_support::{VerdictFixtureOutcome, verdict_fixture},
+    application::workrun_execution::{
+        TerminalArtifactReference, TerminalOutcomeStatus,
+        test_support::{
+            active_lease_identity, delivery_terminal_outcome_facts, session_binding_authority,
+            terminal_outcome_metadata, terminal_worker_outcome,
+        },
+    },
     domain::{
         AcceptanceCriterionId, AttentionItem, AttentionItemStatus, AttentionItemType,
-        CandidatePathFact, CandidatePathState, Delivery, DeliveryStatus, FrozenDeliveryCandidate,
-        SessionBindingId,
+        CandidatePathFact, CandidatePathState, CriterionVerdict, DELIVERY_SCHEMA_VERSION, Delivery,
+        DeliveryStatus, EvidenceId, EvidenceRef, EvidenceRefType, FrozenDeliveryCandidate,
+        RepositoryKind, RepositoryRef, SessionBindingId,
         candidate::{
-            CandidateHunkFact,
+            CandidateHunkFact, freeze_delivery_candidate_from_source,
             test_support::{CandidateFixtureInput, freeze_candidate_fixture},
         },
+        rework::{CurrentReworkScope, ReworkDecision, decide_precise_rework},
     },
     projection::runtime::{
         RuntimeProjection,
@@ -43,22 +73,58 @@ use winwincode_delivery::{
         },
     },
     store::{
-        AppendDelivery, CreateDelivery, DeliveryCommand, DeliveryCommandPort, DeliveryJournalPort,
-        DeliveryMutationOperation, DeliveryStore, InMemoryDeliveryJournal,
+        AppendDelivery, CreateDelivery, DeliveryCommand, DeliveryCommandPort, DeliveryJournalCodec,
+        DeliveryJournalPort, DeliveryMutationOperation, DeliveryReworkHistoryPort, DeliveryStore,
+        InMemoryDeliveryJournal,
     },
 };
 use winwincode_domain::{
-    AgentIdentityId, AttentionItemId, CodexThreadId, ControlPlaneEventId, DeliveryId,
-    ExecutionEventId, ExecutionJobId, ExecutionSequence, Instant, OrganizationId, ProductSessionId,
-    ProjectId, RepositoryId, RequestId, Revision, SchemaVersion, Sha256Digest, UserId,
-    WorkItemState, WorkRunId, WorkerSessionId, WorkspaceId,
+    AgentIdentityId, ArtifactId, AttentionItemId, CodexThreadId, ControlPlaneEventId, DeliveryId,
+    ExecutionAckSequence, ExecutionEventId, ExecutionJobId, ExecutionMessageId, ExecutionSequence,
+    FencingToken, Instant, LeaseId, OrganizationId, ProductSessionId, ProjectId, RepositoryId,
+    RequestId, Revision, SchemaVersion, Sha256Digest, UserId, WorkItemState, WorkRunId, WorkerId,
+    WorkerInstanceId, WorkerSessionId, WorkspaceId,
 };
 use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_execution_port::generated::{ExecutionEventCategory, ExecutionEventRecord};
 use winwincode_storage::{
-    ProjectionReadCut, ReceiptIdentity, ReceiptScopeKey, SqliteStorage, StateCommit,
-    WorkRunDeviceBindingFacts,
+    AggregateJournalPublication, ArtifactAccess, ArtifactChunk, ArtifactMeteringAttribution,
+    ArtifactOpen, ArtifactProvenance, ArtifactRetention, ArtifactStore, FakeArtifactObjectStore,
+    GitCandidateArtifactManifest, LocalArtifactObjectStore, LocalGitSourceResolver,
+    ProjectionReadCut, ReceiptIdentity, ReceiptScopeKey, SqliteStorage, StateCommit, StateMutation,
+    StateRevisionGuard, WorkRunDeviceBindingFacts,
 };
+
+static NEXT_POSITIVE_FIXTURE: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PositiveTerminalAuthority {
+    schema_version: u8,
+    delivery_id: DeliveryId,
+    work_run_id: WorkRunId,
+    job_id: ExecutionJobId,
+    attempt: u64,
+    lease_id: LeaseId,
+    fencing_token: FencingToken,
+    worker_id: WorkerId,
+    worker_instance_id: WorkerInstanceId,
+    worker_session_id: WorkerSessionId,
+    issued_at: Instant,
+    expires_at: Instant,
+    artifacts: Vec<TerminalArtifactReference>,
+    codex_thread_id: Option<CodexThreadId>,
+    finished_at_millis: u64,
+    last_event_sequence: ExecutionAckSequence,
+    status: &'static str,
+    disposition: PositiveTerminalDisposition,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum PositiveTerminalDisposition {
+    Settled { delivery_revision: u64 },
+}
 
 // PublicationAuthorizationSnapshot is deliberately not constructible from HTTP input.
 // Missing sources return TRUSTED_FACTS_UNAVAILABLE.
@@ -68,6 +134,7 @@ use winwincode_storage::{
 #[derive(Clone)]
 struct JournalStorage {
     journal: Arc<Mutex<LoadedAggregateJournal>>,
+    states: Arc<Mutex<std::collections::BTreeMap<String, StoredState>>>,
     runtime_read_count: Arc<Mutex<usize>>,
     advance_event_after_runtime_read: bool,
     device_binding: Arc<Mutex<Option<(ExecutionJobId, WorkRunDeviceBindingFacts)>>>,
@@ -83,8 +150,8 @@ impl ProductStateStorage for JournalStorage {
     ) -> Result<Option<CommitReceipt>, StorageError> {
         Ok(None)
     }
-    fn load_state(&self, _stream_id: &str) -> Result<Option<StoredState>, StorageError> {
-        Ok(None)
+    fn load_state(&self, stream_id: &str) -> Result<Option<StoredState>, StorageError> {
+        Ok(self.states.lock().expect("states").get(stream_id).cloned())
     }
     fn load_work_run_device_binding_facts(
         &self,
@@ -180,6 +247,41 @@ impl ProductStateStorage for JournalStorage {
     }
     fn close(self: Box<Self>) -> Result<(), StorageError> {
         Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct E2eInboxSource(CollaborationInboxSourceSnapshot);
+
+impl CollaborationInboxSourcePort for E2eInboxSource {
+    fn snapshot(
+        &mut self,
+        _scope: &RepositoryScope,
+    ) -> Result<CollaborationInboxSourceSnapshot, CollaborationInboxSourceError> {
+        Ok(self.0.clone())
+    }
+}
+
+#[derive(Clone)]
+struct E2eInboxAuthority(CollaborationInboxAuthoritySnapshot);
+
+impl CollaborationInboxAuthorityPort for E2eInboxAuthority {
+    fn authorize(
+        &mut self,
+        _actor: &Actor,
+        _authenticated_scopes: &[winwincode_api::generated::Scope],
+        _scope: &RepositoryScope,
+        _audience: &CollaborationInboxAudience,
+    ) -> Result<CollaborationInboxAuthoritySnapshot, CollaborationInboxAuthorityError> {
+        Ok(self.0.clone())
+    }
+}
+
+struct E2eInboxClock;
+
+impl CollaborationInboxClock for E2eInboxClock {
+    fn now_millis(&mut self) -> Result<u64, CollaborationInboxClockError> {
+        Ok(1_800_000_000_100)
     }
 }
 struct NoopPublisher;
@@ -380,6 +482,7 @@ struct Fixture {
     delivery: Delivery,
     scope: RepositoryScope,
     journal: Arc<Mutex<LoadedAggregateJournal>>,
+    states: Arc<Mutex<std::collections::BTreeMap<String, StoredState>>>,
     domain_journal: Arc<InMemoryDeliveryJournal>,
     runtime: Arc<Mutex<TrustedRuntimeProjectionRead>>,
     device_binding: Arc<Mutex<Option<(ExecutionJobId, WorkRunDeviceBindingFacts)>>>,
@@ -488,6 +591,23 @@ fn fixture_with_delivery_and_candidate(
     )
 }
 
+fn fixture_with_delivery_and_candidate_artifacts(
+    delivery: Delivery,
+    candidate: FrozenDeliveryCandidate,
+    artifacts: ArtifactStore,
+) -> Fixture {
+    fixture_with_delivery_and_event_behavior_and_artifacts(
+        delivery,
+        Some(candidate),
+        false,
+        false,
+        false,
+        None,
+        EventCursorBehavior::Stable,
+        Some(artifacts),
+    )
+}
+
 fn fixture_projection_cursor(
     scope: &RepositoryScope,
     stream: ProjectionEventStream,
@@ -523,6 +643,29 @@ fn fixture_with_delivery_and_event_behavior(
     race: bool,
     expire_after_reads: Option<usize>,
     event_cursor_behavior: EventCursorBehavior,
+) -> Fixture {
+    fixture_with_delivery_and_event_behavior_and_artifacts(
+        delivery,
+        candidate,
+        runtime_unavailable,
+        publication_unavailable,
+        race,
+        expire_after_reads,
+        event_cursor_behavior,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn fixture_with_delivery_and_event_behavior_and_artifacts(
+    delivery: Delivery,
+    candidate: Option<FrozenDeliveryCandidate>,
+    runtime_unavailable: bool,
+    publication_unavailable: bool,
+    race: bool,
+    expire_after_reads: Option<usize>,
+    event_cursor_behavior: EventCursorBehavior,
+    artifacts: Option<ArtifactStore>,
 ) -> Fixture {
     let scope = RepositoryScope {
         kind: RepositoryScopeKind::Repository,
@@ -582,6 +725,7 @@ fn fixture_with_delivery_and_event_behavior(
     )
     .expect("trusted publication");
     let journal = Arc::new(Mutex::new(aggregate));
+    let states = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
     let runtime_read_count = Arc::new(Mutex::new(0));
     let device_binding = Arc::new(Mutex::new(
         delivery
@@ -616,18 +760,22 @@ fn fixture_with_delivery_and_event_behavior(
                 "evt_product_session_fixture_0001",
             )
         });
-    let mut control_plane = ControlPlane::start(
-        Box::new(JournalStorage {
-            journal: Arc::clone(&journal),
-            runtime_read_count: Arc::clone(&runtime_read_count),
-            advance_event_after_runtime_read: matches!(
-                event_cursor_behavior,
-                EventCursorBehavior::AdvanceAfterRuntimeRead
-            ),
-            device_binding: Arc::clone(&device_binding),
-        }),
-        Box::new(NoopPublisher),
-    )
+    let storage = Box::new(JournalStorage {
+        journal: Arc::clone(&journal),
+        states: Arc::clone(&states),
+        runtime_read_count: Arc::clone(&runtime_read_count),
+        advance_event_after_runtime_read: matches!(
+            event_cursor_behavior,
+            EventCursorBehavior::AdvanceAfterRuntimeRead
+        ),
+        device_binding: Arc::clone(&device_binding),
+    });
+    let mut control_plane = match artifacts {
+        Some(artifacts) => {
+            ControlPlane::start_with_artifacts(storage, artifacts, Box::new(NoopPublisher))
+        }
+        None => ControlPlane::start(storage, Box::new(NoopPublisher)),
+    }
     .expect("control plane");
     control_plane
         .install_strongflow_projection_sources(StrongFlowProjectionSources::new(
@@ -656,6 +804,7 @@ fn fixture_with_delivery_and_event_behavior(
         delivery,
         scope,
         journal,
+        states,
         domain_journal: memory,
         runtime,
         device_binding,
@@ -734,7 +883,7 @@ fn approved_verified_candidate_fixture() -> (Delivery, FrozenDeliveryCandidate) 
         run.codex_thread_id = Some(CodexThreadId(format!(
             "cdx_01J000000000000000000000{suffix}"
         )));
-        run.lease_id = winwincode_domain::LeaseId(format!("lse_01J000000000000000000000{suffix}"));
+        run.lease_id = LeaseId(format!("lse_01J000000000000000000000{suffix}"));
         run.state = if role == "executor" {
             winwincode_domain::WorkRunState::CandidateReady
         } else {
@@ -871,6 +1020,1071 @@ fn detail_and_cursor(
     let cursor = detail.read_cursor.clone();
     (detail, cursor)
 }
+
+#[test]
+fn candidate_file_content_query_rejects_zero_length_before_reading_candidate_facts() {
+    let f = fixture(false, false, false);
+    let (_, cursor) = detail_and_cursor(&f);
+    let query = CandidateFileContentGetQuery {
+        actor: actor(),
+        page: PageRequest {
+            cursor: None,
+            limit: 20,
+        },
+        parameters: CandidateFileContentGetParameters {
+            at_cursor: cursor,
+            candidate_ref: "candidate:fixture".into(),
+            candidate_tree_id: "3".repeat(40),
+            delivery_id: f.delivery.id().clone(),
+            diff_sha256: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+            length: 0,
+            offset: 0,
+            path: "src/app.txt".into(),
+            read_page_limit: 20,
+        },
+        query: CandidateFileContentGetQueryQuery::CandidateFileContentGet,
+        request_id: RequestId("req_candidate_file_content".into()),
+        schema_version: SchemaVersion::WinwincodeV1,
+        scope: f.scope,
+    };
+
+    let error = StrongFlowProjectionQueryPort::candidate_file_content_get(&f.control_plane, &query)
+        .expect_err("zero-length reads must fail before candidate source access");
+    assert_eq!(
+        error.code(),
+        winwincode_api::generated::ErrorCode::InvalidRequest
+    );
+}
+
+fn positive_query_repository(root: &Path) -> (String, String) {
+    fs::create_dir_all(root.join("src")).expect("repository root");
+    let init = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["init", "-q", "-b", "main"])
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .status()
+        .expect("git init");
+    assert!(init.success());
+    fs::write(root.join("src/app.txt"), b"base\n").expect("base source");
+    positive_query_git(root, &["add", "--", "src/app.txt"]);
+    positive_query_commit(root, "base", "2026-08-25T00:00:00Z");
+    let base = positive_query_text(positive_query_git(root, &["rev-parse", "HEAD"]));
+    fs::write(root.join("src/app.txt"), b"base\ncandidate\n").expect("candidate source");
+    positive_query_git(root, &["add", "--", "src/app.txt"]);
+    positive_query_commit(root, "candidate", "2026-08-25T00:01:00Z");
+    let candidate = positive_query_text(positive_query_git(root, &["rev-parse", "HEAD"]));
+    (base, candidate)
+}
+
+fn positive_query_git(root: &Path, args: &[&str]) -> Vec<u8> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .expect("git command");
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output.stdout
+}
+
+fn positive_query_text(bytes: Vec<u8>) -> String {
+    String::from_utf8(bytes)
+        .expect("git output")
+        .trim()
+        .to_owned()
+}
+
+fn positive_query_commit(root: &Path, message: &str, timestamp: &str) {
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["commit", "-q", "-m", message])
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_AUTHOR_NAME", "WinWinCode Fixture")
+        .env("GIT_AUTHOR_EMAIL", "fixture@winwincode.invalid")
+        .env("GIT_COMMITTER_NAME", "WinWinCode Fixture")
+        .env("GIT_COMMITTER_EMAIL", "fixture@winwincode.invalid")
+        .env("GIT_AUTHOR_DATE", timestamp)
+        .env("GIT_COMMITTER_DATE", timestamp)
+        .status()
+        .expect("git commit");
+    assert!(status.success());
+}
+
+#[allow(clippy::too_many_lines)]
+fn positive_candidate_fixture() -> (Fixture, PathBuf, FrozenDeliveryCandidate, String, String) {
+    let root = std::env::temp_dir().join(format!(
+        "winwincode-control-plane-candidate-query-{}-{}",
+        std::process::id(),
+        NEXT_POSITIVE_FIXTURE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let repositories = root.join("repositories");
+    let repository = repositories.join("project-one");
+    let (base_commit, candidate_commit) = positive_query_repository(&repository);
+    let delivery_id = DeliveryId("dlv_01J00000000000000000000000".into());
+    let fixture = verdict_fixture(&delivery_id, VerdictFixtureOutcome::Pass);
+    let mut snapshot = fixture.delivery.into_snapshot();
+    snapshot.spec.repository = RepositoryRef {
+        schema_version: DELIVERY_SCHEMA_VERSION,
+        kind: RepositoryKind::LocalGit,
+        locator: "project-one".into(),
+    };
+    snapshot.spec.base_revision.clone_from(&base_commit);
+    let binding = snapshot
+        .session_bindings
+        .iter_mut()
+        .find(|binding| binding.execution_profile.as_deref() == Some("executor"))
+        .expect("executor binding");
+    let producer_id = binding.work_run_id.clone();
+    let job_id = ExecutionJobId("job_01J00000000000000000000001".into());
+    let session_id = WorkerSessionId("wsn_01J00000000000000000000001".into());
+    let thread_id = CodexThreadId("cdx_01J00000000000000000000001".into());
+    let lease_id = LeaseId("lse_01J00000000000000000000001".into());
+    let fencing_token = FencingToken("42".into());
+    let worker_id = WorkerId("wrk_01J00000000000000000000001".into());
+    let worker_instance_id = WorkerInstanceId("wki_01J00000000000000000000001".into());
+    let product_session_id = ProductSessionId("psn_01J00000000000000000000001".into());
+    binding.product_session_id = product_session_id.clone();
+    binding.execution_job_id = job_id.clone();
+    binding.worker_session_id = Some(session_id.clone());
+    binding.codex_thread_id = Some(thread_id.clone());
+    binding.lease_id = Some(lease_id.clone());
+    binding.fencing_token = Some(fencing_token.clone());
+    binding.worker_id = Some(worker_id.clone());
+    binding.worker_instance_id = Some(worker_instance_id.clone());
+    let context = binding
+        .runtime_context
+        .as_mut()
+        .expect("executor runtime context");
+    context.agent_identity.worker_id = worker_id.clone();
+    let producer = snapshot
+        .work_run_aggregate
+        .runs
+        .iter_mut()
+        .find(|run| run.id == producer_id)
+        .expect("executor WorkRun");
+    producer.product_session_id = Some(product_session_id);
+    producer.execution_job_id = job_id.clone();
+    producer.worker_session_id = session_id.clone();
+    producer.codex_thread_id = Some(thread_id.clone());
+    producer.lease_id = lease_id.clone();
+    producer.fencing_token.clone_from(&fencing_token.0);
+    producer.worker_id = worker_id.clone();
+    producer.worker_instance_id = worker_instance_id.clone();
+    let delivery = Delivery::try_from_snapshot(snapshot).expect("candidate Delivery");
+
+    let artifact_id = ArtifactId("art_01J00000000000000000000001".into());
+    let manifest = GitCandidateArtifactManifest::new(
+        candidate_commit.clone(),
+        candidate_bundle(&repository, &base_commit, &candidate_commit),
+    )
+    .expect("candidate manifest")
+    .encode()
+    .expect("manifest encoding");
+    let digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(&manifest)));
+    let mut encoded_scope = Vec::new();
+    for value in [
+        "winwincode.command-receipt.scope.v1",
+        "repository",
+        "org_00000000000000000000000001",
+        "wsp_00000000000000000000000001",
+        "prj_00000000000000000000000001",
+        "rep_00000000000000000000000001",
+    ] {
+        encoded_scope.extend_from_slice(&(value.len() as u64).to_be_bytes());
+        encoded_scope.extend_from_slice(value.as_bytes());
+    }
+    let scope = ReceiptScopeKey::from_encoded(encoded_scope).expect("scope");
+    let provenance = ArtifactProvenance::execution_job(
+        job_id.clone(),
+        1,
+        lease_id.clone(),
+        fencing_token.clone(),
+        worker_id.clone(),
+        worker_instance_id.clone(),
+        session_id.clone(),
+    )
+    .expect("Artifact provenance");
+    let mut artifacts = ArtifactStore::open(
+        root.join("catalog"),
+        Box::new(FakeArtifactObjectStore::new()),
+    )
+    .expect("Artifact store");
+    let attribution = ArtifactMeteringAttribution {
+        organization_id: OrganizationId("org_00000000000000000000000001".into()),
+        workspace_id: WorkspaceId("wsp_00000000000000000000000001".into()),
+        project_id: ProjectId("prj_00000000000000000000000001".into()),
+        repository_id: RepositoryId("rep_00000000000000000000000001".into()),
+        delivery_id: Some(delivery_id.clone()),
+        product_session_id: Some(ProductSessionId("psn_00000000000000000000000001".into())),
+        user_id: UserId("usr_00000000000000000000000001".into()),
+    };
+    artifacts
+        .open_artifact(ArtifactOpen::new(
+            scope.clone(),
+            ExecutionMessageId("xmsg_01J00000000000000000000001".into()),
+            RequestId("req_01J00000000000000000000001".into()),
+            artifact_id.clone(),
+            "candidate",
+            "application/vnd.winwincode.git-candidate+json",
+            digest.clone(),
+            manifest.len() as u64,
+            Some("candidate.json".into()),
+            provenance.clone(),
+            attribution,
+            ArtifactRetention::Indefinite,
+            1_800_000_000_000,
+        ))
+        .expect("Artifact open");
+    artifacts
+        .append_chunk(&ArtifactChunk::new(
+            scope.clone(),
+            ExecutionMessageId("xmsg_01J00000000000000000000002".into()),
+            artifact_id.clone(),
+            provenance.clone(),
+            1_800_000_000_020,
+            1,
+            "application/octet-stream",
+            digest.clone(),
+            manifest,
+            true,
+        ))
+        .expect("Artifact complete");
+    let object = artifacts
+        .read_exact(&ArtifactAccess::new(
+            scope,
+            artifact_id.clone(),
+            digest.clone(),
+            provenance.clone(),
+        ))
+        .expect("Artifact read");
+    let resolver = LocalGitSourceResolver::open(&repositories).expect("source resolver");
+    let source = resolver
+        .resolve_candidate(&object, "project-one", &base_commit)
+        .expect("candidate source");
+    let authority = session_binding_authority(
+        active_lease_identity(
+            job_id.clone(),
+            1,
+            lease_id.clone(),
+            fencing_token.clone(),
+            worker_id.clone(),
+            worker_instance_id.clone(),
+            session_id.clone(),
+        ),
+        Instant("2026-08-25T00:00:00.000Z".into()),
+        Instant("2026-08-25T01:00:00.000Z".into()),
+    );
+    let terminal = delivery_terminal_outcome_facts(
+        authority,
+        terminal_worker_outcome(
+            producer_id,
+            job_id,
+            1,
+            lease_id,
+            fencing_token,
+            worker_id,
+            worker_instance_id,
+            session_id,
+            TerminalOutcomeStatus::Succeeded,
+            terminal_outcome_metadata(
+                Some(thread_id),
+                1_800_000_000_020,
+                ExecutionAckSequence(4),
+                vec![TerminalArtifactReference {
+                    artifact_id,
+                    digest,
+                }],
+            ),
+        ),
+    );
+    let candidate = freeze_delivery_candidate_from_source(
+        &delivery,
+        &winwincode_storage::delivery_candidate_source(&source),
+        &terminal,
+    )
+    .expect("freeze candidate");
+    let mut f =
+        fixture_with_delivery_and_candidate_artifacts(delivery, candidate.clone(), artifacts);
+    f.control_plane
+        .install_git_source_resolver(Box::new(resolver))
+        .expect("install source resolver");
+    let delivery_state = StoredState {
+        stream_id: format!("delivery:{}", f.delivery.id().0),
+        revision: f.delivery.revision(),
+        payload: f.delivery.encode_json().expect("delivery JSON"),
+    };
+    f.states
+        .lock()
+        .expect("fixture states")
+        .insert(delivery_state.stream_id.clone(), delivery_state);
+    let active = terminal.authority().active_lease();
+    let authority = PositiveTerminalAuthority {
+        schema_version: 1,
+        delivery_id: f.delivery.id().clone(),
+        work_run_id: terminal.work_run_id().clone(),
+        job_id: active.execution_job_id().clone(),
+        attempt: active.attempt(),
+        lease_id: active.lease_id().clone(),
+        fencing_token: active.fencing_token().clone(),
+        worker_id: active.worker_id().clone(),
+        worker_instance_id: active.worker_instance_id().clone(),
+        worker_session_id: active.worker_session_id().clone(),
+        issued_at: terminal.authority().issued_at().clone(),
+        expires_at: terminal.authority().expires_at().clone(),
+        artifacts: terminal.metadata().artifacts().to_vec(),
+        codex_thread_id: terminal.metadata().codex_thread_id().cloned(),
+        finished_at_millis: terminal.metadata().finished_at_millis(),
+        last_event_sequence: terminal.metadata().last_event_sequence().clone(),
+        status: "succeeded",
+        disposition: PositiveTerminalDisposition::Settled {
+            delivery_revision: f.delivery.revision(),
+        },
+    };
+    let binding = active.execution_job_id();
+    f.states.lock().expect("fixture states").insert(
+        format!("delivery-terminal-authority:{}", binding.0),
+        StoredState {
+            stream_id: format!("delivery-terminal-authority:{}", binding.0),
+            revision: 1,
+            payload: serde_json::to_vec(&authority).expect("terminal authority JSON"),
+        },
+    );
+    (f, root, candidate, base_commit, candidate_commit)
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn candidate_file_content_query_reads_retained_candidate_and_rejects_forged_bindings() {
+    let (f, root, candidate, _base_commit, _candidate_commit) = positive_candidate_fixture();
+    let (_, cursor) = detail_and_cursor(&f);
+    let query = CandidateFileContentGetQuery {
+        actor: actor(),
+        page: PageRequest {
+            cursor: None,
+            limit: 20,
+        },
+        parameters: CandidateFileContentGetParameters {
+            at_cursor: cursor,
+            candidate_ref: candidate.candidate_ref().into(),
+            candidate_tree_id: candidate.candidate_tree_id().into(),
+            delivery_id: f.delivery.id().clone(),
+            diff_sha256: Sha256Digest(format!("sha256:{}", candidate.diff_sha256())),
+            length: 5,
+            offset: 0,
+            path: "src/app.txt".into(),
+            read_page_limit: 20,
+        },
+        query: CandidateFileContentGetQueryQuery::CandidateFileContentGet,
+        request_id: RequestId("req_candidate_file_content_positive".into()),
+        schema_version: SchemaVersion::WinwincodeV1,
+        scope: f.scope.clone(),
+    };
+    let response =
+        StrongFlowProjectionQueryPort::candidate_file_content_get(&f.control_plane, &query)
+            .expect("candidate content");
+    let QueryResultResponse::CandidateFileContentGetResultResponse(response) = response else {
+        panic!("candidate content response");
+    };
+    assert_eq!(
+        response.result.candidate.candidate_ref,
+        candidate.candidate_ref()
+    );
+    assert_eq!(response.result.offset, 0);
+    assert_eq!(response.result.returned_bytes, 5);
+    assert_eq!(response.result.total_bytes, 15);
+    assert_eq!(response.result.next_offset, Some(5));
+    assert_eq!(response.result.read_cursor, query.parameters.at_cursor);
+    assert_eq!(response.result.data_base64, STANDARD.encode(b"base\n"));
+    assert_eq!(response.result.media_type, "text/plain");
+
+    let mut tail = query.clone();
+    tail.parameters.offset = 5;
+    tail.parameters.length = 20;
+    let QueryResultResponse::CandidateFileContentGetResultResponse(response) =
+        StrongFlowProjectionQueryPort::candidate_file_content_get(&f.control_plane, &tail)
+            .expect("candidate tail")
+    else {
+        panic!("candidate tail response");
+    };
+    assert_eq!(response.result.next_offset, None);
+    assert_eq!(response.result.data_base64, STANDARD.encode(b"candidate\n"));
+
+    #[allow(clippy::type_complexity)]
+    let forged_cases: [(&str, fn(&mut CandidateFileContentGetQuery)); 5] = [
+        ("path", |query: &mut CandidateFileContentGetQuery| {
+            query.parameters.path = "src/missing.txt".into();
+        }),
+        ("candidate", |query: &mut CandidateFileContentGetQuery| {
+            query.parameters.candidate_ref = "candidate:forged".into();
+        }),
+        ("tree", |query: &mut CandidateFileContentGetQuery| {
+            query.parameters.candidate_tree_id = "4".repeat(40);
+        }),
+        ("diff", |query: &mut CandidateFileContentGetQuery| {
+            query.parameters.diff_sha256 = Sha256Digest(format!("sha256:{}", "f".repeat(64)));
+        }),
+        ("cursor", |query: &mut CandidateFileContentGetQuery| {
+            query.parameters.at_cursor.token = "forged".into();
+        }),
+    ];
+    for (label, mutate) in forged_cases {
+        let mut forged = query.clone();
+        mutate(&mut forged);
+        assert!(
+            StrongFlowProjectionQueryPort::candidate_file_content_get(&f.control_plane, &forged)
+                .is_err(),
+            "forged {label} binding must fail"
+        );
+    }
+    f.control_plane.shutdown().expect("control plane shutdown");
+    fs::remove_dir_all(root).expect("fixture release");
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn page_annotation_submit_publishes_attention_and_evidence_for_detail_read() {
+    let (delivery, candidate) = approved_verified_candidate_fixture();
+    let mut delivery_snapshot = delivery.into_snapshot();
+    let producer_work_run_id = candidate.producer_work_run_id().clone();
+    delivery_snapshot.status = DeliveryStatus::NeedsAttention;
+    let attention = delivery_snapshot
+        .attention_items
+        .first_mut()
+        .expect("candidate attention");
+    attention.id = AttentionItemId("att_01J00000000000000000000090".into());
+    attention.work_run_id = Some(producer_work_run_id);
+    attention.item_type = AttentionItemType::VerificationBlocked;
+    attention.blocking = true;
+    attention.status = AttentionItemStatus::Open;
+    attention.resolution = None;
+    attention.resolved_by = None;
+    attention.resolved_at_millis = None;
+    let verdict = delivery_snapshot
+        .verdict
+        .as_mut()
+        .expect("candidate verdict");
+    verdict.status = CriterionVerdict::Fail;
+    verdict
+        .criteria
+        .iter_mut()
+        .find(|result| result.criterion_id.0.ends_with('0'))
+        .expect("required criterion")
+        .verdict = CriterionVerdict::Fail;
+    let delivery =
+        Delivery::try_from_snapshot(delivery_snapshot).expect("failed candidate verdict");
+    let mut snapshot = delivery.into_snapshot();
+    let run = snapshot
+        .work_run_aggregate
+        .runs
+        .iter()
+        .find(|run| matches!(run.state, winwincode_domain::WorkRunState::CandidateReady))
+        .expect("candidate-ready WorkRun")
+        .clone();
+    let binding = snapshot
+        .session_bindings
+        .iter()
+        .find(|binding| binding.work_run_id == run.id)
+        .expect("candidate SessionBinding")
+        .clone();
+    let candidate_ref = candidate.candidate_ref().to_owned();
+    let candidate_digest = {
+        let digest = candidate_ref
+            .strip_prefix("git-candidate:")
+            .expect("candidate digest");
+        Sha256Digest(if digest.starts_with("sha256:") {
+            digest.to_owned()
+        } else {
+            format!("sha256:{digest}")
+        })
+    };
+    snapshot
+        .work_run_aggregate
+        .runs
+        .iter_mut()
+        .find(|candidate_run| candidate_run.id == run.id)
+        .expect("candidate-ready WorkRun")
+        .candidate_digest = Some(winwincode_domain::CandidateDigest(
+        candidate_digest.0.clone(),
+    ));
+    let diff_sha256 = Sha256Digest(if candidate.diff_sha256().starts_with("sha256:") {
+        candidate.diff_sha256().to_owned()
+    } else {
+        format!("sha256:{}", candidate.diff_sha256())
+    });
+    let delivery_id = snapshot.spec.delivery_id.clone();
+    let spec_id = snapshot.spec.id.clone();
+    let candidate_identity = CollaborationCandidateIdentity {
+        candidate_ref: candidate_ref.clone(),
+        candidate_digest: candidate_digest.clone(),
+        candidate_revision: snapshot.revision,
+    };
+    let mut candidate_evidence = snapshot.evidence[0].clone();
+    candidate_evidence.delivery_id = delivery_id.clone();
+    candidate_evidence.delivery_spec_id = spec_id.clone();
+    candidate_evidence.delivery_spec_revision = snapshot.spec.revision;
+    candidate_evidence.work_run_id = run.id.clone();
+    candidate_evidence.session_binding_id = binding.id.clone();
+    candidate_evidence.candidate_ref = candidate_ref.clone();
+    candidate_evidence.evidence_type = EvidenceRefType::Commit;
+    candidate_evidence.source_ref = format!("git_commit:{}", candidate.candidate_commit_id());
+    snapshot.evidence[0] = candidate_evidence;
+    snapshot.evidence.push(EvidenceRef {
+        schema_version: DELIVERY_SCHEMA_VERSION,
+        id: EvidenceId("evd_01J00000000000000000000011".into()),
+        delivery_id: delivery_id.clone(),
+        delivery_spec_id: spec_id.clone(),
+        delivery_spec_revision: snapshot.spec.revision,
+        work_run_id: run.id.clone(),
+        session_binding_id: binding.id.clone(),
+        candidate_ref: candidate_ref.clone(),
+        evidence_type: EvidenceRefType::Diff,
+        source_ref: format!("git_diff:{}", diff_sha256.0),
+        created_at_millis: 1_800_000_000_074,
+    });
+    snapshot.evidence.push(EvidenceRef {
+        schema_version: DELIVERY_SCHEMA_VERSION,
+        id: EvidenceId("evd_01J00000000000000000000012".into()),
+        delivery_id: delivery_id.clone(),
+        delivery_spec_id: spec_id.clone(),
+        delivery_spec_revision: snapshot.spec.revision,
+        work_run_id: run.id.clone(),
+        session_binding_id: binding.id.clone(),
+        candidate_ref: candidate_ref.clone(),
+        evidence_type: EvidenceRefType::File,
+        source_ref: format!("git_file:{}:", candidate.candidate_tree_id()),
+        created_at_millis: 1_800_000_000_075,
+    });
+    let delivery = Delivery::try_from_snapshot(snapshot).expect("candidate evidence facts");
+
+    let scope = RepositoryScope {
+        kind: RepositoryScopeKind::Repository,
+        organization_id: OrganizationId("org_00000000000000000000000001".into()),
+        workspace_id: WorkspaceId("wsp_00000000000000000000000001".into()),
+        project_id: ProjectId("prj_00000000000000000000000001".into()),
+        repository_id: RepositoryId("rep_00000000000000000000000001".into()),
+    };
+    let viewer = UserId("usr_01J00000000000000000000000".into());
+    let item_id = CollaborationInboxItemId::DeliveryAttention(AttentionItemId(
+        "att_01J00000000000000000000090".into(),
+    ));
+    let source_item = CollaborationInboxSourceItem {
+        id: item_id.clone(),
+        kind: CollaborationInboxItemKind::DeliveryAttention,
+        target: ResponsibilityTarget::Delivery {
+            delivery_id: delivery_id.clone(),
+        },
+        responsibility_role: ResponsibilityRole::Assignee,
+        source_revision: delivery.revision(),
+        source_sha256: Sha256Digest(format!("sha256:{}", "1".repeat(64))),
+        title_sha256: Sha256Digest(format!("sha256:{}", "2".repeat(64))),
+        opened_at_millis: 1_800_000_000_080,
+        expires_at_millis: None,
+        state: CollaborationInboxItemState::Pending,
+        candidate: Some(candidate_identity.clone()),
+        command_route: FormalCollaborationCommandRoute::DeliveryResolveAttention {
+            attention_item_id: AttentionItemId("att_01J00000000000000000000090".into()),
+            delivery_id: delivery_id.clone(),
+        },
+    };
+    let source = CollaborationInboxSourceSnapshot {
+        scope: scope.clone(),
+        revision: 1,
+        snapshot_sha256: Sha256Digest(format!("sha256:{}", "0".repeat(64))),
+        item_state_guards: std::collections::BTreeMap::new(),
+        items: vec![source_item],
+    };
+    let mut source = source;
+    source.snapshot_sha256 = Sha256Digest(format!(
+        "sha256:{:x}",
+        Sha256::digest(serde_json::to_vec(&source.items).expect("source JSON"))
+    ));
+    source.item_state_guards.insert(
+        source.items[0].id.clone(),
+        vec![StateRevisionGuard::new("e2e-page-source", 0).expect("source guard")],
+    );
+    let assignment = ResponsibilityAssignment {
+        id: ResponsibilityAssignmentId("assignment-page-annotation".into()),
+        scope: scope.clone(),
+        target: ResponsibilityTarget::Delivery {
+            delivery_id: delivery_id.clone(),
+        },
+        role: ResponsibilityRole::Assignee,
+        principal_user_id: viewer.clone(),
+        state: ResponsibilityAssignmentState::Active,
+        revision: 1,
+        assigned_by: actor(),
+        assigned_at_millis: 1_800_000_000_081,
+        accepted_at_millis: Some(1_800_000_000_081),
+        expires_at_millis: None,
+        ended_at_millis: None,
+        target_revision: delivery.revision(),
+        target_sha256: Sha256Digest(format!("sha256:{}", "4".repeat(64))),
+        rbac_revision: 1,
+        rbac_sha256: Sha256Digest(format!("sha256:{}", "5".repeat(64))),
+    };
+    let authority = CollaborationInboxAuthoritySnapshot {
+        scope: scope.clone(),
+        viewer_user_id: viewer.clone(),
+        assignments: vec![CollaborationResponsibilityEntitlement { assignment }],
+        authority_revision: 1,
+        authority_sha256: Sha256Digest(format!("sha256:{}", "6".repeat(64))),
+        state_guards: vec![
+            StateRevisionGuard::new("e2e-page-authority", 0).expect("authority guard"),
+        ],
+    };
+
+    let root = std::env::temp_dir().join(format!(
+        "winwincode-page-annotation-e2e-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("e2e root");
+    let screenshot_bytes = STANDARD
+        .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+        .expect("valid PNG fixture");
+    let screenshot_id = ArtifactId("art_01J00000000000000000000021".into());
+    let screenshot_digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(&screenshot_bytes)));
+    let provenance = ArtifactProvenance::execution_job(
+        run.execution_job_id.clone(),
+        u64::try_from(run.attempt).expect("attempt"),
+        run.lease_id.clone(),
+        FencingToken(run.fencing_token.clone()),
+        run.worker_id.clone(),
+        run.worker_instance_id.clone(),
+        run.worker_session_id.clone(),
+    )
+    .expect("screenshot provenance");
+    let screenshot_scope = product_scope_key(&scope);
+    let screenshot_attribution = ArtifactMeteringAttribution {
+        organization_id: scope.organization_id.clone(),
+        workspace_id: scope.workspace_id.clone(),
+        project_id: scope.project_id.clone(),
+        repository_id: scope.repository_id.clone(),
+        delivery_id: Some(delivery_id.clone()),
+        product_session_id: Some(binding.product_session_id.clone()),
+        user_id: viewer.clone(),
+    };
+    let mut screenshot_store = ArtifactStore::open(
+        root.join("artifacts"),
+        Box::new(LocalArtifactObjectStore::open(root.join("objects")).expect("object store")),
+    )
+    .expect("screenshot artifact store");
+    screenshot_store
+        .open_artifact(ArtifactOpen::new(
+            screenshot_scope.clone(),
+            ExecutionMessageId("xmsg_01J00000000000000000000021".into()),
+            RequestId("req_01J00000000000000000000021".into()),
+            screenshot_id.clone(),
+            "screenshot",
+            "image/png",
+            screenshot_digest.clone(),
+            screenshot_bytes.len() as u64,
+            Some("screen.png".into()),
+            provenance.clone(),
+            screenshot_attribution,
+            ArtifactRetention::Indefinite,
+            1_800_000_000_100,
+        ))
+        .expect("open screenshot artifact");
+    screenshot_store
+        .append_chunk(&ArtifactChunk::new(
+            screenshot_scope,
+            ExecutionMessageId("xmsg_01J00000000000000000000022".into()),
+            screenshot_id.clone(),
+            provenance.clone(),
+            1_800_000_000_101,
+            1,
+            "image/png",
+            screenshot_digest.clone(),
+            screenshot_bytes,
+            true,
+        ))
+        .expect("complete screenshot artifact");
+    let terminal_authority = PositiveTerminalAuthority {
+        schema_version: 1,
+        delivery_id: delivery_id.clone(),
+        work_run_id: run.id.clone(),
+        job_id: run.execution_job_id.clone(),
+        attempt: u64::try_from(run.attempt).expect("attempt"),
+        lease_id: run.lease_id.clone(),
+        fencing_token: FencingToken(run.fencing_token.clone()),
+        worker_id: run.worker_id.clone(),
+        worker_instance_id: run.worker_instance_id.clone(),
+        worker_session_id: run.worker_session_id.clone(),
+        issued_at: Instant("2026-08-25T00:00:00.000Z".into()),
+        expires_at: Instant("2026-08-25T01:00:00.000Z".into()),
+        artifacts: vec![TerminalArtifactReference {
+            artifact_id: screenshot_id.clone(),
+            digest: screenshot_digest.clone(),
+        }],
+        codex_thread_id: binding.codex_thread_id.clone(),
+        finished_at_millis: delivery.snapshot().updated_at_millis,
+        last_event_sequence: ExecutionAckSequence(4),
+        status: "succeeded",
+        disposition: PositiveTerminalDisposition::Settled {
+            delivery_revision: delivery.revision(),
+        },
+    };
+    let memory = InMemoryDeliveryJournal::new();
+    DeliveryStore::borrowed(&memory)
+        .execute(DeliveryCommand::SeedForTest(CreateDelivery {
+            request_id: RequestId("seed-page-annotation".into()),
+            request_digest: "1".repeat(64),
+            snapshot: delivery.clone(),
+        }))
+        .expect("seed Delivery journal");
+    let loaded = memory
+        .load(delivery.id())
+        .expect("load Delivery journal")
+        .expect("seeded Delivery journal");
+    let first = loaded.records.first().expect("first journal record");
+    let mut storage = SqliteStorage::open(&root).expect("e2e storage");
+    let seed_identity = ReceiptIdentity::new(
+        winwincode_storage::receipt_actor_key(&winwincode_storage::PublicEventActor::System {
+            id: winwincode_domain::SystemActorId("sys_01J00000000000000000000000".into()),
+        })
+        .expect("seed actor key"),
+        product_scope_key(&scope),
+        RequestId("seed-journal-page-annotation".into()),
+    )
+    .expect("seed receipt identity");
+    storage
+        .commit(
+            &StateCommit::new(
+                seed_identity,
+                Sha256Digest(format!("sha256:{}", "7".repeat(64))),
+                "e2e-seed-page-annotation",
+                0,
+                b"{}".to_vec(),
+                vec![NewOutboxEvent::internal(
+                    "evt_seed_page_annotation",
+                    "test.page-annotation.seed",
+                    b"{}".to_vec(),
+                )],
+            )
+            .with_state_mutation(
+                StateMutation::new(
+                    format!("delivery-terminal-authority:{}", run.execution_job_id.0),
+                    0,
+                    serde_json::to_vec(&terminal_authority).expect("terminal authority JSON"),
+                )
+                .expect("terminal authority mutation"),
+            )
+            .with_journal_publication(AggregateJournalPublication::Create {
+                key: AggregateJournalKey::new("delivery", delivery.id().0.clone())
+                    .expect("journal key"),
+                manifest: loaded.manifest,
+                first_record: AggregateJournalRecord::new(
+                    first.sequence,
+                    first.digest.clone(),
+                    first.bytes.clone(),
+                ),
+            }),
+        )
+        .expect("persist Delivery journal");
+
+    let annotation_id = PageAnnotationId("page_annotation_e2e_01".into());
+    let annotation_target = PageAnnotationTarget {
+        page_path: "/settings/profile".into(),
+        viewport: PageAnnotationViewport {
+            width: 1280,
+            height: 720,
+            device_pixel_ratio: 2.0,
+        },
+        element: None,
+        region: PageAnnotationRegion {
+            x: 40,
+            y: 80,
+            width: 320,
+            height: 96,
+        },
+    };
+    let mut inbox = CollaborationInboxService::with_clock_and_artifact_store(
+        Box::new(storage),
+        Box::new(E2eInboxSource(source.clone())),
+        Box::new(E2eInboxAuthority(authority)),
+        Box::new(E2eInboxClock),
+        screenshot_store,
+    );
+    let receipt = inbox
+        .apply_page_annotation(&PageAnnotationCommand {
+            context: CollaborationInboxCommandContext {
+                actor: Actor::UserActor(UserActor {
+                    id: viewer.clone(),
+                    kind: UserActorKind::User,
+                }),
+                authenticated_scopes: vec![winwincode_api::generated::Scope::RepositoryScope(
+                    scope.clone(),
+                )],
+                scope: scope.clone(),
+                audience: CollaborationInboxAudience::Personal(viewer.clone()),
+                request_id: RequestId("req_01J00000000000000000000023".into()),
+                expected_revision: 0,
+            },
+            item_id,
+            annotation_id: annotation_id.clone(),
+            action: PageAnnotationAction::Upsert {
+                candidate: PageAnnotationCandidateIdentity {
+                    delivery_id: delivery_id.clone(),
+                    delivery_spec_id: spec_id.0.clone(),
+                    delivery_spec_revision: snapshot_revision(&delivery),
+                    candidate_ref: candidate_ref.clone(),
+                    candidate_digest,
+                    candidate_tree_id: candidate.candidate_tree_id().into(),
+                    diff_sha256,
+                    work_run_id: run.id.clone(),
+                    attempt: u64::try_from(run.attempt).expect("attempt"),
+                    session_binding_id: binding.id.0.clone(),
+                },
+                target: annotation_target.clone(),
+                body: "头像按钮在窄屏下被遮挡".into(),
+                screenshot_artifact: Some(winwincode_control_plane::PageAnnotationArtifactRef {
+                    artifact_id: screenshot_id.0.clone(),
+                    digest: screenshot_digest.clone(),
+                }),
+            },
+        })
+        .expect("page annotation submit");
+    let annotation = match receipt {
+        winwincode_control_plane::CollaborationInboxReceipt::PageAnnotation {
+            annotation, ..
+        } => *annotation,
+        other => panic!("unexpected receipt: {other:?}"),
+    };
+    assert_eq!(annotation.id, annotation_id);
+    drop(inbox);
+
+    let stored = SqliteStorage::open(&root).expect("reopen Delivery journal");
+    let journal = stored
+        .load_journal(
+            &AggregateJournalKey::new("delivery", delivery_id.0.clone())
+                .expect("Delivery journal key"),
+        )
+        .expect("load Delivery journal")
+        .expect("persisted Delivery journal");
+    let published = DeliveryJournalCodec::decode_record(
+        &journal
+            .records
+            .last()
+            .expect("Delivery journal tail")
+            .payload,
+    )
+    .expect("published page-annotation Delivery record")
+    .snapshot;
+    assert_eq!(published.revision(), delivery.revision() + 1);
+
+    let rework_journal = InMemoryDeliveryJournal::new();
+    DeliveryStore::borrowed(&rework_journal)
+        .execute(DeliveryCommand::SeedForTest(CreateDelivery {
+            request_id: RequestId("seed-page-annotation-rework".into()),
+            request_digest: "c".repeat(64),
+            snapshot: delivery.clone(),
+        }))
+        .expect("seed rework Delivery journal");
+    DeliveryStore::borrowed(&rework_journal)
+        .execute(DeliveryCommand::Append(AppendDelivery {
+            delivery_id: published.id().clone(),
+            request_id: RequestId("req-page-annotation-rework".into()),
+            request_digest: "d".repeat(64),
+            operation: DeliveryMutationOperation::PageAnnotationRecorded,
+            expected_revision: delivery.revision(),
+            snapshot: published.clone(),
+        }))
+        .expect("append page annotation to rework journal");
+    let rework_history = DeliveryStore::borrowed(&rework_journal)
+        .validated_rework_history(&published)
+        .expect("rebuild rework history from current Delivery tail");
+    let rework_scope = CurrentReworkScope::from_candidate(&published, &candidate)
+        .expect("page annotation enters current precise rework scope");
+    let rework_annotation = rework_scope
+        .annotations()
+        .into_iter()
+        .next()
+        .expect("rework target");
+    assert!(
+        rework_annotation
+            .evidence_ref_ids
+            .contains(&annotation.evidence_id)
+    );
+    let ReworkDecision::Start(rework_authorization) = decide_precise_rework(
+        &published,
+        &candidate,
+        &rework_scope,
+        &[rework_annotation],
+        &rework_history,
+    )
+    .expect("current page annotation authorizes precise rework") else {
+        panic!("expected precise remediator authorization");
+    };
+    assert!(
+        rework_authorization.targets()[0]
+            .evidence_ref_ids()
+            .contains(&annotation.evidence_id)
+    );
+    rework_authorization
+        .validate_for_dispatch(&published)
+        .expect("page annotation remains valid at remediator dispatch");
+    drop(stored);
+
+    let runtime_projection = runtime_projection_for(&published);
+    let accepted_sequence = u64::from(published.snapshot().session_bindings.first().is_some_and(
+        |binding| binding.worker_session_id.is_some() && binding.codex_thread_id.is_some(),
+    ));
+    let runtime = Arc::new(Mutex::new(
+        TrustedRuntimeProjectionRead::try_new(
+            scope.clone(),
+            published.revision(),
+            Revision(4),
+            accepted_sequence,
+            Instant("2026-08-25T00:00:00Z".into()),
+            &runtime_projection,
+            Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+        )
+        .expect("trusted page-annotation runtime"),
+    ));
+    let delivery_event_cursor = fixture_projection_cursor(
+        &scope,
+        ProjectionEventStream::Delivery(delivery_id.clone()),
+        "evt_page_annotation_delivery_0001",
+    );
+    let publication = TrustedPublicationProjectionRead::try_new(
+        scope.clone(),
+        delivery_id.clone(),
+        published.revision(),
+        Revision(0),
+        Some(candidate.clone()),
+        None,
+        Sha256Digest(format!("sha256:{}", "b".repeat(64))),
+    )
+    .expect("trusted page-annotation publication");
+
+    let mut control_plane = ControlPlane::start_with_artifacts(
+        Box::new(SqliteStorage::open(&root).expect("reopen e2e storage")),
+        ArtifactStore::open(
+            root.join("artifacts"),
+            Box::new(LocalArtifactObjectStore::open(root.join("objects")).expect("object store")),
+        )
+        .expect("reopen screenshot artifact store"),
+        Box::new(NoopPublisher),
+    )
+    .expect("e2e Control Plane");
+    control_plane
+        .install_strongflow_projection_sources(StrongFlowProjectionSources::new(
+            Box::new(RuntimeAdapter {
+                read: runtime,
+                race: Arc::new(Mutex::new(false)),
+                read_count: Arc::new(Mutex::new(0)),
+                expire_after_reads: None,
+                unavailable: false,
+                atomic_read_cut: true,
+                delivery_event_cursor: Some(delivery_event_cursor),
+                product_session_event_cursor: None,
+            }),
+            Box::new(PublicationAdapter {
+                read: publication,
+                unavailable: false,
+            }),
+        ))
+        .expect("page-annotation projection sources");
+    let (detail, cursor) = detail_and_cursor_for(&control_plane, &scope, &delivery_id);
+    let detail_json = serde_json::to_value(&detail).expect("Delivery detail JSON");
+    assert!(detail_json.to_string().contains("页面批注"));
+    let evidence = detail
+        .evidence
+        .iter()
+        .find(|evidence| evidence.source_ref == format!("page-annotation:{}", annotation_id.0))
+        .expect("ReviewFinding Evidence in same journal");
+    let detail_query = EvidenceGetQuery {
+        actor: actor(),
+        page: PageRequest {
+            cursor: None,
+            limit: 20,
+        },
+        parameters: EvidenceReadBinding {
+            at_cursor: cursor,
+            candidate_ref: evidence.candidate_ref.clone(),
+            delivery_id: delivery_id.clone(),
+            evidence_id: evidence.id.clone(),
+            read_page_limit: 20,
+            session_binding_id: evidence.session_binding_id.clone(),
+            source_ref: evidence.source_ref.clone(),
+            type_value: "review_finding".into(),
+            work_run_id: evidence.work_run_id.clone(),
+        },
+        query: EvidenceGetQueryQuery::EvidenceGet,
+        request_id: RequestId("read-page-annotation-e2e".into()),
+        schema_version: SchemaVersion::WinwincodeV1,
+        scope: scope.clone(),
+    };
+    let response = StrongFlowProjectionQueryPort::evidence_get(&control_plane, &detail_query)
+        .expect("Evidence detail");
+    let QueryResultResponse::EvidenceGetResultResponse(response) = response else {
+        panic!("Evidence detail response")
+    };
+    let page = response
+        .result
+        .page_annotation
+        .expect("page annotation detail");
+    assert_eq!(page.body, "头像按钮在窄屏下被遮挡");
+    assert_eq!(page.target.page_path, "/settings/profile");
+    let target = serde_json::to_value(&page.target).expect("annotation target JSON");
+    assert_eq!(target["viewport"]["devicePixelRatio"], 2.0);
+    assert_eq!(target["region"]["width"], 320);
+    assert!(page.screenshot_artifact.is_some());
+    let mut foreign = detail_query;
+    foreign.parameters.source_ref = "page-annotation:foreign".into();
+    assert!(StrongFlowProjectionQueryPort::evidence_get(&control_plane, &foreign).is_err());
+    control_plane.shutdown().expect("Control Plane shutdown");
+    fs::remove_dir_all(root).expect("e2e cleanup");
+}
+
+fn snapshot_revision(delivery: &Delivery) -> u64 {
+    delivery.revision()
+}
+
+fn detail_and_cursor_for(
+    control_plane: &ControlPlane,
+    scope: &RepositoryScope,
+    delivery_id: &DeliveryId,
+) -> (
+    winwincode_api::generated::DeliveryDetailProjection,
+    StrongFlowReadCursor,
+) {
+    let query = DeliveryGetQuery {
+        actor: actor(),
+        page: PageRequest {
+            cursor: None,
+            limit: 20,
+        },
+        parameters: DeliveryGetParameters {
+            at_cursor: None,
+            delivery_id: delivery_id.clone(),
+        },
+        query: DeliveryGetQueryQuery::DeliveryGet,
+        request_id: RequestId("read-page-annotation-delivery".into()),
+        schema_version: SchemaVersion::WinwincodeV1,
+        scope: scope.clone(),
+    };
+    let QueryResultResponse::DeliveryGetResultResponse(response) =
+        StrongFlowProjectionQueryPort::delivery_get(control_plane, &query)
+            .expect("Delivery detail")
+    else {
+        panic!("Delivery detail response")
+    };
+    let cursor = response.result.read_cursor.clone();
+    (response.result, cursor)
+}
+
 fn runtime_query(
     f: &Fixture,
     cursor: StrongFlowReadCursor,
@@ -1473,7 +2687,7 @@ fn public_sqlite_product_session_read_cut_isolated_and_restartable() {
     restarted
         .shutdown()
         .expect("restarted Control Plane shutdown");
-    std::fs::remove_dir_all(root).expect("temporary product runtime directory");
+    fs::remove_dir_all(root).expect("temporary product runtime directory");
 }
 
 #[test]

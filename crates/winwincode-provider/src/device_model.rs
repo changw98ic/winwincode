@@ -192,6 +192,48 @@ impl DeviceProviderStore {
             .unwrap_or(false))
     }
 
+    /// Durably stores Provider response chunks for one exchange identity.
+    ///
+    /// Used by recovery paths and tests that must reconstruct the exact
+    /// Device-side replay ledger without re-invoking a Provider adapter.
+    ///
+    /// # Errors
+    /// Rejects conflicting exchange identities and unavailable storage.
+    pub fn retain_stored_model_exchange_chunks(
+        &self,
+        exchange_id: &str,
+        chunks: &[ModelChunkMessage],
+    ) -> Result<(), DeviceProviderError> {
+        if exchange_id.trim().is_empty() {
+            return Err(DeviceProviderError);
+        }
+        let payload = serde_json::to_string(chunks)?;
+        self.connection.execute(
+            "INSERT INTO exchanges (exchange_id, digest, chunks, cancelled)
+             VALUES (?1, 'retained', ?2, 0)
+             ON CONFLICT(exchange_id) DO UPDATE SET chunks = excluded.chunks
+             WHERE exchanges.cancelled = 0",
+            rusqlite::params![exchange_id, payload],
+        )?;
+        Ok(())
+    }
+
+    /// Lists exchange identities that currently store Provider response chunks.
+    ///
+    /// # Errors
+    /// Rejects unavailable durable storage.
+    pub fn list_stored_model_exchanges(&self) -> Result<Vec<String>, DeviceProviderError> {
+        let mut statement = self.connection.prepare(
+            "SELECT exchange_id FROM exchanges WHERE cancelled = 0 AND chunks IS NOT NULL AND chunks != '' ORDER BY exchange_id",
+        )?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        let mut exchanges = Vec::new();
+        for row in rows {
+            exchanges.push(row?);
+        }
+        Ok(exchanges)
+    }
+
     /// Reads a local replay from a requested sequence, without making a network request.
     ///
     /// # Errors

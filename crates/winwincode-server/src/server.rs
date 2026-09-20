@@ -29,6 +29,7 @@ use winwincode_api::generated::{
     ErrorDetailValue, ErrorDetails, ErrorEnvelope, RetryableError, RetryableErrorCode,
     TerminalError, TerminalErrorCode,
 };
+use winwincode_client_port::managed_app::MANAGED_APP_RUN_CONFIG_SCHEMA_VERSION;
 use winwincode_control_plane::{CredentialLeakGate, CredentialOutputBoundary};
 use winwincode_domain::{RequestId, SchemaVersion, UserAccount};
 
@@ -454,6 +455,7 @@ fn router(state: ServerState) -> Router {
             axum::routing::delete(revoke_preview_access).options(preflight),
         )
         .route("/p/{access_id}/{token}", any(preview_root))
+        .route("/p/{access_id}/{token}/", any(preview_root))
         .route("/p/{access_id}/{token}/{*path}", any(preview_path))
         .route("/api/v1/clients", get(list_clients).options(preflight))
         .route(
@@ -511,6 +513,12 @@ fn router(state: ServerState) -> Router {
             get(list_repositories).options(preflight),
         )
         .route(
+            "/api/v1/repositories/{repository_binding_id}/managed-app-template",
+            get(load_managed_app_template)
+                .post(save_managed_app_template)
+                .options(preflight),
+        )
+        .route(
             "/api/v1/clients/candidates/branch",
             post(create_client_candidate_branch).options(preflight),
         )
@@ -527,6 +535,10 @@ fn router(state: ServerState) -> Router {
             get(list_client_candidates).options(preflight),
         )
         .route("/api/v1/sessions", post(create_session).options(preflight))
+        .route(
+            "/api/v1/clients/{client_id}/managed-app",
+            post(manage_managed_app).options(preflight),
+        )
         .fallback(not_found)
         .with_state(state)
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
@@ -916,6 +928,79 @@ async fn list_repositories(
             };
             connect_error_response(status, code, message, origin.as_ref())
         }
+    }
+}
+
+async fn save_managed_app_template(
+    State(state): State<ServerState>,
+    Path(repository_binding_id): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Response {
+    let Some(application) = &state.client_repositories else {
+        return not_found().await;
+    };
+    let (principal, origin, _) = match authorize(&state, &headers, &uri) {
+        Ok(value) => value,
+        Err(error) => return error.into_response(),
+    };
+    let Some(user_id) = principal.actor_user_id() else {
+        return connect_error_response(
+            StatusCode::FORBIDDEN,
+            "PERMISSION_DENIED",
+            "a signed-in user is required",
+            origin.as_ref(),
+        );
+    };
+    let Ok(value) = serde_json::from_slice::<Value>(&body) else {
+        return connect_error_response(
+            StatusCode::BAD_REQUEST,
+            "INVALID_REQUEST",
+            "managed application template is invalid",
+            origin.as_ref(),
+        );
+    };
+    match application.save_managed_app_template(&user_id.0, &repository_binding_id, value) {
+        Ok(body) => json_response(StatusCode::OK, body, origin.as_ref()),
+        Err(_) => connect_error_response(
+            StatusCode::BAD_REQUEST,
+            "INVALID_REQUEST",
+            "managed application template is invalid or the repository is not visible",
+            origin.as_ref(),
+        ),
+    }
+}
+
+async fn load_managed_app_template(
+    State(state): State<ServerState>,
+    Path(repository_binding_id): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response {
+    let Some(application) = &state.client_repositories else {
+        return not_found().await;
+    };
+    let (principal, origin, _) = match authorize(&state, &headers, &uri) {
+        Ok(value) => value,
+        Err(error) => return error.into_response(),
+    };
+    let Some(user_id) = principal.actor_user_id() else {
+        return connect_error_response(
+            StatusCode::FORBIDDEN,
+            "PERMISSION_DENIED",
+            "a signed-in user is required",
+            origin.as_ref(),
+        );
+    };
+    match application.load_managed_app_template(&user_id.0, &repository_binding_id) {
+        Ok(body) => json_response(StatusCode::OK, body, origin.as_ref()),
+        Err(_) => connect_error_response(
+            StatusCode::BAD_REQUEST,
+            "INVALID_REQUEST",
+            "managed application template is unavailable or the repository is not visible",
+            origin.as_ref(),
+        ),
     }
 }
 
@@ -1603,6 +1688,54 @@ async fn create_session(
     }
 }
 
+/// Schedules one Device-owned managed application operation. The command is
+/// validated and fenced by the Server before it enters the durable downlink;
+/// the response is the latest status observed from the Device exchange.
+async fn manage_managed_app(
+    State(state): State<ServerState>,
+    Path(client_id): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+    request: Request<Body>,
+) -> Response {
+    let Some(application) = &state.client_sessions else {
+        return not_found().await;
+    };
+    let origin = match allowed_origin(&state, &headers) {
+        Ok(origin) => origin,
+        Err(error) => return error.into_response(),
+    };
+    if uri.query().is_some() {
+        return BoundaryError::new(
+            StatusCode::BAD_REQUEST,
+            "QUERY_PARAMETERS_FORBIDDEN",
+            "credentials and routing values are not accepted in the URL query",
+            origin,
+        )
+        .into_response();
+    }
+    let body = match parse_managed_app_body(request, origin.clone()).await {
+        Ok(body) => body,
+        Err(error) => return error.into_response(),
+    };
+    let (principal, origin, _) = match authorize(&state, &headers, &uri) {
+        Ok(authorized) => authorized,
+        Err(error) => return error.into_response(),
+    };
+    let Some(user_id) = principal.actor_user_id() else {
+        return connect_error_response(
+            StatusCode::FORBIDDEN,
+            "PERMISSION_DENIED",
+            "a signed-in user is required",
+            origin.as_ref(),
+        );
+    };
+    match application.manage_managed_app(&user_id.0, &client_id, &body) {
+        Ok(body) => json_response(StatusCode::ACCEPTED, body, origin.as_ref()),
+        Err(error) => session_flow_error(&error, origin.as_ref()),
+    }
+}
+
 /// Maps one launch flow failure onto the central launch wire error code.
 fn session_flow_error(error: &ClientSessionsError, origin: Option<&HeaderValue>) -> Response {
     let (status, code, message) = match error.kind() {
@@ -1660,6 +1793,11 @@ fn session_flow_error(error: &ClientSessionsError, origin: Option<&HeaderValue>)
             StatusCode::GATEWAY_TIMEOUT,
             "LAUNCH_ACK_TIMEOUT",
             "the device did not acknowledge the worker launch in time",
+        ),
+        ClientSessionsErrorKind::SessionNotLaunchable => (
+            StatusCode::CONFLICT,
+            "WRONG_STATE",
+            "the ProductSession or prior Device Worker cannot be started in its current durable state",
         ),
         ClientSessionsErrorKind::Unavailable => (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -2277,6 +2415,41 @@ async fn parse_json_body(
     Ok(value)
 }
 
+async fn parse_managed_app_body(
+    request: Request<Body>,
+    origin: Option<HeaderValue>,
+) -> ResponseResult<Value> {
+    let bytes = to_bytes(request.into_body(), MAX_REQUEST_BYTES)
+        .await
+        .map_err(|_| {
+            BoundaryError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "REQUEST_TOO_LARGE",
+                "request body exceeds the public limit",
+                origin.clone(),
+            )
+        })?;
+    let value: Value = serde_json::from_slice(&bytes).map_err(|_| {
+        BoundaryError::new(
+            StatusCode::BAD_REQUEST,
+            "INVALID_JSON",
+            "request body must be valid JSON",
+            origin.clone(),
+        )
+    })?;
+    if value.get("schemaVersion").and_then(Value::as_str)
+        != Some(MANAGED_APP_RUN_CONFIG_SCHEMA_VERSION)
+    {
+        return Err(BoundaryError::new(
+            StatusCode::UPGRADE_REQUIRED,
+            "CLIENT_UPGRADE_REQUIRED",
+            "managed application protocol is unsupported; upgrade the Client",
+            origin,
+        ));
+    }
+    Ok(value)
+}
+
 async fn preflight(State(state): State<ServerState>, headers: HeaderMap) -> Response {
     let origin = match allowed_origin(&state, &headers) {
         Ok(Some(origin)) => origin,
@@ -2792,6 +2965,10 @@ fn terminal_code(status: StatusCode, source_code: &str) -> TerminalErrorCode {
         "REVISION_CONFLICT" => TerminalErrorCode::RevisionConflict,
         "CANDIDATE_STALE" => TerminalErrorCode::CandidateStale,
         "WRONG_STATE" => TerminalErrorCode::WrongState,
+        // Device-only execution prerequisites are public Control Plane facts.
+        // They must not fall through to WRONG_STATE via the HTTP 409 default.
+        "DEVICE_SESSION_REQUIRED" => TerminalErrorCode::DeviceSessionRequired,
+        "DEVICE_MODEL_UNAVAILABLE" => TerminalErrorCode::DeviceModelUnavailable,
         "INTERNAL_ERROR" => TerminalErrorCode::InternalError,
         "INVALID_REQUEST" => TerminalErrorCode::InvalidRequest,
         _ => match status {
@@ -2827,6 +3004,8 @@ fn public_reason(source_code: &str) -> &'static str {
         "READ_CURSOR_EXPIRED" => "READ_CURSOR_EXPIRED",
         "CANDIDATE_STALE" => "CANDIDATE_STALE",
         "WRONG_STATE" => "WRONG_STATE",
+        "DEVICE_SESSION_REQUIRED" => "DEVICE_SESSION_REQUIRED",
+        "DEVICE_MODEL_UNAVAILABLE" => "DEVICE_MODEL_UNAVAILABLE",
         "RATE_LIMITED" => "RATE_LIMITED",
         "SERVICE_UNAVAILABLE" => "SERVICE_UNAVAILABLE",
         "TRUSTED_FACTS_UNAVAILABLE" => "TRUSTED_FACTS_UNAVAILABLE",
@@ -3040,5 +3219,61 @@ fn device_provider_request(
             };
             connect_error_response(status, code, message, origin.as_ref())
         }
+    }
+}
+
+#[cfg(test)]
+mod public_error_mapping_tests {
+    use super::{Error, TerminalErrorCode, error_envelope, public_reason, terminal_code};
+    use axum::http::StatusCode;
+    use winwincode_domain::RequestId;
+
+    #[test]
+    fn device_session_required_is_not_disguised_as_wrong_state() {
+        let status = StatusCode::CONFLICT;
+        assert_eq!(
+            terminal_code(status, "DEVICE_SESSION_REQUIRED"),
+            TerminalErrorCode::DeviceSessionRequired
+        );
+        assert_eq!(public_reason("DEVICE_SESSION_REQUIRED"), "DEVICE_SESSION_REQUIRED");
+        let envelope = error_envelope(
+            status,
+            "DEVICE_SESSION_REQUIRED",
+            "Connect and launch a Device before sending a message",
+            RequestId("req_00000000000000000000000001".to_owned()),
+        );
+        match envelope.error {
+            Error::TerminalError(error) => {
+                assert_eq!(error.code, TerminalErrorCode::DeviceSessionRequired);
+                assert!(!error.retryable);
+                assert!(
+                    error.message.contains("Device"),
+                    "public message keeps the Device requirement: {}",
+                    error.message
+                );
+            }
+            Error::RetryableError(_) => panic!("DEVICE_SESSION_REQUIRED is terminal"),
+        }
+    }
+
+    #[test]
+    fn device_model_unavailable_is_not_disguised_as_wrong_state() {
+        assert_eq!(
+            terminal_code(StatusCode::CONFLICT, "DEVICE_MODEL_UNAVAILABLE"),
+            TerminalErrorCode::DeviceModelUnavailable
+        );
+        assert_eq!(
+            public_reason("DEVICE_MODEL_UNAVAILABLE"),
+            "DEVICE_MODEL_UNAVAILABLE"
+        );
+    }
+
+    #[test]
+    fn ordinary_wrong_state_stays_wrong_state() {
+        assert_eq!(
+            terminal_code(StatusCode::CONFLICT, "WRONG_STATE"),
+            TerminalErrorCode::WrongState
+        );
+        assert_eq!(public_reason("WRONG_STATE"), "WRONG_STATE");
     }
 }

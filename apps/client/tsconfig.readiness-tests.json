@@ -9,10 +9,10 @@
       "ES2023"
     ],
     "noEmit": false,
-    "outDir": "../../.cache/readiness-tests",
+    "outDir": "node_modules/.cache/readiness-tests",
     "rootDir": "src",
     "sourceMap": false,
-    "tsBuildInfoFile": "../../.cache/tsbuild/readiness-tests.tsbuildinfo"
+    "tsBuildInfoFile": "node_modules/.cache/tsbuild/readiness-tests.tsbuildinfo"
   },
   "include": [
     "src/**/*.ts",

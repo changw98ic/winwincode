@@ -7,6 +7,8 @@ import {
   type ControlPlaneRepositorySummary,
   type ControlPlaneRequestOptions,
   type ControlPlaneRepositoryRegistration,
+  type ControlPlaneManagedAppTemplate,
+  type ControlPlaneManagedAppTemplatePort,
 } from './community-control-plane-client.js'
 import { encryptDeviceRepository } from './device-provider-encryption.js'
 import { mountPageHeader } from '@winwincode/browser-ui'
@@ -19,6 +21,7 @@ export interface ProjectsPageOptions {
   readonly deviceHref: string
   readonly requestOptions?: () => ControlPlaneRequestOptions | undefined
   readonly registration?: ControlPlaneRepositoryRegistration
+  readonly managedAppTemplate?: ControlPlaneManagedAppTemplatePort
 }
 
 export interface ProjectsPage {
@@ -33,6 +36,156 @@ function element<K extends keyof HTMLElementTagNameMap>(
   const node = document.createElement(tag)
   node.className = className
   return node
+}
+
+let managedAppFormSequence = 0
+
+function mountManagedAppSettings(
+  document: Document,
+  repository: ControlPlaneRepositorySummary,
+  port: ControlPlaneManagedAppTemplatePort | undefined,
+): HTMLElement {
+  const details = element(document, 'details', 'wwc-projects-row-settings')
+  const summary = element(document, 'summary', 'wwc-projects-row-settings-summary')
+  summary.textContent = '运行设置'
+  details.append(summary)
+  if (port === undefined) return details
+  const templatePort = port
+
+  const form = element(document, 'form', 'wwc-projects-template-form')
+  const formId = `wwc-projects-template-${++managedAppFormSequence}`
+  form.id = formId
+  const mode = document.createElement('select')
+  mode.required = true
+  const liveOption = document.createElement('option')
+  liveOption.value = 'live'; liveOption.textContent = '实时项目'
+  const candidateOption = document.createElement('option')
+  candidateOption.value = 'frozen-candidate'; candidateOption.textContent = '候选版本'
+  mode.append(liveOption, candidateOption)
+  const cwd = document.createElement('input')
+  cwd.required = true; cwd.value = '.'; cwd.placeholder = '例如：.'; cwd.autocomplete = 'off'
+  const argv = document.createElement('textarea')
+  argv.required = true; argv.rows = 3; argv.value = 'pnpm\ndev'; argv.spellcheck = false
+  const listenPort = document.createElement('input')
+  listenPort.type = 'number'; listenPort.required = true; listenPort.min = '1'; listenPort.max = '65535'; listenPort.value = '3000'
+  const healthPath = document.createElement('input')
+  healthPath.required = true; healthPath.value = '/'; healthPath.placeholder = '例如：/health'; healthPath.autocomplete = 'off'
+  const fields: Array<[string, HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement]> = [
+    ['运行模式', mode], ['仓库相对工作目录', cwd], ['启动命令与参数（每行一个）', argv], ['监听端口', listenPort], ['健康检查路径', healthPath],
+  ]
+  for (const [labelText, input] of fields) {
+    const label = element(document, 'label', 'wwc-projects-template-field')
+    label.textContent = labelText
+    label.append(input)
+    form.append(label)
+  }
+  const error = element(document, 'p', 'wwc-projects-template-error')
+  error.id = `${formId}-error`
+  error.setAttribute('role', 'alert')
+  error.hidden = true
+  const note = element(document, 'p', 'wwc-projects-template-note')
+  note.textContent = '启动设置保存在项目中；敏感环境变量不在此页面填写。'
+  const actions = element(document, 'div', 'wwc-projects-template-actions')
+  const save = element(document, 'button', 'wwc-projects-template-save')
+  save.type = 'submit'; save.textContent = '保存运行设置'
+  const status = element(document, 'p', 'wwc-projects-template-status')
+  status.setAttribute('role', 'status')
+  actions.append(save)
+  form.append(error, note, actions, status)
+  details.append(form)
+
+  const controls = fields.map(([, input]) => input)
+  function clearError(): void {
+    error.hidden = true
+    error.textContent = ''
+    for (const control of controls) {
+      control.removeAttribute('aria-invalid')
+      control.removeAttribute('aria-describedby')
+    }
+  }
+  function showError(message: string, invalidControls: readonly HTMLElement[] = []): void {
+    error.textContent = message
+    error.hidden = false
+    for (const control of invalidControls) {
+      control.setAttribute('aria-invalid', 'true')
+      control.setAttribute('aria-describedby', error.id)
+    }
+    invalidControls[0]?.focus()
+  }
+
+  let loaded = false
+  let busy = false
+  async function load(): Promise<void> {
+    if (loaded || busy) return
+    busy = true
+    clearError()
+    status.textContent = '正在读取运行设置…'
+    try {
+      const snapshot = await templatePort.load(repository.repositoryBindingId)
+      if (snapshot.template !== null) {
+        mode.value = snapshot.template.mode
+        cwd.value = snapshot.template.cwd
+        argv.value = snapshot.template.argv.join('\n')
+        listenPort.value = String(snapshot.template.listenPort)
+        healthPath.value = snapshot.template.healthCheck.path
+        status.textContent = `已加载运行设置 · 第 ${snapshot.revision ?? 1} 版`
+      } else status.textContent = '尚未配置运行设置。'
+      loaded = true
+    } catch (loadError) {
+      status.textContent = ''
+      showError(loadError instanceof Error ? loadError.message : '运行设置读取失败，请稍后重试。')
+    } finally { busy = false }
+  }
+  details.addEventListener('toggle', () => { if (details.open) void load() })
+  form.addEventListener('submit', event => {
+    event.preventDefault()
+    if (busy) return
+    clearError()
+    const nativeInvalid = controls.filter(control => !control.checkValidity())
+    if (nativeInvalid.length > 0) {
+      showError('请修正标记的字段后再保存。', nativeInvalid)
+      return
+    }
+    const relativeCwd = cwd.value.trim()
+    const args = argv.value.split('\n').map(value => value.trim()).filter(Boolean)
+    const portNumber = Number(listenPort.value)
+    const customInvalid: Array<HTMLElement> = []
+    const invalidLabels: string[] = []
+    if (relativeCwd.startsWith('/') || relativeCwd.split('/').some(part => part === '..' || part.length === 0)) {
+      customInvalid.push(cwd); invalidLabels.push('仓库相对工作目录')
+    }
+    if (args.length === 0) {
+      customInvalid.push(argv); invalidLabels.push('启动命令')
+    }
+    if (!Number.isInteger(portNumber) || portNumber < 1 || portNumber > 65535) {
+      customInvalid.push(listenPort); invalidLabels.push('监听端口')
+    }
+    if (!healthPath.value.trim().startsWith('/') || healthPath.value.includes('..')) {
+      customInvalid.push(healthPath); invalidLabels.push('健康检查路径')
+    }
+    if (customInvalid.length > 0) {
+      showError(`请修正：${invalidLabels.join('、')}。`, customInvalid)
+      return
+    }
+    busy = true; save.disabled = true; status.textContent = '正在保存运行设置…'
+    const template: ControlPlaneManagedAppTemplate = {
+      schemaVersion: 'winwincode/managed-app-template-v1',
+      mode: mode.value as ControlPlaneManagedAppTemplate['mode'],
+      cwd: relativeCwd,
+      argv: args,
+      healthCheck: { path: healthPath.value.trim(), timeoutMs: 5000 },
+      listenPort: portNumber,
+    }
+    void templatePort.save(repository.repositoryBindingId, template).then(revision => {
+      loaded = true
+      clearError()
+      status.textContent = `运行设置已保存 · 第 ${revision} 版`
+    }).catch(saveError => {
+      status.textContent = ''
+      showError(saveError instanceof Error ? saveError.message : '运行设置保存失败，请稍后重试。')
+    }).finally(() => { busy = false; save.disabled = false })
+  })
+  return details
 }
 
 /**
@@ -141,7 +294,7 @@ export function renderProjectsPage(options: ProjectsPageOptions): ProjectsPage {
       }
       if (!closed) registrationStatus.textContent = '尚未收到设备结果，请刷新项目列表确认。'
     } catch (error) {
-      if (!closed) registrationStatus.textContent = error instanceof Error ? error.message : '项目接入失败，请重试。'
+      if (!closed) registrationStatus.textContent = '项目接入失败，请检查设备连接和目录后重试。'
     } finally {
       busy = false
       if (!closed) for (const control of [deviceSelect, path, initialize, submit]) control.disabled = false
@@ -193,16 +346,19 @@ export function renderProjectsPage(options: ProjectsPageOptions): ProjectsPage {
       cancel.addEventListener('click', finish)
       restore.addEventListener('click', () => {
         try { clearRepositoryDisplayName(browser, repo.repositoryBindingId); setName(); finish() }
-        catch (error) { feedback.textContent = error instanceof Error ? error.message : '保存失败，请重试。' }
+        catch { feedback.textContent = '保存失败，请重试。' }
       })
       save.addEventListener('click', () => {
         try { saveRepositoryDisplayName(browser, repo.repositoryBindingId, input.value); setName(); finish() }
-        catch (error) { feedback.textContent = error instanceof Error ? error.message : '保存失败，请重试。' }
+        catch { feedback.textContent = '保存失败，请重试。' }
       })
       input.focus(); input.select()
     })
+    const settings = mountManagedAppSettings(document, repo, options.managedAppTemplate)
+    const main = element(document, 'div', 'wwc-projects-row-main')
     const actions = element(document, 'div', 'wwc-projects-row-actions'); actions.append(rename, newChat)
-    row.append(info, actions)
+    main.append(info, actions)
+    row.append(main, settings)
     return row
   }
 

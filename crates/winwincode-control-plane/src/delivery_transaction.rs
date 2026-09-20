@@ -127,7 +127,22 @@ impl DeliveryExecutionTransaction for AtomicDeliveryExecutionTransaction<'_, '_>
             ));
         }
 
-        let receipt = self.storage.commit(&commit).map_err(port_error)?;
+        let config_record = pending
+            .managed_app_run_config()
+            .map(|config| {
+                Ok(winwincode_storage::ManagedAppRunConfigRecord {
+                    run_id: config.run_id.clone(),
+                    work_run_id: config.run_id.clone(),
+                    repository_binding_id: config.repository_binding_id.clone(),
+                    attempt: i64::from(config.attempt),
+                    config_json: serde_json::to_vec(config).map_err(port_error)?,
+                })
+            })
+            .transpose()?;
+        let receipt = self
+            .storage
+            .commit_with_managed_app_run_config(&commit, config_record.as_ref())
+            .map_err(port_error)?;
         committed_delivery_receipt(self.storage, &receipt, &stream_id, pending)
     }
 
@@ -290,6 +305,7 @@ fn validate_command(
                 .and_then(|input| input.candidate_ref.clone()),
             workspace: pending.job().workspace.clone(),
             limits: pending.job().limits.clone(),
+            managed_app_run_config: pending.managed_app_run_config().cloned(),
         },
     )
     .map_err(port_error)?;

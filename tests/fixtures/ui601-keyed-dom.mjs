@@ -45,6 +45,10 @@ export class TrackedElement {
     for (const child of children) this.insertBefore(child, null)
   }
 
+  prepend(...children) {
+    for (const child of children.toReversed()) this.insertBefore(child, this.children[0] ?? null)
+  }
+
   replaceChildren(...children) {
     for (const child of [...this.children]) child.remove()
     for (const child of children) this.insertBefore(child, null)
@@ -78,6 +82,16 @@ export class TrackedElement {
 
   removeAttribute(name) {
     this.attributes.delete(name)
+  }
+
+  querySelector(tagName) {
+    const expected = tagName.toUpperCase()
+    for (const child of this.children) {
+      if (child.tagName === expected) return child
+      const match = child.querySelector(tagName)
+      if (match !== null) return match
+    }
+    return null
   }
 
   addEventListener(name, listener) {

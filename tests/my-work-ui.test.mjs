@@ -651,6 +651,7 @@ test('the My Work page mounts the start entry, the reused work sections, and the
   const rows = allByClass(zone, 'wwc-my-work-clients-device')
   assert.equal(rows.length, 6)
   assert.equal(byClass(rows[0], 'wwc-clients-card-name').textContent, 'MacBook Pro')
+  assert.equal(rows[0].dataset.clientId, undefined)
   assert.equal(byClass(rows[0], 'wwc-clients-card-presence').textContent, '在线')
   assert.equal(byClass(rows[0], 'wwc-clients-card-state').textContent, '在线，可以连接')
   assert.match(

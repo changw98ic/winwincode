@@ -1,6 +1,10 @@
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
+use winwincode_client_port::managed_app::{
+    MANAGED_APP_RUN_CONFIG_SCHEMA_VERSION, ManagedAppHealthCheck, ManagedAppMode,
+    ManagedAppRunConfig,
+};
 use winwincode_control_plane::delivery_execution::{
     DeliveryExecutionCommitReceipt, DeliveryExecutionConfig, DeliveryExecutionPortError,
     DeliveryExecutionTransaction, ExecutionJobDispatcher, PendingDeliveryExecution,
@@ -97,6 +101,7 @@ fn execution_config(seed: u64) -> DeliveryExecutionConfig {
             max_artifact_bytes: 10_000_000,
             max_runtime_seconds: 3_600,
         },
+        managed_app_run_config: None,
     }
 }
 
@@ -592,6 +597,77 @@ fn malformed_execution_job_config_fails_before_pending_publication() {
     );
     assert_invalid_config_values(seed, &request_id);
     assert_invalid_intent_values(seed, &request_id);
+}
+
+#[test]
+fn managed_app_config_binds_workrun_source_and_frozen_candidate_checkout() {
+    let seed = 12;
+    let request_id = RequestId(canonical_id("req", seed));
+    let transition = workrun_dispatch(seed);
+    let WorkRunStartEffect::Dispatch(intent) = &transition.effect else {
+        panic!("test advance must create a dispatch intent");
+    };
+    let candidate = "a".repeat(40);
+    let mut config = execution_config(seed);
+    config.workspace.checkout_revision = candidate.clone();
+    config.managed_app_run_config = Some(ManagedAppRunConfig {
+        schema_version: MANAGED_APP_RUN_CONFIG_SCHEMA_VERSION.to_owned(),
+        run_id: intent.work_run_id.0.clone(),
+        repository_binding_id: canonical_id("rpb", seed),
+        template_revision: 1,
+        attempt: u32::try_from(intent.attempt).expect("attempt fits config"),
+        mode: ManagedAppMode::FrozenCandidate,
+        candidate_commit: Some(candidate.clone()),
+        cwd: "app".to_owned(),
+        argv: vec!["npm".to_owned(), "run".to_owned(), "start".to_owned()],
+        env: std::collections::BTreeMap::new(),
+        health_check: ManagedAppHealthCheck {
+            path: "/health".to_owned(),
+            timeout_ms: 1_000,
+        },
+        listen_port: 3_001,
+        source_id: intent.execution_job_id.0.clone(),
+    });
+    let _job = prepare_workrun_start(
+        &request_id,
+        &transition.delivery.snapshot().work_run_aggregate,
+        &transition.delivery.snapshot().spec,
+        intent,
+        config.clone(),
+    )
+    .expect("exact source and candidate binding is accepted");
+    let managed = config
+        .managed_app_run_config
+        .as_ref()
+        .expect("managed app config");
+    assert_eq!(managed.run_id, intent.work_run_id.0);
+    assert_eq!(managed.source_id, intent.execution_job_id.0);
+    assert_eq!(
+        managed.candidate_commit.as_deref(),
+        Some(candidate.as_str())
+    );
+
+    let mut wrong_source = config.clone();
+    wrong_source
+        .managed_app_run_config
+        .as_mut()
+        .expect("managed app config")
+        .source_id = canonical_id("job", seed + 1);
+    assert_prepare_rejected(
+        "managed app sourceId",
+        &request_id,
+        &transition,
+        wrong_source,
+    );
+
+    let mut stale_candidate = config;
+    stale_candidate.workspace.checkout_revision = "b".repeat(40);
+    assert_prepare_rejected(
+        "managed app candidate checkout",
+        &request_id,
+        &transition,
+        stale_candidate,
+    );
 }
 
 fn assert_invalid_config_values(seed: u64, request_id: &RequestId) {

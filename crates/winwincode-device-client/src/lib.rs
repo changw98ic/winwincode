@@ -124,6 +124,7 @@ pub mod daemon;
 pub mod fencing;
 pub mod http;
 pub mod identity;
+pub mod managed_app;
 pub mod path_confinement;
 pub mod preview;
 pub mod repository;
@@ -168,8 +169,8 @@ pub use connect_code::{
 pub use daemon::{
     DaemonConfig, DaemonError, DaemonStatus, DeviceDaemon, EnrollmentIssuance, ExchangeRequest,
     ExchangeResponse, ExchangeTransport, ExchangeTransportError, LeaseWorkerController,
-    TickOutcome, WorkerCapacitySnapshot, WorkerCapacitySource, WorkerCredentialIssuance,
-    WorkerLaunchDirectories, WorkerLaunchMaterialSource,
+    ManagedAppRepositorySource, TickOutcome, WorkerCapacitySnapshot, WorkerCapacitySource,
+    WorkerCredentialIssuance, WorkerLaunchDirectories, WorkerLaunchMaterialSource,
 };
 pub use fencing::{
     FencedCommandKind, FencingGuard, FencingRejection, FencingTicket, FencingVerdict,
@@ -179,8 +180,12 @@ pub use identity::{
     DeviceCredential, DeviceIdentity, DeviceIdentitySeed, IdentityRecord, IssuedEnrollment,
     adopt_enrollment, ensure_device_identity, load_device_identity,
 };
+pub use managed_app::{ManagedAppError, ManagedAppSupervisor, ManagedAppSupervisorConfig};
 pub use path_confinement::{ConfinedPath, ConfinedRoot, ConfinementVerdict, PathConfinementError};
-pub use preview::{AuthorizedPreviewSource, PreviewTunnelClient, PreviewTunnelError};
+pub use preview::{
+    AuthorizedPreviewSource, AuthorizedPreviewSourceRegistry, PreviewTunnelClient,
+    PreviewTunnelError, PreviewTunnelSupervisor,
+};
 pub use repository::{
     RegistrationOptions, RegistrationRejection, RepositoryBindingSummary, RepositoryRegistration,
     RepositoryRegistryError, RepositoryRemoval, RepositoryRevalidation, list_bindings,
@@ -199,8 +204,8 @@ pub use store::{
     ConnectCodeStateRecord, ConnectionPolicyRecord, DeviceStore, DeviceStoreError,
     DeviceStoreErrorKind, OccupancyMirrorAdvance, OccupancyMirrorRecord, OccupancyMirrorUpdate,
     OccupancyReleaseIntentOutcome, OccupancyReleaseIntentRecord, PathMappingRecord,
-    RepositoryLocalStateRecord, ServerProfileRecord, WorkerProcessRecord, availability_wire_name,
-    dirty_state_wire_name,
+    RepositoryLocalStateRecord, ServerProfileRecord, WorkerProcessRecord, WorkerStopIntentOutcome,
+    WorkerStopIntentRecord, availability_wire_name, dirty_state_wire_name,
 };
 pub use supervisor::{
     ModelRoute, ReapedWorker, SessionSupervisor, SpawnOutcome, SpawnRequest, SupervisorConfig,

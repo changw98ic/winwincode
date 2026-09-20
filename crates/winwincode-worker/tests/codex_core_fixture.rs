@@ -33,11 +33,12 @@ use winwincode_kernel::{
     ModelPortStream, SessionOptions, TurnSubmissionOptions,
 };
 use winwincode_worker::{
-    ActiveJob, CandidateArtifactAckOutcome, CandidateArtifactAuthority, CandidateArtifactUpload,
-    CodexCoreAdapter, CodexPoll, CodexThreadSession, CodexThreadStart, CodexTurnCompletion,
-    DurableExecutionDelivery, RetainedCandidateArtifact, WorkerConfig, WorkerErrorCode,
-    WorkerExecutionPort, WorkerLifecycleState, WorkerMain, secret_safe_runtime_summary,
-    workspace_runtime::JobWorkspaceRuntime,
+    ActiveJob, ArtifactAckOutcome, CandidateArtifactAckOutcome, CandidateArtifactAuthority,
+    CandidateArtifactUpload, CodexCoreAdapter, CodexPoll, CodexThreadSession, CodexThreadStart,
+    CodexTurnCompletion, DiagnosticArtifactAuthority, DiagnosticArtifactUpload,
+    DurableExecutionDelivery, RetainedCandidateArtifact, RetainedDiagnosticArtifact, WorkerConfig,
+    WorkerErrorCode, WorkerExecutionPort, WorkerLifecycleState, WorkerMain,
+    secret_safe_runtime_summary, workspace_runtime::JobWorkspaceRuntime,
 };
 
 const NOW: &str = "2027-01-15T08:00:02.000Z";
@@ -394,6 +395,27 @@ impl CodexCoreAdapter for RealKernelAdapter {
         _acknowledgement: &ArtifactAckMessage,
     ) -> Result<CandidateArtifactAckOutcome, Self::Error> {
         Err("ProductSession fixture cannot accept a candidate Artifact ack".to_owned())
+    }
+
+    fn accept_artifact_ack(
+        &mut self,
+        _acknowledgement: &ArtifactAckMessage,
+    ) -> Result<ArtifactAckOutcome, Self::Error> {
+        Err("ProductSession fixture cannot accept an Artifact ack".to_owned())
+    }
+
+    fn retain_diagnostic_artifact(
+        &mut self,
+        _upload: &DiagnosticArtifactUpload,
+    ) -> Result<RetainedDiagnosticArtifact, Self::Error> {
+        Err("ProductSession fixture cannot retain diagnostic output".to_owned())
+    }
+
+    fn accepted_diagnostic_artifacts(
+        &mut self,
+        _authority: &DiagnosticArtifactAuthority,
+    ) -> Result<Vec<ArtifactReference>, Self::Error> {
+        Err("ProductSession fixture has no diagnostic output".to_owned())
     }
 
     fn accepted_candidate_artifact(

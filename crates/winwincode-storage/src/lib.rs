@@ -2,6 +2,12 @@
 
 //! Transactional product-state storage for the `WinWinCode` Control Plane.
 //!
+//! Community product boundary: exactly one local Owner, local SQLite product
+//! state, Owner user-account ledger, and local execution queue/registry
+//! storage. Organization/tenant identifiers in internal worker/publication
+//! scope keys are protocol encodings, not multi-tenant Member storage product
+//! APIs. PostgreSQL product runtime belongs to Cloud/Enterprise repositories.
+//!
 //! [`ProductStateStorage`] is the storage seam used by the Control Plane. A
 //! commit replaces one canonical state value and atomically appends an optional
 //! opaque aggregate-journal record, its scoped request receipt, and outbox
@@ -25,6 +31,7 @@ mod execution_scope_replacement;
 mod git_candidate_retention;
 mod git_source;
 mod local_candidate;
+mod managed_app;
 mod provider_exchange;
 mod publication;
 mod repository_binding;
@@ -130,12 +137,16 @@ pub use git_candidate_retention::{
 pub use git_source::{
     GitCandidateReviewFile, GitCandidateReviewFileEncoding, GitCandidateReviewFileStatus,
     GitSourceHunk, GitSourcePath, GitSourcePathState, GitSourceResolver, LocalGitSourceResolver,
-    ValidatedGitCandidateDiff, ValidatedGitCandidateReview, ValidatedGitSourceArtifact,
+    ValidatedGitCandidateDiff, ValidatedGitCandidateFileContent, ValidatedGitCandidateReview,
+    ValidatedGitSourceArtifact,
 };
 pub use local_candidate::{
     LocalApplyReceiptRecord, LocalApplyResult, LocalApplySettlement, LocalApplyStrategy,
     LocalCandidateLedger, LocalCandidateReceiptRecord, LocalCandidateReceiptState,
     LocalCandidateRetained, LocalCandidateStoreError, LocalCandidateStoreErrorKind,
+};
+pub use managed_app::{
+    ManagedAppRunConfigRecord, ManagedAppRunTemplateRecord, ManagedAppStatusRecord,
 };
 pub use provider_exchange::{
     ModelRequestPoolAuthority, ProviderExchangeBegin, ProviderExchangeFailure,
@@ -2031,6 +2042,80 @@ impl std::error::Error for StorageError {}
 /// implement an at-least-once outbox with stable event ids.
 #[doc = "winwincode-community-persistence-port"]
 pub trait ProductStateStorage: Send {
+    /// Commits a state mutation and its server-sealed managed-app config as
+    /// one durable fact. `SQLite` overrides this with one transaction. Other
+    /// adapters must override this method before accepting a config; a
+    /// post-commit fallback would leave a `WorkRun` without its authoritative
+    /// runtime configuration when the second write fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when either fact cannot be committed.
+    fn commit_with_managed_app_run_config(
+        &mut self,
+        commit: &StateCommit,
+        config: Option<&ManagedAppRunConfigRecord>,
+    ) -> Result<CommitReceipt, StorageError> {
+        match config {
+            None => self.commit(commit),
+            Some(_) => Err(StorageError::adapter(
+                "atomic managed application config commit is unavailable",
+            )),
+        }
+    }
+
+    /// Persists the authenticated repository managed-app template.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when the template cannot be written.
+    fn save_managed_app_run_template(
+        &mut self,
+        _record: &ManagedAppRunTemplateRecord,
+    ) -> Result<(), StorageError> {
+        Err(StorageError::adapter(
+            "managed application template storage is unavailable",
+        ))
+    }
+
+    /// Loads the authenticated repository managed-app template.
+    ///
+    /// # Errors
+    ///
+    /// Returns storage corruption or adapter failures.
+    fn load_managed_app_run_template(
+        &self,
+        _repository_binding_id: &str,
+    ) -> Result<Option<ManagedAppRunTemplateRecord>, StorageError> {
+        Ok(None)
+    }
+
+    /// Persists a server-sealed managed application configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when this storage cannot persist the fact.
+    fn save_managed_app_run_config(
+        &mut self,
+        _record: &ManagedAppRunConfigRecord,
+    ) -> Result<(), StorageError> {
+        Err(StorageError::adapter(
+            "managed application configuration storage is unavailable",
+        ))
+    }
+
+    /// Loads the server-sealed managed application configuration for one `WorkRun`.
+    ///
+    /// # Errors
+    ///
+    /// Returns storage corruption or adapter failures.
+    fn load_managed_app_run_config_for_work_run(
+        &self,
+        _work_run_id: &WorkRunId,
+    ) -> Result<Option<ManagedAppRunConfigRecord>, StorageError> {
+        Ok(None)
+    }
+
     /// Atomically writes canonical state, its request receipt, and outbox
     /// events. Every [`StateRevisionGuard`] and [`StateMutation`] on `commit`
     /// is checked after the receipt lookup and before the first write in that
@@ -2523,6 +2608,91 @@ impl SqliteStorage {
     pub(crate) fn connection_mut(&mut self) -> Result<&mut Connection, StorageError> {
         self.connection.as_mut().ok_or_else(StorageError::closed)
     }
+
+    /// Persists the Server-sealed managed application configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the record is invalid or `SQLite` cannot write it.
+    pub fn save_managed_app_run_config(
+        &mut self,
+        record: &ManagedAppRunConfigRecord,
+    ) -> Result<(), StorageError> {
+        managed_app::save_run_config(self.connection_mut()?, record)
+    }
+
+    /// Persists the authenticated repository managed-app template.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the record is invalid or `SQLite` cannot write it.
+    pub fn save_managed_app_run_template(
+        &mut self,
+        record: &ManagedAppRunTemplateRecord,
+    ) -> Result<(), StorageError> {
+        managed_app::save_run_template(self.connection()?, record)
+    }
+
+    /// Loads the authenticated repository managed-app template.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when `SQLite` cannot read it.
+    pub fn load_managed_app_run_template(
+        &self,
+        repository_binding_id: &str,
+    ) -> Result<Option<ManagedAppRunTemplateRecord>, StorageError> {
+        managed_app::load_run_template(self.connection()?, repository_binding_id)
+    }
+
+    /// Loads the authoritative configuration for one managed application run.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when `SQLite` cannot read the record.
+    pub fn load_managed_app_run_config(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<ManagedAppRunConfigRecord>, StorageError> {
+        managed_app::load_run_config(self.connection()?, run_id)
+    }
+
+    /// Loads the authoritative configuration by its bound `WorkRun` identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when `SQLite` cannot read the record.
+    pub fn load_managed_app_run_config_for_work_run(
+        &self,
+        work_run_id: &str,
+    ) -> Result<Option<ManagedAppRunConfigRecord>, StorageError> {
+        managed_app::load_run_config_for_work_run(self.connection()?, work_run_id)
+    }
+
+    /// Records the latest Device lifecycle status durably.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the record is invalid or `SQLite` cannot write it.
+    pub fn save_managed_app_status(
+        &mut self,
+        record: &ManagedAppStatusRecord,
+    ) -> Result<(), StorageError> {
+        managed_app::save_status(self.connection_mut()?, record)
+    }
+
+    /// Loads the latest status for one Device/run pair.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when `SQLite` cannot read the record.
+    pub fn load_managed_app_status(
+        &self,
+        client_node_id: &str,
+        run_id: &str,
+    ) -> Result<Option<ManagedAppStatusRecord>, StorageError> {
+        managed_app::load_status(self.connection()?, client_node_id, run_id)
+    }
 }
 
 fn sqlite_open_lock(
@@ -2585,6 +2755,52 @@ fn remaining_sqlite_open_time(open_deadline: StdInstant) -> Result<Duration, Sto
 }
 
 impl ProductStateStorage for SqliteStorage {
+    fn commit_with_managed_app_run_config(
+        &mut self,
+        commit: &StateCommit,
+        config: Option<&ManagedAppRunConfigRecord>,
+    ) -> Result<CommitReceipt, StorageError> {
+        commit.validate()?;
+        let connection = self.connection_mut()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql_error)?;
+        let receipt = commit_in_transaction(&transaction, commit)?;
+        if let Some(config) = config {
+            managed_app::save_run_config(&transaction, config)?;
+        }
+        transaction.commit().map_err(sql_error)?;
+        Ok(receipt)
+    }
+
+    fn save_managed_app_run_template(
+        &mut self,
+        record: &ManagedAppRunTemplateRecord,
+    ) -> Result<(), StorageError> {
+        managed_app::save_run_template(self.connection()?, record)
+    }
+
+    fn load_managed_app_run_template(
+        &self,
+        repository_binding_id: &str,
+    ) -> Result<Option<ManagedAppRunTemplateRecord>, StorageError> {
+        managed_app::load_run_template(self.connection()?, repository_binding_id)
+    }
+
+    fn save_managed_app_run_config(
+        &mut self,
+        record: &ManagedAppRunConfigRecord,
+    ) -> Result<(), StorageError> {
+        SqliteStorage::save_managed_app_run_config(self, record)
+    }
+
+    fn load_managed_app_run_config_for_work_run(
+        &self,
+        work_run_id: &WorkRunId,
+    ) -> Result<Option<ManagedAppRunConfigRecord>, StorageError> {
+        managed_app::load_run_config_for_work_run(self.connection()?, &work_run_id.0)
+    }
+
     fn commit(&mut self, commit: &StateCommit) -> Result<CommitReceipt, StorageError> {
         commit.validate()?;
         let connection = self.connection_mut()?;
@@ -4110,6 +4326,7 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), StorageError> {
     validate_public_event_context_schema(&transaction)?;
     validate_pending_audit_event_schema(&transaction)?;
     git_candidate_retention::validate_schema(&transaction)?;
+    managed_app::create_schema(&transaction)?;
     transaction
         .pragma_update(None, "user_version", SCHEMA_VERSION)
         .map_err(sql_error)?;

@@ -157,6 +157,7 @@ mod session_binding_fixture {
                     max_artifact_bytes: 10_000_000,
                     max_runtime_seconds: 3_600,
                 },
+                managed_app_run_config: None,
             },
         )
         .expect("prepared WorkRun job");

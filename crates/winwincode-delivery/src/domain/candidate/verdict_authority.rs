@@ -248,6 +248,25 @@ pub fn resolve_production_verdict(
         .checked_add(2)
         .ok_or_else(|| error("verdict production time exceeds the durable range"))?;
 
+    // Frozen preview source authority requires one executor/remediator Commit
+    // Evidence sealed from the real frozen candidate already produced by the
+    // writer Worker. Never invent a commit id: rebuild it from the frozen
+    // candidateRef/commit that freeze_source just validated.
+    let producer_commit = resolve_delivery_evidence(
+        delivery,
+        &candidate,
+        ResolveDeliveryEvidenceInput {
+            work_run_id: candidate.producer_work_run_id().clone(),
+            session_binding_id: candidate.producer_session_binding_id().clone(),
+            source: EvidenceSource::CandidateCommit,
+            created_at_millis: produced_at_millis,
+        },
+    )
+    .map_err(|error_value| error(error_value.to_string()))?;
+    evidence.push(producer_commit);
+    evidence.sort_by(|left, right| left.evidence().id.0.cmp(&right.evidence().id.0));
+    evidence.dedup_by(|left, right| left.evidence().id == right.evidence().id);
+
     Ok(ProductionVerdictFacts {
         candidate,
         verification,

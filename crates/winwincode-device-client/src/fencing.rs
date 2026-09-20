@@ -38,6 +38,8 @@ pub enum FencedCommandKind {
     /// Local repository registration/removal/change reported through
     /// `client.repository.upsert` / `client.repository.removed`.
     RepositoryMutation,
+    /// `client.managed_app.command` — control a candidate/live app process group.
+    ManagedApp,
 }
 
 impl FencedCommandKind {
@@ -49,6 +51,7 @@ impl FencedCommandKind {
             Self::WorkerStop => "worker_stop",
             Self::CandidateApply => "candidate_apply",
             Self::RepositoryMutation => "repository_mutation",
+            Self::ManagedApp => "managed_app",
         }
     }
 }

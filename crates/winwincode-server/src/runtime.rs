@@ -24,7 +24,7 @@ use winwincode_domain::{RepositoryScope, RepositoryScopeKind};
 
 use winwincode_control_plane::{
     DurableExecutionPortDelegate, DurableExecutionPortIngress, DurableWorkerExecutionLifecycle,
-    RepositoryExecutionScheduler,
+    ProductSessionService, RepositoryExecutionScheduler,
 };
 use winwincode_domain::{ExecutionJobId, Instant, RequestId, UserId, WorkerId, WorkerInstanceId};
 use winwincode_execution_port::generated::{
@@ -269,6 +269,7 @@ pub struct RepositoryRuntimeScheduler {
     scheduler_generation: String,
     lease_duration_millis: u64,
     sequence: u64,
+    session_cancel_routes_reconciled: bool,
     active_worker_authorities: Vec<WorkerOutboundAuthority>,
     pending_interaction_acknowledgements: Vec<(
         WorkerOutboundAuthority,
@@ -335,6 +336,7 @@ impl RepositoryRuntimeScheduler {
             scheduler_generation,
             lease_duration_millis,
             sequence: 0,
+            session_cancel_routes_reconciled: false,
             active_worker_authorities: Vec::new(),
             pending_interaction_acknowledgements: Vec::new(),
         })
@@ -906,11 +908,33 @@ impl RepositoryRuntimeScheduler {
     }
 
     fn dispatch_cancellations(
-        &self,
+        &mut self,
         state: &mut ApplicationState,
         now: &Instant,
         execution_port: &dyn RuntimeControlOutbound,
     ) -> Result<(), RuntimeSupervisorError> {
+        // y2es: on the first drive after process start, replay any durable
+        // ProductSession cancel routes whose queue cancel never committed.
+        if !self.session_cancel_routes_reconciled {
+            let public_scope = winwincode_storage::PublicEventScope::Repository {
+                organization_id: self.scope.organization_id.clone(),
+                workspace_id: self.scope.workspace_id.clone(),
+                project_id: self.scope.project_id.clone(),
+                repository_id: self.scope.repository_id.clone(),
+            };
+            let reconciled = {
+                let mut sessions = ProductSessionService::new(&mut state.storage);
+                sessions.reconcile_cancelled_session_routes(&public_scope)
+            };
+            match reconciled {
+                Ok(_) => {
+                    self.session_cancel_routes_reconciled = true;
+                }
+                Err(error) => {
+                    debug_scheduler_error("reconcile cancelled ProductSession routes", &error);
+                }
+            }
+        }
         let cancellations = {
             let mut scheduler = RepositoryExecutionScheduler::new(&mut state.storage);
             scheduler
@@ -2068,6 +2092,7 @@ mod tests {
             scheduler_generation: fixed_id("gen_"),
             lease_duration_millis: 30_000,
             sequence: 0,
+            session_cancel_routes_reconciled: false,
             active_worker_authorities: Vec::new(),
             pending_interaction_acknowledgements: Vec::new(),
         }

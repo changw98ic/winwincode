@@ -579,7 +579,7 @@ function buildState(input: {
       observation.deliveryId ?? 'delivery-unassigned',
       observation.deliveryId === null
         ? '未报告交付'
-        : deliveryTitles.get(observation.deliveryId) ?? observation.deliveryId,
+        : deliveryTitles.get(observation.deliveryId) ?? '未命名交付',
     ] as const],
     false,
   )
@@ -587,7 +587,7 @@ function buildState(input: {
     'work-run',
     observation => [[
       observation.workRunId ?? `${observation.productSessionId}/unbound`,
-      observation.workRunId ?? '未报告工作运行',
+      observation.workRunId === null ? '未报告工作运行' : '工作运行',
     ] as const],
     false,
   )
@@ -656,7 +656,7 @@ function buildState(input: {
       const heartbeat = instant(worker.lastHeartbeatAt)
       return Object.freeze({
         key: worker.id,
-        label: worker.id,
+        label: '执行进程',
         state,
         capacity: worker.capacity,
         lastHeartbeatAt: heartbeat,
@@ -774,7 +774,7 @@ function buildState(input: {
       .map(observation => Object.freeze({
         key: `${observation.deliveryId ?? 'unassigned'}/${observation.workRunId ?? 'unbound'}`,
         origin: 'work-run' as const,
-        label: observation.workRunId ?? observation.productSessionId,
+        label: '工作运行',
         failureCount: observation.failureCount,
         attentionCount: 0,
         recovered: observation.recovered,

@@ -1,11 +1,14 @@
 # winwincode-audit
 
 This crate owns the Control Plane audit event and its local immutable storage
-adapter. Callers provide a validated actor, exact tenant scope, request ID,
-stable action and result codes, state digests, a local component or source IP,
-and optional Delivery, ProductSession, Lease, and Publication references.
-There is no field for a raw command body, prompt, response, credential,
-provider diagnostic, or publication body.
+adapter for WinWinCode Community (exactly one local Owner). Callers provide a
+validated actor, exact local scope, request ID, stable action and result codes,
+state digests, a local component or source IP, and optional Delivery,
+ProductSession, Lease, and Publication references. There is no field for a raw
+command body, prompt, response, credential, provider diagnostic, or publication
+body. Organization/tenant identifiers in internal scope keys are not a
+Community multi-user product surface; Community bootstrap maps them to the
+single local Owner scope.
 
 The closed action categories cover business, administration, commands,
 approvals, Policy, Credential, Worker leases, Provider operations, model
@@ -14,24 +17,24 @@ Provider actions carry only stable operation names plus a canonical Credential
 reference or Provider identity; secret material and remote diagnostics cannot
 be represented.
 
-`AuditStore` keeps one continuous sequence and SHA-256 chain per organization.
-The chain header commits the event identity, exact scope, retention rule, and
-canonical event payload digest. Event headers cannot be updated or deleted.
-An exact `AuditEventId` replay returns the first record; reuse with changed
-facts returns `RequestConflict`.
+`AuditStore` keeps one continuous sequence and SHA-256 chain per local Owner
+scope key. The chain header commits the event identity, exact scope, retention
+rule, and canonical event payload digest. Event headers cannot be updated or
+deleted. An exact `AuditEventId` replay returns the first record; reuse with
+changed facts returns `RequestConflict`.
 
 `verify_organization` streams the complete chain in sequence order and returns
-its verified tail checkpoint. The checkpoint contains only the organization,
+its verified tail checkpoint. The checkpoint contains only the scope key,
 last sequence, and last digest, so an export can prove the exact cut without
-copying event payloads.
+copying event payloads. In Community the scope key is the single local Owner.
 
 Reads require an `AuditAccess` scope already approved by the policy layer. The
-store applies that scope exactly at organization, workspace, project, or
-repository level and never treats this value as authentication proof.
+store applies that scope exactly and never treats this value as authentication
+proof.
 
 Finite retention deletes only the canonical payload after its deadline. The
 ordered header, payload digest, and immutable retention tombstone remain so the
-organization chain can still be verified. Indefinite payloads are retained.
+local-Owner chain can still be verified. Indefinite payloads are retained.
 Missing or changed payloads, headers, tombstones, sequence links, or chain
 heads fail closed as corruption.
 
@@ -49,11 +52,11 @@ created. The audit decision is durable before the explicit idempotent deletion
 port is called, so Audit Ledger corruption or policy denial cannot reach
 storage deletion.
 
-`AuditStore::export_page` captures one verified organization checkpoint and
+`AuditStore::export_page` captures one verified local-Owner scope checkpoint and
 binds every continuation cursor to the exact scope, time range, subject
 filter, limits, observation time, and governance redaction decision. Later
 appends do not enter that snapshot. Each page walks a contiguous portion of
-the organization chain, advances through at most 200 headers, and enforces a
+that chain, advances through at most 200 headers, and enforces a
 one-megabyte encoded-record ceiling.
 
 Matching retained events use the canonical secret-safe `AuditEvent` shape.

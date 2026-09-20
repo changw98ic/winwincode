@@ -2978,6 +2978,116 @@
       "x-authority": "control-command",
       "x-message-class": "command"
     },
+    "ManagedAppMode": {
+      "type": "string",
+      "enum": ["live", "frozen-candidate"]
+    },
+    "ManagedAppOperation": {
+      "type": "string",
+      "enum": ["start", "stop", "restart", "query"]
+    },
+    "ManagedAppState": {
+      "type": "string",
+      "enum": ["starting", "healthy", "unhealthy", "stopped", "exited", "missing"]
+    },
+    "ManagedAppHealthCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "path": {"type": "string", "pattern": "^/[^.]*$"},
+        "timeoutMs": {"type": "integer", "minimum": 1, "maximum": 60000}
+      },
+      "required": ["path", "timeoutMs"]
+    },
+    "ManagedAppRunConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {"const": "winwincode/managed-app-run-v1"},
+        "runId": {"$ref": "./domain.schema.json#/$defs/WorkRunId"},
+        "repositoryBindingId": {"$ref": "#/$defs/RepositoryBindingId"},
+        "templateRevision": {"type": "integer", "minimum": 1, "maximum": 1000000000},
+        "attempt": {"type": "integer", "minimum": 1, "maximum": 1000},
+        "mode": {"$ref": "#/$defs/ManagedAppMode"},
+        "candidateCommit": {"type": ["string", "null"], "pattern": "^[0-9a-f]{40}$|^[0-9a-f]{64}$"},
+        "cwd": {"type": "string", "pattern": "^(?:\\.|[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*)$"},
+        "argv": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1, "maxItems": 128},
+        "env": {"type": "object", "additionalProperties": {"type": "string", "maxLength": 4096}},
+        "healthCheck": {"$ref": "#/$defs/ManagedAppHealthCheck"},
+        "listenPort": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "sourceId": {"$ref": "./domain.schema.json#/$defs/ExecutionJobId"}
+      },
+      "required": ["schemaVersion", "runId", "repositoryBindingId", "templateRevision", "attempt", "mode", "candidateCommit", "cwd", "argv", "env", "healthCheck", "listenPort", "sourceId"]
+    },
+    "ManagedAppCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {"const": "winwincode/managed-app-run-v1"},
+        "operation": {"$ref": "#/$defs/ManagedAppOperation"},
+        "idempotencyKey": {"$ref": "#/$defs/IdempotencyKey"},
+        "occupancyLeaseId": {"$ref": "#/$defs/ClientOccupancyLeaseId"},
+        "occupancyFencingToken": {"$ref": "#/$defs/OccupancyFencingToken"},
+        "config": {"anyOf": [{"$ref": "#/$defs/ManagedAppRunConfig"}, {"type": "null"}]},
+        "runId": {"$ref": "./domain.schema.json#/$defs/WorkRunId"}
+      },
+      "required": ["schemaVersion", "operation", "idempotencyKey", "occupancyLeaseId", "occupancyFencingToken", "config", "runId"]
+    },
+    "ManagedAppStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {"const": "winwincode/managed-app-run-v1"},
+        "runId": {"$ref": "./domain.schema.json#/$defs/WorkRunId"},
+        "state": {"$ref": "#/$defs/ManagedAppState"},
+        "pid": {"type": ["integer", "null"], "minimum": 1},
+        "processStartIdentity": {"type": ["string", "null"], "maxLength": 256},
+        "exitCode": {"type": ["integer", "null"]},
+        "sourceId": {"$ref": "./domain.schema.json#/$defs/ExecutionJobId"}
+      },
+      "required": ["schemaVersion", "runId", "state", "pid", "processStartIdentity", "exitCode", "sourceId"]
+    },
+    "ClientManagedAppCommandMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"const": "client.managed_app.command"},
+        "schemaVersion": {"$ref": "./domain.schema.json#/$defs/SchemaVersion"},
+        "messageId": {"$ref": "#/$defs/ClientControlMessageId"},
+        "clientNodeId": {"$ref": "#/$defs/ClientNodeId"},
+        "clientInstanceId": {"$ref": "#/$defs/ClientInstanceId"},
+        "sequence": {"$ref": "#/$defs/ClientExchangeSequence"},
+        "occurredAt": {"$ref": "./domain.schema.json#/$defs/Instant"},
+        "command": {"$ref": "#/$defs/ManagedAppCommand"}
+      },
+      "required": ["kind", "schemaVersion", "messageId", "clientNodeId", "clientInstanceId", "sequence", "occurredAt", "command"],
+      "title": "client.managed_app.command",
+      "description": "Starts, stops, restarts, or queries one Device-owned managed application run.",
+      "x-direction": "control-plane-to-client",
+      "x-authority": "control-command",
+      "x-message-class": "command"
+    },
+    "ClientManagedAppStatusMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"const": "client.managed_app.status"},
+        "schemaVersion": {"$ref": "./domain.schema.json#/$defs/SchemaVersion"},
+        "messageId": {"$ref": "#/$defs/ClientControlMessageId"},
+        "clientNodeId": {"$ref": "#/$defs/ClientNodeId"},
+        "clientInstanceId": {"$ref": "#/$defs/ClientInstanceId"},
+        "sequence": {"$ref": "#/$defs/ClientExchangeSequence"},
+        "occurredAt": {"$ref": "./domain.schema.json#/$defs/Instant"},
+        "commandMessageId": {"$ref": "#/$defs/ClientControlMessageId"},
+        "status": {"$ref": "#/$defs/ManagedAppStatus"}
+      },
+      "required": ["kind", "schemaVersion", "messageId", "clientNodeId", "clientInstanceId", "sequence", "occurredAt", "commandMessageId", "status"],
+      "title": "client.managed_app.status",
+      "description": "Reports the Device-owned managed application state for one command.",
+      "x-direction": "client-to-control-plane",
+      "x-authority": "client-report",
+      "x-message-class": "report"
+    },
     "ClientControlMessageKind": {
       "type": "string",
       "enum": [
@@ -3013,7 +3123,9 @@
         "client.extension.apply",
         "client.extension.report",
         "client.repository.register",
-        "client.repository.registered"
+        "client.repository.registered",
+        "client.managed_app.command",
+        "client.managed_app.status"
       ],
       "title": "ClientControlMessageKind",
       "description": "Every ClientControlPort message kind: sixteen client-to-control-plane kinds followed by eleven control-plane-to-client kinds, exactly as frozen by the ClientControlPort v1 plan."
@@ -3120,6 +3232,12 @@
         },
         {
           "$ref": "#/$defs/ClientRepositoryRegisteredMessage"
+        },
+        {
+          "$ref": "#/$defs/ClientManagedAppCommandMessage"
+        },
+        {
+          "$ref": "#/$defs/ClientManagedAppStatusMessage"
         }
       ]
     },

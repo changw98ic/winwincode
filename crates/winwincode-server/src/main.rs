@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use winwincode_api::generated::{
@@ -14,9 +14,10 @@ use winwincode_api::generated::{
     WorkspaceScope, WorkspaceScopeKind,
 };
 use winwincode_control_plane::{
-    CollaborationService, ControlPlane, ControlPlaneConfig, DurableWorkerInteractionOutbound,
-    LocalDeliveryAdapterConfig, LocalPublicationAdapterConfig, ProductSessionExecutionApplication,
-    ProductSessionExecutionConfig,
+    CollaborationInboxService, CollaborationService, ControlPlane, ControlPlaneConfig,
+    DurableCollaborationInboxSource, DurableWorkerInteractionOutbound, LocalDeliveryAdapterConfig,
+    LocalOwnerCollaborationInboxAuthority, LocalPublicationAdapterConfig,
+    ProductSessionExecutionApplication, ProductSessionExecutionConfig,
 };
 use winwincode_domain::{
     CredentialReferenceId, OrganizationId, ProjectId, RepositoryId, RepositoryScope,
@@ -36,8 +37,8 @@ use winwincode_server::{
     WorkerSessionRemoteAuthenticator, start_server_with_remote_worker,
 };
 use winwincode_storage::{
-    ProductStateStorage, SqliteStorage, WorkerOutboundQueueConfig, WorkerPoolId,
-    WorkerRegistryScope,
+    ArtifactStore, LocalArtifactObjectStore, ProductStateStorage, SqliteStorage,
+    WorkerOutboundQueueConfig, WorkerPoolId, WorkerRegistryScope,
 };
 
 const SERVER_TOKIO_WORKER_STACK_BYTES: usize = 32 * 1024 * 1024;
@@ -190,6 +191,21 @@ fn open_production_application(
             return Err(Box::new(error));
         }
     };
+    // Worker artifact.open/chunk must settle on the Control Plane Artifact
+    // store. start_local leaves artifact_store unset; install the production
+    // catalog before any Device Worker exchange can arrive.
+    let mut control_plane = control_plane;
+    let execution_artifact_objects =
+        LocalArtifactObjectStore::open(config.data_directory().join("artifacts"))?;
+    let execution_artifact_store = ArtifactStore::open(
+        config.data_directory().join("artifact-catalog"),
+        Box::new(execution_artifact_objects),
+    )?;
+    if let Err(error) = control_plane.install_artifact_store(execution_artifact_store) {
+        let _ = control_plane.shutdown();
+        let _ = hub.close();
+        return Err(Box::new(error));
+    }
     let storage = match SqliteStorage::open(config.data_directory()) {
         Ok(storage) => storage,
         Err(error) => {
@@ -228,6 +244,9 @@ fn open_production_application(
         worker_outbound,
         hub,
         execution_config,
+        owner
+            .as_ref()
+            .ok_or("local Owner account is not initialized")?,
     )?;
     Ok(ProductionApplicationComposition {
         config,
@@ -457,18 +476,42 @@ fn compose_production_application(
     worker_outbound: DurableWorkerInteractionOutbound,
     hub: Arc<DurableEventHub>,
     execution_config: ProductSessionExecutionConfig,
+    owner: &UserAccount,
 ) -> Result<StandaloneControlPlaneApplication, Box<dyn std::error::Error>> {
     let collaboration = Arc::new(CollaborationService::new(SqliteStorage::open(
         config.data_directory(),
     )?));
-    let application = StandaloneControlPlaneApplication::new_with_collaboration(
-        control_plane,
-        storage,
-        worker_outbound,
-        hub,
-        collaboration,
-        execution_config,
+    let artifact_objects =
+        LocalArtifactObjectStore::open(config.data_directory().join("artifacts"))?;
+    // Collaboration inbox keeps its own catalog handle; the execution-port
+    // Control Plane owns the canonical artifact-catalog installed above.
+    let artifact_store = ArtifactStore::open(
+        config.data_directory().join("artifact-catalog-collaboration"),
+        Box::new(artifact_objects),
     )?;
+    let page_annotations = Arc::new(Mutex::new(
+        CollaborationInboxService::new_with_artifact_store(
+            Box::new(SqliteStorage::open(config.data_directory())?),
+            Box::new(DurableCollaborationInboxSource::new(Box::new(
+                SqliteStorage::open(config.data_directory())?,
+            ))),
+            Box::new(LocalOwnerCollaborationInboxAuthority::new(
+                Box::new(SqliteStorage::open(config.data_directory())?),
+                owner.user_id.clone(),
+            )),
+            artifact_store,
+        ),
+    ));
+    let application =
+        StandaloneControlPlaneApplication::new_with_collaboration_and_page_annotations(
+            control_plane,
+            storage,
+            worker_outbound,
+            hub,
+            collaboration,
+            page_annotations,
+            execution_config,
+        )?;
     Ok(application)
 }
 

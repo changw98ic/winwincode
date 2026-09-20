@@ -21,13 +21,15 @@ use winwincode_control_plane::{
     CollaborationInboxListRequest, CollaborationInboxReceipt, CollaborationInboxService,
     CollaborationInboxSourceError, CollaborationInboxSourceItem, CollaborationInboxSourcePort,
     CollaborationInboxSourceSnapshot, CollaborationResponsibilityEntitlement,
-    FormalCollaborationCommandRoute, ResponsibilityAssignment, ResponsibilityAssignmentId,
+    FormalCollaborationCommandRoute, PageAnnotationAction, PageAnnotationCandidateIdentity,
+    PageAnnotationCommand, PageAnnotationId, PageAnnotationRegion, PageAnnotationTarget,
+    PageAnnotationViewport, ResponsibilityAssignment, ResponsibilityAssignmentId,
     ResponsibilityAssignmentState, ResponsibilityReviewKind, ResponsibilityRole,
     ResponsibilityTarget,
 };
 use winwincode_domain::{
     ApprovalId, AttentionItemId, DeliveryId, OpaqueCursor, OrganizationId, ProductSessionId,
-    ProjectId, RepositoryId, RequestId, Sha256Digest, UserId, WorkspaceId,
+    ProjectId, RepositoryId, RequestId, Sha256Digest, UserId, WorkRunId, WorkspaceId,
 };
 use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_storage::SqliteStorage;
@@ -475,6 +477,68 @@ fn exact_candidate_annotations_cover_node_file_hunk_and_stale_candidate_is_zero_
         panic!("annotation receipt");
     };
     assert_eq!(annotation.state, CollaborationAnnotationState::Revoked);
+}
+
+#[test]
+fn page_annotation_without_delivery_journal_fails_closed_without_catalog_write() {
+    let fixture = Fixture::new("page-annotations");
+    let source_candidate = candidate('c', 1);
+    let mut source_item = delivery_attention_item(1, NOW + 300);
+    source_item.candidate = Some(source_candidate.clone());
+    fixture.replace_items(vec![source_item]);
+    let page_candidate = PageAnnotationCandidateIdentity {
+        delivery_id: delivery(1),
+        delivery_spec_id: "spec_01J00000000000000000000001".to_owned(),
+        delivery_spec_revision: 3,
+        candidate_ref: source_candidate.candidate_ref.clone(),
+        candidate_digest: source_candidate.candidate_digest.clone(),
+        candidate_tree_id: "a".repeat(40),
+        diff_sha256: digest('d'),
+        work_run_id: WorkRunId("wrn_01J00000000000000000000001".to_owned()),
+        attempt: 2,
+        session_binding_id: "binding_01J00000000000000000000001".to_owned(),
+    };
+    let command = PageAnnotationCommand {
+        context: fixture.context(30, 0),
+        item_id: CollaborationInboxItemId::DeliveryAttention(attention(1)),
+        annotation_id: PageAnnotationId("page_annotation_1".to_owned()),
+        action: PageAnnotationAction::Upsert {
+            candidate: page_candidate.clone(),
+            target: PageAnnotationTarget {
+                page_path: "/settings/profile".to_owned(),
+                viewport: PageAnnotationViewport {
+                    width: 390,
+                    height: 844,
+                    device_pixel_ratio: 2.0,
+                },
+                element: None,
+                region: PageAnnotationRegion {
+                    x: 8,
+                    y: 32,
+                    width: 300,
+                    height: 120,
+                },
+            },
+            body: "保存按钮应在校验失败时保持可见".to_owned(),
+            screenshot_artifact: None,
+        },
+    };
+    let mut service = fixture.service();
+    assert_eq!(
+        service
+            .apply_page_annotation(&command)
+            .expect_err("missing Delivery journal")
+            .kind(),
+        CollaborationInboxErrorKind::Invalid
+    );
+    let page = service
+        .list(&fixture.personal_list(10, None))
+        .expect("catalog remains readable");
+    assert!(
+        page.items
+            .iter()
+            .all(|item| item.page_annotations.is_empty())
+    );
 }
 
 #[test]

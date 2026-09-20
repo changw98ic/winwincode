@@ -44,6 +44,7 @@ const COMMAND_NAMES = Object.freeze([
   'input.respond',
   'session.cancel',
   'session.close',
+  'session.update',
   'delivery.create',
   'delivery.update_spec',
   'workrun.start',
@@ -62,6 +63,7 @@ const COMMAND_NAMES = Object.freeze([
   'publication.cancel',
   'collaboration.notification.ack',
   'collaboration.presence.update',
+  'collaboration.page_annotation.submit',
   'workitems.create',
 ])
 const WORK_ITEM_STATES = Object.freeze([
@@ -87,6 +89,8 @@ const ERROR_CODES = Object.freeze([
   'READ_CURSOR_EXPIRED',
   'CANDIDATE_STALE',
   'WRONG_STATE',
+  'DEVICE_SESSION_REQUIRED',
+  'DEVICE_MODEL_UNAVAILABLE',
   'RATE_LIMITED',
   'SERVICE_UNAVAILABLE',
   'TRUSTED_FACTS_UNAVAILABLE',

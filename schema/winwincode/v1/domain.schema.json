@@ -2,23 +2,27 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
   "title": "WinWinCode v1 domain contracts",
-  "description": "Canonical external value objects and projections shared by the Rust Control Plane, Rust Execution Worker, and TypeScript presentation layer.",
+  "description": "Canonical external value objects and projections shared by the Rust Control Plane, Rust Execution Worker, and TypeScript presentation layer. Community product boundary: exactly one local Owner, local SQLite product state, no multi-tenant organization/member product surface. Community bootstrap uses LocalDefaultScope; hierarchical scope identifiers remain protocol keys, not Cloud/Enterprise product types.",
   "$defs": {
     "OrganizationId": {
       "type": "string",
-      "pattern": "^org_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^org_[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "Protocol scope-key identifier. In WinWinCode Community this is the local Owner scope encoding used by LocalDefaultScope, not multi-tenant organization membership."
     },
     "WorkspaceId": {
       "type": "string",
-      "pattern": "^wsp_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^wsp_[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "Protocol scope-key identifier. Community product identity uses LocalDefaultScope; this key is not Cloud/Enterprise workspace administration."
     },
     "ProjectId": {
       "type": "string",
-      "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "Protocol scope-key identifier. Community product identity uses LocalDefaultScope; this key is not multi-tenant project membership."
     },
     "RepositoryId": {
       "type": "string",
-      "pattern": "^rep_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^rep_[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "Protocol scope-key identifier. Community product identity uses LocalDefaultScope; this key is not multi-tenant repository administration."
     },
     "IntegrationId": {
       "type": "string",
@@ -1170,6 +1174,7 @@
     "OrganizationScope": {
       "type": "object",
       "additionalProperties": false,
+      "description": "Organization-level scope key. Community product uses only LocalDefaultScope; this shape is protocol vocabulary, not org-admin product surface.",
       "required": [
         "kind",
         "organizationId"
@@ -1256,6 +1261,7 @@
       }
     },
     "Scope": {
+      "description": "Protocol scope key union. Community product surfaces use LocalDefaultScope; organization/member administration is not Community product surface.",
       "oneOf": [
         {
           "$ref": "#/$defs/OrganizationScope"
@@ -1272,6 +1278,7 @@
       ]
     },
     "LocalDefaultScope": {
+      "description": "WinWinCode Community canonical single-Owner local scope. All Community product runtime state maps to this fixed repository-scope identity.",
       "allOf": [
         {
           "$ref": "#/$defs/RepositoryScope"
@@ -1324,6 +1331,7 @@
         "publication.cancel",
         "collaboration.notification.ack",
         "collaboration.presence.update",
+        "collaboration.page_annotation.submit",
         "workitems.create"
       ]
     },
@@ -1527,6 +1535,8 @@
         "READ_CURSOR_EXPIRED",
         "CANDIDATE_STALE",
         "WRONG_STATE",
+        "DEVICE_SESSION_REQUIRED",
+        "DEVICE_MODEL_UNAVAILABLE",
         "RATE_LIMITED",
         "SERVICE_UNAVAILABLE",
         "TRUSTED_FACTS_UNAVAILABLE",
@@ -1544,6 +1554,8 @@
         "REVISION_CONFLICT",
         "CANDIDATE_STALE",
         "WRONG_STATE",
+        "DEVICE_SESSION_REQUIRED",
+        "DEVICE_MODEL_UNAVAILABLE",
         "INTERNAL_ERROR"
       ]
     },

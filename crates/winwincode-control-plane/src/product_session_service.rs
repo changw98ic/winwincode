@@ -29,18 +29,20 @@ use winwincode_domain::{
 use winwincode_session::{
     AuthenticatedActor, BindingScope, ExecutionCancellationRoutes, ExecutionRoute,
     InteractionRouter, InteractionRoutingError, ModelStreamCancellationRoute, ProductSession,
-    ProductSessionCreate, ProductSessionError, ProductSessionState, RouteWriteStatus,
+    ProductSessionCreate, ProductSessionError, RouteWriteStatus,
     RuntimeRouteAuthority, RuntimeSourceIdentity, SessionBinding, SessionBindingError,
     SessionBindingIdentity, SessionCancellationRequest, SessionCancellationSnapshot,
     WorkerCancellationRoute,
 };
 use winwincode_storage::{
     CommitReceipt, ExecutionJobRecord, ExecutionJobState, ExecutionLeaseRecord,
-    ExecutionQueueScope, ExecutionReservationRecord, ExecutionReservationState,
+    ExecutionQueueScope, ExecutionReservationRecord, ExecutionReservationRelease,
+    ExecutionReservationReleaseReason, ExecutionReservationState,
     ExecutionScopeReplacementAuthority, NewOutboxEvent, ProductStateStorage, ProjectionEventStream,
     PublicEventActor, PublicEventScope, PublicEventSource, ReceiptIdentity, ReceiptScopeKey,
-    SqliteStorage, StateCommit, StateRevisionGuard, StorageError, StorageErrorKind, WorkerPoolId,
-    WorkerSlotAuthority, WorkerSlotRecord, WorkerSlotState,
+    RepositorySchedulerCancellationRequest, RepositorySchedulerScope, SqliteStorage, StateCommit,
+    StateRevisionGuard, StorageError, StorageErrorKind, WorkerPoolId, WorkerSlotAuthority,
+    WorkerSlotRecord, WorkerSlotState, receipt_scope_key,
 };
 
 #[path = "product_session_api.rs"]
@@ -60,6 +62,7 @@ pub use chat::{
     ProductSessionTurnIntent, ProductSessionTurnState, ProductSessionTurnTerminalOutcome,
     RecordAssistantTerminalCommand, SubmitChatMessageCommand, product_session_state_filters,
 };
+pub use winwincode_session::ProductSessionState;
 use chat::{
     PersistedCancellation, PersistedChatMessage, PersistedExecutionCancellationRoutes,
     PersistedTurnIntent, PersistedTurnState,
@@ -140,6 +143,29 @@ pub trait ProductSessionPersistence: ProductStateStorage {
         )>,
         StorageError,
     >;
+
+    /// Lists scheduler jobs under a repository scope for cancelled-route recovery.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the scheduler cannot be opened or read.
+    fn list_scheduler_jobs(
+        &mut self,
+        scope: &winwincode_storage::RepositorySchedulerScope,
+        states: &[winwincode_storage::ExecutionJobState],
+    ) -> Result<Vec<ExecutionJobRecord>, StorageError>;
+
+    /// Releases a queued/running execution-admission reservation for a cancelled job.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when admission cannot be read or released.
+    fn release_cancelled_execution_admission(
+        &mut self,
+        job_id: &ExecutionJobId,
+        request_id: &RequestId,
+        released_at: &Instant,
+    ) -> Result<(), StorageError>;
 }
 
 impl ProductSessionPersistence for SqliteStorage {
@@ -155,31 +181,76 @@ impl ProductSessionPersistence for SqliteStorage {
         request: &winwincode_storage::RepositorySchedulerCancellationRequest,
     ) -> Result<(), StorageError> {
         let receipt = self.repository_scheduler()?.request_cancellation(request)?;
-        if receipt.worker_session_id.is_none() {
-            let mut admission = self
-                .execution_admission()
+        // Always reclaim non-terminal admission after a durable cancel, even
+        // when a Worker route exists. Recovery after process exit must free
+        // org concurrency without waiting for a Worker that may be gone.
+        let _ = receipt.worker_session_id;
+        let mut admission = self
+            .execution_admission()
+            .map_err(|error| StorageError::adapter(error.to_string()))?;
+        if let Some(reservation) = admission
+            .load_reservation_by_job(&request.job_id)
+            .map_err(|error| StorageError::adapter(error.to_string()))?
+            && matches!(
+                reservation.state,
+                ExecutionReservationState::Queued | ExecutionReservationState::Running
+            )
+        {
+            admission
+                .release(&ExecutionReservationRelease {
+                    scope: reservation.scope,
+                    worker_pool_id: reservation.worker_pool_id,
+                    job_id: request.job_id.clone(),
+                    request_id: request.request_id.clone(),
+                    expected_revision: reservation.revision,
+                    reason: ExecutionReservationReleaseReason::Cancelled,
+                    released_at: request.requested_at.clone(),
+                })
                 .map_err(|error| StorageError::adapter(error.to_string()))?;
-            if let Some(reservation) = admission
-                .load_reservation_by_job(&request.job_id)
-                .map_err(|error| StorageError::adapter(error.to_string()))?
-                && matches!(
-                    reservation.state,
-                    ExecutionReservationState::Queued | ExecutionReservationState::Running
-                )
-            {
-                admission
-                    .release(&winwincode_storage::ExecutionReservationRelease {
-                        scope: reservation.scope,
-                        worker_pool_id: reservation.worker_pool_id,
-                        job_id: request.job_id.clone(),
-                        request_id: request.request_id.clone(),
-                        expected_revision: reservation.revision,
-                        reason: winwincode_storage::ExecutionReservationReleaseReason::Cancelled,
-                        released_at: request.requested_at.clone(),
-                    })
-                    .map_err(|error| StorageError::adapter(error.to_string()))?;
-            }
         }
+        Ok(())
+    }
+
+    fn list_scheduler_jobs(
+        &mut self,
+        scope: &winwincode_storage::RepositorySchedulerScope,
+        states: &[winwincode_storage::ExecutionJobState],
+    ) -> Result<Vec<ExecutionJobRecord>, StorageError> {
+        self.repository_scheduler()?.list_jobs(scope, states)
+    }
+
+    fn release_cancelled_execution_admission(
+        &mut self,
+        job_id: &ExecutionJobId,
+        request_id: &RequestId,
+        released_at: &Instant,
+    ) -> Result<(), StorageError> {
+        let mut admission = self
+            .execution_admission()
+            .map_err(|error| StorageError::adapter(error.to_string()))?;
+        let Some(reservation) = admission
+            .load_reservation_by_job(job_id)
+            .map_err(|error| StorageError::adapter(error.to_string()))?
+        else {
+            return Ok(());
+        };
+        if !matches!(
+            reservation.state,
+            ExecutionReservationState::Queued | ExecutionReservationState::Running
+        ) {
+            return Ok(());
+        }
+        admission
+            .release(&winwincode_storage::ExecutionReservationRelease {
+                scope: reservation.scope,
+                worker_pool_id: reservation.worker_pool_id,
+                job_id: job_id.clone(),
+                request_id: request_id.clone(),
+                expected_revision: reservation.revision,
+                reason: winwincode_storage::ExecutionReservationReleaseReason::Cancelled,
+                released_at: released_at.clone(),
+            })
+            .map_err(|error| StorageError::adapter(error.to_string()))?;
         Ok(())
     }
 
@@ -1263,6 +1334,99 @@ impl<'storage> ProductSessionService<'storage> {
             .collect()
     }
 
+    /// Replays durable cancelled-session cancel routes onto the queue after a
+    /// process exit between the ProductSession catalog commit and the
+    /// RepositoryScheduler cancel commit (y2es).
+    ///
+    /// Uses the same request-identity formula as the original cancel. Jobs
+    /// that are still `queued`/`leased`/`running` are cancelled under that
+    /// identity; orphaned admission reservations for every routed job are
+    /// reclaimed. Re-running is idempotent and never rewrites Worker or
+    /// request identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage/corruption error when durable state cannot be read
+    /// or a recovery cancellation cannot be committed.
+    pub fn reconcile_cancelled_session_routes(
+        &mut self,
+        public_scope: &PublicEventScope,
+    ) -> Result<usize, ProductSessionServiceError> {
+        let PublicEventScope::Repository {
+            organization_id,
+            workspace_id,
+            project_id,
+            repository_id,
+        } = public_scope
+        else {
+            return Ok(0);
+        };
+        let scope_key = receipt_scope_key(public_scope).map_err(|error| storage_error(&error))?;
+        let catalog = self.load_catalog(&scope_key)?;
+        let scheduler_scope = RepositorySchedulerScope {
+            organization_id: organization_id.clone(),
+            workspace_id: workspace_id.clone(),
+            project_id: project_id.clone(),
+            repository_id: repository_id.clone(),
+        };
+        let jobs = self
+            .storage
+            .list_scheduler_jobs(&scheduler_scope, &[])
+            .map_err(|error| storage_error(&error))?;
+        let mut applied = 0_usize;
+        for session in catalog.sessions.values() {
+            if !matches!(
+                session.session.state(),
+                ProductSessionState::Cancelled | ProductSessionState::Closed
+            ) {
+                continue;
+            }
+            let Some(cancel) = &session.cancellation else {
+                continue;
+            };
+            for route in &cancel.routes {
+                let request_id = session_route_cancel_request_id(
+                    &cancel.request_id,
+                    &route.execution_job_id,
+                );
+                let requested_at = session.session.updated_at().clone();
+                let Some(job) = jobs
+                    .iter()
+                    .find(|job| job.job_id == route.execution_job_id)
+                else {
+                    continue;
+                };
+                if matches!(
+                    job.state,
+                    ExecutionJobState::Queued
+                        | ExecutionJobState::Leased
+                        | ExecutionJobState::Running
+                ) {
+                    self.storage
+                        .request_product_session_cancellation(
+                            &RepositorySchedulerCancellationRequest {
+                                scope: scheduler_scope.clone(),
+                                job_id: route.execution_job_id.clone(),
+                                request_id: request_id.clone(),
+                                expected_revision: job.revision,
+                                requested_at: requested_at.clone(),
+                            },
+                        )
+                        .map_err(|error| storage_error(&error))?;
+                    applied += 1;
+                }
+                self.storage
+                    .release_cancelled_execution_admission(
+                        &route.execution_job_id,
+                        &request_id,
+                        &requested_at,
+                    )
+                    .map_err(|error| storage_error(&error))?;
+            }
+        }
+        Ok(applied)
+    }
+
     fn replay(
         &self,
         context: &ProductSessionCommandContext,
@@ -2098,6 +2262,23 @@ fn require_revision(
 
 pub(crate) fn catalog_stream_id(scope: &ReceiptScopeKey) -> String {
     format!("product-sessions:{:x}", Sha256::digest(scope.as_bytes()))
+}
+
+/// Stable queue-cancellation request identity for one ProductSession cancel
+/// route. The original cancel and post-crash recovery share this formula so
+/// recovery never invents a second request identity.
+pub(crate) fn session_route_cancel_request_id(
+    session_request_id: &RequestId,
+    job_id: &ExecutionJobId,
+) -> RequestId {
+    let digest = format!(
+        "{:X}",
+        Sha256::digest(format!(
+            "{}:{}",
+            session_request_id.0, job_id.0
+        ))
+    );
+    RequestId(format!("req_0{}", &digest[..25]))
 }
 
 fn command_digest(

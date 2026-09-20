@@ -1,10 +1,21 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: Apache-2.0
+/**
+ * GLM UI rework vertical on the Device-only production path.
+ *
+ * Real GLM secrets are Device-local only. The Server never receives
+ * WWC_SERVER_MODEL_* variables.
+ */
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, writeFileSync, readFileSync, readdirSync } from 'node:fs'
 import { resolve, join } from 'node:path'
-import { runApiProductionVertical, workItemCreatePayload } from './run-api-production-vertical.mjs'
+import {
+  runApiProductionVertical,
+  workItemCreatePayload,
+  deviceOnlyServerEnvironment,
+  assertServerEnvironmentIsDeviceOnly,
+} from './run-api-production-vertical.mjs'
 
 const directory = resolve('test-results/glm-ui-rework', new Date().toISOString().replaceAll(':', '-'))
 mkdirSync(directory, { recursive: true, mode: 0o700 })
@@ -25,12 +36,18 @@ for (const path of ['tests/chat-touch-target.test.mjs', 'tests/fixtures/real-bro
 files['package.json'] = JSON.stringify({ private: true, type: 'module', scripts: { verify: 'node --test tests/chat-touch-target.test.mjs' } })
 const baselineCss = files[targetPath]
 assert.ok(baselineCss?.includes('.wwc-chat'), 'The existing Chat source is required')
-const report = { model: process.env.ZHIPU_MODEL, baselineCssSource: replayArguments[1] ?? targetPath, steps: [], complete: false }
+const report = {
+  model: process.env.ZHIPU_MODEL,
+  execution: 'device-worker-only',
+  baselineCssSource: replayArguments[1] ?? targetPath,
+  steps: [],
+  complete: false,
+}
 const save = () => writeFileSync(join(directory, 'result.json'), JSON.stringify(report, null, 2))
-function preservePages(root) {
-  for (const entry of readdirSync(root, { withFileTypes: true })) {
+function preservePages(rootPath) {
+  for (const entry of readdirSync(rootPath, { withFileTypes: true })) {
     if (entry.name.startsWith('.') || entry.name === 'provider-secrets' || entry.name === 'publication-secrets') continue
-    const path = join(root, entry.name)
+    const path = join(rootPath, entry.name)
     if (entry.isDirectory()) preservePages(path)
     else if (path.endsWith('/' + targetPath)) {
       const content = readFileSync(path, 'utf8')
@@ -42,27 +59,43 @@ for (const name of ['ZHIPU_API_KEY', 'ZHIPU_BASE_URL', 'ZHIPU_MODEL']) assert.ok
 const url = new URL(process.env.ZHIPU_BASE_URL)
 assert.equal(url.protocol, 'https:')
 assert.ok(!url.username && !url.password && !url.search && !url.hash)
-const endpoint = url.href.replace(/\/$/u, '') + '/v1/messages'
 writeFileSync(join(directory, 'before-chat.css'), baselineCss)
 writeFileSync(join(directory, 'source-paths.json'), JSON.stringify(sourcePaths, null, 2))
+
+const deviceProviderSecrets = [process.env.ZHIPU_API_KEY]
+const deviceRoute = {
+  providerId: 'zhipu-glm',
+  modelId: process.env.ZHIPU_MODEL,
+  clientNodeId: null,
+}
+const serverEnvironment = deviceOnlyServerEnvironment({
+  WWC_DEBUG_RUNTIME: '1',
+  WWC_DEBUG_RUNTIME_LOG: join(directory, 'runtime.log'),
+  WWC_SERVER_EXECUTION_LEASE_SECONDS: '600',
+})
+assertServerEnvironmentIsDeviceOnly(serverEnvironment)
+
 try {
   await runApiProductionVertical({
     directory,
     restart: false,
     repeat: false,
-    serverEnvironment: {
-      WWC_SERVER_EXECUTION_LEASE_SECONDS: '600',
-      WWC_DEBUG_RUNTIME: '1',
-      WWC_DEBUG_RUNTIME_LOG: join(directory, 'runtime.log'),
-      WWC_SERVER_MODEL_PROVIDER_ID: 'zhipu-glm',
-      WWC_SERVER_MODEL_ID: process.env.ZHIPU_MODEL,
-      WWC_SERVER_MODEL_ANTHROPIC_ENDPOINT: endpoint,
-      WWC_SERVER_MODEL_API_KEY: process.env.ZHIPU_API_KEY,
-    },
+    devicePrerequisites: true,
+    deviceRoute,
+    deviceProviderSecrets,
+    wwcBinary: process.env.WWC_CLI_BINARY ?? resolve('target/debug/wwc'),
+    serverEnvironment,
     timeoutMillis: 600_000,
     scenario: {
       files,
-      async run({ api, baseline }) {
+      async run({ api, baseline, modelRoute, devicePath }) {
+        assert.ok(devicePath, 'GLM UI rework vertical must run after Device prerequisites')
+        report.devicePath = {
+          publicClientId: devicePath.publicClientId,
+          repositoryBindingId: devicePath.repositoryBindingId,
+          steps: [...devicePath.steps],
+        }
+        report.modelRoute = modelRoute
         const get = async () => (await api.query('delivery.get', { deliveryId })).result
         const aggregate = async () => (await api.query('workrun.get', { deliveryId, workItemId: null, atCursor: null })).result
         const command = async (name, payload) => {
@@ -109,7 +142,7 @@ try {
         for (const profile of ['reviewer', 'verifier']) {
           const previous = new Set(runs.runs.map(run => run.id))
           await command('workrun.start', { deliveryId, dispatchProfile: profile, rework: null })
-          const deadline = Date.now() + 600_000
+          const profileDeadline = Date.now() + 600_000
           let consumer
           do {
             try {
@@ -122,7 +155,7 @@ try {
             }
             if (consumer && ['settled', 'failed', 'cancelled'].includes(consumer.state)) break
             await new Promise(r => setTimeout(r, 1000))
-          } while (Date.now() < deadline)
+          } while (Date.now() < profileDeadline)
           assert.equal(consumer?.state, 'settled', `${profile} must settle its own read-only run`)
         }
         const candidate = (await get()).currentCandidate

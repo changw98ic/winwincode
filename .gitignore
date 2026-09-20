@@ -45,5 +45,9 @@ source-repositories/
 # Local browser-review artifacts and beads machine state
 .playwright-mcp/
 .tmp-ui-review/
+.codegraph/
+.playwright-cli/
+wwc-*.png
+$DB
 .beads/dolt-backup.json
 .beads/dolt-backup-state.json

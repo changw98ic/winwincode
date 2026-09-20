@@ -368,8 +368,24 @@ function summary() {
   if (panel === null) return { present: false }
   // The panel is the secret boundary. The host settings page legitimately
   // renders credential references, so only the panel text is scanned.
-  const leak = panel.textContent.includes(SECRET_MARKER)
-    || panel.textContent.includes(CREDENTIAL_MARKER)
+  const attributes = [...panel.querySelectorAll('*')]
+    .flatMap(node => node.getAttributeNames().map(name => `${name}=${node.getAttribute(name)}`))
+  const visible = [panel.textContent, ...attributes].join(' ')
+  const leakMarkers = [
+    SECRET_MARKER,
+    CREDENTIAL_MARKER,
+    'git-candidate:sha256:',
+    'agt_',
+    'wrk_',
+    'wss_',
+    'thr_',
+    'rep_',
+    'runtime:',
+    '[INTERNAL ID]',
+    '[CANDIDATE]',
+    '[SOURCE REF]',
+  ]
+  const foundLeaks = leakMarkers.filter(marker => visible.includes(marker))
   return {
     present: true,
     heading: panel.querySelector('.wwc-usage-health-heading')?.textContent ?? '',
@@ -378,15 +394,12 @@ function summary() {
     capacityState: panel.querySelector('.wwc-usage-health-capacity')?.dataset.capacityState ?? null,
     liveRegions: document.querySelectorAll('.wwc-usage-health [aria-live="polite"]').length,
     deliveries: [...panel.querySelectorAll('.wwc-usage-health-delivery')].map(row => ({
-      key: row.dataset.key,
       usage: row.querySelector('.wwc-usage-health-row-usage')?.textContent ?? '',
     })),
     workRuns: [...panel.querySelectorAll('.wwc-usage-health-work-run')].map(row => ({
-      key: row.dataset.key,
       unknown: row.dataset.unknown,
     })),
     providers: [...panel.querySelectorAll('.wwc-usage-health-provider')].map(row => ({
-      key: row.dataset.key,
       state: row.dataset.providerState,
     })),
     models: [...panel.querySelectorAll('.wwc-usage-health-model')].length,
@@ -409,7 +422,8 @@ function summary() {
     unknownMarkers: [...panel.querySelectorAll('.wwc-usage-health-unknown')].map(
       node => node.dataset.unknown,
     ),
-    leak,
+    leak: foundLeaks.length > 0,
+    leakMarkers: foundLeaks,
   }
 }
 

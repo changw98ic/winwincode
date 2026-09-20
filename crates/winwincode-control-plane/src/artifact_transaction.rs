@@ -757,6 +757,10 @@ fn validate_chunk_shape(message: &ArtifactChunkMessage) -> Result<(), StorageErr
         ));
     }
     let content_type = message.payload.content_type.as_bytes();
+    // Open accepts any bounded mediaType string; chunk contentType must accept
+    // the same production diagnostic media types, including RFC 6838
+    // parameters such as `text/plain; charset=utf-8`. Rejecting parameters
+    // after open accepts them leaves the Worker durable outbox pending forever.
     if content_type.is_empty()
         || content_type.len() > 200
         || !content_type[0].is_ascii_alphanumeric()
@@ -764,7 +768,23 @@ fn validate_chunk_shape(message: &ArtifactChunkMessage) -> Result<(), StorageErr
             byte.is_ascii_alphanumeric()
                 || matches!(
                     byte,
-                    b'!' | b'#' | b'$' | b'&' | b'^' | b'_' | b'.' | b'+' | b'-' | b'/'
+                    b'!'
+                        | b'#'
+                        | b'$'
+                        | b'&'
+                        | b'^'
+                        | b'_'
+                        | b'.'
+                        | b'+'
+                        | b'-'
+                        | b'/'
+                        | b';'
+                        | b'='
+                        | b' '
+                        | b'*'
+                        | b'\''
+                        | b'|'
+                        | b'%'
                 )
         })
     {

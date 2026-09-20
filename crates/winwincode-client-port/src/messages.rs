@@ -50,6 +50,7 @@ use crate::domain::RepositoryBindingProjection;
 use crate::domain::RepositoryDirtyState;
 use crate::domain::WorkerLaunchAckStatus;
 use crate::domain::WorkerLaunchGrant;
+use crate::managed_app::{ManagedAppCommand, ManagedAppStatus};
 
 /// Current `schemaVersion` of the `ClientControlPort` wire contract
 /// (domain schema `SchemaVersion`).
@@ -409,6 +410,20 @@ pub struct ClientCommandAckPayload {
     pub error: Option<ClientControlError>,
 }
 
+/// Device result for one managed application lifecycle command.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ClientManagedAppStatusPayload {
+    #[serde(rename = "commandMessageId")]
+    pub command_message_id: String,
+    pub status: ManagedAppStatus,
+}
+
+/// Server command for the Device-owned managed application lifecycle.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ServerManagedAppCommandPayload {
+    pub command: ManagedAppCommand,
+}
+
 /// A client-to-server `ClientControlPort` message (plan section 9.3).
 ///
 /// Serialized as a `kind`/`payload` pair using the plan's exact kind strings.
@@ -474,6 +489,9 @@ pub enum ClientToServerMessage {
     /// Device acknowledges a server-to-client command.
     #[serde(rename = "client.command_ack")]
     CommandAck(ClientCommandAckPayload),
+    /// Device reports a managed application lifecycle state.
+    #[serde(rename = "client.managed_app.status")]
+    ManagedAppStatus(ClientManagedAppStatusPayload),
 }
 
 /// Payload of `client.enrollment_accepted` (plan section 9.4, 11.4).
@@ -702,6 +720,9 @@ pub enum ServerToClientMessage {
     /// Server requests a device credential rotation.
     #[serde(rename = "client.credential_rotate")]
     CredentialRotate(ServerCredentialRotatePayload),
+    /// Server controls one Device-owned managed application process group.
+    #[serde(rename = "client.managed_app.command")]
+    ManagedAppCommand(ServerManagedAppCommandPayload),
 }
 
 #[cfg(test)]

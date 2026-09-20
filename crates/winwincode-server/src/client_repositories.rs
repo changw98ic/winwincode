@@ -25,11 +25,12 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 use serde_json::json;
+use winwincode_client_port::managed_app::ManagedAppRunTemplate;
 use winwincode_control_plane::ClientRegistryService;
 use winwincode_control_plane::RepositoryBindingService;
 use winwincode_storage::ClientPresenceState;
 use winwincode_storage::RepositoryBindingRecord;
-use winwincode_storage::SqliteStorage;
+use winwincode_storage::{ManagedAppRunTemplateRecord, SqliteStorage};
 
 /// Schema version of the public browser-facing repository directory.
 const SUPPORTED_SCHEMA_VERSION: &str = "winwincode/v1";
@@ -165,6 +166,120 @@ impl ClientRepositoriesApplication {
         Ok(json!({
             "schemaVersion": SUPPORTED_SCHEMA_VERSION,
             "repositories": repositories,
+        }))
+    }
+
+    /// Saves one authenticated repository managed-app template. The binding
+    /// visibility check is the project/device settings authorization boundary;
+    /// the template has no run or candidate identity and cannot start a run.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Unavailable` for malformed input, a missing binding, or a
+    /// storage failure so callers do not reveal repository ownership.
+    pub fn save_managed_app_template(
+        &self,
+        user_id: &str,
+        repository_binding_id: &str,
+        value: Value,
+    ) -> Result<Value, ClientRepositoriesError> {
+        let template: ManagedAppRunTemplate =
+            serde_json::from_value(value).map_err(|_| ClientRepositoriesError::unavailable())?;
+        template
+            .validate()
+            .map_err(|_| ClientRepositoriesError::unavailable())?;
+        let mut storage = self.open_storage()?;
+        let binding = {
+            let mut bindings = RepositoryBindingService::new(&mut storage);
+            bindings
+                .snapshot(repository_binding_id)
+                .map_err(|_| ClientRepositoriesError::unavailable())?
+                .ok_or_else(ClientRepositoriesError::unavailable)?
+        };
+        let visible = {
+            let mut bindings = RepositoryBindingService::new(&mut storage);
+            bindings
+                .visible_bindings(user_id, &binding.client_node_id)
+                .map_err(|_| ClientRepositoriesError::unavailable())?
+                .into_iter()
+                .any(|record| record.repository_binding_id == repository_binding_id)
+        };
+        if !visible {
+            return Err(ClientRepositoriesError::unavailable());
+        }
+        let revision = storage
+            .load_managed_app_run_template(repository_binding_id)
+            .map_err(|_| ClientRepositoriesError::unavailable())?
+            .map_or(1, |record| record.revision.saturating_add(1));
+        storage
+            .save_managed_app_run_template(&ManagedAppRunTemplateRecord {
+                repository_binding_id: repository_binding_id.to_owned(),
+                revision,
+                template_json: serde_json::to_vec(&template)
+                    .map_err(|_| ClientRepositoriesError::unavailable())?,
+            })
+            .map_err(|_| ClientRepositoriesError::unavailable())?;
+        Ok(json!({
+            "schemaVersion": template.schema_version,
+            "repositoryBindingId": repository_binding_id,
+            "revision": revision,
+        }))
+    }
+
+    /// Reads the authenticated repository managed-app template. A missing
+    /// template is an ordinary empty settings state; the response keeps the
+    /// binding identity and revision fields explicit so a browser refresh can
+    /// distinguish "not configured" from an unavailable repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Unavailable` when the binding is not visible to the user or
+    /// the durable template cannot be decoded.
+    pub fn load_managed_app_template(
+        &self,
+        user_id: &str,
+        repository_binding_id: &str,
+    ) -> Result<Value, ClientRepositoriesError> {
+        let mut storage = self.open_storage()?;
+        let binding = {
+            let mut bindings = RepositoryBindingService::new(&mut storage);
+            bindings
+                .snapshot(repository_binding_id)
+                .map_err(|_| ClientRepositoriesError::unavailable())?
+                .ok_or_else(ClientRepositoriesError::unavailable)?
+        };
+        let visible = {
+            let mut bindings = RepositoryBindingService::new(&mut storage);
+            bindings
+                .visible_bindings(user_id, &binding.client_node_id)
+                .map_err(|_| ClientRepositoriesError::unavailable())?
+                .into_iter()
+                .any(|record| record.repository_binding_id == repository_binding_id)
+        };
+        if !visible {
+            return Err(ClientRepositoriesError::unavailable());
+        }
+        let record = storage
+            .load_managed_app_run_template(repository_binding_id)
+            .map_err(|_| ClientRepositoriesError::unavailable())?;
+        let Some(record) = record else {
+            return Ok(json!({
+                "schemaVersion": SUPPORTED_SCHEMA_VERSION,
+                "repositoryBindingId": repository_binding_id,
+                "revision": null,
+                "template": null,
+            }));
+        };
+        let template: ManagedAppRunTemplate = serde_json::from_slice(&record.template_json)
+            .map_err(|_| ClientRepositoriesError::unavailable())?;
+        template
+            .validate()
+            .map_err(|_| ClientRepositoriesError::unavailable())?;
+        Ok(json!({
+            "schemaVersion": SUPPORTED_SCHEMA_VERSION,
+            "repositoryBindingId": repository_binding_id,
+            "revision": record.revision,
+            "template": template,
         }))
     }
 

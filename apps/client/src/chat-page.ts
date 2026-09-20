@@ -60,6 +60,9 @@ export interface ChatPageOptions {
   readonly nowMillis?: () => number
   /** Presentation-only capability; Server authorization remains authoritative. */
   readonly readOnly?: boolean
+  /** Renderer seams for deterministic DOM tests; production uses the DSH renderers. */
+  readonly mountAttachments?: typeof mountChatAttachments
+  readonly mountMarkdown?: typeof mountChatMarkdown
 }
 
 export interface ChatPage {
@@ -359,7 +362,8 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   const delegationRefresh = element(document, 'button', 'wwc-chat-delegations-refresh')
   delegationRefresh.type = 'button'
   delegationRefresh.textContent = '刷新任务'
-  delegationRefresh.addEventListener('click', () => { void options.deliveries?.refresh() })
+  const onDelegationRefresh = () => { void options.deliveries?.refresh() }
+  delegationRefresh.addEventListener('click', onDelegationRefresh)
   const newDelegation = mountButton({ document, props: { className: 'wwc-chat-new-delegation', label: '新建委托', type: 'button' } })
   delegationPanel.id = 'wwc-chat-delegations'
   delegationPanel.append(delegationStatus, delegationList, delegationRefresh, newDelegation.root)
@@ -409,16 +413,19 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
     ['实现一个功能', '帮我实现一个功能'],
     ['解释一段代码', '请解释这段代码的作用'],
   ] as const
+  const starterBindings: [HTMLButtonElement, () => void][] = []
   for (const [label, value] of starters) {
     const button = element(document, 'button', 'wwc-chat-starter')
     button.type = 'button'
     button.textContent = label
-    button.addEventListener('click', () => {
+    const activate = () => {
       composer.value = value
       resizeComposer()
       composer.focus()
       onComposerInput()
-    })
+    }
+    button.addEventListener('click', activate)
+    starterBindings.push([button, activate])
     starterList.append(button)
   }
   empty.append(emptyMessage, starterList)
@@ -714,7 +721,11 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   )
   layout.append(conversation)
   options.root.replaceChildren(layout)
-  const attachments = mountChatAttachments(form, attach, () => render(options.model.state))
+  const attachments = (options.mountAttachments ?? mountChatAttachments)(
+    form,
+    attach,
+    () => render(options.model.state),
+  )
   const attachmentHint = form.querySelector('small')
   const onAttachmentButtonClick = () => { if (attachmentHint !== null) attachmentHint.hidden = false }
   if (attachmentHint !== null) {
@@ -766,7 +777,9 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
       badge.className = 'wwc-chat-message-state'
       article.append(role, content, badge, artifacts)
       item.append(article)
-      const markdown = message.role === 'assistant' ? mountChatMarkdown(content) : null
+      const markdown = message.role === 'assistant'
+        ? (options.mountMarkdown ?? mountChatMarkdown)(content)
+        : null
       messageRows.set(item, { article, role, content, badge, artifacts, markdown })
       return item
     },
@@ -1196,19 +1209,20 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   }
   const onRetry = () => { void options.model.refresh() }
   const onLoadEarlier = () => { void options.model.loadMoreMessages() }
+  const onDelegationPanelKeyDown = (event: KeyboardEvent) => {
+    if (event.key !== 'Escape') return
+    event.preventDefault()
+    delegationPanel.hidden = true
+    delegationChip.root.setAttribute('aria-expanded', 'false')
+    delegationChip.root.focus()
+  }
 
   composer.addEventListener('input', onComposerInput)
   modelSelect.addEventListener('change', onModelRouteChange)
   composer.addEventListener('keydown', onComposerKeydown)
   form.addEventListener('submit', onComposerSubmit)
   conversionForm.addEventListener('submit', onConversionSubmit)
-  delegationPanel.addEventListener('keydown', event => {
-    if (event.key !== 'Escape') return
-    event.preventDefault()
-    delegationPanel.hidden = true
-    delegationChip.root.setAttribute('aria-expanded', 'false')
-    delegationChip.root.focus()
-  })
+  delegationPanel.addEventListener('keydown', onDelegationPanelKeyDown)
   conversion.addEventListener('keydown', onConversionKeyDown)
   cancel.addEventListener('click', onCancel)
   retry.addEventListener('click', onRetry)
@@ -1243,11 +1257,14 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
       if (deliveryTimer !== null) clearInterval(deliveryTimer)
       options.deliveries?.close()
       composer.removeEventListener('input', onComposerInput)
+      delegationRefresh.removeEventListener('click', onDelegationRefresh)
+      for (const [button, activate] of starterBindings) button.removeEventListener('click', activate)
       attach.removeEventListener('click', onAttachmentButtonClick)
       modelSelect.removeEventListener('change', onModelRouteChange)
       composer.removeEventListener('keydown', onComposerKeydown)
       form.removeEventListener('submit', onComposerSubmit)
       conversionForm.removeEventListener('submit', onConversionSubmit)
+      delegationPanel.removeEventListener('keydown', onDelegationPanelKeyDown)
       conversion.removeEventListener('keydown', onConversionKeyDown)
       cancel.removeEventListener('click', onCancel)
       retry.removeEventListener('click', onRetry)

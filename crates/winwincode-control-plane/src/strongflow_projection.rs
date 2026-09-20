@@ -17,13 +17,13 @@ mod sources;
 use std::fmt;
 
 use winwincode_api::generated::{
-    CandidateDiffGetQuery, CandidateFilesListQuery, CandidateHistoricalReviewGetQuery,
-    CandidateHistoryListQuery, DeliveryGetQuery, DeliveryGetResultResponse,
-    DeliveryGetResultResponseQuery, ErrorCode, EvidenceArtifactContentGetQuery, EvidenceGetQuery,
-    PageInfo, QueryResultResponse, RuntimeProjectionGetParameters, RuntimeProjectionGetQuery,
-    RuntimeProjectionGetResultResponse, RuntimeProjectionGetResultResponseQuery,
-    WorkRunDeviceBindingProjection, WorkRunGetQuery, WorkRunGetResultResponse,
-    WorkRunGetResultResponseQuery,
+    CandidateDiffGetQuery, CandidateFileContentGetQuery, CandidateFilesListQuery,
+    CandidateHistoricalReviewGetQuery, CandidateHistoryListQuery, DeliveryGetQuery,
+    DeliveryGetResultResponse, DeliveryGetResultResponseQuery, ErrorCode,
+    EvidenceArtifactContentGetQuery, EvidenceGetQuery, PageInfo, QueryResultResponse,
+    RuntimeProjectionGetParameters, RuntimeProjectionGetQuery, RuntimeProjectionGetResultResponse,
+    RuntimeProjectionGetResultResponseQuery, WorkRunDeviceBindingProjection, WorkRunGetQuery,
+    WorkRunGetResultResponse, WorkRunGetResultResponseQuery,
 };
 use winwincode_domain::{SchemaVersion, is_canonical_delivery_id};
 
@@ -167,6 +167,17 @@ pub trait StrongFlowProjectionQueryPort {
     fn candidate_diff_get(
         &self,
         query: &CandidateDiffGetQuery,
+    ) -> Result<QueryResultResponse, StrongFlowProjectionError>;
+
+    /// Returns one bounded byte range from the exact current-Candidate file.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed on path traversal, over-limit ranges, foreign/stale
+    /// Candidate bindings, deleted/non-blob paths, or unavailable Git facts.
+    fn candidate_file_content_get(
+        &self,
+        query: &CandidateFileContentGetQuery,
     ) -> Result<QueryResultResponse, StrongFlowProjectionError>;
 
     /// Returns a stable page of Candidates observed through one exact delivery
@@ -397,7 +408,7 @@ impl StrongFlowProjectionQueryPort for ControlPlane {
                 schema_version: SchemaVersion::WinwincodeV1,
                 request_id: query.request_id.clone(),
                 query: WorkRunGetResultResponseQuery::WorkRunGet,
-                result: mapping::workrun_aggregate(aggregate, device_bindings, read_cursor),
+                result: mapping::workrun_aggregate(self, aggregate, device_bindings, read_cursor)?,
                 page: page(),
             },
         ))
@@ -415,6 +426,13 @@ impl StrongFlowProjectionQueryPort for ControlPlane {
         query: &CandidateDiffGetQuery,
     ) -> Result<QueryResultResponse, StrongFlowProjectionError> {
         candidate_review::diff_get(self, query)
+    }
+
+    fn candidate_file_content_get(
+        &self,
+        query: &CandidateFileContentGetQuery,
+    ) -> Result<QueryResultResponse, StrongFlowProjectionError> {
+        candidate_review::file_content_get(self, query)
     }
 
     fn candidate_history_list(

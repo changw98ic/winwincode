@@ -106,6 +106,11 @@ fn durable_sources_resolve_one_replay_stable_production_verdict() {
             .clone_from(&binding.fencing_token.as_ref().expect("fence").0);
         run.worker_id = binding.worker_id.clone().expect("worker");
         run.worker_instance_id = binding.worker_instance_id.clone().expect("worker instance");
+        if binding.execution_profile.as_deref() == Some("executor") {
+            // Production freezes Commit evidence only after the writer candidate
+            // is sealed into CandidateReady/Settled.
+            run.state = winwincode_domain::WorkRunState::CandidateReady;
+        }
     }
     let delivery = Delivery::try_from_snapshot(snapshot).expect("production Delivery");
     let scope = ReceiptScopeKey::from_encoded(b"repository:project-one".to_vec()).expect("scope");
@@ -186,11 +191,30 @@ fn durable_sources_resolve_one_replay_stable_production_verdict() {
     let (candidate, verification, evidence, produced_at_millis) = first.into_parts();
     assert_eq!(candidate.candidate_commit_id(), candidate_commit);
     assert_eq!(verification.settlements().len(), 2);
-    assert_eq!(evidence.len(), 2);
+    // Runtime command evidence plus one executor Commit sealed from the frozen
+    // candidate that freeze_source rebuilt from the real Worker artifact.
+    assert_eq!(evidence.len(), 3);
     assert!(
         evidence
             .iter()
             .all(|item| item.evidence().candidate_ref == candidate.candidate_ref())
+    );
+    let commits = evidence
+        .iter()
+        .filter(|item| {
+            item.evidence().evidence_type == winwincode_delivery::domain::EvidenceRefType::Commit
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(commits.len(), 1);
+    let commit = commits[0].evidence();
+    assert_eq!(
+        commit.source_ref,
+        format!("git_commit:{candidate_commit}")
+    );
+    assert_eq!(commit.work_run_id, *candidate.producer_work_run_id());
+    assert_eq!(
+        commit.session_binding_id,
+        *candidate.producer_session_binding_id()
     );
     assert!(produced_at_millis > 1_800_000_000_060);
 

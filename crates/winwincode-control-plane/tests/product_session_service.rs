@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use rusqlite::{Connection, params};
+use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
     ControlPlaneWebSocketProductSessionChangedEvent,
     ControlPlaneWebSocketProductSessionMessageAppendedEvent, ModelRoute,
@@ -1483,5 +1484,181 @@ fn metadata_and_attachments_survive_restart_and_preserve_execution() {
     assert_eq!(
         restored.record.session().state(),
         ProductSessionState::Running
+    );
+}
+
+/// y2es: inject a process exit after the ProductSession cancel catalog commit
+/// but before the RepositoryScheduler cancel commit. Recovery must cancel the
+/// job and release admission without user retry, without rewriting identity.
+#[test]
+fn cancelled_session_routes_reconcile_after_queue_cancel_commit_loss() {
+    let directory = TestDirectory::new("cancel-reconcile");
+    let scope_key = repository_scope_key();
+    let public_scope = public_scope(1);
+    let mut storage = SqliteStorage::open(&directory.0).expect("storage");
+    let execution_job_id = {
+        let mut service = ProductSessionService::new(&mut storage);
+        service
+            .create(&create_command(&scope_key, 55, 75, "Reconcile", 1))
+            .expect("session create");
+        service
+            .submit_chat(&submit_command(&scope_key, 55, 76, 1, "Run task", 2))
+            .expect("chat submit")
+            .turn_intent
+            .execution_job_id
+    };
+    prepare_worker(&mut storage, 1);
+    let (execution_scope, authority) =
+        prepare_slot_for_job(&mut storage, 55, None, execution_job_id.clone(), 55, 55, 55, 700);
+    {
+        let mut bind = continue_command(&scope_key, 55, 77, authority.clone(), execution_scope);
+        bind.context.expected_revision = 2;
+        bind.model_exchange_id = ModelExchangeId(id("mdl", 55));
+        ProductSessionService::new(&mut storage)
+            .continue_session(&bind)
+            .expect("bind submitted turn");
+    }
+    let cancel = CancelProductSessionCommand {
+        context: context(&scope_key, 78, 2, 10),
+        product_session_id: ProductSessionId(id("psn", 55)),
+        actor: AuthenticatedActor::User(UserId(id("usr", 1))),
+        reason: "user requested cancellation".into(),
+    };
+    let accepted = ProductSessionService::new(&mut storage)
+        .cancel_session(&cancel)
+        .expect("cancel session");
+    assert_eq!(accepted.routing.routes.len(), 1);
+    let original_revision = accepted.routing.routes[0].job.expected_revision;
+    let cancelled = storage
+        .execution_queue()
+        .expect("queue")
+        .load_job(
+            &winwincode_storage::ExecutionQueueScope {
+                organization_id: OrganizationId(id("org", 1)),
+                workspace_id: WorkspaceId(id("wsp", 1)),
+                project_id: ProjectId(id("prj", 1)),
+                repository_id: RepositoryId(id("rep", 1)),
+                delivery_id: None,
+                product_session_id: ProductSessionId(id("psn", 55)),
+            },
+            &execution_job_id,
+        )
+        .expect("job")
+        .expect("cancelled job");
+    assert_eq!(cancelled.state, winwincode_storage::ExecutionJobState::Cancelling);
+
+    // Inject the crash window: session cancel is durable, queue cancel is not.
+    {
+        let connection = Connection::open(directory.0.join("control-plane.sqlite3"))
+            .expect("open SQLite for crash fixture");
+        connection
+            .execute(
+                "UPDATE scheduler_execution_jobs
+                 SET state = 'running', revision = ?1,
+                     cancellation_request_id = NULL, cancellation_requested_at = NULL
+                 WHERE job_id = ?2",
+                params![i64::try_from(original_revision).expect("revision"), &execution_job_id.0],
+            )
+            .expect("restore job to pre-cancel state");
+        connection
+            .execute(
+                "DELETE FROM repository_scheduler_cancel_receipts
+                 WHERE response_json LIKE ?1",
+                params![format!("%{}%", execution_job_id.0)],
+            )
+            .expect("drop scheduler cancel receipts");
+        connection
+            .execute(
+                "DELETE FROM scheduler_execution_job_receipts
+                 WHERE job_id = ?1 AND operation = 'cancel'",
+                params![&execution_job_id.0],
+            )
+            .expect("drop queue cancel receipts");
+    }
+    drop(storage);
+
+    // Restart: recovery auto-aligns the queue without user retry.
+    let mut reopened = SqliteStorage::open(&directory.0).expect("restart after crash window");
+    let public_scope_for_recovery = public_scope.clone();
+    let applied = ProductSessionService::new(&mut reopened)
+        .reconcile_cancelled_session_routes(&public_scope_for_recovery)
+        .expect("reconcile cancelled routes");
+    assert_eq!(applied, 1, "one lost queue cancel is recovered");
+    let recovered = reopened
+        .execution_queue()
+        .expect("queue")
+        .load_job(
+            &winwincode_storage::ExecutionQueueScope {
+                organization_id: OrganizationId(id("org", 1)),
+                workspace_id: WorkspaceId(id("wsp", 1)),
+                project_id: ProjectId(id("prj", 1)),
+                repository_id: RepositoryId(id("rep", 1)),
+                delivery_id: None,
+                product_session_id: ProductSessionId(id("psn", 55)),
+            },
+            &execution_job_id,
+        )
+        .expect("job")
+        .expect("recovered job");
+    assert_eq!(
+        recovered.state,
+        winwincode_storage::ExecutionJobState::Cancelling
+    );
+    let reservation = reopened
+        .execution_admission()
+        .expect("admission")
+        .load_reservation_by_job(&execution_job_id)
+        .expect("reservation");
+    if let Some(reservation) = reservation {
+        assert!(
+            !matches!(
+                reservation.state,
+                winwincode_storage::ExecutionReservationState::Queued
+                    | winwincode_storage::ExecutionReservationState::Running
+            ),
+            "capacity must be released after recovery"
+        );
+    }
+
+    // Identity-stable replay: a second recovery does not invent a new request
+    // or rewrite Worker identity.
+    let again = ProductSessionService::new(&mut reopened)
+        .reconcile_cancelled_session_routes(&public_scope_for_recovery)
+        .expect("second reconcile");
+    assert_eq!(again, 0, "already-aligned routes are not re-cancelled");
+    let still = reopened
+        .execution_queue()
+        .expect("queue")
+        .load_job(
+            &winwincode_storage::ExecutionQueueScope {
+                organization_id: OrganizationId(id("org", 1)),
+                workspace_id: WorkspaceId(id("wsp", 1)),
+                project_id: ProjectId(id("prj", 1)),
+                repository_id: RepositoryId(id("rep", 1)),
+                delivery_id: None,
+                product_session_id: ProductSessionId(id("psn", 55)),
+            },
+            &execution_job_id,
+        )
+        .expect("job")
+        .expect("job still cancelled");
+    let expected_request_id = {
+        let digest = format!(
+            "{:X}",
+            Sha256::digest(format!(
+                "{}:{}",
+                cancel.context.receipt_identity.request_id().0,
+                execution_job_id.0
+            ))
+        );
+        format!("req_0{}", &digest[..25])
+    };
+    let cancellation = still
+        .cancellation
+        .as_ref()
+        .expect("recovered job keeps a durable cancellation");
+    assert_eq!(
+        cancellation.request_id.0, expected_request_id,
+        "recovery reuses the original derived request identity"
     );
 }

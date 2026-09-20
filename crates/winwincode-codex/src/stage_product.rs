@@ -16,8 +16,8 @@ use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use winwincode_domain::{SchemaVersion, Sha256Digest};
 use winwincode_execution_port::generated::{
-    ExecutionEventCategory, ExecutionJob, ExecutionScope, ExecutionWorkspaceWriteMode,
-    WorkRunExecutionScope, WorkRunInput,
+    ArtifactReference, ExecutionEventCategory, ExecutionJob, ExecutionScope,
+    ExecutionWorkspaceWriteMode, WorkRunExecutionScope, WorkRunInput,
 };
 use winwincode_kernel::{
     RoleExecutionMode, RoleSessionPolicy, RoleSessionPolicyRoleId, RoleSessionPolicyWorkspaceMode,
@@ -789,7 +789,7 @@ pub fn prepare_verification_policy_attestation(
 }
 
 /// Stable command outcome retained as direct verification evidence.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum VerificationEvidenceStatus {
     Completed,
@@ -821,6 +821,33 @@ pub fn prepare_verification_command_evidence(
     source_id: &str,
     command_digest: &Sha256Digest,
 ) -> Result<PreparedStageProduct, StageProductError> {
+    prepare_verification_command_evidence_with_artifact(
+        job,
+        kind,
+        status,
+        exit_code,
+        source_id,
+        command_digest,
+        None,
+    )
+}
+
+/// Prepares direct command/test evidence and binds it to the exact diagnostic
+/// Artifact reference retained for the same command.
+///
+/// # Errors
+///
+/// Returns an error when the job is not a verification role or any evidence
+/// field exceeds the bounded stage-product contract.
+pub fn prepare_verification_command_evidence_with_artifact(
+    job: &ExecutionJob,
+    kind: VerificationEvidenceKind,
+    status: VerificationEvidenceStatus,
+    exit_code: i64,
+    source_id: &str,
+    command_digest: &Sha256Digest,
+    artifact: Option<&ArtifactReference>,
+) -> Result<PreparedStageProduct, StageProductError> {
     ensure_verification_role(job)?;
     if i32::try_from(exit_code).is_err() || !bounded_text(source_id) {
         return Err(invalid_output());
@@ -835,6 +862,7 @@ pub fn prepare_verification_command_evidence(
             status,
             exit_code,
             command_digest,
+            artifact,
         },
         match kind {
             VerificationEvidenceKind::Command => "verification command produced direct evidence",
@@ -1188,6 +1216,8 @@ struct VerificationCommandEvidence<'source> {
     status: VerificationEvidenceStatus,
     exit_code: i64,
     command_digest: &'source Sha256Digest,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    artifact: Option<&'source ArtifactReference>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

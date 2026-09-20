@@ -57,6 +57,31 @@ export interface PageAnnotationDraft {
   readonly createdAt: string
 }
 
+export interface PageAnnotationPersisted {
+  readonly id: string
+  readonly body: string
+  readonly candidateRef: string
+  readonly workRunId: string
+  readonly target: {
+    readonly pagePath: string
+    readonly viewport: AnnotationViewport
+    readonly element: AnnotationElementSummary | null
+    readonly region: AnnotationScreenshotRegion
+  }
+  readonly updatedAt: string
+}
+
+export interface PageAnnotationTransport {
+  submit(input: {
+    readonly draft: PageAnnotationDraft
+    readonly expectedRevision: number
+  }): Promise<{ readonly annotation: PageAnnotationPersisted; readonly catalogRevision: number }>
+  list(input: { readonly deliveryId: string }): Promise<{
+    readonly items: readonly PageAnnotationPersisted[]
+    readonly catalogRevision: number
+  }>
+}
+
 export type AnnotationState =
   | { readonly status: 'idle' }
   | {
@@ -71,16 +96,25 @@ export type AnnotationState =
     readonly status: 'submitted'
     readonly drafts: readonly PageAnnotationDraft[]
   }
+  | {
+    readonly status: 'submitting'
+    readonly drafts: readonly PageAnnotationDraft[]
+  }
 
 export interface PageAnnotationViewModel {
   readonly state: AnnotationState
   subscribe(listener: (state: AnnotationState) => void): () => void
   prepare(input: {
+    /** Stable candidate/source binding; drafts never cross this boundary. */
+    readonly bindingKey?: string
     readonly pageUrl: string
     readonly pagePath: string
     readonly access: 'authorized' | 'revoked'
     readonly injectable: boolean
     readonly viewport: AnnotationViewport
+    readonly deliveryId?: string
+    readonly candidateRef?: string
+    readonly workRunId?: string
   }): void
   pickElement(summary: AnnotationElementSummary): void
   markScreenshotRegion(region: AnnotationScreenshotRegion): void
@@ -94,6 +128,7 @@ export interface PageAnnotationOptions {
   readonly now?: () => string
   readonly nextDraftId?: () => string
   readonly appOrigin: string
+  readonly transport?: PageAnnotationTransport
 }
 
 function sameOrigin(appOrigin: string, pageUrl: string): boolean {
@@ -168,6 +203,12 @@ export function createPageAnnotationViewModel(
   let comment = ''
   let pagePath = '/'
   let viewport = DEFAULT_VIEWPORT
+  let annotationBindingKey: string | null = null
+  let deliveryId: string | null = null
+  let candidateRef: string | null = null
+  let workRunId: string | null = null
+  let expectedRevision = 0
+  let restoreGeneration = 0
   let closed = false
 
   function emit(next: AnnotationState): void {
@@ -177,6 +218,42 @@ export function createPageAnnotationViewModel(
 
   function requireReady(): Extract<AnnotationState, { status: 'ready' }> | null {
     return state.status === 'ready' ? state : null
+  }
+
+  function persistedDraft(item: PageAnnotationPersisted): PageAnnotationDraft {
+    return Object.freeze({
+      id: item.id,
+      surfaceKind: item.target.element === null ? 'screenshot-coordinate' : 'injectable-element',
+      pagePath: item.target.pagePath,
+      viewport: item.target.viewport,
+      element: item.target.element,
+      region: item.target.region,
+      comment: item.body,
+      degradedReason: null,
+      createdAt: item.updatedAt,
+    })
+  }
+
+  async function restorePersisted(binding: string, requestedDeliveryId: string): Promise<void> {
+    const generation = ++restoreGeneration
+    try {
+      const result = await options.transport?.list({ deliveryId: requestedDeliveryId })
+      if (result === undefined || closed || generation !== restoreGeneration
+        || annotationBindingKey !== binding) return
+      expectedRevision = result.catalogRevision
+      const restored = result.items
+        .filter(item => (candidateRef === null || item.candidateRef === candidateRef)
+          && (workRunId === null || item.workRunId === workRunId))
+        .map(persistedDraft)
+      const current = requireReady()
+      if (current === null) return
+      emit({ ...current, drafts: Object.freeze(restored), notice: null })
+    } catch {
+      const current = requireReady()
+      if (current !== null && generation === restoreGeneration && annotationBindingKey === binding) {
+        emit({ ...current, notice: '已打开本地批注，历史批注暂时无法恢复。' })
+      }
+    }
   }
 
   return {
@@ -197,6 +274,22 @@ export function createPageAnnotationViewModel(
       })
       pagePath = input.pagePath
       viewport = input.viewport
+      deliveryId = input.deliveryId ?? null
+      candidateRef = input.candidateRef ?? null
+      workRunId = input.workRunId ?? null
+      expectedRevision = 0
+      const previousDrafts = state.status === 'ready' || state.status === 'submitted'
+        ? state.drafts
+        : Object.freeze([])
+      const preserveDrafts = input.bindingKey !== undefined
+        && annotationBindingKey === input.bindingKey
+        && state.status !== 'idle'
+      annotationBindingKey = input.bindingKey ?? null
+      const drafts = input.bindingKey === undefined
+        ? previousDrafts
+        : preserveDrafts
+          ? previousDrafts
+          : Object.freeze([])
       pendingElement = null
       pendingRegion = null
       comment = ''
@@ -205,9 +298,12 @@ export function createPageAnnotationViewModel(
         injectability: resolved.kind,
         surfaceKind: surfaceKindFor(resolved.kind),
         degradationReason: resolved.reason,
-        drafts: state.status === 'idle' ? Object.freeze([]) : state.drafts,
+        drafts,
         notice: resolved.reason,
       })
+      if (options.transport !== undefined && input.deliveryId !== undefined && input.bindingKey !== undefined) {
+        void restorePersisted(input.bindingKey, input.deliveryId)
+      }
     },
     pickElement(summary) {
       if (closed) return
@@ -289,7 +385,35 @@ export function createPageAnnotationViewModel(
         emit({ ...ready, notice: '没有可提交的批注。' })
         return
       }
-      emit({ status: 'submitted', drafts: ready.drafts })
+      if (options.transport === undefined || deliveryId === null) {
+        emit({ status: 'submitted', drafts: ready.drafts })
+        return
+      }
+      const drafts = ready.drafts
+      emit({ status: 'submitting', drafts })
+      void (async () => {
+        try {
+          const submitted: PageAnnotationDraft[] = []
+          for (const draft of drafts) {
+            const result = await options.transport?.submit({ draft, expectedRevision })
+            if (result === undefined) throw new Error('批注提交适配器不可用')
+            expectedRevision = result.catalogRevision
+            submitted.push(persistedDraft(result.annotation))
+          }
+          if (closed) return
+          emit({ status: 'submitted', drafts: Object.freeze(submitted) })
+        } catch {
+          if (closed) return
+          emit({
+            status: 'ready',
+            injectability: ready.injectability,
+            surfaceKind: ready.surfaceKind,
+            degradationReason: ready.degradationReason,
+            drafts,
+            notice: '批注提交失败，请刷新任务后重试。',
+          })
+        }
+      })()
     },
     close() {
       closed = true

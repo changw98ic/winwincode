@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { mountKeyedCollection, type KeyedCollectionView } from './components/keyed-collection.js'
+import { redactPublicText } from './public-redaction.js'
 import type {
   CredentialHealthRow,
   ProviderHealthRow,
@@ -188,6 +189,12 @@ function asOfText(asOf: string | null, known: boolean): string {
   return `${PRESENTATION.updatedLabel} ${asOf}`
 }
 
+function publicText(value: string | null, fallback: string): string {
+  if (value === null) return fallback
+  const redacted = redactPublicText(value)
+  return /\[(?:INTERNAL ID|CANDIDATE|SOURCE REF)\]/u.test(redacted) ? fallback : redacted
+}
+
 export function mountUsageHealthSummary(
   options: UsageHealthSummaryOptions,
 ): UsageHealthSummary {
@@ -239,11 +246,10 @@ export function mountUsageHealthSummary(
   }
 
   function fillAggregateRow(node: HTMLLIElement, row: UsageAggregate): void {
-    node.dataset.key = row.key
     node.dataset.tokensKnown = row.tokensKnown ? 'true' : 'false'
     node.dataset.unknown = row.tokensKnown ? 'false' : 'true'
     const label = element(document, 'span', 'wwc-usage-health-row-label')
-    label.textContent = row.label
+    label.textContent = publicText(row.label, '未命名分组')
     const usage = element(document, 'span', 'wwc-usage-health-row-usage')
     usage.textContent = row.tokensKnown
       ? row.metrics.map(metric => `${metric.name} ${metric.value}`).join(' · ')
@@ -300,11 +306,10 @@ export function mountUsageHealthSummary(
     key: row => row.key,
     create: () => element(document, 'li', 'wwc-usage-health-worker'),
     update: (node, row) => {
-      node.dataset.key = row.key
       node.dataset.workerState = row.state
       node.dataset.tone = WORKER_TONES[row.state]
       const label = element(document, 'span', 'wwc-usage-health-worker-label')
-      label.textContent = row.label
+      label.textContent = publicText(row.label, '执行进程')
       const state = element(document, 'span', 'wwc-usage-health-worker-state')
       state.textContent = `${presentation.workerStateLabel[row.state]} · 容量 ${row.capacity}`
       const heartbeat = element(document, 'span', 'wwc-usage-health-worker-heartbeat')
@@ -324,38 +329,33 @@ export function mountUsageHealthSummary(
     create: () => element(document, 'li', 'wwc-usage-health-session-team'),
     update: (node, row) => {
       const unknown = presentation.unknownLabel
-      node.dataset.key = row.key
       node.dataset.sessionState = row.state
       node.dataset.tone = SESSION_TEAM_TONES[row.state]
       const label = element(document, 'span', 'wwc-usage-health-session-team-label')
       label.textContent = row.agentName === null
-        ? `AgentIdentity ${unknown}`
-        : `${row.agentName} · ${row.role ?? unknown}`
+        ? `执行身份 ${unknown}`
+        : `${publicText(row.agentName, '已绑定身份')} · ${publicText(row.role, unknown)}`
       const identity = element(document, 'span', 'wwc-usage-health-session-team-identity')
-      identity.textContent = `AgentIdentity ${row.agentId ?? unknown} · Worker ${
-        row.workerId ?? unknown
-      }`
+      identity.textContent = `执行身份 ${row.agentName === null
+        ? unknown
+        : publicText(row.agentName, '已绑定身份')} · 角色 ${publicText(row.role, unknown)}`
       const session = element(document, 'span', 'wwc-usage-health-session-team-session')
-      session.textContent = `Session ${row.workerSessionId} · ${row.codexThreadId} · attempt ${
-        String(row.attempt)
-      }`
+      session.textContent = `会话尝试 ${String(row.attempt)}`
       const provider = element(document, 'span', 'wwc-usage-health-session-team-provider')
-      provider.textContent = `Provider ${row.provider ?? unknown} · Model ${row.model ?? unknown}`
+      provider.textContent = `服务商 ${publicText(row.provider, unknown)} · 模型 ${
+        publicText(row.model, unknown)
+      }`
       const workspace = element(document, 'span', 'wwc-usage-health-session-team-workspace')
-      workspace.textContent = `Workspace ${row.repositoryId ?? unknown} · ${
-        row.workspaceRevision ?? unknown
-      } · ${row.writeMode ?? unknown}`
+      workspace.textContent = `工作区写入模式 ${publicText(row.writeMode, unknown)}`
       const activity = element(document, 'span', 'wwc-usage-health-session-team-activity')
-      activity.textContent = `当前活动 ${row.currentActivity ?? '无运行活动'}`
+      activity.textContent = `当前活动 ${publicText(row.currentActivity, '无运行活动')}`
       const state = element(document, 'span', 'wwc-usage-health-session-team-state')
       state.textContent = `${SESSION_TEAM_STATE_LABEL[row.state]} · ${
         RECOVERY_STATE_LABEL[row.recoveryState]
       }`
       const recovery = element(document, 'span', 'wwc-usage-health-session-team-recovery')
       recovery.dataset.requiresHuman = row.recoveryRequiresHuman ? 'true' : 'false'
-      recovery.textContent = `${row.recoveryMessage}${
-        row.lastFailureSourceRef === null ? '' : ` · 异常来源 ${row.lastFailureSourceRef}`
-      }`
+      recovery.textContent = publicText(row.recoveryMessage, '恢复状态已记录')
       node.replaceChildren(label, identity, session, provider, workspace, activity, state, recovery)
     },
   })
@@ -365,11 +365,10 @@ export function mountUsageHealthSummary(
     key: row => row.key,
     create: () => element(document, 'li', 'wwc-usage-health-provider'),
     update: (node, row) => {
-      node.dataset.key = row.key
       node.dataset.providerState = row.state
       node.dataset.tone = PROVIDER_TONES[row.state]
       const label = element(document, 'span', 'wwc-usage-health-provider-label')
-      label.textContent = row.label
+      label.textContent = publicText(row.label, '未命名服务商')
       const state = element(document, 'span', 'wwc-usage-health-provider-state')
       state.textContent = `${presentation.providerStateLabel[row.state]}${
         row.state === 'ready' ? '' : row.reason === null ? '' : ` · ${row.reason}`
@@ -396,12 +395,11 @@ export function mountUsageHealthSummary(
     key: row => row.key,
     create: () => element(document, 'li', 'wwc-usage-health-model'),
     update: (node, row) => {
-      node.dataset.key = row.key
       const label = element(document, 'span', 'wwc-usage-health-model-label')
-      label.textContent = row.label
+      label.textContent = publicText(row.label, '未命名模型')
       const detail = element(document, 'span', 'wwc-usage-health-model-detail')
-      detail.textContent = `${row.detail} · ${row.status}${
-        row.reason === null ? '' : ` · ${row.reason}`
+      detail.textContent = `${publicText(row.detail, '服务商未知')} · ${publicText(row.status, '状态未知')}${
+        row.reason === null ? '' : ` · ${publicText(row.reason, '状态详情未知')}`
       } · 上下文 ${row.contextWindowTokens} tokens`
       node.replaceChildren(...withMarkers([
         label,
@@ -416,10 +414,9 @@ export function mountUsageHealthSummary(
     key: row => row.key,
     create: () => element(document, 'li', 'wwc-usage-health-credential'),
     update: (node, row) => {
-      node.dataset.key = row.key
       node.dataset.credentialState = row.secretState
       const label = element(document, 'span', 'wwc-usage-health-credential-label')
-      label.textContent = row.label
+      label.textContent = publicText(row.label, '未命名凭据')
       const state = element(document, 'span', 'wwc-usage-health-credential-state')
       state.textContent = `${presentation.credentialStateLabel[row.secretState]} · 轮换 ${
         row.rotationVersion
@@ -435,14 +432,13 @@ export function mountUsageHealthSummary(
     key: row => row.key,
     create: () => element(document, 'li', 'wwc-usage-health-error'),
     update: (node, row) => {
-      node.dataset.key = row.key
       const label = element(document, 'span', 'wwc-usage-health-error-label')
-      label.textContent = row.label
+      label.textContent = publicText(row.label, row.origin === 'work-run' ? '工作运行' : '交付')
       const detail = element(document, 'span', 'wwc-usage-health-error-detail')
       detail.textContent = row.origin === 'work-run'
         ? `${row.failureCount} 次失败${
           row.recovered ? ' · 恢复进行中或已完成' : ''
-        }${row.sourceRef === null ? '' : ` · ${row.sourceRef}`}`
+        }`
         : `${row.attentionCount} 个未关闭注意点`
       node.replaceChildren(label, detail)
     },

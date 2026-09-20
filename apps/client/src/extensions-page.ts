@@ -167,7 +167,7 @@ export function mountExtensionsPage(options: ExtensionsPageOptions): ExtensionsP
       view = result
       status.textContent = !result.online ? '设备离线，连接后可配置扩展。' : result.snapshot === null ? '等待设备上报扩展配置，请稍后刷新。' : '设备已连接，可配置技能与 MCP。'
       show()
-    } catch (error) { if (!closed && current === generation) status.textContent = error instanceof Error ? error.message : '读取失败。' }
+    } catch { if (!closed && current === generation) status.textContent = '扩展读取失败，请检查设备连接后重试。' }
   }
   async function directory(): Promise<void> {
     try {
@@ -177,7 +177,7 @@ export function mountExtensionsPage(options: ExtensionsPageOptions): ExtensionsP
       for (const device of result.clients) { const option = node('option', device.displayName); option.value = device.clientId; devices.append(option) }
       if (result.clients.some(device => device.clientId === previous)) devices.value = previous
       await load()
-    } catch (error) { if (!closed) status.textContent = error instanceof Error ? error.message : '读取失败。' }
+    } catch { if (!closed) status.textContent = '设备列表读取失败，请检查连接后重试。' }
   }
   async function apply(mutation: DeviceExtensionMutation): Promise<boolean> {
     if (view?.online !== true || view.snapshot === null) return false
@@ -205,7 +205,7 @@ export function mountExtensionsPage(options: ExtensionsPageOptions): ExtensionsP
   async function run(action: () => Promise<unknown>): Promise<void> {
     if (busy || view?.online !== true || view.snapshot === null) return
     busy = true; show()
-    try { await action() } catch (error) { if (!closed) status.textContent = error instanceof Error ? error.message : '设备设置失败。' }
+    try { await action() } catch { if (!closed) status.textContent = '设备设置失败，请检查配置后重试。' }
     finally { busy = false; if (!closed) show() }
   }
   devices.addEventListener('change', () => { for (const { form } of forms) { form.reset(); form.hidden = true }; void load() })

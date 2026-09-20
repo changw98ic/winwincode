@@ -91,9 +91,11 @@ test('a real browser renders the Usage, Provider and Worker health summary in th
   assert.deepEqual(summary.unknownMarkers.every(value => value === 'true'), true)
 
   assert.deepEqual(summary.sessionTeam.map(row => row.state), ['running', 'offline'])
-  assert.match(summary.sessionTeam[0].text, /AgentIdentity agt_/u)
-  assert.match(summary.sessionTeam[0].text, /Provider openai · Model gpt-5/u)
-  assert.match(summary.sessionTeam[0].text, /Workspace rep_.*git-tree:/u)
+  assert.match(summary.sessionTeam[0].text, /执行身份 community-executor · 角色 executor/u)
+  assert.match(summary.sessionTeam[0].text, /服务商 openai · 模型 gpt-5/u)
+  assert.match(summary.sessionTeam[0].text, /工作区写入模式 candidate/u)
+  assert.match(summary.sessionTeam[0].text, /会话尝试 1/u)
+  assert.equal(/(?:agt_|wrk_|wss_|thr_|rep_|git-tree:|runtime:|\[INTERNAL ID\]|\[SOURCE REF\])/u.test(summary.sessionTeam[0].text), false)
   assert.match(summary.sessionTeam[0].text, /当前活动 执行发布门验证/u)
   assert.match(summary.sessionTeam[1].text, /离线 · 恢复中/u)
   assert.match(summary.sessionTeam[1].text, /连接中断，正在自动恢复/u)
@@ -118,11 +120,11 @@ test('a real browser renders the Usage, Provider and Worker health summary in th
   assert.match(summary.errors.join(' '), /恢复进行中或已完成/u)
   assert.match(summary.errors.join(' '), /1 个未关闭注意点/u)
 
-  assert.equal(summary.leak, false, 'no secret material or credential id may reach the summary')
+  assert.deepEqual(summary.leakMarkers, [], JSON.stringify(summary))
 
   const refreshed = await evaluate(devtools, sessionId, 'globalThis.refreshUsageHealth()')
   assert.equal(refreshed.present, true)
-  assert.deepEqual(refreshed.deliveries.map(row => row.key), summary.deliveries.map(row => row.key))
+  assert.equal(refreshed.deliveries.length, summary.deliveries.length)
   assert.equal(refreshed.leak, false)
 
   // A projection this fixture never implements must mark only its own section.

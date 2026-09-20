@@ -13,6 +13,19 @@ import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import test from 'node:test'
 
+globalThis.MutationObserver = class {
+  observe() {}
+  disconnect() {}
+}
+
+function mountTestAttachments() {
+  return { items: [], busy: false, clear() {}, close() {} }
+}
+
+function mountTestMarkdown(root) {
+  return { update(text) { root.textContent = text }, close() {} }
+}
+
 const root = resolve(import.meta.dirname, '..')
 const compiler = spawnSync(
   'corepack',
@@ -35,7 +48,7 @@ assert.equal(
   `UI-604 audit modules did not compile:\n${compiler.stdout}${compiler.stderr}`,
 )
 
-const cache = resolve(root, '.cache/ui604-a11y-tests')
+const cache = resolve(root, 'apps/client/node_modules/.cache/ui604-a11y-tests')
 const chatModule = await import(`${pathToFileURL(resolve(
   cache,
   'chat-page.js',
@@ -87,6 +100,10 @@ class FakeElement {
     for (const child of children) this.insertBefore(child, null)
   }
 
+  prepend(...children) {
+    for (const child of children.toReversed()) this.insertBefore(child, this.children[0] ?? null)
+  }
+
   replaceChildren(...children) {
     for (const child of [...this.children]) child.remove()
     for (const child of children) this.insertBefore(child, null)
@@ -110,6 +127,15 @@ class FakeElement {
   setAttribute(name, value) { this.attributes.set(name, String(value)) }
   getAttribute(name) { return this.attributes.get(name) ?? null }
   removeAttribute(name) { this.attributes.delete(name) }
+  querySelector(tagName) {
+    const expected = tagName.toUpperCase()
+    for (const child of this.children) {
+      if (child.tagName === expected) return child
+      const match = child.querySelector(tagName)
+      if (match !== null) return match
+    }
+    return null
+  }
 
   addEventListener(name, listener) {
     this.listeners.set(name, [...(this.listeners.get(name) ?? []), listener])
@@ -315,13 +341,16 @@ function mountedChat(stateOverrides = {}) {
     deliveryCreator,
     scope: scopeSelection,
     nextProductSessionId: () => 'psn_00000000000000000000000002',
+    mountAttachments: mountTestAttachments,
+    mountMarkdown: mountTestMarkdown,
   })
   return { document, rootElement, model, deliveryCreator, page }
 }
 
 test('A4 the Chat conversion panel is a named dialog tied to its trigger', () => {
   const { rootElement, page } = mountedChat()
-  const trigger = findByClass(rootElement, 'wwc-chat-delegation-chip')
+  findByClass(rootElement, 'wwc-chat-delegation-chip').click()
+  const trigger = findByClass(rootElement, 'wwc-chat-new-delegation')
   assert.equal(trigger.getAttribute('aria-expanded'), 'false')
   assert.notEqual(trigger.getAttribute('aria-controls'), null)
 
@@ -342,7 +371,8 @@ test('A4 the Chat conversion panel is a named dialog tied to its trigger', () =>
 
 test('A4 opening the conversion dialog moves focus into its first field', () => {
   const { document, rootElement, page } = mountedChat()
-  const trigger = findByClass(rootElement, 'wwc-chat-delegation-chip')
+  findByClass(rootElement, 'wwc-chat-delegation-chip').click()
+  const trigger = findByClass(rootElement, 'wwc-chat-new-delegation')
   trigger.focus()
   trigger.click()
   const title = findByClass(rootElement, 'wwc-chat-convert-title')
@@ -356,7 +386,8 @@ test('A4 opening the conversion dialog moves focus into its first field', () => 
 
 test('A4 Escape closes the conversion dialog and returns focus to the trigger', () => {
   const { document, rootElement, page } = mountedChat()
-  const trigger = findByClass(rootElement, 'wwc-chat-delegation-chip')
+  findByClass(rootElement, 'wwc-chat-delegation-chip').click()
+  const trigger = findByClass(rootElement, 'wwc-chat-new-delegation')
   trigger.focus()
   trigger.click()
   const dialog = findByClass(rootElement, 'wwc-chat-convert')

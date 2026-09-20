@@ -81,6 +81,7 @@ tokio-rustls = "=0.26.4"
 toml = "=0.9.11"
 uuid = { version = "=1.20.0", features = ["v7"] }
 winwincode-api = { path = "crates/winwincode-api" }
+winwincode-client-port = { path = "crates/winwincode-client-port" }
 winwincode-audit = { path = "crates/winwincode-audit" }
 winwincode-data-export = { path = "crates/winwincode-data-export" }
 winwincode-delivery = { version = "=0.1.0-alpha.2", path = "crates/winwincode-delivery" }

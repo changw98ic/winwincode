@@ -208,6 +208,7 @@ fn precise_rework_dispatch_authority_is_sealed_and_work_item_scoped() {
             max_artifact_bytes: 10_000,
             max_runtime_seconds: 60,
         },
+        managed_app_run_config: None,
     };
     let WorkRunStartEffect::Dispatch(accepted_intent) = &accepted.effect else {
         unreachable!()

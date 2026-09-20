@@ -80,7 +80,7 @@ export function mountPageAnnotationPage(
   add.type = 'button'
   add.textContent = '添加批注'
   submit.type = 'button'
-  submit.textContent = '提交批注'
+  submit.textContent = '提交到当前任务'
   comment.rows = 3
   comment.placeholder = '写下自然语言意见'
 
@@ -105,7 +105,17 @@ export function mountPageAnnotationPage(
       return
     }
     if (state.status === 'submitted') {
-      mode.textContent = `已提交 ${String(state.drafts.length)} 条批注。`
+      mode.textContent = `已写入任务 ${String(state.drafts.length)} 条批注，并生成验收证据。`
+      notice.hidden = true
+      pick.disabled = true
+      region.disabled = true
+      add.disabled = true
+      submit.disabled = true
+      renderList(state.drafts)
+      return
+    }
+    if (state.status === 'submitting') {
+      mode.textContent = `正在提交 ${String(state.drafts.length)} 条批注…`
       notice.hidden = true
       pick.disabled = true
       region.disabled = true
@@ -115,8 +125,8 @@ export function mountPageAnnotationPage(
       return
     }
     mode.textContent = state.surfaceKind === 'injectable-element'
-      ? '同源可注入：支持元素拾取与截图坐标。'
-      : '已降级为截图坐标批注（不承诺任意网页可拾取）。'
+      ? '支持元素拾取与截图坐标；提交后会进入当前任务。'
+      : '已降级为截图坐标批注；提交后会进入当前任务。'
     mode.dataset.surface = state.surfaceKind
     notice.hidden = state.notice === null
     notice.textContent = state.notice ?? ''

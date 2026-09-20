@@ -61,6 +61,10 @@ const defaultAllowedLiterals = Object.freeze([
     literal: '/internal/v1/client/exchange',
     reason: 'ClientControlPort HTTP transport route; a URL path in contract prose, not a filesystem path',
   },
+  {
+    literal: '/api/v1/clients/',
+    reason: 'Community ClientControlPort browser API routes in contract prose; URL paths, not filesystem paths',
+  },
 ])
 
 const forbiddenRules = Object.freeze([

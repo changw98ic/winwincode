@@ -27,6 +27,9 @@ use crate::candidate_artifact_outbox::{
     CandidateArtifactAckOutcome, CandidateArtifactAuthority, CandidateArtifactUpload,
     RetainedCandidateArtifact,
 };
+use crate::diagnostic_artifact_outbox::{
+    DiagnosticArtifactAuthority, DiagnosticArtifactUpload, RetainedDiagnosticArtifact,
+};
 
 /// Stable create-or-load identity for one Codex thread.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -269,10 +272,18 @@ pub enum CodexPoll {
     ChangeBatchProgress(Box<ChangeBatchProgressEvent>),
     RepairRequired(Box<RepairEnvelope>),
     Completed(CodexTurnCompletion),
+    /// A terminal turn whose command/test diagnostics were `ACKed` separately
+    /// from candidate artifacts. Keeping these references outside
+    /// `CodexTurnCompletion` prevents Worker candidate gating from treating
+    /// diagnostics as a candidate upload.
+    CompletedWithDiagnostics(CodexTurnCompletion, Vec<ArtifactReference>),
     Inconclusive(SecretSafeTraceSummary),
     Failed(SecretSafeTraceSummary),
+    FailedWithDiagnostics(SecretSafeTraceSummary, Vec<ArtifactReference>),
     Cancelled(SecretSafeTraceSummary),
+    CancelledWithDiagnostics(SecretSafeTraceSummary, Vec<ArtifactReference>),
     InfrastructureFailed(SecretSafeTraceSummary),
+    InfrastructureFailedWithDiagnostics(SecretSafeTraceSummary, Vec<ArtifactReference>),
 }
 
 /// One canonical `ExecutionPort` frame retained before its first delivery attempt.
@@ -520,6 +531,36 @@ pub trait CodexCoreAdapter {
         acknowledgement: &ArtifactAckMessage,
     ) -> Result<CandidateArtifactAckOutcome, Self::Error>;
 
+    /// Applies an Artifact acknowledgement to the canonical upload ledgers.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a foreign, stale, or malformed acknowledgement.
+    fn accept_artifact_ack(
+        &mut self,
+        acknowledgement: &ArtifactAckMessage,
+    ) -> Result<ArtifactAckOutcome, Self::Error>;
+
+    /// Retains one bounded, already-redacted command/test output stream.
+    ///
+    /// # Errors
+    ///
+    /// Rejects output that is not bound to the active Job authority.
+    fn retain_diagnostic_artifact(
+        &mut self,
+        upload: &DiagnosticArtifactUpload,
+    ) -> Result<RetainedDiagnosticArtifact, Self::Error>;
+
+    /// Returns final `ACK`ed diagnostic references for the exact run authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter storage or authority error.
+    fn accepted_diagnostic_artifacts(
+        &mut self,
+        authority: &DiagnosticArtifactAuthority,
+    ) -> Result<Vec<ArtifactReference>, Self::Error>;
+
     /// Recovers the final accepted candidate reference after restart.
     ///
     /// # Errors
@@ -641,6 +682,15 @@ pub trait CodexCoreAdapter {
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
     fn shutdown(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send;
+}
+
+/// Canonical acknowledgement outcome shared by candidate and diagnostic
+/// Artifact ledgers.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ArtifactAckOutcome {
+    Pending,
+    Replay(Vec<DurableExecutionDelivery>),
+    Accepted(ArtifactReference),
 }
 
 /// Outbound canonical `ExecutionPort` used identically by local and remote IO.

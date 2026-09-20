@@ -77,6 +77,7 @@ use winwincode_client_port::exchange::DedupVerdict;
 use winwincode_client_port::exchange::FrameCodec;
 use winwincode_client_port::exchange::FrameIdentity;
 use winwincode_client_port::exchange::SequenceVerdict;
+use winwincode_client_port::managed_app::ManagedAppStatus;
 use winwincode_client_port::messages::CLIENT_CONTROL_PORT_SCHEMA_VERSION;
 use winwincode_client_port::messages::ClientCandidateApplyResultPayload;
 use winwincode_client_port::messages::ClientCandidateRetainedPayload;
@@ -112,6 +113,7 @@ use winwincode_storage::LocalApplyResult;
 use winwincode_storage::LocalApplySettlement;
 use winwincode_storage::LocalApplyStrategy;
 use winwincode_storage::LocalCandidateRetained;
+use winwincode_storage::ManagedAppStatusRecord;
 use winwincode_storage::OccupancyReleaseReason;
 use winwincode_storage::ProductStateStorage;
 use winwincode_storage::RepositoryAccessGrantIssuance;
@@ -296,6 +298,10 @@ pub trait ClientExchangePort: Send + Sync {
         &self,
         delivery: WorkerCredentialDelivery,
     ) -> Result<(), ClientExchangeError>;
+
+    fn managed_app_status(&self, _client_node_id: &str, _run_id: &str) -> Option<ManagedAppStatus> {
+        None
+    }
 }
 
 /// Production exchange over the Server's one product-state database
@@ -691,7 +697,15 @@ impl ClientExchangeApplication {
             match settler.ingest(&envelope.client_instance_id, &identity, command.as_ref()) {
                 BatchOutcome::Accepted {
                     command: CommandOutcome::Fresh,
-                } => apply_effect(storage, &self.data_directory, node_id, envelope, now)?,
+                } => {
+                    apply_effect_with_status(
+                        storage,
+                        &self.data_directory,
+                        node_id,
+                        envelope,
+                        now,
+                    )?;
+                }
                 BatchOutcome::Accepted { .. } | BatchOutcome::Duplicate => {}
                 BatchOutcome::Gap {
                     replay_from_sequence,
@@ -972,6 +986,14 @@ impl ClientExchangePort for ClientExchangeApplication {
         pending.push(delivery);
         Ok(())
     }
+
+    fn managed_app_status(&self, client_node_id: &str, run_id: &str) -> Option<ManagedAppStatus> {
+        let storage = SqliteStorage::open(&self.data_directory).ok()?;
+        let record = storage
+            .load_managed_app_status(client_node_id, run_id)
+            .ok()??;
+        serde_json::from_slice(&record.status_json).ok()
+    }
 }
 
 /// Decoded exchange request: the bounded frame batch plus the client's
@@ -1137,6 +1159,7 @@ fn command_identity(
         | ClientToServerMessage::RepositoryStatus(_)
         | ClientToServerMessage::WorkerState(_)
         | ClientToServerMessage::WorkerReconcile(_)
+        | ClientToServerMessage::ManagedAppStatus(_)
         | ClientToServerMessage::CommandAck(_) => return None,
     };
     Some(CommandIdentity::new(key.clone(), payload_digest))
@@ -1149,7 +1172,19 @@ fn command_identity(
 /// release/force-fence effective revision) feed the Server's durable view
 /// the occupancy downlink stamps are computed against.
 #[allow(clippy::too_many_lines)]
+#[cfg(test)]
 fn apply_effect(
+    storage: &mut SqliteStorage,
+    data_directory: &Path,
+    node_id: &str,
+    envelope: &ClientToServerEnvelope,
+    now: &Instant,
+) -> Result<(), ClientExchangeError> {
+    apply_effect_with_status(storage, data_directory, node_id, envelope, now)
+}
+
+#[allow(clippy::too_many_lines)]
+fn apply_effect_with_status(
     storage: &mut SqliteStorage,
     data_directory: &Path,
     node_id: &str,
@@ -1436,6 +1471,19 @@ fn apply_effect(
         }
         ClientToServerMessage::CommandAck(payload) => {
             observe_command_ack_revision(data_directory, node_id, payload, now);
+            Ok(())
+        }
+        ClientToServerMessage::ManagedAppStatus(payload) => {
+            let status_json = serde_json::to_vec(&payload.status)
+                .map_err(|_| ClientExchangeError::unavailable())?;
+            storage
+                .save_managed_app_status(&ManagedAppStatusRecord {
+                    client_node_id: node_id.to_owned(),
+                    run_id: payload.status.run_id.clone(),
+                    status_json,
+                    occurred_at: envelope.occurred_at.clone(),
+                })
+                .map_err(|_| ClientExchangeError::unavailable())?;
             Ok(())
         }
         // The remaining kinds settle at the cursor in this lane; their

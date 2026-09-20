@@ -52,12 +52,17 @@ pub use winwincode_codex::candidate_artifact_outbox::{
     CandidateArtifactAckOutcome, CandidateArtifactAuthority, CandidateArtifactUpload,
     RetainedCandidateArtifact,
 };
+pub use winwincode_codex::diagnostic_artifact_outbox::{
+    DiagnosticArtifactAckOutcome, DiagnosticArtifactAuthority, DiagnosticArtifactUpload,
+    RetainedDiagnosticArtifact,
+};
 pub use winwincode_codex::{
-    ActionRequestTransport, CodexCoreAdapter, CodexPoll, CodexRunKey, CodexThreadSession,
-    CodexThreadStart, CodexTurnCompletion, DelegatedLoopPhase, DelegatedLoopStopFact,
-    DelegatedLoopTransition, DelegatedLoopTransitionOutcome, DelegatedObserverPreflight,
-    DelegatedObserverPreflightOutcome, DelegatedObserverSettlement, DurableExecutionDelivery,
-    ObserverMode, RoleExecutionMode, WorkerExecutionPort, secret_safe_runtime_summary,
+    ActionRequestTransport, ArtifactAckOutcome, CodexCoreAdapter, CodexPoll, CodexRunKey,
+    CodexThreadSession, CodexThreadStart, CodexTurnCompletion, DelegatedLoopPhase,
+    DelegatedLoopStopFact, DelegatedLoopTransition, DelegatedLoopTransitionOutcome,
+    DelegatedObserverPreflight, DelegatedObserverPreflightOutcome, DelegatedObserverSettlement,
+    DurableExecutionDelivery, ObserverMode, RoleExecutionMode, WorkerExecutionPort,
+    secret_safe_runtime_summary,
 };
 use winwincode_domain::{
     AgentIdentityId, ChangeBatchId, CodexThreadId, ExecutionAckSequence, ExecutionEventId,
@@ -262,6 +267,7 @@ struct PendingCandidateCompletion {
     terminal_fact: CandidateTerminalFact,
     authority: CandidateArtifactAuthority,
     artifact: Option<ArtifactReference>,
+    diagnostic_artifacts: Vec<ArtifactReference>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -331,6 +337,7 @@ impl CandidateTerminalFact {
 /// Single semantic Worker core shared by local and remote `ExecutionPort` IO.
 pub struct WorkerMain<Port, Codex> {
     device_models: Option<device_model::DeviceModels>,
+    intake_log_path: Option<std::path::PathBuf>,
     config: WorkerConfig,
     port: Port,
     codex: Codex,
@@ -403,8 +410,70 @@ where
         mut self,
         directory: &std::path::Path,
     ) -> Result<Self, winwincode_provider::DeviceProviderError> {
-        self.device_models = Some(device_model::DeviceModels::open(directory)?);
+        let mut models = device_model::DeviceModels::open(directory)?;
+        models.note_worker_instance_id(&self.config.worker_instance_id.0);
+        if let Some(path) = std::env::var_os("WWC_MODEL_INTAKE_LOG") {
+            models.set_intake_log(Some(std::path::PathBuf::from(path)));
+        }
+        self.device_models = Some(models);
         Ok(self)
+    }
+
+    /// Attaches a durable non-secret intake log for Device→Worker model frames.
+    #[must_use]
+    pub fn with_model_intake_log(mut self, path: &std::path::Path) -> Self {
+        self.intake_log_path = Some(path.to_path_buf());
+        winwincode_codex::set_model_intake_log_path(path);
+        if let Some(models) = self.device_models.as_mut() {
+            models.set_intake_log(Some(path.to_path_buf()));
+        }
+        self
+    }
+
+    fn log_model_intake(
+        &self,
+        stage: &str,
+        code: &str,
+        chunk: &ModelChunkMessage,
+        detail: &str,
+    ) {
+        let exchange = chunk.model_exchange_id.0.as_str();
+        let sequence = chunk.sequence.0;
+        let worker_session_id = chunk.worker_session_id.0.as_str();
+        let thread_id = chunk.session_identity.codex_thread_id.0.as_str();
+        if let Some(models) = self.device_models.as_ref() {
+            models.log_intake(
+                stage,
+                code,
+                exchange,
+                sequence,
+                worker_session_id,
+                thread_id,
+                detail,
+            );
+        }
+        let Some(path) = self.intake_log_path.as_deref() else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        else {
+            return;
+        };
+        use std::io::Write as _;
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or_default();
+        let _ = writeln!(
+            file,
+            "ts={ts} component=worker stage={stage} code={code} exchange={exchange} seq={sequence} wsn={worker_session_id} thr={thread_id} detail={detail}"
+        );
     }
 
     /// Creates a booting Worker without starting IO or Codex services.
@@ -420,6 +489,7 @@ where
             recover_heartbeat_sequence(&mut codex, &config.worker_id, &config.worker_instance_id);
         Self {
             device_models: None,
+            intake_log_path: None,
             config,
             port,
             codex,
@@ -527,6 +597,40 @@ where
                 .codex
                 .pending_execution_deliveries()
                 .is_ok_and(|pending| pending.is_empty())
+    }
+
+    /// True when the durable Worker→Control-Plane outbox still holds
+    /// verification/evidence frames that must reach the Server. Used by the
+    /// process entry to keep retrying after a Server restart instead of
+    /// exiting while `runtime.event` / `artifact.chunk` / `JobOutcome` remain
+    /// pending.
+    #[must_use]
+    pub fn has_pending_durable_evidence(&mut self) -> bool {
+        self.codex
+            .pending_execution_deliveries()
+            .map(|pending| {
+                pending.iter().any(|delivery| {
+                    matches!(
+                        delivery.message,
+                        ExecutionPortMessage::RuntimeEventMessage(_)
+                            | ExecutionPortMessage::ModelChunkMessage(_)
+                            | ExecutionPortMessage::JobOutcomeMessage(_)
+                            | ExecutionPortMessage::ArtifactChunkMessage(_)
+                            | ExecutionPortMessage::ArtifactOpenMessage(_)
+                    )
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    /// Flushes every pending durable Worker→Server delivery on the existing
+    /// exchange protocol. Safe to call when the in-memory Job is already gone.
+    ///
+    /// # Errors
+    ///
+    /// Returns an outbound-port or Codex-store failure.
+    pub async fn flush_durable_outbox(&mut self) -> Result<(), WorkerError> {
+        self.flush_durable_execution_deliveries().await
     }
 
     /// Builds a bounded recovery hint for one active task.
@@ -672,17 +776,54 @@ where
                 {
                     return self.accept_observation_model_chunk(chunk, &now).await;
                 }
+                // The durable model-call frame ledger is written inside
+                // `accept_model_chunk`. Post-retain steps (ModelOpen compaction,
+                // outbox flush, Core runtime flush) must not fail this control
+                // path: a hard error here requeues the same frame at the front
+                // of the Device model queue and starves later contiguous
+                // Provider frames for an automatic second model call after
+                // tool_result.
                 self.codex
                     .accept_model_chunk(chunk, &now)
                     .await
-                    .map_err(|_| codex_model_error())?;
-                if chunk.sequence.0 == 1 {
-                    self.codex
-                        .accept_execution_delivery_ack(message)
-                        .map_err(|_| codex_model_error())?;
+                    .map_err(|error| {
+                        self.log_model_intake(
+                            "accept_chunk",
+                            "MODEL_CHUNK_ACCEPT_FAILED",
+                            chunk,
+                            "worker accept_model_chunk rejected Device frame",
+                        );
+                        let _ = error;
+                        codex_model_error()
+                    })?;
+                if chunk.sequence.0 == 1
+                    && self.codex.accept_execution_delivery_ack(message).is_err()
+                    && std::env::var_os("WWC_WORKER_POLL_DEBUG").is_some()
+                {
+                    eprintln!(
+                        "poll_codex ModelOpen compact best-effort failed exchange={}",
+                        chunk.model_exchange_id.0
+                    );
                 }
-                self.flush_durable_execution_deliveries().await?;
-                self.flush_codex_execution_messages().await
+                if self.flush_durable_execution_deliveries().await.is_err()
+                    && std::env::var_os("WWC_WORKER_POLL_DEBUG").is_some()
+                {
+                    eprintln!(
+                        "poll_codex durable flush best-effort failed exchange={} seq={}",
+                        chunk.model_exchange_id.0,
+                        chunk.sequence.0
+                    );
+                }
+                if self.flush_codex_execution_messages().await.is_err()
+                    && std::env::var_os("WWC_WORKER_POLL_DEBUG").is_some()
+                {
+                    eprintln!(
+                        "poll_codex core flush best-effort failed exchange={} seq={}",
+                        chunk.model_exchange_id.0,
+                        chunk.sequence.0
+                    );
+                }
+                Ok(())
             }
             ExecutionPortMessage::ActionEnforcementReceiptMessage(receipt) => {
                 self.codex
@@ -787,6 +928,21 @@ where
                 "Codex polling requires an active Worker",
             ));
         }
+        // Drain Core-queued ModelOpen/ModelAck before Device frame intake.
+        // An automatic second model call after tool_result can enqueue its
+        // Provider open while the Device chunk queue is still empty; if that
+        // open waits for a later job poll the Provider never runs and the
+        // durable model-call ledger stays at zero frames.
+        if self.flush_durable_execution_deliveries().await.is_err()
+            && std::env::var_os("WWC_WORKER_POLL_DEBUG").is_some()
+        {
+            eprintln!("poll_codex durable outbox pre-flush failed");
+        }
+        if self.flush_codex_execution_messages().await.is_err()
+            && std::env::var_os("WWC_WORKER_POLL_DEBUG").is_some()
+        {
+            eprintln!("poll_codex pre-flush of Core execution messages failed");
+        }
         loop {
             let chunk = match &mut self.device_models {
                 Some(models) => models.next_chunk().map_err(|_| codex_model_error())?,
@@ -810,8 +966,39 @@ where
             }
             .await;
             if let Err(error) = result {
+                let exchange = chunk.model_exchange_id.0.clone();
+                let sequence = chunk.sequence.0;
+                let owned = self
+                    .device_models
+                    .as_ref()
+                    .is_some_and(|models| models.owns_exchange(&exchange));
+                if !owned {
+                    // Shared Device providers.sqlite3 holds every session's
+                    // exchanges. A foreign frame that fails authority must not
+                    // be retry-pinned at the queue front or this Worker's own
+                    // verification exchange never becomes durable.
+                    self.log_model_intake(
+                        "poll_codex",
+                        "FOREIGN_OR_UNOWNED_EXCHANGE",
+                        &chunk,
+                        "dropped non-owned Device frame without retry",
+                    );
+                    if let Some(models) = &mut self.device_models {
+                        models.drop_chunk(&chunk);
+                    }
+                    if std::env::var_os("WWC_WORKER_POLL_DEBUG").is_some() {
+                        eprintln!(
+                            "poll_codex dropped unowned exchange={exchange} seq={sequence}: {:?}",
+                            error.code
+                        );
+                    }
+                    continue;
+                }
                 if let Some(models) = &mut self.device_models {
                     models.retry_chunk(chunk);
+                }
+                if std::env::var_os("WWC_WORKER_POLL_DEBUG").is_some() {
+                    eprintln!("poll_codex chunk failed exchange={exchange} seq={sequence}: {:?}", error.code);
                 }
                 return Err(error);
             }
@@ -821,11 +1008,22 @@ where
         // different frame.  Give each new poll a fresh retry window so a
         // lost response is retried, while the current window does not resend
         // the same frame between those acknowledgements.
+        //
+        // Durable flush here is best-effort: a Server restart / connection
+        // refused window must not prevent Core polls from retaining further
+        // verification evidence. Heartbeat and the process drive loop retry
+        // the flush on the same exchange protocol when the Server returns.
         self.sent_delivery_ids.clear();
         if self.deferred_core_interaction_jobs.is_empty() {
-            self.flush_durable_execution_deliveries().await?;
-        } else {
-            self.flush_recovered_durable_execution_deliveries().await?;
+            if self.flush_durable_execution_deliveries().await.is_err()
+                && std::env::var_os("WWC_WORKER_POLL_DEBUG").is_some()
+            {
+                eprintln!("poll_codex durable flush failed; Core polls continue");
+            }
+        } else if self.flush_recovered_durable_execution_deliveries().await.is_err()
+            && std::env::var_os("WWC_WORKER_POLL_DEBUG").is_some()
+        {
+            eprintln!("poll_codex recovered durable flush failed; Core polls continue");
         }
         // A lost binding response must not strand a prepared Core turn.
         let pending = self
@@ -891,6 +1089,7 @@ where
                                 .and_then(|record| record.replacement_authority.clone()),
                         )?,
                         artifact: Some(freeze.candidate_artifact_ref.clone()),
+                        diagnostic_artifacts: Vec::new(),
                     },
                 );
                 self.finish_job(
@@ -994,6 +1193,7 @@ where
         Ok(())
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn handle_codex_poll(
         &mut self,
         job_id: &str,
@@ -1015,7 +1215,12 @@ where
                 DelegatedPollOutcome::RepairRequired(envelope),
             ),
             CodexPoll::Completed(completion) => {
-                self.complete_codex_job(job_id, completion, now).await
+                self.complete_codex_job(job_id, completion, Vec::new(), now)
+                    .await
+            }
+            CodexPoll::CompletedWithDiagnostics(completion, diagnostics) => {
+                self.complete_codex_job(job_id, completion, diagnostics, now)
+                    .await
             }
             CodexPoll::Inconclusive(summary) => {
                 self.finish_job(
@@ -1043,6 +1248,54 @@ where
                     Some(port_error(
                         ExecutionPortErrorCode::ExecutionFailed,
                         "embedded Codex execution failed",
+                        false,
+                    )),
+                    now,
+                )
+                .await
+            }
+            CodexPoll::FailedWithDiagnostics(summary, diagnostics) => {
+                self.finish_job(
+                    job_id,
+                    ExecutionOutcomeStatus::Failed,
+                    summary.as_str(),
+                    diagnostics,
+                    None,
+                    Some(port_error(
+                        ExecutionPortErrorCode::ExecutionFailed,
+                        "embedded Codex execution failed",
+                        false,
+                    )),
+                    now,
+                )
+                .await
+            }
+            CodexPoll::CancelledWithDiagnostics(summary, diagnostics) => {
+                self.finish_job(
+                    job_id,
+                    ExecutionOutcomeStatus::Cancelled,
+                    summary.as_str(),
+                    diagnostics,
+                    None,
+                    Some(port_error(
+                        ExecutionPortErrorCode::Cancelled,
+                        "embedded Codex execution cancelled",
+                        false,
+                    )),
+                    now,
+                )
+                .await
+            }
+            CodexPoll::InfrastructureFailedWithDiagnostics(summary, diagnostics) => {
+                self.finish_job(
+                    job_id,
+                    ExecutionOutcomeStatus::InfrastructureError,
+                    summary.as_str(),
+                    diagnostics,
+                    None,
+                    Some(port_error(
+                        ExecutionPortErrorCode::ExecutionFailed,
+                        "embedded Codex infrastructure failure",
                         false,
                     )),
                     now,
@@ -1532,10 +1785,12 @@ where
                     .and_then(|record| record.replacement_authority.clone()),
             )?,
             artifact: None,
+            diagnostic_artifacts: Vec::new(),
         };
         if let Some(existing) = self.pending_candidates.get(job_id) {
             if existing.terminal_fact != pending.terminal_fact
                 || existing.authority != pending.authority
+                || existing.diagnostic_artifacts != pending.diagnostic_artifacts
             {
                 return Err(candidate_artifact_error(
                     "accepted delegated batch changed before candidate acceptance",
@@ -1954,6 +2209,7 @@ where
         &mut self,
         job_id: &str,
         completion: CodexTurnCompletion,
+        diagnostic_artifacts: Vec<ArtifactReference>,
         now: Instant,
     ) -> Result<(), WorkerError> {
         let cancelling = self
@@ -1976,14 +2232,19 @@ where
             .active
             .get(job_id)
             .is_some_and(|job| verification_artifact_role(&job.job.execution_profile));
+        if !diagnostic_artifacts.is_empty() && !completion.artifacts.is_empty() {
+            return Err(candidate_artifact_error(
+                "diagnostic and candidate Artifact references cannot share completion.artifacts",
+            ));
+        }
         if !cancelling && (candidate_writer || verification_role) {
             if candidate_writer {
                 return self
-                    .complete_candidate_writer(job_id, completion, now)
+                    .complete_candidate_writer(job_id, completion, diagnostic_artifacts, now)
                     .await;
             }
             return self
-                .complete_verification_job(job_id, completion, now)
+                .complete_verification_job(job_id, completion, diagnostic_artifacts, now)
                 .await;
         }
         let (status, summary, error) = if cancelling {
@@ -2004,11 +2265,16 @@ where
             )
         };
         let usage = (!cancelling).then_some(completion.usage);
+        let terminal_artifacts = if diagnostic_artifacts.is_empty() {
+            completion.artifacts
+        } else {
+            diagnostic_artifacts
+        };
         self.finish_job(
             job_id,
             status,
             summary,
-            completion.artifacts,
+            terminal_artifacts,
             usage,
             error,
             now,
@@ -2020,9 +2286,13 @@ where
         &mut self,
         job_id: &str,
         completion: CodexTurnCompletion,
+        diagnostic_artifacts: Vec<ArtifactReference>,
         now: Instant,
     ) -> Result<(), WorkerError> {
-        if let Some(artifact) = self.hold_candidate_completion(job_id, completion)? {
+        let diagnostics_for_failure = diagnostic_artifacts.clone();
+        if let Some(artifact) =
+            self.hold_candidate_completion(job_id, completion, diagnostic_artifacts)?
+        {
             return self.finish_candidate_job(job_id, artifact, now).await;
         }
         let active = self.active.get(job_id).cloned().ok_or_else(|| {
@@ -2041,7 +2311,7 @@ where
             job_id,
             ExecutionOutcomeStatus::Failed,
             "writer completed without a valid candidate",
-            Vec::new(),
+            diagnostics_for_failure,
             None,
             Some(port_error(
                 ExecutionPortErrorCode::ExecutionFailed,
@@ -2057,9 +2327,13 @@ where
         &mut self,
         job_id: &str,
         completion: CodexTurnCompletion,
+        diagnostic_artifacts: Vec<ArtifactReference>,
         now: Instant,
     ) -> Result<(), WorkerError> {
-        if let Some(artifact) = self.hold_candidate_completion(job_id, completion)? {
+        let diagnostics_for_failure = diagnostic_artifacts.clone();
+        if let Some(artifact) =
+            self.hold_candidate_completion(job_id, completion, diagnostic_artifacts)?
+        {
             return self.finish_candidate_job(job_id, artifact, now).await;
         }
         let active = self.active.get(job_id).cloned().ok_or_else(|| {
@@ -2075,7 +2349,7 @@ where
             job_id,
             ExecutionOutcomeStatus::Failed,
             "verification completed without a valid candidate",
-            Vec::new(),
+            diagnostics_for_failure,
             None,
             Some(port_error(
                 ExecutionPortErrorCode::ExecutionFailed,
@@ -2764,6 +3038,7 @@ where
         &mut self,
         job_id: &str,
         completion: CodexTurnCompletion,
+        diagnostic_artifacts: Vec<ArtifactReference>,
     ) -> Result<Option<ArtifactReference>, WorkerError> {
         if !completion.artifacts.is_empty() {
             return Err(candidate_artifact_error(
@@ -2786,6 +3061,7 @@ where
             },
             authority: authority.clone(),
             artifact: None,
+            diagnostic_artifacts,
         };
         if let Some(existing) = self.pending_candidates.get(job_id) {
             if existing.terminal_fact != pending.terminal_fact
@@ -2827,27 +3103,54 @@ where
         now: Instant,
     ) -> Result<(), WorkerError> {
         let job_id = acknowledgement.lease.job_id.0.clone();
-        if self.active.contains_key(&job_id) && self.pending_candidates.contains_key(&job_id) {
+        let candidate_ack = self.pending_candidates.get(&job_id).is_some_and(|pending| {
+            pending
+                .artifact
+                .as_ref()
+                .is_some_and(|artifact| artifact.artifact_id == acknowledgement.artifact_id)
+        });
+        if self.active.contains_key(&job_id) && candidate_ack {
             self.validate_candidate_ack_state(acknowledgement, None)?;
         }
         let durable_acknowledgement = self.durable_candidate_ack(acknowledgement)?;
-        let outcome = self
-            .codex
-            .accept_candidate_artifact_ack(&durable_acknowledgement)
-            .map_err(|_| {
-                candidate_artifact_error("Artifact acknowledgement conflicts with durable upload")
-            })?;
-        let accepted = match &outcome {
-            CandidateArtifactAckOutcome::Accepted(artifact) => Some(artifact),
-            CandidateArtifactAckOutcome::Pending | CandidateArtifactAckOutcome::Replay(_) => None,
+        let outcome = if candidate_ack {
+            match self
+                .codex
+                .accept_candidate_artifact_ack(&durable_acknowledgement)
+                .map_err(|_| {
+                    candidate_artifact_error(
+                        "candidate Artifact acknowledgement conflicts with durable upload",
+                    )
+                })? {
+                CandidateArtifactAckOutcome::Pending => ArtifactAckOutcome::Pending,
+                CandidateArtifactAckOutcome::Replay(deliveries) => {
+                    ArtifactAckOutcome::Replay(deliveries)
+                }
+                CandidateArtifactAckOutcome::Accepted(reference) => {
+                    ArtifactAckOutcome::Accepted(reference)
+                }
+            }
+        } else {
+            self.codex
+                .accept_artifact_ack(acknowledgement)
+                .map_err(|_| {
+                    candidate_artifact_error(
+                        "Artifact acknowledgement conflicts with durable upload",
+                    )
+                })?
         };
-        if self.active.contains_key(&job_id) && self.pending_candidates.contains_key(&job_id) {
+        let accepted = match &outcome {
+            ArtifactAckOutcome::Accepted(artifact) => Some(artifact),
+            ArtifactAckOutcome::Pending | ArtifactAckOutcome::Replay(_) => None,
+        };
+        if self.active.contains_key(&job_id) && candidate_ack {
             self.validate_candidate_ack_state(acknowledgement, accepted)?;
         }
         match outcome {
-            CandidateArtifactAckOutcome::Pending => self.flush_durable_execution_deliveries().await,
-            CandidateArtifactAckOutcome::Replay(deliveries) => {
-                if self.active.contains_key(&job_id)
+            ArtifactAckOutcome::Pending => self.flush_durable_execution_deliveries().await,
+            ArtifactAckOutcome::Replay(deliveries) => {
+                if candidate_ack
+                    && self.active.contains_key(&job_id)
                     && self.pending_candidates.contains_key(&job_id)
                 {
                     for delivery in deliveries {
@@ -2863,8 +3166,9 @@ where
                 }
                 self.flush_durable_execution_deliveries().await
             }
-            CandidateArtifactAckOutcome::Accepted(artifact) => {
-                if !self.active.contains_key(&job_id)
+            ArtifactAckOutcome::Accepted(artifact) => {
+                if !candidate_ack
+                    || !self.active.contains_key(&job_id)
                     || !self.pending_candidates.contains_key(&job_id)
                 {
                     return self.flush_durable_execution_deliveries().await;
@@ -3051,8 +3355,10 @@ where
             }
             _ => (ExecutionOutcomeStatus::Succeeded, None),
         };
+        let mut artifacts = vec![artifact];
+        artifacts.extend(pending.diagnostic_artifacts);
         let result = self
-            .finish_job(job_id, status, summary, vec![artifact], usage, error, now)
+            .finish_job(job_id, status, summary, artifacts, usage, error, now)
             .await;
         if result.is_ok() || !self.active.contains_key(job_id) {
             self.pending_candidates.remove(job_id);
@@ -3197,12 +3503,16 @@ where
         job_id: &str,
         message: RuntimeEventMessage,
     ) -> Result<(), WorkerError> {
-        let active = self.active.get(job_id).ok_or_else(|| {
-            worker_error(
-                WorkerErrorCode::RuntimeTraceMismatch,
-                "runtime trace has no active Job",
-            )
-        })?;
+        let Some(active) = self.active.get(job_id) else {
+            // finish_job (or a Server-restart recovery path) can drop the
+            // in-memory Job before every Core runtime frame reached the
+            // Control Plane. Retain and send on the durable outbox path so
+            // verification evidence is not stranded; Server validates the
+            // lease/fencing stamp.
+            let delivery =
+                self.retain_execution_message(&ExecutionPortMessage::RuntimeEventMessage(message))?;
+            return self.send_retained_delivery(delivery).await;
+        };
         let sequence = message.event.sequence.0;
         let last_sequence = active.last_event_sequence.0;
         // A recovered adapter owns the durable runtime cursor. When every
@@ -3262,39 +3572,70 @@ where
                 "terminal result has no active Job",
             )
         })?;
-        if active.job.execution_profile == "codex-chat" && artifacts.is_empty()
+        if active.job.execution_profile == "codex-chat"
             && self.workspaces.has_source_changes(&active).map_err(|_| workspace_error())?
         {
             if status == ExecutionOutcomeStatus::Cancelled {
                 self.workspaces.retain_source_changes(&active).map_err(|_| workspace_error())?;
             } else {
+                let diagnostic_artifacts = if verification_artifact_role(&active.job.execution_profile) {
+                    artifacts.clone()
+                } else {
+                    Vec::new()
+                };
+                let candidate_artifact = self
+                    .pending_candidates
+                    .get(job_id)
+                    .and_then(|pending| pending.artifact.clone());
+                let candidate_artifact_is_accepted = candidate_artifact.is_some();
                 let authority = candidate_artifact_authority(&active, self.dispatches.get(job_id)
                     .and_then(|record| record.replacement_authority.clone()))?;
                 let pending = PendingCandidateCompletion {
-                    terminal_fact: CandidateTerminalFact::ChatTerminal { status, summary: summary.to_owned(), usage, error },
-                    authority: authority.clone(), artifact: None,
+                    terminal_fact: CandidateTerminalFact::ChatTerminal {
+                        status: status.clone(),
+                        summary: summary.to_owned(),
+                        usage: usage.clone(),
+                        error: error.clone(),
+                    },
+                    authority: authority.clone(), artifact: candidate_artifact,
+                    diagnostic_artifacts,
                 };
                 if self.pending_candidates.get(job_id).is_some_and(|existing| existing != &pending) {
                     return Err(candidate_artifact_error("Chat terminal facts changed during project retention"));
                 }
                 self.pending_candidates.insert(job_id.to_owned(), pending);
-                if let Some(artifact) = self.codex.accepted_candidate_artifact(&authority).map_err(|_| codex_model_error())? {
+                if !candidate_artifact_is_accepted
+                    && let Some(artifact) = self
+                        .codex
+                        .accepted_candidate_artifact(&authority)
+                        .map_err(|_| codex_model_error())?
+                {
                     return Box::pin(self.finish_candidate_job(job_id, artifact, now)).await;
                 }
-                let prepared = self.workspaces.prepare_candidate(&active, RoleExecutionMode::React)
-                    .map_err(|_| workspace_error())?;
-                return Box::pin(self.retain_candidate_artifact(&active.job.job_id, prepared, now)).await;
+                if !candidate_artifact_is_accepted {
+                    let prepared = self
+                        .workspaces
+                        .prepare_candidate(&active, RoleExecutionMode::React)
+                        .map_err(|_| workspace_error())?;
+                    return Box::pin(self.retain_candidate_artifact(
+                        &active.job.job_id,
+                        prepared,
+                        now,
+                    ))
+                    .await;
+                }
             }
         }
         if (status == ExecutionOutcomeStatus::Succeeded || active.job.execution_profile == "codex-chat")
             && candidate_artifact_role(&active.job.execution_profile)
             && (active.job.execution_profile != "codex-chat" || !artifacts.is_empty())
+            && self.pending_candidates.contains_key(job_id)
         {
             let accepted = self
                 .pending_candidates
                 .get(job_id)
                 .and_then(|pending| pending.artifact.as_ref());
-            if artifacts.len() != 1 || accepted != artifacts.first() {
+            if artifacts.is_empty() || accepted != artifacts.first() {
                 return Err(candidate_artifact_error(
                     "candidate-producing success requires one final acknowledged candidate reference",
                 ));
@@ -3346,6 +3687,15 @@ where
             .retain(|(ledger_job_id, _), _| ledger_job_id != job_id);
         let _ = self.codex.close_thread(&active.codex_thread_id).await;
         self.send_retained_delivery(delivery).await?;
+        // The in-memory Job is already gone. Durable runtime.event /
+        // diagnostic artifact.chunk frames retained beside this outcome must
+        // still flush on the same Worker→Server exchange; blocking them here
+        // strands verification evidence after a Server restart window.
+        if self.flush_durable_execution_deliveries().await.is_err()
+            && std::env::var_os("WWC_WORKER_POLL_DEBUG").is_some()
+        {
+            eprintln!("finish_job durable evidence flush failed job={job_id}");
+        }
         self.flush_codex_execution_messages().await
         }).await
     }
@@ -3650,7 +4000,7 @@ where
             .codex
             .pending_execution_deliveries()
             .map_err(|_| codex_model_error())?;
-        let mut blocked_inactive_jobs = HashSet::new();
+        let mut last_error = None;
         for delivery in deliveries {
             if self.sent_delivery_ids.contains(&delivery.delivery_id) {
                 continue;
@@ -3678,17 +4028,24 @@ where
                 && !self.active.contains_key(job_id)
             {
                 match &delivery.message {
+                    // Durable Control Plane frames must still flush after the
+                    // Worker drops an in-memory Job. Blocking RuntimeEvent /
+                    // JobOutcome / diagnostic artifact frames here strands
+                    // verification evidence forever and leaves Delivery
+                    // verdict=null even when Core already produced
+                    // independent-verification-result. The frame lease is the
+                    // authority; Server validates fencing. Candidate uploads
+                    // remain gated by the pending-candidate checks below.
                     ExecutionPortMessage::RuntimeEventMessage(_)
-                    | ExecutionPortMessage::ModelChunkMessage(_) => {
-                        blocked_inactive_jobs.insert(job_id.to_owned());
+                    | ExecutionPortMessage::ModelChunkMessage(_)
+                    | ExecutionPortMessage::JobOutcomeMessage(_)
+                    | ExecutionPortMessage::ArtifactChunkMessage(_)
+                    | ExecutionPortMessage::ArtifactOpenMessage(_) => {}
+                    ExecutionPortMessage::ApprovalRequestMessage(_)
+                    | ExecutionPortMessage::InputRequestMessage(_)
+                    | ExecutionPortMessage::ActionEnforcementRequestMessage(_) => {
                         continue;
                     }
-                    ExecutionPortMessage::JobOutcomeMessage(_)
-                        if blocked_inactive_jobs.contains(job_id) =>
-                    {
-                        continue;
-                    }
-                    ExecutionPortMessage::JobOutcomeMessage(_) => {}
                     _ => continue,
                 }
             }
@@ -3716,7 +4073,20 @@ where
                 _ => None,
             };
             let delivery_id = delivery.delivery_id.clone();
-            self.send_retained_delivery(delivery).await?;
+            // One rejected/unreachable frame must not poison the rest of the
+            // durable evidence queue. Continue sending remaining pending
+            // frames (especially runtime.event beside a diagnostic chunk)
+            // and report the last transport error after the pass.
+            if let Err(error) = self.send_retained_delivery(delivery).await {
+                if std::env::var_os("WWC_WORKER_POLL_DEBUG").is_some() {
+                    eprintln!(
+                        "flush_durable frame failed delivery={delivery_id}: {:?}",
+                        error.code
+                    );
+                }
+                last_error = Some(error);
+                continue;
+            }
             if recovered_interaction {
                 self.recovery_sent_delivery_ids.insert(delivery_id);
             }
@@ -3727,7 +4097,10 @@ where
                 active.last_event_sequence = ExecutionAckSequence(sequence);
             }
         }
-        Ok(())
+        match last_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     async fn flush_codex_execution_messages(&mut self) -> Result<(), WorkerError> {
@@ -3787,6 +4160,8 @@ fn cancelling_job_has_late_result(active: Option<&ActiveJob>, polled: &CodexPoll
                 | CodexPoll::RepairRequired(_)
                 | CodexPoll::Inconclusive(_)
                 | CodexPoll::Failed(_)
+                | CodexPoll::FailedWithDiagnostics(_, _)
+                | CodexPoll::InfrastructureFailedWithDiagnostics(_, _)
                 | CodexPoll::InfrastructureFailed(_)
         )
 }

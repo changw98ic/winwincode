@@ -249,11 +249,11 @@ test('release source and package metadata retain the Apache-2.0 project boundary
   assert.match(read('LICENSE'), /Apache License\s+Version 2\.0/u)
   assert.match(
     read('THIRD_PARTY_NOTICES.md'),
-    /Ratatui and historical DeepSeek Harness MIT terms/u,
+    /Ratatui and DeepSeek Harness MIT terms/u,
   )
   assert.match(
     read('THIRD_PARTY_NOTICES.md'),
-    /do not ship or execute DeepSeek Harness or Cordis\s+packages/u,
+    /Client incorporates adapted DeepSeek Harness frontend components/u,
   )
   assert.match(read('THIRD_PARTY_NOTICES.md'), /Permission is hereby granted/u)
 })

@@ -29,8 +29,8 @@ use std::time::{Duration, Instant as StdInstant};
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use winwincode_client_port::domain::{
-    ClientLockState, ClientOccupancyReleaseMode, ConnectCodeState, RepositoryAvailability,
-    RepositoryDirtyState,
+    ClientLockState, ClientOccupancyReleaseMode, ClientWorkerStopReason, ConnectCodeState,
+    RepositoryAvailability, RepositoryDirtyState,
 };
 use winwincode_client_port::exchange::{
     CompactingOutbox, FrameCodec, FrameOutbox, OutboxSnapshot, StoredFrame,
@@ -55,8 +55,10 @@ use winwincode_client_port::messages::{
 /// frozen `candidate_commit`, and the `retained_at` stamp joined the row, and
 /// `local_state` froze onto the plan 15 `LocalCandidateState` vocabulary. No
 /// version-1 through version-5 database ever shipped, so older databases fail
-/// closed as unsupported.
-pub const CLIENT_STORE_SCHEMA_VERSION: i64 = 6;
+/// closed as unsupported. Version 7 (WORKER-100.3) adds the durable worker
+/// stop-intent/receipt table, including the stop reason in its command
+/// identity.
+pub const CLIENT_STORE_SCHEMA_VERSION: i64 = 7;
 
 const DATABASE_FILE_NAME: &str = "device-client.sqlite3";
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -372,6 +374,30 @@ pub enum OccupancyReleaseIntentOutcome {
     /// The idempotency key already recorded an intent (a replayed release
     /// command); the stored row is returned unchanged.
     Duplicate(OccupancyReleaseIntentRecord),
+}
+
+/// Durable intent and terminal receipt for one `client.worker.stop` command.
+/// The row is written before touching the worker process and completed only
+/// after the supervisor has persisted the terminal process state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkerStopIntentRecord {
+    pub command_message_id: String,
+    pub idempotency_key: String,
+    pub worker_session_id: String,
+    pub worker_id: String,
+    pub reason: ClientWorkerStopReason,
+    pub occupancy_lease_id: String,
+    pub fencing_token: u64,
+    pub expected_revision: u64,
+    pub receipt_payload: Option<Vec<u8>>,
+    pub recorded_at: String,
+    pub completed_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WorkerStopIntentOutcome {
+    Recorded(WorkerStopIntentRecord),
+    Duplicate(WorkerStopIntentRecord),
 }
 
 /// One durable worker-process registry row (plan section 8.2, WORKER-100.2).
@@ -1553,6 +1579,181 @@ impl DeviceStore {
             .map_err(sql_error)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(sql_error)
     }
+
+    /// Records the stop intent before any local process action. Replays are
+    /// accepted only when every command identity field except the transport
+    /// envelope id matches the durable row; the idempotency key is the stable
+    /// command identity across downlink redelivery.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the intent is invalid, conflicts with an existing
+    /// identity, or cannot be committed to the durable store.
+    pub fn record_worker_stop_intent(
+        &mut self,
+        intent: &WorkerStopIntentRecord,
+    ) -> Result<WorkerStopIntentOutcome, DeviceStoreError> {
+        validate_worker_stop_intent(intent)?;
+        let connection = self.connection_mut()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql_error)?;
+        let existing = read_worker_stop_intent(&transaction, &intent.command_message_id)?;
+        if let Some(stored) = existing {
+            if !same_worker_stop_intent(&stored, intent) {
+                return Err(DeviceStoreError::conflict(
+                    "worker stop command identity changed during replay",
+                ));
+            }
+            transaction.commit().map_err(sql_error)?;
+            return Ok(WorkerStopIntentOutcome::Duplicate(stored));
+        }
+        if let Some(stored) =
+            read_worker_stop_intent_by_idempotency(&transaction, &intent.idempotency_key)?
+        {
+            if !same_worker_stop_intent(&stored, intent) {
+                return Err(DeviceStoreError::conflict(
+                    "worker stop idempotency key is bound to another command",
+                ));
+            }
+            transaction.commit().map_err(sql_error)?;
+            return Ok(WorkerStopIntentOutcome::Duplicate(stored));
+        }
+        transaction
+            .execute(
+                "INSERT INTO worker_stop_intents \
+                 (command_message_id, idempotency_key, worker_session_id, worker_id, reason, \
+                  occupancy_lease_id, fencing_token, expected_revision, receipt_payload, \
+                  recorded_at, completed_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, ?9, NULL)",
+                params![
+                    intent.command_message_id,
+                    intent.idempotency_key,
+                    intent.worker_session_id,
+                    intent.worker_id,
+                    worker_stop_reason_wire_name(intent.reason),
+                    intent.occupancy_lease_id,
+                    i64::try_from(intent.fencing_token).map_err(|_| {
+                        DeviceStoreError::invalid("worker stop fencing token is out of range")
+                    })?,
+                    i64::try_from(intent.expected_revision).map_err(|_| {
+                        DeviceStoreError::invalid("worker stop revision is out of range")
+                    })?,
+                    intent.recorded_at,
+                ],
+            )
+            .map_err(sql_error)?;
+        transaction.commit().map_err(sql_error)?;
+        Ok(WorkerStopIntentOutcome::Recorded(intent.clone()))
+    }
+
+    /// Loads a worker stop intent and its optional terminal receipt.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the command identity is invalid or the store
+    /// cannot be queried.
+    pub fn worker_stop_intent(
+        &self,
+        command_message_id: &str,
+    ) -> Result<Option<WorkerStopIntentRecord>, DeviceStoreError> {
+        require_non_empty(
+            command_message_id,
+            "worker stop command message id",
+            MAX_ID_BYTES,
+        )?;
+        read_worker_stop_intent(self.connection()?, command_message_id)
+    }
+
+    /// Loads one stop intent by its stable idempotency key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the idempotency key is invalid or the store
+    /// cannot be queried.
+    pub fn worker_stop_intent_by_idempotency(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Option<WorkerStopIntentRecord>, DeviceStoreError> {
+        require_non_empty(idempotency_key, "worker stop idempotency key", MAX_ID_BYTES)?;
+        read_worker_stop_intent_by_idempotency(self.connection()?, idempotency_key)
+    }
+
+    /// Loads stop intents that were authorized and recorded before their
+    /// terminal receipt was committed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the durable store cannot be queried.
+    pub fn pending_worker_stop_intents(
+        &self,
+    ) -> Result<Vec<WorkerStopIntentRecord>, DeviceStoreError> {
+        let mut statement = self
+            .connection()?
+            .prepare(
+                "SELECT command_message_id, idempotency_key, worker_session_id, worker_id, \
+             reason, occupancy_lease_id, fencing_token, expected_revision, receipt_payload, \
+             recorded_at, completed_at FROM worker_stop_intents \
+             WHERE receipt_payload IS NULL ORDER BY recorded_at, rowid",
+            )
+            .map_err(sql_error)?;
+        let rows = statement
+            .query_map([], row_to_worker_stop_intent)
+            .map_err(sql_error)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(sql_error)
+    }
+
+    /// Persists the serialized command receipt after the supervisor has
+    /// completed the process-group stop. A different second receipt is a
+    /// conflict, while the same receipt is an idempotent replay.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the receipt is invalid, the intent is missing or
+    /// conflicting, or the durable store cannot commit the receipt.
+    pub fn complete_worker_stop_intent(
+        &mut self,
+        command_message_id: &str,
+        receipt_payload: &[u8],
+        completed_at: &str,
+    ) -> Result<(), DeviceStoreError> {
+        require_non_empty(
+            command_message_id,
+            "worker stop command message id",
+            MAX_ID_BYTES,
+        )?;
+        if receipt_payload.is_empty() || receipt_payload.len() > 64 * 1024 {
+            return Err(DeviceStoreError::invalid(
+                "worker stop receipt payload must be between 1 and 65536 bytes",
+            ));
+        }
+        require_non_empty(completed_at, "worker stop completed at", MAX_ID_BYTES)?;
+        let connection = self.connection_mut()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql_error)?;
+        let Some(stored) = read_worker_stop_intent(&transaction, command_message_id)? else {
+            return Err(DeviceStoreError::not_found(format!(
+                "worker stop command {command_message_id} does not have a durable intent"
+            )));
+        };
+        if let Some(existing) = stored.receipt_payload {
+            if existing != receipt_payload {
+                return Err(DeviceStoreError::conflict(
+                    "worker stop receipt changed during replay",
+                ));
+            }
+        } else {
+            transaction
+                .execute(
+                    "UPDATE worker_stop_intents SET receipt_payload = ?2, completed_at = ?3 \
+                     WHERE command_message_id = ?1",
+                    params![command_message_id, receipt_payload, completed_at],
+                )
+                .map_err(sql_error)?;
+        }
+        transaction.commit().map_err(sql_error)
+    }
 }
 
 impl DeviceStore {
@@ -2214,6 +2415,32 @@ fn parse_dirty_state_wire_name(value: &str) -> rusqlite::Result<RepositoryDirtyS
     }
 }
 
+#[must_use]
+const fn worker_stop_reason_wire_name(reason: ClientWorkerStopReason) -> &'static str {
+    match reason {
+        ClientWorkerStopReason::OccupantRequested => "occupant_requested",
+        ClientWorkerStopReason::DrainingComplete => "draining_complete",
+        ClientWorkerStopReason::LeaseRecovered => "lease_recovered",
+        ClientWorkerStopReason::GrantRevoked => "grant_revoked",
+        ClientWorkerStopReason::Superseded => "superseded",
+    }
+}
+
+fn parse_worker_stop_reason_wire_name(value: &str) -> rusqlite::Result<ClientWorkerStopReason> {
+    match value {
+        "occupant_requested" => Ok(ClientWorkerStopReason::OccupantRequested),
+        "draining_complete" => Ok(ClientWorkerStopReason::DrainingComplete),
+        "lease_recovered" => Ok(ClientWorkerStopReason::LeaseRecovered),
+        "grant_revoked" => Ok(ClientWorkerStopReason::GrantRevoked),
+        "superseded" => Ok(ClientWorkerStopReason::Superseded),
+        other => Err(rusqlite::Error::FromSqlConversionFailure(
+            4,
+            rusqlite::types::Type::Text,
+            format!("stored worker stop reason {other} is not in the vocabulary").into(),
+        )),
+    }
+}
+
 fn row_to_outbox_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<ClientOutboxEntry> {
     let outbox_sequence: i64 = row.get(0)?;
     let envelope_sequence: i64 = row.get(4)?;
@@ -2412,6 +2639,83 @@ fn read_release_intent(
         .map_err(sql_error)
 }
 
+fn read_worker_stop_intent(
+    connection: &Connection,
+    command_message_id: &str,
+) -> Result<Option<WorkerStopIntentRecord>, DeviceStoreError> {
+    connection
+        .query_row(
+            "SELECT command_message_id, idempotency_key, worker_session_id, worker_id, \
+             reason, occupancy_lease_id, fencing_token, expected_revision, receipt_payload, \
+             recorded_at, completed_at FROM worker_stop_intents \
+             WHERE command_message_id = ?1",
+            params![command_message_id],
+            row_to_worker_stop_intent,
+        )
+        .optional()
+        .map_err(sql_error)
+}
+
+fn read_worker_stop_intent_by_idempotency(
+    connection: &Connection,
+    idempotency_key: &str,
+) -> Result<Option<WorkerStopIntentRecord>, DeviceStoreError> {
+    connection
+        .query_row(
+            "SELECT command_message_id, idempotency_key, worker_session_id, worker_id, \
+             reason, occupancy_lease_id, fencing_token, expected_revision, receipt_payload, \
+             recorded_at, completed_at FROM worker_stop_intents \
+             WHERE idempotency_key = ?1",
+            params![idempotency_key],
+            row_to_worker_stop_intent,
+        )
+        .optional()
+        .map_err(sql_error)
+}
+
+fn row_to_worker_stop_intent(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkerStopIntentRecord> {
+    let fencing_token: i64 = row.get(6)?;
+    let expected_revision: i64 = row.get(7)?;
+    Ok(WorkerStopIntentRecord {
+        command_message_id: row.get(0)?,
+        idempotency_key: row.get(1)?,
+        worker_session_id: row.get(2)?,
+        worker_id: row.get(3)?,
+        reason: parse_worker_stop_reason_wire_name(&row.get::<_, String>(4)?)?,
+        occupancy_lease_id: row.get(5)?,
+        fencing_token: u64::try_from(fencing_token).map_err(|_| {
+            rusqlite::Error::FromSqlConversionFailure(
+                6,
+                rusqlite::types::Type::Integer,
+                "stored worker stop fencing token is negative".into(),
+            )
+        })?,
+        expected_revision: u64::try_from(expected_revision).map_err(|_| {
+            rusqlite::Error::FromSqlConversionFailure(
+                7,
+                rusqlite::types::Type::Integer,
+                "stored worker stop revision is negative".into(),
+            )
+        })?,
+        receipt_payload: row.get(8)?,
+        recorded_at: row.get(9)?,
+        completed_at: row.get(10)?,
+    })
+}
+
+fn same_worker_stop_intent(
+    stored: &WorkerStopIntentRecord,
+    incoming: &WorkerStopIntentRecord,
+) -> bool {
+    stored.idempotency_key == incoming.idempotency_key
+        && stored.worker_session_id == incoming.worker_session_id
+        && stored.worker_id == incoming.worker_id
+        && stored.reason == incoming.reason
+        && stored.occupancy_lease_id == incoming.occupancy_lease_id
+        && stored.fencing_token == incoming.fencing_token
+        && stored.expected_revision == incoming.expected_revision
+}
+
 fn row_to_occupancy_mirror(row: &rusqlite::Row<'_>) -> rusqlite::Result<OccupancyMirrorRecord> {
     let fencing_token: i64 = row.get(1)?;
     let mirror_revision: i64 = row.get(3)?;
@@ -2528,6 +2832,46 @@ fn validate_release_intent(intent: &OccupancyReleaseIntentRecord) -> Result<(), 
         return Err(DeviceStoreError::invalid(
             "release fencing token must be a positive SQLite-range integer",
         ));
+    }
+    Ok(())
+}
+
+fn validate_worker_stop_intent(intent: &WorkerStopIntentRecord) -> Result<(), DeviceStoreError> {
+    require_non_empty(
+        &intent.command_message_id,
+        "worker stop command message id",
+        MAX_ID_BYTES,
+    )?;
+    require_non_empty(&intent.idempotency_key, "idempotency key", MAX_ID_BYTES)?;
+    require_non_empty(&intent.worker_session_id, "worker session id", MAX_ID_BYTES)?;
+    require_non_empty(&intent.worker_id, "worker id", MAX_ID_BYTES)?;
+    require_non_empty(
+        &intent.occupancy_lease_id,
+        "occupancy lease id",
+        MAX_ID_BYTES,
+    )?;
+    require_non_empty(&intent.recorded_at, "recorded at", MAX_ID_BYTES)?;
+    if intent.fencing_token == 0 || intent.fencing_token > MAX_SAFE_INTEGER {
+        return Err(DeviceStoreError::invalid(
+            "worker stop fencing token must be a positive SQLite-range integer",
+        ));
+    }
+    if intent.expected_revision > MAX_SAFE_INTEGER {
+        return Err(DeviceStoreError::invalid(
+            "worker stop revision must be a SQLite-range integer",
+        ));
+    }
+    if intent
+        .receipt_payload
+        .as_ref()
+        .is_some_and(|payload| payload.is_empty() || payload.len() > 64 * 1024)
+    {
+        return Err(DeviceStoreError::invalid(
+            "worker stop receipt payload must be between 1 and 65536 bytes",
+        ));
+    }
+    if let Some(completed_at) = &intent.completed_at {
+        require_non_empty(completed_at, "worker stop completed at", MAX_ID_BYTES)?;
     }
     Ok(())
 }
@@ -2705,6 +3049,27 @@ CREATE TABLE worker_launch_receipts (
 );
 CREATE INDEX worker_launch_receipts_by_session
     ON worker_launch_receipts (worker_session_id, received_at);
+-- WORKER-100.3: the stop intent is committed before process-group action;
+-- receipt_payload is filled only after the registry reaches a terminal state.
+CREATE TABLE worker_stop_intents (
+    command_message_id TEXT PRIMARY KEY NOT NULL,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    worker_session_id TEXT NOT NULL,
+    worker_id TEXT NOT NULL,
+    reason TEXT NOT NULL CHECK (reason IN
+        ('occupant_requested', 'draining_complete', 'lease_recovered',
+         'grant_revoked', 'superseded')),
+    occupancy_lease_id TEXT NOT NULL,
+    fencing_token INTEGER NOT NULL
+        CHECK (fencing_token > 0 AND fencing_token <= 9007199254740991),
+    expected_revision INTEGER NOT NULL
+        CHECK (expected_revision >= 0 AND expected_revision <= 9007199254740991),
+    receipt_payload BLOB,
+    recorded_at TEXT NOT NULL,
+    completed_at TEXT
+);
+CREATE INDEX worker_stop_intents_by_session
+    ON worker_stop_intents (worker_session_id, recorded_at);
 -- LOCAL ONLY (GIT-100.2): the device-local candidate registry. Local
 -- candidate git refs and workspace paths never leave the device; only the
 -- stable candidate identity rides the client.candidate.retained frame.
@@ -2778,7 +3143,7 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), DeviceStoreError>
     let version = connection
         .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
         .map_err(sql_error)?;
-    if !matches!(version, 0 | CLIENT_STORE_SCHEMA_VERSION) {
+    if !matches!(version, 0 | 6 | CLIENT_STORE_SCHEMA_VERSION) {
         return Err(DeviceStoreError::adapter(format!(
             "unsupported schema version {version}"
         )));
@@ -2789,6 +3154,30 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), DeviceStoreError>
         .map_err(sql_error)?;
     if version == 0 {
         transaction.execute_batch(STORE_SCHEMA).map_err(sql_error)?;
+    } else if version == 6 {
+        transaction
+            .execute_batch(
+                "CREATE TABLE worker_stop_intents (\
+                    command_message_id TEXT PRIMARY KEY NOT NULL,\
+                    idempotency_key TEXT NOT NULL UNIQUE,\
+                    worker_session_id TEXT NOT NULL,\
+                    worker_id TEXT NOT NULL,\
+                    reason TEXT NOT NULL CHECK (reason IN \
+                        ('occupant_requested', 'draining_complete', 'lease_recovered',\
+                         'grant_revoked', 'superseded')),\
+                    occupancy_lease_id TEXT NOT NULL,\
+                    fencing_token INTEGER NOT NULL\
+                        CHECK (fencing_token > 0 AND fencing_token <= 9007199254740991),\
+                    expected_revision INTEGER NOT NULL\
+                        CHECK (expected_revision >= 0 AND expected_revision <= 9007199254740991),\
+                    receipt_payload BLOB,\
+                    recorded_at TEXT NOT NULL,\
+                    completed_at TEXT\
+                );\
+                CREATE INDEX worker_stop_intents_by_session\
+                    ON worker_stop_intents (worker_session_id, recorded_at);",
+            )
+            .map_err(sql_error)?;
     }
     validate_store_schema(&transaction)?;
     transaction
@@ -2929,6 +3318,23 @@ const STORE_SCHEMA_COLUMNS: &[(&str, &str, &[&str])] = &[
             "idempotency_key",
             "receipt_payload",
             "received_at",
+        ],
+    ),
+    (
+        "worker_stop_intents",
+        "PRAGMA table_info(worker_stop_intents)",
+        &[
+            "command_message_id",
+            "idempotency_key",
+            "worker_session_id",
+            "worker_id",
+            "reason",
+            "occupancy_lease_id",
+            "fencing_token",
+            "expected_revision",
+            "receipt_payload",
+            "recorded_at",
+            "completed_at",
         ],
     ),
     (

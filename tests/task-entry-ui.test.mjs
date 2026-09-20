@@ -700,6 +700,8 @@ test('the production run identity port joins the canonical WorkItem detail cut',
   const taskId = 'wit_00000000000000000000000042'
   const contractId = 'wct_00000000000000000000000042'
   const runId = 'wrn_00000000000000000000000042'
+  const candidateCommitId = 'a'.repeat(40)
+  let candidateTreeId = 'b'.repeat(40)
   const scope = {
     kind: 'repository',
     organizationId: 'org_00000000000000000000000001',
@@ -772,6 +774,16 @@ test('the production run identity port joins the canonical WorkItem detail cut',
     codexThreadId: null,
     candidateDigest: null,
   }
+  const managedAppSourceRun = {
+    ...workRun,
+    id: 'wrn_00000000000000000000000043',
+    executionJobId: 'job_00000000000000000000000043',
+    workerId: 'wrk_00000000000000000000000043',
+    workerInstanceId: 'wki_00000000000000000000000043',
+    workerSessionId: 'wsn_00000000000000000000000043',
+    leaseId: 'lse_00000000000000000000000043',
+    productSessionId: 'psn_00000000000000000000000043',
+  }
   const evidence = {
     id: 'evd_00000000000000000000000042',
     deliverySpecId: 'spec-login',
@@ -783,6 +795,13 @@ test('the production run identity port joins the canonical WorkItem detail cut',
     sourceRef: 'cmd:node --test',
     createdAt: FIXED_NOW(),
   }
+  let managedAppConfigs = [{
+    schemaVersion: 'winwincode/managed-app-run-v1',
+    runId: managedAppSourceRun.id,
+    attempt: managedAppSourceRun.attempt,
+    mode: 'frozen-candidate',
+    candidateCommit: candidateCommitId,
+  }]
   const calls = []
   const client = {
     async query(request) {
@@ -799,12 +818,13 @@ test('the production run identity port joins the canonical WorkItem detail cut',
             contract,
             items: [item],
             graphItems: [{ workItemId: taskId, state: 'running', dependencies: [], blockers: [] }],
-            runs: [workRun],
-            deviceBindings: [{
-              workRunId: runId,
+            runs: [workRun, managedAppSourceRun],
+            deviceBindings: [runId, managedAppSourceRun.id].map(workRunId => ({
+              workRunId,
               clientId: '123456789012',
               repositoryBindingId: 'rbd_00000000000000000000000042',
-            }],
+            })),
+            managedAppRunConfigs: managedAppConfigs,
           },
         }
       }
@@ -848,16 +868,42 @@ test('the production run identity port joins the canonical WorkItem detail cut',
           diagramExecution: null,
           attention: [],
           evidence: [evidence],
-          currentCandidate: null,
+          currentCandidate: {
+            candidateCommitId,
+            candidateRef: `git-candidate:sha256:${'c'.repeat(64)}`,
+            candidateTreeId,
+            deliverySpecId: 'spec-login',
+            deliverySpecRevision: 1,
+            diffSha256: `sha256:${'d'.repeat(64)}`,
+            frozenAt: FIXED_NOW(),
+            producerSessionBindingId: 'binding-1',
+            producerWorkRunId: runId,
+          },
           verdict: null,
           publication: null,
         },
       }
     },
   }
+  let deviceCandidateCommit = candidateCommitId
   const port = createControlPlaneRunIdentityPort({
     client,
-    candidates: { async listDeviceCandidates() { throw new Error('unexpected read') } },
+    candidates: {
+      async listDeviceCandidates() {
+        return [{
+          localCandidateReceiptId: 'lcr_00000000000000000000000042',
+          candidateRef: `git-candidate:sha256:${'c'.repeat(64)}`,
+          repositoryBindingId: 'rbd_00000000000000000000000042',
+          candidateCommit: deviceCandidateCommit,
+          localRefName: 'refs/winwincode/candidates/42',
+          state: 'retained',
+          createdAt: FIXED_NOW(),
+          revision: 1,
+          branchName: null,
+          history: [],
+        }]
+      },
+    },
     actor: () => ({ kind: 'human', id: 'hum_00000000000000000000000001' }),
     scope: () => scope,
     deliveryId: () => deliveryId,
@@ -879,6 +925,88 @@ test('the production run identity port joins the canonical WorkItem detail cut',
   assert.equal(projection.item.id, taskId)
   assert.equal(projection.graphItem.state, 'running')
   assert.deepEqual(projection.evidence.map(entry => entry.id), [evidence.id])
+  assert.equal(projection.candidate.candidateCommitId, candidateCommitId)
+  assert.equal(projection.candidate.candidateTreeId, candidateTreeId)
+  assert.equal(projection.workRun.id, runId)
+  assert.equal(projection.managedAppRunConfig?.runId, managedAppSourceRun.id)
+  assert.equal(projection.managedAppSourceRun?.id, managedAppSourceRun.id)
+
+  for (const invalidConfig of [
+    { ...managedAppConfigs[0], attempt: 2 },
+    { ...managedAppConfigs[0], candidateCommit: 'e'.repeat(40) },
+    { ...managedAppConfigs[0], runId },
+  ]) {
+    managedAppConfigs = [invalidConfig]
+    const rejected = await port.read({
+      taskId,
+      clientId: '123456789012',
+      repositoryBindingId: 'rbd_00000000000000000000000042',
+      baseBranch: 'main',
+      description: 'stale route values',
+      modelRouteId: 'route_default',
+    })
+    assert.equal(rejected.managedAppRunConfig, null)
+    assert.equal(rejected.managedAppSourceRun, null)
+  }
+  managedAppConfigs = [
+    {
+      schemaVersion: 'winwincode/managed-app-run-v1',
+      runId: managedAppSourceRun.id,
+      attempt: managedAppSourceRun.attempt,
+      mode: 'frozen-candidate',
+      candidateCommit: candidateCommitId,
+    },
+    {
+      schemaVersion: 'winwincode/managed-app-run-v1',
+      runId: managedAppSourceRun.id,
+      attempt: managedAppSourceRun.attempt,
+      mode: 'frozen-candidate',
+      candidateCommit: candidateCommitId,
+    },
+  ]
+  await assert.rejects(
+    port.read({
+      taskId,
+      clientId: '123456789012',
+      repositoryBindingId: 'rbd_00000000000000000000000042',
+      baseBranch: 'main',
+      description: 'stale route values',
+      modelRouteId: 'route_default',
+    }),
+    error => error.code === 'INVALID_WORKRUN_PROJECTION',
+  )
+  managedAppConfigs = [{
+    schemaVersion: 'winwincode/managed-app-run-v1',
+    runId: managedAppSourceRun.id,
+    attempt: managedAppSourceRun.attempt,
+    mode: 'frozen-candidate',
+    candidateCommit: candidateCommitId,
+  }]
+
+  deviceCandidateCommit = 'e'.repeat(40)
+  await assert.rejects(
+    port.read({
+      taskId,
+      clientId: '123456789012',
+      repositoryBindingId: 'rbd_00000000000000000000000042',
+      baseBranch: 'main',
+      description: 'stale route values',
+      modelRouteId: 'route_default',
+    }),
+    /设备候选与当前工作运行不匹配/u,
+  )
+  deviceCandidateCommit = candidateCommitId
+  candidateTreeId = 'invalid-tree'
+  await assert.rejects(
+    port.read({
+      taskId,
+      clientId: '123456789012',
+      repositoryBindingId: 'rbd_00000000000000000000000042',
+      baseBranch: 'main',
+      description: 'stale route values',
+      modelRouteId: 'route_default',
+    }),
+  )
 
   const chain = []
   const taskClient = {
@@ -970,6 +1098,7 @@ function runFixture({
   devices = [device({ ...OCCUPIED })],
   byDevice,
   identity = identityFake(),
+  candidatePreviewHref,
   anchor = {
     taskId: 'tsk_00000000000000000000000042',
     clientId: '123456789012',
@@ -993,6 +1122,7 @@ function runFixture({
     clients,
     repositories,
     identity,
+    candidatePreviewHref,
   })
   return { directory, repositoryDirectory, clients, repositories, identity, anchor, model }
 }
@@ -1149,7 +1279,7 @@ test('the run page renders the twelve identity rows and seven WorkItem facts', a
   )
   assert.match(visibleText(topbarActions), /更多/u)
 
-  assert.match(visibleText(byClass(rootElement, 'wwc-task-run-heading')), /运行中的任务/u)
+  assert.match(visibleText(byClass(rootElement, 'wwc-task-run-heading')), /Ship the occupancy gate/u)
   assert.equal(
     byClass(rootElement, 'wwc-task-run-status').textContent,
     '强流程 · 运行中',
@@ -1167,11 +1297,11 @@ test('the run page renders the twelve identity rows and seven WorkItem facts', a
 
   // The identity table stays collapsed behind the design-05 row.
   const identityToggle = byClass(rootElement, 'wwc-task-run-identity-toggle')
-  assert.equal(identityToggle.textContent, '展开完整运行身份 · 12 行')
+  assert.equal(identityToggle.textContent, '展开运行详情 · 12 项')
   const rowsContainer = byClass(rootElement, 'wwc-task-run-rows')
   assert.equal(rowsContainer.hidden, true)
   identityToggle.dispatch('click')
-  assert.equal(identityToggle.textContent, '收起完整运行身份 · 12 行')
+  assert.equal(identityToggle.textContent, '收起运行详情 · 12 项')
   assert.equal(rowsContainer.hidden, false)
 
   const rows = allByClass(rootElement, 'wwc-task-run-row')
@@ -1198,17 +1328,63 @@ test('the run page renders the twelve identity rows and seven WorkItem facts', a
   assert.match(visibleText(values.get('工作契约')), /修复登录后的回跳逻辑/u)
   assert.match(visibleText(values.get('验收条件')), /成功登录返回原页面/u)
   assert.match(visibleText(values.get('负责人')), /chengwen/u)
-  assert.match(visibleText(values.get('依赖项')), /wit_00000000000000000000000041/u)
-  assert.match(visibleText(values.get('阻塞项')), /wit_00000000000000000000000041/u)
-  assert.match(visibleText(values.get('证据')), /cmd:node --test/u)
+  assert.match(visibleText(values.get('依赖项')), /1 项依赖/u)
+  assert.match(visibleText(values.get('阻塞项')), /1 项阻塞/u)
+  assert.match(visibleText(values.get('证据')), /命令 1 条/u)
   assert.match(visibleText(values.get('执行会话')), /运行中/u)
   assert.match(visibleText(values.get('候选结果')), /尚无候选结果/u)
   assert.match(visibleText(values.get('应用结果')), /尚无应用记录/u)
+  assert.equal(allByClass(rootElement, 'wwc-task-run-scope-line')[0].hidden, true)
+  assert.match(visibleText(allByClass(rootElement, 'wwc-task-run-scope-line')[1]), /验收：.*成功登录返回原页面/u)
+  assert.doesNotMatch(visibleText(rootElement), /wct_|wit_|evd_|cmd:node --test|git-candidate:/u)
   assert.equal(
     byClass(rootElement, 'wwc-task-run-identity-notice').hidden,
     true,
     'a served identity zone shows no gap notice',
   )
+
+  fixture.model.close()
+  page.close()
+})
+
+test('the run page links to preview only from a served candidate projection', async () => {
+  const base = identityFake()
+  const identity = {
+    async read(anchor) {
+      const projection = await base.read(anchor)
+      return {
+        ...projection,
+        deliveryId: 'dlv_00000000000000000000000042',
+        candidate: {
+          candidateRef: `git-candidate:sha256:${'c'.repeat(64)}`,
+          candidateCommitId: 'a'.repeat(40),
+          candidateTreeId: 'b'.repeat(40),
+          diffSha256: `sha256:${'d'.repeat(64)}`,
+          state: 'produced',
+          branchName: null,
+          history: [],
+        },
+      }
+    },
+  }
+  const document = new FakeDocument()
+  const rootElement = new FakeElement(document, 'div')
+  const fixture = runFixture({
+    identity,
+    candidatePreviewHref: projection => (
+      `#/home/preview?delivery=${projection.deliveryId}&task=${projection.taskId}`
+    ),
+  })
+  const page = mountTaskRunPage({ root: rootElement, model: fixture.model })
+  await fixture.model.start()
+
+  const previewLink = byClass(rootElement, 'wwc-task-run-preview-link')
+  assert.equal(previewLink.hidden, false)
+  assert.equal(
+    previewLink.href,
+    '#/home/preview?delivery=dlv_00000000000000000000000042&task=tsk_00000000000000000000000042',
+  )
+  assert.doesNotMatch(previewLink.href, /client|worker|repository|commit|attempt/u)
 
   fixture.model.close()
   page.close()
@@ -1268,6 +1444,33 @@ test('the fake task port issues stable ids and answers describe', async () => {
   assert.equal(projection.workRun.workItemId, first.taskId)
   assert.equal(projection.workRun.state, 'running')
   assert.equal(projection.candidate, null)
+})
+
+test('the canonical run projection carries only an identity-matched managed app config', async () => {
+  const port = createControlPlaneTaskFake()
+  const anchor = await port.create({
+    clientId: '123456789012',
+    repositoryBindingId: 'rb_10000000000000000000000001',
+    baseBranch: 'main',
+    description: 'preview app',
+    modelRouteId: 'route_default',
+  })
+  const suffix = anchor.taskId.slice(4)
+  const config = {
+    schemaVersion: 'winwincode/managed-app-run-v1',
+    runId: `wrn_${suffix}`,
+    attempt: 1,
+    mode: 'live',
+    candidateCommit: null,
+  }
+  const identity = createControlPlaneRunIdentityFake({ managedAppRunConfig: config })
+  const projection = await identity.read(anchor)
+  assert.deepEqual(projection.managedAppRunConfig, config)
+
+  const foreign = createControlPlaneRunIdentityFake({
+    managedAppRunConfig: { ...config, runId: 'wrn_fffffffffffffffffffffffff1' },
+  })
+  assert.equal((await foreign.read(anchor)).managedAppRunConfig, null)
 })
 
 test('the run presentation helpers keep one tone and commit vocabulary', () => {

@@ -2,11 +2,14 @@
 
 //! Tamper-evident, secret-safe audit records for the `WinWinCode` Control Plane.
 //!
-//! The crate accepts only structured identities, digests, stable action/result
-//! codes, and a closed local-or-network origin. It has no raw payload, prompt,
-//! credential, or diagnostic field. [`AuditStore`] persists one independently
-//! ordered hash chain per organization and keeps immutable chain headers after
-//! retained payloads expire.
+//! Community product boundary: exactly one local Owner. The crate accepts only
+//! structured identities, digests, stable action/result codes, and a closed
+//! local-or-network origin. It has no raw payload, prompt, credential, or
+//! diagnostic field. [`AuditStore`] persists one independently ordered hash
+//! chain per local Owner scope and keeps immutable chain headers after retained
+//! payloads expire. Organization/tenant identifiers in internal scope keys are
+//! not a Community multi-user product surface; Community bootstrap always maps
+//! them to the single local Owner.
 
 mod event;
 mod export;

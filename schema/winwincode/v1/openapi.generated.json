@@ -1659,6 +1659,180 @@
         "pattern": "^sha256:[0-9a-f]{64}$",
         "type": "string"
       },
+      "CandidateFileContentChunkProjection": {
+        "additionalProperties": false,
+        "description": "One bounded, integrity-checked byte range from the retained Candidate commit. Text and binary data are both returned as base64 with an explicit content classification and media type.",
+        "properties": {
+          "candidate": {
+            "$ref": "#/components/schemas/FrozenCandidateSummaryProjection"
+          },
+          "contentEncoding": {
+            "$ref": "#/components/schemas/CandidateFileEncoding"
+          },
+          "dataBase64": {
+            "maxLength": 349528,
+            "pattern": "^[A-Za-z0-9+/]*={0,2}$",
+            "type": "string"
+          },
+          "encoding": {
+            "const": "base64"
+          },
+          "kind": {
+            "const": "candidate_file_content_chunk"
+          },
+          "mediaType": {
+            "maxLength": 200,
+            "pattern": "^[^\\s/]+/[^\\s]+$",
+            "type": "string"
+          },
+          "nextOffset": {
+            "oneOf": [
+              {
+                "maximum": 268435456,
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "offset": {
+            "maximum": 268435456,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "path": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          },
+          "readCursor": {
+            "$ref": "#/components/schemas/StrongFlowReadCursor"
+          },
+          "returnedBytes": {
+            "maximum": 262144,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "totalBytes": {
+            "maximum": 268435456,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "candidate",
+          "readCursor",
+          "path",
+          "contentEncoding",
+          "encoding",
+          "mediaType",
+          "offset",
+          "returnedBytes",
+          "totalBytes",
+          "dataBase64",
+          "nextOffset"
+        ],
+        "type": "object"
+      },
+      "CandidateFileContentGetParameters": {
+        "additionalProperties": false,
+        "description": "One bounded base64 byte range from the exact retained Candidate commit blob. The server resolves the retained candidate source; callers cannot supply a repository locator or Git revision.",
+        "properties": {
+          "atCursor": {
+            "$ref": "#/components/schemas/StrongFlowReadCursor"
+          },
+          "candidateRef": {
+            "pattern": "^git-candidate:sha256:[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "candidateTreeId": {
+            "pattern": "^[0-9a-f]{40,64}$",
+            "type": "string"
+          },
+          "deliveryId": {
+            "$ref": "#/components/schemas/DeliveryId"
+          },
+          "diffSha256": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "length": {
+            "maximum": 262144,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "offset": {
+            "maximum": 268435456,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "path": {
+            "description": "Normalized repository-relative path selected from the trusted Candidate file inventory.",
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          },
+          "readPageLimit": {
+            "description": "The delivery.get page.limit sealed into atCursor.",
+            "maximum": 200,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "deliveryId",
+          "atCursor",
+          "readPageLimit",
+          "candidateRef",
+          "candidateTreeId",
+          "diffSha256",
+          "path",
+          "offset",
+          "length"
+        ],
+        "type": "object"
+      },
+      "CandidateFileContentGetQuery": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryEnvelope"
+          },
+          {
+            "properties": {
+              "parameters": {
+                "$ref": "#/components/schemas/CandidateFileContentGetParameters"
+              },
+              "query": {
+                "const": "candidate.file.content.get"
+              },
+              "scope": {
+                "$ref": "#/components/schemas/RepositoryScope"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "CandidateFileContentGetResultResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryResultEnvelope"
+          },
+          {
+            "properties": {
+              "query": {
+                "const": "candidate.file.content.get"
+              },
+              "result": {
+                "$ref": "#/components/schemas/CandidateFileContentChunkProjection"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
       "CandidateFileEncoding": {
         "enum": [
           "utf-8",
@@ -3903,6 +4077,12 @@
           },
           {
             "$ref": "#/components/schemas/ClientRepositoryRegisteredMessage"
+          },
+          {
+            "$ref": "#/components/schemas/ClientManagedAppCommandMessage"
+          },
+          {
+            "$ref": "#/components/schemas/ClientManagedAppStatusMessage"
           }
         ],
         "title": "ClientControlMessage"
@@ -3947,7 +4127,9 @@
           "client.extension.apply",
           "client.extension.report",
           "client.repository.register",
-          "client.repository.registered"
+          "client.repository.registered",
+          "client.managed_app.command",
+          "client.managed_app.status"
         ],
         "title": "ClientControlMessageKind",
         "type": "string"
@@ -4452,6 +4634,100 @@
         ],
         "title": "ClientLockState",
         "type": "string"
+      },
+      "ClientManagedAppCommandMessage": {
+        "additionalProperties": false,
+        "description": "Starts, stops, restarts, or queries one Device-owned managed application run.",
+        "properties": {
+          "clientInstanceId": {
+            "$ref": "#/components/schemas/ClientInstanceId"
+          },
+          "clientNodeId": {
+            "$ref": "#/components/schemas/ClientNodeId"
+          },
+          "command": {
+            "$ref": "#/components/schemas/ManagedAppCommand"
+          },
+          "kind": {
+            "const": "client.managed_app.command"
+          },
+          "messageId": {
+            "$ref": "#/components/schemas/ClientControlMessageId"
+          },
+          "occurredAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "sequence": {
+            "$ref": "#/components/schemas/ClientExchangeSequence"
+          }
+        },
+        "required": [
+          "kind",
+          "schemaVersion",
+          "messageId",
+          "clientNodeId",
+          "clientInstanceId",
+          "sequence",
+          "occurredAt",
+          "command"
+        ],
+        "title": "client.managed_app.command",
+        "type": "object",
+        "x-authority": "control-command",
+        "x-direction": "control-plane-to-client",
+        "x-message-class": "command"
+      },
+      "ClientManagedAppStatusMessage": {
+        "additionalProperties": false,
+        "description": "Reports the Device-owned managed application state for one command.",
+        "properties": {
+          "clientInstanceId": {
+            "$ref": "#/components/schemas/ClientInstanceId"
+          },
+          "clientNodeId": {
+            "$ref": "#/components/schemas/ClientNodeId"
+          },
+          "commandMessageId": {
+            "$ref": "#/components/schemas/ClientControlMessageId"
+          },
+          "kind": {
+            "const": "client.managed_app.status"
+          },
+          "messageId": {
+            "$ref": "#/components/schemas/ClientControlMessageId"
+          },
+          "occurredAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "sequence": {
+            "$ref": "#/components/schemas/ClientExchangeSequence"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ManagedAppStatus"
+          }
+        },
+        "required": [
+          "kind",
+          "schemaVersion",
+          "messageId",
+          "clientNodeId",
+          "clientInstanceId",
+          "sequence",
+          "occurredAt",
+          "commandMessageId",
+          "status"
+        ],
+        "title": "client.managed_app.status",
+        "type": "object",
+        "x-authority": "client-report",
+        "x-direction": "client-to-control-plane",
+        "x-message-class": "report"
       },
       "ClientNode": {
         "additionalProperties": false,
@@ -6290,6 +6566,501 @@
         ],
         "type": "string"
       },
+      "CollaborationPageAnnotationArtifact": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "artifactId": {
+                "$ref": "#/components/schemas/ArtifactId"
+              },
+              "digest": {
+                "$ref": "#/components/schemas/Sha256Digest"
+              }
+            },
+            "required": [
+              "artifactId",
+              "digest"
+            ],
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "CollaborationPageAnnotationCandidate": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt": {
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "candidateDigest": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "candidateRef": {
+            "pattern": "^git-candidate:sha256:[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "candidateTreeId": {
+            "pattern": "^[0-9a-f]{40,64}$",
+            "type": "string"
+          },
+          "deliveryId": {
+            "$ref": "#/components/schemas/DeliveryId"
+          },
+          "deliverySpecId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "deliverySpecRevision": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "diffSha256": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "sessionBindingId": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "workRunId": {
+            "$ref": "#/components/schemas/WorkRunId"
+          }
+        },
+        "required": [
+          "deliveryId",
+          "deliverySpecId",
+          "deliverySpecRevision",
+          "candidateRef",
+          "candidateDigest",
+          "candidateTreeId",
+          "diffSha256",
+          "workRunId",
+          "attempt",
+          "sessionBindingId"
+        ],
+        "type": "object"
+      },
+      "CollaborationPageAnnotationItemId": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "approval",
+              "gate_attention",
+              "delivery_attention"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "CollaborationPageAnnotationListParameters": {
+        "additionalProperties": false,
+        "properties": {
+          "deliveryId": {
+            "$ref": "#/components/schemas/DeliveryId"
+          }
+        },
+        "required": [
+          "deliveryId"
+        ],
+        "type": "object"
+      },
+      "CollaborationPageAnnotationListQuery": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryEnvelope"
+          },
+          {
+            "properties": {
+              "parameters": {
+                "$ref": "#/components/schemas/CollaborationPageAnnotationListParameters"
+              },
+              "query": {
+                "const": "collaboration.page_annotation.list"
+              },
+              "scope": {
+                "$ref": "#/components/schemas/RepositoryScope"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "CollaborationPageAnnotationListResultResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryResultEnvelope"
+          },
+          {
+            "properties": {
+              "query": {
+                "const": "collaboration.page_annotation.list"
+              },
+              "result": {
+                "$ref": "#/components/schemas/CollaborationPageAnnotationPage"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "CollaborationPageAnnotationPage": {
+        "additionalProperties": false,
+        "properties": {
+          "catalogRevision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/CollaborationPageAnnotationProjection"
+            },
+            "maxItems": 200,
+            "type": "array"
+          },
+          "kind": {
+            "const": "collaboration_page_annotation_page"
+          }
+        },
+        "required": [
+          "kind",
+          "items",
+          "catalogRevision"
+        ],
+        "type": "object"
+      },
+      "CollaborationPageAnnotationProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "authorUserId": {
+            "$ref": "#/components/schemas/UserId"
+          },
+          "body": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "candidate": {
+            "$ref": "#/components/schemas/CollaborationPageAnnotationCandidate"
+          },
+          "derivedAttentionId": {
+            "$ref": "#/components/schemas/AttentionItemId"
+          },
+          "evidenceId": {
+            "$ref": "#/components/schemas/EvidenceId"
+          },
+          "id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "itemId": {
+            "$ref": "#/components/schemas/CollaborationPageAnnotationItemId"
+          },
+          "revision": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "screenshotArtifact": {
+            "$ref": "#/components/schemas/CollaborationPageAnnotationArtifact"
+          },
+          "sourceRevision": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "sourceSha256": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "state": {
+            "enum": [
+              "active",
+              "revoked"
+            ],
+            "type": "string"
+          },
+          "target": {
+            "$ref": "#/components/schemas/CollaborationPageAnnotationTarget"
+          },
+          "updatedAt": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "itemId",
+          "authorUserId",
+          "candidate",
+          "target",
+          "body",
+          "screenshotArtifact",
+          "derivedAttentionId",
+          "evidenceId",
+          "state",
+          "revision",
+          "sourceRevision",
+          "sourceSha256",
+          "updatedAt"
+        ],
+        "type": "object"
+      },
+      "CollaborationPageAnnotationSubmitCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "collaboration.page_annotation.submit"
+              },
+              "payload": {
+                "$ref": "#/components/schemas/CollaborationPageAnnotationSubmitPayload"
+              },
+              "scope": {
+                "$ref": "#/components/schemas/RepositoryScope"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "CollaborationPageAnnotationSubmitCompletedResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandCompletedEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "collaboration.page_annotation.submit"
+              },
+              "result": {
+                "$ref": "#/components/schemas/CollaborationPageAnnotationSubmitResult"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "CollaborationPageAnnotationSubmitPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "annotationId": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "body": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "candidate": {
+            "$ref": "#/components/schemas/CollaborationPageAnnotationCandidate"
+          },
+          "itemId": {
+            "$ref": "#/components/schemas/CollaborationPageAnnotationItemId"
+          },
+          "screenshotArtifact": {
+            "$ref": "#/components/schemas/CollaborationPageAnnotationArtifact"
+          },
+          "target": {
+            "$ref": "#/components/schemas/CollaborationPageAnnotationTarget"
+          }
+        },
+        "required": [
+          "itemId",
+          "annotationId",
+          "candidate",
+          "target",
+          "body",
+          "screenshotArtifact"
+        ],
+        "type": "object"
+      },
+      "CollaborationPageAnnotationSubmitResult": {
+        "additionalProperties": false,
+        "properties": {
+          "annotation": {
+            "$ref": "#/components/schemas/CollaborationPageAnnotationProjection"
+          },
+          "catalogRevision": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "replayed": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "annotation",
+          "catalogRevision",
+          "replayed"
+        ],
+        "type": "object"
+      },
+      "CollaborationPageAnnotationTarget": {
+        "additionalProperties": false,
+        "properties": {
+          "element": {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "accessibleName": {
+                    "oneOf": [
+                      {
+                        "maxLength": 500,
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "height": {
+                    "maximum": 4096,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "locator": {
+                    "maxLength": 1000,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "role": {
+                    "oneOf": [
+                      {
+                        "maxLength": 128,
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "tagName": {
+                    "maxLength": 64,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "width": {
+                    "maximum": 4096,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "x": {
+                    "maximum": 4096,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "y": {
+                    "maximum": 4096,
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "tagName",
+                  "locator",
+                  "x",
+                  "y",
+                  "width",
+                  "height"
+                ],
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "pagePath": {
+            "pattern": "^/[^\\u0000]{0,2047}$",
+            "type": "string"
+          },
+          "region": {
+            "additionalProperties": false,
+            "properties": {
+              "height": {
+                "maximum": 4096,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "width": {
+                "maximum": 4096,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "x": {
+                "maximum": 4096,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "y": {
+                "maximum": 4096,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "x",
+              "y",
+              "width",
+              "height"
+            ],
+            "type": "object"
+          },
+          "viewport": {
+            "additionalProperties": false,
+            "properties": {
+              "devicePixelRatio": {
+                "exclusiveMinimum": 0.1,
+                "maximum": 4,
+                "type": "number"
+              },
+              "height": {
+                "maximum": 4096,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "width": {
+                "maximum": 4096,
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "width",
+              "height",
+              "devicePixelRatio"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "pagePath",
+          "viewport",
+          "region"
+        ],
+        "type": "object"
+      },
       "CollaborationPresenceListParameters": {
         "additionalProperties": false,
         "properties": {
@@ -6664,6 +7435,9 @@
             "$ref": "#/components/schemas/CollaborationPresenceUpdateCompletedResponse"
           },
           {
+            "$ref": "#/components/schemas/CollaborationPageAnnotationSubmitCompletedResponse"
+          },
+          {
             "$ref": "#/components/schemas/WorkItemsCreateCompletedResponse"
           }
         ]
@@ -6731,6 +7505,7 @@
           "publication.cancel",
           "collaboration.notification.ack",
           "collaboration.presence.update",
+          "collaboration.page_annotation.submit",
           "workitems.create"
         ],
         "type": "string"
@@ -6808,6 +7583,9 @@
           },
           {
             "$ref": "#/components/schemas/CollaborationPresenceUpdateCommand"
+          },
+          {
+            "$ref": "#/components/schemas/CollaborationPageAnnotationSubmitCommand"
           },
           {
             "$ref": "#/components/schemas/WorkItemsCreateCommand"
@@ -12468,6 +13246,8 @@
           "READ_CURSOR_EXPIRED",
           "CANDIDATE_STALE",
           "WRONG_STATE",
+          "DEVICE_SESSION_REQUIRED",
+          "DEVICE_MODEL_UNAVAILABLE",
           "RATE_LIMITED",
           "SERVICE_UNAVAILABLE",
           "TRUSTED_FACTS_UNAVAILABLE",
@@ -13094,6 +13874,16 @@
           "outcome": {
             "$ref": "#/components/schemas/EvidenceOutcome"
           },
+          "pageAnnotation": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/EvidencePageAnnotationProjection"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "readCursor": {
             "$ref": "#/components/schemas/StrongFlowReadCursor"
           }
@@ -13161,6 +13951,29 @@
           "cancelled"
         ],
         "type": "string"
+      },
+      "EvidencePageAnnotationProjection": {
+        "additionalProperties": false,
+        "description": "Exact secret-free page annotation source bound to one ReviewFinding Evidence.",
+        "properties": {
+          "body": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "screenshotArtifact": {
+            "$ref": "#/components/schemas/CollaborationPageAnnotationArtifact"
+          },
+          "target": {
+            "$ref": "#/components/schemas/CollaborationPageAnnotationTarget"
+          }
+        },
+        "required": [
+          "body",
+          "target",
+          "screenshotArtifact"
+        ],
+        "type": "object"
       },
       "EvidenceReadBinding": {
         "additionalProperties": false,
@@ -15092,7 +15905,260 @@
               }
             }
           }
-        ]
+        ],
+        "description": "WinWinCode Community canonical single-Owner local scope. All Community product runtime state maps to this fixed repository-scope identity."
+      },
+      "ManagedAppCommand": {
+        "additionalProperties": false,
+        "properties": {
+          "config": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ManagedAppRunConfig"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "idempotencyKey": {
+            "$ref": "#/components/schemas/IdempotencyKey"
+          },
+          "occupancyFencingToken": {
+            "$ref": "#/components/schemas/OccupancyFencingToken"
+          },
+          "occupancyLeaseId": {
+            "$ref": "#/components/schemas/ClientOccupancyLeaseId"
+          },
+          "operation": {
+            "$ref": "#/components/schemas/ManagedAppOperation"
+          },
+          "runId": {
+            "$ref": "#/components/schemas/WorkRunId"
+          },
+          "schemaVersion": {
+            "const": "winwincode/managed-app-run-v1"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "operation",
+          "idempotencyKey",
+          "occupancyLeaseId",
+          "occupancyFencingToken",
+          "config",
+          "runId"
+        ],
+        "type": "object"
+      },
+      "ManagedAppHealthCheck": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "pattern": "^/[^.]*$",
+            "type": "string"
+          },
+          "timeoutMs": {
+            "maximum": 60000,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path",
+          "timeoutMs"
+        ],
+        "type": "object"
+      },
+      "ManagedAppMode": {
+        "enum": [
+          "live",
+          "frozen-candidate"
+        ],
+        "type": "string"
+      },
+      "ManagedAppOperation": {
+        "enum": [
+          "start",
+          "stop",
+          "restart",
+          "query"
+        ],
+        "type": "string"
+      },
+      "ManagedAppRunConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "argv": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 128,
+            "minItems": 1,
+            "type": "array"
+          },
+          "attempt": {
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "candidateCommit": {
+            "pattern": "^[0-9a-f]{40}$|^[0-9a-f]{64}$",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cwd": {
+            "pattern": "^(?:\\.|[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*)$",
+            "type": "string"
+          },
+          "env": {
+            "additionalProperties": {
+              "maxLength": 4096,
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "healthCheck": {
+            "$ref": "#/components/schemas/ManagedAppHealthCheck"
+          },
+          "listenPort": {
+            "maximum": 65535,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/ManagedAppMode"
+          },
+          "repositoryBindingId": {
+            "$ref": "#/components/schemas/RepositoryBindingId"
+          },
+          "runId": {
+            "$ref": "#/components/schemas/WorkRunId"
+          },
+          "schemaVersion": {
+            "const": "winwincode/managed-app-run-v1"
+          },
+          "sourceId": {
+            "$ref": "#/components/schemas/ExecutionJobId"
+          },
+          "templateRevision": {
+            "maximum": 1000000000,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "runId",
+          "repositoryBindingId",
+          "templateRevision",
+          "attempt",
+          "mode",
+          "candidateCommit",
+          "cwd",
+          "argv",
+          "env",
+          "healthCheck",
+          "listenPort",
+          "sourceId"
+        ],
+        "type": "object"
+      },
+      "ManagedAppRunControlProjection": {
+        "additionalProperties": false,
+        "description": "Secret-safe browser projection of one Server-sealed managed application run.",
+        "properties": {
+          "attempt": {
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "candidateCommit": {
+            "pattern": "^[0-9a-f]{40}$|^[0-9a-f]{64}$",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mode": {
+            "$ref": "#/components/schemas/ManagedAppMode"
+          },
+          "runId": {
+            "$ref": "#/components/schemas/WorkRunId"
+          },
+          "schemaVersion": {
+            "const": "winwincode/managed-app-run-v1"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "runId",
+          "attempt",
+          "mode",
+          "candidateCommit"
+        ],
+        "type": "object"
+      },
+      "ManagedAppState": {
+        "enum": [
+          "starting",
+          "healthy",
+          "unhealthy",
+          "stopped",
+          "exited",
+          "missing"
+        ],
+        "type": "string"
+      },
+      "ManagedAppStatus": {
+        "additionalProperties": false,
+        "properties": {
+          "exitCode": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "pid": {
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "processStartIdentity": {
+            "maxLength": 256,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "runId": {
+            "$ref": "#/components/schemas/WorkRunId"
+          },
+          "schemaVersion": {
+            "const": "winwincode/managed-app-run-v1"
+          },
+          "sourceId": {
+            "$ref": "#/components/schemas/ExecutionJobId"
+          },
+          "state": {
+            "$ref": "#/components/schemas/ManagedAppState"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "runId",
+          "state",
+          "pid",
+          "processStartIdentity",
+          "exitCode",
+          "sourceId"
+        ],
+        "type": "object"
       },
       "ModelAckMessage": {
         "additionalProperties": false,
@@ -16458,11 +17524,13 @@
         "type": "string"
       },
       "OrganizationId": {
+        "description": "Protocol scope-key identifier. In WinWinCode Community this is the local Owner scope encoding used by LocalDefaultScope, not multi-tenant organization membership.",
         "pattern": "^org_[0-9A-HJKMNP-TV-Z]{26}$",
         "type": "string"
       },
       "OrganizationScope": {
         "additionalProperties": false,
+        "description": "Organization-level scope key. Community product uses only LocalDefaultScope; this shape is protocol vocabulary, not org-admin product surface.",
         "properties": {
           "kind": {
             "const": "organization"
@@ -19043,6 +20111,7 @@
         "type": "object"
       },
       "ProjectId": {
+        "description": "Protocol scope-key identifier. Community product identity uses LocalDefaultScope; this key is not multi-tenant project membership.",
         "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$",
         "type": "string"
       },
@@ -19778,6 +20847,7 @@
           "candidate.review.get",
           "candidate.files.list",
           "candidate.diff.get",
+          "candidate.file.content.get",
           "evidence.get",
           "evidence.artifact.content.get",
           "settings.get",
@@ -19793,6 +20863,7 @@
           "collaboration.activity.list",
           "collaboration.notification.list",
           "collaboration.presence.list",
+          "collaboration.page_annotation.list",
           "session.artifact.get"
         ],
         "type": "string"
@@ -19834,6 +20905,9 @@
           },
           {
             "$ref": "#/components/schemas/CandidateDiffGetQuery"
+          },
+          {
+            "$ref": "#/components/schemas/CandidateFileContentGetQuery"
           },
           {
             "$ref": "#/components/schemas/EvidenceGetQuery"
@@ -19879,6 +20953,9 @@
           },
           {
             "$ref": "#/components/schemas/CollaborationPresenceListQuery"
+          },
+          {
+            "$ref": "#/components/schemas/CollaborationPageAnnotationListQuery"
           },
           {
             "$ref": "#/components/schemas/SessionArtifactGetQuery"
@@ -19952,6 +21029,9 @@
             "$ref": "#/components/schemas/CandidateDiffGetResultResponse"
           },
           {
+            "$ref": "#/components/schemas/CandidateFileContentGetResultResponse"
+          },
+          {
             "$ref": "#/components/schemas/EvidenceGetResultResponse"
           },
           {
@@ -19995,6 +21075,9 @@
           },
           {
             "$ref": "#/components/schemas/CollaborationPresenceListResultResponse"
+          },
+          {
+            "$ref": "#/components/schemas/CollaborationPageAnnotationListResultResponse"
           },
           {
             "$ref": "#/components/schemas/SessionArtifactGetResultResponse"
@@ -20576,6 +21659,7 @@
         "type": "string"
       },
       "RepositoryId": {
+        "description": "Protocol scope-key identifier. Community product identity uses LocalDefaultScope; this key is not multi-tenant repository administration.",
         "pattern": "^rep_[0-9A-HJKMNP-TV-Z]{26}$",
         "type": "string"
       },
@@ -21809,6 +22893,7 @@
         "type": "string"
       },
       "Scope": {
+        "description": "Protocol scope key union. Community product surfaces use LocalDefaultScope; organization/member administration is not Community product surface.",
         "oneOf": [
           {
             "$ref": "#/components/schemas/OrganizationScope"
@@ -23617,6 +24702,8 @@
           "REVISION_CONFLICT",
           "CANDIDATE_STALE",
           "WRONG_STATE",
+          "DEVICE_SESSION_REQUIRED",
+          "DEVICE_MODEL_UNAVAILABLE",
           "INTERNAL_ERROR"
         ],
         "type": "string"
@@ -26151,6 +27238,15 @@
             "maxItems": 1000,
             "type": "array"
           },
+          "managedAppRunConfigs": {
+            "description": "Secret-safe managed application controls. The Server keeps executable fields authoritative and attaches them only when dispatching to the Device.",
+            "items": {
+              "$ref": "#/components/schemas/ManagedAppRunControlProjection"
+            },
+            "maxItems": 1000,
+            "type": "array",
+            "uniqueItems": true
+          },
           "readCursor": {
             "$ref": "#/components/schemas/StrongFlowReadCursor"
           },
@@ -26171,6 +27267,7 @@
           "items",
           "runs",
           "deviceBindings",
+          "managedAppRunConfigs",
           "graphItems",
           "readCursor"
         ],
@@ -26530,6 +27627,7 @@
         "type": "string"
       },
       "WorkspaceId": {
+        "description": "Protocol scope-key identifier. Community product identity uses LocalDefaultScope; this key is not Cloud/Enterprise workspace administration.",
         "pattern": "^wsp_[0-9A-HJKMNP-TV-Z]{26}$",
         "type": "string"
       },
@@ -27001,7 +28099,7 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:b91be8d38875390b4d7c083c794e67d42166951faaa288b2f5f18b640decec49",
+  "x-source-digest": "sha256:fe0da56b06a48137e5c570d7d11ea53bcc476d9f694112b3709aa93d585a1695",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {

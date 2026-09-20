@@ -74,6 +74,14 @@
         "httpStatus": 409,
         "retryable": false
       },
+      "DEVICE_SESSION_REQUIRED": {
+        "httpStatus": 409,
+        "retryable": false
+      },
+      "DEVICE_MODEL_UNAVAILABLE": {
+        "httpStatus": 409,
+        "retryable": false
+      },
       "RATE_LIMITED": {
         "httpStatus": 429,
         "retryable": true
@@ -290,7 +298,8 @@
         "candidate.list",
         "candidate.review.get",
         "candidate.files.list",
-        "candidate.diff.get"
+        "candidate.diff.get",
+        "candidate.file.content.get"
       ],
       "binding": [
         "repository scope",
@@ -308,6 +317,9 @@
       "callerGitRevisionAllowed": false,
       "pathTraversalAllowed": false,
       "baseProjectionIncludesContent": false,
+      "contentChunkMaxBytes": 262144,
+      "contentMaxBytes": 268435456,
+      "contentRead": "candidate commit blob bytes only; deleted and non-blob paths fail closed",
       "historyAvailability": "available only for an exact pinned retention; released is display-only and never authorizes Git content reads",
       "historicalReviewAuthorization": "historical Verdict and Evidence are display-only and never become current Delivery authorization"
     },
@@ -460,6 +472,9 @@
           "$ref": "#/$defs/CollaborationPresenceUpdateCommand"
         },
         {
+          "$ref": "#/$defs/CollaborationPageAnnotationSubmitCommand"
+        },
+        {
           "$ref": "#/$defs/WorkItemsCreateCommand"
         }
       ]
@@ -501,6 +516,9 @@
         },
         {
           "$ref": "#/$defs/CandidateDiffGetQuery"
+        },
+        {
+          "$ref": "#/$defs/CandidateFileContentGetQuery"
         },
         {
           "$ref": "#/$defs/EvidenceGetQuery"
@@ -548,6 +566,9 @@
           "$ref": "#/$defs/CollaborationPresenceListQuery"
         },
         {
+          "$ref": "#/$defs/CollaborationPageAnnotationListQuery"
+        },
+        {
           "$ref": "#/$defs/SessionArtifactGetQuery"
         }
       ]
@@ -567,6 +588,7 @@
         "candidate.review.get",
         "candidate.files.list",
         "candidate.diff.get",
+        "candidate.file.content.get",
         "evidence.get",
         "evidence.artifact.content.get",
         "settings.get",
@@ -582,6 +604,7 @@
         "collaboration.activity.list",
         "collaboration.notification.list",
         "collaboration.presence.list",
+        "collaboration.page_annotation.list",
         "session.artifact.get"
       ]
     },
@@ -753,6 +776,9 @@
           "$ref": "#/$defs/CollaborationPresenceUpdateCompletedResponse"
         },
         {
+          "$ref": "#/$defs/CollaborationPageAnnotationSubmitCompletedResponse"
+        },
+        {
           "$ref": "#/$defs/WorkItemsCreateCompletedResponse"
         }
       ],
@@ -829,6 +855,9 @@
           "$ref": "#/$defs/CandidateDiffGetResultResponse"
         },
         {
+          "$ref": "#/$defs/CandidateFileContentGetResultResponse"
+        },
+        {
           "$ref": "#/$defs/EvidenceGetResultResponse"
         },
         {
@@ -872,6 +901,9 @@
         },
         {
           "$ref": "#/$defs/CollaborationPresenceListResultResponse"
+        },
+        {
+          "$ref": "#/$defs/CollaborationPageAnnotationListResultResponse"
         },
         {
           "$ref": "#/$defs/SessionArtifactGetResultResponse"
@@ -6209,6 +6241,178 @@
         }
       ]
     },
+    "CollaborationPageAnnotationItemId": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id"],
+      "properties": {
+        "kind": {
+          "enum": ["approval", "gate_attention", "delivery_attention"],
+          "type": "string"
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      }
+    },
+    "CollaborationPageAnnotationCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deliveryId", "deliverySpecId", "deliverySpecRevision", "candidateRef", "candidateDigest", "candidateTreeId", "diffSha256", "workRunId", "attempt", "sessionBindingId"],
+      "properties": {
+        "deliveryId": {"$ref": "./domain.schema.json#/$defs/DeliveryId"},
+        "deliverySpecId": {"type": "string", "minLength": 1, "maxLength": 200},
+        "deliverySpecRevision": {"type": "integer", "minimum": 1},
+        "candidateRef": {"type": "string", "pattern": "^git-candidate:sha256:[0-9a-f]{64}$"},
+        "candidateDigest": {"$ref": "./domain.schema.json#/$defs/Sha256Digest"},
+        "candidateTreeId": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+        "diffSha256": {"$ref": "./domain.schema.json#/$defs/Sha256Digest"},
+        "workRunId": {"$ref": "./domain.schema.json#/$defs/WorkRunId"},
+        "attempt": {"type": "integer", "minimum": 1, "maximum": 1000},
+        "sessionBindingId": {"type": "string", "minLength": 1, "maxLength": 256}
+      }
+    },
+    "CollaborationPageAnnotationTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pagePath", "viewport", "region"],
+      "properties": {
+        "pagePath": {"type": "string", "pattern": "^/[^\\u0000]{0,2047}$"},
+        "viewport": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["width", "height", "devicePixelRatio"],
+          "properties": {
+            "width": {"type": "integer", "minimum": 1, "maximum": 4096},
+            "height": {"type": "integer", "minimum": 1, "maximum": 4096},
+            "devicePixelRatio": {"type": "number", "exclusiveMinimum": 0.1, "maximum": 4}
+          }
+        },
+        "element": {
+          "oneOf": [
+            {"type": "object", "additionalProperties": false, "required": ["tagName", "locator", "x", "y", "width", "height"], "properties": {
+              "tagName": {"type": "string", "minLength": 1, "maxLength": 64},
+              "role": {"oneOf": [{"type": "string", "maxLength": 128}, {"type": "null"}]},
+              "accessibleName": {"oneOf": [{"type": "string", "maxLength": 500}, {"type": "null"}]},
+              "locator": {"type": "string", "minLength": 1, "maxLength": 1000},
+              "x": {"type": "integer", "minimum": 0, "maximum": 4096},
+              "y": {"type": "integer", "minimum": 0, "maximum": 4096},
+              "width": {"type": "integer", "minimum": 1, "maximum": 4096},
+              "height": {"type": "integer", "minimum": 1, "maximum": 4096}
+            }},
+            {"type": "null"}
+          ]
+        },
+        "region": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["x", "y", "width", "height"],
+          "properties": {
+            "x": {"type": "integer", "minimum": 0, "maximum": 4096},
+            "y": {"type": "integer", "minimum": 0, "maximum": 4096},
+            "width": {"type": "integer", "minimum": 1, "maximum": 4096},
+            "height": {"type": "integer", "minimum": 1, "maximum": 4096}
+          }
+        }
+      }
+    },
+    "CollaborationPageAnnotationArtifact": {
+      "oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["artifactId", "digest"], "properties": {
+          "artifactId": {"$ref": "./domain.schema.json#/$defs/ArtifactId"},
+          "digest": {"$ref": "./domain.schema.json#/$defs/Sha256Digest"}
+        }},
+        {"type": "null"}
+      ]
+    },
+    "CollaborationPageAnnotationProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "itemId", "authorUserId", "candidate", "target", "body", "screenshotArtifact", "derivedAttentionId", "evidenceId", "state", "revision", "sourceRevision", "sourceSha256", "updatedAt"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "itemId": {"$ref": "#/$defs/CollaborationPageAnnotationItemId"},
+        "authorUserId": {"$ref": "./domain.schema.json#/$defs/UserId"},
+        "candidate": {"$ref": "#/$defs/CollaborationPageAnnotationCandidate"},
+        "target": {"$ref": "#/$defs/CollaborationPageAnnotationTarget"},
+        "body": {"type": "string", "minLength": 1, "maxLength": 4000},
+        "screenshotArtifact": {"$ref": "#/$defs/CollaborationPageAnnotationArtifact"},
+        "derivedAttentionId": {"$ref": "./domain.schema.json#/$defs/AttentionItemId"},
+        "evidenceId": {"$ref": "./domain.schema.json#/$defs/EvidenceId"},
+        "state": {"enum": ["active", "revoked"], "type": "string"},
+        "revision": {"type": "integer", "minimum": 1},
+        "sourceRevision": {"type": "integer", "minimum": 1},
+        "sourceSha256": {"$ref": "./domain.schema.json#/$defs/Sha256Digest"},
+        "updatedAt": {"type": "integer", "minimum": 0}
+      }
+    },
+    "CollaborationPageAnnotationSubmitPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["itemId", "annotationId", "candidate", "target", "body", "screenshotArtifact"],
+      "properties": {
+        "itemId": {"$ref": "#/$defs/CollaborationPageAnnotationItemId"},
+        "annotationId": {"type": "string", "minLength": 1, "maxLength": 256},
+        "candidate": {"$ref": "#/$defs/CollaborationPageAnnotationCandidate"},
+        "target": {"$ref": "#/$defs/CollaborationPageAnnotationTarget"},
+        "body": {"type": "string", "minLength": 1, "maxLength": 4000},
+        "screenshotArtifact": {"$ref": "#/$defs/CollaborationPageAnnotationArtifact"}
+      }
+    },
+    "CollaborationPageAnnotationSubmitCommand": {
+      "allOf": [{"$ref": "./domain.schema.json#/$defs/CommandEnvelope"}, {"type": "object", "properties": {
+        "command": {"const": "collaboration.page_annotation.submit"},
+        "payload": {"$ref": "#/$defs/CollaborationPageAnnotationSubmitPayload"},
+        "scope": {"$ref": "./domain.schema.json#/$defs/RepositoryScope"}
+      }}]
+    },
+    "CollaborationPageAnnotationSubmitResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["annotation", "catalogRevision", "replayed"],
+      "properties": {
+        "annotation": {"$ref": "#/$defs/CollaborationPageAnnotationProjection"},
+        "catalogRevision": {"type": "integer", "minimum": 1},
+        "replayed": {"type": "boolean"}
+      }
+    },
+    "CollaborationPageAnnotationSubmitCompletedResponse": {
+      "allOf": [{"$ref": "#/$defs/CommandCompletedEnvelope"}, {"type": "object", "properties": {
+        "command": {"const": "collaboration.page_annotation.submit"},
+        "result": {"$ref": "#/$defs/CollaborationPageAnnotationSubmitResult"}
+      }}]
+    },
+    "CollaborationPageAnnotationListParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deliveryId"],
+      "properties": {"deliveryId": {"$ref": "./domain.schema.json#/$defs/DeliveryId"}}
+    },
+    "CollaborationPageAnnotationPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "items", "catalogRevision"],
+      "properties": {
+        "kind": {"const": "collaboration_page_annotation_page"},
+        "catalogRevision": {"$ref": "./domain.schema.json#/$defs/Revision"},
+        "items": {"type": "array", "maxItems": 200, "items": {"$ref": "#/$defs/CollaborationPageAnnotationProjection"}}
+      }
+    },
+    "CollaborationPageAnnotationListQuery": {
+      "allOf": [{"$ref": "#/$defs/QueryEnvelope"}, {"type": "object", "properties": {
+        "query": {"const": "collaboration.page_annotation.list"},
+        "parameters": {"$ref": "#/$defs/CollaborationPageAnnotationListParameters"},
+        "scope": {"$ref": "./domain.schema.json#/$defs/RepositoryScope"}
+      }}]
+    },
+    "CollaborationPageAnnotationListResultResponse": {
+      "allOf": [{"$ref": "#/$defs/QueryResultEnvelope"}, {"type": "object", "properties": {
+        "query": {"const": "collaboration.page_annotation.list"},
+        "result": {"$ref": "#/$defs/CollaborationPageAnnotationPage"}
+      }}]
+    },
     "CandidateFileStatus": {
       "type": "string",
       "enum": [
@@ -6897,6 +7101,180 @@
         }
       ]
     },
+    "CandidateFileContentGetParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deliveryId",
+        "atCursor",
+        "readPageLimit",
+        "candidateRef",
+        "candidateTreeId",
+        "diffSha256",
+        "path",
+        "offset",
+        "length"
+      ],
+      "properties": {
+        "deliveryId": {
+          "$ref": "./domain.schema.json#/$defs/DeliveryId"
+        },
+        "atCursor": {
+          "$ref": "./domain.schema.json#/$defs/StrongFlowReadCursor"
+        },
+        "readPageLimit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200,
+          "description": "The delivery.get page.limit sealed into atCursor."
+        },
+        "candidateRef": {
+          "type": "string",
+          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$"
+        },
+        "candidateTreeId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40,64}$"
+        },
+        "diffSha256": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "description": "Normalized repository-relative path selected from the trusted Candidate file inventory."
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 268435456
+        },
+        "length": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 262144
+        }
+      },
+      "description": "One bounded base64 byte range from the exact retained Candidate commit blob. The server resolves the retained candidate source; callers cannot supply a repository locator or Git revision."
+    },
+    "CandidateFileContentChunkProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "candidate",
+        "readCursor",
+        "path",
+        "contentEncoding",
+        "encoding",
+        "mediaType",
+        "offset",
+        "returnedBytes",
+        "totalBytes",
+        "dataBase64",
+        "nextOffset"
+      ],
+      "properties": {
+        "kind": {
+          "const": "candidate_file_content_chunk"
+        },
+        "candidate": {
+          "$ref": "#/$defs/FrozenCandidateSummaryProjection"
+        },
+        "readCursor": {
+          "$ref": "./domain.schema.json#/$defs/StrongFlowReadCursor"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "contentEncoding": {
+          "$ref": "#/$defs/CandidateFileEncoding"
+        },
+        "encoding": {
+          "const": "base64"
+        },
+        "mediaType": {
+          "type": "string",
+          "pattern": "^[^\\s/]+/[^\\s]+$",
+          "maxLength": 200
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 268435456
+        },
+        "returnedBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 262144
+        },
+        "totalBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 268435456
+        },
+        "dataBase64": {
+          "type": "string",
+          "maxLength": 349528,
+          "pattern": "^[A-Za-z0-9+/]*={0,2}$"
+        },
+        "nextOffset": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 268435456
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "description": "One bounded, integrity-checked byte range from the retained Candidate commit. Text and binary data are both returned as base64 with an explicit content classification and media type."
+    },
+    "CandidateFileContentGetQuery": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "const": "candidate.file.content.get"
+            },
+            "parameters": {
+              "$ref": "#/$defs/CandidateFileContentGetParameters"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
+            }
+          }
+        }
+      ]
+    },
+    "CandidateFileContentGetResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "const": "candidate.file.content.get"
+            },
+            "result": {
+              "$ref": "#/$defs/CandidateFileContentChunkProjection"
+            }
+          }
+        }
+      ]
+    },
     "EvidenceReadBinding": {
       "type": "object",
       "additionalProperties": false,
@@ -7140,9 +7518,42 @@
         },
         "artifactAccess": {
           "$ref": "#/$defs/EvidenceArtifactAccessProjection"
+        },
+        "pageAnnotation": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/EvidencePageAnnotationProjection"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "description": "Exact current Evidence details reconstructed from the accepted Delivery, terminal, and runtime authorities. Free-form logs are never treated as outcome or access authority."
+    },
+    "EvidencePageAnnotationProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "body",
+        "target",
+        "screenshotArtifact"
+      ],
+      "properties": {
+        "body": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000
+        },
+        "target": {
+          "$ref": "#/$defs/CollaborationPageAnnotationTarget"
+        },
+        "screenshotArtifact": {
+          "$ref": "#/$defs/CollaborationPageAnnotationArtifact"
+        }
+      },
+      "description": "Exact secret-free page annotation source bound to one ReviewFinding Evidence."
     },
     "EvidenceGetQuery": {
       "allOf": [
@@ -8130,6 +8541,7 @@
         "items",
         "runs",
         "deviceBindings",
+        "managedAppRunConfigs",
         "graphItems",
         "readCursor"
       ],
@@ -8162,6 +8574,15 @@
             "$ref": "#/$defs/WorkRunDeviceBindingProjection"
           }
         },
+        "managedAppRunConfigs": {
+          "type": "array",
+          "maxItems": 1000,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/ManagedAppRunControlProjection"
+          },
+          "description": "Secret-safe managed application controls. The Server keeps executable fields authoritative and attaches them only when dispatching to the Device."
+        },
         "graphItems": {
           "type": "array",
           "maxItems": 1000,
@@ -8173,6 +8594,25 @@
           "$ref": "./domain.schema.json#/$defs/StrongFlowReadCursor"
         }
       }
+    },
+    "ManagedAppRunControlProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "runId",
+        "attempt",
+        "mode",
+        "candidateCommit"
+      ],
+      "properties": {
+        "schemaVersion": {"const": "winwincode/managed-app-run-v1"},
+        "runId": {"$ref": "./domain.schema.json#/$defs/WorkRunId"},
+        "attempt": {"type": "integer", "minimum": 1, "maximum": 1000},
+        "mode": {"$ref": "./client-control.schema.json#/$defs/ManagedAppMode"},
+        "candidateCommit": {"type": ["string", "null"], "pattern": "^[0-9a-f]{40}$|^[0-9a-f]{64}$"}
+      },
+      "description": "Secret-safe browser projection of one Server-sealed managed application run."
     },
     "WorkRunGetParameters": {
       "type": "object",

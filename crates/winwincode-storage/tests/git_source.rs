@@ -399,6 +399,24 @@ fn local_git_resolver_imports_candidate_from_an_isolated_worker_repository() {
         format!("{:x}", Sha256::digest(path_diff.bytes()))
     );
     assert!(String::from_utf8_lossy(path_diff.bytes()).contains("+candidate"));
+    let content = resolver
+        .candidate_file_content(&source, "src/app.txt")
+        .expect("Candidate file content");
+    assert_eq!(content.path(), "src/app.txt");
+    assert_eq!(content.encoding(), GitCandidateReviewFileEncoding::Utf8);
+    assert_eq!(content.bytes(), b"base\ncandidate\n");
+    let binary_content = resolver
+        .candidate_file_content(&source, "src/blob.bin")
+        .expect("Candidate binary content");
+    assert_eq!(
+        binary_content.encoding(),
+        GitCandidateReviewFileEncoding::Binary
+    );
+    assert_eq!(binary_content.bytes(), [0_u8, 1, 2, 0, 255]);
+    let traversal = resolver
+        .candidate_file_content(&source, "../secret")
+        .expect_err("path traversal must not select Candidate content");
+    assert_eq!(traversal.kind(), ArtifactErrorKind::InvalidInput);
     let binary_diff = resolver
         .candidate_diff(&source, "src/blob.bin")
         .expect("Candidate binary diff");

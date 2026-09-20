@@ -74,7 +74,7 @@
 //! dependency-free std TCP implementation in [`crate::http`].
 
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -93,15 +93,16 @@ use winwincode_client_port::exchange::{
     AckCursor, FrameCodec, FrameCodecError, FrameOutbox, OutboxBatch, OutboxError, OutboxSession,
     OutboxSnapshot, OutboxStateError, SequenceVerdict,
 };
+use winwincode_client_port::managed_app::{ManagedAppCommand, ManagedAppOperation};
 use winwincode_client_port::messages::{
     CLIENT_CONTROL_PORT_SCHEMA_VERSION, ClientCommandAckPayload, ClientEnrollPayload,
-    ClientHeartbeatPayload, ClientHelloPayload, ClientOccupancyAckPayload,
-    ClientOccupancyRejectedPayload, ClientToServerEnvelope, ClientToServerMessage,
-    ClientWorkerLaunchAckPayload, CommandContext, OccupancyCommandContext,
+    ClientHeartbeatPayload, ClientHelloPayload, ClientManagedAppStatusPayload,
+    ClientOccupancyAckPayload, ClientOccupancyRejectedPayload, ClientToServerEnvelope,
+    ClientToServerMessage, ClientWorkerLaunchAckPayload, CommandContext, OccupancyCommandContext,
     ServerAccessChallengePayload, ServerClientLockPayload, ServerEnrollmentAcceptedPayload,
     ServerOccupancyForceFencePayload, ServerOccupancyOfferPayload, ServerOccupancyReleasePayload,
     ServerRepositoryRescanPayload, ServerToClientEnvelope, ServerToClientMessage,
-    ServerWorkerLaunchPayload,
+    ServerWorkerLaunchPayload, ServerWorkerStopPayload,
 };
 
 use crate::connect_code::{self, PublishedConnectCode};
@@ -114,7 +115,7 @@ use crate::store::{
     ClientInboxCursorUpdate, ConnectCodeStateRecord, ConnectionPolicyRecord, DeviceStore,
     DeviceStoreError, DeviceStoreErrorKind, OccupancyMirrorAdvance, OccupancyMirrorRecord,
     OccupancyMirrorUpdate, OccupancyReleaseIntentOutcome, OccupancyReleaseIntentRecord,
-    ServerProfileRecord, envelope_kind,
+    ServerProfileRecord, WorkerStopIntentOutcome, WorkerStopIntentRecord, envelope_kind,
 };
 use crate::supervisor::{SessionSupervisor, SpawnOutcome, SpawnRequest, SupervisorError};
 
@@ -190,6 +191,12 @@ pub trait WorkerLaunchMaterialSource: Send + Sync {
         worker_session_id: &str,
         repository_binding_id: &str,
     ) -> Option<WorkerLaunchDirectories>;
+}
+
+/// Device-local repository resolver for managed application runs. Absolute
+/// paths stay on Device and are never part of the Server command.
+pub trait ManagedAppRepositorySource: Send + Sync {
+    fn repository_root(&self, repository_binding_id: &str) -> Option<PathBuf>;
 }
 
 /// Longest slice the run loop sleeps without re-reading the shutdown flag.
@@ -583,6 +590,8 @@ pub struct DeviceDaemon {
     /// The device-local launch material source (WORKER-200.2): the one-time
     /// worker credential and the local directories one launch needs.
     worker_launch_material: Option<Arc<dyn WorkerLaunchMaterialSource>>,
+    managed_app_supervisor: Option<crate::managed_app::ManagedAppSupervisor>,
+    managed_app_repository: Option<Arc<dyn ManagedAppRepositorySource>>,
     /// Credential digest → worker session of every launch this daemon
     /// handled, so the deferred launch-response material reaches the right
     /// worker's private file (`receive_worker_credential`).
@@ -672,6 +681,8 @@ impl DeviceDaemon {
             lease_worker_controller: None,
             worker_supervisor: None,
             worker_launch_material: None,
+            managed_app_supervisor: None,
+            managed_app_repository: None,
             launch_credential_sessions: std::collections::HashMap::new(),
             pending_worker_credentials: std::collections::HashMap::new(),
             status: DaemonStatus {
@@ -1023,6 +1034,50 @@ impl DeviceDaemon {
         self.worker_supervisor = Some(supervisor);
     }
 
+    /// Replays authorized WorkerStop intents left without a terminal receipt
+    /// by a previous daemon process. This runs after the supervisor is wired,
+    /// before the next exchange, and routes through the normal receipt/outbox
+    /// path while preserving the original fencing decision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the durable store cannot be read or a recovered
+    /// stop cannot be verified by the local supervisor.
+    pub fn recover_worker_stop_intents(&mut self) -> Result<u64, DaemonError> {
+        let pending = self
+            .store
+            .pending_worker_stop_intents()
+            .map_err(DaemonError::Store)?;
+        if pending.is_empty() {
+            return Ok(0);
+        }
+        if self.worker_supervisor.is_none() {
+            return Err(DaemonError::Protocol(
+                "worker stop recovery requires a wired supervisor".to_owned(),
+            ));
+        }
+        let mut recovered = 0_u64;
+        for intent in pending {
+            let payload = ServerWorkerStopPayload {
+                occupancy: OccupancyCommandContext {
+                    command: CommandContext {
+                        expected_revision: intent.expected_revision,
+                        idempotency_key: intent.idempotency_key,
+                    },
+                    occupancy_lease_id: intent.occupancy_lease_id,
+                    occupancy_fencing_token: intent.fencing_token,
+                },
+                worker_session_id: intent.worker_session_id,
+                worker_id: intent.worker_id,
+                reason: intent.reason,
+            };
+            self.apply_worker_stop(&payload, &intent.command_message_id)
+                .map_err(DaemonError::from)?;
+            recovered += 1;
+        }
+        Ok(recovered)
+    }
+
     /// Wires the device-local launch material source (WORKER-200.2): the
     /// bridge that received the one-time worker credential with the launch
     /// response and owns the local worker directories.
@@ -1031,6 +1086,17 @@ impl DeviceDaemon {
         source: Arc<dyn WorkerLaunchMaterialSource>,
     ) {
         self.worker_launch_material = Some(source);
+    }
+
+    /// Wires the independent managed-application supervisor and the local
+    /// repository resolver used by its Server→Device commands.
+    pub fn set_managed_app_supervisor(
+        &mut self,
+        supervisor: crate::managed_app::ManagedAppSupervisor,
+        repository: Arc<dyn ManagedAppRepositorySource>,
+    ) {
+        self.managed_app_supervisor = Some(supervisor);
+        self.managed_app_repository = Some(repository);
     }
 
     /// The capacity report for the current moment: the configured skeleton
@@ -1506,19 +1572,11 @@ impl DeviceDaemon {
             }
             match self.downlink.observe(envelope.sequence) {
                 SequenceVerdict::Accept => {
-                    self.downlink.advance(envelope.sequence).map_err(|error| {
-                        DownlinkFailure::Fatal(DaemonError::Protocol(format!(
-                            "downlink cursor rejected an accepted sequence: {error:?}"
-                        )))
-                    })?;
-                    self.store
-                        .advance_inbox_cursor(&ClientInboxCursorUpdate {
-                            server_profile_id: self.config.server_profile_id.clone(),
-                            last_sequence: envelope.sequence,
-                            last_message_id: Some(envelope.message_id.clone()),
-                            updated_at: now_rfc3339(),
-                        })
-                        .map_err(|error| DownlinkFailure::Fatal(DaemonError::Store(error)))?;
+                    let defer_cursor =
+                        matches!(&envelope.message, ServerToClientMessage::WorkerStop(_));
+                    if !defer_cursor {
+                        self.advance_downlink_cursor(&envelope)?;
+                    }
                     match envelope.message {
                         ServerToClientMessage::ProviderApply(_)
                         | ServerToClientMessage::CandidateApply(_)
@@ -1551,17 +1609,28 @@ impl DeviceDaemon {
                             self.apply_worker_launch(&payload)
                                 .map_err(DownlinkFailure::Fatal)?;
                         }
+                        ServerToClientMessage::WorkerStop(ref payload) => {
+                            self.apply_worker_stop(payload, &envelope.message_id)
+                                .map_err(worker_stop_failure_to_downlink)?;
+                            // The stop intent, process-group action, terminal
+                            // registry state, and receipt are durable before
+                            // this cursor is advanced. A crash before this
+                            // point therefore replays the same command.
+                            self.advance_downlink_cursor(&envelope)?;
+                        }
                         ServerToClientMessage::RepositoryRescan(payload) => {
                             self.apply_repository_rescan(&payload, &envelope.message_id)
                                 .map_err(DownlinkFailure::Fatal)?;
                         }
-                        _ => {
-                            // Worker stop and credential
-                            // commands are owned by later device-client lanes;
-                            // the skeleton records them without acting. The cursor has
-                            // already advanced, so the skipped frame never
-                            // blocks the stream.
+                        ServerToClientMessage::CredentialRotate(_) => {
+                            // Credential commands are owned by later device-client
+                            // lanes; the cursor has already advanced, so a skipped
+                            // frame never blocks the stream.
                             self.status.unhandled_downlink_commands += 1;
+                        }
+                        ServerToClientMessage::ManagedAppCommand(payload) => {
+                            self.apply_managed_app_command(&payload, &envelope.message_id)
+                                .map_err(DownlinkFailure::Fatal)?;
                         }
                     }
                     accepted += 1;
@@ -1605,6 +1674,26 @@ impl DeviceDaemon {
         }
         self.status.downlink_accepted_through = self.downlink.ack_sequence();
         Ok(accepted)
+    }
+
+    fn advance_downlink_cursor(
+        &mut self,
+        envelope: &ServerToClientEnvelope,
+    ) -> Result<(), DownlinkFailure> {
+        self.downlink.advance(envelope.sequence).map_err(|error| {
+            DownlinkFailure::Fatal(DaemonError::Protocol(format!(
+                "downlink cursor rejected an accepted sequence: {error:?}"
+            )))
+        })?;
+        self.store
+            .advance_inbox_cursor(&ClientInboxCursorUpdate {
+                server_profile_id: self.config.server_profile_id.clone(),
+                last_sequence: envelope.sequence,
+                last_message_id: Some(envelope.message_id.clone()),
+                updated_at: now_rfc3339(),
+            })
+            .map_err(|error| DownlinkFailure::Fatal(DaemonError::Store(error)))?;
+        Ok(())
     }
 
     fn apply_candidate_command(
@@ -1975,7 +2064,7 @@ impl DeviceDaemon {
             Err((rejection, code)) => {
                 return ack(
                     self,
-                    release_rejection_status(rejection),
+                    fencing_rejection_status(rejection),
                     Some(control_error(code, rejection)),
                     current_revision,
                 );
@@ -2127,6 +2216,112 @@ impl DeviceDaemon {
                 current_revision,
             ),
             Err(error) => Err(DaemonError::Store(error)),
+        }
+    }
+
+    /// Applies one managed application lifecycle command. The same occupancy
+    /// mirror and fencing ticket gate every operation before the independent
+    /// managed-app supervisor is touched.
+    fn apply_managed_app_command(
+        &mut self,
+        payload: &winwincode_client_port::messages::ServerManagedAppCommandPayload,
+        command_message_id: &str,
+    ) -> Result<(), DaemonError> {
+        let command: &ManagedAppCommand = &payload.command;
+        let current_revision = self
+            .occupancy_mirror
+            .as_ref()
+            .map_or(0, |mirror| mirror.mirror_revision);
+        let ticket = match self.fencing_guard().authorize_command(
+            FencedCommandKind::ManagedApp,
+            &command.occupancy_lease_id,
+            command.occupancy_fencing_token,
+        ) {
+            FencingVerdict::Authorized(ticket) => ticket,
+            FencingVerdict::Rejected(rejection) => {
+                self.enqueue(command_ack_message(
+                    ClientControlMessageKind::ManagedAppCommand,
+                    command_message_id,
+                    fencing_rejection_status(rejection),
+                    Some(current_revision),
+                    Some(control_error(rejection.wire_error_code(), rejection)),
+                ))?;
+                return Ok(());
+            }
+        };
+        self.fencing_guard()
+            .verify_ticket(&ticket)
+            .map_err(|rejection| {
+                DaemonError::Protocol(format!("managed app fencing changed: {rejection:?}"))
+            })?;
+        let Some(supervisor) = self.managed_app_supervisor.clone() else {
+            self.enqueue(command_ack_message(
+                ClientControlMessageKind::ManagedAppCommand,
+                command_message_id,
+                CommandAckStatus::RejectedWrongState,
+                Some(current_revision),
+                Some(stop_error(
+                    ClientControlErrorCode::WrongState,
+                    "no managed application supervisor is wired",
+                    false,
+                )),
+            ))?;
+            return Ok(());
+        };
+        let repository = self.managed_app_repository.as_ref().and_then(|source| {
+            source.repository_root(
+                command
+                    .config
+                    .as_ref()
+                    .map_or(command.run_id.as_str(), |config| {
+                        config.repository_binding_id.as_str()
+                    }),
+            )
+        });
+        let root = match command.operation {
+            ManagedAppOperation::Start | ManagedAppOperation::Restart => {
+                let Some(root) = repository.as_deref() else {
+                    self.enqueue(command_ack_message(
+                        ClientControlMessageKind::ManagedAppCommand,
+                        command_message_id,
+                        CommandAckStatus::RejectedWrongState,
+                        Some(current_revision),
+                        Some(stop_error(
+                            ClientControlErrorCode::RepositoryUnavailable,
+                            "managed application repository is unavailable",
+                            false,
+                        )),
+                    ))?;
+                    return Ok(());
+                };
+                root
+            }
+            ManagedAppOperation::Stop | ManagedAppOperation::Query => Path::new("."),
+        };
+        match supervisor.apply(command, root) {
+            Ok(status) => {
+                self.enqueue(ClientToServerMessage::ManagedAppStatus(
+                    ClientManagedAppStatusPayload {
+                        command_message_id: command_message_id.to_owned(),
+                        status,
+                    },
+                ))?;
+                Ok(())
+            }
+            Err(error) => {
+                self.enqueue(command_ack_message(
+                    ClientControlMessageKind::ManagedAppCommand,
+                    command_message_id,
+                    managed_app_error_status(&error),
+                    Some(current_revision),
+                    Some(stop_error(
+                        ClientControlErrorCode::WrongState,
+                        "managed application command was refused",
+                        false,
+                    )),
+                ))?;
+                Ok(())
+            }
         }
     }
 
@@ -2308,6 +2503,234 @@ impl DeviceDaemon {
         }
     }
 
+    /// Applies one `client.worker.stop` command. The command is acknowledged
+    /// through the existing universal `client.command_ack` contract because
+    /// the wire has no worker-specific stop acknowledgement. The fencing
+    /// stamp is checked before looking up the session, so an old lease cannot
+    /// stop (or claim an idempotent replay of) a terminal worker row.
+    #[allow(clippy::too_many_lines)]
+    fn apply_worker_stop(
+        &mut self,
+        payload: &ServerWorkerStopPayload,
+        command_message_id: &str,
+    ) -> Result<(), WorkerStopFailure> {
+        let stamp = &payload.occupancy;
+        let intent = WorkerStopIntentRecord {
+            command_message_id: command_message_id.to_owned(),
+            idempotency_key: stamp.command.idempotency_key.clone(),
+            worker_session_id: payload.worker_session_id.clone(),
+            worker_id: payload.worker_id.clone(),
+            reason: payload.reason,
+            occupancy_lease_id: stamp.occupancy_lease_id.clone(),
+            fencing_token: stamp.occupancy_fencing_token,
+            expected_revision: stamp.command.expected_revision,
+            receipt_payload: None,
+            recorded_at: now_rfc3339(),
+            completed_at: None,
+        };
+        let existing = self
+            .store
+            .worker_stop_intent(command_message_id)
+            .map_err(|error| WorkerStopFailure::Fatal(DaemonError::Store(error)))?
+            .or(self
+                .store
+                .worker_stop_intent_by_idempotency(&intent.idempotency_key)
+                .map_err(|error| WorkerStopFailure::Fatal(DaemonError::Store(error)))?);
+        if existing.is_none() {
+            let current_revision = self
+                .occupancy_mirror
+                .as_ref()
+                .map_or(0, |mirror| mirror.mirror_revision);
+            let guard = self.fencing_guard();
+            match guard.authorize_command(
+                FencedCommandKind::WorkerStop,
+                &stamp.occupancy_lease_id,
+                stamp.occupancy_fencing_token,
+            ) {
+                FencingVerdict::Authorized(ticket)
+                    if stamp.command.expected_revision == ticket.mirror_revision => {}
+                FencingVerdict::Rejected(rejection) => {
+                    return self
+                        .enqueue(command_ack_message(
+                            ClientControlMessageKind::WorkerStop,
+                            command_message_id,
+                            fencing_rejection_status(rejection),
+                            Some(current_revision),
+                            Some(control_error(rejection.wire_error_code(), rejection)),
+                        ))
+                        .map(|_| ())
+                        .map_err(WorkerStopFailure::Fatal);
+                }
+                FencingVerdict::Authorized(_ticket) => {
+                    return self
+                        .enqueue(command_ack_message(
+                            ClientControlMessageKind::WorkerStop,
+                            command_message_id,
+                            CommandAckStatus::RejectedRevisionConflict,
+                            Some(current_revision),
+                            Some(stop_error(
+                                ClientControlErrorCode::RevisionConflict,
+                                "the worker stop expected revision is not current",
+                                false,
+                            )),
+                        ))
+                        .map(|_| ())
+                        .map_err(WorkerStopFailure::Fatal);
+                }
+            }
+        }
+        let stored = match self
+            .store
+            .record_worker_stop_intent(&intent)
+            .map_err(|error| WorkerStopFailure::Fatal(DaemonError::Store(error)))?
+        {
+            WorkerStopIntentOutcome::Recorded(record)
+            | WorkerStopIntentOutcome::Duplicate(record) => record,
+        };
+        // The durable row owns the command identity. A redelivered frame may
+        // carry another envelope id while retaining the same idempotency key;
+        // complete and replay the original row so that branch cannot leave an
+        // action applied with an uncommitted receipt.
+        let durable_command_message_id = stored.command_message_id.clone();
+        if let Some(receipt_payload) = stored.receipt_payload {
+            let receipt: ClientToServerMessage =
+                serde_json::from_slice(&receipt_payload).map_err(|error| {
+                    WorkerStopFailure::Fatal(DaemonError::Protocol(format!(
+                        "worker stop receipt for {command_message_id} is invalid: {error}"
+                    )))
+                })?;
+            self.enqueue(receipt).map_err(WorkerStopFailure::Fatal)?;
+            return Ok(());
+        }
+
+        let current_revision = self
+            .occupancy_mirror
+            .as_ref()
+            .map_or(0, |mirror| mirror.mirror_revision);
+        let result = if existing.is_some() {
+            self.worker_stop_recovery_result(payload)?
+        } else {
+            self.worker_stop_result(payload)?
+        };
+        let receipt = command_ack_message(
+            ClientControlMessageKind::WorkerStop,
+            &durable_command_message_id,
+            result.0,
+            Some(current_revision),
+            result.1,
+        );
+        let receipt_payload = serde_json::to_vec(&receipt).map_err(|error| {
+            WorkerStopFailure::Fatal(DaemonError::Protocol(format!(
+                "worker stop receipt is not encodable: {error}"
+            )))
+        })?;
+        self.store
+            .complete_worker_stop_intent(
+                &durable_command_message_id,
+                &receipt_payload,
+                &now_rfc3339(),
+            )
+            .map_err(|error| WorkerStopFailure::Fatal(DaemonError::Store(error)))?;
+        self.enqueue(receipt).map_err(WorkerStopFailure::Fatal)?;
+        Ok(())
+    }
+
+    fn worker_stop_recovery_result(
+        &self,
+        payload: &ServerWorkerStopPayload,
+    ) -> Result<(CommandAckStatus, Option<ClientControlError>), WorkerStopFailure> {
+        let Some(supervisor) = self.worker_supervisor.clone() else {
+            return Err(WorkerStopFailure::Retryable(
+                "worker stop recovery requires a wired supervisor; retry".to_owned(),
+            ));
+        };
+        match supervisor.stop_recovered(
+            &payload.worker_session_id,
+            &payload.worker_id,
+            &payload.occupancy.occupancy_lease_id,
+            true,
+        ) {
+            Ok(_) => Ok((CommandAckStatus::Accepted, None)),
+            Err(error @ (SupervisorError::NotFound { .. } | SupervisorError::InvalidInput(_))) => {
+                Ok((
+                    CommandAckStatus::RejectedWrongState,
+                    Some(stop_error(
+                        ClientControlErrorCode::WrongState,
+                        &error.to_string(),
+                        false,
+                    )),
+                ))
+            }
+            Err(error) => Err(worker_stop_supervisor_failure(
+                error,
+                "worker stop recovery must retry",
+            )),
+        }
+    }
+
+    fn worker_stop_result(
+        &self,
+        payload: &ServerWorkerStopPayload,
+    ) -> Result<(CommandAckStatus, Option<ClientControlError>), WorkerStopFailure> {
+        let Some(supervisor) = self.worker_supervisor.clone() else {
+            return Err(WorkerStopFailure::Retryable(
+                "worker stop requires a wired supervisor; retry".to_owned(),
+            ));
+        };
+        let Some(record) = supervisor
+            .worker_process(&payload.worker_session_id)
+            .map_err(|error| {
+                worker_stop_supervisor_failure(error, "worker stop lookup must retry")
+            })?
+        else {
+            return Ok((
+                CommandAckStatus::RejectedWrongState,
+                Some(stop_error(
+                    ClientControlErrorCode::WrongState,
+                    "worker session has no local process record",
+                    false,
+                )),
+            ));
+        };
+        if record.worker_id != payload.worker_id {
+            return Ok((
+                CommandAckStatus::RejectedWrongState,
+                Some(stop_error(
+                    ClientControlErrorCode::WrongState,
+                    "worker session and worker identity do not match",
+                    false,
+                )),
+            ));
+        }
+        let status = if record.state == crate::supervisor::WORKER_STATE_RUNNING {
+            CommandAckStatus::Accepted
+        } else {
+            CommandAckStatus::Duplicate
+        };
+        let result = supervisor.stop(&payload.worker_session_id, true);
+        match result {
+            Ok(_) => Ok((status, None)),
+            Err(SupervisorError::Fencing(rejection)) => Ok((
+                fencing_rejection_status(rejection),
+                Some(control_error(rejection.wire_error_code(), rejection)),
+            )),
+            Err(error @ (SupervisorError::NotFound { .. } | SupervisorError::InvalidInput(_))) => {
+                Ok((
+                    CommandAckStatus::RejectedWrongState,
+                    Some(stop_error(
+                        ClientControlErrorCode::WrongState,
+                        &error.to_string(),
+                        false,
+                    )),
+                ))
+            }
+            Err(error) => Err(worker_stop_supervisor_failure(
+                error,
+                "worker stop must retry",
+            )),
+        }
+    }
+
     /// Delivers one deferred Worker Session Credential: the launch response
     /// handed the raw material to the local user-session bridge after the
     /// grant was consumed, and the bridge hands it over here. The material
@@ -2453,6 +2876,40 @@ enum DownlinkFailure {
     Retriable(String),
     /// The local durable state failed; the daemon must stop.
     Fatal(DaemonError),
+}
+
+/// Applies one WorkerStop while preserving the distinction between a local
+/// condition that can be retried after the supervisor is ready and durable
+/// state that must stop the daemon.
+enum WorkerStopFailure {
+    Retryable(String),
+    Fatal(DaemonError),
+}
+
+impl From<WorkerStopFailure> for DaemonError {
+    fn from(error: WorkerStopFailure) -> Self {
+        match error {
+            WorkerStopFailure::Retryable(reason) => Self::Protocol(reason),
+            WorkerStopFailure::Fatal(error) => error,
+        }
+    }
+}
+
+fn worker_stop_failure_to_downlink(error: WorkerStopFailure) -> DownlinkFailure {
+    match error {
+        WorkerStopFailure::Retryable(reason) => DownlinkFailure::Retriable(reason),
+        WorkerStopFailure::Fatal(error) => DownlinkFailure::Fatal(error),
+    }
+}
+
+fn worker_stop_supervisor_failure(
+    error: SupervisorError,
+    retry_message: &str,
+) -> WorkerStopFailure {
+    match error {
+        SupervisorError::Store(error) => WorkerStopFailure::Fatal(DaemonError::Store(error)),
+        error => WorkerStopFailure::Retryable(format!("{retry_message}: {error}")),
+    }
 }
 
 /// Maps a connect-code failure onto the daemon error set.
@@ -2610,13 +3067,22 @@ const fn reject_reason_slug(reason: OccupancyRejectReason) -> &'static str {
     }
 }
 
-/// The command-ack status for one release fencing rejection.
-const fn release_rejection_status(rejection: FencingRejection) -> CommandAckStatus {
+/// The command-ack status for one fenced command rejection.
+const fn fencing_rejection_status(rejection: FencingRejection) -> CommandAckStatus {
     match rejection {
         FencingRejection::MirrorNotSet => CommandAckStatus::RejectedLeaseMismatch,
         FencingRejection::StaleFencingToken | FencingRejection::SupersededIntent => {
             CommandAckStatus::RejectedStaleFencingToken
         }
+    }
+}
+
+/// Builds a non-fencing worker-stop error without exposing local process data.
+fn stop_error(code: ClientControlErrorCode, message: &str, retryable: bool) -> ClientControlError {
+    ClientControlError {
+        code,
+        message: message.to_owned(),
+        retryable,
     }
 }
 
@@ -2657,6 +3123,18 @@ fn command_ack_message(
         current_revision,
         error,
     })
+}
+
+const fn managed_app_error_status(error: &crate::managed_app::ManagedAppError) -> CommandAckStatus {
+    match error {
+        crate::managed_app::ManagedAppError::StaleLease => {
+            CommandAckStatus::RejectedStaleFencingToken
+        }
+        crate::managed_app::ManagedAppError::LeaseMismatch => {
+            CommandAckStatus::RejectedLeaseMismatch
+        }
+        _ => CommandAckStatus::RejectedWrongState,
+    }
 }
 
 /// The `client.worker.launch_ack` status for one fencing rejection: an

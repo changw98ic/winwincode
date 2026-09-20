@@ -23,19 +23,20 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use winwincode_client_port::domain::{
-    ClientArchitecture, ClientCapacityReport, ClientPlatformTarget, WorkerLaunchGrant,
-    WorkerLaunchGrantState,
+    ClientArchitecture, ClientCapacityReport, ClientOccupancyForceFenceReason,
+    ClientPlatformTarget, ClientWorkerStopReason, WorkerLaunchGrant, WorkerLaunchGrantState,
 };
 use winwincode_client_port::messages::{
     CLIENT_CONTROL_PORT_SCHEMA_VERSION, CommandContext, OccupancyCommandContext,
-    ServerOccupancyOfferPayload, ServerToClientEnvelope, ServerToClientMessage,
-    ServerWorkerLaunchPayload,
+    ServerOccupancyForceFencePayload, ServerOccupancyOfferPayload, ServerToClientEnvelope,
+    ServerToClientMessage, ServerWorkerLaunchPayload, ServerWorkerStopPayload,
 };
 use winwincode_device_client::{
     DaemonConfig, DeviceDaemon, DeviceIdentitySeed, DeviceStore, ExchangeRequest, ExchangeResponse,
     ExchangeTransport, ExchangeTransportError, IdentityRecord, IssuedEnrollment, SessionSupervisor,
     SupervisorConfig, WORKER_STATE_RUNNING, WorkerCredentialIssuance, WorkerLaunchDirectories,
-    WorkerLaunchMaterialSource, adopt_enrollment, ensure_device_identity, load_device_identity,
+    WorkerLaunchMaterialSource, WorkerProcessRecord, WorkerStopIntentRecord, adopt_enrollment,
+    ensure_device_identity, load_device_identity,
 };
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -153,15 +154,15 @@ impl ServerSim {
         }
     }
 
-    fn queue_downlink(&self, message: ServerToClientMessage) {
-        self.queue_downlink_with_credentials(message, Vec::new());
+    fn queue_downlink(&self, message: ServerToClientMessage) -> ServerToClientEnvelope {
+        self.queue_downlink_with_credentials(message, Vec::new())
     }
 
     fn queue_downlink_with_credentials(
         &self,
         message: ServerToClientMessage,
         credentials: Vec<WorkerCredentialIssuance>,
-    ) {
+    ) -> ServerToClientEnvelope {
         let sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed);
         let envelope = ServerToClientEnvelope {
             schema_version: CLIENT_CONTROL_PORT_SCHEMA_VERSION.to_owned(),
@@ -172,7 +173,16 @@ impl ServerSim {
             occurred_at: STAMP.to_owned(),
             message,
         };
-        let frame = serde_json::to_value(&envelope).expect("downlink frame value");
+        self.queue_downlink_envelope(&envelope, credentials);
+        envelope
+    }
+
+    fn queue_downlink_envelope(
+        &self,
+        envelope: &ServerToClientEnvelope,
+        credentials: Vec<WorkerCredentialIssuance>,
+    ) {
+        let frame = serde_json::to_value(envelope).expect("downlink frame value");
         self.downlink
             .lock()
             .expect("downlink lock")
@@ -434,6 +444,23 @@ fn launch(
     })
 }
 
+fn stop(stamp: OccupancyCommandContext, worker_id: &str) -> ServerToClientMessage {
+    ServerToClientMessage::WorkerStop(ServerWorkerStopPayload {
+        occupancy: stamp,
+        worker_session_id: WORKER_SESSION.to_owned(),
+        worker_id: worker_id.to_owned(),
+        reason: ClientWorkerStopReason::OccupantRequested,
+    })
+}
+
+fn force_fence(stamp: OccupancyCommandContext) -> ServerToClientMessage {
+    ServerToClientMessage::OccupancyForceFence(ServerOccupancyForceFencePayload {
+        occupancy: stamp,
+        reason: ClientOccupancyForceFenceReason::RecoveryDeadlineExceeded,
+        superseded_lease_id: None,
+    })
+}
+
 /// Drives ticks until `condition` holds or the budget runs out.
 fn drive_until(daemon: &mut DeviceDaemon, mut condition: impl FnMut(&mut DeviceDaemon) -> bool) {
     for _ in 0..600 {
@@ -459,6 +486,13 @@ fn settled(daemon: &mut DeviceDaemon) -> bool {
 
 fn launch_acks(sim: &ServerSim) -> Vec<Value> {
     sim.frames_with_kind("client.worker.launch_ack")
+        .into_iter()
+        .map(|frame| frame.frame["payload"].clone())
+        .collect()
+}
+
+fn command_acks(sim: &ServerSim) -> Vec<Value> {
+    sim.frames_with_kind("client.command_ack")
         .into_iter()
         .map(|frame| frame.frame["payload"].clone())
         .collect()
@@ -572,6 +606,339 @@ fn launch_command_spawns_the_worker_and_answers_the_grant_ack() {
     );
 
     daemon.into_store().close().expect("store close");
+    drop(lane);
+    cleanup(&root);
+}
+
+#[test]
+fn worker_stop_downlink_fences_identity_stops_one_session_and_replays_idempotently() {
+    let root = temporary_directory("stop-downlink");
+    let sim = Arc::new(ServerSim::new());
+    let (store, identity) = open_enrolled(&root);
+    let instance_id = identity.current_instance_id().to_owned();
+    let mut daemon = DeviceDaemon::start(daemon_config(), store, sim.clone(), &identity)
+        .expect("daemon should start enrolled");
+    let lane = WorkerLane::open(&root, &instance_id, "stop");
+    daemon.set_worker_supervisor(lane.supervisor.clone());
+    daemon.set_worker_launch_material_source(lane.material.clone());
+
+    sim.queue_downlink(offer(LEASE, 7));
+    drive_until(&mut daemon, |daemon| daemon.occupancy_mirror().is_some());
+    sim.queue_downlink(launch(
+        occupancy_stamp(1, "srv-launch", LEASE, 7),
+        grant(&instance_id, LEASE, 7),
+    ));
+    drive_until(&mut daemon, |daemon| {
+        daemon.status().worker_launches_accepted == 1
+    });
+    wait_for_ready_marker(&lane.directories().data_directory);
+
+    // A stale command revision is rejected before the session lookup or
+    // signal, even though the lease/token pair is current.
+    sim.queue_downlink(stop(
+        occupancy_stamp(0, "srv-stop-revision", LEASE, 7),
+        WORKER_ID,
+    ));
+    drive_until(&mut daemon, |_daemon| command_acks(&sim).len() == 1);
+    let revision_conflict = command_acks(&sim);
+    assert_eq!(
+        revision_conflict[0]["status"],
+        json_str("rejected_revision_conflict")
+    );
+    assert_eq!(
+        revision_conflict[0]["error"]["code"],
+        json_str("REVISION_CONFLICT")
+    );
+
+    // A stale fencing token is rejected before the session lookup or signal.
+    sim.queue_downlink(stop(
+        occupancy_stamp(1, "srv-stop-stale", LEASE, 9),
+        WORKER_ID,
+    ));
+    drive_until(&mut daemon, |_daemon| command_acks(&sim).len() == 2);
+    let stale = command_acks(&sim);
+    assert_eq!(stale[1]["commandKind"], json_str("client.worker.stop"));
+    assert_eq!(stale[1]["status"], json_str("rejected_stale_fencing_token"));
+    assert_eq!(
+        lane.supervisor
+            .worker_process(WORKER_SESSION)
+            .expect("registry read")
+            .expect("worker row")
+            .state,
+        WORKER_STATE_RUNNING,
+        "stale stop must leave the worker running"
+    );
+
+    sim.queue_downlink(stop(occupancy_stamp(1, "srv-stop", LEASE, 7), WORKER_ID));
+    drive_until(&mut daemon, |_daemon| command_acks(&sim).len() == 3);
+    let acks = command_acks(&sim);
+    assert_eq!(acks[2]["commandKind"], json_str("client.worker.stop"));
+    assert_eq!(acks[2]["status"], json_str("accepted"));
+    assert_eq!(
+        lane.supervisor
+            .worker_process(WORKER_SESSION)
+            .expect("registry read")
+            .expect("worker row")
+            .state,
+        "exited"
+    );
+
+    // A replay of the same idempotency key returns the durable first receipt;
+    // it cannot signal a second process or affect another session.
+    sim.queue_downlink(stop(occupancy_stamp(1, "srv-stop", LEASE, 7), WORKER_ID));
+    drive_until(&mut daemon, |_daemon| command_acks(&sim).len() == 4);
+    assert_eq!(command_acks(&sim)[3]["status"], json_str("accepted"));
+
+    daemon.into_store().close().expect("store close");
+    drop(lane);
+    cleanup(&root);
+}
+
+#[test]
+fn unfinished_worker_stop_intent_is_replayed_after_store_restart() {
+    let root = temporary_directory("stop-intent-restart");
+    let intent = WorkerStopIntentRecord {
+        command_message_id: "srv-stop-crash".to_owned(),
+        idempotency_key: "srv-stop-crash-key".to_owned(),
+        worker_session_id: WORKER_SESSION.to_owned(),
+        worker_id: WORKER_ID.to_owned(),
+        reason: ClientWorkerStopReason::OccupantRequested,
+        occupancy_lease_id: LEASE.to_owned(),
+        fencing_token: 7,
+        expected_revision: 1,
+        receipt_payload: None,
+        recorded_at: STAMP.to_owned(),
+        completed_at: None,
+    };
+
+    let mut store = DeviceStore::open(&root).expect("device store should open");
+    let recorded = store
+        .record_worker_stop_intent(&intent)
+        .expect("stop intent should be durable");
+    assert!(matches!(
+        recorded,
+        winwincode_device_client::WorkerStopIntentOutcome::Recorded(_)
+    ));
+    store.close().expect("first device process should close");
+
+    // This is the crash boundary: the intent exists, but no receipt was
+    // committed. A restarted client must recover the same work item rather
+    // than creating a second command identity.
+    let mut restarted = DeviceStore::open(&root).expect("restarted store should open");
+    let replay = restarted
+        .record_worker_stop_intent(&intent)
+        .expect("unfinished stop intent should replay");
+    let replayed = match replay {
+        winwincode_device_client::WorkerStopIntentOutcome::Duplicate(record) => record,
+        other @ winwincode_device_client::WorkerStopIntentOutcome::Recorded(_) => {
+            panic!("expected duplicate unfinished intent, got {other:?}")
+        }
+    };
+    assert_eq!(replayed.command_message_id, intent.command_message_id);
+    assert!(replayed.receipt_payload.is_none());
+    assert_eq!(
+        restarted
+            .pending_worker_stop_intents()
+            .expect("pending intents should remain retryable")
+            .len(),
+        1
+    );
+
+    let mut different_reason = intent.clone();
+    different_reason.reason = ClientWorkerStopReason::GrantRevoked;
+    let conflict = restarted
+        .record_worker_stop_intent(&different_reason)
+        .expect_err("same idempotency key with another reason must conflict");
+    assert_eq!(
+        conflict.kind(),
+        winwincode_device_client::DeviceStoreErrorKind::Conflict
+    );
+
+    let receipt = br#"{"status":"duplicate","commandKind":"client.worker.stop"}"#;
+    restarted
+        .complete_worker_stop_intent(&intent.command_message_id, receipt, STAMP)
+        .expect("replayed stop should persist its terminal receipt");
+    restarted
+        .close()
+        .expect("restarted device process should close");
+
+    let mut final_store = DeviceStore::open(&root).expect("final store should open");
+    let completed = match final_store
+        .record_worker_stop_intent(&intent)
+        .expect("completed stop should remain idempotent")
+    {
+        winwincode_device_client::WorkerStopIntentOutcome::Duplicate(record) => record,
+        other @ winwincode_device_client::WorkerStopIntentOutcome::Recorded(_) => {
+            panic!("expected duplicate completed intent, got {other:?}")
+        }
+    };
+    assert_eq!(
+        completed.receipt_payload.as_deref(),
+        Some(receipt.as_slice())
+    );
+    final_store
+        .close()
+        .expect("final device process should close");
+    cleanup(&root);
+}
+
+#[test]
+fn initial_worker_stop_without_supervisor_retries_the_same_envelope() {
+    let root = temporary_directory("stop-unknown-supervisor");
+    let sim = Arc::new(ServerSim::new());
+    let (mut store, identity) = open_enrolled(&root);
+    store
+        .put_worker_process(&WorkerProcessRecord {
+            worker_session_id: WORKER_SESSION.to_owned(),
+            worker_id: WORKER_ID.to_owned(),
+            worker_instance_id: WORKER_INSTANCE.to_owned(),
+            pid: 1,
+            process_start_identity: "unknown-worker-boot".to_owned(),
+            repository_binding_id: BINDING.to_owned(),
+            occupancy_lease_id: LEASE.to_owned(),
+            launch_grant_id: GRANT.to_owned(),
+            data_directory: root.join("worker-data").display().to_string(),
+            state: WORKER_STATE_RUNNING.to_owned(),
+            exit_code: None,
+            last_observed_at: STAMP.to_owned(),
+        })
+        .expect("running worker row writes");
+    let mut daemon =
+        DeviceDaemon::start(daemon_config(), store, sim.clone(), &identity).expect("daemon starts");
+
+    sim.queue_downlink(offer(LEASE, 7));
+    drive_until(&mut daemon, |daemon| daemon.occupancy_mirror().is_some());
+    let stop_envelope = sim.queue_downlink(stop(
+        occupancy_stamp(1, "srv-stop-unknown-supervisor", LEASE, 7),
+        WORKER_ID,
+    ));
+    loop {
+        match daemon.tick(Instant::now()) {
+            Ok(winwincode_device_client::TickOutcome::Retrying { .. }) => break,
+            Ok(winwincode_device_client::TickOutcome::Waiting { .. }) => {
+                thread::sleep(Duration::from_millis(1));
+            }
+            Ok(other) => panic!("initial stop should retry before advancing: {other:?}"),
+            Err(error) => panic!("initial stop failed fatally: {error:?}"),
+        }
+    }
+    assert_eq!(daemon.status().downlink_accepted_through, 1);
+
+    let lane = WorkerLane::open(&root, identity.current_instance_id(), "unknown");
+    daemon.set_worker_supervisor(lane.supervisor.clone());
+    sim.queue_downlink_envelope(&stop_envelope, Vec::new());
+    drive_until(&mut daemon, |daemon| {
+        daemon.status().downlink_accepted_through == 2
+    });
+
+    let pending_store = daemon.into_store();
+    let pending = pending_store
+        .worker_stop_intent("srv-down-2")
+        .expect("pending intent reads")
+        .expect("initial stop intent exists");
+    assert_eq!(pending.command_message_id, "srv-down-2");
+    assert!(
+        pending.receipt_payload.is_some(),
+        "the retry completes the pending intent after the supervisor is wired"
+    );
+    pending_store.close().expect("daemon store closes");
+    drop(lane);
+    cleanup(&root);
+}
+
+#[test]
+fn daemon_and_supervisor_restart_recover_stop_after_fencing_changes() {
+    let root = temporary_directory("stop-recovery-restart");
+    let sim = Arc::new(ServerSim::new());
+    let (store, identity) = open_enrolled(&root);
+    let instance_id = identity.current_instance_id().to_owned();
+    let mut daemon = DeviceDaemon::start(daemon_config(), store, sim.clone(), &identity)
+        .expect("daemon should start enrolled");
+    let lane = WorkerLane::open(&root, &instance_id, "recovery");
+    daemon.set_worker_supervisor(lane.supervisor.clone());
+    daemon.set_worker_launch_material_source(lane.material.clone());
+
+    sim.queue_downlink(offer(LEASE, 7));
+    drive_until(&mut daemon, |daemon| daemon.occupancy_mirror().is_some());
+    sim.queue_downlink(launch(
+        occupancy_stamp(1, "srv-launch-recovery", LEASE, 7),
+        grant(&instance_id, LEASE, 7),
+    ));
+    drive_until(&mut daemon, |daemon| {
+        daemon.status().worker_launches_accepted == 1
+    });
+    wait_for_ready_marker(&lane.directories().data_directory);
+
+    let intent = WorkerStopIntentRecord {
+        command_message_id: "srv-stop-recovery".to_owned(),
+        idempotency_key: "srv-stop-recovery-key".to_owned(),
+        worker_session_id: WORKER_SESSION.to_owned(),
+        worker_id: WORKER_ID.to_owned(),
+        reason: ClientWorkerStopReason::LeaseRecovered,
+        occupancy_lease_id: LEASE.to_owned(),
+        fencing_token: 7,
+        expected_revision: 1,
+        receipt_payload: None,
+        recorded_at: STAMP.to_owned(),
+        completed_at: None,
+    };
+    let mut crash_store = DeviceStore::open(&root).expect("crash store opens");
+    crash_store
+        .record_worker_stop_intent(&intent)
+        .expect("accepted stop intent should be durable before the crash");
+    crash_store.close().expect("crash store closes");
+    daemon.into_store().close().expect("daemon process closes");
+
+    // The replacement daemon first observes a newer fencing state. Recovery
+    // must still finish the already-authorized local stop.
+    let restarted_store = DeviceStore::open(&root).expect("restarted store opens");
+    let restarted_identity = load_device_identity(&restarted_store)
+        .expect("restarted identity reads")
+        .expect("restarted identity exists");
+    let mut restarted = DeviceDaemon::start(
+        daemon_config(),
+        restarted_store,
+        sim.clone(),
+        &restarted_identity,
+    )
+    .expect("restarted daemon should start");
+    let restarted_lane = WorkerLane::open(&root, &instance_id, "recovery-restarted");
+    restarted.set_worker_supervisor(restarted_lane.supervisor.clone());
+    sim.queue_downlink(force_fence(occupancy_stamp(
+        1,
+        "srv-force-recovery",
+        LEASE,
+        9,
+    )));
+    drive_until(&mut restarted, |daemon| {
+        daemon
+            .occupancy_mirror()
+            .is_some_and(|mirror| mirror.fencing_token == 9)
+    });
+    assert_eq!(
+        restarted.recover_worker_stop_intents().expect("recovery"),
+        1
+    );
+    drive_until(&mut restarted, settled);
+    assert_eq!(
+        restarted_lane
+            .supervisor
+            .worker_process(WORKER_SESSION)
+            .expect("registry read")
+            .expect("recovered worker row")
+            .state,
+        "exited"
+    );
+    assert_eq!(
+        command_acks(&sim).last().expect("recovery ack")["status"],
+        json_str("accepted")
+    );
+
+    restarted
+        .into_store()
+        .close()
+        .expect("restarted store closes");
+    drop(restarted_lane);
     drop(lane);
     cleanup(&root);
 }

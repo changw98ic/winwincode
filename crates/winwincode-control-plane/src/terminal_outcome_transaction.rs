@@ -66,6 +66,11 @@ impl DeliveryTerminalOutcomeCommitReceipt {
     pub const fn receipt(&self) -> &CommitReceipt {
         &self.receipt
     }
+
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.receipt.revision
+    }
 }
 
 /// Failure of a terminal-outcome transaction.

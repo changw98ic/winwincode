@@ -294,7 +294,10 @@ pub fn compute_delivery_verdict(
 
     let mut canonical_evidence = evidence
         .iter()
-        .filter(|resolved| used_evidence_ids.contains(&resolved.evidence().id.0))
+        .filter(|resolved| {
+            used_evidence_ids.contains(&resolved.evidence().id.0)
+                || is_producer_candidate_commit_evidence(resolved, candidate)
+        })
         .map(|resolved| resolved.evidence().clone())
         .collect::<Vec<_>>();
     canonical_evidence.sort_by(|left, right| left.id.0.cmp(&right.id.0));
@@ -890,6 +893,22 @@ const fn direct_evidence_type(evidence_type: EvidenceRefType) -> bool {
     )
 }
 
+/// Retains already-resolved executor/remediator Commit Evidence that names the
+/// exact frozen candidate producer identity. Preview source authority reads
+/// this sealed fact from the Delivery evidence store even when no acceptance
+/// criterion cites it as runtime verification evidence.
+fn is_producer_candidate_commit_evidence(
+    resolved: &ResolvedDeliveryEvidence,
+    candidate: &FrozenDeliveryCandidate,
+) -> bool {
+    let reference = resolved.evidence();
+    reference.evidence_type == EvidenceRefType::Commit
+        && reference.work_run_id == *candidate.producer_work_run_id()
+        && reference.session_binding_id == *candidate.producer_session_binding_id()
+        && reference.candidate_ref == candidate.candidate_ref()
+        && reference.source_ref == format!("git_commit:{}", candidate.candidate_commit_id())
+}
+
 const fn role_order(role: VerificationRole) -> u8 {
     match role {
         VerificationRole::Reviewer => 0,
@@ -1309,6 +1328,63 @@ mod tests {
             CriterionVerdict::Inconclusive
         );
         assert_eq!(first.evidence().len(), 2);
+    }
+
+    #[test]
+    fn computed_verdict_retains_producer_commit_evidence_for_preview_authority() {
+        use crate::domain::evidence::{
+            EvidenceSource, ResolveDeliveryEvidenceInput, resolve_delivery_evidence,
+        };
+
+        let delivery = verdict_delivery();
+        let candidate = candidate(&delivery);
+        let (verification, mut evidence) = passing_inputs(&delivery, &candidate);
+        let producer_commit = resolve_delivery_evidence(
+            &delivery,
+            &candidate,
+            ResolveDeliveryEvidenceInput {
+                work_run_id: candidate.producer_work_run_id().clone(),
+                session_binding_id: candidate.producer_session_binding_id().clone(),
+                source: EvidenceSource::CandidateCommit,
+                created_at_millis: PRODUCED_AT_MILLIS,
+            },
+        )
+        .expect("producer Commit evidence rebuilds from the frozen candidate");
+        evidence.push(producer_commit);
+
+        let computed = compute_delivery_verdict(
+            &delivery,
+            &candidate,
+            &verification,
+            &evidence,
+            PRODUCED_AT_MILLIS,
+        )
+        .expect("passing verdict retains producer Commit evidence");
+
+        assert_eq!(computed.verdict().status, CriterionVerdict::Pass);
+        let commits = computed
+            .evidence()
+            .iter()
+            .filter(|item| item.evidence_type == EvidenceRefType::Commit)
+            .collect::<Vec<_>>();
+        assert_eq!(commits.len(), 1);
+        assert_eq!(
+            commits[0].source_ref,
+            format!("git_commit:{}", candidate.candidate_commit_id())
+        );
+        assert_eq!(commits[0].work_run_id, *candidate.producer_work_run_id());
+        assert_eq!(
+            commits[0].session_binding_id,
+            *candidate.producer_session_binding_id()
+        );
+        assert_eq!(commits[0].candidate_ref, candidate.candidate_ref());
+        // Criterion evaluation still uses only runtime command/test evidence.
+        assert!(
+            !computed.verdict().criteria[0]
+                .evidence_refs
+                .iter()
+                .any(|id| id == &commits[0].id)
+        );
     }
 
     #[test]

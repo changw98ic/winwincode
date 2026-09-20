@@ -191,7 +191,6 @@ export function mountMyWorkPage(
   function updateDeviceRow(node: HTMLLIElement, device: ControlPlaneDeviceSummary): void {
     const parts = rowParts.get(node)
     if (parts === undefined) return
-    node.dataset.clientId = device.clientId
     parts.name.textContent = device.displayName
     parts.presence.dataset.tone = deviceStateTone(device)
     parts.presence.textContent = devicePresenceText(device)

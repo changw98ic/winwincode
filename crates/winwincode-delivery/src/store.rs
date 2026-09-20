@@ -67,6 +67,8 @@ pub enum DeliveryMutationOperation {
     WorkRunAppended,
     #[serde(rename = "workitems.created")]
     WorkItemsCreated,
+    #[serde(rename = "page-annotation.recorded")]
+    PageAnnotationRecorded,
 }
 
 impl FromStr for DeliveryMutationOperation {
@@ -85,6 +87,7 @@ impl FromStr for DeliveryMutationOperation {
             "rework.clarified" => Ok(Self::ReworkClarified),
             "workrun.appended" => Ok(Self::WorkRunAppended),
             "workitems.created" => Ok(Self::WorkItemsCreated),
+            "page-annotation.recorded" => Ok(Self::PageAnnotationRecorded),
             _ => Err(store_error(
                 DeliveryStoreErrorCode::InvalidStoreOptions,
                 "delivery mutation operation is unsupported",
@@ -1892,6 +1895,9 @@ fn validate_generic_append_delta(
 ) -> Result<(), DeliveryStoreError> {
     match operation {
         DeliveryMutationOperation::DeliverySpecUpdated => validate_spec_update_delta(before, after),
+        DeliveryMutationOperation::PageAnnotationRecorded => {
+            validate_page_annotation_delta(before, after)
+        }
         DeliveryMutationOperation::SessionBound => Err(store_error(
             DeliveryStoreErrorCode::InvalidStoreOptions,
             "session.bound requires its typed authority-aware Delivery command",
@@ -1912,6 +1918,62 @@ fn validate_generic_append_delta(
             "this Delivery operation requires its dedicated application command",
         )),
     }
+}
+
+fn validate_page_annotation_delta(
+    before: &Delivery,
+    after: &Delivery,
+) -> Result<(), DeliveryStoreError> {
+    let before = before.snapshot();
+    let after = after.snapshot();
+    if after.revision != before.revision.saturating_add(1)
+        || after.id != before.id
+        || after.spec != before.spec
+        || after.work_run_aggregate != before.work_run_aggregate
+        || after.session_bindings != before.session_bindings
+        || after.verdict != before.verdict
+        || after.status != before.status
+        || after.created_at_millis != before.created_at_millis
+        || after.work_run_aggregate.runs.len() != before.work_run_aggregate.runs.len()
+        || after.attention_items.len() != before.attention_items.len().saturating_add(1)
+        || after.evidence.len() != before.evidence.len().saturating_add(1)
+        || after.attention_items[..before.attention_items.len()] != before.attention_items
+        || after.evidence[..before.evidence.len()] != before.evidence
+    {
+        return Err(store_error(
+            DeliveryStoreErrorCode::InvalidStoreOptions,
+            "page annotation mutation changed unrelated Delivery state",
+        ));
+    }
+    let attention = after.attention_items.last().ok_or_else(|| {
+        store_error(
+            DeliveryStoreErrorCode::InvalidStoreOptions,
+            "page annotation attention is missing",
+        )
+    })?;
+    let evidence = after.evidence.last().ok_or_else(|| {
+        store_error(
+            DeliveryStoreErrorCode::InvalidStoreOptions,
+            "page annotation evidence is missing",
+        )
+    })?;
+    if attention.delivery_id != after.id
+        || evidence.delivery_id != after.id
+        || attention.status != crate::domain::AttentionItemStatus::Open
+        || attention.resolution.is_some()
+        || attention.resolved_by.is_some()
+        || attention.resolved_at_millis.is_some()
+        || evidence.delivery_spec_id != after.spec.id
+        || evidence.delivery_spec_revision != after.spec.revision
+        || evidence.candidate_ref.is_empty()
+        || evidence.evidence_type != crate::domain::EvidenceRefType::ReviewFinding
+    {
+        return Err(store_error(
+            DeliveryStoreErrorCode::InvalidStoreOptions,
+            "page annotation source does not match the current Delivery candidate",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_initial_delivery(delivery: &Delivery) -> Result<(), DeliveryStoreError> {

@@ -330,7 +330,12 @@ impl ExecutionOutbox {
                 acknowledgement,
                 ExecutionPortMessage::InputResponseMessage(_)
                     | ExecutionPortMessage::JobOutcomeAckMessage(_)
+                    | ExecutionPortMessage::ModelChunkMessage(_)
             ) {
+                // ModelChunk first-frame acks compact ModelOpen. After the
+                // durable Provider frame exists, a missing open row is an
+                // idempotent no-op rather than a Worker-fatal conflict that
+                // would pin the Device model queue on sequence 1.
                 return Ok(());
             }
             return Err(AdapterStoreError::Conflict);
@@ -1010,11 +1015,12 @@ mod tests {
                 .acknowledge_response(&fixture(response_kind))
                 .expect("exact response");
             assert!(outbox.pending().expect("compacted pending").is_empty());
-            if matches!(response_kind, "input.response" | "job.outcome_ack") {
-                // The Kernel/input ledger has already accepted this exact
-                // response.  Replaying the Control Plane frame after the
-                // Worker lost its ACK must remain an idempotent no-op even
-                // though the durable request row is compacted.
+            if matches!(response_kind, "input.response" | "job.outcome_ack" | "model.chunk") {
+                // The Kernel/input ledger or durable model-call frame ledger
+                // has already accepted this exact response. Replaying the
+                // Control Plane frame after the Worker lost its ACK must
+                // remain an idempotent no-op even though the durable request
+                // row is compacted.
                 outbox
                     .acknowledge_response(&fixture(response_kind))
                     .expect("exact terminal response replay after compaction");

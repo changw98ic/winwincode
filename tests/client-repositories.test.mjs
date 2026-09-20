@@ -26,7 +26,7 @@ assert.equal(
   `Repositories area did not compile:\n${compiler.stdout}${compiler.stderr}`,
 )
 
-const cache = resolve(root, '.cache/client-repositories-tests')
+const cache = resolve(root, 'apps/client/node_modules/.cache/client-repositories-tests')
 // Plain module paths keep one ControlPlaneClientError class identity across
 // the facade, the view-models, and these assertions.
 async function cachedModule(name) {
@@ -39,6 +39,7 @@ const applicationModule = await cachedModule('application.js')
 
 const {
   ControlPlaneClientError,
+  createControlPlaneManagedAppTemplatePort,
   createControlPlaneClientDirectory,
 } = facade
 const { createRepositoriesViewModel } = repositoriesViewModelModule
@@ -118,6 +119,64 @@ function directoryFixture(transport, baseOverrides = {}) {
     transport,
   })
 }
+
+test('managed app template facade uses the repository settings contract', async () => {
+  const requests = []
+  const template = {
+    schemaVersion: 'winwincode/managed-app-template-v1',
+    mode: 'live',
+    cwd: '.',
+    argv: ['pnpm', 'dev'],
+    healthCheck: { path: '/', timeoutMs: 5000 },
+    listenPort: 3000,
+  }
+  const port = createControlPlaneManagedAppTemplatePort({
+    serverUrl: 'https://control.example',
+    transport: {
+      async fetch(input, init) {
+        requests.push({ input: String(input), init: structuredClone(init) })
+        return requests.length === 1
+          ? response(200, { schemaVersion, repositoryBindingId: repository().repositoryBindingId, revision: 2, template })
+          : response(200, { schemaVersion, repositoryBindingId: repository().repositoryBindingId, revision: 3 })
+      },
+    },
+  })
+  assert.deepEqual(await port.load(repository().repositoryBindingId), { revision: 2, template })
+  assert.equal(await port.save(repository().repositoryBindingId, template), 3)
+  assert.equal(requests[0].input, 'https://control.example/api/v1/repositories/rbd_00000000000000000000000001/managed-app-template')
+  assert.equal(requests[0].init.method, 'GET')
+  assert.equal(requests[0].init.credentials, 'include')
+  assert.equal(requests[1].init.method, 'POST')
+  assert.deepEqual(JSON.parse(requests[1].init.body), template)
+})
+
+test('managed app template facade rejects environment values', async () => {
+  const port = createControlPlaneManagedAppTemplatePort({
+    serverUrl: 'https://control.example',
+    transport: {
+      async fetch() {
+        return response(200, {
+          schemaVersion,
+          repositoryBindingId: repository().repositoryBindingId,
+          revision: 2,
+          template: {
+            schemaVersion: 'winwincode/managed-app-template-v1',
+            mode: 'live',
+            cwd: '.',
+            argv: ['pnpm', 'dev'],
+            env: { API_KEY: 'secret' },
+            healthCheck: { path: '/', timeoutMs: 5000 },
+            listenPort: 3000,
+          },
+        })
+      },
+    },
+  })
+  await assert.rejects(
+    port.load(repository().repositoryBindingId),
+    /项目运行设置返回了无效结果/u,
+  )
+})
 
 test('facade reads the repository list for one Client and freezes the summaries', async () => {
   const requests = []
@@ -661,6 +720,8 @@ class ApplicationWindow {
       (this.listeners.get(name) ?? []).filter(candidate => candidate !== listener),
     )
   }
+  setInterval() { return 0 }
+  clearInterval() {}
 }
 
 function repositoriesFacadeFake({ expired = true, repositories = [repository()] } = {}) {
@@ -755,6 +816,7 @@ function mountApplication(hash, client) {
     serverUrl: client.serverUrl,
     window: browser,
     controlPlane: client,
+    mountSessionBrowser: () => ({ update() {}, close() {} }),
   })
   return { application, browser, rootElement, client }
 }

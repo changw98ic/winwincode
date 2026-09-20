@@ -61,6 +61,7 @@ const domainDefinitions = [
   'ApprovalId',
   'ArtifactId',
   'ChangeBatchId',
+  'ChatAttachment',
   'CodexThreadId',
   'DebugExperimentId',
   'DebugHypothesisId',

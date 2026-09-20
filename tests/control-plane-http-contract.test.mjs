@@ -12,6 +12,7 @@ const COMMANDS = Object.freeze([
   'input.respond',
   'session.cancel',
   'session.close',
+  'session.update',
   'delivery.create',
   'delivery.update_spec',
   'workrun.start',
@@ -30,6 +31,7 @@ const COMMANDS = Object.freeze([
   'publication.cancel',
   'collaboration.notification.ack',
   'collaboration.presence.update',
+  'collaboration.page_annotation.submit',
   'workitems.create',
 ])
 
@@ -46,6 +48,7 @@ const QUERIES = Object.freeze([
   'candidate.review.get',
   'candidate.files.list',
   'candidate.diff.get',
+  'candidate.file.content.get',
   'evidence.get',
   'evidence.artifact.content.get',
   'settings.get',
@@ -61,6 +64,7 @@ const QUERIES = Object.freeze([
   'collaboration.activity.list',
   'collaboration.notification.list',
   'collaboration.presence.list',
+  'collaboration.page_annotation.list',
   'session.artifact.get',
 ])
 
@@ -74,6 +78,8 @@ const ERROR_STATUS = Object.freeze({
   READ_CURSOR_EXPIRED: 409,
   CANDIDATE_STALE: 409,
   WRONG_STATE: 409,
+  DEVICE_SESSION_REQUIRED: 409,
+  DEVICE_MODEL_UNAVAILABLE: 409,
   RATE_LIMITED: 429,
   INTERNAL_ERROR: 500,
   SERVICE_UNAVAILABLE: 503,
@@ -220,6 +226,7 @@ test('HTTP query contract covers every current read surface with an opaque stabl
     'candidate.review.get': '#/$defs/CandidateHistoricalReviewProjection',
     'candidate.files.list': '#/$defs/CandidateFilePage',
     'candidate.diff.get': '#/$defs/CandidateDiffChunkProjection',
+    'candidate.file.content.get': '#/$defs/CandidateFileContentChunkProjection',
     'evidence.get': '#/$defs/EvidenceDetailProjection',
     'evidence.artifact.content.get': '#/$defs/EvidenceArtifactContentResult',
     'settings.get': '#/$defs/SettingsProjection',
@@ -235,6 +242,7 @@ test('HTTP query contract covers every current read surface with an opaque stabl
     'collaboration.activity.list': '#/$defs/CollaborationActivityPage',
     'collaboration.notification.list': '#/$defs/CollaborationNotificationPage',
     'collaboration.presence.list': '#/$defs/CollaborationPresencePage',
+    'collaboration.page_annotation.list': '#/$defs/CollaborationPageAnnotationPage',
     'session.artifact.get': '#/$defs/SessionArtifactGetResult',
   })
   assert.deepEqual(
@@ -252,6 +260,7 @@ test('HTTP query contract covers every current read surface with an opaque stabl
       'CollaborationActivityPage',
       'CollaborationNotificationPage',
       'CollaborationPresencePage',
+      'CollaborationPageAnnotationPage',
     ].map(name => schema.$defs[name].properties.kind.const),
     [
       'product_session_page',
@@ -267,6 +276,7 @@ test('HTTP query contract covers every current read surface with an opaque stabl
       'collaboration_activity_page',
       'collaboration_notification_page',
       'collaboration_presence_page',
+      'collaboration_page_annotation_page',
     ],
   )
 
@@ -281,8 +291,12 @@ test('HTTP query contract covers every current read surface with an opaque stabl
     'candidate.review.get',
     'candidate.files.list',
     'candidate.diff.get',
+    'candidate.file.content.get',
   ])
   assert.equal(candidateRead.diffChunkMaxBytes, 262_144)
+  assert.equal(candidateRead.contentChunkMaxBytes, 262_144)
+  assert.equal(candidateRead.contentMaxBytes, 268_435_456)
+  assert.match(candidateRead.contentRead, /candidate commit blob bytes/u)
   assert.deepEqual(candidateRead.binding, [
     'repository scope',
     'deliveryId',

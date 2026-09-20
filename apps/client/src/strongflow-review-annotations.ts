@@ -231,9 +231,9 @@ export function mountStrongFlowReviewAnnotations(
       pinList.append(empty)
       return
     }
-    for (const pin of pins) {
+    for (const [pinIndex, pin] of pins.entries()) {
       const item = element(document, 'li', 'wwc-review-annotations-pin')
-      item.dataset.reviewPinKey = pin.reference.key
+      item.dataset.reviewPinIndex = String(pinIndex + 1)
       item.dataset.reviewPinKind = pin.reference.kind
       item.dataset.reviewRetention = pin.reference.retention ?? 'unknown'
       item.dataset.reviewAvailabilityChanged = pin.availabilityChanged ? 'true' : 'false'
@@ -262,10 +262,9 @@ export function mountStrongFlowReviewAnnotations(
       snippetList.append(empty)
       return
     }
-    for (const entry of snippets) {
+    for (const [snippetIndex, entry] of snippets.entries()) {
       const item = element(document, 'li', 'wwc-review-annotations-snippet')
-      item.dataset.reviewAttentionId = entry.attentionId
-      item.dataset.reviewSourceRef = entry.snippet.sourceRef
+      item.dataset.reviewSnippetIndex = String(snippetIndex + 1)
       const attention = element(document, 'span', 'wwc-review-annotations-snippet-attention')
       attention.textContent = `关联 Attention：${entry.attentionTitle}`
       const citation = element(document, 'span', 'wwc-review-annotations-snippet-citation')
@@ -273,7 +272,7 @@ export function mountStrongFlowReviewAnnotations(
       const exit = entry.snippet.exitCode === null ? '' : ` · 退出码 ${entry.snippet.exitCode}`
       citation.textContent = `${command}${exit} · outcome ${entry.snippet.outcome}`
       const source = element(document, 'span', 'wwc-review-annotations-snippet-source')
-      source.textContent = `来源 ${entry.snippet.sourceRef}（WorkRun ${entry.snippet.workRunId ?? '未知'}）`
+      source.textContent = '错误引用已绑定当前执行记录'
       item.append(attention, citation, source)
       snippetList.append(item)
     }

@@ -9,6 +9,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Barrier};
+use std::thread;
 use std::time::Duration;
 
 use winwincode_device_client::supervisor::{WORKER_STATE_CRASHED, WORKER_STATE_EXITED};
@@ -93,6 +95,48 @@ fn append_line(recorder: &WorkerLogRecorder, session: &str, stream: WorkerLogStr
             STAMP,
         )
         .expect("diagnostic append");
+}
+
+#[test]
+fn concurrent_stdout_and_stderr_appends_preserve_metadata() {
+    let root = temporary_root("concurrent");
+    let logs = recorder(&root, WorkerLogConfig::default());
+    let start = Arc::new(Barrier::new(2));
+    let per_stream = 128_u64;
+    let mut workers = Vec::new();
+    for (stream, label) in [
+        (WorkerLogStream::Stdout, "stdout"),
+        (WorkerLogStream::Stderr, "stderr"),
+    ] {
+        let logs = logs.clone();
+        let start = Arc::clone(&start);
+        workers.push(thread::spawn(move || {
+            start.wait();
+            for index in 0..per_stream {
+                let line = format!("{label} line {index}\n");
+                logs.append(
+                    SESSION,
+                    INSTANCE,
+                    stream,
+                    WorkerLogContentKind::Diagnostic,
+                    line.as_bytes(),
+                    STAMP,
+                )
+                .expect("concurrent diagnostic append");
+            }
+        }));
+    }
+    for worker in workers {
+        worker.join().expect("concurrent append worker exits");
+    }
+
+    let summary = logs
+        .summary(SESSION)
+        .expect("summary reads")
+        .expect("session exists");
+    assert_eq!(summary.stdout_lines, per_stream);
+    assert_eq!(summary.stderr_lines, per_stream);
+    cleanup(&root);
 }
 
 #[test]

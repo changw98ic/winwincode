@@ -4,6 +4,7 @@ import type {
   CandidatePreviewState,
   CandidatePreviewViewModel,
   ManagedRunPhase,
+  PreviewFileContentState,
   PreviewFileFacts,
   PreviewLogSegmentFacts,
   PreviewViewportPreset,
@@ -17,6 +18,8 @@ import {
 } from './candidate-run-preview-view-model.js'
 import type { PageAnnotationViewModel } from './page-annotation-view-model.js'
 import { mountPageAnnotationPage } from './page-annotation-page.js'
+import { renderDiff } from './diff-preview.js'
+import { redactPublicText } from './public-redaction.js'
 
 export interface CandidateRunPreviewPageOptions {
   readonly root: HTMLElement
@@ -25,6 +28,7 @@ export interface CandidateRunPreviewPageOptions {
   readonly annotations?: PageAnnotationViewModel
   readonly appOrigin?: string
   readonly devicePixelRatio?: number
+  readonly deliveryId?: string
 }
 
 export interface CandidateRunPreviewPage {
@@ -59,19 +63,28 @@ function modeBanner(state: CandidatePreviewState): string {
 function identityDetail(state: CandidatePreviewState): string {
   const identity = state.identity
   if (identity === null) return '等待候选运行身份'
-  const parts = [
-    `source ${identity.sourceId}`,
-    `task ${identity.taskId ?? '—'}`,
-    identity.attempt === null ? null : `attempt ${String(identity.attempt)}`,
-    `commit ${shortCommit(identity.candidateCommit)}`,
-    `tree ${identity.candidateTreeId === null ? '—' : identity.candidateTreeId.slice(0, 7)}`,
-    `config ${identity.runConfigVersion ?? '—'}`,
-  ].filter((part): part is string => part !== null)
-  return parts.join(' · ')
+  const run = identity.attempt === null ? '当前运行' : `第 ${String(identity.attempt)} 次运行`
+  const version = identity.candidateCommit === null ? null : `版本 ${shortCommit(identity.candidateCommit)}`
+  return ['当前任务', run, version].filter((part): part is string => part !== null).join(' · ')
 }
 
 function runPhase(state: CandidatePreviewState): ManagedRunPhase {
   return state.run?.phase ?? 'idle'
+}
+
+function annotationBindingKey(state: CandidatePreviewState): string {
+  const identity = state.identity
+  if (identity === null) return 'unknown'
+  return [
+    identity.mode,
+    identity.sourceId,
+    identity.workRunId,
+    identity.repositoryBindingId,
+    identity.taskId ?? '',
+    identity.attempt === null ? '' : String(identity.attempt),
+    identity.candidateCommit ?? '',
+    identity.candidateTreeId ?? '',
+  ].join('\u0000')
 }
 
 function fileClassText(file: PreviewFileFacts): string {
@@ -82,6 +95,14 @@ function fileClassText(file: PreviewFileFacts): string {
     case 'html': return 'HTML/SVG'
     case 'download': return '下载'
     case 'degraded': return '已降级'
+  }
+}
+
+function logStreamText(stream: PreviewLogSegmentFacts['stream']): string {
+  switch (stream) {
+    case 'stdout': return '标准输出'
+    case 'stderr': return '错误输出'
+    case 'diagnostic': return '诊断'
   }
 }
 
@@ -104,17 +125,20 @@ export function mountCandidateRunPreviewPage(
   const noticeLine = element(document, 'p', 'wwc-candidate-run-preview-notice')
   noticeLine.setAttribute('role', 'status')
 
+  const runHeading = element(document, 'h3', 'wwc-candidate-run-preview-section-heading')
   const runBar = element(document, 'div', 'wwc-candidate-run-preview-run-bar')
   const runBadge = element(document, 'span', 'wwc-candidate-run-preview-run-badge')
   const startButton = element(document, 'button', 'wwc-candidate-run-preview-start')
   const stopButton = element(document, 'button', 'wwc-candidate-run-preview-stop')
   const restartButton = element(document, 'button', 'wwc-candidate-run-preview-restart')
 
+  const previewHeading = element(document, 'h3', 'wwc-candidate-run-preview-section-heading')
   const previewBar = element(document, 'div', 'wwc-candidate-run-preview-preview-bar')
   const authorizeButton = element(document, 'button', 'wwc-candidate-run-preview-authorize')
   const revokeButton = element(document, 'button', 'wwc-candidate-run-preview-revoke')
   const accessLine = element(document, 'p', 'wwc-candidate-run-preview-access')
 
+  const viewportHeading = element(document, 'h3', 'wwc-candidate-run-preview-section-heading')
   const viewportBar = element(document, 'div', 'wwc-candidate-run-preview-viewport-bar')
   const desktopButton = element(document, 'button', 'wwc-candidate-run-preview-viewport-desktop')
   const mobileButton = element(document, 'button', 'wwc-candidate-run-preview-viewport-mobile')
@@ -136,12 +160,21 @@ export function mountCandidateRunPreviewPage(
   const frameNotice = element(document, 'p', 'wwc-candidate-run-preview-frame-notice')
   const openPreview = element(document, 'a', 'wwc-candidate-run-preview-open')
 
+  const fileHeading = element(document, 'h3', 'wwc-candidate-run-preview-section-heading')
   const fileList = element(document, 'ul', 'wwc-candidate-run-preview-files')
+  const fileContentHeading = element(document, 'h3', 'wwc-candidate-run-preview-section-heading')
+  const fileContentPanel = element(document, 'div', 'wwc-candidate-run-preview-file-content')
+  const diffHeading = element(document, 'h3', 'wwc-candidate-run-preview-section-heading')
+  const diffPanel = element(document, 'div', 'wwc-candidate-run-preview-diff')
+  const logHeading = element(document, 'h3', 'wwc-candidate-run-preview-section-heading')
   const logList = element(document, 'ul', 'wwc-candidate-run-preview-logs')
   const citation = element(document, 'p', 'wwc-candidate-run-preview-citation')
   const annotationRoot = element(document, 'div', 'wwc-candidate-run-preview-annotations')
 
   let closed = false
+  let currentFrameUrl: string | null = null
+  let frameLoading = false
+  let frameLoadError = false
 
   section.setAttribute('aria-label', '候选运行预览')
   heading.textContent = '候选运行预览'
@@ -171,10 +204,12 @@ export function mountCandidateRunPreviewPage(
   customWidth.min = '200'
   customWidth.max = '4096'
   customWidth.placeholder = '宽'
+  customWidth.setAttribute('aria-label', '自定义视口宽度')
   customHeight.type = 'number'
   customHeight.min = '200'
   customHeight.max = '4096'
   customHeight.placeholder = '高'
+  customHeight.setAttribute('aria-label', '自定义视口高度')
   backButton.type = 'button'
   backButton.textContent = '后退'
   forwardButton.type = 'button'
@@ -187,29 +222,63 @@ export function mountCandidateRunPreviewPage(
   pathInput.placeholder = '/path'
   pathInput.setAttribute('aria-label', '预览路径')
   frame.title = '受控候选预览'
+  noticeLine.setAttribute('role', 'status')
+  frameNotice.setAttribute('role', 'status')
+  fileContentPanel.tabIndex = -1
+  diffPanel.tabIndex = -1
   frame.setAttribute('sandbox', 'allow-downloads allow-forms allow-modals allow-popups allow-scripts')
   frame.setAttribute('referrerpolicy', 'no-referrer')
+  frame.addEventListener('load', () => {
+    if (closed) return
+    frameLoading = false
+    frameLoadError = false
+    delete frameNotice.dataset.tone
+    frameNotice.hidden = true
+    frameNotice.textContent = ''
+  })
+  frame.addEventListener('error', () => {
+    if (closed) return
+    frameLoading = false
+    frameLoadError = true
+    frameNotice.dataset.tone = 'danger'
+    frameNotice.hidden = false
+    frameNotice.textContent = '预览加载失败。请刷新，或检查受控运行和短期访问是否仍有效。'
+  })
   openPreview.textContent = '在新窗口打开'
   openPreview.target = '_blank'
   openPreview.rel = 'noopener noreferrer'
 
   runBar.append(runBadge, startButton, stopButton, restartButton)
+  runHeading.textContent = '运行控制'
   previewBar.append(authorizeButton, revokeButton, accessLine, openPreview)
+  previewHeading.textContent = '受控预览访问'
   viewportBar.append(desktopButton, mobileButton, customWidth, customHeight, applyCustom, viewportLabel)
+  viewportHeading.textContent = '视口与导航'
   navBar.append(backButton, forwardButton, refreshButton, pathInput, goButton, navError)
   frameShell.append(frame, frameNotice)
+  fileHeading.textContent = '授权文件'
+  logHeading.textContent = '运行日志'
   section.append(
     topbar,
     heading,
     modeLine,
     identityLine,
     noticeLine,
+    runHeading,
     runBar,
+    previewHeading,
     previewBar,
+    viewportHeading,
     viewportBar,
     navBar,
     frameShell,
+    fileHeading,
     fileList,
+    fileContentHeading,
+    fileContentPanel,
+    diffHeading,
+    diffPanel,
+    logHeading,
     logList,
     citation,
     annotationRoot,
@@ -242,8 +311,148 @@ export function mountCandidateRunPreviewPage(
       })
       const badge = element(document, 'span', 'wwc-candidate-run-preview-file-class')
       badge.textContent = fileClassText(file)
-      item.append(open, badge)
+      const diff = element(document, 'button', 'wwc-candidate-run-preview-file-diff')
+      diff.type = 'button'
+      diff.textContent = '查看变更 diff'
+      const canDiff = file.previewClass === 'code' || file.previewClass === 'markdown'
+      diff.disabled = !canDiff
+      if (!canDiff) diff.title = file.degradationReason ?? '该文件不支持内联变更 diff。'
+      diff.addEventListener('click', () => {
+        void options.model.openDiff(file.path)
+      })
+      item.append(open, badge, diff)
       fileList.append(item)
+    }
+  }
+
+  function renderFileContent(content: PreviewFileContentState | null): void {
+    fileContentHeading.hidden = content === null
+    fileContentPanel.hidden = content === null
+    fileContentPanel.replaceChildren()
+    if (content === null) return
+    const label = element(document, 'p', 'wwc-candidate-run-preview-file-content-label')
+    label.textContent = `${content.path} · 文件内容`
+    fileContentPanel.append(label)
+    if (content.loading) {
+      const loading = element(document, 'p', 'wwc-candidate-run-preview-file-content-status')
+      loading.setAttribute('role', 'status')
+      loading.textContent = '正在读取有界文件内容…'
+      fileContentPanel.append(loading)
+      return
+    }
+    if (content.error !== null) {
+      const error = element(document, 'p', 'wwc-candidate-run-preview-file-content-status')
+      error.setAttribute('role', 'alert')
+      error.dataset.tone = 'danger'
+      error.textContent = `文件内容读取失败：${content.error}`
+      fileContentPanel.append(error)
+      if (content.retryable) {
+        const retry = element(document, 'button', 'wwc-candidate-run-preview-file-content-retry')
+        retry.type = 'button'
+        retry.textContent = '重试读取文件'
+        retry.addEventListener('click', () => {
+          fileContentPanel.focus?.()
+          void options.model.openFile(content.path)
+        })
+        fileContentPanel.append(retry)
+      }
+      return
+    }
+    let binary = ''
+    try {
+      binary = atob(content.dataBase64)
+    } catch {
+      binary = ''
+    }
+    const bytes = Uint8Array.from(binary, character => character.charCodeAt(0))
+    const file = stateFile(content.path)
+    if (file?.previewClass === 'html') {
+      const safe = element(document, 'p', 'wwc-candidate-run-preview-file-content-status')
+      safe.textContent = 'HTML/SVG 只可在独立受控预览来源中渲染；此处不执行文件内容。'
+      fileContentPanel.append(safe)
+    } else if (file?.previewClass === 'image'
+      && content.nextOffset === null
+      && /^image\/(?:png|jpeg|gif|webp|avif)$/u.test(content.mediaType)) {
+      const image = element(document, 'img', 'wwc-candidate-run-preview-file-content-image')
+      image.alt = content.path
+      image.src = `data:${content.mediaType};base64,${content.dataBase64}`
+      fileContentPanel.append(image)
+    } else if (content.contentEncoding === 'utf-8'
+      && (file?.previewClass === 'markdown' || file?.previewClass === 'code')) {
+      const pre = element(document, 'pre', 'wwc-candidate-run-preview-file-content-code')
+      pre.tabIndex = 0
+      pre.textContent = new TextDecoder('utf-8', { fatal: false }).decode(bytes)
+      fileContentPanel.append(pre)
+    } else {
+      const binaryNotice = element(document, 'p', 'wwc-candidate-run-preview-file-content-status')
+      binaryNotice.textContent = '该文件按二进制内容处理，只提供安全下载。'
+      fileContentPanel.append(binaryNotice)
+    }
+    const download = element(document, 'a', 'wwc-candidate-run-preview-file-content-download')
+    download.textContent = content.nextOffset === null ? '下载文件' : '下载已读取内容'
+    download.href = `data:application/octet-stream;base64,${content.dataBase64}`
+    download.download = content.path.split('/').at(-1) ?? 'candidate-file'
+    download.rel = 'noopener noreferrer'
+    fileContentPanel.append(download)
+    const meta = element(document, 'p', 'wwc-candidate-run-preview-file-content-meta')
+    meta.textContent = content.nextOffset === null
+      ? `已读取 ${String(content.returnedBytes)} / ${String(content.totalBytes)} 字节`
+      : `已读取 ${String(content.returnedBytes)} / ${String(content.totalBytes)} 字节；文件过大，下载当前有界内容`
+    fileContentPanel.append(meta)
+  }
+
+  function stateFile(path: string): PreviewFileFacts | undefined {
+    return options.model.state.files.find(file => file.path === path)
+  }
+
+  function renderDiffPanel(state: CandidatePreviewState): void {
+    const diff = state.fileDiff
+    diffHeading.hidden = diff === null
+    diffPanel.hidden = diff === null
+    diffPanel.replaceChildren()
+    if (diff === null) return
+    const label = element(document, 'p', 'wwc-candidate-run-preview-diff-label')
+    label.textContent = `${diff.path} · 变更 diff（不是原始文件内容）`
+    diffPanel.append(label)
+    if (diff.loading) {
+      const loading = element(document, 'p', 'wwc-candidate-run-preview-diff-status')
+      loading.setAttribute('role', 'status')
+      loading.textContent = '正在读取候选变更 diff…'
+      diffPanel.append(loading)
+      return
+    }
+    if (diff.error !== null) {
+      const error = element(document, 'p', 'wwc-candidate-run-preview-diff-status')
+      error.setAttribute('role', 'alert')
+      error.dataset.tone = 'danger'
+      error.textContent = `变更 diff 读取失败：${diff.error}`
+      diffPanel.append(error)
+      if (diff.retryable) {
+        const retry = element(document, 'button', 'wwc-candidate-run-preview-diff-retry')
+        retry.type = 'button'
+        retry.textContent = '重试读取 diff'
+        retry.addEventListener('click', () => {
+          diffPanel.focus?.()
+          void options.model.openDiff(diff.path)
+        })
+        diffPanel.append(retry)
+      }
+      return
+    }
+    const pre = element(document, 'pre', 'wwc-candidate-run-preview-diff-code')
+    pre.tabIndex = 0
+    pre.setAttribute('aria-label', `${diff.path} 的变更 diff，减号为删除，加号为新增`)
+    pre.append(renderDiff(document, diff.text))
+    diffPanel.append(pre)
+    const meta = element(document, 'p', 'wwc-candidate-run-preview-diff-meta')
+    meta.textContent = `已读取 ${String(diff.returnedBytes)} / ${String(diff.totalBytes)} 字节`
+    diffPanel.append(meta)
+    if (diff.nextOffset !== null) {
+      const more = element(document, 'button', 'wwc-candidate-run-preview-diff-more')
+      more.type = 'button'
+      more.textContent = '继续读取变更 diff'
+      more.addEventListener('click', () => { void options.model.continueDiff() })
+      diffPanel.append(more)
     }
   }
 
@@ -259,7 +468,7 @@ export function mountCandidateRunPreviewPage(
       const item = element(document, 'li', 'wwc-candidate-run-preview-log')
       const label = element(document, 'span', 'wwc-candidate-run-preview-log-label')
       label.textContent = [
-        segment.stream,
+        logStreamText(segment.stream),
         `${String(segment.lineCount)} 行`,
         segment.truncated ? `已截断至 ${String(segment.maxLines)}` : '完整',
       ].join(' · ')
@@ -296,7 +505,7 @@ export function mountCandidateRunPreviewPage(
     startButton.disabled = !state.runControlAvailable || state.status !== 'ready' || (hasRun && phase !== 'exited' && phase !== 'failed' && phase !== 'idle')
     stopButton.disabled = !state.runControlAvailable || !hasRun || phase === 'idle' || phase === 'exited'
     restartButton.disabled = !state.runControlAvailable || !hasRun
-    const runControlTitle = state.runControlAvailable ? '' : '等待本地 Client 提供受管应用控制能力'
+    const runControlTitle = state.runControlAvailable ? '' : '等待本地设备提供受管应用控制能力'
     startButton.title = runControlTitle
     stopButton.title = runControlTitle
     restartButton.title = runControlTitle
@@ -305,7 +514,7 @@ export function mountCandidateRunPreviewPage(
     accessLine.textContent = state.source === null
       ? '尚未授权远程预览。'
       : access === 'authorized'
-        ? `已授权 · ${state.source.accessExpiresAt ?? '短期访问'}`
+        ? '已授权 · 短期访问'
         : access === 'revoked'
           ? '访问已撤销。'
           : '无预览访问。'
@@ -313,6 +522,11 @@ export function mountCandidateRunPreviewPage(
     authorizeButton.disabled = state.status !== 'ready' || access === 'authorized'
 
     viewportLabel.textContent = `视口 ${state.viewport.preset} · ${String(state.viewport.width)}×${String(state.viewport.height)}`
+    desktopButton.setAttribute('aria-pressed', String(state.viewport.preset === 'desktop'))
+    mobileButton.setAttribute('aria-pressed', String(state.viewport.preset === 'mobile'))
+    applyCustom.setAttribute('aria-pressed', String(state.viewport.preset === 'custom'))
+    customWidth.value = state.viewport.preset === 'custom' ? String(state.viewport.width) : customWidth.value
+    customHeight.value = state.viewport.preset === 'custom' ? String(state.viewport.height) : customHeight.value
     pathInput.value = state.navigation.path
     backButton.disabled = !state.navigation.canGoBack
     forwardButton.disabled = !state.navigation.canGoForward
@@ -320,25 +534,40 @@ export function mountCandidateRunPreviewPage(
     navError.textContent = state.navigation.lastError ?? ''
 
     const frameReady = state.source?.access === 'authorized'
-    frameNotice.hidden = frameReady
-    frameNotice.textContent = frameReady
-      ? ''
-      : '受控预览帧在授权后加载；此处不内嵌任意本机地址。'
     frameShell.dataset.viewport = `${String(state.viewport.width)}x${String(state.viewport.height)}`
     frameShell.dataset.path = state.navigation.path
+    frameShell.setAttribute('style', `width:${String(state.viewport.width)}px;max-width:100%;height:${String(state.viewport.height)}px`)
     const frameUrl = frameReady && state.source !== null
       ? new URL(state.navigation.path.replace(/^\//u, ''), state.source.previewOrigin).toString()
       : null
     if (frameUrl === null) {
+      currentFrameUrl = null
+      frameLoading = false
+      frameLoadError = false
+      delete frameNotice.dataset.tone
       frame.removeAttribute('src')
       frame.hidden = true
       openPreview.hidden = true
     } else {
+      if (currentFrameUrl !== frameUrl) {
+        currentFrameUrl = frameUrl
+        frameLoading = true
+        frameLoadError = false
+      }
       if (frame.src !== frameUrl) frame.src = frameUrl
       frame.hidden = false
       openPreview.hidden = false
       openPreview.href = frameUrl
     }
+    frameNotice.hidden = frameReady && !frameLoading && !frameLoadError
+    frameNotice.textContent = frameReady
+      ? frameLoadError
+        ? '预览加载失败。请刷新，或检查受控运行和短期访问是否仍有效。'
+        : frameLoading
+          ? '正在加载受控预览…'
+          : ''
+      : '受控预览帧在授权后加载；此处不内嵌任意本机地址。'
+    if (!frameReady || !frameLoadError) delete frameNotice.dataset.tone
     if (options.annotations !== undefined && state.source !== null) {
       const nextSurface = [
         state.source.previewAccessId,
@@ -350,10 +579,13 @@ export function mountCandidateRunPreviewPage(
       if (annotationSurface !== nextSurface) {
         annotationSurface = nextSurface
         options.annotations.prepare({
+          bindingKey: annotationBindingKey(state),
           pageUrl: frameUrl ?? options.appOrigin ?? 'about:blank',
           pagePath: state.navigation.path,
           access: state.source.access === 'authorized' ? 'authorized' : 'revoked',
           injectable: false,
+          ...(options.deliveryId === undefined ? {} : { deliveryId: options.deliveryId }),
+          ...(state.identity?.workRunId === undefined ? {} : { workRunId: state.identity.workRunId }),
           viewport: {
             width: state.viewport.width,
             height: state.viewport.height,
@@ -364,13 +596,18 @@ export function mountCandidateRunPreviewPage(
     }
 
     renderFiles(state.files)
+    fileContentHeading.textContent = '文件内容'
+    renderFileContent(state.fileContent)
+    diffHeading.textContent = '变更 diff'
+    renderDiffPanel(state)
     renderLogs(state.logSegments)
 
     const logCitation = state.logCitation
     citation.hidden = logCitation === null
+    citation.title = logCitation === null ? '' : '来源已绑定当前运行'
     citation.textContent = logCitation === null
       ? ''
-      : `${logCitation.sourceRef} · ${String(logCitation.lineStart)}–${String(logCitation.lineEnd)} · ${logCitation.redactedText}`
+      : `运行日志 · 第 ${String(logCitation.lineStart)}–${String(logCitation.lineEnd)} 行 · ${redactPublicText(logCitation.redactedText)}`
   }
 
   startButton.addEventListener('click', () => {

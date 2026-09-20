@@ -27,6 +27,7 @@ use crate::{
 };
 
 const CONTEXT: &str = "winwincode.device-provider.v1";
+const DEVICE_PROVIDER_TLS_ROOT_DER_ENVIRONMENT: &str = "WWC_DEVICE_PROVIDER_TLS_ROOT_DER_FILE";
 
 /// Bounded failure: database and crypto errors never expose configuration or keys.
 #[derive(Debug, Clone, Copy)]
@@ -540,6 +541,11 @@ pub(crate) fn adapter(
         },
     )
     .map_err(|_| DeviceProviderError)?;
+    if let Some(path) = std::env::var_os(DEVICE_PROVIDER_TLS_ROOT_DER_ENVIRONMENT) {
+        transport = transport
+            .with_specific_tls_roots(vec![fs::read(path)?])
+            .map_err(|_| DeviceProviderError)?;
+    }
     if config.protocol == DeviceProviderProtocol::AnthropicMessages {
         transport = transport
             .with_anthropic_messages(8192, ProviderTokenPricing::default())

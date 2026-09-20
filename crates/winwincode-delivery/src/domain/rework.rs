@@ -115,6 +115,24 @@ impl CurrentReworkScope {
             .filter(|result| result.verdict == CriterionVerdict::Fail)
             .flat_map(|result| result.evidence_refs.iter().cloned())
             .collect::<Vec<_>>();
+        if evidence_ref_ids.iter().any(|evidence_id| {
+            !delivery.snapshot().evidence.iter().any(|evidence| {
+                current_verdict_evidence(evidence, delivery, candidate)
+                    && evidence.id == *evidence_id
+            })
+        }) {
+            return Err(invalid_rework(
+                "rework verdict cites missing or foreign current candidate Evidence",
+            ));
+        }
+        evidence_ref_ids.extend(
+            delivery
+                .snapshot()
+                .evidence
+                .iter()
+                .filter(|evidence| page_annotation_evidence(evidence, delivery, candidate))
+                .map(|evidence| evidence.id.clone()),
+        );
         evidence_ref_ids.sort_by(|a, b| a.0.cmp(&b.0));
         evidence_ref_ids.dedup();
         if evidence_ref_ids.is_empty()
@@ -394,6 +412,17 @@ impl ReworkAuthorization {
             .flat_map(|result| result.evidence_refs.iter())
             .map(|evidence_id| evidence_id.0.as_str())
             .collect::<HashSet<_>>();
+        let allowed_evidence_ids = delivery
+            .snapshot()
+            .evidence
+            .iter()
+            .filter(|evidence| {
+                current_verdict_evidence(evidence, delivery, &self.previous_candidate)
+                    && (failed_evidence_ids.contains(evidence.id.0.as_str())
+                        || page_annotation_evidence(evidence, delivery, &self.previous_candidate))
+            })
+            .map(|evidence| evidence.id.0.as_str())
+            .collect::<HashSet<_>>();
         let current = verdict.status == DeliveryVerdictStatus::Fail
             && verdict.candidate_ref == self.candidate_ref
             && self.previous_candidate.diff_sha256() == self.diff_sha256
@@ -409,15 +438,10 @@ impl ReworkAuthorization {
                         &target.hunk_sha256,
                     )
                     && !target.evidence_ref_ids.is_empty()
-                    && target.evidence_ref_ids.iter().all(|evidence_id| {
-                        failed_evidence_ids.contains(evidence_id.0.as_str())
-                            && delivery.snapshot().evidence.iter().any(|evidence| {
-                                evidence.id == *evidence_id
-                                    && evidence.candidate_ref == self.candidate_ref
-                                    && evidence.delivery_spec_revision
-                                        == delivery.snapshot().spec.revision
-                            })
-                    })
+                    && target
+                        .evidence_ref_ids
+                        .iter()
+                        .all(|evidence_id| allowed_evidence_ids.contains(evidence_id.0.as_str()))
             });
         if current {
             Ok(())
@@ -427,6 +451,39 @@ impl ReworkAuthorization {
             ))
         }
     }
+}
+
+fn current_verdict_evidence(
+    evidence: &super::EvidenceRef,
+    delivery: &Delivery,
+    candidate: &FrozenDeliveryCandidate,
+) -> bool {
+    evidence.delivery_id == *delivery.id()
+        && evidence.delivery_spec_id == delivery.snapshot().spec.id
+        && evidence.delivery_spec_revision == delivery.snapshot().spec.revision
+        && evidence.candidate_ref == candidate.candidate_ref()
+}
+
+fn page_annotation_evidence(
+    evidence: &super::EvidenceRef,
+    delivery: &Delivery,
+    candidate: &FrozenDeliveryCandidate,
+) -> bool {
+    current_verdict_evidence(evidence, delivery, candidate)
+        && evidence.work_run_id == *candidate.producer_work_run_id()
+        && evidence.session_binding_id == *candidate.producer_session_binding_id()
+        && evidence.evidence_type == super::EvidenceRefType::ReviewFinding
+        && valid_page_annotation_source(&evidence.source_ref)
+}
+
+fn valid_page_annotation_source(source_ref: &str) -> bool {
+    let Some(annotation_id) = source_ref.strip_prefix("page-annotation:") else {
+        return false;
+    };
+    (5..=128).contains(&annotation_id.len())
+        && annotation_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
 fn candidate_work_item_id<'a>(
@@ -881,11 +938,9 @@ fn validate_precise_scope(
         for evidence_id in &annotation.evidence_ref_ids {
             let current = delivery.snapshot().evidence.iter().any(|evidence| {
                 evidence.id == *evidence_id
-                    && evidence.delivery_id == *delivery.id()
-                    && evidence.delivery_spec_id == delivery.snapshot().spec.id
-                    && evidence.delivery_spec_revision == delivery.snapshot().spec.revision
-                    && evidence.candidate_ref == candidate.candidate_ref()
-                    && failed_evidence_ids.contains(evidence.id.0.as_str())
+                    && current_verdict_evidence(evidence, delivery, candidate)
+                    && (failed_evidence_ids.contains(evidence.id.0.as_str())
+                        || page_annotation_evidence(evidence, delivery, candidate))
             });
             if !current {
                 return Err(invalid_rework(
@@ -1941,6 +1996,86 @@ mod tests {
         let mut stale = annotation;
         stale.hunk_sha256 = "0".repeat(64);
         assert!(decide_precise_rework(&delivery, &candidate, &scope, &[stale], &history,).is_err());
+    }
+
+    #[test]
+    fn current_page_annotation_evidence_is_carried_into_remediator_target() {
+        let (delivery, candidate, _, _) = current_failure();
+        let page_evidence_id = EvidenceId("evidence-page-current".into());
+        let mut snapshot = delivery.into_snapshot();
+        snapshot.evidence.push(EvidenceRef {
+            schema_version: super::super::DELIVERY_SCHEMA_VERSION,
+            id: page_evidence_id.clone(),
+            delivery_id: snapshot.id.clone(),
+            delivery_spec_id: snapshot.spec.id.clone(),
+            delivery_spec_revision: snapshot.spec.revision,
+            work_run_id: candidate.producer_work_run_id().clone(),
+            session_binding_id: candidate.producer_session_binding_id().clone(),
+            candidate_ref: candidate.candidate_ref().into(),
+            evidence_type: EvidenceRefType::ReviewFinding,
+            source_ref: "page-annotation:annotation-current".into(),
+            created_at_millis: snapshot.updated_at_millis,
+        });
+        let delivery = Delivery::try_from_snapshot(snapshot).expect("page annotation Evidence");
+        let scope = CurrentReworkScope::from_candidate(&delivery, &candidate)
+            .expect("current page annotation is in the rework scope");
+        let annotation = scope.annotations().into_iter().next().expect("target");
+        assert!(annotation.evidence_ref_ids.contains(&page_evidence_id));
+
+        let ReworkDecision::Start(authorization) = decide_precise_rework(
+            &delivery,
+            &candidate,
+            &scope,
+            &[annotation],
+            &empty_history(&delivery),
+        )
+        .expect("page annotation can authorize precise rework") else {
+            panic!("expected remediator authorization");
+        };
+        assert!(
+            authorization.targets()[0]
+                .evidence_ref_ids()
+                .contains(&page_evidence_id)
+        );
+    }
+
+    #[test]
+    fn foreign_page_annotation_evidence_is_rejected() {
+        let (delivery, candidate, _, _) = current_failure();
+        let foreign_evidence_id = EvidenceId("evidence-page-foreign".into());
+        let mut snapshot = delivery.into_snapshot();
+        snapshot.evidence.push(EvidenceRef {
+            schema_version: super::super::DELIVERY_SCHEMA_VERSION,
+            id: foreign_evidence_id.clone(),
+            delivery_id: snapshot.id.clone(),
+            delivery_spec_id: snapshot.spec.id.clone(),
+            delivery_spec_revision: snapshot.spec.revision,
+            work_run_id: candidate.producer_work_run_id().clone(),
+            session_binding_id: candidate.producer_session_binding_id().clone(),
+            candidate_ref: candidate.candidate_ref().into(),
+            evidence_type: EvidenceRefType::ReviewFinding,
+            source_ref: "page-annotation:annotation/foreign".into(),
+            created_at_millis: snapshot.updated_at_millis,
+        });
+        let delivery =
+            Delivery::try_from_snapshot(snapshot).expect("foreign Evidence remains stored");
+        let mut scope = CurrentReworkScope::from_candidate(&delivery, &candidate)
+            .expect("failed Verdict still has a valid precise scope");
+        let mut annotation = scope.annotations().into_iter().next().expect("target");
+        scope.targets[0]
+            .evidence_ref_ids
+            .push(foreign_evidence_id.clone());
+        annotation.evidence_ref_ids.push(foreign_evidence_id);
+        assert!(
+            decide_precise_rework(
+                &delivery,
+                &candidate,
+                &scope,
+                &[annotation],
+                &empty_history(&delivery),
+            )
+            .is_err()
+        );
     }
 
     #[test]

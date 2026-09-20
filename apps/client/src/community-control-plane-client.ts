@@ -55,6 +55,8 @@ import type {
   WorkRunCancelCommand,
   WorkRunAggregateProjection,
   WorkRunId,
+  Sha256Digest,
+  StrongFlowReadCursor,
   QueryRequest,
   QueryResultResponse,
   RequestId,
@@ -65,6 +67,90 @@ export interface ControlPlaneRepositoryRegistration {
   readDevice(clientId: string, signal: AbortSignal): Promise<DeviceProviderView>
   submit(clientId: string, envelope: DeviceConfigurationEnvelope, signal: AbortSignal): Promise<void>
   receipt(clientId: string, requestId: string, signal: AbortSignal): Promise<{ online: boolean; receipt: DeviceRepositoryRegistrationReceipt | null }>
+}
+
+export type ControlPlaneManagedAppMode = 'live' | 'frozen-candidate'
+
+export interface ControlPlaneManagedAppTemplate {
+  readonly schemaVersion: 'winwincode/managed-app-template-v1'
+  readonly mode: ControlPlaneManagedAppMode
+  readonly cwd: string
+  readonly argv: readonly string[]
+  readonly healthCheck: { readonly path: string; readonly timeoutMs: number }
+  readonly listenPort: number
+}
+
+export interface ControlPlaneManagedAppTemplateSnapshot {
+  readonly revision: number | null
+  readonly template: ControlPlaneManagedAppTemplate | null
+}
+
+export interface ControlPlaneManagedAppTemplatePort {
+  load(repositoryBindingId: string, signal?: AbortSignal): Promise<ControlPlaneManagedAppTemplateSnapshot>
+  save(repositoryBindingId: string, template: ControlPlaneManagedAppTemplate, signal?: AbortSignal): Promise<number>
+}
+
+export function createControlPlaneManagedAppTemplatePort(options: {
+  readonly serverUrl: string
+  readonly transport: ControlPlaneClientTransport
+}): ControlPlaneManagedAppTemplatePort {
+  const location = parseControlPlaneServerUrl(options.serverUrl)
+  const transportFetch = options.transport.fetch
+  const pathFor = (repositoryBindingId: string) =>
+    `${location.serverUrl}/api/v1/repositories/${encodeURIComponent(repositoryBindingId)}/managed-app-template`
+  async function request(repositoryBindingId: string, method: 'GET' | 'POST', signal: AbortSignal | undefined, template?: ControlPlaneManagedAppTemplate): Promise<unknown> {
+    if (transportFetch === undefined) throw new Error('项目运行设置服务不可用。')
+    const response = await transportFetch(pathFor(repositoryBindingId), {
+      method,
+      headers: {},
+      credentials: 'include',
+      cache: 'no-store',
+      redirect: 'error',
+      referrerPolicy: 'no-referrer',
+      ...(signal === undefined ? {} : { signal }),
+      ...(template === undefined ? {} : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(template) }),
+    })
+    const source = await response.text()
+    if (!response.ok) throw new Error(response.status === 401 ? '请重新登录。' : response.status === 403 ? '没有管理该项目的权限。' : '项目运行设置未保存，请稍后重试。')
+    try { return JSON.parse(source) as unknown } catch { throw new Error('项目运行设置返回了无效结果。') }
+  }
+  function parseSnapshot(value: unknown): ControlPlaneManagedAppTemplateSnapshot {
+    if (!isRecord(value)
+      || value.schemaVersion !== CONTROL_PLANE_SCHEMA_VERSION
+      || (value.revision !== null && (typeof value.revision !== 'number' || !Number.isInteger(value.revision) || value.revision < 1))
+      || (value.template !== null && !isManagedAppTemplate(value.template))) {
+      throw new Error('项目运行设置返回了无效结果。')
+    }
+    return Object.freeze({
+      revision: value.revision as number | null,
+      template: value.template as ControlPlaneManagedAppTemplate | null,
+    })
+  }
+  return {
+    async load(repositoryBindingId, signal) {
+      return parseSnapshot(await request(repositoryBindingId, 'GET', signal))
+    },
+    async save(repositoryBindingId, template, signal) {
+      const value = await request(repositoryBindingId, 'POST', signal, template)
+      const revision = isRecord(value) ? value.revision : undefined
+      if (!isRecord(value) || value.schemaVersion !== CONTROL_PLANE_SCHEMA_VERSION
+        || typeof revision !== 'number' || !Number.isInteger(revision) || revision < 1) throw new Error('项目运行设置返回了无效结果。')
+      return revision
+    },
+  }
+}
+
+function isManagedAppTemplate(value: unknown): value is ControlPlaneManagedAppTemplate {
+  const healthCheck = isRecord(value) ? value.healthCheck : null
+  if (!isRecord(value) || value.schemaVersion !== 'winwincode/managed-app-template-v1'
+    || 'env' in value
+    || (value.mode !== 'live' && value.mode !== 'frozen-candidate')
+    || typeof value.cwd !== 'string' || value.cwd.length === 0
+    || !Array.isArray(value.argv) || value.argv.length === 0 || value.argv.some(item => typeof item !== 'string' || item.length === 0)
+    || !isRecord(healthCheck) || typeof healthCheck.path !== 'string' || healthCheck.path.length === 0
+    || typeof healthCheck.timeoutMs !== 'number' || !Number.isInteger(healthCheck.timeoutMs) || healthCheck.timeoutMs < 1
+    || typeof value.listenPort !== 'number' || !Number.isInteger(value.listenPort) || value.listenPort < 1 || value.listenPort > 65535) return false
+  return true
 }
 
 export function createControlPlaneRepositoryRegistration(options: {
@@ -379,7 +465,9 @@ export async function queryWorkRunAggregate(
     || response.result.runs.some(run => run.workContractId !== response.result.contract.id
       || !response.result.items.some(item => item.id === run.workItemId))
     || response.result.deviceBindings.some(binding =>
-      !response.result.runs.some(run => run.id === binding.workRunId))
+        !response.result.runs.some(run => run.id === binding.workRunId))
+    || response.result.managedAppRunConfigs.some(config =>
+        !response.result.runs.some(run => run.id === config.runId))
     || new Set(response.result.deviceBindings.map(binding => binding.workRunId)).size
       !== response.result.deviceBindings.length
     || (input.workRunId !== undefined && input.workRunId !== null
@@ -780,7 +868,7 @@ function clientDirectoryBoundaryError(
     ? error.code
     : 'CLIENT_DIRECTORY_FAILED'
   const kind: ControlPlaneClientErrorKind = accessKind(code)
-    ?? (code === 'RATE_LIMITED'
+    ?? (code === 'RATE_LIMITED' || code === 'TOO_MANY_REQUESTS'
       ? 'server'
       : (versionCode(code)
         ? 'version'
@@ -1313,7 +1401,7 @@ function clientOccupancyBoundaryError(
     ? error.code
     : 'CLIENT_OCCUPANCY_FAILED'
   const kind: ControlPlaneClientErrorKind = accessKind(code)
-    ?? (code === 'RATE_LIMITED'
+    ?? (code === 'RATE_LIMITED' || code === 'TOO_MANY_REQUESTS'
       ? 'server'
       : (versionCode(code)
         ? 'version'
@@ -1981,7 +2069,12 @@ function candidateNetworkError(): ControlPlaneClientError {
   })
 }
 
-function candidateBoundaryError(status: number, source: string): ControlPlaneClientError {
+export function candidateBoundaryError(
+  status: number,
+  source: string,
+  fallbackCode = 'CLIENT_CANDIDATES_FAILED',
+  fallbackMessage = 'The Client candidate request failed.',
+): ControlPlaneClientError {
   let value: unknown
   try {
     value = JSON.parse(source)
@@ -1991,9 +2084,9 @@ function candidateBoundaryError(status: number, source: string): ControlPlaneCli
   const error = isRecord(value) && isRecord(value.error) ? value.error : null
   const code = error !== null && typeof error.code === 'string'
     ? error.code
-    : 'CLIENT_CANDIDATES_FAILED'
+    : fallbackCode
   const kind: ControlPlaneClientErrorKind = accessKind(code)
-    ?? (code === 'RATE_LIMITED'
+    ?? (code === 'RATE_LIMITED' || code === 'TOO_MANY_REQUESTS'
       ? 'server'
       : (versionCode(code)
         ? 'version'
@@ -2003,11 +2096,14 @@ function candidateBoundaryError(status: number, source: string): ControlPlaneCli
     code,
     message: error !== null && typeof error.message === 'string'
       ? error.message
-      : 'The Client candidate request failed.',
+      : fallbackMessage,
     requestId: isRecord(value) && typeof value.requestId === 'string'
       ? value.requestId as RequestId
       : null,
-    retryable: error !== null && error.retryable === true,
+    retryable: error !== null && typeof error.retryable === 'boolean'
+      ? error.retryable
+      : status >= 500,
+    details: error !== null && isRecord(error.details) ? error.details as ErrorDetails : {},
   })
 }
 
@@ -2569,6 +2665,8 @@ export interface ControlPlaneTaskAnchor {
   readonly title?: string
   readonly changes?: string
   readonly acceptance?: string
+  /** Server sealed managed-app run configuration, when this task has one. */
+  readonly managedAppRunConfig?: import('./generated/contracts.js').ManagedAppRunControlProjection
 }
 
 /**
@@ -2824,8 +2922,17 @@ export type ControlPlaneRunWorkerSessionState =
  */
 export interface ControlPlaneRunIdentityProjection {
   readonly taskId: import('./generated/contracts.js').WorkItemId
+  /** The Delivery read cut that selected every other identity fact. */
+  readonly deliveryId: DeliveryId | null
+  readonly readCursor: StrongFlowReadCursor | null
   readonly clientId: string
   readonly repositoryBindingId: string
+  /** Versioned runtime fact; null means this WorkRun has no managed-app config. */
+  readonly managedAppRunConfig: import('./generated/contracts.js').ManagedAppRunControlProjection | null
+  /** WorkRun that owns the managed-app source; candidate facts remain bound to `workRun`. */
+  readonly managedAppSourceRun: import('./generated/contracts.js').WorkRun | null
+  /** Evidence for the managed-app source WorkRun, kept separate from candidate producer evidence. */
+  readonly managedAppSourceEvidence?: readonly import('./generated/contracts.js').DeliveryEvidenceProjection[]
   /** The canonical WorkContract and WorkItem cut returned by `workrun.get`. */
   readonly contract: import('./generated/contracts.js').WorkContract | null
   readonly item: import('./generated/contracts.js').WorkItem | null
@@ -2842,9 +2949,49 @@ export interface ControlPlaneRunIdentityProjection {
 /** Current Candidate identity plus its optional device-local lifecycle facts. */
 export interface ControlPlaneRunCandidateProjection {
   readonly candidateRef: string
+  /** Exact commit sealed by the canonical FrozenCandidateSummaryProjection. */
+  readonly candidateCommitId: string
+  /** Exact tree sealed by the canonical FrozenCandidateSummaryProjection. */
+  readonly candidateTreeId: string
+  /** Exact diff digest sealed by the canonical FrozenCandidateSummaryProjection. */
+  readonly diffSha256: Sha256Digest
   readonly state: ControlPlaneCandidateState | 'produced'
   readonly branchName: string | null
   readonly history: readonly ControlPlaneCandidateApplyReceipt[]
+}
+
+/**
+ * Accepts only a server sealed run config whose identities match the exact
+ * WorkRun read cut. The browser never fills in executable fields.
+ */
+function projectManagedAppRunConfig(
+  config: import('./generated/contracts.js').ManagedAppRunControlProjection | undefined,
+  sourceRun: import('./generated/contracts.js').WorkRun | undefined,
+  taskId: import('./generated/contracts.js').WorkItemId,
+  candidateCommitId: string | null,
+): import('./generated/contracts.js').ManagedAppRunControlProjection | null {
+  if (config === undefined || sourceRun === undefined
+    || sourceRun.workItemId !== taskId
+    || String(config.runId) !== sourceRun.id
+    || config.attempt !== sourceRun.attempt) return null
+  if (config.mode === 'frozen-candidate') {
+    if (candidateCommitId === null || config.candidateCommit !== candidateCommitId) return null
+  } else if (config.mode === 'live'
+    && (config.candidateCommit !== null || candidateCommitId !== null)) {
+    return null
+  } else if (config.mode !== 'live') {
+    return null
+  }
+  return Object.freeze({
+    ...config,
+  })
+}
+
+function canonicalCandidateObjectId(value: unknown, label: 'commit' | 'tree'): string {
+  if (typeof value !== 'string' || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(value)) {
+    throw new Error(`控制平面返回的候选${label}身份无效。`)
+  }
+  return value
 }
 
 /** The run-page identity seam; it reads the canonical WorkRun projection. */
@@ -2883,24 +3030,34 @@ export function createControlPlaneRunIdentityPort(options: {
         workItemId: anchor.taskId,
         atCursor: detail.readCursor,
       })
+      const producerWorkRunId = detail.currentCandidate?.producerWorkRunId ?? null
       const workRun = aggregate.runs
-        .filter(run => run.workItemId === anchor.taskId)
+        .filter(run => run.workItemId === anchor.taskId
+          && (producerWorkRunId === null || run.id === producerWorkRunId))
         .sort((left, right) => right.attempt - left.attempt || right.revision - left.revision)[0]
-      if (workRun === undefined) throw new Error('此交付没有该任务项的工作运行。')
+      if (workRun === undefined) {
+        throw new Error(producerWorkRunId === null
+          ? '此交付没有该任务项的工作运行。'
+          : '当前候选的生产工作运行不存在。')
+      }
       const binding = aggregate.deviceBindings.find(candidate => candidate.workRunId === workRun.id)
       if (binding === undefined) throw new Error('此工作运行尚未分配执行设备。')
-      const currentCandidate = detail.currentCandidate?.producerWorkRunId === workRun.id
-        ? detail.currentCandidate
-        : null
-      let candidate: ControlPlaneRunCandidateProjection | null = currentCandidate === null
-        ? null
-        : Object.freeze({
-            candidateRef: currentCandidate.candidateRef,
-            state: 'produced',
-            branchName: null,
-            history: Object.freeze([]),
-          })
+      const currentCandidate = detail.currentCandidate
+      let candidate: ControlPlaneRunCandidateProjection | null = null
       if (currentCandidate !== null) {
+        const candidateIdentity = {
+          candidateCommitId: canonicalCandidateObjectId(currentCandidate.candidateCommitId, 'commit'),
+          candidateTreeId: canonicalCandidateObjectId(currentCandidate.candidateTreeId, 'tree'),
+        }
+        candidate = Object.freeze({
+          candidateRef: currentCandidate.candidateRef,
+          candidateCommitId: candidateIdentity.candidateCommitId,
+          candidateTreeId: candidateIdentity.candidateTreeId,
+          diffSha256: currentCandidate.diffSha256,
+          state: 'produced',
+          branchName: null,
+          history: Object.freeze([]),
+        })
         const deviceCandidates = await options.candidates.listDeviceCandidates({
           clientId: binding.clientId,
         })
@@ -2909,21 +3066,53 @@ export function createControlPlaneRunIdentityPort(options: {
         )
         if (deviceCandidate !== undefined) {
           if (deviceCandidate.repositoryBindingId !== binding.repositoryBindingId
-            || deviceCandidate.candidateCommit !== currentCandidate.candidateCommitId) {
+            || deviceCandidate.candidateCommit !== candidateIdentity.candidateCommitId) {
             throw new Error('设备候选与当前工作运行不匹配。')
           }
           candidate = Object.freeze({
             candidateRef: currentCandidate.candidateRef,
+            candidateCommitId: candidateIdentity.candidateCommitId,
+            candidateTreeId: candidateIdentity.candidateTreeId,
+            diffSha256: currentCandidate.diffSha256,
             state: deviceCandidate.state,
             branchName: deviceCandidate.branchName,
             history: deviceCandidate.history,
           })
         }
       }
+      const managedAppSource = (() => {
+        const candidateCommitId = currentCandidate === null ? null : candidate?.candidateCommitId ?? null
+        const candidates = aggregate.managedAppRunConfigs
+          .map(config => {
+            const sourceRun = aggregate.runs.find(run => run.id === config.runId)
+            const projected = projectManagedAppRunConfig(config, sourceRun, anchor.taskId, candidateCommitId)
+            if (projected === null || sourceRun === undefined) return null
+            const sourceBinding = aggregate.deviceBindings.find(item => item.workRunId === sourceRun.id)
+            if (sourceBinding === undefined
+              || sourceBinding.clientId !== binding.clientId
+              || sourceBinding.repositoryBindingId !== binding.repositoryBindingId
+              || sourceRun.id === currentCandidate?.producerWorkRunId) return null
+            return Object.freeze({ config: projected, sourceRun })
+          })
+          .filter((entry): entry is {
+            readonly config: import('./generated/contracts.js').ManagedAppRunControlProjection
+            readonly sourceRun: import('./generated/contracts.js').WorkRun
+          } => entry !== null)
+        // A candidate must never select an arbitrary verifier when more than
+        // one source run claims the same frozen commit.
+        return candidates.length === 1 ? (candidates[0] ?? null) : null
+      })()
       return Object.freeze({
         taskId: anchor.taskId,
+        deliveryId,
+        readCursor: detail.readCursor,
         clientId: binding.clientId,
         repositoryBindingId: binding.repositoryBindingId,
+        managedAppRunConfig: managedAppSource?.config ?? null,
+        managedAppSourceRun: managedAppSource?.sourceRun ?? null,
+        managedAppSourceEvidence: managedAppSource === null
+          ? Object.freeze([])
+          : Object.freeze(detail.evidence.filter(entry => entry.workRunId === managedAppSource.sourceRun.id)),
         contract: aggregate.contract,
         item: aggregate.items.find(item => item.id === anchor.taskId) ?? null,
         graphItem: aggregate.graphItems.find(item => item.workItemId === anchor.taskId) ?? null,
@@ -2937,7 +3126,9 @@ export function createControlPlaneRunIdentityPort(options: {
 }
 
 /** Deterministic local fixture for the canonical WorkRun read seam. */
-export function createControlPlaneRunIdentityFake(): ControlPlaneRunIdentityPort {
+export function createControlPlaneRunIdentityFake(options?: {
+  readonly managedAppRunConfig?: import('./generated/contracts.js').ManagedAppRunControlProjection
+}): ControlPlaneRunIdentityPort {
   return Object.freeze({
     async read(
       anchor: ControlPlaneTaskAnchor,
@@ -2964,10 +3155,21 @@ export function createControlPlaneRunIdentityFake(): ControlPlaneRunIdentityPort
         codexThreadId: null,
         candidateDigest: null,
       }) as import('./generated/contracts.js').WorkRun
+      const managedAppRunConfig = projectManagedAppRunConfig(
+        options?.managedAppRunConfig,
+        workRun,
+        workItemId,
+        null,
+      )
       return Object.freeze({
         taskId: anchor.taskId,
+        deliveryId: null,
+        readCursor: null,
         clientId: anchor.clientId,
         repositoryBindingId: anchor.repositoryBindingId,
+        managedAppRunConfig,
+        managedAppSourceRun: managedAppRunConfig === null ? null : workRun,
+        managedAppSourceEvidence: Object.freeze([]),
         contract: null,
         item: null,
         graphItem: null,

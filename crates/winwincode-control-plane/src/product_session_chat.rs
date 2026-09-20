@@ -455,7 +455,7 @@ pub(super) struct PersistedExecutionCancellationRoutes {
     work_item_id: Option<winwincode_domain::WorkItemId>,
     work_item_revision: Option<winwincode_domain::Revision>,
     work_run_id: Option<winwincode_domain::WorkRunId>,
-    execution_job_id: ExecutionJobId,
+    pub(super) execution_job_id: ExecutionJobId,
     job_revision: u64,
     worker_authority: Option<PersistedRuntimeRouteAuthority>,
     worker_slot_revision: Option<u64>,
@@ -1188,13 +1188,6 @@ impl ProductSessionService<'_> {
             return Err(corrupt("session cancellation requires repository scope"));
         };
         for route in &receipt.routing.routes {
-            let digest = format!(
-                "{:X}",
-                Sha256::digest(format!(
-                    "{}:{}",
-                    receipt.routing.request_id.0, route.job.execution_job_id.0
-                ))
-            );
             self.storage
                 .request_product_session_cancellation(
                     &winwincode_storage::RepositorySchedulerCancellationRequest {
@@ -1205,7 +1198,10 @@ impl ProductSessionService<'_> {
                             repository_id: repository_id.clone(),
                         },
                         job_id: route.job.execution_job_id.clone(),
-                        request_id: RequestId(format!("req_0{}", &digest[..25])),
+                        request_id: super::session_route_cancel_request_id(
+                            &receipt.routing.request_id,
+                            &route.job.execution_job_id,
+                        ),
                         expected_revision: route.job.expected_revision,
                         requested_at: receipt.mutation.record.session().updated_at().clone(),
                     },

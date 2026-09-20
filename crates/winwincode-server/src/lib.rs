@@ -52,7 +52,7 @@ pub use client_repositories::{
 };
 pub use client_sessions::{
     ClientSessionsApplication, ClientSessionsConfig, ClientSessionsError, ClientSessionsErrorKind,
-    worker_stop_message,
+    enqueue_managed_app_command, managed_app_command_message, worker_stop_message,
 };
 pub use winwincode_api::generated::{AuthSessionRequest, AuthSessionResponse};
 

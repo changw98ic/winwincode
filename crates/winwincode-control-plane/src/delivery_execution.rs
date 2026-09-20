@@ -12,6 +12,7 @@ use std::{error::Error, fmt};
 
 #[cfg(test)]
 use sha2::{Digest, Sha256};
+use winwincode_client_port::managed_app::{ManagedAppMode, ManagedAppRunConfig};
 use winwincode_delivery::{
     application::{
         CoordinationError,
@@ -72,6 +73,40 @@ pub fn prepare_workrun_start(
             "stage execution attempt exceeds wire range".to_owned(),
         )
     })?;
+    if let Some(managed_app_run_config) = &config.managed_app_run_config {
+        managed_app_run_config.validate().map_err(|_| {
+            DeliveryExecutionError::InvalidEffect(
+                "managed-app configuration is not valid".to_owned(),
+            )
+        })?;
+        if managed_app_run_config.run_id != intent.work_run_id.0
+            || u64::from(managed_app_run_config.attempt) != intent.attempt
+        {
+            return Err(DeliveryExecutionError::InvalidEffect(
+                "managed-app configuration does not match the WorkRun attempt".to_owned(),
+            ));
+        }
+        if managed_app_run_config.source_id != intent.execution_job_id.0 {
+            return Err(DeliveryExecutionError::InvalidEffect(
+                "managed-app configuration does not match the ExecutionJob source".to_owned(),
+            ));
+        }
+        if matches!(managed_app_run_config.mode, ManagedAppMode::FrozenCandidate)
+            && managed_app_run_config.candidate_commit.as_deref()
+                != Some(config.workspace.checkout_revision.as_str())
+        {
+            return Err(DeliveryExecutionError::InvalidEffect(
+                "frozen managed-app configuration does not match the candidate checkout".to_owned(),
+            ));
+        }
+        if let Some(target) = &config.device_target
+            && managed_app_run_config.repository_binding_id != target.repository_binding_id
+        {
+            return Err(DeliveryExecutionError::InvalidEffect(
+                "managed-app configuration does not match the device repository".to_owned(),
+            ));
+        }
+    }
     let rework_authorization =
         intent
             .rework_authorization()
@@ -288,6 +323,9 @@ pub struct DeliveryExecutionConfig {
     pub candidate_ref: Option<String>,
     pub workspace: ExecutionWorkspace,
     pub limits: ExecutionLimits,
+    /// Server-side managed-app facts sealed by the task authority. This is
+    /// intentionally absent when the confirmed task did not request an app.
+    pub managed_app_run_config: Option<ManagedAppRunConfig>,
 }
 
 /// Delivery mutation and generated job waiting for one outer transaction.
@@ -296,6 +334,7 @@ pub struct PendingDeliveryExecution {
     request_id: RequestId,
     work_run_transition: WorkRunStartResult,
     job: ExecutionJob,
+    managed_app_run_config: Option<ManagedAppRunConfig>,
 }
 
 impl PendingDeliveryExecution {
@@ -308,7 +347,14 @@ impl PendingDeliveryExecution {
             request_id,
             work_run_transition,
             job,
+            managed_app_run_config: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_managed_app_run_config(mut self, config: Option<ManagedAppRunConfig>) -> Self {
+        self.managed_app_run_config = config;
+        self
     }
 
     #[must_use]
@@ -329,6 +375,11 @@ impl PendingDeliveryExecution {
     #[must_use]
     pub fn job(&self) -> &ExecutionJob {
         &self.job
+    }
+
+    #[must_use]
+    pub fn managed_app_run_config(&self) -> Option<&ManagedAppRunConfig> {
+        self.managed_app_run_config.as_ref()
     }
 }
 

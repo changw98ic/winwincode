@@ -30,7 +30,7 @@ use winwincode_storage::{
 use crate::delivery_transaction::load_durable_execution_job;
 use crate::session_binding_transaction::instant_millis;
 use crate::{
-    ActionPolicyEnforcementError, ControlPlane, DeliveryApplicationError,
+    ActionPolicyEnforcementError, ArtifactMessageError, ControlPlane, DeliveryApplicationError,
     DeliverySessionBindingCommitError, DeliveryTerminalOutcomeCommitError, ExecutionPortService,
     ExecutionPortServiceError, RuntimeMessageError,
 };
@@ -53,6 +53,8 @@ pub enum DurableExecutionPortError {
     Controller(DeliveryApplicationError),
     /// The canonical runtime ledger transaction failed.
     Runtime(RuntimeMessageError),
+    /// The canonical Control Plane Artifact transaction failed.
+    Artifact(ArtifactMessageError),
     /// The canonical Delivery terminal transaction failed.
     Terminal(DeliveryTerminalOutcomeCommitError),
     /// The canonical Control Plane action-policy receipt could not be issued.
@@ -71,6 +73,7 @@ impl fmt::Display for DurableExecutionPortError {
             Self::SessionBinding(error) => write!(formatter, "{error}"),
             Self::Controller(error) => write!(formatter, "{error}"),
             Self::Runtime(error) => write!(formatter, "{error}"),
+            Self::Artifact(error) => write!(formatter, "{error}"),
             Self::Terminal(error) => write!(formatter, "{error}"),
             Self::ActionPolicy(error) => write!(formatter, "{error}"),
             Self::UnsupportedMessage => {
@@ -88,9 +91,26 @@ impl std::error::Error for DurableExecutionPortError {
             Self::SessionBinding(error) => Some(error),
             Self::Controller(error) => Some(error),
             Self::Runtime(error) => Some(error),
+            Self::Artifact(error) => Some(error),
             Self::Terminal(error) => Some(error),
             Self::ActionPolicy(error) => Some(error),
             Self::Configuration | Self::UnsupportedMessage => None,
+        }
+    }
+}
+
+impl DurableExecutionPortError {
+    /// Returns the durable Delivery terminal receipt when the terminal
+    /// transaction already committed and only Worker resource/publication
+    /// settlement remains pending. Controller follow-up can then still advance
+    /// reviewer→verifier→verdict from that sealed revision.
+    #[must_use]
+    pub fn committed_terminal_receipt(
+        &self,
+    ) -> Option<&crate::terminal_outcome_transaction::DeliveryTerminalOutcomeCommitReceipt> {
+        match self {
+            Self::Terminal(error) => error.committed_receipt(),
+            _ => None,
         }
     }
 }
@@ -383,10 +403,36 @@ impl<'application> DurableExecutionPortIngress<'application> {
                 self.accept_terminal_outcome(outcome)
             }
             ExecutionPortMessage::ArtifactOpenMessage(artifact) => {
-                self.delegate_job_scoped(&artifact.lease.job_id, message)
+                // Diagnostic and candidate Artifact frames must settle on the
+                // Control Plane Artifact store. The Device-model delegate is
+                // only for Provider/model payloads; rejecting artifact frames
+                // as UnsupportedMessage makes the HTTP exchange fail and
+                // strands the Worker durable outbox (including verification
+                // runtime.event beside the chunk).
+                let authority = self.dispatch_authority(&artifact.lease.job_id)?;
+                let authority = seal_session_binding_authority(
+                    &winwincode_storage::delivery_dispatch_authority(&authority),
+                );
+                let acknowledgement = self
+                    .control_plane
+                    .accept_artifact_open(self.repository_scope, artifact, &authority)
+                    .map_err(DurableExecutionPortError::Artifact)?;
+                Ok(vec![ExecutionPortMessage::ArtifactAckMessage(
+                    acknowledgement,
+                )])
             }
             ExecutionPortMessage::ArtifactChunkMessage(artifact) => {
-                self.delegate_job_scoped(&artifact.lease.job_id, message)
+                let authority = self.dispatch_authority(&artifact.lease.job_id)?;
+                let authority = seal_session_binding_authority(
+                    &winwincode_storage::delivery_dispatch_authority(&authority),
+                );
+                let acknowledgement = self
+                    .control_plane
+                    .accept_artifact_chunk(self.repository_scope, artifact, &authority)
+                    .map_err(DurableExecutionPortError::Artifact)?;
+                Ok(vec![ExecutionPortMessage::ArtifactAckMessage(
+                    acknowledgement,
+                )])
             }
             ExecutionPortMessage::ModelChunkMessage(model) => {
                 self.delegate_job_scoped(&model.lease.job_id, message)
@@ -535,38 +581,84 @@ impl<'application> DurableExecutionPortIngress<'application> {
             );
         }
         let facts = Self::terminal_facts(message, &authority, &job)?;
-        let (replayed, terminal_revision) = match self.commit_terminal(message, &facts)? {
-            Ok(committed) => committed,
-            Err(rejection) => return Ok(outcome_output(rejection)),
+        let (replayed, terminal_revision) = match self.commit_terminal(message, &facts) {
+            Ok(Ok(committed)) => committed,
+            Ok(Err(rejection)) => {
+                // Terminal is already durable (receipt-first replay or raced
+                // receipt). Retry the Controller follow-up so a prior accept
+                // that failed after commit can still dispatch the next role.
+                if facts.status() == TerminalOutcomeStatus::Succeeded {
+                    self.continue_delivery_controller_follow_up(&durable, &job, None)?;
+                }
+                return Ok(outcome_output(rejection));
+            }
+            Err(error) => {
+                // WorkerResourcesPending / PublicationPending still carry a
+                // committed terminal receipt. Dispatch the next role from that
+                // durable revision, then surface the original resource error.
+                if facts.status() == TerminalOutcomeStatus::Succeeded
+                    && let Some(receipt) = error.committed_terminal_receipt()
+                {
+                    self.continue_delivery_controller_follow_up(
+                        &durable,
+                        &job,
+                        Some(receipt.revision()),
+                    )?;
+                }
+                return Err(error);
+            }
         };
         self.finish_delivery_execution_resources(message, &job, &authority, &durable)?;
         if facts.status() == TerminalOutcomeStatus::Succeeded {
-            let initiating_actor =
-                public_actor_from_receipt_key(durable.receipt_identity().actor_key())
-                    .map_err(DurableExecutionPortError::Storage)?;
-            let delivery_id = DeliveryId(
-                durable
-                    .stream_id()
-                    .strip_prefix("delivery:")
-                    .ok_or_else(|| {
-                        DurableExecutionPortError::Storage(StorageError::invalid_input(
-                            "Delivery terminal intent has no Delivery stream",
-                        ))
-                    })?
-                    .to_owned(),
-            );
-            self.control_plane
-                .continue_delivery_after_terminal(
-                    self.repository_scope,
-                    &delivery_id,
-                    &job.execution_profile,
-                    &job.job_id,
-                    terminal_revision,
-                    &initiating_actor,
-                )
-                .map_err(DurableExecutionPortError::Controller)?;
+            self.continue_delivery_controller_follow_up(&durable, &job, Some(terminal_revision))?;
         }
         Ok(outcome_output(outcome_success(message, replayed)))
+    }
+
+    fn continue_delivery_controller_follow_up(
+        &mut self,
+        durable: &DurableOutboxEvent,
+        job: &ExecutionJob,
+        terminal_revision: Option<u64>,
+    ) -> Result<(), DurableExecutionPortError> {
+        let initiating_actor = public_actor_from_receipt_key(durable.receipt_identity().actor_key())
+            .map_err(DurableExecutionPortError::Storage)?;
+        let delivery_id = DeliveryId(
+            durable
+                .stream_id()
+                .strip_prefix("delivery:")
+                .ok_or_else(|| {
+                    DurableExecutionPortError::Storage(StorageError::invalid_input(
+                        "Delivery terminal intent has no Delivery stream",
+                    ))
+                })?
+                .to_owned(),
+        );
+        let revision = match terminal_revision {
+            Some(revision) => revision,
+            None => {
+                let delivery = self
+                    .storage
+                    .load_state(&format!("delivery:{}", delivery_id.0))
+                    .map_err(DurableExecutionPortError::Storage)?
+                    .ok_or_else(|| {
+                        DurableExecutionPortError::Storage(StorageError::invalid_input(
+                            "Delivery state is missing for Controller follow-up",
+                        ))
+                    })?;
+                delivery.revision
+            }
+        };
+        self.control_plane
+            .continue_delivery_after_terminal(
+                self.repository_scope,
+                &delivery_id,
+                &job.execution_profile,
+                &job.job_id,
+                revision,
+                &initiating_actor,
+            )
+            .map_err(DurableExecutionPortError::Controller)
     }
 
     /// Delivery terminal ownership has the same local admission, Worker slot,

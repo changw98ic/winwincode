@@ -191,7 +191,31 @@ test('page uses labeled native controls and exposes real revision impact', async
 
   assert.equal(findByClass(rootElement, 'wwc-decision-clarification-heading').textContent, '编辑需求与验收')
   assert.match(findByClass(rootElement, 'wwc-decision-clarification-binding').textContent, /交付修订 4/)
+  assert.match(findByClass(rootElement, 'wwc-decision-clarification-binding').textContent, /规范修订 2/)
+  assert.equal(findByClass(rootElement, 'wwc-decision-clarification-binding').textContent.includes(actor.id), false)
+  assert.equal(findByClass(rootElement, 'wwc-decision-clarification-binding').textContent.includes('psn_'), false)
+  assert.equal(findByClass(rootElement, 'wwc-decision-clarification-binding').textContent.includes('req_'), false)
   assert.match(findByClass(rootElement, 'wwc-decision-clarification-impact-warning').textContent, /保留为历史记录/)
+  assert.match(findByClass(rootElement, 'wwc-decision-clarification-impact-warning').textContent, /当前候选版本/)
+  assert.equal(findByClass(rootElement, 'wwc-decision-clarification-impact-warning').textContent.includes('git-candidate:'), false)
+  const domValues = document.elements.flatMap(element => [
+    element.textContent,
+    element.value,
+    element.id,
+    element.href,
+    ...Object.values(element.dataset),
+  ])
+  const domText = domValues.join(' ')
+  for (const marker of [
+    'git-candidate:',
+    actor.id,
+    'psn_',
+    'req_',
+    'crt_',
+    '[INTERNAL ID]',
+    '[CANDIDATE]',
+    '[SOURCE REF]',
+  ]) assert.equal(domText.includes(marker), false, marker)
   const goal = document.elements.find(element => element.id === 'wwc-decision-clarification-goal')
   assert.equal(goal.tagName, 'TEXTAREA')
   assert.equal(goal.required, true)

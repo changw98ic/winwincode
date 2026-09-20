@@ -50,7 +50,8 @@ impl CommandFamily {
             CommandName::WorkerDrain | CommandName::WorkerEnable => Self::Worker,
             CommandName::PublicationPublish | CommandName::PublicationCancel => Self::Publication,
             CommandName::CollaborationNotificationAck
-            | CommandName::CollaborationPresenceUpdate => Self::Collaboration,
+            | CommandName::CollaborationPresenceUpdate
+            | CommandName::CollaborationPageAnnotationSubmit => Self::Collaboration,
         }
     }
 }
@@ -85,6 +86,7 @@ impl QueryFamily {
             | QueryName::CandidateReviewGet
             | QueryName::CandidateFilesList
             | QueryName::CandidateDiffGet
+            | QueryName::CandidateFileContentGet
             | QueryName::EvidenceGet
             | QueryName::EvidenceArtifactContentGet => Self::Delivery,
             QueryName::SettingsGet | QueryName::ModelRouteAvailabilityList => Self::Settings,
@@ -96,7 +98,8 @@ impl QueryFamily {
             QueryName::PublicationList | QueryName::PublicationGet => Self::Publication,
             QueryName::CollaborationActivityList
             | QueryName::CollaborationNotificationList
-            | QueryName::CollaborationPresenceList => Self::Collaboration,
+            | QueryName::CollaborationPresenceList
+            | QueryName::CollaborationPageAnnotationList => Self::Collaboration,
         }
     }
 }

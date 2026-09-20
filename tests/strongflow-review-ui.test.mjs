@@ -17,6 +17,7 @@ const cache = resolve(root, '.cache/strongflow-review-tests')
 const reviewModule = await import(pathToFileURL(resolve(cache, 'strongflow-review-view-model.js')).href)
 const detailModule = await import(pathToFileURL(resolve(cache, 'strongflow-review-detail.js')).href)
 const annotationsModule = await import(pathToFileURL(resolve(cache, 'strongflow-review-annotations.js')).href)
+const redactionModule = await import(pathToFileURL(resolve(cache, 'public-redaction.js')).href)
 const {
   classifyPreview,
   createStrongFlowReviewViewModel,
@@ -27,6 +28,7 @@ const { deliveryReportText } = detailModule
 const { candidateCanApply } = await import(pathToFileURL(resolve(cache, 'candidate-application.js')).href)
 const { diffLines, renderDiff } = await import(pathToFileURL(resolve(cache, 'diff-preview.js')).href)
 const { createStrongFlowReviewAnnotations } = annotationsModule
+const { redactPublicText, publicErrorText } = redactionModule
 
 const deliveryId = 'dlv_00000000000000000000000042'
 const workRunId = 'wrn_00000000000000000000000042'
@@ -283,6 +285,27 @@ test('review preview classes keep executable and binary content out of the DOM p
   assert.equal(classifyPreview({ path: 'report.svg', binary: false, encoding: 'utf-8' }).previewClass, 'executable-document')
   assert.equal(classifyPreview({ path: 'asset.bin', binary: true, encoding: 'binary' }).previewClass, 'binary')
   assert.equal(classifyPreview({ path: 'src/main.ts', binary: false, encoding: 'utf-8' }).previewClass, 'text')
+})
+
+test('browser-facing runtime text redacts credentials, paths, and internal identities', () => {
+  const candidate = 'git-candidate:sha256:' + 'a'.repeat(64)
+  const value = redactPublicText([
+    'aUtHoRiZaTiOn: BeArEr super-secret-token',
+    'TOKEN=top-secret',
+    'path=/Users/alice/project/.env',
+    'path=C:\\Users\\alice\\project\\.env',
+    `candidate=${candidate} and again ${candidate}`,
+    'sourceRef=runtime:command:42\nsource_ref: runtime:command:43',
+    'workRun=wrn_00000000000000000000000001\nworkRun=wrn_00000000000000000000000002',
+    '用户验收条件：登录后显示相对路径 src/app.ts，短 commit 1a2b3c4d',
+    'diff:\n- const value = 1\n+ const value = 2',
+  ].join('\n'))
+  assert.doesNotMatch(value, /super-secret-token|top-secret|\/Users\/alice|C:\\Users\\alice|git-candidate:|runtime:command:|sourceRef=|source_ref:|wrn_000/u)
+  assert.match(value, /\[REDACTED\]|\[REDACTED PATH\]|\[CANDIDATE\]|\[INTERNAL ID\]/u)
+  assert.match(value, /用户验收条件：登录后显示相对路径 src\/app\.ts，短 commit 1a2b3c4d/u)
+  assert.match(value, /diff:\n- const value = 1\n\+ const value = 2/u)
+  assert.match(publicErrorText({ code: 'INTERNAL_ERROR', message: 'raw server detail' }, '读取产物'), /读取产物，请重试/u)
+  assert.doesNotMatch(publicErrorText({ code: 'INTERNAL_ERROR', message: 'raw server detail' }, '读取产物'), /raw server detail/u)
 })
 
 test('working-plan and accepted-criterion progress are separate exact counts', () => {

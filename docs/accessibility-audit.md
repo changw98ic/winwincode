@@ -1,8 +1,9 @@
 # Client keyboard, focus, responsive, and accessibility audit
 
 Bead `winwincode-mrt` (logical ID UI-604, parent UI-600). Scope: the Shell, Chat,
-StrongFlow, Diff, Graph, Attention, Settings, and Enterprise surfaces of
-`apps/client`.
+StrongFlow, Diff, Graph, Attention, Settings, Device, and other Community
+single-Owner surfaces of `apps/client`. Cloud/Enterprise product pages are not
+part of this Community client surface.
 
 Status: findings A1–A8 below are fixed and pinned by tests. Residual risks are
 listed at the end.
@@ -25,7 +26,7 @@ The automated checks live in two suites:
 | --- | --- |
 | `tests/ui604-shell-a11y-browser.test.mjs` | Landmarks, heading outline, live-region allow-list, skip link, 200 % zoom and narrow-viewport overflow, for Chat, Settings, Attention, Local Operations, and session decisions |
 | `tests/ui604-a11y-audit.test.mjs` | Kanban keyboard advance, Chat conversion dialog semantics, panel heading nesting, Diff table caption and column headers |
-| `tests/chat-page.test.mjs`, `tests/strongflow-delivery-list-page.test.mjs`, `tests/strongflow-diff-viewer.test.mjs`, `tests/enterprise-operations-page.test.mjs`, `tests/enterprise-resource-page.test.mjs` | The same contracts asserted next to the behaviour they belong to |
+| `tests/chat-page.test.mjs`, `tests/strongflow-delivery-list-page.test.mjs`, `tests/strongflow-diff-viewer.test.mjs` | The same contracts asserted next to the Community behaviour they belong to |
 
 ## What was already correct
 
@@ -72,10 +73,11 @@ page's own single polite status line and on the shell's connection badge.
 
 Ten collection containers were `aria-live="polite"`: the Attention Center card
 list, the Settings Credential list, the Local Worker list, the three
-Local-decisions lists (inputs, approvals, Attention), and the Enterprise
-Policy, Fleet, Usage, Audit, Integration, Organization, Member, Role, Project,
-and Repository lists. A keyed collection replaces nodes on every realtime tick,
-so a background refresh re-read the whole list.
+Local-decisions lists (inputs, approvals, Attention), and additional local
+registry/collection lists that used the same pattern. A keyed collection
+replaces nodes on every realtime tick, so a background refresh re-read the whole
+list. (Enterprise Policy/Member/Organization lists that once shared this bug are
+outside the Community product surface.)
 
 *Fix*: `aria-live` is removed from every collection container. The dedicated
 `*-status` line next to each list stays live, so a change is announced once as a
@@ -121,7 +123,8 @@ calls `preventDefault()` — so the hash router never sees it — then focuses
 ### A6 — Major — Two `<main>` landmarks and two page headings per surface
 
 Six feature pages (Settings, Attention Center, Local Operations, Local
-decisions, Enterprise operations, Enterprise resources) built their layout as a
+decisions, and other Community pages that later reused the layout helper) built
+their layout as a
 `<main>` inside the Shell's `<main>`, and also mounted a page header at
 `headingLevel: 1` next to the Shell's `<h1>` surface title. The result was two
 `main` landmarks — nested `main` is invalid, and the landmark map a screen
@@ -179,7 +182,7 @@ the structural parts; the items below need a person.
    trust-boundary headers and chips, and the graph/list toggle.
 9. Open the Attention Center. Change the type and order selects, reach each
    card's context link, and confirm disabled cards are skipped without trapping.
-10. Open Settings and Enterprise. Change every select and submit every form with
+10. Open Settings. Change every select and submit every form with
     the keyboard only, and confirm validation errors are announced.
 11. Narrow the window until the StrongFlow drawers appear. Open each with
     `Enter`, close with `Escape`, and confirm focus returns to the button that
@@ -235,13 +238,12 @@ production build.
   transcript, but a streaming reply mutates the message text in place and may be
   announced repeatedly by some screen readers. The chat fixture models a
   completed message, so this needs a live streaming run to measure.
-- **Enterprise surface is covered by the node suites, not the browser suite.**
+- **Community surfaces are covered by the node suites and browser suite.**
   The browser audit walks Chat, Settings, Attention, Local Operations, and
-  session decisions. The Enterprise Policy, Fleet, Usage, Audit, Integration,
-  Organization, Member, Role, Project, and Repository lists are covered by the
-  aria-live assertions in `tests/enterprise-operations-page.test.mjs` and
-  `tests/enterprise-resource-page.test.mjs`; their landmarks and headings
-  inherit the same Shell and page-header components the browser suite checks.
+  session decisions. Remaining local collection lists inherit the same Shell and
+  page-header components the browser suite checks. Multi-user/Enterprise
+  administration lists are not Community product surface and are not asserted
+  here.
 - **Screen-reader coverage is manual by nature.** The automated suites assert
   roles, names, levels, and the live-region set, not how a specific screen
   reader renders them. Use the checklist above.

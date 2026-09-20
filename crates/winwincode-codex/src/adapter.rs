@@ -16,6 +16,11 @@ use crate::candidate_artifact_outbox::{
     CandidateArtifactAckOutcome, CandidateArtifactAuthority, CandidateArtifactOutbox,
     CandidateArtifactUpload, RetainedCandidateArtifact,
 };
+use crate::diagnostic_artifact_outbox::{
+    DiagnosticArtifactAckOutcome, DiagnosticArtifactAuthority, DiagnosticArtifactOutbox,
+    DiagnosticArtifactUpload, RetainedDiagnosticArtifact, canonical_command_source_id,
+    sanitize_command_output,
+};
 use crate::{
     ActionRequestTransport, CodexCoreAdapter, CodexPoll, CodexThreadSession, CodexThreadStart,
     CodexTurnCompletion, DelegatedLoopPhase, DelegatedLoopStopFact, DelegatedLoopTransition,
@@ -383,6 +388,7 @@ pub struct ProductionCodexAdapter {
     store: AdapterStore,
     outbox: ExecutionOutbox,
     candidate_artifacts: CandidateArtifactOutbox,
+    diagnostic_artifacts: DiagnosticArtifactOutbox,
     workrun_projector: WorkRunRuntimeProjector,
     installation: ProductionCodexInstallation,
     runs: HashMap<String, ActiveRun>,
@@ -427,6 +433,8 @@ impl ProductionCodexAdapter {
         let outbox = ExecutionOutbox::open(store.clone()).map_err(map_store_error)?;
         let candidate_artifacts =
             CandidateArtifactOutbox::open(store.clone()).map_err(map_store_error)?;
+        let diagnostic_artifacts =
+            DiagnosticArtifactOutbox::open(store.clone()).map_err(map_store_error)?;
         let authority = SharedAuthoritySource::default();
         let bridge = Arc::new(ExecutionPortModelBridge::new(
             store.clone(),
@@ -469,6 +477,7 @@ impl ProductionCodexAdapter {
             store,
             outbox,
             candidate_artifacts,
+            diagnostic_artifacts,
             workrun_projector: WorkRunRuntimeProjector::new(),
             installation: ProductionCodexInstallation {
                 capability_catalog,
@@ -567,7 +576,7 @@ impl ProductionCodexAdapter {
         state: WorkerRuntimeTraceState,
         summary: &'static str,
     ) -> Result<Box<RuntimeEventMessage>, ProductionCodexError> {
-        self.retain_runtime_trace_at(run_key, state, summary, None)
+        self.retain_runtime_trace_at(run_key, state, summary, None, Vec::new())
     }
 
     /// Retains a lifecycle trace, optionally at an identity already committed
@@ -582,6 +591,7 @@ impl ProductionCodexAdapter {
         state: WorkerRuntimeTraceState,
         summary: &'static str,
         fixed: Option<&StoredTerminalTrace>,
+        artifacts: Vec<ArtifactReference>,
     ) -> Result<Box<RuntimeEventMessage>, ProductionCodexError> {
         let run = self.runs.get(run_key).ok_or_else(unknown_thread)?;
         let identity = RuntimeReplayIdentity {
@@ -634,7 +644,7 @@ impl ProductionCodexAdapter {
             category: ExecutionEventCategory::Lifecycle,
             summary: SecretSafeTraceSummary::new(summary).map_err(|_| unavailable())?,
             fact: RuntimeTraceFact::Runtime { state },
-            artifacts: Vec::new(),
+            artifacts,
         };
         match self
             .installation
@@ -903,6 +913,7 @@ impl ProductionCodexAdapter {
         &mut self,
         run_key: &str,
         command_end: &codex_protocol::protocol::ExecCommandEndEvent,
+        artifact: Option<&ArtifactReference>,
         now: &Instant,
     ) -> Result<Option<RuntimeEventMessage>, ProductionCodexError> {
         let source = crate::workrun_runtime_projection::source_key(
@@ -925,6 +936,7 @@ impl ProductionCodexAdapter {
                     call_id: &command_end.call_id,
                     status: verification_evidence_status(&command_end.status),
                     exit_code: i64::from(command_end.exit_code),
+                    artifact,
                 },
             )
             .map_err(|_| unavailable())?;
@@ -971,20 +983,47 @@ impl ProductionCodexAdapter {
         self.store
             .commit_provider_final_model_calls(run_key)
             .map_err(map_store_error)?;
-        let first_failure = self
-            .runs
-            .get(run_key)
-            .ok_or_else(unknown_thread)?
-            .record
-            .terminal
-            .is_none();
-        if first_failure {
+        self.retain_failed_terminal(run_key, now)
+    }
+
+    fn retain_failed_terminal(
+        &mut self,
+        run_key: &str,
+        now: &Instant,
+    ) -> Result<CodexPoll, ProductionCodexError> {
+        let authority = {
+            let run = self.runs.get(run_key).ok_or_else(unknown_thread)?;
+            DiagnosticArtifactAuthority {
+                job: run.record.job.clone(),
+                scope: run.record.job.scope.clone(),
+                lease: run.binding.authority.lease.clone(),
+                worker_session_id: run.binding.authority.worker_session_id.clone(),
+                session_identity: run.binding.authority.session_identity.clone(),
+            }
+        };
+        if self
+            .diagnostic_artifacts
+            .has_pending(&authority)
+            .map_err(map_store_error)?
+        {
             let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
             run.record.last_activity_at = now.clone();
-            run.record.terminal = Some(StoredTerminal::Failed);
-            run.record.phase = StoredRunPhase::TerminalTracePending;
+            run.record.pending_completion = Some(StoredPendingCompletion {
+                final_message: None,
+                kind: StoredPendingTerminalKind::Failed,
+            });
             self.persist_run(run_key)?;
+            return Ok(CodexPoll::Pending);
         }
+        let artifacts = self
+            .diagnostic_artifacts
+            .accepted_references(&authority)
+            .map_err(map_store_error)?;
+        let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
+        run.record.last_activity_at = now.clone();
+        run.record.terminal = Some(StoredTerminal::Failed { artifacts });
+        run.record.phase = StoredRunPhase::TerminalTracePending;
+        self.persist_run(run_key)?;
         self.poll_retained_terminal(run_key)?
             .ok_or_else(unavailable)
     }
@@ -1081,6 +1120,7 @@ impl ProductionCodexAdapter {
             WorkerRuntimeTraceState::Stopped,
             summary,
             Some(&terminal_trace),
+            Vec::new(),
         )?;
         let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
         let retained = run.record.terminal_trace.as_mut().ok_or_else(unavailable)?;
@@ -1199,6 +1239,29 @@ impl ProductionCodexAdapter {
         run_key: &str,
         now: &Instant,
     ) -> Result<CodexPoll, ProductionCodexError> {
+        let authority = {
+            let run = self.runs.get(run_key).ok_or_else(unknown_thread)?;
+            DiagnosticArtifactAuthority {
+                job: run.record.job.clone(),
+                scope: run.record.job.scope.clone(),
+                lease: run.binding.authority.lease.clone(),
+                worker_session_id: run.binding.authority.worker_session_id.clone(),
+                session_identity: run.binding.authority.session_identity.clone(),
+            }
+        };
+        if self
+            .diagnostic_artifacts
+            .has_pending(&authority)
+            .map_err(map_store_error)?
+        {
+            let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
+            run.record.pending_completion = Some(StoredPendingCompletion {
+                final_message: None,
+                kind: StoredPendingTerminalKind::InfrastructureFailed,
+            });
+            self.persist_run(run_key)?;
+            return Ok(CodexPoll::Pending);
+        }
         let first_failure = self
             .runs
             .get(run_key)
@@ -1207,10 +1270,14 @@ impl ProductionCodexAdapter {
             .terminal
             .is_none();
         if first_failure {
+            let artifacts = self
+                .diagnostic_artifacts
+                .accepted_references(&authority)
+                .map_err(map_store_error)?;
             {
                 let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
                 run.record.last_activity_at = now.clone();
-                run.record.terminal = Some(StoredTerminal::InfrastructureFailed);
+                run.record.terminal = Some(StoredTerminal::InfrastructureFailed { artifacts });
                 run.record.phase = StoredRunPhase::TerminalTracePending;
             }
             self.persist_run(run_key)?;
@@ -1244,9 +1311,35 @@ impl ProductionCodexAdapter {
         if !first_failure {
             return Ok(());
         }
+        let authority = {
+            let run = self.runs.get(run_key).ok_or_else(unknown_thread)?;
+            DiagnosticArtifactAuthority {
+                job: run.record.job.clone(),
+                scope: run.record.job.scope.clone(),
+                lease: run.binding.authority.lease.clone(),
+                worker_session_id: run.binding.authority.worker_session_id.clone(),
+                session_identity: run.binding.authority.session_identity.clone(),
+            }
+        };
+        if self
+            .diagnostic_artifacts
+            .has_pending(&authority)
+            .map_err(map_store_error)?
         {
             let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
-            run.record.terminal = Some(StoredTerminal::InfrastructureFailed);
+            run.record.pending_completion = Some(StoredPendingCompletion {
+                final_message: None,
+                kind: StoredPendingTerminalKind::InfrastructureFailed,
+            });
+            return self.persist_run(run_key);
+        }
+        let artifacts = self
+            .diagnostic_artifacts
+            .accepted_references(&authority)
+            .map_err(map_store_error)?;
+        {
+            let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
+            run.record.terminal = Some(StoredTerminal::InfrastructureFailed { artifacts });
             run.record.phase = StoredRunPhase::TerminalTracePending;
         }
         self.persist_run(run_key)?;
@@ -1516,6 +1609,10 @@ impl ProductionCodexAdapter {
         }))
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "terminal projection and its durable ACK gate form one crash-safe transition"
+    )]
     fn accept_turn_complete(
         &mut self,
         run_key: &str,
@@ -1578,14 +1675,57 @@ impl ProductionCodexAdapter {
         self.store
             .commit_provider_final_model_calls(run_key)
             .map_err(map_store_error)?;
+        let diagnostic_authority = {
+            let run = self.runs.get(run_key).ok_or_else(unknown_thread)?;
+            DiagnosticArtifactAuthority {
+                job: run.record.job.clone(),
+                scope: run.record.job.scope.clone(),
+                lease: run.binding.authority.lease.clone(),
+                worker_session_id: run.binding.authority.worker_session_id.clone(),
+                session_identity: run.binding.authority.session_identity.clone(),
+            }
+        };
+        if self
+            .diagnostic_artifacts
+            .has_pending(&diagnostic_authority)
+            .map_err(map_store_error)?
+        {
+            let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
+            run.record.pending_completion = Some(StoredPendingCompletion {
+                final_message: final_message.clone(),
+                kind: if failed {
+                    StoredPendingTerminalKind::Failed
+                } else {
+                    StoredPendingTerminalKind::Completed
+                },
+            });
+            self.persist_run(run_key)?;
+            return Ok(stage.map_or(CodexPoll::Pending, |stage| {
+                CodexPoll::RuntimeTrace(Box::new(stage))
+            }));
+        }
+        let diagnostic_artifacts = {
+            let run = self.runs.get(run_key).ok_or_else(unknown_thread)?;
+            self.diagnostic_artifacts
+                .accepted_references(&DiagnosticArtifactAuthority {
+                    job: run.record.job.clone(),
+                    scope: run.record.job.scope.clone(),
+                    lease: run.binding.authority.lease.clone(),
+                    worker_session_id: run.binding.authority.worker_session_id.clone(),
+                    session_identity: run.binding.authority.session_identity.clone(),
+                })
+                .map_err(map_store_error)?
+        };
         let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
         run.record.terminal = Some(if failed {
-            StoredTerminal::Failed
+            StoredTerminal::Failed {
+                artifacts: diagnostic_artifacts,
+            }
         } else {
             StoredTerminal::Completed {
                 summary: "embedded Codex turn completed".to_owned(),
                 final_message,
-                artifacts: Vec::new(),
+                artifacts: diagnostic_artifacts,
                 usage: ExecutionOutcomeUsage {
                     runtime_millis: run.record.last_runtime_millis,
                     tokens: run.record.last_tokens,
@@ -1900,10 +2040,15 @@ impl ProductionCodexAdapter {
                 Some(command_duration),
             )?;
         }
-        let Ok(stage) = self.retain_stage_command_end(run_key, command_end, now) else {
+        let artifact = self.retain_command_output_artifact(run_key, command_end, now)?;
+        let Ok(stage) = self.retain_stage_command_end(run_key, command_end, artifact.as_ref(), now)
+        else {
             return self.retain_stage_failure(run_key, now);
         };
         let hook = self.retain_command_post_action(run_key, command_end, now)?;
+        if artifact.is_some() {
+            return Ok(CodexPoll::Pending);
+        }
         if let Some(hook) = hook {
             if stage.is_some() {
                 self.runs
@@ -1918,6 +2063,58 @@ impl ProductionCodexAdapter {
         Ok(stage.map_or(CodexPoll::Pending, |stage| {
             CodexPoll::RuntimeTrace(Box::new(stage))
         }))
+    }
+
+    fn retain_command_output_artifact(
+        &mut self,
+        run_key: &str,
+        command_end: &codex_protocol::protocol::ExecCommandEndEvent,
+        now: &Instant,
+    ) -> Result<Option<ArtifactReference>, ProductionCodexError> {
+        let is_verification = self.runs.get(run_key).is_some_and(|run| {
+            matches!(
+                run.record.job.execution_profile.as_str(),
+                "reviewer" | "verifier" | "adversarial-verifier"
+            )
+        });
+        if !is_verification {
+            return Ok(None);
+        }
+        if command_end.stdout.is_empty() && command_end.stderr.is_empty() {
+            return Ok(None);
+        }
+        let run = self.runs.get(run_key).ok_or_else(unknown_thread)?;
+        let bytes = sanitize_command_output(&command_end.stdout, &command_end.stderr);
+        if bytes.is_empty() {
+            return Ok(None);
+        }
+        let kind = if winwincode_domain::observed_verification_command_is_test(&command_end.command)
+        {
+            winwincode_execution_port::generated::ArtifactKind::TestOutput
+        } else {
+            winwincode_execution_port::generated::ArtifactKind::CommandOutput
+        };
+        let upload = DiagnosticArtifactUpload {
+            run_key: run_key.to_owned(),
+            job: run.record.job.clone(),
+            scope: run.record.job.scope.clone(),
+            lease: run.binding.authority.lease.clone(),
+            worker_session_id: run.binding.authority.worker_session_id.clone(),
+            session_identity: run.binding.authority.session_identity.clone(),
+            source_id: canonical_command_source_id(&command_end.turn_id, &command_end.call_id),
+            kind,
+            media_type: "text/plain; charset=utf-8".to_owned(),
+            file_name: format!(
+                "{}.log",
+                canonical_command_source_id(&command_end.turn_id, &command_end.call_id)
+            ),
+            bytes,
+            created_at: now.clone(),
+        };
+        let retained = self
+            .retain_diagnostic_artifact(&upload)
+            .map_err(|_| unavailable())?;
+        Ok(Some(retained.artifact))
     }
 
     fn retain_command_post_action(
@@ -2180,13 +2377,7 @@ impl ProductionCodexAdapter {
             }
             return self.retain_delegated_inconclusive(run_key, now);
         }
-        let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
-        run.record.last_activity_at = now.clone();
-        run.record.terminal = Some(StoredTerminal::Failed);
-        run.record.phase = StoredRunPhase::TerminalTracePending;
-        self.persist_run(run_key)?;
-        self.poll_retained_terminal(run_key)?
-            .ok_or_else(unavailable)
+        self.retain_failed_terminal(run_key, now)
     }
 
     fn retain_input_request(
@@ -2832,6 +3023,10 @@ impl ProductionCodexAdapter {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "restart reconciliation and its terminal ACK gate form one crash-safe transition"
+)]
 fn complete_reconciled_turn(
     adapter: &mut ProductionCodexAdapter,
     run_key: &str,
@@ -2924,11 +3119,37 @@ fn complete_reconciled_turn(
         .store
         .commit_provider_final_model_calls(run_key)
         .map_err(map_store_error)?;
+    let authority = {
+        let run = adapter.runs.get(run_key).ok_or_else(unknown_thread)?;
+        DiagnosticArtifactAuthority {
+            job: run.record.job.clone(),
+            scope: run.record.job.scope.clone(),
+            lease: run.binding.authority.lease.clone(),
+            worker_session_id: run.binding.authority.worker_session_id.clone(),
+            session_identity: run.binding.authority.session_identity.clone(),
+        }
+    };
+    if adapter
+        .diagnostic_artifacts
+        .has_pending(&authority)
+        .map_err(map_store_error)?
+    {
+        let run = adapter.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
+        run.record.pending_completion = Some(StoredPendingCompletion {
+            final_message,
+            kind: StoredPendingTerminalKind::Completed,
+        });
+        return adapter.persist_run(run_key);
+    }
+    let artifacts = adapter
+        .diagnostic_artifacts
+        .accepted_references(&authority)
+        .map_err(map_store_error)?;
     let run = adapter.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
     run.record.terminal = Some(StoredTerminal::Completed {
         summary: "embedded Codex turn completed".to_owned(),
         final_message,
-        artifacts: Vec::new(),
+        artifacts,
         usage: ExecutionOutcomeUsage {
             runtime_millis: run.record.last_runtime_millis,
             tokens: run.record.last_tokens,
@@ -2937,6 +3158,147 @@ fn complete_reconciled_turn(
     });
     run.record.phase = StoredRunPhase::TerminalTracePending;
     adapter.persist_run(run_key)
+}
+
+impl ProductionCodexAdapter {
+    fn attach_accepted_diagnostic_artifact(
+        &mut self,
+        reference: &ArtifactReference,
+        authority: &DiagnosticArtifactAuthority,
+        run_key: &str,
+        _emit_trace: bool,
+    ) -> Result<(), ProductionCodexError> {
+        let Some(run_key) = self
+            .runs
+            .iter()
+            .find(|(candidate_key, run)| {
+                candidate_key.as_str() == run_key
+                    && run.binding.authority.lease == authority.lease
+                    && run.binding.authority.worker_session_id == authority.worker_session_id
+                    && run.binding.authority.session_identity == authority.session_identity
+            })
+            .map(|(key, _)| key.clone())
+        else {
+            return self
+                .attach_accepted_diagnostic_artifact_after_restart(reference, authority, run_key);
+        };
+        let pending_completion = {
+            let run = self.runs.get_mut(&run_key).ok_or_else(unknown_thread)?;
+            if let Some(StoredTerminal::Completed { artifacts, .. }) = run.record.terminal.as_mut()
+                && !artifacts.contains(reference)
+            {
+                artifacts.push(reference.clone());
+            }
+            if let Some(StoredTerminal::Failed { artifacts }) = run.record.terminal.as_mut()
+                && !artifacts.contains(reference)
+            {
+                artifacts.push(reference.clone());
+            }
+            if let Some(StoredTerminal::Cancelled { artifacts }) = run.record.terminal.as_mut()
+                && !artifacts.contains(reference)
+            {
+                artifacts.push(reference.clone());
+            }
+            if let Some(StoredTerminal::InfrastructureFailed { artifacts }) =
+                run.record.terminal.as_mut()
+                && !artifacts.contains(reference)
+            {
+                artifacts.push(reference.clone());
+            }
+            run.record.pending_completion.take()
+        };
+        self.persist_run(&run_key)?;
+        if let Some(completion) = pending_completion {
+            if self
+                .diagnostic_artifacts
+                .has_pending(authority)
+                .map_err(map_store_error)?
+            {
+                let run = self.runs.get_mut(&run_key).ok_or_else(unknown_thread)?;
+                run.record.pending_completion = Some(completion);
+                self.persist_run(&run_key)?;
+            } else {
+                let artifacts = self
+                    .diagnostic_artifacts
+                    .accepted_references(authority)
+                    .map_err(map_store_error)?;
+                let run = self.runs.get_mut(&run_key).ok_or_else(unknown_thread)?;
+                run.record.terminal = Some(terminal_from_pending_completion(
+                    completion,
+                    artifacts,
+                    ExecutionOutcomeUsage {
+                        runtime_millis: run.record.last_runtime_millis,
+                        tokens: run.record.last_tokens,
+                        cost_microunits: 0,
+                    },
+                ));
+                run.record.phase = StoredRunPhase::TerminalTracePending;
+                self.persist_run(&run_key)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn attach_accepted_diagnostic_artifact_after_restart(
+        &mut self,
+        reference: &ArtifactReference,
+        authority: &DiagnosticArtifactAuthority,
+        run_key: &str,
+    ) -> Result<(), ProductionCodexError> {
+        let Some(mut record) = load_stored_run(&self.store, run_key)? else {
+            return Ok(());
+        };
+        if record.job != authority.job || record.job.scope != authority.scope {
+            return Err(conflict());
+        }
+        if let Some(StoredTerminal::Completed { artifacts, .. }) = record.terminal.as_mut()
+            && !artifacts.contains(reference)
+        {
+            artifacts.push(reference.clone());
+        }
+        if let Some(StoredTerminal::Failed { artifacts }) = record.terminal.as_mut()
+            && !artifacts.contains(reference)
+        {
+            artifacts.push(reference.clone());
+        }
+        if let Some(StoredTerminal::Cancelled { artifacts }) = record.terminal.as_mut()
+            && !artifacts.contains(reference)
+        {
+            artifacts.push(reference.clone());
+        }
+        if let Some(StoredTerminal::InfrastructureFailed { artifacts }) = record.terminal.as_mut()
+            && !artifacts.contains(reference)
+        {
+            artifacts.push(reference.clone());
+        }
+        if let Some(completion) = record.pending_completion.take() {
+            if self
+                .diagnostic_artifacts
+                .has_pending(authority)
+                .map_err(map_store_error)?
+            {
+                record.pending_completion = Some(completion);
+            } else {
+                let artifacts = self
+                    .diagnostic_artifacts
+                    .accepted_references(authority)
+                    .map_err(map_store_error)?;
+                record.terminal = Some(terminal_from_pending_completion(
+                    completion,
+                    artifacts,
+                    ExecutionOutcomeUsage {
+                        runtime_millis: record.last_runtime_millis,
+                        tokens: record.last_tokens,
+                        cost_microunits: 0,
+                    },
+                ));
+                record.phase = StoredRunPhase::TerminalTracePending;
+            }
+        }
+        self.store
+            .save_run(run_key, &record)
+            .map_err(map_store_error)
+    }
 }
 
 impl CodexCoreAdapter for ProductionCodexAdapter {
@@ -3064,6 +3426,23 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             };
             let thread_id =
                 self.install_active_run(&run_key, record, binding, kernel_live, true)?;
+            let authority = {
+                let run = self.runs.get(&run_key).ok_or_else(unknown_thread)?;
+                DiagnosticArtifactAuthority {
+                    job: run.record.job.clone(),
+                    scope: run.record.job.scope.clone(),
+                    lease: run.binding.authority.lease.clone(),
+                    worker_session_id: run.binding.authority.worker_session_id.clone(),
+                    session_identity: run.binding.authority.session_identity.clone(),
+                }
+            };
+            let accepted = self
+                .diagnostic_artifacts
+                .accepted_references(&authority)
+                .map_err(map_store_error)?;
+            for reference in accepted {
+                self.attach_accepted_diagnostic_artifact(&reference, &authority, &run_key, false)?;
+            }
             return Ok(CodexThreadSession {
                 thread_id,
                 agent_config,
@@ -3109,6 +3488,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             delegated_stop: None,
             terminal_message_id: None,
             post_action_traces: Vec::new(),
+            pending_completion: None,
         };
         self.store
             .save_run(&run_key, &record)
@@ -3225,10 +3605,14 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
                 self.store
                     .commit_provider_final_model_calls(&run_key)
                     .map_err(map_store_error)?;
-                let run = self.runs.get_mut(&run_key).ok_or_else(unknown_thread)?;
-                run.record.terminal = Some(StoredTerminal::Failed);
-                run.record.phase = StoredRunPhase::TerminalTracePending;
-                self.persist_run(&run_key)?;
+                let activity_at = self
+                    .runs
+                    .get(&run_key)
+                    .ok_or_else(unknown_thread)?
+                    .record
+                    .last_activity_at
+                    .clone();
+                let _ = self.retain_failed_terminal(&run_key, &activity_at)?;
             }
             ExactTurnReconciliation::Started { .. }
             | ExactTurnReconciliation::NotSubmitted { .. } => {
@@ -3646,6 +4030,16 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         {
             return Ok(CodexPoll::RuntimeTrace(Box::new(message)));
         }
+        // A TurnComplete observed before the command/test Artifact's final
+        // ACK is a durable wait state. Do not let a later Core close/error
+        // turn that wait into an infrastructure terminal outcome.
+        if self
+            .runs
+            .get(&run_key)
+            .is_some_and(|run| run.record.pending_completion.is_some())
+        {
+            return Ok(CodexPoll::Pending);
+        }
         let pending_delegated_turn = self.runs.get(&run_key).and_then(|run| {
             run.record
                 .delegated_transitions
@@ -3960,6 +4354,71 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             .map_err(map_store_error)
     }
 
+    fn accept_artifact_ack(
+        &mut self,
+        acknowledgement: &ArtifactAckMessage,
+    ) -> Result<crate::ArtifactAckOutcome, Self::Error> {
+        match self
+            .diagnostic_artifacts
+            .apply_ack(acknowledgement)
+            .map_err(map_store_error)?
+        {
+            DiagnosticArtifactAckOutcome::Unknown => Ok(
+                match self
+                    .candidate_artifacts
+                    .apply_ack(acknowledgement)
+                    .map_err(map_store_error)?
+                {
+                    CandidateArtifactAckOutcome::Pending => crate::ArtifactAckOutcome::Pending,
+                    CandidateArtifactAckOutcome::Replay(deliveries) => {
+                        crate::ArtifactAckOutcome::Replay(deliveries)
+                    }
+                    CandidateArtifactAckOutcome::Accepted(reference) => {
+                        crate::ArtifactAckOutcome::Accepted(reference)
+                    }
+                },
+            ),
+            DiagnosticArtifactAckOutcome::Pending => Ok(crate::ArtifactAckOutcome::Pending),
+            DiagnosticArtifactAckOutcome::Replay(deliveries) => {
+                Ok(crate::ArtifactAckOutcome::Replay(deliveries))
+            }
+            DiagnosticArtifactAckOutcome::Accepted {
+                reference,
+                authority,
+                run_key,
+            } => {
+                self.attach_accepted_diagnostic_artifact(&reference, &authority, &run_key, true)?;
+                Ok(crate::ArtifactAckOutcome::Accepted(reference))
+            }
+            DiagnosticArtifactAckOutcome::Duplicate {
+                reference,
+                authority,
+                run_key,
+            } => {
+                self.attach_accepted_diagnostic_artifact(&reference, &authority, &run_key, false)?;
+                Ok(crate::ArtifactAckOutcome::Accepted(reference))
+            }
+        }
+    }
+
+    fn retain_diagnostic_artifact(
+        &mut self,
+        upload: &DiagnosticArtifactUpload,
+    ) -> Result<RetainedDiagnosticArtifact, Self::Error> {
+        self.diagnostic_artifacts
+            .retain(upload)
+            .map_err(map_store_error)
+    }
+
+    fn accepted_diagnostic_artifacts(
+        &mut self,
+        authority: &DiagnosticArtifactAuthority,
+    ) -> Result<Vec<ArtifactReference>, Self::Error> {
+        self.diagnostic_artifacts
+            .accepted_references(authority)
+            .map_err(map_store_error)
+    }
+
     fn accepted_candidate_artifact(
         &mut self,
         authority: &CandidateArtifactAuthority,
@@ -4190,9 +4649,36 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             let run = self.runs.get_mut(&run_key).ok_or_else(unknown_thread)?;
             run.record.last_activity_at = interrupted_at.clone();
         }
+        let authority = {
+            let run = self.runs.get(&run_key).ok_or_else(unknown_thread)?;
+            DiagnosticArtifactAuthority {
+                job: run.record.job.clone(),
+                scope: run.record.job.scope.clone(),
+                lease: run.binding.authority.lease.clone(),
+                worker_session_id: run.binding.authority.worker_session_id.clone(),
+                session_identity: run.binding.authority.session_identity.clone(),
+            }
+        };
+        if self
+            .diagnostic_artifacts
+            .has_pending(&authority)
+            .map_err(map_store_error)?
         {
             let run = self.runs.get_mut(&run_key).ok_or_else(unknown_thread)?;
-            run.record.terminal = Some(StoredTerminal::Cancelled);
+            run.record.pending_completion = Some(StoredPendingCompletion {
+                final_message: None,
+                kind: StoredPendingTerminalKind::Cancelled,
+            });
+            self.persist_run(&run_key)?;
+            return Ok(());
+        }
+        let artifacts = self
+            .diagnostic_artifacts
+            .accepted_references(&authority)
+            .map_err(map_store_error)?;
+        {
+            let run = self.runs.get_mut(&run_key).ok_or_else(unknown_thread)?;
+            run.record.terminal = Some(StoredTerminal::Cancelled { artifacts });
             run.record.phase = StoredRunPhase::TerminalTracePending;
         }
         self.persist_run(&run_key)?;
@@ -4498,6 +4984,26 @@ struct StoredRun {
     terminal_message_id: Option<ExecutionMessageId>,
     #[serde(default)]
     post_action_traces: Vec<StoredPostActionTrace>,
+    #[serde(default)]
+    pending_completion: Option<StoredPendingCompletion>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+enum StoredPendingTerminalKind {
+    Completed,
+    #[default]
+    Failed,
+    Cancelled,
+    InfrastructureFailed,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StoredPendingCompletion {
+    final_message: Option<String>,
+    #[serde(default)]
+    kind: StoredPendingTerminalKind,
 }
 
 fn terminal_performance_runtime(
@@ -4519,6 +5025,26 @@ fn terminal_performance_runtime(
                 .as_ref()
                 .map_or(0, |stop| stop.counters.elapsed_millis),
         ))
+}
+
+fn terminal_from_pending_completion(
+    completion: StoredPendingCompletion,
+    artifacts: Vec<ArtifactReference>,
+    usage: ExecutionOutcomeUsage,
+) -> StoredTerminal {
+    match completion.kind {
+        StoredPendingTerminalKind::Completed => StoredTerminal::Completed {
+            summary: "embedded Codex turn completed".to_owned(),
+            final_message: completion.final_message,
+            artifacts,
+            usage,
+        },
+        StoredPendingTerminalKind::Failed => StoredTerminal::Failed { artifacts },
+        StoredPendingTerminalKind::Cancelled => StoredTerminal::Cancelled { artifacts },
+        StoredPendingTerminalKind::InfrastructureFailed => {
+            StoredTerminal::InfrastructureFailed { artifacts }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -4596,24 +5122,30 @@ enum StoredTerminal {
         artifacts: Vec<ArtifactReference>,
         usage: ExecutionOutcomeUsage,
     },
-    Failed,
+    Failed {
+        artifacts: Vec<ArtifactReference>,
+    },
     DelegatedInconclusive,
     DelegatedRepairInfrastructureFailed,
-    Cancelled,
-    InfrastructureFailed,
+    Cancelled {
+        artifacts: Vec<ArtifactReference>,
+    },
+    InfrastructureFailed {
+        artifacts: Vec<ArtifactReference>,
+    },
 }
 
 impl StoredTerminal {
     fn trace_summary(&self) -> &'static str {
         match self {
             Self::Completed { .. } => "embedded Codex turn stopped",
-            Self::Failed => "embedded Codex turn failed",
+            Self::Failed { .. } => "embedded Codex turn failed",
             Self::DelegatedInconclusive => "delegated ChangeBatch proposal was inconclusive",
             Self::DelegatedRepairInfrastructureFailed => {
                 "delegated format-repair infrastructure failure"
             }
-            Self::Cancelled => "embedded Codex turn cancelled",
-            Self::InfrastructureFailed => "embedded Codex infrastructure failure",
+            Self::Cancelled { .. } => "embedded Codex turn cancelled",
+            Self::InfrastructureFailed { .. } => "embedded Codex infrastructure failure",
         }
     }
 
@@ -4624,15 +5156,30 @@ impl StoredTerminal {
                 final_message: _,
                 artifacts,
                 usage,
-            } => Ok(CodexPoll::Completed(CodexTurnCompletion {
-                summary: SecretSafeTraceSummary::new(summary).map_err(|_| unavailable())?,
-                artifacts,
-                usage,
-            })),
-            Self::Failed => Ok(CodexPoll::Failed(
-                SecretSafeTraceSummary::new("embedded Codex turn failed")
-                    .map_err(|_| unavailable())?,
-            )),
+            } => {
+                let completion = CodexTurnCompletion {
+                    summary: SecretSafeTraceSummary::new(summary).map_err(|_| unavailable())?,
+                    artifacts: Vec::new(),
+                    usage,
+                };
+                Ok(if artifacts.is_empty() {
+                    CodexPoll::Completed(completion)
+                } else {
+                    CodexPoll::CompletedWithDiagnostics(completion, artifacts)
+                })
+            }
+            Self::Failed { artifacts } => Ok(if artifacts.is_empty() {
+                CodexPoll::Failed(
+                    SecretSafeTraceSummary::new("embedded Codex turn failed")
+                        .map_err(|_| unavailable())?,
+                )
+            } else {
+                CodexPoll::FailedWithDiagnostics(
+                    SecretSafeTraceSummary::new("embedded Codex turn failed")
+                        .map_err(|_| unavailable())?,
+                    artifacts,
+                )
+            }),
             Self::DelegatedInconclusive => Ok(CodexPoll::Inconclusive(
                 SecretSafeTraceSummary::new("delegated ChangeBatch proposal was inconclusive")
                     .map_err(|_| unavailable())?,
@@ -4641,14 +5188,24 @@ impl StoredTerminal {
                 SecretSafeTraceSummary::new("delegated format-repair infrastructure failure")
                     .map_err(|_| unavailable())?,
             )),
-            Self::Cancelled => Ok(CodexPoll::Cancelled(
-                SecretSafeTraceSummary::new("embedded Codex turn cancelled")
-                    .map_err(|_| unavailable())?,
-            )),
-            Self::InfrastructureFailed => Ok(CodexPoll::InfrastructureFailed(
-                SecretSafeTraceSummary::new("embedded Codex infrastructure failure")
-                    .map_err(|_| unavailable())?,
-            )),
+            Self::Cancelled { artifacts } => {
+                let summary = SecretSafeTraceSummary::new("embedded Codex turn cancelled")
+                    .map_err(|_| unavailable())?;
+                Ok(if artifacts.is_empty() {
+                    CodexPoll::Cancelled(summary)
+                } else {
+                    CodexPoll::CancelledWithDiagnostics(summary, artifacts)
+                })
+            }
+            Self::InfrastructureFailed { artifacts } => {
+                let summary = SecretSafeTraceSummary::new("embedded Codex infrastructure failure")
+                    .map_err(|_| unavailable())?;
+                Ok(if artifacts.is_empty() {
+                    CodexPoll::InfrastructureFailed(summary)
+                } else {
+                    CodexPoll::InfrastructureFailedWithDiagnostics(summary, artifacts)
+                })
+            }
         }
     }
 }
@@ -6002,8 +6559,9 @@ fn map_bridge_error(_: BridgeError) -> ProductionCodexError {
 mod tests {
     use super::{
         AdapterStore, ExecutionMode, HELPER_RELEASE_BINARY_MODE, MAX_HELPER_BYTES,
-        ModelLeaseAuthority, ModelRunBinding, ProductionCodexErrorKind, RepositoryRulePack,
-        RoleExecutionMode, RoleSessionPolicy, StoredRun, StoredRunPhase, TurnSubmissionOptions,
+        ModelLeaseAuthority, ModelRunBinding, ProductionCodexAdapter, ProductionCodexConfig,
+        ProductionCodexErrorKind, ProductionCodexOptions, RepositoryRulePack, RoleExecutionMode,
+        RoleSessionPolicy, StoredRun, StoredRunPhase, TurnSubmissionOptions,
         allocate_interactive_input_choice_identities, bounded_helper_handshake,
         decode_kernel_event, delegated_budget_stop, delegated_budget_stopped_counters,
         delegated_change_batch_event, interactive_input_choice_replay_keys,
@@ -6016,16 +6574,22 @@ mod tests {
         validate_helper_image, validate_sealed_helper, validate_stored_batch_intent,
     };
     use crate::helper_release::HelperReleaseManifest;
+    use crate::{CodexCoreAdapter, CodexPoll, CodexRunKey, CodexThreadStart};
+    use codex_protocol::protocol::{
+        Event as CodexEvent, EventMsg as CodexEventMsg, ExecCommandEndEvent, ExecCommandSource,
+        ExecCommandStatus, TurnCompleteEvent,
+    };
     use codex_protocol::request_user_input::{
         RequestUserInputQuestion, RequestUserInputQuestionOption,
     };
     use std::fmt::Write as _;
     use std::path::PathBuf;
     use winwincode_domain::{
-        ChangeBatchId, CodexThreadId, Criterion, CriterionId, ExecutionJobId, FencingToken,
-        Instant, LeaseId, ProductSessionId, RepositoryId, Revision, SchemaVersion, SessionIdentity,
-        Sha256Digest, WorkContract, WorkContractId, WorkItem, WorkItemId, WorkItemState, WorkRunId,
-        WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceRevision,
+        ChangeBatchId, CodexThreadId, Criterion, CriterionId, ExecutionAckSequence, ExecutionJobId,
+        ExecutionMessageId, FencingToken, Instant, LeaseId, ProductSessionId, RepositoryId,
+        Revision, SchemaVersion, SessionIdentity, Sha256Digest, WorkContract, WorkContractId,
+        WorkItem, WorkItemId, WorkItemState, WorkRunId, WorkerId, WorkerInstanceId,
+        WorkerSessionId, WorkspaceRevision,
     };
     use winwincode_execution_port::agent_config::{
         AgentProfileSettings, AgentSessionConfigSnapshot, resolve_agent_session_config,
@@ -6035,6 +6599,15 @@ mod tests {
         ExecutionWorkspaceWriteMode, RepairLoopBudget, RepairLoopCounters, RepairLoopStopReason,
         RoleSessionPolicyWorkspaceMode, WorkRunExecutionScope, WorkRunExecutionScopeKind,
         WorkRunInput, WorkerCapabilityFeature, WorkerCapabilitySet, WorkerCapabilitySetPlatform,
+    };
+    use winwincode_execution_port::{
+        action_enforcement::ActionEnforcementSigningKey,
+        action_gateway::ExecutionEnvelopeToken,
+        generated::{
+            ArtifactAckMessage, ArtifactAckMessageKind, ArtifactKind, ArtifactReference,
+            ExecutionPortMessage, LeaseWriteStatus, ModelGatewayRoute,
+        },
+        runtime_trace_outbox::ObserverMode,
     };
 
     #[test]
@@ -6352,6 +6925,340 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn diagnostic_adapter_config(root: &std::path::Path) -> ProductionCodexConfig {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        std::fs::create_dir_all(root).expect("create diagnostic adapter root");
+        let executable = std::env::current_exe().expect("locate diagnostic test binary");
+        let release_directory = executable
+            .parent()
+            .and_then(|directory| {
+                (directory.file_name().and_then(|name| name.to_str()) == Some("deps"))
+                    .then(|| directory.parent().unwrap_or(directory))
+            })
+            .or_else(|| executable.parent())
+            .expect("locate diagnostic release directory");
+        let helper = release_directory.join("winwincode-kernel-helper");
+        std::fs::write(
+            &helper,
+            format!(
+                "#!/bin/sh\ncase \"$1\" in\n  --winwincode-helper-handshake) printf '%s\\n' '{{\"protocol\":\"winwincode-kernel-helper\",\"version\":1,\"packageVersion\":\"{}\"}}' ;;\n  --winwincode-helper-identity) printf '%s\\n' '{{\"protocol\":\"winwincode-kernel-helper\",\"version\":1,\"packageVersion\":\"{}\",\"sourceSha256\":\"{}\"}}' ;;\n  *) exit 2 ;;\nesac\n",
+                env!("CARGO_PKG_VERSION"),
+                env!("CARGO_PKG_VERSION"),
+                env!("WINWINCODE_HELPER_SOURCE_SHA256"),
+            ),
+        )
+        .expect("write diagnostic helper");
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))
+            .expect("make diagnostic helper executable");
+        ProductionCodexConfig::try_new(ProductionCodexOptions {
+            data_directory: root.join("runtime"),
+            helper_executable: helper.clone(),
+            helper_release_manifest: HelperReleaseManifest::from_test_helper(&helper)
+                .expect("build diagnostic helper manifest"),
+            provider: "fixture-provider".to_owned(),
+            model: "fixture-model".to_owned(),
+            gateway_route: ModelGatewayRoute {
+                capability: "reasoning".to_owned(),
+                route: "embedded-canonical-loopback".to_owned(),
+            },
+            registered_capabilities: WorkerCapabilitySet {
+                capability_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+                features: vec![WorkerCapabilityFeature::Sandbox],
+                max_concurrent_jobs: 1,
+                platform: WorkerCapabilitySetPlatform::Aarch64AppleDarwin,
+            },
+            discovered_capabilities: Vec::new(),
+            action_signing_key: ActionEnforcementSigningKey::from_bytes([31_u8; 32])
+                .expect("diagnostic signing key"),
+            execution_envelope: ExecutionEnvelopeToken {
+                version: 1,
+                digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+            },
+            execution_mode: ExecutionMode::React,
+            observer_mode: ObserverMode::Off,
+        })
+        .expect("validate diagnostic adapter config")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn production_command_output_ack_survives_restart_before_terminal_projection() {
+        std::thread::Builder::new()
+            .name("diagnostic-vertical".to_owned())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("build diagnostic runtime")
+                    .block_on(Box::pin(
+                        production_command_output_ack_survives_restart_before_terminal_projection_body(),
+                    ));
+            })
+            .expect("spawn diagnostic test thread")
+            .join()
+            .expect("diagnostic test thread");
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn production_command_output_ack_survives_restart_before_terminal_projection_body() {
+        let root = test_root("diagnostic-vertical");
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).expect("create diagnostic workspace");
+        let mut job = executor_job();
+        job.execution_profile = "reviewer".to_owned();
+        job.work_input
+            .as_mut()
+            .expect("diagnostic work input")
+            .candidate_ref = Some(
+            "git-candidate:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_owned(),
+        );
+        job.workspace.write_mode = ExecutionWorkspaceWriteMode::ReadOnly;
+        let lease = ExecutionLeaseStamp {
+            attempt: 1,
+            expires_at: Instant("2030-01-01T00:05:00Z".to_owned()),
+            fencing_token: FencingToken("1".to_owned()),
+            issued_at: Instant("2030-01-01T00:00:00Z".to_owned()),
+            job_id: job.job_id.clone(),
+            lease_id: LeaseId("lse_00000000000000000000000001".to_owned()),
+            worker_id: WorkerId("wrk_00000000000000000000000001".to_owned()),
+            worker_instance_id: WorkerInstanceId("wki_00000000000000000000000001".to_owned()),
+        };
+        let worker_session_id = WorkerSessionId("wss_00000000000000000000000001".to_owned());
+        let run_key = CodexRunKey {
+            job_id: job.job_id.clone(),
+            attempt: job.attempt,
+            fencing_token: lease.fencing_token.clone(),
+            payload_digest: job.payload_digest.clone(),
+        };
+        let workspace_revision = WorkspaceRevision(format!("git-tree:{}", "1".repeat(40)));
+        let now = Instant("2030-01-01T00:00:01Z".to_owned());
+        let start = CodexThreadStart {
+            run_key: &run_key,
+            worker_id: &lease.worker_id,
+            job: &job,
+            lease: &lease,
+            worker_session_id: &worker_session_id,
+            workspace: &workspace,
+            workspace_revision: &workspace_revision,
+        };
+        let mut adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root))
+            .expect("open diagnostic adapter");
+        let session = Box::pin(adapter.ensure_thread(start))
+            .await
+            .expect("open diagnostic thread");
+        let run_digest = run_key.canonical_digest().expect("run digest").0;
+        adapter
+            .retain_stage_turn_started(&run_digest, "turn-diagnostic", &now)
+            .expect("retain reviewer policy before command evidence");
+        let command_end = ExecCommandEndEvent {
+            call_id: "call-real-command-output".to_owned(),
+            plugin_id: None,
+            script_path: None,
+            process_id: None,
+            turn_id: "turn-diagnostic".to_owned(),
+            completed_at_ms: 1,
+            command: vec!["cargo".to_owned(), "test".to_owned()],
+            cwd: serde_json::from_value(serde_json::json!(format!(
+                "file://{}",
+                workspace.display()
+            )))
+            .expect("diagnostic cwd URI"),
+            parsed_cmd: Vec::new(),
+            source: ExecCommandSource::Agent,
+            interaction_input: None,
+            stdout: "stdout-real\n".to_owned(),
+            stderr: "stderr-real\n".to_owned(),
+            aggregated_output: "stdout-real\nstderr-real\n".to_owned(),
+            exit_code: 0,
+            duration: std::time::Duration::from_millis(1),
+            formatted_output: "stdout-real\nstderr-real\n".to_owned(),
+            status: ExecCommandStatus::Completed,
+        };
+        let command_poll = adapter
+            .accept_polled_event(
+                &run_digest,
+                CodexEvent {
+                    id: "turn-diagnostic".to_owned(),
+                    msg: CodexEventMsg::ExecCommandEnd(command_end),
+                },
+                &now,
+            )
+            .expect("retain real command output");
+        assert!(
+            matches!(command_poll, CodexPoll::Pending),
+            "command stage unexpectedly terminal: {command_poll:?}"
+        );
+        let diagnostic_open = adapter
+            .outbox
+            .pending()
+            .expect("read durable diagnostic frames")
+            .into_iter()
+            .find_map(|delivery| match delivery.message {
+                ExecutionPortMessage::ArtifactOpenMessage(open)
+                    if matches!(
+                        open.artifact.kind,
+                        ArtifactKind::CommandOutput | ArtifactKind::TestOutput
+                    ) =>
+                {
+                    Some(open)
+                }
+                _ => None,
+            })
+            .expect("command output artifact.open");
+        let artifact = ArtifactReference {
+            artifact_id: diagnostic_open.artifact.artifact_id.clone(),
+            digest: diagnostic_open.artifact.digest.clone(),
+        };
+        let ack_sequence = adapter
+            .outbox
+            .pending()
+            .expect("read durable diagnostic chunks")
+            .into_iter()
+            .filter_map(|delivery| match delivery.message {
+                ExecutionPortMessage::ArtifactChunkMessage(chunk)
+                    if chunk.artifact_id == artifact.artifact_id =>
+                {
+                    Some(chunk.sequence.0)
+                }
+                _ => None,
+            })
+            .max()
+            .expect("command output artifact.chunk");
+        let mut output = Vec::new();
+        for delivery in adapter
+            .outbox
+            .pending()
+            .expect("read command output payload")
+        {
+            if let ExecutionPortMessage::ArtifactChunkMessage(chunk) = delivery.message
+                && chunk.artifact_id == artifact.artifact_id
+            {
+                output.extend(
+                    base64::Engine::decode(
+                        &base64::engine::general_purpose::STANDARD,
+                        &chunk.payload.data_base64,
+                    )
+                    .expect("decode command output chunk"),
+                );
+            }
+        }
+        let output = String::from_utf8(output).expect("command output remains utf8");
+        assert!(output.contains("stdout-real"));
+        assert!(output.contains("stderr-real"));
+        assert!(matches!(
+            adapter
+                .accept_polled_event(
+                    &run_digest,
+                    CodexEvent {
+                        id: "turn-diagnostic".to_owned(),
+                        msg: CodexEventMsg::TurnComplete(TurnCompleteEvent {
+                            turn_id: "turn-diagnostic".to_owned(),
+                            last_agent_message: Some("{\"protocol\":\"winwincode.independent-verification-result.v1\",\"delivery_spec_id\":\"spec-fixture\",\"delivery_spec_revision\":2,\"candidate_ref\":\"git-candidate:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"findings\":[{\"finding_id\":\"finding-diagnostic\",\"criterion_id\":\"crt_00000000000000000000000001\",\"verdict\":\"pass\",\"explanation\":\"Direct command output passed.\",\"evidence_sources\":[{\"source_id\":\"call-real-command-output\"}]}]}".to_owned()),
+                            error: None,
+                            started_at: None,
+                            completed_at: None,
+                            duration_ms: Some(1),
+                            time_to_first_token_ms: None,
+                        }),
+                    },
+                    &now,
+                )
+                .expect("retain turn completion before artifact ACK"),
+            CodexPoll::Pending | CodexPoll::RuntimeTrace(_)
+        ));
+        assert!(matches!(
+            adapter
+                .poll(&session.thread_id, &now)
+                .await
+                .expect("poll wait one"),
+            CodexPoll::Pending
+        ));
+        assert!(matches!(
+            adapter
+                .poll(&session.thread_id, &now)
+                .await
+                .expect("poll wait two"),
+            CodexPoll::Pending
+        ));
+        drop(adapter);
+
+        let mut reopened = ProductionCodexAdapter::open(diagnostic_adapter_config(&root))
+            .expect("reopen diagnostic adapter");
+        let accepted = reopened
+            .accept_artifact_ack(&ArtifactAckMessage {
+                ack_sequence: ExecutionAckSequence(ack_sequence),
+                artifact_id: artifact.artifact_id.clone(),
+                error: None,
+                kind: ArtifactAckMessageKind::ArtifactAck,
+                lease: diagnostic_open.lease.clone(),
+                message_id: ExecutionMessageId("xmsg_00000000000000000000009999".to_owned()),
+                replay_from_sequence: None,
+                schema_version: SchemaVersion::WinwincodeV1,
+                sent_at: now.clone(),
+                session_identity: diagnostic_open.session_identity.clone(),
+                status: LeaseWriteStatus::Accepted,
+                worker_session_id: diagnostic_open.worker_session_id.clone(),
+            })
+            .expect("ACK after process reopen");
+        assert!(
+            matches!(accepted, crate::ArtifactAckOutcome::Accepted(reference) if reference == artifact)
+        );
+        let reopened_session = Box::pin(reopened.ensure_thread(start))
+            .await
+            .expect("recover terminal thread");
+        let runtime_reference = reopened
+            .outbox
+            .pending()
+            .expect("read accepted diagnostic runtime frame")
+            .into_iter()
+            .find_map(|delivery| match delivery.message {
+                ExecutionPortMessage::RuntimeEventMessage(message) => {
+                    let payload = message
+                        .event
+                        .payload
+                        .as_ref()
+                        .and_then(|payload| {
+                            base64::Engine::decode(
+                                &base64::engine::general_purpose::STANDARD,
+                                &payload.data_base64,
+                            )
+                            .ok()
+                        })
+                        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+                    payload
+                        .as_ref()
+                        .is_some_and(|payload| {
+                            payload.to_string().contains(&artifact.artifact_id.0)
+                        })
+                        .then_some(artifact.clone())
+                }
+                _ => None,
+            });
+        let mut terminal_reference = None;
+        for _ in 0..8 {
+            match reopened
+                .poll(&reopened_session.thread_id, &now)
+                .await
+                .expect("poll recovered diagnostic")
+            {
+                CodexPoll::CompletedWithDiagnostics(_, artifacts) => {
+                    assert_eq!(artifacts, vec![artifact.clone()]);
+                    terminal_reference = Some(artifact.clone());
+                    break;
+                }
+                CodexPoll::Pending | CodexPoll::RuntimeTrace(_) => {}
+                other => panic!("unexpected recovered diagnostic poll: {other:?}"),
+            }
+        }
+        assert_eq!(runtime_reference, Some(artifact.clone()));
+        assert_eq!(terminal_reference, Some(artifact));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
     #[test]
     fn oversized_helper_is_rejected_before_reading_or_sealing() {
         use std::fs::OpenOptions;
@@ -6452,6 +7359,7 @@ mod tests {
             delegated_stop: None,
             terminal_message_id: None,
             post_action_traces: Vec::new(),
+            pending_completion: None,
         };
         let mut legacy = serde_json::to_value(record).expect("encode stored run");
         let role_policy = legacy
@@ -6607,6 +7515,7 @@ mod tests {
             delegated_stop: None,
             terminal_message_id: None,
             post_action_traces: Vec::new(),
+            pending_completion: None,
         };
         let binding = ModelRunBinding {
             run_key: format!("sha256:{}", "b".repeat(64)),

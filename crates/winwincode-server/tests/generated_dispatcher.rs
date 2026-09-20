@@ -362,6 +362,7 @@ fn assert_query_families() {
         (QueryName::CandidateReviewGet, QueryFamily::Delivery),
         (QueryName::CandidateFilesList, QueryFamily::Delivery),
         (QueryName::CandidateDiffGet, QueryFamily::Delivery),
+        (QueryName::CandidateFileContentGet, QueryFamily::Delivery),
         (QueryName::EvidenceGet, QueryFamily::Delivery),
         (QueryName::EvidenceArtifactContentGet, QueryFamily::Delivery),
         (QueryName::SettingsGet, QueryFamily::Settings),
@@ -482,6 +483,7 @@ fn representative_generated_commands_reach_each_application_family() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn representative_generated_queries_reach_each_application_family() {
     let application = Arc::new(RecordingApplication::default());
     let dispatcher = GeneratedContractDispatcher::new(application.clone());
@@ -503,6 +505,38 @@ fn representative_generated_queries_reach_each_application_family() {
             "delivery.list",
             &repository_scope(),
             &json!({ "states": [] }),
+        ),
+        query_fixture(
+            "candidate.file.content.get",
+            &repository_scope(),
+            &json!({
+                "atCursor": {
+                    "deliveryId": "dlv_00000000000000000000000001",
+                    "deliveryRevision": 1,
+                    "eventCursor": {
+                        "eventId": null,
+                        "scope": repository_scope(),
+                        "sequence": 0,
+                        "stream": {
+                            "deliveryId": "dlv_00000000000000000000000001",
+                            "kind": "delivery"
+                        }
+                    },
+                    "publicationRevision": 1,
+                    "runtimeAcceptedSequence": 0,
+                    "runtimeLedgerRevision": 1,
+                    "scope": repository_scope(),
+                    "token": "cursor"
+                },
+                "candidateRef": "candidate:example",
+                "candidateTreeId": "tree-example",
+                "deliveryId": "dlv_00000000000000000000000001",
+                "diffSha256": format!("sha256:{}", "0".repeat(64)),
+                "length": 1,
+                "offset": 0,
+                "path": "README.md",
+                "readPageLimit": 50
+            }),
         ),
         settings_query(),
         query_fixture(
@@ -543,6 +577,7 @@ fn representative_generated_queries_reach_each_application_family() {
         vec![
             QueryFamily::Session,
             QueryFamily::Runtime,
+            QueryFamily::Delivery,
             QueryFamily::Delivery,
             QueryFamily::Settings,
             QueryFamily::CredentialReference,

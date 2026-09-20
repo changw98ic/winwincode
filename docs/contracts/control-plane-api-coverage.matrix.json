@@ -38,6 +38,7 @@
       "publication.cancel",
       "collaboration.notification.ack",
       "collaboration.presence.update",
+      "collaboration.page_annotation.submit",
       "workitems.create",
       "workrun.cancel"
     ],
@@ -51,6 +52,7 @@
       "delivery.get",
       "candidate.list",
       "candidate.review.get",
+      "candidate.file.content.get",
       "candidate.files.list",
       "candidate.diff.get",
       "evidence.get",
@@ -68,6 +70,7 @@
       "collaboration.activity.list",
       "collaboration.notification.list",
       "collaboration.presence.list",
+      "collaboration.page_annotation.list",
       "workrun.get",
       "session.artifact.get"
     ],
@@ -865,7 +868,8 @@
         "candidate.diff.get",
         "evidence.get",
         "evidence.artifact.content.get",
-        "runtime.projection.get"
+        "runtime.projection.get",
+        "candidate.file.content.get"
       ],
       "websocketEvents": [
         "runtime-projection.invalidated.v1",
@@ -920,16 +924,19 @@
       "currentObservableOperations": [
         "acknowledge collaboration notifications and publish scoped presence",
         "read collaboration activity, notifications, and presence",
-        "enforce actions through one neutral policy boundary"
+        "enforce actions through one neutral policy boundary",
+        "submit and list StrongFlow page annotations for the local Owner"
       ],
       "httpCommands": [
         "collaboration.notification.ack",
-        "collaboration.presence.update"
+        "collaboration.presence.update",
+        "collaboration.page_annotation.submit"
       ],
       "httpQueries": [
         "collaboration.activity.list",
         "collaboration.notification.list",
-        "collaboration.presence.list"
+        "collaboration.presence.list",
+        "collaboration.page_annotation.list"
       ],
       "websocketEvents": [],
       "executionPortMessages": [

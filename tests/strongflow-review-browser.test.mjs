@@ -64,7 +64,7 @@ test('a real browser reviews bounded artifacts without executing HTML or SVG', a
   assert.match(result.artifactDegraded, /不与管理界面同源执行/u)
   assert.equal(result.scriptCount, 0)
   assert.equal(result.pwned, false)
-  assert.match(result.citation, /runtime:command:42/u)
+  assert.equal(result.citation, '错误引用已绑定当前执行记录')
   assert.equal(result.evidenceResult, '已核验执行结果：失败')
   assert.match(result.history, /不能授权当前候选/u)
   assert.equal(result.currentAuthorization, 'false')
@@ -73,8 +73,8 @@ test('a real browser reviews bounded artifacts without executing HTML or SVG', a
   assert.match(result.progress, /已发生返工 0 次 · 预算 2 次/u)
   assert.doesNotMatch(result.progress, /%/u)
   assert.deepEqual(result.criteria.map(criterion => [criterion.id, criterion.result]), [
-    ['criterion-one', 'pass'],
-    ['criterion-two', 'pending'],
+    ['1', 'pass'],
+    ['2', 'pending'],
   ])
   assert.match(result.criteria[0].text, /命令执行 · 失败 · 附件可用 · 1 个附件/u)
   assert.match(result.criteria[0].text, /查看第 1 条证据/u)

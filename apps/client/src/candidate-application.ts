@@ -3,6 +3,7 @@
 import type { ControlPlaneClientCandidates, ControlPlaneClientDirectory, ControlPlaneCandidateSummary, ControlPlaneCandidateApplyReceipt, ControlPlaneRepositorySummary } from './community-control-plane-client.js'
 import type { StrongFlowReviewViewModel, StrongFlowReviewState } from './strongflow-review-view-model.js'
 import { repositoryDisplayName } from './display-labels.js'
+import { publicErrorText } from './public-redaction.js'
 
 export interface CandidateApplicationOptions {
   readonly root: HTMLElement
@@ -177,7 +178,7 @@ export function mountCandidateApplication(options: CandidateApplicationOptions):
         if (result.candidateRef !== input.candidateRef || result.repositoryBindingId !== input.repositoryBindingId || result.targetBranch !== selectedBranch || result.expectedHead !== expectedHead) throw new Error('应用回执与当前操作不一致，请刷新确认。')
         if (!closed) { receipt(result); if (result.result === 'applied') target.candidate = { ...target.candidate, state: 'applied' } }
       }
-    } catch (error) { if (!closed) status.textContent = error instanceof Error ? error.message : '应用请求未完成，请刷新设备结果确认。' }
+    } catch (error) { if (!closed) status.textContent = publicErrorText(error, '应用请求未完成') }
     finally { busy = false; if (!closed) { lock(); if (target.candidate.state === 'applied') apply.disabled = true } }
   }
   form.addEventListener('submit', event => { event.preventDefault(); void submit(false) })

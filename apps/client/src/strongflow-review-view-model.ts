@@ -15,11 +15,13 @@ import type {
   CandidateFileStatus,
   CandidateHistoricalReviewProjection,
   CandidateHistoryItemProjection,
+  CollaborationPageAnnotationProjection,
   CommandRequest,
   DeliveryDetailProjection,
   DeliveryEvidenceProjection,
   EvidenceArtifactDescriptorProjection,
   EvidenceOutcome,
+  EvidencePageAnnotationProjection,
   QueryRequest,
   QueryResultResponse,
   RepositoryScope,
@@ -30,6 +32,7 @@ import type {
   StrongFlowReadCursor,
 } from './generated/contracts.js'
 import { CommandName, QueryName } from './generated/contracts.js'
+import { publicErrorText } from './public-redaction.js'
 
 const SCHEMA_VERSION = 'winwincode/v1' as const
 /** List page size; the Control Plane accepts 1..=200 per projection read. */
@@ -129,6 +132,8 @@ export interface ReviewActivitySegment {
 export interface ReviewEvidenceEntry {
   readonly evidence: DeliveryEvidenceProjection
   readonly outcome: EvidenceOutcome | null
+  /** Durable page annotation source for ReviewFinding Evidence. */
+  readonly pageAnnotation: EvidencePageAnnotationProjection | null
   /** Server-owned artifact access; `unavailable` renders the fail-closed note. */
   readonly artifactState: 'available' | 'unavailable' | null
   readonly artifactReason: string | null
@@ -136,7 +141,7 @@ export interface ReviewEvidenceEntry {
   readonly detailError: string | null
 }
 
-export type ReviewArtifactClass = 'inline-text' | 'executable-document' | 'download-only'
+export type ReviewArtifactClass = 'inline-text' | 'image' | 'executable-document' | 'download-only'
 
 export interface ReviewArtifactChunk {
   readonly offset: number
@@ -409,7 +414,18 @@ function artifactClass(descriptor: EvidenceArtifactDescriptorProjection): Review
   const fileName = descriptor.fileName?.toLowerCase() ?? ''
   if (mediaType === 'text/html' || mediaType === 'image/svg+xml'
     || /\.(?:html?|xhtml|xht|svg)$/u.test(fileName)) return 'executable-document'
+  if (mediaType === 'image/png' || mediaType === 'image/jpeg' || mediaType === 'image/webp') return 'image'
   return descriptor.previewMode === 'inline_text' ? 'inline-text' : 'download-only'
+}
+
+function publicPageAnnotation(
+  annotation: CollaborationPageAnnotationProjection,
+): EvidencePageAnnotationProjection {
+  return Object.freeze({
+    body: annotation.body,
+    target: annotation.target,
+    screenshotArtifact: annotation.screenshotArtifact,
+  })
 }
 
 function evidenceBinding(
@@ -534,6 +550,26 @@ export function createStrongFlowReviewViewModel(
       parameters: { deliveryId: options.deliveryId as never },
       page: page(null),
     }) as QueryRequest, QueryName.DeliveryGet).then(response => response.result)
+  }
+
+  async function readPageAnnotations(): Promise<readonly CollaborationPageAnnotationProjection[]> {
+    const items: CollaborationPageAnnotationProjection[] = []
+    let cursor: unknown = null
+    do {
+      const response = await read<Extract<
+        QueryResultResponse,
+        { query: 'collaboration.page_annotation.list' }
+      >>(() => ({
+        ...requestBase(),
+        requestId: options.nextRequestId(),
+        query: QueryName.CollaborationPageAnnotationList,
+        parameters: { deliveryId: options.deliveryId as never },
+        page: page(cursor),
+      }) as QueryRequest, QueryName.CollaborationPageAnnotationList)
+      items.push(...response.result.items)
+      cursor = response.page.nextCursor
+    } while (cursor !== null)
+    return Object.freeze(items)
   }
 
   function readCandidateHistory(
@@ -777,6 +813,12 @@ export function createStrongFlowReviewViewModel(
           ? Promise.resolve(null)
           : readFilePage(atCursor, candidate, null),
       ])
+      const pageAnnotations = detail.evidence.some(entry => entry.type === 'review_finding')
+        ? await readPageAnnotations()
+        : Object.freeze([]) as readonly CollaborationPageAnnotationProjection[]
+      const pageAnnotationsByEvidence = new Map(
+        pageAnnotations.map(annotation => [annotation.evidenceId, publicPageAnnotation(annotation)]),
+      )
       const files = fileResult === null
         ? Object.freeze([]) as readonly ReviewFileEntry[]
         : fileEntries(fileResult.page.items)
@@ -804,6 +846,7 @@ export function createStrongFlowReviewViewModel(
         evidence: Object.freeze(detail.evidence.map(entry => Object.freeze({
           evidence: entry,
           outcome: null,
+          pageAnnotation: pageAnnotationsByEvidence.get(entry.id) ?? null,
           artifactState: null,
           artifactReason: null,
           artifacts: Object.freeze([]),
@@ -836,7 +879,7 @@ export function createStrongFlowReviewViewModel(
         status: 'error',
         error: reviewFailure(
           'STRONGFLOW_REVIEW_READ_FAILED',
-          error instanceof Error ? error.message : 'The StrongFlow review read failed.',
+          publicErrorText(error, '读取审核产物失败'),
         ),
       })
     }
@@ -913,7 +956,7 @@ export function createStrongFlowReviewViewModel(
       updateFile(path, { preview: merged, previewError: null })
     } catch (error) {
       if (!isCurrentRead()) return
-      const message = error instanceof Error ? error.message : 'preview read failed'
+      const message = publicErrorText(error, '读取差异失败')
       updateFile(path, { previewError: message })
     }
   }
@@ -976,7 +1019,7 @@ export function createStrongFlowReviewViewModel(
     } catch (error) {
       updateArtifact(evidenceId, artifactId, current => Object.freeze({
         ...current,
-        error: error instanceof Error ? error.message : 'artifact read failed',
+        error: publicErrorText(error, '读取验收产物失败'),
       }))
     }
   }
@@ -1041,7 +1084,7 @@ export function createStrongFlowReviewViewModel(
         patch({
           error: reviewFailure(
             'STRONGFLOW_REVIEW_FILE_PAGE_FAILED',
-            error instanceof Error ? error.message : 'The next Candidate file page failed.',
+            publicErrorText(error, '读取变更文件失败'),
           ),
         })
       }
@@ -1080,6 +1123,7 @@ export function createStrongFlowReviewViewModel(
             item.evidence.id !== evidenceId ? item : Object.freeze({
               ...item,
               outcome: result.outcome,
+              pageAnnotation: result.pageAnnotation ?? item.pageAnnotation,
               artifactState: access.state,
               artifactReason: access.state === 'unavailable' ? access.reason : null,
               artifacts: access.state === 'available'
@@ -1098,7 +1142,7 @@ export function createStrongFlowReviewViewModel(
           ))),
         })
       } catch (error) {
-        const message = error instanceof Error ? error.message : 'evidence read failed'
+        const message = publicErrorText(error, '读取验收证据失败')
         if (currentState.detail?.readCursor.token !== detail.readCursor.token) return
         patch({
           evidence: Object.freeze(currentState.evidence.map(item => (
@@ -1156,7 +1200,7 @@ export function createStrongFlowReviewViewModel(
           ))),
         })
       } catch (error) {
-        const message = error instanceof Error ? error.message : 'historical review read failed'
+        const message = publicErrorText(error, '读取历史结论失败')
         patch({
           history: Object.freeze(currentState.history.map(item => (
             item.candidateRef !== candidateRef

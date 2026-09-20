@@ -23,6 +23,7 @@ const CANDIDATE_MEDIA_TYPE: &str = "application/vnd.winwincode.git-candidate+jso
 const MAX_CHANGED_PATHS: usize = 100_000;
 const MAX_PATH_BYTES: usize = 4_096;
 const MAX_DIFF_BYTES: usize = 268_435_456;
+const MAX_CONTENT_BYTES: usize = 268_435_456;
 static NEXT_BUNDLE_FILE: AtomicU64 = AtomicU64::new(1);
 
 /// State of one path rebuilt at the candidate commit.
@@ -212,6 +213,31 @@ impl ValidatedGitCandidateDiff {
     }
 }
 
+/// Opaque, bounded bytes from one trusted file at the retained Candidate commit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ValidatedGitCandidateFileContent {
+    path: String,
+    encoding: GitCandidateReviewFileEncoding,
+    bytes: Vec<u8>,
+}
+
+impl ValidatedGitCandidateFileContent {
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    #[must_use]
+    pub const fn encoding(&self) -> GitCandidateReviewFileEncoding {
+        self.encoding
+    }
+
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
 impl GitSourceHunk {
     #[must_use]
     pub fn file_path(&self) -> &str {
@@ -308,6 +334,25 @@ pub trait GitSourceResolver: Send {
     ) -> Result<ValidatedGitCandidateDiff, ArtifactError> {
         Err(ArtifactError::adapter(
             "Git Candidate diff reads are unavailable",
+        ))
+    }
+
+    /// Reads one exact file blob from the retained Candidate commit.
+    ///
+    /// Adapter implementations that cannot provide trusted file reads fail
+    /// closed. The path must already be present in the Candidate inventory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an Artifact error when the source or path cannot be revalidated
+    /// or the adapter cannot provide trusted file reads.
+    fn candidate_file_content(
+        &self,
+        _source: &ValidatedGitSourceArtifact,
+        _path: &str,
+    ) -> Result<ValidatedGitCandidateFileContent, ArtifactError> {
+        Err(ArtifactError::adapter(
+            "Git Candidate file content reads are unavailable",
         ))
     }
 }
@@ -552,6 +597,72 @@ impl LocalGitSourceResolver {
             file_diff_sha256: format!("{:x}", Sha256::digest(&bytes)),
             binary: file.binary,
             encoding: file.encoding,
+            bytes,
+        })
+    }
+
+    fn candidate_file_content(
+        &self,
+        source: &ValidatedGitSourceArtifact,
+        path: &str,
+    ) -> Result<ValidatedGitCandidateFileContent, ArtifactError> {
+        portable_path(path)?;
+        let repository = self.revalidate_candidate_source(source)?;
+        let review = self.candidate_review(source)?;
+        let file = review
+            .files
+            .iter()
+            .find(|file| file.path == path)
+            .ok_or_else(|| {
+                ArtifactError::new(ArtifactErrorKind::NotFound, "Candidate path is not changed")
+            })?;
+        if file.status == GitCandidateReviewFileStatus::Deleted {
+            return Err(ArtifactError::new(
+                ArtifactErrorKind::NotFound,
+                "Candidate path is deleted at the retained commit",
+            ));
+        }
+        let object = format!("{}:{path}", source.candidate_commit_id);
+        let size = utf8_line(
+            git_output(
+                &repository,
+                &["cat-file".into(), "-s".into(), object.clone().into()],
+                "Candidate file content size",
+            )?,
+            "Candidate file content size",
+        )?
+        .parse::<u64>()
+        .map_err(|_| ArtifactError::corrupt("Candidate file content size is invalid"))?;
+        if size > MAX_CONTENT_BYTES as u64 {
+            return Err(ArtifactError::invalid(
+                "Candidate file content exceeds the supported in-memory limit",
+            ));
+        }
+        let bytes = git_output(
+            &repository,
+            &["cat-file".into(), "blob".into(), object.into()],
+            "Candidate file content",
+        )?;
+        if bytes.len() as u64 != size {
+            return Err(ArtifactError::conflict(
+                "Candidate file content changed while it was being read",
+            ));
+        }
+        if bytes.len() > MAX_CONTENT_BYTES {
+            return Err(ArtifactError::invalid(
+                "Candidate file content exceeds the supported in-memory limit",
+            ));
+        }
+        let encoding = if file.binary {
+            GitCandidateReviewFileEncoding::Binary
+        } else if std::str::from_utf8(&bytes).is_ok() {
+            GitCandidateReviewFileEncoding::Utf8
+        } else {
+            GitCandidateReviewFileEncoding::Unknown8Bit
+        };
+        Ok(ValidatedGitCandidateFileContent {
+            path: path.to_owned(),
+            encoding,
             bytes,
         })
     }
@@ -1111,6 +1222,14 @@ impl GitSourceResolver for LocalGitSourceResolver {
         path: &str,
     ) -> Result<ValidatedGitCandidateDiff, ArtifactError> {
         Self::candidate_diff(self, source, path)
+    }
+
+    fn candidate_file_content(
+        &self,
+        source: &ValidatedGitSourceArtifact,
+        path: &str,
+    ) -> Result<ValidatedGitCandidateFileContent, ArtifactError> {
+        Self::candidate_file_content(self, source, path)
     }
 }
 

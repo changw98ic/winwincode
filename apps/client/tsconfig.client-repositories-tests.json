@@ -9,10 +9,10 @@
       "ES2023"
     ],
     "noEmit": false,
-    "outDir": "../../.cache/client-repositories-tests",
+    "outDir": "node_modules/.cache/client-repositories-tests",
     "rootDir": "src",
     "sourceMap": false,
-    "tsBuildInfoFile": "../../.cache/tsbuild/client-repositories-tests.tsbuildinfo"
+    "tsBuildInfoFile": "node_modules/.cache/tsbuild/client-repositories-tests.tsbuildinfo"
   },
   "include": [
     "src/**/*.ts",

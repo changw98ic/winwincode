@@ -26,7 +26,7 @@ assert.equal(
   `Clients area did not compile:\n${compiler.stdout}${compiler.stderr}`,
 )
 
-const cache = resolve(root, '.cache/client-clients-tests')
+const cache = resolve(root, 'apps/client/node_modules/.cache/client-clients-tests')
 // Plain module paths keep one ControlPlaneClientError class identity across
 // the facade, the view-models, and these assertions.
 async function cachedModule(name) {
@@ -848,6 +848,8 @@ class ApplicationWindow {
       (this.listeners.get(name) ?? []).filter(candidate => candidate !== listener),
     )
   }
+  setInterval() { return 0 }
+  clearInterval() {}
 }
 
 function clientsFacadeFake({ expired = true, devices = [device()] } = {}) {
@@ -940,6 +942,7 @@ function mountApplication(hash, client) {
     serverUrl: client.serverUrl,
     window: browser,
     controlPlane: client,
+    mountSessionBrowser: () => ({ update() {}, close() {} }),
   })
   return { application, browser, rootElement, client }
 }

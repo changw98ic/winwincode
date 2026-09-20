@@ -18,12 +18,12 @@ use sha2::{Digest as _, Sha256};
 use winwincode_api::generated::{Actor, Scope};
 use winwincode_domain::RepositoryScope;
 use winwincode_domain::{
-    ApprovalId, AttentionItemId, DeliveryId, OpaqueCursor, ProductSessionId, RequestId,
-    Sha256Digest, UserId,
+    ApprovalId, AttentionItemId, DeliveryId, EvidenceId, OpaqueCursor, ProductSessionId, RequestId,
+    Sha256Digest, UserId, WorkRunId,
 };
 use winwincode_storage::{
-    NewOutboxEvent, ProductStateStorage, ReceiptIdentity, StateCommit, StateRevisionGuard,
-    StorageError, StorageErrorKind,
+    AggregateJournalPublication, ArtifactStore, NewOutboxEvent, ProductStateStorage,
+    ReceiptIdentity, StateCommit, StateRevisionGuard, StorageError, StorageErrorKind,
 };
 
 use crate::{
@@ -388,23 +388,138 @@ pub struct CollaborationAnnotation {
     pub updated_at_millis: u64,
 }
 
+/// Stable identity for a page annotation retained with the collaboration
+/// catalog. The derived Attention and Evidence identities are deterministic
+/// selectors for the same Delivery source cut.
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct PageAnnotationId(pub String);
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PageAnnotationViewport {
+    pub width: u64,
+    pub height: u64,
+    pub device_pixel_ratio: f64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PageAnnotationRegion {
+    pub x: u64,
+    pub y: u64,
+    pub width: u64,
+    pub height: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PageAnnotationElement {
+    pub tag_name: String,
+    pub role: Option<String>,
+    pub accessible_name: Option<String>,
+    pub locator: String,
+    pub x: u64,
+    pub y: u64,
+    pub width: u64,
+    pub height: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PageAnnotationTarget {
+    pub page_path: String,
+    pub viewport: PageAnnotationViewport,
+    pub element: Option<PageAnnotationElement>,
+    pub region: PageAnnotationRegion,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PageAnnotationCandidateIdentity {
+    pub delivery_id: DeliveryId,
+    pub delivery_spec_id: String,
+    pub delivery_spec_revision: u64,
+    pub candidate_ref: String,
+    pub candidate_digest: Sha256Digest,
+    pub candidate_tree_id: String,
+    pub diff_sha256: Sha256Digest,
+    pub work_run_id: WorkRunId,
+    pub attempt: u64,
+    pub session_binding_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PageAnnotationArtifactRef {
+    pub artifact_id: String,
+    pub digest: Sha256Digest,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PageAnnotationState {
+    Active,
+    Revoked,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PageAnnotation {
+    pub id: PageAnnotationId,
+    pub item_id: CollaborationInboxItemId,
+    pub author_user_id: UserId,
+    pub candidate: PageAnnotationCandidateIdentity,
+    pub target: PageAnnotationTarget,
+    pub body: String,
+    pub screenshot_artifact: Option<PageAnnotationArtifactRef>,
+    pub derived_attention_id: AttentionItemId,
+    pub evidence_id: EvidenceId,
+    pub state: PageAnnotationState,
+    pub revision: u64,
+    pub source_revision: u64,
+    pub source_sha256: Sha256Digest,
+    pub updated_at_millis: u64,
+}
+
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub enum PageAnnotationAction {
+    Upsert {
+        candidate: PageAnnotationCandidateIdentity,
+        target: PageAnnotationTarget,
+        body: String,
+        screenshot_artifact: Option<PageAnnotationArtifactRef>,
+    },
+    Revoke,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct PageAnnotationCommand {
+    pub context: CollaborationInboxCommandContext,
+    pub item_id: CollaborationInboxItemId,
+    pub annotation_id: PageAnnotationId,
+    pub action: PageAnnotationAction,
+}
+
 /// Business item plus collaboration overlays and its formal command route.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CollaborationInboxItem {
     pub source: CollaborationInboxSourceItem,
     pub effective_state: CollaborationInboxItemState,
     pub assignment_ids: Vec<ResponsibilityAssignmentId>,
     pub claim: Option<CollaborationClaim>,
     pub annotations: Vec<CollaborationAnnotation>,
+    pub page_annotations: Vec<PageAnnotation>,
 }
 
 /// Stable keyset-like page sealed to source, authority, overlay, filters and time.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CollaborationInboxPage {
     pub items: Vec<CollaborationInboxItem>,
     pub has_more: bool,
     pub next_cursor: Option<OpaqueCursor>,
     pub snapshot_at_millis: u64,
+    pub catalog_revision: u64,
 }
 
 /// Authenticated context shared by claim and annotation mutations.
@@ -454,7 +569,7 @@ pub struct CollaborationAnnotationCommand {
 }
 
 /// Durable mutation result.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum CollaborationInboxReceipt {
     Claim {
@@ -464,6 +579,11 @@ pub enum CollaborationInboxReceipt {
     },
     Annotation {
         annotation: CollaborationAnnotation,
+        catalog_revision: u64,
+        replayed: bool,
+    },
+    PageAnnotation {
+        annotation: Box<PageAnnotation>,
         catalog_revision: u64,
         replayed: bool,
     },
@@ -477,6 +597,8 @@ struct CollaborationCatalog {
     revision: u64,
     claims: BTreeMap<String, CollaborationClaim>,
     annotations: BTreeMap<String, CollaborationAnnotation>,
+    #[serde(default)]
+    page_annotations: BTreeMap<String, PageAnnotation>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -502,6 +624,7 @@ pub struct CollaborationInboxService {
     source: Box<dyn CollaborationInboxSourcePort>,
     authority: Box<dyn CollaborationInboxAuthorityPort>,
     clock: Box<dyn CollaborationInboxClock>,
+    artifact_store: Option<ArtifactStore>,
 }
 
 impl CollaborationInboxService {
@@ -520,6 +643,22 @@ impl CollaborationInboxService {
     }
 
     #[must_use]
+    pub fn new_with_artifact_store(
+        storage: Box<dyn ProductStateStorage>,
+        source: Box<dyn CollaborationInboxSourcePort>,
+        authority: Box<dyn CollaborationInboxAuthorityPort>,
+        artifact_store: ArtifactStore,
+    ) -> Self {
+        Self::with_clock_and_artifact_store(
+            storage,
+            source,
+            authority,
+            Box::new(SystemCollaborationInboxClock),
+            artifact_store,
+        )
+    }
+
+    #[must_use]
     pub fn with_clock(
         storage: Box<dyn ProductStateStorage>,
         source: Box<dyn CollaborationInboxSourcePort>,
@@ -531,6 +670,27 @@ impl CollaborationInboxService {
             source,
             authority,
             clock,
+            artifact_store: None,
+        }
+    }
+
+    /// Composes the Inbox with the canonical `ArtifactStore` for screenshot
+    /// annotations. A service without this adapter rejects screenshot refs;
+    /// it never accepts an unverified ArtifactId/digest pair.
+    #[must_use]
+    pub fn with_clock_and_artifact_store(
+        storage: Box<dyn ProductStateStorage>,
+        source: Box<dyn CollaborationInboxSourcePort>,
+        authority: Box<dyn CollaborationInboxAuthorityPort>,
+        clock: Box<dyn CollaborationInboxClock>,
+        artifact_store: ArtifactStore,
+    ) -> Self {
+        Self {
+            storage,
+            source,
+            authority,
+            clock,
+            artifact_store: Some(artifact_store),
         }
     }
 
@@ -585,6 +745,7 @@ impl CollaborationInboxService {
             has_more,
             next_cursor,
             snapshot_at_millis,
+            catalog_revision: catalog.revision,
         })
     }
 
@@ -645,6 +806,7 @@ impl CollaborationInboxService {
             source_guards(&source, &command.item_id),
             &authority.state_guards,
             &receipt,
+            None,
         )
     }
 
@@ -696,6 +858,78 @@ impl CollaborationInboxService {
             source_guards(&source, &command.item_id),
             &authority.state_guards,
             &receipt,
+            None,
+        )
+    }
+
+    /// Persists one page annotation against the exact current candidate cut.
+    ///
+    /// The page payload is stored in this same Inbox catalog and receipt ledger;
+    /// the derived Attention and Evidence IDs are stable references for the
+    /// Controller projection of the owning Delivery.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when authorization, source identity, candidate
+    /// freshness, revision guards, or the canonical Delivery journal rejects
+    /// the command.
+    pub fn apply_page_annotation(
+        &mut self,
+        command: &PageAnnotationCommand,
+    ) -> Result<CollaborationInboxReceipt, CollaborationInboxError> {
+        validate_context(&command.context)?;
+        validate_page_annotation_id(&command.annotation_id)?;
+        let identity = receipt_identity(&command.context)?;
+        let digest = digest_json(&("page-annotation", command))?;
+        if let Some(receipt) = self.storage.load_receipt(&identity, &digest)? {
+            return replay_receipt(&receipt.events, true);
+        }
+        let authority = self.authorize_context(&command.context)?;
+        let source = self.source_snapshot(&command.context.scope)?;
+        let now = self.now()?;
+        let item = current_eligible_item(
+            &source,
+            &authority,
+            &command.context.audience,
+            &command.item_id,
+            now,
+        )?;
+        let (mut catalog, _) = self.load_catalog(&command.context.scope)?;
+        require_catalog_revision(catalog.revision, command.context.expected_revision)?;
+        let current = catalog.page_annotations.get(&command.annotation_id.0);
+        let annotation =
+            apply_page_annotation_action(current, command, item, &authority.viewer_user_id, now)?;
+        catalog
+            .page_annotations
+            .insert(command.annotation_id.0.clone(), annotation.clone());
+        let receipt = CollaborationInboxReceipt::PageAnnotation {
+            annotation: Box::new(annotation.clone()),
+            catalog_revision: next_revision(catalog.revision)?,
+            replayed: false,
+        };
+        let delivery_publication = if matches!(&command.action, PageAnnotationAction::Upsert { .. })
+        {
+            crate::page_annotation_delivery::stage(
+                self.storage.as_ref(),
+                &command.context.scope,
+                &annotation,
+                &command.context.request_id,
+                &digest,
+                item.source_revision,
+                self.artifact_store.as_ref(),
+            )?
+        } else {
+            None
+        };
+        self.commit(
+            &identity,
+            &digest,
+            &command.context.scope,
+            catalog,
+            source_guards(&source, &command.item_id),
+            &authority.state_guards,
+            &receipt,
+            delivery_publication,
         )
     }
 
@@ -766,6 +1000,7 @@ impl CollaborationInboxService {
                 .claims
                 .len()
                 .saturating_add(catalog.annotations.len())
+                .saturating_add(catalog.page_annotations.len())
                 > MAX_RECORDS
         {
             return Err(corrupt());
@@ -785,6 +1020,7 @@ impl CollaborationInboxService {
         source_guards: &[StateRevisionGuard],
         authority_guards: &[StateRevisionGuard],
         receipt: &CollaborationInboxReceipt,
+        journal_publication: Option<AggregateJournalPublication>,
     ) -> Result<CollaborationInboxReceipt, CollaborationInboxError> {
         let expected_revision = catalog.revision;
         catalog.revision = next_revision(catalog.revision)?;
@@ -792,6 +1028,7 @@ impl CollaborationInboxService {
             .claims
             .len()
             .saturating_add(catalog.annotations.len())
+            .saturating_add(catalog.page_annotations.len())
             > MAX_RECORDS
         {
             return Err(invalid());
@@ -810,12 +1047,21 @@ impl CollaborationInboxService {
                 event_payload,
             )],
         );
-        let mut guarded = BTreeSet::new();
+        if let Some(publication) = journal_publication {
+            commit = commit.with_journal_publication(publication);
+        }
+        let mut guarded = BTreeMap::new();
         for guard in source_guards.iter().chain(authority_guards) {
-            if guarded.insert(guard.stream_id().to_owned()) {
-                commit = commit.with_state_guard(guard.clone());
-            } else {
-                return Err(corrupt());
+            match guarded.entry(guard.stream_id().to_owned()) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(guard.expected_revision());
+                    commit = commit.with_state_guard(guard.clone());
+                }
+                std::collections::btree_map::Entry::Occupied(entry) => {
+                    if *entry.get() != guard.expected_revision() {
+                        return Err(corrupt());
+                    }
+                }
             }
         }
         match self.storage.commit(&commit) {
@@ -974,6 +1220,18 @@ fn rebuild_items(
             .cloned()
             .collect::<Vec<_>>();
         annotations.sort_by(|left, right| left.id.cmp(&right.id));
+        let mut page_annotations = catalog
+            .page_annotations
+            .values()
+            .filter(|annotation| {
+                annotation.item_id == source_item.id
+                    && annotation.state == PageAnnotationState::Active
+                    && annotation.source_revision == source_item.source_revision
+                    && annotation.source_sha256 == source_item.source_sha256
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        page_annotations.sort_by(|left, right| left.id.cmp(&right.id));
         items.push(CollaborationInboxItem {
             source: source_item.clone(),
             effective_state,
@@ -983,6 +1241,7 @@ fn rebuild_items(
                 .collect(),
             claim,
             annotations,
+            page_annotations,
         });
     }
     items.sort_by(|left, right| {
@@ -1101,11 +1360,6 @@ fn apply_annotation_action(
             if item.candidate.as_ref() != Some(candidate) {
                 return Err(candidate_changed());
             }
-            if current.is_some_and(|annotation| {
-                annotation.author_user_id != *viewer || annotation.item_id != command.item_id
-            }) {
-                return Err(unauthorized());
-            }
             let revision = current
                 .map(|annotation| next_revision(annotation.revision))
                 .transpose()?
@@ -1136,6 +1390,103 @@ fn apply_annotation_action(
             Ok(annotation)
         }
     }
+}
+
+fn apply_page_annotation_action(
+    current: Option<&PageAnnotation>,
+    command: &PageAnnotationCommand,
+    item: &CollaborationInboxSourceItem,
+    viewer: &UserId,
+    now: u64,
+) -> Result<PageAnnotation, CollaborationInboxError> {
+    match &command.action {
+        PageAnnotationAction::Upsert {
+            candidate,
+            target,
+            body,
+            screenshot_artifact,
+        } => {
+            validate_page_candidate(candidate)?;
+            validate_page_annotation_target(target)?;
+            validate_page_annotation_body(body)?;
+            if let Some(artifact) = screenshot_artifact {
+                validate_page_artifact(artifact)?;
+            }
+            if !source_item_matches_page_candidate(item, candidate) {
+                return Err(candidate_changed());
+            }
+            // Page annotations are currently create-only. Reusing an annotation
+            // id would require a matching canonical Delivery mutation for the
+            // derived Attention/Evidence pair, so fail closed until that seam
+            // exists instead of leaving the projections stale.
+            if current.is_some() {
+                return Err(wrong_state());
+            }
+            if current.is_some_and(|annotation| {
+                annotation.author_user_id != *viewer || annotation.item_id != command.item_id
+            }) {
+                return Err(unauthorized());
+            }
+            let revision = current
+                .map(|annotation| next_revision(annotation.revision))
+                .transpose()?
+                .unwrap_or(1);
+            let (derived_attention_id, evidence_id) =
+                derived_page_annotation_ids(&command.annotation_id, &candidate.delivery_id);
+            Ok(PageAnnotation {
+                id: command.annotation_id.clone(),
+                item_id: command.item_id.clone(),
+                author_user_id: viewer.clone(),
+                candidate: candidate.clone(),
+                target: target.clone(),
+                body: body.clone(),
+                screenshot_artifact: screenshot_artifact.clone(),
+                derived_attention_id,
+                evidence_id,
+                state: PageAnnotationState::Active,
+                revision,
+                source_revision: item.source_revision,
+                source_sha256: item.source_sha256.clone(),
+                updated_at_millis: now,
+            })
+        }
+        PageAnnotationAction::Revoke => {
+            let _ = (current, viewer, now);
+            // Revoke must atomically update the canonical Delivery Attention
+            // and Evidence projections. There is no such mutation route yet.
+            Err(wrong_state())
+        }
+    }
+}
+
+fn source_item_matches_page_candidate(
+    item: &CollaborationInboxSourceItem,
+    candidate: &PageAnnotationCandidateIdentity,
+) -> bool {
+    if item.candidate.as_ref().is_none_or(|source| {
+        source.candidate_ref != candidate.candidate_ref
+            || source.candidate_digest != candidate.candidate_digest
+    }) {
+        return false;
+    }
+    match &item.target {
+        ResponsibilityTarget::Delivery { delivery_id }
+        | ResponsibilityTarget::WorkItem { delivery_id, .. }
+        | ResponsibilityTarget::Review { delivery_id, .. } => delivery_id == &candidate.delivery_id,
+        ResponsibilityTarget::ProductSession { .. } => false,
+    }
+}
+
+fn derived_page_annotation_ids(
+    annotation_id: &PageAnnotationId,
+    delivery_id: &DeliveryId,
+) -> (AttentionItemId, EvidenceId) {
+    let digest = Sha256::digest(format!("{}:{}", annotation_id.0, delivery_id.0).as_bytes());
+    let suffix = format!("{digest:x}");
+    (
+        AttentionItemId(format!("attention-page-{}", &suffix[..32])),
+        EvidenceId(format!("evidence-page-{}", &suffix[..32])),
+    )
 }
 
 fn validate_list_request(
@@ -1371,6 +1722,23 @@ fn validate_catalog(catalog: &CollaborationCatalog) -> Result<(), CollaborationI
         validate_safe_integer(annotation.source_revision)?;
         validate_safe_integer(annotation.updated_at_millis)?;
     }
+    for (key, annotation) in &catalog.page_annotations {
+        if key != &annotation.id.0 {
+            return Err(corrupt());
+        }
+        validate_page_annotation_id(&annotation.id)?;
+        validate_page_candidate(&annotation.candidate)?;
+        validate_page_annotation_target(&annotation.target)?;
+        validate_page_annotation_body(&annotation.body)?;
+        if let Some(artifact) = &annotation.screenshot_artifact {
+            validate_page_artifact(artifact)?;
+        }
+        validate_page_item_id(&annotation.item_id)?;
+        validate_sha256(&annotation.source_sha256)?;
+        validate_safe_integer(annotation.revision)?;
+        validate_safe_integer(annotation.source_revision)?;
+        validate_safe_integer(annotation.updated_at_millis)?;
+    }
     Ok(())
 }
 
@@ -1385,6 +1753,127 @@ fn validate_candidate(
     }
     validate_safe_integer(candidate.candidate_revision)?;
     validate_sha256(&candidate.candidate_digest)
+}
+
+fn validate_page_candidate(
+    candidate: &PageAnnotationCandidateIdentity,
+) -> Result<(), CollaborationInboxError> {
+    validate_text(&candidate.delivery_id.0)?;
+    validate_text(&candidate.delivery_spec_id)?;
+    validate_safe_integer(candidate.delivery_spec_revision)?;
+    validate_text(&candidate.candidate_ref)?;
+    validate_sha256(&candidate.candidate_digest)?;
+    validate_git_object_id(&candidate.candidate_tree_id)?;
+    validate_sha256(&candidate.diff_sha256)?;
+    validate_text(&candidate.work_run_id.0)?;
+    if candidate.attempt == 0 {
+        return Err(invalid());
+    }
+    validate_safe_integer(candidate.attempt)?;
+    validate_text(&candidate.session_binding_id)
+}
+
+fn validate_git_object_id(value: &str) -> Result<(), CollaborationInboxError> {
+    if !matches!(value.len(), 40 | 64) || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+fn validate_page_annotation_target(
+    target: &PageAnnotationTarget,
+) -> Result<(), CollaborationInboxError> {
+    if target.page_path.is_empty()
+        || target.page_path.len() > 2_048
+        || !target.page_path.starts_with('/')
+        || target.page_path.contains('\0')
+        || target.page_path.split('/').any(|part| part == "..")
+    {
+        return Err(invalid());
+    }
+    let viewport = &target.viewport;
+    if !(1..=4_096).contains(&viewport.width)
+        || !(1..=4_096).contains(&viewport.height)
+        || !viewport.device_pixel_ratio.is_finite()
+        || !(0.1..=4.0).contains(&viewport.device_pixel_ratio)
+    {
+        return Err(invalid());
+    }
+    let region = &target.region;
+    if region.width == 0
+        || region.height == 0
+        || region.x >= viewport.width
+        || region.y >= viewport.height
+        || region
+            .x
+            .checked_add(region.width)
+            .is_none_or(|end| end > viewport.width)
+        || region
+            .y
+            .checked_add(region.height)
+            .is_none_or(|end| end > viewport.height)
+    {
+        return Err(invalid());
+    }
+    if let Some(element) = &target.element {
+        validate_text(&element.tag_name)?;
+        if let Some(role) = &element.role {
+            validate_text(role)?;
+        }
+        if let Some(name) = &element.accessible_name {
+            validate_text(name)?;
+        }
+        validate_text(&element.locator)?;
+        if element.width == 0
+            || element.height == 0
+            || element.x >= viewport.width
+            || element.y >= viewport.height
+            || element
+                .x
+                .checked_add(element.width)
+                .is_none_or(|end| end > viewport.width)
+            || element
+                .y
+                .checked_add(element.height)
+                .is_none_or(|end| end > viewport.height)
+        {
+            return Err(invalid());
+        }
+    }
+    Ok(())
+}
+
+fn validate_page_annotation_body(body: &str) -> Result<(), CollaborationInboxError> {
+    if body.is_empty() || body.len() > 4_000 || body.contains('\0') {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+fn validate_page_artifact(
+    artifact: &PageAnnotationArtifactRef,
+) -> Result<(), CollaborationInboxError> {
+    if artifact.artifact_id.len() != 30
+        || !artifact.artifact_id.starts_with("art_")
+        || !artifact.artifact_id[4..]
+            .bytes()
+            .all(|byte| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(&byte))
+    {
+        return Err(invalid());
+    }
+    validate_sha256(&artifact.digest)
+}
+
+fn validate_page_annotation_id(id: &PageAnnotationId) -> Result<(), CollaborationInboxError> {
+    validate_annotation_id(&CollaborationAnnotationId(id.0.clone()))
+}
+
+fn validate_page_item_id(id: &CollaborationInboxItemId) -> Result<(), CollaborationInboxError> {
+    match id {
+        CollaborationInboxItemId::Approval(value) => validate_text(&value.0),
+        CollaborationInboxItemId::GateAttention(value)
+        | CollaborationInboxItemId::DeliveryAttention(value) => validate_text(&value.0),
+    }
 }
 
 fn validate_annotation_target(
@@ -1527,6 +2016,7 @@ fn empty_catalog(scope: &RepositoryScope) -> CollaborationCatalog {
         revision: 0,
         claims: BTreeMap::new(),
         annotations: BTreeMap::new(),
+        page_annotations: BTreeMap::new(),
     }
 }
 
@@ -1602,6 +2092,9 @@ fn replay_receipt(
             replayed: stored, ..
         }
         | CollaborationInboxReceipt::Annotation {
+            replayed: stored, ..
+        }
+        | CollaborationInboxReceipt::PageAnnotation {
             replayed: stored, ..
         } => *stored = replayed,
     }

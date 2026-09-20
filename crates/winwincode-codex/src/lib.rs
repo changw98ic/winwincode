@@ -11,6 +11,7 @@ mod action_bridge;
 mod adapter;
 pub mod candidate_artifact_outbox;
 mod contract;
+pub mod diagnostic_artifact_outbox;
 mod helper_release;
 mod model_bridge;
 pub mod model_port_client;
@@ -31,13 +32,18 @@ pub use adapter::{
     ProductionSubmissionFault,
 };
 pub use contract::{
-    ActionRequestTransport, CodexCoreAdapter, CodexPoll, CodexRunKey, CodexRunKeyError,
-    CodexThreadSession, CodexThreadStart, CodexTurnCompletion, DelegatedLoopPhase,
-    DelegatedLoopStopFact, DelegatedLoopTransition, DelegatedLoopTransitionOutcome,
-    DelegatedObserverPreflight, DelegatedObserverPreflightOutcome, DelegatedObserverSettlement,
-    DurableExecutionDelivery, WorkerExecutionPort, delegated_loop_turn_id,
-    secret_safe_runtime_summary,
+    ActionRequestTransport, ArtifactAckOutcome, CodexCoreAdapter, CodexPoll, CodexRunKey,
+    CodexRunKeyError, CodexThreadSession, CodexThreadStart, CodexTurnCompletion,
+    DelegatedLoopPhase, DelegatedLoopStopFact, DelegatedLoopTransition,
+    DelegatedLoopTransitionOutcome, DelegatedObserverPreflight, DelegatedObserverPreflightOutcome,
+    DelegatedObserverSettlement, DurableExecutionDelivery, WorkerExecutionPort,
+    delegated_loop_turn_id, secret_safe_runtime_summary,
+};
+pub use diagnostic_artifact_outbox::{
+    DiagnosticArtifactAckOutcome, DiagnosticArtifactAuthority, DiagnosticArtifactUpload,
+    RetainedDiagnosticArtifact,
 };
 pub use helper_release::{HelperReleaseManifest, HelperReleaseManifestError};
+pub use model_bridge::set_model_intake_log_path;
 pub use winwincode_execution_port::runtime_trace_outbox::{ExecutionMode, ObserverMode};
 pub use winwincode_kernel::RoleExecutionMode;

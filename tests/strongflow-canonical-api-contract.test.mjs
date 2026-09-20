@@ -52,6 +52,7 @@ test('delivery.get has one closed StrongFlow detail while DeliveryPage stays com
   assert.equal(http.$defs.DeliveryPage.properties.items.items.$ref,
     './domain.schema.json#/$defs/DeliveryProjection')
   assert.deepEqual(sorted(Object.keys(domain.$defs.DeliveryProjection.properties)), sorted([
+    'acceptance',
     'schemaVersion',
     'deliveryId',
     'revision',
@@ -61,6 +62,8 @@ test('delivery.get has one closed StrongFlow detail while DeliveryPage stays com
     'workItemCounts',
     'activeWorkRunId',
     'openAttentionCount',
+    'reworkAttemptsUsed',
+    'sourceProductSessionId',
     'updatedAt',
   ]))
 
