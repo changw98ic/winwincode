@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use winwincode_delivery::domain::{verification::VerificationFindingConclusion, EvidenceRefType};
+use winwincode_delivery::domain::{EvidenceRefType, verification::VerificationFindingConclusion};
 
 const MAX_CANDIDATES: usize = 64;
 const MAX_CLAIMS: usize = 1_000;
@@ -401,10 +401,12 @@ mod tests {
 
         assert_eq!(analysis.conflicts.len(), 1);
         assert_eq!(analysis.conflicts[0].leading_position, None);
-        assert!(analysis.conflicts[0]
-            .positions
-            .iter()
-            .all(|position| position.strongest_evidence == FusionEvidenceQuality::VerifiedFact));
+        assert!(
+            analysis.conflicts[0]
+                .positions
+                .iter()
+                .all(|position| position.strongest_evidence == FusionEvidenceQuality::VerifiedFact)
+        );
         assert!(analysis.unsupported_claims.is_empty());
         assert!(analysis.missing_evidence.is_empty());
     }
