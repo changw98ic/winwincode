@@ -4,6 +4,7 @@
 //! This crate does not depend on the Server or Control Plane.
 
 pub mod credential_leak_gate;
+mod jev;
 mod provider_anthropic;
 pub mod provider_https_sse;
 pub mod provider_stream;
@@ -11,6 +12,11 @@ mod types;
 
 pub use credential_leak_gate::{
     CredentialLeakError, CredentialLeakErrorKind, CredentialLeakGate, CredentialOutputBoundary,
+};
+pub use jev::{
+    JevAttemptFailure, JevBatchEvaluation, JevDevice, JevDtype, JevEvaluation, JevExecutionOptions,
+    JevHealth, JevHypothesis, JevObservation, JevProvider, JevProviderCapabilities,
+    JevProviderError, JevProviderErrorKind, JevRun, JevRuntime, JevRuntimeConfig, JevScores,
 };
 pub use provider_anthropic::ProviderTokenPricing;
 pub use provider_https_sse::{
