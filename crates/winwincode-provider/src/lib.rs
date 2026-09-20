@@ -14,9 +14,15 @@ pub use credential_leak_gate::{
     CredentialLeakError, CredentialLeakErrorKind, CredentialLeakGate, CredentialOutputBoundary,
 };
 pub use jev::{
-    JevAttemptFailure, JevBatchEvaluation, JevDevice, JevDtype, JevEvaluation, JevExecutionOptions,
-    JevHealth, JevHypothesis, JevObservation, JevProvider, JevProviderCapabilities,
-    JevProviderError, JevProviderErrorKind, JevRun, JevRuntime, JevRuntimeConfig, JevScores,
+    HttpsJevRemoteTransport, JevAttemptFailure, JevBatchEvaluation, JevDevice, JevDtype,
+    JevEvaluation, JevExecutionOptions, JevFallbackPolicy, JevHealth, JevHypothesis,
+    JevObservation, JevProvider, JevProviderCapabilities, JevProviderError, JevProviderErrorKind,
+    JevRemoteScoreItem, JevRemoteScoreRequest, JevRemoteTransport, JevRun, JevRuntime,
+    JevRuntimeConfig, JevScores, MockJevProvider, MockJevRemoteTransport,
+    OPENJEV_DEFAULT_MODEL_ID, OPENJEV_LOCAL_RUNTIME_GAP, OpenJevLocalProvider, OpenJevLocalRuntime,
+    OpenJevRemoteConfig, OpenJevRemoteConfigRequest, OpenJevRemoteProvider, OpenJevRemoteSettings,
+    RemoteJevScoreBatch, contract_capability_mocks, jev_provider_order, parse_jev_score_list,
+    parse_jev_scores, portable_scores,
 };
 pub use provider_anthropic::ProviderTokenPricing;
 pub use provider_https_sse::{
