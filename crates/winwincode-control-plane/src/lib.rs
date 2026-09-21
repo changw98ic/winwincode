@@ -61,6 +61,7 @@ mod device_scheduler;
 pub mod device_session_gate;
 mod durable_execution_port;
 pub mod execution_port_service;
+pub mod fusion_adjudication_host;
 pub mod fusion_analysis;
 mod gate_interaction_service;
 pub mod knowledge;
