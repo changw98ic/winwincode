@@ -5,7 +5,10 @@ import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import test from 'node:test'
 
-import { BenchmarkError, evaluateRealTaskBenchmark } from '../scripts/evaluate-real-task-benchmark.mjs'
+import {
+  BenchmarkError,
+  evaluateRealTaskBenchmark,
+} from '../scripts/evaluate-real-task-benchmark.mjs'
 
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
 const canonicalId = (prefix, index) => `${prefix}_${index.toString(10).padStart(26, '0')}`
@@ -75,5 +78,23 @@ test('synthetic tasks, missing coverage, and evidence drift fail closed', async 
   dataset.tasks[0].evidence[0].sha256 = 'c'.repeat(64)
   await assert.rejects(evaluateRealTaskBenchmark(dataset, root), error => (
     error instanceof BenchmarkError && error.code === 'EVIDENCE_MISMATCH'
+  ))
+})
+
+test('E13 evaluator refuses JEV session-replay datasets', async t => {
+  const { root } = await fixture(t)
+  const dataset = {
+    schemaVersion: 1,
+    kind: 'winwincode.jev-session-replay.v1',
+    track: 'jev-session-replay',
+    phase: 'phase1',
+    evidenceClass: 'fixture',
+    datasetLabel: 'must-not-enter-e13',
+    tasks: [],
+  }
+  await assert.rejects(evaluateRealTaskBenchmark(dataset, root), error => (
+    error instanceof BenchmarkError
+      && error.code === 'BENCHMARK_INVALID'
+      && error.message.includes('evaluate-jev-session-replay.mjs')
   ))
 })

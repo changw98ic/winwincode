@@ -1,0 +1,215 @@
+{
+  "schemaVersion": 1,
+  "kind": "winwincode.jev-session-replay.v1",
+  "track": "jev-session-replay",
+  "phase": "phase1",
+  "evidenceClass": "fixture",
+  "datasetLabel": "jev-phase1-fixture-skeleton-not-production",
+  "missingRealData": [
+    "live BD-01 OpenJev scores on real sessions",
+    "production token usage from Codex rollouts",
+    "critical-constraint inventories from real tasks"
+  ],
+  "tasks": [
+    {
+      "id": "fixture-task-jev04-001",
+      "runs": [
+        {
+          "mode": "baseline",
+          "status": "available",
+          "provenance": "fixture",
+          "sourceCommit": "fixture-commit-jev04-phase1",
+          "configurationSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "workItemId": "fixture-wit-jev04-task-001",
+          "workRunId": "fixture-wrn-jev04-baseline-001",
+          "measurements": {
+            "tokens": {
+              "rawInput": 1000,
+              "cachedInput": 0,
+              "uncachedInput": 1000,
+              "output": 200,
+              "reasoning": 50,
+              "jevInput": 0
+            },
+            "context": {
+              "active": 1000,
+              "removed": 0,
+              "archived": 0,
+              "bootstrap": 20
+            },
+            "agent": {
+              "turns": 8,
+              "toolCalls": 40,
+              "fileReads": 12,
+              "greps": 6,
+              "tests": 4,
+              "repeatToolCalls": 20
+            },
+            "perf": {
+              "ttftMs": 1200,
+              "latencyMs": 18000,
+              "jevLatencyMs": null,
+              "rotations": 0
+            },
+            "quality": {
+              "success": true,
+              "verificationPassed": true,
+              "regression": false,
+              "contextFailure": false,
+              "forgottenConstraint": false,
+              "criticalRecall": null
+            },
+            "cost": [
+              {
+                "provider": "fixture-provider",
+                "inputUsd": 1,
+                "cacheUsd": 0,
+                "outputUsd": 0.2,
+                "jevUsd": 0,
+                "retryUsd": 0
+              }
+            ]
+          },
+          "evidence": [
+            {
+              "path": "tests/fixtures/jev-session-replay/fixture-evidence.txt",
+              "sha256": "7432b5aac43f4ffd8e42d9cb766c0a6d765780708dc2d19ac2e63154a84903a1"
+            }
+          ]
+        },
+        {
+          "mode": "deterministic-gc",
+          "status": "available",
+          "provenance": "fixture",
+          "sourceCommit": "fixture-commit-jev04-phase1",
+          "configurationSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "workItemId": "fixture-wit-jev04-task-001",
+          "workRunId": "fixture-wrn-jev04-detgc-001",
+          "measurements": {
+            "tokens": {
+              "rawInput": 850,
+              "cachedInput": 100,
+              "uncachedInput": 750,
+              "output": 190,
+              "reasoning": 48,
+              "jevInput": 0
+            },
+            "context": {
+              "active": 700,
+              "removed": 150,
+              "archived": 150,
+              "bootstrap": 20
+            },
+            "agent": {
+              "turns": 7,
+              "toolCalls": 34,
+              "fileReads": 10,
+              "greps": 5,
+              "tests": 4,
+              "repeatToolCalls": 14
+            },
+            "perf": {
+              "ttftMs": 1100,
+              "latencyMs": 16000,
+              "jevLatencyMs": null,
+              "rotations": 0
+            },
+            "quality": {
+              "success": true,
+              "verificationPassed": true,
+              "regression": false,
+              "contextFailure": false,
+              "forgottenConstraint": false,
+              "criticalRecall": {
+                "recalled": 99,
+                "total": 100
+              }
+            },
+            "cost": [
+              {
+                "provider": "fixture-provider",
+                "inputUsd": 0.85,
+                "cacheUsd": 0.02,
+                "outputUsd": 0.19,
+                "jevUsd": 0,
+                "retryUsd": 0
+              }
+            ]
+          },
+          "evidence": [
+            {
+              "path": "tests/fixtures/jev-session-replay/fixture-evidence-detgc.txt",
+              "sha256": "18ac06f0f6b7d0f0bea270061ca86c2d15a8352e96953231ea979ce1ae802d00"
+            }
+          ]
+        },
+        {
+          "mode": "gc+jev",
+          "status": "available",
+          "provenance": "fixture",
+          "sourceCommit": "fixture-commit-jev04-phase1",
+          "configurationSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "workItemId": "fixture-wit-jev04-task-001",
+          "workRunId": "fixture-wrn-jev04-gcjev-001",
+          "measurements": {
+            "tokens": {
+              "rawInput": 700,
+              "cachedInput": 200,
+              "uncachedInput": 500,
+              "output": 180,
+              "reasoning": 45,
+              "jevInput": 40
+            },
+            "context": {
+              "active": 520,
+              "removed": 300,
+              "archived": 180,
+              "bootstrap": 20
+            },
+            "agent": {
+              "turns": 6,
+              "toolCalls": 30,
+              "fileReads": 8,
+              "greps": 4,
+              "tests": 3,
+              "repeatToolCalls": 12
+            },
+            "perf": {
+              "ttftMs": 1000,
+              "latencyMs": 15000,
+              "jevLatencyMs": 80,
+              "rotations": 0
+            },
+            "quality": {
+              "success": true,
+              "verificationPassed": true,
+              "regression": false,
+              "contextFailure": false,
+              "forgottenConstraint": false,
+              "criticalRecall": {
+                "recalled": 99,
+                "total": 100
+              }
+            },
+            "cost": [
+              {
+                "provider": "fixture-provider",
+                "inputUsd": 0.75,
+                "cacheUsd": 0.04,
+                "outputUsd": 0.18,
+                "jevUsd": 0.02,
+                "retryUsd": 0
+              }
+            ]
+          },
+          "evidence": [
+            {
+              "path": "tests/fixtures/jev-session-replay/fixture-evidence-gcjev.txt",
+              "sha256": "cf92e1eca56a0bb12ad2947702d955b8abfad8a8bd80d27336bbd31ff740133c"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
