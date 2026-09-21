@@ -587,6 +587,80 @@ fn device_routed_work_run_jobs_are_excluded_from_local_claims() {
 }
 
 #[test]
+fn registered_device_worker_claims_its_reserved_strongflow_job() {
+    let mut storage = SqliteStorage::open(temporary_root("device-claim")).expect("storage");
+    let (node, instance, lease_id, fencing_token, binding) =
+        work_run_device_fixture(&mut storage, 1100, HOLDER);
+    let (job_id, work_run_id, product_session_id) = work_run_role_job(
+        &mut storage,
+        1200,
+        "executor",
+        ExecutionWorkspaceWriteMode::Candidate,
+    );
+    work_run_anchor(
+        &mut storage,
+        1300,
+        &node,
+        &instance,
+        HOLDER,
+        &lease_id,
+        fencing_token,
+        &binding,
+        product_session_id.0.as_str(),
+        work_run_id.0.as_str(),
+    );
+    let dispatch = dispatch_work_run_to_device_worker(
+        &mut storage,
+        Some(HOLDER),
+        &work_run_id,
+        &instant("2026-09-04T12:05:00.000Z"),
+    )
+    .expect("anchored WorkRun dispatches")
+    .expect("device dispatch");
+    // The Device WorkerSession process registers under the exact launch-grant
+    // worker identities that the reservation facts sealed. Local exclusion
+    // still holds for any other worker; this process may claim its own job.
+    let worker_id = WorkerId(dispatch.facts.worker_id.clone());
+    let worker_instance_id = WorkerInstanceId(dispatch.facts.worker_instance_id.clone());
+    let request = WorkerRegistrationRequest {
+        authentication_identity: WorkerAuthenticationIdentity::TransportPrincipal {
+            issuer: "winwincode-server".to_owned(),
+            subject: format!("worker-session:{}", dispatch.facts.worker_session_id),
+            credential_fingerprint: Sha256Digest(DIGEST.to_owned()),
+        },
+        protocol_version: EXECUTION_PROTOCOL_VERSION.to_owned(),
+        platform: WorkerPlatform::Aarch64AppleDarwin,
+        capabilities: vec!["codex".to_owned()],
+        capability_digest: Sha256Digest(format!("sha256:{}", "0".repeat(64))),
+        security_zone: "device-client".to_owned(),
+        max_slots: 1,
+        message_id: ExecutionMessageId(canonical_id("xmsg", 1400)),
+        request_id: RequestId(canonical_id("req", 1400)),
+        sent_at: instant(T0),
+        started_at: instant(T0),
+        worker_id: worker_id.clone(),
+        worker_instance_id: worker_instance_id.clone(),
+    };
+    let mut registry = storage.execution_registry().expect("registry");
+    let receipt = registry.register_worker(&request).expect("register");
+    assert!(matches!(
+        receipt.status,
+        WorkerRegistrationStatus::Accepted | WorkerRegistrationStatus::Duplicate
+    ));
+    let claimed = claim_locally(&mut storage, 1401, &worker_id, &worker_instance_id);
+    assert_eq!(
+        claimed.as_ref(),
+        Some(&job_id),
+        "Device StrongFlow Worker must lease the reservation-facts job after registration"
+    );
+    let still_queued = queued_jobs(&mut storage);
+    assert!(
+        !still_queued.iter().any(|job| job == &job_id),
+        "claimed WorkRun job must leave the queued set"
+    );
+}
+
+#[test]
 fn a_dead_anchor_refuses_the_dispatch_without_binding() {
     let mut storage = SqliteStorage::open(temporary_root("dead-anchor")).expect("storage");
     let (node, instance, lease_id, fencing_token, binding) =

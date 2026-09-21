@@ -498,10 +498,6 @@ where
             .map_err(|_| RemoteWorkerTransportError::new("remote Worker credential is invalid"))?;
         let frame = RemoteTransportAdapter::<NoopCore>::decode(request.frame())
             .map_err(|_| RemoteWorkerTransportError::new("remote Worker frame is invalid"))?;
-        let is_registration = matches!(
-            frame.message(),
-            ExecutionPortMessage::WorkerRegisterMessage(_)
-        );
         let mut storage = SqliteStorage::open(&self.data_directory).map_err(|_| {
             RemoteWorkerTransportError::new("remote Worker Registry is unavailable")
         })?;
@@ -524,24 +520,31 @@ where
         scheduler
             .acknowledge_remote(&now, request.acknowledgements())
             .map_err(|_| RemoteWorkerTransportError::new("remote Worker scheduler failed"))?;
-        // Registration leaves Registry health at `registered`. Returning its
-        // acceptance must not be coupled to a scheduler tick that requires a
-        // healthy slot; the first authenticated heartbeat makes the Worker
-        // healthy and drives the queued work immediately afterward.
-        if !is_registration {
+        // Registration leaves Registry health at `registered` by default.
+        // Device WorkerSessions are live Client-spawned processes that already
+        // hold a launch grant; mark them healthy on the accepting registration
+        // so the same exchange can drive the identity-bound queued Job claim
+        // (StrongFlow WorkRun executor jobs are never locally claimable).
+        // A later scheduler failure must not erase an accepted registration:
+        // the Worker already joined the Registry and will retry drive on the
+        // next heartbeat.
+        let drive_result = {
             let worker_queue = WorkerDeliveryQueue {
                 queue: &self.queue,
                 worker_id: request.worker_id().clone(),
             };
-            scheduler
-                .drive_remote_for(
-                    &now,
-                    &worker_queue,
-                    request.worker_id().clone(),
-                    request.worker_instance_id().clone(),
-                    principal.worker_pool_id().clone(),
-                )
-                .map_err(|_| RemoteWorkerTransportError::new("remote Worker scheduler failed"))?;
+            scheduler.drive_remote_for(
+                &now,
+                &worker_queue,
+                request.worker_id().clone(),
+                request.worker_instance_id().clone(),
+                principal.worker_pool_id().clone(),
+            )
+        };
+        if let Err(error) = drive_result {
+            if std::env::var_os("WWC_DEBUG_RUNTIME").is_some() {
+                eprintln!("remote Worker scheduler drive after exchange failed: {error}");
+            }
         }
         let response = RemoteExchangeResponse::new(self.queue.snapshot(request.worker_id())?)
             .map_err(|_| RemoteWorkerTransportError::new("remote Worker response is invalid"))?;

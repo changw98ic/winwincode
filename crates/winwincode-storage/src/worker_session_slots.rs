@@ -990,7 +990,11 @@ fn require_current_worker(
             "Worker process instance is no longer current",
         ));
     }
-    if require_healthy && health != "healthy" {
+    // `registered` is a live process that already joined the Registry.
+    // Device StrongFlow Workers claim identity-bound jobs on the registration
+    // exchange before any heartbeat; treating `registered` as unhealthy left
+    // those jobs queued forever. Terminal health states still refuse slots.
+    if require_healthy && health != "healthy" && health != "registered" {
         return Err(WorkerSlotError::new(
             WorkerSlotErrorCode::WorkerNotHealthy,
             "Worker is not healthy",
