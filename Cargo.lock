@@ -12858,6 +12858,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "winwincode-fusion"
+version = "0.1.0-alpha.2"
+dependencies = [
+ "futures",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+]
+
+[[package]]
 name = "winwincode-integration-core"
 version = "0.1.0-alpha.2"
 dependencies = [

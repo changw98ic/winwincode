@@ -51,24 +51,24 @@ function safeEvidencePath(path) {
     && !path.includes('\\')
 }
 
-async function validateEvidence(repositoryRoot, task, index) {
-  if (!Array.isArray(task.evidence) || task.evidence.length === 0) {
-    fail('EVIDENCE_MISSING', `tasks[${index}] has no evidence`)
+async function validateEvidence(repositoryRoot, subject, label) {
+  if (!Array.isArray(subject.evidence) || subject.evidence.length === 0) {
+    fail('EVIDENCE_MISSING', `${label} has no evidence`)
   }
-  for (const [evidenceIndex, evidenceValue] of task.evidence.entries()) {
-    const evidence = record(evidenceValue, `tasks[${index}].evidence[${evidenceIndex}]`)
+  for (const [evidenceIndex, evidenceValue] of subject.evidence.entries()) {
+    const evidence = record(evidenceValue, `${label}.evidence[${evidenceIndex}]`)
     if (!safeEvidencePath(evidence.path) || !SHA256.test(evidence.sha256 ?? '')) {
-      fail('EVIDENCE_INVALID', `tasks[${index}].evidence[${evidenceIndex}] identity is invalid`)
+      fail('EVIDENCE_INVALID', `${label}.evidence[${evidenceIndex}] identity is invalid`)
     }
     let bytes
     try {
       bytes = await readFile(resolve(repositoryRoot, evidence.path))
     } catch {
-      fail('EVIDENCE_MISSING', `tasks[${index}] evidence is unavailable: ${evidence.path}`)
+      fail('EVIDENCE_MISSING', `${label} evidence is unavailable: ${evidence.path}`)
     }
     const actual = createHash('sha256').update(bytes).digest('hex')
     if (actual !== evidence.sha256) {
-      fail('EVIDENCE_MISMATCH', `tasks[${index}] evidence digest changed: ${evidence.path}`)
+      fail('EVIDENCE_MISMATCH', `${label} evidence digest changed: ${evidence.path}`)
     }
   }
 }
@@ -122,6 +122,12 @@ function validateTask(taskValue, index) {
 
 export async function evaluateRealTaskBenchmark(datasetValue, repositoryRoot) {
   const dataset = record(datasetValue, 'dataset')
+  if (typeof dataset.kind === 'string' && dataset.kind.includes('session-replay')) {
+    fail(
+      'BENCHMARK_INVALID',
+      'JEV session replay is evaluated by scripts/evaluate-jev-session-replay.mjs, not this E13 production gate',
+    )
+  }
   if (dataset.schemaVersion !== 1 || dataset.kind !== 'winwincode.real-task-benchmark.v1') {
     fail('BENCHMARK_INVALID', 'dataset identity is invalid')
   }
@@ -140,7 +146,7 @@ export async function evaluateRealTaskBenchmark(datasetValue, repositoryRoot) {
   if (!tasks.some(task => task.result === 'accepted') || !tasks.some(task => task.result !== 'accepted')) {
     fail('COVERAGE_MISSING', 'both successful and unsuccessful results are required')
   }
-  await Promise.all(tasks.map((task, index) => validateEvidence(repositoryRoot, task, index)))
+  await Promise.all(tasks.map((task, index) => validateEvidence(repositoryRoot, task, `tasks[${index}]`)))
 
   const total = tasks.length
   const accepted = tasks.filter(task => task.result === 'accepted').length
@@ -219,7 +225,8 @@ export async function runCli(arguments_ = process.argv.slice(2)) {
     const options = parseArguments(arguments_)
     const input = resolve(options.input)
     const dataset = JSON.parse(await readFile(input, 'utf8'))
-    const report = await evaluateRealTaskBenchmark(dataset, resolve(options['repository-root'] ?? '.'))
+    const repositoryRoot = resolve(options['repository-root'] ?? '.')
+    const report = await evaluateRealTaskBenchmark(dataset, repositoryRoot)
     const bytes = `${JSON.stringify(report, null, 2)}\n`
     if (options.output) await writeFile(resolve(options.output), bytes, { flag: 'wx' })
     else process.stdout.write(bytes)

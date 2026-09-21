@@ -14,6 +14,7 @@ members = [
   "crates/winwincode-domain",
   "crates/winwincode-execution-port",
   "crates/winwincode-evidence-export",
+  "crates/winwincode-fusion",
   "crates/winwincode-connector-github",
   "crates/winwincode-connector-jira",
   "crates/winwincode-connector-linear",
@@ -87,6 +88,7 @@ winwincode-data-export = { path = "crates/winwincode-data-export" }
 winwincode-delivery = { version = "=0.1.0-alpha.2", path = "crates/winwincode-delivery" }
 winwincode-domain = { version = "=0.1.0-alpha.2", path = "crates/winwincode-domain" }
 winwincode-execution-port = { path = "crates/winwincode-execution-port" }
+winwincode-fusion = { path = "crates/winwincode-fusion" }
 winwincode-integration-core = { version = "=0.1.0-alpha.2", path = "crates/winwincode-integration-core" }
 winwincode-integration-sqlite = { path = "crates/winwincode-integration-sqlite" }
 winwincode-connector-github = { path = "crates/winwincode-connector-github" }

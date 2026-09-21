@@ -23,3 +23,4 @@ export interface WorkspaceComponentDescriptor {
 export * from './runtime-events.js'
 export * from './strongflow-role.js'
 export * from './client-control.js'
+export * from './fusion.js'

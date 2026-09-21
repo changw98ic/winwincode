@@ -1,3 +1,4 @@
+mod deterministic_gc;
 mod history;
 mod normalize;
 pub(crate) mod updates;

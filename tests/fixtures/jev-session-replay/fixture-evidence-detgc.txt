@@ -1,0 +1,1 @@
+JEV-04 Phase1 fixture evidence: deterministic-gc arm sample.
