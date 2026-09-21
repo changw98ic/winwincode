@@ -59,9 +59,9 @@
     "cloudZeroMoveMeaning": "No current tracked path is safely Cloud-only. Cloud must start from a clean repository; shared or mixed candidates remain in migration-review until split."
   },
   "summary": {
-    "classifiedPathCount": 1213,
+    "classifiedPathCount": 1234,
     "classifiedPathCountByBucket": {
-      "winwincode": 963,
+      "winwincode": 984,
       "winwincode-cloud": 0,
       "winwincode-enterprise": 0,
       "migration-review": 250
@@ -69,12 +69,12 @@
     "classifiedPathCountByBucketAndRoot": {
       "winwincode": {
         "apps": 111,
-        "crates": 544,
-        "docs": 55,
-        "packages": 25,
+        "crates": 557,
+        "docs": 56,
+        "packages": 26,
         "schema": 12,
-        "scripts": 31,
-        "tests": 185
+        "scripts": 32,
+        "tests": 190
       },
       "winwincode-cloud": {},
       "winwincode-enterprise": {},
@@ -93,8 +93,8 @@
     "migrationReviewPathCount": 250,
     "highRiskMixedPathCount": 12,
     "historicalHighRiskMixedPathCount": 5,
-    "currentHeadTrackedPathCount": 1213,
-    "currentHeadTrackedPathListSha256": "808a50a5ae939663931dbb6a8c3108a6de4aa08b639d65e81020184afacc95d7",
+    "currentHeadTrackedPathCount": 1234,
+    "currentHeadTrackedPathListSha256": "0c04c79cce8b3ee6047f46a907d1d05c5e187fc2179eb76532da7266a2300e14",
     "targetEvidenceRequiredPathCount": 12,
     "targetEvidenceRequiredByRepository": {
       "winwincode-cloud": 12,
@@ -265,6 +265,7 @@
       "crates/winwincode-codex/src/model_bridge.rs",
       "crates/winwincode-codex/src/model_port_client.rs",
       "crates/winwincode-codex/src/outbox.rs",
+      "crates/winwincode-codex/src/parallel_model_runner.rs",
       "crates/winwincode-codex/src/performance_evidence.rs",
       "crates/winwincode-codex/src/performance.rs",
       "crates/winwincode-codex/src/stage_product.rs",
@@ -322,6 +323,9 @@
       "crates/winwincode-control-plane/src/device_session_gate.rs",
       "crates/winwincode-control-plane/src/durable_execution_port.rs",
       "crates/winwincode-control-plane/src/execution_port_service.rs",
+      "crates/winwincode-control-plane/src/fusion_adjudication_host.rs",
+      "crates/winwincode-control-plane/src/fusion_analysis.rs",
+      "crates/winwincode-control-plane/src/fusion_compose.rs",
       "crates/winwincode-control-plane/src/gate_interaction_service.rs",
       "crates/winwincode-control-plane/src/knowledge.rs",
       "crates/winwincode-control-plane/src/local_candidate.rs",
@@ -552,6 +556,7 @@
       "crates/winwincode-execution-port/src/debug_probe_delta_context.rs",
       "crates/winwincode-execution-port/src/diagnostic_parser.rs",
       "crates/winwincode-execution-port/src/execution_identity.rs",
+      "crates/winwincode-execution-port/src/jev_decision.rs",
       "crates/winwincode-execution-port/src/observation_contract.rs",
       "crates/winwincode-execution-port/src/performance_comparison.rs",
       "crates/winwincode-execution-port/src/probe_result_normalizer.rs",
@@ -588,6 +593,12 @@
       "crates/winwincode-execution-port/tests/transport_parity.rs",
       "crates/winwincode-execution-port/tests/typed_replay.rs",
       "crates/winwincode-execution-port/tests/validation_config.rs",
+      "crates/winwincode-fusion/Cargo.toml",
+      "crates/winwincode-fusion/src/contract.rs",
+      "crates/winwincode-fusion/src/lib.rs",
+      "crates/winwincode-fusion/src/panel.rs",
+      "crates/winwincode-fusion/src/provider.rs",
+      "crates/winwincode-fusion/tests/blind_panel.rs",
       "crates/winwincode-integration-core/Cargo.toml",
       "crates/winwincode-integration-core/README.md",
       "crates/winwincode-integration-core/src/error.rs",
@@ -617,6 +628,7 @@
       "crates/winwincode-provider/src/device_extensions.rs",
       "crates/winwincode-provider/src/device_model.rs",
       "crates/winwincode-provider/src/device_store.rs",
+      "crates/winwincode-provider/src/jev.rs",
       "crates/winwincode-provider/src/lib.rs",
       "crates/winwincode-provider/src/mcp_connection.rs",
       "crates/winwincode-provider/src/provider_anthropic_namespace_safety_tests.rs",
@@ -627,6 +639,7 @@
       "crates/winwincode-provider/src/types.rs",
       "crates/winwincode-provider/tests/device_extensions.rs",
       "crates/winwincode-provider/tests/device_settings.rs",
+      "crates/winwincode-provider/tests/jev_openjev.rs",
       "crates/winwincode-publication/Cargo.toml",
       "crates/winwincode-publication/src/coordinator.rs",
       "crates/winwincode-publication/src/facts.rs",
@@ -819,6 +832,7 @@
       "docs/engineering-runtime/backlog-migration.json",
       "docs/engineering-runtime/runtime-contract.design.check.mjs",
       "docs/engineering-runtime/runtime-contract.design.json",
+      "docs/jev-session-replay.md",
       "docs/real-task-benchmark.md",
       "docs/releases/0.1.0-alpha.2.md",
       "docs/threejs-execution-diagnosis.html",
@@ -840,6 +854,7 @@
       "packages/browser-ui/tsconfig.json",
       "packages/contracts/src/browser-control.ts",
       "packages/contracts/src/device-provider.generated.ts",
+      "packages/contracts/src/fusion.ts",
       "packages/contracts/src/runtime-events.ts",
       "packages/contracts/src/strongflow-role.ts",
       "packages/control-plane-client/package.json",
@@ -875,6 +890,7 @@
       "scripts/cpb-boundary-contract.mjs",
       "scripts/credential-leak-gate.mjs",
       "scripts/device-production-fixture.mjs",
+      "scripts/evaluate-jev-session-replay.mjs",
       "scripts/evaluate-real-task-benchmark.mjs",
       "scripts/finalize-community-core-release.mjs",
       "scripts/lint-workspace.mjs",
@@ -1025,6 +1041,10 @@
       "tests/fixtures/dsh-profile/session-ledger.mjs",
       "tests/fixtures/extensions/mcp_server.py",
       "tests/fixtures/installed-host-keyless.mjs",
+      "tests/fixtures/jev-session-replay/fixture-evidence-detgc.txt",
+      "tests/fixtures/jev-session-replay/fixture-evidence-gcjev.txt",
+      "tests/fixtures/jev-session-replay/fixture-evidence.txt",
+      "tests/fixtures/jev-session-replay/phase1.skeleton.json",
       "tests/fixtures/keyless-dsh-product-smoke.mjs",
       "tests/fixtures/login-bootstrap.mjs",
       "tests/fixtures/provider-dsh-rust-differential.v1.json",
@@ -1036,6 +1056,7 @@
       "tests/home-dashboard-browser.test.mjs",
       "tests/home-dashboard-client.test.mjs",
       "tests/i18n-embed-fl-reproducibility.test.mjs",
+      "tests/jev-session-replay.test.mjs",
       "tests/keyless-dsh-product-smoke.test.mjs",
       "tests/my-work-clients-consistency.test.mjs",
       "tests/my-work-ui.test.mjs",
@@ -2302,8 +2323,8 @@
     "workingTreeAdr0031Covered": true,
     "currentHeadCoverageComplete": true,
     "currentHeadOwnershipUnique": true,
-    "currentHeadTrackedPathCount": 1205,
-    "currentHeadTrackedPathListSha256": "15f77aa423b2512075fac2c6f9ae9dba2926c32efdb2a25b122dbe9002a77fc0",
+    "currentHeadTrackedPathCount": 1234,
+    "currentHeadTrackedPathListSha256": "0c04c79cce8b3ee6047f46a907d1d05c5e187fc2179eb76532da7266a2300e14",
     "duplicateExactPaths": [],
     "overlappingPatterns": [],
     "uncoveredBaselinePaths": [],
@@ -2319,9 +2340,9 @@
     "crossRepositoryAcceptanceRequiredForCommunityPrune": false
   },
   "currentHead": {
-    "snapshotKind": "mutable-git-head-inventory-post-community-prune-1.2-clean-checkout-reaudit",
-    "gitHead": "c622e0c185288395fa82db17287c0995ed6f64d4",
-    "gitTree": "0b35596548ada043ff517ea9848a843d1a5f8271",
+    "snapshotKind": "mutable-git-head-inventory-post-community-prune-1.2-followup-jev-fusion-reaudit",
+    "gitHead": "a878d4c53b927c80357becb29bed7e897a1c9b16",
+    "gitTree": "86c8b5be8c46ddde657f3f0ab060f0d2d87d06e6",
     "indexMode": "external-local-code-index-file-inventory",
     "indexAvailable": true,
     "indexFresh": true,
@@ -2337,17 +2358,17 @@
       "tests",
       "docs"
     ],
-    "trackedFileCount": 1213,
+    "trackedFileCount": 1234,
     "trackedFileCountByRoot": {
       "apps": 151,
-      "crates": 652,
-      "docs": 88,
-      "packages": 29,
+      "crates": 665,
+      "docs": 89,
+      "packages": 30,
       "schema": 22,
-      "scripts": 43,
-      "tests": 228
+      "scripts": 44,
+      "tests": 233
     },
-    "trackedPathListSha256": "808a50a5ae939663931dbb6a8c3108a6de4aa08b639d65e81020184afacc95d7",
+    "trackedPathListSha256": "0c04c79cce8b3ee6047f46a907d1d05c5e187fc2179eb76532da7266a2300e14",
     "ownershipScope": "tracked paths under includedRoots; exactly one ownership bucket per path",
     "excludedTrackedPathPolicy": {
       "status": "out-of-scope",
@@ -2392,14 +2413,14 @@
         "winwincode-bd-tracks"
       ]
     },
-    "pruneExecutionNote": "Tracked-path inventory is live git index coverage at accepted Community head c622e0c185288395fa82db17287c0995ed6f64d4 after authorized migrate-out removal of vault_kms_network paths and after ownership lockstep for managed-app/00os/docs landings. Migrate-out recoverable source remains pinned at 52f2eda69fd0b03e6f42b980be3b9a4965092497. Documented re-audit 2026-09-20."
+    "pruneExecutionNote": "Tracked-path inventory is live git index coverage at accepted Community head a878d4c53b927c80357becb29bed7e897a1c9b16 after authorized merge of 00os + Jev/Fusion batch1 + fusion compose. Ownership lockstep covers JEV/fusion/device/docs paths. Migrate-out recoverable source remains pinned at 52f2eda69fd0b03e6f42b980be3b9a4965092497. Documented re-audit 2026-09-21 follow-up on main a878d4c53b927c80357becb29bed7e897a1c9b16."
   },
   "currentHeadClassification": {
-    "status": "current-head-ownership-complete-community-prune-migrate-out-executed-clean-checkout-reaudit-c622e0c1",
-    "trackedPathCount": 1213,
-    "classifiedPathCount": 1213,
+    "status": "current-head-ownership-complete-community-prune-migrate-out-executed-clean-checkout-reaudit-a878d4c5",
+    "trackedPathCount": 1234,
+    "classifiedPathCount": 1234,
     "classifiedPathCountByBucket": {
-      "winwincode": 963,
+      "winwincode": 984,
       "winwincode-cloud": 0,
       "winwincode-enterprise": 0,
       "migration-review": 250
@@ -2407,12 +2428,12 @@
     "classifiedPathCountByBucketAndRoot": {
       "winwincode": {
         "apps": 111,
-        "crates": 544,
-        "docs": 55,
-        "packages": 25,
+        "crates": 557,
+        "docs": 56,
+        "packages": 26,
         "schema": 12,
-        "scripts": 31,
-        "tests": 185
+        "scripts": 32,
+        "tests": 190
       },
       "winwincode-cloud": {},
       "winwincode-enterprise": {},
@@ -2426,7 +2447,7 @@
         "tests": 43
       }
     },
-    "communityRetainedPathCount": 963,
+    "communityRetainedPathCount": 984,
     "cloudDirectMigrationPathCount": 0,
     "enterpriseDirectMigrationPathCount": 0,
     "migrationReviewPathCount": 250,
@@ -2469,9 +2490,9 @@
     "status": "cross-repository-reconciliation-with-gaps",
     "source": {
       "repository": "winwincode",
-      "gitHead": "c622e0c185288395fa82db17287c0995ed6f64d4",
-      "gitTree": "0b35596548ada043ff517ea9848a843d1a5f8271",
-      "scopedTrackedPathCount": 1213
+      "gitHead": "a878d4c53b927c80357becb29bed7e897a1c9b16",
+      "gitTree": "86c8b5be8c46ddde657f3f0ab060f0d2d87d06e6",
+      "scopedTrackedPathCount": 1234
     },
     "sourcePins": {
       "cloud": {
@@ -2480,10 +2501,10 @@
         "targetHead": "85f975678a89f53265ca35d317e35c5cc8c9de4f",
         "targetTree": "54cbce94ac290cdb23ea58d1461acf0d40c1f2d8",
         "sourceAudit": {
-          "gitHead": "c622e0c185288395fa82db17287c0995ed6f64d4",
-          "gitTree": "0b35596548ada043ff517ea9848a843d1a5f8271",
-          "scopedTrackedPathCount": 1213,
-          "trackedPathListSha256": "808a50a5ae939663931dbb6a8c3108a6de4aa08b639d65e81020184afacc95d7"
+          "gitHead": "a878d4c53b927c80357becb29bed7e897a1c9b16",
+          "gitTree": "86c8b5be8c46ddde657f3f0ab060f0d2d87d06e6",
+          "scopedTrackedPathCount": 1234,
+          "trackedPathListSha256": "0c04c79cce8b3ee6047f46a907d1d05c5e187fc2179eb76532da7266a2300e14"
         },
         "sourceHeadMatches": true,
         "sourceScopeMatches": true
@@ -2494,8 +2515,8 @@
         "targetHead": "ca81171217489959b5f89de4440cd7567bd5d090",
         "targetTree": "6edc986ff7ac2d7ecf1b4c763ce98665375a1bcf",
         "sourcePin": {
-          "gitHead": "c622e0c185288395fa82db17287c0995ed6f64d4",
-          "gitTree": "0b35596548ada043ff517ea9848a843d1a5f8271"
+          "gitHead": "a878d4c53b927c80357becb29bed7e897a1c9b16",
+          "gitTree": "86c8b5be8c46ddde657f3f0ab060f0d2d87d06e6"
         },
         "sourceHeadMatches": true
       }
@@ -2537,8 +2558,8 @@
           "enterprise": "ENTERPRISE-SEAM-001"
         },
         "sourceHead": {
-          "gitHead": "c622e0c185288395fa82db17287c0995ed6f64d4",
-          "gitTree": "0b35596548ada043ff517ea9848a843d1a5f8271",
+          "gitHead": "a878d4c53b927c80357becb29bed7e897a1c9b16",
+          "gitTree": "86c8b5be8c46ddde657f3f0ab060f0d2d87d06e6",
           "cloudAuditMatches": true,
           "enterpriseProvenanceMatches": true
         },
@@ -2581,8 +2602,8 @@
           "enterprise": "ENTERPRISE-SEAM-002"
         },
         "sourceHead": {
-          "gitHead": "c622e0c185288395fa82db17287c0995ed6f64d4",
-          "gitTree": "0b35596548ada043ff517ea9848a843d1a5f8271",
+          "gitHead": "a878d4c53b927c80357becb29bed7e897a1c9b16",
+          "gitTree": "86c8b5be8c46ddde657f3f0ab060f0d2d87d06e6",
           "cloudAuditMatches": true,
           "enterpriseProvenanceMatches": true
         },
@@ -2627,8 +2648,8 @@
           "enterprise": "ENTERPRISE-SEAM-003"
         },
         "sourceHead": {
-          "gitHead": "c622e0c185288395fa82db17287c0995ed6f64d4",
-          "gitTree": "0b35596548ada043ff517ea9848a843d1a5f8271",
+          "gitHead": "a878d4c53b927c80357becb29bed7e897a1c9b16",
+          "gitTree": "86c8b5be8c46ddde657f3f0ab060f0d2d87d06e6",
           "cloudAuditMatches": true,
           "enterpriseProvenanceMatches": true
         },
@@ -2671,8 +2692,8 @@
           "enterprise": "ENTERPRISE-SEAM-004"
         },
         "sourceHead": {
-          "gitHead": "c622e0c185288395fa82db17287c0995ed6f64d4",
-          "gitTree": "0b35596548ada043ff517ea9848a843d1a5f8271",
+          "gitHead": "a878d4c53b927c80357becb29bed7e897a1c9b16",
+          "gitTree": "86c8b5be8c46ddde657f3f0ab060f0d2d87d06e6",
           "cloudAuditMatches": true,
           "enterpriseProvenanceMatches": true
         },
@@ -2715,8 +2736,8 @@
           "enterprise": "ENTERPRISE-SEAM-005"
         },
         "sourceHead": {
-          "gitHead": "c622e0c185288395fa82db17287c0995ed6f64d4",
-          "gitTree": "0b35596548ada043ff517ea9848a843d1a5f8271",
+          "gitHead": "a878d4c53b927c80357becb29bed7e897a1c9b16",
+          "gitTree": "86c8b5be8c46ddde657f3f0ab060f0d2d87d06e6",
           "cloudAuditMatches": true,
           "enterpriseProvenanceMatches": true
         },
@@ -2759,8 +2780,8 @@
           "enterprise": "ENTERPRISE-SEAM-006"
         },
         "sourceHead": {
-          "gitHead": "c622e0c185288395fa82db17287c0995ed6f64d4",
-          "gitTree": "0b35596548ada043ff517ea9848a843d1a5f8271",
+          "gitHead": "a878d4c53b927c80357becb29bed7e897a1c9b16",
+          "gitTree": "86c8b5be8c46ddde657f3f0ab060f0d2d87d06e6",
           "cloudAuditMatches": true,
           "enterpriseProvenanceMatches": true
         },
@@ -2803,8 +2824,8 @@
           "enterprise": "ENTERPRISE-SEAM-007"
         },
         "sourceHead": {
-          "gitHead": "c622e0c185288395fa82db17287c0995ed6f64d4",
-          "gitTree": "0b35596548ada043ff517ea9848a843d1a5f8271",
+          "gitHead": "a878d4c53b927c80357becb29bed7e897a1c9b16",
+          "gitTree": "86c8b5be8c46ddde657f3f0ab060f0d2d87d06e6",
           "cloudAuditMatches": true,
           "enterpriseProvenanceMatches": true
         },
@@ -2847,8 +2868,8 @@
           "enterprise": "ENTERPRISE-SEAM-008"
         },
         "sourceHead": {
-          "gitHead": "c622e0c185288395fa82db17287c0995ed6f64d4",
-          "gitTree": "0b35596548ada043ff517ea9848a843d1a5f8271",
+          "gitHead": "a878d4c53b927c80357becb29bed7e897a1c9b16",
+          "gitTree": "86c8b5be8c46ddde657f3f0ab060f0d2d87d06e6",
           "cloudAuditMatches": true,
           "enterpriseProvenanceMatches": true
         },
@@ -2891,8 +2912,8 @@
           "enterprise": "ENTERPRISE-SEAM-009"
         },
         "sourceHead": {
-          "gitHead": "c622e0c185288395fa82db17287c0995ed6f64d4",
-          "gitTree": "0b35596548ada043ff517ea9848a843d1a5f8271",
+          "gitHead": "a878d4c53b927c80357becb29bed7e897a1c9b16",
+          "gitTree": "86c8b5be8c46ddde657f3f0ab060f0d2d87d06e6",
           "cloudAuditMatches": true,
           "enterpriseProvenanceMatches": true
         },
@@ -2935,8 +2956,8 @@
           "enterprise": "ENTERPRISE-SEAM-010"
         },
         "sourceHead": {
-          "gitHead": "c622e0c185288395fa82db17287c0995ed6f64d4",
-          "gitTree": "0b35596548ada043ff517ea9848a843d1a5f8271",
+          "gitHead": "a878d4c53b927c80357becb29bed7e897a1c9b16",
+          "gitTree": "86c8b5be8c46ddde657f3f0ab060f0d2d87d06e6",
           "cloudAuditMatches": true,
           "enterpriseProvenanceMatches": true
         },
@@ -2981,8 +3002,8 @@
           "enterprise": "ENTERPRISE-SEAM-011"
         },
         "sourceHead": {
-          "gitHead": "c622e0c185288395fa82db17287c0995ed6f64d4",
-          "gitTree": "0b35596548ada043ff517ea9848a843d1a5f8271",
+          "gitHead": "a878d4c53b927c80357becb29bed7e897a1c9b16",
+          "gitTree": "86c8b5be8c46ddde657f3f0ab060f0d2d87d06e6",
           "cloudAuditMatches": true,
           "enterpriseProvenanceMatches": true
         },
@@ -3025,8 +3046,8 @@
           "enterprise": "ENTERPRISE-SEAM-012"
         },
         "sourceHead": {
-          "gitHead": "c622e0c185288395fa82db17287c0995ed6f64d4",
-          "gitTree": "0b35596548ada043ff517ea9848a843d1a5f8271",
+          "gitHead": "a878d4c53b927c80357becb29bed7e897a1c9b16",
+          "gitTree": "86c8b5be8c46ddde657f3f0ab060f0d2d87d06e6",
           "cloudAuditMatches": true,
           "enterpriseProvenanceMatches": true
         },
@@ -3124,19 +3145,19 @@
       ]
     },
     "auditedHead": {
-      "gitHead": "c622e0c185288395fa82db17287c0995ed6f64d4",
-      "gitTree": "0b35596548ada043ff517ea9848a843d1a5f8271",
-      "trackedPathCount": 1213,
-      "trackedPathListSha256": "808a50a5ae939663931dbb6a8c3108a6de4aa08b639d65e81020184afacc95d7",
+      "gitHead": "a878d4c53b927c80357becb29bed7e897a1c9b16",
+      "gitTree": "86c8b5be8c46ddde657f3f0ab060f0d2d87d06e6",
+      "trackedPathCount": 1234,
+      "trackedPathListSha256": "0c04c79cce8b3ee6047f46a907d1d05c5e187fc2179eb76532da7266a2300e14",
       "reAudit": {
         "status": "documented-reaudit-on-accepted-community-head",
-        "date": "2026-09-20",
-        "acceptedCommunityHead": "c622e0c185288395fa82db17287c0995ed6f64d4",
-        "acceptedCommunityTree": "0b35596548ada043ff517ea9848a843d1a5f8271",
-        "priorAuditedHead": "52f2eda69fd0b03e6f42b980be3b9a4965092497",
-        "priorAuditedTree": "2a49c265e95d4160016618ba0cf17377849a134f",
+        "date": "2026-09-21",
+        "acceptedCommunityHead": "a878d4c53b927c80357becb29bed7e897a1c9b16",
+        "acceptedCommunityTree": "86c8b5be8c46ddde657f3f0ab060f0d2d87d06e6",
+        "priorAuditedHead": "c622e0c185288395fa82db17287c0995ed6f64d4",
+        "priorAuditedTree": "0b35596548ada043ff517ea9848a843d1a5f8271",
         "migrateOutRecoverableSourceHead": "52f2eda69fd0b03e6f42b980be3b9a4965092497",
-        "reason": "Community.1.2 clean-checkout gates 02/03 require inventory ownership + AUDITED_COMMUNITY_HEAD lockstep on the accepted Community head (main c622e0c1). Managed-app/00os paths landed in f15e9f8e without ownership; docs pages in c622e0c1 are outside includedRoots."
+        "reason": "Follow-up after authorized merge of 00os + Jev/Fusion batch1 + fusion compose onto main a878d4c5. Live tree added JEV/fusion/device/docs paths without inventory ownership. Re-audit adds Community winwincode ownership for those paths and advances AUDITED_COMMUNITY_HEAD/TREE + inventory currentHead to accepted head a878d4c5. Migrate-out recovery pins stay at 52f2eda6. OrganizationId remains protocol keys + LocalDefaultScope; no mass type rewrite."
       }
     },
     "dispositionCounts": {
@@ -6716,8 +6737,8 @@
       "policy": "Already-removed Cloud/Enterprise product paths stay out of Community. Recovery is from audited HEAD git history and this inventory; do not recreate dual copies in Community."
     },
     "worktreeIncrements": {
-      "status": "previously-untracked-product-candidates-committed-into-community-ownership-at-c622e0c1",
-      "policy": "Previously untracked managed-app/00os product increments landed in accepted Community head c622e0c1 and are now ownership.winwincode paths. Unfinished features are not complete; dirty state does not authorize deletion.",
+      "status": "previously-untracked-product-candidates-committed-into-community-ownership-at-c622e0c1-plus-jev-fusion-ownership-lockstep-at-a878d4c5",
+      "policy": "Previously untracked managed-app/00os product increments landed in accepted Community head c622e0c1 and are ownership.winwincode paths. Follow-up: JEV/fusion/device/docs paths landed on main a878d4c5 and are now ownership.winwincode via 2026-09-21 lockstep (see ownershipLockstepPathsAdded). Unfinished features are not complete; dirty state does not authorize deletion.",
       "splitMetadataDirty": [
         "docs/decisions/0031-repository-split.inventory.json",
         "scripts/verify-repository-split-metadata.mjs",
@@ -6789,7 +6810,37 @@
         "crates/winwincode-api/src/generated.rs",
         "docs/contracts/control-plane-api-coverage.matrix.json"
       ],
-      "note": "All managed-app/00os/docs landing paths under includedRoots are now ownership.winwincode. c622e0c1 docs pages under jev-runtime-spec/ and winwincode-bd-tracks/ are outside includedRoots (out-of-scope support/docs roots) and are recorded in currentHead.excludedTrackedPathPolicy."
+      "note": "All managed-app/00os/docs landing paths under includedRoots are now ownership.winwincode. c622e0c1 docs pages under jev-runtime-spec/ and winwincode-bd-tracks/ are outside includedRoots (out-of-scope support/docs roots) and are recorded in currentHead.excludedTrackedPathPolicy.",
+      "ownershipLockstepFollowUp": {
+        "auditedHead": "a878d4c53b927c80357becb29bed7e897a1c9b16",
+        "auditedTree": "86c8b5be8c46ddde657f3f0ab060f0d2d87d06e6",
+        "date": "2026-09-21",
+        "paths": [
+          "crates/winwincode-codex/src/parallel_model_runner.rs",
+          "crates/winwincode-control-plane/src/fusion_adjudication_host.rs",
+          "crates/winwincode-control-plane/src/fusion_analysis.rs",
+          "crates/winwincode-control-plane/src/fusion_compose.rs",
+          "crates/winwincode-execution-port/src/jev_decision.rs",
+          "crates/winwincode-fusion/Cargo.toml",
+          "crates/winwincode-fusion/src/contract.rs",
+          "crates/winwincode-fusion/src/lib.rs",
+          "crates/winwincode-fusion/src/panel.rs",
+          "crates/winwincode-fusion/src/provider.rs",
+          "crates/winwincode-fusion/tests/blind_panel.rs",
+          "crates/winwincode-provider/src/jev.rs",
+          "crates/winwincode-provider/tests/jev_openjev.rs",
+          "docs/jev-session-replay.md",
+          "packages/contracts/src/fusion.ts",
+          "scripts/evaluate-jev-session-replay.mjs",
+          "tests/fixtures/jev-session-replay/fixture-evidence-detgc.txt",
+          "tests/fixtures/jev-session-replay/fixture-evidence-gcjev.txt",
+          "tests/fixtures/jev-session-replay/fixture-evidence.txt",
+          "tests/fixtures/jev-session-replay/phase1.skeleton.json",
+          "tests/jev-session-replay.test.mjs"
+        ],
+        "disposition": "winwincode-retain",
+        "reason": "JEV runtime, fusion panel/analyzer/adjudicator/compose, parallel model runner, session-replay fixtures/docs/scripts are Community product paths under includedRoots; single-owner Community retain, not migration-review."
+      }
     },
     "communityPrunePermission": {
       "status": "community-owned-ready-for-1.1-freeze",
@@ -7042,13 +7093,13 @@
         "cleanCheckoutReadiness": {
           "requiresCommitForAcPass": true,
           "acRequirement": "winwincode-community.1.2 acceptance criterion requires clean-checkout Community build/test/boundary/product-release checks. A dirty worktree cannot honestly satisfy that criterion.",
-          "policyThisPass": "Metadata lockstep applied in dedicated worktree community-clean-20260920 on accepted head c622e0c1. Default no commit/push. Gates 02/03 + local community tests re-run on this worktree. Release-artifact 4-platform remains CI ship gate — not faked locally.",
+          "policyThisPass": "Metadata lockstep applied on main at accepted head a878d4c53b927c80357becb29bed7e897a1c9b16 after authorized JEV/fusion/device merges. Default was overridden by user authorization to commit+push this cleanup. Split-metadata allowlist files carry the inventory/verifier/test lockstep; product tree outside allowlist matches the new audited baseline.",
           "communityOwnedCommitPathList": [
             "docs/decisions/0031-repository-split.inventory.json",
             "scripts/verify-repository-split-metadata.mjs",
             "tests/repository-split-metadata.test.mjs"
           ],
-          "comingleRisk": "Only the three split-metadata allowlist files are dirty on top of accepted head c622e0c1. Product tree outside allowlist matches audited baseline.",
+          "comingleRisk": "Only the three split-metadata allowlist files are dirty on top of accepted head a878d4c53b927c80357becb29bed7e897a1c9b16. Product tree outside allowlist matches audited baseline.",
           "preferredIsolationOption": "After user-accepted commit SHA C: git worktree add /tmp/winwincode-community-clean C --detach && corepack pnpm install --frozen-lockfile && run verificationScriptRunPlan in that worktree. Do not claim clean-checkout from a dirty sibling worktree.",
           "fallbackNoCommitOption": "If user still prefers no-commit, run as much of verificationScriptRunPlan as possible in the priority worktree, record gate evidence, and keep winwincode-community.1.2 open with remainingGate=clean-checkout-on-accepted-commit.",
           "verificationScriptRunPlan": [
@@ -7078,19 +7129,40 @@
             "Community product release artifact verification without CI 4-platform evidence",
             "type-level removal of OrganizationId/OrganizationScope"
           ],
-          "reAuditDate": "2026-09-20",
-          "acceptedCommunityHead": "c622e0c185288395fa82db17287c0995ed6f64d4",
-          "acceptedCommunityTree": "0b35596548ada043ff517ea9848a843d1a5f8271",
+          "reAuditDate": "2026-09-21",
+          "acceptedCommunityHead": "a878d4c53b927c80357becb29bed7e897a1c9b16",
+          "acceptedCommunityTree": "86c8b5be8c46ddde657f3f0ab060f0d2d87d06e6",
           "ownershipLockstepPathsAdded": [
             "apps/client/src/public-redaction.ts",
             "crates/winwincode-client-port/src/managed_app.rs",
             "crates/winwincode-codex/src/diagnostic_artifact_outbox.rs",
+            "crates/winwincode-codex/src/parallel_model_runner.rs",
+            "crates/winwincode-control-plane/src/fusion_adjudication_host.rs",
+            "crates/winwincode-control-plane/src/fusion_analysis.rs",
+            "crates/winwincode-control-plane/src/fusion_compose.rs",
             "crates/winwincode-control-plane/src/page_annotation_delivery.rs",
             "crates/winwincode-device-client/src/managed_app.rs",
+            "crates/winwincode-execution-port/src/jev_decision.rs",
+            "crates/winwincode-fusion/Cargo.toml",
+            "crates/winwincode-fusion/src/contract.rs",
+            "crates/winwincode-fusion/src/lib.rs",
+            "crates/winwincode-fusion/src/panel.rs",
+            "crates/winwincode-fusion/src/provider.rs",
+            "crates/winwincode-fusion/tests/blind_panel.rs",
+            "crates/winwincode-provider/src/jev.rs",
+            "crates/winwincode-provider/tests/jev_openjev.rs",
             "crates/winwincode-storage/src/managed_app.rs",
+            "docs/jev-session-replay.md",
+            "packages/contracts/src/fusion.ts",
             "scripts/device-production-fixture.mjs",
+            "scripts/evaluate-jev-session-replay.mjs",
             "scripts/run-00os-device-live-vertical.mjs",
             "tests/api-production-device-prerequisites.test.mjs",
+            "tests/fixtures/jev-session-replay/fixture-evidence-detgc.txt",
+            "tests/fixtures/jev-session-replay/fixture-evidence-gcjev.txt",
+            "tests/fixtures/jev-session-replay/fixture-evidence.txt",
+            "tests/fixtures/jev-session-replay/phase1.skeleton.json",
+            "tests/jev-session-replay.test.mjs",
             "tests/projects-page-ui.test.mjs"
           ]
         }

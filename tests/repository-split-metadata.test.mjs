@@ -79,9 +79,43 @@ const EXPECTED_VALIDATION_RESULT = {
 }
 
 // Documented re-audit pins (keep lockstep with scripts/verify-repository-split-metadata.mjs)
-const AUDITED_COMMUNITY_HEAD = 'c622e0c185288395fa82db17287c0995ed6f64d4'
+// 2026-09-21 follow-up on accepted main a878d4c5 after JEV/fusion/device merges.
+const AUDITED_COMMUNITY_HEAD = 'a878d4c53b927c80357becb29bed7e897a1c9b16'
 const AUDITED_MIGRATE_OUT_RECOVERY_HEAD = '52f2eda69fd0b03e6f42b980be3b9a4965092497'
-const AUDITED_CURRENT_HEAD_TRACKED_FILE_COUNT = 1213
+const AUDITED_CURRENT_HEAD_TRACKED_FILE_COUNT = 1234
+const AUDITED_OWNERSHIP_LOCKSTEP_PATHS = [
+  'apps/client/src/public-redaction.ts',
+  'crates/winwincode-client-port/src/managed_app.rs',
+  'crates/winwincode-codex/src/diagnostic_artifact_outbox.rs',
+  'crates/winwincode-codex/src/parallel_model_runner.rs',
+  'crates/winwincode-control-plane/src/fusion_adjudication_host.rs',
+  'crates/winwincode-control-plane/src/fusion_analysis.rs',
+  'crates/winwincode-control-plane/src/fusion_compose.rs',
+  'crates/winwincode-control-plane/src/page_annotation_delivery.rs',
+  'crates/winwincode-device-client/src/managed_app.rs',
+  'crates/winwincode-execution-port/src/jev_decision.rs',
+  'crates/winwincode-fusion/Cargo.toml',
+  'crates/winwincode-fusion/src/contract.rs',
+  'crates/winwincode-fusion/src/lib.rs',
+  'crates/winwincode-fusion/src/panel.rs',
+  'crates/winwincode-fusion/src/provider.rs',
+  'crates/winwincode-fusion/tests/blind_panel.rs',
+  'crates/winwincode-provider/src/jev.rs',
+  'crates/winwincode-provider/tests/jev_openjev.rs',
+  'crates/winwincode-storage/src/managed_app.rs',
+  'docs/jev-session-replay.md',
+  'packages/contracts/src/fusion.ts',
+  'scripts/device-production-fixture.mjs',
+  'scripts/evaluate-jev-session-replay.mjs',
+  'scripts/run-00os-device-live-vertical.mjs',
+  'tests/api-production-device-prerequisites.test.mjs',
+  'tests/fixtures/jev-session-replay/fixture-evidence-detgc.txt',
+  'tests/fixtures/jev-session-replay/fixture-evidence-gcjev.txt',
+  'tests/fixtures/jev-session-replay/fixture-evidence.txt',
+  'tests/fixtures/jev-session-replay/phase1.skeleton.json',
+  'tests/jev-session-replay.test.mjs',
+  'tests/projects-page-ui.test.mjs',
+]
 
 test('current repository split documents agree on repositories, tasks, and source counts', () => {
   assert.deepEqual(validateRepositorySplitMetadata(fixture()), EXPECTED_VALIDATION_RESULT)
@@ -187,18 +221,7 @@ test('community-owned disposition freezes retain / rewrite / migrate-out scopes'
   )
   assert.deepEqual(
     permission.pruneExecution.cleanCheckoutReadiness.ownershipLockstepPathsAdded,
-    [
-      'apps/client/src/public-redaction.ts',
-      'crates/winwincode-client-port/src/managed_app.rs',
-      'crates/winwincode-codex/src/diagnostic_artifact_outbox.rs',
-      'crates/winwincode-control-plane/src/page_annotation_delivery.rs',
-      'crates/winwincode-device-client/src/managed_app.rs',
-      'crates/winwincode-storage/src/managed_app.rs',
-      'scripts/device-production-fixture.mjs',
-      'scripts/run-00os-device-live-vertical.mjs',
-      'tests/api-production-device-prerequisites.test.mjs',
-      'tests/projects-page-ui.test.mjs',
-    ],
+    AUDITED_OWNERSHIP_LOCKSTEP_PATHS,
   )
   assert.deepEqual(
     permission.pruneExecution.executedMigrateOut.map(entry => entry.path),
@@ -366,7 +389,7 @@ test('metadata-only commit may advance live HEAD while audited product tree stay
   const { parent, repositoryRoot } = cloneRepository()
   try {
     // Live HEAD may already be a metadata-only descendant of the audited
-    // Community head (c622e0c1). Product-tree authority stays on the audited
+    // Community head (a878d4c5). Product-tree authority stays on the audited
     // baseline: inventory currentHead.gitHead remains pinned, and the clone
     // must still carry the authorized migrate-out removals.
     const cloneHead = execFileSync('git', ['-C', repositoryRoot, 'rev-parse', 'HEAD'], {

@@ -20,12 +20,13 @@ const EXPECTED_ENTERPRISE_DIRECT_PATHS = 103
 // This is the reviewed Community tree from which the split inventory was audited.
 // Keep this independent from the inventory: changing every recorded pin must not
 // move the source of truth used by this verifier.
-// 2026-09-20 documented re-audit: accepted Community head is main c622e0c1
-// (managed-app/00os product landings + docs pages). Ownership lockstep covers
-// scoped managed-app/00os paths; jev-runtime-spec/ and winwincode-bd-tracks/
-// remain out-of-scope support/docs roots outside includedRoots.
-const AUDITED_COMMUNITY_HEAD = 'c622e0c185288395fa82db17287c0995ed6f64d4'
-const AUDITED_COMMUNITY_TREE = '0b35596548ada043ff517ea9848a843d1a5f8271'
+// 2026-09-21 documented re-audit follow-up: accepted Community head is main
+// a878d4c5 (authorized merge of 00os + Jev/Fusion batch1 + fusion compose).
+// Ownership lockstep covers scoped managed-app/00os + JEV/fusion/device/docs
+// paths; jev-runtime-spec/ and winwincode-bd-tracks/ remain out-of-scope
+// support/docs roots outside includedRoots.
+const AUDITED_COMMUNITY_HEAD = 'a878d4c53b927c80357becb29bed7e897a1c9b16'
+const AUDITED_COMMUNITY_TREE = '86c8b5be8c46ddde657f3f0ab060f0d2d87d06e6'
 // vault_kms_network migrate-out sources remain recoverable from the pre-prune
 // Community tree that still contained those paths. This pin is intentionally
 // distinct from the live audited Community head after the prune commit landed.
