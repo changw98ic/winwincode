@@ -17,11 +17,13 @@ test-support = ["winwincode-publication/test-support"]
 [dependencies]
 aes-gcm = "=0.10.3"
 base64.workspace = true
+futures.workspace = true
 getrandom.workspace = true
 jiff.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+tokio.workspace = true
 ureq = { version = "=3.1.4", default-features = false, features = ["rustls", "json"] }
 winwincode-api.workspace = true
 winwincode-client-port.workspace = true
@@ -30,6 +32,7 @@ winwincode-audit.workspace = true
 winwincode-delivery = { path = "../winwincode-delivery" }
 winwincode-domain.workspace = true
 winwincode-execution-port.workspace = true
+winwincode-fusion.workspace = true
 winwincode-publication.workspace = true
 winwincode-repository-context = { path = "../winwincode-repository-context" }
 winwincode-session.workspace = true
@@ -39,6 +42,7 @@ winwincode-storage = { path = "../winwincode-storage" }
 rcgen.workspace = true
 rustls.workspace = true
 rusqlite.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
 winwincode-delivery = { path = "../winwincode-delivery", features = ["test-support"] }
 
 [[test]]
