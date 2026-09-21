@@ -55,6 +55,11 @@ import {
   deviceProviderSecretBundle,
   establishDeviceOnlyExecutionPath,
   seedDeviceLocalProvider,
+  selectDeviceProvider,
+  realDeviceProvider,
+  normalizeAnthropicMessagesEndpoint,
+  DEVICE_PROVIDER_KIND_DETERMINISTIC,
+  DEVICE_PROVIDER_KIND_REAL,
   startDeterministicDeviceModelServer,
   encryptDeviceProviderEnvelope,
 } from './device-production-fixture.mjs'
@@ -77,6 +82,11 @@ export {
   deviceProviderSecretBundle,
   establishDeviceOnlyExecutionPath,
   seedDeviceLocalProvider,
+  selectDeviceProvider,
+  realDeviceProvider,
+  normalizeAnthropicMessagesEndpoint,
+  DEVICE_PROVIDER_KIND_DETERMINISTIC,
+  DEVICE_PROVIDER_KIND_REAL,
   startDeterministicDeviceModelServer,
   encryptDeviceProviderEnvelope,
 }
@@ -163,28 +173,36 @@ const SCOPE = Object.freeze({
  * Device Provider credential reference, not Server model environment
  * variables. Callers must pass the enrolled Device client node id (or the
  * public client id used by the Device Provider projection) after pairing.
+ *
+ * When a real Device-local Provider identity is selected (secrets + route),
+ * providerId/modelId stay authoritative even before pairing. Only the
+ * credentialReferenceId placeholder remains pre-pairing.
  */
 function configuredModelRoute(deviceRoute = {}) {
+  const providerId = deviceRoute.providerId
+    ?? process.env.WWC_DEVICE_PROVIDER_ID
+    ?? 'winwincode-device-deterministic'
+  const modelId = deviceRoute.modelId
+    ?? process.env.WWC_DEVICE_MODEL_ID
+    ?? 'device-deterministic-model'
   if (
     typeof deviceRoute.clientNodeId === 'string'
     && deviceRoute.clientNodeId.length > 0
   ) {
     return configuredDeviceModelRoute({
       clientNodeId: deviceRoute.clientNodeId,
-      providerId: deviceRoute.providerId
-        ?? process.env.WWC_DEVICE_PROVIDER_ID
-        ?? 'winwincode-device-deterministic',
-      modelId: deviceRoute.modelId
-        ?? process.env.WWC_DEVICE_MODEL_ID
-        ?? 'device-deterministic-model',
+      providerId,
+      modelId,
     })
   }
   // Pre-pairing placeholder. chat.submit is rejected with the public
-  // DEVICE_SESSION_REQUIRED code until Device prerequisites exist.
+  // DEVICE_SESSION_REQUIRED code until Device prerequisites exist. Keep the
+  // selected provider identity so Device Worker env is not forced back to the
+  // deterministic fixture when a real Device-local Provider is intended.
   return configuredDeviceModelRoute({
     clientNodeId: 'cix_device_session_required_placeholder',
-    providerId: 'winwincode-device-deterministic',
-    modelId: 'device-deterministic-model',
+    providerId,
+    modelId,
   })
 }
 
@@ -1850,13 +1868,22 @@ export async function runApiProductionVertical({
   devicePrerequisites = true,
   wwcBinary = null,
   deviceProviderSecrets = [],
+  deviceProviderEndpoint = null,
   scenario = null,
   timeoutMillis = DEFAULT_TIMEOUT_MILLIS,
 } = {}) {
   assertServerEnvironmentIsDeviceOnly(serverEnvironment)
   assertDeviceSecretsNeverOnServer(serverEnvironment, deviceProviderSecrets)
   const modelRoute = configuredModelRoute(deviceRoute ?? {})
-  const deviceProvider = deterministicDeviceProvider()
+  // Secrets + modelRoute select a Device-local real Provider identity.
+  // Without secrets the deterministic fixture remains the acceptance default.
+  // Server never receives WWC_SERVER_MODEL_* and never falls back to a
+  // Server-local model path.
+  const deviceProvider = selectDeviceProvider({
+    deviceProviderSecrets,
+    deviceRoute,
+    deviceProviderEndpoint,
+  })
   const plannedDevicePrerequisites = devicePrerequisites
     ? [...DEVICE_ONLY_PREREQUISITES]
     : null
@@ -1972,6 +1999,9 @@ export async function runApiProductionVertical({
       ? {
         providerId: deviceProvider.providerId,
         modelId: deviceProvider.modelId,
+        kind: deviceProvider.kind ?? DEVICE_PROVIDER_KIND_DETERMINISTIC,
+        fixture: deviceProvider.fixture !== false,
+        endpointHint: deviceProvider.endpointHint ?? null,
         secretPlacement: 'device-local-only',
       }
       : null,

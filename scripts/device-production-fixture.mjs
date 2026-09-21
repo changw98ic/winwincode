@@ -89,11 +89,119 @@ export function deterministicDeviceProvider({
   modelId = 'device-deterministic-model',
 } = {}) {
   return Object.freeze({
+    kind: DEVICE_PROVIDER_KIND_DETERMINISTIC,
+    fixture: true,
     providerId,
     modelId,
     displayName: 'WinWinCode Device deterministic Provider',
     endpointHint: 'https://127.0.0.1:<device-mock-model-port>/v1/messages',
     protocol: 'anthropic_messages',
+    seedMode: 'deterministic-loopback',
+  })
+}
+
+/** Provider identity kinds for isolated Device verticals. */
+export const DEVICE_PROVIDER_KIND_DETERMINISTIC = 'device-local-deterministic'
+export const DEVICE_PROVIDER_KIND_REAL = 'device-local-real'
+
+/**
+ * Normalizes a base or full Anthropic Messages endpoint to
+ * `https://…/v1/messages`. Rejects non-HTTPS and credential-bearing URLs.
+ */
+export function normalizeAnthropicMessagesEndpoint(value) {
+  assert.equal(typeof value, 'string')
+  const trimmed = value.trim()
+  assert.ok(trimmed.length > 0, 'Device Provider endpoint must be non-empty')
+  const url = new URL(trimmed)
+  assert.equal(url.protocol, 'https:', 'Device Provider endpoint must use https')
+  assert.equal(url.username, '', 'Device Provider endpoint must not embed credentials')
+  assert.equal(url.password, '', 'Device Provider endpoint must not embed credentials')
+  assert.equal(url.search, '', 'Device Provider endpoint must not include a query string')
+  assert.equal(url.hash, '', 'Device Provider endpoint must not include a fragment')
+  const path = url.pathname.replace(/\/+$/u, '')
+  if (path.endsWith('/v1/messages')) {
+    return `https://${url.host}${path}`
+  }
+  return `https://${url.host}${path}/v1/messages`
+}
+
+/**
+ * Builds one real Device-local Provider identity from secrets + model route.
+ * Secrets stay Device-local; the returned object never carries API keys.
+ */
+export function realDeviceProvider({
+  providerId,
+  modelId,
+  endpoint,
+  displayName = null,
+} = {}) {
+  assert.equal(typeof providerId, 'string')
+  assert.ok(providerId.length > 0, 'real Device Provider requires providerId')
+  assert.equal(typeof modelId, 'string')
+  assert.ok(modelId.length > 0, 'real Device Provider requires modelId')
+  const normalizedEndpoint = normalizeAnthropicMessagesEndpoint(endpoint)
+  return Object.freeze({
+    kind: DEVICE_PROVIDER_KIND_REAL,
+    fixture: false,
+    providerId,
+    modelId,
+    displayName: displayName ?? `Device-local real Provider (${providerId})`,
+    endpointHint: normalizedEndpoint,
+    endpoint: normalizedEndpoint,
+    protocol: 'anthropic_messages',
+    seedMode: 'encrypted-web-to-device-apply-real-endpoint',
+  })
+}
+
+/**
+ * Selects the Device-local Provider identity for an isolated coding vertical.
+ *
+ * - No Device secrets → deterministic fixture (acceptance default).
+ * - Secrets + modelRoute (providerId/modelId) → real Device-local identity.
+ * - Never reads WWC_SERVER_MODEL_* and never puts secrets on Server env.
+ *
+ * Endpoint resolution order for the real path:
+ * `deviceRoute.endpoint` → `deviceProviderEndpoint` → `ZHIPU_BASE_URL`.
+ */
+export function selectDeviceProvider({
+  deviceProviderSecrets = [],
+  deviceRoute = null,
+  deviceProviderEndpoint = null,
+  environment = process.env,
+} = {}) {
+  const secret = Array.isArray(deviceProviderSecrets)
+    ? deviceProviderSecrets.find(value => typeof value === 'string' && value.length > 0) ?? null
+    : null
+  const providerId = typeof deviceRoute?.providerId === 'string'
+    && deviceRoute.providerId.length > 0
+    && !deviceRoute.providerId.startsWith('winwincode-device-deterministic')
+    ? deviceRoute.providerId
+    : null
+  const modelId = typeof deviceRoute?.modelId === 'string'
+    && deviceRoute.modelId.length > 0
+    && deviceRoute.modelId !== 'device-deterministic-model'
+    ? deviceRoute.modelId
+    : null
+  if (secret === null || providerId === null || modelId === null) {
+    return deterministicDeviceProvider()
+  }
+  const rawEndpoint = (typeof deviceRoute?.endpoint === 'string' && deviceRoute.endpoint.length > 0)
+    ? deviceRoute.endpoint
+    : (typeof deviceProviderEndpoint === 'string' && deviceProviderEndpoint.length > 0)
+      ? deviceProviderEndpoint
+      : environment?.ZHIPU_BASE_URL
+  assert.ok(
+    typeof rawEndpoint === 'string' && rawEndpoint.length > 0,
+    'Device-local real Provider requires an https endpoint '
+    + '(deviceRoute.endpoint, deviceProviderEndpoint, or ZHIPU_BASE_URL)',
+  )
+  return realDeviceProvider({
+    providerId,
+    modelId,
+    endpoint: rawEndpoint,
+    displayName: typeof deviceRoute?.displayName === 'string' && deviceRoute.displayName.length > 0
+      ? deviceRoute.displayName
+      : null,
   })
 }
 
@@ -809,10 +917,16 @@ export async function establishDeviceOnlyExecutionPath({
     certificatePath,
     destination: join(directory, 'device-provider-trust-root.der'),
   })
+  const providerKind = deviceProvider?.kind ?? DEVICE_PROVIDER_KIND_DETERMINISTIC
+  const useRealDeviceProvider = providerKind === DEVICE_PROVIDER_KIND_REAL
   const deviceEnvironment = {
     ...process.env,
     WWC_DEVICE_TLS_ROOT_DER_FILE: tlsRoot,
-    WWC_DEVICE_PROVIDER_TLS_ROOT_DER_FILE: tlsRoot,
+    // Fixture TLS roots pin the Device Provider HTTPS client to the acceptance
+    // mock. Real Device-local Providers (e.g. Zhipu) must use WebPki trust.
+    ...(useRealDeviceProvider
+      ? {}
+      : { WWC_DEVICE_PROVIDER_TLS_ROOT_DER_FILE: tlsRoot }),
     WWC_WORKER_TLS_ROOT_DER_FILE: tlsRoot,
     ...(helperReleaseManifest === undefined ? {} : {
       WWC_WORKER_HELPER_RELEASE_MANIFEST: helperReleaseManifest,
@@ -831,7 +945,16 @@ export async function establishDeviceOnlyExecutionPath({
           process.env.WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX,
       }),
   }
-  if (modelRouteSource !== undefined && modelRouteSource !== null) {
+  if (useRealDeviceProvider) {
+    // Explicitly drop fixture Provider TLS pin if the parent environment had one.
+    delete deviceEnvironment.WWC_DEVICE_PROVIDER_TLS_ROOT_DER_FILE
+  }
+  if (deviceProvider !== null && typeof deviceProvider.providerId === 'string') {
+    // Selected Device Provider identity wins over any pre-pairing route
+    // placeholder so Worker/Codex launch against the seeded Provider.
+    deviceEnvironment.WWC_WORKER_MODEL_PROVIDER_ID = deviceProvider.providerId
+    deviceEnvironment.WWC_WORKER_MODEL_ID = deviceProvider.modelId
+  } else if (modelRouteSource !== undefined && modelRouteSource !== null) {
     deviceEnvironment.WWC_WORKER_MODEL_PROVIDER_ID = modelRouteSource.providerId
     deviceEnvironment.WWC_WORKER_MODEL_ID = modelRouteSource.modelId
   }
@@ -906,7 +1029,45 @@ export async function establishDeviceOnlyExecutionPath({
     let modelServer = null
     let providerApiKey = deviceSecret
     let seededProvider = null
-    if (deviceProvider !== null && seedDeviceProvider) {
+    if (deviceProvider !== null && seedDeviceProvider && useRealDeviceProvider) {
+      // Real Device-local Provider: encrypted Web→Device apply to the external
+      // endpoint. Secrets never leave Device config; Server never sees them.
+      assert.equal(
+        typeof deviceSecret,
+        'string',
+        'Device-local real Provider requires a Device-local secret on the Device process only',
+      )
+      assert.ok(deviceSecret.length > 0, 'Device-local real Provider secret must be non-empty')
+      assert.equal(
+        typeof deviceProvider.endpoint,
+        'string',
+        'Device-local real Provider requires an explicit endpoint',
+      )
+      providerApiKey = deviceSecret
+      seededProvider = await seedDeviceLocalProvider({
+        api,
+        publicClientId: status.publicClientId,
+        providerId: deviceProvider.providerId,
+        modelId: deviceProvider.modelId,
+        endpoint: deviceProvider.endpoint,
+        apiKey: providerApiKey,
+        displayName: deviceProvider.displayName
+          ?? `Device-local real Provider (${deviceProvider.providerId})`,
+        timeoutMillis,
+      })
+      report.deviceProvider = {
+        providerId: seededProvider.providerId,
+        modelId: seededProvider.modelId,
+        endpoint: seededProvider.endpoint,
+        credentialReferenceId: seededProvider.credentialReferenceId,
+        receiptOutcome: seededProvider.receiptOutcome,
+        configured: 'encrypted-web-to-device-apply',
+        kind: DEVICE_PROVIDER_KIND_REAL,
+        seedMode: deviceProvider.seedMode ?? 'encrypted-web-to-device-apply-real-endpoint',
+        secretPlacement: 'device-local-only',
+      }
+      steps.push('device-local-real-provider-seeded')
+    } else if (deviceProvider !== null && seedDeviceProvider) {
       // Production path: Device-local HTTPS Provider + encrypted Web→Device apply.
       modelServer = await startDeterministicDeviceModelServer({
         certificatePath,
@@ -931,6 +1092,8 @@ export async function establishDeviceOnlyExecutionPath({
         credentialReferenceId: seededProvider.credentialReferenceId,
         receiptOutcome: seededProvider.receiptOutcome,
         configured: 'encrypted-web-to-device-apply',
+        kind: DEVICE_PROVIDER_KIND_DETERMINISTIC,
+        seedMode: 'deterministic-loopback',
         secretPlacement: 'device-local-only',
       }
       steps.push('device-local-model-server')
@@ -943,6 +1106,7 @@ export async function establishDeviceOnlyExecutionPath({
         // may provision Device-local store state when a live encrypted apply
         // endpoint is unavailable; secrets never leave Device config.
         configured: 'device-local-unseeded',
+        kind: providerKind,
       }
       steps.push('device-local-provider')
     }

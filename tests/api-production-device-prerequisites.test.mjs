@@ -7,6 +7,8 @@ import test from 'node:test'
 import {
   DEVICE_ONLY_PREREQUISITES,
   FORBIDDEN_SERVER_MODEL_ENVIRONMENT_KEYS,
+  DEVICE_PROVIDER_KIND_DETERMINISTIC,
+  DEVICE_PROVIDER_KIND_REAL,
   assertDeviceSecretsNeverOnServer,
   assertServerEnvironmentIsDeviceOnly,
   configuredDeviceModelRoute,
@@ -15,6 +17,9 @@ import {
   deviceCredentialReferenceId,
   deviceOnlyServerEnvironment,
   deviceProviderSecretBundle,
+  normalizeAnthropicMessagesEndpoint,
+  realDeviceProvider,
+  selectDeviceProvider,
 } from '../scripts/run-api-production-vertical.mjs'
 import {
   DETERMINISTIC_VERIFICATION_BEHAVIOR_MARKER,
@@ -91,6 +96,22 @@ test('configuredModelRoute is Device-bound and never reads Server model env', ()
       clientNodeId: 'cix_ABC',
       providerId: 'zhipu-glm',
     }))
+    // Pre-pairing real route keeps the selected Provider identity so Device
+    // Worker env is not forced back to the deterministic fixture.
+    const prePairingReal = configuredModelRoute({
+      providerId: 'zhipu-glm',
+      modelId: 'glm-5.3-flash',
+      clientNodeId: null,
+    })
+    assert.equal(prePairingReal.providerId, 'zhipu-glm')
+    assert.equal(prePairingReal.modelId, 'glm-5.3-flash')
+    assert.equal(
+      prePairingReal.credentialReferenceId,
+      deviceCredentialReferenceId({
+        clientNodeId: 'cix_device_session_required_placeholder',
+        providerId: 'zhipu-glm',
+      }),
+    )
   } finally {
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) delete process.env[key]
@@ -143,7 +164,125 @@ test('deterministic Device Provider is the acceptance default', () => {
   const provider = deterministicDeviceProvider()
   assert.equal(provider.providerId, 'winwincode-device-deterministic')
   assert.equal(provider.modelId, 'device-deterministic-model')
+  assert.equal(provider.kind, DEVICE_PROVIDER_KIND_DETERMINISTIC)
+  assert.equal(provider.fixture, true)
   assert.equal(Object.isFrozen(provider), true)
+})
+
+test('runner selects deterministic Device Provider when no secrets are present', () => {
+  const provider = selectDeviceProvider({
+    deviceProviderSecrets: [],
+    deviceRoute: {
+      providerId: 'zhipu-glm',
+      modelId: 'glm-5.3-flash',
+      clientNodeId: null,
+      endpoint: 'https://open.bigmodel.cn/api/anthropic',
+    },
+  })
+  assert.equal(provider.providerId, 'winwincode-device-deterministic')
+  assert.equal(provider.modelId, 'device-deterministic-model')
+  assert.equal(provider.kind, DEVICE_PROVIDER_KIND_DETERMINISTIC)
+  assert.equal(provider.fixture, true)
+})
+
+test('runner selects device-local real Provider identity when secrets and modelRoute are present', () => {
+  const provider = selectDeviceProvider({
+    deviceProviderSecrets: ['secret-not-leaked-into-identity'],
+    deviceRoute: {
+      providerId: 'zhipu-glm',
+      modelId: 'glm-5.3-flash',
+      clientNodeId: null,
+      endpoint: 'https://open.bigmodel.cn/api/anthropic',
+    },
+  })
+  assert.equal(provider.kind, DEVICE_PROVIDER_KIND_REAL)
+  assert.equal(provider.fixture, false)
+  assert.equal(provider.providerId, 'zhipu-glm')
+  assert.equal(provider.modelId, 'glm-5.3-flash')
+  assert.equal(provider.protocol, 'anthropic_messages')
+  assert.equal(provider.endpoint, 'https://open.bigmodel.cn/api/anthropic/v1/messages')
+  assert.equal(Object.isFrozen(provider), true)
+  // Identity never carries the API key.
+  assert.equal(JSON.stringify(provider).includes('secret-not-leaked'), false)
+})
+
+test('real Device Provider identity selection still refuses Server model environment keys', () => {
+  const previous = {
+    WWC_SERVER_MODEL_PROVIDER_ID: process.env.WWC_SERVER_MODEL_PROVIDER_ID,
+    WWC_SERVER_MODEL_ID: process.env.WWC_SERVER_MODEL_ID,
+    WWC_SERVER_MODEL_API_KEY: process.env.WWC_SERVER_MODEL_API_KEY,
+  }
+  try {
+    process.env.WWC_SERVER_MODEL_PROVIDER_ID = 'zhipu-glm'
+    process.env.WWC_SERVER_MODEL_ID = 'glm-5.3-flash'
+    process.env.WWC_SERVER_MODEL_API_KEY = 'server-side-should-be-ignored'
+    const provider = selectDeviceProvider({
+      deviceProviderSecrets: ['device-only-secret'],
+      deviceRoute: {
+        providerId: 'zhipu-glm',
+        modelId: 'glm-5.3-flash',
+        endpoint: 'https://open.bigmodel.cn/api/anthropic',
+      },
+      environment: {
+        ZHIPU_BASE_URL: 'https://open.bigmodel.cn/api/anthropic',
+        WWC_SERVER_MODEL_PROVIDER_ID: 'zhipu-glm',
+        WWC_SERVER_MODEL_API_KEY: 'server-side-should-be-ignored',
+      },
+    })
+    assert.equal(provider.kind, DEVICE_PROVIDER_KIND_REAL)
+    assert.equal(provider.providerId, 'zhipu-glm')
+    assert.equal(JSON.stringify(provider).includes('server-side-should-be-ignored'), false)
+    assert.throws(
+      () => assertServerEnvironmentIsDeviceOnly({
+        WWC_SERVER_MODEL_API_KEY: 'server-side-should-be-ignored',
+      }),
+      /WWC_SERVER_MODEL_API_KEY/u,
+    )
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
+})
+
+test('normalizeAnthropicMessagesEndpoint appends /v1/messages and rejects unsafe URLs', () => {
+  assert.equal(
+    normalizeAnthropicMessagesEndpoint('https://open.bigmodel.cn/api/anthropic'),
+    'https://open.bigmodel.cn/api/anthropic/v1/messages',
+  )
+  assert.equal(
+    normalizeAnthropicMessagesEndpoint('https://open.bigmodel.cn/api/anthropic/v1/messages'),
+    'https://open.bigmodel.cn/api/anthropic/v1/messages',
+  )
+  assert.throws(() => normalizeAnthropicMessagesEndpoint('http://open.bigmodel.cn/api'), /https/u)
+  assert.throws(() => normalizeAnthropicMessagesEndpoint('https://user:pass@example.com/v1'), /credentials/u)
+})
+
+test('realDeviceProvider freezes identity without embedding secrets', () => {
+  const provider = realDeviceProvider({
+    providerId: 'zhipu-glm',
+    modelId: 'glm-5.3-flash',
+    endpoint: 'https://open.bigmodel.cn/api/anthropic',
+  })
+  assert.equal(provider.kind, DEVICE_PROVIDER_KIND_REAL)
+  assert.equal(provider.seedMode, 'encrypted-web-to-device-apply-real-endpoint')
+  assert.equal(Object.isFrozen(provider), true)
+  assert.equal('apiKey' in provider, false)
+})
+
+test('production scripts no longer hardcode deterministicDeviceProvider as the only seed identity', () => {
+  const source = readFileSync(runnerPath, 'utf8')
+  assert.match(source, /selectDeviceProvider\s*\(/u)
+  assert.match(source, /deviceProviderEndpoint/u)
+  assert.equal(
+    /const deviceProvider = deterministicDeviceProvider\(\)/u.test(source),
+    false,
+    'run-api-production-vertical.mjs must select Provider identity from secrets+route',
+  )
+  const deviceTaskSource = readFileSync(deviceTaskPath, 'utf8')
+  assert.match(deviceTaskSource, /deviceProviderEndpoint/u)
+  assert.match(deviceTaskSource, /ZHIPU_BASE_URL/u)
 })
 
 test('production scripts no longer put model secrets on the Server environment', () => {

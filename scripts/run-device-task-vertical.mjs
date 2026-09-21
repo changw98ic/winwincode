@@ -60,7 +60,13 @@ const deviceRoute = {
   modelId: deviceProvider.modelId,
   // Filled after pairing by establishDeviceOnlyExecutionPath.
   clientNodeId: null,
+  ...(useDeviceDeterministic
+    ? {}
+    : { endpoint: process.env.ZHIPU_BASE_URL }),
 }
+const deviceProviderEndpoint = useDeviceDeterministic
+  ? null
+  : process.env.ZHIPU_BASE_URL
 
 const serverEnvironment = deviceOnlyServerEnvironment({
   WWC_SERVER_WORKER_MODE: 'remote',
@@ -78,6 +84,7 @@ try {
     devicePrerequisites: true,
     deviceRoute,
     deviceProviderSecrets: deviceSecrets,
+    deviceProviderEndpoint,
     wwcBinary: process.env.WWC_CLI_BINARY ?? resolve(root, 'target/debug/wwc'),
     serverEnvironment,
     timeoutMillis: 600_000,
@@ -98,6 +105,7 @@ try {
         report.repositoryBindingId = devicePath.repositoryBindingId
         report.steps.push(...devicePath.steps)
         report.modelRoute = modelRoute
+        report.deviceProviderSelected = devicePath.deviceProvider ?? null
         report.providerSecretBundle = deviceProviderSecretBundle({
           providerId: deviceProvider.providerId,
           modelId: deviceProvider.modelId,
