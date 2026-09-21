@@ -16,6 +16,13 @@ mod helper_release;
 mod model_bridge;
 pub mod model_port_client;
 mod outbox;
+pub mod parallel_model_runner;
+pub use parallel_model_runner::{
+    FusionPanelSeat, ParallelModelAttempt, ParallelModelAttemptRecord, ParallelModelBatchResult,
+    ParallelModelBudget, ParallelModelCancelHandle, ParallelModelCancelSignal, ParallelModelResult,
+    ParallelModelRunError, ParallelModelRunner, ParallelModelStatus, ParallelModelTarget,
+    ParallelModelTotals, fusion_panel, parallel_model_cancellation,
+};
 mod performance;
 pub mod performance_evidence;
 pub mod stage_product;
