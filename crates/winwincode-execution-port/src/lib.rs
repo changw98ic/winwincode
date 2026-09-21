@@ -20,6 +20,7 @@ pub mod debug_probe_delta_context;
 pub mod diagnostic_parser;
 pub mod execution_identity;
 pub mod generated;
+pub mod jev_decision;
 pub mod observation_contract;
 pub mod performance_comparison;
 pub mod probe_result_normalizer;
