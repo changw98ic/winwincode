@@ -21,7 +21,7 @@ pub use parallel_model_runner::{
     FusionPanelSeat, ParallelModelAttempt, ParallelModelAttemptRecord, ParallelModelBatchResult,
     ParallelModelBudget, ParallelModelCancelHandle, ParallelModelCancelSignal, ParallelModelResult,
     ParallelModelRunError, ParallelModelRunner, ParallelModelStatus, ParallelModelTarget,
-    ParallelModelTotals, fusion_panel, parallel_model_cancellation,
+    ParallelModelTotals, fusion_compose_frame_rows, fusion_panel, parallel_model_cancellation,
 };
 mod performance;
 pub mod performance_evidence;

@@ -63,6 +63,7 @@ mod durable_execution_port;
 pub mod execution_port_service;
 pub mod fusion_adjudication_host;
 pub mod fusion_analysis;
+pub mod fusion_compose;
 mod gate_interaction_service;
 pub mod knowledge;
 mod local_candidate;

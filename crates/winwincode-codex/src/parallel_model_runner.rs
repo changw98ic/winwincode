@@ -174,6 +174,23 @@ pub struct ParallelModelResult {
     pub latency: Duration,
 }
 
+/// FUSION compose-seam feed rows: `(candidate_id/target_id, frames)` for each
+/// succeeded target.
+///
+/// Control-plane `fusion_compose::answers_from_parallel_model_frames` consumes
+/// these rows. `target_id` is the Fusion `candidate_id`. Failed / timed-out /
+/// cancelled / budget-exceeded targets are omitted so one model failure never
+/// fails the Fusion compose batch.
+#[must_use]
+pub fn fusion_compose_frame_rows(batch: &ParallelModelBatchResult) -> Vec<(String, Vec<String>)> {
+    batch
+        .results
+        .iter()
+        .filter(|result| result.status == ParallelModelStatus::Succeeded)
+        .map(|result| (result.target_id.clone(), result.frames.clone()))
+        .collect()
+}
+
 /// Measured aggregate facts for the completed portion of a batch.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ParallelModelTotals {
@@ -970,6 +987,16 @@ mod tests {
             assert!(payload.get("apiKey").is_none());
             assert!(payload.get("secret").is_none());
         }
+
+        // Control-plane compose seam feed: only succeeded targets, target_id
+        // equals Fusion candidate_id, frames preserved for answer extraction.
+        let rows = fusion_compose_frame_rows(&batch);
+        assert_eq!(rows.len(), 5);
+        assert!(rows.iter().any(|(id, _)| id == fusion_panel::ASTRA));
+        assert!(rows.iter().any(|(id, _)| id == fusion_panel::SOL));
+        assert!(rows.iter().all(|(id, _)| *id != fusion_panel::FABLE));
+        assert!(rows.iter().all(|(id, _)| *id != fusion_panel::QWEN));
+        assert!(rows.iter().all(|(_, frames)| !frames.is_empty()));
     }
 
     #[tokio::test]
