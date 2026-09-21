@@ -208,8 +208,21 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
     while worker.lifecycle() == WorkerLifecycleState::Booting
         || worker.lifecycle() == WorkerLifecycleState::Registering
     {
-        if Box::pin(worker.start(started_at.clone())).await.is_ok() {
-            Box::pin(drain_controls(&mut worker, &handle)).await?;
+        match Box::pin(worker.start(started_at.clone())).await {
+            Ok(()) => {
+                Box::pin(drain_controls(&mut worker, &handle)).await?;
+            }
+            Err(error) => {
+                // Secret-safe lifecycle category only: a Device StrongFlow
+                // Worker that silently retries registration forever is
+                // indistinguishable from a hung process in production logs.
+                eprintln!(
+                    "winwincode-worker: registration/start retry category={:?} reason={} lifecycle={:?}",
+                    error.code,
+                    error.reason,
+                    worker.lifecycle()
+                );
+            }
         }
         if worker.lifecycle() != WorkerLifecycleState::Active {
             tokio::time::sleep(Duration::from_millis(250)).await;

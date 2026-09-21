@@ -943,6 +943,29 @@ async function waitForRemoteWorker(
   }, `remote Worker ${IDS.remoteWorker} ready heartbeat`, timeoutMillis)
 }
 
+/**
+ * Device StrongFlow WorkerSessions are launched by the Client after
+ * Controller dispatch. Registration is not instant (Codex/helper boot), and
+ * `workRunAggregate.runs` stays empty until the job is Leased/Running — so
+ * the vertical must wait for the launched Device Worker identity to appear
+ * with a heartbeat instead of treating a queued WorkRun as a stall.
+ */
+export async function waitForDeviceWorkerRegistered(
+  client,
+  launched,
+  timeoutMillis,
+) {
+  const workerId = launched?.workerId
+  assert.equal(typeof workerId, 'string', 'Device launch anchor must return workerId')
+  return waitFor(async () => {
+    const response = await client.query('worker.list', { states: [] })
+    const worker = response.result?.items?.find(item => item.id === workerId)
+    return worker?.state === 'enabled' && typeof worker.lastHeartbeatAt === 'string'
+      ? worker
+      : false
+  }, `Device Worker ${workerId} registration/heartbeat`, timeoutMillis)
+}
+
 async function freePort() {
   const server = createNetServer()
   await new Promise((resolvePromise, reject) => {
@@ -1588,6 +1611,15 @@ export async function driveDelivery(
     const workRuns = Array.isArray(workRunAggregate?.runs) ? workRunAggregate.runs : []
     const activeWorkRuns = workRuns
       .filter(run => ['queued', 'leased', 'running'].includes(run.state))
+    // Queued Device WorkRuns are not projected into workRunAggregate.runs
+    // (append_run accepts only Leased/Running). The Client launch anchor is
+    // still product authority: while the caller expects a Device WorkRun,
+    // keep polling until lease/registration instead of declaring a stall.
+    const pendingDeviceWorkRunIds = typeof hooks.pendingDeviceWorkRunIds === 'function'
+      ? hooks.pendingDeviceWorkRunIds()
+      : []
+    const expectDeviceWorkRun = hooks.expectDeviceWorkRun === true
+      || pendingDeviceWorkRunIds.length > 0
     const observation = { revision: detail.deliveryRevision, status: detail.status }
     appendDeliveryTransition(transitionTrace, observation)
     if (detail.status === 'done') break
@@ -1596,6 +1628,7 @@ export async function driveDelivery(
         observations: transitionTrace.observations,
         totalTransitionCount: transitionTrace.totalTransitionCount,
         workRunStates: workRuns.map(run => ({ id: run.id, state: run.state })),
+        pendingDeviceWorkRunIds,
         failure: deliveryFailureSummary(detail, modelRoute),
         transientErrors: transientDeliveryErrorSummary(transientErrors),
       })}`)
@@ -1620,6 +1653,13 @@ export async function driveDelivery(
       await new Promise(resolvePromise => setTimeout(resolvePromise, POLL_INTERVAL_MILLIS))
       continue
     }
+    if (typeof hooks.onPendingDeviceWorkRuns === 'function') {
+      try {
+        await hooks.onPendingDeviceWorkRuns(pendingDeviceWorkRunIds)
+      } catch (error) {
+        if (hooks.strictLaunchAnchor === true) throw error
+      }
+    }
     if (detail.solutionReview?.reviewStatus === 'pending') {
       fail('Delivery requires an external Solution Review decision')
     }
@@ -1634,6 +1674,14 @@ export async function driveDelivery(
         resolution: 'Resolve the bounded API workflow attention item.',
         remediation: null,
       }
+    } else if (expectDeviceWorkRun) {
+      // Device StrongFlow: Controller dispatched a queued executor job and the
+      // Client consumed a launch grant. The WorkerSession still has to
+      // register and lease before the aggregate can append the run. Wait out
+      // the caller timeout instead of the short local-stall budget.
+      idlePolls = 0
+      await new Promise(resolvePromise => setTimeout(resolvePromise, POLL_INTERVAL_MILLIS))
+      continue
     } else {
       // No active WorkRun and no open Attention while the Delivery is not
       // done: the Controller should already have dispatched the next step.
@@ -2255,27 +2303,61 @@ export async function runApiProductionVertical({
         // WorkerLaunchGrant before Device execution can dispatch. Controller
         // owns role sequencing; the Client owns launch anchors.
         const anchoredWorkRunIds = new Set()
+        const deviceWorkersByWorkRun = new Map()
         const anchorWorkRun = async workRunId => {
           if (devicePath === null || typeof workRunId !== 'string' || workRunId.length === 0) {
             return false
           }
           if (anchoredWorkRunIds.has(workRunId)) return false
-          await devicePath.launchAnchor({ workRunId })
+          const launched = await devicePath.launchAnchor({ workRunId })
           anchoredWorkRunIds.add(workRunId)
+          if (launched?.workerId !== undefined) {
+            deviceWorkersByWorkRun.set(workRunId, launched)
+          }
           report.devicePath.steps = [...devicePath.steps]
+          // Wait for the Device WorkerSession process to register/heartbeat
+          // so the Server can lease the queued StrongFlow executor job.
+          if (launched?.workerId !== undefined) {
+            try {
+              await waitForDeviceWorkerRegistered(
+                api,
+                launched,
+                Math.min(timeoutMillis, 90_000),
+              )
+            } catch {
+              // worker.list may omit Device sessions; driveDelivery still waits
+              // for the WorkRun lease/aggregate projection.
+            }
+          }
           return true
         }
         const executorWorkRunId = deliveryAdvanced.result?.activeWorkRunId
           ?? deliveryAdvanced.result?.workRunId
           ?? null
         await anchorWorkRun(executorWorkRunId)
-        delivery = await driveDelivery(api, timeoutMillis, modelRoute, Date.now, {
+        // Device StrongFlow needs Worker boot + registration + lease. Cap the
+        // wait well above chat register time but below the full vertical budget
+        // so a residual is reported instead of hanging the acceptance script.
+        delivery = await driveDelivery(
+          api,
+          Math.min(timeoutMillis, 180_000),
+          modelRoute,
+          Date.now,
+          {
           onActiveWorkRuns: async activeWorkRuns => {
             for (const run of activeWorkRuns) {
               await anchorWorkRun(run.id)
             }
           },
-        })
+          expectDeviceWorkRun: devicePath !== null,
+          pendingDeviceWorkRunIds: () => [...anchoredWorkRunIds],
+            onPendingDeviceWorkRuns: async pendingIds => {
+              for (const workRunId of pendingIds) {
+                await anchorWorkRun(workRunId)
+              }
+            },
+          },
+        )
         const workRunRuntime = await runtimeWorkRunEvidence(api, delivery.detail)
         report.flow.strongflow = {
           actions: delivery.actions,
