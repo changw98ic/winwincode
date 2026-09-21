@@ -105,6 +105,10 @@ export const DETERMINISTIC_VERIFICATION_BEHAVIOR_MARKER =
   'Use read-only commands against exactly workInput.candidateRef.'
 export const DETERMINISTIC_PLANNER_PROTOCOL = 'winwincode.planner-solution.v1'
 export const DETERMINISTIC_VERIFICATION_PROTOCOL = 'winwincode.independent-verification-result.v1'
+export const DETERMINISTIC_VERIFICATION_CALL_ID = 'loopback-verification-command'
+export const DETERMINISTIC_VERIFICATION_POLL_CALL_ID = 'loopback-verification-command-poll'
+/** Long enough for contract verification methods (e.g. git rev-parse) to finish. */
+export const DETERMINISTIC_VERIFICATION_YIELD_MS = 30_000
 
 /**
  * Encrypts one Device Provider mutation with the Device public key.
@@ -222,7 +226,7 @@ function toolOutputText(output) {
   return null
 }
 
-function parseProcessExitCode(text) {
+export function parseProcessExitCode(text) {
   if (typeof text !== 'string') return null
   for (const line of text.split(/\r?\n/u)) {
     const match = line.match(/^(?:Exit code: |Process exited with code )(-?\d+)\s*$/u)
@@ -234,7 +238,13 @@ function parseProcessExitCode(text) {
   return null
 }
 
-function workInputFromRequest(request) {
+/**
+ * Extracts StrongFlow workInput fields the Device deterministic Provider must
+ * honor for reviewer/verifier roles: contract criterion ids and the approved
+ * verification method. Top-level `criterionIds` / `verificationCommand` remain
+ * accepted for older runners; WorkRun dispatch uses nested WorkContract shape.
+ */
+export function workInputFromRequest(request) {
   const text = findTextValue(request, 'StrongFlow workInput (canonical JSON):')
   if (text === null) return null
   const start = text.indexOf('{')
@@ -256,24 +266,52 @@ function workInputFromRequest(request) {
   if (end < 0) return null
   try {
     const parsed = JSON.parse(text.slice(start, end))
-    const criterionIds = Array.isArray(parsed.criterionIds)
-      ? parsed.criterionIds
-      : Array.isArray(parsed.criterion_ids)
-        ? parsed.criterion_ids
-        : []
+    const criterionIds = []
+    const pushCriterionIds = values => {
+      if (!Array.isArray(values)) return
+      for (const value of values) {
+        if (typeof value === 'string' && value.length > 0 && !criterionIds.includes(value)) {
+          criterionIds.push(value)
+        }
+      }
+    }
+    pushCriterionIds(parsed.criterionIds)
+    pushCriterionIds(parsed.criterion_ids)
+    pushCriterionIds(parsed.workItem?.criterionIds)
+    pushCriterionIds(parsed.work_item?.criterion_ids)
+    const contractCriteria = parsed.workContract?.criteria
+      ?? parsed.work_contract?.criteria
+      ?? []
+    if (Array.isArray(contractCriteria)) {
+      for (const criterion of contractCriteria) {
+        const id = criterion?.id
+        if (typeof id === 'string' && id.length > 0 && !criterionIds.includes(id)) {
+          criterionIds.push(id)
+        }
+      }
+    }
     const verificationCommands = []
+    const pushVerificationCommand = value => {
+      if (typeof value === 'string' && value.length > 0 && !verificationCommands.includes(value)) {
+        verificationCommands.push(value)
+      }
+    }
+    if (Array.isArray(contractCriteria)) {
+      for (const criterion of contractCriteria) {
+        pushVerificationCommand(criterion?.verificationMethod)
+        pushVerificationCommand(criterion?.verification_method)
+      }
+    }
     const walk = value => {
       if (Array.isArray(value)) {
         for (const item of value) walk(item)
         return
       }
       if (value === null || typeof value !== 'object') return
-      if (typeof value.verificationCommand === 'string' && value.verificationCommand.length > 0) {
-        verificationCommands.push(value.verificationCommand)
-      }
-      if (typeof value.verification_command === 'string' && value.verification_command.length > 0) {
-        verificationCommands.push(value.verification_command)
-      }
+      pushVerificationCommand(value.verificationCommand)
+      pushVerificationCommand(value.verification_command)
+      pushVerificationCommand(value.verificationMethod)
+      pushVerificationCommand(value.verification_method)
       for (const child of Object.values(value)) walk(child)
     }
     walk(parsed)
@@ -282,10 +320,30 @@ function workInputFromRequest(request) {
       deliverySpecRevision: Number(parsed.deliverySpecRevision ?? parsed.delivery_spec_revision ?? 0),
       candidateRef: parsed.candidateRef ?? parsed.candidate_ref ?? null,
       criterionIds,
-      verificationCommand: verificationCommands[0] ?? 'npm run verify',
+      verificationCommand: verificationCommands[0] ?? 'git rev-parse --verify HEAD',
     }
   } catch {
     return null
+  }
+}
+
+export function resolveVerificationObservation(providerRequest) {
+  const primary = findToolOutput(providerRequest, DETERMINISTIC_VERIFICATION_CALL_ID)
+  const poll = findToolOutput(providerRequest, DETERMINISTIC_VERIFICATION_POLL_CALL_ID)
+  const primaryExit = primary === null ? null : parseProcessExitCode(toolOutputText(primary))
+  const pollExit = poll === null ? null : parseProcessExitCode(toolOutputText(poll))
+  if (pollExit !== null) {
+    return { exitCode: pollExit, evidenceSourceId: DETERMINISTIC_VERIFICATION_POLL_CALL_ID, hasToolOutput: true }
+  }
+  if (primaryExit !== null) {
+    return { exitCode: primaryExit, evidenceSourceId: DETERMINISTIC_VERIFICATION_CALL_ID, hasToolOutput: true }
+  }
+  return {
+    exitCode: null,
+    evidenceSourceId: primary !== null || poll !== null
+      ? (poll !== null ? DETERMINISTIC_VERIFICATION_POLL_CALL_ID : DETERMINISTIC_VERIFICATION_CALL_ID)
+      : null,
+    hasToolOutput: primary !== null || poll !== null,
   }
 }
 
@@ -353,7 +411,11 @@ function deterministicPlannerProduct(criterionIds) {
   })
 }
 
-function deterministicVerificationProduct({ passed, workInput }) {
+export function deterministicVerificationProduct({
+  passed,
+  workInput,
+  evidenceSourceId = DETERMINISTIC_VERIFICATION_CALL_ID,
+}) {
   const criterionIds = workInput?.criterionIds?.length
     ? workInput.criterionIds
     : ['api-terminal-criterion']
@@ -370,7 +432,7 @@ function deterministicVerificationProduct({ passed, workInput }) {
       criterion_id: criterionId,
       verdict: passed ? 'pass' : 'fail',
       explanation,
-      evidence_sources: [{ source_id: 'loopback-verification-command' }],
+      evidence_sources: [{ source_id: evidenceSourceId }],
     })),
   })
 }
@@ -420,16 +482,19 @@ export function startDeterministicDeviceModelServer({
           || containsValueWithType(providerRequest, 'custom_tool_call_output')
           || (bodyText.includes('loopback-executor-change')
             && /function_call_output|custom_tool_call_output|tool_result/u.test(bodyText))
-        const verificationOutput = findToolOutput(providerRequest, 'loopback-verification-command')
-        const verificationExit = verificationOutput === null
-          ? null
-          : parseProcessExitCode(toolOutputText(verificationOutput))
+        const verificationObservation = resolveVerificationObservation(providerRequest)
+        const verificationExit = verificationObservation.exitCode
+        const verificationEvidenceSourceId = verificationObservation.evidenceSourceId
+          ?? DETERMINISTIC_VERIFICATION_CALL_ID
+        const verificationCommand = workInput?.verificationCommand
+          ?? 'git rev-parse --verify HEAD'
 
         let text = chatContent
         let useTool = false
         let toolCallId = 'loopback-chat'
         let toolCommand = 'true'
         let stopReason = 'end_turn'
+        let toolYieldMs = 1000
 
         if (isExecutor && !executorOutput) {
           useTool = true
@@ -441,17 +506,36 @@ export function startDeterministicDeviceModelServer({
           text = ''
         } else if (isExecutor) {
           text = 'The requested stage action completed.'
-        } else if (isVerification && verificationOutput === null && shellTool) {
+        } else if (isVerification && !verificationObservation.hasToolOutput && shellTool) {
           useTool = true
           stopReason = 'tool_use'
-          toolCallId = 'loopback-verification-command'
-          toolCommand = workInput?.verificationCommand ?? 'npm run verify'
+          toolCallId = DETERMINISTIC_VERIFICATION_CALL_ID
+          toolCommand = verificationCommand
+          toolYieldMs = DETERMINISTIC_VERIFICATION_YIELD_MS
           text = ''
-        } else if (isVerification) {
+        } else if (isVerification && verificationExit === null && shellTool
+          && verificationEvidenceSourceId === DETERMINISTIC_VERIFICATION_CALL_ID) {
+          // Tool output arrived without a sealed exit code (process still
+          // running). Do not invent a fail verdict — poll once under a
+          // distinct evidence source so Core can finish and seal command
+          // evidence before the verification product is emitted.
+          useTool = true
+          stopReason = 'tool_use'
+          toolCallId = DETERMINISTIC_VERIFICATION_POLL_CALL_ID
+          toolCommand = verificationCommand
+          toolYieldMs = DETERMINISTIC_VERIFICATION_YIELD_MS
+          text = ''
+        } else if (isVerification && verificationExit !== null) {
           text = deterministicVerificationProduct({
             passed: verificationExit === 0,
             workInput,
+            evidenceSourceId: verificationEvidenceSourceId,
           })
+        } else if (isVerification) {
+          // Still no sealed exit after the poll. Do not invent pass or fail:
+          // Worker bind_verification_evidence requires a sealed command
+          // outcome for the cited source and must fail closed without one.
+          text = 'Verification command did not yield a sealed exit code; no independent result emitted.'
         } else if (isPlanner) {
           text = deterministicPlannerProduct(workInput.criterionIds)
         }
@@ -482,7 +566,7 @@ export function startDeterministicDeviceModelServer({
             },
           }])
           const input = shellTool.input_schema?.properties?.cmd
-            ? { cmd: toolCommand, workdir: '.', yield_time_ms: 1000 }
+            ? { cmd: toolCommand, workdir: '.', yield_time_ms: toolYieldMs }
             : { command: toolCommand, workdir: '.' }
           events.push(['content_block_delta', {
             type: 'content_block_delta',

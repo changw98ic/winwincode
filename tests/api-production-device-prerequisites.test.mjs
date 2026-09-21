@@ -16,6 +16,16 @@ import {
   deviceOnlyServerEnvironment,
   deviceProviderSecretBundle,
 } from '../scripts/run-api-production-vertical.mjs'
+import {
+  DETERMINISTIC_VERIFICATION_BEHAVIOR_MARKER,
+  DETERMINISTIC_VERIFICATION_CALL_ID,
+  DETERMINISTIC_VERIFICATION_POLL_CALL_ID,
+  DETERMINISTIC_VERIFICATION_PROTOCOL,
+  deterministicVerificationProduct,
+  parseProcessExitCode,
+  resolveVerificationObservation,
+  workInputFromRequest,
+} from '../scripts/device-production-fixture.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 const runnerPath = resolve(root, 'scripts/run-api-production-vertical.mjs')
@@ -162,4 +172,79 @@ test('runner exports Device-only helpers used by acceptance scripts', () => {
   assert.match(source, /establishDeviceOnlyExecutionPath/u)
   assert.match(source, /devicePrerequisites/u)
   assert.match(source, /DEVICE_SESSION_REQUIRED|device-session-required|Device before sending/u)
+})
+
+function strongFlowWorkInputRequest(workInput) {
+  return {
+    messages: [{
+      role: 'user',
+      content: `${DETERMINISTIC_VERIFICATION_BEHAVIOR_MARKER}\nStrongFlow workInput (canonical JSON):\n${JSON.stringify(workInput)}\n`,
+    }],
+  }
+}
+
+test('Device fixture workInput parser reads WorkRun contract criterion and verification method', () => {
+  const workInput = {
+    candidateRef: 'git-candidate:sha256:abc',
+    deliverySpecId: 'delivery-spec-FVCV3K8Q8830EB8BSPQ9Y1N1AG',
+    deliverySpecRevision: 1,
+    workContract: {
+      criteria: [{
+        id: 'crt_G180XH7PSZJVRVJMJWNJY2YKKS',
+        verificationMethod: 'git rev-parse --verify HEAD',
+      }],
+    },
+    workItem: {
+      criterionIds: ['crt_G180XH7PSZJVRVJMJWNJY2YKKS'],
+    },
+  }
+  const parsed = workInputFromRequest(strongFlowWorkInputRequest(workInput))
+  assert.ok(parsed !== null)
+  assert.deepEqual(parsed.criterionIds, ['crt_G180XH7PSZJVRVJMJWNJY2YKKS'])
+  assert.equal(parsed.verificationCommand, 'git rev-parse --verify HEAD')
+  assert.equal(parsed.deliverySpecId, 'delivery-spec-FVCV3K8Q8830EB8BSPQ9Y1N1AG')
+  assert.equal(parsed.candidateRef, 'git-candidate:sha256:abc')
+})
+
+test('Device fixture verification product cites sealed evidence and contract criterion ids', () => {
+  const product = JSON.parse(deterministicVerificationProduct({
+    passed: true,
+    workInput: {
+      candidateRef: 'git-candidate:sha256:abc',
+      deliverySpecId: 'delivery-spec-FVCV3K8Q8830EB8BSPQ9Y1N1AG',
+      deliverySpecRevision: 1,
+      criterionIds: ['crt_G180XH7PSZJVRVJMJWNJY2YKKS'],
+    },
+  }))
+  assert.equal(product.protocol, DETERMINISTIC_VERIFICATION_PROTOCOL)
+  assert.equal(product.findings[0].criterion_id, 'crt_G180XH7PSZJVRVJMJWNJY2YKKS')
+  assert.equal(product.findings[0].verdict, 'pass')
+  assert.equal(product.findings[0].evidence_sources[0].source_id, DETERMINISTIC_VERIFICATION_CALL_ID)
+})
+
+test('Device fixture does not invent fail when verification exit code is still unsealed', () => {
+  assert.equal(parseProcessExitCode('Process running with session ID 14484\nOutput:\n'), null)
+  assert.equal(parseProcessExitCode('Exit code: 0\n'), 0)
+  const running = resolveVerificationObservation({
+    messages: [{
+      type: 'function_call_output',
+      call_id: DETERMINISTIC_VERIFICATION_CALL_ID,
+      output: 'Process running with session ID 14484\n',
+    }],
+  })
+  assert.equal(running.exitCode, null)
+  assert.equal(running.hasToolOutput, true)
+  const sealed = resolveVerificationObservation({
+    messages: [{
+      type: 'function_call_output',
+      call_id: DETERMINISTIC_VERIFICATION_POLL_CALL_ID,
+      output: 'Exit code: 0\n',
+    }, {
+      type: 'function_call_output',
+      call_id: DETERMINISTIC_VERIFICATION_CALL_ID,
+      output: 'Process running with session ID 1\n',
+    }],
+  })
+  assert.equal(sealed.exitCode, 0)
+  assert.equal(sealed.evidenceSourceId, DETERMINISTIC_VERIFICATION_POLL_CALL_ID)
 })
