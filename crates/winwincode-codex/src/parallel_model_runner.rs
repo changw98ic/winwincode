@@ -7,7 +7,7 @@
 //! [`ModelPort`]. This module is a Fusion consumer only:
 //!
 //! - Provider routing, credentials, and the Device provider secrets path stay
-//!   inside the WinWinCode Provider Runtime (ge4r) behind [`ModelPort`].
+//!   inside the `WinWinCode` Provider Runtime (ge4r) behind [`ModelPort`].
 //! - Reasoning effort is carried in each attempt's existing
 //!   [`ModelPortRequest::payload_json`] contract; this runner never rewrites
 //!   the model request schema.
@@ -868,10 +868,9 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn dynasty_panel_preserves_partial_success_reasoning_cost_and_latency() {
-        let port = Arc::new(FixturePort::default());
-        let runner = ParallelModelRunner::new(port.clone());
+    /// Seven dynasty seats; FABLE fails and QWEN hangs so partial success,
+    /// reasoning-effort passthrough, cost and latency can all be asserted.
+    fn dynasty_panel_seats() -> Vec<FusionPanelSeat> {
         let mut seats = vec![
             FusionPanelSeat {
                 model: fusion_panel::ASTRA.to_owned(),
@@ -912,6 +911,14 @@ mod tests {
                 _ => {}
             }
         }
+        seats
+    }
+
+    #[tokio::test]
+    async fn dynasty_panel_preserves_partial_success_reasoning_cost_and_latency() {
+        let port = Arc::new(FixturePort::default());
+        let runner = ParallelModelRunner::new(port.clone());
+        let seats = dynasty_panel_seats();
         let targets = seats
             .iter()
             .map(|seat| {
@@ -920,9 +927,10 @@ mod tests {
                     dynasty_payload(route, effort)
                 });
                 for attempt in &mut target.attempts {
-                    if seat.model == fusion_panel::SOL && attempt.route.ends_with("-primary") {
-                        attempt.request.request_id = format!("fusion:{}:fail", seat.model);
-                    } else if seat.model == fusion_panel::FABLE {
+                    // SOL primary and FABLE both force a terminal failure.
+                    if (seat.model == fusion_panel::SOL && attempt.route.ends_with("-primary"))
+                        || seat.model == fusion_panel::FABLE
+                    {
                         attempt.request.request_id = format!("fusion:{}:fail", seat.model);
                     } else if seat.model == fusion_panel::QWEN {
                         attempt.request.request_id = format!("fusion:{}:hang", seat.model);

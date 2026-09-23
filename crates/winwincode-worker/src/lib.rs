@@ -437,20 +437,22 @@ where
         chunk: &ModelChunkMessage,
         detail: &str,
     ) {
+        use std::io::Write as _;
+
         let exchange = chunk.model_exchange_id.0.as_str();
         let sequence = chunk.sequence.0;
         let worker_session_id = chunk.worker_session_id.0.as_str();
         let thread_id = chunk.session_identity.codex_thread_id.0.as_str();
         if let Some(models) = self.device_models.as_ref() {
-            models.log_intake(
+            models.log_intake(device_model::IntakeLogLine {
                 stage,
                 code,
-                exchange,
+                exchange_id: exchange,
                 sequence,
                 worker_session_id,
                 thread_id,
                 detail,
-            );
+            });
         }
         let Some(path) = self.intake_log_path.as_deref() else {
             return;
@@ -465,7 +467,6 @@ where
         else {
             return;
         };
-        use std::io::Write as _;
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_secs())
@@ -606,21 +607,18 @@ where
     /// pending.
     #[must_use]
     pub fn has_pending_durable_evidence(&mut self) -> bool {
-        self.codex
-            .pending_execution_deliveries()
-            .map(|pending| {
-                pending.iter().any(|delivery| {
-                    matches!(
-                        delivery.message,
-                        ExecutionPortMessage::RuntimeEventMessage(_)
-                            | ExecutionPortMessage::ModelChunkMessage(_)
-                            | ExecutionPortMessage::JobOutcomeMessage(_)
-                            | ExecutionPortMessage::ArtifactChunkMessage(_)
-                            | ExecutionPortMessage::ArtifactOpenMessage(_)
-                    )
-                })
+        self.codex.pending_execution_deliveries().is_ok_and(|pending| {
+            pending.iter().any(|delivery| {
+                matches!(
+                    delivery.message,
+                    ExecutionPortMessage::RuntimeEventMessage(_)
+                        | ExecutionPortMessage::ModelChunkMessage(_)
+                        | ExecutionPortMessage::JobOutcomeMessage(_)
+                        | ExecutionPortMessage::ArtifactChunkMessage(_)
+                        | ExecutionPortMessage::ArtifactOpenMessage(_)
+                )
             })
-            .unwrap_or(false)
+        })
     }
 
     /// Flushes every pending durable Worker→Server delivery on the existing
@@ -731,6 +729,74 @@ where
         self.send_retained_delivery(delivery).await
     }
 
+    /// `ModelChunk` control path: the durable model-call frame ledger is
+    /// written inside `accept_model_chunk`. Post-retain steps (`ModelOpen`
+    /// compaction, outbox flush, Core runtime flush) must not fail this control
+    /// path — a hard error here requeues the same frame at the front of the
+    /// Device model queue and starves later contiguous Provider frames for an
+    /// automatic second model call after `tool_result`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the workspace, Codex-adapter, or `WorkerError` failure that
+    /// aborted this frame. Best-effort post-retain steps only log under
+    /// `WWC_WORKER_POLL_DEBUG` and never fail the control path.
+    async fn accept_model_chunk_control(
+        &mut self,
+        chunk: &ModelChunkMessage,
+        message: &ExecutionPortMessage,
+        now: &Instant,
+    ) -> Result<(), WorkerError> {
+        if self
+            .workspaces
+            .is_observation_model_exchange(&chunk.model_exchange_id)
+            .map_err(|_| workspace_error())?
+        {
+            return self.accept_observation_model_chunk(chunk, now).await;
+        }
+        self.codex
+            .accept_model_chunk(chunk, now)
+            .await
+            .map_err(|error| {
+                self.log_model_intake(
+                    "accept_chunk",
+                    "MODEL_CHUNK_ACCEPT_FAILED",
+                    chunk,
+                    "worker accept_model_chunk rejected Device frame",
+                );
+                let _ = error;
+                codex_model_error()
+            })?;
+        if chunk.sequence.0 == 1
+            && self.codex.accept_execution_delivery_ack(message).is_err()
+            && std::env::var_os("WWC_WORKER_POLL_DEBUG").is_some()
+        {
+            eprintln!(
+                "poll_codex ModelOpen compact best-effort failed exchange={}",
+                chunk.model_exchange_id.0
+            );
+        }
+        if self.flush_durable_execution_deliveries().await.is_err()
+            && std::env::var_os("WWC_WORKER_POLL_DEBUG").is_some()
+        {
+            eprintln!(
+                "poll_codex durable flush best-effort failed exchange={} seq={}",
+                chunk.model_exchange_id.0,
+                chunk.sequence.0
+            );
+        }
+        if self.flush_codex_execution_messages().await.is_err()
+            && std::env::var_os("WWC_WORKER_POLL_DEBUG").is_some()
+        {
+            eprintln!(
+                "poll_codex core flush best-effort failed exchange={} seq={}",
+                chunk.model_exchange_id.0,
+                chunk.sequence.0
+            );
+        }
+        Ok(())
+    }
+
     /// Applies one Control Plane message to the shared Worker lifecycle core.
     ///
     /// Local and remote adapters must decode into the same generated union
@@ -769,61 +835,7 @@ where
                     .await
             }
             ExecutionPortMessage::ModelChunkMessage(chunk) => {
-                if self
-                    .workspaces
-                    .is_observation_model_exchange(&chunk.model_exchange_id)
-                    .map_err(|_| workspace_error())?
-                {
-                    return self.accept_observation_model_chunk(chunk, &now).await;
-                }
-                // The durable model-call frame ledger is written inside
-                // `accept_model_chunk`. Post-retain steps (ModelOpen compaction,
-                // outbox flush, Core runtime flush) must not fail this control
-                // path: a hard error here requeues the same frame at the front
-                // of the Device model queue and starves later contiguous
-                // Provider frames for an automatic second model call after
-                // tool_result.
-                self.codex
-                    .accept_model_chunk(chunk, &now)
-                    .await
-                    .map_err(|error| {
-                        self.log_model_intake(
-                            "accept_chunk",
-                            "MODEL_CHUNK_ACCEPT_FAILED",
-                            chunk,
-                            "worker accept_model_chunk rejected Device frame",
-                        );
-                        let _ = error;
-                        codex_model_error()
-                    })?;
-                if chunk.sequence.0 == 1
-                    && self.codex.accept_execution_delivery_ack(message).is_err()
-                    && std::env::var_os("WWC_WORKER_POLL_DEBUG").is_some()
-                {
-                    eprintln!(
-                        "poll_codex ModelOpen compact best-effort failed exchange={}",
-                        chunk.model_exchange_id.0
-                    );
-                }
-                if self.flush_durable_execution_deliveries().await.is_err()
-                    && std::env::var_os("WWC_WORKER_POLL_DEBUG").is_some()
-                {
-                    eprintln!(
-                        "poll_codex durable flush best-effort failed exchange={} seq={}",
-                        chunk.model_exchange_id.0,
-                        chunk.sequence.0
-                    );
-                }
-                if self.flush_codex_execution_messages().await.is_err()
-                    && std::env::var_os("WWC_WORKER_POLL_DEBUG").is_some()
-                {
-                    eprintln!(
-                        "poll_codex core flush best-effort failed exchange={} seq={}",
-                        chunk.model_exchange_id.0,
-                        chunk.sequence.0
-                    );
-                }
-                Ok(())
+                self.accept_model_chunk_control(chunk, message, &now).await
             }
             ExecutionPortMessage::ActionEnforcementReceiptMessage(receipt) => {
                 self.codex

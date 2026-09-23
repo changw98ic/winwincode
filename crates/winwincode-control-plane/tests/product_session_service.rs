@@ -1487,8 +1487,8 @@ fn metadata_and_attachments_survive_restart_and_preserve_execution() {
     );
 }
 
-/// y2es: inject a process exit after the ProductSession cancel catalog commit
-/// but before the RepositoryScheduler cancel commit. Recovery must cancel the
+/// y2es: inject a process exit after the `ProductSession` cancel catalog commit
+/// but before the `RepositoryScheduler` cancel commit. Recovery must cancel the
 /// job and release admission without user retry, without rewriting identity.
 #[test]
 fn cancelled_session_routes_reconcile_after_queue_cancel_commit_loss() {
@@ -1533,7 +1533,7 @@ fn cancelled_session_routes_reconcile_after_queue_cancel_commit_loss() {
         .execution_queue()
         .expect("queue")
         .load_job(
-            &winwincode_storage::ExecutionQueueScope {
+            &ExecutionQueueScope {
                 organization_id: OrganizationId(id("org", 1)),
                 workspace_id: WorkspaceId(id("wsp", 1)),
                 project_id: ProjectId(id("prj", 1)),
@@ -1588,7 +1588,7 @@ fn cancelled_session_routes_reconcile_after_queue_cancel_commit_loss() {
         .execution_queue()
         .expect("queue")
         .load_job(
-            &winwincode_storage::ExecutionQueueScope {
+            &ExecutionQueueScope {
                 organization_id: OrganizationId(id("org", 1)),
                 workspace_id: WorkspaceId(id("wsp", 1)),
                 project_id: ProjectId(id("prj", 1)),
@@ -1630,7 +1630,7 @@ fn cancelled_session_routes_reconcile_after_queue_cancel_commit_loss() {
         .execution_queue()
         .expect("queue")
         .load_job(
-            &winwincode_storage::ExecutionQueueScope {
+            &ExecutionQueueScope {
                 organization_id: OrganizationId(id("org", 1)),
                 workspace_id: WorkspaceId(id("wsp", 1)),
                 project_id: ProjectId(id("prj", 1)),

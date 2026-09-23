@@ -1165,7 +1165,7 @@ async fn full_launch_chain_issues_consumes_and_is_idempotent_under_replays() {
 }
 
 /// Releases every active occupancy lease of a client through durable storage
-/// (simulates an occupancy rewrite after cancel_and_release / abnormal exit).
+/// (simulates an occupancy rewrite after `cancel_and_release` / abnormal exit).
 fn release_all_occupancy(data_directory: &Path) {
     let connection = rusqlite::Connection::open(data_directory.join("control-plane.sqlite3"))
         .expect("open database");
@@ -1180,7 +1180,7 @@ fn release_all_occupancy(data_directory: &Path) {
         .expect("release occupancy leases");
 }
 
-/// Cancels the staged chat ProductSession through the durable service.
+/// Cancels the staged chat `ProductSession` through the durable service.
 fn cancel_staged_product_session(data_directory: &Path, user_id: &str, session: u64) {
     use winwincode_control_plane::{CancelProductSessionCommand, ProductSessionCommandContext};
     let mut storage = SqliteStorage::open(data_directory).expect("storage");
@@ -1211,7 +1211,7 @@ fn cancel_staged_product_session(data_directory: &Path, user_id: &str, session: 
         .expect("receipt identity"),
         expected_revision: 1,
         event_id: winwincode_domain::ControlPlaneEventId(format!("evt_{:026}", session + 900)),
-        occurred_at: winwincode_domain::Instant("2026-09-04T12:05:00.000Z".to_owned()),
+        occurred_at: Instant("2026-09-04T12:05:00.000Z".to_owned()),
         public_actor,
         public_scope,
     };
@@ -1237,7 +1237,7 @@ fn bind_live_device_worker(
     use winwincode_control_plane::DeviceExecutionBindingService;
     use winwincode_storage::DeviceExecutionBindingIssuance;
     let mut storage = SqliteStorage::open(data_directory).expect("storage");
-    let now = winwincode_domain::Instant("2026-09-04T12:03:00.000Z".to_owned());
+    let now = Instant("2026-09-04T12:03:00.000Z".to_owned());
     let command = DeviceExecutionBindingIssuance::try_new(
         "deb_00000000000000000000000200",
         "req_00000000000000000000000200",
@@ -1490,7 +1490,7 @@ async fn cancelled_product_session_reopen_is_wrong_state_not_fake_start() {
     // The prior grant remains the only grant; no fake replacement was issued.
     let newest = {
         let mut storage = SqliteStorage::open(&data_directory).expect("storage");
-        winwincode_control_plane::WorkerLaunchGrantService::new(&mut storage)
+        WorkerLaunchGrantService::new(&mut storage)
             .newest_grant_for_product_session(
                 first["productSessionId"].as_str().expect("session id"),
             )
@@ -1506,6 +1506,34 @@ async fn cancelled_product_session_reopen_is_wrong_state_not_fake_start() {
     running.shutdown().await.expect("shutdown");
     let _ = std::fs::remove_dir_all(&data_directory);
     let _ = std::fs::remove_dir_all(&auth_directory);
+}
+
+/// Releases the prior Device execution binding so a reopen may restart.
+fn release_prior_device_worker(
+    data_directory: &Path,
+    grant: &winwincode_storage::WorkerLaunchGrantRecord,
+) {
+    use winwincode_control_plane::DeviceExecutionBindingService;
+    use winwincode_storage::DeviceExecutionBindingRelease;
+    let mut storage = SqliteStorage::open(data_directory).expect("storage");
+    let mut bindings = DeviceExecutionBindingService::new(&mut storage);
+    let snapshot = bindings
+        .snapshot(&grant.worker_session_id)
+        .expect("binding snapshot")
+        .expect("bound worker");
+    let release = DeviceExecutionBindingRelease::try_new(
+        &grant.worker_session_id,
+        "req_00000000000000000000000210",
+        snapshot.revision,
+        Instant("2026-09-04T12:06:00.000Z".to_owned()),
+    )
+    .expect("release command");
+    bindings
+        .release(
+            &release,
+            &Instant("2026-09-04T12:06:00.000Z".to_owned()),
+        )
+        .expect("release prior worker");
 }
 
 #[tokio::test]
@@ -1568,29 +1596,7 @@ async fn occupancy_rewrite_with_still_bound_worker_does_not_restart() {
 
     // After the prior worker is proven released, the same reopen restarts
     // with evidence under the new occupancy.
-    {
-        use winwincode_control_plane::DeviceExecutionBindingService;
-        use winwincode_storage::DeviceExecutionBindingRelease;
-        let mut storage = SqliteStorage::open(&data_directory).expect("storage");
-        let mut bindings = DeviceExecutionBindingService::new(&mut storage);
-        let snapshot = bindings
-            .snapshot(&grant.worker_session_id)
-            .expect("binding snapshot")
-            .expect("bound worker");
-        let release = DeviceExecutionBindingRelease::try_new(
-            &grant.worker_session_id,
-            "req_00000000000000000000000210",
-            snapshot.revision,
-            winwincode_domain::Instant("2026-09-04T12:06:00.000Z".to_owned()),
-        )
-        .expect("release command");
-        bindings
-            .release(
-                &release,
-                &winwincode_domain::Instant("2026-09-04T12:06:00.000Z".to_owned()),
-            )
-            .expect("release prior worker");
-    }
+    release_prior_device_worker(&data_directory, &grant);
     close_device_worker_slot(&data_directory, &grant);
 
     let restarted = http_request(

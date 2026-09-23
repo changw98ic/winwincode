@@ -151,6 +151,41 @@ async fn run_managed(config_path: &str) -> Result<(), Box<dyn std::error::Error>
 /// The shared execution main loop. Both entries run the same registration,
 /// control drain, heartbeat, and Codex drive cycles over
 /// [`RemoteWorkerPort::open`]; only the [`WorkerBootstrap`] source differs.
+/// Retries Worker registration until the lifecycle leaves the boot/register
+/// window. A silent retry loop would look like a hung process in production
+/// logs, so each failure prints its secret-safe category only.
+async fn register_until_active<Port, Codex>(
+    worker: &mut WorkerMain<Port, Codex>,
+    handle: &RemoteWorkerTransportHandle,
+    started_at: &Instant,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    Port: winwincode_codex::WorkerExecutionPort,
+    Codex: winwincode_codex::CodexCoreAdapter + Send + 'static,
+{
+    while worker.lifecycle() == WorkerLifecycleState::Booting
+        || worker.lifecycle() == WorkerLifecycleState::Registering
+    {
+        match Box::pin(worker.start(started_at.clone())).await {
+            Ok(()) => {
+                Box::pin(drain_controls(worker, handle)).await?;
+            }
+            Err(error) => {
+                eprintln!(
+                    "winwincode-worker: registration/start retry category={:?} reason={} lifecycle={:?}",
+                    error.code,
+                    error.reason,
+                    worker.lifecycle()
+                );
+            }
+        }
+        if worker.lifecycle() != WorkerLifecycleState::Active {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+    Ok(())
+}
+
 async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error::Error>> {
     let WorkerBootstrap {
         exit_after_work,
@@ -205,29 +240,7 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
         worker = worker.with_observation_model(observation_model);
     }
 
-    while worker.lifecycle() == WorkerLifecycleState::Booting
-        || worker.lifecycle() == WorkerLifecycleState::Registering
-    {
-        match Box::pin(worker.start(started_at.clone())).await {
-            Ok(()) => {
-                Box::pin(drain_controls(&mut worker, &handle)).await?;
-            }
-            Err(error) => {
-                // Secret-safe lifecycle category only: a Device StrongFlow
-                // Worker that silently retries registration forever is
-                // indistinguishable from a hung process in production logs.
-                eprintln!(
-                    "winwincode-worker: registration/start retry category={:?} reason={} lifecycle={:?}",
-                    error.code,
-                    error.reason,
-                    worker.lifecycle()
-                );
-            }
-        }
-        if worker.lifecycle() != WorkerLifecycleState::Active {
-            tokio::time::sleep(Duration::from_millis(250)).await;
-        }
-    }
+    register_until_active(&mut worker, &handle, &started_at).await?;
 
     let mut heartbeat = tokio::time::interval(Duration::from_secs(1));
     let mut drive = tokio::time::interval(Duration::from_millis(25));

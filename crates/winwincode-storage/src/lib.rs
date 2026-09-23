@@ -2,11 +2,11 @@
 
 //! Transactional product-state storage for the `WinWinCode` Control Plane.
 //!
-//! Community product boundary: exactly one local Owner, local SQLite product
+//! Community product boundary: exactly one local Owner, local `SQLite` product
 //! state, Owner user-account ledger, and local execution queue/registry
 //! storage. Organization/tenant identifiers in internal worker/publication
 //! scope keys are protocol encodings, not multi-tenant Member storage product
-//! APIs. PostgreSQL product runtime belongs to Cloud/Enterprise repositories.
+//! APIs. `PostgreSQL` product runtime belongs to Cloud/Enterprise repositories.
 //!
 //! [`ProductStateStorage`] is the storage seam used by the Control Plane. A
 //! commit replaces one canonical state value and atomically appends an optional

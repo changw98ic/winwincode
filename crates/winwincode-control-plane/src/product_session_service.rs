@@ -95,7 +95,7 @@ pub trait ProductSessionPersistence: ProductStateStorage {
     /// Rejects stale queue revisions, changed replays, and storage failures.
     fn request_product_session_cancellation(
         &mut self,
-        request: &winwincode_storage::RepositorySchedulerCancellationRequest,
+        request: &RepositorySchedulerCancellationRequest,
     ) -> Result<(), StorageError>;
 
     /// Loads the immutable queue entry and proves its original submission
@@ -151,8 +151,8 @@ pub trait ProductSessionPersistence: ProductStateStorage {
     /// Returns a storage error when the scheduler cannot be opened or read.
     fn list_scheduler_jobs(
         &mut self,
-        scope: &winwincode_storage::RepositorySchedulerScope,
-        states: &[winwincode_storage::ExecutionJobState],
+        scope: &RepositorySchedulerScope,
+        states: &[ExecutionJobState],
     ) -> Result<Vec<ExecutionJobRecord>, StorageError>;
 
     /// Releases a queued/running execution-admission reservation for a cancelled job.
@@ -178,7 +178,7 @@ impl ProductSessionPersistence for SqliteStorage {
     }
     fn request_product_session_cancellation(
         &mut self,
-        request: &winwincode_storage::RepositorySchedulerCancellationRequest,
+        request: &RepositorySchedulerCancellationRequest,
     ) -> Result<(), StorageError> {
         let receipt = self.repository_scheduler()?.request_cancellation(request)?;
         // Always reclaim non-terminal admission after a durable cancel, even
@@ -213,8 +213,8 @@ impl ProductSessionPersistence for SqliteStorage {
 
     fn list_scheduler_jobs(
         &mut self,
-        scope: &winwincode_storage::RepositorySchedulerScope,
-        states: &[winwincode_storage::ExecutionJobState],
+        scope: &RepositorySchedulerScope,
+        states: &[ExecutionJobState],
     ) -> Result<Vec<ExecutionJobRecord>, StorageError> {
         self.repository_scheduler()?.list_jobs(scope, states)
     }
@@ -241,13 +241,13 @@ impl ProductSessionPersistence for SqliteStorage {
             return Ok(());
         }
         admission
-            .release(&winwincode_storage::ExecutionReservationRelease {
+            .release(&ExecutionReservationRelease {
                 scope: reservation.scope,
                 worker_pool_id: reservation.worker_pool_id,
                 job_id: job_id.clone(),
                 request_id: request_id.clone(),
                 expected_revision: reservation.revision,
-                reason: winwincode_storage::ExecutionReservationReleaseReason::Cancelled,
+                reason: ExecutionReservationReleaseReason::Cancelled,
                 released_at: released_at.clone(),
             })
             .map_err(|error| StorageError::adapter(error.to_string()))?;
@@ -1335,8 +1335,8 @@ impl<'storage> ProductSessionService<'storage> {
     }
 
     /// Replays durable cancelled-session cancel routes onto the queue after a
-    /// process exit between the ProductSession catalog commit and the
-    /// RepositoryScheduler cancel commit (y2es).
+    /// process exit between the `ProductSession` catalog commit and the
+    /// `RepositoryScheduler` cancel commit (y2es).
     ///
     /// Uses the same request-identity formula as the original cancel. Jobs
     /// that are still `queued`/`leased`/`running` are cancelled under that
@@ -2264,7 +2264,7 @@ pub(crate) fn catalog_stream_id(scope: &ReceiptScopeKey) -> String {
     format!("product-sessions:{:x}", Sha256::digest(scope.as_bytes()))
 }
 
-/// Stable queue-cancellation request identity for one ProductSession cancel
+/// Stable queue-cancellation request identity for one `ProductSession` cancel
 /// route. The original cancel and post-crash recovery share this formula so
 /// recovery never invents a second request identity.
 pub(crate) fn session_route_cancel_request_id(

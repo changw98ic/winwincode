@@ -23,31 +23,40 @@ pub(crate) struct DeviceModels {
     /// process restart so a post-tool second model call cannot stall at
     /// sequence 1 while Device already stores the full response.
     delivered_high_water: HashMap<String, i64>,
-    /// Exchange identities this Worker opened through DeviceModels.
+    /// Exchange identities this Worker opened through `DeviceModels`.
     /// Shared Device providers.sqlite3 stores every session's exchanges;
     /// recover must not re-queue foreign-session frames into this Worker.
     owned_exchanges: HashSet<String>,
-    /// Session identities observed on ModelOpen messages this Worker sent.
+    /// Session identities observed on `ModelOpen` messages this Worker sent.
     session_ids: HashSet<String>,
     /// Worker instance identities that may own Device frames for this process.
     instance_ids: HashSet<String>,
     /// Foreign exchanges already logged once (avoid 25ms poll spam).
     logged_foreign: HashSet<String>,
-    /// Optional durable non-secret intake log shared with model_bridge.
+    /// Optional durable non-secret intake log shared with `model_bridge`.
     intake_log: Option<PathBuf>,
+}
+
+/// One durable intake log line. Bundled so the writer keeps a flat format
+/// string without an eight-argument signature.
+#[derive(Clone, Copy)]
+pub(crate) struct IntakeLogLine<'a> {
+    pub stage: &'a str,
+    pub code: &'a str,
+    pub exchange_id: &'a str,
+    pub sequence: i64,
+    pub worker_session_id: &'a str,
+    pub thread_id: &'a str,
+    pub detail: &'a str,
 }
 
 impl DeviceModels {
     pub(crate) fn open(directory: &Path) -> Result<Self, DeviceProviderError> {
         DeviceProviderStore::open(directory)?;
-        let intake_log = std::env::var_os("WWC_MODEL_INTAKE_LOG")
-            .map(PathBuf::from)
-            .or_else(|| {
-                // Managed workers keep durable diagnostics beside Codex runtime.
-                // The provider directory itself is shared across Worker sessions
-                // on one Device, so prefer an explicit env path when present.
-                None
-            });
+        // Managed workers keep durable diagnostics beside Codex runtime. The
+        // provider directory itself is shared across Worker sessions on one
+        // Device, so only an explicit env path is honoured — no derived fallback.
+        let intake_log = std::env::var_os("WWC_MODEL_INTAKE_LOG").map(PathBuf::from);
         let (sender, receiver) = mpsc::channel();
         Ok(Self {
             directory: directory.to_owned(),
@@ -245,15 +254,15 @@ impl DeviceModels {
             }
             if !self.exchange_is_recoverable(&store, &exchange_id)? {
                 if self.logged_foreign.insert(exchange_id.clone()) {
-                    self.log_intake(
-                        "recover_skip",
-                        "FOREIGN_EXCHANGE",
-                        &exchange_id,
-                        0,
-                        "",
-                        "",
-                        "shared Device store exchange not owned by this Worker",
-                    );
+                    self.log_intake(IntakeLogLine {
+                        stage: "recover_skip",
+                        code: "FOREIGN_EXCHANGE",
+                        exchange_id: &exchange_id,
+                        sequence: 0,
+                        worker_session_id: "",
+                        thread_id: "",
+                        detail: "shared Device store exchange not owned by this Worker",
+                    });
                 }
                 continue;
             }
@@ -281,16 +290,7 @@ impl DeviceModels {
         Ok(())
     }
 
-    pub(crate) fn log_intake(
-        &self,
-        stage: &str,
-        code: &str,
-        exchange_id: &str,
-        sequence: i64,
-        worker_session_id: &str,
-        thread_id: &str,
-        detail: &str,
-    ) {
+    pub(crate) fn log_intake(&self, line: IntakeLogLine<'_>) {
         let Some(path) = self.intake_log.as_deref() else {
             return;
         };
@@ -310,7 +310,14 @@ impl DeviceModels {
             .unwrap_or_default();
         let _ = writeln!(
             file,
-            "ts={ts} component=device_models stage={stage} code={code} exchange={exchange_id} seq={sequence} wsn={worker_session_id} thr={thread_id} detail={detail}"
+            "ts={ts} component=device_models stage={} code={} exchange={} seq={} wsn={} thr={} detail={}",
+            line.stage,
+            line.code,
+            line.exchange_id,
+            line.sequence,
+            line.worker_session_id,
+            line.thread_id,
+            line.detail
         );
     }
 }

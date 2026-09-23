@@ -129,7 +129,7 @@ pub enum ClientSessionsErrorKind {
     /// The Device Client did not answer within the bounded wait; the grant
     /// stays `issued` until its expiry.
     LaunchAckTimeout,
-    /// The ProductSession or its prior Device Worker cannot be started in the
+    /// The `ProductSession` or its prior Device Worker cannot be started in the
     /// current durable state. Callers must recover/stop the prior worker or
     /// reopen a live conversation; this is never a fake success.
     SessionNotLaunchable,

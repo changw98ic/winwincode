@@ -445,42 +445,8 @@ impl ControlPlane {
             return Ok(());
         }
         let delivery = load_current_delivery(self.storage_ref()?, delivery_id)?;
-        if delivery.revision() < terminal_revision {
+        if !controller_followup_is_safe(&delivery, terminal_revision, completed_job_id) {
             return Ok(());
-        }
-        if delivery.revision() != terminal_revision {
-            // Exact revision equality is too strict when a durable candidate
-            // pin or projection commit lands after the WorkRun terminal
-            // revision. Proceed only when the completed WorkRun is still a
-            // successful terminal producer and no next-stage WorkRun is
-            // already active. The Controller receipt above still makes a
-            // duplicate dispatch a no-op.
-            let Some(completed) = delivery
-                .snapshot()
-                .work_run_aggregate
-                .runs
-                .iter()
-                .find(|run| run.execution_job_id == *completed_job_id)
-            else {
-                return Ok(());
-            };
-            if !matches!(
-                completed.state,
-                winwincode_domain::WorkRunState::CandidateReady
-                    | winwincode_domain::WorkRunState::Settled
-            ) {
-                return Ok(());
-            }
-            if delivery.snapshot().work_run_aggregate.runs.iter().any(|run| {
-                matches!(
-                    run.state,
-                    winwincode_domain::WorkRunState::Queued
-                        | winwincode_domain::WorkRunState::Leased
-                        | winwincode_domain::WorkRunState::Running
-                )
-            }) {
-                return Ok(());
-            }
         }
         let expected_revision = Revision(i64::try_from(delivery.revision()).map_err(|_| {
             DeliveryApplicationError::InvalidRequest(
@@ -1384,6 +1350,49 @@ fn map_command<T: Serialize>(
     };
     crate::command_receipt(&mapped)?;
     Ok(mapped)
+}
+
+/// Decides whether Controller follow-up is still safe at the terminal revision.
+///
+/// Exact revision equality is too strict when a durable candidate pin or
+/// projection commit lands after the `WorkRun` terminal revision. In that case
+/// proceed only when the completed `WorkRun` is still a successful terminal
+/// producer and no next-stage `WorkRun` is already active. The Controller
+/// receipt still makes a duplicate dispatch a no-op.
+fn controller_followup_is_safe(
+    delivery: &Delivery,
+    terminal_revision: u64,
+    completed_job_id: &ExecutionJobId,
+) -> bool {
+    if delivery.revision() < terminal_revision {
+        return false;
+    }
+    if delivery.revision() == terminal_revision {
+        return true;
+    }
+    let Some(completed) = delivery
+        .snapshot()
+        .work_run_aggregate
+        .runs
+        .iter()
+        .find(|run| run.execution_job_id == *completed_job_id)
+    else {
+        return false;
+    };
+    if !matches!(
+        completed.state,
+        winwincode_domain::WorkRunState::CandidateReady | winwincode_domain::WorkRunState::Settled
+    ) {
+        return false;
+    }
+    !delivery.snapshot().work_run_aggregate.runs.iter().any(|run| {
+        matches!(
+            run.state,
+            winwincode_domain::WorkRunState::Queued
+                | winwincode_domain::WorkRunState::Leased
+                | winwincode_domain::WorkRunState::Running
+        )
+    })
 }
 
 fn load_current_delivery(

@@ -541,10 +541,10 @@ where
                 principal.worker_pool_id().clone(),
             )
         };
-        if let Err(error) = drive_result {
-            if std::env::var_os("WWC_DEBUG_RUNTIME").is_some() {
-                eprintln!("remote Worker scheduler drive after exchange failed: {error}");
-            }
+        if let Err(error) = drive_result
+            && std::env::var_os("WWC_DEBUG_RUNTIME").is_some()
+        {
+            eprintln!("remote Worker scheduler drive after exchange failed: {error}");
         }
         let response = RemoteExchangeResponse::new(self.queue.snapshot(request.worker_id())?)
             .map_err(|_| RemoteWorkerTransportError::new("remote Worker response is invalid"))?;

@@ -710,123 +710,76 @@ impl ExecutionPortModelBridge {
         Ok(())
     }
 
-    pub(crate) async fn accept_chunk(
-        &self,
+    /// Marks the model call provider-final in the durable ledger.
+    fn mark_provider_final(&self, owner: &ModelExchangeOwner) -> Result<(), BridgeError> {
+        self.ordinal_store
+            .mark_model_call_provider_final(&owner.run_key, &owner.model_call_id)
+            .map_err(|error| match error {
+                crate::store::AdapterStoreError::Conflict => BridgeError::Conflict,
+                crate::store::AdapterStoreError::Unavailable
+                | crate::store::AdapterStoreError::Corrupt => BridgeError::Unavailable,
+            })
+    }
+
+    /// Classifies an incoming frame against the durable ledger: an exact
+    /// retained duplicate, the next contiguous Provider frame, or neither.
+    fn frame_position(
+        persisted_frames: &[ModelChunkMessage],
         chunk: &ModelChunkMessage,
-        received_at: &Instant,
-    ) -> Result<ModelChunkDisposition, BridgeError> {
-        let (owner, binding, process_exchange) =
-            self.resolve_chunk_owner(chunk).map_err(|error| {
-                log_model_intake_failure(chunk, "resolve", &error);
-                error
-            })?;
-        let metadata = ModelMessageMetadata {
-            message_id: execution_message_id(b"model-ack", &chunk.message_id.0),
-            sent_at: received_at.clone(),
-        };
-        self.validate_chunk_authority(chunk, &binding, received_at)
-            .map_err(|error| {
-                log_model_intake_failure(chunk, "authority", &error);
-                error
-            })?;
-        // The sink can wake Core synchronously while `accept_chunk` is
-        // awaiting. Advance the action gate only after the complete chunk
-        // authority check succeeds, but before the frame is delivered to
-        // Core, so a tool request cannot race with the trusted-clock update.
-        self.sync_action_clock(received_at)?;
-        // Keep the exact response frame before handing it to Core.  This
-        // closes the crash window where Core has consumed a final chunk but
-        // the private replay ledger has not yet been written.  A gap or a
-        // changed duplicate is left to WorkerModelPortClient so it can emit
-        // the canonical Gap/Conflict acknowledgement instead of poisoning
-        // the durable response sequence.
-        let mut client = self.client.lock().await;
-        let persisted_frames = self
-            .ordinal_store
-            .load_model_call_frames(&owner.run_key, &owner.model_call_id)
-            .map_err(model_frame_store_error)?;
+    ) -> (bool, bool) {
         let sequence = usize::try_from(chunk.sequence.0).ok();
         let expected = persisted_frames.len().saturating_add(1);
         let exact_duplicate = sequence
             .and_then(|sequence| sequence.checked_sub(1))
             .and_then(|index| persisted_frames.get(index))
             .is_some_and(|existing| existing == chunk);
-        let contiguous_new = sequence == Some(expected);
-        if !process_exchange {
-            // A Provider may retry a terminal frame after the Worker process
-            // has released its live Core stream.  The durable frame ledger is
-            // authoritative in that interval: acknowledge only an exact
-            // retained frame and never create a new Provider/Core exchange.
-            if exact_duplicate && chunk.is_final {
-                let disposition = client
-                    .accept_terminal_duplicate(binding.authority.clone(), chunk, metadata)
-                    .await
-                    .map_err(|_| BridgeError::Protocol)?;
-                self.record_primary_model_completion(&owner, chunk, received_at)?;
-                self.ordinal_store
-                    .mark_model_call_provider_final(&owner.run_key, &owner.model_call_id)
-                    .map_err(|error| match error {
-                        crate::store::AdapterStoreError::Conflict => BridgeError::Conflict,
-                        crate::store::AdapterStoreError::Unavailable
-                        | crate::store::AdapterStoreError::Corrupt => BridgeError::Unavailable,
-                    })?;
-                return Ok(disposition);
-            }
-            // An exact durable duplicate must unblock the Device model queue
-            // even when Core is not attached; otherwise one stale accept error
-            // can starve every later Provider frame for the same exchange.
-            if exact_duplicate {
-                return Ok(ModelChunkDisposition::Duplicate {
-                    confirmed_sequence: u64::try_from(chunk.sequence.0)
-                        .map_err(|_| BridgeError::InvalidPayload)?,
-                });
-            }
-            // Contiguous Provider frames can outlive the process-local exchange
-            // map (for example after a Core stream was abandoned mid-response).
-            // Keep the durable frame ledger exact and deliver to any still-live
-            // Core sink so a verifier final response is not lost after Device
-            // has already produced it.
-            if contiguous_new {
-                validate_chunk_for_retention(chunk).map_err(|error| {
-                    log_model_intake_failure(chunk, "retention", &error);
-                    error
-                })?;
-                self.ordinal_store
-                    .retain_model_call_frame(&owner.run_key, &owner.model_call_id, chunk)
-                    .map_err(model_frame_store_error)?;
-                if let Some(payload) = &chunk.payload {
-                    let bytes = STANDARD
-                        .decode(&payload.data_base64)
-                        .map_err(|_| BridgeError::InvalidPayload)?;
-                    let text = String::from_utf8(bytes).map_err(|_| BridgeError::InvalidPayload)?;
-                    let _ = self.sink.deliver_item(
-                        &chunk.model_exchange_id,
-                        Ok(text),
-                    );
-                }
-                if chunk.is_final {
-                    self.record_primary_model_completion(&owner, chunk, received_at)?;
-                    self.ordinal_store
-                        .mark_model_call_provider_final(&owner.run_key, &owner.model_call_id)
-                        .map_err(|error| match error {
-                            crate::store::AdapterStoreError::Conflict => BridgeError::Conflict,
-                            crate::store::AdapterStoreError::Unavailable
-                            | crate::store::AdapterStoreError::Corrupt => BridgeError::Unavailable,
-                        })?;
-                }
-                return Ok(ModelChunkDisposition::Delivered {
-                    confirmed_sequence: u64::try_from(chunk.sequence.0)
-                        .map_err(|_| BridgeError::InvalidPayload)?,
-                    termination: chunk
-                        .is_final
-                        .then_some(ModelTerminationReason::Completed),
-                });
-            }
-            return Err(BridgeError::Conflict);
+        (exact_duplicate, sequence == Some(expected))
+    }
+
+    /// Retains a contiguous Provider frame and forwards any payload text to a
+    /// still-live Core sink so a verifier final response is not lost after
+    /// Device has already produced it.
+    fn retain_and_forward_frame(
+        &self,
+        chunk: &ModelChunkMessage,
+        owner: &ModelExchangeOwner,
+    ) -> Result<(), BridgeError> {
+        validate_chunk_for_retention(chunk)
+            .inspect_err(|error| log_model_intake_failure(chunk, "retention", *error))?;
+        self.ordinal_store
+            .retain_model_call_frame(&owner.run_key, &owner.model_call_id, chunk)
+            .map_err(model_frame_store_error)?;
+        if let Some(payload) = &chunk.payload {
+            let bytes = STANDARD
+                .decode(&payload.data_base64)
+                .map_err(|_| BridgeError::InvalidPayload)?;
+            let text = String::from_utf8(bytes).map_err(|_| BridgeError::InvalidPayload)?;
+            let _ = self.sink.deliver_item(&chunk.model_exchange_id, Ok(text));
         }
+        Ok(())
+    }
+
+    /// Reserves the frame in the durable ledger before Core sees it, then hands
+    /// the frame to Core and maps a Core rejection onto the canonical
+    /// dispositions. Returns the disposition and whether the ledger already
+    /// held this frame. A gap or changed duplicate is left to
+    /// `WorkerModelPortClient` so it can emit the canonical Gap/Conflict
+    /// acknowledgement instead of poisoning the durable response sequence.
+    async fn reserve_and_accept(
+        &self,
+        client: &mut ModelClient,
+        chunk: &ModelChunkMessage,
+        owner: &ModelExchangeOwner,
+        metadata: ModelMessageMetadata,
+        exact_duplicate: bool,
+        contiguous_new: bool,
+    ) -> Result<(ModelChunkDisposition, bool), BridgeError> {
         let pre_retained = if exact_duplicate {
             true
         } else if contiguous_new {
+            // Note: this path does not log a retention failure (unlike
+            // `retain_and_forward_frame`) — the caller surfaces it as a hard
+            // error on the control path instead.
             validate_chunk_for_retention(chunk)?;
             self.ordinal_store
                 .retain_model_call_frame(&owner.run_key, &owner.model_call_id, chunk)
@@ -848,13 +801,100 @@ impl ExecutionPortModelBridge {
                 ModelChunkDisposition::Delivered {
                     confirmed_sequence: u64::try_from(chunk.sequence.0)
                         .map_err(|_| BridgeError::InvalidPayload)?,
-                    termination: chunk
-                        .is_final
-                        .then_some(ModelTerminationReason::Completed),
+                    termination: chunk.is_final.then_some(ModelTerminationReason::Completed),
                 }
             }
             Err(_) => return Err(BridgeError::Protocol),
         };
+        Ok((disposition, pre_retained))
+    }
+
+    pub(crate) async fn accept_chunk(
+        &self,
+        chunk: &ModelChunkMessage,
+        received_at: &Instant,
+    ) -> Result<ModelChunkDisposition, BridgeError> {
+        let (owner, binding, process_exchange) = self
+            .resolve_chunk_owner(chunk)
+            .inspect_err(|error| log_model_intake_failure(chunk, "resolve", *error))?;
+        let metadata = ModelMessageMetadata {
+            message_id: execution_message_id(b"model-ack", &chunk.message_id.0),
+            sent_at: received_at.clone(),
+        };
+        self.validate_chunk_authority(chunk, &binding, received_at)
+            .inspect_err(|error| log_model_intake_failure(chunk, "authority", *error))?;
+        // The sink can wake Core synchronously while `accept_chunk` is
+        // awaiting. Advance the action gate only after the complete chunk
+        // authority check succeeds, but before the frame is delivered to
+        // Core, so a tool request cannot race with the trusted-clock update.
+        self.sync_action_clock(received_at)?;
+        // Keep the exact response frame before handing it to Core.  This
+        // closes the crash window where Core has consumed a final chunk but
+        // the private replay ledger has not yet been written.  A gap or a
+        // changed duplicate is left to WorkerModelPortClient so it can emit
+        // the canonical Gap/Conflict acknowledgement instead of poisoning
+        // the durable response sequence.
+        let mut client = self.client.lock().await;
+        let persisted_frames = self
+            .ordinal_store
+            .load_model_call_frames(&owner.run_key, &owner.model_call_id)
+            .map_err(model_frame_store_error)?;
+        let (exact_duplicate, contiguous_new) =
+            Self::frame_position(&persisted_frames, chunk);
+        if !process_exchange {
+            // A Provider may retry a terminal frame after the Worker process
+            // has released its live Core stream.  The durable frame ledger is
+            // authoritative in that interval: acknowledge only an exact
+            // retained frame and never create a new Provider/Core exchange.
+            if exact_duplicate && chunk.is_final {
+                let disposition = client
+                    .accept_terminal_duplicate(binding.authority.clone(), chunk, metadata)
+                    .await
+                    .map_err(|_| BridgeError::Protocol)?;
+                self.record_primary_model_completion(&owner, chunk, received_at)?;
+                self.mark_provider_final(&owner)?;
+                return Ok(disposition);
+            }
+            // An exact durable duplicate must unblock the Device model queue
+            // even when Core is not attached; otherwise one stale accept error
+            // can starve every later Provider frame for the same exchange.
+            if exact_duplicate {
+                return Ok(ModelChunkDisposition::Duplicate {
+                    confirmed_sequence: u64::try_from(chunk.sequence.0)
+                        .map_err(|_| BridgeError::InvalidPayload)?,
+                });
+            }
+            // Contiguous Provider frames can outlive the process-local exchange
+            // map (for example after a Core stream was abandoned mid-response).
+            // Keep the durable frame ledger exact and deliver to any still-live
+            // Core sink so a verifier final response is not lost after Device
+            // has already produced it.
+            if contiguous_new {
+                self.retain_and_forward_frame(chunk, &owner)?;
+                if chunk.is_final {
+                    self.record_primary_model_completion(&owner, chunk, received_at)?;
+                    self.mark_provider_final(&owner)?;
+                }
+                return Ok(ModelChunkDisposition::Delivered {
+                    confirmed_sequence: u64::try_from(chunk.sequence.0)
+                        .map_err(|_| BridgeError::InvalidPayload)?,
+                    termination: chunk
+                        .is_final
+                        .then_some(ModelTerminationReason::Completed),
+                });
+            }
+            return Err(BridgeError::Conflict);
+        }
+        let (disposition, pre_retained) = self
+            .reserve_and_accept(
+                &mut client,
+                chunk,
+                &owner,
+                metadata,
+                exact_duplicate,
+                contiguous_new,
+            )
+            .await?;
         drop(client);
         if !pre_retained
             && matches!(
@@ -876,13 +916,7 @@ impl ExecutionPortModelBridge {
             && chunk.is_final;
         if terminal {
             self.record_primary_model_completion(&owner, chunk, received_at)?;
-            self.ordinal_store
-                .mark_model_call_provider_final(&owner.run_key, &owner.model_call_id)
-                .map_err(|error| match error {
-                    crate::store::AdapterStoreError::Conflict => BridgeError::Conflict,
-                    crate::store::AdapterStoreError::Unavailable
-                    | crate::store::AdapterStoreError::Corrupt => BridgeError::Unavailable,
-                })?;
+            self.mark_provider_final(&owner)?;
             self.client
                 .lock()
                 .await
@@ -1649,7 +1683,7 @@ fn model_store_failure(error: crate::store::AdapterStoreError) -> ModelPortFailu
 
 /// Durable non-secret intake diagnostics for Device→Worker model frames.
 /// Worker stderr redacts credentials; this path records only public envelope
-/// identities and BridgeError codes so verification-exchange resolve/authority
+/// identities and `BridgeError` codes so verification-exchange resolve/authority
 /// failures remain inspectable after a run.
 static MODEL_INTAKE_LOG_PATH: std::sync::OnceLock<std::path::PathBuf> =
     std::sync::OnceLock::new();
@@ -1671,8 +1705,10 @@ fn model_intake_log_path() -> Option<std::path::PathBuf> {
 pub(crate) fn log_model_intake_failure(
     chunk: &ModelChunkMessage,
     stage: &str,
-    error: &BridgeError,
+    error: BridgeError,
 ) {
+    use std::io::Write as _;
+
     let Some(path) = model_intake_log_path() else {
         return;
     };
@@ -1686,7 +1722,6 @@ pub(crate) fn log_model_intake_failure(
     else {
         return;
     };
-    use std::io::Write as _;
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
@@ -1703,8 +1738,7 @@ pub(crate) fn log_model_intake_failure(
             .session_identity
             .work_run_id
             .as_ref()
-            .map(|run| run.0.as_str())
-            .unwrap_or(""),
+            .map_or("", |run| run.0.as_str()),
         chunk.lease.job_id.0,
         chunk.lease.worker_instance_id.0,
     );
@@ -1863,6 +1897,130 @@ mod tests {
     use winwincode_execution_port::runtime_trace_outbox::{ExecutionMode, ObserverMode};
     use winwincode_execution_port::typed_replay::frame_from_message;
     use winwincode_kernel::ModelPortRequest;
+
+    /// Builds one Provider frame from already-resolved lease/session identity.
+    fn test_chunk(
+        authority: &ModelLeaseAuthority,
+        exchange: &ModelExchangeId,
+        sequence: i64,
+        is_final: bool,
+        payload: &[u8],
+        message_marker: char,
+    ) -> ModelChunkMessage {
+        ModelChunkMessage {
+            error: None,
+            is_final,
+            kind: ModelChunkMessageKind::ModelChunk,
+            lease: authority.lease.clone(),
+            message_id: ExecutionMessageId(format!(
+                "xmsg_0{}{message_marker}{sequence}",
+                "P".repeat(20)
+            )),
+            model_exchange_id: exchange.clone(),
+            payload: Some(EncodedPayload {
+                content_type: "application/json".to_owned(),
+                data_base64: base64::engine::general_purpose::STANDARD.encode(payload),
+                payload_digest: winwincode_domain::Sha256Digest(format!(
+                    "sha256:{:x}",
+                    Sha256::digest(payload)
+                )),
+            }),
+            schema_version: winwincode_domain::SchemaVersion::WinwincodeV1,
+            sent_at: authority.lease.issued_at.clone(),
+            sequence: ExecutionSequence(sequence),
+            session_identity: authority.session_identity.clone(),
+            worker_session_id: authority.worker_session_id.clone(),
+        }
+    }
+
+    /// Loopback-route bridge over one shared authority source.
+    fn loopback_bridge(
+        store: &AdapterStore,
+        source: SharedAuthoritySource,
+        outbox_label: &str,
+    ) -> ExecutionPortModelBridge {
+        ExecutionPortModelBridge::new(
+            store.clone(),
+            ExecutionOutbox::open(store.clone())
+                .unwrap_or_else(|error| panic!("open {outbox_label} outbox: {error:?}")),
+            ModelGatewayRoute {
+                capability: "model".to_owned(),
+                route: "loopback".to_owned(),
+            },
+            "loopback".to_owned(),
+            source,
+        )
+    }
+
+    /// Loopback-route bridge with one run binding already installed.
+    fn installed_loopback_bridge(
+        store: &AdapterStore,
+        source: SharedAuthoritySource,
+        outbox_label: &str,
+        run_key: &str,
+        authority: &ModelLeaseAuthority,
+        kernel_session_id: &str,
+    ) -> ExecutionPortModelBridge {
+        let bridge = loopback_bridge(store, source, outbox_label);
+        bridge
+            .install_binding(ModelRunBinding {
+                run_key: run_key.to_owned(),
+                canonical_thread_id: authority.session_identity.codex_thread_id.clone(),
+                kernel_session_id: kernel_session_id.to_owned(),
+                authority: authority.clone(),
+                opened_at: authority.lease.issued_at.clone(),
+            })
+            .unwrap_or_else(|error| panic!("install {outbox_label} binding: {error:?}"));
+        bridge
+    }
+
+    /// Claims one model call on the durable store.
+    fn claim_test_call(
+        store: &AdapterStore,
+        run_key: &str,
+        call_id: &str,
+        exchange: &ModelExchangeId,
+        request: &serde_json::Value,
+    ) {
+        store
+            .claim_model_call(
+                run_key,
+                call_id,
+                exchange,
+                &model_call_digest(request).expect("call digest"),
+            )
+            .unwrap_or_else(|error| panic!("claim {call_id}: {error:?}"));
+    }
+
+    /// One `ModelOpen` over a claimed call on the loopback route.
+    fn test_open(
+        authority: &ModelLeaseAuthority,
+        call_id: &str,
+        exchange: &ModelExchangeId,
+        request: &serde_json::Value,
+    ) -> ModelOpenMessage {
+        ModelOpenMessage {
+            kind: winwincode_execution_port::generated::ModelOpenMessageKind::ModelOpen,
+            schema_version: winwincode_domain::SchemaVersion::WinwincodeV1,
+            message_id: ExecutionMessageId(id("xmsg", 'O')),
+            sent_at: authority.lease.issued_at.clone(),
+            request_id: winwincode_domain::RequestId(call_id.to_owned()),
+            lease: authority.lease.clone(),
+            worker_session_id: authority.worker_session_id.clone(),
+            model_exchange_id: exchange.clone(),
+            route: ModelGatewayRoute {
+                capability: "model".to_owned(),
+                route: "loopback".to_owned(),
+            },
+            request: EncodedPayload {
+                content_type: "application/json".to_owned(),
+                data_base64: base64::engine::general_purpose::STANDARD
+                    .encode(serde_json::to_vec(request).expect("encode request")),
+                payload_digest: model_call_digest(request).expect("request digest"),
+            },
+            session_identity: authority.session_identity.clone(),
+        }
+    }
 
     fn id(prefix: &str, value: char) -> String {
         format!("{prefix}_{}", value.to_string().repeat(26))
@@ -2169,16 +2327,7 @@ mod tests {
         source
             .install(run_key, authority.clone())
             .expect("install orphan root authority");
-        let bridge = ExecutionPortModelBridge::new(
-            store.clone(),
-            ExecutionOutbox::open(store.clone()).expect("open orphan outbox"),
-            ModelGatewayRoute {
-                capability: "model".to_owned(),
-                route: "loopback".to_owned(),
-            },
-            "loopback".to_owned(),
-            source,
-        );
+        let bridge = loopback_bridge(&store, source, "orphan");
         bridge
             .install_binding(ModelRunBinding {
                 run_key: run_key.to_owned(),
@@ -2195,50 +2344,22 @@ mod tests {
             .claim_model_call(run_key, model_call_id, &exchange, &digest)
             .expect("claim orphan call");
 
-        let payload_one = br#"{"type":"created"}"#;
-        let chunk_one = ModelChunkMessage {
-            error: None,
-            is_final: false,
-            kind: ModelChunkMessageKind::ModelChunk,
-            lease: authority.lease.clone(),
-            message_id: ExecutionMessageId(id("xmsg", '1')),
-            model_exchange_id: exchange.clone(),
-            payload: Some(EncodedPayload {
-                content_type: "application/json".to_owned(),
-                data_base64: base64::engine::general_purpose::STANDARD.encode(payload_one),
-                payload_digest: winwincode_domain::Sha256Digest(format!(
-                    "sha256:{:x}",
-                    Sha256::digest(payload_one)
-                )),
-            }),
-            schema_version: winwincode_domain::SchemaVersion::WinwincodeV1,
-            sent_at: authority.lease.issued_at.clone(),
-            sequence: ExecutionSequence(1),
-            session_identity: authority.session_identity.clone(),
-            worker_session_id: authority.worker_session_id.clone(),
-        };
-        let payload_two = br#"{"type":"completed","endTurn":true}"#;
-        let chunk_two = ModelChunkMessage {
-            error: None,
-            is_final: true,
-            kind: ModelChunkMessageKind::ModelChunk,
-            lease: authority.lease.clone(),
-            message_id: ExecutionMessageId(id("xmsg", '2')),
-            model_exchange_id: exchange.clone(),
-            payload: Some(EncodedPayload {
-                content_type: "application/json".to_owned(),
-                data_base64: base64::engine::general_purpose::STANDARD.encode(payload_two),
-                payload_digest: winwincode_domain::Sha256Digest(format!(
-                    "sha256:{:x}",
-                    Sha256::digest(payload_two)
-                )),
-            }),
-            schema_version: winwincode_domain::SchemaVersion::WinwincodeV1,
-            sent_at: authority.lease.issued_at.clone(),
-            sequence: ExecutionSequence(2),
-            session_identity: authority.session_identity.clone(),
-            worker_session_id: authority.worker_session_id.clone(),
-        };
+        let chunk_one = test_chunk(
+            &authority,
+            &exchange,
+            1,
+            false,
+            br#"{"type":"created"}"#,
+            '1',
+        );
+        let chunk_two = test_chunk(
+            &authority,
+            &exchange,
+            2,
+            true,
+            br#"{"type":"completed","endTurn":true}"#,
+            '2',
+        );
 
         let first = bridge
             .accept_chunk(&chunk_one, &Instant("2030-01-01T00:00:01.000Z".to_owned()))
@@ -2315,7 +2436,7 @@ mod tests {
         }
     }
 
-    /// Automatic second model call after tool_result must retain the full
+    /// Automatic second model call after `tool_result` must retain the full
     /// multi-frame Provider response even when the live Core sink is gone.
     #[tokio::test]
     async fn post_tool_second_call_multi_frame_path_is_durably_provider_final() {
@@ -2331,25 +2452,8 @@ mod tests {
         source
             .install(run_key, authority.clone())
             .expect("install post-tool root authority");
-        let bridge = ExecutionPortModelBridge::new(
-            store.clone(),
-            ExecutionOutbox::open(store.clone()).expect("open post-tool outbox"),
-            ModelGatewayRoute {
-                capability: "model".to_owned(),
-                route: "loopback".to_owned(),
-            },
-            "loopback".to_owned(),
-            source,
-        );
-        bridge
-            .install_binding(ModelRunBinding {
-                run_key: run_key.to_owned(),
-                canonical_thread_id: authority.session_identity.codex_thread_id.clone(),
-                kernel_session_id: "kernel-post-tool".to_owned(),
-                authority: authority.clone(),
-                opened_at: authority.lease.issued_at.clone(),
-            })
-            .expect("install post-tool binding");
+        let bridge =
+            installed_loopback_bridge(&store, source, "post-tool", run_key, &authority, "kernel-post-tool");
 
         let first_call_id = "post-tool-call-1";
         let second_call_id = "post-tool-call-2";
@@ -2357,44 +2461,10 @@ mod tests {
         let second_exchange = ModelExchangeId(id("mdl", '2'));
         let first_request = json!({"model": "loopback", "input": [{"role": "user", "content": "tool"}]});
         let second_request = json!({"model": "loopback", "input": [{"role": "user", "content": "after-tool"}]});
-        store
-            .claim_model_call(
-                run_key,
-                first_call_id,
-                &first_exchange,
-                &model_call_digest(&first_request).expect("first call digest"),
-            )
-            .expect("claim first call");
-        store
-            .claim_model_call(
-                run_key,
-                second_call_id,
-                &second_exchange,
-                &model_call_digest(&second_request).expect("second call digest"),
-            )
-            .expect("claim second call");
+        claim_test_call(&store, run_key, first_call_id, &first_exchange, &first_request);
+        claim_test_call(&store, run_key, second_call_id, &second_exchange, &second_request);
 
-        let first_open = ModelOpenMessage {
-            kind: winwincode_execution_port::generated::ModelOpenMessageKind::ModelOpen,
-            schema_version: winwincode_domain::SchemaVersion::WinwincodeV1,
-            message_id: ExecutionMessageId(id("xmsg", 'O')),
-            sent_at: authority.lease.issued_at.clone(),
-            request_id: winwincode_domain::RequestId(first_call_id.to_owned()),
-            lease: authority.lease.clone(),
-            worker_session_id: authority.worker_session_id.clone(),
-            model_exchange_id: first_exchange.clone(),
-            route: ModelGatewayRoute {
-                capability: "model".to_owned(),
-                route: "loopback".to_owned(),
-            },
-            request: EncodedPayload {
-                content_type: "application/json".to_owned(),
-                data_base64: base64::engine::general_purpose::STANDARD
-                    .encode(serde_json::to_vec(&first_request).unwrap()),
-                payload_digest: model_call_digest(&first_request).unwrap(),
-            },
-            session_identity: authority.session_identity.clone(),
-        };
+        let first_open = test_open(&authority, first_call_id, &first_exchange, &first_request);
         let second_open = ModelOpenMessage {
             request_id: winwincode_domain::RequestId(second_call_id.to_owned()),
             model_exchange_id: second_exchange.clone(),

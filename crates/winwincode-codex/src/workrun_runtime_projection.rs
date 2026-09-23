@@ -592,14 +592,14 @@ fn sealed_command_outcome(value: &Value) -> BoundEvidenceOutcome {
         .or_else(|| value.get("exitCode"))
         .and_then(Value::as_i64);
     match status.as_deref() {
-        Some("timed-out" | "timeout" | "cancelled" | "canceled" | "interrupted") => {
-            BoundEvidenceOutcome::Failed
-        }
-        Some("policy-denied" | "sandbox-denied" | "declined" | "denied") => {
-            BoundEvidenceOutcome::Failed
-        }
-        Some("infrastructure-error" | "infrastructure-failed") => BoundEvidenceOutcome::Failed,
-        Some("failed") => BoundEvidenceOutcome::Failed,
+        // Timeout, cancel, policy denial, infrastructure failure and plain
+        // failure are all terminal failures — the categories stay documented
+        // here even though they share one outcome.
+        Some(
+            "timed-out" | "timeout" | "cancelled" | "canceled" | "interrupted" | "policy-denied"
+            | "sandbox-denied" | "declined" | "denied" | "infrastructure-error"
+            | "infrastructure-failed" | "failed",
+        ) => BoundEvidenceOutcome::Failed,
         Some("completed" | "succeeded" | "exited") if exit_code.unwrap_or(0) == 0 => {
             BoundEvidenceOutcome::Succeeded
         }

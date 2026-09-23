@@ -634,20 +634,19 @@ impl<'application> DurableExecutionPortIngress<'application> {
                 })?
                 .to_owned(),
         );
-        let revision = match terminal_revision {
-            Some(revision) => revision,
-            None => {
-                let delivery = self
-                    .storage
-                    .load_state(&format!("delivery:{}", delivery_id.0))
-                    .map_err(DurableExecutionPortError::Storage)?
-                    .ok_or_else(|| {
-                        DurableExecutionPortError::Storage(StorageError::invalid_input(
-                            "Delivery state is missing for Controller follow-up",
-                        ))
-                    })?;
-                delivery.revision
-            }
+        let revision = if let Some(revision) = terminal_revision {
+            revision
+        } else {
+            let delivery = self
+                .storage
+                .load_state(&format!("delivery:{}", delivery_id.0))
+                .map_err(DurableExecutionPortError::Storage)?
+                .ok_or_else(|| {
+                    DurableExecutionPortError::Storage(StorageError::invalid_input(
+                        "Delivery state is missing for Controller follow-up",
+                    ))
+                })?;
+            delivery.revision
         };
         self.control_plane
             .continue_delivery_after_terminal(

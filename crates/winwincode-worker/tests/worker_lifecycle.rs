@@ -369,8 +369,8 @@ impl FakeCodex {
 
     /// Injects one durable pending delivery (used to model frames retained
     /// while the Server exchange was down / restarting).
-    fn inject_pending_delivery(&self, message: ExecutionPortMessage) {
-        let delivery = fixture_delivery(&message);
+    fn inject_pending_delivery(&self, message: &ExecutionPortMessage) {
+        let delivery = fixture_delivery(message);
         let mut state = self.state.lock().expect("FakeCodex state");
         state
             .pending_delivery_ids
@@ -4296,7 +4296,7 @@ async fn pending_runtime_and_diagnostic_artifact_flush_after_server_restart_wind
             usage: measured_completion_usage(),
         })),
     );
-    pump.inject_pending_delivery(diagnostic_chunk);
+    pump.inject_pending_delivery(&diagnostic_chunk);
 
     let first = worker.poll_codex_boxed().await;
     assert!(first.is_err(), "runtime send must fail while Server is down");
