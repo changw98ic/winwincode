@@ -2,9 +2,9 @@
 
 //! Application lifecycle host for the `WinWinCode` Control Plane.
 //!
-//! Community product boundary: WinWinCode Community is a single local Owner
+//! Community product boundary: `WinWinCode` Community is a single local Owner
 //! product with an embedded Codex Core execution kernel, local Device
-//! Client/Worker, and local SQLite product state. This crate root exports
+//! Client/Worker, and local `SQLite` product state. This crate root exports
 //! Community local execution control-plane modules only. Network Vault/KMS
 //! composition and Cloud/Enterprise management modules are not Community
 //! product surface. Organization/tenant identifiers that remain in internal
@@ -63,7 +63,13 @@ mod durable_execution_port;
 pub mod execution_port_service;
 pub mod fusion_adjudication_host;
 pub mod fusion_analysis;
+pub mod fusion_bench;
 pub mod fusion_compose;
+pub mod fusion_investigation;
+pub mod fusion_knowledge;
+pub mod fusion_planner;
+pub mod heartbeat;
+pub mod source_hygiene;
 mod gate_interaction_service;
 pub mod knowledge;
 mod local_candidate;

@@ -220,6 +220,8 @@ mod tests {
                     strongest_evidence: FusionEvidenceQuality::ToolObservation,
                 }],
                 leading_position: Some(FusionClaimPosition::Opposes),
+                leading_source: crate::fusion_analysis::ConflictLeadingSource::Evidence,
+                jev_confidence: None,
             }],
             unique_insights: vec![FusionFinding {
                 claim_key: "claim:unique".to_owned(),
@@ -284,6 +286,8 @@ mod tests {
                     },
                 ],
                 leading_position: None,
+                leading_source: crate::fusion_analysis::ConflictLeadingSource::Undecided,
+                jev_confidence: None,
             }],
             unique_insights: Vec::new(),
             unsupported_claims: Vec::new(),

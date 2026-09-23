@@ -1,0 +1,35 @@
+{
+  "id": "q1-defect-shared-map-race",
+  "kind": "false-consensus-watch",
+  "description": "Live miss: fusion wrong on shared-map-race; keep claim visible and investigable",
+  "claims": [
+    {
+      "candidateId": "opencode",
+      "claims": [
+        {
+          "claimKey": "claim:defect-shared-map-race",
+          "summary": "Writing the shared cache Map without synchronization is a data race (defect)",
+          "position": "supports",
+          "evidence": [{ "evidenceType": "diff", "sourceRef": "cache.set(id!)" }]
+        }
+      ]
+    },
+    {
+      "candidateId": "glm",
+      "claims": [
+        {
+          "claimKey": "claim:defect-shared-map-race",
+          "summary": "Writing the shared cache Map without synchronization is a data race (defect)",
+          "position": "opposes",
+          "evidence": [{ "evidenceType": "review_finding", "sourceRef": "single-threaded-assume" }]
+        }
+      ]
+    }
+  ],
+  "expected": {
+    "claimCount": 1,
+    "state": "DISPUTED",
+    "mustNotBe": ["REFUTED"],
+    "mustTriggerInvestigation": true
+  }
+}

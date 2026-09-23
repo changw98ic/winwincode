@@ -41,7 +41,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
-use serde_json::Value;
+use serde_json::{Value, json};
 use winwincode_delivery::domain::{
     CanonicalDecision, ComputedDeliveryVerdict, Delivery, DeliveryValidationError, EvidenceRefType,
     FrozenDeliveryCandidate, evidence::ResolvedDeliveryEvidence,
@@ -55,7 +55,7 @@ use winwincode_fusion::{
 use crate::fusion_adjudication_host::adjudicate_canonical_decision_from_fusion_analysis;
 use crate::fusion_analysis::{
     FusionAnalysis, FusionAnalysisError, FusionCandidateClaims, FusionClaim, FusionClaimPosition,
-    FusionEvidence, analyze_fusion,
+    FusionEvidence, FusionRound, FusionStopReason, analyze_fusion,
 };
 
 /// One independently collected model answer consumed by the compose seam.
@@ -105,6 +105,8 @@ pub enum FusionComposeError {
     NoSuccessfulAnswers,
     /// The portable runner port failed.
     Runner(String),
+    /// Multi-round investigation / judge port failed (ADR-0036).
+    MultiRound(String),
 }
 
 impl fmt::Display for FusionComposeError {
@@ -123,6 +125,7 @@ impl fmt::Display for FusionComposeError {
                 formatter.write_str("fusion compose had no successful answers")
             }
             Self::Runner(message) => write!(formatter, "fusion runner port failed: {message}"),
+            Self::MultiRound(message) => write!(formatter, "fusion multi-round failed: {message}"),
         }
     }
 }
@@ -397,6 +400,534 @@ pub fn compose_independent_answers(
     })
 }
 
+/// One R3 targeted-investigation request (ADR-0036).
+#[derive(Clone, Debug, PartialEq)]
+pub struct InvestigationRequest {
+    pub claim_key: String,
+    pub summary: String,
+    pub question: String,
+    pub canonical_context: Value,
+    pub constraints: Vec<String>,
+    pub support_evidence: Vec<Value>,
+    pub oppose_evidence: Vec<Value>,
+}
+
+/// R3 must contribute NEW evidence; empty `new_evidence` adds no weight.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InvestigationAnswer {
+    pub seat_id: String,
+    pub new_evidence: Vec<InvestigationEvidenceItem>,
+    pub conclusion: FusionClaimPosition,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct InvestigationEvidenceItem {
+    pub kind: String,
+    pub detail: String,
+    pub side: FusionClaimPosition,
+}
+
+/// R4 judge input is an evidence pack (R1+R3), never vote counts (ADR-0036).
+#[derive(Clone, Debug, PartialEq)]
+pub struct JudgeRequest {
+    pub claim_key: String,
+    pub summary: String,
+    pub question: String,
+    pub canonical_context: Value,
+    pub evidence_pack: Vec<Value>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct JudgeAnswer {
+    pub claim_key: String,
+    pub outcome: JudgeClaimOutcome,
+    pub confidence: u8,
+    pub reason: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum JudgeClaimOutcome {
+    ConfirmedSupports,
+    ConfirmedOpposes,
+    Unresolved,
+}
+
+/// Host-side R3 port. Production may call seats or tools; tests inject fixtures.
+pub trait FusionInvestigationPort: fmt::Debug + Send + Sync {
+    fn investigate(
+        &self,
+        request: InvestigationRequest,
+    ) -> BoxFuture<'static, Result<Vec<InvestigationAnswer>, FusionComposeError>>;
+}
+
+/// Host-side R4 verification port (JEV / Verifier).
+pub trait FusionJudgePort: fmt::Debug + Send + Sync {
+    fn judge(
+        &self,
+        request: JudgeRequest,
+    ) -> BoxFuture<'static, Result<JudgeAnswer, FusionComposeError>>;
+}
+
+/// Terminal reason and per-round audit for multi-round Fusion (ADR-0036).
+#[derive(Clone, Debug, PartialEq)]
+pub struct MultiRoundReport {
+    pub stop_reason: FusionStopReason,
+    pub rounds: Vec<MultiRoundStep>,
+    pub judged: Vec<JudgeAnswer>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MultiRoundStep {
+    pub round: FusionRound,
+    pub disputed_claim_keys: Vec<String>,
+    pub produced_new_evidence: bool,
+}
+
+/// Control flow for one multi-round loop iteration (ADR-0036).
+enum RoundControl {
+    /// Start the next round.
+    Continue,
+    /// Leave the loop with this terminal reason.
+    Stop(FusionStopReason),
+}
+
+/// R3 evidence rows collected for disputed claims (kind/detail/side only).
+fn build_judge_evidence_pack(composed: &ComposedFusionOutcome, claim_key: &str) -> Vec<Value> {
+    let mut evidence_pack = Vec::new();
+    for answer in &composed.answers {
+        if let Ok(candidate) = extract_claims_from_answer(&answer.candidate_id, &answer.answer) {
+            for claim in &candidate.claims {
+                if claim.claim_key == claim_key {
+                    evidence_pack.push(json!({
+                        "seat": answer.candidate_id,
+                        "position": match claim.position {
+                            FusionClaimPosition::Supports => "supports",
+                            FusionClaimPosition::Opposes => "opposes",
+                        },
+                        "evidence": claim.evidence.iter().map(|e| json!({
+                            "evidenceType": format!("{:?}", e.evidence_type),
+                            "sourceRef": e.source_ref,
+                            "verifiedConclusion": e.verified_conclusion.map(|c| format!("{c:?}")),
+                        })).collect::<Vec<_>>(),
+                    }));
+                }
+            }
+        }
+    }
+    evidence_pack
+}
+
+/// Re-opens analysis with R3 rows that carry only NEW evidence (ADR-0036:
+/// knowledge is additive, and one candidate per claim key avoids `DuplicateClaim`).
+fn recompose_with_round3(
+    composed: &mut ComposedFusionOutcome,
+    extra_answers: &mut Vec<ComposedFusionAnswer>,
+    pack_items: &[Value],
+    claim_keys: &[String],
+) -> Result<(), FusionComposeError> {
+    let mut investigation_claims = Vec::new();
+    for item in pack_items {
+        // Rows are keyed by claim via `claim_keys`: the R3 pack shape carries
+        // kind/detail/side, so the lookup falls through to the disputed set.
+        let claim_key = item
+            .get("claimKey")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .or_else(|| {
+                claim_keys
+                    .iter()
+                    .find(|key| composed.analysis.conflicts.iter().any(|conflict| conflict.claim_key == **key))
+                    .cloned()
+            });
+        let Some(claim_key) = claim_key else {
+            continue;
+        };
+        let summary = composed
+            .analysis
+            .conflicts
+            .iter()
+            .find(|conflict| conflict.claim_key == claim_key)
+            .map(|conflict| conflict.summary.clone())
+            .unwrap_or_default();
+        let position = match item.get("side").and_then(Value::as_str) {
+            Some("opposes") => FusionClaimPosition::Opposes,
+            _ => FusionClaimPosition::Supports,
+        };
+        investigation_claims.push(FusionClaim {
+            claim_key,
+            summary,
+            position,
+            evidence: vec![FusionEvidence {
+                evidence_type: EvidenceRefType::ReviewFinding,
+                source_ref: format!(
+                    "round3:{}",
+                    item.get("kind").and_then(Value::as_str).unwrap_or("new")
+                ),
+                verified_conclusion: None,
+            }],
+            required_evidence: Vec::new(),
+        });
+    }
+    if investigation_claims.is_empty() {
+        return Ok(());
+    }
+    for (index, claim) in investigation_claims.into_iter().enumerate() {
+        extra_answers.push(ComposedFusionAnswer {
+            candidate_id: format!("round3-investigation-{index}"),
+            answer: json!({
+                "claims": [{
+                    "claimKey": claim.claim_key,
+                    "summary": claim.summary,
+                    "position": match claim.position {
+                        FusionClaimPosition::Supports => "supports",
+                        FusionClaimPosition::Opposes => "opposes",
+                    },
+                    "evidence": [{
+                        "evidenceType": "review_finding",
+                        "sourceRef": claim.evidence[0].source_ref,
+                        "verifiedConclusion": null
+                    }]
+                }],
+                "decision": "inconclusive",
+                "rationale": "R3 targeted investigation new evidence"
+            }),
+        });
+    }
+    *composed = compose_independent_answers(extra_answers.clone())?;
+    Ok(())
+}
+
+/// R3: targeted investigation on disputed claims only; must contribute NEW evidence.
+async fn run_targeted_investigation(
+    composed: &mut ComposedFusionOutcome,
+    rounds: &mut [MultiRoundStep],
+    extra_answers: &mut Vec<ComposedFusionAnswer>,
+    claim_keys: &[String],
+    input: &FusionInput,
+    investigation: &Arc<dyn FusionInvestigationPort>,
+) -> Result<RoundControl, FusionComposeError> {
+    let mut produced_new_evidence = false;
+    let mut pack_items: Vec<Value> = Vec::new();
+    for claim_key in claim_keys {
+        let summary = composed
+            .analysis
+            .conflicts
+            .iter()
+            .find(|conflict| conflict.claim_key == *claim_key)
+            .map(|conflict| conflict.summary.clone())
+            .unwrap_or_default();
+        let mut support_evidence = Vec::new();
+        let mut oppose_evidence = Vec::new();
+        for answer in &composed.answers {
+            if let Ok(candidate) = extract_claims_from_answer(&answer.candidate_id, &answer.answer) {
+                for claim in &candidate.claims {
+                    if claim.claim_key != *claim_key {
+                        continue;
+                    }
+                    let row = json!({
+                        "seat": answer.candidate_id,
+                        "position": match claim.position {
+                            FusionClaimPosition::Supports => "supports",
+                            FusionClaimPosition::Opposes => "opposes",
+                        },
+                        "evidence": claim.evidence.iter().map(|e| json!({
+                            "evidenceType": format!("{:?}", e.evidence_type),
+                            "sourceRef": e.source_ref,
+                        })).collect::<Vec<_>>(),
+                    });
+                    match claim.position {
+                        FusionClaimPosition::Supports => support_evidence.push(row),
+                        FusionClaimPosition::Opposes => oppose_evidence.push(row),
+                    }
+                }
+            }
+        }
+        let request = InvestigationRequest {
+            claim_key: (*claim_key).clone(),
+            summary,
+            question: input.question.clone(),
+            canonical_context: input.canonical_context.clone(),
+            constraints: input.constraints.clone(),
+            support_evidence,
+            oppose_evidence,
+        };
+        let answers = investigation.investigate(request).await.map_err(|error| {
+            FusionComposeError::MultiRound(format!(
+                "investigation failed for {claim_key}: {error}"
+            ))
+        })?;
+        for answer in answers {
+            for item in &answer.new_evidence {
+                produced_new_evidence = true;
+                pack_items.push(json!({
+                    "round": "R3",
+                    "seat": answer.seat_id,
+                    "kind": item.kind,
+                    "detail": item.detail,
+                    "side": match item.side {
+                        FusionClaimPosition::Supports => "supports",
+                        FusionClaimPosition::Opposes => "opposes",
+                    },
+                }));
+            }
+        }
+    }
+    if let Some(step) = rounds.last_mut() {
+        step.produced_new_evidence = produced_new_evidence;
+    }
+    if !produced_new_evidence {
+        // No increment → do not add weight (ADR-0036).
+        return Ok(RoundControl::Stop(FusionStopReason::Unresolvable));
+    }
+    recompose_with_round3(composed, extra_answers, &pack_items, claim_keys)?;
+    Ok(RoundControl::Continue)
+}
+
+/// R4: judge disputed claims over the R1+R3 evidence pack (never vote counts).
+async fn run_verification(
+    composed: &mut ComposedFusionOutcome,
+    rounds: &mut Vec<MultiRoundStep>,
+    judged: &mut Vec<JudgeAnswer>,
+    claim_keys: Vec<String>,
+    input: &FusionInput,
+    judge: &Arc<dyn FusionJudgePort>,
+) -> Result<RoundControl, FusionComposeError> {
+    rounds.push(MultiRoundStep {
+        round: FusionRound::Verification,
+        disputed_claim_keys: claim_keys.clone(),
+        produced_new_evidence: true,
+    });
+    for claim_key in claim_keys {
+        let summary = composed
+            .analysis
+            .conflicts
+            .iter()
+            .find(|conflict| conflict.claim_key == claim_key)
+            .map(|conflict| conflict.summary.clone())
+            .unwrap_or_default();
+        let evidence_pack = build_judge_evidence_pack(composed, &claim_key);
+        let judged_answer = judge
+            .judge(JudgeRequest {
+                claim_key: claim_key.clone(),
+                summary,
+                question: input.question.clone(),
+                canonical_context: input.canonical_context.clone(),
+                evidence_pack,
+            })
+            .await
+            .map_err(|error| {
+                FusionComposeError::MultiRound(format!("judge failed for {claim_key}: {error}"))
+            })?;
+        let position = match judged_answer.outcome {
+            JudgeClaimOutcome::ConfirmedSupports => Some(FusionClaimPosition::Supports),
+            JudgeClaimOutcome::ConfirmedOpposes => Some(FusionClaimPosition::Opposes),
+            JudgeClaimOutcome::Unresolved => None,
+        };
+        if let Some(position) = position {
+            // R4 may fill an undecided conflict, never override an evidence leader.
+            crate::fusion_analysis::apply_jev_conflict_leading(
+                &mut composed.analysis,
+                &claim_key,
+                position,
+                judged_answer.confidence,
+                true,
+            );
+        }
+        judged.push(judged_answer);
+    }
+    Ok(RoundControl::Stop(
+        if crate::fusion_analysis::undecided_conflicts(&composed.analysis).is_empty() {
+            FusionStopReason::EvidenceConvergence
+        } else {
+            FusionStopReason::Unresolvable
+        },
+    ))
+}
+
+/// Product multi-round Fusion: Discovery → Conflict Detection → Targeted
+/// Investigation → Verification → Synthesis (ADR-0036).
+///
+/// R1 disputes never go straight to JEV. R3 without new evidence does not
+/// gain weight and leaves claims disputed.
+///
+/// # Errors
+///
+/// Returns panel/compose failures or investigation/judge port failures.
+pub async fn compose_multiround(
+    panel_id: &str,
+    input: FusionInput,
+    router: Arc<dyn FusionProviderRouter>,
+    investigation: Arc<dyn FusionInvestigationPort>,
+    judge: Arc<dyn FusionJudgePort>,
+    max_investigation_rounds: u8,
+) -> Result<(ComposedFusionOutcome, MultiRoundReport), FusionComposeError> {
+    let mut composed = compose_blind_panel(panel_id, input.clone(), Arc::clone(&router)).await?;
+    let mut rounds = Vec::new();
+    let mut judged = Vec::new();
+    let mut extra_answers: Vec<ComposedFusionAnswer> = composed.answers.clone();
+
+    let mut investigation_rounds = 0u8;
+    // Every exit does `break <reason>`, so the terminal reason is assigned
+    // exactly once and there is no unobserved initial value (ADR-0036).
+    let stop_reason = loop {
+        let disputed: Vec<String> = crate::fusion_analysis::undecided_conflicts(&composed.analysis)
+            .into_iter()
+            .map(|conflict| conflict.claim_key.clone())
+            .collect();
+        rounds.push(MultiRoundStep {
+            round: if investigation_rounds == 0 {
+                FusionRound::ConflictDetection
+            } else {
+                FusionRound::TargetedInvestigation
+            },
+            disputed_claim_keys: disputed.clone(),
+            produced_new_evidence: false,
+        });
+
+        let action = crate::fusion_analysis::fusion_next_action(
+            &composed.analysis,
+            if investigation_rounds == 0 {
+                FusionRound::Discovery
+            } else {
+                FusionRound::TargetedInvestigation
+            },
+            investigation_rounds >= max_investigation_rounds,
+            false,
+        );
+
+        match action {
+            crate::fusion_analysis::FusionNextAction::Finish { reason } => break reason,
+            crate::fusion_analysis::FusionNextAction::TargetedInvestigation { claim_keys } => {
+                if investigation_rounds >= max_investigation_rounds {
+                    break FusionStopReason::BudgetLimit;
+                }
+                investigation_rounds = investigation_rounds.saturating_add(1);
+                match run_targeted_investigation(
+                    &mut composed,
+                    &mut rounds,
+                    &mut extra_answers,
+                    &claim_keys,
+                    &input,
+                    &investigation,
+                )
+                .await?
+                {
+                    RoundControl::Continue => {}
+                    RoundControl::Stop(reason) => break reason,
+                }
+            }
+            crate::fusion_analysis::FusionNextAction::Verify { claim_keys } => {
+                match run_verification(
+                    &mut composed,
+                    &mut rounds,
+                    &mut judged,
+                    claim_keys,
+                    &input,
+                    &judge,
+                )
+                .await?
+                {
+                    RoundControl::Continue => {}
+                    RoundControl::Stop(reason) => break reason,
+                }
+            }
+        }
+    };
+
+    Ok((
+        composed,
+        MultiRoundReport {
+            stop_reason,
+            rounds,
+            judged,
+        },
+    ))
+}
+
+/// Product ADR-0037 loop: disputed claims run `investigate_claim` with real
+/// `EvidenceProvider`s (CodeGraph/Git/Test/...) after compose.
+///
+/// # Errors
+///
+/// Returns compose failure only. Investigation failures leave claims unresolved.
+pub async fn compose_multiround_with_evidence(
+    panel_id: &str,
+    input: FusionInput,
+    router: Arc<dyn FusionProviderRouter>,
+    providers: Vec<Arc<dyn crate::fusion_planner::EvidenceProvider>>,
+    max_investigation_rounds: u8,
+) -> Result<
+    (
+        ComposedFusionOutcome,
+        crate::fusion_knowledge::ClaimGraph,
+        Vec<crate::fusion_investigation::InvestigationRunReport>,
+    ),
+    FusionComposeError,
+> {
+    let (composed, _legacy) = compose_multiround(
+        panel_id,
+        input,
+        router,
+        Arc::new(NoopInvestigation),
+        Arc::new(NoopJudge),
+        max_investigation_rounds,
+    )
+    .await?;
+    let claims = composed.claims.clone();
+    let mut graph = crate::fusion_knowledge::build_claim_graph(&claims);
+    let mut reports = Vec::new();
+    let mut store = graph.evidence.clone();
+    for index in 0..graph.claims.len() {
+        let mut claim = graph.claims[index].clone();
+        if !crate::fusion_knowledge::needs_investigation(&claim) {
+            continue;
+        }
+        let report = crate::fusion_investigation::investigate_claim(
+            &mut claim,
+            &mut store,
+            &providers,
+            &crate::fusion_investigation::ConservativeCrossReviewer,
+            &crate::fusion_investigation::PolicyEvidenceVerifier,
+            &crate::fusion_planner::DefaultEvidencePlanner,
+            crate::fusion_investigation::InvestigationBudget::default(),
+        )
+        .await;
+        graph.claims[index] = claim;
+        reports.push(report);
+    }
+    graph.evidence = store;
+    Ok((composed, graph, reports))
+}
+
+#[derive(Debug)]
+struct NoopInvestigation;
+impl FusionInvestigationPort for NoopInvestigation {
+    fn investigate(
+        &self,
+        _request: InvestigationRequest,
+    ) -> BoxFuture<'static, Result<Vec<InvestigationAnswer>, FusionComposeError>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+}
+
+#[derive(Debug)]
+struct NoopJudge;
+impl FusionJudgePort for NoopJudge {
+    fn judge(
+        &self,
+        request: JudgeRequest,
+    ) -> BoxFuture<'static, Result<JudgeAnswer, FusionComposeError>> {
+        Box::pin(async move {
+            Ok(JudgeAnswer {
+                claim_key: request.claim_key,
+                outcome: JudgeClaimOutcome::Unresolved,
+                confidence: 0,
+                reason: "noop".to_owned(),
+            })
+        })
+    }
+}
+
 /// FUSION-02 host path through a portable runner port (mock `ModelPort` ok).
 ///
 /// # Errors
@@ -654,13 +1185,102 @@ mod tests {
         ])
     }
 
-    /// Stand-in for kernel ModelPort used only to document the FUSION-02
+    /// Stand-in for kernel `ModelPort` used only to document the FUSION-02
     /// frame shape that `answers_from_parallel_model_frames` consumes.
     #[derive(Debug)]
     struct MockParallelModelSource;
 
+    /// Multi-round fixture seat that always claims `claim:tests-pass`.
+    #[derive(Debug)]
+    struct Seat {
+        position: &'static str,
+    }
+    impl FusionProvider for Seat {
+        fn complete(
+            &self,
+            request: FusionProviderRequest,
+        ) -> BoxFuture<'static, Result<FusionProviderAnswer, FusionProviderError>> {
+            let position = self.position;
+            Box::pin(async move {
+                Ok(FusionProviderAnswer {
+                    provider_response_id: format!("resp-{}", request.candidate_id),
+                    answer: json!({
+                        "claims": [{
+                            "claimKey": "claim:tests-pass",
+                            "summary": "The tests pass",
+                            "position": position,
+                            "evidence": [{
+                                "evidenceType": "command",
+                                "sourceRef": "tool:assert",
+                                "verifiedConclusion": null
+                            }]
+                        }],
+                        "decision": "inconclusive",
+                        "rationale": "fixture"
+                    }),
+                    token_usage: None,
+                })
+            })
+        }
+    }
+
+    struct MapRouter {
+        p1: Arc<dyn FusionProvider>,
+        p2: Arc<dyn FusionProvider>,
+        p3: Arc<dyn FusionProvider>,
+    }
+    impl fmt::Debug for MapRouter {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("MapRouter")
+        }
+    }
+    impl FusionProviderRouter for MapRouter {
+        fn resolve(&self, provider: &str) -> Option<Arc<dyn FusionProvider>> {
+            match provider {
+                "provider-a" => Some(Arc::clone(&self.p1)),
+                "provider-b" => Some(Arc::clone(&self.p2)),
+                "provider-c" => Some(Arc::clone(&self.p3)),
+                _ => None,
+            }
+        }
+    }
+
+    /// Investigation port that contributes no new evidence (ADR-0036 R3).
+    #[derive(Debug)]
+    struct NoNewEvidence;
+    impl FusionInvestigationPort for NoNewEvidence {
+        fn investigate(
+            &self,
+            _request: InvestigationRequest,
+        ) -> BoxFuture<'static, Result<Vec<InvestigationAnswer>, FusionComposeError>> {
+            Box::pin(async {
+                Ok(vec![InvestigationAnswer {
+                    seat_id: "inv".to_owned(),
+                    new_evidence: Vec::new(),
+                    conclusion: FusionClaimPosition::Supports,
+                }])
+            })
+        }
+    }
+
+    /// Judge that fails the test if JEV runs before new evidence exists.
+    #[derive(Debug)]
+    struct MustNotJudge;
+    impl FusionJudgePort for MustNotJudge {
+        fn judge(
+            &self,
+            _request: JudgeRequest,
+        ) -> BoxFuture<'static, Result<JudgeAnswer, FusionComposeError>> {
+            Box::pin(async {
+                Err(FusionComposeError::MultiRound(
+                    "ADR-0036 forbids JEV before new evidence".to_owned(),
+                ))
+            })
+        }
+    }
+
     impl MockParallelModelSource {
-        fn frame_rows(&self) -> Vec<(String, Vec<String>)> {
+        fn frame_rows() -> Vec<(String, Vec<String>)> {
             vec![
                 (
                     "candidate-a".to_owned(),
@@ -691,8 +1311,8 @@ mod tests {
     }
 
     fn fail_verifier_fixture() -> (
-        winwincode_delivery::domain::Delivery,
-        winwincode_delivery::domain::FrozenDeliveryCandidate,
+        Delivery,
+        FrozenDeliveryCandidate,
         ComputedDeliveryVerdict,
         Vec<ResolvedDeliveryEvidence>,
     ) {
@@ -837,7 +1457,7 @@ mod tests {
     #[tokio::test]
     async fn parallel_runner_frame_rows_compose_into_host_chain() {
         // FUSION-02 stand-in: frames shaped like ParallelModelRunner successes.
-        let rows = MockParallelModelSource.frame_rows();
+        let rows = MockParallelModelSource::frame_rows();
         let answers = answers_from_parallel_model_frames(rows).expect("frames convert to answers");
         assert_eq!(answers.len(), 3);
         assert_eq!(answers[0].candidate_id, "candidate-a");
@@ -939,5 +1559,41 @@ mod tests {
             error,
             FusionComposeError::ClaimExtraction { candidate_id, .. } if candidate_id == "candidate-x"
         ));
+    }
+
+    #[tokio::test]
+    async fn compose_multiround_blocks_jev_without_new_evidence() {
+        use crate::fusion_analysis::{FusionStopReason, fusion_next_action, FusionNextAction, FusionRound};
+
+        let router = Arc::new(MapRouter {
+            p1: Arc::new(Seat {
+                position: "supports",
+            }),
+            p2: Arc::new(Seat {
+                position: "opposes",
+            }),
+            p3: Arc::new(Seat {
+                position: "opposes",
+            }),
+        });
+        let input = sample_input(300);
+        let (composed, report) = compose_multiround(
+            "panel-multiround",
+            input,
+            router,
+            Arc::new(NoNewEvidence),
+            Arc::new(MustNotJudge),
+            1,
+        )
+        .await
+        .expect("multi-round compose");
+        assert_eq!(report.stop_reason, FusionStopReason::Unresolvable);
+        assert!(report.judged.is_empty());
+        assert_eq!(
+            fusion_next_action(&composed.analysis, FusionRound::Discovery, false, false),
+            FusionNextAction::TargetedInvestigation {
+                claim_keys: vec!["claim:tests-pass".to_owned()]
+            }
+        );
     }
 }

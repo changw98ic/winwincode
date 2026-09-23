@@ -1,0 +1,47 @@
+{
+  "id": "q2-root-float-precision",
+  "kind": "majority-right-watch",
+  "description": "Live miss on mimo-v2.5: float-precision wrongly opposed by one seat while others support",
+  "claims": [
+    {
+      "candidateId": "glm",
+      "claims": [
+        {
+          "claimKey": "claim:root-float-precision",
+          "summary": "Root cause is binary floating-point summation error in Cart.total (0.1*420)",
+          "position": "supports",
+          "evidence": [{ "evidenceType": "test", "sourceRef": "42.000000000000004" }]
+        }
+      ]
+    },
+    {
+      "candidateId": "mimo",
+      "claims": [
+        {
+          "claimKey": "claim:root-float-precision",
+          "summary": "Root cause is binary floating-point summation error in Cart.total (0.1*420)",
+          "position": "opposes",
+          "evidence": [{ "evidenceType": "review_finding", "sourceRef": "race-first" }]
+        }
+      ]
+    },
+    {
+      "candidateId": "opencode",
+      "claims": [
+        {
+          "claimKey": "claim:root-float-precision",
+          "summary": "Root cause is binary floating-point summation error in Cart.total (0.1*420)",
+          "position": "supports",
+          "evidence": [{ "evidenceType": "test", "sourceRef": "41.99999999999999" }]
+        }
+      ]
+    }
+  ],
+  "expected": {
+    "claimCount": 1,
+    "state": "DISPUTED",
+    "mustNotBe": ["REFUTED"],
+    "mustTriggerInvestigation": true,
+    "groundTruth": "supports"
+  }
+}

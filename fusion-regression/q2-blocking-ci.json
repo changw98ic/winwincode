@@ -1,0 +1,36 @@
+{
+  "id": "q2-blocking-ci",
+  "kind": "live-disputed",
+  "description": "Live product-chain dispute on claim:blocking-ci after claimKey normalization",
+  "claims": [
+    {
+      "candidateId": "glm",
+      "claims": [
+        {
+          "claimKey": "claim:blocking-ci",
+          "summary": "CI should quarantine / fix before treating main as green",
+          "position": "supports",
+          "evidence": [{ "evidenceType": "runtime_event", "sourceRef": "flake-1-in-8" }]
+        }
+      ]
+    },
+    {
+      "candidateId": "mimo",
+      "claims": [
+        {
+          "claimKey": "claim:blocking-ci",
+          "summary": "CI should quarantine / fix before treating main as green",
+          "position": "opposes",
+          "evidence": [{ "evidenceType": "review_finding", "sourceRef": "rare-flake-ok" }]
+        }
+      ]
+    }
+  ],
+  "expected": {
+    "claimCount": 1,
+    "state": "DISPUTED",
+    "mustNotBe": ["REFUTED"],
+    "mustTriggerInvestigation": true,
+    "groundTruth": "supports"
+  }
+}

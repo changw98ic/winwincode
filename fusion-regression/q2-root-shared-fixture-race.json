@@ -1,0 +1,58 @@
+{
+  "id": "q2-root-shared-fixture-race",
+  "kind": "minority-truth",
+  "description": "Canonical regression: 2:3 evidence-tied dispute. Must go to investigation, never direct JEV/majority refute. True root contributing cause.",
+  "claims": [
+    {
+      "candidateId": "mimo",
+      "claims": [
+        {
+          "claimKey": "claim:root-shared-fixture-race",
+          "summary": "Root cause is shared module-level cart mutated across parallel tests (race)",
+          "position": "supports",
+          "evidence": [{ "evidenceType": "runtime_event", "sourceRef": "xdist-n-auto" }]
+        }
+      ]
+    },
+    {
+      "candidateId": "opencode",
+      "claims": [
+        {
+          "claimKey": "root-shared-fixture-race",
+          "summary": "Root cause is shared module-level cart mutated across parallel tests (race)",
+          "position": "supports",
+          "evidence": [{ "evidenceType": "command", "sourceRef": "shared_cart=Cart()" }]
+        }
+      ]
+    },
+    {
+      "candidateId": "glm",
+      "claims": [
+        {
+          "claimKey": "claim:root-shared-fixture-race",
+          "summary": "Root cause is shared module-level cart mutated across parallel tests (race)",
+          "position": "opposes",
+          "evidence": [{ "evidenceType": "review_finding", "sourceRef": "float-only" }]
+        }
+      ]
+    },
+    {
+      "candidateId": "deepseek",
+      "claims": [
+        {
+          "claimKey": "claim:root-shared-fixture-race",
+          "summary": "Root cause is shared module-level cart mutated across parallel tests (race)",
+          "position": "opposes",
+          "evidence": [{ "evidenceType": "review_finding", "sourceRef": "float-only" }]
+        }
+      ]
+    }
+  ],
+  "expected": {
+    "claimCount": 1,
+    "state": "DISPUTED",
+    "mustNotBe": ["REFUTED", "MISSING"],
+    "mustTriggerInvestigation": true,
+    "groundTruth": "supports"
+  }
+}

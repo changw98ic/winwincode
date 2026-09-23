@@ -1,0 +1,46 @@
+{
+  "id": "q1-defect-null-unwrap",
+  "kind": "minority-truth",
+  "description": "1:4 style split must investigate, never majority-kill",
+  "claims": [
+    {
+      "candidateId": "mimo",
+      "claims": [
+        {
+          "claimKey": "claim:defect-null-unwrap",
+          "summary": "Non-null assertions on id can panic when id is null (defect)",
+          "position": "supports",
+          "evidence": [{ "evidenceType": "file", "sourceRef": "lookup.ts:id!" }]
+        }
+      ]
+    },
+    {
+      "candidateId": "glm",
+      "claims": [
+        {
+          "claimKey": "defect-null-unwrap",
+          "summary": "Non-null assertions on id can panic when id is null (defect)",
+          "position": "opposes",
+          "evidence": [{ "evidenceType": "review_finding", "sourceRef": "assumed-non-null" }]
+        }
+      ]
+    },
+    {
+      "candidateId": "deepseek",
+      "claims": [
+        {
+          "claimKey": "claim:defect-null-unwrap",
+          "summary": "Non-null assertions on id can panic when id is null (defect)",
+          "position": "opposes",
+          "evidence": [{ "evidenceType": "review_finding", "sourceRef": "assumed-non-null" }]
+        }
+      ]
+    }
+  ],
+  "expected": {
+    "claimCount": 1,
+    "state": "DISPUTED",
+    "mustNotBe": ["REFUTED", "MISSING"],
+    "mustTriggerInvestigation": true
+  }
+}

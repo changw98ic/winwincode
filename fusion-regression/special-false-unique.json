@@ -1,0 +1,33 @@
+{
+  "id": "special-false-unique",
+  "kind": "false-unique",
+  "description": "Hallucinated unique race: add first, verify later, subtract only by proof",
+  "claims": [
+    {
+      "candidateId": "hallucinator",
+      "claims": [
+        {
+          "claimKey": "claim:root:phantom-race",
+          "summary": "There is a phantom race in the cache allocator",
+          "position": "supports",
+          "evidence": [{ "evidenceType": "review_finding", "sourceRef": "guessed" }]
+        }
+      ]
+    }
+  ],
+  "afterEvidence": [
+    {
+      "direction": "counter",
+      "verified": true,
+      "kind": "trace_ownership",
+      "facts": ["each worker constructs a distinct allocator instance"],
+      "provider": "codegraph"
+    }
+  ],
+  "expected": {
+    "claimCount": 1,
+    "stateBeforeEvidence": "SUPPORTED",
+    "stateAfterEvidence": "DISPUTED",
+    "refuteAllowedOnlyWithVerifiedCounter": true
+  }
+}

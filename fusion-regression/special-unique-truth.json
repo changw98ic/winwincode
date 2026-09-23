@@ -1,0 +1,38 @@
+{
+  "id": "special-unique-truth",
+  "kind": "unique-insight",
+  "description": "One seat finds a real defect the others miss — retain and verify, never drop",
+  "claims": [
+    {
+      "candidateId": "finder",
+      "claims": [
+        {
+          "claimKey": "claim:defect:return-cast-null",
+          "summary": "Returning cache.get(id!) as User can be null (defect)",
+          "position": "supports",
+          "evidence": [{ "evidenceType": "diff", "sourceRef": "return cache.get(id!) as User" }]
+        }
+      ]
+    },
+    {
+      "candidateId": "silent-1",
+      "claims": [
+        {
+          "claimKey": "claim:defect-null-unwrap",
+          "summary": "Non-null assertions on id can panic when id is null (defect)",
+          "position": "supports",
+          "evidence": [{ "evidenceType": "file", "sourceRef": "lookup.ts:id!" }]
+        }
+      ]
+    }
+  ],
+  "expected": {
+    "claimCount": 2,
+    "states": {
+      "claim:defect:return-cast-null": "SUPPORTED",
+      "claim:defect-null-unwrap": "SUPPORTED"
+    },
+    "mustNotBe": ["MISSING"],
+    "mustRetainUnique": "claim:defect:return-cast-null"
+  }
+}

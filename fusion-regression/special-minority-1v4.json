@@ -1,0 +1,69 @@
+{
+  "id": "special-minority-1v4",
+  "kind": "minority-truth",
+  "description": "1 correct vs 4 wrong must investigate, never majority-kill",
+  "claims": [
+    {
+      "candidateId": "solo-right",
+      "claims": [
+        {
+          "claimKey": "claim:root:shared-fixture-race",
+          "summary": "shared fixture race is the root cause",
+          "position": "supports",
+          "evidence": [{ "evidenceType": "runtime_event", "sourceRef": "repro:parallel" }]
+        }
+      ]
+    },
+    {
+      "candidateId": "w1",
+      "claims": [
+        {
+          "claimKey": "root:shared-fixture-race",
+          "summary": "shared fixture race is the root cause",
+          "position": "opposes",
+          "evidence": [{ "evidenceType": "review_finding", "sourceRef": "assumption:scoped" }]
+        }
+      ]
+    },
+    {
+      "candidateId": "w2",
+      "claims": [
+        {
+          "claimKey": "claim:root:shared-fixture-race",
+          "summary": "shared fixture race is the root cause",
+          "position": "opposes",
+          "evidence": [{ "evidenceType": "review_finding", "sourceRef": "assumption:scoped" }]
+        }
+      ]
+    },
+    {
+      "candidateId": "w3",
+      "claims": [
+        {
+          "claimKey": "claim:root:shared-fixture-race",
+          "summary": "shared fixture race is the root cause",
+          "position": "opposes",
+          "evidence": [{ "evidenceType": "review_finding", "sourceRef": "assumption:scoped" }]
+        }
+      ]
+    },
+    {
+      "candidateId": "w4",
+      "claims": [
+        {
+          "claimKey": "claim:root:shared-fixture-race",
+          "summary": "shared fixture race is the root cause",
+          "position": "opposes",
+          "evidence": [{ "evidenceType": "review_finding", "sourceRef": "assumption:scoped" }]
+        }
+      ]
+    }
+  ],
+  "expected": {
+    "claimCount": 1,
+    "state": "DISPUTED",
+    "mustNotBe": ["REFUTED", "MISSING"],
+    "mustTriggerInvestigation": true,
+    "groundTruth": "supports"
+  }
+}
