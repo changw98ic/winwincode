@@ -2125,7 +2125,14 @@ mod tests {
             "--output",
             &backup,
         ]));
-        patch_snapshot_version(&fixture.backup_dir(), "device-client", 7);
+        // Relative to the live version so the fixture cannot go stale when
+        // `CLIENT_STORE_SCHEMA_VERSION` is bumped (a hardcoded 7 became the
+        // supported version and turned this into a pass-path assertion).
+        patch_snapshot_version(
+            &fixture.backup_dir(),
+            "device-client",
+            winwincode_device_client::CLIENT_STORE_SCHEMA_VERSION + 1,
+        );
 
         let restore = run(&[
             "restore",
