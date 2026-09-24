@@ -35,11 +35,13 @@ ADR-0038 Phase 2 任务源：`agent-benchmark-tasks`（20 道独立多语言开�
 | zig-001 | 有界 RLE 字节编解码器 | Zig 0.14 |
 | zig-002 | 受限根路径规范化器 | Zig 0.14 |
 
-每题预算上限 **20M token**；评分 = 隐藏测试通过权重 / 总权重 × 100。
+单题和全批次都不设 token、调用、墙钟或费用上限；同一工具请求重复超过五次时
+立即停止并计为未通过。
+评分 = 隐藏测试通过权重 / 总权重 × 100。
 
 ## 与 ADR-0038 四组基线对齐
 
-每题跑 A/B/C/D：
+每题跑 A/B/C/D，且每组各产生五个对照结果一次：
 
 | Arm | Fusion | JEV |
 |---|---|---|
@@ -47,6 +49,20 @@ ADR-0038 Phase 2 任务源：`agent-benchmark-tasks`（20 道独立多语言开�
 | B | OFF | ON |
 | C | ON | OFF |
 | D | ON | ON |
+
+| 对照 | 组成 |
+|---|---|
+| `glm5.1flash` | 单模型 |
+| `mimov2.6pro` | 单模型 |
+| `ds4.1flash` | 单模型 |
+| `qwen3.8flash` | 单模型 |
+| `fusion(4)` | 独立调用四模型各一次，再聚合一次 |
+
+所有模型调用统一使用 `max` 思考强度。四个单模型对照各执行一个独立 run；
+`fusion(4)` 是额外的一次独立四模型聚合 run，四个成员各调用一次后聚合一次，
+不复用单模型对照输出，也不递归聚合。主矩阵包含 320 个单模型 run 和 80 个
+Fusion run，共 400 个评测 run；JEV 的 Context-only / Judge-only / Full 消融
+另有 240 + 60 = 300 个 run。
 
 任务分类（跑完自动打标）：Consensus Correct / Complementary Truth / Minority Truth / False Consensus / False Minority / Evidence Conflict。
 
@@ -63,6 +79,7 @@ ADR-0038 Phase 2 任务源：`agent-benchmark-tasks`（20 道独立多语言开�
   - **禁止**污染公开题库 A、禁止触碰私有裁判库 B
   - 不把维护者 gh 配置 / 钥匙串 / 裁判库 B 的代码或 token 提供给被测 agent
 - 本地开发可在临时工作区；**最终成绩以 push 后的提交内容为准**。
+- 旧评测记录、旧运行历史和旧 Snapshot 事实不并入新结果，也不迁移。
 
 ## 本地目录
 
@@ -75,8 +92,16 @@ fusion-benchmark-tasks/
 
 ## Phase 2 用法（ADR-0038）
 
-1. 锁定任务 commit + 环境 image ID  
-2. 对每题跑 A/B/C/D  
-3. 记录 `benchmark_run / task_run / agent_run / claim / evidence / jev_rebuild / context_snapshot`  
-4. **push 提交物**到 https://github.com/changw98ic/agent-benchmark-submissions（`submit/<task-id>/<run-id>`）  
-5. 输出 Quality / Context / Efficiency / Fusion / JEV 面板指标  
+1. 锁定任务 commit + 环境 image ID
+2. 对每题跑 A/B/C/D × 四个单模型与独立 `fusion(4)`；另跑三组 JEV 消融
+3. 记录 `benchmark_run / task_run / agent_run / claim / evidence / jev_rebuild / context_snapshot`
+4. **push 提交物**到 https://github.com/changw98ic/agent-benchmark-submissions（`submit/<task-id>/<run-id>`）
+5. 输出 Quality / Context / Efficiency / Fusion / JEV 面板指标
+
+卡死判定：工具请求身份由工具名、目标资源、规范化参数和请求内容摘要组成，
+排除请求 ID、时间戳和进度元数据。同一身份累计出现 6 次，即重复请求相同内容
+超过 5 次；第 6 次必须在执行前拦截，记录 `STUCK_TOOL_REPEAT_LIMIT` 并结束
+本机 runner。该 run 不得计为通过，也不得移出固定分母。
+
+正式评测 Runner 固定为本机 `macOS 26.5.1 aarch64-apple-darwin`，不需要另行
+选择或确认。

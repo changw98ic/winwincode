@@ -6,14 +6,19 @@
 - 记忆键：`fusion-jev-joint-bench-20260922`
 - 关联：[ADR-0037](0037-agent-fusion-engine.md)、[ADR-0036](0036-multi-round-fusion-convergence.md)
 
+> 2026-09-24 修订：正式评测固定为 20 个 GitHub 公开任务、A/B/C/D 四组、
+> 四个单模型与独立 `fusion(4)` 各运行一次；全部模型调用使用 max 思考强度，
+> 单任务和全批次都不设资源或费用上限。修订后的
+> 完整实施合同见 [ADR-0039](0039-integration-fusion-snapshot-remediation.md)。
+
 ## 目标
 
 同时回答：
 
-1. Fusion 是否真的比单 Agent / 单模型更强  
-2. Fusion 的增益来自哪里  
-3. JEV 是否在降低上下文成本的同时保持任务状态完整  
-4. Fusion + JEV 组合是否仍产生净收益  
+1. Fusion 是否真的比单 Agent / 单模型更强
+2. Fusion 的增益来自哪里
+3. JEV 是否在降低上下文成本的同时保持任务状态完整
+4. Fusion + JEV 组合是否仍产生净收益
 
 优化目标（不只 accuracy）：
 
@@ -48,21 +53,46 @@ JEV 管上下文，不修改业务真值
 | **L2 Active Context** | JEV 动态构造（Agent 实际所见） | 当前目标/阶段/高优 claim/相关 evidence/必要代码/限制/最近关键 observation |
 | **L3 Archive** | JEV | 旧 reasoning、raw tool、重复搜索、失败路径、过期 hypothesis、大日志 |
 
-## 四组基线（每批任务）
+## 四组主实验与五个对照 run
 
-| 模式 | Fusion | JEV | 回答 |
+| 组 | 后置 Fusion 处理 | JEV | 回答 |
 |---|---|---|---|
 | A | OFF | OFF | 单 Agent 基础能力 |
 | B | OFF | ON | JEV 是否省 token / 是否破坏单 Agent |
 | C | ON | OFF | Fusion 质量上限、Oracle Capture、Gain、Regret |
 | D | ON | ON | 产品形态：`D vs C` |
 
+每组固定产生以下五个对照结果，每个任务、每格恰好一次：
+
+| 对照 ID | 组成 |
+|---|---|
+| `glm5.1flash` | 单模型 |
+| `mimov2.6pro` | 单模型 |
+| `ds4.1flash` | 单模型 |
+| `qwen3.8flash` | 单模型 |
+| `fusion(4)` | 独立调用上述四模型各一次，并做一次聚合 |
+
+`fusion(4)` 不是第五个 provider，也不是另一层候选后处理。它是一个独立的
+四模型聚合 run：四个成员各自产生一份结果，再恰好聚合一次；不复用四个单模型
+对照 run 的输出，也不对聚合结果递归融合。五个对照 run 在 A/B/C/D 中均不得
+省略。正式主矩阵包含 `20 × 4 × 4 = 320` 个单模型 run 和
+`20 × 4 × 1 = 80` 个 `fusion(4)` run，共 400 个评测 run。每个 Fusion run
+内部的四个成员调用和一次聚合调用必须分别计量。
+
 理想：`Quality(D)≈Quality(C)` 且 `Token(D)<<Token(C)`；更理想 `Quality(D)>Quality(C)`。
 
 ## 任务来源与类别
 
-真实历史 bug / PR / issue / 开源 fix / mutation / CI 故障 / 并发 / 数据流 / 跨模块等。  
-每类 20–50 cases（调试期 5–10）。**正式结果禁止 2 题宣布胜利。**
+正式任务固定为 20 个，来源为公开题库
+<https://github.com/changw9813/agent-benchmark-tasks>，当前冻结 revision 为
+`fa9da301e493fb88d48c86cb8954ed46d9cd2ffe`。任务覆盖多语言工程实现、
+状态机、解析、并发模拟和数据处理，并绑定公开需求与私有独立验收。
+
+提交仓库为独立公开仓库
+<https://github.com/changw98ic/agent-benchmark-submissions>。题库保持只读，
+受测 Agent 不直接推送题库；调度器把冻结结果按 `submit/<task-id>/<run-id>`
+写入提交仓库。旧评测记录、旧运行结果和旧 Snapshot 事实不进入新结果集，
+也不迁移到新实验或提交仓库。
 
 ## 自动分类样本
 
@@ -77,27 +107,27 @@ JEV 管上下文，不修改业务真值
 
 ## Fusion 指标
 
-- Fusion Score、**Best Fixed Single**、Best Single Oracle、Oracle Union  
-- **Oracle Capture Rate**（→100%）  
-- **Fusion Gain**、**Fusion Regret**（→0）  
-- Minority Truth Recovery、**False Consensus Recovery**（证明 Ceiling > Model Oracle）  
-- Investigation Gain  
+- Fusion Score、**Best Fixed Single**、Best Single Oracle、Oracle Union
+- **Oracle Capture Rate**（→100%）
+- **Fusion Gain**、**Fusion Regret**（→0）
+- Minority Truth Recovery、**False Consensus Recovery**（证明 Ceiling > Model Oracle）
+- Investigation Gain
 
 ## JEV 指标
 
-- Constraint Recall = 100%  
-- Claim Recall（Confirmed/Refuted/Disputed 不得混）  
-- Evidence Recall ≥99%、**Evidence Binding Accuracy = 0 error**  
-- **State Regression Rate = 0**（Confirmed 不得回退，除非新 verified counter）  
-- **Stale Fact Rate ≈ 0**（Refuted 不得回 Active Hypothesis）  
-- **Hallucinated State Rate = 0**  
-- Compression（最后看；禁止「压 90% 掉 15% accuracy 还宣布成功」）  
-- **Post-Rebuild Task Success**（rebuild 后继续干活，不只背约束）  
+- Constraint Recall = 100%
+- Claim Recall（Confirmed/Refuted/Disputed 不得混）
+- Evidence Recall ≥99%、**Evidence Binding Accuracy = 0 error**
+- **State Regression Rate = 0**（Confirmed 不得回退，除非新 verified counter）
+- **Stale Fact Rate ≈ 0**（Refuted 不得回 Active Hypothesis）
+- **Hallucinated State Rate = 0**
+- Compression（最后看；禁止「压 90% 掉 15% accuracy 还宣布成功」）
+- **Post-Rebuild Task Success**（rebuild 后继续干活，不只背约束）
 
 ## Rebuild 实验
 
-- 深度：0/1/3/5/10 rebuild → Rebuild Degradation Curve  
-- 阈值：20%–80% 或 16k–96k tokens  
+- 深度：0/1/3/5/10 rebuild → Rebuild Degradation Curve
+- 阈值：20%–80% 或 16k–96k tokens
 - 动态分（后续）：
 
 ```text
@@ -125,17 +155,22 @@ Fusion R1 → 6 claims → ReAct 10 calls → JEV rebuild#1
 
 ## 消融
 
-**Fusion**：F0 single → F1 union → F2 +conflict → F3 +CodeGraph → F4 +cross review → F5 +JEV verifier → F6 +dynamic routing  
+**Fusion**：F0 single → F1 union → F2 +conflict → F3 +CodeGraph → F4 +cross review → F5 +JEV verifier → F6 +dynamic routing
 
-**JEV**：J0 none → J1 truncate → J2 summary → J3 pin+summary → J4 pin+drop+archive → J5 full rebuild  
+**JEV**：Context-only、Judge-only、Full JEV。三种消融均交叉四个单模型 run
+和一个独立 `fusion(4)` run，每个任务、每格恰好一次，共 300 个消融 run
+（240 个单模型 + 60 个 Fusion）；不得用 Full JEV 的总体收益替代两个子功能
+的独立结果。
 
-**联合矩阵（代表点，不全排列）**：F0J0、F0J5、F3J0、F3J5、F6J0、F6J5。
+主实验与消融矩阵均为冻结的全排列，不采用代表点抽样。
 
 ## 成本 / Cache
 
-记录 input/output/cached/rebuild/tool/Fusion tokens、LLM/tool cost、latency。  
-派生：Cost per Correct Claim / Resolved Conflict / Fusion Gain；Tokens per Fusion Gain。  
+记录 input/output/cached/rebuild/tool/Fusion tokens、LLM/tool cost、latency。
+派生：Cost per Correct Claim / Resolved Conflict / Fusion Gain；Tokens per Fusion Gain。
 Cache：hit/miss、rebuildFrequency、prefixReuse → **Net Token Saving**（不是表面 compression）。
+单任务和全批次都不设 token、调用、墙钟或费用上限；成本照实计量，不把无上限
+当作零成本。
 
 ## 存储结构
 
@@ -158,16 +193,18 @@ build candidate → integrity check → PASS: activate
 
 ## Fusion Verification Gate
 
-`Claim → Confirmed` 至少：model consensus **或** verified evidence **或** verifier。  
-**高风险 claim 必须 evidence / verifier，单纯 consensus 不够。**
+`Claim → Confirmed` 必须有可解析 Source Receipt 和 Claim Verification。
+model consensus 只是 metadata，不能确认事实。反驳已有支持的 claim 必须有
+同命题、同范围、同适用版本的 verified counter。
 
 ## 分阶段调优
 
-1. **Phase 1 Instrumentation**：claim canonical、evidence ID、state log、context snapshot、JEV rebuild log、fusion round log、agent profile、token/cost。  
-2. **Phase 2 Baseline**：四组 A–D，30–50 任务。  
-3. **Phase 3 Fusion 调优**（固定 JEV）。  
-4. **Phase 4 JEV 调优**（固定 Fusion）。  
-5. **Phase 5 联合优化**。  
+1. **Phase 1 Instrumentation**：claim canonical、evidence ID、state log、context snapshot、JEV rebuild log、fusion round log、agent profile、token/cost。
+2. **Phase 2 Baseline**：20 个公开任务，四组 A–D × 四个单模型与独立
+   `fusion(4)`，每格一次。
+3. **Phase 3 Fusion 调优**（固定 JEV）。
+4. **Phase 4 JEV 调优**（固定 Fusion）。
+5. **Phase 5 联合优化**。
 禁止第一版上 RL 黑盒策略。
 
 ## 第一阶段验收门槛
@@ -185,6 +222,17 @@ Hallucinated State = 0
 ```
 
 JEV 成本目标待真实数据后取 Pareto Front（Quality × Cost × Latency）。
+
+## 卡死停止
+
+单任务和全批次都不设时间和资源上限。工具请求身份由工具名、目标文件或资源、
+规范化参数和请求内容摘要组成，排除请求 ID、时间戳及进度元数据。同一身份在
+一个 run 中累计出现 6 次，即重复请求相同内容超过 5 次；第 6 次请求必须在
+实际执行前被拦截，立即记录 `STUCK_TOOL_REPEAT_LIMIT` 并结束本机 runner。
+该结果不是通过，也不从任务分母删除。
+
+正式评测 Runner 固定为本机 `macOS 26.5.1 aarch64-apple-darwin`，不需要另行
+选择或确认 Runner。
 
 ## 最终闭环
 

@@ -125,7 +125,7 @@ DISCOVERED → SUPPORTED → CONFIRMED
                                                      └→ UNRESOLVED
 ```
 
-`REFUTED` 硬条件：**存在 verified counter-evidence**。  
+`REFUTED` 硬条件：**存在 verified counter-evidence**。
 禁止因「3 个模型反对」进入 REFUTED。
 
 ## 争议检测（不只看 2:2 / 2:3）
@@ -208,7 +208,7 @@ CodeGraph 必须返回 Evidence 而非裸图：
 
 ## Evidence 去重
 
-按 semantic similarity + source overlap + reasoning premise overlap 聚成 `independenceGroup` / Evidence Cluster。  
+按 semantic similarity + source overlap + reasoning premise overlap 聚成 `independenceGroup` / Evidence Cluster。
 三家基于同一错误假设的口述 = 1 个独立组，不是 3 votes。
 
 ## R3 不只是「找新证据」
@@ -222,7 +222,7 @@ CodeGraph 必须返回 Evidence 而非裸图：
 
 ## Cross Review
 
-E1 来自 MiMo → 交给 OpenCode 盲审 + CodeGraph 验 ownership。  
+E1 来自 MiMo → 交给 OpenCode 盲审 + CodeGraph 验 ownership。
 「MiMo 推理 + OpenCode 盲审 + CodeGraph 直接证据」强于「三家口头反对」。
 
 ## 验证升级阶梯（无新证据 ≠ 结束）
@@ -240,7 +240,7 @@ L7 runtime evidence
 
 ## R4 JEV 真正角色
 
-输入：Claim + verified support/counter + unverified support/counter + assumptions + unknowns。  
+输入：Claim + verified support/counter + unverified support/counter + assumptions + unknowns。
 **不提供人数；不提供模型名**（防品牌先验）。
 
 输出仅三态：
@@ -265,7 +265,7 @@ while claim.isImportant && claim.isDisputed
      plan → acquire → review → recompute
 ```
 
-停止：`CONFIRMED` / `REFUTED` / `EVIDENCE_CONVERGED` / `BUDGET_EXHAUSTED` / `UNRESOLVABLE`。  
+停止：`CONFIRMED` / `REFUTED` / `EVIDENCE_CONVERGED` / `BUDGET_EXHAUSTED` / `UNRESOLVABLE`。
 `EVIDENCE_CONVERGED`：嘴硬但无新证据、无有效反证 → 停。
 
 ## Budget
@@ -278,8 +278,8 @@ priority ∝ importance × uncertainty × expected_information_gain
 
 ## Final Synthesis
 
-保留 Confirmed / Refuted / Unresolved + Evidence + Trace。  
-用户可见结构：Root Cause A（证据）/ Root Cause B（证据）/ Potential C（仍 unresolved 及原因）。  
+保留 Confirmed / Refuted / Unresolved + Evidence + Trace。
+用户可见结构：Root Cause A（证据）/ Root Cause B（证据）/ Potential C（仍 unresolved 及原因）。
 允许 unresolved，但必须是真没法验证。
 
 ## KPI（核心三个）
@@ -296,14 +296,14 @@ priority ∝ importance × uncertainty × expected_information_gain
 
 ## 回归集 `fusion-regression/`
 
-必含：Q1 `defect-null-unwrap` / `defect-shared-map-race`；Q2 `root-shared-fixture-race` / `root-float-precision` / `blocking-ci`。  
+必含：Q1 `defect-null-unwrap` / `defect-shared-map-race`；Q2 `root-shared-fixture-race` / `root-float-precision` / `blocking-ci`。
 每条存：candidate outputs、claim graph、evidence、conflict、investigation、expected state、expected verdict。
 
 三类必测：
 
 1. **Minority Truth**（1:4、2:3）→ 调查，禁止 majority kill。
 2. **独见真值**（1 家找到真缺陷）→ 保留并验证，禁止 1:4 删除。
-3. **错误独见**（幻觉 race）→ 加法后调查，CodeGraph/test 证明后才 REFUTED。  
+3. **错误独见**（幻觉 race）→ 加法后调查，CodeGraph/test 证明后才 REFUTED。
    口号：**Add first, Verify later, Subtract only by proof.**
 
 ## 模块概念（不强制目录美学）
@@ -340,15 +340,15 @@ P0–P3 不做完，CodeGraph 再强也是把证据倒进漏水的桶。
 
 ## 第一阶段硬验收
 
-1. claim key 100% canonical  
-2. 所有模型 Claim 正确归并  
-3. minority claim 不因人数自动删除  
-4. disputed claim 自动创建 Investigation Plan  
-5. 无新 evidence 时自动升级 Provider  
-6. CodeGraph evidence 可进统一 Evidence Store  
-7. JEV 看不到 vote 数量  
-8. JEV 无 verified counter evidence 不得输出 REFUTED  
-9. Fusion trace 可完整重放  
+1. claim key 100% canonical
+2. 所有模型 Claim 正确归并
+3. minority claim 不因人数自动删除
+4. disputed claim 自动创建 Investigation Plan
+5. 无新 evidence 时自动升级 Provider
+6. CodeGraph evidence 可进统一 Evidence Store
+7. JEV 看不到 vote 数量
+8. JEV 无 verified counter evidence 不得输出 REFUTED
+9. Fusion trace 可完整重放
 10. benchmark 同时输出 Best Single / Oracle Union / Fusion / Gain / Regret / Capture Rate
 
 ## 结论
