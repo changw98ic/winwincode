@@ -1783,11 +1783,6 @@ impl ControlPlane {
                     StorageError::invalid_input("verification frame has no snapshotId"),
                 ));
             }
-            // Verification roles re-upload the already-frozen candidate checkout.
-            // The writer owns the Delivery Git pin; pinning the verification
-            // re-upload can fail the already-accepted chunk ack and strand the
-            // Worker durable outbox (and therefore JobOutcome/verdict).
-            return Ok(None);
         }
         let ExecutionScope::WorkRunExecutionScope(_job_scope) = &job.scope else {
             // Chat retains its candidate Git ref on the owning Device before upload.
