@@ -2889,6 +2889,82 @@
         }
       },
       "description": "User attachment: UTF-8 text (32 KiB each) or base64 PNG/JPEG/WebP. Up to four and 128 KiB decoded total per message."
+    },
+    "SnapshotId": {
+      "type": "string",
+      "pattern": "^snap_[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "Canonical ULID for one immutable code snapshot under verification."
+    },
+    "Snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "snapshotId",
+        "candidateId",
+        "workRunId",
+        "repositoryId",
+        "baseCommitId",
+        "baseTreeId",
+        "candidateCommitId",
+        "candidateTreeId",
+        "diffSha256",
+        "contentDigest",
+        "validationSeal",
+        "createdAtMillis",
+        "immutable"
+      ],
+      "properties": {
+        "snapshotId": {
+          "$ref": "#/$defs/SnapshotId"
+        },
+        "candidateId": {
+          "$ref": "#/$defs/CandidateId"
+        },
+        "workRunId": {
+          "$ref": "#/$defs/WorkRunId"
+        },
+        "repositoryId": {
+          "$ref": "#/$defs/RepositoryId"
+        },
+        "baseCommitId": {
+          "type": "string",
+          "minLength": 40,
+          "maxLength": 64
+        },
+        "baseTreeId": {
+          "type": "string",
+          "minLength": 40,
+          "maxLength": 64
+        },
+        "candidateCommitId": {
+          "type": "string",
+          "minLength": 40,
+          "maxLength": 64
+        },
+        "candidateTreeId": {
+          "type": "string",
+          "minLength": 40,
+          "maxLength": 64
+        },
+        "diffSha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "contentDigest": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "validationSeal": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "createdAtMillis": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "immutable": {
+          "type": "boolean",
+          "const": true
+        }
+      }
     }
   }
 }

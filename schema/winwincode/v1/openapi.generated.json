@@ -1193,6 +1193,9 @@
           "sessionIdentity": {
             "$ref": "#/components/schemas/SessionIdentity"
           },
+          "snapshotId": {
+            "$ref": "#/components/schemas/SnapshotId"
+          },
           "workerSessionId": {
             "$ref": "#/components/schemas/WorkerSessionId"
           }
@@ -1208,7 +1211,8 @@
           "sequence",
           "payload",
           "isFinal",
-          "sessionIdentity"
+          "sessionIdentity",
+          "snapshotId"
         ],
         "title": "artifact.chunk",
         "type": "object",
@@ -1297,6 +1301,9 @@
           "sessionIdentity": {
             "$ref": "#/components/schemas/SessionIdentity"
           },
+          "snapshotId": {
+            "$ref": "#/components/schemas/SnapshotId"
+          },
           "workerSessionId": {
             "$ref": "#/components/schemas/WorkerSessionId"
           }
@@ -1310,7 +1317,8 @@
           "lease",
           "workerSessionId",
           "artifact",
-          "sessionIdentity"
+          "sessionIdentity",
+          "snapshotId"
         ],
         "title": "artifact.open",
         "type": "object",
@@ -23166,6 +23174,9 @@
           "sessionIdentity": {
             "$ref": "#/components/schemas/SessionIdentity"
           },
+          "snapshotId": {
+            "$ref": "#/components/schemas/SnapshotId"
+          },
           "sourceIdentity": {
             "$ref": "#/components/schemas/SessionBindingSourceIdentity"
           },
@@ -23196,7 +23207,8 @@
           "workerId",
           "leaseId",
           "attempt",
-          "fencingToken"
+          "fencingToken",
+          "snapshotId"
         ],
         "title": "session.binding",
         "type": "object",
@@ -23801,6 +23813,82 @@
       },
       "Sha256Digest": {
         "pattern": "^sha256:[0-9a-f]{64}$",
+        "type": "string"
+      },
+      "Snapshot": {
+        "additionalProperties": false,
+        "properties": {
+          "baseCommitId": {
+            "maxLength": 64,
+            "minLength": 40,
+            "type": "string"
+          },
+          "baseTreeId": {
+            "maxLength": 64,
+            "minLength": 40,
+            "type": "string"
+          },
+          "candidateCommitId": {
+            "maxLength": 64,
+            "minLength": 40,
+            "type": "string"
+          },
+          "candidateId": {
+            "$ref": "#/components/schemas/CandidateId"
+          },
+          "candidateTreeId": {
+            "maxLength": 64,
+            "minLength": 40,
+            "type": "string"
+          },
+          "contentDigest": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "createdAtMillis": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "diffSha256": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "immutable": {
+            "const": true,
+            "type": "boolean"
+          },
+          "repositoryId": {
+            "$ref": "#/components/schemas/RepositoryId"
+          },
+          "snapshotId": {
+            "$ref": "#/components/schemas/SnapshotId"
+          },
+          "validationSeal": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "workRunId": {
+            "$ref": "#/components/schemas/WorkRunId"
+          }
+        },
+        "required": [
+          "snapshotId",
+          "candidateId",
+          "workRunId",
+          "repositoryId",
+          "baseCommitId",
+          "baseTreeId",
+          "candidateCommitId",
+          "candidateTreeId",
+          "diffSha256",
+          "contentDigest",
+          "validationSeal",
+          "createdAtMillis",
+          "immutable"
+        ],
+        "type": "object"
+      },
+      "SnapshotId": {
+        "description": "Canonical ULID for one immutable code snapshot under verification.",
+        "pattern": "^snap_[0-9A-HJKMNP-TV-Z]{26}$",
         "type": "string"
       },
       "SolutionReviewComponentProjection": {
@@ -28099,7 +28187,7 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:fe0da56b06a48137e5c570d7d11ea53bcc476d9f694112b3709aa93d585a1695",
+  "x-source-digest": "sha256:8864fefd578e93276b956840178118819f050b988a310f75eddfd79dd78babd0",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {

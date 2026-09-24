@@ -740,3 +740,28 @@ test('StructuredOutputSupport is a closed canonical capability enum', async () =
   assert.match(typescript, /export enum StructuredOutputSupport \{\s+Unsupported = "unsupported",\s+JsonSchemaStrict = "json_schema_strict",\s+\}/u)
   assert.match(rust, /pub enum StructuredOutputSupport \{\s+#\[serde\(rename = "unsupported"\)\]\s+Unsupported,\s+#\[serde\(rename = "json_schema_strict"\)\]\s+JsonSchemaStrict,\s+\}/u)
 })
+
+test('domain schema defines SnapshotId and Snapshot', async () => {
+  const domain = await loadSchema()
+  assert.ok(domain.$defs.SnapshotId, 'SnapshotId is missing')
+  assert.ok(domain.$defs.Snapshot, 'Snapshot is missing')
+  assert.equal(domain.$defs.Snapshot.properties.snapshotId.$ref, '#/$defs/SnapshotId')
+  assert.equal(domain.$defs.Snapshot.properties.immutable.const, true)
+})
+
+test('Snapshot carries the exact code identity', async () => {
+  const domain = await loadSchema()
+  const props = domain.$defs.Snapshot.properties
+  for (const key of [
+    'candidateCommitId',
+    'candidateTreeId',
+    'baseCommitId',
+    'baseTreeId',
+    'diffSha256',
+    'contentDigest',
+    'validationSeal',
+    'createdAtMillis',
+  ]) {
+    assert.ok(props[key], `Snapshot is missing ${key}`)
+  }
+})

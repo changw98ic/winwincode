@@ -1603,6 +1603,9 @@
         },
         "sessionIdentity": {
           "$ref": "./domain.schema.json#/$defs/SessionIdentity"
+        },
+        "snapshotId": {
+          "$ref": "./domain.schema.json#/$defs/SnapshotId"
         }
       },
       "required": [
@@ -1614,7 +1617,8 @@
         "lease",
         "workerSessionId",
         "artifact",
-        "sessionIdentity"
+        "sessionIdentity",
+        "snapshotId"
       ],
       "title": "artifact.open",
       "description": "Begins a lease-scoped artifact stream without exposing an object-store implementation.",
@@ -1657,6 +1661,9 @@
         },
         "sessionIdentity": {
           "$ref": "./domain.schema.json#/$defs/SessionIdentity"
+        },
+        "snapshotId": {
+          "$ref": "./domain.schema.json#/$defs/SnapshotId"
         }
       },
       "required": [
@@ -1670,7 +1677,8 @@
         "sequence",
         "payload",
         "isFinal",
-        "sessionIdentity"
+        "sessionIdentity",
+        "snapshotId"
       ],
       "title": "artifact.chunk",
       "description": "Transfers one ordered artifact chunk through either local or remote adapters.",
@@ -2699,7 +2707,8 @@
         "workerId",
         "leaseId",
         "attempt",
-        "fencingToken"
+        "fencingToken",
+        "snapshotId"
       ],
       "properties": {
         "kind": {
@@ -2755,6 +2764,9 @@
         },
         "fencingToken": {
           "$ref": "#/$defs/FencingToken"
+        },
+        "snapshotId": {
+          "$ref": "./domain.schema.json#/$defs/SnapshotId"
         }
       },
       "description": "Authoritative WorkerSession-to-CodexThread binding and secret-free immutable runtime context for one exact active Job lease. Delivery WorkRun bindings carry the exact WorkRun; ProductSession Chat bindings omit it.",
