@@ -75,9 +75,15 @@ impl HeartbeatHandle {
         });
         let bg = Arc::clone(&handle);
         std::thread::spawn(move || {
+            // Sleep before the first tick: an immediate `beat` here races the
+            // caller's own `start`/`beat` writes and can leave the record at
+            // `idle` instead of the phase the caller just reported.
             while bg.running.load(Ordering::SeqCst) {
-                bg.beat("idle", "background tick");
                 std::thread::sleep(Duration::from_secs(5));
+                if !bg.running.load(Ordering::SeqCst) {
+                    break;
+                }
+                bg.beat("idle", "background tick");
             }
         });
         handle.beat("start", "heartbeat started");
@@ -138,11 +144,31 @@ impl HeartbeatHandle {
     }
 }
 
+/// Atomic replace so a concurrent reader never observes a torn file.
+///
+/// A non-atomic `fs::write` truncates first, and a supervisor that reads the
+/// half-written JSON gets `None` from [`read_heartbeat`], which
+/// [`classify_heartbeat`] reports as `Stalled` — a false wedge signal for a
+/// live job.
 fn write_heartbeat(path: &Path, record: &Heartbeat) {
-    if let Ok(text) = serde_json::to_string_pretty(record) {
-        let _ = fs::write(path, format!("{text}\n"));
+    let Ok(text) = serde_json::to_string_pretty(record) else {
+        return;
+    };
+    // A unique staging name per write keeps two concurrent beaters from
+    // interleaving bytes into one temporary file before either rename lands.
+    let sequence = STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let staging = path.with_file_name(format!(
+        ".{}.{}.tmp",
+        std::process::id(),
+        sequence
+    ));
+    if fs::write(&staging, format!("{text}\n")).is_err() {
+        return;
     }
+    let _ = fs::rename(&staging, path);
 }
+
+static STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Read last heartbeat; `None` if missing/corrupt.
 #[must_use]
