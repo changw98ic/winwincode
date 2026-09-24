@@ -525,7 +525,10 @@ fn accept_verification_artifact(
         lease: binding.lease.clone(),
         message_id: ExecutionMessageId(canonical_id("xmsg", seed + 1)),
         payload: EncodedPayload {
-            content_type: "application/octet-stream".into(),
+            // Same media type as `artifact.media_type` above: the decoded
+            // payload is the candidate manifest, and the pin gate reads
+            // `payload.content_type`.
+            content_type: "application/vnd.winwincode.git-candidate+json".into(),
             data_base64: STANDARD.encode(manifest),
             payload_digest: digest,
         },
@@ -2636,7 +2639,12 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
         lease: binding_message.lease.clone(),
         message_id: ExecutionMessageId(canonical_id("xmsg", seed + 2)),
         payload: EncodedPayload {
-            content_type: "application/octet-stream".into(),
+            // The decoded payload is the candidate manifest, so its media type
+            // is the candidate type — matching `artifact.media_type` above and
+            // the `worker_lifecycle` fixture. `pin_candidate_git_after_final_
+            // artifact_ack` gates on this field, so `application/octet-stream`
+            // silently skipped the pin and left `load_by_artifact` empty.
+            content_type: "application/vnd.winwincode.git-candidate+json".into(),
             data_base64: STANDARD.encode(&manifest),
             payload_digest: digest.clone(),
         },
