@@ -10,7 +10,12 @@
           "claimKey": "claim:defect-null-unwrap",
           "summary": "Non-null assertions on id can panic when id is null (defect)",
           "position": "supports",
-          "evidence": [{ "evidenceType": "file", "sourceRef": "lookup.ts:id!" }]
+          "evidence": [
+            {
+              "evidenceType": "file",
+              "sourceRef": "lookup.ts:id!"
+            }
+          ]
         }
       ]
     },
@@ -21,7 +26,12 @@
           "claimKey": "defect-null-unwrap",
           "summary": "Non-null assertions on id can panic when id is null (defect)",
           "position": "opposes",
-          "evidence": [{ "evidenceType": "review_finding", "sourceRef": "assumed-non-null" }]
+          "evidence": [
+            {
+              "evidenceType": "review_finding",
+              "sourceRef": "assumed-non-null"
+            }
+          ]
         }
       ]
     },
@@ -32,7 +42,12 @@
           "claimKey": "claim:defect-null-unwrap",
           "summary": "Non-null assertions on id can panic when id is null (defect)",
           "position": "opposes",
-          "evidence": [{ "evidenceType": "review_finding", "sourceRef": "assumed-non-null" }]
+          "evidence": [
+            {
+              "evidenceType": "review_finding",
+              "sourceRef": "assumed-non-null"
+            }
+          ]
         }
       ]
     }
@@ -40,7 +55,10 @@
   "expected": {
     "claimCount": 1,
     "state": "DISPUTED",
-    "mustNotBe": ["REFUTED", "MISSING"],
+    "mustNotBe": [
+      "REFUTED",
+      "MISSING"
+    ],
     "mustTriggerInvestigation": true
   }
 }

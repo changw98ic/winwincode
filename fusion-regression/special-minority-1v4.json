@@ -10,7 +10,12 @@
           "claimKey": "claim:root:shared-fixture-race",
           "summary": "shared fixture race is the root cause",
           "position": "supports",
-          "evidence": [{ "evidenceType": "runtime_event", "sourceRef": "repro:parallel" }]
+          "evidence": [
+            {
+              "evidenceType": "runtime_event",
+              "sourceRef": "repro:parallel"
+            }
+          ]
         }
       ]
     },
@@ -21,7 +26,12 @@
           "claimKey": "root:shared-fixture-race",
           "summary": "shared fixture race is the root cause",
           "position": "opposes",
-          "evidence": [{ "evidenceType": "review_finding", "sourceRef": "assumption:scoped" }]
+          "evidence": [
+            {
+              "evidenceType": "review_finding",
+              "sourceRef": "assumption:scoped"
+            }
+          ]
         }
       ]
     },
@@ -32,7 +42,12 @@
           "claimKey": "claim:root:shared-fixture-race",
           "summary": "shared fixture race is the root cause",
           "position": "opposes",
-          "evidence": [{ "evidenceType": "review_finding", "sourceRef": "assumption:scoped" }]
+          "evidence": [
+            {
+              "evidenceType": "review_finding",
+              "sourceRef": "assumption:scoped"
+            }
+          ]
         }
       ]
     },
@@ -43,7 +58,12 @@
           "claimKey": "claim:root:shared-fixture-race",
           "summary": "shared fixture race is the root cause",
           "position": "opposes",
-          "evidence": [{ "evidenceType": "review_finding", "sourceRef": "assumption:scoped" }]
+          "evidence": [
+            {
+              "evidenceType": "review_finding",
+              "sourceRef": "assumption:scoped"
+            }
+          ]
         }
       ]
     },
@@ -54,7 +74,12 @@
           "claimKey": "claim:root:shared-fixture-race",
           "summary": "shared fixture race is the root cause",
           "position": "opposes",
-          "evidence": [{ "evidenceType": "review_finding", "sourceRef": "assumption:scoped" }]
+          "evidence": [
+            {
+              "evidenceType": "review_finding",
+              "sourceRef": "assumption:scoped"
+            }
+          ]
         }
       ]
     }
@@ -62,7 +87,10 @@
   "expected": {
     "claimCount": 1,
     "state": "DISPUTED",
-    "mustNotBe": ["REFUTED", "MISSING"],
+    "mustNotBe": [
+      "REFUTED",
+      "MISSING"
+    ],
     "mustTriggerInvestigation": true,
     "groundTruth": "supports"
   }

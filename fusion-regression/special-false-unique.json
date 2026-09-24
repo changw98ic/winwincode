@@ -10,7 +10,12 @@
           "claimKey": "claim:root:phantom-race",
           "summary": "There is a phantom race in the cache allocator",
           "position": "supports",
-          "evidence": [{ "evidenceType": "review_finding", "sourceRef": "guessed" }]
+          "evidence": [
+            {
+              "evidenceType": "review_finding",
+              "sourceRef": "guessed"
+            }
+          ]
         }
       ]
     }
@@ -20,7 +25,9 @@
       "direction": "counter",
       "verified": true,
       "kind": "trace_ownership",
-      "facts": ["each worker constructs a distinct allocator instance"],
+      "facts": [
+        "each worker constructs a distinct allocator instance"
+      ],
       "provider": "codegraph"
     }
   ],

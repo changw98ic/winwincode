@@ -10,7 +10,12 @@
           "claimKey": "claim:root-shared-fixture-race",
           "summary": "Root cause is shared module-level cart mutated across parallel tests (race)",
           "position": "supports",
-          "evidence": [{ "evidenceType": "runtime_event", "sourceRef": "xdist-n-auto" }]
+          "evidence": [
+            {
+              "evidenceType": "runtime_event",
+              "sourceRef": "xdist-n-auto"
+            }
+          ]
         }
       ]
     },
@@ -21,7 +26,12 @@
           "claimKey": "root-shared-fixture-race",
           "summary": "Root cause is shared module-level cart mutated across parallel tests (race)",
           "position": "supports",
-          "evidence": [{ "evidenceType": "command", "sourceRef": "shared_cart=Cart()" }]
+          "evidence": [
+            {
+              "evidenceType": "command",
+              "sourceRef": "shared_cart=Cart()"
+            }
+          ]
         }
       ]
     },
@@ -32,7 +42,12 @@
           "claimKey": "claim:root-shared-fixture-race",
           "summary": "Root cause is shared module-level cart mutated across parallel tests (race)",
           "position": "opposes",
-          "evidence": [{ "evidenceType": "review_finding", "sourceRef": "float-only" }]
+          "evidence": [
+            {
+              "evidenceType": "review_finding",
+              "sourceRef": "float-only"
+            }
+          ]
         }
       ]
     },
@@ -43,7 +58,12 @@
           "claimKey": "claim:root-shared-fixture-race",
           "summary": "Root cause is shared module-level cart mutated across parallel tests (race)",
           "position": "opposes",
-          "evidence": [{ "evidenceType": "review_finding", "sourceRef": "float-only" }]
+          "evidence": [
+            {
+              "evidenceType": "review_finding",
+              "sourceRef": "float-only"
+            }
+          ]
         }
       ]
     }
@@ -51,7 +71,10 @@
   "expected": {
     "claimCount": 1,
     "state": "DISPUTED",
-    "mustNotBe": ["REFUTED", "MISSING"],
+    "mustNotBe": [
+      "REFUTED",
+      "MISSING"
+    ],
     "mustTriggerInvestigation": true,
     "groundTruth": "supports"
   }

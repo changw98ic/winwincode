@@ -10,7 +10,12 @@
           "claimKey": "claim:blocking-ci",
           "summary": "CI should quarantine / fix before treating main as green",
           "position": "supports",
-          "evidence": [{ "evidenceType": "runtime_event", "sourceRef": "flake-1-in-8" }]
+          "evidence": [
+            {
+              "evidenceType": "runtime_event",
+              "sourceRef": "flake-1-in-8"
+            }
+          ]
         }
       ]
     },
@@ -21,7 +26,12 @@
           "claimKey": "claim:blocking-ci",
           "summary": "CI should quarantine / fix before treating main as green",
           "position": "opposes",
-          "evidence": [{ "evidenceType": "review_finding", "sourceRef": "rare-flake-ok" }]
+          "evidence": [
+            {
+              "evidenceType": "review_finding",
+              "sourceRef": "rare-flake-ok"
+            }
+          ]
         }
       ]
     }
@@ -29,7 +39,9 @@
   "expected": {
     "claimCount": 1,
     "state": "DISPUTED",
-    "mustNotBe": ["REFUTED"],
+    "mustNotBe": [
+      "REFUTED"
+    ],
     "mustTriggerInvestigation": true,
     "groundTruth": "supports"
   }

@@ -10,7 +10,12 @@
           "claimKey": "claim:defect:return-cast-null",
           "summary": "Returning cache.get(id!) as User can be null (defect)",
           "position": "supports",
-          "evidence": [{ "evidenceType": "diff", "sourceRef": "return cache.get(id!) as User" }]
+          "evidence": [
+            {
+              "evidenceType": "diff",
+              "sourceRef": "return cache.get(id!) as User"
+            }
+          ]
         }
       ]
     },
@@ -21,7 +26,12 @@
           "claimKey": "claim:defect-null-unwrap",
           "summary": "Non-null assertions on id can panic when id is null (defect)",
           "position": "supports",
-          "evidence": [{ "evidenceType": "file", "sourceRef": "lookup.ts:id!" }]
+          "evidence": [
+            {
+              "evidenceType": "file",
+              "sourceRef": "lookup.ts:id!"
+            }
+          ]
         }
       ]
     }
@@ -32,7 +42,9 @@
       "claim:defect:return-cast-null": "SUPPORTED",
       "claim:defect-null-unwrap": "SUPPORTED"
     },
-    "mustNotBe": ["MISSING"],
+    "mustNotBe": [
+      "MISSING"
+    ],
     "mustRetainUnique": "claim:defect:return-cast-null"
   }
 }

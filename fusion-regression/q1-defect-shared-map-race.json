@@ -10,7 +10,12 @@
           "claimKey": "claim:defect-shared-map-race",
           "summary": "Writing the shared cache Map without synchronization is a data race (defect)",
           "position": "supports",
-          "evidence": [{ "evidenceType": "diff", "sourceRef": "cache.set(id!)" }]
+          "evidence": [
+            {
+              "evidenceType": "diff",
+              "sourceRef": "cache.set(id!)"
+            }
+          ]
         }
       ]
     },
@@ -21,7 +26,12 @@
           "claimKey": "claim:defect-shared-map-race",
           "summary": "Writing the shared cache Map without synchronization is a data race (defect)",
           "position": "opposes",
-          "evidence": [{ "evidenceType": "review_finding", "sourceRef": "single-threaded-assume" }]
+          "evidence": [
+            {
+              "evidenceType": "review_finding",
+              "sourceRef": "single-threaded-assume"
+            }
+          ]
         }
       ]
     }
@@ -29,7 +39,9 @@
   "expected": {
     "claimCount": 1,
     "state": "DISPUTED",
-    "mustNotBe": ["REFUTED"],
+    "mustNotBe": [
+      "REFUTED"
+    ],
     "mustTriggerInvestigation": true
   }
 }
