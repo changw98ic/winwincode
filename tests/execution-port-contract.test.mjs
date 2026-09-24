@@ -88,6 +88,7 @@ const domainDefinitions = [
   'SessionBindingSourceIdentity',
   'SessionIdentity',
   'Sha256Digest',
+  'SnapshotId',
   'UserActor',
   'WorkContract',
   'WorkContractId',

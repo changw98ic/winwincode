@@ -477,6 +477,7 @@ impl StoredCandidateArtifact {
             schema_version: SchemaVersion::WinwincodeV1,
             sent_at: upload.created_at.clone(),
             session_identity: upload.session_identity.clone(),
+            snapshot_id: None,
             worker_session_id: upload.worker_session_id.clone(),
         };
         let chunk_messages = upload
@@ -510,6 +511,7 @@ impl StoredCandidateArtifact {
                     sent_at: upload.created_at.clone(),
                     sequence: ExecutionSequence(sequence_i64),
                     session_identity: upload.session_identity.clone(),
+                    snapshot_id: None,
                     worker_session_id: upload.worker_session_id.clone(),
                 })
             })

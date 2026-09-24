@@ -758,6 +758,7 @@ fn prepare_current_stage(
     let authority =
         session_binding_authority(active, lease.issued_at.clone(), lease.expires_at.clone());
     let binding_message = SessionBindingMessage {
+        snapshot_id: None,
         attempt: job.attempt,
         bound_at: submitted_at.clone(),
         codex_thread_id,
@@ -1254,6 +1255,7 @@ fn upload_candidate(
         schema_version: SchemaVersion::WinwincodeV1,
         sent_at: stage.binding.sent_at.clone(),
         session_identity: stage.binding.session_identity.clone(),
+        snapshot_id: None,
         worker_session_id: stage.binding.worker_session_id.clone(),
     };
     let opened = control_plane
@@ -1274,6 +1276,7 @@ fn upload_candidate(
         sent_at: stage.binding.sent_at.clone(),
         sequence: ExecutionSequence(1),
         session_identity: stage.binding.session_identity.clone(),
+        snapshot_id: None,
         worker_session_id: stage.binding.worker_session_id.clone(),
     };
     let accepted = control_plane

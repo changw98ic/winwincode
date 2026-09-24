@@ -1512,6 +1512,7 @@ mod runtime_router_fixture {
             schema_version: SchemaVersion::WinwincodeV1,
             sent_at: Instant("2027-01-15T08:00:01.100Z".into()),
             session_identity,
+            snapshot_id: None,
             source_identity: SessionBindingSourceIdentity {
                 kind: SessionBindingSourceIdentityKind::ExecutionWorker,
                 lease_id,

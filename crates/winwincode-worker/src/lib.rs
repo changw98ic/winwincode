@@ -3017,6 +3017,7 @@ where
             return Err(error);
         }
         let binding = SessionBindingMessage {
+            snapshot_id: None,
             attempt: dispatch.job.attempt,
             bound_at: now.clone(),
             codex_thread_id: thread_id.clone(),

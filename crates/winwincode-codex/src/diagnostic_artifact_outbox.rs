@@ -601,6 +601,7 @@ impl StoredDiagnosticArtifact {
             schema_version: SchemaVersion::WinwincodeV1,
             sent_at: upload.created_at.clone(),
             session_identity: upload.session_identity.clone(),
+            snapshot_id: None,
             worker_session_id: upload.worker_session_id.clone(),
         };
         let chunks = upload
@@ -631,6 +632,7 @@ impl StoredDiagnosticArtifact {
                         i64::try_from(sequence).map_err(|_| AdapterStoreError::Conflict)?,
                     ),
                     session_identity: upload.session_identity.clone(),
+                    snapshot_id: None,
                     worker_session_id: upload.worker_session_id.clone(),
                 })
             })

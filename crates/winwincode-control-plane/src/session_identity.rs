@@ -465,6 +465,7 @@ mod tests {
             expires_at.clone(),
         );
         let message = SessionBindingMessage {
+            snapshot_id: None,
             attempt: 1,
             bound_at,
             codex_thread_id: CodexThreadId(id("cdx", seed)),

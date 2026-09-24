@@ -1617,8 +1617,7 @@
         "lease",
         "workerSessionId",
         "artifact",
-        "sessionIdentity",
-        "snapshotId"
+        "sessionIdentity"
       ],
       "title": "artifact.open",
       "description": "Begins a lease-scoped artifact stream without exposing an object-store implementation.",
@@ -1677,8 +1676,7 @@
         "sequence",
         "payload",
         "isFinal",
-        "sessionIdentity",
-        "snapshotId"
+        "sessionIdentity"
       ],
       "title": "artifact.chunk",
       "description": "Transfers one ordered artifact chunk through either local or remote adapters.",
@@ -2707,8 +2705,7 @@
         "workerId",
         "leaseId",
         "attempt",
-        "fencingToken",
-        "snapshotId"
+        "fencingToken"
       ],
       "properties": {
         "kind": {

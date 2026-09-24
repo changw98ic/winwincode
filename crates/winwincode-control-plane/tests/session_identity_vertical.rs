@@ -294,6 +294,7 @@ mod session_binding_fixture {
             worker_session_id: worker_session_id.clone(),
         };
         let message = SessionBindingMessage {
+            snapshot_id: None,
             attempt: 1,
             bound_at: Instant("2027-01-15T08:00:06.000Z".into()),
             codex_thread_id: session_identity.codex_thread_id.clone(),

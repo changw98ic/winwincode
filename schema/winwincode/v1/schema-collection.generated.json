@@ -1210,8 +1210,7 @@
         "sequence",
         "payload",
         "isFinal",
-        "sessionIdentity",
-        "snapshotId"
+        "sessionIdentity"
       ],
       "title": "artifact.chunk",
       "type": "object",
@@ -1316,8 +1315,7 @@
         "lease",
         "workerSessionId",
         "artifact",
-        "sessionIdentity",
-        "snapshotId"
+        "sessionIdentity"
       ],
       "title": "artifact.open",
       "type": "object",
@@ -23206,8 +23204,7 @@
         "workerId",
         "leaseId",
         "attempt",
-        "fencingToken",
-        "snapshotId"
+        "fencingToken"
       ],
       "title": "session.binding",
       "type": "object",
@@ -27755,7 +27752,7 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:8864fefd578e93276b956840178118819f050b988a310f75eddfd79dd78babd0",
+  "x-source-digest": "sha256:0d9cac9f11348aa49903152a621a5fd9873259e7bb8cb29f50cc520d46faf843",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {

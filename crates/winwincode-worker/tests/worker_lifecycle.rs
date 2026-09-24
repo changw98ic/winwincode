@@ -773,6 +773,7 @@ impl CodexCoreAdapter for FakeCodex {
             schema_version: SchemaVersion::WinwincodeV1,
             sent_at: upload.created_at.clone(),
             session_identity: upload.session_identity.clone(),
+            snapshot_id: None,
             worker_session_id: upload.worker_session_id.clone(),
         });
         let chunk = ExecutionPortMessage::ArtifactChunkMessage(ArtifactChunkMessage {
@@ -790,6 +791,7 @@ impl CodexCoreAdapter for FakeCodex {
             sent_at: upload.created_at.clone(),
             sequence: ExecutionSequence(1),
             session_identity: upload.session_identity.clone(),
+            snapshot_id: None,
             worker_session_id: upload.worker_session_id.clone(),
         });
         let deliveries = [open, chunk]
@@ -4279,6 +4281,7 @@ async fn pending_runtime_and_diagnostic_artifact_flush_after_server_restart_wind
         sent_at: now(),
         sequence: ExecutionSequence(1),
         session_identity: active.session_identity.clone(),
+        snapshot_id: None,
         worker_session_id: active.worker_session_id.clone(),
     });
 

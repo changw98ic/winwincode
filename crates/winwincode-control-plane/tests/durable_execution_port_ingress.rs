@@ -1805,6 +1805,7 @@ fn workrun_binding(
         work_run_id: Some(scope.work_run_id.clone()),
     };
     SessionBindingMessage {
+        snapshot_id: None,
         attempt: lease.attempt,
         bound_at: Instant(binding_time.into()),
         codex_thread_id: codex_thread_id.clone(),

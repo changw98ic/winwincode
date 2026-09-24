@@ -513,6 +513,7 @@ fn accept_verification_artifact(
         schema_version: SchemaVersion::WinwincodeV1,
         sent_at: binding.sent_at.clone(),
         session_identity: binding.session_identity.clone(),
+        snapshot_id: None,
         worker_session_id: binding.worker_session_id.clone(),
     };
     control_plane
@@ -536,6 +537,7 @@ fn accept_verification_artifact(
         sent_at: binding.sent_at.clone(),
         sequence: ExecutionSequence(1),
         session_identity: binding.session_identity.clone(),
+        snapshot_id: None,
         worker_session_id: binding.worker_session_id.clone(),
     };
     let acknowledgement = control_plane
@@ -668,6 +670,7 @@ fn binding_for_dispatch(
         },
         work_run_id: Some(scope.work_run_id.clone()),
         worker_id: dispatch.lease.worker_id.clone(),
+        snapshot_id: None,
         worker_session_id: worker_session_id.clone(),
     };
     let lease = active_lease_identity(
@@ -1063,6 +1066,7 @@ fn artifact_open_message(seed: u64, binding: &SessionBindingMessage) -> Artifact
         schema_version: SchemaVersion::WinwincodeV1,
         sent_at: Instant("2027-01-15T08:00:07.000Z".into()),
         session_identity: binding.session_identity.clone(),
+        snapshot_id: None,
         worker_session_id: binding.worker_session_id.clone(),
     }
 }
@@ -2407,6 +2411,7 @@ fn generated_artifact_messages_use_the_exact_durable_job_and_binding_authority()
         sent_at: Instant("2027-01-15T08:00:08.000Z".into()),
         sequence: ExecutionSequence(1),
         session_identity: binding_message.session_identity.clone(),
+        snapshot_id: None,
         worker_session_id: binding_message.worker_session_id.clone(),
     };
     let mut invalid_transport_chunk = chunk.clone();
@@ -2542,6 +2547,7 @@ fn start_local_accepts_diagnostic_open_and_charset_chunk() {
         schema_version: SchemaVersion::WinwincodeV1,
         sent_at: binding_message.sent_at.clone(),
         session_identity: binding_message.session_identity.clone(),
+        snapshot_id: None,
         worker_session_id: binding_message.worker_session_id.clone(),
     };
     let opened = control_plane
@@ -2565,6 +2571,7 @@ fn start_local_accepts_diagnostic_open_and_charset_chunk() {
         sent_at: Instant("2027-01-15T08:00:08.000Z".into()),
         sequence: ExecutionSequence(1),
         session_identity: binding_message.session_identity.clone(),
+        snapshot_id: None,
         worker_session_id: binding_message.worker_session_id.clone(),
     };
     let accepted = control_plane
@@ -2627,6 +2634,7 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
         schema_version: SchemaVersion::WinwincodeV1,
         sent_at: Instant("2027-01-15T08:00:07.000Z".into()),
         session_identity: binding_message.session_identity.clone(),
+        snapshot_id: None,
         worker_session_id: binding_message.worker_session_id.clone(),
     };
     control_plane
@@ -2652,6 +2660,7 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
         sent_at: Instant("2027-01-15T08:00:08.000Z".into()),
         sequence: ExecutionSequence(1),
         session_identity: binding_message.session_identity.clone(),
+        snapshot_id: None,
         worker_session_id: binding_message.worker_session_id.clone(),
     };
     let final_ack = control_plane
