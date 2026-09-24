@@ -12,6 +12,7 @@ pub mod candidate;
 pub mod evidence;
 pub mod rework;
 mod session_binding;
+pub mod snapshot;
 mod spec;
 pub mod verdict;
 pub mod verification;
