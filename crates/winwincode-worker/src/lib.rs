@@ -22,6 +22,7 @@ mod probe_process;
 pub mod probe_reducer;
 pub mod probe_scheduler;
 pub mod remote_transport;
+pub mod snapshot_worktree;
 pub mod stage_product;
 pub mod validation_artifact;
 pub mod validation_diagnostics;
