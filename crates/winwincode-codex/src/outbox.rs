@@ -331,11 +331,20 @@ impl ExecutionOutbox {
                 ExecutionPortMessage::InputResponseMessage(_)
                     | ExecutionPortMessage::JobOutcomeAckMessage(_)
                     | ExecutionPortMessage::ModelChunkMessage(_)
+                    | ExecutionPortMessage::ActionEnforcementReceiptMessage(_)
+                    | ExecutionPortMessage::ApprovalDecisionMessage(_)
             ) {
-                // ModelChunk first-frame acks compact ModelOpen. After the
-                // durable Provider frame exists, a missing open row is an
-                // idempotent no-op rather than a Worker-fatal conflict that
-                // would pin the Device model queue on sequence 1.
+                // Each family here is applied through a durable ledger before
+                // its request row is compacted: the Kernel/input ledger, the
+                // durable model-call frame ledger, the action gate (a replayed
+                // receipt is already `Consumed`, which it treats as success) or
+                // the approval-operation ledger (an already-`Resolved` operation
+                // re-resolves and returns). ModelChunk first-frame acks compact
+                // ModelOpen. After that durable apply, a missing request row is
+                // the expected post-compaction replay — for example after a
+                // crash between the Worker compacting its request and the
+                // transport ACK reaching the Server — not a Worker-fatal
+                // conflict.
                 return Ok(());
             }
             return Err(AdapterStoreError::Conflict);
@@ -1015,12 +1024,19 @@ mod tests {
                 .acknowledge_response(&fixture(response_kind))
                 .expect("exact response");
             assert!(outbox.pending().expect("compacted pending").is_empty());
-            if matches!(response_kind, "input.response" | "job.outcome_ack" | "model.chunk") {
-                // The Kernel/input ledger or durable model-call frame ledger
-                // has already accepted this exact response. Replaying the
-                // Control Plane frame after the Worker lost its ACK must
-                // remain an idempotent no-op even though the durable request
-                // row is compacted.
+            if matches!(
+                response_kind,
+                "input.response"
+                    | "job.outcome_ack"
+                    | "model.chunk"
+                    | "action.enforcement_receipt"
+                    | "approval.decision"
+            ) {
+                // The Kernel/input ledger, durable model-call frame ledger,
+                // action gate or approval-operation ledger has already applied
+                // this exact response. Replaying the Control Plane frame after
+                // the Worker lost its ACK must remain an idempotent no-op even
+                // though the durable request row is compacted.
                 outbox
                     .acknowledge_response(&fixture(response_kind))
                     .expect("exact terminal response replay after compaction");
