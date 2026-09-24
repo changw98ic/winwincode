@@ -513,7 +513,9 @@ fn accept_verification_artifact(
         schema_version: SchemaVersion::WinwincodeV1,
         sent_at: binding.sent_at.clone(),
         session_identity: binding.session_identity.clone(),
-        snapshot_id: None,
+        // A verification frame must name the snapshot under test; the Control
+        // Plane rejects a verification frame with no snapshotId.
+        snapshot_id: Some(winwincode_domain::SnapshotId(canonical_id("snap", seed))),
         worker_session_id: binding.worker_session_id.clone(),
     };
     control_plane
@@ -537,7 +539,8 @@ fn accept_verification_artifact(
         sent_at: binding.sent_at.clone(),
         sequence: ExecutionSequence(1),
         session_identity: binding.session_identity.clone(),
-        snapshot_id: None,
+        // The re-upload names the same snapshot as its open frame.
+        snapshot_id: Some(winwincode_domain::SnapshotId(canonical_id("snap", seed))),
         worker_session_id: binding.worker_session_id.clone(),
     };
     let acknowledgement = control_plane

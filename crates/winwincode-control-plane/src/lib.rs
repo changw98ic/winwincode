@@ -1775,6 +1775,14 @@ impl ControlPlane {
             job.execution_profile.as_str(),
             "reviewer" | "verifier" | "adversarial-verifier"
         ) {
+            // A verification frame must name the snapshot under test. Writer
+            // frames are produced before a Snapshot exists and legitimately
+            // carry none; only verification frames reach this rejection.
+            if chunk.snapshot_id.is_none() {
+                return Err(CandidateResolutionError::Storage(
+                    StorageError::invalid_input("verification frame has no snapshotId"),
+                ));
+            }
             // Verification roles re-upload the already-frozen candidate checkout.
             // The writer owns the Delivery Git pin; pinning the verification
             // re-upload can fail the already-accepted chunk ack and strand the

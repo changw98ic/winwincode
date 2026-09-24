@@ -319,6 +319,7 @@ fn active_job(repository_id: &RepositoryId, suffix: &str, role: &str) -> ActiveJ
                 delivery_spec_id: "spec-fixture".into(),
                 delivery_spec_revision: Revision(2),
                 schema_version: SchemaVersion::WinwincodeV1,
+                snapshot_id: None,
                 work_contract: WorkContract {
                     constraints: Vec::new(),
                     created_at: Instant("2029-01-01T00:00:00.000Z".into()),

@@ -600,6 +600,7 @@ fn dispatch(suffix: char, goal: &str) -> JobDispatchMessage {
         replacement_authority: None,
         request_id: RequestId(id("req", suffix)),
         schema_version: SchemaVersion::WinwincodeV1,
+        snapshot_id: None,
         sent_at: now(),
     }
 }

@@ -1107,6 +1107,7 @@ mod tests {
                 delivery_spec_revision: Revision(2),
                 candidate_ref: (role != "planner").then(|| CANDIDATE_REF.to_owned()),
                 schema_version: SchemaVersion::WinwincodeV1,
+                snapshot_id: None,
                 work_contract: contract,
                 work_item: item,
             }),

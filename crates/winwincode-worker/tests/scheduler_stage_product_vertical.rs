@@ -994,6 +994,7 @@ fn stage_job(role: &str, seed: u64, revision: &str, candidate_ref: Option<&str>)
         delivery_spec_revision: Revision(1),
         candidate_ref: candidate_ref.map(str::to_owned),
         schema_version: SchemaVersion::WinwincodeV1,
+        snapshot_id: None,
         work_contract: WorkContract {
             constraints: vec!["Keep the repository boundary exact.".to_owned()],
             created_at: at(1),

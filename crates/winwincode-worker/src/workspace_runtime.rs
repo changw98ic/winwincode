@@ -1027,6 +1027,10 @@ impl JobWorkspaceRuntime {
     /// Captures and verifies the clean candidate checkout used by a read-only
     /// reviewer or verifier into its own Candidate upload.
     ///
+    /// The sealed `Snapshot` is allocated here, at freeze, before any
+    /// verification product is staged, and every staged verification Artifact
+    /// binds to that exact code identity.
+    ///
     /// # Errors
     ///
     /// Rejects a missing/foreign workspace, an invalid verification Job, a
@@ -1042,7 +1046,8 @@ impl JobWorkspaceRuntime {
         if !same_authority(workspace.provenance(), active) {
             return Err(authority_error());
         }
-        match prepare_verification_artifact(active, workspace) {
+        let snapshot = freeze_verification_snapshot(active, workspace)?;
+        match prepare_verification_artifact(active, workspace, &snapshot) {
             Ok(prepared) => Ok(prepared),
             Err(error) => Err(error.into()),
         }
@@ -3103,6 +3108,73 @@ fn authority_error() -> JobWorkspaceError {
         JobWorkspaceErrorCode::AuthorityMismatch,
         "active Job does not own this detached workspace",
     )
+}
+
+/// Freezes one sealed `Snapshot` for a read-only verification checkout.
+///
+/// The snapshot id is allocated here, at freeze, before any verification
+/// product is staged. The candidate identity is the job's own
+/// `work_input.candidate_ref` string, taken verbatim: nothing in the Worker
+/// inputs produces a `cnd_` id. Base, candidate and content come from the
+/// frozen checkout so the writer freeze and the verifier freeze seal the same
+/// code identity.
+fn freeze_verification_snapshot(
+    active: &ActiveJob,
+    workspace: &WorkerWorkspace,
+) -> Result<winwincode_delivery::domain::snapshot::Snapshot, JobWorkspaceError> {
+    use winwincode_delivery::domain::snapshot::SnapshotBuilder;
+
+    let winwincode_execution_port::generated::ExecutionScope::WorkRunExecutionScope(scope) =
+        &active.job.scope
+    else {
+        return Err(JobWorkspaceError::new(
+            JobWorkspaceErrorCode::Candidate,
+            "verification snapshot requires a WorkRun execution scope",
+        ));
+    };
+    let candidate_ref = active
+        .job
+        .work_input
+        .as_ref()
+        .and_then(|input| input.candidate_ref.clone())
+        .unwrap_or_default();
+    let facts = workspace.snapshot_verification()?;
+    let checkout = workspace.layout().checkout();
+    let base_commit_id =
+        crate::workspace::rev_parse(checkout, &format!("{}^", facts.candidate_commit_id))?;
+    let base_tree_id =
+        crate::workspace::rev_parse(checkout, &format!("{base_commit_id}^{{tree}}"))?;
+    let diff = crate::workspace::candidate_diff_sha256(
+        checkout,
+        &base_commit_id,
+        &facts.candidate_commit_id,
+    )?;
+    let created_at_millis = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_millis()),
+    )
+    .unwrap_or(u64::MAX);
+    SnapshotBuilder::new(
+        candidate_ref,
+        scope.work_run_id.0.as_str(),
+        active.job.workspace.repository_id.0.as_str(),
+    )
+    .with_base(base_commit_id.as_str(), base_tree_id.as_str())
+    .with_candidate(
+        facts.candidate_commit_id.as_str(),
+        facts.candidate_tree_id.as_str(),
+    )
+    .with_diff_sha256(diff.0.as_str())
+    .with_content_digest(facts.content_digest.0.as_str())
+    .with_created_at_millis(created_at_millis)
+    .build()
+    .map_err(|_| {
+        JobWorkspaceError::new(
+            JobWorkspaceErrorCode::Candidate,
+            "verification snapshot is missing required code identity",
+        )
+    })
 }
 
 fn change_batch_error(message: &'static str) -> JobWorkspaceError {

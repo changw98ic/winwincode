@@ -1465,36 +1465,35 @@ impl WorkerWorkspace {
         Ok(())
     }
 
-    /// Rebuilds and verifies a read-only verification snapshot.
+    /// Re-verifies the frozen checkout against one sealed Snapshot.
     ///
-    /// Unlike an executor candidate, a verifier's candidate commit is the
-    /// workspace source commit itself, so no parent/source rewrite is allowed.
+    /// The manifest bytes stay the transport payload (a `GitCandidateArtifactManifest`
+    /// Git bundle). Identity comes from the Snapshot alone.
     ///
     /// # Errors
     ///
-    /// Returns `DigestMismatch` for altered or foreign snapshot facts.
-    pub fn verify_verification(&self, snapshot: &CandidateSnapshot) -> Result<(), WorkspaceError> {
-        let checkout_head = rev_parse(&self.layout.checkout, "HEAD^{commit}")?;
+    /// Returns `DigestMismatch` when the checkout does not match the sealed
+    /// commit, tree or content digest.
+    pub fn verify_snapshot(
+        &self,
+        snapshot: &winwincode_delivery::domain::snapshot::Snapshot,
+    ) -> Result<(), WorkspaceError> {
+        if !winwincode_delivery::domain::snapshot::verify_seal(snapshot) {
+            return Err(WorkspaceError::new(
+                WorkspaceErrorCode::DigestMismatch,
+                "snapshot seal does not cover its own code identity",
+            ));
+        }
         let candidate_tree = rev_parse(
             &self.layout.checkout,
-            &format!("{}^{{tree}}", snapshot.candidate_commit_id),
+            &format!("{}^{{tree}}", snapshot.candidate_commit_id()),
         )?;
-        let manifest = GitCandidateArtifactManifest::decode(&snapshot.manifest_bytes)
-            .map_err(|error| WorkspaceError::io("candidate manifest cannot be decoded", error))?;
-        let digest = tree_digest(&self.layout.checkout, &snapshot.candidate_commit_id)?;
+        let digest = tree_digest(&self.layout.checkout, snapshot.candidate_commit_id())?;
         if !workspace_checkout_clean(&self.layout.checkout)?
-            || snapshot.repository_id != self.repository_id
-            || snapshot.checkout_revision != self.checkout_revision
-            || snapshot.source_commit_id != self.source_commit_id
-            || snapshot.source_tree_id != self.source_tree_id
-            || snapshot.origin_provenance != self.origin_provenance
-            || snapshot.provenance != self.current_provenance
-            || checkout_head != self.source_commit_id
-            || snapshot.candidate_commit_id != self.source_commit_id
-            || candidate_tree != self.source_tree_id
-            || candidate_tree != snapshot.candidate_tree_id
-            || digest != snapshot.content_digest
-            || manifest.candidate_commit_id() != snapshot.candidate_commit_id
+            || snapshot.repository_id() != &self.repository_id.0
+            || snapshot.candidate_commit_id() != self.source_commit_id
+            || candidate_tree != snapshot.candidate_tree_id()
+            || digest.0 != snapshot.content_digest()
         {
             return Err(WorkspaceError::new(
                 WorkspaceErrorCode::DigestMismatch,
@@ -2697,6 +2696,32 @@ fn artifact_set_digest(files: &[WorkspaceArtifactFile]) -> Sha256Digest {
         update_field(&mut hasher, file.digest.0.as_bytes());
     }
     Sha256Digest(format!("sha256:{:x}", hasher.finalize()))
+}
+
+/// Fingerprints the exact change between base and candidate.
+///
+/// Mirrors the canonical candidate-diff measurement
+/// (`git diff --no-ext-diff --no-textconv --binary --full-index`, SHA-256)
+/// so a writer freeze and a verifier freeze seal the same bytes as
+/// `diff_sha256`.
+pub(crate) fn candidate_diff_sha256(
+    repository: &Path,
+    base_commit_id: &str,
+    candidate_commit_id: &str,
+) -> Result<Sha256Digest, WorkspaceError> {
+    let range = format!("{base_commit_id}..{candidate_commit_id}");
+    let diff = git_output(
+        repository,
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--binary",
+            "--full-index",
+            &range,
+        ],
+    )?;
+    Ok(Sha256Digest(format!("sha256:{:x}", Sha256::digest(diff))))
 }
 
 fn tree_digest(repository: &Path, commit: &str) -> Result<Sha256Digest, WorkspaceError> {

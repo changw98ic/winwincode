@@ -1250,6 +1250,9 @@
               "type": "null"
             }
           ]
+        },
+        "snapshotId": {
+          "$ref": "./domain.schema.json#/$defs/SnapshotId"
         }
       },
       "required": [
@@ -10246,6 +10249,9 @@
         },
         "deviceTarget": {
           "$ref": "#/$defs/ExecutionDeviceTarget"
+        },
+        "snapshotId": {
+          "$ref": "./domain.schema.json#/$defs/SnapshotId"
         }
       },
       "required": [

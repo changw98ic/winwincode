@@ -315,6 +315,7 @@ fn execution_job(delivery: &Delivery, scope: &RepositoryScope) -> ExecutionJob {
                     .to_owned()
             }),
             schema_version: SchemaVersion::WinwincodeV1,
+            snapshot_id: None,
             work_contract: delivery.snapshot().work_run_aggregate.contract.clone(),
             work_item: delivery
                 .snapshot()

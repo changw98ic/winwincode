@@ -6863,6 +6863,7 @@ mod tests {
                 delivery_spec_revision: Revision(2),
                 candidate_ref: None,
                 schema_version: SchemaVersion::WinwincodeV1,
+                snapshot_id: None,
                 work_contract: contract,
                 work_item: item,
             }),

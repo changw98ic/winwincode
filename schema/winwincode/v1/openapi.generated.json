@@ -15408,6 +15408,9 @@
           },
           "sentAt": {
             "$ref": "#/components/schemas/Instant"
+          },
+          "snapshotId": {
+            "$ref": "#/components/schemas/SnapshotId"
           }
         },
         "required": [
@@ -27588,6 +27591,9 @@
           "schemaVersion": {
             "$ref": "#/components/schemas/SchemaVersion"
           },
+          "snapshotId": {
+            "$ref": "#/components/schemas/SnapshotId"
+          },
           "workContract": {
             "$ref": "#/components/schemas/WorkContract"
           },
@@ -28184,7 +28190,7 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:0d9cac9f11348aa49903152a621a5fd9873259e7bb8cb29f50cc520d46faf843",
+  "x-source-digest": "sha256:a576c59a24049135b466ff51a465e6a195fe0ead6a88f1ab4689e38f3482f7ce",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {

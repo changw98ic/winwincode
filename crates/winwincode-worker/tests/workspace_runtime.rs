@@ -282,6 +282,7 @@ fn active_job() -> ActiveJob {
                 delivery_spec_revision: Revision(2),
                 candidate_ref: None,
                 schema_version: SchemaVersion::WinwincodeV1,
+                snapshot_id: None,
                 work_contract: WorkContract {
                     constraints: vec!["Keep repository isolation.".to_owned()],
                     created_at: Instant("2026-08-28T00:00:00.000Z".to_owned()),

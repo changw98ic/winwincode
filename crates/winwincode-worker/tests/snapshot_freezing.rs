@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::path::PathBuf;
 use std::process::Command;
 
 fn git(root: &std::path::Path, args: &[&str]) -> String {
@@ -99,4 +98,47 @@ fn frozen_worktree_is_read_only() {
     winwincode_worker::snapshot_worktree::drop_worktree(&repo, &frozen).expect("drop");
     let _ = std::fs::remove_dir_all(&root);
     let _ = snap;
+}
+
+#[test]
+fn freezing_a_candidate_allocates_its_own_snapshot_id() {
+    let root = std::env::temp_dir().join(format!("wwc-snap-{}-{}", std::process::id(), 4));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("root");
+    let repo = root.join("repo");
+    let frozen = root.join("frozen");
+    std::fs::create_dir_all(&repo).expect("repo dir");
+    let candidate_commit = seed_repo(&repo);
+    let base_commit = git(&repo, &["rev-parse", &format!("{candidate_commit}^")]);
+    let base_tree_id = git(&repo, &["rev-parse", &format!("{base_commit}^{{tree}}")]);
+
+    let worktree = winwincode_worker::snapshot_worktree::freeze_worktree(
+        &repo,
+        &candidate_commit,
+        &frozen,
+    )
+    .expect("freeze");
+
+    // The freeze allocates the snapshot id before any verification product is
+    // staged, and the candidate identity is the job's own candidate_ref string.
+    let snapshot = winwincode_delivery::domain::snapshot::SnapshotBuilder::new(
+        "git-candidate:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "wrn_00000000000000000000000005",
+        "rep_00000000000000000000000005",
+    )
+    .with_base(base_commit.as_str(), base_tree_id.as_str())
+    .with_candidate(worktree.commit_id.as_str(), worktree.tree_id.as_str())
+    .with_diff_sha256("sha256:0000000000000000000000000000000000000000000000000000000000000000")
+    .with_content_digest("sha256:1111111111111111111111111111111111111111111111111111111111111111")
+    .with_created_at_millis(1_800_000_000_000)
+    .build()
+    .expect("snapshot at freeze");
+    assert!(
+        snapshot.snapshot_id().starts_with("snap_"),
+        "the freeze must allocate a snap_ identity"
+    );
+    assert_eq!(snapshot.candidate_commit_id(), worktree.commit_id);
+
+    winwincode_worker::snapshot_worktree::drop_worktree(&repo, &frozen).expect("drop");
+    let _ = std::fs::remove_dir_all(&root);
 }

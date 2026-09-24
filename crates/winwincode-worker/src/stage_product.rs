@@ -239,8 +239,9 @@ pub fn prepare_candidate_artifact(
 }
 
 /// Captures the already-frozen candidate from a read-only verification
-/// checkout. The verifier receives its own Artifact authority and ACK, while
-/// the bytes remain the exact candidate manifest observed by that stage.
+/// checkout against one sealed `Snapshot`. The verifier receives its own
+/// Artifact authority and ACK, while the bytes remain the exact candidate
+/// manifest observed by that stage.
 ///
 /// # Errors
 ///
@@ -250,6 +251,7 @@ pub fn prepare_candidate_artifact(
 pub fn prepare_verification_artifact(
     active: &ActiveJob,
     workspace: &WorkerWorkspace,
+    snapshot: &winwincode_delivery::domain::snapshot::Snapshot,
 ) -> Result<PreparedCandidateArtifact, CandidateProductError> {
     if active.lifecycle != ActiveJobLifecycle::Running {
         return Err(CandidateProductError::new(
@@ -280,23 +282,26 @@ pub fn prepare_verification_artifact(
             )
         })?;
     let provenance = candidate_workspace_provenance(active, workspace)?;
-    let snapshot = workspace
+    workspace
+        .verify_snapshot(snapshot)
+        .map_err(CandidateProductError::from)?;
+    let facts = workspace
         .snapshot_verification()
         .map_err(CandidateProductError::from)?;
-    workspace
-        .verify_verification(&snapshot)
-        .map_err(CandidateProductError::from)?;
-    if snapshot.repository_id != active.job.workspace.repository_id
-        || snapshot.checkout_revision != active.job.workspace.checkout_revision
-        || snapshot.provenance != provenance
+    if facts.repository_id != active.job.workspace.repository_id
+        || facts.checkout_revision != active.job.workspace.checkout_revision
+        || facts.provenance != provenance
+        || facts.candidate_commit_id.as_str() != snapshot.candidate_commit_id()
+        || facts.candidate_tree_id.as_str() != snapshot.candidate_tree_id()
+        || facts.content_digest.0.as_str() != snapshot.content_digest()
     {
         return Err(CandidateProductError::new(
             CandidateProductErrorCode::AuthorityMismatch,
             "verification snapshot does not match its Job workspace",
         ));
     }
-    let bytes = snapshot.manifest_bytes().to_vec();
-    prepared_artifact(active, snapshot, bytes)
+    let bytes = facts.manifest_bytes().to_vec();
+    prepared_artifact(active, facts, bytes)
 }
 
 fn prepared_artifact(

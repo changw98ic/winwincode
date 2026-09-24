@@ -495,6 +495,7 @@ impl<'storage> ExecutionPortService<'storage> {
             replacement_authority: None,
             request_id: claim.request_id,
             schema_version: SchemaVersion::WinwincodeV1,
+            snapshot_id: None,
             sent_at: lease.issued_at.clone(),
         })
     }

@@ -188,6 +188,7 @@ fn dispatch() -> JobDispatchMessage {
                 delivery_spec_id: "spec-local-fixture".to_owned(),
                 delivery_spec_revision: Revision(1),
                 schema_version: SchemaVersion::WinwincodeV1,
+                snapshot_id: None,
                 work_contract: contract,
                 work_item: item,
             }),
@@ -203,6 +204,7 @@ fn dispatch() -> JobDispatchMessage {
         replacement_authority: None,
         request_id: RequestId(id("req", 'D')),
         schema_version: SchemaVersion::WinwincodeV1,
+        snapshot_id: None,
         sent_at: now(),
     }
 }

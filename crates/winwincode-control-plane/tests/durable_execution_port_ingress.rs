@@ -467,6 +467,7 @@ fn workrun_job(seed: u64, delivery: &Delivery, scope: &RepositoryScope) -> Execu
             delivery_spec_revision: Revision(2),
             candidate_ref: None,
             schema_version: SchemaVersion::WinwincodeV1,
+            snapshot_id: None,
             work_contract: contract,
             work_item: item,
         }),

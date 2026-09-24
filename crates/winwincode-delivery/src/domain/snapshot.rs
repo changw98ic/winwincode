@@ -9,9 +9,7 @@
 use std::{fmt, sync::atomic::{AtomicU64, Ordering}};
 
 use sha2::{Digest, Sha256};
-use winwincode_domain::{
-    CandidateId, RepositoryId, SnapshotId, WorkRunId, is_canonical_prefixed_id,
-};
+use winwincode_domain::{RepositoryId, SnapshotId, WorkRunId, is_canonical_prefixed_id};
 
 /// Failure while assembling one Snapshot.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -35,7 +33,7 @@ impl std::error::Error for SnapshotError {}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Snapshot {
     snapshot_id: SnapshotId,
-    candidate_id: CandidateId,
+    candidate_ref: String,
     work_run_id: WorkRunId,
     repository_id: RepositoryId,
     base_commit_id: String,
@@ -139,7 +137,7 @@ fn seal_fields(snapshot: &Snapshot) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"winwincode.snapshot.v1\0");
     for field in [
-        snapshot.candidate_id.0.as_bytes(),
+        snapshot.candidate_ref.as_bytes(),
         snapshot.work_run_id.0.as_bytes(),
         snapshot.repository_id.0.as_bytes(),
         snapshot.base_commit_id.as_bytes(),
@@ -159,7 +157,7 @@ fn seal_fields(snapshot: &Snapshot) -> String {
 /// Assembles one Snapshot from an exact frozen Candidate.
 #[derive(Clone, Debug)]
 pub struct SnapshotBuilder {
-    candidate_id: String,
+    candidate_ref: String,
     work_run_id: String,
     repository_id: String,
     base_commit_id: Option<String>,
@@ -173,14 +171,17 @@ pub struct SnapshotBuilder {
 
 impl SnapshotBuilder {
     /// Starts a builder bound to one candidate, work run and repository.
+    ///
+    /// The candidate identity is the job's own `candidate_ref` string, taken
+    /// verbatim; nothing in the Worker inputs produces a `cnd_` newtype.
     #[must_use]
     pub fn new(
-        candidate_id: impl Into<String>,
+        candidate_ref: impl Into<String>,
         work_run_id: impl Into<String>,
         repository_id: impl Into<String>,
     ) -> Self {
         Self {
-            candidate_id: candidate_id.into(),
+            candidate_ref: candidate_ref.into(),
             work_run_id: work_run_id.into(),
             repository_id: repository_id.into(),
             base_commit_id: None,
@@ -262,24 +263,26 @@ impl SnapshotBuilder {
         };
         // The generated identifier newtypes expose no constructors, so the
         // canonical prefixed shape is checked here and the newtype wrapped.
-        if !is_canonical_prefixed_id(&self.candidate_id, "cnd_")
+        // `candidate_ref` is stored verbatim: the job carries it as a plain
+        // string and nothing produces a `cnd_` id to demand here.
+        if self.candidate_ref.is_empty()
             || !is_canonical_prefixed_id(&self.work_run_id, "wrn_")
             || !is_canonical_prefixed_id(&self.repository_id, "rep_")
         {
             return Err(SnapshotError::Incomplete);
         }
-        let candidate_id = CandidateId(self.candidate_id);
+        let candidate_ref = self.candidate_ref;
         let work_run_id = WorkRunId(self.work_run_id);
         let repository_id = RepositoryId(self.repository_id);
         let snapshot_id = allocate_snapshot_id(
-            &candidate_id.0,
+            &candidate_ref,
             &work_run_id.0,
             &repository_id.0,
             created_at_millis,
         );
         let mut snapshot = Snapshot {
             snapshot_id,
-            candidate_id,
+            candidate_ref,
             work_run_id,
             repository_id,
             base_commit_id,
@@ -302,7 +305,7 @@ impl SnapshotBuilder {
 /// Every build allocates its own identifier, so rebuilding the same code
 /// identity twice yields two snapshots that share a seal but never an id.
 fn allocate_snapshot_id(
-    candidate_id: &str,
+    candidate_ref: &str,
     work_run_id: &str,
     repository_id: &str,
     created_at_millis: u64,
@@ -320,7 +323,7 @@ fn allocate_snapshot_id(
         &counter.to_be_bytes()[..],
         &std::process::id().to_be_bytes()[..],
         &created_at_millis.to_be_bytes()[..],
-        candidate_id.as_bytes(),
+        candidate_ref.as_bytes(),
         work_run_id.as_bytes(),
         repository_id.as_bytes(),
     ] {

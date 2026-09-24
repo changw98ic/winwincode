@@ -1110,6 +1110,7 @@ fn dispatch(job_suffix: char, scope: ExecutionScope) -> JobDispatchMessage {
                 delivery_spec_id: "spec-fixture".into(),
                 delivery_spec_revision: Revision(2),
                 schema_version: SchemaVersion::WinwincodeV1,
+                snapshot_id: None,
                 work_contract: WorkContract {
                     constraints: Vec::new(),
                     created_at: Instant("2027-01-15T08:00:00.000Z".to_owned()),
@@ -1154,6 +1155,7 @@ fn dispatch(job_suffix: char, scope: ExecutionScope) -> JobDispatchMessage {
         replacement_authority: None,
         request_id: RequestId(id("req", job_suffix)),
         schema_version: SchemaVersion::WinwincodeV1,
+        snapshot_id: None,
         sent_at: now(),
     }
 }

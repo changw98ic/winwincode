@@ -475,6 +475,7 @@ fn dispatch_message(
         replacement_authority,
         request_id: receipt.request_id,
         schema_version: SchemaVersion::WinwincodeV1,
+        snapshot_id: None,
         sent_at: receipt.lease.issued_at,
     })
 }

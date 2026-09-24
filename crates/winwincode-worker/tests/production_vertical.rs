@@ -1351,6 +1351,7 @@ fn dispatch_for_job(job: ExecutionJob, lease: ExecutionLeaseStamp) -> JobDispatc
         replacement_authority: None,
         request_id: RequestId(id("req", 80)),
         schema_version: SchemaVersion::WinwincodeV1,
+        snapshot_id: None,
         sent_at: at("2030-01-01T00:00:00.000Z"),
     }
 }

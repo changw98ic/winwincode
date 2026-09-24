@@ -47,3 +47,28 @@ fn snapshot_requires_a_candidate_commit() {
     );
     assert!(incomplete.build().is_err(), "a snapshot without a candidate commit is not buildable");
 }
+
+#[test]
+fn snapshot_accepts_the_job_candidate_ref_verbatim() {
+    // The job carries `work_input.candidate_ref` as a plain string. The
+    // snapshot must not demand a `cnd_` newtype it has no source for.
+    let snapshot = SnapshotBuilder::new(
+        "git-candidate:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "wrn_00000000000000000000000004",
+        "rep_00000000000000000000000004",
+    )
+    .with_base(
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    )
+    .with_candidate(
+        "cccccccccccccccccccccccccccccccccccccccc",
+        "dddddddddddddddddddddddddddddddddddddddd",
+    )
+    .with_diff_sha256("sha256:0000000000000000000000000000000000000000000000000000000000000000")
+    .with_content_digest("sha256:1111111111111111111111111111111111111111111111111111111111111111")
+    .with_created_at_millis(1_800_000_000_000)
+    .build()
+    .expect("snapshot from a plain candidate ref");
+    assert!(verify_seal(&snapshot));
+}
