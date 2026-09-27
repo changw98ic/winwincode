@@ -252,6 +252,7 @@ fn active_job() -> ActiveJob {
     let product_session_id = ProductSessionId("psn_00000000000000000000000001".to_owned());
     let work_run_id = WorkRunId("wrn_01J00000000000000000000001".to_owned());
     ActiveJob {
+        snapshot_id: None,
         job: ExecutionJob {
             attachments: None,
             model_selection: None,
@@ -559,10 +560,13 @@ fn crash_recovery_keeps_original_checkout_and_freezes_one_candidate() {
         .prepare_candidate(&active, winwincode_codex::RoleExecutionMode::React)
         .expect("freeze recovered candidate");
     assert_ne!(
-        prepared.snapshot().candidate_tree_id,
-        prepared.snapshot().source_tree_id
+        prepared.freeze_fact().candidate_tree_id(),
+        prepared.freeze_fact().source_tree_id()
     );
-    assert_eq!(prepared.snapshot().source_commit_id, original_source_commit);
+    assert_eq!(
+        prepared.freeze_fact().source_commit_id(),
+        original_source_commit
+    );
     let root = recovered.parent().expect("workspace root").to_path_buf();
     let report = restarted
         .close_job(&active.job.job_id, WorkspaceCloseReason::Completed)
@@ -632,14 +636,17 @@ fn sealed_replacement_rotates_authority_and_preserves_the_predecessor_checkout()
         .prepare_candidate(&successor, winwincode_codex::RoleExecutionMode::React)
         .expect("freeze candidate under successor authority");
     assert_eq!(
-        prepared.snapshot().origin_provenance.worker_instance_id,
+        prepared
+            .freeze_fact()
+            .origin_provenance()
+            .worker_instance_id,
         predecessor.lease.worker_instance_id
     );
     assert_eq!(
-        prepared.snapshot().provenance.worker_instance_id,
+        prepared.freeze_fact().provenance().worker_instance_id,
         successor.lease.worker_instance_id
     );
-    let candidate_commit = prepared.snapshot().candidate_commit_id.clone();
+    let candidate_commit = prepared.freeze_fact().candidate_commit_id().to_owned();
     drop(restarted);
 
     let mut replayed = fixture.runtime();
@@ -653,8 +660,8 @@ fn sealed_replacement_rotates_authority_and_preserves_the_predecessor_checkout()
         replayed
             .prepare_candidate(&successor, winwincode_codex::RoleExecutionMode::React)
             .expect("replay successor candidate")
-            .snapshot()
-            .candidate_commit_id,
+            .freeze_fact()
+            .candidate_commit_id(),
         candidate_commit
     );
     replayed
@@ -2112,6 +2119,193 @@ async fn timed_out_parser_profile_persists_infrastructure_instead_of_an_incomple
         executed.progress.last().map(|event| &event.state),
         Some(&ChangeBatchProgressState::RepairRequired)
     );
+}
+
+const PRODUCTION_ISOLATION_ATTACKS: &str = r#"import errno
+import os
+import pathlib
+import subprocess
+import traceback
+
+root = pathlib.Path.cwd()
+source = root / "fixture.txt"
+scratch = pathlib.Path(os.environ["WWC_SCRATCH"])
+
+def require_write_blocked(action, cross_device=False):
+    try:
+        action()
+    except OSError as error:
+        if error.errno in (errno.EACCES, errno.EPERM, errno.EROFS) or (cross_device and error.errno == errno.EXDEV):
+            return
+        raise
+    raise RuntimeError("protected mutation was accepted")
+
+def shell_attempt(marker, command):
+    return f'printf attempted > "$WWC_SCRATCH/{marker}"; {command}'
+
+def require_shell_blocked(script, required=(), absent=()):
+    result = subprocess.run(["/bin/sh", "-c", script], cwd=root)
+    if result.returncode == 0:
+        raise RuntimeError("protected shell mutation was accepted")
+    for path in required:
+        if not path.exists():
+            raise RuntimeError(f"attack did not reach required proof: {path}")
+    for path in absent:
+        if path.exists():
+            raise RuntimeError(f"protected mutation was accepted: {path}")
+
+def require_alias_write_blocked(create_alias, alias):
+    try:
+        create_alias()
+    except OSError as error:
+        if error.errno in (errno.EACCES, errno.EPERM, errno.EROFS, errno.EXDEV):
+            return
+        raise
+    require_write_blocked(lambda: alias.write_text("changed"))
+
+def attacks():
+    require_write_blocked(lambda: (root / "created.txt").write_text("created"))
+    require_write_blocked(lambda: source.write_text("changed"))
+    require_write_blocked(lambda: source.unlink())
+    require_write_blocked(lambda: source.rename(root / "fixture.txt.renamed"))
+    replacement = scratch / "replacement"
+    replacement.write_text("replacement")
+    require_write_blocked(lambda: os.replace(replacement, source), cross_device=True)
+    require_shell_blocked(
+        shell_attempt(
+            "child-modify-attempted",
+            'cp fixture.txt "$WWC_SCRATCH/original" && printf changed > fixture.txt && cp "$WWC_SCRATCH/original" fixture.txt',
+        ),
+        required=(scratch / "child-modify-attempted", scratch / "original"),
+    )
+    require_shell_blocked(
+        shell_attempt("child-create-attempted", "printf child > created-by-child.txt"),
+        required=(scratch / "child-create-attempted",),
+        absent=(root / "created-by-child.txt",),
+    )
+    require_shell_blocked(
+        shell_attempt(
+            "grandchild-create-outer-attempted",
+            '/bin/sh -c \'printf inner > "$WWC_SCRATCH/grandchild-create-attempted"; printf grandchild > created-by-grandchild.txt\'',
+        ),
+        required=(
+            scratch / "grandchild-create-outer-attempted",
+            scratch / "grandchild-create-attempted",
+        ),
+        absent=(root / "created-by-grandchild.txt",),
+    )
+    require_shell_blocked(
+        shell_attempt(
+            "grandchild-modify-outer-attempted",
+            '/bin/sh -c \'printf inner > "$WWC_SCRATCH/grandchild-modify-attempted"; printf changed > fixture.txt\'',
+        ),
+        required=(
+            scratch / "grandchild-modify-outer-attempted",
+            scratch / "grandchild-modify-attempted",
+        ),
+    )
+    require_alias_write_blocked(
+        lambda: os.symlink(source, scratch / "fixture-link"),
+        scratch / "fixture-link",
+    )
+    require_alias_write_blocked(
+        lambda: os.link(source, scratch / "fixture-hardlink"),
+        scratch / "fixture-hardlink",
+    )
+    (scratch / "production-ok").write_text("ok")
+    assert source.read_text() == "source\n"
+    assert not (root / "created-by-child.txt").exists()
+    assert not (root / "created-by-grandchild.txt").exists()
+    assert not (root / "fixture.txt.renamed").exists()
+
+try:
+    attacks()
+except BaseException:
+    (scratch / "attack-error").write_text(traceback.format_exc())
+    raise
+"#;
+
+#[tokio::test]
+async fn production_validation_blocks_source_mutation_and_writes_only_scratch() {
+    let fixture = Fixture::new("production-isolation");
+    let attacks = PRODUCTION_ISOLATION_ATTACKS;
+    let configuration = VALIDATION_CONFIG.replace(
+        "argv = [\"/usr/bin/python3\", \"-B\", \"-c\", 'from pathlib import Path; assert Path(\"delegated.txt\").read_text() == \"formatted\\n\"']",
+        &format!(
+            "argv = [\"/usr/bin/python3\", \"-B\", \"-c\", {attacks:?}]"
+        ),
+    );
+    fixture.install_validation_config_text(&configuration);
+    let active = active_job();
+    let mut runtime = fixture.runtime();
+    let checkout = runtime
+        .open_for_job(&active, None)
+        .expect("open production isolation workspace");
+    let proposal = batch_proposal(&active, source_revision(&fixture));
+    let executed = Box::pin(runtime.execute_change_batch(
+        &active,
+        &proposal,
+        &Instant("2026-08-28T00:00:02.000Z".to_owned()),
+    ))
+    .await
+    .expect("execute production validation through isolation");
+
+    let validation = executed.receipt.validation.expect("validation receipt");
+    if validation.status != winwincode_execution_port::generated::ValidationReceiptStatus::Passed {
+        let diagnostic = find_named_file(
+            &checkout
+                .parent()
+                .expect("workspace root")
+                .join("verification"),
+            "attack-error",
+        )
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .unwrap_or_else(|| {
+            format!(
+                "validation did not pass and no attack-error was retained; summary={:?}",
+                validation.checks
+            )
+        });
+        panic!("production isolation attack failed: {diagnostic}");
+    }
+    assert_eq!(validation.checks.len(), 1);
+    assert_eq!(validation.artifact_refs.len(), 2);
+    assert!(validation.checks[0].summary.contains("isolation="));
+    assert!(validation.checks[0].summary.contains("scope-v1=sha256:"));
+    assert!(validation.checks[0].summary.contains("scratch=vs-"));
+    assert_eq!(
+        std::fs::read_to_string(checkout.join("fixture.txt")).expect("protected fixture"),
+        "source\n"
+    );
+    assert!(!checkout.join("created-by-child.txt").exists());
+    assert!(!checkout.join("created-by-grandchild.txt").exists());
+    assert!(!checkout.join("fixture.txt.renamed").exists());
+    let scratch_output = find_named_file(
+        &checkout
+            .parent()
+            .expect("workspace root")
+            .join("verification"),
+        "production-ok",
+    );
+    assert_eq!(
+        std::fs::read(scratch_output.expect("scratch output")).unwrap(),
+        b"ok"
+    );
+}
+
+fn find_named_file(root: &std::path::Path, name: &str) -> Option<PathBuf> {
+    for entry in std::fs::read_dir(root).ok()? {
+        let path = entry.ok()?.path();
+        if path.file_name().and_then(|value| value.to_str()) == Some(name) {
+            return Some(path);
+        }
+        if path.is_dir()
+            && let Some(found) = find_named_file(&path, name)
+        {
+            return Some(found);
+        }
+    }
+    None
 }
 
 #[test]

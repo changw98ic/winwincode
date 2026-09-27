@@ -158,10 +158,7 @@ pub fn check_rebuild_integrity(before: &CanonicalState, after: &CanonicalState) 
         }
     }
     for record in &after.evidence {
-        if !before
-            .evidence
-            .iter()
-            .any(|prior| prior.id == record.id)
+        if !before.evidence.iter().any(|prior| prior.id == record.id)
             && record.id.starts_with("ev_")
         {
             // New tool evidence is allowed; fabricated ids without provenance are not.
@@ -263,10 +260,7 @@ impl FusionQualityMetrics {
         if self.minority_truth_recovery_den == 0 {
             None
         } else {
-            Some(
-                self.minority_truth_recovery_num as f64
-                    / self.minority_truth_recovery_den as f64,
-            )
+            Some(self.minority_truth_recovery_num as f64 / self.minority_truth_recovery_den as f64)
         }
     }
 }
@@ -362,8 +356,16 @@ pub fn pinned_payload(state: &CanonicalState) -> Vec<String> {
 pub fn is_pinned_claim(display_key: &str) -> bool {
     let hay = display_key.to_ascii_lowercase();
     [
-        "race", "null", "security", "injection", "deadlock", "leak", "blocking", "regression",
-        "shared", "fixture",
+        "race",
+        "null",
+        "security",
+        "injection",
+        "deadlock",
+        "leak",
+        "blocking",
+        "regression",
+        "shared",
+        "fixture",
     ]
     .iter()
     .any(|needle| hay.contains(needle))
@@ -413,10 +415,12 @@ mod tests {
         after.claims.clear();
         let report = check_rebuild_integrity(&before, &after);
         assert!(!report.pass);
-        assert!(report
-            .missing_confirmed_claims
-            .iter()
-            .any(|key| key == "defect:shared-map-race"));
+        assert!(
+            report
+                .missing_confirmed_claims
+                .iter()
+                .any(|key| key == "defect:shared-map-race")
+        );
         let previous = ContextSnapshot {
             label: "before".to_owned(),
             canonical: before.clone(),
@@ -439,7 +443,12 @@ mod tests {
         let mut after = base_state();
         after.claims[0].state = ClaimState::Supported;
         let report = check_rebuild_integrity(&before, &after);
-        assert!(report.state_regressions.iter().any(|k| k.contains("shared-map")));
+        assert!(
+            report
+                .state_regressions
+                .iter()
+                .any(|k| k.contains("shared-map"))
+        );
     }
 
     #[test]

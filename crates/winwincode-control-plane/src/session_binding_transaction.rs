@@ -223,6 +223,16 @@ pub(crate) fn execute_at(
     // New and partially committed paths need the scheduler's current attempt
     // and replacement seal. Only these paths consult mutable queue state.
     let (_, job) = load_durable_execution_job(storage, &message.lease.job_id)?;
+    let snapshot = crate::snapshot_production::snapshot_for_job(storage, &job)?;
+    if message.snapshot_id.as_ref()
+        != snapshot
+            .as_ref()
+            .map(winwincode_domain::CanonicalSnapshot::snapshot_id)
+    {
+        return Err(
+            StorageError::invalid_input("SessionBinding Snapshot is missing or foreign").into(),
+        );
+    }
     validate_durable_job(&durable, &job, message)?;
     let mut context = BindingContext::from_durable(&durable, &job, mutation_time_millis)?;
     // Validate the frame's internal identity before applying the scheduler

@@ -1568,6 +1568,13 @@ fn main() {
             .status()
             .expect("compile process fixture");
         assert!(status.success(), "compile process fixture");
+        // Finish first-launch initialization before the timed process-tree checks.
+        assert!(
+            std::process::Command::new(&executable)
+                .status()
+                .expect("initialize process fixture")
+                .success()
+        );
         let root = root.canonicalize().expect("canonical process root");
         (
             executable

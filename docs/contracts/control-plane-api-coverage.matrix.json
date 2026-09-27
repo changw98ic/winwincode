@@ -116,7 +116,10 @@
       "job.outcome",
       "job.outcome_ack",
       "action.enforcement_request",
-      "action.enforcement_receipt"
+      "action.enforcement_receipt",
+      "snapshot.freeze_request",
+      "snapshot.freeze_receipt",
+      "snapshot.verify"
     ]
   },
   "callerCoverage": [
@@ -724,7 +727,10 @@
         "job.outcome_ack",
         "artifact.open",
         "artifact.chunk",
-        "artifact.ack"
+        "artifact.ack",
+        "snapshot.freeze_request",
+        "snapshot.freeze_receipt",
+        "snapshot.verify"
       ],
       "targetObservableOperations": []
     },

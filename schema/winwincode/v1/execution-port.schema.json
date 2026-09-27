@@ -123,6 +123,8 @@
         "SEQUENCE_GAP",
         "MESSAGE_CONFLICT",
         "ARTIFACT_DIGEST_MISMATCH",
+        "SNAPSHOT_BINDING_MISSING",
+        "SNAPSHOT_BINDING_MISMATCH",
         "MODEL_STREAM_FAILED",
         "INPUT_CLOSED",
         "APPROVAL_DENIED",
@@ -2607,6 +2609,15 @@
         },
         {
           "$ref": "#/$defs/ActionEnforcementReceiptMessage"
+        },
+        {
+          "$ref": "#/$defs/SnapshotFreezeRequestMessage"
+        },
+        {
+          "$ref": "#/$defs/SnapshotFreezeReceiptMessage"
+        },
+        {
+          "$ref": "#/$defs/SnapshotVerificationDispatchMessage"
         }
       ]
     },
@@ -2652,7 +2663,7 @@
         },
         "candidateRef": {
           "type": "string",
-          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$"
+          "pattern": "^refs/winwincode/candidates/(?:[0-9a-f]{40}|[0-9a-f]{64})$"
         },
         "diffSha256": {
           "type": "string",
@@ -2688,6 +2699,96 @@
         "requiresFullReverification",
         "targets"
       ]
+    },
+    "SnapshotFreezeReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "receiptId": {
+          "$ref": "./domain.schema.json#/$defs/RequestId"
+        },
+        "requestId": {
+          "$ref": "./domain.schema.json#/$defs/RequestId"
+        },
+        "candidateId": {
+          "$ref": "./domain.schema.json#/$defs/CandidateId"
+        },
+        "workRunId": {
+          "$ref": "./domain.schema.json#/$defs/WorkRunId"
+        },
+        "workerId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerId"
+        },
+        "workerInstanceId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerInstanceId"
+        },
+        "leaseId": {
+          "$ref": "./domain.schema.json#/$defs/LeaseId"
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "fencingToken": {
+          "$ref": "#/$defs/FencingToken"
+        },
+        "repositoryId": {
+          "$ref": "./domain.schema.json#/$defs/RepositoryId"
+        },
+        "baseCommitId": {
+          "$ref": "./domain.schema.json#/$defs/GitObjectId"
+        },
+        "baseTreeId": {
+          "$ref": "./domain.schema.json#/$defs/GitObjectId"
+        },
+        "candidateCommitId": {
+          "$ref": "./domain.schema.json#/$defs/GitObjectId"
+        },
+        "candidateTreeId": {
+          "$ref": "./domain.schema.json#/$defs/GitObjectId"
+        },
+        "diffSha256": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "contentDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "validationSeal": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "frozenAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "receiptId",
+        "requestId",
+        "candidateId",
+        "workRunId",
+        "workerId",
+        "workerInstanceId",
+        "leaseId",
+        "attempt",
+        "fencingToken",
+        "repositoryId",
+        "baseCommitId",
+        "baseTreeId",
+        "candidateCommitId",
+        "candidateTreeId",
+        "diffSha256",
+        "contentDigest",
+        "validationSeal",
+        "frozenAt"
+      ],
+      "description": "Worker-owned exact execution fact for one freeze request. Control Plane validates the Candidate and receipt, then allocates the product SnapshotId; workers cannot allocate or carry that identity.",
+      "title": "snapshot.freeze_receipt",
+      "x-direction": "worker-to-control-plane",
+      "x-authority": "lease-write"
     },
     "SessionBindingMessage": {
       "type": "object",
@@ -10245,7 +10346,7 @@
         },
         "candidateRef": {
           "type": "string",
-          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$"
+          "pattern": "^refs/winwincode/candidates/(?:[0-9a-f]{40}|[0-9a-f]{64})$"
         },
         "deviceTarget": {
           "$ref": "#/$defs/ExecutionDeviceTarget"
@@ -10315,6 +10416,134 @@
         "repositoryBindingId",
         "userId"
       ]
+    },
+    "SnapshotFreezeRequestMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "snapshot.freeze_request"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ExecutionMessageId"
+        },
+        "sentAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "requestId": {
+          "$ref": "./domain.schema.json#/$defs/RequestId"
+        },
+        "candidate": {
+          "$ref": "./domain.schema.json#/$defs/Candidate"
+        },
+        "repositoryId": {
+          "$ref": "./domain.schema.json#/$defs/RepositoryId"
+        },
+        "lease": {
+          "$ref": "#/$defs/ExecutionLeaseStamp"
+        },
+        "baseTreeId": {
+          "$ref": "./domain.schema.json#/$defs/GitObjectId"
+        },
+        "contentDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "dispatch": {
+          "$ref": "#/$defs/JobDispatchMessage"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "sentAt",
+        "requestId",
+        "candidate",
+        "repositoryId",
+        "lease",
+        "baseTreeId",
+        "contentDigest",
+        "dispatch"
+      ],
+      "title": "snapshot.freeze_request",
+      "description": "Materializes and protects one sealed Candidate for the exact planned dispatch, without starting execution. Control Plane allocates Snapshot identity after receipt acceptance.",
+      "x-direction": "control-plane-to-worker",
+      "x-authority": "control-command"
+    },
+    "SnapshotFreezeReceiptMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "snapshot.freeze_receipt"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ExecutionMessageId"
+        },
+        "sentAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "receipt": {
+          "$ref": "#/$defs/SnapshotFreezeReceipt"
+        },
+        "lease": {
+          "$ref": "#/$defs/ExecutionLeaseStamp"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "sentAt",
+        "receipt",
+        "lease"
+      ],
+      "title": "snapshot.freeze_receipt",
+      "description": "Returns exact Worker freeze facts for one durable Control Plane request.",
+      "x-direction": "worker-to-control-plane",
+      "x-authority": "lease-write"
+    },
+    "SnapshotVerificationDispatchMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "snapshot.verify"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ExecutionMessageId"
+        },
+        "sentAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "dispatch": {
+          "$ref": "#/$defs/JobDispatchMessage"
+        },
+        "snapshot": {
+          "$ref": "./domain.schema.json#/$defs/Snapshot"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "sentAt",
+        "dispatch",
+        "snapshot"
+      ],
+      "title": "snapshot.verify",
+      "description": "Starts the exact planned verification only after Control Plane has committed this canonical Snapshot and binding.",
+      "x-direction": "control-plane-to-worker",
+      "x-authority": "control-command"
     }
   }
 }

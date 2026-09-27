@@ -549,6 +549,18 @@ fn seed_verdict_sources(
             delivery,
             &winwincode_storage::delivery_candidate_source(&writer_source),
             &writer_terminal,
+            winwincode_domain::CandidateId(fixture_derived_id(
+                "cnd",
+                "sealed-candidate",
+                &serde_json::to_vec(&(
+                    &writer.work_contract_id,
+                    &writer.work_contract_revision,
+                    &writer.work_run_id,
+                    &writer.execution_job_id,
+                    &writer.lease_id,
+                ))
+                .unwrap(),
+            )),
         )
         .expect("frozen production candidate");
         current_candidate_ref = frozen.candidate_ref().to_owned();
@@ -584,6 +596,9 @@ fn seed_verdict_sources(
             1_300 + index as u64 * 10,
         );
     }
+    if let Some(frozen) = &writer_candidate {
+        seed_snapshot_authority(&mut storage, scope, delivery, frozen, &writer_source);
+    }
     Box::new(storage).close().expect("storage close");
     artifacts.close().expect("Artifact close");
     let mut candidate = writer_candidate
@@ -602,15 +617,7 @@ fn seed_verdict_sources(
     }
     let digest = writer_candidate.map_or_else(
         || Sha256Digest(format!("sha256:{}", "f".repeat(64))),
-        |candidate| {
-            Sha256Digest(
-                candidate
-                    .candidate_ref()
-                    .strip_prefix("git-candidate:")
-                    .expect("candidate prefix")
-                    .to_owned(),
-            )
-        },
+        |candidate| candidate.candidate_digest().clone(),
     );
     (digest, candidate)
 }
@@ -1364,4 +1371,170 @@ fn unique_root(label: &str) -> PathBuf {
         std::process::id(),
         NEXT_ROOT.fetch_add(1, Ordering::Relaxed)
     ))
+}
+
+fn fixture_derived_id(prefix: &str, namespace: &str, value: &[u8]) -> String {
+    let source = format!("sha256:{:x}", Sha256::digest(value));
+    let bytes = Sha256::digest(format!("{namespace}\0{source}").as_bytes());
+    let mut number = u128::from_be_bytes(bytes[..16].try_into().unwrap());
+    let mut encoded = [b'0'; 26];
+    for byte in encoded.iter_mut().rev() {
+        *byte = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ"[(number & 31) as usize];
+        number >>= 5;
+    }
+    format!("{prefix}_{}", String::from_utf8(encoded.to_vec()).unwrap())
+}
+
+#[allow(clippy::too_many_lines)]
+fn seed_snapshot_authority(
+    storage: &mut SqliteStorage,
+    scope: &RepositoryScope,
+    delivery: &Delivery,
+    frozen: &winwincode_delivery::domain::FrozenDeliveryCandidate,
+    source: &winwincode_storage::ValidatedGitSourceArtifact,
+) {
+    use winwincode_domain::{Candidate, CanonicalSnapshot, Snapshot, SnapshotId, seal_snapshot};
+    use winwincode_execution_port::generated::SnapshotFreezeRequestMessage;
+    use winwincode_storage::{
+        SnapshotProductStaged, SnapshotVerificationBinding, commit_snapshot_product,
+    };
+    let writer = delivery
+        .snapshot()
+        .session_bindings
+        .iter()
+        .find(|binding| binding.work_run_id == *frozen.producer_work_run_id())
+        .unwrap();
+    let candidate: Candidate = serde_json::from_value(json!({
+        "schemaVersion": "winwincode/v1", "id": frozen.candidate_id(),
+        "candidateDigest": frozen.candidate_digest(), "candidateRef": frozen.candidate_ref(),
+        "workContractId": writer.work_contract_id, "contractRevision": writer.work_contract_revision,
+        "workItemId": writer.work_item_id, "workRunId": writer.work_run_id, "attempt": writer.attempt,
+        "producerWorkerSessionId": writer.worker_session_id,
+        "baseCommit": source.base_commit_id(), "candidateCommit": source.candidate_commit_id(),
+        "candidateTree": source.candidate_tree_id(), "diffDigest": format!("sha256:{}", source.diff_sha256())
+    })).unwrap();
+    let snapshot_id = SnapshotId(fixture_derived_id(
+        "snap",
+        "candidate-snapshot",
+        candidate.id.0.as_bytes(),
+    ));
+    let mut snapshot: Snapshot = serde_json::from_value(json!({
+        "schemaVersion": "winwincode/v1", "snapshotId": snapshot_id, "candidateId": candidate.id,
+        "workRunId": writer.work_run_id, "repositoryId": scope.repository_id,
+        "baseCommitId": candidate.base_commit, "baseTreeId": source.base_tree_id(),
+        "candidateCommitId": candidate.candidate_commit, "candidateTreeId": candidate.candidate_tree,
+        "diffSha256": candidate.diff_digest, "contentDigest": source.content_digest(),
+        "createdAtMillis": frozen.producer_finished_at_millis(), "immutable": true,
+        "validationSeal": format!("sha256:{}", "0".repeat(64))
+    })).unwrap();
+    snapshot.validation_seal = seal_snapshot(&snapshot);
+    let snapshot = CanonicalSnapshot::try_from(snapshot).unwrap();
+    let templates: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/contracts/execution-port.valid.json"
+    ))
+    .unwrap();
+    let template = templates["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["kind"] == "snapshot.freeze_request")
+        .unwrap();
+    for (index, binding) in delivery
+        .snapshot()
+        .session_bindings
+        .iter()
+        .filter(|binding| {
+            matches!(
+                binding.execution_profile.as_deref(),
+                Some("reviewer" | "verifier")
+            )
+        })
+        .enumerate()
+    {
+        let n = 20_000 + u64::try_from(index).unwrap();
+        let role = binding.execution_profile.as_ref().unwrap();
+        let run = delivery
+            .snapshot()
+            .work_run_aggregate
+            .runs
+            .iter()
+            .find(|run| run.id == binding.work_run_id)
+            .unwrap();
+        let mut request = template.clone();
+        request["candidate"] = serde_json::to_value(&candidate).unwrap();
+        request["repositoryId"] = json!(scope.repository_id);
+        request["baseTreeId"] = json!(source.base_tree_id());
+        request["contentDigest"] = json!(source.content_digest());
+        request["requestId"] = json!(canonical_id("req", n));
+        request["lease"] = json!({"jobId": binding.execution_job_id, "attempt": binding.attempt,
+            "leaseId": binding.lease_id, "fencingToken": binding.fencing_token,
+            "workerId": binding.worker_id, "workerInstanceId": binding.worker_instance_id,
+            "issuedAt": "2026-01-01T00:00:00.000Z", "expiresAt": "2030-01-01T00:00:00.000Z"});
+        request["dispatch"]["lease"] = request["lease"].clone();
+        let job = &mut request["dispatch"]["job"];
+        job["jobId"] = json!(binding.execution_job_id);
+        job["attempt"] = json!(binding.attempt);
+        job["executionProfile"] = json!(role);
+        job["workspace"] = json!({"repositoryId":scope.repository_id,"checkoutRevision":candidate.candidate_commit,"writeMode":"read-only"});
+        job["scope"] = json!({"kind":"work-run","productSessionId":binding.product_session_id,
+            "workContractId":binding.work_contract_id,"workContractRevision":binding.work_contract_revision,
+            "workItemId":binding.work_item_id,"workItemRevision":run.work_item_revision,
+            "workRunId":binding.work_run_id,"attempt":binding.attempt});
+        job["workInput"]["candidateRef"] = json!(candidate.candidate_ref);
+        job["workInput"]["workContract"]["id"] = json!(binding.work_contract_id);
+        job["workInput"]["workContract"]["revision"] = json!(binding.work_contract_revision);
+        job["workInput"]["workItem"]["id"] = json!(binding.work_item_id);
+        job["workInput"]["workItem"]["revision"] = json!(run.work_item_revision);
+        job["workInput"]["workItem"]["workContractId"] = json!(binding.work_contract_id);
+        job["workInput"]["workItem"]["workContractRevision"] =
+            json!(binding.work_contract_revision);
+        let request: SnapshotFreezeRequestMessage = serde_json::from_value(request).unwrap();
+        winwincode_execution_port::snapshot_freeze::validate_freeze_request(&request).unwrap();
+        storage
+            .commit(&StateCommit::new(
+                receipt_identity(repository_scope_key(scope), n),
+                digest(n),
+                format!(
+                    "snapshot-freeze:v1:{}:{}",
+                    binding.execution_job_id.0, binding.attempt
+                ),
+                0,
+                serde_json::to_vec(&request).unwrap(),
+                vec![NewOutboxEvent::internal(
+                    format!("execution-job:{}", binding.execution_job_id.0),
+                    "execution.job.dispatch",
+                    serde_json::to_vec(&request.dispatch.job).unwrap(),
+                )],
+            ))
+            .unwrap();
+        let plan_id = canonical_id("vpl", n);
+        let session_id = canonical_id("vsn", n);
+        let binding: SnapshotVerificationBinding = serde_json::from_value(json!({
+            "sessionBindingId":canonical_id("sbn",n),"workRunId":binding.work_run_id,
+            "executionJobId":binding.execution_job_id,"productSessionId":binding.product_session_id,
+            "workerSessionId":binding.worker_session_id,"codexThreadId":binding.codex_thread_id,
+            "verificationRole":role,"attempt":binding.attempt,
+            "verificationPlan":{"schemaVersion":"winwincode/v1","id":plan_id,
+                "candidateDigest":candidate.candidate_digest,"workContractId":binding.work_contract_id,
+                "contractRevision":binding.work_contract_revision,"workItemId":binding.work_item_id,
+                "workItemRevision":run.work_item_revision,"workRunId":binding.work_run_id,"planRevision":1,
+                "criterionIds":delivery.snapshot().spec.acceptance_criteria.iter().map(|c| &c.id).collect::<Vec<_>>(),
+                "commands":["cargo test"],"permissionProfile":"candidate-read-only","requiredRoles":[role]},
+            "verificationSession":{"schemaVersion":"winwincode/v1","id":session_id,
+                "verificationSessionId":session_id,"verificationPlanId":plan_id,
+                "snapshotId":snapshot_id,"candidateId":candidate.id,"workRunId":binding.work_run_id,
+                "attempt":binding.attempt,"createdAt":"2026-01-01T00:00:00.000Z",
+                "sessionIdentity":{"workRunId":binding.work_run_id,"productSessionId":binding.product_session_id,
+                    "workerSessionId":binding.worker_session_id,"codexThreadId":binding.codex_thread_id}}
+        })).unwrap();
+        let staged =
+            SnapshotProductStaged::new(candidate.clone(), snapshot.clone(), binding).unwrap();
+        commit_snapshot_product(
+            storage,
+            receipt_identity(repository_scope_key(scope), n + 100),
+            digest(n + 100),
+            &staged,
+        )
+        .unwrap();
+    }
 }

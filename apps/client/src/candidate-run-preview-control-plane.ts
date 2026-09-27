@@ -71,7 +71,7 @@ export function candidatePreviewFileContextFromIdentity(
 ): CandidatePreviewFileContext | null {
   const candidate = projection.candidate
   if (projection.deliveryId === null || projection.readCursor === null || candidate === null) return null
-  if (!/^git-candidate:sha256:[0-9a-f]{64}$/u.test(candidate.candidateRef)
+  if (!/^refs\/winwincode\/candidates\/(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(candidate.candidateRef)
     || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(candidate.candidateTreeId)
     || !/^sha256:[0-9a-f]{64}$/u.test(candidate.diffSha256)) return null
   return Object.freeze({
@@ -149,7 +149,7 @@ function hasCandidateFileContext(
 ): context is CandidatePreviewFileContext {
   return context !== undefined
     && /^dlv_[0-9A-HJKMNP-TV-Z]{26}$/u.test(context.deliveryId)
-    && /^git-candidate:sha256:[0-9a-f]{64}$/u.test(context.candidateRef)
+    && /^refs\/winwincode\/candidates\/(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(context.candidateRef)
     && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(context.candidateTreeId)
     && /^sha256:[0-9a-f]{64}$/u.test(context.diffSha256)
     && context.atCursor.deliveryId === context.deliveryId
@@ -242,10 +242,11 @@ export function createControlPlaneCandidatePreviewPort(options: {
     if (projection.deliveryId === null || projection.readCursor === null
       || evidence.workRunId !== sourceWorkRunId
       || (projection.candidate !== null && projection.candidate !== undefined
-        && evidence.candidateRef !== projection.candidate.candidateRef)) return null
+        && evidence.candidateId !== projection.candidate.candidateId)) return null
     return {
       atCursor: projection.readCursor,
-      candidateRef: evidence.candidateRef,
+      candidateId: evidence.candidateId,
+      snapshotId: evidence.snapshotId,
       deliveryId: projection.deliveryId,
       evidenceId: evidence.id,
       readPageLimit: 100,
@@ -294,10 +295,12 @@ export function createControlPlaneCandidatePreviewPort(options: {
       || result.artifact.sizeBytes !== entry.descriptor.sizeBytes
       || result.evidence.id !== entry.evidence.id
       || result.evidence.workRunId !== entry.evidence.workRunId
-      || result.evidence.candidateRef !== entry.evidence.candidateRef
+      || result.evidence.candidateId !== entry.evidence.candidateId
+      || result.evidence.snapshotId !== entry.evidence.snapshotId
       || result.artifact.provenance.evidenceId !== entry.evidence.id
       || result.artifact.provenance.workRunId !== entry.evidence.workRunId
-      || result.artifact.provenance.candidateRef !== entry.evidence.candidateRef
+      || result.artifact.provenance.candidateId !== entry.evidence.candidateId
+      || result.artifact.provenance.snapshotId !== entry.evidence.snapshotId
       || result.artifact.provenance.sessionBindingId !== entry.evidence.sessionBindingId
       || projection.deliveryId === null
       || result.artifact.provenance.deliveryId !== projection.deliveryId

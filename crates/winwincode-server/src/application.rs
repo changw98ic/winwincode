@@ -1948,6 +1948,8 @@ fn page_annotation_candidate(
     candidate: &winwincode_api::generated::CollaborationPageAnnotationCandidate,
 ) -> Result<PageAnnotationCandidateIdentity, ApiError> {
     Ok(PageAnnotationCandidateIdentity {
+        candidate_id: candidate.candidate_id.clone(),
+        snapshot_id: candidate.snapshot_id.clone(),
         delivery_id: candidate.delivery_id.clone(),
         delivery_spec_id: candidate.delivery_spec_id.clone(),
         delivery_spec_revision: u64::try_from(candidate.delivery_spec_revision)

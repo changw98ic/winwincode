@@ -768,8 +768,7 @@ fn validate_chunk_shape(message: &ArtifactChunkMessage) -> Result<(), StorageErr
             byte.is_ascii_alphanumeric()
                 || matches!(
                     byte,
-                    b'!'
-                        | b'#'
+                    b'!' | b'#'
                         | b'$'
                         | b'&'
                         | b'^'

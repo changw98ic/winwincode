@@ -487,6 +487,8 @@ fn page_annotation_without_delivery_journal_fails_closed_without_catalog_write()
     source_item.candidate = Some(source_candidate.clone());
     fixture.replace_items(vec![source_item]);
     let page_candidate = PageAnnotationCandidateIdentity {
+        candidate_id: winwincode_domain::CandidateId("cnd_01J00000000000000000000001".into()),
+        snapshot_id: winwincode_domain::SnapshotId("snap_01J00000000000000000000001".into()),
         delivery_id: delivery(1),
         delivery_spec_id: "spec_01J00000000000000000000001".to_owned(),
         delivery_spec_revision: 3,

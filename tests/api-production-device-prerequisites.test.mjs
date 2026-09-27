@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { createHash } from 'node:crypto'
 import test from 'node:test'
+import { DatabaseSync } from 'node:sqlite'
 
 import {
   DEVICE_ONLY_PREREQUISITES,
@@ -24,6 +25,8 @@ import {
   deterministicVerificationProduct,
   parseProcessExitCode,
   resolveVerificationObservation,
+  observeToolProcess,
+  deviceConnectCodePublished,
   workInputFromRequest,
 } from '../scripts/device-production-fixture.mjs'
 
@@ -246,5 +249,36 @@ test('Device fixture does not invent fail when verification exit code is still u
     }],
   })
   assert.equal(sealed.exitCode, 0)
-  assert.equal(sealed.evidenceSourceId, DETERMINISTIC_VERIFICATION_POLL_CALL_ID)
+  assert.equal(sealed.evidenceSourceId, DETERMINISTIC_VERIFICATION_CALL_ID)
+})
+
+test('Device fixture polls the existing executor process until its actual exit', () => {
+  const messages = [{ type: 'tool_result', tool_use_id: 'loopback-executor-change', content: 'Process running with session ID 42\n' }]
+  let observed = observeToolProcess({ messages }, 'loopback-executor-change')
+  assert.equal(observed.sessionId, 42)
+  assert.equal(observed.exitCode, null)
+  messages.push({ type: 'tool_result', tool_use_id: observed.nextCallId, content: 'Process running with session ID 42\n' })
+  observed = observeToolProcess({ messages }, 'loopback-executor-change')
+  assert.equal(observed.nextCallId, 'loopback-executor-change-poll-2')
+  messages.push({ type: 'tool_result', tool_use_id: observed.nextCallId, content: 'Process exited with code 1\n' })
+  observed = observeToolProcess({ messages }, 'loopback-executor-change')
+  assert.equal(observed.sessionId, null)
+  assert.equal(observed.exitCode, 1)
+})
+
+test('device connection waits for the exact code publication acknowledgement', () => {
+  const database = new DatabaseSync(':memory:')
+  try {
+    database.exec('CREATE TABLE client_outbox (kind TEXT, published INTEGER, payload BLOB)')
+    database.prepare('INSERT INTO client_outbox VALUES (?, ?, ?)').run(
+      'client.connect_code.published', 0,
+      Buffer.from(JSON.stringify({ payload: { connectCodeId: 'current-code' } })),
+    )
+    assert.equal(deviceConnectCodePublished(database, 'current-code'), false)
+    database.exec('UPDATE client_outbox SET published = 1')
+    assert.equal(deviceConnectCodePublished(database, 'other-code'), false)
+    assert.equal(deviceConnectCodePublished(database, 'current-code'), true)
+  } finally {
+    database.close()
+  }
 })

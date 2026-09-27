@@ -1859,6 +1859,28 @@ impl<'storage> ExecutionRegistry<'storage> {
         load_lease_in_transaction(self.storage.connection()?, job_id)
     }
 
+    /// Loads current authority only while its lease is live and nonterminal.
+    ///
+    /// # Errors
+    /// Rejects malformed identities/timestamps and propagates storage failures.
+    pub fn load_live_lease(
+        &self,
+        job_id: &ExecutionJobId,
+        now: &Instant,
+    ) -> Result<Option<ExecutionLeaseRecord>, StorageError> {
+        validate_instant(now, "checkedAt")?;
+        let Some(lease) = self.load_lease(job_id)? else {
+            return Ok(None);
+        };
+        if now.0 < lease.issued_at.0
+            || now.0 >= lease.expires_at.0
+            || execution_lease_is_terminal(self.storage.connection()?, &lease.lease_id)?
+        {
+            return Ok(None);
+        }
+        Ok(Some(lease))
+    }
+
     /// Loads the authenticated pool placement frozen beside the current lease.
     ///
     /// # Errors

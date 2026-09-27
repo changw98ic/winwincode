@@ -51,7 +51,6 @@ pub(crate) fn resolve(
         &writer_terminal,
         &delivery.snapshot().spec.base_revision,
     )?;
-    let delivery_writer_source = winwincode_storage::delivery_candidate_source(&writer_source);
     let candidate = freeze_source(
         storage,
         artifacts,
@@ -71,11 +70,16 @@ pub(crate) fn resolve(
             "adversarial-verifier" => VerificationRole::AdversarialVerifier,
             _ => return Err(DeliveryAuthorityError::new("unknown verification role")),
         };
-        verification.push(ProductionVerificationRuntime::from_durable_read_only(
-            role,
-            terminal,
-            delivery_writer_source.clone(),
-            events,
+        let (_, job) = crate::delivery_transaction::load_durable_execution_job(
+            storage,
+            &binding.execution_job_id,
+        )
+        .map_err(|error| storage_error(&error))?;
+        let snapshot = crate::snapshot_production::snapshot_for_job(storage, &job)
+            .map_err(|error| storage_error(&error))?
+            .ok_or_else(|| DeliveryAuthorityError::new("verification Snapshot is missing"))?;
+        verification.push(ProductionVerificationRuntime::from_durable(
+            role, terminal, snapshot, events,
         ));
     }
     let resolved = resolve_production_verdict(delivery, candidate, verification)
@@ -163,6 +167,7 @@ pub(crate) fn resolve_current_candidate_with_source(
 }
 
 /// One candidate authority join shared by terminal replay, review reads and verdicts.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn freeze_source(
     storage: &dyn ProductStateStorage,
     artifacts: &ArtifactStore,
@@ -184,9 +189,12 @@ pub(crate) fn freeze_source(
         binding.execution_job_id == *job_id
             && binding.execution_profile.as_deref() == Some("remediator")
     });
+    let candidate_id =
+        crate::snapshot_production::candidate_id_for_writer(current_writer(delivery)?)
+            .map_err(|error| storage_error(&error))?;
     let input = winwincode_storage::delivery_candidate_source(source);
     if !remediator {
-        return freeze_delivery_candidate_from_source(delivery, &input, terminal)
+        return freeze_delivery_candidate_from_source(delivery, &input, terminal, candidate_id)
             .map_err(|error| authority_error(&error));
     }
     let (durable, job) = crate::delivery_transaction::load_durable_execution_job(storage, job_id)
@@ -268,11 +276,20 @@ pub(crate) fn freeze_source(
         &delta,
     )
     .map_err(|error| authority_error(&error))?;
-    freeze_rework_candidate_from_sources(delivery, &authorization, &input, &delta, terminal)
-        .map_err(|error| authority_error(&error))
+    freeze_rework_candidate_from_sources(
+        delivery,
+        &authorization,
+        &input,
+        &delta,
+        terminal,
+        candidate_id,
+    )
+    .map_err(|error| authority_error(&error))
 }
 
-fn current_writer(delivery: &Delivery) -> Result<&SessionBinding, DeliveryAuthorityError> {
+pub(crate) fn current_writer(
+    delivery: &Delivery,
+) -> Result<&SessionBinding, DeliveryAuthorityError> {
     selected_current_writer(delivery)?.ok_or_else(|| {
         DeliveryAuthorityError::new("current writer is missing or has not succeeded")
     })
@@ -345,7 +362,7 @@ fn current_verification_bindings(
     Ok(ordered)
 }
 
-fn load_terminal(
+pub(crate) fn load_terminal(
     storage: &dyn ProductStateStorage,
     delivery: &Delivery,
     job_id: &ExecutionJobId,
@@ -354,7 +371,7 @@ fn load_terminal(
         .map_err(|error| storage_error(&error))
 }
 
-fn source_for_terminal(
+pub(crate) fn source_for_terminal(
     artifacts: &ArtifactStore,
     source_resolver: &dyn GitSourceResolver,
     scope: &RepositoryScope,

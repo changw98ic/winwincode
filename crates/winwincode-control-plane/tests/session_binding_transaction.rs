@@ -515,7 +515,7 @@ fn accept_verification_artifact(
         session_identity: binding.session_identity.clone(),
         // A verification frame must name the snapshot under test; the Control
         // Plane rejects a verification frame with no snapshotId.
-        snapshot_id: Some(winwincode_domain::SnapshotId(canonical_id("snap", seed))),
+        snapshot_id: binding.snapshot_id.clone(),
         worker_session_id: binding.worker_session_id.clone(),
     };
     control_plane
@@ -540,7 +540,7 @@ fn accept_verification_artifact(
         sequence: ExecutionSequence(1),
         session_identity: binding.session_identity.clone(),
         // The re-upload names the same snapshot as its open frame.
-        snapshot_id: Some(winwincode_domain::SnapshotId(canonical_id("snap", seed))),
+        snapshot_id: binding.snapshot_id.clone(),
         worker_session_id: binding.worker_session_id.clone(),
     };
     let acknowledgement = control_plane
@@ -622,8 +622,19 @@ fn binding_for_dispatch(
         panic!("dispatch must be a Delivery stage");
     };
     assert_eq!(dispatch.job.job_id, pending.job().job_id);
-    let worker_session_id = WorkerSessionId(canonical_id("wsn", seed + attempt * 10));
-    let codex_thread_id = CodexThreadId(canonical_id("cdx", seed + attempt * 10));
+    let (worker_session_id, codex_thread_id) = if dispatch.snapshot_id.is_some() {
+        winwincode_execution_port::execution_identity::canonical_dispatch_session_identity(
+            &dispatch.lease.worker_id,
+            &dispatch.lease.worker_instance_id,
+            dispatch,
+        )
+        .unwrap()
+    } else {
+        (
+            WorkerSessionId(canonical_id("wsn", seed + attempt * 10)),
+            CodexThreadId(canonical_id("cdx", seed + attempt * 10)),
+        )
+    };
     let message_id = ExecutionMessageId(canonical_id("xmsg", seed + 240 + attempt * 10));
     let bound_at = attempt_time(clock, 5);
     let sent_at = attempt_time(clock, 6);
@@ -673,7 +684,7 @@ fn binding_for_dispatch(
         },
         work_run_id: Some(scope.work_run_id.clone()),
         worker_id: dispatch.lease.worker_id.clone(),
-        snapshot_id: None,
+        snapshot_id: dispatch.snapshot_id.clone(),
         worker_session_id: worker_session_id.clone(),
     };
     let lease = active_lease_identity(
@@ -693,7 +704,9 @@ fn binding_for_dispatch(
     (authority, message)
 }
 
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn claim_delivery_attempt_with_slot(
+    snapshot_host: Option<&mut ControlPlane>,
     root: &Path,
     pending: &RecordedExecution,
     seed: u64,
@@ -708,7 +721,7 @@ fn claim_delivery_attempt_with_slot(
     let mut storage = SqliteStorage::open(root).expect("scheduler attempt storage");
     let (worker_id, worker_instance_id) =
         register_attempt_worker(&mut storage, identity_seed, attempt, clock);
-    let dispatch = RepositoryExecutionScheduler::new(&mut storage)
+    let mut dispatch = RepositoryExecutionScheduler::new(&mut storage)
         .claim_next(&RepositorySchedulerClaimRequest {
             scope: scheduler_scope(seed),
             request_id: RequestId(canonical_id("req", identity_seed + 250 + attempt * 10)),
@@ -738,6 +751,57 @@ fn claim_delivery_attempt_with_slot(
             .as_ref()
             .expect("typed replacement authority");
         assert_eq!(replacement.successor_lease, dispatch.lease);
+    }
+    if let Some(host) = snapshot_host {
+        use winwincode_execution_port::generated::{
+            SnapshotFreezeReceipt, SnapshotFreezeReceiptMessage, SnapshotFreezeReceiptMessageKind,
+        };
+        let now = attempt_time(clock, 4);
+        let ExecutionPortMessage::SnapshotFreezeRequestMessage(request) = host
+            .prepare_snapshot_freeze(&mut storage, &dispatch, &now)
+            .expect("persist real freeze request")
+        else {
+            panic!("verification freeze required")
+        };
+        let mut receipt = SnapshotFreezeReceipt {
+            schema_version: SchemaVersion::WinwincodeV1,
+            receipt_id: request.request_id.clone(),
+            request_id: request.request_id.clone(),
+            candidate_id: request.candidate.id.clone(),
+            work_run_id: request.candidate.work_run_id.clone(),
+            repository_id: request.repository_id.clone(),
+            worker_id: request.lease.worker_id.clone(),
+            worker_instance_id: request.lease.worker_instance_id.clone(),
+            lease_id: request.lease.lease_id.clone(),
+            attempt: request.lease.attempt,
+            fencing_token: request.lease.fencing_token.clone(),
+            base_commit_id: winwincode_domain::GitObjectId(request.candidate.base_commit.clone()),
+            base_tree_id: request.base_tree_id.clone(),
+            candidate_commit_id: winwincode_domain::GitObjectId(
+                request.candidate.candidate_commit.clone(),
+            ),
+            candidate_tree_id: winwincode_domain::GitObjectId(
+                request.candidate.candidate_tree.clone(),
+            ),
+            diff_sha256: request.candidate.diff_digest.clone(),
+            content_digest: request.content_digest.clone(),
+            frozen_at: now.clone(),
+            validation_seal: Sha256Digest(String::new()),
+        };
+        receipt.validation_seal =
+            winwincode_execution_port::snapshot_freeze::seal_freeze_receipt(&receipt).unwrap();
+        let response = SnapshotFreezeReceiptMessage {
+            schema_version: SchemaVersion::WinwincodeV1,
+            kind: SnapshotFreezeReceiptMessageKind::SnapshotFreezeReceipt,
+            message_id: request.message_id,
+            sent_at: now.clone(),
+            lease: request.lease,
+            receipt,
+        };
+        dispatch = host
+            .accept_snapshot_freeze(&mut storage, &response, &now)
+            .expect("commit canonical Snapshot before dispatch")
+            .dispatch;
     }
     let (authority, message) =
         binding_for_dispatch(pending, &dispatch, identity_seed, attempt, clock);
@@ -818,6 +882,7 @@ fn claim_delivery_attempt(
     SessionBindingMessage,
 ) {
     claim_delivery_attempt_with_slot(
+        None,
         root,
         pending,
         seed,
@@ -839,6 +904,7 @@ fn claim_delivery_attempt_without_slot(
     SessionBindingMessage,
 ) {
     claim_delivery_attempt_with_slot(
+        None,
         root,
         pending,
         seed,
@@ -2917,6 +2983,7 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
         job: verification_job.clone(),
     };
     let (verification_authority, verification_binding) = claim_delivery_attempt_with_slot(
+        Some(&mut control_plane),
         &root,
         &verification_execution,
         seed,
@@ -3063,6 +3130,7 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
     };
     let (second_verification_authority, second_verification_binding) =
         claim_delivery_attempt_with_slot(
+            Some(&mut control_plane),
             &root,
             &second_verification_execution,
             seed,
@@ -3468,8 +3536,16 @@ fn public_dispatch_starts_a_second_ready_work_item_while_the_first_is_running() 
     snapshot.work_run_aggregate.items.push(second_item);
     let initial = Delivery::try_from_snapshot(snapshot).expect("two independent ready WorkItems");
     let (mut control_plane, first) = public_execution_fixture(&root, &repository, &initial, seed);
-    let (authority, binding) =
-        claim_delivery_attempt_with_slot(&root, &first, seed, seed, (1, 1), "parallel-first", true);
+    let (authority, binding) = claim_delivery_attempt_with_slot(
+        None,
+        &root,
+        &first,
+        seed,
+        seed,
+        (1, 1),
+        "parallel-first",
+        true,
+    );
     control_plane
         .commit_delivery_session_binding(&binding, &authority, &binding.sent_at)
         .expect("first WorkRun bound to its accepted Worker");
@@ -3500,6 +3576,7 @@ fn public_dispatch_starts_a_second_ready_work_item_while_the_first_is_running() 
     };
     assert_ne!(first.job.job_id, second.job.job_id);
     let (authority, binding) = claim_delivery_attempt_with_slot(
+        None,
         &root,
         &second,
         seed,

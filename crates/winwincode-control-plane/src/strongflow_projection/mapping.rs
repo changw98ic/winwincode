@@ -320,7 +320,7 @@ fn diagram_execution(
                 .evidence()
                 .iter()
                 .filter(|evidence| {
-                    evidence.candidate_ref() == value.candidate_ref()
+                    evidence.candidate_id() == value.candidate_id()
                         && evidence.delivery_spec_id() == value.delivery_spec_id()
                         && evidence.delivery_spec_revision() == value.delivery_spec_revision()
                         && evidence.work_run_id() == value.producer_work_run_id()
@@ -493,7 +493,8 @@ pub(super) fn evidence(
         )?,
         work_run_id: source.work_run_id().clone(),
         session_binding_id: source.session_binding_id().0.clone(),
-        candidate_ref: source.candidate_ref().to_owned(),
+        candidate_id: source.candidate_id().clone(),
+        snapshot_id: source.snapshot_id().clone(),
         type_value: match source.evidence_type() {
             EvidenceRefType::Test => "test",
             EvidenceRefType::Command => "command",
@@ -514,6 +515,8 @@ pub(super) fn candidate(
     source: &delivery_projection::CurrentCandidateProjection,
 ) -> Result<api::FrozenCandidateSummaryProjection, StrongFlowProjectionError> {
     Ok(api::FrozenCandidateSummaryProjection {
+        candidate_id: source.candidate_id().clone(),
+        candidate_digest: source.candidate_digest().clone(),
         candidate_ref: source.candidate_ref().to_owned(),
         delivery_spec_id: source.delivery_spec_id().0.clone(),
         delivery_spec_revision: revision(
@@ -533,6 +536,8 @@ pub(super) fn frozen_candidate(
     source: &FrozenDeliveryCandidate,
 ) -> Result<api::FrozenCandidateSummaryProjection, StrongFlowProjectionError> {
     Ok(api::FrozenCandidateSummaryProjection {
+        candidate_id: source.candidate_id().clone(),
+        candidate_digest: source.candidate_digest().clone(),
         candidate_ref: source.candidate_ref().to_owned(),
         delivery_spec_id: source.delivery_spec_id().0.clone(),
         delivery_spec_revision: revision(
@@ -560,7 +565,8 @@ pub(super) fn historical_evidence(
         )?,
         work_run_id: source.work_run_id.clone(),
         session_binding_id: source.session_binding_id.0.clone(),
-        candidate_ref: source.candidate_ref.clone(),
+        candidate_id: source.candidate_id.clone(),
+        snapshot_id: source.snapshot_id.clone(),
         type_value: match source.evidence_type {
             EvidenceRefType::Test => "test",
             EvidenceRefType::Command => "command",
@@ -583,13 +589,15 @@ pub(super) fn historical_verdict(
 ) -> Result<api::DeliveryVerdictProjection, StrongFlowProjectionError> {
     if source.delivery_id != *candidate.delivery_id()
         || source.delivery_spec_id != *candidate.delivery_spec_id()
-        || source.candidate_ref != candidate.candidate_ref()
+        || source.candidate_id != *candidate.candidate_id()
     {
         return Err(StrongFlowProjectionError::TrustedFactsUnavailable(
             "historical Verdict is not bound to its original Candidate".to_owned(),
         ));
     }
     Ok(api::DeliveryVerdictProjection {
+        candidate_id: source.candidate_id.clone(),
+        snapshot_id: source.snapshot_id.clone(),
         id: source.id.0.clone(),
         delivery_spec_id: source.delivery_spec_id.0.clone(),
         delivery_spec_revision: revision(
@@ -625,6 +633,8 @@ fn verdict(
     source: &delivery_projection::VerdictProjection,
 ) -> Result<api::DeliveryVerdictProjection, StrongFlowProjectionError> {
     Ok(api::DeliveryVerdictProjection {
+        candidate_id: source.candidate_id().clone(),
+        snapshot_id: source.snapshot_id().clone(),
         id: source.id().0.clone(),
         delivery_spec_id: source.delivery_spec_id().0.clone(),
         delivery_spec_revision: revision(source.delivery_spec_revision(), "verdict spec revision")?,

@@ -291,11 +291,14 @@ fn verified_candidate_delivery() -> (Delivery, FrozenDeliveryCandidate) {
     let mut snapshot = delivery.into_snapshot();
     let verdict = snapshot.verdict.as_mut().expect("current verdict");
     verdict.candidate_ref = candidate.candidate_ref().into();
+    verdict.candidate_id = candidate.candidate_id().clone();
+    verdict.candidate_digest = candidate.candidate_digest().clone();
     for criterion in &mut verdict.criteria {
         criterion.candidate_ref = candidate.candidate_ref().into();
     }
     for evidence in &mut snapshot.evidence {
-        evidence.candidate_ref = candidate.candidate_ref().into();
+        evidence.candidate_id = candidate.candidate_id().clone();
+        evidence.snapshot_id = verdict.snapshot_id.clone();
     }
     let delivery = Delivery::try_from_snapshot(snapshot).expect("exact candidate verdict");
     winwincode_delivery::projection::project_delivery_detail(

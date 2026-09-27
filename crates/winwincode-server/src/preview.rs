@@ -719,6 +719,22 @@ pub(crate) fn authorize_current_frozen_candidate(
                 && evidence.evidence_type == EvidenceRefType::Commit
         })
         .collect::<Vec<_>>();
+    let evidence = commits.first().ok_or_else(source_authority_conflict)?;
+    let snapshot_state = storage
+        .load_state(&format!("snapshot-product:v1:{}", evidence.snapshot_id.0))
+        .map_err(|_| unavailable())?
+        .ok_or_else(source_authority_conflict)?;
+    let snapshot: winwincode_domain::CanonicalSnapshot =
+        serde_json::from_slice(&snapshot_state.payload).map_err(|_| source_authority_conflict())?;
+    if snapshot.candidate_id() != &evidence.candidate_id
+        || snapshot.as_contract().work_run_id != writer.work_run_id
+    {
+        return Err(source_authority_conflict());
+    }
+    let candidate_ref = format!(
+        "refs/winwincode/candidates/{}",
+        snapshot.as_contract().candidate_commit_id.0
+    );
     let commit_ids = commits
         .iter()
         .filter_map(|evidence| evidence.source_ref.strip_prefix("git_commit:"))
@@ -732,9 +748,7 @@ pub(crate) fn authorize_current_frozen_candidate(
             .work_input
             .as_ref()
             .and_then(|input| input.candidate_ref.as_deref()),
-        commits
-            .first()
-            .map(|evidence| evidence.candidate_ref.as_str()),
+        Some(candidate_ref.as_str()),
         commits.len(),
         &commit_ids,
     )
@@ -1216,7 +1230,7 @@ mod tests {
                 verifier_binding: canonical("bnd_", "preview-authorize-verifier-binding"),
                 base_revision: "b".repeat(40),
                 candidate_commit: "a".repeat(40),
-                candidate_ref: "git-candidate:sha256:a71f11375d06a904ac3ed9faeffe28cddcc754e663b2f6b77029a84de6743e26".to_owned(),
+                candidate_ref: format!("refs/winwincode/candidates/{}", "a".repeat(40)),
                 spec_id: canonical("dsp_", "preview-authorize-spec"),
                 evidence_id: canonical("evd_", "preview-authorize-commit-evidence"),
             }
@@ -1369,7 +1383,6 @@ mod tests {
             evidence_id,
             executor_run,
             executor_binding,
-            candidate_ref,
             candidate_commit,
             ..
         } = ids;
@@ -1381,7 +1394,8 @@ mod tests {
             "deliverySpecRevision": 1,
             "workRunId": executor_run,
             "sessionBindingId": executor_binding,
-            "candidateRef": candidate_ref,
+            "snapshotId": canonical("snap_", "preview-authorize"),
+            "candidateId": canonical("cnd_", "preview-authorize"),
             "type": "commit",
             "sourceRef": format!("git_commit:{candidate_commit}"),
             "createdAtMillis": 1_800_000_000_060_u64
@@ -1497,34 +1511,63 @@ mod tests {
         ids: &PreviewAuthorizeIds,
         delivery: &Delivery,
     ) -> SqliteStorage {
-        use winwincode_domain::Sha256Digest;
+        use winwincode_domain::{CanonicalSnapshot, Sha256Digest, Snapshot, seal_snapshot};
         use winwincode_storage::{
             NewOutboxEvent, ProductStateStorage as _, ReceiptActorKey, ReceiptIdentity,
-            ReceiptScopeKey, StateCommit,
+            ReceiptScopeKey, StateCommit, StateMutation,
         };
+        let mut snapshot: Snapshot = serde_json::from_value(serde_json::json!({
+            "schemaVersion": "winwincode/v1",
+            "snapshotId": canonical("snap_", "preview-authorize"),
+            "candidateId": canonical("cnd_", "preview-authorize"),
+            "workRunId": ids.executor_run,
+            "repositoryId": canonical("rep_", "preview-authorize"),
+            "baseCommitId": ids.base_revision,
+            "baseTreeId": "b".repeat(40),
+            "candidateCommitId": ids.candidate_commit,
+            "candidateTreeId": "c".repeat(40),
+            "diffSha256": format!("sha256:{}", "d".repeat(64)),
+            "contentDigest": format!("sha256:{}", "e".repeat(64)),
+            "createdAtMillis": 1_800_000_000_060_u64,
+            "immutable": true,
+            "validationSeal": format!("sha256:{}", "0".repeat(64))
+        }))
+        .expect("Snapshot contract");
+        snapshot.validation_seal = seal_snapshot(&snapshot);
+        let snapshot = CanonicalSnapshot::try_from(snapshot).expect("sealed Snapshot");
         let mut storage = SqliteStorage::open(root).expect("preview storage");
         let scope = ReceiptScopeKey::from_encoded(b"preview-authorize-fixture".to_vec())
             .expect("receipt scope");
         storage
-            .commit(&StateCommit::new(
-                ReceiptIdentity::new(
-                    ReceiptActorKey::from_encoded(b"preview-authorize-actor".to_vec())
-                        .expect("actor"),
-                    scope,
-                    winwincode_domain::RequestId(canonical("req_", "preview-authorize")),
+            .commit(
+                &StateCommit::new(
+                    ReceiptIdentity::new(
+                        ReceiptActorKey::from_encoded(b"preview-authorize-actor".to_vec())
+                            .expect("actor"),
+                        scope,
+                        winwincode_domain::RequestId(canonical("req_", "preview-authorize")),
+                    )
+                    .expect("receipt identity"),
+                    Sha256Digest(format!("sha256:{:x}", Sha256::digest(b"preview-authorize"))),
+                    format!("delivery:{}", ids.delivery_id),
+                    0,
+                    delivery.encode_json().expect("Delivery payload"),
+                    vec![NewOutboxEvent::internal(
+                        "preview-authorize-seed",
+                        "fixture.seed.internal",
+                        b"{}".to_vec(),
+                    )],
                 )
-                .expect("receipt identity"),
-                Sha256Digest(format!("sha256:{:x}", Sha256::digest(b"preview-authorize"))),
-                format!("delivery:{}", ids.delivery_id),
-                0,
-                delivery.encode_json().expect("Delivery payload"),
-                vec![NewOutboxEvent::internal(
-                    "preview-authorize-seed",
-                    "fixture.seed.internal",
-                    b"{}".to_vec(),
-                )],
-            ))
-            .expect("seed Delivery state");
+                .with_state_mutation(
+                    StateMutation::new(
+                        format!("snapshot-product:v1:{}", snapshot.snapshot_id().0),
+                        0,
+                        serde_json::to_vec(&snapshot).expect("Snapshot payload"),
+                    )
+                    .expect("Snapshot state"),
+                ),
+            )
+            .expect("seed Delivery and Snapshot state");
         storage
     }
 
@@ -1678,10 +1721,7 @@ mod tests {
                         .expect("actor"),
                     ReceiptScopeKey::from_encoded(b"preview-authorize-fixture-2".to_vec())
                         .expect("scope"),
-                    winwincode_domain::RequestId(canonical(
-                        "req_",
-                        "preview-authorize-missing",
-                    )),
+                    winwincode_domain::RequestId(canonical("req_", "preview-authorize-missing")),
                 )
                 .expect("receipt identity"),
                 Sha256Digest(format!(

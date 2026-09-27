@@ -27,6 +27,10 @@ winwincode-provider.workspace = true
 base64.workspace = true
 codex-apply-patch = { path = "../../third_party/codex/codex-rs/apply-patch" }
 codex-exec-server = { path = "../../third_party/codex/codex-rs/exec-server" }
+codex-protocol.workspace = true
+sandboxing = { package = "codex-sandboxing", path = "../../third_party/codex/codex-rs/sandboxing" }
+codex-utils-absolute-path = { path = "../../third_party/codex/codex-rs/utils/absolute-path" }
+codex-utils-pty = { path = "../../third_party/codex/codex-rs/utils/pty" }
 codex-utils-path-uri = { path = "../../third_party/codex/codex-rs/utils/path-uri" }
 futures.workspace = true
 rusqlite.workspace = true
@@ -36,7 +40,6 @@ sha2.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "time"] }
 tokio-rustls.workspace = true
 winwincode-codex = { path = "../winwincode-codex" }
-winwincode-delivery = { path = "../winwincode-delivery" }
 winwincode-domain = { path = "../winwincode-domain" }
 winwincode-execution-port = { path = "../winwincode-execution-port" }
 

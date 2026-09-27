@@ -460,7 +460,7 @@ fn sha256_digest(bytes: &[u8]) -> Sha256Digest {
     Sha256Digest(format!("sha256:{:x}", Sha256::digest(bytes)))
 }
 
-fn derived_id(prefix: &str, namespace: &str, digest: &Sha256Digest) -> String {
+pub(crate) fn derived_id(prefix: &str, namespace: &str, digest: &Sha256Digest) -> String {
     let mut hasher = Sha256::new();
     hasher.update(namespace.as_bytes());
     hasher.update([0]);

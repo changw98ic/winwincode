@@ -525,7 +525,7 @@ test('RUN-07 read failures use safe copy and keep retryability visible', async (
 
 test('RUN-07 reads the canonical candidate file pages and rejects stale identity', async () => {
   const deliveryId = 'dlv_00000000000000000000000042'
-  const candidateRef = `git-candidate:sha256:${'c'.repeat(64)}`
+  const candidateRef = `refs/winwincode/candidates/${'c'.repeat(64)}`
   const candidateTreeId = 'b'.repeat(40)
   const diffSha256 = `sha256:${'d'.repeat(64)}`
   const scope = {
@@ -552,6 +552,8 @@ test('RUN-07 reads the canonical candidate file pages and rejects stale identity
   }
   const requests = []
   const candidate = {
+    candidateId: 'cnd_00000000000000000000000042',
+    candidateDigest: `sha256:${'d'.repeat(64)}`,
     candidateCommitId: 'a'.repeat(40),
     candidateRef,
     candidateTreeId,
@@ -689,7 +691,7 @@ test('RUN-07 reads the canonical candidate file pages and rejects stale identity
 test('RUN-07 rejects a UTF-8 file chunk with invalid byte sequences', async () => {
   const context = {
     deliveryId: 'dlv_00000000000000000000000042',
-    candidateRef: `git-candidate:sha256:${'c'.repeat(64)}`,
+    candidateRef: `refs/winwincode/candidates/${'c'.repeat(64)}`,
     candidateTreeId: 'b'.repeat(40),
     diffSha256: `sha256:${'d'.repeat(64)}`,
   }
@@ -716,6 +718,8 @@ test('RUN-07 rejects a UTF-8 file chunk with invalid byte sequences', async () =
     },
   }
   const candidate = {
+    candidateId: 'cnd_00000000000000000000000042',
+    candidateDigest: `sha256:${'d'.repeat(64)}`,
     candidateCommitId: 'a'.repeat(40),
     candidateRef: context.candidateRef,
     candidateTreeId: context.candidateTreeId,
@@ -843,7 +847,7 @@ test('RUN-08 production port reads only canonical, bounded UTF-8 Evidence logs',
   const workRunId = 'wrn_00000000000000000000000001'
   const evidenceId = 'evd_00000000000000000000000001'
   const artifactId = 'art_00000000000000000000000001'
-  const candidateRef = `git-candidate:sha256:${'a'.repeat(64)}`
+  const candidateRef = `refs/winwincode/candidates/${'a'.repeat(64)}`
   const cursor = {
     token: `sfread_${'1'.repeat(32)}`,
     scope,
@@ -860,7 +864,8 @@ test('RUN-08 production port reads only canonical, bounded UTF-8 Evidence logs',
     },
   }
   const evidence = {
-    candidateRef,
+    candidateId: 'cnd_00000000000000000000000042',
+    snapshotId: 'snap_00000000000000000000000042',
     createdAt: '2026-09-12T00:00:00.000Z',
     deliverySpecId: 'spec:current',
     deliverySpecRevision: 1,
@@ -879,7 +884,8 @@ test('RUN-08 production port reads only canonical, bounded UTF-8 Evidence logs',
     mediaType: 'text/plain',
     previewMode: 'inline_text',
     provenance: {
-      candidateRef,
+      candidateId: evidence.candidateId,
+      snapshotId: evidence.snapshotId,
       deliveryId,
       deliveryRevision: 1,
       evidenceId,
@@ -1000,7 +1006,8 @@ test('RUN-03 keeps managed-app source logs separate from candidate producer evid
   const sourceWorkRunId = 'wrn_00000000000000000000000003'
   const deliveryId = 'dlv_00000000000000000000000001'
   const evidence = {
-    candidateRef: `git-candidate:sha256:${'a'.repeat(64)}`,
+    candidateId: 'cnd_00000000000000000000000042',
+    snapshotId: 'snap_00000000000000000000000042',
     createdAt: '2026-09-12T00:00:00.000Z',
     deliverySpecId: 'spec:current',
     deliverySpecRevision: 1,
@@ -1041,7 +1048,8 @@ test('RUN-03 keeps managed-app source logs separate from candidate producer evid
     mediaType: 'text/plain',
     previewMode: 'inline_text',
     provenance: {
-      candidateRef: evidence.candidateRef,
+      candidateId: evidence.candidateId,
+      snapshotId: evidence.snapshotId,
       deliveryId,
       deliveryRevision: 1,
       evidenceId: evidence.id,

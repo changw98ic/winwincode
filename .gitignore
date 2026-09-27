@@ -25,6 +25,8 @@ release-artifact-security-report.json
 server-data/
 publication-secrets/
 source-repositories/
+fusion-benchmark-tasks/agent-benchmark-submissions/
+fusion-benchmark-tasks/agent-benchmark-tasks/
 
 # Local configuration and credentials
 .env

@@ -3235,7 +3235,10 @@ mod public_error_mapping_tests {
             terminal_code(status, "DEVICE_SESSION_REQUIRED"),
             TerminalErrorCode::DeviceSessionRequired
         );
-        assert_eq!(public_reason("DEVICE_SESSION_REQUIRED"), "DEVICE_SESSION_REQUIRED");
+        assert_eq!(
+            public_reason("DEVICE_SESSION_REQUIRED"),
+            "DEVICE_SESSION_REQUIRED"
+        );
         let envelope = error_envelope(
             status,
             "DEVICE_SESSION_REQUIRED",

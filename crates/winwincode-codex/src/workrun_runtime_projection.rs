@@ -596,9 +596,18 @@ fn sealed_command_outcome(value: &Value) -> BoundEvidenceOutcome {
         // failure are all terminal failures — the categories stay documented
         // here even though they share one outcome.
         Some(
-            "timed-out" | "timeout" | "cancelled" | "canceled" | "interrupted" | "policy-denied"
-            | "sandbox-denied" | "declined" | "denied" | "infrastructure-error"
-            | "infrastructure-failed" | "failed",
+            "timed-out"
+            | "timeout"
+            | "cancelled"
+            | "canceled"
+            | "interrupted"
+            | "policy-denied"
+            | "sandbox-denied"
+            | "declined"
+            | "denied"
+            | "infrastructure-error"
+            | "infrastructure-failed"
+            | "failed",
         ) => BoundEvidenceOutcome::Failed,
         Some("completed" | "succeeded" | "exited") if exit_code.unwrap_or(0) == 0 => {
             BoundEvidenceOutcome::Succeeded
@@ -870,8 +879,7 @@ mod tests {
 
     use super::*;
 
-    const CANDIDATE_REF: &str =
-        "git-candidate:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const CANDIDATE_REF: &str = "refs/winwincode/candidates/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const PLANNER_JSON: &str = concat!(
         "{\"schemaVersion\":1,",
         "\"protocol\":\"winwincode.planner-solution.v1\",",
@@ -938,7 +946,7 @@ mod tests {
         "{\"protocol\":\"winwincode.independent-verification-result.v1\",",
         "\"delivery_spec_id\":\"spec-fixture\",",
         "\"delivery_spec_revision\":2,",
-        "\"candidate_ref\":\"git-candidate:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",",
+        "\"candidate_ref\":\"refs/winwincode/candidates/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",",
         "\"findings\":[{",
         "\"finding_id\":\"finding-fixture\",",
         "\"criterion_id\":\"crt_00000000000000000000000001\",",
@@ -1690,14 +1698,8 @@ mod tests {
                 )
                 .expect("bound conflicting product"),
         );
-        let payload = retained
-            .event
-            .payload
-            .as_ref()
-            .expect("result payload");
-        let bytes = STANDARD
-            .decode(&payload.data_base64)
-            .expect("result bytes");
+        let payload = retained.event.payload.as_ref().expect("result payload");
+        let bytes = STANDARD.decode(&payload.data_base64).expect("result bytes");
         let json: Value = serde_json::from_slice(&bytes).expect("result JSON");
         assert_eq!(json["findings"][0]["verdict"], "pass");
         assert!(

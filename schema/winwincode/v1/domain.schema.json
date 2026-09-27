@@ -56,9 +56,26 @@
       "type": "string",
       "pattern": "^vpl_[0-9A-HJKMNP-TV-Z]{26}$"
     },
+    "VerificationSessionId": {
+      "type": "string",
+      "pattern": "^vsn_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "VerifierResultId": {
+      "type": "string",
+      "pattern": "^vrs_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "VerdictId": {
+      "type": "string",
+      "pattern": "^vdt_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
     "CandidateDigest": {
       "type": "string",
       "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "GitObjectId": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+      "description": "Exact SHA-1 or SHA-256 Git object identity."
     },
     "WorkItemState": {
       "type": "string",
@@ -430,20 +447,75 @@
         }
       }
     },
+    "VerificationSession": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "id",
+        "snapshotId",
+        "candidateId",
+        "workRunId",
+        "verificationPlanId",
+        "verificationSessionId",
+        "attempt",
+        "sessionIdentity",
+        "createdAt"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
+        "id": {
+          "$ref": "#/$defs/VerificationSessionId"
+        },
+        "snapshotId": {
+          "$ref": "#/$defs/SnapshotId"
+        },
+        "candidateId": {
+          "$ref": "#/$defs/CandidateId"
+        },
+        "workRunId": {
+          "$ref": "#/$defs/WorkRunId"
+        },
+        "verificationPlanId": {
+          "$ref": "#/$defs/VerificationPlanId"
+        },
+        "verificationSessionId": {
+          "$ref": "#/$defs/VerificationSessionId"
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "sessionIdentity": {
+          "$ref": "#/$defs/SessionIdentity"
+        },
+        "createdAt": {
+          "$ref": "#/$defs/Instant"
+        }
+      }
+    },
     "Evidence": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "schemaVersion",
         "id",
+        "snapshotId",
+        "candidateId",
+        "workRunId",
+        "verificationPlanId",
+        "verificationSessionId",
+        "attempt",
+        "sessionIdentity",
+        "createdAt",
         "workContractId",
         "contractRevision",
-        "verificationPlanId",
         "planRevision",
         "criterionId",
         "workItemId",
-        "workRunId",
-        "candidateDigest",
         "producer",
         "producerExecutionIdentity",
         "sourceEventId",
@@ -457,14 +529,37 @@
         "id": {
           "$ref": "#/$defs/EvidenceId"
         },
+        "snapshotId": {
+          "$ref": "#/$defs/SnapshotId"
+        },
+        "candidateId": {
+          "$ref": "#/$defs/CandidateId"
+        },
+        "workRunId": {
+          "$ref": "#/$defs/WorkRunId"
+        },
+        "verificationPlanId": {
+          "$ref": "#/$defs/VerificationPlanId"
+        },
+        "verificationSessionId": {
+          "$ref": "#/$defs/VerificationSessionId"
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "sessionIdentity": {
+          "$ref": "#/$defs/SessionIdentity"
+        },
+        "createdAt": {
+          "$ref": "#/$defs/Instant"
+        },
         "workContractId": {
           "$ref": "#/$defs/WorkContractId"
         },
         "contractRevision": {
           "$ref": "#/$defs/Revision"
-        },
-        "verificationPlanId": {
-          "$ref": "#/$defs/VerificationPlanId"
         },
         "planRevision": {
           "$ref": "#/$defs/Revision"
@@ -474,12 +569,6 @@
         },
         "workItemId": {
           "$ref": "#/$defs/WorkItemId"
-        },
-        "workRunId": {
-          "$ref": "#/$defs/WorkRunId"
-        },
-        "candidateDigest": {
-          "$ref": "#/$defs/CandidateDigest"
         },
         "producer": {
           "type": "string",
@@ -515,18 +604,94 @@
         }
       }
     },
+    "VerifierResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "id",
+        "snapshotId",
+        "candidateId",
+        "workRunId",
+        "verificationPlanId",
+        "verificationSessionId",
+        "attempt",
+        "sessionIdentity",
+        "createdAt",
+        "evidenceIds",
+        "status"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
+        "id": {
+          "$ref": "#/$defs/VerifierResultId"
+        },
+        "snapshotId": {
+          "$ref": "#/$defs/SnapshotId"
+        },
+        "candidateId": {
+          "$ref": "#/$defs/CandidateId"
+        },
+        "workRunId": {
+          "$ref": "#/$defs/WorkRunId"
+        },
+        "verificationPlanId": {
+          "$ref": "#/$defs/VerificationPlanId"
+        },
+        "verificationSessionId": {
+          "$ref": "#/$defs/VerificationSessionId"
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "sessionIdentity": {
+          "$ref": "#/$defs/SessionIdentity"
+        },
+        "createdAt": {
+          "$ref": "#/$defs/Instant"
+        },
+        "evidenceIds": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 100,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/EvidenceId"
+          }
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "pass",
+            "fail",
+            "inconclusive",
+            "infra_error"
+          ]
+        }
+      }
+    },
     "Verdict": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "schemaVersion",
         "id",
+        "snapshotId",
+        "candidateId",
+        "workRunId",
+        "verificationPlanId",
+        "verificationSessionId",
+        "attempt",
+        "sessionIdentity",
+        "createdAt",
         "workContractId",
         "contractRevision",
-        "verificationPlanId",
         "planRevision",
         "workItemId",
-        "candidateDigest",
         "status",
         "evidenceIds",
         "revision"
@@ -536,8 +701,33 @@
           "$ref": "#/$defs/SchemaVersion"
         },
         "id": {
-          "type": "string",
-          "pattern": "^vdt_[0-9A-HJKMNP-TV-Z]{26}$"
+          "$ref": "#/$defs/VerdictId"
+        },
+        "snapshotId": {
+          "$ref": "#/$defs/SnapshotId"
+        },
+        "candidateId": {
+          "$ref": "#/$defs/CandidateId"
+        },
+        "workRunId": {
+          "$ref": "#/$defs/WorkRunId"
+        },
+        "verificationPlanId": {
+          "$ref": "#/$defs/VerificationPlanId"
+        },
+        "verificationSessionId": {
+          "$ref": "#/$defs/VerificationSessionId"
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "sessionIdentity": {
+          "$ref": "#/$defs/SessionIdentity"
+        },
+        "createdAt": {
+          "$ref": "#/$defs/Instant"
         },
         "workContractId": {
           "$ref": "#/$defs/WorkContractId"
@@ -545,17 +735,11 @@
         "contractRevision": {
           "$ref": "#/$defs/Revision"
         },
-        "verificationPlanId": {
-          "$ref": "#/$defs/VerificationPlanId"
-        },
         "planRevision": {
           "$ref": "#/$defs/Revision"
         },
         "workItemId": {
           "$ref": "#/$defs/WorkItemId"
-        },
-        "candidateDigest": {
-          "$ref": "#/$defs/CandidateDigest"
         },
         "status": {
           "type": "string",
@@ -2899,6 +3083,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "schemaVersion",
         "snapshotId",
         "candidateId",
         "workRunId",
@@ -2914,6 +3099,9 @@
         "immutable"
       ],
       "properties": {
+        "schemaVersion": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
         "snapshotId": {
           "$ref": "#/$defs/SnapshotId"
         },
@@ -2927,24 +3115,16 @@
           "$ref": "#/$defs/RepositoryId"
         },
         "baseCommitId": {
-          "type": "string",
-          "minLength": 40,
-          "maxLength": 64
+          "$ref": "#/$defs/GitObjectId"
         },
         "baseTreeId": {
-          "type": "string",
-          "minLength": 40,
-          "maxLength": 64
+          "$ref": "#/$defs/GitObjectId"
         },
         "candidateCommitId": {
-          "type": "string",
-          "minLength": 40,
-          "maxLength": 64
+          "$ref": "#/$defs/GitObjectId"
         },
         "candidateTreeId": {
-          "type": "string",
-          "minLength": 40,
-          "maxLength": 64
+          "$ref": "#/$defs/GitObjectId"
         },
         "diffSha256": {
           "$ref": "#/$defs/Sha256Digest"
@@ -2953,12 +3133,12 @@
           "$ref": "#/$defs/Sha256Digest"
         },
         "validationSeal": {
-          "type": "string",
-          "pattern": "^sha256:[0-9a-f]{64}$"
+          "$ref": "#/$defs/Sha256Digest"
         },
         "createdAtMillis": {
           "type": "integer",
-          "minimum": 0
+          "minimum": 0,
+          "maximum": 9007199254740991
         },
         "immutable": {
           "type": "boolean",

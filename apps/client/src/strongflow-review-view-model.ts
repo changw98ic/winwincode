@@ -434,7 +434,8 @@ function evidenceBinding(
 ) {
   return {
     atCursor: detail.readCursor,
-    candidateRef: evidence.candidateRef,
+    candidateId: evidence.candidateId,
+    snapshotId: evidence.snapshotId,
     deliveryId: detail.deliveryId,
     evidenceId: evidence.id,
     readPageLimit: READ_PAGE_LIMIT,

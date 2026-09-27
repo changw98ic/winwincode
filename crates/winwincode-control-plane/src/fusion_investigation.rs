@@ -12,8 +12,8 @@ use crate::fusion_knowledge::{
     ClaimNode, ClaimState, EvidenceDirection, EvidenceStrength, FusionEvidenceRecord,
 };
 use crate::fusion_planner::{
-    EvidenceLevel, EvidencePlanner, EvidenceProvider, InvestigationAction, InvestigationPlan,
-    ProviderCapability, DefaultEvidencePlanner, plan_investigation,
+    DefaultEvidencePlanner, EvidenceLevel, EvidencePlanner, EvidenceProvider, InvestigationAction,
+    InvestigationPlan, ProviderCapability, plan_investigation,
 };
 
 // ---------------------------------------------------------------------------
@@ -97,7 +97,8 @@ impl CrossReviewer for ConservativeCrossReviewer {
                 outcome,
                 accepted_evidence_ids: accepted,
                 rejected_evidence_ids: rejected,
-                notes: "conservative policy: verified DIRECT accepted; speculation escalated".to_owned(),
+                notes: "conservative policy: verified DIRECT accepted; speculation escalated"
+                    .to_owned(),
             })
         })
     }
@@ -198,12 +199,18 @@ impl EvidenceVerifier for PolicyEvidenceVerifier {
 
 /// Strip brand/model names before verifier sees the pack (ADR-0037 §R4).
 #[must_use]
-pub fn build_evidence_only_request(claim: &ClaimNode, store: &[FusionEvidenceRecord]) -> EvidenceOnlyVerdictRequest {
+pub fn build_evidence_only_request(
+    claim: &ClaimNode,
+    store: &[FusionEvidenceRecord],
+) -> EvidenceOnlyVerdictRequest {
     let mut verified_support = Vec::new();
     let mut verified_counter = Vec::new();
     let mut unverified_support = Vec::new();
     let mut unverified_counter = Vec::new();
-    for record in store.iter().filter(|r| r.claim_id == claim.id && !r.invalidated) {
+    for record in store
+        .iter()
+        .filter(|r| r.claim_id == claim.id && !r.invalidated)
+    {
         let facts = record.facts.clone();
         match (record.direction, record.verified) {
             (EvidenceDirection::Support, true) => verified_support.extend(facts),
@@ -339,21 +346,17 @@ impl EvidenceProvider for AstEvidenceProvider {
 // P9 Budget + dynamic rounds
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InvestigationBudget {
-    pub max_llm_rounds_per_claim: u8,
-    pub max_tool_escalation: u8,
-    pub max_test_attempts: u8,
+    pub max_llm_rounds_per_claim: Option<u8>,
+    pub max_tool_escalation: Option<u8>,
+    pub max_test_attempts: Option<u8>,
 }
 
-impl Default for InvestigationBudget {
-    fn default() -> Self {
-        Self {
-            max_llm_rounds_per_claim: 3,
-            max_tool_escalation: 5,
-            max_test_attempts: 2,
-        }
+impl InvestigationBudget {
+    fn limit_reached(limit: Option<u8>, used: u32) -> bool {
+        limit.is_some_and(|limit| used >= u32::from(limit))
     }
 }
 
@@ -375,7 +378,10 @@ pub fn claim_priority(claim: &ClaimNode) -> ClaimPriority {
     if !disputed {
         return ClaimPriority::Low;
     }
-    match (claim.supporter_count + claim.opponent_count, claim.has_verified_counter) {
+    match (
+        claim.supporter_count + claim.opponent_count,
+        claim.has_verified_counter,
+    ) {
         (n, _) if n >= 4 => ClaimPriority::Critical,
         (n, true) if n >= 2 => ClaimPriority::High,
         (n, false) if n >= 2 => ClaimPriority::High,
@@ -396,6 +402,15 @@ pub struct ClaimRoundTrace {
     pub state_after: ClaimState,
 }
 
+/// Non-destructive JEV or verifier outage retained in the investigation report.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JevUnavailableRecord {
+    pub code: String,
+    pub claim_id: String,
+    pub detail: String,
+}
+
 /// Terminal condition of one investigation (P0-7) — not the strategy name.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -407,6 +422,7 @@ pub enum TerminalReason {
     BudgetExhausted,
     Unresolvable,
     NoActionableConflict,
+    AttentionRequired,
 }
 
 impl std::fmt::Display for TerminalReason {
@@ -419,6 +435,7 @@ impl std::fmt::Display for TerminalReason {
             Self::BudgetExhausted => "BUDGET_EXHAUSTED",
             Self::Unresolvable => "UNRESOLVABLE",
             Self::NoActionableConflict => "NO_ACTIONABLE_CONFLICT",
+            Self::AttentionRequired => "ATTENTION_REQUIRED",
         })
     }
 }
@@ -462,11 +479,7 @@ impl FusionMetrics {
     pub fn fusion_regret(&self) -> i64 {
         // Errors Fusion introduced beyond the best fixed single baseline.
         let gain = self.fusion_gain();
-        if gain < 0 {
-            -gain
-        } else {
-            0
-        }
+        if gain < 0 { -gain } else { 0 }
     }
 }
 
@@ -519,6 +532,7 @@ pub struct InvestigationRunReport {
     pub verdict: Option<EvidenceVerdict>,
     pub stop_reason: TerminalReason,
     pub provider_executions: Vec<crate::fusion_planner::ProviderExecutionRecord>,
+    pub jev_unavailable: Vec<JevUnavailableRecord>,
 }
 
 /// One claim-level dynamic loop: plan → acquire → cross-review → verify → recompute.
@@ -532,7 +546,11 @@ async fn acquire_step_evidence(
     store: &mut Vec<FusionEvidenceRecord>,
     providers: &[Arc<dyn EvidenceProvider>],
     action: &InvestigationAction,
-) -> (crate::fusion_planner::InvestigationOutcome, Option<String>, bool) {
+) -> (
+    crate::fusion_planner::InvestigationOutcome,
+    Option<String>,
+    bool,
+) {
     use crate::fusion_planner::InvestigationOutcome;
 
     let before = store.len();
@@ -557,7 +575,10 @@ async fn acquire_step_evidence(
                             action.capability
                         )],
                         source_refs: vec![format!("{}:{}", action.provider, action.capability)],
-                        independence_group: format!("ig:neg:{}:{}", action.provider, action.capability),
+                        independence_group: format!(
+                            "ig:neg:{}:{}",
+                            action.provider, action.capability
+                        ),
                         verified: true,
                         invalidated: false,
                     }],
@@ -617,31 +638,81 @@ async fn cross_review_and_invalidate(
 ///
 /// Returns the terminal marker when the ladder settles. `Refuted` is only
 /// reachable with a verified counter (ADR-0037 hard rule).
+enum VerificationSettlement {
+    Settled(&'static str, EvidenceVerdict),
+    Insufficient,
+    Unavailable(JevUnavailableRecord),
+}
+
 async fn settle_with_evidence_verdict(
     claim: &mut ClaimNode,
     store: &[FusionEvidenceRecord],
     verifier: &dyn EvidenceVerifier,
-) -> Option<(&'static str, EvidenceVerdict)> {
+) -> VerificationSettlement {
     let request = build_evidence_only_request(claim, store);
-    let Ok(result) = verifier.verify(request).await else {
-        return None;
+    let result = match verifier.verify(request).await {
+        Ok(result) => result,
+        Err(error) => {
+            return VerificationSettlement::Unavailable(JevUnavailableRecord {
+                code: jev_unavailable_code(&error),
+                claim_id: claim.id.clone(),
+                detail: error,
+            });
+        }
     };
     match result.verdict {
         EvidenceVerdict::Confirmed => {
             claim.state = ClaimState::Confirmed;
-            Some(("CONFIRMED", EvidenceVerdict::Confirmed))
+            VerificationSettlement::Settled("CONFIRMED", EvidenceVerdict::Confirmed)
         }
         EvidenceVerdict::Refuted if claim.has_verified_counter => {
             claim.state = ClaimState::Refuted;
-            Some(("REFUTED", EvidenceVerdict::Refuted))
+            VerificationSettlement::Settled("REFUTED", EvidenceVerdict::Refuted)
         }
         _ => {
             claim.state = crate::fusion_planner::recompute_state(claim);
-            None
+            VerificationSettlement::Insufficient
         }
     }
 }
 
+pub(crate) fn jev_unavailable_code(error: &str) -> String {
+    let normalized = error.to_ascii_uppercase();
+    if normalized.contains("TIMEOUT") || normalized.contains("RESOURCE_EXHAUSTED") {
+        "JEV_TIMEOUT".to_owned()
+    } else if normalized.contains("INVALID_RESPONSE")
+        || normalized.contains("DESERIALIZE")
+        || normalized.contains("SCHEMA")
+    {
+        "JEV_INVALID_RESPONSE".to_owned()
+    } else if normalized.contains("TRANSPORT")
+        || normalized.contains("UNAVAILABLE")
+        || normalized.contains("CONNECTION")
+    {
+        "JEV_TRANSPORT".to_owned()
+    } else {
+        "JEV_UNAVAILABLE".to_owned()
+    }
+}
+
+fn requires_attention(error: &str) -> bool {
+    let normalized = error.to_ascii_uppercase();
+    [
+        "PERMISSION",
+        "DEPENDENCY",
+        "MISSING",
+        "MATERIAL",
+        "INPUT_REQUIRED",
+        "ATTENTION",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker))
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "Keep the investigation state transitions and terminal reasons together"
+)]
 pub async fn investigate_claim(
     claim: &mut ClaimNode,
     store: &mut Vec<FusionEvidenceRecord>,
@@ -663,41 +734,52 @@ pub async fn investigate_claim(
     let plan = planner.plan(claim, &capabilities);
     let priority = claim_priority(claim);
     let mut rounds: Vec<ClaimRoundTrace> = Vec::new();
-    let mut tool_escalation = 0u8;
-    let mut llm_rounds = 0u8;
+    let mut tool_escalation = 0u32;
+    let mut llm_rounds = 0u32;
     let mut verdict = None;
-    let mut stop_reason = "BUDGET_EXHAUSTED";
+    let mut stop_reason = None;
+    let mut budget_exhausted = false;
+    let mut attention_required = false;
+    let mut jev_unavailable = Vec::new();
 
     claim.state = ClaimState::Investigating;
     for action in &plan.actions {
-        if tool_escalation >= budget.max_tool_escalation {
-            stop_reason = "BUDGET_EXHAUSTED";
+        if InvestigationBudget::limit_reached(budget.max_tool_escalation, tool_escalation) {
+            budget_exhausted = true;
             break;
         }
         if action.level == EvidenceLevel::LlmReasoning {
-            if llm_rounds >= budget.max_llm_rounds_per_claim {
+            if InvestigationBudget::limit_reached(budget.max_llm_rounds_per_claim, llm_rounds) {
+                budget_exhausted = true;
                 continue;
             }
-            llm_rounds = llm_rounds.saturating_add(1);
+            llm_rounds += 1;
         }
         if action.level == EvidenceLevel::Test
-            && rounds
-                .iter()
-                .filter(|round| round.action == action.capability)
-                .count()
-                >= budget.max_test_attempts as usize
+            && InvestigationBudget::limit_reached(
+                budget.max_test_attempts,
+                u32::try_from(
+                    rounds
+                        .iter()
+                        .filter(|round| round.action == action.capability)
+                        .count(),
+                )
+                .unwrap_or(u32::MAX),
+            )
         {
+            budget_exhausted = true;
             continue;
         }
 
         let (outcome, failure_reason, produced_new_evidence) =
             acquire_step_evidence(claim, store, providers, action).await;
+        attention_required |= failure_reason.as_deref().is_some_and(requires_attention);
         if produced_new_evidence {
-            tool_escalation = tool_escalation.saturating_add(1);
+            tool_escalation += 1;
         }
 
         let review = cross_review_and_invalidate(claim, store, reviewer).await;
-        let settled = settle_with_evidence_verdict(claim, store, verifier).await;
+        let settlement = settle_with_evidence_verdict(claim, store, verifier).await;
 
         rounds.push(ClaimRoundTrace {
             round: u8::try_from(rounds.len() + 1).unwrap_or(u8::MAX),
@@ -710,35 +792,42 @@ pub async fn investigate_claim(
             state_after: claim.state,
         });
 
-        if let Some((reason, found)) = settled {
-            stop_reason = reason;
-            verdict = Some(found);
-            break;
+        match settlement {
+            VerificationSettlement::Settled(reason, found) => {
+                stop_reason = Some(match reason {
+                    "CONFIRMED" => TerminalReason::Confirmed,
+                    "REFUTED" => TerminalReason::Refuted,
+                    _ => TerminalReason::EvidenceConverged,
+                });
+                verdict = Some(found);
+                break;
+            }
+            VerificationSettlement::Unavailable(record) => jev_unavailable.push(record),
+            VerificationSettlement::Insufficient => {}
         }
 
-        if !produced_new_evidence && matches!(review.outcome, CrossReviewOutcome::Accept) {
-            stop_reason = "EVIDENCE_CONVERGED";
-            if claim.state == ClaimState::Investigating {
-                claim.state = ClaimState::Unresolved;
-            }
-            break;
-        }
+        // A no-increment round never adds weight or stops the investigation.
+        // The planner's next source/tool/reproduction action is still meaningful.
+        let _ = review.outcome;
     }
 
     if verdict.is_none() {
-        if claim.state == ClaimState::Investigating {
-            claim.state = if matches!(stop_reason, "EVIDENCE_CONVERGED") {
-                ClaimState::Unresolved
-            } else if tool_escalation >= budget.max_tool_escalation {
-                ClaimState::Escalated
-            } else {
-                ClaimState::Unresolved
-            };
-        }
-        if stop_reason == "BUDGET_EXHAUSTED" && claim.state != ClaimState::Escalated {
+        if attention_required || budget_exhausted {
+            claim.state = ClaimState::Escalated;
+        } else if claim.state == ClaimState::Investigating {
             claim.state = ClaimState::Unresolved;
         }
     }
+
+    let terminal = stop_reason.unwrap_or({
+        if attention_required {
+            TerminalReason::AttentionRequired
+        } else if budget_exhausted {
+            TerminalReason::BudgetExhausted
+        } else {
+            TerminalReason::Unresolvable
+        }
+    });
 
     InvestigationRunReport {
         claim_id: claim.id.clone(),
@@ -746,16 +835,9 @@ pub async fn investigate_claim(
         rounds,
         plan,
         verdict,
-        stop_reason: match stop_reason {
-            "CONFIRMED" => TerminalReason::Confirmed,
-            "REFUTED" => TerminalReason::Refuted,
-            "EVIDENCE_CONVERGED" => TerminalReason::EvidenceConverged,
-            "UNRESOLVABLE" => TerminalReason::Unresolvable,
-            "NO_ACTIONABLE_CONFLICT" => TerminalReason::NoActionableConflict,
-            "CONSENSUS_CONVERGED" => TerminalReason::ConsensusConverged,
-            _ => TerminalReason::BudgetExhausted,
-        },
+        stop_reason: terminal,
         provider_executions: Vec::new(),
+        jev_unavailable,
     }
 }
 
@@ -831,8 +913,8 @@ mod tests {
 
     #[test]
     fn cross_review_escalates_speculation() {
-        let result = futures::executor::block_on(ConservativeCrossReviewer.review(
-            CrossReviewRequest {
+        let result =
+            futures::executor::block_on(ConservativeCrossReviewer.review(CrossReviewRequest {
                 claim_display_key: "x".to_owned(),
                 claim_summary: "x".to_owned(),
                 hide_provider_names: true,
@@ -849,9 +931,8 @@ mod tests {
                     verified: false,
                     invalidated: false,
                 }],
-            },
-        ))
-        .expect("review");
+            }))
+            .expect("review");
         assert_eq!(result.outcome, CrossReviewOutcome::NeedsTool);
     }
 
@@ -872,6 +953,223 @@ mod tests {
         assert!(!report.rounds.is_empty());
         assert_ne!(claim.state, ClaimState::Refuted);
         let _ = EvidenceLevel::CodeGraph;
+    }
+
+    #[derive(Debug)]
+    struct UnavailableVerifier {
+        code: &'static str,
+    }
+
+    impl EvidenceVerifier for UnavailableVerifier {
+        fn verify(
+            &self,
+            _request: EvidenceOnlyVerdictRequest,
+        ) -> BoxFuture<'static, Result<EvidenceOnlyVerdict, String>> {
+            let code = self.code;
+            Box::pin(async move { Err(code.to_owned()) })
+        }
+    }
+
+    #[derive(Debug)]
+    struct TwoStepPlanner;
+
+    impl EvidencePlanner for TwoStepPlanner {
+        fn plan(
+            &self,
+            claim: &ClaimNode,
+            _capabilities: &[ProviderCapability],
+        ) -> InvestigationPlan {
+            InvestigationPlan {
+                claim_id: claim.id.clone(),
+                display_key: claim.display_key.clone(),
+                modes: vec![
+                    crate::fusion_planner::InvestigationMode::EvidenceExpansion,
+                    crate::fusion_planner::InvestigationMode::CrossVerification,
+                ],
+                unknowns: claim.unknowns.clone(),
+                actions: vec![
+                    InvestigationAction {
+                        provider: "independent".to_owned(),
+                        level: EvidenceLevel::CodeGraph,
+                        question: "read the current call graph".to_owned(),
+                        capability: "source.read".to_owned(),
+                        expected_information_gain: crate::fusion_planner::InformationGain::Medium,
+                    },
+                    InvestigationAction {
+                        provider: "independent".to_owned(),
+                        level: EvidenceLevel::Reproduction,
+                        question: "run the targeted reproduction".to_owned(),
+                        capability: "reproduction.run".to_owned(),
+                        expected_information_gain: crate::fusion_planner::InformationGain::High,
+                    },
+                ],
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct TwoStepProvider;
+
+    impl EvidenceProvider for TwoStepProvider {
+        fn provider_id(&self) -> &'static str {
+            "independent"
+        }
+
+        fn can_handle(&self, action: &InvestigationAction) -> bool {
+            action.provider == self.provider_id()
+        }
+
+        fn investigate(
+            &self,
+            action: &InvestigationAction,
+            claim: &ClaimNode,
+        ) -> BoxFuture<'static, Result<Vec<FusionEvidenceRecord>, String>> {
+            let increment = action.capability == "reproduction.run";
+            let record = FusionEvidenceRecord {
+                id: format!("ev_{}_{}", claim.id, action.capability),
+                claim_id: claim.id.clone(),
+                provider: self.provider_id().to_owned(),
+                direction: EvidenceDirection::Support,
+                kind: "reproduction".to_owned(),
+                strength: EvidenceStrength::Direct,
+                facts: vec!["targeted reproduction completed".to_owned()],
+                source_refs: vec!["reproduction:targeted".to_owned()],
+                independence_group: "ig:reproduction:targeted".to_owned(),
+                verified: true,
+                invalidated: false,
+            };
+            Box::pin(async move { Ok(if increment { vec![record] } else { Vec::new() }) })
+        }
+    }
+
+    #[test]
+    fn jev_unavailable_preserves_investigation_state_and_continues_next_action() {
+        for code in ["JEV_TIMEOUT", "JEV_TRANSPORT", "JEV_INVALID_RESPONSE"] {
+            let mut claim = disputed();
+            let original_supporters = claim.supporters.clone();
+            let original_opponents = claim.opponents.clone();
+            let original_unknowns = claim.unknowns.clone();
+            let mut store = vec![FusionEvidenceRecord {
+                id: "ev_existing".to_owned(),
+                claim_id: claim.id.clone(),
+                provider: "existing".to_owned(),
+                direction: EvidenceDirection::Support,
+                kind: "source".to_owned(),
+                strength: EvidenceStrength::StrongInference,
+                facts: vec!["existing source fact".to_owned()],
+                source_refs: vec!["source:existing".to_owned()],
+                independence_group: "ig:existing".to_owned(),
+                verified: false,
+                invalidated: false,
+            }];
+
+            let report = futures::executor::block_on(investigate_claim(
+                &mut claim,
+                &mut store,
+                &[Arc::new(TwoStepProvider)],
+                &ConservativeCrossReviewer,
+                &UnavailableVerifier { code },
+                &TwoStepPlanner,
+                InvestigationBudget::default(),
+            ));
+
+            assert_eq!(claim.supporters, original_supporters);
+            assert_eq!(claim.opponents, original_opponents);
+            assert_eq!(claim.unknowns, original_unknowns);
+            assert!(store.iter().any(|record| record.id == "ev_existing"));
+            assert_eq!(report.rounds.len(), 2);
+            assert!(!report.rounds[0].produced_new_evidence);
+            assert!(report.rounds[1].produced_new_evidence);
+            assert_eq!(report.jev_unavailable.len(), 2);
+            assert!(
+                report
+                    .jev_unavailable
+                    .iter()
+                    .all(|event| event.code == code)
+            );
+            assert_eq!(report.stop_reason, TerminalReason::Unresolvable);
+        }
+    }
+
+    #[test]
+    fn unavailable_dependency_is_an_attention_terminal_not_a_false_resolution() {
+        #[derive(Debug)]
+        struct MissingDependency;
+
+        impl EvidenceProvider for MissingDependency {
+            fn provider_id(&self) -> &'static str {
+                "missing"
+            }
+
+            fn can_handle(&self, _action: &InvestigationAction) -> bool {
+                true
+            }
+
+            fn investigate(
+                &self,
+                _action: &InvestigationAction,
+                _claim: &ClaimNode,
+            ) -> BoxFuture<'static, Result<Vec<FusionEvidenceRecord>, String>> {
+                Box::pin(async { Err("DEPENDENCY_UNAVAILABLE: test binary is missing".to_owned()) })
+            }
+        }
+
+        let mut claim = disputed();
+        let mut store = Vec::new();
+        let report = futures::executor::block_on(investigate_claim(
+            &mut claim,
+            &mut store,
+            &[Arc::new(MissingDependency)],
+            &ConservativeCrossReviewer,
+            &PolicyEvidenceVerifier,
+            &DefaultEvidencePlanner,
+            InvestigationBudget::default(),
+        ));
+
+        assert_eq!(report.stop_reason, TerminalReason::AttentionRequired);
+        assert_eq!(claim.state, ClaimState::Escalated);
+        assert!(
+            report
+                .rounds
+                .iter()
+                .any(|round| round.failure_reason.as_deref()
+                    == Some("DEPENDENCY_UNAVAILABLE: test binary is missing"))
+        );
+    }
+
+    #[test]
+    fn explicit_budget_can_stop_while_default_allows_every_planned_action() {
+        let mut unconstrained_claim = disputed();
+        let mut unconstrained_store = Vec::new();
+        let unconstrained = futures::executor::block_on(investigate_claim(
+            &mut unconstrained_claim,
+            &mut unconstrained_store,
+            &[Arc::new(TwoStepProvider)],
+            &ConservativeCrossReviewer,
+            &PolicyEvidenceVerifier,
+            &TwoStepPlanner,
+            InvestigationBudget::default(),
+        ));
+        assert_eq!(unconstrained.rounds.len(), 2);
+
+        let mut limited_claim = disputed();
+        let mut limited_store = Vec::new();
+        let limited = futures::executor::block_on(investigate_claim(
+            &mut limited_claim,
+            &mut limited_store,
+            &[Arc::new(TwoStepProvider)],
+            &ConservativeCrossReviewer,
+            &PolicyEvidenceVerifier,
+            &TwoStepPlanner,
+            InvestigationBudget {
+                max_llm_rounds_per_claim: None,
+                max_tool_escalation: Some(0),
+                max_test_attempts: None,
+            },
+        ));
+        assert!(limited.rounds.is_empty());
+        assert_eq!(limited.stop_reason, TerminalReason::BudgetExhausted);
+        assert_eq!(limited_claim.state, ClaimState::Escalated);
     }
 
     #[test]

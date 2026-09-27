@@ -195,9 +195,9 @@ impl DeviceModels {
 
     /// Drops a non-owned Device frame without pinning this Worker's queue.
     pub(crate) fn drop_chunk(&mut self, chunk: &ModelChunkMessage) {
-        self.chunks
-            .retain(|queued| queued.model_exchange_id != chunk.model_exchange_id
-                || queued.sequence != chunk.sequence);
+        self.chunks.retain(|queued| {
+            queued.model_exchange_id != chunk.model_exchange_id || queued.sequence != chunk.sequence
+        });
     }
 
     pub(crate) fn next_chunk(&mut self) -> Result<Option<ModelChunkMessage>, DeviceProviderError> {
@@ -381,10 +381,7 @@ mod tests {
                     &base64::engine::general_purpose::STANDARD,
                     payload_bytes,
                 ),
-                payload_digest: Sha256Digest(format!(
-                    "sha256:{:x}",
-                    Sha256::digest(payload_bytes)
-                )),
+                payload_digest: Sha256Digest(format!("sha256:{:x}", Sha256::digest(payload_bytes))),
             }),
             schema_version: SchemaVersion::WinwincodeV1,
             sent_at: Instant("2030-01-01T00:00:00.000Z".to_owned()),
@@ -466,22 +463,14 @@ mod tests {
                     &[
                         chunk(&owned_exchange, 1, false, &owned_wsn, &owned_wki),
                         chunk(&owned_exchange, 2, false, &owned_wsn, &owned_wki),
-                        chunk(
-                            &owned_exchange,
-                            3,
-                            true,
-                            &owned_wsn,
-                            &owned_wki,
-                        ),
+                        chunk(&owned_exchange, 3, true, &owned_wsn, &owned_wki),
                     ],
                 )
                 .expect("seed owned verification exchange");
         }
         let mut models = DeviceModels::open(&root).expect("open device models");
         models.note_worker_instance_id(&owned_wki);
-        models
-            .session_ids
-            .insert(owned_wsn.clone());
+        models.session_ids.insert(owned_wsn.clone());
         // Simulate the verification ModelOpen that marked ownership.
         models.owned_exchanges.insert(owned_exchange.clone());
 
@@ -493,10 +482,7 @@ mod tests {
             "recover must not re-queue foreign Device-store exchanges, got sequences {:?}",
             recovered
                 .iter()
-                .map(|chunk| (
-                    chunk.model_exchange_id.0.clone(),
-                    chunk.sequence.0
-                ))
+                .map(|chunk| (chunk.model_exchange_id.0.clone(), chunk.sequence.0))
                 .collect::<Vec<_>>()
         );
         assert_eq!(

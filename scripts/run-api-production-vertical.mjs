@@ -1269,7 +1269,7 @@ async function waitForServer(baseUrl, origin, child, errors, proof, timeoutMilli
     } catch {
       return false
     }
-  }, 'standalone Server health', Math.min(timeoutMillis, 30_000))
+  }, 'standalone Server health', timeoutMillis)
 }
 
 async function stopServer(child) {
@@ -1876,16 +1876,11 @@ export async function runApiProductionVertical({
     const result = spawnSync('cargo', [
       'build', '-p', 'winwincode-server', '--bin', 'winwincode-server',
       '-p', 'winwincode-kernel-helper', '--bin', 'winwincode-kernel-helper',
+      '-p', 'winwincode-cli', '--bin', 'wwc',
+      '-p', 'winwincode-worker', '--bin', 'winwincode-worker',
       '--locked', '--offline',
     ], { cwd: root, encoding: 'utf8', env: buildEnvironment, stdio: 'inherit' })
     assert.equal(result.status, 0, 'winwincode-server production binary build failed')
-    if (remoteWorkerBinary !== null) {
-      const workerResult = spawnSync('cargo', [
-        'build', '-p', 'winwincode-worker', '--bin', 'winwincode-worker',
-        '--locked', '--offline',
-      ], { cwd: root, encoding: 'utf8', env: buildEnvironment, stdio: 'inherit' })
-      assert.equal(workerResult.status, 0, 'winwincode-worker production binary build failed')
-    }
     // Prefer the freshly built compact helper; oversized development builds
     // still require release compilation to satisfy the signed helper boundary.
     const debugHelper = resolve(serverTargetDirectory(root), 'debug/winwincode-kernel-helper')

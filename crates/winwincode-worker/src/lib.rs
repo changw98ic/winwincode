@@ -26,6 +26,7 @@ pub mod snapshot_worktree;
 pub mod stage_product;
 pub mod validation_artifact;
 pub mod validation_diagnostics;
+pub mod verification_isolation;
 pub mod workspace_runtime;
 
 /// Canonical types used by deployment adapters that compose this Worker.
@@ -151,6 +152,7 @@ pub enum ActiveJobLifecycle {
 /// One exact active Job/lease/WorkerSession/CodexThread binding.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ActiveJob {
+    pub snapshot_id: Option<winwincode_domain::SnapshotId>,
     /// Immutable dispatched job.
     pub job: ExecutionJob,
     /// Current exact lease and fencing authority.
@@ -232,6 +234,7 @@ pub struct WorkerShutdownReport {
 
 #[derive(Debug, Clone)]
 struct DispatchRecord {
+    snapshot: Option<std::sync::Arc<winwincode_domain::Snapshot>>,
     run_key: CodexRunKey,
     job_digest: winwincode_domain::Sha256Digest,
     worker_session_id: WorkerSessionId,
@@ -431,13 +434,7 @@ where
         self
     }
 
-    fn log_model_intake(
-        &self,
-        stage: &str,
-        code: &str,
-        chunk: &ModelChunkMessage,
-        detail: &str,
-    ) {
+    fn log_model_intake(&self, stage: &str, code: &str, chunk: &ModelChunkMessage, detail: &str) {
         use std::io::Write as _;
 
         let exchange = chunk.model_exchange_id.0.as_str();
@@ -608,18 +605,20 @@ where
     /// pending.
     #[must_use]
     pub fn has_pending_durable_evidence(&mut self) -> bool {
-        self.codex.pending_execution_deliveries().is_ok_and(|pending| {
-            pending.iter().any(|delivery| {
-                matches!(
-                    delivery.message,
-                    ExecutionPortMessage::RuntimeEventMessage(_)
-                        | ExecutionPortMessage::ModelChunkMessage(_)
-                        | ExecutionPortMessage::JobOutcomeMessage(_)
-                        | ExecutionPortMessage::ArtifactChunkMessage(_)
-                        | ExecutionPortMessage::ArtifactOpenMessage(_)
-                )
+        self.codex
+            .pending_execution_deliveries()
+            .is_ok_and(|pending| {
+                pending.iter().any(|delivery| {
+                    matches!(
+                        delivery.message,
+                        ExecutionPortMessage::RuntimeEventMessage(_)
+                            | ExecutionPortMessage::ModelChunkMessage(_)
+                            | ExecutionPortMessage::JobOutcomeMessage(_)
+                            | ExecutionPortMessage::ArtifactChunkMessage(_)
+                            | ExecutionPortMessage::ArtifactOpenMessage(_)
+                    )
+                })
             })
-        })
     }
 
     /// Flushes every pending durable Worker→Server delivery on the existing
@@ -782,8 +781,7 @@ where
         {
             eprintln!(
                 "poll_codex durable flush best-effort failed exchange={} seq={}",
-                chunk.model_exchange_id.0,
-                chunk.sequence.0
+                chunk.model_exchange_id.0, chunk.sequence.0
             );
         }
         if self.flush_codex_execution_messages().await.is_err()
@@ -791,8 +789,7 @@ where
         {
             eprintln!(
                 "poll_codex core flush best-effort failed exchange={} seq={}",
-                chunk.model_exchange_id.0,
-                chunk.sequence.0
+                chunk.model_exchange_id.0, chunk.sequence.0
             );
         }
         Ok(())
@@ -828,7 +825,13 @@ where
                 // ledger while the Core has nowhere to deliver it.
                 self.flush_durable_execution_deliveries_with_core_replay(true)
                     .await?;
-                self.accept_dispatch(dispatch, now).await
+                Box::pin(self.accept_dispatch(dispatch, now)).await
+            }
+            ExecutionPortMessage::SnapshotFreezeRequestMessage(request) => {
+                Box::pin(self.accept_snapshot_freeze(request, now)).await
+            }
+            ExecutionPortMessage::SnapshotVerificationDispatchMessage(message) => {
+                Box::pin(self.accept_snapshot_dispatch(message, now)).await
             }
             ExecutionPortMessage::JobCancelMessage(cancel) => self.accept_cancel(cancel, now).await,
             ExecutionPortMessage::ArtifactAckMessage(acknowledgement) => {
@@ -893,20 +896,25 @@ where
         self.flush_durable_execution_deliveries().await?;
         self.heartbeat_sequence = self.heartbeat_sequence.saturating_add(1);
         let mut active_leases = self
-            .active
-            .values()
-            .map(|job| ActiveLeaseSummary {
-                attempt: job.lease.attempt,
-                expires_at: job.lease.expires_at.clone(),
-                fencing_token: job.lease.fencing_token.clone(),
-                job_id: job.job.job_id.clone(),
-                last_event_sequence: job.last_event_sequence.clone(),
-                lease_id: job.lease.lease_id.clone(),
+            .workspaces
+            .workspace_authorities()
+            .map(|authority| ActiveLeaseSummary {
+                attempt: i64::try_from(authority.attempt).unwrap_or(i64::MAX),
+                expires_at: authority.lease_expires_at.clone(),
+                fencing_token: authority.fencing_token.clone(),
+                job_id: authority.execution_job_id.clone(),
+                last_event_sequence: self
+                    .active
+                    .get(&authority.execution_job_id.0)
+                    .map_or(ExecutionAckSequence(0), |active| {
+                        active.last_event_sequence.clone()
+                    }),
+                lease_id: authority.lease_id.clone(),
             })
             .collect::<Vec<_>>();
         active_leases.sort_by(|left, right| left.job_id.0.cmp(&right.job_id.0));
         let max = self.config.capabilities.max_concurrent_jobs;
-        let running = i64::try_from(self.active.len()).unwrap_or(i64::MAX);
+        let running = i64::try_from(active_leases.len()).unwrap_or(i64::MAX);
         let heartbeat = WorkerHeartbeatMessage {
             active_leases,
             capacity: WorkerCapacity {
@@ -1011,7 +1019,10 @@ where
                     models.retry_chunk(chunk);
                 }
                 if std::env::var_os("WWC_WORKER_POLL_DEBUG").is_some() {
-                    eprintln!("poll_codex chunk failed exchange={exchange} seq={sequence}: {:?}", error.code);
+                    eprintln!(
+                        "poll_codex chunk failed exchange={exchange} seq={sequence}: {:?}",
+                        error.code
+                    );
                 }
                 return Err(error);
             }
@@ -1033,7 +1044,10 @@ where
             {
                 eprintln!("poll_codex durable flush failed; Core polls continue");
             }
-        } else if self.flush_recovered_durable_execution_deliveries().await.is_err()
+        } else if self
+            .flush_recovered_durable_execution_deliveries()
+            .await
+            .is_err()
             && std::env::var_os("WWC_WORKER_POLL_DEBUG").is_some()
         {
             eprintln!("poll_codex recovered durable flush failed; Core polls continue");
@@ -2644,6 +2658,71 @@ where
         Ok(())
     }
 
+    async fn accept_snapshot_freeze(
+        &mut self,
+        request: &winwincode_execution_port::generated::SnapshotFreezeRequestMessage,
+        now: Instant,
+    ) -> Result<(), WorkerError> {
+        if self.lifecycle != WorkerLifecycleState::Active {
+            return Err(worker_error(
+                WorkerErrorCode::InvalidLifecycle,
+                "freeze requires an active registered Worker",
+            ));
+        }
+        winwincode_execution_port::snapshot_freeze::validate_freeze_request(request)
+            .map_err(|reason| worker_error(WorkerErrorCode::InvalidDispatchAuthority, reason))?;
+        let dispatch = &request.dispatch;
+        if dispatch_authority_rejection(&self.config, dispatch, &now).is_some() {
+            return Err(worker_error(
+                WorkerErrorCode::InvalidDispatchAuthority,
+                "freeze lease is unavailable",
+            ));
+        }
+        if !self.workspaces.has_capacity_for(
+            &dispatch.job.job_id,
+            usize::try_from(self.config.capabilities.max_concurrent_jobs).unwrap_or(0),
+        ) {
+            return Err(worker_error(
+                WorkerErrorCode::InvalidLifecycle,
+                "Snapshot freeze has no Worker capacity",
+            ));
+        }
+        let (product_session_id, work_run_id) = scope_identity(&dispatch.job.scope);
+        let prepared = self.prepare_dispatch_workspace(
+            dispatch,
+            &CodexRunKey::from_dispatch(dispatch),
+            product_session_id,
+            work_run_id,
+            &now,
+        )?;
+        let response = self
+            .workspaces
+            .freeze_snapshot(&prepared.active, request, &now)
+            .await
+            .map_err(|_| workspace_error())?;
+        // The workspace recovery manifest retains this exact response before
+        // transport. Replaying the durable CP request recovers it after a crash.
+        self.send_execution_message(ExecutionPortMessage::SnapshotFreezeReceiptMessage(response))
+            .await
+    }
+
+    fn dispatch_snapshot_is_bound(
+        &self,
+        dispatch: &JobDispatchMessage,
+        existing: Option<&DispatchRecord>,
+    ) -> Result<bool, WorkerError> {
+        if existing.is_some_and(|record| {
+            record.snapshot.as_ref().is_some_and(|snapshot| {
+                dispatch.snapshot_id.as_ref() == Some(&snapshot.snapshot_id)
+            })
+        }) {
+            return Ok(true);
+        }
+        self.workspaces
+            .snapshot_dispatch_is_bound(dispatch)
+            .map_err(|_| workspace_error())
+    }
+
     async fn accept_dispatch(
         &mut self,
         dispatch: &JobDispatchMessage,
@@ -2656,9 +2735,9 @@ where
             ));
         }
         if let Some((status, error)) = dispatch_authority_rejection(&self.config, dispatch, &now) {
-            self.send_dispatch_result(dispatch, status, None, Some(error), now)
-                .await?;
-            return Ok(());
+            return self
+                .send_dispatch_result(dispatch, status, None, Some(error), now)
+                .await;
         }
         let run_key = CodexRunKey::from_dispatch(dispatch);
         let job_digest = winwincode_codex::stage_product::stage_product_job_digest(&dispatch.job)
@@ -2668,15 +2747,46 @@ where
                 "dispatch Job cannot be sealed for duplicate detection",
             )
         })?;
-        if let Some(record) = self.dispatches.get(&dispatch.job.job_id.0).cloned() {
-            let status = if record.run_key == run_key && record.job_digest == job_digest {
-                JobDispatchResultMessageStatus::Duplicate
-            } else {
-                JobDispatchResultMessageStatus::Conflict
-            };
-            self.send_dispatch_result(dispatch, status, Some(record.worker_session_id), None, now)
-                .await?;
-            return Ok(());
+        let existing = self.dispatches.get(&dispatch.job.job_id.0).cloned();
+        if let Some(record) = &existing
+            && (record.run_key != run_key || record.job_digest != job_digest)
+        {
+            return self
+                .send_dispatch_result(
+                    dispatch,
+                    JobDispatchResultMessageStatus::Conflict,
+                    Some(record.worker_session_id.clone()),
+                    None,
+                    now,
+                )
+                .await;
+        }
+        if matches!(
+            dispatch.job.execution_profile.as_str(),
+            "reviewer" | "verifier" | "adversarial-verifier"
+        ) && !self.dispatch_snapshot_is_bound(dispatch, existing.as_ref())?
+        {
+            return self
+                .reject_dispatch_failure(
+                    dispatch,
+                    JobDispatchResultMessageStatus::RejectedCapability,
+                    ExecutionPortErrorCode::CapabilityMismatch,
+                    "verification requires its committed Snapshot binding",
+                    false,
+                    now,
+                )
+                .await;
+        }
+        if let Some(record) = existing {
+            return self
+                .send_dispatch_result(
+                    dispatch,
+                    JobDispatchResultMessageStatus::Duplicate,
+                    Some(record.worker_session_id),
+                    None,
+                    now,
+                )
+                .await;
         }
         // Validate the complete WorkRun contract before creating a checkout or
         // opening a Codex thread.  The input is Controller-sealed authority,
@@ -2685,31 +2795,28 @@ where
         // failure after local resources have already been allocated.  Existing
         // Job IDs are handled above so changed replays remain conflicts.
         if winwincode_codex::stage_product::stage_product_prompt(&dispatch.job).is_err() {
-            self.send_dispatch_result(
-                dispatch,
-                JobDispatchResultMessageStatus::RejectedCapability,
-                None,
-                Some(port_error(
+            return self
+                .reject_dispatch_failure(
+                    dispatch,
+                    JobDispatchResultMessageStatus::RejectedCapability,
                     ExecutionPortErrorCode::CapabilityMismatch,
                     "dispatch WorkRun contract, workspace, or profile is invalid",
                     false,
-                )),
-                now,
-            )
-            .await?;
-            return Ok(());
+                    now,
+                )
+                .await;
         }
         let max = usize::try_from(self.config.capabilities.max_concurrent_jobs).unwrap_or(0);
-        if max == 0 || self.active.len() >= max {
-            self.send_dispatch_result(
-                dispatch,
-                JobDispatchResultMessageStatus::RejectedCapacity,
-                None,
-                None,
-                now,
-            )
-            .await?;
-            return Ok(());
+        if !self.workspaces.has_capacity_for(&dispatch.job.job_id, max) {
+            return self
+                .send_dispatch_result(
+                    dispatch,
+                    JobDispatchResultMessageStatus::RejectedCapacity,
+                    None,
+                    None,
+                    now,
+                )
+                .await;
         }
         let (product_session_id, work_run_id) = scope_identity(&dispatch.job.scope);
         self.start_dispatch(
@@ -2721,6 +2828,67 @@ where
             now,
         )
         .await
+    }
+
+    async fn accept_snapshot_dispatch(
+        &mut self,
+        message: &winwincode_execution_port::generated::SnapshotVerificationDispatchMessage,
+        now: Instant,
+    ) -> Result<(), WorkerError> {
+        let dispatch = &message.dispatch;
+        if self.lifecycle != WorkerLifecycleState::Active
+            || dispatch_authority_rejection(&self.config, dispatch, &now).is_some()
+            || !matches!(
+                dispatch.job.execution_profile.as_str(),
+                "reviewer" | "verifier" | "adversarial-verifier"
+            )
+        {
+            return Err(worker_error(
+                WorkerErrorCode::InvalidDispatchAuthority,
+                "Snapshot dispatch authority is unavailable",
+            ));
+        }
+        if let Some(snapshot) = self
+            .dispatches
+            .get(&dispatch.job.job_id.0)
+            .and_then(|record| record.snapshot.as_ref())
+        {
+            if snapshot.as_ref() != &message.snapshot
+                || dispatch.snapshot_id.as_ref() != Some(&snapshot.snapshot_id)
+            {
+                return Err(worker_error(
+                    WorkerErrorCode::InvalidDispatchAuthority,
+                    "Snapshot replay changed its accepted product identity",
+                ));
+            }
+            return self.accept_dispatch(dispatch, now).await;
+        }
+        let (session, run) = scope_identity(&dispatch.job.scope);
+        let prepared = self.prepare_dispatch_workspace(
+            dispatch,
+            &CodexRunKey::from_dispatch(dispatch),
+            session,
+            run,
+            &now,
+        )?;
+        let request = self
+            .workspaces
+            .bind_snapshot_dispatch(message)
+            .map_err(|_| workspace_error())?;
+        self.workspaces
+            .freeze_snapshot(&prepared.active, &request, &now)
+            .await
+            .map_err(|_| workspace_error())?;
+        self.accept_dispatch(dispatch, now).await?;
+        let job_digest = winwincode_codex::stage_product::stage_product_job_digest(&dispatch.job)
+            .map_err(|_| workspace_error())?;
+        if let Some(record) = self.dispatches.get_mut(&dispatch.job.job_id.0)
+            && record.run_key == CodexRunKey::from_dispatch(dispatch)
+            && record.job_digest == job_digest
+        {
+            record.snapshot = Some(std::sync::Arc::new(message.snapshot.clone()));
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_lines)]
@@ -2757,6 +2925,7 @@ where
         let thread_session = match self
             .codex
             .ensure_thread(CodexThreadStart {
+                snapshot_id: dispatch.snapshot_id.as_ref(),
                 run_key: &run_key,
                 worker_id: &self.config.worker_id,
                 job: &dispatch.job,
@@ -2866,13 +3035,15 @@ where
                 "test process stopped before submission intent",
             ));
         }
-        let submitted = match winwincode_codex::stage_product::stage_product_prompt(job) {
-            Ok(prompt) => match self.codex.submit_turn(thread_id, &prompt).await {
-                Ok(()) => true,
+        let snapshot_id = self
+            .active
+            .get(&job.job_id.0)
+            .and_then(|active| active.snapshot_id.as_ref());
+        let submitted =
+            match winwincode_codex::stage_product::snapshot_bound_prompt(job, snapshot_id) {
+                Ok(prompt) => self.codex.submit_turn(thread_id, &prompt).await.is_ok(),
                 Err(_error) => false,
-            },
-            Err(_error) => false,
-        };
+            };
         if let Some(record) = self.dispatches.get_mut(&job.job_id.0) {
             record.submission_started = true;
         }
@@ -2929,6 +3100,7 @@ where
             .canonical_thread_id()
             .map_err(|_| workspace_error())?;
         let active = ActiveJob {
+            snapshot_id: dispatch.snapshot_id.clone(),
             job: dispatch.job.clone(),
             lease: dispatch.lease.clone(),
             worker_session_id: worker_session_id.clone(),
@@ -2994,6 +3166,7 @@ where
         self.dispatches.insert(
             dispatch.job.job_id.0.clone(),
             DispatchRecord {
+                snapshot: None,
                 run_key,
                 job_digest,
                 worker_session_id: worker_session_id.clone(),
@@ -3018,7 +3191,7 @@ where
             return Err(error);
         }
         let binding = SessionBindingMessage {
-            snapshot_id: None,
+            snapshot_id: dispatch.snapshot_id.clone(),
             attempt: dispatch.job.attempt,
             bound_at: now.clone(),
             codex_thread_id: thread_id.clone(),
@@ -4765,6 +4938,7 @@ fn candidate_artifact_authority(
         candidate_artifact_error("writer logical Job cannot be sealed for candidate replay")
     })?;
     Ok(CandidateArtifactAuthority {
+        snapshot_id: active.snapshot_id.clone(),
         job_digest,
         logical_job_digest,
         execution_profile: active.job.execution_profile.clone(),

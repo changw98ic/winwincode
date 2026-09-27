@@ -1188,13 +1188,9 @@ fn cancel_staged_product_session(data_directory: &Path, user_id: &str, session: 
         organization_id: winwincode_domain::OrganizationId(
             "org_00000000000000000000000001".to_owned(),
         ),
-        workspace_id: winwincode_domain::WorkspaceId(
-            "wsp_00000000000000000000000001".to_owned(),
-        ),
+        workspace_id: winwincode_domain::WorkspaceId("wsp_00000000000000000000000001".to_owned()),
         project_id: winwincode_domain::ProjectId("prj_00000000000000000000000001".to_owned()),
-        repository_id: winwincode_domain::RepositoryId(
-            "rep_00000000000000000000000001".to_owned(),
-        ),
+        repository_id: winwincode_domain::RepositoryId("rep_00000000000000000000000001".to_owned()),
     };
     let scope_key = winwincode_storage::receipt_scope_key(&public_scope).expect("scope key");
     let public_actor = winwincode_storage::PublicEventActor::User {
@@ -1204,9 +1200,7 @@ fn cancel_staged_product_session(data_directory: &Path, user_id: &str, session: 
     let request_id = winwincode_domain::RequestId(format!("req_{:026}", session + 900));
     let context = ProductSessionCommandContext {
         receipt_identity: winwincode_storage::ReceiptIdentity::new(
-            actor_key,
-            scope_key,
-            request_id,
+            actor_key, scope_key, request_id,
         )
         .expect("receipt identity"),
         expected_revision: 1,
@@ -1303,8 +1297,7 @@ async fn live_worker_duplicate_start_maps_to_same_worker() {
     let running = start_server(&data_directory, &auth_directory).await;
     let address = running.local_address();
     let (cookie, user_id) = initialize_and_login_owner(address).await;
-    let (node, public_client_id, credential) =
-        enroll_online_device(address, &data_directory).await;
+    let (node, public_client_id, credential) = enroll_online_device(address, &data_directory).await;
     let code = publish_connect_code(&data_directory, &node, "77112233");
     consume_code_as(&data_directory, &node, &code, &user_id);
     let binding_id = stage_visible_binding(&data_directory, &node, &user_id);
@@ -1349,8 +1342,7 @@ async fn live_worker_duplicate_start_maps_to_same_worker() {
     assert_eq!(status_of(&repeated), "201", "{repeated}");
     let repeated_body = response_body(&repeated);
     assert_eq!(
-        repeated_body["workerSessionId"],
-        first["workerSessionId"],
+        repeated_body["workerSessionId"], first["workerSessionId"],
         "duplicate start on a live worker maps to the same worker"
     );
     assert_eq!(
@@ -1370,8 +1362,7 @@ async fn exited_worker_reopen_returns_restart_evidence_not_fake_start() {
     let running = start_server(&data_directory, &auth_directory).await;
     let address = running.local_address();
     let (cookie, user_id) = initialize_and_login_owner(address).await;
-    let (node, public_client_id, credential) =
-        enroll_online_device(address, &data_directory).await;
+    let (node, public_client_id, credential) = enroll_online_device(address, &data_directory).await;
     let code = publish_connect_code(&data_directory, &node, "77223344");
     consume_code_as(&data_directory, &node, &code, &user_id);
     let binding_id = stage_visible_binding(&data_directory, &node, &user_id);
@@ -1417,8 +1408,7 @@ async fn exited_worker_reopen_returns_restart_evidence_not_fake_start() {
     assert_eq!(status_of(&reopened), "201", "{reopened}");
     let restarted = response_body(&reopened);
     assert_ne!(
-        restarted["workerSessionId"],
-        first["workerSessionId"],
+        restarted["workerSessionId"], first["workerSessionId"],
         "restart-with-evidence must mint a new worker session, not fake-reuse the dead one"
     );
     assert_ne!(
@@ -1427,7 +1417,9 @@ async fn exited_worker_reopen_returns_restart_evidence_not_fake_start() {
     );
     let replacement = launch_grant(
         &data_directory,
-        restarted["workerLaunchGrantId"].as_str().expect("new grant"),
+        restarted["workerLaunchGrantId"]
+            .as_str()
+            .expect("new grant"),
     );
     assert_eq!(replacement.product_session_id, grant.product_session_id);
     assert_eq!(replacement.state, WorkerLaunchGrantState::Consumed);
@@ -1444,8 +1436,7 @@ async fn cancelled_product_session_reopen_is_wrong_state_not_fake_start() {
     let running = start_server(&data_directory, &auth_directory).await;
     let address = running.local_address();
     let (cookie, user_id) = initialize_and_login_owner(address).await;
-    let (node, public_client_id, credential) =
-        enroll_online_device(address, &data_directory).await;
+    let (node, public_client_id, credential) = enroll_online_device(address, &data_directory).await;
     let code = publish_connect_code(&data_directory, &node, "77334455");
     consume_code_as(&data_directory, &node, &code, &user_id);
     let binding_id = stage_visible_binding(&data_directory, &node, &user_id);
@@ -1498,8 +1489,7 @@ async fn cancelled_product_session_reopen_is_wrong_state_not_fake_start() {
             .expect("grant exists")
     };
     assert_eq!(
-        newest.worker_launch_grant_id,
-        first["workerLaunchGrantId"],
+        newest.worker_launch_grant_id, first["workerLaunchGrantId"],
         "cancelled reopen does not issue a replacement grant"
     );
     responder.abort();
@@ -1529,10 +1519,7 @@ fn release_prior_device_worker(
     )
     .expect("release command");
     bindings
-        .release(
-            &release,
-            &Instant("2026-09-04T12:06:00.000Z".to_owned()),
-        )
+        .release(&release, &Instant("2026-09-04T12:06:00.000Z".to_owned()))
         .expect("release prior worker");
 }
 
@@ -1543,8 +1530,7 @@ async fn occupancy_rewrite_with_still_bound_worker_does_not_restart() {
     let running = start_server(&data_directory, &auth_directory).await;
     let address = running.local_address();
     let (cookie, user_id) = initialize_and_login_owner(address).await;
-    let (node, public_client_id, credential) =
-        enroll_online_device(address, &data_directory).await;
+    let (node, public_client_id, credential) = enroll_online_device(address, &data_directory).await;
     let code = publish_connect_code(&data_directory, &node, "77445566");
     consume_code_as(&data_directory, &node, &code, &user_id);
     let binding_id = stage_visible_binding(&data_directory, &node, &user_id);
@@ -1611,13 +1597,14 @@ async fn occupancy_rewrite_with_still_bound_worker_does_not_restart() {
     assert_eq!(status_of(&restarted), "201", "{restarted}");
     let restarted = response_body(&restarted);
     assert_ne!(
-        restarted["workerSessionId"],
-        first["workerSessionId"],
+        restarted["workerSessionId"], first["workerSessionId"],
         "restart under the new occupancy mints a new worker"
     );
     let replacement = launch_grant(
         &data_directory,
-        restarted["workerLaunchGrantId"].as_str().expect("new grant"),
+        restarted["workerLaunchGrantId"]
+            .as_str()
+            .expect("new grant"),
     );
     assert_ne!(
         replacement.occupancy_lease_id, grant.occupancy_lease_id,

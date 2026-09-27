@@ -19,7 +19,7 @@
     "productionEnablementPolicy": "A domain unit test may create sealed fixtures through crate-private test support. Production candidate freeze, evidence resolution, verification settlement, verdict computation, and replacement-candidate acceptance remain unavailable until the owning adapters below produce the required sealed facts and pass their integration gates; a domain test is not proof that Git, an Artifact, a checkout, or a runtime event was actually verified.",
     "adapterDependencies": [
       {
-        "factType": "ValidatedGitSnapshotFact",
+        "factType": "SealedCandidateSource",
         "owner": "GitSnapshotResolver and Artifact adapter",
         "availability": "follow-up-adapter",
         "produces": "A sealed base/candidate commit-to-tree resolution, exact diff digest, changed paths, path object IDs, and pre/post verification or rework snapshots read from the exact Job workspace or immutable Artifact.",
@@ -110,18 +110,19 @@
       "candidate-facts-changed",
       "later-executing-or-reworking-writer-started"
     ],
-    "factSourcePolicy": "The phase 2.4 domain freezes only a sealed ValidatedGitSnapshotFact and matching VerifiedTerminalOutcome/ValidatedCheckoutAttestationFact. The owning adapters rebuild and attest those facts for the exact SessionBinding and successful Worker outcome; the domain checks their complete bindings and cannot itself read Git, a Worker workspace, or an Artifact. Format-valid caller strings or an unmatched Worker artifact are not candidate facts."
+    "factSourcePolicy": "The phase 2.4 domain freezes only a sealed SealedCandidateSource and matching VerifiedTerminalOutcome/ValidatedCheckoutAttestationFact. The owning adapters rebuild and attest those facts for the exact SessionBinding and successful Worker outcome; the domain checks their complete bindings and cannot itself read Git, a Worker workspace, or an Artifact. Format-valid caller strings or an unmatched Worker artifact are not candidate facts."
   },
   "evidence": {
     "persistedBindings": [
       "deliveryId",
       "deliverySpecId",
       "deliverySpecRevision",
-      "candidateRef",
       "workRunId",
       "sessionBindingId",
       "type",
-      "sourceRef"
+      "sourceRef",
+      "candidateId",
+      "snapshotId"
     ],
     "runtimeSourceIdentity": [
       "productSessionId",
@@ -228,7 +229,7 @@
       ],
       "rust": {
         "module": "domain/candidate.rs",
-        "testName": "candidate_requires_sealed_validated_git_snapshot"
+        "testName": "candidate_requires_sealed_candidate_source_fixture"
       }
     },
     {

@@ -121,6 +121,7 @@ impl TestAsset {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TestAssetManifest {
+    pub candidate_id: winwincode_domain::CandidateId,
     pub schema_version: u8,
     pub id: String,
     pub revision: u64,
@@ -151,6 +152,13 @@ impl TestAssetManifest {
                 TestAssetManifestErrorCode::InvalidValue,
                 "revision",
                 "manifest revision must be positive",
+            ));
+        }
+        if !winwincode_domain::is_canonical_prefixed_id(&self.candidate_id.0, "cnd_") {
+            return Err(manifest_error(
+                TestAssetManifestErrorCode::InvalidValue,
+                "candidateId",
+                "manifest CandidateId is invalid",
             ));
         }
         bounded_text(&self.candidate_ref, "candidateRef")?;
@@ -228,10 +236,10 @@ impl TestAssetManifest {
                 "only test EvidenceRef values can bind to TestAsset",
             ));
         }
-        if evidence.candidate_ref != self.candidate_ref {
+        if evidence.candidate_id != self.candidate_id {
             return Err(manifest_error(
                 TestAssetManifestErrorCode::EvidenceMismatch,
-                "evidence.candidateRef",
+                "evidence.candidateId",
                 "EvidenceRef belongs to another candidate",
             ));
         }
@@ -255,6 +263,8 @@ impl TestAssetManifest {
         }
 
         Ok(TestAssetEvidenceBinding {
+            candidate_id: evidence.candidate_id.clone(),
+            snapshot_id: evidence.snapshot_id.clone(),
             evidence_ref_id: evidence.id.clone(),
             candidate_ref: self.candidate_ref.clone(),
             manifest_ref,
@@ -278,6 +288,8 @@ pub struct TestAssetManifestRef {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TestAssetEvidenceBinding {
+    candidate_id: winwincode_domain::CandidateId,
+    snapshot_id: winwincode_domain::SnapshotId,
     evidence_ref_id: EvidenceId,
     candidate_ref: String,
     manifest_ref: TestAssetManifestRef,
@@ -341,7 +353,9 @@ impl TestAssetVerdictBinding {
         evidence: &[TestAssetEvidenceBinding],
     ) -> Result<Self, TestAssetManifestError> {
         let manifest_ref = manifest.artifact_ref()?;
-        if verdict.candidate_ref != manifest.candidate_ref {
+        if verdict.candidate_ref != manifest.candidate_ref
+            || verdict.candidate_id != manifest.candidate_id
+        {
             return Err(manifest_error(
                 TestAssetManifestErrorCode::VerdictMismatch,
                 "verdict.candidateRef",
@@ -365,6 +379,8 @@ impl TestAssetVerdictBinding {
         let mut unique = HashSet::with_capacity(evidence.len());
         for (index, binding) in evidence.iter().enumerate() {
             if binding.candidate_ref != manifest.candidate_ref
+                || binding.candidate_id != verdict.candidate_id
+                || binding.snapshot_id != verdict.snapshot_id
                 || binding.manifest_ref != manifest_ref
             {
                 return Err(manifest_error(

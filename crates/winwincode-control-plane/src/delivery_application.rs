@@ -928,12 +928,7 @@ impl ControlPlane {
         )?;
         let current = load_current_delivery(self.storage_ref()?, &command.payload.delivery_id)?;
         let authority = self.resolve_verdict_authority(&mapped, &current)?;
-        if authority
-            .candidate
-            .candidate_ref()
-            .strip_prefix("git-candidate:")
-            != Some(command.payload.candidate_digest.0.as_str())
-        {
+        if authority.candidate.candidate_digest() != &command.payload.candidate_digest {
             return Err(DeliveryApplicationError::TrustedFactsUnavailable(
                 "current candidate differs from the command stale-check digest".to_owned(),
             ));
@@ -1385,14 +1380,19 @@ fn controller_followup_is_safe(
     ) {
         return false;
     }
-    !delivery.snapshot().work_run_aggregate.runs.iter().any(|run| {
-        matches!(
-            run.state,
-            winwincode_domain::WorkRunState::Queued
-                | winwincode_domain::WorkRunState::Leased
-                | winwincode_domain::WorkRunState::Running
-        )
-    })
+    !delivery
+        .snapshot()
+        .work_run_aggregate
+        .runs
+        .iter()
+        .any(|run| {
+            matches!(
+                run.state,
+                winwincode_domain::WorkRunState::Queued
+                    | winwincode_domain::WorkRunState::Leased
+                    | winwincode_domain::WorkRunState::Running
+            )
+        })
 }
 
 fn load_current_delivery(
@@ -2025,15 +2025,7 @@ fn delivery_controller_candidate_digest(
             "Delivery Controller has no current candidate".to_owned(),
         )
     })?;
-    candidate
-        .candidate_ref()
-        .strip_prefix("git-candidate:")
-        .map(|digest| Sha256Digest(digest.to_owned()))
-        .ok_or_else(|| {
-            DeliveryApplicationError::TrustedFactsUnavailable(
-                "Delivery Controller candidate identity is invalid".to_owned(),
-            )
-        })
+    Ok(candidate.candidate_digest().clone())
 }
 
 fn delivery_controller_request_id(action: &str, job_id: &ExecutionJobId) -> RequestId {

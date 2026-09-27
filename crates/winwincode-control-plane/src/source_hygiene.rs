@@ -116,9 +116,29 @@ pub fn looks_like_real_source(content: &str) -> bool {
     }
     // TypeScript `function` does not contain `func ` (trailing space).
     [
-        "fn ", "def ", "func ", "function ", "class ", "struct ", "impl ", "public ",
-        "#include", "using ", "export ", "const ", "let ", "interface ", "type ",
-        "module ", "pub ", "package ", "import ", "namespace ", "void ", "int ", "std::",
+        "fn ",
+        "def ",
+        "func ",
+        "function ",
+        "class ",
+        "struct ",
+        "impl ",
+        "public ",
+        "#include",
+        "using ",
+        "export ",
+        "const ",
+        "let ",
+        "interface ",
+        "type ",
+        "module ",
+        "pub ",
+        "package ",
+        "import ",
+        "namespace ",
+        "void ",
+        "int ",
+        "std::",
     ]
     .iter()
     .any(|p| content.contains(p))
@@ -158,7 +178,10 @@ mod tests {
 
     #[test]
     fn protocol_body_is_invalid_json_object() {
-        assert_eq!(protocol_invalid_json_response(), "{\"error\":\"INVALID_JSON\"}");
+        assert_eq!(
+            protocol_invalid_json_response(),
+            "{\"error\":\"INVALID_JSON\"}"
+        );
     }
 
     #[test]
@@ -173,6 +196,9 @@ mod tests {
             "// padding padding padding padding padding padding padding\n",
         );
         assert!(src.len() >= 200);
-        assert!(looks_like_real_source(src), "ts function style must pass hygiene");
+        assert!(
+            looks_like_real_source(src),
+            "ts function style must pass hygiene"
+        );
     }
 }

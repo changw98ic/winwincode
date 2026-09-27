@@ -839,8 +839,7 @@ impl ExecutionPortModelBridge {
             .ordinal_store
             .load_model_call_frames(&owner.run_key, &owner.model_call_id)
             .map_err(model_frame_store_error)?;
-        let (exact_duplicate, contiguous_new) =
-            Self::frame_position(&persisted_frames, chunk);
+        let (exact_duplicate, contiguous_new) = Self::frame_position(&persisted_frames, chunk);
         if !process_exchange {
             // A Provider may retry a terminal frame after the Worker process
             // has released its live Core stream.  The durable frame ledger is
@@ -878,9 +877,7 @@ impl ExecutionPortModelBridge {
                 return Ok(ModelChunkDisposition::Delivered {
                     confirmed_sequence: u64::try_from(chunk.sequence.0)
                         .map_err(|_| BridgeError::InvalidPayload)?,
-                    termination: chunk
-                        .is_final
-                        .then_some(ModelTerminationReason::Completed),
+                    termination: chunk.is_final.then_some(ModelTerminationReason::Completed),
                 });
             }
             return Err(BridgeError::Conflict);
@@ -1685,8 +1682,7 @@ fn model_store_failure(error: crate::store::AdapterStoreError) -> ModelPortFailu
 /// Worker stderr redacts credentials; this path records only public envelope
 /// identities and `BridgeError` codes so verification-exchange resolve/authority
 /// failures remain inspectable after a run.
-static MODEL_INTAKE_LOG_PATH: std::sync::OnceLock<std::path::PathBuf> =
-    std::sync::OnceLock::new();
+static MODEL_INTAKE_LOG_PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
 /// Publishes the Worker-owned durable intake log path for model-bridge
 /// diagnostics. Idempotent; the first path wins.
@@ -1702,11 +1698,7 @@ fn model_intake_log_path() -> Option<std::path::PathBuf> {
         .or_else(|| std::env::var_os("WWC_MODEL_INTAKE_LOG").map(std::path::PathBuf::from))
 }
 
-pub(crate) fn log_model_intake_failure(
-    chunk: &ModelChunkMessage,
-    stage: &str,
-    error: BridgeError,
-) {
+pub(crate) fn log_model_intake_failure(chunk: &ModelChunkMessage, stage: &str, error: BridgeError) {
     use std::io::Write as _;
 
     let Some(path) = model_intake_log_path() else {
@@ -2439,6 +2431,7 @@ mod tests {
     /// Automatic second model call after `tool_result` must retain the full
     /// multi-frame Provider response even when the live Core sink is gone.
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn post_tool_second_call_multi_frame_path_is_durably_provider_final() {
         let root = std::env::temp_dir().join(format!(
             "winwincode-codex-post-tool-second-call-{}-{}",
@@ -2452,17 +2445,37 @@ mod tests {
         source
             .install(run_key, authority.clone())
             .expect("install post-tool root authority");
-        let bridge =
-            installed_loopback_bridge(&store, source, "post-tool", run_key, &authority, "kernel-post-tool");
+        let bridge = installed_loopback_bridge(
+            &store,
+            source,
+            "post-tool",
+            run_key,
+            &authority,
+            "kernel-post-tool",
+        );
 
         let first_call_id = "post-tool-call-1";
         let second_call_id = "post-tool-call-2";
         let first_exchange = ModelExchangeId(id("mdl", '1'));
         let second_exchange = ModelExchangeId(id("mdl", '2'));
-        let first_request = json!({"model": "loopback", "input": [{"role": "user", "content": "tool"}]});
-        let second_request = json!({"model": "loopback", "input": [{"role": "user", "content": "after-tool"}]});
-        claim_test_call(&store, run_key, first_call_id, &first_exchange, &first_request);
-        claim_test_call(&store, run_key, second_call_id, &second_exchange, &second_request);
+        let first_request =
+            json!({"model": "loopback", "input": [{"role": "user", "content": "tool"}]});
+        let second_request =
+            json!({"model": "loopback", "input": [{"role": "user", "content": "after-tool"}]});
+        claim_test_call(
+            &store,
+            run_key,
+            first_call_id,
+            &first_exchange,
+            &first_request,
+        );
+        claim_test_call(
+            &store,
+            run_key,
+            second_call_id,
+            &second_exchange,
+            &second_request,
+        );
 
         let first_open = test_open(&authority, first_call_id, &first_exchange, &first_request);
         let second_open = ModelOpenMessage {
@@ -2487,10 +2500,7 @@ mod tests {
                 .await
                 .expect("retain first-call frame");
             assert!(
-                matches!(
-                    disposition,
-                    ModelChunkDisposition::Delivered { .. }
-                ),
+                matches!(disposition, ModelChunkDisposition::Delivered { .. }),
                 "first call frame {sequence} must deliver"
             );
         }
@@ -2535,7 +2545,12 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 2, 3, 4, 5, 6]
         );
-        assert!(second_frames.last().expect("final second-call frame").is_final);
+        assert!(
+            second_frames
+                .last()
+                .expect("final second-call frame")
+                .is_final
+        );
         assert_eq!(
             store
                 .model_call_phase(run_key, second_call_id)

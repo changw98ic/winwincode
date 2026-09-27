@@ -33,7 +33,7 @@ use sha2::{Digest, Sha256};
 use winwincode_codex::stage_product::{
     VerificationEvidenceKind, VerificationEvidenceStatus, prepare_planner_solution_activity,
     prepare_verification_command_evidence, prepare_verification_policy_attestation,
-    prepare_verification_result_activity, stage_product_prompt,
+    prepare_verification_result_activity, snapshot_bound_prompt,
 };
 use winwincode_control_plane::RepositoryExecutionScheduler;
 use winwincode_domain::{
@@ -210,7 +210,7 @@ fn git(repository: &Path, arguments: &[&str]) {
     assert!(status.success(), "git command failed: {arguments:?}");
 }
 
-fn git_output(repository: &Path, arguments: &[&str]) -> String {
+fn git_bytes(repository: &Path, arguments: &[&str]) -> Vec<u8> {
     let output = Command::new("git")
         .arg("-C")
         .arg(repository)
@@ -221,7 +221,11 @@ fn git_output(repository: &Path, arguments: &[&str]) -> String {
         output.status.success(),
         "git output command failed: {arguments:?}"
     );
-    String::from_utf8(output.stdout)
+    output.stdout
+}
+
+fn git_output(repository: &Path, arguments: &[&str]) -> String {
+    String::from_utf8(git_bytes(repository, arguments))
         .expect("git output utf8")
         .trim()
         .to_owned()
@@ -270,6 +274,7 @@ struct SemanticEvent {
 #[derive(Clone, Debug)]
 struct Run {
     job: ExecutionJob,
+    snapshot_id: Option<winwincode_domain::SnapshotId>,
     lease: ExecutionLeaseStamp,
     worker_session_id: WorkerSessionId,
     session_identity: SessionIdentity,
@@ -307,7 +312,7 @@ impl ScriptedStageProductAdapter {
             .candidates
             .values()
             .next()
-            .map(|record| format!("git-candidate:{}", record.artifact.digest.0))
+            .map(|record| format!("refs/winwincode/candidates/{}", record.candidate_commit_id))
     }
 
     fn candidate_commit_id(&self) -> Option<String> {
@@ -549,6 +554,7 @@ impl CodexCoreAdapter for ScriptedStageProductAdapter {
                     thread_id.0.clone(),
                     Run {
                         job: start.job.clone(),
+                        snapshot_id: start.snapshot_id.cloned(),
                         lease: start.lease.clone(),
                         worker_session_id: start.worker_session_id.clone(),
                         session_identity: SessionIdentity {
@@ -597,7 +603,7 @@ impl CodexCoreAdapter for ScriptedStageProductAdapter {
                 .get(thread_id.0.as_str())
                 .cloned()
                 .ok_or(())?;
-            if stage_product_prompt(&run.job).map_err(|_| ())? != goal {
+            if snapshot_bound_prompt(&run.job, run.snapshot_id.as_ref()).map_err(|_| ())? != goal {
                 return Err(());
             }
             if run.job.execution_profile == "executor" {
@@ -1348,6 +1354,153 @@ fn replacement_request(
     }
 }
 
+async fn stage_dispatch_message(
+    fixture: &Fixture,
+    worker: &mut WorkerMain<RecordingPort, ScriptedStageProductAdapter>,
+    port: &RecordingPort,
+    adapter: &ScriptedStageProductAdapter,
+    mut dispatch: winwincode_execution_port::generated::JobDispatchMessage,
+    seed: u64,
+) -> ExecutionPortMessage {
+    use winwincode_domain::{Snapshot, SnapshotId, seal_snapshot};
+    use winwincode_execution_port::generated::{
+        SnapshotFreezeRequestMessage, SnapshotVerificationDispatchMessage,
+        SnapshotVerificationDispatchMessageKind,
+    };
+    if !matches!(
+        dispatch.job.execution_profile.as_str(),
+        "reviewer" | "verifier"
+    ) {
+        return ExecutionPortMessage::JobDispatchMessage(dispatch);
+    }
+    let record = adapter
+        .state
+        .lock()
+        .unwrap()
+        .candidates
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+    let ExecutionScope::WorkRunExecutionScope(producer) = &record.authority.scope else {
+        panic!("executor WorkRun");
+    };
+    let repository = fixture
+        .sources()
+        .join(&dispatch.job.workspace.repository_id.0);
+    let commit = &record.candidate_commit_id;
+    let tree = git_output(&repository, &["rev-parse", &format!("{commit}^{{tree}}")]);
+    let base_tree = git_output(
+        &repository,
+        &["rev-parse", &format!("{}^{{tree}}", fixture.revision)],
+    );
+    let diff = git_bytes(
+        &repository,
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--binary",
+            "--full-index",
+            &format!("{}..{commit}", fixture.revision),
+        ],
+    );
+    let mut content = Sha256::new();
+    for path in ["fixture.txt", "scheduler-stage-change.txt"] {
+        let bytes = git_bytes(&repository, &["show", &format!("{commit}:{path}")]);
+        for field in [path.as_bytes(), b"100644", &bytes] {
+            content.update(u64::try_from(field.len()).unwrap().to_be_bytes());
+            content.update(field);
+        }
+    }
+    let templates: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/contracts/execution-port.valid.json"
+    ))
+    .unwrap();
+    let mut freeze: SnapshotFreezeRequestMessage = serde_json::from_value(
+        templates["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["kind"] == "snapshot.freeze_request")
+            .unwrap()
+            .clone(),
+    )
+    .unwrap();
+    freeze.request_id = RequestId(id("req", 50_000 + seed));
+    freeze.message_id = ExecutionMessageId(frame_id("xmsg"));
+    freeze.candidate.id.0 = id("cnd", 2);
+    freeze.candidate.candidate_digest =
+        winwincode_domain::CandidateDigest(record.artifact.digest.0);
+    freeze.candidate.work_contract_id = producer.work_contract_id.clone();
+    freeze.candidate.contract_revision = producer.work_contract_revision.clone();
+    freeze.candidate.work_item_id = producer.work_item_id.clone();
+    freeze.candidate.work_run_id = producer.work_run_id.clone();
+    freeze.candidate.attempt = producer.attempt;
+    freeze.candidate.producer_worker_session_id = record.authority.worker_session_id;
+    freeze.candidate.base_commit = fixture.revision.clone();
+    freeze.candidate.candidate_commit = commit.clone();
+    freeze.candidate.candidate_tree = tree;
+    freeze.candidate.candidate_ref = format!("refs/winwincode/candidates/{commit}");
+    freeze.candidate.diff_digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(diff)));
+    freeze.base_tree_id.0 = base_tree;
+    freeze.repository_id = dispatch.job.workspace.repository_id.clone();
+    freeze.content_digest = Sha256Digest(format!("sha256:{:x}", content.finalize()));
+    freeze.dispatch = dispatch.clone();
+    freeze.lease = dispatch.lease.clone();
+    worker
+        .accept_control(
+            &ExecutionPortMessage::SnapshotFreezeRequestMessage(freeze.clone()),
+            at(9 + seed),
+        )
+        .await
+        .expect("freeze stage source");
+    assert!(
+        worker.active_jobs().is_empty(),
+        "freeze does not start Core"
+    );
+    let receipt = port
+        .messages()
+        .into_iter()
+        .find_map(|message| match message {
+            ExecutionPortMessage::SnapshotFreezeReceiptMessage(receipt)
+                if receipt.receipt.request_id == freeze.request_id =>
+            {
+                Some(receipt)
+            }
+            _ => None,
+        })
+        .expect("stage freeze receipt");
+    winwincode_execution_port::snapshot_freeze::validate_freeze_receipt(&freeze, &receipt).unwrap();
+    let receipt = receipt.receipt;
+    let mut snapshot = Snapshot {
+        schema_version: SchemaVersion::WinwincodeV1,
+        snapshot_id: SnapshotId(id("snap", 2)),
+        candidate_id: receipt.candidate_id,
+        work_run_id: receipt.work_run_id,
+        repository_id: receipt.repository_id,
+        base_commit_id: receipt.base_commit_id,
+        base_tree_id: receipt.base_tree_id,
+        candidate_commit_id: receipt.candidate_commit_id,
+        candidate_tree_id: receipt.candidate_tree_id,
+        diff_sha256: receipt.diff_sha256,
+        content_digest: receipt.content_digest,
+        created_at_millis: 2_145_916_800_000,
+        immutable: true,
+        validation_seal: Sha256Digest(String::new()),
+    };
+    snapshot.validation_seal = seal_snapshot(&snapshot);
+    dispatch.snapshot_id = Some(snapshot.snapshot_id.clone());
+    ExecutionPortMessage::SnapshotVerificationDispatchMessage(SnapshotVerificationDispatchMessage {
+        kind: SnapshotVerificationDispatchMessageKind::SnapshotVerify,
+        schema_version: SchemaVersion::WinwincodeV1,
+        message_id: dispatch.message_id.clone(),
+        sent_at: dispatch.sent_at.clone(),
+        dispatch,
+        snapshot,
+    })
+}
+
 fn output_since<T>(
     messages: &[ExecutionPortMessage],
     select: impl Fn(&ExecutionPortMessage) -> Option<T>,
@@ -1594,17 +1747,27 @@ fn scheduler_stage_product_roles_cancel_restart_and_old_attempt_are_exact() {
                 .expect("claim stage")
                 .expect("stage dispatch");
             let cursor = port.len();
+            let stage_message = stage_dispatch_message(
+                &fixture,
+                &mut worker,
+                &port,
+                &adapter,
+                dispatch.clone(),
+                seed,
+            )
+            .await;
             worker
-                .accept_control(
-                    &ExecutionPortMessage::JobDispatchMessage(dispatch.clone()),
-                    at(9 + seed),
-                )
+                .accept_control(&stage_message, at(9 + seed))
                 .await
                 .expect("accept stage dispatch");
             let messages = port.since(cursor);
             let result = dispatch_result_for(&messages);
+            assert_eq!(
+                result.status,
+                JobDispatchResultMessageStatus::Accepted,
+                "{role} dispatch: {result:?}"
+            );
             let binding = binding_for(&messages);
-            assert_eq!(result.status, JobDispatchResultMessageStatus::Accepted);
             assert_eq!(result.job_id, job.job_id);
             assert_eq!(result.lease, dispatch.lease);
             assert_eq!(result.payload_digest, job.payload_digest);
@@ -1638,6 +1801,28 @@ fn scheduler_stage_product_roles_cancel_restart_and_old_attempt_are_exact() {
             assert!(running.accepted);
             assert_eq!(running.job.state, ExecutionJobState::Running);
             let authority = open_slot(&mut storage, &binding, seed);
+            if matches!(role, "reviewer" | "verifier") {
+                let unbound_cursor = port.len();
+                worker
+                    .accept_control(
+                        &ExecutionPortMessage::JobDispatchMessage(dispatch.clone()),
+                        at(10 + seed),
+                    )
+                    .await
+                    .expect("reject unbound verification replay");
+                let unbound = port.since(unbound_cursor);
+                assert_eq!(
+                    dispatch_result_for(&unbound).status,
+                    JobDispatchResultMessageStatus::RejectedCapability
+                );
+                assert!(
+                    output_since(&unbound, |message| match message {
+                        ExecutionPortMessage::SessionBindingMessage(_) => Some(()),
+                        _ => None,
+                    })
+                    .is_empty()
+                );
+            }
             let outcome =
                 run_worker_until_outcome(&mut worker, &port, &job.job_id, at(12 + seed)).await;
             assert_eq!(outcome.lease, dispatch.lease);
@@ -1698,15 +1883,36 @@ fn scheduler_stage_product_roles_cancel_restart_and_old_attempt_are_exact() {
                 .expect("replay stage settlement");
             assert!(replay.replayed);
             settle_admission(&mut storage, &job, seed, false);
+            if let ExecutionPortMessage::SnapshotVerificationDispatchMessage(message) =
+                &stage_message
+            {
+                let before = port.len();
+                let mut changed = message.clone();
+                changed.snapshot.candidate_commit_id.0 = "f".repeat(40);
+                changed.snapshot.validation_seal =
+                    winwincode_domain::seal_snapshot(&changed.snapshot);
+                assert!(
+                    worker
+                        .accept_control(
+                            &ExecutionPortMessage::SnapshotVerificationDispatchMessage(changed),
+                            at(20 + seed)
+                        )
+                        .await
+                        .is_err()
+                );
+                assert_eq!(port.len(), before, "changed Snapshot replay has no output");
+                assert!(worker.active_jobs().is_empty());
+            }
             let duplicate_cursor = port.len();
             worker
-                .accept_control(
-                    &ExecutionPortMessage::JobDispatchMessage(dispatch.clone()),
-                    at(20 + seed),
-                )
+                .accept_control(&stage_message, at(20 + seed))
                 .await
                 .expect("replay dispatch");
             let duplicate_messages = port.since(duplicate_cursor);
+            assert_eq!(
+                dispatch_result_for(&duplicate_messages).status,
+                JobDispatchResultMessageStatus::Duplicate
+            );
             assert_eq!(
                 output_since(&duplicate_messages, |message| match message {
                     ExecutionPortMessage::JobDispatchResultMessage(result) => Some(result.clone()),

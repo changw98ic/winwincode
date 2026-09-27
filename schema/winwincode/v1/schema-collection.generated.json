@@ -1573,7 +1573,7 @@
           "$ref": "#/$defs/StrongFlowReadCursor"
         },
         "candidateRef": {
-          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$",
+          "pattern": "^refs/winwincode/candidates/(?:[0-9a-f]{40}|[0-9a-f]{64})$",
           "type": "string"
         },
         "candidateTreeId": {
@@ -1750,7 +1750,7 @@
           "$ref": "#/$defs/StrongFlowReadCursor"
         },
         "candidateRef": {
-          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$",
+          "pattern": "^refs/winwincode/candidates/(?:[0-9a-f]{40}|[0-9a-f]{64})$",
           "type": "string"
         },
         "candidateTreeId": {
@@ -1945,7 +1945,7 @@
           "$ref": "#/$defs/StrongFlowReadCursor"
         },
         "candidateRef": {
-          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$",
+          "pattern": "^refs/winwincode/candidates/(?:[0-9a-f]{40}|[0-9a-f]{64})$",
           "type": "string"
         },
         "candidateTreeId": {
@@ -2055,7 +2055,7 @@
           "$ref": "#/$defs/StrongFlowReadCursor"
         },
         "candidateRef": {
-          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$",
+          "pattern": "^refs/winwincode/candidates/(?:[0-9a-f]{40}|[0-9a-f]{64})$",
           "type": "string"
         },
         "candidateTreeId": {
@@ -6605,8 +6605,11 @@
         "candidateDigest": {
           "$ref": "#/$defs/Sha256Digest"
         },
+        "candidateId": {
+          "$ref": "#/$defs/CandidateId"
+        },
         "candidateRef": {
-          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$",
+          "pattern": "^refs/winwincode/candidates/(?:[0-9a-f]{40}|[0-9a-f]{64})$",
           "type": "string"
         },
         "candidateTreeId": {
@@ -6633,6 +6636,9 @@
           "minLength": 1,
           "type": "string"
         },
+        "snapshotId": {
+          "$ref": "#/$defs/SnapshotId"
+        },
         "workRunId": {
           "$ref": "#/$defs/WorkRunId"
         }
@@ -6647,7 +6653,9 @@
         "diffSha256",
         "workRunId",
         "attempt",
-        "sessionBindingId"
+        "sessionBindingId",
+        "candidateId",
+        "snapshotId"
       ],
       "type": "object"
     },
@@ -11563,9 +11571,8 @@
       "additionalProperties": false,
       "description": "Evidence stores a bounded source reference, never copied runtime logs or command output.",
       "properties": {
-        "candidateRef": {
-          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$",
-          "type": "string"
+        "candidateId": {
+          "$ref": "#/$defs/CandidateId"
         },
         "createdAt": {
           "$ref": "#/$defs/Instant"
@@ -11587,6 +11594,9 @@
           "minLength": 1,
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$",
           "type": "string"
+        },
+        "snapshotId": {
+          "$ref": "#/$defs/SnapshotId"
         },
         "sourceRef": {
           "maxLength": 1024,
@@ -11616,10 +11626,11 @@
         "deliverySpecRevision",
         "workRunId",
         "sessionBindingId",
-        "candidateRef",
         "type",
         "sourceRef",
-        "createdAt"
+        "createdAt",
+        "candidateId",
+        "snapshotId"
       ],
       "type": "object"
     },
@@ -12081,7 +12092,7 @@
           "$ref": "#/$defs/Sha256Digest"
         },
         "candidateRef": {
-          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$",
+          "pattern": "^refs/winwincode/candidates/(?:[0-9a-f]{40}|[0-9a-f]{64})$",
           "type": "string"
         },
         "diffSha256": {
@@ -12125,7 +12136,7 @@
       "description": "Exact requested subset of the current failed candidate. The Controller independently verifies WorkItem ownership, sealed Git hunks, current failed Evidence and durable rework history.",
       "properties": {
         "candidateRef": {
-          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$",
+          "pattern": "^refs/winwincode/candidates/(?:[0-9a-f]{40}|[0-9a-f]{64})$",
           "type": "string"
         },
         "diffSha256": {
@@ -12457,8 +12468,11 @@
     "DeliveryVerdictProjection": {
       "additionalProperties": false,
       "properties": {
+        "candidateId": {
+          "$ref": "#/$defs/CandidateId"
+        },
         "candidateRef": {
-          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$",
+          "pattern": "^refs/winwincode/candidates/(?:[0-9a-f]{40}|[0-9a-f]{64})$",
           "type": "string"
         },
         "criteria": {
@@ -12487,6 +12501,9 @@
         "producedAt": {
           "$ref": "#/$defs/Instant"
         },
+        "snapshotId": {
+          "$ref": "#/$defs/SnapshotId"
+        },
         "status": {
           "enum": [
             "pass",
@@ -12514,7 +12531,9 @@
         "status",
         "criteria",
         "unresolvedFindings",
-        "producedAt"
+        "producedAt",
+        "candidateId",
+        "snapshotId"
       ],
       "type": "object"
     },
@@ -13382,11 +13401,19 @@
     "Evidence": {
       "additionalProperties": false,
       "properties": {
-        "candidateDigest": {
-          "$ref": "#/$defs/CandidateDigest"
+        "attempt": {
+          "maximum": 1000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "candidateId": {
+          "$ref": "#/$defs/CandidateId"
         },
         "contractRevision": {
           "$ref": "#/$defs/Revision"
+        },
+        "createdAt": {
+          "$ref": "#/$defs/Instant"
         },
         "criterionId": {
           "$ref": "#/$defs/CriterionId"
@@ -13422,6 +13449,12 @@
         "schemaVersion": {
           "$ref": "#/$defs/SchemaVersion"
         },
+        "sessionIdentity": {
+          "$ref": "#/$defs/SessionIdentity"
+        },
+        "snapshotId": {
+          "$ref": "#/$defs/SnapshotId"
+        },
         "sourceEventId": {
           "maxLength": 256,
           "minLength": 1,
@@ -13434,6 +13467,9 @@
         },
         "verificationPlanId": {
           "$ref": "#/$defs/VerificationPlanId"
+        },
+        "verificationSessionId": {
+          "$ref": "#/$defs/VerificationSessionId"
         },
         "workContractId": {
           "$ref": "#/$defs/WorkContractId"
@@ -13448,14 +13484,19 @@
       "required": [
         "schemaVersion",
         "id",
+        "snapshotId",
+        "candidateId",
+        "workRunId",
+        "verificationPlanId",
+        "verificationSessionId",
+        "attempt",
+        "sessionIdentity",
+        "createdAt",
         "workContractId",
         "contractRevision",
-        "verificationPlanId",
         "planRevision",
         "criterionId",
         "workItemId",
-        "workRunId",
-        "candidateDigest",
         "producer",
         "producerExecutionIdentity",
         "sourceEventId",
@@ -13810,9 +13851,8 @@
       "additionalProperties": false,
       "description": "Public provenance only. Worker, lease, fence, object key, path, and credential facts stay server-owned.",
       "properties": {
-        "candidateRef": {
-          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$",
-          "type": "string"
+        "candidateId": {
+          "$ref": "#/$defs/CandidateId"
         },
         "deliveryId": {
           "$ref": "#/$defs/DeliveryId"
@@ -13829,6 +13869,9 @@
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$",
           "type": "string"
         },
+        "snapshotId": {
+          "$ref": "#/$defs/SnapshotId"
+        },
         "workRunId": {
           "$ref": "#/$defs/WorkRunId"
         }
@@ -13838,8 +13881,9 @@
         "deliveryRevision",
         "workRunId",
         "sessionBindingId",
-        "candidateRef",
-        "evidenceId"
+        "evidenceId",
+        "candidateId",
+        "snapshotId"
       ],
       "type": "object"
     },
@@ -13987,9 +14031,8 @@
         "atCursor": {
           "$ref": "#/$defs/StrongFlowReadCursor"
         },
-        "candidateRef": {
-          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$",
-          "type": "string"
+        "candidateId": {
+          "$ref": "#/$defs/CandidateId"
         },
         "deliveryId": {
           "$ref": "#/$defs/DeliveryId"
@@ -14008,6 +14051,9 @@
           "minLength": 1,
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$",
           "type": "string"
+        },
+        "snapshotId": {
+          "$ref": "#/$defs/SnapshotId"
         },
         "sourceRef": {
           "maxLength": 1024,
@@ -14036,11 +14082,12 @@
         "atCursor",
         "readPageLimit",
         "evidenceId",
-        "candidateRef",
         "workRunId",
         "sessionBindingId",
         "type",
-        "sourceRef"
+        "sourceRef",
+        "candidateId",
+        "snapshotId"
       ],
       "type": "object"
     },
@@ -14584,6 +14631,8 @@
         "SEQUENCE_GAP",
         "MESSAGE_CONFLICT",
         "ARTIFACT_DIGEST_MISMATCH",
+        "SNAPSHOT_BINDING_MISSING",
+        "SNAPSHOT_BINDING_MISMATCH",
         "MODEL_STREAM_FAILED",
         "INPUT_CLOSED",
         "APPROVAL_DENIED",
@@ -14679,6 +14728,15 @@
         },
         {
           "$ref": "#/$defs/ActionEnforcementReceiptMessage"
+        },
+        {
+          "$ref": "#/$defs/SnapshotFreezeRequestMessage"
+        },
+        {
+          "$ref": "#/$defs/SnapshotFreezeReceiptMessage"
+        },
+        {
+          "$ref": "#/$defs/SnapshotVerificationDispatchMessage"
         }
       ],
       "title": "ExecutionPortMessage"
@@ -14803,8 +14861,14 @@
           "pattern": "^[0-9a-f]{40,64}$",
           "type": "string"
         },
+        "candidateDigest": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "candidateId": {
+          "$ref": "#/$defs/CandidateId"
+        },
         "candidateRef": {
-          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$",
+          "pattern": "^refs/winwincode/candidates/(?:[0-9a-f]{40}|[0-9a-f]{64})$",
           "type": "string"
         },
         "candidateTreeId": {
@@ -14845,7 +14909,9 @@
         "candidateCommitId",
         "candidateTreeId",
         "diffSha256",
-        "frozenAt"
+        "frozenAt",
+        "candidateId",
+        "candidateDigest"
       ],
       "type": "object"
     },
@@ -14859,6 +14925,11 @@
       "maxLength": 140,
       "minLength": 3,
       "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?/[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9._-])?$",
+      "type": "string"
+    },
+    "GitObjectId": {
+      "description": "Exact SHA-1 or SHA-256 Git object identity.",
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
       "type": "string"
     },
     "GitRefName": {
@@ -20448,7 +20519,7 @@
           "$ref": "#/$defs/ActorId"
         },
         "candidateRef": {
-          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$",
+          "pattern": "^refs/winwincode/candidates/(?:[0-9a-f]{40}|[0-9a-f]{64})$",
           "type": "string"
         },
         "deliveryId": {
@@ -23818,32 +23889,25 @@
       "additionalProperties": false,
       "properties": {
         "baseCommitId": {
-          "maxLength": 64,
-          "minLength": 40,
-          "type": "string"
+          "$ref": "#/$defs/GitObjectId"
         },
         "baseTreeId": {
-          "maxLength": 64,
-          "minLength": 40,
-          "type": "string"
+          "$ref": "#/$defs/GitObjectId"
         },
         "candidateCommitId": {
-          "maxLength": 64,
-          "minLength": 40,
-          "type": "string"
+          "$ref": "#/$defs/GitObjectId"
         },
         "candidateId": {
           "$ref": "#/$defs/CandidateId"
         },
         "candidateTreeId": {
-          "maxLength": 64,
-          "minLength": 40,
-          "type": "string"
+          "$ref": "#/$defs/GitObjectId"
         },
         "contentDigest": {
           "$ref": "#/$defs/Sha256Digest"
         },
         "createdAtMillis": {
+          "maximum": 9007199254740991,
           "minimum": 0,
           "type": "integer"
         },
@@ -23857,18 +23921,21 @@
         "repositoryId": {
           "$ref": "#/$defs/RepositoryId"
         },
+        "schemaVersion": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
         "snapshotId": {
           "$ref": "#/$defs/SnapshotId"
         },
         "validationSeal": {
-          "pattern": "^sha256:[0-9a-f]{64}$",
-          "type": "string"
+          "$ref": "#/$defs/Sha256Digest"
         },
         "workRunId": {
           "$ref": "#/$defs/WorkRunId"
         }
       },
       "required": [
+        "schemaVersion",
         "snapshotId",
         "candidateId",
         "workRunId",
@@ -23885,10 +23952,228 @@
       ],
       "type": "object"
     },
+    "SnapshotFreezeReceipt": {
+      "additionalProperties": false,
+      "description": "Worker-owned exact execution fact for one freeze request. Control Plane validates the Candidate and receipt, then allocates the product SnapshotId; workers cannot allocate or carry that identity.",
+      "properties": {
+        "attempt": {
+          "maximum": 1000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "baseCommitId": {
+          "$ref": "#/$defs/GitObjectId"
+        },
+        "baseTreeId": {
+          "$ref": "#/$defs/GitObjectId"
+        },
+        "candidateCommitId": {
+          "$ref": "#/$defs/GitObjectId"
+        },
+        "candidateId": {
+          "$ref": "#/$defs/CandidateId"
+        },
+        "candidateTreeId": {
+          "$ref": "#/$defs/GitObjectId"
+        },
+        "contentDigest": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "diffSha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "fencingToken": {
+          "$ref": "#/$defs/FencingToken"
+        },
+        "frozenAt": {
+          "$ref": "#/$defs/Instant"
+        },
+        "leaseId": {
+          "$ref": "#/$defs/LeaseId"
+        },
+        "receiptId": {
+          "$ref": "#/$defs/RequestId"
+        },
+        "repositoryId": {
+          "$ref": "#/$defs/RepositoryId"
+        },
+        "requestId": {
+          "$ref": "#/$defs/RequestId"
+        },
+        "schemaVersion": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
+        "validationSeal": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "workerId": {
+          "$ref": "#/$defs/WorkerId"
+        },
+        "workerInstanceId": {
+          "$ref": "#/$defs/WorkerInstanceId"
+        },
+        "workRunId": {
+          "$ref": "#/$defs/WorkRunId"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "receiptId",
+        "requestId",
+        "candidateId",
+        "workRunId",
+        "workerId",
+        "workerInstanceId",
+        "leaseId",
+        "attempt",
+        "fencingToken",
+        "repositoryId",
+        "baseCommitId",
+        "baseTreeId",
+        "candidateCommitId",
+        "candidateTreeId",
+        "diffSha256",
+        "contentDigest",
+        "validationSeal",
+        "frozenAt"
+      ],
+      "title": "snapshot.freeze_receipt",
+      "type": "object",
+      "x-authority": "lease-write",
+      "x-direction": "worker-to-control-plane"
+    },
+    "SnapshotFreezeReceiptMessage": {
+      "additionalProperties": false,
+      "description": "Returns exact Worker freeze facts for one durable Control Plane request.",
+      "properties": {
+        "kind": {
+          "const": "snapshot.freeze_receipt"
+        },
+        "lease": {
+          "$ref": "#/$defs/ExecutionLeaseStamp"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ExecutionMessageId"
+        },
+        "receipt": {
+          "$ref": "#/$defs/SnapshotFreezeReceipt"
+        },
+        "schemaVersion": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
+        "sentAt": {
+          "$ref": "#/$defs/Instant"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "sentAt",
+        "receipt",
+        "lease"
+      ],
+      "title": "snapshot.freeze_receipt",
+      "type": "object",
+      "x-authority": "lease-write",
+      "x-direction": "worker-to-control-plane"
+    },
+    "SnapshotFreezeRequestMessage": {
+      "additionalProperties": false,
+      "description": "Materializes and protects one sealed Candidate for the exact planned dispatch, without starting execution. Control Plane allocates Snapshot identity after receipt acceptance.",
+      "properties": {
+        "baseTreeId": {
+          "$ref": "#/$defs/GitObjectId"
+        },
+        "candidate": {
+          "$ref": "#/$defs/Candidate"
+        },
+        "contentDigest": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "dispatch": {
+          "$ref": "#/$defs/JobDispatchMessage"
+        },
+        "kind": {
+          "const": "snapshot.freeze_request"
+        },
+        "lease": {
+          "$ref": "#/$defs/ExecutionLeaseStamp"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ExecutionMessageId"
+        },
+        "repositoryId": {
+          "$ref": "#/$defs/RepositoryId"
+        },
+        "requestId": {
+          "$ref": "#/$defs/RequestId"
+        },
+        "schemaVersion": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
+        "sentAt": {
+          "$ref": "#/$defs/Instant"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "sentAt",
+        "requestId",
+        "candidate",
+        "repositoryId",
+        "lease",
+        "baseTreeId",
+        "contentDigest",
+        "dispatch"
+      ],
+      "title": "snapshot.freeze_request",
+      "type": "object",
+      "x-authority": "control-command",
+      "x-direction": "control-plane-to-worker"
+    },
     "SnapshotId": {
       "description": "Canonical ULID for one immutable code snapshot under verification.",
       "pattern": "^snap_[0-9A-HJKMNP-TV-Z]{26}$",
       "type": "string"
+    },
+    "SnapshotVerificationDispatchMessage": {
+      "additionalProperties": false,
+      "description": "Starts the exact planned verification only after Control Plane has committed this canonical Snapshot and binding.",
+      "properties": {
+        "dispatch": {
+          "$ref": "#/$defs/JobDispatchMessage"
+        },
+        "kind": {
+          "const": "snapshot.verify"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ExecutionMessageId"
+        },
+        "schemaVersion": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
+        "sentAt": {
+          "$ref": "#/$defs/Instant"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/Snapshot"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "sentAt",
+        "dispatch",
+        "snapshot"
+      ],
+      "title": "snapshot.verify",
+      "type": "object",
+      "x-authority": "control-command",
+      "x-direction": "control-plane-to-worker"
     },
     "SolutionReviewComponentProjection": {
       "additionalProperties": false,
@@ -25840,11 +26125,19 @@
     "Verdict": {
       "additionalProperties": false,
       "properties": {
-        "candidateDigest": {
-          "$ref": "#/$defs/CandidateDigest"
+        "attempt": {
+          "maximum": 1000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "candidateId": {
+          "$ref": "#/$defs/CandidateId"
         },
         "contractRevision": {
           "$ref": "#/$defs/Revision"
+        },
+        "createdAt": {
+          "$ref": "#/$defs/Instant"
         },
         "evidenceIds": {
           "items": {
@@ -25856,8 +26149,7 @@
           "uniqueItems": true
         },
         "id": {
-          "pattern": "^vdt_[0-9A-HJKMNP-TV-Z]{26}$",
-          "type": "string"
+          "$ref": "#/$defs/VerdictId"
         },
         "planRevision": {
           "$ref": "#/$defs/Revision"
@@ -25867,6 +26159,12 @@
         },
         "schemaVersion": {
           "$ref": "#/$defs/SchemaVersion"
+        },
+        "sessionIdentity": {
+          "$ref": "#/$defs/SessionIdentity"
+        },
+        "snapshotId": {
+          "$ref": "#/$defs/SnapshotId"
         },
         "status": {
           "enum": [
@@ -25880,27 +26178,43 @@
         "verificationPlanId": {
           "$ref": "#/$defs/VerificationPlanId"
         },
+        "verificationSessionId": {
+          "$ref": "#/$defs/VerificationSessionId"
+        },
         "workContractId": {
           "$ref": "#/$defs/WorkContractId"
         },
         "workItemId": {
           "$ref": "#/$defs/WorkItemId"
+        },
+        "workRunId": {
+          "$ref": "#/$defs/WorkRunId"
         }
       },
       "required": [
         "schemaVersion",
         "id",
+        "snapshotId",
+        "candidateId",
+        "workRunId",
+        "verificationPlanId",
+        "verificationSessionId",
+        "attempt",
+        "sessionIdentity",
+        "createdAt",
         "workContractId",
         "contractRevision",
-        "verificationPlanId",
         "planRevision",
         "workItemId",
-        "candidateDigest",
         "status",
         "evidenceIds",
         "revision"
       ],
       "type": "object"
+    },
+    "VerdictId": {
+      "pattern": "^vdt_[0-9A-HJKMNP-TV-Z]{26}$",
+      "type": "string"
     },
     "VerificationPlan": {
       "additionalProperties": false,
@@ -25991,6 +26305,134 @@
     },
     "VerificationPlanId": {
       "pattern": "^vpl_[0-9A-HJKMNP-TV-Z]{26}$",
+      "type": "string"
+    },
+    "VerificationSession": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt": {
+          "maximum": 1000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "candidateId": {
+          "$ref": "#/$defs/CandidateId"
+        },
+        "createdAt": {
+          "$ref": "#/$defs/Instant"
+        },
+        "id": {
+          "$ref": "#/$defs/VerificationSessionId"
+        },
+        "schemaVersion": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
+        "sessionIdentity": {
+          "$ref": "#/$defs/SessionIdentity"
+        },
+        "snapshotId": {
+          "$ref": "#/$defs/SnapshotId"
+        },
+        "verificationPlanId": {
+          "$ref": "#/$defs/VerificationPlanId"
+        },
+        "verificationSessionId": {
+          "$ref": "#/$defs/VerificationSessionId"
+        },
+        "workRunId": {
+          "$ref": "#/$defs/WorkRunId"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "id",
+        "snapshotId",
+        "candidateId",
+        "workRunId",
+        "verificationPlanId",
+        "verificationSessionId",
+        "attempt",
+        "sessionIdentity",
+        "createdAt"
+      ],
+      "type": "object"
+    },
+    "VerificationSessionId": {
+      "pattern": "^vsn_[0-9A-HJKMNP-TV-Z]{26}$",
+      "type": "string"
+    },
+    "VerifierResult": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt": {
+          "maximum": 1000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "candidateId": {
+          "$ref": "#/$defs/CandidateId"
+        },
+        "createdAt": {
+          "$ref": "#/$defs/Instant"
+        },
+        "evidenceIds": {
+          "items": {
+            "$ref": "#/$defs/EvidenceId"
+          },
+          "maxItems": 100,
+          "minItems": 0,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "id": {
+          "$ref": "#/$defs/VerifierResultId"
+        },
+        "schemaVersion": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
+        "sessionIdentity": {
+          "$ref": "#/$defs/SessionIdentity"
+        },
+        "snapshotId": {
+          "$ref": "#/$defs/SnapshotId"
+        },
+        "status": {
+          "enum": [
+            "pass",
+            "fail",
+            "inconclusive",
+            "infra_error"
+          ],
+          "type": "string"
+        },
+        "verificationPlanId": {
+          "$ref": "#/$defs/VerificationPlanId"
+        },
+        "verificationSessionId": {
+          "$ref": "#/$defs/VerificationSessionId"
+        },
+        "workRunId": {
+          "$ref": "#/$defs/WorkRunId"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "id",
+        "snapshotId",
+        "candidateId",
+        "workRunId",
+        "verificationPlanId",
+        "verificationSessionId",
+        "attempt",
+        "sessionIdentity",
+        "createdAt",
+        "evidenceIds",
+        "status"
+      ],
+      "type": "object"
+    },
+    "VerifierResultId": {
+      "pattern": "^vrs_[0-9A-HJKMNP-TV-Z]{26}$",
       "type": "string"
     },
     "WorkContract": {
@@ -27573,7 +28015,7 @@
       "additionalProperties": false,
       "properties": {
         "candidateRef": {
-          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$",
+          "pattern": "^refs/winwincode/candidates/(?:[0-9a-f]{40}|[0-9a-f]{64})$",
           "type": "string"
         },
         "deliverySpecId": {
@@ -27758,7 +28200,7 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:a576c59a24049135b466ff51a465e6a195fe0ead6a88f1ab4689e38f3482f7ce",
+  "x-source-digest": "sha256:acc233729685e6be6f9234ff369616e3acff79653db292788482d5f6cf210fd4",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {

@@ -23,6 +23,7 @@ import { chmodSync, openSync, readFileSync, writeFileSync } from 'node:fs'
 import { createServer as createHttpsServer } from 'node:https'
 import { createServer as createNetServer } from 'node:net'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 
 /** Server environment keys that encode the removed Server-local model path. */
 export const FORBIDDEN_SERVER_MODEL_ENVIRONMENT_KEYS = Object.freeze([
@@ -160,13 +161,6 @@ async function freeLoopbackPort() {
   await new Promise(resolvePromise => server.close(resolvePromise))
   assert.ok(port > 0, 'Device model fixture port must be positive')
   return port
-}
-
-function containsValueWithType(value, expected) {
-  if (Array.isArray(value)) return value.some(item => containsValueWithType(item, expected))
-  if (value === null || typeof value !== 'object') return false
-  if (value.type === expected) return true
-  return Object.values(value).some(item => containsValueWithType(item, expected))
 }
 
 function findTextValue(value, needle) {
@@ -327,24 +321,32 @@ export function workInputFromRequest(request) {
   }
 }
 
-export function resolveVerificationObservation(providerRequest) {
-  const primary = findToolOutput(providerRequest, DETERMINISTIC_VERIFICATION_CALL_ID)
-  const poll = findToolOutput(providerRequest, DETERMINISTIC_VERIFICATION_POLL_CALL_ID)
-  const primaryExit = primary === null ? null : parseProcessExitCode(toolOutputText(primary))
-  const pollExit = poll === null ? null : parseProcessExitCode(toolOutputText(poll))
-  if (pollExit !== null) {
-    return { exitCode: pollExit, evidenceSourceId: DETERMINISTIC_VERIFICATION_POLL_CALL_ID, hasToolOutput: true }
+export function observeToolProcess(providerRequest, callId) {
+  let output = findToolOutput(providerRequest, callId)
+  let pollIndex = 1
+  let nextCallId = `${callId}-poll`
+  for (;;) {
+    const poll = findToolOutput(providerRequest, nextCallId)
+    if (poll === null) break
+    output = poll
+    pollIndex += 1
+    nextCallId = `${callId}-poll-${pollIndex}`
   }
-  if (primaryExit !== null) {
-    return { exitCode: primaryExit, evidenceSourceId: DETERMINISTIC_VERIFICATION_CALL_ID, hasToolOutput: true }
-  }
+  const text = toolOutputText(output)
+  const exitCode = parseProcessExitCode(text)
+  const session = text?.match(/^Process running with session ID (\d+)\s*$/mu)
+  const sessionId = session ? Number(session[1]) : null
   return {
-    exitCode: null,
-    evidenceSourceId: primary !== null || poll !== null
-      ? (poll !== null ? DETERMINISTIC_VERIFICATION_POLL_CALL_ID : DETERMINISTIC_VERIFICATION_CALL_ID)
-      : null,
-    hasToolOutput: primary !== null || poll !== null,
+    exitCode,
+    sessionId: Number.isSafeInteger(sessionId) ? sessionId : null,
+    nextCallId,
+    evidenceSourceId: output === null ? null : callId,
+    hasToolOutput: output !== null,
   }
+}
+
+export function resolveVerificationObservation(providerRequest) {
+  return observeToolProcess(providerRequest, DETERMINISTIC_VERIFICATION_CALL_ID)
 }
 
 function deterministicPlannerProduct(criterionIds) {
@@ -470,7 +472,7 @@ export function startDeterministicDeviceModelServer({
           planner: bodyText.includes(DETERMINISTIC_PLANNER_PROTOCOL),
           hasToolOutput: /function_call_output|custom_tool_call_output|tool_result/u.test(bodyText),
         })
-        const shellTool = providerRequest.tools?.find(tool => (
+        let shellTool = providerRequest.tools?.find(tool => (
           /(?:^|__)shell_command$|(?:^|__)exec_command$/u.test(tool.name)
         )) ?? null
         const workInput = workInputFromRequest(providerRequest)
@@ -478,10 +480,8 @@ export function startDeterministicDeviceModelServer({
         const isVerification = bodyText.includes(DETERMINISTIC_VERIFICATION_BEHAVIOR_MARKER)
         const isPlanner = bodyText.includes(DETERMINISTIC_PLANNER_PROTOCOL)
           && workInput?.criterionIds?.length
-        const executorOutput = containsValueWithType(providerRequest, 'function_call_output')
-          || containsValueWithType(providerRequest, 'custom_tool_call_output')
-          || (bodyText.includes('loopback-executor-change')
-            && /function_call_output|custom_tool_call_output|tool_result/u.test(bodyText))
+        const executorObservation = observeToolProcess(providerRequest, 'loopback-executor-change')
+        const executorOutput = executorObservation.hasToolOutput
         const verificationObservation = resolveVerificationObservation(providerRequest)
         const verificationExit = verificationObservation.exitCode
         const verificationEvidenceSourceId = verificationObservation.evidenceSourceId
@@ -495,8 +495,18 @@ export function startDeterministicDeviceModelServer({
         let toolCommand = 'true'
         let stopReason = 'end_turn'
         let toolYieldMs = 1000
+        let toolInput = null
 
-        if (isExecutor && !executorOutput) {
+        const observation = isExecutor ? executorObservation : verificationObservation
+        if ((isExecutor || isVerification) && observation.sessionId !== null) {
+          shellTool = providerRequest.tools?.find(tool => /(?:^|__)write_stdin$/u.test(tool.name)) ?? null
+          assert.ok(shellTool, 'running command requires the exposed write_stdin tool')
+          useTool = true
+          stopReason = 'tool_use'
+          toolCallId = observation.nextCallId
+          toolInput = { session_id: observation.sessionId, chars: '', yield_time_ms: 1000 }
+          text = ''
+        } else if (isExecutor && !executorOutput) {
           useTool = true
           stopReason = 'tool_use'
           toolCallId = 'loopback-executor-change'
@@ -505,23 +515,13 @@ export function startDeterministicDeviceModelServer({
             : "printf '%s\\n' 'status: complete' > TASK.md; printf '%s\\n' 'deterministic Device candidate' > .winwincode-api-candidate; git status --porcelain=v1 --untracked-files=all"
           text = ''
         } else if (isExecutor) {
-          text = 'The requested stage action completed.'
+          text = executorObservation.exitCode === 0
+            ? 'The requested stage action completed.'
+            : 'The stage command did not complete successfully.'
         } else if (isVerification && !verificationObservation.hasToolOutput && shellTool) {
           useTool = true
           stopReason = 'tool_use'
           toolCallId = DETERMINISTIC_VERIFICATION_CALL_ID
-          toolCommand = verificationCommand
-          toolYieldMs = DETERMINISTIC_VERIFICATION_YIELD_MS
-          text = ''
-        } else if (isVerification && verificationExit === null && shellTool
-          && verificationEvidenceSourceId === DETERMINISTIC_VERIFICATION_CALL_ID) {
-          // Tool output arrived without a sealed exit code (process still
-          // running). Do not invent a fail verdict — poll once under a
-          // distinct evidence source so Core can finish and seal command
-          // evidence before the verification product is emitted.
-          useTool = true
-          stopReason = 'tool_use'
-          toolCallId = DETERMINISTIC_VERIFICATION_POLL_CALL_ID
           toolCommand = verificationCommand
           toolYieldMs = DETERMINISTIC_VERIFICATION_YIELD_MS
           text = ''
@@ -565,9 +565,9 @@ export function startDeterministicDeviceModelServer({
               input: {},
             },
           }])
-          const input = shellTool.input_schema?.properties?.cmd
+          const input = toolInput ?? (shellTool.input_schema?.properties?.cmd
             ? { cmd: toolCommand, workdir: '.', yield_time_ms: toolYieldMs }
-            : { command: toolCommand, workdir: '.' }
+            : { command: toolCommand, workdir: '.' })
           events.push(['content_block_delta', {
             type: 'content_block_delta',
             index: 0,
@@ -743,6 +743,14 @@ export function checkedWwc(wwc, args, environment = process.env) {
   return result.stdout.trim().length === 0 ? null : JSON.parse(result.stdout)
 }
 
+export function deviceConnectCodePublished(database, connectCodeId) {
+  return database.prepare(`
+    SELECT 1 FROM client_outbox
+    WHERE kind = 'client.connect_code.published' AND published = 1
+      AND json_extract(CAST(payload AS TEXT), '$.payload.connectCodeId') = ?
+  `).get(connectCodeId) !== undefined
+}
+
 export async function waitFor(check, label, timeoutMillis = 30_000, pollMillis = 200) {
   const deadline = Date.now() + timeoutMillis
   for (;;) {
@@ -872,7 +880,21 @@ export async function establishDeviceOnlyExecutionPath({
     const refreshed = checkedWwc(wwc, [
       'device', 'refresh-code', '--data-dir', deviceData, '--json',
     ], deviceEnvironment)
-    await new Promise(resolvePromise => setTimeout(resolvePromise, 250))
+    const deviceDatabase = new DatabaseSync(join(deviceData, 'device-client.sqlite3'), { readOnly: true })
+    try {
+      await waitFor(
+        () => {
+          if (device.exitCode !== null) {
+            throw new Error(`Device Client exited before connect code publication (${device.exitCode})`)
+          }
+          return deviceConnectCodePublished(deviceDatabase, refreshed.code.connectCodeId)
+        },
+        'Device connect code publication acknowledgement',
+        timeoutMillis,
+      )
+    } finally {
+      deviceDatabase.close()
+    }
     const connected = await api.request('/api/v1/clients/connections', {
       method: 'POST',
       body: {

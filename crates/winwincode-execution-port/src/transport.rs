@@ -293,10 +293,13 @@ impl FrameDirection {
             | "approval.request"
             | "action.enforcement_request"
             | "job.cancel_ack"
+            | "snapshot.freeze_receipt"
             | "job.outcome" => Ok(Self::WorkerToControlPlane),
             "worker.registration_result"
             | "worker.heartbeat_ack"
             | "job.dispatch"
+            | "snapshot.freeze_request"
+            | "snapshot.verify"
             | "lease.renew"
             | "runtime.ack"
             | "runtime.replay_request"

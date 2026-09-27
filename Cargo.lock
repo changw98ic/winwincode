@@ -13069,6 +13069,7 @@ dependencies = [
  "sha2 0.10.9",
  "winwincode-delivery",
  "winwincode-domain",
+ "winwincode-execution-port",
  "winwincode-publication",
 ]
 
@@ -13080,6 +13081,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "winwincode-delivery",
+ "winwincode-domain",
 ]
 
 [[package]]
@@ -13089,7 +13091,11 @@ dependencies = [
  "base64 0.22.1",
  "codex-apply-patch",
  "codex-exec-server",
+ "codex-protocol",
+ "codex-sandboxing",
+ "codex-utils-absolute-path",
  "codex-utils-path-uri",
+ "codex-utils-pty",
  "futures",
  "rusqlite",
  "serde",

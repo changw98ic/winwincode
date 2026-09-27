@@ -11,7 +11,9 @@ use std::sync::Arc;
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 
-use crate::fusion_knowledge::{ClaimNode, ClaimState, EvidenceDirection, EvidenceStrength, FusionEvidenceRecord};
+use crate::fusion_knowledge::{
+    ClaimNode, ClaimState, EvidenceDirection, EvidenceStrength, FusionEvidenceRecord,
+};
 
 /// Escalation ladder (ADR-0037 §验证升级阶梯).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -141,22 +143,42 @@ pub fn classify_claim_kind(claim: &ClaimNode) -> ClaimKind {
         claim.display_key.to_ascii_lowercase(),
         claim.summary.to_ascii_lowercase()
     );
-    if ["null", "unwrap", "optional", "panic"].iter().any(|n| hay.contains(n)) {
-        return ClaimKind::NullSafety;
-    }
-    if ["race", "shared", "fixture", "concurrent", "mutation", "lock", "map-race"]
+    if ["null", "unwrap", "optional", "panic"]
         .iter()
         .any(|n| hay.contains(n))
     {
+        return ClaimKind::NullSafety;
+    }
+    if [
+        "race",
+        "shared",
+        "fixture",
+        "concurrent",
+        "mutation",
+        "lock",
+        "map-race",
+    ]
+    .iter()
+    .any(|n| hay.contains(n))
+    {
         return ClaimKind::SharedStateRace;
     }
-    if ["sql", "injection", "xss", "security"].iter().any(|n| hay.contains(n)) {
+    if ["sql", "injection", "xss", "security"]
+        .iter()
+        .any(|n| hay.contains(n))
+    {
         return ClaimKind::Injection;
     }
-    if ["blocking", "merge", "ci", "quarantine"].iter().any(|n| hay.contains(n)) {
+    if ["blocking", "merge", "ci", "quarantine"]
+        .iter()
+        .any(|n| hay.contains(n))
+    {
         return ClaimKind::Blocking;
     }
-    if ["style", "format", "naming"].iter().any(|n| hay.contains(n)) {
+    if ["style", "format", "naming"]
+        .iter()
+        .any(|n| hay.contains(n))
+    {
         return ClaimKind::Style;
     }
     ClaimKind::Other
@@ -225,8 +247,12 @@ pub fn plan_investigation(
     let mut actions = Vec::new();
     for (provider, capability) in provider_route_for(kind) {
         let gain = match capability {
-            "trace_ownership" | "find_writers" | "find_parallel_entrypoints" | "nullable_dataflow"
-            | "targeted_repro" | "find_sync" => InformationGain::High,
+            "trace_ownership"
+            | "find_writers"
+            | "find_parallel_entrypoints"
+            | "nullable_dataflow"
+            | "targeted_repro"
+            | "find_sync" => InformationGain::High,
             "find_callers" | "race_or_null" | "null_guard" | "taint" | "dataflow" => {
                 InformationGain::Medium
             }
@@ -306,15 +332,26 @@ fn is_shared_state_claim(claim: &ClaimNode) -> bool {
         claim.display_key.to_ascii_lowercase(),
         claim.summary.to_ascii_lowercase()
     );
-    ["race", "shared", "fixture", "mutation", "concurrent", "lock", "singleton"]
-        .iter()
-        .any(|needle| hay.contains(needle))
+    [
+        "race",
+        "shared",
+        "fixture",
+        "mutation",
+        "concurrent",
+        "lock",
+        "singleton",
+    ]
+    .iter()
+    .any(|needle| hay.contains(needle))
 }
 
 fn default_unknowns(claim: &ClaimNode) -> Vec<String> {
     let mut unknowns = vec![
         format!("Is {} supported by a direct code path?", claim.display_key),
-        format!("Is there verified counter-evidence against {}?", claim.display_key),
+        format!(
+            "Is there verified counter-evidence against {}?",
+            claim.display_key
+        ),
     ];
     if is_shared_state_claim(claim) {
         unknowns.push("Is the object a shared instance?".to_owned());
@@ -376,9 +413,6 @@ pub fn merge_evidence(
             EvidenceDirection::Support => claim.evidence_ids.push(record.id.clone()),
             EvidenceDirection::Counter => {
                 claim.counter_evidence_ids.push(record.id.clone());
-                if record.verified {
-                    claim.has_verified_counter = true;
-                }
             }
         }
         records.push(record.clone());
@@ -405,7 +439,10 @@ pub fn recompute_state(claim: &ClaimNode) -> ClaimState {
 
 /// Strength helper for synthesizer/summary layers.
 #[must_use]
-pub fn strongest_evidence(records: &[FusionEvidenceRecord], claim_id: &str) -> Option<EvidenceStrength> {
+pub fn strongest_evidence(
+    records: &[FusionEvidenceRecord],
+    claim_id: &str,
+) -> Option<EvidenceStrength> {
     records
         .iter()
         .filter(|record| record.claim_id == claim_id && !record.invalidated)
@@ -423,7 +460,8 @@ mod tests {
             id: "c_test".to_owned(),
             identity: ClaimIdentity::parse("root:shared-fixture-race"),
             display_key: "claim:root:shared-fixture-race".to_owned(),
-            summary: "Root cause is shared module-level cart mutated across parallel tests".to_owned(),
+            summary: "Root cause is shared module-level cart mutated across parallel tests"
+                .to_owned(),
             state: ClaimState::Disputed,
             supporters: vec!["mimo".to_owned()],
             opponents: vec!["glm".to_owned(), "deepseek".to_owned()],
@@ -440,24 +478,27 @@ mod tests {
     fn planner_emits_escalation_for_shared_state_dispute() {
         let plan = plan_investigation(&disputed_claim(), &[]);
         assert!(plan.modes.contains(&InvestigationMode::Falsification));
-        assert!(plan
-            .actions
-            .iter()
-            .any(|action| action.capability == "trace_ownership"
-                && action.level == EvidenceLevel::CodeGraph));
-        assert!(plan
-            .actions
-            .iter()
-            .any(|action| action.capability == "targeted_repro"));
+        assert!(
+            plan.actions
+                .iter()
+                .any(|action| action.capability == "trace_ownership"
+                    && action.level == EvidenceLevel::CodeGraph)
+        );
+        assert!(
+            plan.actions
+                .iter()
+                .any(|action| action.capability == "targeted_repro")
+        );
         // Must not be a "just ask the LLM again" plan.
-        assert!(plan
-            .actions
-            .iter()
-            .any(|action| action.level >= EvidenceLevel::CodeGraph));
+        assert!(
+            plan.actions
+                .iter()
+                .any(|action| action.level >= EvidenceLevel::CodeGraph)
+        );
     }
 
     #[test]
-    fn merge_evidence_marks_verified_counter() {
+    fn merge_evidence_records_counter_without_self_verifying_it() {
         let mut claim = disputed_claim();
         let mut store = Vec::new();
         merge_evidence(
@@ -477,7 +518,7 @@ mod tests {
                 invalidated: false,
             }],
         );
-        assert!(claim.has_verified_counter);
+        assert!(!claim.has_verified_counter);
         assert_eq!(claim.counter_evidence_ids, vec!["ev_x".to_owned()]);
     }
 }
@@ -514,7 +555,8 @@ impl CliCodeGraphBackend {
     pub fn new(project_path: impl Into<String>) -> Self {
         Self {
             project_path: project_path.into(),
-            codegraph_bin: std::env::var("CODEGRAPH_BIN").unwrap_or_else(|_| "codegraph".to_owned()),
+            codegraph_bin: std::env::var("CODEGRAPH_BIN")
+                .unwrap_or_else(|_| "codegraph".to_owned()),
         }
     }
 
@@ -540,7 +582,9 @@ impl CodeGraphEvidenceBackend for CliCodeGraphBackend {
         let this = self.clone();
         let symbol = symbol.to_owned();
         Box::pin(async move {
-            let callers = this.run(&["callers", "--json", &symbol]).or_else(|_| this.run(&["callers", &symbol]))?;
+            let callers = this
+                .run(&["callers", "--json", &symbol])
+                .or_else(|_| this.run(&["callers", &symbol]))?;
             let mut facts = Vec::new();
             for line in callers.lines() {
                 let line = line.trim();
@@ -649,7 +693,9 @@ impl CodeGraphEvidenceBackend for CliCodeGraphBackend {
                 Ok(text) => {
                     let hits = text.lines().filter(|line| !line.trim().is_empty()).count();
                     if hits == 0 {
-                        facts.push("NEGATIVE_FINDING: no lock/mutex/sync symbols in index".to_owned());
+                        facts.push(
+                            "NEGATIVE_FINDING: no lock/mutex/sync symbols in index".to_owned(),
+                        );
                     } else {
                         for line in text.lines().take(10) {
                             let line = line.trim();

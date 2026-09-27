@@ -21,7 +21,9 @@ export function candidateCanApply(state: StrongFlowReviewState): boolean {
   const candidate = detail?.currentCandidate
   const verdict = detail?.verdict
   return state.status === 'ready' && candidate != null && verdict != null
-    && verdict.status === 'pass' && verdict.candidateRef === candidate.candidateRef
+    && typeof candidate.candidateId === 'string' && typeof verdict.snapshotId === 'string'
+    && verdict.status === 'pass' && verdict.candidateId === candidate.candidateId
+    && verdict.candidateRef === candidate.candidateRef
     && candidate.deliverySpecId === detail?.requirements.deliverySpecId
     && candidate.deliverySpecRevision === detail?.requirements.deliverySpecRevision
     && verdict.deliverySpecId === detail?.requirements.deliverySpecId
@@ -30,7 +32,8 @@ export function candidateCanApply(state: StrongFlowReviewState): boolean {
     && detail.requirements.acceptanceCriteria.filter(item => item.required).every(item => (
       verdict.criteria.some(result => result.criterionId === item.id && result.verdict === 'pass' && result.evidenceRefs.length > 0
         && result.evidenceRefs.every(id => detail.evidence.some(evidence => evidence.id === id
-          && evidence.candidateRef === candidate.candidateRef
+          && evidence.candidateId === candidate.candidateId
+          && evidence.snapshotId === verdict.snapshotId
           && evidence.deliverySpecId === candidate.deliverySpecId
           && evidence.deliverySpecRevision === candidate.deliverySpecRevision)))
     ))

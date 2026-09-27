@@ -418,7 +418,8 @@ fn validate_delivery_and_test_evidence(
             format!("TestAsset manifest is invalid: {error}"),
         )
     })?;
-    if request.test_asset_manifest.candidate_ref != request.candidate.candidate_ref()
+    if request.test_asset_manifest.candidate_id != *request.candidate.candidate_id()
+        || request.test_asset_manifest.candidate_ref != request.candidate.candidate_ref()
         || request.test_asset_manifest.source_commit != request.candidate.candidate_commit_id()
     {
         return Err(implementation_error(
@@ -537,7 +538,8 @@ fn validate_independent_test_evidence(
             .filter(|evidence| cited.contains(&&evidence.id))
             .ok_or_else(|| independent_error("test Evidence is absent from the current Verdict"))?;
         if evidence.evidence_type != EvidenceRefType::Test
-            || evidence.candidate_ref != request.candidate.candidate_ref()
+            || evidence.candidate_id != *request.candidate.candidate_id()
+            || evidence.snapshot_id != verdict.snapshot_id
         {
             return Err(independent_error(
                 "test Evidence belongs to another type or candidate",

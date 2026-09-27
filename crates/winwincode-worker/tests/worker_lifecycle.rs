@@ -1704,6 +1704,275 @@ async fn local_and_remote_frames_drive_value_identical_worker_semantics() {
 }
 
 #[tokio::test]
+async fn snapshot_freeze_replays_after_restart_without_starting_codex() {
+    use winwincode_execution_port::generated::SnapshotFreezeRequestMessage;
+    use winwincode_execution_port::snapshot_freeze::validate_freeze_receipt;
+
+    let (workspace_root, source_root) = test_workspace_paths();
+    let repository = source_root.join(id("rep", 'A'));
+    std::fs::rename(source_root.join(id("rpo", 'A')), &repository).unwrap();
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&repository)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        output.stdout
+    };
+    let text = |args: &[&str]| String::from_utf8(git(args)).unwrap().trim().to_owned();
+    let base = text(&["rev-parse", "HEAD"]);
+    let base_tree = text(&["rev-parse", "HEAD^{tree}"]);
+    std::fs::write(repository.join("fixture.txt"), b"candidate\n").unwrap();
+    run_git(&repository, &["add", "fixture.txt"]);
+    run_git(
+        &repository,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "candidate",
+        ],
+    );
+    let commit = text(&["rev-parse", "HEAD"]);
+    let tree = text(&["rev-parse", "HEAD^{tree}"]);
+    let diff = git(&[
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--binary",
+        "--full-index",
+        &format!("{base}..{commit}"),
+    ]);
+    let mut content = Sha256::new();
+    for field in [b"fixture.txt".as_slice(), b"100644", b"candidate\n"] {
+        content.update(u64::try_from(field.len()).unwrap().to_be_bytes());
+        content.update(field);
+    }
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/contracts/execution-port.valid.json"
+    ))
+    .unwrap();
+    let mut request: SnapshotFreezeRequestMessage = serde_json::from_value(
+        fixture["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["kind"] == "snapshot.freeze_request")
+            .unwrap()
+            .clone(),
+    )
+    .unwrap();
+    request.dispatch = dispatch('A', delivery_scope('A'));
+    request.dispatch.job.execution_profile = "verifier".into();
+    request.dispatch.job.workspace.repository_id = RepositoryId(id("rep", 'A'));
+    request.dispatch.job.workspace.checkout_revision = commit.clone();
+    request.lease = request.dispatch.lease.clone();
+    request.repository_id = request.dispatch.job.workspace.repository_id.clone();
+    request.candidate.base_commit = base;
+    request.candidate.candidate_commit = commit.clone();
+    request.candidate.candidate_tree = tree;
+    request.candidate.candidate_ref = format!("refs/winwincode/candidates/{commit}");
+    request.candidate.diff_digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(diff)));
+    request.base_tree_id.0 = base_tree;
+    request.content_digest = Sha256Digest(format!("sha256:{:x}", content.finalize()));
+    request
+        .dispatch
+        .job
+        .work_input
+        .as_mut()
+        .unwrap()
+        .candidate_ref = Some(request.candidate.candidate_ref.clone());
+    let mut responses = Vec::new();
+    for replay in 0..2 {
+        let port = RecordingPort::default();
+        let messages = Rc::clone(&port.messages);
+        let codex = FakeCodex::with_threads([thread('A')]);
+        let calls = codex.clone();
+        let mut worker = WorkerMain::new(
+            worker_config(1),
+            port,
+            codex,
+            JobWorkspaceRuntime::open(&workspace_root, &source_root).unwrap(),
+        );
+        register(&mut worker).await;
+        if replay == 0 {
+            let mut foreign = request.clone();
+            foreign.dispatch.lease.fencing_token.0 = "999".into();
+            assert!(
+                worker
+                    .accept_control(
+                        &ExecutionPortMessage::SnapshotFreezeRequestMessage(foreign),
+                        now()
+                    )
+                    .await
+                    .is_err()
+            );
+            assert!(std::fs::read_dir(&workspace_root).unwrap().next().is_none());
+        }
+        worker
+            .accept_control(
+                &ExecutionPortMessage::SnapshotFreezeRequestMessage(request.clone()),
+                now(),
+            )
+            .await
+            .unwrap();
+        let response = messages
+            .borrow()
+            .iter()
+            .find_map(|message| match message {
+                ExecutionPortMessage::SnapshotFreezeReceiptMessage(receipt) => {
+                    Some(receipt.clone())
+                }
+                _ => None,
+            })
+            .unwrap();
+        validate_freeze_receipt(&request, &response).unwrap();
+        responses.push(response);
+        assert!(worker.active_jobs().is_empty());
+        assert!(
+            !calls
+                .calls()
+                .iter()
+                .any(|call| call.starts_with("ensure:") || call.starts_with("submit:"))
+        );
+        let mut changed = request.clone();
+        changed.content_digest.0 = format!("sha256:{}", "f".repeat(64));
+        assert!(
+            worker
+                .accept_control(
+                    &ExecutionPortMessage::SnapshotFreezeRequestMessage(changed),
+                    now()
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            messages
+                .borrow()
+                .iter()
+                .filter(|message| matches!(
+                    message,
+                    ExecutionPortMessage::SnapshotFreezeReceiptMessage(_)
+                ))
+                .count(),
+            1
+        );
+        if replay == 1 {
+            use winwincode_domain::{Snapshot, SnapshotId, seal_snapshot};
+            use winwincode_execution_port::generated::{
+                SnapshotVerificationDispatchMessage, SnapshotVerificationDispatchMessageKind,
+            };
+            worker
+                .accept_control(
+                    &ExecutionPortMessage::JobDispatchMessage(request.dispatch.clone()),
+                    now(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                worker.active_jobs().is_empty(),
+                "missing Snapshot must reject before execution"
+            );
+            let receipt = &responses[1].receipt;
+            let mut snapshot = Snapshot {
+                schema_version: SchemaVersion::WinwincodeV1,
+                snapshot_id: SnapshotId(id("snap", 'A')),
+                candidate_id: receipt.candidate_id.clone(),
+                work_run_id: receipt.work_run_id.clone(),
+                repository_id: receipt.repository_id.clone(),
+                base_commit_id: receipt.base_commit_id.clone(),
+                base_tree_id: receipt.base_tree_id.clone(),
+                candidate_commit_id: receipt.candidate_commit_id.clone(),
+                candidate_tree_id: receipt.candidate_tree_id.clone(),
+                diff_sha256: receipt.diff_sha256.clone(),
+                content_digest: receipt.content_digest.clone(),
+                created_at_millis: 1_800_000_000_000,
+                immutable: true,
+                validation_seal: Sha256Digest(String::new()),
+            };
+            snapshot.validation_seal = seal_snapshot(&snapshot);
+            let mut dispatch = request.dispatch.clone();
+            dispatch.snapshot_id = Some(snapshot.snapshot_id.clone());
+            let valid = SnapshotVerificationDispatchMessage {
+                kind: SnapshotVerificationDispatchMessageKind::SnapshotVerify,
+                schema_version: SchemaVersion::WinwincodeV1,
+                message_id: dispatch.message_id.clone(),
+                sent_at: now(),
+                dispatch,
+                snapshot,
+            };
+            let mut foreign = valid.clone();
+            foreign.snapshot.candidate_id.0 = id("cnd", 'Z');
+            foreign.snapshot.validation_seal = seal_snapshot(&foreign.snapshot);
+            assert!(
+                worker
+                    .accept_control(
+                        &ExecutionPortMessage::SnapshotVerificationDispatchMessage(foreign),
+                        now()
+                    )
+                    .await
+                    .is_err()
+            );
+            assert!(
+                !calls
+                    .calls()
+                    .iter()
+                    .any(|call| call.starts_with("ensure:") || call.starts_with("submit:"))
+            );
+            worker
+                .accept_control(
+                    &ExecutionPortMessage::SnapshotVerificationDispatchMessage(valid),
+                    now(),
+                )
+                .await
+                .unwrap();
+            worker
+                .accept_control(
+                    &ExecutionPortMessage::SnapshotFreezeRequestMessage(request.clone()),
+                    now(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                messages
+                    .borrow()
+                    .iter()
+                    .filter(|message| matches!(
+                        message,
+                        ExecutionPortMessage::SnapshotFreezeReceiptMessage(_)
+                    ))
+                    .count(),
+                2,
+                "late exact freeze replay must not start another model turn"
+            );
+            assert_eq!(worker.active_jobs().len(), 1);
+            assert_eq!(
+                calls
+                    .calls()
+                    .iter()
+                    .filter(|call| call.starts_with("ensure:"))
+                    .count(),
+                1
+            );
+            assert_eq!(
+                calls
+                    .calls()
+                    .iter()
+                    .filter(|call| call.starts_with("submit:"))
+                    .count(),
+                1
+            );
+        }
+    }
+    assert_eq!(responses[0], responses[1]);
+}
+
+#[tokio::test]
 async fn mismatched_work_run_input_is_rejected_before_workspace_or_codex() {
     let (workspace_root, source_root) = test_workspace_paths();
     let port = RecordingPort::default();
@@ -4304,7 +4573,10 @@ async fn pending_runtime_and_diagnostic_artifact_flush_after_server_restart_wind
     pump.inject_pending_delivery(&diagnostic_chunk);
 
     let first = worker.poll_codex_boxed().await;
-    assert!(first.is_err(), "runtime send must fail while Server is down");
+    assert!(
+        first.is_err(),
+        "runtime send must fail while Server is down"
+    );
     let second = worker.poll_codex_boxed().await;
     assert!(
         second.is_err(),

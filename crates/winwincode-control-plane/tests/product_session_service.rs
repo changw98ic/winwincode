@@ -1508,8 +1508,16 @@ fn cancelled_session_routes_reconcile_after_queue_cancel_commit_loss() {
             .execution_job_id
     };
     prepare_worker(&mut storage, 1);
-    let (execution_scope, authority) =
-        prepare_slot_for_job(&mut storage, 55, None, execution_job_id.clone(), 55, 55, 55, 700);
+    let (execution_scope, authority) = prepare_slot_for_job(
+        &mut storage,
+        55,
+        None,
+        execution_job_id.clone(),
+        55,
+        55,
+        55,
+        700,
+    );
     {
         let mut bind = continue_command(&scope_key, 55, 77, authority.clone(), execution_scope);
         bind.context.expected_revision = 2;
@@ -1545,7 +1553,10 @@ fn cancelled_session_routes_reconcile_after_queue_cancel_commit_loss() {
         )
         .expect("job")
         .expect("cancelled job");
-    assert_eq!(cancelled.state, winwincode_storage::ExecutionJobState::Cancelling);
+    assert_eq!(
+        cancelled.state,
+        winwincode_storage::ExecutionJobState::Cancelling
+    );
 
     // Inject the crash window: session cancel is durable, queue cancel is not.
     {
@@ -1557,7 +1568,10 @@ fn cancelled_session_routes_reconcile_after_queue_cancel_commit_loss() {
                  SET state = 'running', revision = ?1,
                      cancellation_request_id = NULL, cancellation_requested_at = NULL
                  WHERE job_id = ?2",
-                params![i64::try_from(original_revision).expect("revision"), &execution_job_id.0],
+                params![
+                    i64::try_from(original_revision).expect("revision"),
+                    &execution_job_id.0
+                ],
             )
             .expect("restore job to pre-cancel state");
         connection

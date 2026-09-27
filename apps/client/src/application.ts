@@ -1612,8 +1612,9 @@ export function mountWinWinCodeClient(
         const contract = current.contract
         const candidate = current.candidate
         const evidence = current.evidence.find(item =>
-          item.workRunId === current.workRun.id && item.candidateRef === candidate.candidateRef)
-        const candidateDigest = candidate.candidateRef.replace(/^git-candidate:/u, '')
+          item.workRunId === current.workRun.id && item.candidateId === candidate.candidateId)
+        if (evidence === undefined) throw new Error('当前候选缺少已验证的快照证据，请刷新后重试。')
+        const candidateDigest = candidate.candidateDigest
         return { current, contract, candidate, attention, evidence, candidateDigest }
       }
       const annotationTransport = {
@@ -1679,12 +1680,14 @@ export function mountWinWinCodeClient(
                 deliverySpecId: contract.id,
                 deliverySpecRevision: Number(contract.revision),
                 candidateRef: candidate.candidateRef,
+                candidateId: candidate.candidateId,
+                snapshotId: evidence.snapshotId,
                 candidateDigest,
                 candidateTreeId: candidate.candidateTreeId,
                 diffSha256: candidate.diffSha256,
                 workRunId: current.workRun.id,
                 attempt: current.workRun.attempt,
-                sessionBindingId: evidence?.sessionBindingId ?? current.workRun.workerSessionId,
+                sessionBindingId: evidence.sessionBindingId,
               },
               target,
               body: draft.comment,

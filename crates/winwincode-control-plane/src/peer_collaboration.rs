@@ -996,7 +996,7 @@ fn validate_result(result: &CollaborationResult) -> Result<(), PeerCollaboration
 }
 
 fn validate_evidence(reference: &EvidenceRef) -> Result<(), PeerCollaborationError> {
-    if reference.schema_version != 1
+    if reference.schema_version != winwincode_delivery::domain::DELIVERY_SCHEMA_VERSION
         || reference.delivery_spec_revision == 0
         || reference.delivery_spec_revision > MAX_SAFE_INTEGER
     {
@@ -1007,7 +1007,8 @@ fn validate_evidence(reference: &EvidenceRef) -> Result<(), PeerCollaborationErr
     validate_text(&reference.delivery_spec_id.0, 128)?;
     validate_id(&reference.work_run_id.0, "wrn_")?;
     validate_token(&reference.session_binding_id.0, 128)?;
-    validate_text(&reference.candidate_ref, 2_000)?;
+    validate_id(&reference.candidate_id.0, "cnd_")?;
+    validate_id(&reference.snapshot_id.0, "snap_")?;
     validate_text(&reference.source_ref, 2_000)?;
     validate_millis(reference.created_at_millis)
 }

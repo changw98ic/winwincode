@@ -133,7 +133,7 @@
       "ControlPlaneWebSocketEventPayload",
       "PublicationPublishPayload",
       "AcceptedRuntimeSourceFact",
-      "ValidatedGitSnapshotFact",
+      "SealedCandidateSource",
       "VerifiedTerminalOutcome"
     ],
     "forbiddenPublicFields": [

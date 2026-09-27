@@ -68,9 +68,7 @@ fn verdict_command(seed: u64, fixture: &VerdictFixture) -> CommandEnvelope {
         ),
         payload: serde_json::json!({
             "deliveryId": fixture.delivery.id().0,
-            "candidateDigest": fixture.candidate.candidate_ref()
-                .strip_prefix("git-candidate:")
-                .expect("candidate digest prefix"),
+            "candidateDigest": fixture.candidate.candidate_digest(),
         }),
         request_id: RequestId(canonical_id("req", seed)),
         schema_version: SchemaVersion::WinwincodeV1,
@@ -143,7 +141,8 @@ impl DeliveryJournalPort for CapturingJournal {
     }
 }
 
-fn seed_delivery(root: &PathBuf, delivery: &Delivery) {
+fn seed_delivery(root: &PathBuf, fixture: &VerdictFixture) {
+    let delivery = &fixture.delivery;
     let capture = CapturingJournal::default();
     DeliveryStore::borrowed(&capture)
         .execute(DeliveryCommand::SeedForTest(CreateDelivery {
@@ -200,7 +199,133 @@ fn seed_delivery(root: &PathBuf, delivery: &Delivery) {
     storage
         .mark_published(&receipt.events[0].event_id)
         .expect("seed event acknowledgement");
+    seed_verification_bindings(&mut storage, fixture);
     Box::new(storage).close().expect("seed storage close");
+}
+
+#[allow(clippy::too_many_lines)]
+fn seed_verification_bindings(storage: &mut SqliteStorage, fixture: &VerdictFixture) {
+    use winwincode_domain::{
+        Candidate, CandidateDigest, Instant, SessionIdentity, VerificationPlan, VerificationPlanId,
+        VerificationSession, VerificationSessionId,
+    };
+    use winwincode_storage::{
+        SnapshotProductStaged, SnapshotVerificationBinding, commit_snapshot_product,
+    };
+    let source = &fixture.candidate;
+    let snapshot = fixture.verification.snapshot();
+    let producer = fixture
+        .delivery
+        .snapshot()
+        .work_run_aggregate
+        .runs
+        .iter()
+        .find(|run| &run.id == source.producer_work_run_id())
+        .unwrap();
+    let candidate = Candidate {
+        schema_version: SchemaVersion::WinwincodeV1,
+        id: source.candidate_id().clone(),
+        candidate_digest: CandidateDigest(source.candidate_digest().0.clone()),
+        work_contract_id: producer.work_contract_id.clone(),
+        contract_revision: producer.contract_revision.clone(),
+        work_item_id: producer.work_item_id.clone(),
+        work_run_id: producer.id.clone(),
+        attempt: producer.attempt,
+        producer_worker_session_id: producer.worker_session_id.clone(),
+        candidate_ref: source.candidate_ref().to_owned(),
+        base_commit: source.base_commit_id().to_owned(),
+        candidate_commit: source.candidate_commit_id().to_owned(),
+        candidate_tree: source.candidate_tree_id().to_owned(),
+        diff_digest: snapshot.as_contract().diff_sha256.clone(),
+    };
+    for (index, settlement) in fixture.verification.settlements().iter().enumerate() {
+        let Some(assignment) = settlement.assignment() else {
+            continue;
+        };
+        let run = fixture
+            .delivery
+            .snapshot()
+            .work_run_aggregate
+            .runs
+            .iter()
+            .find(|run| &run.id == assignment.work_run_id())
+            .unwrap();
+        let n = u64::try_from(index + 1).unwrap();
+        let plan_id = VerificationPlanId(canonical_id("vpl", n));
+        let session_id = VerificationSessionId(canonical_id("vsn", n));
+        let role = serde_json::to_value(assignment.role())
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let binding = SnapshotVerificationBinding {
+            session_binding_id: canonical_id("sbn", n),
+            work_run_id: run.id.clone(),
+            execution_job_id: run.execution_job_id.clone(),
+            product_session_id: assignment.product_session_id().clone(),
+            worker_session_id: Some(assignment.worker_session_id().clone()),
+            codex_thread_id: Some(assignment.codex_thread_id().clone()),
+            verification_role: role.clone(),
+            attempt: run.attempt,
+            verification_plan: VerificationPlan {
+                schema_version: SchemaVersion::WinwincodeV1,
+                id: plan_id.clone(),
+                candidate_digest: candidate.candidate_digest.clone(),
+                work_contract_id: run.work_contract_id.clone(),
+                contract_revision: run.contract_revision.clone(),
+                work_item_id: run.work_item_id.clone(),
+                work_item_revision: run.work_item_revision.clone(),
+                work_run_id: run.id.clone(),
+                plan_revision: Revision(1),
+                criterion_ids: fixture
+                    .delivery
+                    .snapshot()
+                    .spec
+                    .acceptance_criteria
+                    .iter()
+                    .map(|criterion| winwincode_domain::CriterionId(criterion.id.0.clone()))
+                    .collect(),
+                commands: vec!["cargo test".into()],
+                permission_profile: "candidate-read-only".into(),
+                required_roles: vec![role],
+            },
+            verification_session: VerificationSession {
+                schema_version: SchemaVersion::WinwincodeV1,
+                id: session_id.clone(),
+                verification_session_id: session_id,
+                verification_plan_id: plan_id,
+                snapshot_id: snapshot.snapshot_id().clone(),
+                candidate_id: candidate.id.clone(),
+                work_run_id: run.id.clone(),
+                attempt: run.attempt,
+                created_at: Instant("2026-01-01T00:00:00.000Z".into()),
+                session_identity: SessionIdentity {
+                    work_run_id: Some(run.id.clone()),
+                    product_session_id: assignment.product_session_id().clone(),
+                    worker_session_id: assignment.worker_session_id().clone(),
+                    codex_thread_id: assignment.codex_thread_id().clone(),
+                },
+            },
+        };
+        let staged =
+            SnapshotProductStaged::new(candidate.clone(), snapshot.clone(), binding).unwrap();
+        let identity = ReceiptIdentity::new(
+            ReceiptActorKey::from_encoded(b"seed-actor".to_vec()).unwrap(),
+            ReceiptScopeKey::from_encoded(b"seed-scope".to_vec()).unwrap(),
+            RequestId(canonical_id("req", 10_000 + n)),
+        )
+        .unwrap();
+        let receipt = commit_snapshot_product(
+            storage,
+            identity,
+            Sha256Digest(format!("sha256:{n:064x}")),
+            &staged,
+        )
+        .unwrap();
+        for event in receipt.receipt.events {
+            storage.mark_published(&event.event_id).unwrap();
+        }
+    }
 }
 
 fn advance_after_failed_verdict(root: &PathBuf, delivery_id: &DeliveryId) -> Delivery {
@@ -309,7 +434,7 @@ fn verdict_commit_is_atomic_and_replay_returns_the_original_event_once() {
     let root = temporary_directory("commit-replay");
     let fixture = fixture(1, VerdictFixtureOutcome::Fail);
     let command = verdict_command(1, &fixture);
-    seed_delivery(&root, &fixture.delivery);
+    seed_delivery(&root, &fixture);
     let published = Arc::new(Mutex::new(Vec::new()));
     let mut control_plane = ControlPlane::start_local(
         ControlPlaneConfig::local(&root),
@@ -343,7 +468,31 @@ fn verdict_commit_is_atomic_and_replay_returns_the_original_event_once() {
     let delivery = Delivery::decode_json(&state.payload).expect("committed Delivery");
     assert_eq!(delivery.snapshot().status, DeliveryStatus::NeedsAttention);
     assert_eq!(delivery.snapshot().evidence.len(), 2);
-    assert!(delivery.snapshot().verdict.is_some());
+    let verdict = delivery.snapshot().verdict.as_ref().unwrap();
+    let result_state = control_plane
+        .load_state(&format!("verdict-verifier-results:v1:{}", verdict.id.0))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        result_state.revision, 1,
+        "receipt replay must not rewrite verifier results"
+    );
+    let results: Vec<winwincode_domain::VerifierResult> =
+        serde_json::from_slice(&result_state.payload).unwrap();
+    assert_eq!(results.len(), 2);
+    for result in results {
+        assert_eq!(result.snapshot_id, verdict.snapshot_id);
+        assert_eq!(result.candidate_id, verdict.candidate_id);
+        assert!(!result.evidence_ids.is_empty());
+        assert!(
+            result.evidence_ids.iter().all(|id| delivery
+                .snapshot()
+                .evidence
+                .iter()
+                .any(|e| &e.id == id))
+        );
+    }
+
     assert_eq!(delivery.snapshot().attention_items.len(), 1);
     assert!(delivery.snapshot().attention_items[0].blocking);
 
@@ -370,7 +519,7 @@ fn durable_replay_uses_the_original_verdict_after_facts_and_current_revision_cha
     let root = temporary_directory("historical-replay");
     let original = fixture(10, VerdictFixtureOutcome::Fail);
     let command = verdict_command(10, &original);
-    seed_delivery(&root, &original.delivery);
+    seed_delivery(&root, &original);
     let first_published = Arc::new(Mutex::new(Vec::new()));
     let mut control_plane = ControlPlane::start_local(
         ControlPlaneConfig::local(&root),
@@ -441,7 +590,7 @@ fn durable_replay_returns_original_verdict_before_broken_state_journal_or_replac
     let root = temporary_directory("receipt-before-broken-facts");
     let original = fixture(11, VerdictFixtureOutcome::Fail);
     let command = verdict_command(11, &original);
-    seed_delivery(&root, &original.delivery);
+    seed_delivery(&root, &original);
     let mut control_plane = ControlPlane::start_local(
         ControlPlaneConfig::local(&root),
         Box::new(CapturingPublisher {
@@ -522,7 +671,7 @@ fn passing_verdict_enters_final_manual_delivery_review_state() {
     let root = temporary_directory("passing-review");
     let fixture = fixture(2, VerdictFixtureOutcome::Pass);
     let command = verdict_command(2, &fixture);
-    seed_delivery(&root, &fixture.delivery);
+    seed_delivery(&root, &fixture);
     let mut control_plane = ControlPlane::start_local(
         ControlPlaneConfig::local(&root),
         Box::new(CapturingPublisher {
@@ -572,6 +721,12 @@ fn passing_verdict_enters_final_manual_delivery_review_state() {
 fn failure_at_each_atomic_member_rolls_back_verdict_and_event() {
     let failure_points = [
         (
+            "verifier-results",
+            "CREATE TRIGGER fail_verifier_results BEFORE INSERT ON product_state \
+             WHEN NEW.stream_id LIKE 'verdict-verifier-results:v1:%' \
+             BEGIN SELECT RAISE(ABORT, 'injected verifier result failure'); END;",
+        ),
+        (
             "state",
             "CREATE TRIGGER fail_verdict_state BEFORE UPDATE ON product_state \
              WHEN NEW.stream_id LIKE 'delivery:%' \
@@ -602,7 +757,7 @@ fn failure_at_each_atomic_member_rolls_back_verdict_and_event() {
         let root = temporary_directory(member);
         let fixture = fixture(seed, VerdictFixtureOutcome::Fail);
         let command = verdict_command(seed, &fixture);
-        seed_delivery(&root, &fixture.delivery);
+        seed_delivery(&root, &fixture);
         let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3"))
             .expect("failure injection database");
         connection.execute_batch(trigger).expect("failure trigger");
@@ -644,6 +799,11 @@ fn failure_at_each_atomic_member_rolls_back_verdict_and_event() {
             )
             .expect("rollback fact counts");
         assert_eq!(counts, (1, 0, 0), "{member}");
+        let results: i64 = connection.query_row("SELECT COUNT(*) FROM product_state WHERE stream_id LIKE 'verdict-verifier-results:v1:%'", [], |row| row.get(0)).unwrap();
+        assert_eq!(
+            results, 0,
+            "{member}: verifier results must roll back with Verdict"
+        );
         connection.close().expect("inspection close");
         fs::remove_dir_all(root).expect("database cleanup");
     }

@@ -34,9 +34,13 @@ const ID_DEFINITIONS = Object.freeze({
   ServiceAccountId: 'svc_',
   SystemActorId: 'sys_',
   UserId: 'usr_',
+  VerificationSessionId: 'vsn_',
+  VerdictId: 'vdt_',
+  VerifierResultId: 'vrs_',
   WorkerId: 'wrk_',
   WorkerSessionId: 'wsn_',
   WorkspaceId: 'wsp_',
+  SnapshotId: 'snap_',
 })
 const COMMAND_NAMES = Object.freeze([
   'session.create',
@@ -741,27 +745,168 @@ test('StructuredOutputSupport is a closed canonical capability enum', async () =
   assert.match(rust, /pub enum StructuredOutputSupport \{\s+#\[serde\(rename = "unsupported"\)\]\s+Unsupported,\s+#\[serde\(rename = "json_schema_strict"\)\]\s+JsonSchemaStrict,\s+\}/u)
 })
 
-test('domain schema defines SnapshotId and Snapshot', async () => {
+test('canonical Snapshot is strict, exact, and immutable', async () => {
   const domain = await loadSchema()
-  assert.ok(domain.$defs.SnapshotId, 'SnapshotId is missing')
-  assert.ok(domain.$defs.Snapshot, 'Snapshot is missing')
-  assert.equal(domain.$defs.Snapshot.properties.snapshotId.$ref, '#/$defs/SnapshotId')
+  const validate = ajvDefinitionValidator(domain, 'Snapshot')
+  const snapshot = snapshotFixture()
+
+  assert.equal(validate(snapshot), true, JSON.stringify(validate.errors))
+  assert.equal(validate({ ...snapshot, candidateId: undefined }), false)
+  assert.equal(validate({ ...snapshot, immutable: false }), false)
+  assert.equal(validate({ ...snapshot, candidateRef: 'legacy' }), false)
+  assert.equal(validate({ ...snapshot, baseCommitId: 'not-an-object-id' }), false)
+  assert.equal(validate({ ...snapshot, diffSha256: 'a'.repeat(64) }), false)
+
+  for (const definitionName of ['GitObjectId', 'Sha256Digest', 'SnapshotId']) {
+    assert.equal(domain.$defs[definitionName].type, 'string')
+  }
+  assert.match(domain.$defs.GitObjectId.pattern, /^\^\(\?:\[0-9a-f\]\{40\}\|/u)
+  assert.equal(domain.$defs.Snapshot.properties.candidateId.$ref, '#/$defs/CandidateId')
+  assert.equal(domain.$defs.Snapshot.properties.validationSeal.$ref, '#/$defs/Sha256Digest')
   assert.equal(domain.$defs.Snapshot.properties.immutable.const, true)
 })
 
-test('Snapshot carries the exact code identity', async () => {
+test('verification chain records require one canonical Snapshot binding', async () => {
   const domain = await loadSchema()
-  const props = domain.$defs.Snapshot.properties
-  for (const key of [
-    'candidateCommitId',
-    'candidateTreeId',
-    'baseCommitId',
-    'baseTreeId',
-    'diffSha256',
-    'contentDigest',
-    'validationSeal',
-    'createdAtMillis',
+  const graph = verificationGraphFixture()
+
+  for (const definitionName of [
+    'VerificationSession',
+    'Evidence',
+    'VerifierResult',
+    'Verdict',
   ]) {
-    assert.ok(props[key], `Snapshot is missing ${key}`)
+    const definition = domain.$defs[definitionName]
+    assert.equal(definition.properties.snapshotId.$ref, '#/$defs/SnapshotId')
+    assert.equal(
+      definition.properties.verificationSessionId.$ref,
+      '#/$defs/VerificationSessionId',
+    )
+    assert.ok(definition.required.includes('snapshotId'))
+    assert.ok(definition.required.includes('verificationSessionId'))
+
+    const validate = ajvDefinitionValidator(domain, definitionName)
+    const record = graph.records[definitionName]
+    assert.equal(validate(record), true, `${definitionName}: ${JSON.stringify(validate.errors)}`)
+
+    const missingSnapshot = structuredClone(record)
+    delete missingSnapshot.snapshotId
+    assert.equal(validate(missingSnapshot), false, `${definitionName} accepted missing Snapshot`)
+
+    const foreignSnapshot = {
+      ...record,
+      snapshotId: `snap_${'B'.repeat(26)}`,
+    }
+    assert.equal(
+      validate(foreignSnapshot),
+      true,
+      `${definitionName} schema is record-local; runtime binding rejects the cross-record foreign ID`,
+    )
+
+    const legacyEvidenceGraph = {
+      ...record,
+      candidateDigest: `sha256:${'a'.repeat(64)}`,
+    }
+    assert.equal(
+      validate(legacyEvidenceGraph),
+      false,
+      `${definitionName} still decodes candidateDigest evidence graphs`,
+    )
+
+    const legacyCandidateRef = { ...record, candidateRef: 'git-candidate:legacy' }
+    assert.equal(
+      validate(legacyCandidateRef),
+      false,
+      `${definitionName} still decodes candidateRef evidence graphs`,
+    )
   }
+
+  const snapshotIds = Object.values(graph.records).map(record => record.snapshotId)
+  assert.equal(new Set(snapshotIds).size, 1)
 })
+
+function snapshotFixture() {
+  return {
+    schemaVersion: 'winwincode/v1',
+    snapshotId: `snap_${'A'.repeat(26)}`,
+    candidateId: `cnd_${'A'.repeat(26)}`,
+    workRunId: `wrn_${'A'.repeat(26)}`,
+    repositoryId: `rep_${'A'.repeat(26)}`,
+    baseCommitId: 'a'.repeat(40),
+    baseTreeId: 'b'.repeat(40),
+    candidateCommitId: 'c'.repeat(40),
+    candidateTreeId: 'd'.repeat(40),
+    diffSha256: `sha256:${'1'.repeat(64)}`,
+    contentDigest: `sha256:${'2'.repeat(64)}`,
+    validationSeal: `sha256:${'3'.repeat(64)}`,
+    createdAtMillis: 1_769_150_400_000,
+    immutable: true,
+  }
+}
+
+function verificationGraphFixture() {
+  const base = {
+    schemaVersion: 'winwincode/v1',
+    snapshotId: `snap_${'A'.repeat(26)}`,
+    candidateId: `cnd_${'A'.repeat(26)}`,
+    workRunId: `wrn_${'A'.repeat(26)}`,
+    verificationPlanId: `vpl_${'A'.repeat(26)}`,
+    verificationSessionId: `vsn_${'A'.repeat(26)}`,
+    attempt: 1,
+    sessionIdentity: {
+      productSessionId: `psn_${'A'.repeat(26)}`,
+      workerSessionId: `wsn_${'A'.repeat(26)}`,
+      codexThreadId: `cdx_${'A'.repeat(26)}`,
+      workRunId: `wrn_${'A'.repeat(26)}`,
+    },
+    createdAt: '2026-09-24T09:10:11.123Z',
+  }
+  const records = {
+    VerificationSession: {
+      ...base,
+      id: `vsn_${'A'.repeat(26)}`,
+    },
+    Evidence: {
+      ...base,
+      id: `evd_${'A'.repeat(26)}`,
+      workContractId: `wct_${'A'.repeat(26)}`,
+      contractRevision: 1,
+      planRevision: 1,
+      criterionId: `crt_${'A'.repeat(26)}`,
+      workItemId: `wit_${'A'.repeat(26)}`,
+      producer: 'worker',
+      producerExecutionIdentity: {
+        executionJobId: `job_${'A'.repeat(26)}`,
+        attempt: 1,
+        leaseId: `lse_${'A'.repeat(26)}`,
+        fencingToken: '7',
+        workerId: `wrk_${'A'.repeat(26)}`,
+        workerInstanceId: `wki_${'A'.repeat(26)}`,
+        workerSessionId: `wsn_${'A'.repeat(26)}`,
+        productSessionId: `psn_${'A'.repeat(26)}`,
+        codexThreadId: `cdx_${'A'.repeat(26)}`,
+      },
+      sourceEventId: `xevt_${'A'.repeat(26)}`,
+      sourceSequence: 1,
+      outcome: 'succeeded',
+    },
+    VerifierResult: {
+      ...base,
+      id: `vrs_${'A'.repeat(26)}`,
+      evidenceIds: [`evd_${'A'.repeat(26)}`],
+      status: 'pass',
+    },
+    Verdict: {
+      ...base,
+      id: `vdt_${'A'.repeat(26)}`,
+      workContractId: `wct_${'A'.repeat(26)}`,
+      contractRevision: 1,
+      planRevision: 1,
+      workItemId: `wit_${'A'.repeat(26)}`,
+      status: 'pass',
+      evidenceIds: [`evd_${'A'.repeat(26)}`],
+      revision: 1,
+    },
+  }
+  return { records }
+}

@@ -957,7 +957,7 @@ fn approved_verified_candidate_fixture() -> (Delivery, FrozenDeliveryCandidate) 
     );
     let mut snapshot = pre_candidate.into_snapshot();
     for evidence in &mut snapshot.evidence {
-        evidence.candidate_ref = candidate.candidate_ref().into();
+        evidence.candidate_id = candidate.candidate_id().clone();
     }
     let verdict = snapshot.verdict.as_mut().expect("passing verdict");
     verdict.candidate_ref = candidate.candidate_ref().into();
@@ -1311,6 +1311,7 @@ fn positive_candidate_fixture() -> (Fixture, PathBuf, FrozenDeliveryCandidate, S
         &delivery,
         &winwincode_storage::delivery_candidate_source(&source),
         &terminal,
+        winwincode_domain::CandidateId("cnd_4FTQCJQDCCS9S41A0QK9M4EYWR".into()),
     )
     .expect("freeze candidate");
     let mut f =
@@ -1358,6 +1359,22 @@ fn positive_candidate_fixture() -> (Fixture, PathBuf, FrozenDeliveryCandidate, S
             revision: 1,
             payload: serde_json::to_vec(&authority).expect("terminal authority JSON"),
         },
+    );
+    let artifact = &terminal.metadata().artifacts()[0];
+    let canonical = f
+        .control_plane
+        .resolve_delivery_candidate(
+            &f.scope,
+            f.delivery.id(),
+            &artifact.artifact_id,
+            &artifact.digest,
+            &terminal,
+        )
+        .expect("canonical candidate");
+    assert_eq!(
+        candidate.candidate_id(),
+        canonical.candidate_id(),
+        "positive fixture must use the canonical writer identity"
     );
     (f, root, candidate, base_commit, candidate_commit)
 }
@@ -1497,16 +1514,7 @@ fn page_annotation_submit_publishes_attention_and_evidence_for_detail_read() {
         .expect("candidate SessionBinding")
         .clone();
     let candidate_ref = candidate.candidate_ref().to_owned();
-    let candidate_digest = {
-        let digest = candidate_ref
-            .strip_prefix("git-candidate:")
-            .expect("candidate digest");
-        Sha256Digest(if digest.starts_with("sha256:") {
-            digest.to_owned()
-        } else {
-            format!("sha256:{digest}")
-        })
-    };
+    let candidate_digest = candidate.candidate_digest().clone();
     snapshot
         .work_run_aggregate
         .runs
@@ -1534,7 +1542,7 @@ fn page_annotation_submit_publishes_attention_and_evidence_for_detail_read() {
     candidate_evidence.delivery_spec_revision = snapshot.spec.revision;
     candidate_evidence.work_run_id = run.id.clone();
     candidate_evidence.session_binding_id = binding.id.clone();
-    candidate_evidence.candidate_ref = candidate_ref.clone();
+    candidate_evidence.candidate_id = candidate.candidate_id().clone();
     candidate_evidence.evidence_type = EvidenceRefType::Commit;
     candidate_evidence.source_ref = format!("git_commit:{}", candidate.candidate_commit_id());
     snapshot.evidence[0] = candidate_evidence;
@@ -1546,7 +1554,8 @@ fn page_annotation_submit_publishes_attention_and_evidence_for_detail_read() {
         delivery_spec_revision: snapshot.spec.revision,
         work_run_id: run.id.clone(),
         session_binding_id: binding.id.clone(),
-        candidate_ref: candidate_ref.clone(),
+        candidate_id: candidate.candidate_id().clone(),
+        snapshot_id: winwincode_domain::SnapshotId("snap_01J00000000000000000000001".into()),
         evidence_type: EvidenceRefType::Diff,
         source_ref: format!("git_diff:{}", diff_sha256.0),
         created_at_millis: 1_800_000_000_074,
@@ -1559,7 +1568,8 @@ fn page_annotation_submit_publishes_attention_and_evidence_for_detail_read() {
         delivery_spec_revision: snapshot.spec.revision,
         work_run_id: run.id.clone(),
         session_binding_id: binding.id.clone(),
-        candidate_ref: candidate_ref.clone(),
+        candidate_id: candidate.candidate_id().clone(),
+        snapshot_id: winwincode_domain::SnapshotId("snap_01J00000000000000000000001".into()),
         evidence_type: EvidenceRefType::File,
         source_ref: format!("git_file:{}:", candidate.candidate_tree_id()),
         created_at_millis: 1_800_000_000_075,
@@ -1835,6 +1845,12 @@ fn page_annotation_submit_publishes_attention_and_evidence_for_detail_read() {
             annotation_id: annotation_id.clone(),
             action: PageAnnotationAction::Upsert {
                 candidate: PageAnnotationCandidateIdentity {
+                    candidate_id: winwincode_domain::CandidateId(
+                        "cnd_01J00000000000000000000001".into(),
+                    ),
+                    snapshot_id: winwincode_domain::SnapshotId(
+                        "snap_01J00000000000000000000001".into(),
+                    ),
                     delivery_id: delivery_id.clone(),
                     delivery_spec_id: spec_id.0.clone(),
                     delivery_spec_revision: snapshot_revision(&delivery),
@@ -2012,7 +2028,8 @@ fn page_annotation_submit_publishes_attention_and_evidence_for_detail_read() {
         },
         parameters: EvidenceReadBinding {
             at_cursor: cursor,
-            candidate_ref: evidence.candidate_ref.clone(),
+            candidate_id: evidence.candidate_id.clone(),
+            snapshot_id: evidence.snapshot_id.clone(),
             delivery_id: delivery_id.clone(),
             evidence_id: evidence.id.clone(),
             read_page_limit: 20,

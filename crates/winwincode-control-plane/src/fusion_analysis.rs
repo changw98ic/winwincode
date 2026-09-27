@@ -77,6 +77,7 @@ pub struct FusionFinding {
 pub enum ConflictLeadingSource {
     Evidence,
     JevProvisional,
+    Verifier,
     Undecided,
 }
 
@@ -89,6 +90,16 @@ pub struct FusionConflict {
     pub leading_position: Option<FusionClaimPosition>,
     pub leading_source: ConflictLeadingSource,
     pub jev_confidence: Option<u8>,
+    pub jev_reason: Option<String>,
+    pub verification_basis: Option<String>,
+}
+
+/// Verifier conclusion applied to a reversible JEV provisional decision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum JevVerificationConclusion {
+    Supports,
+    Opposes,
+    Insufficient,
 }
 
 /// Candidates and evidence quality behind one side of a conflict.
@@ -219,6 +230,8 @@ pub fn analyze_fusion(
                 leading_position,
                 leading_source,
                 jev_confidence: None,
+                jev_reason: None,
+                verification_basis: None,
             });
             continue;
         }
@@ -274,10 +287,7 @@ fn summaries_compatible(left: &str, right: &str) -> bool {
 /// `claim:root-race` and `root-race` are one claim, not two.
 #[must_use]
 pub fn claim_group_key(claim_key: &str) -> String {
-    let collapsed = claim_key
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let collapsed = claim_key.split_whitespace().collect::<Vec<_>>().join(" ");
     let trimmed = collapsed.trim();
     let stripped = trimmed
         .strip_prefix("claim:")
@@ -325,11 +335,17 @@ pub enum FusionStopReason {
 /// Next control-plane action for the Fusion state machine (ADR-0036).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FusionNextAction {
-    Finish { reason: FusionStopReason },
+    Finish {
+        reason: FusionStopReason,
+    },
     /// Round1 disputes must investigate; JEV direct ruling is forbidden here.
-    TargetedInvestigation { claim_keys: Vec<String> },
+    TargetedInvestigation {
+        claim_keys: Vec<String>,
+    },
     /// After R3 produced new evidence (or budget forces verify).
-    Verify { claim_keys: Vec<String> },
+    Verify {
+        claim_keys: Vec<String>,
+    },
 }
 
 /// Hard rule (ADR-0036): same-tier disputes after Discovery go to targeted
@@ -341,6 +357,16 @@ pub fn fusion_next_action(
     budget_exhausted: bool,
     produced_new_evidence: bool,
 ) -> FusionNextAction {
+    let awaiting_verification: Vec<String> = awaiting_verification_conflicts(analysis)
+        .into_iter()
+        .map(|conflict| conflict.claim_key.clone())
+        .collect();
+    if !awaiting_verification.is_empty() {
+        return FusionNextAction::Verify {
+            claim_keys: awaiting_verification,
+        };
+    }
+
     let disputed: Vec<String> = undecided_conflicts(analysis)
         .into_iter()
         .map(|conflict| conflict.claim_key.clone())
@@ -358,22 +384,25 @@ pub fn fusion_next_action(
     }
 
     match round {
-        FusionRound::Discovery | FusionRound::ConflictDetection => FusionNextAction::TargetedInvestigation {
-            claim_keys: disputed,
-        },
+        FusionRound::Discovery | FusionRound::ConflictDetection => {
+            FusionNextAction::TargetedInvestigation {
+                claim_keys: disputed,
+            }
+        }
         FusionRound::TargetedInvestigation => {
-            // Two distinct triggers deliberately converge on `Verify`: ADR-0036
-            // allows verification after R3 produced new evidence, and the budget
-            // limit is the documented escape hatch that forces it. The trigger is
-            // recorded separately on `MultiRoundStep.produced_new_evidence`.
-            if produced_new_evidence || budget_exhausted {
+            if budget_exhausted {
+                FusionNextAction::Finish {
+                    reason: FusionStopReason::BudgetLimit,
+                }
+            } else if produced_new_evidence {
                 FusionNextAction::Verify {
                     claim_keys: disputed,
                 }
             } else {
-                // No increment → do not add weight; stay in investigation or stop unresolvable.
-                FusionNextAction::Finish {
-                    reason: FusionStopReason::Unresolvable,
+                // No increment does not add weight, but the next meaningful
+                // source/tool/reproduction action still has to be attempted.
+                FusionNextAction::TargetedInvestigation {
+                    claim_keys: disputed,
                 }
             }
         }
@@ -403,6 +432,25 @@ pub fn apply_jev_conflict_leading(
     confidence: u8,
     post_investigation: bool,
 ) -> bool {
+    apply_jev_conflict_leading_with_reason(
+        analysis,
+        claim_key,
+        position,
+        confidence,
+        "",
+        post_investigation,
+    )
+}
+
+/// Applies a reversible JEV provisional decision with an auditable reason.
+pub fn apply_jev_conflict_leading_with_reason(
+    analysis: &mut FusionAnalysis,
+    claim_key: &str,
+    position: FusionClaimPosition,
+    confidence: u8,
+    reason: &str,
+    post_investigation: bool,
+) -> bool {
     if !post_investigation {
         return false;
     }
@@ -417,9 +465,55 @@ pub fn apply_jev_conflict_leading(
         conflict.leading_position = Some(position);
         conflict.leading_source = ConflictLeadingSource::JevProvisional;
         conflict.jev_confidence = Some(confidence.min(100));
+        conflict.jev_reason = Some(reason.trim().to_owned());
+        conflict.verification_basis = None;
         return true;
     }
     false
+}
+
+/// Replaces a JEV provisional in either direction, or returns it to the
+/// unresolved set when verification remains insufficient.
+pub fn resolve_jev_conflict_with_verification(
+    analysis: &mut FusionAnalysis,
+    claim_key: &str,
+    conclusion: JevVerificationConclusion,
+    basis: &str,
+) -> bool {
+    let target = claim_group_key(claim_key);
+    for conflict in &mut analysis.conflicts {
+        if claim_group_key(&conflict.claim_key) != target
+            || !matches!(
+                conflict.leading_source,
+                ConflictLeadingSource::JevProvisional | ConflictLeadingSource::Undecided
+            )
+        {
+            continue;
+        }
+        conflict.leading_position = match conclusion {
+            JevVerificationConclusion::Supports => Some(FusionClaimPosition::Supports),
+            JevVerificationConclusion::Opposes => Some(FusionClaimPosition::Opposes),
+            JevVerificationConclusion::Insufficient => None,
+        };
+        conflict.leading_source = if conclusion == JevVerificationConclusion::Insufficient {
+            ConflictLeadingSource::Undecided
+        } else {
+            ConflictLeadingSource::Verifier
+        };
+        conflict.verification_basis = Some(basis.trim().to_owned());
+        return true;
+    }
+    false
+}
+
+/// Provisional decisions that must still reach a verifier before completion.
+#[must_use]
+pub fn awaiting_verification_conflicts(analysis: &FusionAnalysis) -> Vec<&FusionConflict> {
+    analysis
+        .conflicts
+        .iter()
+        .filter(|conflict| conflict.leading_source == ConflictLeadingSource::JevProvisional)
+        .collect()
 }
 
 /// Conflicts still waiting for a judge or verifier (ADR-0035 disputed set).
@@ -795,7 +889,10 @@ mod tests {
         let analysis = analyze_fusion(&mismatched).expect("wording drift is not fatal");
         assert_eq!(analysis.conflicts.len(), 1);
         assert_eq!(analysis.conflicts[0].summary, "The tests pass");
-        assert_eq!(analysis.conflicts[0].leading_source, ConflictLeadingSource::Undecided);
+        assert_eq!(
+            analysis.conflicts[0].leading_source,
+            ConflictLeadingSource::Undecided
+        );
 
         assert_eq!(analyze_fusion(&[]), Err(FusionAnalysisError::InvalidInput));
     }
@@ -848,8 +945,14 @@ mod tests {
         ];
         let analysis = analyze_fusion(&candidates).expect("fixture is valid");
         assert_eq!(analysis.conflicts.len(), 1);
-        assert_eq!(analysis.conflicts[0].claim_key, "claim:root-shared-fixture-race");
-        assert_eq!(analysis.conflicts[0].leading_source, ConflictLeadingSource::Undecided);
+        assert_eq!(
+            analysis.conflicts[0].claim_key,
+            "claim:root-shared-fixture-race"
+        );
+        assert_eq!(
+            analysis.conflicts[0].leading_source,
+            ConflictLeadingSource::Undecided
+        );
     }
 
     #[test]
@@ -909,20 +1012,26 @@ mod tests {
             }
         );
 
-        let evidence_led = [FusionCandidateClaims {
-            candidate_id: "model-a".to_owned(),
-            claims: vec![claim(FusionClaimPosition::Supports, tool_command_evidence())],
-        }, FusionCandidateClaims {
-            candidate_id: "model-b".to_owned(),
-            claims: vec![claim(
-                FusionClaimPosition::Opposes,
-                vec![FusionEvidence {
-                    evidence_type: EvidenceRefType::Test,
-                    source_ref: "verification:failing-test".to_owned(),
-                    verified_conclusion: Some(VerificationFindingConclusion::Fail),
-                }],
-            )],
-        }];
+        let evidence_led = [
+            FusionCandidateClaims {
+                candidate_id: "model-a".to_owned(),
+                claims: vec![claim(
+                    FusionClaimPosition::Supports,
+                    tool_command_evidence(),
+                )],
+            },
+            FusionCandidateClaims {
+                candidate_id: "model-b".to_owned(),
+                claims: vec![claim(
+                    FusionClaimPosition::Opposes,
+                    vec![FusionEvidence {
+                        evidence_type: EvidenceRefType::Test,
+                        source_ref: "verification:failing-test".to_owned(),
+                        verified_conclusion: Some(VerificationFindingConclusion::Fail),
+                    }],
+                )],
+            },
+        ];
         let mut analysis = analyze_fusion(&evidence_led).expect("fixture is valid");
         assert_eq!(
             analysis.conflicts[0].leading_source,
@@ -953,10 +1062,7 @@ mod tests {
             },
             FusionCandidateClaims {
                 candidate_id: "model-b".to_owned(),
-                claims: vec![claim(
-                    FusionClaimPosition::Opposes,
-                    tool_command_evidence(),
-                )],
+                claims: vec![claim(FusionClaimPosition::Opposes, tool_command_evidence())],
             },
         ];
         let analysis = analyze_fusion(&disputed).expect("fixture is valid");
@@ -972,11 +1078,12 @@ mod tests {
                 claim_keys: vec!["claim:tests-pass".to_owned()]
             }
         );
-        // No new evidence in R3 → Unresolvable (do not add weight).
+        // No new evidence does not add weight, but it still gets the next
+        // meaningful investigation action before any terminal decision.
         assert_eq!(
             fusion_next_action(&analysis, FusionRound::TargetedInvestigation, false, false),
-            FusionNextAction::Finish {
-                reason: FusionStopReason::Unresolvable
+            FusionNextAction::TargetedInvestigation {
+                claim_keys: vec!["claim:tests-pass".to_owned()]
             }
         );
         assert_eq!(
@@ -987,7 +1094,140 @@ mod tests {
         );
         assert_eq!(
             fusion_next_action(&analysis, FusionRound::TargetedInvestigation, true, false),
+            FusionNextAction::Finish {
+                reason: FusionStopReason::BudgetLimit
+            }
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn provisional_waits_and_verifier_replaces_it_in_either_direction() {
+        let disputed = [
+            FusionCandidateClaims {
+                candidate_id: "seat-a".to_owned(),
+                claims: vec![claim(
+                    FusionClaimPosition::Supports,
+                    tool_command_evidence(),
+                )],
+            },
+            FusionCandidateClaims {
+                candidate_id: "seat-b".to_owned(),
+                claims: vec![claim(FusionClaimPosition::Opposes, tool_command_evidence())],
+            },
+        ];
+
+        let mut supports = analyze_fusion(&disputed).expect("fixture is valid");
+        assert!(apply_jev_conflict_leading_with_reason(
+            &mut supports,
+            "claim:tests-pass",
+            FusionClaimPosition::Supports,
+            71,
+            "transaction lifetime favors support",
+            true,
+        ));
+        assert_eq!(
+            fusion_next_action(&supports, FusionRound::Verification, false, true),
             FusionNextAction::Verify {
+                claim_keys: vec!["claim:tests-pass".to_owned()]
+            }
+        );
+        assert!(resolve_jev_conflict_with_verification(
+            &mut supports,
+            "claim:tests-pass",
+            JevVerificationConclusion::Opposes,
+            "verified counter test closes the disputed transaction",
+        ));
+        assert_eq!(
+            supports.conflicts[0].leading_position,
+            Some(FusionClaimPosition::Opposes)
+        );
+        assert_eq!(
+            supports.conflicts[0].leading_source,
+            ConflictLeadingSource::Verifier
+        );
+        assert_eq!(
+            supports.conflicts[0].jev_reason.as_deref(),
+            Some("transaction lifetime favors support")
+        );
+        assert_eq!(
+            supports.conflicts[0].verification_basis.as_deref(),
+            Some("verified counter test closes the disputed transaction")
+        );
+
+        let mut opposes = analyze_fusion(&disputed).expect("fixture is valid");
+        assert!(apply_jev_conflict_leading_with_reason(
+            &mut opposes,
+            "claim:tests-pass",
+            FusionClaimPosition::Opposes,
+            64,
+            "current call graph appears unsafe",
+            true,
+        ));
+        assert!(resolve_jev_conflict_with_verification(
+            &mut opposes,
+            "claim:tests-pass",
+            JevVerificationConclusion::Supports,
+            "verified synchronization covers both entry points",
+        ));
+        assert_eq!(
+            opposes.conflicts[0].leading_position,
+            Some(FusionClaimPosition::Supports)
+        );
+        assert_eq!(
+            opposes.conflicts[0].leading_source,
+            ConflictLeadingSource::Verifier
+        );
+
+        let mut insufficient = analyze_fusion(&disputed).expect("fixture is valid");
+        assert!(apply_jev_conflict_leading_with_reason(
+            &mut insufficient,
+            "claim:tests-pass",
+            FusionClaimPosition::Supports,
+            55,
+            "weak source-path inference",
+            true,
+        ));
+        assert!(resolve_jev_conflict_with_verification(
+            &mut insufficient,
+            "claim:tests-pass",
+            JevVerificationConclusion::Insufficient,
+            "required concurrency observation is missing",
+        ));
+        assert_eq!(
+            insufficient.conflicts[0].leading_source,
+            ConflictLeadingSource::Undecided
+        );
+        assert_eq!(insufficient.conflicts[0].leading_position, None);
+        assert_eq!(
+            insufficient.conflicts[0].jev_reason.as_deref(),
+            Some("weak source-path inference")
+        );
+        assert_eq!(
+            insufficient.conflicts[0].verification_basis.as_deref(),
+            Some("required concurrency observation is missing")
+        );
+    }
+
+    #[test]
+    fn no_increment_round_escalates_to_the_next_meaningful_action() {
+        let disputed = [
+            FusionCandidateClaims {
+                candidate_id: "seat-a".to_owned(),
+                claims: vec![claim(
+                    FusionClaimPosition::Supports,
+                    tool_command_evidence(),
+                )],
+            },
+            FusionCandidateClaims {
+                candidate_id: "seat-b".to_owned(),
+                claims: vec![claim(FusionClaimPosition::Opposes, tool_command_evidence())],
+            },
+        ];
+        let analysis = analyze_fusion(&disputed).expect("fixture is valid");
+        assert_eq!(
+            fusion_next_action(&analysis, FusionRound::TargetedInvestigation, false, false),
+            FusionNextAction::TargetedInvestigation {
                 claim_keys: vec!["claim:tests-pass".to_owned()]
             }
         );

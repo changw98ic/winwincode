@@ -98,8 +98,8 @@ fn sample_input() -> FusionInput {
             })
             .collect(),
         budget: FusionBudget {
-            candidate_timeout_millis: 200,
-            max_total_tokens: 1_000,
+            candidate_timeout_millis: Some(200),
+            max_total_tokens: Some(1_000),
         },
     }
 }
@@ -187,7 +187,7 @@ async fn three_providers_run_in_parallel_with_isolated_blind_contexts() {
                 "question",
             ]
         );
-        assert_eq!(request.max_total_tokens, 1_000);
+        assert_eq!(request.max_total_tokens, Some(1_000));
         assert_eq!(request.panel_id, "panel-1");
         assert_ne!(request.candidate_id, "");
     }
@@ -234,7 +234,7 @@ async fn timeout_and_provider_failure_do_not_kill_successful_siblings() {
     );
 
     let mut input = sample_input();
-    input.budget.candidate_timeout_millis = 80;
+    input.budget.candidate_timeout_millis = Some(80);
     let result = run_blind_panel("panel-2", input, panel_router)
         .await
         .expect("panel survives partial failure");

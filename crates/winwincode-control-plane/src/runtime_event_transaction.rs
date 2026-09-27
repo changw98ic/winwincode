@@ -172,6 +172,16 @@ pub(crate) fn execute_at(
         }
         Err(error) => return Err(error.into()),
     };
+    if let Err(error) = crate::snapshot_production::snapshot_for_job(storage, &job) {
+        if error.kind() == StorageErrorKind::InvalidInput {
+            return Ok(rejection_ack(
+                message,
+                0,
+                Rejection::Conflict("verification Snapshot is missing or foreign"),
+            ));
+        }
+        return Err(error.into());
+    }
     let context = match RuntimeContext::from_durable(scope, &scope_key, &durable, &job) {
         Ok(context) => context,
         Err(rejection) => return Ok(rejection_ack(message, 0, rejection)),

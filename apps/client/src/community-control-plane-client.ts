@@ -2948,6 +2948,8 @@ export interface ControlPlaneRunIdentityProjection {
 
 /** Current Candidate identity plus its optional device-local lifecycle facts. */
 export interface ControlPlaneRunCandidateProjection {
+  readonly candidateId: import('./generated/contracts.js').CandidateId
+  readonly candidateDigest: Sha256Digest
   readonly candidateRef: string
   /** Exact commit sealed by the canonical FrozenCandidateSummaryProjection. */
   readonly candidateCommitId: string
@@ -3051,6 +3053,8 @@ export function createControlPlaneRunIdentityPort(options: {
         }
         candidate = Object.freeze({
           candidateRef: currentCandidate.candidateRef,
+          candidateId: currentCandidate.candidateId,
+          candidateDigest: currentCandidate.candidateDigest,
           candidateCommitId: candidateIdentity.candidateCommitId,
           candidateTreeId: candidateIdentity.candidateTreeId,
           diffSha256: currentCandidate.diffSha256,
@@ -3071,6 +3075,8 @@ export function createControlPlaneRunIdentityPort(options: {
           }
           candidate = Object.freeze({
             candidateRef: currentCandidate.candidateRef,
+          candidateId: currentCandidate.candidateId,
+          candidateDigest: currentCandidate.candidateDigest,
             candidateCommitId: candidateIdentity.candidateCommitId,
             candidateTreeId: candidateIdentity.candidateTreeId,
             diffSha256: currentCandidate.diffSha256,

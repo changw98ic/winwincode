@@ -20,12 +20,12 @@ pub struct FusionProviderCandidate {
     pub reasoning_effort: Option<String>,
 }
 
-/// Hard per-candidate limits carried by the canonical panel input.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+/// Explicit optional limits. Production task runs default to no cutoff.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FusionBudget {
-    pub candidate_timeout_millis: u64,
-    pub max_total_tokens: u64,
+    pub candidate_timeout_millis: Option<u64>,
+    pub max_total_tokens: Option<u64>,
 }
 
 /// Canonical input shared by every route.
@@ -75,7 +75,7 @@ pub struct FusionProviderRequest {
     pub reasoning_effort: Option<String>,
     /// Blind prompt only. Never includes sibling candidates.
     pub prompt: FusionBlindPrompt,
-    pub max_total_tokens: u64,
+    pub max_total_tokens: Option<u64>,
 }
 
 /// One complete independent Provider answer.

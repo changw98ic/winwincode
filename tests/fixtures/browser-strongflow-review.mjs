@@ -6,7 +6,9 @@ const deliveryId = 'dlv_00000000000000000000000042'
 const workRunId = 'wrn_00000000000000000000000042'
 const evidenceId = 'evd_00000000000000000000000042'
 const artifactId = 'art_00000000000000000000000042'
-const candidateRef = `git-candidate:sha256:${'c'.repeat(64)}`
+const candidateId = 'cnd_00000000000000000000000042'
+const snapshotId = 'snap_00000000000000000000000042'
+const candidateRef = `refs/winwincode/candidates/${'c'.repeat(40)}`
 const scope = {
   kind: 'repository',
   organizationId: 'org_00000000000000000000000001',
@@ -21,6 +23,7 @@ const readCursor = {
   eventCursor: { scope, stream: { kind: 'delivery', deliveryId }, sequence: 0, eventId: null },
 }
 const candidate = {
+  candidateId, candidateDigest: `sha256:${'d'.repeat(64)}`,
   candidateRef, deliverySpecId: 'spec-review', deliverySpecRevision: 1,
   producerWorkRunId: workRunId, producerSessionBindingId: 'binding-1',
   candidateCommitId: 'abc1234567890abcdef1234567890abcdef123456',
@@ -28,8 +31,9 @@ const candidate = {
   diffSha256: `sha256:${'b'.repeat(64)}`, frozenAt: '2026-09-11T00:00:00.000Z',
 }
 const evidence = {
+  candidateId, snapshotId,
   id: evidenceId, deliverySpecId: 'spec-review', deliverySpecRevision: 1,
-  workRunId, sessionBindingId: 'binding-1', candidateRef,
+  workRunId, sessionBindingId: 'binding-1',
   type: 'command', sourceRef: 'runtime:command:42', createdAt: '2026-09-11T00:01:00.000Z',
 }
 const acceptanceCriteria = [
@@ -37,6 +41,7 @@ const acceptanceCriteria = [
   { id: 'criterion-two', description: 'Review passes', required: true, verificationMethod: null },
 ]
 const verdict = {
+  candidateId, snapshotId,
   id: 'verdict-1', deliverySpecId: 'spec-review', deliverySpecRevision: 1,
   candidateRef, producedAt: '2026-09-11T00:02:00.000Z', status: 'pass', unresolvedFindings: [],
   criteria: [{
@@ -71,7 +76,7 @@ const descriptor = {
   artifactId, kind: 'report', digest: `sha256:${'e'.repeat(64)}`,
   fileName: 'report.html', mediaType: 'text/html', sizeBytes: 48,
   previewMode: 'inline_text',
-  provenance: { candidateRef, deliveryId, deliveryRevision: 2, evidenceId, sessionBindingId: 'binding-1', workRunId },
+  provenance: { candidateId, snapshotId, deliveryId, deliveryRevision: 2, evidenceId, sessionBindingId: 'binding-1', workRunId },
 }
 
 const queries = []

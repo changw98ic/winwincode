@@ -112,17 +112,17 @@ fn executor_freezes_real_checkout_into_exact_candidate_artifact() {
         format!("sha256:{:x}", Sha256::digest(prepared.bytes()))
     );
     assert_eq!(
-        prepared.snapshot().provenance.execution_job_id,
+        prepared.freeze_fact().provenance().execution_job_id,
         active.job.job_id
     );
     assert_eq!(
-        prepared.snapshot().provenance.work_run_id,
+        prepared.freeze_fact().provenance().work_run_id,
         active.session_identity.work_run_id
     );
     assert!(
         std::str::from_utf8(prepared.bytes())
             .expect("candidate manifest UTF-8")
-            .contains(&prepared.snapshot().candidate_commit_id)
+            .contains(prepared.freeze_fact().candidate_commit_id())
     );
     let upload = prepared
         .clone()
@@ -136,6 +136,75 @@ fn executor_freezes_real_checkout_into_exact_candidate_artifact() {
     workspace
         .close(WorkspaceCloseReason::Completed)
         .expect("close writer workspace");
+}
+
+#[test]
+fn candidate_freeze_fact_contains_only_worker_code_identity() {
+    let fixture = Fixture::new();
+    let active = active_job(&fixture.repository_id, "freeze-fact", "executor");
+    let mut workspace = fixture
+        .manager()
+        .create(&active)
+        .expect("create writer workspace");
+    fs::write(
+        workspace
+            .checkout_path("candidate.txt")
+            .expect("candidate path"),
+        b"candidate\n",
+    )
+    .expect("write candidate change");
+
+    let prepared = prepare_candidate_artifact(&active, &mut workspace, RoleExecutionMode::React)
+        .expect("prepare candidate artifact");
+    let fact = prepared.freeze_fact();
+
+    let value = serde_json::to_value(fact).expect("serialize freeze fact");
+    let object = value.as_object().expect("freeze fact object");
+    let mut keys = object.keys().map(String::as_str).collect::<Vec<_>>();
+    keys.sort_unstable();
+
+    assert_eq!(
+        keys,
+        [
+            "candidateCommitId",
+            "candidateTreeId",
+            "checkoutRevision",
+            "contentDigest",
+            "originProvenance",
+            "provenance",
+            "repositoryId",
+            "sourceCommitId",
+            "sourceTreeId",
+        ]
+    );
+    assert!(!object.contains_key("snapshotId"));
+    assert!(!object.contains_key("candidateId"));
+
+    assert_eq!(object["repositoryId"], active.job.workspace.repository_id.0);
+    assert_eq!(
+        object["checkoutRevision"],
+        active.job.workspace.checkout_revision
+    );
+    assert_ne!(object["candidateTreeId"], object["sourceTreeId"]);
+    assert!(
+        object["contentDigest"]
+            .as_str()
+            .expect("content digest")
+            .starts_with("sha256:")
+    );
+
+    let candidate_commit = object["candidateCommitId"]
+        .as_str()
+        .expect("candidate commit");
+    assert!(
+        std::str::from_utf8(prepared.bytes())
+            .expect("candidate manifest UTF-8")
+            .contains(candidate_commit)
+    );
+
+    let wire = serde_json::to_string(fact).expect("freeze fact wire form");
+    assert!(!wire.contains("\"snap_"));
+    assert!(!wire.contains("\"cnd_"));
 }
 
 #[test]
@@ -159,8 +228,8 @@ fn delegated_executor_freezes_only_under_its_read_only_composer_policy() {
         prepare_candidate_artifact(&active, &mut workspace, RoleExecutionMode::DelegatedBatch)
             .expect("freeze delegated candidate through the canonical snapshot");
     assert_ne!(
-        prepared.snapshot().candidate_tree_id,
-        prepared.snapshot().source_tree_id
+        prepared.freeze_fact().candidate_tree_id(),
+        prepared.freeze_fact().source_tree_id()
     );
     workspace
         .close(WorkspaceCloseReason::Completed)
@@ -290,6 +359,7 @@ fn active_job(repository_id: &RepositoryId, suffix: &str, role: &str) -> ActiveJ
         worker_instance_id: WorkerInstanceId("wki_stage_product".to_owned()),
     };
     ActiveJob {
+        snapshot_id: None,
         job: ExecutionJob {
             attachments: None,
             model_selection: None,

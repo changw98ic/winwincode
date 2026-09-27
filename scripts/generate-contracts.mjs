@@ -2567,7 +2567,7 @@ function rustSharedDefinitionNamesForExecutionPort(context) {
   // Public engineering-runtime objects are database-neutral domain values. Keep
   // their single Rust ownership in winwincode-domain; API only references them.
   for (const name of [
-    'Candidate', 'CandidateDigest', 'Criterion', 'ExecutionFactIdentity', 'WorkContractId', 'WorkItemId', 'WorkRunId', 'VerificationPlanId',
+    'Candidate', 'CandidateDigest', 'Criterion', 'ExecutionFactIdentity', 'Snapshot', 'VerificationSession', 'VerifierResult', 'WorkContractId', 'WorkItemId', 'WorkRunId', 'VerificationPlanId',
     'WorkItemState', 'WorkRunState', 'WorkContract', 'WorkItem', 'WorkRun',
     'VerificationPlan', 'Evidence', 'Verdict',
   ]) {

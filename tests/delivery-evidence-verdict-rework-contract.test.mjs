@@ -87,7 +87,8 @@ const CANDIDATE_IDENTITY_FIELDS = Object.freeze([
 ].sort())
 
 const PERSISTED_EVIDENCE_BINDINGS = Object.freeze([
-  'candidateRef',
+  'candidateId',
+  'snapshotId',
   'deliveryId',
   'deliverySpecId',
   'deliverySpecRevision',
@@ -123,7 +124,7 @@ const PROHIBITED_RUST_SESSION_FIELDS = Object.freeze([
 const SEALED_FACT_AVAILABILITY = Object.freeze({
   AcceptedRuntimeSourceFact: 'follow-up-adapter',
   ValidatedCheckoutAttestationFact: 'follow-up-adapter',
-  ValidatedGitSnapshotFact: 'follow-up-adapter',
+  SealedCandidateSource: 'follow-up-adapter',
   VerifiedTerminalOutcome: 'phase-4-adapter-gate',
 })
 
@@ -259,7 +260,7 @@ test('phase 2.4 rules freeze candidate, evidence, verdict, and rework behavior',
   assert.deepEqual([...rules.rework.preciseBindings].sort(), PRECISE_REWORK_BINDINGS)
   assert.equal(rules.rework.attemptLimitSource, 'DeliverySpec.maxReworkAttempts')
   assert.equal(rules.rework.writerRole, 'remediator')
-  assert.match(rules.candidate.factSourcePolicy, /sealed ValidatedGitSnapshotFact/u)
+  assert.match(rules.candidate.factSourcePolicy, /sealed SealedCandidateSource/u)
   assert.match(rules.candidate.factSourcePolicy, /cannot itself read Git/u)
   assert.match(rules.evidence.candidateCheckoutPolicy, /ValidatedCheckoutAttestationFact/u)
   assert.match(rules.evidence.ledgerPolicy, /persisted source positions/u)

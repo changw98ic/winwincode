@@ -739,7 +739,8 @@ impl OpenJevRemoteSettings {
     ///
     /// Rejects malformed TOML and fields that fail [`OpenJevRemoteConfig::try_new`].
     pub fn from_toml(input: &str) -> Result<Self, JevProviderError> {
-        toml::from_str(input).map_err(|_| JevProviderError::new(JevProviderErrorKind::InvalidRequest))
+        toml::from_str(input)
+            .map_err(|_| JevProviderError::new(JevProviderErrorKind::InvalidRequest))
     }
 
     /// Converts host settings into a validated remote Provider config plus runtime retry policy.
@@ -1048,11 +1049,11 @@ impl JevRemoteTransport for MockJevRemoteTransport {
         _options: JevExecutionOptions,
     ) -> BoxFuture<'static, Result<RemoteJevScoreBatch, JevProviderError>> {
         let error = self.error;
-        let scores = self.evaluations.first().copied().unwrap_or(portable_scores(
-            0.5,
-            0.25,
-            0.25,
-        ));
+        let scores = self
+            .evaluations
+            .first()
+            .copied()
+            .unwrap_or(portable_scores(0.5, 0.25, 0.25));
         let input_tokens = self.input_tokens;
         let device = self.device;
         Box::pin(async move {
@@ -1261,12 +1262,11 @@ pub fn contract_capability_mocks() -> Vec<MockJevProvider> {
 /// Builds already-validated portable scores for mocks and parsers.
 #[must_use]
 pub fn portable_scores(entailment: f32, contradiction: f32, neutral: f32) -> JevScores {
-    JevScores::try_new(entailment, contradiction, neutral)
-        .unwrap_or(JevScores {
-            entailment: 0.0,
-            contradiction: 0.0,
-            neutral: 1.0,
-        })
+    JevScores::try_new(entailment, contradiction, neutral).unwrap_or(JevScores {
+        entailment: 0.0,
+        contradiction: 0.0,
+        neutral: 1.0,
+    })
 }
 
 #[allow(
@@ -1513,7 +1513,10 @@ mod tests {
         fn openjev() -> Self {
             Self {
                 available: true,
-                capabilities: openjev_capabilities("openjev-local", OPENJEV_DEFAULT_MODEL_ID.to_owned()),
+                capabilities: openjev_capabilities(
+                    "openjev-local",
+                    OPENJEV_DEFAULT_MODEL_ID.to_owned(),
+                ),
                 scores: portable_scores(0.7, 0.2, 0.1),
                 device: JevDevice::Cpu,
             }
@@ -1685,7 +1688,10 @@ mod tests {
                 let options = JevExecutionOptions { device, dtype };
                 assert_eq!(mock.health().await, JevHealth::Healthy);
 
-                let single = mock.evaluate(hypothesis(), options).await.expect("evaluate");
+                let single = mock
+                    .evaluate(hypothesis(), options)
+                    .await
+                    .expect("evaluate");
                 assert!(single.scores.valid());
                 assert_ne!(single.device, JevDevice::Auto);
                 assert!(single.input_tokens > 0);
@@ -1712,7 +1718,10 @@ mod tests {
                 .batch_evaluate(vec![hypothesis(); 32], options())
                 .await;
             assert!(oversized.value.is_none());
-            assert_eq!(oversized.failures[0].kind, JevProviderErrorKind::Unsupported);
+            assert_eq!(
+                oversized.failures[0].kind,
+                JevProviderErrorKind::Unsupported
+            );
 
             let gpu = runtime(vec![Arc::new(
                 MockJevProvider::healthy("cpu-only").with_capabilities(JevProviderCapabilities {
@@ -1743,7 +1752,11 @@ mod tests {
             assert!(!local.has_runtime());
             assert_eq!(local.health().await, JevHealth::Unavailable);
             assert_eq!(
-                local.evaluate(hypothesis(), options()).await.unwrap_err().kind(),
+                local
+                    .evaluate(hypothesis(), options())
+                    .await
+                    .unwrap_err()
+                    .kind(),
                 JevProviderErrorKind::Unavailable
             );
             assert!(OPENJEV_LOCAL_RUNTIME_GAP.contains("not embedded"));
@@ -1757,7 +1770,10 @@ mod tests {
             assert_eq!(ordered.len(), 2);
             let outcome = runtime(ordered).evaluate(hypothesis(), options()).await;
             let evaluation = outcome.value.expect("remote fallback");
-            assert_eq!(outcome.observation.expect("observation").provider_id, "openjev-remote");
+            assert_eq!(
+                outcome.observation.expect("observation").provider_id,
+                "openjev-remote"
+            );
             assert!((evaluation.scores.entailment - 0.75).abs() < f32::EPSILON);
         });
     }
@@ -1765,7 +1781,8 @@ mod tests {
     #[test]
     fn local_openjev_with_injected_runtime_scores_and_observes() {
         block_on(async {
-            let local = OpenJevLocalProvider::with_runtime(Arc::new(ScriptedLocalRuntime::openjev()));
+            let local =
+                OpenJevLocalProvider::with_runtime(Arc::new(ScriptedLocalRuntime::openjev()));
             assert!(local.has_runtime());
             assert_eq!(local.health().await, JevHealth::Healthy);
             let runtime = runtime(jev_provider_order(
@@ -1787,7 +1804,8 @@ mod tests {
     #[test]
     fn remote_first_policy_prefers_remote_then_local() {
         block_on(async {
-            let local = OpenJevLocalProvider::with_runtime(Arc::new(ScriptedLocalRuntime::openjev()));
+            let local =
+                OpenJevLocalProvider::with_runtime(Arc::new(ScriptedLocalRuntime::openjev()));
             let remote = remote_provider(RemoteMode::Success);
             let ordered = jev_provider_order(
                 JevFallbackPolicy::RemoteFirst,
@@ -1808,7 +1826,9 @@ mod tests {
             let ordered = jev_provider_order(JevFallbackPolicy::Skip, None, None);
             assert!(ordered.is_empty());
             let runtime = runtime(ordered);
-            let outcome = runtime.batch_evaluate(vec![hypothesis(), hypothesis()], options()).await;
+            let outcome = runtime
+                .batch_evaluate(vec![hypothesis(), hypothesis()], options())
+                .await;
             assert!(outcome.value.is_none());
             assert!(outcome.observation.is_none());
             // Worker step still completes; Jev is optional context, not a gate.
@@ -1820,7 +1840,8 @@ mod tests {
     #[test]
     fn remote_outage_falls_back_to_local_or_skips() {
         block_on(async {
-            let local = OpenJevLocalProvider::with_runtime(Arc::new(ScriptedLocalRuntime::openjev()));
+            let local =
+                OpenJevLocalProvider::with_runtime(Arc::new(ScriptedLocalRuntime::openjev()));
             let remote = remote_provider(RemoteMode::Unavailable);
             let ordered = jev_provider_order(
                 JevFallbackPolicy::RemoteFirst,
@@ -1833,10 +1854,7 @@ mod tests {
                 "openjev-local"
             );
             assert_eq!(outcome.failures.len(), 1);
-            assert_eq!(
-                outcome.failures[0].kind,
-                JevProviderErrorKind::Unavailable
-            );
+            assert_eq!(outcome.failures[0].kind, JevProviderErrorKind::Unavailable);
 
             let both_broken = jev_provider_order(
                 JevFallbackPolicy::Fallback,
@@ -1852,9 +1870,8 @@ mod tests {
     #[test]
     fn transient_remote_failure_is_retried_then_succeeds() {
         block_on(async {
-            let remote = Arc::new(
-                MockJevProvider::healthy("remote-flaky").with_failures_before_success(1),
-            );
+            let remote =
+                Arc::new(MockJevProvider::healthy("remote-flaky").with_failures_before_success(1));
             let runtime = runtime_with(
                 vec![remote.clone()],
                 JevRuntimeConfig {
@@ -1872,7 +1889,8 @@ mod tests {
     #[test]
     fn provider_timeout_is_recorded_and_fail_opens() {
         block_on(async {
-            let slow = Arc::new(MockJevProvider::healthy("slow").with_delay(Duration::from_millis(80)));
+            let slow =
+                Arc::new(MockJevProvider::healthy("slow").with_delay(Duration::from_millis(80)));
             let outcome = runtime(vec![slow]).evaluate(hypothesis(), options()).await;
             assert!(outcome.value.is_none());
             assert_eq!(outcome.failures[0].kind, JevProviderErrorKind::Timeout);
@@ -1929,17 +1947,19 @@ mod tests {
 
     #[test]
     fn remote_config_rejects_non_https_and_redacts_secret() {
-        assert!(OpenJevRemoteConfig::try_new(OpenJevRemoteConfigRequest {
-            provider_id: "openjev-remote".to_owned(),
-            endpoint: "http://nli.example.com/v1/score".to_owned(),
-            model_id: OPENJEV_DEFAULT_MODEL_ID.to_owned(),
-            max_batch_size: 8,
-            devices: vec![JevDevice::Cpu],
-            dtypes: vec![JevDtype::Float32],
-            timeout: Duration::from_millis(200),
-            api_key: None,
-        })
-        .is_err());
+        assert!(
+            OpenJevRemoteConfig::try_new(OpenJevRemoteConfigRequest {
+                provider_id: "openjev-remote".to_owned(),
+                endpoint: "http://nli.example.com/v1/score".to_owned(),
+                model_id: OPENJEV_DEFAULT_MODEL_ID.to_owned(),
+                max_batch_size: 8,
+                devices: vec![JevDevice::Cpu],
+                dtypes: vec![JevDtype::Float32],
+                timeout: Duration::from_millis(200),
+                api_key: None,
+            })
+            .is_err()
+        );
 
         let config = remote_config();
         let debug = format!("{config:?}");

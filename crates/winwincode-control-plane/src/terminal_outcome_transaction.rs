@@ -141,6 +141,7 @@ pub(crate) fn execute_at(
     validate_trusted_lease_time(facts, server_time)?;
 
     let (durable, job) = load_durable_execution_job(storage, &message.lease.job_id)?;
+    crate::snapshot_production::snapshot_for_job(storage, &job)?;
     let context = TerminalContext::from_durable(scope, &durable, &job)?;
     let current = load_current_delivery(storage, &context.delivery_id)?;
     let session_identity = match validate_current_job_binding(&current, &job, &context) {

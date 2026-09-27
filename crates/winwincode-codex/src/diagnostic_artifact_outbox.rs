@@ -30,6 +30,7 @@ use crate::{
 /// A bounded, already-redacted command/test output stream.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DiagnosticArtifactUpload {
+    pub snapshot_id: Option<winwincode_domain::SnapshotId>,
     pub run_key: String,
     pub job: ExecutionJob,
     pub scope: ExecutionScope,
@@ -46,6 +47,7 @@ pub struct DiagnosticArtifactUpload {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct DiagnosticArtifactAuthority {
+    pub snapshot_id: Option<winwincode_domain::SnapshotId>,
     pub job: ExecutionJob,
     pub scope: ExecutionScope,
     pub lease: ExecutionLeaseStamp,
@@ -548,7 +550,10 @@ struct StoredDiagnosticArtifact {
 impl StoredDiagnosticArtifact {
     #[allow(clippy::too_many_lines)]
     fn from_upload(upload: &DiagnosticArtifactUpload) -> Result<Self, AdapterStoreError> {
-        if upload.run_key.is_empty()
+        if !winwincode_execution_port::snapshot_freeze::snapshot_role_binding_valid(
+            &upload.job.execution_profile,
+            upload.snapshot_id.as_ref(),
+        ) || upload.run_key.is_empty()
             || upload.bytes.is_empty()
             || upload.bytes.len() > MAX_DIAGNOSTIC_OUTPUT_BYTES
             || upload.source_id.is_empty()
@@ -601,7 +606,7 @@ impl StoredDiagnosticArtifact {
             schema_version: SchemaVersion::WinwincodeV1,
             sent_at: upload.created_at.clone(),
             session_identity: upload.session_identity.clone(),
-            snapshot_id: None,
+            snapshot_id: upload.snapshot_id.clone(),
             worker_session_id: upload.worker_session_id.clone(),
         };
         let chunks = upload
@@ -632,7 +637,7 @@ impl StoredDiagnosticArtifact {
                         i64::try_from(sequence).map_err(|_| AdapterStoreError::Conflict)?,
                     ),
                     session_identity: upload.session_identity.clone(),
-                    snapshot_id: None,
+                    snapshot_id: upload.snapshot_id.clone(),
                     worker_session_id: upload.worker_session_id.clone(),
                 })
             })
@@ -673,7 +678,10 @@ impl StoredDiagnosticArtifact {
         let expected_file_name = format!("{}.log", self.source_id);
         let final_sequence =
             u64::try_from(self.chunks.len()).map_err(|_| AdapterStoreError::Corrupt)?;
-        if self.run_key.is_empty()
+        if !winwincode_execution_port::snapshot_freeze::snapshot_role_binding_valid(
+            &self.job.execution_profile,
+            self.open.snapshot_id.as_ref(),
+        ) || self.run_key.is_empty()
             || self.bytes.is_empty()
             || self.bytes.len() > MAX_DIAGNOSTIC_OUTPUT_BYTES
             || self.source_id.is_empty()
@@ -746,6 +754,7 @@ impl StoredDiagnosticArtifact {
                 let sequence = u64::try_from(index + 1).map_err(|_| AdapterStoreError::Corrupt)?;
                 if decoded.as_slice() != expected_bytes
                     || chunk.artifact_id != self.descriptor.artifact_id
+                    || chunk.snapshot_id != self.open.snapshot_id
                     || chunk.lease != self.open.lease
                     || chunk.worker_session_id != self.open.worker_session_id
                     || chunk.session_identity != self.open.session_identity
@@ -793,6 +802,7 @@ impl StoredDiagnosticArtifact {
     }
     fn authority(&self) -> DiagnosticArtifactAuthority {
         DiagnosticArtifactAuthority {
+            snapshot_id: self.open.snapshot_id.clone(),
             job: self.job.clone(),
             scope: self.scope.clone(),
             lease: self.open.lease.clone(),
@@ -992,6 +1002,7 @@ mod tests {
             .expect("artifact open");
         let open: ArtifactOpenMessage = serde_json::from_value(open_value.clone()).expect("open");
         DiagnosticArtifactUpload {
+            snapshot_id: None,
             run_key: "run_fixture_opaque".to_owned(),
             scope: job.scope.clone(),
             job,

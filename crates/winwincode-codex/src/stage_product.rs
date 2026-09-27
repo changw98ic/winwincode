@@ -410,6 +410,29 @@ const fn role_policy_workspace_mode_name(mode: &RoleSessionPolicyWorkspaceMode) 
     }
 }
 
+/// Builds the sealed role prompt with its runtime-owned Snapshot binding.
+///
+/// # Errors
+/// Rejects invalid role input or a missing/foreign Snapshot role binding.
+pub fn snapshot_bound_prompt(
+    job: &ExecutionJob,
+    snapshot_id: Option<&winwincode_domain::SnapshotId>,
+) -> Result<String, StageProductError> {
+    if !winwincode_execution_port::snapshot_freeze::snapshot_role_binding_valid(
+        &job.execution_profile,
+        snapshot_id,
+    ) {
+        return Err(invalid_job());
+    }
+    let mut prompt = stage_product_prompt(job)?;
+    if let Some(snapshot_id) = snapshot_id {
+        prompt.push_str("\nRuntime verification binding: snapshotId=");
+        prompt.push_str(&snapshot_id.0);
+        prompt.push_str(". All judgments and evidence apply only to this frozen input.\n");
+    }
+    Ok(prompt)
+}
+
 /// Builds the exact first-turn prompt from the sealed typed Job input.
 ///
 /// `ProductSession` Chat keeps its original goal. `WorkRun` turns receive
@@ -948,8 +971,13 @@ fn prepare_json_product<T: Serialize>(
 
 fn valid_candidate_ref(value: &str) -> bool {
     value
-        .strip_prefix("git-candidate:sha256:")
-        .is_some_and(valid_sha256)
+        .strip_prefix("refs/winwincode/candidates/")
+        .is_some_and(|commit| {
+            matches!(commit.len(), 40 | 64)
+                && commit
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
 }
 
 fn valid_sha256(digest: &str) -> bool {
@@ -1389,13 +1417,12 @@ mod tests {
         "}"
     );
 
-    const CANDIDATE_REF: &str =
-        "git-candidate:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const CANDIDATE_REF: &str = "refs/winwincode/candidates/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const VERIFICATION_RESULT_JSON: &str = concat!(
         "{\"protocol\":\"winwincode.independent-verification-result.v1\",",
         "\"delivery_spec_id\":\"spec-fixture\",",
         "\"delivery_spec_revision\":2,",
-        "\"candidate_ref\":\"git-candidate:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",",
+        "\"candidate_ref\":\"refs/winwincode/candidates/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",",
         "\"findings\":[{",
         "\"finding_id\":\"finding-reviewer-fixture\",",
         "\"criterion_id\":\"crt_00000000000000000000000001\",",
@@ -1513,6 +1540,22 @@ mod tests {
                 },
             },
         }
+    }
+
+    #[test]
+    fn runtime_prompt_requires_and_preserves_canonical_snapshot_binding() {
+        let reviewer = delivery_job("reviewer");
+        let snapshot = winwincode_domain::SnapshotId("snap_01J00000000000000000000001".to_owned());
+        assert!(snapshot_bound_prompt(&reviewer, None).is_err());
+        let prompt = snapshot_bound_prompt(&reviewer, Some(&snapshot)).unwrap();
+        assert!(prompt.starts_with(&stage_product_prompt(&reviewer).unwrap()));
+        assert!(prompt.contains(&format!("snapshotId={}", snapshot.0)));
+        let writer = delivery_job("executor");
+        assert!(snapshot_bound_prompt(&writer, Some(&snapshot)).is_err());
+        assert_eq!(
+            snapshot_bound_prompt(&writer, None).unwrap(),
+            stage_product_prompt(&writer).unwrap()
+        );
     }
 
     #[test]
@@ -1953,7 +1996,7 @@ mod tests {
                 "{\"protocol\":\"winwincode.verification-session-policy.v1\",",
                 "\"workspace_mode\":\"candidate-read-only\",",
                 "\"permission_profile\":\"candidate-read-only-restricted\",",
-                "\"candidate_ref\":\"git-candidate:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"
+                "\"candidate_ref\":\"refs/winwincode/candidates/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"
             )
             .as_bytes()
         );
@@ -2053,12 +2096,12 @@ mod tests {
 
         let candidate_error = prepare_verification_policy_attestation(
             &delivery_job("verifier"),
-            "git-candidate:sha256:ABCDEF",
+            "refs/winwincode/candidates/ABCDEF",
         )
         .expect_err("malformed candidate");
         assert_eq!(candidate_error.code(), StageProductErrorCode::InvalidOutput);
 
-        let foreign_candidate = format!("git-candidate:sha256:{}", "b".repeat(64));
+        let foreign_candidate = format!("refs/winwincode/candidates/{}", "b".repeat(64));
         let foreign_error =
             prepare_verification_policy_attestation(&delivery_job("verifier"), &foreign_candidate)
                 .expect_err("well-shaped foreign candidate must fail");

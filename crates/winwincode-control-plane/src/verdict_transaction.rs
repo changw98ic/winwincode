@@ -5,6 +5,7 @@
 use std::collections::HashSet;
 
 use serde_json::Value;
+use sha2::Digest as _;
 use winwincode_api::generated::{CommandEnvelope, CommandName, DeliverySubmitVerdictPayload};
 use winwincode_delivery::{
     application::verdict::{
@@ -18,6 +19,7 @@ use winwincode_delivery::{
         SubmitDeliveryVerdict,
     },
 };
+use winwincode_domain::Sha256Digest;
 use winwincode_storage::{
     CommitReceipt, NewOutboxEvent, ProductStateStorage, ReceiptIdentity, StorageError,
 };
@@ -75,6 +77,8 @@ pub(crate) fn execute(
         .map_err(delivery_store_error)?;
     let transition = compute_verdict_transition(&source, facts)
         .map_err(DeliveryVerdictCommitError::Coordination)?;
+    let verifier_results = verifier_results(storage, &source, &facts)?;
+    let verdict_id = transition.event().verdict.id.0.clone();
     let event_id = verdict_event_id(transition.event());
     let event_payload = serde_json::to_vec(transition.event()).map_err(storage_error)?;
     let changed_event = delivery_changed_event(
@@ -100,6 +104,14 @@ pub(crate) fn execute(
         ),
     )
     .map_err(DeliveryVerdictCommitError::Storage)?;
+    commit = commit.with_state_mutation(
+        winwincode_storage::StateMutation::new(
+            format!("verdict-verifier-results:v1:{verdict_id}"),
+            0,
+            serde_json::to_vec(&verifier_results).map_err(storage_error)?,
+        )
+        .map_err(DeliveryVerdictCommitError::Storage)?,
+    );
     let request_digest = commit
         .command_digest
         .0
@@ -153,6 +165,82 @@ pub(crate) fn execute(
     Ok(receipt)
 }
 
+fn verifier_results(
+    storage: &dyn ProductStateStorage,
+    delivery: &Delivery,
+    facts: &SubmitVerdictFacts<'_>,
+) -> Result<Vec<winwincode_domain::VerifierResult>, DeliveryVerdictCommitError> {
+    use winwincode_domain::{SchemaVersion, VerifierResult, VerifierResultId};
+    let mut results = Vec::new();
+    for settlement in facts.verification.settlements() {
+        let Some(assignment) = settlement.assignment() else {
+            continue;
+        };
+        let Some(terminal) = settlement.terminal_job_outcome() else {
+            continue;
+        };
+        let run = delivery
+            .snapshot()
+            .work_run_aggregate
+            .runs
+            .iter()
+            .find(|run| &run.id == assignment.work_run_id())
+            .ok_or_else(|| StorageError::invalid_input("VerifierResult WorkRun is missing"))?;
+        let bound = winwincode_storage::validate_snapshot_binding(
+            storage,
+            &winwincode_storage::SnapshotBindingCheck::new(
+                facts.verification.snapshot().snapshot_id().clone(),
+                assignment.execution_job_id().clone(),
+                assignment.work_run_id().clone(),
+                assignment.product_session_id().clone(),
+                run.attempt,
+            ),
+        )?;
+        let session = bound.verification_session;
+        if session.candidate_id != *facts.candidate.candidate_id()
+            || session.session_identity.worker_session_id != *assignment.worker_session_id()
+            || session.session_identity.codex_thread_id != *assignment.codex_thread_id()
+        {
+            return Err(
+                StorageError::invalid_input("VerifierResult session identity changed").into(),
+            );
+        }
+        let (status, evidence_ids) = winwincode_delivery::domain::verdict::compute_verifier_result(
+            delivery,
+            settlement,
+            facts.evidence,
+        );
+        let status = serde_json::to_value(status)
+            .map_err(storage_error)?
+            .as_str()
+            .ok_or_else(|| StorageError::invalid_input("VerifierResult status invalid"))?
+            .to_owned();
+        let seed = Sha256Digest(format!(
+            "sha256:{:x}",
+            sha2::Sha256::digest(session.id.0.as_bytes())
+        ));
+        results.push(VerifierResult {
+            schema_version: SchemaVersion::WinwincodeV1,
+            id: VerifierResultId(crate::publication_preparation::derived_id(
+                "vrs",
+                "verifier-result",
+                &seed,
+            )),
+            snapshot_id: session.snapshot_id,
+            candidate_id: session.candidate_id,
+            work_run_id: session.work_run_id,
+            verification_plan_id: session.verification_plan_id,
+            verification_session_id: session.id,
+            attempt: session.attempt,
+            session_identity: session.session_identity,
+            created_at: crate::instant_from_millis(terminal.finished_at_millis())?,
+            evidence_ids,
+            status,
+        });
+    }
+    Ok(results)
+}
+
 fn validate_command_envelope(
     command: &CommandEnvelope,
 ) -> Result<DeliverySubmitVerdictPayload, StorageError> {
@@ -182,11 +270,7 @@ fn validate_command_facts(
 ) -> Result<(), StorageError> {
     if payload.delivery_id != *facts.candidate.delivery_id()
         || facts.expected_revision != expected_revision
-        || facts
-            .candidate
-            .candidate_ref()
-            .strip_prefix("git-candidate:")
-            != Some(payload.candidate_digest.0.as_str())
+        || facts.candidate.candidate_digest() != &payload.candidate_digest
     {
         return Err(StorageError::invalid_input(
             "delivery.submit_verdict does not match the sealed candidate or expected revision",
@@ -223,8 +307,17 @@ fn validate_replayed_receipt(
         ));
     }
     let submitted = strict_receipt_event(receipt)?;
-    let candidate_ref = format!("git-candidate:{}", payload.candidate_digest.0);
-    validate_replayed_event(&submitted, payload, &candidate_ref, receipt.revision)?;
+    if submitted.verdict.candidate_digest != payload.candidate_digest {
+        return Err(StorageError::invalid_input(
+            "verdict replay Candidate digest differs",
+        ));
+    }
+    validate_replayed_event(
+        &submitted,
+        payload,
+        &submitted.candidate_ref,
+        receipt.revision,
+    )?;
     validate_delivery_changed_receipt(
         receipt,
         &payload.delivery_id,
@@ -266,7 +359,8 @@ fn validate_replayed_event(
             && evidence.delivery_id == event.delivery_id
             && evidence.delivery_spec_id == verdict.delivery_spec_id
             && evidence.delivery_spec_revision > 0
-            && evidence.candidate_ref == candidate_ref
+            && evidence.candidate_id == verdict.candidate_id
+            && evidence.snapshot_id == verdict.snapshot_id
             && evidence.created_at_millis <= event.produced_at_millis
             && evidence_ids.insert(evidence.id.0.as_str());
         if !valid

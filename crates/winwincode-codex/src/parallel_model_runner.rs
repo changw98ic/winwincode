@@ -743,9 +743,12 @@ mod tests {
             Box::pin(async move {
                 let inner: Pin<Box<dyn Stream<Item = Result<String, ModelPortFailure>> + Send>> =
                     match request_id.as_str() {
-                        id if id.ends_with(":fail") || id == "fail" => Box::pin(stream::iter([Err(
-                            ModelPortFailure::new("SERVER", "fixture failure"),
-                        )])),
+                        id if id.ends_with(":fail") || id == "fail" => {
+                            Box::pin(stream::iter([Err(ModelPortFailure::new(
+                                "SERVER",
+                                "fixture failure",
+                            ))]))
+                        }
                         id if id.ends_with(":hang") || id == "hang" => Box::pin(stream::pending()),
                         _ => Box::pin(stream::once(async move {
                             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -923,7 +926,11 @@ mod tests {
             .iter()
             .map(|seat| {
                 let mut target = seat.to_target("fusion", |route| {
-                    let effort = if route.contains("opus") { "high" } else { "medium" };
+                    let effort = if route.contains("opus") {
+                        "high"
+                    } else {
+                        "medium"
+                    };
                     dynasty_payload(route, effort)
                 });
                 for attempt in &mut target.attempts {
@@ -984,7 +991,8 @@ mod tests {
         assert!(batch.latency > Duration::ZERO);
         let requests = port.state.requests.lock().expect("request log").clone();
         assert!(requests.iter().any(|request| {
-            request.request_id.contains("opus") && request.payload_json.contains(r#""effort":"high""#)
+            request.request_id.contains("opus")
+                && request.payload_json.contains(r#""effort":"high""#)
         }));
         assert!(requests.iter().any(|request| {
             request.payload_json.contains("runtime/glm")

@@ -96,8 +96,6 @@ static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 const PROVIDER_ID: &str = "winwincode-loopback";
 const MODEL_ID: &str = "loopback-model";
 const PROVIDER_SECRET: &[u8] = b"native-cutover-provider-secret";
-const FIXTURE_CANDIDATE_REF: &str =
-    "git-candidate:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 fn run_on_large_stack(future: impl Future<Output = ()> + Send + 'static) {
     std::thread::Builder::new()
         .name("production-codex-vertical".to_owned())
@@ -750,7 +748,8 @@ fn pending_workrun_execution(
             device_target: None,
             model_selection: None,
             payload_digest: digest('b'),
-            candidate_ref: read_only.then(|| FIXTURE_CANDIDATE_REF.to_owned()),
+            candidate_ref: read_only
+                .then(|| format!("refs/winwincode/candidates/{checkout_revision}")),
             workspace: ExecutionWorkspace {
                 checkout_revision: checkout_revision.to_owned(),
                 repository_id: RepositoryId(id("rep", 1)),
@@ -1885,6 +1884,7 @@ fn delegated_proposal_restart_replays_one_intent_without_second_composer() {
         .expect("reopen delegated proposal adapter");
         let replayed_session = replay_adapter
             .ensure_thread(CodexThreadStart {
+                snapshot_id: None,
                 run_key: &run_key,
                 worker_id: &dispatch.lease.worker_id,
                 job: &dispatch.job,
@@ -2938,65 +2938,59 @@ async fn poll_until_candidate_outcome(
     port: &RecordedPort,
     now: &Instant,
 ) -> winwincode_execution_port::generated::JobOutcomeMessage {
-    let mut acknowledged_frames = Vec::<String>::new();
+    let mut acknowledged_sequences = std::collections::BTreeMap::new();
     for _ in 0..400 {
         worker
             .poll_codex(now.clone())
             .await
             .expect("poll embedded production Codex");
         let messages = port.messages();
-        let mut acknowledgements = Vec::new();
+        let mut acknowledgements = std::collections::BTreeMap::new();
         for message in &messages {
-            let (frame_id, artifact, job_id, sequence) = match message {
-                ExecutionPortMessage::ArtifactOpenMessage(open)
-                    if open.artifact.kind == ArtifactKind::Candidate =>
-                {
-                    (
-                        open.message_id.0.clone(),
-                        ArtifactReference {
-                            artifact_id: open.artifact.artifact_id.clone(),
-                            digest: open.artifact.digest.clone(),
-                        },
-                        open.lease.job_id.clone(),
-                        0,
-                    )
-                }
-                ExecutionPortMessage::ArtifactChunkMessage(chunk) => {
-                    let Some(artifact) = messages.iter().find_map(|candidate| match candidate {
-                        ExecutionPortMessage::ArtifactOpenMessage(open)
-                            if open.artifact.artifact_id == chunk.artifact_id
-                                && open.artifact.kind == ArtifactKind::Candidate =>
-                        {
-                            Some(ArtifactReference {
-                                artifact_id: open.artifact.artifact_id.clone(),
-                                digest: open.artifact.digest.clone(),
-                            })
-                        }
-                        _ => None,
-                    }) else {
-                        continue;
-                    };
-                    (
-                        chunk.message_id.0.clone(),
-                        artifact,
-                        chunk.lease.job_id.clone(),
-                        chunk.sequence.0,
-                    )
-                }
-                _ => continue,
+            let ExecutionPortMessage::ArtifactOpenMessage(open) = message else {
+                continue;
             };
-            if acknowledged_frames.iter().any(|id| id == &frame_id) {
+            let artifact = ArtifactReference {
+                artifact_id: open.artifact.artifact_id.clone(),
+                digest: open.artifact.digest.clone(),
+            };
+            let sequence = messages
+                .iter()
+                .filter_map(|message| match message {
+                    ExecutionPortMessage::ArtifactChunkMessage(chunk)
+                        if chunk.artifact_id == artifact.artifact_id =>
+                    {
+                        Some(chunk.sequence.0)
+                    }
+                    _ => None,
+                })
+                .max()
+                .unwrap_or(0);
+            if acknowledged_sequences
+                .get(&artifact.artifact_id.0)
+                .is_some_and(|acknowledged| *acknowledged >= sequence)
+            {
                 continue;
             }
             let active = worker
                 .active_jobs()
                 .into_iter()
-                .find(|active| active.job.job_id == job_id)
+                .find(|active| active.job.job_id == open.lease.job_id)
                 .cloned()
                 .expect("candidate artifact has an active candidate-producing Job");
-            acknowledgements.push((frame_id, candidate_ack(&active, &artifact, sequence)));
+            let mut ack = candidate_ack(&active, &artifact, sequence);
+            ack.lease = open.lease.clone();
+            ack.worker_session_id = open.worker_session_id.clone();
+            ack.session_identity = open.session_identity.clone();
+            let entry = acknowledgements
+                .entry(artifact.artifact_id.0.clone())
+                .or_insert(ack.clone());
+            if entry.ack_sequence.0 < sequence {
+                *entry = ack;
+            }
         }
-        for (frame_id, acknowledgement) in acknowledgements {
+        for (artifact_id, acknowledgement) in acknowledgements {
+            let sequence = acknowledgement.ack_sequence.0;
             worker
                 .accept_control(
                     &ExecutionPortMessage::ArtifactAckMessage(acknowledgement),
@@ -3004,7 +2998,7 @@ async fn poll_until_candidate_outcome(
                 )
                 .await
                 .expect("accept loopback candidate artifact acknowledgement");
-            acknowledged_frames.push(frame_id);
+            acknowledged_sequences.insert(artifact_id, sequence);
         }
         if let Some(outcome) = port
             .messages()
@@ -3032,9 +3026,12 @@ fn candidate_ack(
         error: None,
         kind: ArtifactAckMessageKind::ArtifactAck,
         lease: active.lease.clone(),
-        message_id: ExecutionMessageId(id(
-            "xmsg",
-            910_u64 + u64::try_from(sequence).expect("non-negative candidate ACK sequence"),
+        message_id: ExecutionMessageId(format!(
+            "xmsg_{:.26}",
+            format!(
+                "{:X}",
+                Sha256::digest(format!("{}:{sequence}", artifact.artifact_id.0))
+            )
         )),
         replay_from_sequence: None,
         schema_version: SchemaVersion::WinwincodeV1,
@@ -3095,7 +3092,12 @@ fn assert_verification_products(messages: &[ExecutionPortMessage], role: &str, c
 }
 
 async fn run_verification_work_run(root: &TestDirectory, role: &str, command: &str) {
-    let dispatch = verification_dispatch(root, role);
+    use winwincode_domain::{Snapshot, SnapshotId, seal_snapshot};
+    use winwincode_execution_port::generated::{
+        SnapshotFreezeRequestMessage, SnapshotVerificationDispatchMessage,
+        SnapshotVerificationDispatchMessageKind,
+    };
+    let mut dispatch = verification_dispatch(root, role);
     let port = RecordedPort::default();
     let adapter = winwincode_codex::ProductionCodexAdapter::open(adapter_config(root))
         .expect("open verification production adapter");
@@ -3106,13 +3108,103 @@ async fn run_verification_work_run(root: &TestDirectory, role: &str, command: &s
         root.workspace_runtime(),
     );
     register(&mut worker, &port).await;
+    let templates: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/contracts/execution-port.valid.json"
+    ))
+    .unwrap();
+    let mut freeze: SnapshotFreezeRequestMessage = serde_json::from_value(
+        templates["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["kind"] == "snapshot.freeze_request")
+            .unwrap()
+            .clone(),
+    )
+    .unwrap();
+    let repository = root.sources().join(id("rep", 1));
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&repository)
+        .args(["rev-parse", "HEAD^{tree}"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let tree = String::from_utf8(output.stdout).unwrap().trim().to_owned();
+    let mut content = Sha256::new();
+    for path in [".gitignore", "Cargo.toml", "fixture.txt", "src/lib.rs"] {
+        let bytes = fs::read(repository.join(path)).unwrap();
+        for field in [path.as_bytes(), b"100644", &bytes] {
+            content.update(u64::try_from(field.len()).unwrap().to_be_bytes());
+            content.update(field);
+        }
+    }
+    let input = dispatch.job.work_input.as_ref().unwrap();
+    freeze.candidate.work_contract_id = input.work_contract.id.clone();
+    freeze.candidate.contract_revision = input.work_contract.revision.clone();
+    freeze.candidate.work_item_id = input.work_item.id.clone();
+    freeze.candidate.base_commit = dispatch.job.workspace.checkout_revision.clone();
+    freeze.candidate.candidate_commit = dispatch.job.workspace.checkout_revision.clone();
+    freeze.candidate.candidate_tree = tree.clone();
+    freeze.candidate.candidate_ref = input.candidate_ref.clone().unwrap();
+    freeze.candidate.diff_digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest([])));
+    freeze.base_tree_id.0 = tree;
+    freeze.repository_id = dispatch.job.workspace.repository_id.clone();
+    freeze.content_digest = Sha256Digest(format!("sha256:{:x}", content.finalize()));
+    freeze.dispatch = dispatch.clone();
+    freeze.lease = dispatch.lease.clone();
     worker
         .accept_control(
-            &ExecutionPortMessage::JobDispatchMessage(dispatch.clone()),
+            &ExecutionPortMessage::SnapshotFreezeRequestMessage(freeze.clone()),
             at("2030-01-01T00:00:00.000Z"),
         )
         .await
-        .expect("accept verification dispatch");
+        .expect("freeze exact verification source");
+    assert!(worker.active_jobs().is_empty());
+    let receipt = port
+        .messages()
+        .iter()
+        .find_map(|message| match message {
+            ExecutionPortMessage::SnapshotFreezeReceiptMessage(receipt) => Some(receipt.clone()),
+            _ => None,
+        })
+        .expect("freeze receipt before Core execution");
+    winwincode_execution_port::snapshot_freeze::validate_freeze_receipt(&freeze, &receipt).unwrap();
+    let receipt = receipt.receipt;
+    let mut snapshot = Snapshot {
+        schema_version: SchemaVersion::WinwincodeV1,
+        snapshot_id: SnapshotId(id("snap", 1)),
+        candidate_id: receipt.candidate_id,
+        work_run_id: receipt.work_run_id,
+        repository_id: receipt.repository_id,
+        base_commit_id: receipt.base_commit_id,
+        base_tree_id: receipt.base_tree_id,
+        candidate_commit_id: receipt.candidate_commit_id,
+        candidate_tree_id: receipt.candidate_tree_id,
+        diff_sha256: receipt.diff_sha256,
+        content_digest: receipt.content_digest,
+        created_at_millis: 1_893_456_000_000,
+        immutable: true,
+        validation_seal: digest('0'),
+    };
+    snapshot.validation_seal = seal_snapshot(&snapshot);
+    dispatch.snapshot_id = Some(snapshot.snapshot_id.clone());
+    worker
+        .accept_control(
+            &ExecutionPortMessage::SnapshotVerificationDispatchMessage(
+                SnapshotVerificationDispatchMessage {
+                    kind: SnapshotVerificationDispatchMessageKind::SnapshotVerify,
+                    schema_version: SchemaVersion::WinwincodeV1,
+                    message_id: dispatch.message_id.clone(),
+                    sent_at: dispatch.sent_at.clone(),
+                    dispatch: dispatch.clone(),
+                    snapshot,
+                },
+            ),
+            at("2030-01-01T00:00:00.000Z"),
+        )
+        .await
+        .expect("accept frozen verification dispatch");
     let checkout = detached_checkout(root);
     let first_open = poll_until_message(
         &mut worker,
@@ -3329,7 +3421,30 @@ async fn run_verification_work_run(root: &TestDirectory, role: &str, command: &s
         "{:?}",
         outcome.outcome.error
     );
-    assert_eq!(outcome.outcome.artifacts.len(), 1);
+    let candidate_artifact = port
+        .messages()
+        .iter()
+        .find_map(|message| match message {
+            ExecutionPortMessage::ArtifactOpenMessage(open)
+                if open.artifact.kind == ArtifactKind::Candidate =>
+            {
+                Some(open.artifact.artifact_id.clone())
+            }
+            _ => None,
+        })
+        .expect("exact verification candidate artifact");
+    assert!(
+        outcome
+            .outcome
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.artifact_id == candidate_artifact)
+    );
+    for message in port.messages() {
+        if let ExecutionPortMessage::ArtifactOpenMessage(open) = message {
+            assert_eq!(open.snapshot_id, dispatch.snapshot_id);
+        }
+    }
     assert_verification_products(&port.messages(), role, &call_id);
     worker
         .shutdown(at("2030-01-01T00:00:03.000Z"))

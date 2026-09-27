@@ -102,7 +102,7 @@ use crate::performance::{
 };
 use crate::stage_product::{
     change_batch_proposal_json_schema, migrate_persisted_role_session_policy_v1,
-    role_session_policy, stage_product_job_digest, stage_product_prompt,
+    role_session_policy, stage_product_job_digest,
 };
 use crate::store::{
     AdapterStore, AdapterStoreError, StoredApprovalOperation, StoredApprovalOperationKind,
@@ -455,18 +455,24 @@ impl ProductionCodexAdapter {
         bridge
             .attach_action_gate(action_gate.clone())
             .map_err(map_bridge_error)?;
+        let kernel_options =
+            KernelOptions::new(config.kernel_home.clone(), config.helper_executable.clone());
+        #[cfg(target_os = "linux")]
+        let kernel_options = {
+            let mut options = kernel_options;
+            options.linux_sandbox_executable =
+                Some(install_linux_sandbox_alias(&config.helper_executable)?);
+            options
+        };
         let kernel = Arc::new(
-            Kernel::new(
-                KernelOptions::new(config.kernel_home.clone(), config.helper_executable.clone()),
-                bridge.model_port(),
-                action_gate.clone(),
-            )
-            .map_err(|_| {
-                ProductionCodexError::new(
-                    ProductionCodexErrorKind::Kernel,
-                    "embedded Codex Kernel could not start",
-                )
-            })?,
+            Kernel::new(kernel_options, bridge.model_port(), action_gate.clone()).map_err(
+                |_| {
+                    ProductionCodexError::new(
+                        ProductionCodexErrorKind::Kernel,
+                        "embedded Codex Kernel could not start",
+                    )
+                },
+            )?,
         );
         Ok(Self {
             config,
@@ -994,6 +1000,7 @@ impl ProductionCodexAdapter {
         let authority = {
             let run = self.runs.get(run_key).ok_or_else(unknown_thread)?;
             DiagnosticArtifactAuthority {
+                snapshot_id: run.record.snapshot_id.clone(),
                 job: run.record.job.clone(),
                 scope: run.record.job.scope.clone(),
                 lease: run.binding.authority.lease.clone(),
@@ -1242,6 +1249,7 @@ impl ProductionCodexAdapter {
         let authority = {
             let run = self.runs.get(run_key).ok_or_else(unknown_thread)?;
             DiagnosticArtifactAuthority {
+                snapshot_id: run.record.snapshot_id.clone(),
                 job: run.record.job.clone(),
                 scope: run.record.job.scope.clone(),
                 lease: run.binding.authority.lease.clone(),
@@ -1314,6 +1322,7 @@ impl ProductionCodexAdapter {
         let authority = {
             let run = self.runs.get(run_key).ok_or_else(unknown_thread)?;
             DiagnosticArtifactAuthority {
+                snapshot_id: run.record.snapshot_id.clone(),
                 job: run.record.job.clone(),
                 scope: run.record.job.scope.clone(),
                 lease: run.binding.authority.lease.clone(),
@@ -1678,6 +1687,7 @@ impl ProductionCodexAdapter {
         let diagnostic_authority = {
             let run = self.runs.get(run_key).ok_or_else(unknown_thread)?;
             DiagnosticArtifactAuthority {
+                snapshot_id: run.record.snapshot_id.clone(),
                 job: run.record.job.clone(),
                 scope: run.record.job.scope.clone(),
                 lease: run.binding.authority.lease.clone(),
@@ -1708,6 +1718,7 @@ impl ProductionCodexAdapter {
             let run = self.runs.get(run_key).ok_or_else(unknown_thread)?;
             self.diagnostic_artifacts
                 .accepted_references(&DiagnosticArtifactAuthority {
+                    snapshot_id: run.record.snapshot_id.clone(),
                     job: run.record.job.clone(),
                     scope: run.record.job.scope.clone(),
                     lease: run.binding.authority.lease.clone(),
@@ -2095,6 +2106,7 @@ impl ProductionCodexAdapter {
             winwincode_execution_port::generated::ArtifactKind::CommandOutput
         };
         let upload = DiagnosticArtifactUpload {
+            snapshot_id: run.record.snapshot_id.clone(),
             run_key: run_key.to_owned(),
             job: run.record.job.clone(),
             scope: run.record.job.scope.clone(),
@@ -3122,6 +3134,7 @@ fn complete_reconciled_turn(
     let authority = {
         let run = adapter.runs.get(run_key).ok_or_else(unknown_thread)?;
         DiagnosticArtifactAuthority {
+            snapshot_id: run.record.snapshot_id.clone(),
             job: run.record.job.clone(),
             scope: run.record.job.scope.clone(),
             lease: run.binding.authority.lease.clone(),
@@ -3355,7 +3368,8 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         let workspace = canonical_workspace(start.workspace)?;
         self.register_performance_run(&run_key, start.job)?;
         if let Some(run) = self.runs.get(&run_key) {
-            if run.record.job_digest == job_digest
+            if run.record.snapshot_id.as_ref() == start.snapshot_id
+                && run.record.job_digest == job_digest
                 && run.record.workspace == workspace
                 && run.record.workspace_revision == *start.workspace_revision
                 && run.record.agent_config == agent_config
@@ -3380,6 +3394,9 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             session_identity,
         };
         if let Some(mut record) = load_stored_run(&self.store, &run_key)? {
+            if record.snapshot_id.as_ref() != start.snapshot_id {
+                return Err(conflict());
+            }
             let frozen_workspace = record
                 .final_candidate_freeze
                 .as_ref()
@@ -3429,6 +3446,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             let authority = {
                 let run = self.runs.get(&run_key).ok_or_else(unknown_thread)?;
                 DiagnosticArtifactAuthority {
+                    snapshot_id: run.record.snapshot_id.clone(),
                     job: run.record.job.clone(),
                     scope: run.record.job.scope.clone(),
                     lease: run.binding.authority.lease.clone(),
@@ -3460,6 +3478,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             .await
             .map_err(|_| kernel_error())?;
         let record = StoredRun {
+            snapshot_id: start.snapshot_id.cloned(),
             job: start.job.clone(),
             workspace_revision: start.workspace_revision.clone(),
             canonical_thread_id: thread_id.clone(),
@@ -3521,7 +3540,11 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         // retry after the session has been opened.
         let expected_goal = {
             let run = self.runs.get(&run_key).ok_or_else(unknown_thread)?;
-            stage_product_prompt(&run.record.job).map_err(|_| invalid_job())?
+            crate::stage_product::snapshot_bound_prompt(
+                &run.record.job,
+                run.record.snapshot_id.as_ref(),
+            )
+            .map_err(|_| invalid_job())?
         };
         if goal != expected_goal {
             return Err(conflict());
@@ -4652,6 +4675,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         let authority = {
             let run = self.runs.get(&run_key).ok_or_else(unknown_thread)?;
             DiagnosticArtifactAuthority {
+                snapshot_id: run.record.snapshot_id.clone(),
                 job: run.record.job.clone(),
                 scope: run.record.job.scope.clone(),
                 lease: run.binding.authority.lease.clone(),
@@ -4937,6 +4961,7 @@ fn migrate_stored_run_role_policies_v1_to_v2(
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StoredRun {
+    snapshot_id: Option<winwincode_domain::SnapshotId>,
     job: ExecutionJob,
     workspace_revision: WorkspaceRevision,
     canonical_thread_id: CodexThreadId,
@@ -5211,7 +5236,10 @@ impl StoredTerminal {
 }
 
 fn validate_start(start: CodexThreadStart<'_>) -> Result<(), ProductionCodexError> {
-    if start.run_key.job_id != start.job.job_id
+    if !winwincode_execution_port::snapshot_freeze::snapshot_role_binding_valid(
+        &start.job.execution_profile,
+        start.snapshot_id,
+    ) || start.run_key.job_id != start.job.job_id
         || start.worker_id != &start.lease.worker_id
         || start.run_key.attempt != start.job.attempt
         || start.run_key.job_id != start.lease.job_id
@@ -6038,6 +6066,29 @@ const SEALED_HELPER_NAME: &str = "winwincode-kernel-helper";
 #[cfg(unix)]
 static HELPER_VALIDATIONS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
+// Older bubblewrap re-executes argv0. A real sandbox filename lets Core
+// preserve its absolute path while the general helper keeps its other modes.
+#[cfg(all(unix, any(target_os = "linux", test)))]
+fn install_linux_sandbox_alias(helper: &Path) -> Result<PathBuf, ProductionCodexError> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let alias = helper.with_file_name("codex-linux-sandbox");
+    if let Err(error) = std::fs::hard_link(helper, &alias)
+        && error.kind() != std::io::ErrorKind::AlreadyExists
+    {
+        return Err(unavailable());
+    }
+    let source = std::fs::symlink_metadata(helper).map_err(|_| invalid_configuration())?;
+    let linked = std::fs::symlink_metadata(&alias).map_err(|_| invalid_configuration())?;
+    if !source.is_file()
+        || !linked.is_file()
+        || (source.dev(), source.ino()) != (linked.dev(), linked.ino())
+    {
+        return Err(invalid_configuration());
+    }
+    Ok(alias)
+}
+
 fn project_helper(path: &Path, manifest: &HelperReleaseManifest) -> Option<Arc<[u8]>> {
     let Ok(metadata) = std::fs::symlink_metadata(path) else {
         return None;
@@ -6347,7 +6398,9 @@ fn bounded_helper_probe(path: &Path, argument: &str, expected: &[u8]) -> bool {
     use std::os::unix::process::CommandExt as _;
 
     const OUTPUT_LIMIT: u64 = 4096;
-    const TIMEOUT: Duration = Duration::from_secs(2);
+    // Cold executable validation on supported macOS volumes can exceed two seconds.
+    // Keep startup bounded while allowing the signed image to begin execution.
+    const TIMEOUT: Duration = Duration::from_secs(30);
     const CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
 
     let Ok((stdout, helper_stdout)) = UnixStream::pair() else {
@@ -7013,7 +7066,7 @@ mod tests {
             .as_mut()
             .expect("diagnostic work input")
             .candidate_ref = Some(
-            "git-candidate:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            "refs/winwincode/candidates/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 .to_owned(),
         );
         job.workspace.write_mode = ExecutionWorkspaceWriteMode::ReadOnly;
@@ -7036,7 +7089,10 @@ mod tests {
         };
         let workspace_revision = WorkspaceRevision(format!("git-tree:{}", "1".repeat(40)));
         let now = Instant("2030-01-01T00:00:01Z".to_owned());
+        let snapshot_id =
+            winwincode_domain::SnapshotId("snap_00000000000000000000000001".to_owned());
         let start = CodexThreadStart {
+            snapshot_id: Some(&snapshot_id),
             run_key: &run_key,
             worker_id: &lease.worker_id,
             job: &job,
@@ -7157,7 +7213,7 @@ mod tests {
                         id: "turn-diagnostic".to_owned(),
                         msg: CodexEventMsg::TurnComplete(TurnCompleteEvent {
                             turn_id: "turn-diagnostic".to_owned(),
-                            last_agent_message: Some("{\"protocol\":\"winwincode.independent-verification-result.v1\",\"delivery_spec_id\":\"spec-fixture\",\"delivery_spec_revision\":2,\"candidate_ref\":\"git-candidate:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"findings\":[{\"finding_id\":\"finding-diagnostic\",\"criterion_id\":\"crt_00000000000000000000000001\",\"verdict\":\"pass\",\"explanation\":\"Direct command output passed.\",\"evidence_sources\":[{\"source_id\":\"call-real-command-output\"}]}]}".to_owned()),
+                            last_agent_message: Some("{\"protocol\":\"winwincode.independent-verification-result.v1\",\"delivery_spec_id\":\"spec-fixture\",\"delivery_spec_revision\":2,\"candidate_ref\":\"refs/winwincode/candidates/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"findings\":[{\"finding_id\":\"finding-diagnostic\",\"criterion_id\":\"crt_00000000000000000000000001\",\"verdict\":\"pass\",\"explanation\":\"Direct command output passed.\",\"evidence_sources\":[{\"source_id\":\"call-real-command-output\"}]}]}".to_owned()),
                             error: None,
                             started_at: None,
                             completed_at: None,
@@ -7332,6 +7388,7 @@ mod tests {
             .expect("Delivery policy");
         let agent_config = fixture_agent_config(&job, &policy);
         let record = StoredRun {
+            snapshot_id: None,
             job,
             workspace_revision: WorkspaceRevision(format!("git-tree:{}", "1".repeat(40))),
             canonical_thread_id: CodexThreadId("cdx_00000000000000000000000001".to_owned()),
@@ -7488,6 +7545,7 @@ mod tests {
             .expect("delegated role policy");
         let agent_config = fixture_agent_config(&job, &role_policy);
         let record = StoredRun {
+            snapshot_id: None,
             role_policy: Some(role_policy),
             agent_config,
             job,
@@ -7924,6 +7982,30 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn linux_sandbox_alias_preserves_the_sealed_image_and_rejects_replacement() {
+        use std::os::unix::fs::symlink;
+
+        let root = test_root("sandbox-alias");
+        std::fs::create_dir_all(&root).unwrap();
+        let helper = helper_fixture(&root);
+        let alias = super::install_linux_sandbox_alias(&helper).unwrap();
+        assert_eq!(alias.file_name().unwrap(), "codex-linux-sandbox");
+        assert_eq!(
+            std::fs::read(&alias).unwrap(),
+            std::fs::read(&helper).unwrap()
+        );
+        assert_eq!(super::install_linux_sandbox_alias(&helper).unwrap(), alias);
+        std::fs::remove_file(&alias).unwrap();
+        std::fs::write(&alias, b"different helper").unwrap();
+        assert!(super::install_linux_sandbox_alias(&helper).is_err());
+        std::fs::remove_file(&alias).unwrap();
+        symlink(&helper, &alias).unwrap();
+        assert!(super::install_linux_sandbox_alias(&helper).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn sealed_helper_is_atomic_private_and_repairs_crash_snapshot_mode() {
         use std::os::unix::fs::PermissionsExt as _;
 
@@ -8031,7 +8113,7 @@ mod tests {
             std::fs::Permissions::from_mode(0o700),
         )
         .expect("restrict symlink destination");
-        let destination = destination_directory.join("winwincode-kernel-helper");
+        let destination = destination_directory.join(super::SEALED_HELPER_NAME);
         symlink(&helper, &destination).expect("create replacement symlink");
         assert_eq!(
             seal_helper(&helper, None, &symlink_data, &manifest)
@@ -8058,8 +8140,28 @@ mod tests {
 
         let started = std::time::Instant::now();
         assert!(bounded_helper_handshake(&helper, expected));
-        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert!(started.elapsed() < std::time::Duration::from_secs(30));
         std::fs::remove_dir_all(root).expect("remove helper fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn helper_handshake_accepts_delayed_startup_with_exact_output() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = test_root("delayed-handshake");
+        std::fs::create_dir_all(&root).unwrap();
+        let helper = root.join("winwincode-kernel-helper");
+        std::fs::write(
+            &helper,
+            "#!/bin/sh\nsleep 3\nprintf 'exact helper handshake\\n'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(bounded_helper_handshake(
+            &helper,
+            b"exact helper handshake\n"
+        ));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]
@@ -8189,7 +8291,9 @@ mod tests {
                 .all(|thread| thread.join().expect("join sealed helper installation"))
         );
         assert!(!active.exists());
-        let changed = root.join("runtime-0/helper-installation/winwincode-kernel-helper");
+        let changed = root
+            .join("runtime-0/helper-installation")
+            .join(super::SEALED_HELPER_NAME);
         std::fs::write(&changed, b"#!/bin/sh\nexit 0\n").expect("replace one cached helper copy");
         assert!(!validate_sealed_helper(&changed, &manifest));
         std::fs::remove_dir_all(root).expect("remove helper fixture");
@@ -8253,7 +8357,7 @@ mod tests {
             .expect("make sleeping helper runnable");
         let started = std::time::Instant::now();
         assert!(!bounded_helper_handshake(&helper, b"never"));
-        assert!(started.elapsed() < std::time::Duration::from_secs(4));
+        assert!(started.elapsed() < std::time::Duration::from_secs(32));
         let process_id = std::fs::read_to_string(process_id_path)
             .expect("read helper process id")
             .parse::<u32>()
@@ -8286,7 +8390,7 @@ mod tests {
             .expect("make descendant helper runnable");
         let started = std::time::Instant::now();
         assert!(bounded_helper_handshake(&helper, expected));
-        assert!(started.elapsed() < std::time::Duration::from_secs(4));
+        assert!(started.elapsed() < std::time::Duration::from_secs(32));
         let helper_process_id = std::fs::read_to_string(helper_process_id_path)
             .expect("read helper process id")
             .parse::<u32>()

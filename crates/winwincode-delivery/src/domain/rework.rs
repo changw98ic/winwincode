@@ -29,9 +29,9 @@ use winwincode_domain::{DeliveryId, EvidenceId, Sha256Digest, WorkItemId, WorkRu
 use super::{
     AcceptanceCriterionId, CriterionVerdict, Delivery, DeliverySnapshot, DeliveryStatus,
     DeliveryValidationError, DeliveryValidationErrorCode, DeliveryVerdictStatus,
-    FreezeCandidateFacts, FrozenDeliveryCandidate, ValidatedGitSnapshotFact,
+    FreezeCandidateFacts, FrozenDeliveryCandidate, SealedCandidateSource,
     assert_frozen_candidate_current, bounded_text,
-    candidate::{assert_validated_git_snapshot_fact, freeze_authorized_rework_candidate},
+    candidate::{assert_sealed_candidate_source, freeze_authorized_rework_candidate},
     portable_identifier, validation_error,
 };
 
@@ -461,7 +461,7 @@ fn current_verdict_evidence(
     evidence.delivery_id == *delivery.id()
         && evidence.delivery_spec_id == delivery.snapshot().spec.id
         && evidence.delivery_spec_revision == delivery.snapshot().spec.revision
-        && evidence.candidate_ref == candidate.candidate_ref()
+        && evidence.candidate_id == *candidate.candidate_id()
 }
 
 fn page_annotation_evidence(
@@ -1010,9 +1010,9 @@ pub fn freeze_rework_replacement_candidate(
     delivery: &Delivery,
     authorization: &ReworkAuthorization,
     replacement_facts: &FreezeCandidateFacts,
-    replacement_delta: &ValidatedGitSnapshotFact,
+    replacement_delta: &SealedCandidateSource,
 ) -> Result<FrozenDeliveryCandidate, DeliveryValidationError> {
-    if !replacement_delta.has_same_terminal_workspace(replacement_facts.git_snapshot()) {
+    if !replacement_delta.has_same_terminal_workspace(replacement_facts.candidate_source()) {
         return Err(invalid_rework(
             "replacement delta and candidate snapshot must come from one exact terminal fenced workspace",
         ));
@@ -1037,10 +1037,10 @@ fn assert_remediator_output_in_scope(
     authorization: &ReworkAuthorization,
     previous_candidate: &FrozenDeliveryCandidate,
     replacement_candidate: &FrozenDeliveryCandidate,
-    replacement_delta: &ValidatedGitSnapshotFact,
+    replacement_delta: &SealedCandidateSource,
 ) -> Result<(), DeliveryValidationError> {
     assert_frozen_candidate_current(delivery, replacement_candidate)?;
-    assert_validated_git_snapshot_fact(replacement_delta)?;
+    assert_sealed_candidate_source(replacement_delta)?;
     let producer = delivery
         .snapshot()
         .work_run_aggregate
@@ -1515,8 +1515,8 @@ mod tests {
     };
     use crate::domain::candidate::CandidateHunkFact;
     use crate::domain::candidate::test_support::{
-        CandidateFixtureInput, freeze_facts, validated_git_snapshot,
-        validated_git_snapshot_between, with_changed_hunks, with_foreign_terminal_workspace,
+        CandidateFixtureInput, candidate_source_between, candidate_source_fixture, freeze_facts,
+        with_changed_hunks, with_foreign_terminal_workspace,
     };
     use crate::domain::{
         CandidatePathState, CriterionResult, DeliveryStatus, DeliveryVerdict, DeliveryVerdictId,
@@ -1565,7 +1565,7 @@ mod tests {
         snapshot.work_run_aggregate.items[0].state =
             winwincode_domain::WorkItemState::CandidateReady;
         let writer = Delivery::try_from_snapshot(snapshot).expect("writer");
-        let facts = validated_git_snapshot(
+        let facts = candidate_source_fixture(
             &writer,
             1_800_000_000_020,
             &SessionBindingId("writer-binding".into()),
@@ -1591,12 +1591,16 @@ mod tests {
             delivery_spec_revision: snapshot.spec.revision,
             work_run_id: candidate.producer_work_run_id().clone(),
             session_binding_id: SessionBindingId("writer-binding".into()),
-            candidate_ref: candidate.candidate_ref().into(),
+            candidate_id: candidate.candidate_id().clone(),
+            snapshot_id: winwincode_domain::SnapshotId("snap_01J00000000000000000000001".into()),
             evidence_type: EvidenceRefType::Test,
             source_ref: "runtime_event:test-failure".into(),
             created_at_millis: 1_800_000_000_019,
         }];
         snapshot.verdict = Some(DeliveryVerdict {
+            snapshot_id: winwincode_domain::SnapshotId("snap_01J00000000000000000000001".into()),
+            candidate_id: winwincode_domain::CandidateId("cnd_01J00000000000000000000001".into()),
+            candidate_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
             schema_version: super::super::DELIVERY_SCHEMA_VERSION,
             id: DeliveryVerdictId("verdict-failure".into()),
             delivery_id: snapshot.id.clone(),
@@ -1755,7 +1759,7 @@ mod tests {
     fn precise_rework_authorization_fixture_rejects_candidate_without_changed_hunk() {
         let (delivery, candidate, _, _) = current_failure();
         let no_hunk_snapshot = with_changed_hunks(
-            validated_git_snapshot(
+            candidate_source_fixture(
                 &delivery,
                 1_800_000_000_020,
                 candidate.producer_session_binding_id(),
@@ -1773,7 +1777,7 @@ mod tests {
         .expect("candidate without hunk remains a valid frozen Git snapshot");
         let mut snapshot = delivery.into_snapshot();
         for evidence in &mut snapshot.evidence {
-            evidence.candidate_ref = no_hunk.candidate_ref().into();
+            evidence.candidate_id = no_hunk.candidate_id().clone();
         }
         let verdict = snapshot.verdict.as_mut().expect("failing verdict");
         verdict.candidate_ref = no_hunk.candidate_ref().into();
@@ -1794,9 +1798,9 @@ mod tests {
     }
 
     fn map_delta_to_authorized_hunk(
-        delta: ValidatedGitSnapshotFact,
+        delta: SealedCandidateSource,
         file_path: &str,
-    ) -> ValidatedGitSnapshotFact {
+    ) -> SealedCandidateSource {
         with_changed_hunks(
             delta,
             vec![CandidateHunkFact {
@@ -2011,7 +2015,8 @@ mod tests {
             delivery_spec_revision: snapshot.spec.revision,
             work_run_id: candidate.producer_work_run_id().clone(),
             session_binding_id: candidate.producer_session_binding_id().clone(),
-            candidate_ref: candidate.candidate_ref().into(),
+            candidate_id: candidate.candidate_id().clone(),
+            snapshot_id: winwincode_domain::SnapshotId("snap_01J00000000000000000000001".into()),
             evidence_type: EvidenceRefType::ReviewFinding,
             source_ref: "page-annotation:annotation-current".into(),
             created_at_millis: snapshot.updated_at_millis,
@@ -2052,7 +2057,8 @@ mod tests {
             delivery_spec_revision: snapshot.spec.revision,
             work_run_id: candidate.producer_work_run_id().clone(),
             session_binding_id: candidate.producer_session_binding_id().clone(),
-            candidate_ref: candidate.candidate_ref().into(),
+            candidate_id: candidate.candidate_id().clone(),
+            snapshot_id: winwincode_domain::SnapshotId("snap_01J00000000000000000000001".into()),
             evidence_type: EvidenceRefType::ReviewFinding,
             source_ref: "page-annotation:annotation/foreign".into(),
             created_at_millis: snapshot.updated_at_millis,
@@ -2204,7 +2210,7 @@ mod tests {
             "remediator-finished-binding",
             WorkRunState::Settled,
         );
-        let replacement_snapshot = validated_git_snapshot(
+        let replacement_snapshot = candidate_source_fixture(
             &remediated,
             remediated.snapshot().updated_at_millis,
             &SessionBindingId("remediator-finished-binding".into()),
@@ -2219,7 +2225,7 @@ mod tests {
         );
         let replacement_facts = freeze_facts(&remediated, replacement_snapshot);
         let authorized_delta = map_delta_to_authorized_hunk(
-            validated_git_snapshot_between(
+            candidate_source_between(
                 &remediated,
                 remediated.snapshot().updated_at_millis,
                 &SessionBindingId("remediator-finished-binding".into()),
@@ -2246,7 +2252,7 @@ mod tests {
         assert!(!replacement.producer_work_run_id().0.is_empty());
 
         let wrong_source_hunk_delta = with_changed_hunks(
-            validated_git_snapshot_between(
+            candidate_source_between(
                 &remediated,
                 remediated.snapshot().updated_at_millis,
                 &SessionBindingId("remediator-finished-binding".into()),
@@ -2288,7 +2294,7 @@ mod tests {
         )
         .expect_err("replacement cannot coordinate a foreign authorization and delta source hunk");
 
-        let out_of_scope_snapshot = validated_git_snapshot(
+        let out_of_scope_snapshot = candidate_source_fixture(
             &remediated,
             remediated.snapshot().updated_at_millis,
             &SessionBindingId("remediator-finished-binding".into()),
@@ -2303,7 +2309,7 @@ mod tests {
         );
         let out_of_scope_facts = freeze_facts(&remediated, out_of_scope_snapshot);
         let out_of_scope_delta = map_delta_to_authorized_hunk(
-            validated_git_snapshot_between(
+            candidate_source_between(
                 &remediated,
                 remediated.snapshot().updated_at_millis,
                 &SessionBindingId("remediator-finished-binding".into()),
@@ -2340,7 +2346,7 @@ mod tests {
             "remediator-revised-spec-binding",
             WorkRunState::Settled,
         );
-        let changed_spec_candidate_snapshot = validated_git_snapshot(
+        let changed_spec_candidate_snapshot = candidate_source_fixture(
             &changed_spec_remediated,
             changed_spec_remediated.snapshot().updated_at_millis,
             &SessionBindingId("remediator-revised-spec-binding".into()),
@@ -2356,7 +2362,7 @@ mod tests {
         let changed_spec_facts =
             freeze_facts(&changed_spec_remediated, changed_spec_candidate_snapshot);
         let changed_spec_delta = map_delta_to_authorized_hunk(
-            validated_git_snapshot_between(
+            candidate_source_between(
                 &changed_spec_remediated,
                 changed_spec_remediated.snapshot().updated_at_millis,
                 &SessionBindingId("remediator-revised-spec-binding".into()),
@@ -2400,7 +2406,7 @@ mod tests {
         let foreign_binding_delivery = Delivery::try_from_snapshot(foreign_binding_snapshot)
             .expect("foreign sealed delta fixture");
         let foreign_binding_delta = map_delta_to_authorized_hunk(
-            validated_git_snapshot_between(
+            candidate_source_between(
                 &foreign_binding_delivery,
                 foreign_binding_delivery.snapshot().updated_at_millis,
                 &SessionBindingId("remediator-foreign-binding".into()),
@@ -2454,7 +2460,7 @@ mod tests {
         );
 
         let expanded_delta = map_delta_to_authorized_hunk(
-            validated_git_snapshot_between(
+            candidate_source_between(
                 &remediated,
                 remediated.snapshot().updated_at_millis,
                 &SessionBindingId("remediator-finished-binding".into()),
@@ -2539,9 +2545,13 @@ mod tests {
             (&mut second, "prior-candidate-two"),
         ] {
             for evidence in &mut snapshot.evidence {
-                evidence.candidate_ref = candidate.into();
+                evidence.candidate_id = winwincode_domain::CandidateId(format!(
+                    "cnd_01J0000000000000000000000{}",
+                    if candidate.ends_with("one") { 2 } else { 3 }
+                ));
             }
             let verdict = snapshot.verdict.as_mut().expect("failed candidate");
+            verdict.candidate_id = snapshot.evidence[0].candidate_id.clone();
             verdict.candidate_ref = candidate.into();
             for result in &mut verdict.criteria {
                 result.candidate_ref = candidate.into();
@@ -2635,9 +2645,11 @@ mod tests {
         .into_snapshot();
         let repeated_candidate_ref = "candidate-after-rework";
         for evidence in &mut repeated_snapshot.evidence {
-            evidence.candidate_ref = repeated_candidate_ref.into();
+            evidence.candidate_id =
+                winwincode_domain::CandidateId("cnd_01J00000000000000000000002".into());
         }
         let verdict = repeated_snapshot.verdict.as_mut().expect("current verdict");
+        verdict.candidate_id = repeated_snapshot.evidence[0].candidate_id.clone();
         verdict.candidate_ref = repeated_candidate_ref.into();
         for result in &mut verdict.criteria {
             result.candidate_ref = repeated_candidate_ref.into();

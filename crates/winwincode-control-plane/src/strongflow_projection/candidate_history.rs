@@ -199,7 +199,7 @@ pub(super) fn review_get(
         .collect::<Result<Vec<_>, _>>()?;
     if evidence
         .iter()
-        .any(|item| item.candidate_ref != candidate.candidate_ref)
+        .any(|item| item.candidate_id != candidate.candidate_id)
     {
         return Err(StrongFlowProjectionError::TrustedFactsUnavailable(
             "historical Evidence is not bound to its original Candidate".to_owned(),
@@ -292,7 +292,7 @@ fn rebuild_history(
             .snapshot()
             .evidence
             .iter()
-            .filter(|evidence| evidence.candidate_ref == candidate.candidate_ref())
+            .filter(|evidence| evidence.candidate_id == *candidate.candidate_id())
             .cloned()
             .collect::<Vec<_>>();
         let candidate_verdict = snapshot

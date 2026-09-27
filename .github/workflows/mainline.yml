@@ -136,6 +136,8 @@ jobs:
       - name: Test Rust workspace
         if: ${{ matrix.lane == 'test' }}
         shell: bash
+        env:
+          WWC_WORKER_HELPER_EXECUTABLE: ${{ github.workspace }}/target/debug/winwincode-kernel-helper
         run: |
           corepack enable
           corepack pnpm test:rust

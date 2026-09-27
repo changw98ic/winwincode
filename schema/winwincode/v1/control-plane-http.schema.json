@@ -2957,7 +2957,7 @@
         },
         "candidateRef": {
           "type": "string",
-          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$"
+          "pattern": "^refs/winwincode/candidates/(?:[0-9a-f]{40}|[0-9a-f]{64})$"
         },
         "deliveryVerdictId": {
           "type": "string",
@@ -4170,10 +4170,11 @@
         "deliverySpecRevision",
         "workRunId",
         "sessionBindingId",
-        "candidateRef",
         "type",
         "sourceRef",
-        "createdAt"
+        "createdAt",
+        "candidateId",
+        "snapshotId"
       ],
       "properties": {
         "id": {
@@ -4193,10 +4194,6 @@
           "minLength": 1,
           "maxLength": 200,
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$"
-        },
-        "candidateRef": {
-          "type": "string",
-          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$"
         },
         "type": {
           "type": "string",
@@ -4221,6 +4218,12 @@
         },
         "workRunId": {
           "$ref": "./domain.schema.json#/$defs/WorkRunId"
+        },
+        "candidateId": {
+          "$ref": "./domain.schema.json#/$defs/CandidateId"
+        },
+        "snapshotId": {
+          "$ref": "./domain.schema.json#/$defs/SnapshotId"
         }
       },
       "description": "Evidence stores a bounded source reference, never copied runtime logs or command output."
@@ -4237,12 +4240,14 @@
         "candidateCommitId",
         "candidateTreeId",
         "diffSha256",
-        "frozenAt"
+        "frozenAt",
+        "candidateId",
+        "candidateDigest"
       ],
       "properties": {
         "candidateRef": {
           "type": "string",
-          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$"
+          "pattern": "^refs/winwincode/candidates/(?:[0-9a-f]{40}|[0-9a-f]{64})$"
         },
         "deliverySpecId": {
           "type": "string",
@@ -4275,6 +4280,12 @@
         },
         "producerWorkRunId": {
           "$ref": "./domain.schema.json#/$defs/WorkRunId"
+        },
+        "candidateId": {
+          "$ref": "./domain.schema.json#/$defs/CandidateId"
+        },
+        "candidateDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
         }
       },
       "description": "Bounded current candidate identity. Changed paths, hunks, and diff bytes require a separate authorized detail endpoint."
@@ -4341,7 +4352,9 @@
         "status",
         "criteria",
         "unresolvedFindings",
-        "producedAt"
+        "producedAt",
+        "candidateId",
+        "snapshotId"
       ],
       "properties": {
         "id": {
@@ -4361,7 +4374,7 @@
         },
         "candidateRef": {
           "type": "string",
-          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$"
+          "pattern": "^refs/winwincode/candidates/(?:[0-9a-f]{40}|[0-9a-f]{64})$"
         },
         "status": {
           "type": "string",
@@ -4391,6 +4404,12 @@
         },
         "producedAt": {
           "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "candidateId": {
+          "$ref": "./domain.schema.json#/$defs/CandidateId"
+        },
+        "snapshotId": {
+          "$ref": "./domain.schema.json#/$defs/SnapshotId"
         }
       }
     },
@@ -6244,10 +6263,17 @@
     "CollaborationPageAnnotationItemId": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "id"],
+      "required": [
+        "kind",
+        "id"
+      ],
       "properties": {
         "kind": {
-          "enum": ["approval", "gate_attention", "delivery_attention"],
+          "enum": [
+            "approval",
+            "gate_attention",
+            "delivery_attention"
+          ],
           "type": "string"
         },
         "id": {
@@ -6260,158 +6286,482 @@
     "CollaborationPageAnnotationCandidate": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["deliveryId", "deliverySpecId", "deliverySpecRevision", "candidateRef", "candidateDigest", "candidateTreeId", "diffSha256", "workRunId", "attempt", "sessionBindingId"],
+      "required": [
+        "deliveryId",
+        "deliverySpecId",
+        "deliverySpecRevision",
+        "candidateRef",
+        "candidateDigest",
+        "candidateTreeId",
+        "diffSha256",
+        "workRunId",
+        "attempt",
+        "sessionBindingId",
+        "candidateId",
+        "snapshotId"
+      ],
       "properties": {
-        "deliveryId": {"$ref": "./domain.schema.json#/$defs/DeliveryId"},
-        "deliverySpecId": {"type": "string", "minLength": 1, "maxLength": 200},
-        "deliverySpecRevision": {"type": "integer", "minimum": 1},
-        "candidateRef": {"type": "string", "pattern": "^git-candidate:sha256:[0-9a-f]{64}$"},
-        "candidateDigest": {"$ref": "./domain.schema.json#/$defs/Sha256Digest"},
-        "candidateTreeId": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
-        "diffSha256": {"$ref": "./domain.schema.json#/$defs/Sha256Digest"},
-        "workRunId": {"$ref": "./domain.schema.json#/$defs/WorkRunId"},
-        "attempt": {"type": "integer", "minimum": 1, "maximum": 1000},
-        "sessionBindingId": {"type": "string", "minLength": 1, "maxLength": 256}
+        "deliveryId": {
+          "$ref": "./domain.schema.json#/$defs/DeliveryId"
+        },
+        "deliverySpecId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "deliverySpecRevision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "candidateRef": {
+          "type": "string",
+          "pattern": "^refs/winwincode/candidates/(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "candidateDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "candidateTreeId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40,64}$"
+        },
+        "diffSha256": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "workRunId": {
+          "$ref": "./domain.schema.json#/$defs/WorkRunId"
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "sessionBindingId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "candidateId": {
+          "$ref": "./domain.schema.json#/$defs/CandidateId"
+        },
+        "snapshotId": {
+          "$ref": "./domain.schema.json#/$defs/SnapshotId"
+        }
       }
     },
     "CollaborationPageAnnotationTarget": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["pagePath", "viewport", "region"],
+      "required": [
+        "pagePath",
+        "viewport",
+        "region"
+      ],
       "properties": {
-        "pagePath": {"type": "string", "pattern": "^/[^\\u0000]{0,2047}$"},
+        "pagePath": {
+          "type": "string",
+          "pattern": "^/[^\\u0000]{0,2047}$"
+        },
         "viewport": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["width", "height", "devicePixelRatio"],
+          "required": [
+            "width",
+            "height",
+            "devicePixelRatio"
+          ],
           "properties": {
-            "width": {"type": "integer", "minimum": 1, "maximum": 4096},
-            "height": {"type": "integer", "minimum": 1, "maximum": 4096},
-            "devicePixelRatio": {"type": "number", "exclusiveMinimum": 0.1, "maximum": 4}
+            "width": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4096
+            },
+            "height": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4096
+            },
+            "devicePixelRatio": {
+              "type": "number",
+              "exclusiveMinimum": 0.1,
+              "maximum": 4
+            }
           }
         },
         "element": {
           "oneOf": [
-            {"type": "object", "additionalProperties": false, "required": ["tagName", "locator", "x", "y", "width", "height"], "properties": {
-              "tagName": {"type": "string", "minLength": 1, "maxLength": 64},
-              "role": {"oneOf": [{"type": "string", "maxLength": 128}, {"type": "null"}]},
-              "accessibleName": {"oneOf": [{"type": "string", "maxLength": 500}, {"type": "null"}]},
-              "locator": {"type": "string", "minLength": 1, "maxLength": 1000},
-              "x": {"type": "integer", "minimum": 0, "maximum": 4096},
-              "y": {"type": "integer", "minimum": 0, "maximum": 4096},
-              "width": {"type": "integer", "minimum": 1, "maximum": 4096},
-              "height": {"type": "integer", "minimum": 1, "maximum": 4096}
-            }},
-            {"type": "null"}
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "tagName",
+                "locator",
+                "x",
+                "y",
+                "width",
+                "height"
+              ],
+              "properties": {
+                "tagName": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "role": {
+                  "oneOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 128
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "accessibleName": {
+                  "oneOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 500
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "locator": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 1000
+                },
+                "x": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4096
+                },
+                "y": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4096
+                },
+                "width": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 4096
+                },
+                "height": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 4096
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "region": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["x", "y", "width", "height"],
+          "required": [
+            "x",
+            "y",
+            "width",
+            "height"
+          ],
           "properties": {
-            "x": {"type": "integer", "minimum": 0, "maximum": 4096},
-            "y": {"type": "integer", "minimum": 0, "maximum": 4096},
-            "width": {"type": "integer", "minimum": 1, "maximum": 4096},
-            "height": {"type": "integer", "minimum": 1, "maximum": 4096}
+            "x": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096
+            },
+            "y": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096
+            },
+            "width": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4096
+            },
+            "height": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4096
+            }
           }
         }
       }
     },
     "CollaborationPageAnnotationArtifact": {
       "oneOf": [
-        {"type": "object", "additionalProperties": false, "required": ["artifactId", "digest"], "properties": {
-          "artifactId": {"$ref": "./domain.schema.json#/$defs/ArtifactId"},
-          "digest": {"$ref": "./domain.schema.json#/$defs/Sha256Digest"}
-        }},
-        {"type": "null"}
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "artifactId",
+            "digest"
+          ],
+          "properties": {
+            "artifactId": {
+              "$ref": "./domain.schema.json#/$defs/ArtifactId"
+            },
+            "digest": {
+              "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+            }
+          }
+        },
+        {
+          "type": "null"
+        }
       ]
     },
     "CollaborationPageAnnotationProjection": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "itemId", "authorUserId", "candidate", "target", "body", "screenshotArtifact", "derivedAttentionId", "evidenceId", "state", "revision", "sourceRevision", "sourceSha256", "updatedAt"],
+      "required": [
+        "id",
+        "itemId",
+        "authorUserId",
+        "candidate",
+        "target",
+        "body",
+        "screenshotArtifact",
+        "derivedAttentionId",
+        "evidenceId",
+        "state",
+        "revision",
+        "sourceRevision",
+        "sourceSha256",
+        "updatedAt"
+      ],
       "properties": {
-        "id": {"type": "string", "minLength": 1, "maxLength": 256},
-        "itemId": {"$ref": "#/$defs/CollaborationPageAnnotationItemId"},
-        "authorUserId": {"$ref": "./domain.schema.json#/$defs/UserId"},
-        "candidate": {"$ref": "#/$defs/CollaborationPageAnnotationCandidate"},
-        "target": {"$ref": "#/$defs/CollaborationPageAnnotationTarget"},
-        "body": {"type": "string", "minLength": 1, "maxLength": 4000},
-        "screenshotArtifact": {"$ref": "#/$defs/CollaborationPageAnnotationArtifact"},
-        "derivedAttentionId": {"$ref": "./domain.schema.json#/$defs/AttentionItemId"},
-        "evidenceId": {"$ref": "./domain.schema.json#/$defs/EvidenceId"},
-        "state": {"enum": ["active", "revoked"], "type": "string"},
-        "revision": {"type": "integer", "minimum": 1},
-        "sourceRevision": {"type": "integer", "minimum": 1},
-        "sourceSha256": {"$ref": "./domain.schema.json#/$defs/Sha256Digest"},
-        "updatedAt": {"type": "integer", "minimum": 0}
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "itemId": {
+          "$ref": "#/$defs/CollaborationPageAnnotationItemId"
+        },
+        "authorUserId": {
+          "$ref": "./domain.schema.json#/$defs/UserId"
+        },
+        "candidate": {
+          "$ref": "#/$defs/CollaborationPageAnnotationCandidate"
+        },
+        "target": {
+          "$ref": "#/$defs/CollaborationPageAnnotationTarget"
+        },
+        "body": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000
+        },
+        "screenshotArtifact": {
+          "$ref": "#/$defs/CollaborationPageAnnotationArtifact"
+        },
+        "derivedAttentionId": {
+          "$ref": "./domain.schema.json#/$defs/AttentionItemId"
+        },
+        "evidenceId": {
+          "$ref": "./domain.schema.json#/$defs/EvidenceId"
+        },
+        "state": {
+          "enum": [
+            "active",
+            "revoked"
+          ],
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sourceRevision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sourceSha256": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "updatedAt": {
+          "type": "integer",
+          "minimum": 0
+        }
       }
     },
     "CollaborationPageAnnotationSubmitPayload": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["itemId", "annotationId", "candidate", "target", "body", "screenshotArtifact"],
+      "required": [
+        "itemId",
+        "annotationId",
+        "candidate",
+        "target",
+        "body",
+        "screenshotArtifact"
+      ],
       "properties": {
-        "itemId": {"$ref": "#/$defs/CollaborationPageAnnotationItemId"},
-        "annotationId": {"type": "string", "minLength": 1, "maxLength": 256},
-        "candidate": {"$ref": "#/$defs/CollaborationPageAnnotationCandidate"},
-        "target": {"$ref": "#/$defs/CollaborationPageAnnotationTarget"},
-        "body": {"type": "string", "minLength": 1, "maxLength": 4000},
-        "screenshotArtifact": {"$ref": "#/$defs/CollaborationPageAnnotationArtifact"}
+        "itemId": {
+          "$ref": "#/$defs/CollaborationPageAnnotationItemId"
+        },
+        "annotationId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "candidate": {
+          "$ref": "#/$defs/CollaborationPageAnnotationCandidate"
+        },
+        "target": {
+          "$ref": "#/$defs/CollaborationPageAnnotationTarget"
+        },
+        "body": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000
+        },
+        "screenshotArtifact": {
+          "$ref": "#/$defs/CollaborationPageAnnotationArtifact"
+        }
       }
     },
     "CollaborationPageAnnotationSubmitCommand": {
-      "allOf": [{"$ref": "./domain.schema.json#/$defs/CommandEnvelope"}, {"type": "object", "properties": {
-        "command": {"const": "collaboration.page_annotation.submit"},
-        "payload": {"$ref": "#/$defs/CollaborationPageAnnotationSubmitPayload"},
-        "scope": {"$ref": "./domain.schema.json#/$defs/RepositoryScope"}
-      }}]
+      "allOf": [
+        {
+          "$ref": "./domain.schema.json#/$defs/CommandEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "const": "collaboration.page_annotation.submit"
+            },
+            "payload": {
+              "$ref": "#/$defs/CollaborationPageAnnotationSubmitPayload"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
+            }
+          }
+        }
+      ]
     },
     "CollaborationPageAnnotationSubmitResult": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["annotation", "catalogRevision", "replayed"],
+      "required": [
+        "annotation",
+        "catalogRevision",
+        "replayed"
+      ],
       "properties": {
-        "annotation": {"$ref": "#/$defs/CollaborationPageAnnotationProjection"},
-        "catalogRevision": {"type": "integer", "minimum": 1},
-        "replayed": {"type": "boolean"}
+        "annotation": {
+          "$ref": "#/$defs/CollaborationPageAnnotationProjection"
+        },
+        "catalogRevision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "replayed": {
+          "type": "boolean"
+        }
       }
     },
     "CollaborationPageAnnotationSubmitCompletedResponse": {
-      "allOf": [{"$ref": "#/$defs/CommandCompletedEnvelope"}, {"type": "object", "properties": {
-        "command": {"const": "collaboration.page_annotation.submit"},
-        "result": {"$ref": "#/$defs/CollaborationPageAnnotationSubmitResult"}
-      }}]
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "const": "collaboration.page_annotation.submit"
+            },
+            "result": {
+              "$ref": "#/$defs/CollaborationPageAnnotationSubmitResult"
+            }
+          }
+        }
+      ]
     },
     "CollaborationPageAnnotationListParameters": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["deliveryId"],
-      "properties": {"deliveryId": {"$ref": "./domain.schema.json#/$defs/DeliveryId"}}
+      "required": [
+        "deliveryId"
+      ],
+      "properties": {
+        "deliveryId": {
+          "$ref": "./domain.schema.json#/$defs/DeliveryId"
+        }
+      }
     },
     "CollaborationPageAnnotationPage": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "items", "catalogRevision"],
+      "required": [
+        "kind",
+        "items",
+        "catalogRevision"
+      ],
       "properties": {
-        "kind": {"const": "collaboration_page_annotation_page"},
-        "catalogRevision": {"$ref": "./domain.schema.json#/$defs/Revision"},
-        "items": {"type": "array", "maxItems": 200, "items": {"$ref": "#/$defs/CollaborationPageAnnotationProjection"}}
+        "kind": {
+          "const": "collaboration_page_annotation_page"
+        },
+        "catalogRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "items": {
+          "type": "array",
+          "maxItems": 200,
+          "items": {
+            "$ref": "#/$defs/CollaborationPageAnnotationProjection"
+          }
+        }
       }
     },
     "CollaborationPageAnnotationListQuery": {
-      "allOf": [{"$ref": "#/$defs/QueryEnvelope"}, {"type": "object", "properties": {
-        "query": {"const": "collaboration.page_annotation.list"},
-        "parameters": {"$ref": "#/$defs/CollaborationPageAnnotationListParameters"},
-        "scope": {"$ref": "./domain.schema.json#/$defs/RepositoryScope"}
-      }}]
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "const": "collaboration.page_annotation.list"
+            },
+            "parameters": {
+              "$ref": "#/$defs/CollaborationPageAnnotationListParameters"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
+            }
+          }
+        }
+      ]
     },
     "CollaborationPageAnnotationListResultResponse": {
-      "allOf": [{"$ref": "#/$defs/QueryResultEnvelope"}, {"type": "object", "properties": {
-        "query": {"const": "collaboration.page_annotation.list"},
-        "result": {"$ref": "#/$defs/CollaborationPageAnnotationPage"}
-      }}]
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "const": "collaboration.page_annotation.list"
+            },
+            "result": {
+              "$ref": "#/$defs/CollaborationPageAnnotationPage"
+            }
+          }
+        }
+      ]
     },
     "CandidateFileStatus": {
       "type": "string",
@@ -6684,7 +7034,7 @@
         },
         "candidateRef": {
           "type": "string",
-          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$"
+          "pattern": "^refs/winwincode/candidates/(?:[0-9a-f]{40}|[0-9a-f]{64})$"
         },
         "candidateTreeId": {
           "type": "string",
@@ -6834,7 +7184,7 @@
         },
         "candidateRef": {
           "type": "string",
-          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$"
+          "pattern": "^refs/winwincode/candidates/(?:[0-9a-f]{40}|[0-9a-f]{64})$"
         },
         "candidateTreeId": {
           "type": "string",
@@ -6934,7 +7284,7 @@
         },
         "candidateRef": {
           "type": "string",
-          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$"
+          "pattern": "^refs/winwincode/candidates/(?:[0-9a-f]{40}|[0-9a-f]{64})$"
         },
         "candidateTreeId": {
           "type": "string",
@@ -7130,7 +7480,7 @@
         },
         "candidateRef": {
           "type": "string",
-          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$"
+          "pattern": "^refs/winwincode/candidates/(?:[0-9a-f]{40}|[0-9a-f]{64})$"
         },
         "candidateTreeId": {
           "type": "string",
@@ -7283,11 +7633,12 @@
         "atCursor",
         "readPageLimit",
         "evidenceId",
-        "candidateRef",
         "workRunId",
         "sessionBindingId",
         "type",
-        "sourceRef"
+        "sourceRef",
+        "candidateId",
+        "snapshotId"
       ],
       "properties": {
         "deliveryId": {
@@ -7304,10 +7655,6 @@
         },
         "evidenceId": {
           "$ref": "./domain.schema.json#/$defs/EvidenceId"
-        },
-        "candidateRef": {
-          "type": "string",
-          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$"
         },
         "sessionBindingId": {
           "type": "string",
@@ -7335,6 +7682,12 @@
         },
         "workRunId": {
           "$ref": "./domain.schema.json#/$defs/WorkRunId"
+        },
+        "candidateId": {
+          "$ref": "./domain.schema.json#/$defs/CandidateId"
+        },
+        "snapshotId": {
+          "$ref": "./domain.schema.json#/$defs/SnapshotId"
         }
       },
       "description": "A stale-check selector for one Evidence already returned at the exact Delivery read cursor. No field is bearer authorization."
@@ -7359,8 +7712,9 @@
         "deliveryRevision",
         "workRunId",
         "sessionBindingId",
-        "candidateRef",
-        "evidenceId"
+        "evidenceId",
+        "candidateId",
+        "snapshotId"
       ],
       "properties": {
         "deliveryId": {
@@ -7375,15 +7729,17 @@
           "maxLength": 200,
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$"
         },
-        "candidateRef": {
-          "type": "string",
-          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$"
-        },
         "evidenceId": {
           "$ref": "./domain.schema.json#/$defs/EvidenceId"
         },
         "workRunId": {
           "$ref": "./domain.schema.json#/$defs/WorkRunId"
+        },
+        "candidateId": {
+          "$ref": "./domain.schema.json#/$defs/CandidateId"
+        },
+        "snapshotId": {
+          "$ref": "./domain.schema.json#/$defs/SnapshotId"
         }
       },
       "description": "Public provenance only. Worker, lease, fence, object key, path, and credential facts stay server-owned."
@@ -8606,11 +8962,27 @@
         "candidateCommit"
       ],
       "properties": {
-        "schemaVersion": {"const": "winwincode/managed-app-run-v1"},
-        "runId": {"$ref": "./domain.schema.json#/$defs/WorkRunId"},
-        "attempt": {"type": "integer", "minimum": 1, "maximum": 1000},
-        "mode": {"$ref": "./client-control.schema.json#/$defs/ManagedAppMode"},
-        "candidateCommit": {"type": ["string", "null"], "pattern": "^[0-9a-f]{40}$|^[0-9a-f]{64}$"}
+        "schemaVersion": {
+          "const": "winwincode/managed-app-run-v1"
+        },
+        "runId": {
+          "$ref": "./domain.schema.json#/$defs/WorkRunId"
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "mode": {
+          "$ref": "./client-control.schema.json#/$defs/ManagedAppMode"
+        },
+        "candidateCommit": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{40}$|^[0-9a-f]{64}$"
+        }
       },
       "description": "Secret-safe browser projection of one Server-sealed managed application run."
     },
@@ -8933,7 +9305,7 @@
       "properties": {
         "candidateRef": {
           "type": "string",
-          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$"
+          "pattern": "^refs/winwincode/candidates/(?:[0-9a-f]{40}|[0-9a-f]{64})$"
         },
         "diffSha256": {
           "type": "string",

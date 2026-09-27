@@ -230,7 +230,9 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
         started_at: started_at.clone(),
         capabilities,
     };
-    let intake_log = data_directory.join("codex-runtime").join("model-intake.log");
+    let intake_log = data_directory
+        .join("codex-runtime")
+        .join("model-intake.log");
     let mut worker = WorkerMain::new(config, port, codex, workspaces)
         .with_device_providers(&provider_directory)?
         .with_observer_mode(observer_mode)

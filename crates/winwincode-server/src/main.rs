@@ -486,7 +486,9 @@ fn compose_production_application(
     // Collaboration inbox keeps its own catalog handle; the execution-port
     // Control Plane owns the canonical artifact-catalog installed above.
     let artifact_store = ArtifactStore::open(
-        config.data_directory().join("artifact-catalog-collaboration"),
+        config
+            .data_directory()
+            .join("artifact-catalog-collaboration"),
         Box::new(artifact_objects),
     )?;
     let page_annotations = Arc::new(Mutex::new(

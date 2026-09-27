@@ -327,7 +327,14 @@ fn execution_job(delivery: &Delivery, scope: &RepositoryScope) -> ExecutionJob {
                 .clone(),
         }),
         workspace: ExecutionWorkspace {
-            checkout_revision: "candidate-checkout".into(),
+            checkout_revision: if binding.execution_profile.as_deref() == Some("verifier") {
+                verdict_fixture(delivery.id(), VerdictFixtureOutcome::Pass)
+                    .candidate
+                    .candidate_commit_id()
+                    .to_owned()
+            } else {
+                "candidate-checkout".into()
+            },
             repository_id: scope.repository_id.clone(),
             write_mode: if binding.execution_profile.as_deref() == Some("executor") {
                 ExecutionWorkspaceWriteMode::Candidate
@@ -428,7 +435,159 @@ fn seed_delivery_and_job(root: &Path, delivery: &Delivery, job: &ExecutionJob) {
     storage
         .mark_published(&receipt.events[0].event_id)
         .expect("seed event acknowledgement");
+    if job.execution_profile == "verifier" {
+        seed_verification_snapshot(&mut storage, &repository_scope, delivery, job, seed);
+    }
     Box::new(storage).close().expect("seed close");
+}
+
+#[allow(clippy::too_many_lines)]
+fn seed_verification_snapshot(
+    storage: &mut SqliteStorage,
+    scope: &RepositoryScope,
+    delivery: &Delivery,
+    job: &ExecutionJob,
+    seed: u64,
+) {
+    use serde_json::json;
+    use winwincode_domain::{Candidate, CanonicalSnapshot, seal_snapshot};
+    use winwincode_execution_port::generated::SnapshotFreezeRequestMessage;
+    use winwincode_storage::{
+        SnapshotProductStaged, SnapshotVerificationBinding, commit_snapshot_product,
+    };
+
+    let fixture = verdict_fixture(delivery.id(), VerdictFixtureOutcome::Pass);
+    let frozen = &fixture.candidate;
+    let writer = delivery
+        .snapshot()
+        .session_bindings
+        .iter()
+        .find(|binding| binding.work_run_id == *frozen.producer_work_run_id())
+        .unwrap();
+    let candidate: Candidate = serde_json::from_value(json!({
+        "schemaVersion": "winwincode/v1", "id": frozen.candidate_id(),
+        "candidateDigest": frozen.candidate_digest(), "candidateRef": frozen.candidate_ref(),
+        "workContractId": writer.work_contract_id, "contractRevision": writer.work_contract_revision,
+        "workItemId": writer.work_item_id, "workRunId": writer.work_run_id, "attempt": writer.attempt,
+        "producerWorkerSessionId": writer.worker_session_id,
+        "baseCommit": frozen.base_commit_id(), "candidateCommit": frozen.candidate_commit_id(),
+        "candidateTree": frozen.candidate_tree_id(), "diffDigest": format!("sha256:{}", frozen.diff_sha256())
+    })).unwrap();
+    let mut snapshot = fixture.verification.snapshot().as_contract().clone();
+    snapshot.repository_id = scope.repository_id.clone();
+    snapshot.validation_seal = seal_snapshot(&snapshot);
+    let snapshot = CanonicalSnapshot::try_from(snapshot).unwrap();
+    let active = delivery
+        .snapshot()
+        .session_bindings
+        .iter()
+        .find(|binding| binding.execution_job_id == job.job_id)
+        .unwrap();
+    let templates: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/contracts/execution-port.valid.json"
+    ))
+    .unwrap();
+    let mut request = templates["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["kind"] == "snapshot.freeze_request")
+        .unwrap()
+        .clone();
+    request["requestId"] = json!(canonical_id("req", seed + 10_000));
+    request["candidate"] = json!(candidate);
+    request["repositoryId"] = json!(scope.repository_id);
+    request["baseTreeId"] = json!(snapshot.as_contract().base_tree_id);
+    request["contentDigest"] = json!(snapshot.as_contract().content_digest);
+    request["lease"] = json!({
+        "jobId": job.job_id, "attempt": job.attempt, "leaseId": active.lease_id,
+        "fencingToken": active.fencing_token, "workerId": active.worker_id,
+        "workerInstanceId": active.worker_instance_id,
+        "issuedAt": "2027-01-15T08:00:00.200Z", "expiresAt": "2027-01-15T08:05:00.000Z"
+    });
+    request["dispatch"]["lease"] = request["lease"].clone();
+    request["dispatch"]["job"] = json!(job);
+    let request: SnapshotFreezeRequestMessage = serde_json::from_value(request).unwrap();
+    winwincode_execution_port::snapshot_freeze::validate_freeze_request(&request).unwrap();
+    let payload = serde_json::to_vec(&request).unwrap();
+    let actor = winwincode_storage::receipt_actor_key(&PublicEventActor::User {
+        id: UserId(canonical_id("usr", seed)),
+    })
+    .unwrap();
+    let receipt_scope = repository_receipt_scope(scope);
+    let receipt = storage
+        .commit(&StateCommit::new(
+            ReceiptIdentity::new(
+                actor.clone(),
+                receipt_scope.clone(),
+                request.request_id.clone(),
+            )
+            .unwrap(),
+            Sha256Digest(format!("sha256:{:x}", Sha256::digest(&payload))),
+            format!("snapshot-freeze:v1:{}:{}", job.job_id.0, job.attempt),
+            0,
+            payload.clone(),
+            vec![NewOutboxEvent::internal(
+                format!("snapshot-freeze:{}", request.request_id.0),
+                "verification.snapshot.freeze",
+                payload,
+            )],
+        ))
+        .unwrap();
+    storage.mark_published(&receipt.events[0].event_id).unwrap();
+    for (index, binding) in delivery
+        .snapshot()
+        .session_bindings
+        .iter()
+        .filter(|binding| {
+            matches!(
+                binding.execution_profile.as_deref(),
+                Some("reviewer" | "verifier")
+            )
+        })
+        .enumerate()
+    {
+        let n = seed + 11_000 + u64::try_from(index).unwrap();
+        let role = binding.execution_profile.as_ref().unwrap();
+        let plan_id = canonical_id("vpl", n);
+        let session_id = canonical_id("vsn", n);
+        let binding: SnapshotVerificationBinding = serde_json::from_value(json!({
+            "sessionBindingId": canonical_id("sbn", n), "workRunId": binding.work_run_id,
+            "executionJobId": binding.execution_job_id, "productSessionId": binding.product_session_id,
+            "workerSessionId": binding.worker_session_id, "codexThreadId": binding.codex_thread_id,
+            "verificationRole": role, "attempt": binding.attempt,
+            "verificationPlan": {"schemaVersion": "winwincode/v1", "id": plan_id,
+                "candidateDigest": candidate.candidate_digest, "workContractId": binding.work_contract_id,
+                "contractRevision": binding.work_contract_revision, "workItemId": binding.work_item_id,
+                "workItemRevision": binding.work_item_revision, "workRunId": binding.work_run_id,
+                "planRevision": 1, "criterionIds": delivery.snapshot().spec.acceptance_criteria.iter().map(|c| &c.id).collect::<Vec<_>>(),
+                "commands": ["cargo test"], "permissionProfile": "candidate-read-only", "requiredRoles": [role]},
+            "verificationSession": {"schemaVersion": "winwincode/v1", "id": session_id,
+                "verificationSessionId": session_id, "verificationPlanId": plan_id,
+                "snapshotId": snapshot.snapshot_id(), "candidateId": candidate.id,
+                "workRunId": binding.work_run_id, "attempt": binding.attempt,
+                "createdAt": "2027-01-15T08:00:00.200Z",
+                "sessionIdentity": {"workRunId": binding.work_run_id, "productSessionId": binding.product_session_id,
+                    "workerSessionId": binding.worker_session_id, "codexThreadId": binding.codex_thread_id}}
+        })).unwrap();
+        let staged =
+            SnapshotProductStaged::new(candidate.clone(), snapshot.clone(), binding).unwrap();
+        let receipt = commit_snapshot_product(
+            storage,
+            ReceiptIdentity::new(
+                actor.clone(),
+                receipt_scope.clone(),
+                RequestId(canonical_id("req", n)),
+            )
+            .unwrap(),
+            Sha256Digest(format!("sha256:{n:064x}")),
+            &staged,
+        )
+        .unwrap();
+        for event in receipt.receipt.events {
+            storage.mark_published(&event.event_id).unwrap();
+        }
+    }
 }
 
 fn seed_authenticated_worker_execution(
@@ -1168,9 +1327,7 @@ fn verdict_command(
         expected_revision: Revision(i64::try_from(delivery.revision()).expect("revision")),
         payload: serde_json::json!({
             "deliveryId": delivery.id().0,
-            "candidateDigest": candidate.candidate_ref()
-                .strip_prefix("git-candidate:")
-                .expect("candidate digest"),
+            "candidateDigest": candidate.candidate_digest(),
         }),
         request_id: RequestId(canonical_id("req", seed + 1000)),
         schema_version: SchemaVersion::WinwincodeV1,
@@ -1642,6 +1799,8 @@ fn a_new_message_cannot_resettle_an_already_terminal_work_run() {
     let message = terminal_message(&job, &delivery, seed, ExecutionOutcomeStatus::Succeeded);
     let facts = outcome_facts(&delivery, &message);
     seed_delivery_and_job(&root, &delivery, &job);
+    let before = durable_terminal_counts(&root, delivery.id());
+    let after = (before.0 + 1, before.1 + 1, before.2 + 1, before.3 + 3);
     let mut control_plane = ControlPlane::start_local(
         ControlPlaneConfig::local(&root),
         Box::new(RecordingPublisher),
@@ -1656,7 +1815,7 @@ fn a_new_message_cannot_resettle_an_already_terminal_work_run() {
     control_plane
         .commit_delivery_terminal_outcome(&scope, &stale, &facts, &stale.sent_at)
         .expect_err("a new message cannot settle the same WorkRun twice");
-    assert_eq!(durable_terminal_counts(&root, delivery.id()), (2, 2, 2, 4));
+    assert_eq!(durable_terminal_counts(&root, delivery.id()), after);
     control_plane.shutdown().expect("shutdown");
     fs::remove_dir_all(root).expect("database directory release");
 }
@@ -2043,6 +2202,7 @@ fn failure_at_each_atomic_member_rolls_back_terminal_outcome() {
         let message = terminal_message(&job, &delivery, seed, ExecutionOutcomeStatus::Failed);
         let facts = outcome_facts(&delivery, &message);
         seed_delivery_and_job(&root, &delivery, &job);
+        let before = durable_terminal_counts(&root, delivery.id());
         let mut control_plane = ControlPlane::start_local(
             ControlPlaneConfig::local(&root),
             Box::new(RecordingPublisher),
@@ -2055,7 +2215,7 @@ fn failure_at_each_atomic_member_rolls_back_terminal_outcome() {
             .expect_err("injected atomic member failure");
         assert_eq!(
             durable_terminal_counts(&root, delivery.id()),
-            (1, 1, 1, 1),
+            before,
             "{member}"
         );
         assert_eq!(audit_event_count(&root), 0, "{member}");
@@ -2074,6 +2234,8 @@ fn publication_failure_keeps_terminal_commit_for_restart_and_receipt_replay() {
     let message = terminal_message(&job, &delivery, seed, ExecutionOutcomeStatus::Succeeded);
     let facts = outcome_facts(&delivery, &message);
     seed_delivery_and_job(&root, &delivery, &job);
+    let before = durable_terminal_counts(&root, delivery.id());
+    let after = (before.0 + 1, before.1 + 1, before.2 + 1, before.3 + 3);
     let mut failing =
         ControlPlane::start_local(ControlPlaneConfig::local(&root), Box::new(FailingPublisher))
             .expect("Control Plane start");
@@ -2085,7 +2247,7 @@ fn publication_failure_keeps_terminal_commit_for_restart_and_receipt_replay() {
         .committed_receipt()
         .expect("publication error carries committed terminal receipt");
     assert_eq!(committed.receipt().revision, delivery.revision() + 1);
-    assert_eq!(durable_terminal_counts(&root, delivery.id()), (2, 2, 2, 4));
+    assert_eq!(durable_terminal_counts(&root, delivery.id()), after);
     assert_eq!(audit_event_count(&root), 1);
     failing
         .shutdown()
@@ -2100,7 +2262,7 @@ fn publication_failure_keeps_terminal_commit_for_restart_and_receipt_replay() {
         .commit_delivery_terminal_outcome(&scope, &message, &facts, &message.sent_at)
         .expect("receipt replay after restart");
     assert!(replay.receipt().idempotent_replay);
-    assert_eq!(durable_terminal_counts(&root, delivery.id()), (2, 2, 2, 4));
+    assert_eq!(durable_terminal_counts(&root, delivery.id()), after);
     assert_eq!(audit_event_count(&root), 1);
     let audit_event = audit_event_for_receipt(&root, replay.receipt());
     let audit_access = AuditScope::repository(
@@ -2144,6 +2306,7 @@ fn stale_or_foreign_lease_binding_metadata_and_artifacts_fail_closed() {
     let message = terminal_message(&job, &delivery, seed, ExecutionOutcomeStatus::Succeeded);
     let facts = outcome_facts(&delivery, &message);
     seed_delivery_and_job(&root, &delivery, &job);
+    let before = durable_terminal_counts(&root, delivery.id());
     let mut control_plane = ControlPlane::start_local(
         ControlPlaneConfig::local(&root),
         Box::new(RecordingPublisher),
@@ -2207,7 +2370,7 @@ fn stale_or_foreign_lease_binding_metadata_and_artifacts_fail_closed() {
         );
         assert_eq!(
             durable_terminal_counts(&root, delivery.id()),
-            (1, 1, 1, 1),
+            before,
             "{name}"
         );
         assert_eq!(audit_event_count(&root), 0, "{name}");
@@ -2221,7 +2384,7 @@ fn stale_or_foreign_lease_binding_metadata_and_artifacts_fail_closed() {
     control_plane
         .commit_delivery_terminal_outcome(&scope, &message, &foreign_stage_facts, &message.sent_at)
         .expect_err("foreign stage authority must fail closed");
-    assert_eq!(durable_terminal_counts(&root, delivery.id()), (1, 1, 1, 1));
+    assert_eq!(durable_terminal_counts(&root, delivery.id()), before);
     assert_eq!(audit_event_count(&root), 0);
     control_plane.shutdown().expect("shutdown");
     fs::remove_dir_all(root).expect("database directory release");
@@ -2243,6 +2406,7 @@ fn outcome_error_must_match_the_generated_schema_before_persistence() {
         });
         let facts = outcome_facts(&delivery, &message);
         seed_delivery_and_job(&root, &delivery, &job);
+        let before = durable_terminal_counts(&root, delivery.id());
         let mut control_plane = ControlPlane::start_local(
             ControlPlaneConfig::local(&root),
             Box::new(RecordingPublisher),
@@ -2252,7 +2416,7 @@ fn outcome_error_must_match_the_generated_schema_before_persistence() {
         control_plane
             .commit_delivery_terminal_outcome(&scope, &message, &facts, &message.sent_at)
             .expect_err("schema-invalid outcome.error must be rejected");
-        assert_eq!(durable_terminal_counts(&root, delivery.id()), (1, 1, 1, 1));
+        assert_eq!(durable_terminal_counts(&root, delivery.id()), before);
         control_plane.shutdown().expect("shutdown");
         fs::remove_dir_all(root).expect("database directory release");
     }
@@ -2457,6 +2621,7 @@ fn generic_control_plane_commit_cannot_forge_terminal_delivery_state() {
     let (delivery, candidate) = running_final_verifier(seed);
     let job = execution_job(&delivery, &scope);
     seed_delivery_and_job(&root, &delivery, &job);
+    let before = durable_terminal_counts(&root, delivery.id());
     let mut control_plane = ControlPlane::start_local(
         ControlPlaneConfig::local(&root),
         Box::new(RecordingPublisher),
@@ -2513,7 +2678,7 @@ fn generic_control_plane_commit_cannot_forge_terminal_delivery_state() {
             .expect("generic bypass state read")
             .is_none()
     );
-    assert_eq!(durable_terminal_counts(&root, delivery.id()), (1, 1, 1, 1));
+    assert_eq!(durable_terminal_counts(&root, delivery.id()), before);
     control_plane.shutdown().expect("shutdown");
     fs::remove_dir_all(root).expect("database directory release");
 }

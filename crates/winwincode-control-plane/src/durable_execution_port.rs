@@ -305,6 +305,7 @@ impl<'application> DurableExecutionPortIngress<'application> {
         &mut self,
         message: &ExecutionPortMessage,
     ) -> Result<Vec<ExecutionPortMessage>, DurableExecutionPortError> {
+        self.validate_snapshot_ingress(message)?;
         match message {
             ExecutionPortMessage::WorkerRegisterMessage(_)
             | ExecutionPortMessage::WorkerHeartbeatMessage(_) => {
@@ -323,6 +324,22 @@ impl<'application> DurableExecutionPortIngress<'application> {
                 }
                 .map_err(DurableExecutionPortError::Service)?;
                 Ok(vec![response])
+            }
+            ExecutionPortMessage::SnapshotFreezeReceiptMessage(receipt) => {
+                if receipt.receipt.repository_id != self.repository_scope.repository_id {
+                    return Err(DurableExecutionPortError::Storage(
+                        StorageError::invalid_input(
+                            "Snapshot receipt is outside the ingress repository",
+                        ),
+                    ));
+                }
+                let dispatch = self
+                    .control_plane
+                    .accept_snapshot_freeze(self.storage, receipt, &self.server_time)
+                    .map_err(DurableExecutionPortError::Storage)?;
+                Ok(vec![
+                    ExecutionPortMessage::SnapshotVerificationDispatchMessage(dispatch),
+                ])
             }
             ExecutionPortMessage::JobDispatchResultMessage(result) => {
                 let accepted = ExecutionPortService::new(self.storage, self.server_time.clone())
@@ -350,6 +367,10 @@ impl<'application> DurableExecutionPortIngress<'application> {
                     });
                     if !replacement_is_current {
                         self.append_workrun_after_dispatch(result)?;
+                    }
+                    let event_id = format!("snapshot-dispatch:{}:{}", result.job_id.0, result.lease.attempt);
+                    if self.storage.load_outbox_event(&event_id).map_err(DurableExecutionPortError::Storage)?.is_some() {
+                        self.storage.mark_published(&event_id).map_err(DurableExecutionPortError::Storage)?;
                     }
                 }
                 Ok(Vec::new())
@@ -475,6 +496,38 @@ impl<'application> DurableExecutionPortIngress<'application> {
                     "accepted dispatch authority is missing",
                 ))
             })
+    }
+
+    fn validate_snapshot_ingress(
+        &self,
+        message: &ExecutionPortMessage,
+    ) -> Result<(), DurableExecutionPortError> {
+        let (lease, supplied) = match message {
+            ExecutionPortMessage::ArtifactOpenMessage(value) => (&value.lease, Some(value.snapshot_id.as_ref())),
+            ExecutionPortMessage::ArtifactChunkMessage(value) => (&value.lease, Some(value.snapshot_id.as_ref())),
+            ExecutionPortMessage::SessionBindingMessage(value) => (&value.lease, Some(value.snapshot_id.as_ref())),
+            ExecutionPortMessage::JobDispatchResultMessage(value) if matches!(value.status, winwincode_execution_port::generated::JobDispatchResultMessageStatus::Accepted | winwincode_execution_port::generated::JobDispatchResultMessageStatus::Duplicate) => (&value.lease, None),
+            ExecutionPortMessage::RuntimeEventMessage(value) => (&value.lease, None),
+            ExecutionPortMessage::JobOutcomeMessage(value) => (&value.lease, None),
+            _ => return Ok(()),
+        };
+        let (_, job) = load_durable_execution_job(self.storage, &lease.job_id)
+            .map_err(DurableExecutionPortError::Storage)?;
+        let snapshot = self
+            .control_plane
+            .snapshot_for_job(&job)
+            .map_err(DurableExecutionPortError::Storage)?;
+        if let Some(supplied) = supplied
+            && supplied
+                != snapshot
+                    .as_ref()
+                    .map(winwincode_domain::CanonicalSnapshot::snapshot_id)
+        {
+            return Err(DurableExecutionPortError::Storage(
+                StorageError::invalid_input("verification Snapshot binding is missing or foreign"),
+            ));
+        }
+        Ok(())
     }
 
     fn append_workrun_after_dispatch(
@@ -621,8 +674,9 @@ impl<'application> DurableExecutionPortIngress<'application> {
         job: &ExecutionJob,
         terminal_revision: Option<u64>,
     ) -> Result<(), DurableExecutionPortError> {
-        let initiating_actor = public_actor_from_receipt_key(durable.receipt_identity().actor_key())
-            .map_err(DurableExecutionPortError::Storage)?;
+        let initiating_actor =
+            public_actor_from_receipt_key(durable.receipt_identity().actor_key())
+                .map_err(DurableExecutionPortError::Storage)?;
         let delivery_id = DeliveryId(
             durable
                 .stream_id()

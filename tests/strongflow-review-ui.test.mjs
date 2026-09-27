@@ -34,7 +34,9 @@ const deliveryId = 'dlv_00000000000000000000000042'
 const workRunId = 'wrn_00000000000000000000000042'
 const evidenceId = 'evd_00000000000000000000000042'
 const artifactId = 'art_00000000000000000000000042'
-const candidateRef = `git-candidate:sha256:${'c'.repeat(64)}`
+const candidateId = 'cnd_00000000000000000000000042'
+const snapshotId = 'snap_00000000000000000000000042'
+const candidateRef = `refs/winwincode/candidates/${'c'.repeat(40)}`
 const scope = {
   kind: 'repository',
   organizationId: 'org_00000000000000000000000001',
@@ -53,6 +55,7 @@ const readCursor = {
   eventCursor: { scope, stream: { kind: 'delivery', deliveryId }, sequence: 0, eventId: null },
 }
 const candidate = {
+  candidateId, candidateDigest: `sha256:${'d'.repeat(64)}`,
   candidateRef,
   deliverySpecId: 'spec-review',
   deliverySpecRevision: 1,
@@ -64,12 +67,13 @@ const candidate = {
   frozenAt: '2026-09-11T00:00:00.000Z',
 }
 const evidence = {
+  candidateId, snapshotId,
   id: evidenceId,
   deliverySpecId: 'spec-review',
   deliverySpecRevision: 1,
   workRunId,
   sessionBindingId: 'binding-1',
-  candidateRef,
+
   type: 'command',
   sourceRef: 'runtime:command:42',
   createdAt: '2026-09-11T00:01:00.000Z',
@@ -80,6 +84,7 @@ const acceptanceCriteria = [
   { id: 'criterion-three', description: 'Docs checked', required: false, verificationMethod: null },
 ]
 const verdict = {
+  candidateId, snapshotId,
   id: 'verdict-1', deliverySpecId: 'spec-review', deliverySpecRevision: 1,
   candidateRef, producedAt: '2026-09-11T00:02:00.000Z', status: 'fail',
   unresolvedFindings: ['review pending'],
@@ -132,7 +137,7 @@ test('applying requires current candidate, current specification and resolvable 
     { ...state, detail: { ...state.detail, verdict } },
     { ...state, detail: { ...state.detail, verdict: { ...state.detail.verdict, candidateRef: 'other-version' } } },
     { ...state, detail: { ...state.detail, verdict: { ...state.detail.verdict, criteria: [state.detail.verdict.criteria[0]] } } },
-    { ...state, detail: { ...state.detail, evidence: [{ ...evidence, candidateRef: 'other-version' }] } },
+    { ...state, detail: { ...state.detail, evidence: [{ ...evidence, snapshotId: 'snap_00000000000000000000000099' }] } },
   ]) assert.equal(candidateCanApply(changed), false)
 })
 
@@ -247,7 +252,7 @@ function fixtureClient(pendingSolution = null) {
               artifactId, kind: 'log', digest: `sha256:${'e'.repeat(64)}`,
               fileName: 'failure.log', mediaType: 'text/plain', sizeBytes: 6,
               previewMode: 'inline_text',
-              provenance: { candidateRef, deliveryId, deliveryRevision: 2, evidenceId, sessionBindingId: 'binding-1', workRunId },
+              provenance: { candidateId, snapshotId, deliveryId, deliveryRevision: 2, evidenceId, sessionBindingId: 'binding-1', workRunId },
             }] },
           })
         case 'evidence.artifact.content.get': {
@@ -259,7 +264,7 @@ function fixtureClient(pendingSolution = null) {
               artifactId, kind: 'log', digest: `sha256:${'e'.repeat(64)}`,
               fileName: 'failure.log', mediaType: 'text/plain', sizeBytes: 6,
               previewMode: 'inline_text',
-              provenance: { candidateRef, deliveryId, deliveryRevision: 2, evidenceId, sessionBindingId: 'binding-1', workRunId },
+              provenance: { candidateId, snapshotId, deliveryId, deliveryRevision: 2, evidenceId, sessionBindingId: 'binding-1', workRunId },
             },
             evidence, contentEncoding: 'utf-8', previewMode: 'inline_text',
             dataBase64: Buffer.from(text).toString('base64'), encoding: 'base64',
@@ -288,7 +293,7 @@ test('review preview classes keep executable and binary content out of the DOM p
 })
 
 test('browser-facing runtime text redacts credentials, paths, and internal identities', () => {
-  const candidate = 'git-candidate:sha256:' + 'a'.repeat(64)
+  const candidate = 'refs/winwincode/candidates/' + 'a'.repeat(40)
   const value = redactPublicText([
     'aUtHoRiZaTiOn: BeArEr super-secret-token',
     'TOKEN=top-secret',
@@ -300,7 +305,7 @@ test('browser-facing runtime text redacts credentials, paths, and internal ident
     '用户验收条件：登录后显示相对路径 src/app.ts，短 commit 1a2b3c4d',
     'diff:\n- const value = 1\n+ const value = 2',
   ].join('\n'))
-  assert.doesNotMatch(value, /super-secret-token|top-secret|\/Users\/alice|C:\\Users\\alice|git-candidate:|runtime:command:|sourceRef=|source_ref:|wrn_000/u)
+  assert.doesNotMatch(value, /super-secret-token|top-secret|\/Users\/alice|C:\\Users\\alice|refs\/winwincode\/candidates\/|runtime:command:|sourceRef=|source_ref:|wrn_000/u)
   assert.match(value, /\[REDACTED\]|\[REDACTED PATH\]|\[CANDIDATE\]|\[INTERNAL ID\]/u)
   assert.match(value, /用户验收条件：登录后显示相对路径 src\/app\.ts，短 commit 1a2b3c4d/u)
   assert.match(value, /diff:\n- const value = 1\n\+ const value = 2/u)

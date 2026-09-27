@@ -17,7 +17,7 @@ use winwincode_execution_port::generated::{
     ArtifactDescriptor, ArtifactKind, ExecutionScope, ExecutionWorkspaceWriteMode,
 };
 
-use crate::workspace::{CandidateSnapshot, WorkerWorkspace, WorkspaceError, WorkspaceProvenance};
+use crate::workspace::{CandidateFreezeFact, WorkerWorkspace, WorkspaceError, WorkspaceProvenance};
 use crate::{ActiveJob, ActiveJobLifecycle};
 use winwincode_codex::RoleExecutionMode;
 
@@ -70,7 +70,8 @@ impl From<WorkspaceError> for CandidateProductError {
 /// Verified candidate bytes ready for durable Artifact identity allocation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PreparedCandidateArtifact {
-    snapshot: CandidateSnapshot,
+    snapshot_id: Option<winwincode_domain::SnapshotId>,
+    freeze_fact: CandidateFreezeFact,
     bytes: Vec<u8>,
     digest: Sha256Digest,
     size_bytes: i64,
@@ -84,10 +85,10 @@ pub struct PreparedCandidateArtifact {
 }
 
 impl PreparedCandidateArtifact {
-    /// Exact detached Git candidate facts used to build the manifest.
+    /// Exact code and execution facts produced by the Worker freeze.
     #[must_use]
-    pub const fn snapshot(&self) -> &CandidateSnapshot {
-        &self.snapshot
+    pub const fn freeze_fact(&self) -> &CandidateFreezeFact {
+        &self.freeze_fact
     }
 
     /// Canonical candidate manifest bytes.
@@ -130,6 +131,7 @@ impl PreparedCandidateArtifact {
     #[must_use]
     pub fn into_upload(self, created_at: winwincode_domain::Instant) -> CandidateArtifactUpload {
         CandidateArtifactUpload {
+            snapshot_id: self.snapshot_id,
             job_digest: self.job_digest,
             logical_job_digest: self.logical_job_digest,
             execution_profile: self.execution_profile,
@@ -212,15 +214,15 @@ pub fn prepare_candidate_artifact(
     }
     let provenance = candidate_workspace_provenance(active, workspace)?;
 
-    let snapshot = workspace
-        .snapshot_candidate()
+    let freeze_fact = workspace
+        .freeze_candidate()
         .map_err(CandidateProductError::from)?;
     workspace
-        .verify_candidate(&snapshot)
+        .verify_candidate(&freeze_fact)
         .map_err(CandidateProductError::from)?;
-    if snapshot.repository_id != active.job.workspace.repository_id
-        || snapshot.checkout_revision != active.job.workspace.checkout_revision
-        || snapshot.provenance != provenance
+    if freeze_fact.repository_id() != &active.job.workspace.repository_id
+        || freeze_fact.checkout_revision() != active.job.workspace.checkout_revision
+        || freeze_fact.provenance() != &provenance
     {
         return Err(CandidateProductError::new(
             CandidateProductErrorCode::AuthorityMismatch,
@@ -230,12 +232,12 @@ pub fn prepare_candidate_artifact(
     let bytes = if active.job.execution_profile == "codex-chat" {
         crate::workspace::git_output(
             workspace.layout().checkout(),
-            &["archive", "--format=zip", &snapshot.candidate_commit_id],
+            &["archive", "--format=zip", freeze_fact.candidate_commit_id()],
         )?
     } else {
-        snapshot.manifest_bytes().to_vec()
+        freeze_fact.manifest_bytes().to_vec()
     };
-    prepared_artifact(active, snapshot, bytes)
+    prepared_artifact(active, freeze_fact, bytes)
 }
 
 /// Captures the already-frozen candidate from a read-only verification
@@ -251,7 +253,6 @@ pub fn prepare_candidate_artifact(
 pub fn prepare_verification_artifact(
     active: &ActiveJob,
     workspace: &WorkerWorkspace,
-    snapshot: &winwincode_delivery::domain::snapshot::Snapshot,
 ) -> Result<PreparedCandidateArtifact, CandidateProductError> {
     if active.lifecycle != ActiveJobLifecycle::Running {
         return Err(CandidateProductError::new(
@@ -282,18 +283,15 @@ pub fn prepare_verification_artifact(
             )
         })?;
     let provenance = candidate_workspace_provenance(active, workspace)?;
-    workspace
-        .verify_snapshot(snapshot)
-        .map_err(CandidateProductError::from)?;
     let facts = workspace
-        .snapshot_verification()
+        .freeze_verification()
         .map_err(CandidateProductError::from)?;
-    if facts.repository_id != active.job.workspace.repository_id
-        || facts.checkout_revision != active.job.workspace.checkout_revision
-        || facts.provenance != provenance
-        || facts.candidate_commit_id.as_str() != snapshot.candidate_commit_id()
-        || facts.candidate_tree_id.as_str() != snapshot.candidate_tree_id()
-        || facts.content_digest.0.as_str() != snapshot.content_digest()
+    workspace
+        .verify_candidate(&facts)
+        .map_err(CandidateProductError::from)?;
+    if facts.repository_id() != &active.job.workspace.repository_id
+        || facts.checkout_revision() != active.job.workspace.checkout_revision
+        || facts.provenance() != &provenance
     {
         return Err(CandidateProductError::new(
             CandidateProductErrorCode::AuthorityMismatch,
@@ -306,7 +304,7 @@ pub fn prepare_verification_artifact(
 
 fn prepared_artifact(
     active: &ActiveJob,
-    snapshot: CandidateSnapshot,
+    freeze_fact: CandidateFreezeFact,
     bytes: Vec<u8>,
 ) -> Result<PreparedCandidateArtifact, CandidateProductError> {
     let size_bytes = i64::try_from(bytes.len()).map_err(|_| {
@@ -339,7 +337,8 @@ fn prepared_artifact(
         )
     })?;
     Ok(PreparedCandidateArtifact {
-        snapshot,
+        snapshot_id: active.snapshot_id.clone(),
+        freeze_fact,
         bytes,
         digest,
         size_bytes,

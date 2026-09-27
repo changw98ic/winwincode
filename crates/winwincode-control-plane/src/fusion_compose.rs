@@ -37,15 +37,20 @@
 //!   Fusion `candidate_id`.
 //! - Tests inject mock Providers / mock runner ports only.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
+use serde::Serialize;
 use serde_json::{Value, json};
 use winwincode_delivery::domain::{
     CanonicalDecision, ComputedDeliveryVerdict, Delivery, DeliveryValidationError, EvidenceRefType,
     FrozenDeliveryCandidate, evidence::ResolvedDeliveryEvidence,
-    verification::VerificationFindingConclusion,
+};
+use winwincode_fusion::evidence::{
+    ClaimTarget, ClaimVerification, EvidenceLedger, ModelClaim, SourceReceipt, SourceReceiptKind,
+    VerificationConclusion,
 };
 use winwincode_fusion::{
     FusionBudget, FusionCandidate, FusionInput, FusionPanelResult, FusionProviderCandidate,
@@ -302,22 +307,12 @@ fn parse_evidence(item: &Value) -> Result<FusionEvidence, String> {
             .ok_or("evidenceType is required")?,
     )?;
     let source_ref = required_text(item, "sourceRef", "source_ref")?;
-    let verified_conclusion = item
-        .get("verifiedConclusion")
-        .or_else(|| item.get("verified_conclusion"))
-        .and_then(Value::as_str)
-        .map(
-            |conclusion| match conclusion.trim().to_ascii_lowercase().as_str() {
-                "pass" => Ok(VerificationFindingConclusion::Pass),
-                "fail" => Ok(VerificationFindingConclusion::Fail),
-                other => Err(format!("unsupported verifiedConclusion: {other}")),
-            },
-        )
-        .transpose()?;
     Ok(FusionEvidence {
         evidence_type,
         source_ref,
-        verified_conclusion,
+        // A candidate's answer is model prose. It can cite a source, but it
+        // cannot promote that citation to a verified fact by naming a result.
+        verified_conclusion: None,
     })
 }
 
@@ -425,10 +420,15 @@ pub struct InvestigationEvidenceItem {
     pub kind: String,
     pub detail: String,
     pub side: FusionClaimPosition,
+    /// Runtime-produced machine source. Model prose cannot fill this field.
+    pub source_receipt: SourceReceipt,
+    /// Independent verification of the exact claim target cited by the receipt.
+    pub claim_verification: ClaimVerification,
 }
 
 /// R4 judge input is an evidence pack (R1+R3), never vote counts (ADR-0036).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct JudgeRequest {
     pub claim_key: String,
     pub summary: String,
@@ -468,12 +468,90 @@ pub trait FusionJudgePort: fmt::Debug + Send + Sync {
     ) -> BoxFuture<'static, Result<JudgeAnswer, FusionComposeError>>;
 }
 
+/// Provider-backed semantic judge. Its answer still requires independent
+/// receipt-backed verification in `run_verification` before it can settle a
+/// claim. Provider identities and telemetry never enter the judge premise.
+#[derive(Debug)]
+pub struct RuntimeFusionJudge {
+    runtime: Arc<winwincode_provider::JevRuntime>,
+    options: winwincode_provider::JevExecutionOptions,
+}
+
+impl RuntimeFusionJudge {
+    pub fn new(
+        runtime: Arc<winwincode_provider::JevRuntime>,
+        options: winwincode_provider::JevExecutionOptions,
+    ) -> Self {
+        Self { runtime, options }
+    }
+}
+
+impl FusionJudgePort for RuntimeFusionJudge {
+    fn judge(
+        &self,
+        request: JudgeRequest,
+    ) -> BoxFuture<'static, Result<JudgeAnswer, FusionComposeError>> {
+        let runtime = Arc::clone(&self.runtime);
+        let options = self.options;
+        Box::pin(async move {
+            let premise = serde_json::to_string(&json!({
+                "question": request.question,
+                "context": blind_context_value(request.canonical_context),
+                "evidence": blind_context_value(Value::Array(request.evidence_pack)),
+            }))
+            .map_err(|error| FusionComposeError::MultiRound(error.to_string()))?;
+            let run = runtime
+                .evaluate(
+                    winwincode_provider::JevHypothesis {
+                        premise,
+                        hypothesis: request.summary,
+                    },
+                    options,
+                )
+                .await;
+            let Some(evaluation) = run.value else {
+                use winwincode_provider::JevProviderErrorKind;
+                let code = match run.failures.last().map(|failure| failure.kind) {
+                    Some(JevProviderErrorKind::Timeout) => "JEV_TIMEOUT",
+                    Some(JevProviderErrorKind::InvalidResponse) => "JEV_INVALID_RESPONSE",
+                    _ => "JEV_TRANSPORT",
+                };
+                return Err(FusionComposeError::MultiRound(code.to_owned()));
+            };
+            let scores = evaluation.scores;
+            let outcome =
+                if scores.entailment > scores.contradiction && scores.entailment > scores.neutral {
+                    JudgeClaimOutcome::ConfirmedSupports
+                } else if scores.contradiction > scores.entailment
+                    && scores.contradiction > scores.neutral
+                {
+                    JudgeClaimOutcome::ConfirmedOpposes
+                } else {
+                    JudgeClaimOutcome::Unresolved
+                };
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "JevRuntime validates finite probabilities in [0, 1]"
+            )]
+            let confidence = (scores.confidence() * 100.0).round() as u8;
+            Ok(JudgeAnswer {
+                claim_key: request.claim_key,
+                outcome,
+                confidence,
+                reason: "Semantic judgment requires independent verification".to_owned(),
+            })
+        })
+    }
+}
+
 /// Terminal reason and per-round audit for multi-round Fusion (ADR-0036).
 #[derive(Clone, Debug, PartialEq)]
 pub struct MultiRoundReport {
     pub stop_reason: FusionStopReason,
     pub rounds: Vec<MultiRoundStep>,
     pub judged: Vec<JudgeAnswer>,
+    pub jev_unavailable: Vec<crate::fusion_investigation::JevUnavailableRecord>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -491,30 +569,181 @@ enum RoundControl {
     Stop(FusionStopReason),
 }
 
-/// R3 evidence rows collected for disputed claims (kind/detail/side only).
+/// Builds the anonymous R4 request sent to the judge port.
+///
+/// Candidate identity remains in the composition audit, while the serialized
+/// request contains only claim semantics and canonical evidence content.
+#[must_use]
+pub fn build_blind_judge_request(
+    composed: &ComposedFusionOutcome,
+    claim_key: &str,
+    summary: &str,
+    question: &str,
+    canonical_context: Value,
+) -> JudgeRequest {
+    JudgeRequest {
+        claim_key: claim_key.to_owned(),
+        summary: summary.to_owned(),
+        question: question.to_owned(),
+        canonical_context: blind_context_value(canonical_context),
+        evidence_pack: build_judge_evidence_pack(composed, claim_key),
+    }
+}
+
+fn blind_context_value(value: Value) -> Value {
+    match value {
+        Value::Object(object) => Value::Object(
+            object
+                .into_iter()
+                .filter(|(key, _)| !is_blind_metadata_key(key))
+                .map(|(key, value)| (key, blind_context_value(value)))
+                .collect(),
+        ),
+        Value::Array(values) => Value::Array(values.into_iter().map(blind_context_value).collect()),
+        other => other,
+    }
+}
+
+fn is_blind_metadata_key(key: &str) -> bool {
+    let normalized: String = key
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|character| character.to_ascii_lowercase())
+        .collect();
+    matches!(
+        normalized.as_str(),
+        "provider"
+            | "providerid"
+            | "providername"
+            | "model"
+            | "modelid"
+            | "modelname"
+            | "seat"
+            | "seatid"
+            | "seatname"
+            | "candidate"
+            | "candidateid"
+            | "candidatename"
+            | "vote"
+            | "votes"
+            | "votecount"
+            | "supportcount"
+            | "supportercount"
+            | "majority"
+            | "minority"
+    )
+}
+
+/// R3 evidence rows collected for disputed claims, canonicalized and deduped.
+///
+/// Evidence provenance is retained as evidence content; respondent identity is
+/// deliberately omitted. Repeated identical support therefore cannot become a
+/// vote-count signal.
 fn build_judge_evidence_pack(composed: &ComposedFusionOutcome, claim_key: &str) -> Vec<Value> {
-    let mut evidence_pack = Vec::new();
-    for answer in &composed.answers {
-        if let Ok(candidate) = extract_claims_from_answer(&answer.candidate_id, &answer.answer) {
-            for claim in &candidate.claims {
-                if claim.claim_key == claim_key {
-                    evidence_pack.push(json!({
-                        "seat": answer.candidate_id,
-                        "position": match claim.position {
-                            FusionClaimPosition::Supports => "supports",
-                            FusionClaimPosition::Opposes => "opposes",
-                        },
-                        "evidence": claim.evidence.iter().map(|e| json!({
-                            "evidenceType": format!("{:?}", e.evidence_type),
-                            "sourceRef": e.source_ref,
-                            "verifiedConclusion": e.verified_conclusion.map(|c| format!("{c:?}")),
-                        })).collect::<Vec<_>>(),
-                    }));
-                }
+    let mut rows = BTreeMap::<(String, String, String), Value>::new();
+    for candidate in &composed.claims {
+        for claim in &candidate.claims {
+            if claim.claim_key != claim_key {
+                continue;
+            }
+            let position = match claim.position {
+                FusionClaimPosition::Supports => "supports",
+                FusionClaimPosition::Opposes => "opposes",
+            };
+            if claim.evidence.is_empty() {
+                rows.entry((position.to_owned(), String::new(), String::new()))
+                    .or_insert_with(|| json!({ "position": position, "evidence": [] }));
+                continue;
+            }
+            for evidence in &claim.evidence {
+                let evidence_type = format!("{:?}", evidence.evidence_type);
+                rows.entry((
+                    position.to_owned(),
+                    evidence_type.clone(),
+                    evidence.source_ref.clone(),
+                ))
+                .or_insert_with(|| {
+                    json!({
+                        "position": position,
+                        "evidenceType": evidence_type,
+                        "sourceRef": evidence.source_ref
+                    })
+                });
             }
         }
     }
-    evidence_pack
+    rows.into_values()
+        .enumerate()
+        .map(|(index, mut row)| {
+            if let Value::Object(object) = &mut row {
+                object.insert(
+                    "evidenceId".to_owned(),
+                    json!(format!("evidence-{index:04}")),
+                );
+            }
+            row
+        })
+        .collect()
+}
+
+fn same_claim_text(left: &str, right: &str) -> bool {
+    left.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .eq_ignore_ascii_case(&right.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+fn evidence_type_for_receipt(kind: SourceReceiptKind) -> EvidenceRefType {
+    match kind {
+        SourceReceiptKind::Command => EvidenceRefType::Command,
+        SourceReceiptKind::Test => EvidenceRefType::Test,
+        SourceReceiptKind::Diff => EvidenceRefType::Diff,
+        SourceReceiptKind::File => EvidenceRefType::File,
+        SourceReceiptKind::RunEvent => EvidenceRefType::RuntimeEvent,
+        SourceReceiptKind::IndependentReview => EvidenceRefType::ReviewFinding,
+    }
+}
+
+/// Resolve one R3 proposal through the runtime evidence ledger. The item's
+/// `detail` remains model explanation; only its runtime receipt and independent
+/// claim verification can create an increment.
+fn admit_investigation_item(
+    ledger: &mut EvidenceLedger,
+    claim_key: &str,
+    item: &InvestigationEvidenceItem,
+) -> bool {
+    if !same_claim_text(&item.claim_verification.proposition, claim_key) {
+        return false;
+    }
+    let expected_direction = match item.side {
+        FusionClaimPosition::Supports => VerificationConclusion::Support,
+        FusionClaimPosition::Opposes => VerificationConclusion::Counter,
+    };
+    if item.claim_verification.conclusion != expected_direction
+        || item.claim_verification.source_receipt_ids != [item.source_receipt.id.clone()]
+    {
+        return false;
+    }
+    if ledger
+        .register_source_receipt(item.source_receipt.clone())
+        .is_err()
+        || ledger
+            .record_claim_verification(item.claim_verification.clone())
+            .is_err()
+    {
+        return false;
+    }
+
+    let target = &item.claim_verification;
+    let admission = ledger.admit_model_claim(ModelClaim {
+        claim_id: item.source_receipt.id.clone(),
+        proposition: target.proposition.clone(),
+        scope: target.scope.clone(),
+        version: target.version.clone(),
+        explanation: item.detail.clone(),
+        source_receipt_ids: vec![item.source_receipt.id.clone()],
+    });
+    admission.produced_new_evidence
 }
 
 /// Re-opens analysis with R3 rows that carry only NEW evidence (ADR-0036:
@@ -536,7 +765,13 @@ fn recompose_with_round3(
             .or_else(|| {
                 claim_keys
                     .iter()
-                    .find(|key| composed.analysis.conflicts.iter().any(|conflict| conflict.claim_key == **key))
+                    .find(|key| {
+                        composed
+                            .analysis
+                            .conflicts
+                            .iter()
+                            .any(|conflict| conflict.claim_key == **key)
+                    })
                     .cloned()
             });
         let Some(claim_key) = claim_key else {
@@ -553,16 +788,25 @@ fn recompose_with_round3(
             Some("opposes") => FusionClaimPosition::Opposes,
             _ => FusionClaimPosition::Supports,
         };
+        let source_ref = item
+            .get("sourceRef")
+            .or_else(|| item.get("source_ref"))
+            .and_then(Value::as_str)
+            .unwrap_or("unresolved-source-receipt")
+            .to_owned();
+        let evidence_type = item
+            .get("evidenceType")
+            .or_else(|| item.get("evidence_type"))
+            .and_then(Value::as_str)
+            .and_then(|kind| serde_json::from_value(Value::String(kind.to_owned())).ok())
+            .unwrap_or(EvidenceRefType::ReviewFinding);
         investigation_claims.push(FusionClaim {
             claim_key,
             summary,
             position,
             evidence: vec![FusionEvidence {
-                evidence_type: EvidenceRefType::ReviewFinding,
-                source_ref: format!(
-                    "round3:{}",
-                    item.get("kind").and_then(Value::as_str).unwrap_or("new")
-                ),
+                evidence_type,
+                source_ref,
                 verified_conclusion: None,
             }],
             required_evidence: Vec::new(),
@@ -598,6 +842,10 @@ fn recompose_with_round3(
 }
 
 /// R3: targeted investigation on disputed claims only; must contribute NEW evidence.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Pass the existing round state and evidence authorities explicitly"
+)]
 async fn run_targeted_investigation(
     composed: &mut ComposedFusionOutcome,
     rounds: &mut [MultiRoundStep],
@@ -605,6 +853,8 @@ async fn run_targeted_investigation(
     claim_keys: &[String],
     input: &FusionInput,
     investigation: &Arc<dyn FusionInvestigationPort>,
+    ledger: &mut EvidenceLedger,
+    target_by_claim: &mut BTreeMap<String, ClaimTarget>,
 ) -> Result<RoundControl, FusionComposeError> {
     let mut produced_new_evidence = false;
     let mut pack_items: Vec<Value> = Vec::new();
@@ -619,7 +869,8 @@ async fn run_targeted_investigation(
         let mut support_evidence = Vec::new();
         let mut oppose_evidence = Vec::new();
         for answer in &composed.answers {
-            if let Ok(candidate) = extract_claims_from_answer(&answer.candidate_id, &answer.answer) {
+            if let Ok(candidate) = extract_claims_from_answer(&answer.candidate_id, &answer.answer)
+            {
                 for claim in &candidate.claims {
                     if claim.claim_key != *claim_key {
                         continue;
@@ -652,18 +903,32 @@ async fn run_targeted_investigation(
             oppose_evidence,
         };
         let answers = investigation.investigate(request).await.map_err(|error| {
-            FusionComposeError::MultiRound(format!(
-                "investigation failed for {claim_key}: {error}"
-            ))
+            FusionComposeError::MultiRound(format!("investigation failed for {claim_key}: {error}"))
         })?;
         for answer in answers {
             for item in &answer.new_evidence {
+                if !admit_investigation_item(ledger, claim_key, item) {
+                    continue;
+                }
+                target_by_claim.insert(
+                    (*claim_key).clone(),
+                    ClaimTarget {
+                        proposition: item.claim_verification.proposition.clone(),
+                        scope: item.claim_verification.scope.clone(),
+                        version: item.claim_verification.version.clone(),
+                    },
+                );
                 produced_new_evidence = true;
                 pack_items.push(json!({
                     "round": "R3",
                     "seat": answer.seat_id,
                     "kind": item.kind,
                     "detail": item.detail,
+                    "sourceRef": item.source_receipt.locator,
+                    "sourceReceiptId": item.source_receipt.id,
+                    "evidenceType": format!("{:?}", evidence_type_for_receipt(item.source_receipt.kind)),
+                    "version": item.source_receipt.version,
+                    "executionOwner": item.source_receipt.execution_owner,
                     "side": match item.side {
                         FusionClaimPosition::Supports => "supports",
                         FusionClaimPosition::Opposes => "opposes",
@@ -676,14 +941,20 @@ async fn run_targeted_investigation(
         step.produced_new_evidence = produced_new_evidence;
     }
     if !produced_new_evidence {
-        // No increment → do not add weight (ADR-0036).
-        return Ok(RoundControl::Stop(FusionStopReason::Unresolvable));
+        // No increment does not add weight or finish the investigation. The
+        // next planner action may still provide a source, tool observation,
+        // reproduction or independent verification result.
+        return Ok(RoundControl::Continue);
     }
     recompose_with_round3(composed, extra_answers, &pack_items, claim_keys)?;
     Ok(RoundControl::Continue)
 }
 
 /// R4: judge disputed claims over the R1+R3 evidence pack (never vote counts).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keep judge output separate from independent verification authority"
+)]
 async fn run_verification(
     composed: &mut ComposedFusionOutcome,
     rounds: &mut Vec<MultiRoundStep>,
@@ -691,11 +962,14 @@ async fn run_verification(
     claim_keys: Vec<String>,
     input: &FusionInput,
     judge: &Arc<dyn FusionJudgePort>,
+    ledger: &EvidenceLedger,
+    target_by_claim: &BTreeMap<String, ClaimTarget>,
+    jev_unavailable: &mut Vec<crate::fusion_investigation::JevUnavailableRecord>,
 ) -> Result<RoundControl, FusionComposeError> {
     rounds.push(MultiRoundStep {
         round: FusionRound::Verification,
         disputed_claim_keys: claim_keys.clone(),
-        produced_new_evidence: true,
+        produced_new_evidence: false,
     });
     for claim_key in claim_keys {
         let summary = composed
@@ -705,38 +979,63 @@ async fn run_verification(
             .find(|conflict| conflict.claim_key == claim_key)
             .map(|conflict| conflict.summary.clone())
             .unwrap_or_default();
-        let evidence_pack = build_judge_evidence_pack(composed, &claim_key);
-        let judged_answer = judge
-            .judge(JudgeRequest {
-                claim_key: claim_key.clone(),
-                summary,
-                question: input.question.clone(),
-                canonical_context: input.canonical_context.clone(),
-                evidence_pack,
-            })
-            .await
-            .map_err(|error| {
-                FusionComposeError::MultiRound(format!("judge failed for {claim_key}: {error}"))
-            })?;
-        let position = match judged_answer.outcome {
-            JudgeClaimOutcome::ConfirmedSupports => Some(FusionClaimPosition::Supports),
-            JudgeClaimOutcome::ConfirmedOpposes => Some(FusionClaimPosition::Opposes),
-            JudgeClaimOutcome::Unresolved => None,
+        let request = build_blind_judge_request(
+            composed,
+            &claim_key,
+            &summary,
+            &input.question,
+            input.canonical_context.clone(),
+        );
+        let judged_answer = match judge.judge(request).await {
+            Ok(answer) => answer,
+            Err(error) => {
+                let detail = error.to_string();
+                jev_unavailable.push(crate::fusion_investigation::JevUnavailableRecord {
+                    code: crate::fusion_investigation::jev_unavailable_code(&detail),
+                    claim_id: claim_key.clone(),
+                    detail,
+                });
+                continue;
+            }
         };
-        if let Some(position) = position {
-            // R4 may fill an undecided conflict, never override an evidence leader.
-            crate::fusion_analysis::apply_jev_conflict_leading(
-                &mut composed.analysis,
-                &claim_key,
-                position,
-                judged_answer.confidence,
-                true,
-            );
-        }
+        let target = target_by_claim.get(&claim_key);
+        let position = match judged_answer.outcome {
+            JudgeClaimOutcome::ConfirmedSupports
+                if target.is_some_and(|target| ledger.has_verified_support(target)) =>
+            {
+                Some(FusionClaimPosition::Supports)
+            }
+            JudgeClaimOutcome::ConfirmedOpposes
+                if target.is_some_and(|target| ledger.has_valid_counter(target)) =>
+            {
+                Some(FusionClaimPosition::Opposes)
+            }
+            JudgeClaimOutcome::ConfirmedSupports
+            | JudgeClaimOutcome::ConfirmedOpposes
+            | JudgeClaimOutcome::Unresolved => None,
+        };
+        let conclusion = match position {
+            Some(FusionClaimPosition::Supports) => {
+                crate::fusion_analysis::JevVerificationConclusion::Supports
+            }
+            Some(FusionClaimPosition::Opposes) => {
+                crate::fusion_analysis::JevVerificationConclusion::Opposes
+            }
+            None => crate::fusion_analysis::JevVerificationConclusion::Insufficient,
+        };
+        crate::fusion_analysis::resolve_jev_conflict_with_verification(
+            &mut composed.analysis,
+            &claim_key,
+            conclusion,
+            &judged_answer.reason,
+        );
         judged.push(judged_answer);
     }
     Ok(RoundControl::Stop(
-        if crate::fusion_analysis::undecided_conflicts(&composed.analysis).is_empty() {
+        if crate::fusion_analysis::undecided_conflicts(&composed.analysis).is_empty()
+            && crate::fusion_analysis::awaiting_verification_conflicts(&composed.analysis)
+                .is_empty()
+        {
             FusionStopReason::EvidenceConvergence
         } else {
             FusionStopReason::Unresolvable
@@ -752,24 +1051,33 @@ async fn run_verification(
 ///
 /// # Errors
 ///
-/// Returns panel/compose failures or investigation/judge port failures.
+/// Returns panel, composition and investigation failures. JEV verifier outages
+/// are non-destructive and remain in [`MultiRoundReport::jev_unavailable`].
 pub async fn compose_multiround(
     panel_id: &str,
     input: FusionInput,
     router: Arc<dyn FusionProviderRouter>,
     investigation: Arc<dyn FusionInvestigationPort>,
     judge: Arc<dyn FusionJudgePort>,
-    max_investigation_rounds: u8,
+    max_investigation_rounds: Option<u8>,
 ) -> Result<(ComposedFusionOutcome, MultiRoundReport), FusionComposeError> {
     let mut composed = compose_blind_panel(panel_id, input.clone(), Arc::clone(&router)).await?;
-    let mut rounds = Vec::new();
+    let mut rounds: Vec<MultiRoundStep> = Vec::new();
     let mut judged = Vec::new();
     let mut extra_answers: Vec<ComposedFusionAnswer> = composed.answers.clone();
+    let mut evidence_ledger = EvidenceLedger::default();
+    let mut target_by_claim = BTreeMap::new();
+    let mut jev_unavailable: Vec<crate::fusion_investigation::JevUnavailableRecord> = Vec::new();
 
     let mut investigation_rounds = 0u8;
     // Every exit does `break <reason>`, so the terminal reason is assigned
     // exactly once and there is no unobserved initial value (ADR-0036).
     let stop_reason = loop {
+        let produced_new_evidence = rounds
+            .iter()
+            .rev()
+            .find(|step| step.round == FusionRound::TargetedInvestigation)
+            .is_some_and(|step| step.produced_new_evidence);
         let disputed: Vec<String> = crate::fusion_analysis::undecided_conflicts(&composed.analysis)
             .into_iter()
             .map(|conflict| conflict.claim_key.clone())
@@ -784,6 +1092,8 @@ pub async fn compose_multiround(
             produced_new_evidence: false,
         });
 
+        let budget_exhausted =
+            max_investigation_rounds.is_some_and(|limit| investigation_rounds >= limit);
         let action = crate::fusion_analysis::fusion_next_action(
             &composed.analysis,
             if investigation_rounds == 0 {
@@ -791,14 +1101,14 @@ pub async fn compose_multiround(
             } else {
                 FusionRound::TargetedInvestigation
             },
-            investigation_rounds >= max_investigation_rounds,
-            false,
+            budget_exhausted,
+            produced_new_evidence,
         );
 
         match action {
             crate::fusion_analysis::FusionNextAction::Finish { reason } => break reason,
             crate::fusion_analysis::FusionNextAction::TargetedInvestigation { claim_keys } => {
-                if investigation_rounds >= max_investigation_rounds {
+                if budget_exhausted {
                     break FusionStopReason::BudgetLimit;
                 }
                 investigation_rounds = investigation_rounds.saturating_add(1);
@@ -809,6 +1119,8 @@ pub async fn compose_multiround(
                     &claim_keys,
                     &input,
                     &investigation,
+                    &mut evidence_ledger,
+                    &mut target_by_claim,
                 )
                 .await?
                 {
@@ -824,6 +1136,9 @@ pub async fn compose_multiround(
                     claim_keys,
                     &input,
                     &judge,
+                    &evidence_ledger,
+                    &target_by_claim,
+                    &mut jev_unavailable,
                 )
                 .await?
                 {
@@ -840,6 +1155,7 @@ pub async fn compose_multiround(
             stop_reason,
             rounds,
             judged,
+            jev_unavailable,
         },
     ))
 }
@@ -855,7 +1171,6 @@ pub async fn compose_multiround_with_evidence(
     input: FusionInput,
     router: Arc<dyn FusionProviderRouter>,
     providers: Vec<Arc<dyn crate::fusion_planner::EvidenceProvider>>,
-    max_investigation_rounds: u8,
 ) -> Result<
     (
         ComposedFusionOutcome,
@@ -864,15 +1179,7 @@ pub async fn compose_multiround_with_evidence(
     ),
     FusionComposeError,
 > {
-    let (composed, _legacy) = compose_multiround(
-        panel_id,
-        input,
-        router,
-        Arc::new(NoopInvestigation),
-        Arc::new(NoopJudge),
-        max_investigation_rounds,
-    )
-    .await?;
+    let composed = compose_blind_panel(panel_id, input, router).await?;
     let claims = composed.claims.clone();
     let mut graph = crate::fusion_knowledge::build_claim_graph(&claims);
     let mut reports = Vec::new();
@@ -897,35 +1204,6 @@ pub async fn compose_multiround_with_evidence(
     }
     graph.evidence = store;
     Ok((composed, graph, reports))
-}
-
-#[derive(Debug)]
-struct NoopInvestigation;
-impl FusionInvestigationPort for NoopInvestigation {
-    fn investigate(
-        &self,
-        _request: InvestigationRequest,
-    ) -> BoxFuture<'static, Result<Vec<InvestigationAnswer>, FusionComposeError>> {
-        Box::pin(async { Ok(Vec::new()) })
-    }
-}
-
-#[derive(Debug)]
-struct NoopJudge;
-impl FusionJudgePort for NoopJudge {
-    fn judge(
-        &self,
-        request: JudgeRequest,
-    ) -> BoxFuture<'static, Result<JudgeAnswer, FusionComposeError>> {
-        Box::pin(async move {
-            Ok(JudgeAnswer {
-                claim_key: request.claim_key,
-                outcome: JudgeClaimOutcome::Unresolved,
-                confidence: 0,
-                reason: "noop".to_owned(),
-            })
-        })
-    }
 }
 
 /// FUSION-02 host path through a portable runner port (mock `ModelPort` ok).
@@ -1153,8 +1431,8 @@ mod tests {
                 })
                 .collect(),
             FusionBudget {
-                candidate_timeout_millis: timeout_millis,
-                max_total_tokens: 2_000,
+                candidate_timeout_millis: Some(timeout_millis),
+                max_total_tokens: Some(2_000),
             },
         )
     }
@@ -1279,6 +1557,178 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct UnavailableJudge {
+        code: &'static str,
+    }
+    impl FusionJudgePort for UnavailableJudge {
+        fn judge(
+            &self,
+            _request: JudgeRequest,
+        ) -> BoxFuture<'static, Result<JudgeAnswer, FusionComposeError>> {
+            let code = self.code;
+            Box::pin(async move { Err(FusionComposeError::MultiRound(code.to_owned())) })
+        }
+    }
+
+    #[test]
+    fn serialized_judge_request_excludes_identity_and_vote_metadata() {
+        let composed = compose_independent_answers(vec![
+            ComposedFusionAnswer {
+                candidate_id: "candidate-alpha".to_owned(),
+                answer: claims_answer("alpha", "supports", None),
+            },
+            ComposedFusionAnswer {
+                candidate_id: "candidate-beta".to_owned(),
+                answer: claims_answer("beta", "opposes", None),
+            },
+            ComposedFusionAnswer {
+                candidate_id: "candidate-gamma".to_owned(),
+                answer: claims_answer("gamma", "opposes", None),
+            },
+        ])
+        .expect("fixture claims compose");
+
+        let request = build_blind_judge_request(
+            &composed,
+            "claim:tests-pass",
+            "The tests pass",
+            "Which change fixes the root cause?",
+            json!({
+                "provider": "provider-alpha",
+                "model": "model-alpha",
+                "seat": "candidate-alpha",
+                "candidate": "candidate-alpha",
+                "voteCount": 3,
+                "supportCount": 2,
+                "repository": "fixture",
+                "revision": "abc123",
+            }),
+        );
+        let serialized = serde_json::to_value(request).expect("judge request serializes");
+        let text = serialized.to_string();
+
+        for forbidden in [
+            "provider",
+            "model",
+            "seat",
+            "candidate",
+            "voteCount",
+            "supportCount",
+        ] {
+            assert!(
+                !text.contains(forbidden),
+                "judge request leaked {forbidden}: {text}"
+            );
+        }
+        for identity in ["provider-alpha", "model-alpha", "candidate-alpha"] {
+            assert!(
+                !text.contains(identity),
+                "judge request leaked identity {identity}: {text}"
+            );
+        }
+        assert_eq!(
+            serialized["canonicalContext"],
+            json!({
+                "repository": "fixture",
+                "revision": "abc123",
+            })
+        );
+    }
+
+    #[test]
+    fn serialized_judge_request_does_not_forward_model_verified_conclusion() {
+        let composed = compose_independent_answers(vec![
+            ComposedFusionAnswer {
+                candidate_id: "candidate-alpha".to_owned(),
+                answer: claims_answer("alpha", "supports", Some("pass")),
+            },
+            ComposedFusionAnswer {
+                candidate_id: "candidate-beta".to_owned(),
+                answer: claims_answer("beta", "opposes", Some("fail")),
+            },
+        ])
+        .expect("malicious verification fields are parseable model prose");
+
+        let request = build_blind_judge_request(
+            &composed,
+            "claim:tests-pass",
+            "The tests pass",
+            "Which change fixes the root cause?",
+            json!({ "repository": "fixture", "revision": "abc123" }),
+        );
+        let serialized = serde_json::to_value(request).expect("judge request serializes");
+
+        assert!(serialized.to_string().contains("verification:alpha"));
+        assert!(serialized.to_string().contains("verification:beta"));
+        assert!(
+            serialized["evidencePack"]
+                .as_array()
+                .expect("evidence pack is an array")
+                .iter()
+                .all(|row| row.get("verifiedConclusion").is_none())
+        );
+        assert!(!serialized.to_string().contains("verifiedConclusion"));
+    }
+
+    #[test]
+    fn serialized_judge_request_ignores_seat_rename_order_and_repeated_support() {
+        let baseline = compose_independent_answers(vec![
+            ComposedFusionAnswer {
+                candidate_id: "candidate-alpha".to_owned(),
+                answer: claims_answer("same-support", "supports", None),
+            },
+            ComposedFusionAnswer {
+                candidate_id: "candidate-beta".to_owned(),
+                answer: claims_answer("same-oppose", "opposes", None),
+            },
+            ComposedFusionAnswer {
+                candidate_id: "candidate-gamma".to_owned(),
+                answer: claims_answer("same-oppose", "opposes", None),
+            },
+        ])
+        .expect("baseline claims compose");
+        let reordered_and_repeated = compose_independent_answers(vec![
+            ComposedFusionAnswer {
+                candidate_id: "seat-zulu".to_owned(),
+                answer: claims_answer("same-oppose", "opposes", None),
+            },
+            ComposedFusionAnswer {
+                candidate_id: "seat-yankee".to_owned(),
+                answer: claims_answer("same-support", "supports", None),
+            },
+            ComposedFusionAnswer {
+                candidate_id: "seat-xray".to_owned(),
+                answer: claims_answer("same-oppose", "opposes", None),
+            },
+            ComposedFusionAnswer {
+                candidate_id: "seat-whiskey".to_owned(),
+                answer: claims_answer("same-support", "supports", None),
+            },
+        ])
+        .expect("renamed claims compose");
+
+        let baseline_request = build_blind_judge_request(
+            &baseline,
+            "claim:tests-pass",
+            "The tests pass",
+            "Which change fixes the root cause?",
+            json!({ "repository": "fixture", "revision": "abc123" }),
+        );
+        let renamed_request = build_blind_judge_request(
+            &reordered_and_repeated,
+            "claim:tests-pass",
+            "The tests pass",
+            "Which change fixes the root cause?",
+            json!({ "repository": "fixture", "revision": "abc123" }),
+        );
+
+        assert_eq!(
+            serde_json::to_value(baseline_request).expect("baseline judge request serializes"),
+            serde_json::to_value(renamed_request).expect("renamed judge request serializes")
+        );
+    }
+
     impl MockParallelModelSource {
         fn frame_rows() -> Vec<(String, Vec<String>)> {
             vec![
@@ -1345,7 +1795,7 @@ mod tests {
         let input = sample_input(200);
         assert_eq!(input.question, "Which change fixes the root cause?");
         assert_eq!(input.provider_candidates.len(), 3);
-        assert_eq!(input.budget.max_total_tokens, 2_000);
+        assert_eq!(input.budget.max_total_tokens, Some(2_000));
         assert!(input.expected_output_schema.is_object());
     }
 
@@ -1563,7 +2013,9 @@ mod tests {
 
     #[tokio::test]
     async fn compose_multiround_blocks_jev_without_new_evidence() {
-        use crate::fusion_analysis::{FusionStopReason, fusion_next_action, FusionNextAction, FusionRound};
+        use crate::fusion_analysis::{
+            FusionNextAction, FusionRound, FusionStopReason, fusion_next_action,
+        };
 
         let router = Arc::new(MapRouter {
             p1: Arc::new(Seat {
@@ -1583,11 +2035,11 @@ mod tests {
             router,
             Arc::new(NoNewEvidence),
             Arc::new(MustNotJudge),
-            1,
+            Some(1),
         )
         .await
         .expect("multi-round compose");
-        assert_eq!(report.stop_reason, FusionStopReason::Unresolvable);
+        assert_eq!(report.stop_reason, FusionStopReason::BudgetLimit);
         assert!(report.judged.is_empty());
         assert_eq!(
             fusion_next_action(&composed.analysis, FusionRound::Discovery, false, false),
@@ -1595,5 +2047,55 @@ mod tests {
                 claim_keys: vec!["claim:tests-pass".to_owned()]
             }
         );
+    }
+
+    #[tokio::test]
+    async fn jev_unavailable_preserves_composed_state_and_reaches_recoverable_unresolved() {
+        for code in ["JEV_TIMEOUT", "JEV_TRANSPORT", "JEV_INVALID_RESPONSE"] {
+            let mut composed = compose_independent_answers(vec![
+                ComposedFusionAnswer {
+                    candidate_id: "candidate-a".to_owned(),
+                    answer: claims_answer("panel-a", "supports", None),
+                },
+                ComposedFusionAnswer {
+                    candidate_id: "candidate-b".to_owned(),
+                    answer: claims_answer("panel-b", "opposes", None),
+                },
+            ])
+            .expect("fixture answers compose");
+            let before_claims = composed.claims.clone();
+            let before_answers = composed.answers.clone();
+            let before_analysis = composed.analysis.clone();
+            let mut rounds = Vec::new();
+            let mut judged = Vec::new();
+            let mut unavailable = Vec::new();
+            let judge: Arc<dyn FusionJudgePort> = Arc::new(UnavailableJudge { code });
+
+            let control = run_verification(
+                &mut composed,
+                &mut rounds,
+                &mut judged,
+                vec!["claim:tests-pass".to_owned()],
+                &sample_input(310),
+                &judge,
+                &EvidenceLedger::default(),
+                &BTreeMap::new(),
+                &mut unavailable,
+            )
+            .await
+            .expect("JEV outage is non-destructive");
+
+            assert!(matches!(
+                control,
+                RoundControl::Stop(FusionStopReason::Unresolvable)
+            ));
+            assert_eq!(unavailable.len(), 1);
+            assert_eq!(unavailable[0].code, code);
+            assert_eq!(unavailable[0].claim_id, "claim:tests-pass");
+            assert!(judged.is_empty());
+            assert_eq!(composed.claims, before_claims);
+            assert_eq!(composed.answers, before_answers);
+            assert_eq!(composed.analysis, before_analysis);
+        }
     }
 }

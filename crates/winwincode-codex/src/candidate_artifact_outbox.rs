@@ -50,6 +50,7 @@ const PENDING: &str = "pending";
 /// Exact verified bytes and execution authority entering the durable ledger.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CandidateArtifactUpload {
+    pub snapshot_id: Option<winwincode_domain::SnapshotId>,
     pub job_digest: Sha256Digest,
     pub logical_job_digest: Sha256Digest,
     pub execution_profile: String,
@@ -68,6 +69,7 @@ impl CandidateArtifactUpload {
     #[must_use]
     pub fn authority(&self) -> CandidateArtifactAuthority {
         CandidateArtifactAuthority {
+            snapshot_id: self.snapshot_id.clone(),
             job_digest: self.job_digest.clone(),
             logical_job_digest: self.logical_job_digest.clone(),
             execution_profile: self.execution_profile.clone(),
@@ -83,6 +85,7 @@ impl CandidateArtifactUpload {
 /// Exact candidate upload authority used to recover a final accepted reference.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CandidateArtifactAuthority {
+    pub snapshot_id: Option<winwincode_domain::SnapshotId>,
     pub job_digest: Sha256Digest,
     pub logical_job_digest: Sha256Digest,
     pub execution_profile: String,
@@ -477,7 +480,7 @@ impl StoredCandidateArtifact {
             schema_version: SchemaVersion::WinwincodeV1,
             sent_at: upload.created_at.clone(),
             session_identity: upload.session_identity.clone(),
-            snapshot_id: None,
+            snapshot_id: upload.snapshot_id.clone(),
             worker_session_id: upload.worker_session_id.clone(),
         };
         let chunk_messages = upload
@@ -511,7 +514,7 @@ impl StoredCandidateArtifact {
                     sent_at: upload.created_at.clone(),
                     sequence: ExecutionSequence(sequence_i64),
                     session_identity: upload.session_identity.clone(),
-                    snapshot_id: None,
+                    snapshot_id: upload.snapshot_id.clone(),
                     worker_session_id: upload.worker_session_id.clone(),
                 })
             })
@@ -551,7 +554,10 @@ impl StoredCandidateArtifact {
                 self.descriptor.digest.0.as_bytes(),
             ],
         );
-        if !candidate_artifact_role(&self.execution_profile)
+        if !winwincode_execution_port::snapshot_freeze::snapshot_role_binding_valid(
+            &self.execution_profile,
+            self.open_message.snapshot_id.as_ref(),
+        ) || !candidate_artifact_role(&self.execution_profile)
             || self.bytes.is_empty()
             || !lowercase_sha256(&self.job_digest.0)
             || !lowercase_sha256(&self.logical_job_digest.0)
@@ -647,6 +653,7 @@ impl StoredCandidateArtifact {
                 let sequence = u64::try_from(expected).map_err(|_| AdapterStoreError::Corrupt)?;
                 if decoded.as_slice() != expected_bytes
                     || chunk.artifact_id != self.descriptor.artifact_id
+                    || chunk.snapshot_id != self.open_message.snapshot_id
                     || chunk.lease != self.open_message.lease
                     || chunk.worker_session_id != self.open_message.worker_session_id
                     || chunk.session_identity != self.open_message.session_identity
@@ -692,6 +699,7 @@ impl StoredCandidateArtifact {
 
     fn same_upload(&self, other: &Self) -> bool {
         self.authority_key == other.authority_key
+            && self.open_message.snapshot_id == other.open_message.snapshot_id
             && self.job_digest == other.job_digest
             && self.logical_job_digest == other.logical_job_digest
             && self.execution_profile == other.execution_profile
@@ -714,6 +722,7 @@ impl StoredCandidateArtifact {
 
     fn authority(&self) -> CandidateArtifactAuthority {
         CandidateArtifactAuthority {
+            snapshot_id: self.open_message.snapshot_id.clone(),
             job_digest: self.job_digest.clone(),
             logical_job_digest: self.logical_job_digest.clone(),
             execution_profile: self.execution_profile.clone(),
@@ -822,7 +831,10 @@ fn same_work_run_identity(left: &ExecutionScope, right: &ExecutionScope) -> bool
 fn validate_upload(upload: &CandidateArtifactUpload) -> Result<(), AdapterStoreError> {
     let actual_digest = format!("sha256:{:x}", Sha256::digest(&upload.bytes));
     let valid_scope = scope_matches_session(&upload.scope, &upload.session_identity);
-    if !candidate_artifact_role(&upload.execution_profile)
+    if !winwincode_execution_port::snapshot_freeze::snapshot_role_binding_valid(
+        &upload.execution_profile,
+        upload.snapshot_id.as_ref(),
+    ) || !candidate_artifact_role(&upload.execution_profile)
         || upload.bytes.is_empty()
         || upload.digest.0 != actual_digest
         || !lowercase_sha256(&upload.job_digest.0)
@@ -1181,6 +1193,7 @@ mod tests {
         let work_run_id = WorkRunId("wrn_00000000000000000000000009".to_owned());
         open.session_identity.work_run_id = Some(work_run_id.clone());
         CandidateArtifactUpload {
+            snapshot_id: None,
             job_digest: Sha256Digest(format!("sha256:{:x}", Sha256::digest(b"exact job"))),
             logical_job_digest: Sha256Digest(format!(
                 "sha256:{:x}",

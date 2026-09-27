@@ -523,6 +523,7 @@ mod tests {
             fixture.candidate.delivery_spec_id().0.clone(),
             fixture.candidate.delivery_spec_revision(),
             fixture.candidate.candidate_ref(),
+            fixture.candidate.candidate_digest().clone(),
             "f".repeat(64),
             "verdict:fixture:pass",
             AttentionItemId("att_01J00000000000000000000000".to_owned()),

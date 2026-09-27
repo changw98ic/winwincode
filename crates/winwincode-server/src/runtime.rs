@@ -1042,6 +1042,21 @@ impl RepositoryRuntimeScheduler {
         })?;
         let request_id = self.next_request_id(b"claim");
         self.dispatch_cancellations(state, now, execution_port)?;
+        for command in state
+            .control_plane
+            .pending_snapshot_commands(
+                &mut state.storage,
+                &self.worker_id,
+                &self.worker_instance_id,
+                now,
+            )
+            .map_err(|error| {
+                debug_scheduler_error("replay Snapshot command", &error);
+                scheduler_failure()
+            })?
+        {
+            execution_port.enqueue_control(command)?;
+        }
         // A queued Job may be waiting for an admission timestamp or for
         // ordinary concurrency/budget capacity.  Cancellation and interaction
         // traffic for already-running work must still flow while that queue
@@ -1104,7 +1119,14 @@ impl RepositoryRuntimeScheduler {
             let authority = self
                 .ensure_worker_slot(&mut state.storage, &dispatch, now)
                 .inspect_err(|error| debug_scheduler_error("ensure Worker slot", error))?;
-            execution_port.enqueue_control(ExecutionPortMessage::JobDispatchMessage(dispatch))?;
+            let command = state
+                .control_plane
+                .prepare_snapshot_freeze(&mut state.storage, &dispatch, now)
+                .map_err(|error| {
+                    debug_scheduler_error("prepare Snapshot freeze", &error);
+                    scheduler_failure()
+                })?;
+            execution_port.enqueue_control(command)?;
             self.remember_worker_authority(authority);
         }
         Ok(())

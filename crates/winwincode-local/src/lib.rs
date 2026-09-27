@@ -663,7 +663,7 @@ where
             worker,
             stopped: false,
         };
-        let worker_start = launcher.worker.start(worker_now.clone()).await;
+        let worker_start = Box::pin(launcher.worker.start(worker_now.clone())).await;
         let worker_drive = if worker_start.is_ok() {
             launcher.drive(worker_now).await
         } else {
@@ -737,8 +737,7 @@ where
     ///
     /// Returns a fixed Worker failure.
     pub async fn heartbeat(&mut self, now: Instant) -> Result<(), LocalLauncherError> {
-        self.worker
-            .heartbeat(now)
+        Box::pin(self.worker.heartbeat(now))
             .await
             .map_err(|_| LocalLauncherError::worker())
     }
@@ -932,7 +931,7 @@ mod tests {
                     == FrameDirection::ControlPlaneToWorker
             })
             .collect::<Vec<_>>();
-        assert_eq!(messages.len(), 13, "generated CP-to-Worker family changed");
+        assert_eq!(messages.len(), 15, "generated CP-to-Worker family changed");
 
         for message in &messages {
             handle
@@ -958,7 +957,7 @@ mod tests {
             })
             .cloned()
             .collect::<Vec<_>>();
-        assert_eq!(responses.len(), 13, "generated CP-to-Worker family changed");
+        assert_eq!(responses.len(), 15, "generated CP-to-Worker family changed");
         let request = fixture
             .into_iter()
             .find(|message| {

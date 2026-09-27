@@ -10,10 +10,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use winwincode_domain::{ExecutionEventId, ExecutionSequence, Sha256Digest};
 
-use super::{
-    DurableCandidateSourceInput, FrozenDeliveryCandidate, assert_frozen_candidate_current,
-    validated_git_snapshot_from_candidate, validated_git_snapshot_from_source,
-};
+use super::{FrozenDeliveryCandidate, assert_frozen_candidate_current};
 use crate::domain::evidence::{
     EvidenceRefType, EvidenceSource, ResolveDeliveryEvidenceInput, ResolvedDeliveryEvidence,
     VerifiedEvidenceOutcome, accepted_runtime_source, checkout_attestation_from_snapshot,
@@ -105,48 +102,25 @@ impl ProductionRuntimePayload {
 pub struct ProductionVerificationRuntime {
     role: VerificationRole,
     terminal: DeliveryTerminalOutcomeFacts,
-    source: DurableCandidateSourceInput,
+    snapshot: winwincode_domain::CanonicalSnapshot,
     events: Vec<ProductionRuntimeEvent>,
-    read_only_candidate_source: bool,
 }
 
 impl ProductionVerificationRuntime {
-    /// Joins one settled Worker outcome, its exact Git Artifact, and the
-    /// accepted append-only runtime ledger. Role and execution identity remain
-    /// derived from those sealed facts.
+    /// The Control Plane supplies the Snapshot loaded through the exact durable
+    /// job/attempt binding, never reconstructed from terminal output.
     #[must_use]
     pub fn from_durable(
         role: VerificationRole,
         terminal: DeliveryTerminalOutcomeFacts,
-        source: DurableCandidateSourceInput,
+        snapshot: winwincode_domain::CanonicalSnapshot,
         events: Vec<ProductionRuntimeEvent>,
     ) -> Self {
         Self {
             role,
             terminal,
-            source,
+            snapshot,
             events,
-            read_only_candidate_source: false,
-        }
-    }
-
-    /// Joins a verification terminal and runtime ledger to the current
-    /// writer's validated candidate source. Read-only verification consumes
-    /// that checkout and therefore does not produce a second candidate
-    /// Artifact of its own.
-    #[must_use]
-    pub fn from_durable_read_only(
-        role: VerificationRole,
-        terminal: DeliveryTerminalOutcomeFacts,
-        candidate_source: DurableCandidateSourceInput,
-        events: Vec<ProductionRuntimeEvent>,
-    ) -> Self {
-        Self {
-            role,
-            terminal,
-            source: candidate_source,
-            events,
-            read_only_candidate_source: true,
         }
     }
 }
@@ -235,10 +209,15 @@ pub fn resolve_production_verdict(
     sessions.sort_by_key(|session| role_order(session.role));
     evidence.sort_by(|left, right| left.evidence().id.0.cmp(&right.evidence().id.0));
     evidence.dedup_by(|left, right| left.evidence().id == right.evidence().id);
+    let snapshot = sessions
+        .first()
+        .and_then(|session| session.pre_candidate_snapshot.clone())
+        .ok_or_else(|| error("verification Snapshot is missing"))?;
     let verification = validate_independent_verification(
         delivery,
         &candidate,
         &VerificationFacts {
+            snapshot,
             required_roles,
             sessions,
         },
@@ -256,6 +235,7 @@ pub fn resolve_production_verdict(
         delivery,
         &candidate,
         ResolveDeliveryEvidenceInput {
+            snapshot: verification.snapshot().clone(),
             work_run_id: candidate.producer_work_run_id().clone(),
             session_binding_id: candidate.producer_session_binding_id().clone(),
             source: EvidenceSource::CandidateCommit,
@@ -287,12 +267,11 @@ fn resolve_verification_runtime(
     candidate: &FrozenDeliveryCandidate,
     runtime: &ProductionVerificationRuntime,
 ) -> Result<ResolvedVerificationRuntime, ProductionVerdictResolutionError> {
-    let (snapshot, verified_terminal) = if runtime.read_only_candidate_source {
-        validated_git_snapshot_from_candidate(delivery, candidate, &runtime.terminal)
-    } else {
-        validated_git_snapshot_from_source(delivery, &runtime.source, &runtime.terminal)
-    }
-    .map_err(|error_value| resolution_error(&error_value))?;
+    let snapshot = &runtime.snapshot;
+    let verified_terminal = runtime
+        .terminal
+        .verify_successful_report(delivery)
+        .map_err(|error_value| error(error_value.to_string()))?;
     let role = runtime.role;
     let binding = delivery
         .snapshot()
@@ -304,25 +283,19 @@ fn resolve_verification_runtime(
                 && binding.attempt == verified_terminal.attempt()
         })
         .ok_or_else(|| error("verification terminal SessionBinding is missing"))?;
-    let terminal = if runtime.read_only_candidate_source {
-        AcceptedVerificationJobOutcomeFact::from_verified_read_only_outcome(
-            &verified_terminal,
-            &snapshot,
-            role.as_str(),
-        )
-    } else {
-        AcceptedVerificationJobOutcomeFact::from_verified_outcome(
-            &verified_terminal,
-            &snapshot,
-            role.as_str(),
-        )
-    }
+    let terminal = AcceptedVerificationJobOutcomeFact::from_verified_outcome(
+        &verified_terminal,
+        binding,
+        snapshot,
+        role.as_str(),
+    )
     .map_err(|error_value| resolution_error(&error_value))?;
     let events = validated_runtime_events(&runtime.events, &terminal)?;
     validate_policy_attestation(&events, candidate)?;
     let result = structured_result(&events, delivery, candidate)?;
-    let checkout = checkout_attestation_from_snapshot(&terminal, &snapshot);
+    let checkout = checkout_attestation_from_snapshot(&terminal, snapshot, candidate.repository());
     let (findings, evidence) = resolve_findings(
+        snapshot,
         delivery,
         candidate,
         &binding.id,
@@ -341,7 +314,7 @@ fn resolve_verification_runtime(
             workspace_mode: VerificationWorkspaceMode::CandidateReadOnly,
             permission_profile: VerificationPermissionProfile::CandidateReadOnlyRestricted,
             pre_candidate_snapshot: Some(snapshot.clone()),
-            post_candidate_snapshot: Some(snapshot),
+            post_candidate_snapshot: Some(snapshot.clone()),
             accepted_job_outcome: Some(terminal),
             codex_turn_completed: true,
             mutation_records: Vec::new(),
@@ -556,7 +529,12 @@ impl Clone for VerificationResultPayload {
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "explicit sealed authorities are joined once at this boundary"
+)]
 fn resolve_findings(
+    snapshot: &winwincode_domain::CanonicalSnapshot,
     delivery: &Delivery,
     candidate: &FrozenDeliveryCandidate,
     session_binding_id: &SessionBindingId,
@@ -623,6 +601,7 @@ fn resolve_findings(
                     delivery,
                     candidate,
                     ResolveDeliveryEvidenceInput {
+                        snapshot: snapshot.clone(),
                         work_run_id: terminal.work_run_id().clone(),
                         session_binding_id: session_binding_id.clone(),
                         source: EvidenceSource::Runtime {

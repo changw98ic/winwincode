@@ -18,6 +18,7 @@
 #![allow(clippy::doc_markdown)]
 
 mod contract;
+pub mod evidence;
 mod panel;
 mod provider;
 

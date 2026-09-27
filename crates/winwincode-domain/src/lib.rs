@@ -8,11 +8,16 @@
 
 mod generated;
 mod git_candidate_artifact;
+mod snapshot;
 mod user_account;
 mod verification_command;
 
 pub use generated::*;
 pub use git_candidate_artifact::{GitCandidateArtifactManifest, GitCandidateArtifactManifestError};
+pub use snapshot::{
+    CanonicalSnapshot, SnapshotBindingError, SnapshotIdentityError, SnapshotVerificationBinding,
+    seal_snapshot, verify_snapshot_seal,
+};
 pub use user_account::{UserAccount, UserAccountError, UserAccountErrorKind};
 pub use verification_command::{
     observed_verification_command_digest, observed_verification_command_is_test,

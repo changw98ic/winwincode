@@ -270,7 +270,8 @@ pub struct EvidenceProjection {
     delivery_spec_revision: u64,
     work_run_id: WorkRunId,
     session_binding_id: SessionBindingId,
-    candidate_ref: String,
+    candidate_id: winwincode_domain::CandidateId,
+    snapshot_id: winwincode_domain::SnapshotId,
     #[serde(rename = "type")]
     evidence_type: EvidenceRefType,
     source_ref: String,
@@ -299,8 +300,12 @@ impl EvidenceProjection {
     }
 
     #[must_use]
-    pub fn candidate_ref(&self) -> &str {
-        &self.candidate_ref
+    pub fn candidate_id(&self) -> &winwincode_domain::CandidateId {
+        &self.candidate_id
+    }
+    #[must_use]
+    pub fn snapshot_id(&self) -> &winwincode_domain::SnapshotId {
+        &self.snapshot_id
     }
 
     #[must_use]
@@ -327,6 +332,8 @@ impl EvidenceProjection {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CurrentCandidateProjection {
+    candidate_id: winwincode_domain::CandidateId,
+    candidate_digest: winwincode_domain::Sha256Digest,
     candidate_ref: String,
     delivery_spec_id: DeliverySpecId,
     delivery_spec_revision: u64,
@@ -339,6 +346,15 @@ pub struct CurrentCandidateProjection {
 }
 
 impl CurrentCandidateProjection {
+    #[must_use]
+    pub fn candidate_id(&self) -> &winwincode_domain::CandidateId {
+        &self.candidate_id
+    }
+    #[must_use]
+    pub fn candidate_digest(&self) -> &winwincode_domain::Sha256Digest {
+        &self.candidate_digest
+    }
+
     #[must_use]
     pub fn candidate_ref(&self) -> &str {
         &self.candidate_ref
@@ -431,6 +447,8 @@ impl VerdictCriterionProjection {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VerdictProjection {
+    candidate_id: winwincode_domain::CandidateId,
+    snapshot_id: winwincode_domain::SnapshotId,
     id: DeliveryVerdictId,
     delivery_spec_id: DeliverySpecId,
     delivery_spec_revision: u64,
@@ -442,6 +460,14 @@ pub struct VerdictProjection {
 }
 
 impl VerdictProjection {
+    #[must_use]
+    pub fn candidate_id(&self) -> &winwincode_domain::CandidateId {
+        &self.candidate_id
+    }
+    #[must_use]
+    pub fn snapshot_id(&self) -> &winwincode_domain::SnapshotId {
+        &self.snapshot_id
+    }
     #[must_use]
     pub fn id(&self) -> &DeliveryVerdictId {
         &self.id
@@ -530,7 +556,10 @@ pub(super) fn project_delivery_sections(
         },
     };
 
-    let evidence = project_current_evidence(delivery, current_candidate_ref);
+    let evidence = project_current_evidence(
+        delivery,
+        candidate.map(FrozenDeliveryCandidate::candidate_id),
+    );
     let attention = project_attention(delivery);
     let verdict = project_current_verdict(delivery, current_candidate_ref, &evidence)?;
 
@@ -566,6 +595,8 @@ fn validate_current_candidate(
     })?;
 
     Ok(Some(CurrentCandidateProjection {
+        candidate_id: candidate.candidate_id().clone(),
+        candidate_digest: candidate.candidate_digest().clone(),
         candidate_ref: candidate.candidate_ref().into(),
         delivery_spec_id: candidate.delivery_spec_id().clone(),
         delivery_spec_revision: candidate.delivery_spec_revision(),
@@ -580,14 +611,14 @@ fn validate_current_candidate(
 
 fn project_current_evidence(
     delivery: &Delivery,
-    current_candidate_ref: Option<&str>,
+    current_candidate_id: Option<&winwincode_domain::CandidateId>,
 ) -> Vec<EvidenceProjection> {
     let snapshot = delivery.snapshot();
     let mut evidence: Vec<_> = snapshot
         .evidence
         .iter()
         .filter(|reference| {
-            current_candidate_ref == Some(reference.candidate_ref.as_str())
+            current_candidate_id == Some(&reference.candidate_id)
                 && reference.delivery_spec_id == snapshot.spec.id
                 && reference.delivery_spec_revision == snapshot.spec.revision
         })
@@ -597,7 +628,8 @@ fn project_current_evidence(
             delivery_spec_revision: reference.delivery_spec_revision,
             work_run_id: reference.work_run_id.clone(),
             session_binding_id: reference.session_binding_id.clone(),
-            candidate_ref: reference.candidate_ref.clone(),
+            candidate_id: reference.candidate_id.clone(),
+            snapshot_id: reference.snapshot_id.clone(),
             evidence_type: reference.evidence_type,
             source_ref: reference.source_ref.clone(),
             created_at: reference.created_at_millis,
@@ -724,6 +756,8 @@ fn project_current_verdict(
     unresolved_findings.dedup();
 
     Ok(Some(VerdictProjection {
+        candidate_id: verdict.candidate_id.clone(),
+        snapshot_id: verdict.snapshot_id.clone(),
         id: verdict.id.clone(),
         delivery_spec_id: verdict.delivery_spec_id.clone(),
         delivery_spec_revision: snapshot.spec.revision,

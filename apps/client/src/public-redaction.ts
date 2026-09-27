@@ -14,7 +14,7 @@ const URL_CREDENTIALS = /\b(?:https?|wss?):\/\/[^/\s:@]+:[^/\s@]+@/giu
 const CREDENTIAL_ASSIGNMENT = /\b(?:api[-_]?key|auth(?:entication|orization)?|authorization|credential(?:s)?|password|passwd|private[-_]?key|secret|access[-_]?token|refresh[-_]?token|id[-_]?token|session[-_]?token|client[-_]?secret|token)\s*=\s*(?:"[^"]*"|'[^']*'|Bearer\s+[^\s,;]+|[^\s,;]+)/giu
 const CREDENTIAL_PROPERTY = /((?:"|')?(?:api[-_]?key|auth(?:entication|orization)?|authorization|credential(?:s)?|password|passwd|private[-_]?key|secret|access[-_]?token|refresh[-_]?token|id[-_]?token|session[-_]?token|client[-_]?secret|token)(?:"|')?\s*:\s*)(?:"[^"]*"|'[^']*'|\[[^\]]*\]|Bearer\s+[^\s,}\]]+|[^\s,}\]]+)/giu
 const ABSOLUTE_PATH = /(?:^|(?<=[\s("'=]))(?:\/(?:Users|Volumes|private|tmp|var|opt|home|Applications|Library)\/[^\s"'<>]+|[A-Za-z]:[\\/][^\s"'<>]+)/gu
-const CANDIDATE_REF = /\bgit-candidate:sha256:[0-9a-f]{64}\b/gu
+const CANDIDATE_REF = /\brefs\/winwincode\/candidates\/(?:[0-9a-f]{64}|[0-9a-f]{40})\b/gu
 const INTERNAL_ID = /\b(?:agt|art|att|binding|call|cfg|crd|crt|dlv|evd|evt|hum|job|lease|lse|org|prj|psn|pva|pvs|rb|rbd|rep|req|rpo|run|sys|thr|wit|wki|wrs|wrk|wsp|wsn|wss|wct|wrn|usr)_[A-Za-z0-9-]+\b/gu
 const SOURCE_REF = /\b(?:sourceRef|source_ref)\s*[:=]\s*[^\s,;]+/giu
 const RUNTIME_SOURCE = /\bruntime(?::\/\/|:)[^\s,;]+/gu

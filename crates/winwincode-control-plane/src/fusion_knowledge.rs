@@ -11,9 +11,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
-use winwincode_delivery::domain::{
-    EvidenceRefType, verification::VerificationFindingConclusion,
-};
+use winwincode_delivery::domain::EvidenceRefType;
+use winwincode_fusion::evidence::{ClaimTargetLike, EvidenceLedger};
 
 use crate::fusion_analysis::{FusionCandidateClaims, FusionClaim, FusionClaimPosition};
 
@@ -187,9 +186,7 @@ impl ClaimGraph {
 fn evidence_strength_for(claim: &FusionClaim) -> EvidenceStrength {
     let mut best = EvidenceStrength::Speculation;
     for evidence in &claim.evidence {
-        let strength = if evidence.verified_conclusion.is_some() {
-            EvidenceStrength::Direct
-        } else if matches!(
+        let strength = if matches!(
             evidence.evidence_type,
             EvidenceRefType::Test
                 | EvidenceRefType::Command
@@ -237,9 +234,9 @@ pub fn build_claim_graph(candidates: &[FusionCandidateClaims]) -> ClaimGraph {
         for claim in &candidate.claims {
             let identity = ClaimIdentity::parse(&claim.claim_key);
             let group = identity.canonical_key();
-            let claim_id = id_by_group.entry(group.clone()).or_insert_with(|| {
-                format!("c_{}", simple_hash(&group))
-            });
+            let claim_id = id_by_group
+                .entry(group.clone())
+                .or_insert_with(|| format!("c_{}", simple_hash(&group)));
             let node = nodes.entry(claim_id.clone()).or_insert_with(|| ClaimNode {
                 id: claim_id.clone(),
                 display_key: identity.display_key(),
@@ -272,16 +269,10 @@ pub fn build_claim_graph(candidates: &[FusionCandidateClaims]) -> ClaimGraph {
                 FusionClaimPosition::Opposes => EvidenceDirection::Counter,
             };
             for (index, item) in claim.evidence.iter().enumerate() {
-                let evidence_id = format!(
-                    "ev_{}_{}_{}",
-                    claim_id,
-                    candidate.candidate_id,
-                    index
-                );
+                let evidence_id = format!("ev_{}_{}_{}", claim_id, candidate.candidate_id, index);
                 if !seen_evidence.insert(evidence_id.clone()) {
                     continue;
                 }
-                let verified = item.verified_conclusion.is_some();
                 let record = FusionEvidenceRecord {
                     id: evidence_id.clone(),
                     claim_id: claim_id.clone(),
@@ -292,19 +283,15 @@ pub fn build_claim_graph(candidates: &[FusionCandidateClaims]) -> ClaimGraph {
                     facts: vec![item.source_ref.clone()],
                     source_refs: vec![item.source_ref.clone()],
                     independence_group: independence_group_for(claim),
-                    verified,
-                    invalidated: matches!(
-                        item.verified_conclusion,
-                        Some(VerificationFindingConclusion::Fail)
-                    ) && direction == EvidenceDirection::Support,
+                    // Candidate evidence is a claim-side citation. Verification
+                    // facts enter only through a bound runtime/Verifier record.
+                    verified: false,
+                    invalidated: false,
                 };
                 match direction {
                     EvidenceDirection::Support => node.evidence_ids.push(evidence_id.clone()),
                     EvidenceDirection::Counter => {
                         node.counter_evidence_ids.push(evidence_id.clone());
-                        if verified {
-                            node.has_verified_counter = true;
-                        }
                     }
                 }
                 evidence.push(record);
@@ -401,17 +388,30 @@ pub fn confirm_claim(graph: &mut ClaimGraph, claim_id: &str) -> bool {
     false
 }
 
-/// Refute only with verified counter-evidence (ADR-0037 hard rule).
+/// Legacy unbound entry point cannot prove proposition, scope, version or
+/// source ownership. It therefore never refutes; use the ledger-bound API.
 pub fn refute_claim(graph: &mut ClaimGraph, claim_id: &str) -> bool {
+    let _ = (graph, claim_id);
+    false
+}
+
+/// Refute only when the ledger contains live machine receipts and a verified
+/// counter for the exact proposition, scope and version being subtracted.
+pub fn refute_claim_with_verified_counter<T: ClaimTargetLike>(
+    graph: &mut ClaimGraph,
+    claim_id: &str,
+    target: &T,
+    ledger: &EvidenceLedger,
+) -> bool {
+    if !ledger.can_refute(target) {
+        return false;
+    }
     for claim in &mut graph.claims {
-        if claim.id != claim_id {
-            continue;
+        if claim.id == claim_id {
+            claim.has_verified_counter = true;
+            claim.state = ClaimState::Refuted;
+            return true;
         }
-        if !claim.has_verified_counter {
-            return false;
-        }
-        claim.state = ClaimState::Refuted;
-        return true;
     }
     false
 }
@@ -449,6 +449,10 @@ fn simple_hash(value: &str) -> String {
 mod tests {
     use super::*;
     use crate::fusion_analysis::FusionEvidence;
+    use winwincode_delivery::domain::verification::VerificationFindingConclusion;
+    use winwincode_fusion::evidence::{
+        ClaimTarget, ClaimVerification, SourceReceipt, SourceReceiptKind, VerificationConclusion,
+    };
 
     fn claim(key: &str, position: FusionClaimPosition, verified: bool) -> FusionClaim {
         FusionClaim {
@@ -497,9 +501,30 @@ mod tests {
     #[test]
     fn p1_union_keeps_unique_and_minority_claims() {
         let graph = build_claim_graph(&[
-            candidate("m1", vec![claim("root:shared-fixture-race", FusionClaimPosition::Supports, false)]),
-            candidate("m2", vec![claim("root:shared-fixture-race", FusionClaimPosition::Opposes, false)]),
-            candidate("m3", vec![claim("defect:unique-path", FusionClaimPosition::Supports, false)]),
+            candidate(
+                "m1",
+                vec![claim(
+                    "root:shared-fixture-race",
+                    FusionClaimPosition::Supports,
+                    false,
+                )],
+            ),
+            candidate(
+                "m2",
+                vec![claim(
+                    "root:shared-fixture-race",
+                    FusionClaimPosition::Opposes,
+                    false,
+                )],
+            ),
+            candidate(
+                "m3",
+                vec![claim(
+                    "defect:unique-path",
+                    FusionClaimPosition::Supports,
+                    false,
+                )],
+            ),
         ]);
         assert_eq!(graph.claims.len(), 2);
         let race = graph
@@ -522,28 +547,116 @@ mod tests {
     fn p3_refuted_requires_verified_counter_evidence() {
         let mut graph = build_claim_graph(&[candidate(
             "m1",
-            vec![claim("root:phantom-race", FusionClaimPosition::Supports, false)],
+            vec![claim(
+                "root:phantom-race",
+                FusionClaimPosition::Supports,
+                false,
+            )],
         )]);
         let id = graph.claims[0].id.clone();
+        assert!(!graph.claims[0].has_verified_counter);
+        assert!(graph.evidence.iter().all(|evidence| !evidence.verified));
         assert!(!refute_claim(&mut graph, &id));
         assert_ne!(graph.claims[0].state, ClaimState::Refuted);
 
-        let mut graph = build_claim_graph(&[candidate(
-            "m1",
-            vec![claim("root:phantom-race", FusionClaimPosition::Opposes, true)],
-        )]);
-        let id = graph.claims[0].id.clone();
-        // Opposes + verified counter on that side sets has_verified_counter.
-        graph.claims[0].has_verified_counter = true;
-        assert!(refute_claim(&mut graph, &id));
+        let mut ledger = EvidenceLedger::default();
+        let receipt = ledger
+            .register_source_receipt(SourceReceipt {
+                id: "counter-receipt".to_owned(),
+                kind: SourceReceiptKind::Test,
+                locator: "test:phantom-race-counter".to_owned(),
+                version: "source-digest-1".to_owned(),
+                execution_owner: "worker-run-42".to_owned(),
+                content_digest: "5e".repeat(32),
+            })
+            .expect("counter receipt registers");
+        ledger
+            .record_claim_verification(ClaimVerification {
+                id: "counter-verification".to_owned(),
+                proposition: "root:phantom-race".to_owned(),
+                scope: "shared fixture race".to_owned(),
+                version: "source-digest-1".to_owned(),
+                conclusion: VerificationConclusion::Counter,
+                source_receipt_ids: vec![receipt.id],
+                verifier: "independent-verifier".to_owned(),
+            })
+            .expect("counter verification registers");
+        let target = ClaimTarget {
+            proposition: "root:phantom-race".to_owned(),
+            scope: "shared fixture race".to_owned(),
+            version: "source-digest-1".to_owned(),
+        };
+        assert!(refute_claim_with_verified_counter(
+            &mut graph, &id, &target, &ledger,
+        ));
         assert_eq!(graph.claims[0].state, ClaimState::Refuted);
+    }
+
+    #[test]
+    fn four_unverified_opponents_cannot_refute_supported_claim() {
+        let mut graph = build_claim_graph(&[
+            candidate(
+                "minority",
+                vec![claim(
+                    "root:shared-fixture-race",
+                    FusionClaimPosition::Supports,
+                    false,
+                )],
+            ),
+            candidate(
+                "opponent-1",
+                vec![claim(
+                    "root:shared-fixture-race",
+                    FusionClaimPosition::Opposes,
+                    false,
+                )],
+            ),
+            candidate(
+                "opponent-2",
+                vec![claim(
+                    "root:shared-fixture-race",
+                    FusionClaimPosition::Opposes,
+                    false,
+                )],
+            ),
+            candidate(
+                "opponent-3",
+                vec![claim(
+                    "root:shared-fixture-race",
+                    FusionClaimPosition::Opposes,
+                    false,
+                )],
+            ),
+            candidate(
+                "opponent-4",
+                vec![claim(
+                    "root:shared-fixture-race",
+                    FusionClaimPosition::Opposes,
+                    false,
+                )],
+            ),
+        ]);
+
+        assert_eq!(graph.claims.len(), 1);
+        let retained_id = graph.claims[0].id.clone();
+        assert_eq!(graph.claims[0].supporter_count, 1);
+        assert_eq!(graph.claims[0].opponent_count, 4);
+        assert_eq!(graph.claims[0].state, ClaimState::Disputed);
+        assert_ne!(graph.claims[0].state, ClaimState::Refuted);
+        assert!(!refute_claim(&mut graph, &retained_id));
+        assert_eq!(graph.claims.len(), 1);
+        assert_ne!(graph.claims[0].state, ClaimState::Refuted);
     }
 
     #[test]
     fn false_consensus_high_risk_absence_needs_verification() {
         let graph = build_claim_graph(&[candidate(
             "m1",
-            vec![claim("defect:shared-map-race", FusionClaimPosition::Opposes, false)],
+            vec![claim(
+                "defect:shared-map-race",
+                FusionClaimPosition::Opposes,
+                false,
+            )],
         )]);
         let node = &graph.claims[0];
         assert_eq!(node.state, ClaimState::UnverifiedAbsence);
@@ -554,8 +667,14 @@ mod tests {
     #[test]
     fn p2_evidence_has_independence_groups() {
         let graph = build_claim_graph(&[
-            candidate("m1", vec![claim("root:x", FusionClaimPosition::Supports, false)]),
-            candidate("m2", vec![claim("root:x", FusionClaimPosition::Supports, false)]),
+            candidate(
+                "m1",
+                vec![claim("root:x", FusionClaimPosition::Supports, false)],
+            ),
+            candidate(
+                "m2",
+                vec![claim("root:x", FusionClaimPosition::Supports, false)],
+            ),
         ]);
         assert!(graph.evidence.len() >= 2);
         let groups: BTreeSet<_> = graph

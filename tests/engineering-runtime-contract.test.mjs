@@ -18,14 +18,24 @@ const identity = {
   workerInstanceId: id('wki'), workerSessionId: id('wsn'),
   leaseId: id('lse'), fencingToken: '1',
 }
+const sessionIdentity = {
+  productSessionId: id('psn'), workerSessionId: id('wsn'),
+  codexThreadId: id('cdx'), workRunId: id('wrn'),
+}
+const snapshotBinding = {
+  snapshotId: id('snap'), candidateId: id('cnd'),
+  verificationSessionId: id('vsn'), attempt: 1,
+  sessionIdentity,
+  createdAt: '2026-09-24T09:10:11.123Z',
+}
 const samples = {
   WorkContract: { ...common, id: id('wct'), revision: 1, scope: ['repository'], objective: 'Deliver tested change', constraints: [], protectedScope: ['credentials'], requiredHumanAuthority: 'none', criteria: [{ id: id('crt'), description: 'Test passes', required: true, requiredEvidenceClass: 'machine', verificationMethod: 'pnpm test' }], createdAt: '2026-09-08T00:00:00.000Z' },
   WorkItem: { ...common, id: id('wit'), workContractId: id('wct'), workContractRevision: 1, revision: 1, state: 'ready', title: 'Implement change', goal: 'Deliver tested change', criterionIds: [id('crt')], dependsOn: [] },
   WorkRun: { ...common, ...contract, ...identity, id: id('wrn'), workItemId: id('wit'), workItemRevision: 1, revision: 1, state: 'leased', productSessionId: id('psn'), codexThreadId: id('cdx'), candidateDigest: null },
   Candidate: { ...common, ...contract, ...run, id: id('cnd'), candidateDigest: digest, attempt: 1, producerWorkerSessionId: id('wsn'), baseCommit: 'a'.repeat(40), diffDigest: `sha256:${'d'.repeat(64)}`, candidateRef: `refs/winwincode/candidates/${'b'.repeat(40)}`, candidateCommit: 'b'.repeat(40), candidateTree: 'c'.repeat(40) },
   VerificationPlan: { ...common, ...contract, ...run, id: id('vpl'), planRevision: 1, workItemRevision: 1, candidateDigest: digest, criterionIds: [id('crt')], requiredRoles: ['verifier'], commands: ['pnpm test'], permissionProfile: 'candidate_read_only_restricted' },
-  Evidence: { ...common, ...contract, ...run, id: id('evd'), verificationPlanId: id('vpl'), planRevision: 1, criterionId: id('crt'), candidateDigest: digest, producer: 'verifier', producerExecutionIdentity: identity, sourceEventId: 'event-1', sourceSequence: 1, outcome: 'succeeded' },
-  Verdict: { ...common, ...contract, id: id('vdt'), workItemId: id('wit'), verificationPlanId: id('vpl'), planRevision: 1, candidateDigest: digest, status: 'inconclusive', evidenceIds: [], revision: 1 },
+  Evidence: { ...common, ...contract, ...run, ...snapshotBinding, id: id('evd'), verificationPlanId: id('vpl'), planRevision: 1, criterionId: id('crt'), producer: 'verifier', producerExecutionIdentity: identity, sourceEventId: 'event-1', sourceSequence: 1, outcome: 'succeeded' },
+  Verdict: { ...common, ...contract, ...run, ...snapshotBinding, id: id('vdt'), workItemId: id('wit'), verificationPlanId: id('vpl'), planRevision: 1, status: 'inconclusive', evidenceIds: [], revision: 1 },
 }
 
 test('seven canonical domain objects accept complete values and reject missing or unknown fields', () => {
@@ -105,7 +115,7 @@ test('Evidence artifact provenance requires the exact canonical WorkRun, never a
   const validate = ajv.getSchema(`${http.$id}#/$defs/EvidenceArtifactProvenanceProjection`)
   const provenance = {
     deliveryId: id('dlv'), deliveryRevision: 1, workRunId: id('wrn'),
-    sessionBindingId: 'binding:verifier', candidateRef: `git-candidate:${digest}`,
+    sessionBindingId: 'binding:verifier', candidateId: id('cnd'), snapshotId: id('snap'),
     evidenceId: id('evd'),
   }
   assert.equal(validate(provenance), true, JSON.stringify(validate.errors))

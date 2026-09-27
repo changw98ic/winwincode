@@ -50,6 +50,7 @@ static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone)]
 struct SettledSource {
+    content_digest: Sha256Digest,
     terminal: DeliveryTerminalOutcomeFacts,
     source: DurableCandidateSourceInput,
 }
@@ -57,6 +58,10 @@ struct SettledSource {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn durable_sources_resolve_one_replay_stable_production_verdict() {
+    use winwincode_domain::{
+        CandidateId, CanonicalSnapshot, GitObjectId, SchemaVersion, Snapshot, SnapshotId,
+        seal_snapshot,
+    };
     let root = temporary_directory("success");
     let repositories = root.join("repositories");
     let repository = repositories.join("project-one");
@@ -142,8 +147,28 @@ fn durable_sources_resolve_one_replay_stable_production_verdict() {
         &delivery,
         &writer_source.source,
         &writer_source.terminal,
+        CandidateId("cnd_01J00000000000000000000001".into()),
     )
     .expect("candidate");
+
+    let mut product = Snapshot {
+        schema_version: SchemaVersion::WinwincodeV1,
+        snapshot_id: SnapshotId(canonical_id("snap", 91)),
+        candidate_id: candidate.candidate_id().clone(),
+        work_run_id: candidate.producer_work_run_id().clone(),
+        repository_id: RepositoryId(canonical_id("rep", 91)),
+        base_commit_id: GitObjectId(candidate.base_commit_id().into()),
+        base_tree_id: GitObjectId(candidate.base_tree_id().into()),
+        candidate_commit_id: GitObjectId(candidate.candidate_commit_id().into()),
+        candidate_tree_id: GitObjectId(candidate.candidate_tree_id().into()),
+        diff_sha256: Sha256Digest(format!("sha256:{}", candidate.diff_sha256())),
+        content_digest: writer_source.content_digest.clone(),
+        created_at_millis: i64::try_from(candidate.producer_finished_at_millis()).unwrap(),
+        immutable: true,
+        validation_seal: Sha256Digest(String::new()),
+    };
+    product.validation_seal = seal_snapshot(&product);
+    let snapshot: CanonicalSnapshot = product.try_into().unwrap();
 
     let verification_sources = ["reviewer", "verifier"]
         .into_iter()
@@ -176,6 +201,7 @@ fn durable_sources_resolve_one_replay_stable_production_verdict() {
                 &delivery,
                 run,
                 settled,
+                &snapshot,
                 candidate.candidate_ref(),
                 role,
                 None,
@@ -197,7 +223,7 @@ fn durable_sources_resolve_one_replay_stable_production_verdict() {
     assert!(
         evidence
             .iter()
-            .all(|item| item.evidence().candidate_ref == candidate.candidate_ref())
+            .all(|item| item.evidence().candidate_id == *candidate.candidate_id())
     );
     let commits = evidence
         .iter()
@@ -207,10 +233,7 @@ fn durable_sources_resolve_one_replay_stable_production_verdict() {
         .collect::<Vec<_>>();
     assert_eq!(commits.len(), 1);
     let commit = commits[0].evidence();
-    assert_eq!(
-        commit.source_ref,
-        format!("git_commit:{candidate_commit}")
-    );
+    assert_eq!(commit.source_ref, format!("git_commit:{candidate_commit}"));
     assert_eq!(commit.work_run_id, *candidate.producer_work_run_id());
     assert_eq!(
         commit.session_binding_id,
@@ -225,6 +248,7 @@ fn durable_sources_resolve_one_replay_stable_production_verdict() {
                 &delivery,
                 run,
                 settled,
+                &snapshot,
                 "git-candidate:stale-runtime",
                 role,
                 None,
@@ -241,6 +265,7 @@ fn durable_sources_resolve_one_replay_stable_production_verdict() {
                 &delivery,
                 run,
                 settled,
+                &snapshot,
                 candidate.candidate_ref(),
                 role,
                 Some(&format!("event-{role}-binary")),
@@ -266,6 +291,7 @@ fn verification_runtime(
     delivery: &Delivery,
     run: &SessionBinding,
     settled: &SettledSource,
+    snapshot: &winwincode_domain::CanonicalSnapshot,
     candidate_ref: &str,
     role: &str,
     evidence_event_override: Option<&str>,
@@ -277,7 +303,7 @@ fn verification_runtime(
             _ => panic!("unexpected role"),
         },
         settled.terminal.clone(),
-        settled.source.clone(),
+        snapshot.clone(),
         runtime_events(
             run,
             candidate_ref,
@@ -439,6 +465,7 @@ fn settled_source(
         ),
     );
     SettledSource {
+        content_digest: source.content_digest().clone(),
         terminal,
         source: winwincode_storage::delivery_candidate_source(&source),
     }

@@ -272,6 +272,7 @@ pub struct ValidatedGitSourceArtifact {
     changed_paths: Vec<GitSourcePath>,
     changed_hunks: Vec<GitSourceHunk>,
     artifact: ArtifactRecord,
+    content_digest: winwincode_domain::Sha256Digest,
 }
 
 /// Replaceable trusted source adapter. The opaque result can only be created
@@ -358,6 +359,11 @@ pub trait GitSourceResolver: Send {
 }
 
 impl ValidatedGitSourceArtifact {
+    #[must_use]
+    pub fn content_digest(&self) -> &winwincode_domain::Sha256Digest {
+        &self.content_digest
+    }
+
     #[must_use]
     pub fn repository_locator(&self) -> &str {
         &self.repository_locator
@@ -1028,6 +1034,7 @@ fn rebuild_candidate_source(
         &revision_range,
         &changed_path_names,
     )?;
+    let content_digest = candidate_content_digest(repository, &candidate_commit_id)?;
     Ok(ValidatedGitSourceArtifact {
         repository_locator: repository_locator.to_owned(),
         requested_base_revision: base_revision.to_owned(),
@@ -1036,10 +1043,66 @@ fn rebuild_candidate_source(
         candidate_commit_id,
         candidate_tree_id,
         diff_sha256,
+        content_digest,
         changed_paths,
         changed_hunks,
         artifact,
     })
+}
+
+fn candidate_content_digest(
+    repository: &Path,
+    commit: &str,
+) -> Result<winwincode_domain::Sha256Digest, ArtifactError> {
+    let listing = git_output(
+        repository,
+        &[
+            "ls-tree".into(),
+            "-r".into(),
+            "-z".into(),
+            "--full-tree".into(),
+            commit.into(),
+        ],
+        "candidate content inventory",
+    )?;
+    let mut hash = Sha256::new();
+    for record in listing
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+    {
+        let separator = record
+            .iter()
+            .position(|byte| *byte == b'\t')
+            .ok_or_else(|| ArtifactError::invalid("candidate tree record is malformed"))?;
+        let header = std::str::from_utf8(&record[..separator])
+            .map_err(|_| ArtifactError::invalid("candidate tree header is not UTF-8"))?;
+        let path = decode_path(&record[separator + 1..])?;
+        portable_path(&path)?;
+        let fields: Vec<_> = header.split(' ').collect();
+        if fields.len() != 3 || !matches!(fields[0], "100644" | "100755") || fields[1] != "blob" {
+            return Err(ArtifactError::invalid(
+                "candidate tree contains an unsupported link or object type",
+            ));
+        }
+        let blob = git_output(
+            repository,
+            &["cat-file".into(), "blob".into(), fields[2].into()],
+            "candidate content",
+        )?;
+        if blob.len() > MAX_CONTENT_BYTES {
+            return Err(ArtifactError::invalid(
+                "candidate content exceeds the supported limit",
+            ));
+        }
+        for field in [path.as_bytes(), fields[0].as_bytes(), blob.as_slice()] {
+            hash.update((field.len() as u64).to_be_bytes());
+            hash.update(field);
+        }
+    }
+    Ok(winwincode_domain::Sha256Digest(format!(
+        "sha256:{:x}",
+        hash.finalize()
+    )))
 }
 
 fn require_descendant(

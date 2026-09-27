@@ -4,12 +4,18 @@
 use serde::Deserialize;
 use serde_json::Value;
 
-use winwincode_control_plane::fusion_analysis::{FusionCandidateClaims, FusionClaim, FusionClaimPosition, FusionEvidence};
+use winwincode_control_plane::fusion_analysis::{
+    FusionCandidateClaims, FusionClaim, FusionClaimPosition, FusionEvidence,
+};
 use winwincode_control_plane::fusion_knowledge::{
     ClaimState, EvidenceDirection, EvidenceStrength, FusionEvidenceRecord, build_claim_graph,
-    refute_claim,
+    refute_claim, refute_claim_with_verified_counter,
 };
 use winwincode_delivery::domain::EvidenceRefType;
+use winwincode_fusion::evidence::{
+    ClaimTarget, ClaimVerification, EvidenceLedger, SourceReceipt, SourceReceiptKind,
+    VerificationConclusion,
+};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -130,14 +136,23 @@ fn check_fixture(raw: &str) {
         }
     }
     if fixture.expected.must_trigger_investigation == Some(true) {
-        assert!(graph
-            .disputed_or_investigating()
-            .iter()
-            .any(|claim| claim.state == ClaimState::Disputed));
+        assert!(
+            graph
+                .disputed_or_investigating()
+                .iter()
+                .any(|claim| claim.state == ClaimState::Disputed)
+        );
     }
     if fixture.expected.refute_allowed_only_with_verified_counter == Some(true) {
         let id = graph.claims[0].id.clone();
         assert!(!refute_claim(&mut graph, &id));
+        let target = ClaimTarget {
+            proposition: fixture.claims[0].claims[0].claim_key.clone(),
+            scope: fixture.claims[0].claims[0].summary.clone(),
+            version: "source-digest-1".to_owned(),
+        };
+        let mut ledger = EvidenceLedger::default();
+        let mut has_verified_counter = false;
         for item in &fixture.after_evidence {
             let direction = if item.direction == "counter" {
                 EvidenceDirection::Counter
@@ -157,13 +172,37 @@ fn check_fixture(raw: &str) {
                 verified: item.verified,
                 invalidated: false,
             };
-            if direction == EvidenceDirection::Counter && record.verified {
-                graph.claims[0].has_verified_counter = true;
-            }
             graph.evidence.push(record);
+            if direction == EvidenceDirection::Counter && item.verified {
+                has_verified_counter = true;
+                let receipt = ledger
+                    .register_source_receipt(SourceReceipt {
+                        id: format!("receipt-{}", item.kind),
+                        kind: SourceReceiptKind::Test,
+                        locator: format!("test:{}", item.provider),
+                        version: target.version.clone(),
+                        execution_owner: "fixture-verifier".to_owned(),
+                        content_digest: "ab".repeat(32),
+                    })
+                    .expect("fixture source receipt registers");
+                ledger
+                    .record_claim_verification(ClaimVerification {
+                        id: format!("verification-{}", item.kind),
+                        proposition: target.proposition.clone(),
+                        scope: target.scope.clone(),
+                        version: target.version.clone(),
+                        conclusion: VerificationConclusion::Counter,
+                        source_receipt_ids: vec![receipt.id],
+                        verifier: "fixture-verifier".to_owned(),
+                    })
+                    .expect("fixture claim verification registers");
+            }
         }
-        if graph.claims[0].has_verified_counter {
-            assert!(refute_claim(&mut graph, &id));
+        assert!(!refute_claim(&mut graph, &id));
+        if has_verified_counter {
+            assert!(refute_claim_with_verified_counter(
+                &mut graph, &id, &target, &ledger,
+            ));
             assert_eq!(graph.claims[0].state, ClaimState::Refuted);
         }
     }
@@ -199,7 +238,9 @@ fn regression_q2_root_float_precision() {
 
 #[test]
 fn regression_q2_blocking_ci() {
-    check_fixture(include_str!("../../../fusion-regression/q2-blocking-ci.json"));
+    check_fixture(include_str!(
+        "../../../fusion-regression/q2-blocking-ci.json"
+    ));
 }
 
 #[test]

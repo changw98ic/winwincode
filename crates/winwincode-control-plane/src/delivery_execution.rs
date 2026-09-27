@@ -290,10 +290,11 @@ pub(crate) fn validate_workrun_execution_job(
                     || target.evidence_ref_ids.is_empty()
             })
             || !sha256_digest(&authorization.authorization_digest.0)
-            || !authorization
-                .candidate_ref
-                .strip_prefix("git-candidate:sha256:")
-                .is_some_and(lowercase_sha256))
+            || authorization.candidate_ref
+                != format!(
+                    "refs/winwincode/candidates/{}",
+                    authorization.source_candidate_commit_id
+                ))
     {
         return Err(DeliveryExecutionError::InvalidEffect(
             "WorkRun rework authorization digest or candidate is invalid".to_owned(),

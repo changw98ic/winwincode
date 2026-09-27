@@ -789,7 +789,9 @@ async fn run_local(label: &str) -> (Vec<u8>, Vec<String>) {
         .enqueue_control(ExecutionPortMessage::JobDispatchMessage(dispatch()))
         .unwrap();
     assert_eq!(Box::pin(launcher.drive(now())).await.unwrap(), 1);
-    launcher.heartbeat(now()).await.unwrap();
+    let heartbeat = launcher.heartbeat(now());
+    assert!(size_of_val(&heartbeat) < 16 * 1024);
+    heartbeat.await.unwrap();
     Box::pin(launcher.poll_codex(now())).await.unwrap();
     assert_eq!(launcher.active_job_count(), 0);
     assert_eq!(
@@ -1010,11 +1012,11 @@ async fn run_remote() -> Vec<u8> {
     let registration_started_at = config.started_at.clone();
     let mut worker = WorkerMain::new(config, port, FixtureCodex::completed(), workspaces)
         .with_registration_request_namespace(&registration_instance, &registration_started_at);
-    worker.start(now()).await.unwrap();
+    Box::pin(worker.start(now())).await.unwrap();
     Box::pin(drain_remote(&mut worker, &handle)).await;
     handle.route_control(ExecutionPortMessage::JobDispatchMessage(dispatch()));
     Box::pin(drain_remote(&mut worker, &handle)).await;
-    worker.heartbeat(now()).await.unwrap();
+    Box::pin(worker.heartbeat(now())).await.unwrap();
     Box::pin(worker.poll_codex(now())).await.unwrap();
     Box::pin(drain_remote(&mut worker, &handle)).await;
     Box::pin(worker.shutdown(now())).await.unwrap();

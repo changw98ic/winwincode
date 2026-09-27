@@ -795,7 +795,8 @@ fn validate_transition_delta(
         .all(|evidence| {
             evidence.evidence_type == EvidenceRefType::Commit
                 && evidence.source_ref.starts_with("git_commit:")
-                && evidence.candidate_ref == transition.candidate_ref
+                && evidence.candidate_id == transition.event.verdict.candidate_id
+                && evidence.snapshot_id == transition.event.verdict.snapshot_id
                 && current_writer.is_some_and(|binding| {
                     evidence.work_run_id == binding.work_run_id
                         && evidence.session_binding_id == binding.id

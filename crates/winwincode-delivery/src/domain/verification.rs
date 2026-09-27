@@ -39,14 +39,13 @@ use crate::application::workrun_execution::{
     TerminalArtifactReference, TerminalOutcomeStatus, VerifiedTerminalOutcome,
 };
 
-use super::candidate::assert_validated_git_snapshot_fact;
 use super::{
     AcceptanceCriterionId, Delivery, DeliveryValidationError, DeliveryValidationErrorCode,
     FrozenDeliveryCandidate, MAX_REFERENCE_LENGTH, MAX_SAFE_INTEGER, MAX_TEXT_LENGTH,
-    RepositoryRef, SessionBinding, SessionBindingId, ValidatedGitSnapshotFact,
-    assert_frozen_candidate_current, bounded_text, collection_length, portable_identifier,
-    validation_error,
+    RepositoryRef, SessionBinding, SessionBindingId, assert_frozen_candidate_current, bounded_text,
+    collection_length, portable_identifier, validation_error,
 };
+use winwincode_domain::{CanonicalSnapshot, SnapshotId, verify_snapshot_seal};
 
 const MAX_EXECUTION_ATTEMPT: u64 = 1_000;
 
@@ -62,18 +61,6 @@ struct FencedExecutionIdentity<'fact> {
 }
 
 impl<'fact> FencedExecutionIdentity<'fact> {
-    fn verified(outcome: &'fact VerifiedTerminalOutcome) -> Self {
-        Self {
-            execution_job_id: outcome.execution_job_id(),
-            attempt: outcome.attempt(),
-            lease_id: outcome.lease_id(),
-            fencing_token: outcome.fencing_token(),
-            worker_id: outcome.worker_id(),
-            worker_instance_id: outcome.worker_instance_id(),
-            worker_session_id: outcome.worker_session_id(),
-        }
-    }
-
     fn outcome(outcome: &'fact AcceptedVerificationJobOutcomeFact) -> Self {
         Self {
             execution_job_id: &outcome.execution_job_id,
@@ -83,18 +70,6 @@ impl<'fact> FencedExecutionIdentity<'fact> {
             worker_id: &outcome.worker_id,
             worker_instance_id: &outcome.worker_instance_id,
             worker_session_id: &outcome.worker_session_id,
-        }
-    }
-
-    fn snapshot(snapshot: &'fact ValidatedGitSnapshotFact) -> Self {
-        Self {
-            execution_job_id: snapshot.execution_job_id(),
-            attempt: snapshot.attempt(),
-            lease_id: snapshot.lease_id(),
-            fencing_token: snapshot.fencing_token(),
-            worker_id: snapshot.worker_id(),
-            worker_instance_id: snapshot.worker_instance_id(),
-            worker_session_id: snapshot.worker_session_id(),
         }
     }
 
@@ -261,8 +236,8 @@ pub(crate) struct VerificationSessionFacts {
     pub(crate) session_binding_id: SessionBindingId,
     pub(crate) workspace_mode: VerificationWorkspaceMode,
     pub(crate) permission_profile: VerificationPermissionProfile,
-    pub(crate) pre_candidate_snapshot: Option<ValidatedGitSnapshotFact>,
-    pub(crate) post_candidate_snapshot: Option<ValidatedGitSnapshotFact>,
+    pub(crate) pre_candidate_snapshot: Option<CanonicalSnapshot>,
+    pub(crate) post_candidate_snapshot: Option<CanonicalSnapshot>,
     pub(crate) accepted_job_outcome: Option<AcceptedVerificationJobOutcomeFact>,
     /// A Codex runtime event, intentionally insufficient for settlement.
     pub(crate) codex_turn_completed: bool,
@@ -276,6 +251,7 @@ pub(crate) struct VerificationSessionFacts {
 /// transport callers cannot construct this value or any sealed attestation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerificationFacts {
+    pub(crate) snapshot: CanonicalSnapshot,
     pub(crate) required_roles: Vec<VerificationRole>,
     pub(crate) sessions: Vec<VerificationSessionFacts>,
 }
@@ -284,6 +260,7 @@ pub struct VerificationFacts {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VerificationAssignment {
+    snapshot_id: SnapshotId,
     role: VerificationRole,
     work_run_id: WorkRunId,
     session_binding_id: SessionBindingId,
@@ -368,6 +345,7 @@ pub enum VerificationTerminalSettlement {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AcceptedVerificationJobOutcomeFact {
+    snapshot_id: SnapshotId,
     product_session_id: ProductSessionId,
     work_run_id: WorkRunId,
     role_id: String,
@@ -384,68 +362,44 @@ pub struct AcceptedVerificationJobOutcomeFact {
     status: VerificationJobOutcomeStatus,
     terminal_candidate_tree_id: String,
     artifacts: Vec<TerminalArtifactReference>,
-    #[serde(skip)]
-    read_only_candidate_source: bool,
 }
 
 impl AcceptedVerificationJobOutcomeFact {
-    /// Joins the stage coordinator's sealed outcome to one adapter-sealed Job
-    /// snapshot. No caller-supplied identity or terminal timestamp is copied.
+    /// Joins a current fenced terminal to its durably assigned canonical Snapshot.
     pub(crate) fn from_verified_outcome(
         outcome: &VerifiedTerminalOutcome,
-        snapshot: &ValidatedGitSnapshotFact,
+        binding: &SessionBinding,
+        snapshot: &CanonicalSnapshot,
         role_id: impl Into<String>,
-    ) -> Result<Self, DeliveryValidationError> {
-        Self::from_verified_outcome_mode(outcome, snapshot, role_id, true, false)
-    }
-
-    /// Joins a read-only verification terminal to the frozen writer
-    /// candidate checkout. The verifier does not produce a second candidate
-    /// Artifact; its terminal identity and runtime facts remain independently
-    /// fenced by its own Worker lease.
-    pub(crate) fn from_verified_read_only_outcome(
-        outcome: &VerifiedTerminalOutcome,
-        snapshot: &ValidatedGitSnapshotFact,
-        role_id: impl Into<String>,
-    ) -> Result<Self, DeliveryValidationError> {
-        Self::from_verified_outcome_mode(outcome, snapshot, role_id, false, true)
-    }
-
-    fn from_verified_outcome_mode(
-        outcome: &VerifiedTerminalOutcome,
-        snapshot: &ValidatedGitSnapshotFact,
-        role_id: impl Into<String>,
-        require_artifact: bool,
-        read_only_candidate_source: bool,
     ) -> Result<Self, DeliveryValidationError> {
         let role_id = role_id.into();
         portable_identifier(&role_id, "verification.terminal.roleId")?;
-        let exact_artifact = outcome.artifacts().iter().any(|artifact| {
-            artifact.artifact_id.0 == snapshot.artifact_ref()
-                && &artifact.digest == snapshot.artifact_digest()
-        });
-        let exact_metadata = outcome.codex_thread_id() == Some(snapshot.codex_thread_id())
-            && outcome.finished_at_millis() == snapshot.finished_at_millis()
-            && u64::try_from(outcome.last_event_sequence().0).ok()
-                == Some(snapshot.last_event_sequence())
-            && (!require_artifact || exact_artifact);
-        if FencedExecutionIdentity::verified(outcome) != FencedExecutionIdentity::snapshot(snapshot)
-            || outcome.work_run_id() != snapshot.work_run_id()
-            || !exact_metadata
+        let thread = outcome.codex_thread_id().ok_or_else(|| {
+            invalid_verification("verification.terminal", "CodexThread is missing")
+        })?;
+        if !verify_snapshot_seal(snapshot)
+            || outcome.work_run_id() != &binding.work_run_id
+            || outcome.execution_job_id() != &binding.execution_job_id
+            || outcome.attempt() != binding.attempt
+            || binding.lease_id.as_ref() != Some(outcome.lease_id())
+            || binding.fencing_token.as_ref() != Some(outcome.fencing_token())
+            || binding.worker_id.as_ref() != Some(outcome.worker_id())
+            || binding.worker_instance_id.as_ref() != Some(outcome.worker_instance_id())
+            || binding.worker_session_id.as_ref() != Some(outcome.worker_session_id())
+            || binding.codex_thread_id.as_ref() != Some(thread)
+            || binding.execution_profile.as_deref() != Some(role_id.as_str())
+            || snapshot.as_contract().created_at_millis < 0
+            || u64::try_from(snapshot.as_contract().created_at_millis)
+                .map_or(true, |created| created > outcome.finished_at_millis())
         {
             return Err(relationship_mismatch(
                 "verification.terminal",
-                "verified terminal outcome and sealed Job snapshot identity, time, sequence, CodexThread, or Artifact differ",
+                "terminal does not match its current Snapshot assignment",
             ));
         }
-        let last_event_sequence = i64::try_from(snapshot.last_event_sequence()).map_err(|_| {
-            invalid_verification(
-                "verification.terminal.lastEventSequence",
-                "snapshot sequence exceeds the supported safe integer range",
-            )
-        })?;
         Ok(Self {
-            product_session_id: snapshot.product_session_id().clone(),
+            snapshot_id: snapshot.snapshot_id().clone(),
+            product_session_id: binding.product_session_id.clone(),
             work_run_id: outcome.work_run_id().clone(),
             role_id,
             execution_job_id: outcome.execution_job_id().clone(),
@@ -455,9 +409,9 @@ impl AcceptedVerificationJobOutcomeFact {
             worker_id: outcome.worker_id().clone(),
             worker_instance_id: outcome.worker_instance_id().clone(),
             worker_session_id: outcome.worker_session_id().clone(),
-            codex_thread_id: snapshot.codex_thread_id().clone(),
-            last_event_sequence: ExecutionAckSequence(last_event_sequence),
-            finished_at_millis: snapshot.finished_at_millis(),
+            codex_thread_id: thread.clone(),
+            last_event_sequence: ExecutionAckSequence(outcome.last_event_sequence().0),
+            finished_at_millis: outcome.finished_at_millis(),
             status: match outcome.status() {
                 TerminalOutcomeStatus::Succeeded => VerificationJobOutcomeStatus::Succeeded,
                 TerminalOutcomeStatus::Failed => VerificationJobOutcomeStatus::Failed,
@@ -466,10 +420,13 @@ impl AcceptedVerificationJobOutcomeFact {
                 }
                 TerminalOutcomeStatus::Cancelled => VerificationJobOutcomeStatus::Cancelled,
             },
-            terminal_candidate_tree_id: snapshot.candidate_tree_id().into(),
+            terminal_candidate_tree_id: snapshot.as_contract().candidate_tree_id.0.clone(),
             artifacts: outcome.artifacts().to_vec(),
-            read_only_candidate_source,
         })
+    }
+
+    pub(crate) fn snapshot_id(&self) -> &SnapshotId {
+        &self.snapshot_id
     }
 
     pub(crate) fn product_session_id(&self) -> &ProductSessionId {
@@ -520,7 +477,8 @@ impl AcceptedVerificationJobOutcomeFact {
         &self.last_event_sequence
     }
 
-    pub(crate) fn finished_at_millis(&self) -> u64 {
+    #[must_use]
+    pub fn finished_at_millis(&self) -> u64 {
         self.finished_at_millis
     }
 
@@ -648,6 +606,7 @@ impl VerificationRoleSettlement {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IndependentVerification {
+    snapshot: CanonicalSnapshot,
     candidate_ref: String,
     settlements: Vec<VerificationRoleSettlement>,
     #[serde(skip)]
@@ -655,6 +614,11 @@ pub struct IndependentVerification {
 }
 
 impl IndependentVerification {
+    #[must_use]
+    pub fn snapshot(&self) -> &CanonicalSnapshot {
+        &self.snapshot
+    }
+
     #[must_use]
     pub fn candidate_ref(&self) -> &str {
         &self.candidate_ref
@@ -861,7 +825,42 @@ pub fn validate_independent_verification(
         });
     }
 
+    let snapshots: Vec<_> = facts
+        .sessions
+        .iter()
+        .filter_map(|session| session.pre_candidate_snapshot.as_ref())
+        .collect();
+    if snapshots.windows(2).any(|pair| pair[0] != pair[1]) {
+        return Err(relationship_mismatch(
+            "verification.snapshotId",
+            "verification roles disagree about their canonical Snapshot product",
+        ));
+    }
+    if !verify_snapshot_seal(&facts.snapshot)
+        || !snapshot_matches_candidate(&facts.snapshot, candidate)
+        || snapshots
+            .iter()
+            .any(|snapshot| *snapshot != &facts.snapshot)
+    {
+        return Err(relationship_mismatch(
+            "verification.snapshotId",
+            "verification must resolve to its canonical Candidate and Snapshot",
+        ));
+    }
+    let snapshot_ids: HashSet<_> = settlements
+        .iter()
+        .filter_map(|settlement| settlement.assignment.as_ref())
+        .map(|assignment| &assignment.snapshot_id)
+        .collect();
+    if snapshot_ids.len() > 1 {
+        return Err(relationship_mismatch(
+            "verification.snapshotId",
+            "all verification roles must consume the same canonical Snapshot",
+        ));
+    }
+
     Ok(IndependentVerification {
+        snapshot: facts.snapshot.clone(),
         candidate_ref: candidate.candidate_ref().into(),
         settlements,
         source_delivery_seal: seal_source_delivery(delivery)?,
@@ -1024,16 +1023,14 @@ fn validate_assignment(
     else {
         return Ok(None);
     };
-    assert_validated_git_snapshot_fact(checkout)?;
-    if !snapshot_matches_assignment(checkout, run, binding)
-        || !snapshot_matches_candidate(checkout, candidate)
-    {
+    if !verify_snapshot_seal(checkout) || !snapshot_matches_candidate(checkout, candidate) {
         return Err(relationship_mismatch(
             &format!("{path}.candidateCheckout"),
             "checkout must bind the complete current assignment to every frozen candidate Git fact",
         ));
     }
     Ok(Some(VerificationAssignment {
+        snapshot_id: checkout.snapshot_id().clone(),
         role: session.role,
         work_run_id: run.id.clone(),
         session_binding_id: binding.id.clone(),
@@ -1041,37 +1038,23 @@ fn validate_assignment(
         execution_job_id: binding.execution_job_id.clone(),
         worker_session_id: worker_session_id.clone(),
         codex_thread_id: codex_thread_id.clone(),
-        repository: checkout.repository().clone(),
-        checkout_revision: checkout.candidate_commit_id().into(),
+        repository: candidate.repository().clone(),
+        checkout_revision: checkout.as_contract().candidate_commit_id.0.clone(),
     }))
 }
 
-fn snapshot_matches_assignment(
-    snapshot: &ValidatedGitSnapshotFact,
-    run: &winwincode_domain::WorkRun,
-    binding: &SessionBinding,
-) -> bool {
-    snapshot.work_run_id() == &binding.work_run_id
-        && snapshot.session_binding_id() == &binding.id
-        && snapshot.product_session_id() == &binding.product_session_id
-        && snapshot.execution_job_id() == &binding.execution_job_id
-        && snapshot.attempt() == u64::try_from(run.attempt).unwrap_or(0)
-        && binding.worker_session_id.as_ref() == Some(snapshot.worker_session_id())
-        && binding.codex_thread_id.as_ref() == Some(snapshot.codex_thread_id())
-}
-
-fn snapshot_matches_candidate(
-    snapshot: &ValidatedGitSnapshotFact,
+pub(crate) fn snapshot_matches_candidate(
+    snapshot: &CanonicalSnapshot,
     candidate: &FrozenDeliveryCandidate,
 ) -> bool {
-    snapshot.repository() == candidate.repository()
-        && snapshot.base_commit_id() == candidate.base_commit_id()
-        && snapshot.base_tree_id() == candidate.base_tree_id()
-        && snapshot.candidate_commit_id() == candidate.candidate_commit_id()
-        && snapshot.candidate_tree_id() == candidate.candidate_tree_id()
-        && snapshot.diff_sha256() == candidate.diff_sha256()
-        && snapshot.changed_paths() == candidate.changed_paths()
-        && snapshot.changed_hunks() == candidate.changed_hunks()
+    let facts = snapshot.as_contract();
+    facts.candidate_id == *candidate.candidate_id()
+        && facts.work_run_id == *candidate.producer_work_run_id()
+        && facts.base_commit_id.0 == candidate.base_commit_id()
+        && facts.base_tree_id.0 == candidate.base_tree_id()
+        && facts.candidate_commit_id.0 == candidate.candidate_commit_id()
+        && facts.candidate_tree_id.0 == candidate.candidate_tree_id()
+        && facts.diff_sha256.0.strip_prefix("sha256:") == Some(candidate.diff_sha256())
 }
 
 fn validate_terminal_job_outcome(
@@ -1098,7 +1081,8 @@ fn validate_terminal_job_outcome(
         ));
     };
     validate_outcome_shape(outcome, path)?;
-    let identity_matches = outcome.work_run_id == binding.work_run_id
+    let identity_matches = outcome.snapshot_id == assignment.snapshot_id
+        && outcome.work_run_id == binding.work_run_id
         && outcome.product_session_id == binding.product_session_id
         && outcome.role_id == session.role.as_str()
         && outcome.execution_job_id == binding.execution_job_id
@@ -1247,8 +1231,8 @@ fn validate_mutation_records(
 }
 
 fn validate_snapshot_pair(
-    run: &winwincode_domain::WorkRun,
-    binding: &SessionBinding,
+    _run: &winwincode_domain::WorkRun,
+    _binding: &SessionBinding,
     session: &VerificationSessionFacts,
     outcome: &AcceptedVerificationJobOutcomeFact,
     candidate: &FrozenDeliveryCandidate,
@@ -1260,52 +1244,24 @@ fn validate_snapshot_pair(
         .zip(session.post_candidate_snapshot.as_ref())
     else {
         return Err(relationship_mismatch(
-            &format!("{path}.candidateSnapshots"),
-            "settlement requires sealed pre- and post-verification Git snapshots",
+            path,
+            "settlement requires its canonical Snapshot",
         ));
     };
-    assert_validated_git_snapshot_fact(before)?;
-    assert_validated_git_snapshot_fact(after)?;
-    let terminal_sequence = u64::try_from(outcome.last_event_sequence.0).unwrap_or_default();
-    let exact_runtime_identity = [before, after].iter().all(|snapshot| {
-        FencedExecutionIdentity::snapshot(snapshot) == FencedExecutionIdentity::outcome(outcome)
-            && snapshot_matches_assignment(snapshot, run, binding)
-            && terminal_names_snapshot(outcome, snapshot)
-    });
-    let exact_candidate = [before, after]
-        .iter()
-        .all(|snapshot| snapshot_matches_candidate(snapshot, candidate));
-    let same_git_facts = before.repository() == after.repository()
-        && before.base_commit_id() == after.base_commit_id()
-        && before.base_tree_id() == after.base_tree_id()
-        && before.candidate_commit_id() == after.candidate_commit_id()
-        && before.candidate_tree_id() == after.candidate_tree_id()
-        && before.diff_sha256() == after.diff_sha256()
-        && before.changed_paths() == after.changed_paths()
-        && before.changed_hunks() == after.changed_hunks();
-    let observations_are_ordered = binding.bound_at_millis <= before.finished_at_millis()
-        && before.finished_at_millis() <= after.finished_at_millis()
-        && after.finished_at_millis() <= outcome.finished_at_millis
-        && before.last_event_sequence() <= after.last_event_sequence()
-        && after.last_event_sequence() <= terminal_sequence;
-    if !exact_runtime_identity || !exact_candidate || !same_git_facts || !observations_are_ordered {
+    if before != after
+        || !verify_snapshot_seal(before)
+        || before.snapshot_id() != &outcome.snapshot_id
+        || !snapshot_matches_candidate(before, candidate)
+        || before.as_contract().created_at_millis < 0
+        || u64::try_from(before.as_contract().created_at_millis)
+            .map_or(true, |created| created > outcome.finished_at_millis)
+    {
         return Err(relationship_mismatch(
-            &format!("{path}.candidateSnapshots"),
-            "sealed pre/post snapshots must be ordered observations of one terminal fenced Job and unchanged frozen candidate",
+            path,
+            "verification result must resolve to the same immutable Snapshot and candidate",
         ));
     }
     Ok(())
-}
-
-fn terminal_names_snapshot(
-    outcome: &AcceptedVerificationJobOutcomeFact,
-    snapshot: &ValidatedGitSnapshotFact,
-) -> bool {
-    outcome.read_only_candidate_source
-        || outcome.artifacts.iter().any(|artifact| {
-            artifact.artifact_id.0 == snapshot.artifact_ref()
-                && &artifact.digest == snapshot.artifact_digest()
-        })
 }
 
 fn validate_findings(
@@ -1526,14 +1482,13 @@ pub(crate) mod test_support {
 
     use super::*;
     use crate::application::workrun_execution::{
-        TerminalArtifactReference, TerminalOutcomeStatus,
+        TerminalOutcomeStatus,
         test_support::{
             active_lease_identity, terminal_outcome_metadata, terminal_worker_outcome,
             verify_terminal_outcome,
         },
     };
-    use crate::domain::candidate::test_support::validated_candidate_checkout;
-    use winwincode_domain::ArtifactId;
+    use crate::domain::candidate::test_support::canonical_snapshot_fixture;
 
     #[allow(dead_code)]
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1568,6 +1523,7 @@ pub(crate) mod test_support {
             "verification fixture requires one acceptance criterion"
         );
         IndependentVerification {
+            snapshot: canonical_snapshot_fixture(candidate),
             candidate_ref: candidate.candidate_ref().into(),
             settlements: vec![
                 fixture_settlement(
@@ -1609,6 +1565,7 @@ pub(crate) mod test_support {
             delivery,
             candidate,
             &VerificationFacts {
+                snapshot: canonical_snapshot_fixture(candidate),
                 required_roles: vec![VerificationRole::Reviewer, VerificationRole::Verifier],
                 sessions,
             },
@@ -1699,12 +1656,7 @@ pub(crate) mod test_support {
         let role_id = role.as_str();
         let (binding, _) = current_role_authority(delivery, role, "verification.fixture")
             .expect("verification fixture current role authority");
-        let snapshot = validated_candidate_checkout(
-            delivery,
-            binding.bound_at_millis.saturating_add(9),
-            &binding.id,
-            candidate,
-        );
+        let snapshot = canonical_snapshot_fixture(candidate);
         let terminal_status = match state {
             VerificationFixtureState::InfrastructureFailed => {
                 TerminalOutcomeStatus::InfrastructureError
@@ -1731,7 +1683,8 @@ pub(crate) mod test_support {
             | VerificationFixtureState::SettledFail => TerminalOutcomeStatus::Succeeded,
             VerificationFixtureState::Missing => unreachable!("filtered before construction"),
         };
-        let terminal = accepted_terminal_outcome(delivery, &snapshot, terminal_status, role_id);
+        let terminal =
+            accepted_terminal_outcome(delivery, binding, &snapshot, terminal_status, role_id);
         let findings = match state {
             VerificationFixtureState::SettledPass | VerificationFixtureState::SettledFail => {
                 let conclusion = if state == VerificationFixtureState::SettledPass {
@@ -1774,21 +1727,22 @@ pub(crate) mod test_support {
 
     fn accepted_terminal_outcome(
         delivery: &Delivery,
-        snapshot: &ValidatedGitSnapshotFact,
+        binding: &SessionBinding,
+        snapshot: &CanonicalSnapshot,
         status: TerminalOutcomeStatus,
         role_id: &str,
     ) -> AcceptedVerificationJobOutcomeFact {
         let lease = active_lease_identity(
-            snapshot.execution_job_id().clone(),
-            snapshot.attempt(),
-            snapshot.lease_id().clone(),
-            snapshot.fencing_token().clone(),
-            snapshot.worker_id().clone(),
-            snapshot.worker_instance_id().clone(),
-            snapshot.worker_session_id().clone(),
+            binding.execution_job_id.clone(),
+            binding.attempt,
+            binding.lease_id.as_ref().unwrap().clone(),
+            binding.fencing_token.as_ref().unwrap().clone(),
+            binding.worker_id.as_ref().unwrap().clone(),
+            binding.worker_instance_id.as_ref().unwrap().clone(),
+            binding.worker_session_id.as_ref().unwrap().clone(),
         );
         let outcome = terminal_worker_outcome(
-            snapshot.work_run_id().clone(),
+            binding.work_run_id.clone(),
             lease.execution_job_id().clone(),
             lease.attempt(),
             lease.lease_id().clone(),
@@ -1798,16 +1752,12 @@ pub(crate) mod test_support {
             lease.worker_session_id().clone(),
             status,
             terminal_outcome_metadata(
-                Some(snapshot.codex_thread_id().clone()),
-                snapshot.finished_at_millis(),
+                Some(binding.codex_thread_id.as_ref().unwrap().clone()),
+                binding.bound_at_millis.saturating_add(9),
                 ExecutionAckSequence(
-                    i64::try_from(snapshot.last_event_sequence())
-                        .expect("verification fixture terminal sequence"),
+                    i64::try_from(12_u64).expect("verification fixture terminal sequence"),
                 ),
-                vec![TerminalArtifactReference {
-                    artifact_id: ArtifactId(snapshot.artifact_ref().into()),
-                    digest: snapshot.artifact_digest().clone(),
-                }],
+                vec![],
             ),
         );
         let verified = if status == TerminalOutcomeStatus::Succeeded {
@@ -1826,7 +1776,7 @@ pub(crate) mod test_support {
                 .work_run_aggregate
                 .runs
                 .iter_mut()
-                .find(|run| run.id == *snapshot.work_run_id())
+                .find(|run| run.id == binding.work_run_id)
                 .expect("verification fixture active WorkRun")
                 .state = winwincode_domain::WorkRunState::Running;
             let active = Delivery::try_from_snapshot(active_snapshot)
@@ -1834,8 +1784,10 @@ pub(crate) mod test_support {
             verify_terminal_outcome(&active, &lease, outcome)
         }
         .expect("verification fixture accepted terminal outcome");
-        AcceptedVerificationJobOutcomeFact::from_verified_outcome(&verified, snapshot, role_id)
-            .expect("verification fixture terminal snapshot join")
+        AcceptedVerificationJobOutcomeFact::from_verified_outcome(
+            &verified, binding, snapshot, role_id,
+        )
+        .expect("verification fixture terminal snapshot join")
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1860,7 +1812,9 @@ pub(crate) mod test_support {
             .codex_thread_id
             .clone()
             .expect("verification fixture requires one CodexThread");
+        let snapshot = canonical_snapshot_fixture(candidate);
         let assignment = VerificationAssignment {
+            snapshot_id: snapshot.snapshot_id().clone(),
             role,
             work_run_id: binding.work_run_id.clone(),
             session_binding_id: binding.id.clone(),
@@ -1884,6 +1838,7 @@ pub(crate) mod test_support {
             VerificationFixtureState::Missing => unreachable!("handled above"),
         };
         let terminal = AcceptedVerificationJobOutcomeFact {
+            snapshot_id: snapshot.snapshot_id().clone(),
             product_session_id: binding.product_session_id.clone(),
             work_run_id: binding.work_run_id.clone(),
             role_id: role_id.into(),
@@ -1900,7 +1855,6 @@ pub(crate) mod test_support {
             status: outcome_status,
             terminal_candidate_tree_id: candidate.candidate_tree_id().into(),
             artifacts: vec![],
-            read_only_candidate_source: false,
         };
         let (session_state, terminal_job_outcome, terminal_settlement, findings) = match state {
             VerificationFixtureState::Running => {
@@ -1992,22 +1946,16 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::workrun_execution::{
-        TerminalArtifactReference,
-        test_support::{
-            active_lease_identity, terminal_outcome_metadata, terminal_worker_outcome,
-            verify_terminal_outcome,
-        },
+    use crate::application::workrun_execution::test_support::{
+        active_lease_identity, terminal_outcome_metadata, terminal_worker_outcome,
+        verify_terminal_outcome,
     };
-    use crate::domain::candidate::{
-        CandidateHunkFact,
-        test_support::{frozen_candidate, validated_git_snapshot, with_changed_hunks},
-    };
+    use crate::domain::candidate::test_support::{canonical_snapshot_fixture, frozen_candidate};
     use crate::domain::{
         Delivery, DeliveryStatus, FrozenDeliveryCandidate, SessionBinding, SessionBindingId,
         SessionBindingSourceProvenance, test_fixture,
     };
-    use winwincode_domain::{ArtifactId, DeliveryId, WorkRunState};
+    use winwincode_domain::{DeliveryId, WorkRunState};
 
     const WRITER_BINDING_ID: &str = "binding-executor-1";
     const REVIEWER_BINDING_ID: &str = "binding-reviewer-1";
@@ -2114,6 +2062,7 @@ mod tests {
             delivery,
             candidate,
             VerificationFacts {
+                snapshot: sessions[0].pre_candidate_snapshot.clone().unwrap(),
                 required_roles,
                 sessions,
             },
@@ -2132,7 +2081,7 @@ mod tests {
             .iter()
             .find(|binding| binding.id.0 == session_binding_id)
             .expect("verification fixture binding");
-        let snapshot = validated_git_snapshot(
+        let snapshot = verification_snapshot(
             delivery,
             binding.bound_at_millis.saturating_add(9),
             &SessionBindingId(session_binding_id.into()),
@@ -2141,7 +2090,12 @@ mod tests {
             candidate.diff_sha256(),
             candidate.changed_paths().to_vec(),
         );
-        let terminal = terminal_outcome(delivery, &snapshot, TerminalOutcomeStatus::Succeeded);
+        let terminal = terminal_outcome(
+            delivery,
+            &binding.id,
+            &snapshot,
+            TerminalOutcomeStatus::Succeeded,
+        );
         VerificationSessionFacts {
             role,
             work_run_id: binding.work_run_id.clone(),
@@ -2165,6 +2119,36 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn verification_snapshot(
+        delivery: &Delivery,
+        _observed_at: u64,
+        _binding: &SessionBindingId,
+        commit: &str,
+        tree: &str,
+        diff: &str,
+        _paths: Vec<crate::domain::candidate::CandidatePathFact>,
+    ) -> CanonicalSnapshot {
+        let candidate = frozen_candidate(
+            delivery,
+            1_800_000_000_020,
+            &SessionBindingId(WRITER_BINDING_ID.into()),
+        );
+        let mut value = canonical_snapshot_fixture(&candidate).into_contract();
+        value.candidate_commit_id.0 = commit.into();
+        value.candidate_tree_id.0 = tree.into();
+        value.diff_sha256.0 = format!("sha256:{diff}");
+        value.repository_id.0 = format!(
+            "rep_0{}",
+            &format!(
+                "{:X}",
+                Sha256::digest(delivery.snapshot().spec.repository.locator.as_bytes())
+            )[..25]
+        );
+        value.validation_seal = winwincode_domain::seal_snapshot(&value);
+        value.try_into().unwrap()
+    }
+
     fn fixture_role(delivery: &Delivery, binding_id: &SessionBindingId) -> String {
         delivery
             .snapshot()
@@ -2177,43 +2161,59 @@ mod tests {
 
     fn terminal_outcome(
         delivery: &Delivery,
-        snapshot: &ValidatedGitSnapshotFact,
+        binding_id: &SessionBindingId,
+        snapshot: &CanonicalSnapshot,
         status: TerminalOutcomeStatus,
     ) -> AcceptedVerificationJobOutcomeFact {
-        let role = fixture_role(delivery, snapshot.session_binding_id());
-        let verified = verified_terminal_outcome(delivery, snapshot, status);
-        AcceptedVerificationJobOutcomeFact::from_verified_outcome(&verified, snapshot, role)
-            .expect("composite terminal outcome")
+        let binding = delivery
+            .snapshot()
+            .session_bindings
+            .iter()
+            .find(|binding| &binding.id == binding_id)
+            .unwrap();
+        let role = fixture_role(delivery, binding_id);
+        let verified = verified_terminal_outcome(delivery, binding_id, snapshot, status);
+        AcceptedVerificationJobOutcomeFact::from_verified_outcome(
+            &verified, binding, snapshot, role,
+        )
+        .expect("composite terminal outcome")
     }
 
     fn verified_terminal_outcome(
         delivery: &Delivery,
-        snapshot: &ValidatedGitSnapshotFact,
+        binding_id: &SessionBindingId,
+        _snapshot: &CanonicalSnapshot,
         status: TerminalOutcomeStatus,
     ) -> VerifiedTerminalOutcome {
+        let binding = delivery
+            .snapshot()
+            .session_bindings
+            .iter()
+            .find(|binding| &binding.id == binding_id)
+            .unwrap();
         let mut active_snapshot = delivery.clone().into_snapshot();
         active_snapshot
             .work_run_aggregate
             .runs
             .iter_mut()
-            .find(|run| run.id == *snapshot.work_run_id())
+            .find(|run| run.id == binding.work_run_id)
             .expect("active WorkRun")
             .state = WorkRunState::Running;
         let active = Delivery::try_from_snapshot(active_snapshot).expect("active verification");
         let lease = active_lease_identity(
-            snapshot.execution_job_id().clone(),
-            snapshot.attempt(),
-            snapshot.lease_id().clone(),
-            snapshot.fencing_token().clone(),
-            snapshot.worker_id().clone(),
-            snapshot.worker_instance_id().clone(),
-            snapshot.worker_session_id().clone(),
+            binding.execution_job_id.clone(),
+            binding.attempt,
+            binding.lease_id.as_ref().unwrap().clone(),
+            binding.fencing_token.as_ref().unwrap().clone(),
+            binding.worker_id.as_ref().unwrap().clone(),
+            binding.worker_instance_id.as_ref().unwrap().clone(),
+            binding.worker_session_id.as_ref().unwrap().clone(),
         );
         verify_terminal_outcome(
             &active,
             &lease,
             terminal_worker_outcome(
-                snapshot.work_run_id().clone(),
+                binding.work_run_id.clone(),
                 lease.execution_job_id().clone(),
                 lease.attempt(),
                 lease.lease_id().clone(),
@@ -2223,16 +2223,12 @@ mod tests {
                 lease.worker_session_id().clone(),
                 status,
                 terminal_outcome_metadata(
-                    Some(snapshot.codex_thread_id().clone()),
-                    snapshot.finished_at_millis(),
+                    Some(binding.codex_thread_id.as_ref().unwrap().clone()),
+                    binding.bound_at_millis.saturating_add(9),
                     ExecutionAckSequence(
-                        i64::try_from(snapshot.last_event_sequence())
-                            .expect("fixture event sequence fits i64"),
+                        i64::try_from(12_u64).expect("fixture event sequence fits i64"),
                     ),
-                    vec![TerminalArtifactReference {
-                        artifact_id: ArtifactId(snapshot.artifact_ref().into()),
-                        digest: snapshot.artifact_digest().clone(),
-                    }],
+                    vec![],
                 ),
             ),
         )
@@ -2267,7 +2263,7 @@ mod tests {
         session: &mut VerificationSessionFacts,
         outcome_status: TerminalOutcomeStatus,
     ) {
-        let snapshot = validated_git_snapshot(
+        let snapshot = verification_snapshot(
             delivery,
             1_800_000_000_060,
             &session.session_binding_id,
@@ -2276,7 +2272,12 @@ mod tests {
             candidate.diff_sha256(),
             candidate.changed_paths().to_vec(),
         );
-        session.accepted_job_outcome = Some(terminal_outcome(delivery, &snapshot, outcome_status));
+        session.accepted_job_outcome = Some(terminal_outcome(
+            delivery,
+            &session.session_binding_id,
+            &snapshot,
+            outcome_status,
+        ));
         session.pre_candidate_snapshot = Some(snapshot.clone());
         session.post_candidate_snapshot = Some(snapshot);
     }
@@ -2544,12 +2545,12 @@ mod tests {
     }
 
     #[test]
-    fn running_role_rejects_a_checkout_from_another_work_run_and_session() {
+    fn running_roles_share_the_same_canonical_snapshot() {
         let (delivery, candidate, mut facts) = fixture(false);
         let running =
             with_role_work_run_state(&delivery, VerificationRole::Reviewer, WorkRunState::Running);
 
-        let foreign_checkout = validated_git_snapshot(
+        let foreign_checkout = verification_snapshot(
             &delivery,
             1_800_000_000_060,
             &SessionBindingId(VERIFIER_BINDING_ID.into()),
@@ -2565,7 +2566,7 @@ mod tests {
         reviewer.accepted_job_outcome = None;
         reviewer.findings.clear();
 
-        assert!(validate_independent_verification(&running, &candidate, &facts).is_err());
+        assert!(validate_independent_verification(&running, &candidate, &facts).is_ok());
     }
 
     #[test]
@@ -2597,7 +2598,7 @@ mod tests {
         let (delivery, candidate, facts) = fixture(false);
 
         let mut changed_tree = facts.clone();
-        changed_tree.sessions[0].post_candidate_snapshot = Some(validated_git_snapshot(
+        changed_tree.sessions[0].post_candidate_snapshot = Some(verification_snapshot(
             &delivery,
             1_800_000_000_040,
             &SessionBindingId(REVIEWER_BINDING_ID.into()),
@@ -2609,7 +2610,7 @@ mod tests {
         assert!(validate_independent_verification(&delivery, &candidate, &changed_tree).is_err());
 
         let mut changed_diff = facts.clone();
-        changed_diff.sessions[1].post_candidate_snapshot = Some(validated_git_snapshot(
+        changed_diff.sessions[1].post_candidate_snapshot = Some(verification_snapshot(
             &delivery,
             1_800_000_000_060,
             &SessionBindingId(VERIFIER_BINDING_ID.into()),
@@ -2664,22 +2665,20 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_sealed_checkout_with_hunks_from_another_candidate() {
+    fn rejects_a_canonical_snapshot_with_a_foreign_diff() {
         let (delivery, candidate, mut facts) = fixture(false);
         let reviewer = &mut facts.sessions[0];
-        let foreign_checkout = with_changed_hunks(
-            reviewer
-                .pre_candidate_snapshot
-                .clone()
-                .expect("reviewer pre-candidate snapshot"),
-            vec![CandidateHunkFact {
-                file_path: "src/invitation.rs".into(),
-                hunk_sha256: "c".repeat(64),
-                source_hunk_sha256: None,
-            }],
-        );
+        let mut foreign = reviewer
+            .pre_candidate_snapshot
+            .clone()
+            .unwrap()
+            .into_contract();
+        foreign.diff_sha256.0 = format!("sha256:{}", "c".repeat(64));
+        foreign.validation_seal = winwincode_domain::seal_snapshot(&foreign);
+        let foreign_checkout = foreign.try_into().unwrap();
         reviewer.accepted_job_outcome = Some(terminal_outcome(
             &delivery,
+            &SessionBindingId(REVIEWER_BINDING_ID.into()),
             &foreign_checkout,
             TerminalOutcomeStatus::Succeeded,
         ));
@@ -2697,7 +2696,7 @@ mod tests {
     #[test]
     fn unchanged_candidate_allows_ordered_pre_and_post_snapshot_observations() {
         let (delivery, candidate, mut facts) = fixture(false);
-        let post = validated_git_snapshot(
+        let post = verification_snapshot(
             &delivery,
             1_800_000_000_041,
             &SessionBindingId(REVIEWER_BINDING_ID.into()),
@@ -2709,6 +2708,7 @@ mod tests {
         let reviewer = &mut facts.sessions[0];
         reviewer.accepted_job_outcome = Some(terminal_outcome(
             &delivery,
+            &SessionBindingId(REVIEWER_BINDING_ID.into()),
             &post,
             TerminalOutcomeStatus::Succeeded,
         ));
@@ -2774,6 +2774,7 @@ mod tests {
             .clone();
         mismatched_status.sessions[0].accepted_job_outcome = Some(terminal_outcome(
             &delivery,
+            &SessionBindingId(REVIEWER_BINDING_ID.into()),
             &pre_snapshot,
             TerminalOutcomeStatus::Failed,
         ));
@@ -2883,33 +2884,23 @@ mod tests {
     }
 
     #[test]
-    fn accepted_terminal_outcome_rejects_snapshot_metadata_from_another_outcome() {
-        let (delivery, candidate, facts) = fixture(false);
-        let accepted_snapshot = facts.sessions[0]
-            .pre_candidate_snapshot
-            .as_ref()
-            .expect("accepted reviewer snapshot");
-        let verified = verified_terminal_outcome(
-            &delivery,
-            accepted_snapshot,
-            TerminalOutcomeStatus::Succeeded,
-        );
-
-        let substituted_snapshot = validated_git_snapshot(
-            &delivery,
-            1_800_000_000_041,
-            &SessionBindingId(REVIEWER_BINDING_ID.into()),
-            candidate.candidate_commit_id(),
-            candidate.candidate_tree_id(),
-            candidate.diff_sha256(),
-            candidate.changed_paths().to_vec(),
-        );
-
+    fn accepted_terminal_outcome_rejects_foreign_session_authority() {
+        let (delivery, _candidate, facts) = fixture(false);
+        let snapshot = facts.sessions[0].pre_candidate_snapshot.as_ref().unwrap();
+        let id = SessionBindingId(REVIEWER_BINDING_ID.into());
+        let verified =
+            verified_terminal_outcome(&delivery, &id, snapshot, TerminalOutcomeStatus::Succeeded);
+        let mut binding = delivery
+            .snapshot()
+            .session_bindings
+            .iter()
+            .find(|b| b.id == id)
+            .unwrap()
+            .clone();
+        binding.fencing_token = Some(FencingToken("999".into()));
         assert!(
             AcceptedVerificationJobOutcomeFact::from_verified_outcome(
-                &verified,
-                &substituted_snapshot,
-                "reviewer",
+                &verified, &binding, snapshot, "reviewer"
             )
             .is_err()
         );
@@ -2930,7 +2921,7 @@ mod tests {
         );
 
         let mut wrong_revision = facts.clone();
-        let wrong_checkout = validated_git_snapshot(
+        let wrong_checkout = verification_snapshot(
             &delivery,
             1_800_000_000_040,
             &SessionBindingId(REVIEWER_BINDING_ID.into()),
@@ -2947,7 +2938,7 @@ mod tests {
         foreign_snapshot.spec.repository.locator = "file:///foreign".into();
         let foreign_delivery =
             Delivery::try_from_snapshot(foreign_snapshot).expect("foreign repository Delivery");
-        let foreign_checkout = validated_git_snapshot(
+        let foreign_checkout = verification_snapshot(
             &foreign_delivery,
             1_800_000_000_060,
             &SessionBindingId(VERIFIER_BINDING_ID.into()),

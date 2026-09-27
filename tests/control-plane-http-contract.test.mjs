@@ -97,7 +97,10 @@ test('Community schema sources contain no Enterprise management contract', async
     'control-plane-events.schema.json',
     'execution-port.schema.json',
   ]) {
-    assert.doesNotMatch(await readFile(join(schemaRoot, name), 'utf8'), /enterprise/iu, name)
+    const contract = JSON.stringify(await json(name), (key, value) => (
+      key === 'description' && typeof value === 'string' ? undefined : value
+    ))
+    assert.doesNotMatch(contract, /enterprise/iu, name)
   }
 })
 

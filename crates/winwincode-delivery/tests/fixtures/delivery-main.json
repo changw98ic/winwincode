@@ -98,11 +98,12 @@
       "deliverySpecId": "delivery-spec-v1",
       "deliverySpecRevision": 1,
       "sessionBindingId": "binding-verifier-1",
-      "candidateRef": "git-tree:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "type": "test",
       "sourceRef": "runtime-event:codex-session-verifier/42",
       "createdAtMillis": 1800000000019,
-      "workRunId": "wrn_01J00000000000000000000000"
+      "workRunId": "wrn_01J00000000000000000000000",
+      "candidateId": "cnd_01J00000000000000000000001",
+      "snapshotId": "snap_01J00000000000000000000001"
     }
   ],
   "verdict": {
@@ -141,7 +142,10 @@
       }
     ],
     "unresolvedFindings": [],
-    "producedAtMillis": 1800000000022
+    "producedAtMillis": 1800000000022,
+    "candidateId": "cnd_01J00000000000000000000001",
+    "snapshotId": "snap_01J00000000000000000000001",
+    "candidateDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   },
   "createdAtMillis": 1800000000000,
   "updatedAtMillis": 1800000000023,

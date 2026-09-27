@@ -68,9 +68,8 @@ pub mod fusion_compose;
 pub mod fusion_investigation;
 pub mod fusion_knowledge;
 pub mod fusion_planner;
-pub mod heartbeat;
-pub mod source_hygiene;
 mod gate_interaction_service;
+pub mod heartbeat;
 pub mod knowledge;
 mod local_candidate;
 pub mod local_secret_store;
@@ -110,6 +109,8 @@ mod rework_transaction;
 mod runtime_event_transaction;
 mod session_binding_transaction;
 pub mod session_identity;
+mod snapshot_production;
+pub mod source_hygiene;
 mod strongflow_device_execution;
 pub mod strongflow_projection;
 mod temporary_root_lease;
@@ -1593,6 +1594,8 @@ impl ControlPlane {
         message: &execution_port::ArtifactOpenMessage,
         authority: &winwincode_delivery::application::workrun_execution::SessionBindingAuthority,
     ) -> Result<execution_port::ArtifactAckMessage, ArtifactMessageError> {
+        self.validate_supplied_snapshot(&message.lease.job_id, message.snapshot_id.as_ref())
+            .map_err(ArtifactMessageError::Storage)?;
         let storage = self.storage.as_deref().ok_or_else(|| {
             ArtifactMessageError::Storage(StorageError::adapter("Control Plane storage is closed"))
         })?;
@@ -1617,6 +1620,8 @@ impl ControlPlane {
         message: &execution_port::ArtifactChunkMessage,
         authority: &winwincode_delivery::application::workrun_execution::SessionBindingAuthority,
     ) -> Result<execution_port::ArtifactAckMessage, ArtifactMessageError> {
+        self.validate_supplied_snapshot(&message.lease.job_id, message.snapshot_id.as_ref())
+            .map_err(ArtifactMessageError::Storage)?;
         let ack = {
             let storage = self.storage.as_deref().ok_or_else(|| {
                 ArtifactMessageError::Storage(StorageError::adapter(
@@ -2264,6 +2269,12 @@ impl ControlPlane {
             .map_err(OutboxError::Acknowledge)?;
         let mut published = 0;
         for event in events {
+            if matches!(
+                event.topic.as_str(),
+                snapshot_production::FREEZE_TOPIC | snapshot_production::DISPATCH_TOPIC
+            ) {
+                continue;
+            }
             self.publisher_mut()
                 .map_err(|error| OutboxError::Publish(EventPublishError::new(error.to_string())))?
                 .publish(&event)

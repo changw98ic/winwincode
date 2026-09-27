@@ -679,7 +679,7 @@ fn normalize_and_validate_evidence(
             })?;
         if evidence.delivery_spec_id != delivery.snapshot().spec.id
             || evidence.delivery_spec_revision != delivery.snapshot().spec.revision
-            || evidence.candidate_ref != candidate.candidate_ref()
+            || evidence.candidate_id != *candidate.candidate_id()
         {
             return Err(routing_error(
                 FailureRoutingErrorCode::ReferenceMismatch,

@@ -29,10 +29,9 @@ use winwincode_domain::{
 use winwincode_session::{
     AuthenticatedActor, BindingScope, ExecutionCancellationRoutes, ExecutionRoute,
     InteractionRouter, InteractionRoutingError, ModelStreamCancellationRoute, ProductSession,
-    ProductSessionCreate, ProductSessionError, RouteWriteStatus,
-    RuntimeRouteAuthority, RuntimeSourceIdentity, SessionBinding, SessionBindingError,
-    SessionBindingIdentity, SessionCancellationRequest, SessionCancellationSnapshot,
-    WorkerCancellationRoute,
+    ProductSessionCreate, ProductSessionError, RouteWriteStatus, RuntimeRouteAuthority,
+    RuntimeSourceIdentity, SessionBinding, SessionBindingError, SessionBindingIdentity,
+    SessionCancellationRequest, SessionCancellationSnapshot, WorkerCancellationRoute,
 };
 use winwincode_storage::{
     CommitReceipt, ExecutionJobRecord, ExecutionJobState, ExecutionLeaseRecord,
@@ -62,7 +61,6 @@ pub use chat::{
     ProductSessionTurnIntent, ProductSessionTurnState, ProductSessionTurnTerminalOutcome,
     RecordAssistantTerminalCommand, SubmitChatMessageCommand, product_session_state_filters,
 };
-pub use winwincode_session::ProductSessionState;
 use chat::{
     PersistedCancellation, PersistedChatMessage, PersistedExecutionCancellationRoutes,
     PersistedTurnIntent, PersistedTurnState,
@@ -70,6 +68,7 @@ use chat::{
 use execution_job::PreparedProductSessionExecution;
 pub use execution_job::ProductSessionExecutionConfig;
 pub(crate) use execution_job::chat_turn_execution_job_id;
+pub use winwincode_session::ProductSessionState;
 
 pub const PRODUCT_SESSION_SERVICE_SCHEMA_VERSION: u8 = 3;
 const PRODUCT_SESSION_CHANGED_TOPIC: &str = "product-session.changed.v1";
@@ -1385,15 +1384,10 @@ impl<'storage> ProductSessionService<'storage> {
                 continue;
             };
             for route in &cancel.routes {
-                let request_id = session_route_cancel_request_id(
-                    &cancel.request_id,
-                    &route.execution_job_id,
-                );
+                let request_id =
+                    session_route_cancel_request_id(&cancel.request_id, &route.execution_job_id);
                 let requested_at = session.session.updated_at().clone();
-                let Some(job) = jobs
-                    .iter()
-                    .find(|job| job.job_id == route.execution_job_id)
-                else {
+                let Some(job) = jobs.iter().find(|job| job.job_id == route.execution_job_id) else {
                     continue;
                 };
                 if matches!(
@@ -2273,10 +2267,7 @@ pub(crate) fn session_route_cancel_request_id(
 ) -> RequestId {
     let digest = format!(
         "{:X}",
-        Sha256::digest(format!(
-            "{}:{}",
-            session_request_id.0, job_id.0
-        ))
+        Sha256::digest(format!("{}:{}", session_request_id.0, job_id.0))
     );
     RequestId(format!("req_0{}", &digest[..25]))
 }

@@ -131,6 +131,7 @@ mod tests {
 /// Start data passed to the sole embedded Codex adapter.
 #[derive(Debug, Clone, Copy)]
 pub struct CodexThreadStart<'job> {
+    pub snapshot_id: Option<&'job winwincode_domain::SnapshotId>,
     pub run_key: &'job CodexRunKey,
     /// Stable Worker identity used to derive the Session's Agent identity.
     pub worker_id: &'job WorkerId,

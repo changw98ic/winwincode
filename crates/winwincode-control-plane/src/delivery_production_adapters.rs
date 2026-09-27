@@ -495,7 +495,10 @@ impl LocalDeliveryAuthority {
                     )
                 })?;
                 (
-                    Some(candidate.candidate_ref().to_owned()),
+                    Some(format!(
+                        "refs/winwincode/candidates/{}",
+                        candidate.candidate_commit_id()
+                    )),
                     candidate.candidate_commit_id().to_owned(),
                     Some(candidate.candidate_commit_id().to_owned()),
                 )

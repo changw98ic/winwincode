@@ -24,7 +24,10 @@ pub enum SnapshotWorktreeErrorCode {
 
 impl SnapshotWorktreeError {
     fn new(code: SnapshotWorktreeErrorCode, message: impl Into<String>) -> Self {
-        Self { code, message: message.into() }
+        Self {
+            code,
+            message: message.into(),
+        }
     }
 
     /// Returns the stable machine-readable category.
@@ -76,17 +79,33 @@ pub fn freeze_worktree(
             "snapshot destination already exists",
         ));
     }
-    let resolved = git(repo, &["rev-parse", "--verify", &format!("{candidate_commit}^{{commit}}")])?;
+    let resolved = git(
+        repo,
+        &[
+            "rev-parse",
+            "--verify",
+            &format!("{candidate_commit}^{{commit}}"),
+        ],
+    )?;
     if resolved != candidate_commit {
         return Err(SnapshotWorktreeError::new(
             SnapshotWorktreeErrorCode::InvalidInput,
             "candidate commit does not resolve to the requested identity",
         ));
     }
-    let tree_id = git(repo, &["rev-parse", &format!("{candidate_commit}^{{tree}}")])?;
+    let tree_id = git(
+        repo,
+        &["rev-parse", &format!("{candidate_commit}^{{tree}}")],
+    )?;
     git(
         repo,
-        &["worktree", "add", "--detach", &dest.to_string_lossy(), candidate_commit],
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            &dest.to_string_lossy(),
+            candidate_commit,
+        ],
     )?;
     Ok(FrozenWorktree {
         path: dest.to_path_buf(),
@@ -101,7 +120,10 @@ pub fn freeze_worktree(
 ///
 /// Returns the underlying `git worktree remove` failure.
 pub fn drop_worktree(repo: &Path, dest: &Path) -> Result<(), SnapshotWorktreeError> {
-    git(repo, &["worktree", "remove", "--force", &dest.to_string_lossy()])?;
+    git(
+        repo,
+        &["worktree", "remove", "--force", &dest.to_string_lossy()],
+    )?;
     Ok(())
 }
 

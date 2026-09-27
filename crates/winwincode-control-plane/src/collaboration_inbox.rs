@@ -436,6 +436,8 @@ pub struct PageAnnotationTarget {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PageAnnotationCandidateIdentity {
+    pub candidate_id: winwincode_domain::CandidateId,
+    pub snapshot_id: winwincode_domain::SnapshotId,
     pub delivery_id: DeliveryId,
     pub delivery_spec_id: String,
     pub delivery_spec_revision: u64,
@@ -1758,6 +1760,11 @@ fn validate_candidate(
 fn validate_page_candidate(
     candidate: &PageAnnotationCandidateIdentity,
 ) -> Result<(), CollaborationInboxError> {
+    if !winwincode_domain::is_canonical_prefixed_id(&candidate.candidate_id.0, "cnd_")
+        || !winwincode_domain::is_canonical_prefixed_id(&candidate.snapshot_id.0, "snap_")
+    {
+        return Err(invalid());
+    }
     validate_text(&candidate.delivery_id.0)?;
     validate_text(&candidate.delivery_spec_id)?;
     validate_safe_integer(candidate.delivery_spec_revision)?;

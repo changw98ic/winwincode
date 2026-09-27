@@ -38,6 +38,7 @@ mod repository_binding;
 mod repository_scheduler;
 mod repository_scheduler_replacement;
 mod scheduler_policy;
+mod snapshot_product;
 mod user_accounts;
 mod worker_fleet_inventory;
 mod worker_fleet_operations;
@@ -177,6 +178,11 @@ pub use scheduler_policy::{
     SchedulerCancellationPlan, SchedulerCancellationTarget, SchedulerCandidate, SchedulerDispatch,
     SchedulerPolicy, SchedulerPolicyError, SchedulerPriority, SchedulerRetryDecision,
     SchedulerRetryPolicy, SchedulerWeights, plan_scheduler_cancellation, scheduler_retry_decision,
+};
+pub use snapshot_product::{
+    SnapshotBindingCheck, SnapshotBindingValidated, SnapshotProductCommit, SnapshotProductStaged,
+    SnapshotVerificationBinding, SnapshotVerificationDispatch, commit_snapshot_product,
+    validate_snapshot_binding,
 };
 pub use user_accounts::{UserAccountLedger, UserAccountStoreError, UserAccountStoreErrorKind};
 pub use winwincode_domain::GitCandidateArtifactManifest;

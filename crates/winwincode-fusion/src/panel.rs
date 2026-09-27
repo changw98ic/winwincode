@@ -68,7 +68,10 @@ pub async fn run_blind_panel(
     let dispatch = PanelDispatch {
         panel_id: panel_id.to_owned(),
         input_digest,
-        timeout: Duration::from_millis(input.budget.candidate_timeout_millis),
+        timeout: input
+            .budget
+            .candidate_timeout_millis
+            .map(Duration::from_millis),
         max_total_tokens: input.budget.max_total_tokens,
         prompt,
     };
@@ -104,8 +107,8 @@ enum CandidateOutcome {
 struct PanelDispatch {
     panel_id: String,
     input_digest: String,
-    timeout: Duration,
-    max_total_tokens: u64,
+    timeout: Option<Duration>,
+    max_total_tokens: Option<u64>,
     prompt: FusionBlindPrompt,
 }
 
@@ -141,14 +144,18 @@ fn dispatch_candidate(
                 "PROVIDER_UNRESOLVED",
                 "Fusion router has no adapter for this Provider",
             )),
-            Some(adapter) => timeout(dispatch.timeout, adapter.complete(request))
-                .await
-                .unwrap_or_else(|_| {
-                    Err(FusionProviderError::new(
-                        "TIMEOUT",
-                        "Fusion candidate exceeded its wall-time budget",
-                    ))
-                }),
+            Some(adapter) if dispatch.timeout.is_none() => adapter.complete(request).await,
+            Some(adapter) => timeout(
+                dispatch.timeout.unwrap_or_default(),
+                adapter.complete(request),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                Err(FusionProviderError::new(
+                    "TIMEOUT",
+                    "Fusion candidate exceeded its wall-time budget",
+                ))
+            }),
         };
         let elapsed_millis = elapsed_millis(started);
         let identity = FailureIdentity {
@@ -185,11 +192,13 @@ fn dispatch_candidate(
     }
 }
 
-fn exceeds_token_budget(usage: Option<FusionTokenUsage>, max_total_tokens: u64) -> bool {
-    usage.is_some_and(|usage| {
-        usage.total_tokens > max_total_tokens
-            || usage.input_tokens.saturating_add(usage.output_tokens) > max_total_tokens
-    })
+fn exceeds_token_budget(usage: Option<FusionTokenUsage>, max_total_tokens: Option<u64>) -> bool {
+    usage
+        .zip(max_total_tokens)
+        .is_some_and(|(usage, max_total_tokens)| {
+            usage.total_tokens > max_total_tokens
+                || usage.input_tokens.saturating_add(usage.output_tokens) > max_total_tokens
+        })
 }
 
 struct FailureIdentity {
@@ -291,7 +300,8 @@ fn validate_input(panel_id: &str, input: &FusionInput) -> Result<(), FusionPanel
             "Fusion panels require three to sixteen Providers",
         ));
     }
-    if input.budget.candidate_timeout_millis == 0 || input.budget.max_total_tokens == 0 {
+    if input.budget.candidate_timeout_millis == Some(0) || input.budget.max_total_tokens == Some(0)
+    {
         return Err(FusionPanelError("Fusion budget limits must be positive"));
     }
     let mut ids = HashSet::new();

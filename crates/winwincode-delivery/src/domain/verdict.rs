@@ -54,6 +54,9 @@ pub struct CriterionResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DeliveryVerdict {
+    pub snapshot_id: winwincode_domain::SnapshotId,
+    pub candidate_id: winwincode_domain::CandidateId,
+    pub candidate_digest: winwincode_domain::Sha256Digest,
     pub schema_version: u8,
     pub id: DeliveryVerdictId,
     pub delivery_id: DeliveryId,
@@ -440,6 +443,8 @@ struct DeliveryVerdictCriterionIdentity<'criterion> {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DeliveryVerdictIdentity<'verdict> {
+    snapshot_id: &'verdict winwincode_domain::SnapshotId,
+    candidate_id: &'verdict winwincode_domain::CandidateId,
     delivery_spec_id: &'verdict DeliverySpecId,
     delivery_spec_revision: u64,
     candidate_ref: &'verdict str,
@@ -480,6 +485,13 @@ pub fn compute_delivery_verdict(
         ));
     }
     validate_resolved_evidence(delivery, candidate, evidence, produced_at_millis)?;
+    if evidence
+        .iter()
+        .any(|item| &item.evidence().snapshot_id != verification.snapshot().snapshot_id())
+    {
+        return Err(invalid_computation("Evidence belongs to another Snapshot"));
+    }
+
     validate_verification_time(verification, produced_at_millis)?;
 
     let mut actions = Vec::new();
@@ -563,6 +575,8 @@ pub fn compute_delivery_verdict(
     let id = deterministic_id(
         "delivery-verdict:sha256",
         &DeliveryVerdictIdentity {
+            snapshot_id: verification.snapshot().snapshot_id(),
+            candidate_id: candidate.candidate_id(),
             delivery_spec_id: &delivery.snapshot().spec.id,
             delivery_spec_revision: delivery.snapshot().spec.revision,
             candidate_ref: candidate.candidate_ref(),
@@ -572,6 +586,9 @@ pub fn compute_delivery_verdict(
         },
     )?;
     let verdict = DeliveryVerdict {
+        snapshot_id: verification.snapshot().snapshot_id().clone(),
+        candidate_id: candidate.candidate_id().clone(),
+        candidate_digest: candidate.candidate_digest().clone(),
         schema_version: super::DELIVERY_SCHEMA_VERSION,
         id: DeliveryVerdictId(id),
         delivery_id: delivery.id().clone(),
@@ -729,7 +746,7 @@ fn validate_resolved_evidence(
         let current = reference.delivery_id == *delivery.id()
             && reference.delivery_spec_id == delivery.snapshot().spec.id
             && reference.delivery_spec_revision == delivery.snapshot().spec.revision
-            && reference.candidate_ref == candidate.candidate_ref()
+            && reference.candidate_id == *candidate.candidate_id()
             && reference.created_at_millis <= produced_at_millis;
         if !current || !ids.insert(reference.id.0.as_str()) {
             return Err(invalid_computation(
@@ -871,6 +888,49 @@ fn compute_criterion(
     }
 }
 
+/// Computes one role's result with the same evidence rules used by Verdict.
+#[must_use]
+pub fn compute_verifier_result(
+    delivery: &Delivery,
+    settlement: &VerificationRoleSettlement,
+    evidence: &[ResolvedDeliveryEvidence],
+) -> (CriterionVerdict, Vec<EvidenceId>) {
+    let evaluations = delivery
+        .snapshot()
+        .spec
+        .acceptance_criteria
+        .iter()
+        .filter(|criterion| criterion.required)
+        .map(|criterion| evaluate_role(criterion, settlement, evidence))
+        .collect::<Vec<_>>();
+    let status = if evaluations
+        .iter()
+        .any(|value| value.outcome == RoleOutcome::InfraError)
+    {
+        CriterionVerdict::InfraError
+    } else if evaluations
+        .iter()
+        .any(|value| value.outcome == RoleOutcome::Product(ProductOutcome::Fail))
+    {
+        CriterionVerdict::Fail
+    } else if evaluations.is_empty()
+        || evaluations
+            .iter()
+            .any(|value| value.outcome != RoleOutcome::Product(ProductOutcome::Pass))
+    {
+        CriterionVerdict::Inconclusive
+    } else {
+        CriterionVerdict::Pass
+    };
+    let mut evidence_ids = evaluations
+        .into_iter()
+        .flat_map(|value| value.evidence_ids)
+        .collect::<Vec<_>>();
+    evidence_ids.sort_by(|left, right| left.0.cmp(&right.0));
+    evidence_ids.dedup();
+    (status, evidence_ids)
+}
+
 fn evaluate_role(
     criterion: &AcceptanceCriterion,
     settlement: &VerificationRoleSettlement,
@@ -979,7 +1039,7 @@ fn evaluate_settled_role(
                 reference.source_ref == *source_ref
                     && reference.work_run_id == *assignment.work_run_id()
                     && reference.session_binding_id == *assignment.session_binding_id()
-                    && reference.candidate_ref == finding.candidate_ref()
+                    && reference.snapshot_id == *terminal.snapshot_id()
             })
             .collect::<Vec<_>>();
         if matching.len() != 1 {
@@ -1196,7 +1256,7 @@ fn is_producer_candidate_commit_evidence(
     reference.evidence_type == EvidenceRefType::Commit
         && reference.work_run_id == *candidate.producer_work_run_id()
         && reference.session_binding_id == *candidate.producer_session_binding_id()
-        && reference.candidate_ref == candidate.candidate_ref()
+        && reference.candidate_id == *candidate.candidate_id()
         && reference.source_ref == format!("git_commit:{}", candidate.candidate_commit_id())
 }
 
@@ -1580,6 +1640,16 @@ mod tests {
         let candidate = candidate(&delivery);
         let (verification, evidence) = passing_inputs(&delivery, &candidate);
 
+        for settlement in verification.settlements() {
+            let (status, ids) = super::compute_verifier_result(&delivery, settlement, &evidence);
+            assert_eq!(status, CriterionVerdict::Pass);
+            assert!(!ids.is_empty());
+            assert!(
+                ids.iter()
+                    .all(|id| evidence.iter().any(|item| &item.evidence().id == id
+                        && &item.evidence().snapshot_id == verification.snapshot().snapshot_id()))
+            );
+        }
         let first = compute_delivery_verdict(
             &delivery,
             &candidate,
@@ -1638,6 +1708,9 @@ mod tests {
             &delivery,
             &candidate,
             ResolveDeliveryEvidenceInput {
+                snapshot: crate::domain::candidate::test_support::canonical_snapshot_fixture(
+                    &candidate,
+                ),
                 work_run_id: candidate.producer_work_run_id().clone(),
                 session_binding_id: candidate.producer_session_binding_id().clone(),
                 source: EvidenceSource::CandidateCommit,
@@ -1672,7 +1745,7 @@ mod tests {
             commits[0].session_binding_id,
             *candidate.producer_session_binding_id()
         );
-        assert_eq!(commits[0].candidate_ref, candidate.candidate_ref());
+        assert_eq!(&commits[0].candidate_id, candidate.candidate_id());
         // Criterion evaluation still uses only runtime command/test evidence.
         assert!(
             !computed.verdict().criteria[0]
@@ -2395,6 +2468,9 @@ mod tests {
             &running_delivery,
             &candidate,
             &VerificationFacts {
+                snapshot: crate::domain::candidate::test_support::canonical_snapshot_fixture(
+                    &candidate,
+                ),
                 required_roles: vec![VerificationRole::Reviewer, VerificationRole::Verifier],
                 sessions: vec![VerificationSessionFacts {
                     role: VerificationRole::Reviewer,

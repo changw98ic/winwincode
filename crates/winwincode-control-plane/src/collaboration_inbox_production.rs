@@ -234,16 +234,14 @@ fn attention_candidate(
         .iter()
         .rev()
         .find(|evidence| &evidence.work_run_id == work_run_id)?;
-    let candidate_digest = evidence
-        .candidate_ref
-        .strip_prefix("git-candidate:")?
-        .to_owned();
-    if !candidate_digest.starts_with("sha256:") {
+    let verdict = delivery.snapshot().verdict.as_ref()?;
+    if evidence.candidate_id != verdict.candidate_id || evidence.snapshot_id != verdict.snapshot_id
+    {
         return None;
     }
     Some(CollaborationCandidateIdentity {
-        candidate_ref: evidence.candidate_ref.clone(),
-        candidate_digest: Sha256Digest(candidate_digest),
+        candidate_ref: verdict.candidate_ref.clone(),
+        candidate_digest: verdict.candidate_digest.clone(),
         candidate_revision: delivery.revision(),
     })
 }

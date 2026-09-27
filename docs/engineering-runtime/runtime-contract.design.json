@@ -12,7 +12,7 @@
   "decisionBoundary": {
     "controller": "唯一命令入口；校验身份、租约/围栏、期望修订和状态转换；持久化 WorkContract/WorkItem/WorkRun 及完成门；只有 Controller 产生完成、重试或人工门禁决定。",
     "worker": "只接受 Controller 派发的 WorkRun；在绑定的 WorkerSession、WorkspaceBinding 和 Candidate 上执行；只上报带完整执行身份的事实，不写 WorkItem 完成状态。",
-    "verifier": "只读取冻结 Candidate 和允许的只读工作区；按 VerificationPlan 计算并上报 Evidence/Findings/结果事实；不能修改产品源代码或直接写权威 Verdict。Controller 校验并持久化消费这些事实。",
+    "verifier": "只读取指定 Snapshot 的受保护代码和允许的可写执行目录；按 VerificationPlan 上报命令、测试和结果事实；不能修改产品源代码或直接写权威 Verdict。Controller 校验并持久化 Evidence、VerifierResult 和 Verdict。",
     "human": "只作为 Attention 的授权端点，通过 Controller 命令确认、驳回或补充事实，不是第四执行引擎。",
     "planner": "降为 Worker 内部生成步骤，不再成为顶层持久化阶段或完成权威。"
   },
@@ -47,7 +47,8 @@
     },
     "Candidate": {
       "purpose": "Worker 在一个 WorkRun 的唯一 execution_registry Attempt 中产生的、绑定 WorkContract revision 的冻结代码结果；每个 WorkRun 最多一个被接受 Candidate。不同 WorkRun 即使复用同一 commit，也分别绑定自己的验证身份。",
-      "writeAuthority": "Worker creates frozen candidate fact; Controller accepts/rejects it"
+      "writeAuthority": "Controller seals Candidate product identity from Worker execution facts",
+      "identity": "candidateId + producer WorkRun; candidateDigest is a separate consistency check"
     },
     "VerificationPlan": {
       "purpose": "对 Candidate、Contract revision 和 acceptance criteria 的只读验证声明；固定 criterionIds、commands、permissionProfile 和 workRun 绑定。",
@@ -56,12 +57,27 @@
     },
     "Evidence": {
       "purpose": "Verifier/Worker 上报并由 Controller 根据当前 Candidate、计划、criterion 和完整 fenced execution identity 重建的事实引用。",
-      "identity": "evidenceId + sourceEventId + candidateDigest + producer execution identity",
+      "identity": "evidenceId + sourceEventId + candidateId + snapshotId + producer execution identity",
       "writeAuthority": "Verifier/Worker reports; Controller accepts"
     },
     "Verdict": {
       "purpose": "Controller 根据已接受 Evidence 和计划计算出的结果；Verifier 可提供结果事实，但只有 Controller 能落地权威 Verdict 或 WorkItem 完成门。",
-      "identity": "verdictId + workItemId + candidateDigest + verdictRevision",
+      "identity": "verdictId + workItemId + candidateId + snapshotId + candidateDigest + verdictRevision",
+      "writeAuthority": "Controller"
+    },
+    "Snapshot": {
+      "purpose": "Controller 校验冻结回执后创建的不可变代码身份；先与验证会话和派发记录一并持久化，再启动验证。",
+      "identity": "snapshotId + candidateId + sealed code facts",
+      "writeAuthority": "Controller"
+    },
+    "VerificationSession": {
+      "purpose": "运行时注入的验证会话，固定 Snapshot、Candidate、WorkRun、attempt 和四层会话身份。",
+      "identity": "verificationSessionId + snapshotId + sessionIdentity",
+      "writeAuthority": "Controller"
+    },
+    "VerifierResult": {
+      "purpose": "根据已接受的验证证据计算的单角色结果，与 Verdict 在同一事务中保存。",
+      "identity": "verifierResultId + verificationSessionId + snapshotId + candidateId",
       "writeAuthority": "Controller"
     }
   },
@@ -71,12 +87,13 @@
     "VerificationPlan must name the exact WorkContract revision, WorkItem revision, Candidate digest and required verifier roles.",
     "Evidence is accepted only when its producer identity, lease/fencing token, WorkRun, Candidate digest and source sequence match the current plan.",
     "Verdict references the exact accepted Evidence set and Candidate digest; a later Candidate or contract revision invalidates the old completion claim.",
-    "Every execution identity and relation uses the canonical WorkItem and WorkRun model; no alternate read, write, or migration path exists."
+    "Every execution identity and relation uses the canonical WorkItem and WorkRun model; no alternate read, write, or migration path exists.",
+    "Snapshot and VerificationSession bind CandidateId before execution. Evidence, VerifierResult and Verdict resolve to that same SnapshotId. Repeated freeze requests and new verification attempts reuse the immutable Snapshot; changed protected input creates a new Candidate and Snapshot."
   ],
   "currentCanonicalSources": [
     {
       "path": "schema/winwincode/v1/domain.schema.json",
-      "sha256": "3e94decca1a167e65ba5de417924c580605d13e735e298118b6b1b589f276d25",
+      "sha256": "a73c17fae84b24464c5cf3ca3eb4271e70a621c711400f992b8855a471e8ef39",
       "facts": [
         "WorkContract",
         "WorkItem",
@@ -85,12 +102,15 @@
         "VerificationPlan",
         "Evidence",
         "Verdict",
-        "SessionIdentity"
+        "SessionIdentity",
+        "Snapshot",
+        "VerificationSession",
+        "VerifierResult"
       ]
     },
     {
       "path": "schema/winwincode/v1/control-plane-http.schema.json",
-      "sha256": "43fe8c3e085158773ab88302d169a7b8cbbb9733b9e85fb001c1e1e870a0e20b",
+      "sha256": "f811f29deff8f0fbd697fc6fa9d826fa66d09faa124e8021b0cfdb61ddd9a275",
       "facts": [
         "HTTP command envelope",
         "WorkItem and WorkRun commands, queries, and projections",
@@ -100,14 +120,15 @@
     },
     {
       "path": "schema/winwincode/v1/execution-port.schema.json",
-      "sha256": "f823a0340ecae079a06f683b408c06a1a99bf4202bbd4563c580b87783665594",
+      "sha256": "6b26929ae5f636eee4a44476ffacbd85050a1d308307945d59cfc8d696e79197",
       "facts": [
-        "Worker execution transport and fenced identity"
+        "Worker execution transport and fenced identity",
+        "Snapshot freeze request, freeze receipt and verification dispatch"
       ]
     },
     {
       "path": "crates/winwincode-delivery/src/domain/verification.rs",
-      "sha256": "83cadb7245d6f6a49470b9cd72ae46ae93fa4e8051cbe80a8cdb3273c48beb01",
+      "sha256": "21412f4a3cab76c9cb2a2564bd04ddbde5006d6ac4710a6479c17c7136fdf209",
       "facts": [
         "sealed verification facts",
         "fenced execution identity",
@@ -116,7 +137,7 @@
     },
     {
       "path": "crates/winwincode-delivery/src/domain/evidence.rs",
-      "sha256": "e1eee9a9f50b08c60e254a54e04e3369630dfe4d640bfd6e97da67b4bab233bb",
+      "sha256": "2054406b981807003660c5ac7172f8247952ed6aa4197b966593aa65882d0f5f",
       "facts": [
         "EvidenceRef",
         "accepted runtime source facts",
@@ -125,22 +146,23 @@
     },
     {
       "path": "crates/winwincode-delivery/src/domain/candidate.rs",
-      "sha256": "b418364b11499cb24fd9be6680dbfbd909968b6796e09d0566f5e0028f4ddf48",
+      "sha256": "d893c9e0be894089bf560a94c8f223f425855fc5fab64df4fd4711afe86459cc",
       "facts": [
         "FrozenDeliveryCandidate",
-        "validated Git snapshot"
+        "SealedCandidateSource producer proof",
+        "canonical Snapshot-bound verification"
       ]
     },
     {
       "path": "scripts/generate-contracts.mjs",
-      "sha256": "77c88df5d451bc6af9b04993fbe4ec1f98192225a7bf1f23eaa373b512973c3e",
+      "sha256": "be59a994716c39c8eeaf8e69d33c0e3c78ac4fa935c483d79cabea93cf987c13",
       "facts": [
         "canonical schema to generated Rust/TypeScript/OpenAPI chain"
       ]
     },
     {
       "path": "crates/winwincode-storage/src/execution_registry.rs",
-      "sha256": "a0bcd381c0695780d43a654695b86efc8f30471e0755bd8b815dc4612afaf037",
+      "sha256": "990472bad0b78b36db25ff37d868399713b9d75af0c01dbb481169f1bae74cbe",
       "facts": [
         "attempt replacement",
         "lease/fencing/worker-instance authority",
@@ -159,7 +181,12 @@
     "Verdict.acceptedEvidence": "0..* (inconclusive may have none)",
     "Evidence.criterion": "exactly 1",
     "WorkRun.productSession": "0..1",
-    "WorkRun.contractRevision": "exactly 1"
+    "WorkRun.contractRevision": "exactly 1",
+    "Snapshot.candidateId": "exactly 1",
+    "VerificationSession.snapshotId": "exactly 1",
+    "Evidence.snapshotId": "exactly 1",
+    "VerifierResult.snapshotId": "exactly 1",
+    "Verdict.snapshotId": "exactly 1"
   },
   "schema": {
     "canonicalLocation": "schema/winwincode/v1/domain.schema.json",
@@ -170,7 +197,10 @@
       "Candidate",
       "VerificationPlan",
       "Evidence",
-      "Verdict"
+      "Verdict",
+      "Snapshot",
+      "VerificationSession",
+      "VerifierResult"
     ],
     "generation": "scripts/generate-contracts.mjs",
     "rustOwner": "winwincode-domain",

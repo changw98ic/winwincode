@@ -97,11 +97,14 @@ fn freeze_publishes_stable_ref_that_survives_workspace_cleanup() {
     )
     .expect("write candidate change");
 
-    let snapshot = workspace.snapshot_candidate().expect("freeze candidate");
-    let ref_name = format!("{CANDIDATE_REF_PREFIX}{}", snapshot.candidate_commit_id);
+    let freeze_fact = workspace.freeze_candidate().expect("freeze candidate");
+    let ref_name = format!(
+        "{CANDIDATE_REF_PREFIX}{}",
+        freeze_fact.candidate_commit_id()
+    );
     assert_eq!(
         ref_text(&fixture.repository(), &ref_name),
-        snapshot.candidate_commit_id,
+        freeze_fact.candidate_commit_id(),
         "stable ref must resolve to the frozen candidate commit before cleanup"
     );
 
@@ -112,7 +115,7 @@ fn freeze_publishes_stable_ref_that_survives_workspace_cleanup() {
     assert!(!root.exists(), "workspace root must be removed");
     assert_eq!(
         ref_text(&fixture.repository(), &ref_name),
-        snapshot.candidate_commit_id,
+        freeze_fact.candidate_commit_id(),
         "stable ref must still resolve after Worktree cleanup"
     );
     git(
@@ -120,7 +123,7 @@ fn freeze_publishes_stable_ref_that_survives_workspace_cleanup() {
         &[
             "cat-file",
             "-e",
-            &format!("{}^{{commit}}", snapshot.candidate_commit_id),
+            &format!("{}^{{commit}}", freeze_fact.candidate_commit_id()),
         ],
     );
 }
@@ -140,26 +143,27 @@ fn repeated_freeze_is_idempotent() {
     )
     .expect("write candidate change");
 
-    let first = workspace.snapshot_candidate().expect("first freeze");
-    let receipt = create_candidate_ref(&fixture.repository(), &first.candidate_commit_id)
+    let first = workspace.freeze_candidate().expect("first freeze");
+    let receipt = create_candidate_ref(&fixture.repository(), first.candidate_commit_id())
         .expect("re-record an already frozen candidate");
     assert!(receipt.preexisting, "same candidate must be a replay");
     assert_eq!(
         receipt.ref_name,
-        format!("{CANDIDATE_REF_PREFIX}{}", first.candidate_commit_id)
+        format!("{CANDIDATE_REF_PREFIX}{}", first.candidate_commit_id())
     );
-    let second = workspace.snapshot_candidate().expect("second freeze");
+    let second = workspace.freeze_candidate().expect("second freeze");
     assert_eq!(
-        first.candidate_commit_id, second.candidate_commit_id,
+        first.candidate_commit_id(),
+        second.candidate_commit_id(),
         "deterministic freeze must reuse one candidate commit"
     );
-    assert_eq!(first.content_digest, second.content_digest);
+    assert_eq!(first.content_digest(), second.content_digest());
     assert_eq!(
         ref_text(
             &fixture.repository(),
-            &format!("{CANDIDATE_REF_PREFIX}{}", first.candidate_commit_id)
+            &format!("{CANDIDATE_REF_PREFIX}{}", first.candidate_commit_id())
         ),
-        first.candidate_commit_id,
+        first.candidate_commit_id(),
         "repeated freeze must keep one stable ref value"
     );
 
@@ -195,7 +199,7 @@ fn ref_creation_failure_fails_the_freeze_closed() {
     .expect("block candidate ref namespace");
 
     let error = workspace
-        .snapshot_candidate()
+        .freeze_candidate()
         .expect_err("freeze without a stable ref must fail closed");
     assert_eq!(error.code(), WorkspaceErrorCode::Git);
     let ref_prefix = fixture
@@ -315,6 +319,7 @@ fn active_job(repository_id: &RepositoryId, suffix: &str, attempt: i64) -> Activ
         worker_instance_id: WorkerInstanceId("wki_workspace".to_owned()),
     };
     ActiveJob {
+        snapshot_id: None,
         job: ExecutionJob {
             attachments: None,
             model_selection: None,

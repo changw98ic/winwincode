@@ -1965,7 +1965,8 @@ fn validate_page_annotation_delta(
         || attention.resolved_at_millis.is_some()
         || evidence.delivery_spec_id != after.spec.id
         || evidence.delivery_spec_revision != after.spec.revision
-        || evidence.candidate_ref.is_empty()
+        || !winwincode_domain::is_canonical_prefixed_id(&evidence.candidate_id.0, "cnd_")
+        || !winwincode_domain::is_canonical_prefixed_id(&evidence.snapshot_id.0, "snap_")
         || evidence.evidence_type != crate::domain::EvidenceRefType::ReviewFinding
     {
         return Err(store_error(

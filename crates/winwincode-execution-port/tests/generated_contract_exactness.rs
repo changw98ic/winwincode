@@ -79,7 +79,7 @@ fn generated_probe_evidence_leaf_contracts_are_closed_required_and_bounded() {
 #[test]
 fn every_canonical_execution_port_message_round_trips_through_the_shared_crate() {
     let messages = valid_messages();
-    assert_eq!(messages.len(), 28);
+    assert_eq!(messages.len(), 31);
 
     for message in messages {
         let kind = message["kind"].as_str().expect("message kind");

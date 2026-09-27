@@ -12,7 +12,6 @@ pub mod candidate;
 pub mod evidence;
 pub mod rework;
 mod session_binding;
-pub mod snapshot;
 mod spec;
 pub mod verdict;
 pub mod verification;
@@ -33,7 +32,7 @@ pub(crate) use candidate::assert_frozen_candidate_current;
 pub use candidate::{
     CandidateHunkFact, CandidatePathFact, CandidatePathState, DurableCandidateArtifactInput,
     DurableCandidateSourceInput, FreezeCandidateFacts, FrozenDeliveryCandidate,
-    ValidatedGitSnapshotFact, freeze_delivery_candidate,
+    SealedCandidateSource, freeze_delivery_candidate,
 };
 pub use evidence::{EvidenceRef, EvidenceRefType, VerifiedEvidenceOutcome};
 pub use session_binding::{
@@ -141,6 +140,32 @@ pub(crate) fn validation_error(
         path: path.into(),
         message: message.into(),
     }
+}
+
+fn reject_legacy_evidence_graph(bytes: &[u8]) -> Result<(), DeliveryValidationError> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|error| {
+        validation_error(
+            DeliveryValidationErrorCode::InvalidShape,
+            "delivery",
+            error.to_string(),
+        )
+    })?;
+    let Some(evidence) = value.get("evidence").and_then(serde_json::Value::as_array) else {
+        return Ok(());
+    };
+    for (index, item) in evidence.iter().enumerate() {
+        let Some(object) = item.as_object() else {
+            continue;
+        };
+        if object.contains_key("candidateRef") || object.contains_key("candidateDigest") {
+            return Err(validation_error(
+                DeliveryValidationErrorCode::InvalidShape,
+                format!("delivery.evidence[{index}]"),
+                "legacy candidateRef/candidateDigest evidence graph is not importable",
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn deserialize_required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
@@ -377,6 +402,7 @@ impl Delivery {
     /// Returns [`DeliveryValidationError`] for malformed JSON, missing or
     /// extra fields, invalid values, or broken aggregate relationships.
     pub fn decode_json(bytes: &[u8]) -> Result<Self, DeliveryValidationError> {
+        reject_legacy_evidence_graph(bytes)?;
         let snapshot = serde_json::from_slice(bytes).map_err(|error| {
             validation_error(
                 DeliveryValidationErrorCode::InvalidShape,
@@ -755,7 +781,8 @@ fn validate_verdict_relationships(
         for evidence_id in &result.evidence_refs {
             let reference = evidence_by_id.get(evidence_id.0.as_str());
             if reference.is_none_or(|reference| {
-                reference.candidate_ref != verdict.candidate_ref
+                reference.candidate_id != verdict.candidate_id
+                    || reference.snapshot_id != verdict.snapshot_id
                     || reference.created_at_millis > result.evaluated_at_millis
             }) {
                 return Err(validation_error(

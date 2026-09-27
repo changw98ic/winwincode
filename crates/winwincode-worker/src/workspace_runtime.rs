@@ -22,7 +22,6 @@ use std::{
     os::unix::fs::PermissionsExt as _,
     path::{Path, PathBuf},
     pin::Pin,
-    process::Stdio,
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -33,8 +32,6 @@ use codex_exec_server::LOCAL_FS;
 use codex_utils_path_uri::PathUri;
 use futures::future::join_all;
 use sha2::{Digest as _, Sha256};
-use tokio::io::AsyncReadExt as _;
-use tokio::process::Command;
 
 use winwincode_codex::RoleExecutionMode;
 use winwincode_domain::{
@@ -85,6 +82,9 @@ use crate::{
         prepare_verification_artifact,
     },
     validation_diagnostics::{ValidationDiagnosticDisposition, decide_validation_diagnostics},
+    verification_isolation::{
+        ProtectedInputScope, ProtectionCapability, VerificationIsolation, VerificationScratch,
+    },
     workspace::{
         WorkerWorkspace, WorkspaceCleanupReport, WorkspaceCloseReason, WorkspaceError,
         WorkspaceManager, WorkspaceProvenance, controlled_path,
@@ -1027,9 +1027,8 @@ impl JobWorkspaceRuntime {
     /// Captures and verifies the clean candidate checkout used by a read-only
     /// reviewer or verifier into its own Candidate upload.
     ///
-    /// The sealed `Snapshot` is allocated here, at freeze, before any
-    /// verification product is staged, and every staged verification Artifact
-    /// binds to that exact code identity.
+    /// The read-only checkout reports only Worker-owned code and execution
+    /// facts. Product Snapshot identity is assigned by the Control Plane.
     ///
     /// # Errors
     ///
@@ -1046,11 +1045,95 @@ impl JobWorkspaceRuntime {
         if !same_authority(workspace.provenance(), active) {
             return Err(authority_error());
         }
-        let snapshot = freeze_verification_snapshot(active, workspace)?;
-        match prepare_verification_artifact(active, workspace, &snapshot) {
-            Ok(prepared) => Ok(prepared),
-            Err(error) => Err(error.into()),
+        prepare_verification_artifact(active, workspace).map_err(Into::into)
+    }
+
+    /// Probes execution-time protection and durably retains the freeze facts.
+    /// This does not start a model turn or allocate a product Snapshot.
+    pub(crate) async fn freeze_snapshot(
+        &mut self,
+        active: &ActiveJob,
+        request: &winwincode_execution_port::generated::SnapshotFreezeRequestMessage,
+        now: &Instant,
+    ) -> Result<winwincode_execution_port::generated::SnapshotFreezeReceiptMessage, JobWorkspaceError>
+    {
+        let workspace = self
+            .active
+            .get(&active.job.job_id.0)
+            .ok_or_else(authority_error)?;
+        if !same_authority(workspace.provenance(), active) {
+            return Err(authority_error());
         }
+        let scope = ProtectedInputScope::new(workspace.layout().checkout(), &[])
+            .map_err(|_| change_batch_error("Snapshot protected input is unavailable"))?;
+        // This scratch is only for the capability probe. Execution allocates
+        // its own scratch; exact receipt replay rechecks protection each time.
+        let probe_id = format!(
+            "{}:{}:{:?}",
+            request.request_id.0,
+            std::process::id(),
+            std::time::SystemTime::now()
+        );
+        let scratch = VerificationScratch::create(workspace.layout().root(), &probe_id, 0)
+            .map_err(|_| change_batch_error("Snapshot protection scratch is unavailable"))?;
+        let scratch_root = scratch.root().to_path_buf();
+        let result =
+            VerificationIsolation::open(scope, scratch, verification_helper_executable()).await;
+        let cleanup = fs::remove_dir_all(&scratch_root);
+        #[cfg(target_os = "linux")]
+        let launcher_cleanup = if scratch_root.with_extension("launcher").exists() {
+            fs::remove_dir_all(scratch_root.with_extension("launcher"))
+        } else {
+            Ok(())
+        };
+        #[cfg(not(target_os = "linux"))]
+        let launcher_cleanup: std::io::Result<()> = Ok(());
+        let isolation =
+            result.map_err(|_| change_batch_error("Snapshot protection is unavailable"))?;
+        cleanup
+            .and(launcher_cleanup)
+            .map_err(|_| change_batch_error("Snapshot protection scratch cleanup failed"))?;
+        if !isolation.capability().allows_strong_pass() {
+            return Err(change_batch_error(
+                "Snapshot protection capability is unavailable",
+            ));
+        }
+        workspace
+            .retain_snapshot_freeze(request, now)
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn bind_snapshot_dispatch(
+        &self,
+        message: &winwincode_execution_port::generated::SnapshotVerificationDispatchMessage,
+    ) -> Result<winwincode_execution_port::generated::SnapshotFreezeRequestMessage, JobWorkspaceError>
+    {
+        self.active
+            .get(&message.dispatch.job.job_id.0)
+            .ok_or_else(authority_error)?
+            .bind_snapshot_dispatch(message)
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn snapshot_dispatch_is_bound(
+        &self,
+        dispatch: &winwincode_execution_port::generated::JobDispatchMessage,
+    ) -> Result<bool, JobWorkspaceError> {
+        self.active
+            .get(&dispatch.job.job_id.0)
+            .map_or(Ok(false), |workspace| {
+                workspace
+                    .snapshot_dispatch_is_bound(dispatch)
+                    .map_err(Into::into)
+            })
+    }
+
+    pub(crate) fn workspace_authorities(&self) -> impl Iterator<Item = &WorkspaceProvenance> {
+        self.active.values().map(WorkerWorkspace::provenance)
+    }
+
+    pub(crate) fn has_capacity_for(&self, job_id: &ExecutionJobId, maximum: usize) -> bool {
+        maximum > 0 && (self.active.contains_key(&job_id.0) || self.active.len() < maximum)
     }
 
     /// Returns the exact source tree this Job's checkout was sealed from.
@@ -1521,15 +1604,16 @@ impl JobWorkspaceRuntime {
             now,
         )?;
         let observation_request = match &decision {
-            ValidationDiagnosticDisposition::BaselineUnavailable => build_observation_request(
-                &self.change_batch_store,
-                event,
-                &validation.selection,
-                active.job.goal.as_str(),
-                &receipt,
-            )?,
-            ValidationDiagnosticDisposition::Pass
-            | ValidationDiagnosticDisposition::RepairRequired { .. } => None,
+            ValidationDiagnosticDisposition::BaselineUnavailable if validation.result.is_some() => {
+                build_observation_request(
+                    &self.change_batch_store,
+                    event,
+                    &validation.selection,
+                    active.job.goal.as_str(),
+                    &receipt,
+                )?
+            }
+            _ => None,
         };
         if let Some(validation_receipt) = receipt.validation.as_ref() {
             validate_validation_receipt_binding(
@@ -1658,20 +1742,7 @@ impl JobWorkspaceRuntime {
             &changed_paths,
         )
         .map_err(|_| change_batch_error("validation profile cannot be resolved"))?;
-        let commands: Vec<&ValidationCommandSpec> = selection
-            .command_ids
-            .iter()
-            .filter_map(|id| {
-                configuration.as_ref().and_then(|parsed| {
-                    parsed
-                        .configuration()
-                        .commands
-                        .iter()
-                        .find(|command| &command.id == id)
-                })
-            })
-            .filter(|command| matches!(command.phase, ValidationCommandPhase::Validation))
-            .collect();
+        let commands = exact_validation_commands(configuration.as_ref(), &selection)?;
         Ok(selection.executable && !commands.is_empty())
     }
 
@@ -1704,16 +1775,7 @@ impl JobWorkspaceRuntime {
         )
         .map_err(|_| change_batch_error("validation profile cannot be resolved"))?;
         let _ = progress;
-        let commands: Vec<&ValidationCommandSpec> = selection
-            .command_ids
-            .iter()
-            .filter_map(|id| {
-                configuration
-                    .as_ref()
-                    .and_then(|parsed| parsed.configuration().commands.iter().find(|c| &c.id == id))
-            })
-            .filter(|command| matches!(command.phase, ValidationCommandPhase::Validation))
-            .collect();
+        let commands = exact_validation_commands(configuration.as_ref(), &selection)?;
         if !selection.executable || commands.is_empty() {
             return Ok(ValidationOutcome {
                 selection,
@@ -1723,6 +1785,24 @@ impl JobWorkspaceRuntime {
                 result: None,
             });
         }
+        let workspace_root = workspace.layout().root().to_path_buf();
+        let scratch_identity = format!(
+            "{}:{}:{:x}",
+            active.job.job_id.0,
+            active.worker_session_id.0,
+            Sha256::digest(serde_json::to_vec(&event.identity).map_err(|_| {
+                change_batch_error("verification scratch identity cannot be encoded")
+            })?)
+        );
+        let scope = ProtectedInputScope::new(&checkout, &changed_paths)
+            .map_err(|_| change_batch_error("protected verification input scope is invalid"))?;
+        let scratch = VerificationScratch::create(workspace_root, &scratch_identity, 0)
+            .map_err(|_| change_batch_error("verification scratch cannot be allocated"))?;
+        let isolation =
+            VerificationIsolation::open(scope, scratch, verification_helper_executable())
+                .await
+                .map_err(|_| change_batch_error("verification isolation cannot be established"))?;
+        let isolation_binding = IsolationBinding::from(&isolation);
         let mut checks = Vec::new();
         let mut artifact_refs = Vec::new();
         let mut duration_millis = 0_i64;
@@ -1731,17 +1811,28 @@ impl JobWorkspaceRuntime {
         let mut parser_failed = false;
         let mut parsed_batches = Vec::new();
         for (ordinal, command) in commands.iter().enumerate() {
-            let mut run = run_validation_command(
-                &checkout,
-                command,
-                ordinal,
-                event,
-                self.validation_artifacts.as_mut(),
-            )
-            .await?;
+            let mut run = if isolation.capability().allows_strong_pass() {
+                run_validation_command(
+                    &isolation,
+                    command,
+                    ordinal,
+                    event,
+                    self.validation_artifacts.as_mut(),
+                )
+                .await?
+            } else {
+                ValidationCommandRun::capability_unavailable(
+                    &command.id,
+                    &isolation_binding,
+                    match isolation.capability() {
+                        ProtectionCapability::Unavailable { reason, .. } => reason.clone(),
+                        ProtectionCapability::Available { .. } => unreachable!(),
+                    },
+                )
+            };
             if run.failed() && command.flaky_rerun_limit == Some(1) {
                 let retry = run_validation_command(
-                    &checkout,
+                    &isolation,
                     command,
                     commands.len().saturating_add(ordinal),
                     event,
@@ -1773,13 +1864,7 @@ impl JobWorkspaceRuntime {
                 break;
             }
         }
-        let status = if infrastructure {
-            ValidationReceiptStatus::InfrastructureError
-        } else if failed {
-            ValidationReceiptStatus::Failed
-        } else {
-            ValidationReceiptStatus::Passed
-        };
+        let status = validation_receipt_status(infrastructure, failed);
         let result_revision = receipt.result_revision.clone();
         let result = if parsed_batches.is_empty() {
             None
@@ -1926,10 +2011,7 @@ impl JobWorkspaceRuntime {
         if !same_authority(workspace.provenance(), active) {
             return Err(authority_error());
         }
-        workspace
-            .snapshot_candidate()
-            .map(|_| ())
-            .map_err(Into::into)
+        workspace.freeze_candidate().map(|_| ()).map_err(Into::into)
     }
 
     /// Returns the currently accepted tree that authorizes the next batch.
@@ -2520,6 +2602,29 @@ struct ValidationOutcome {
     result: Option<DiagnosticBaseline>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct IsolationBinding {
+    scope_version: u8,
+    scope_digest: String,
+    backend: String,
+    scratch_id: String,
+}
+
+impl From<&VerificationIsolation> for IsolationBinding {
+    fn from(isolation: &VerificationIsolation) -> Self {
+        let backend = match isolation.capability() {
+            ProtectionCapability::Available { backend }
+            | ProtectionCapability::Unavailable { backend, .. } => backend.clone(),
+        };
+        Self {
+            scope_version: isolation.scope().version(),
+            scope_digest: isolation.scope().digest().to_owned(),
+            backend,
+            scratch_id: isolation.scratch().id().to_owned(),
+        }
+    }
+}
+
 /// One bounded command outcome.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ValidationCommandOutcome {
@@ -2528,6 +2633,7 @@ enum ValidationCommandOutcome {
     Flaky,
     TimedOut,
     Overflowed,
+    CapabilityUnavailable,
 }
 
 /// One executed read-only validation command.
@@ -2537,13 +2643,33 @@ struct ValidationCommandRun {
     duration_millis: i64,
     artifact_refs: Vec<ArtifactReference>,
     output: Vec<u8>,
+    isolation: IsolationBinding,
+    detail: Option<String>,
 }
 
 impl ValidationCommandRun {
+    fn capability_unavailable(
+        command_id: &str,
+        isolation: &IsolationBinding,
+        reason: String,
+    ) -> Self {
+        Self {
+            command_id: command_id.to_owned(),
+            outcome: ValidationCommandOutcome::CapabilityUnavailable,
+            duration_millis: 0,
+            artifact_refs: Vec::new(),
+            output: Vec::new(),
+            isolation: isolation.clone(),
+            detail: Some(reason),
+        }
+    }
+
     fn infrastructure_failure(&self) -> bool {
         matches!(
             self.outcome,
-            ValidationCommandOutcome::TimedOut | ValidationCommandOutcome::Overflowed
+            ValidationCommandOutcome::TimedOut
+                | ValidationCommandOutcome::Overflowed
+                | ValidationCommandOutcome::CapabilityUnavailable
         )
     }
 
@@ -2582,14 +2708,88 @@ impl ValidationCommandRun {
                 ValidationCheckStatus::Failed,
                 "known-flaky command failed before its bounded rerun passed",
             ),
+            ValidationCommandOutcome::CapabilityUnavailable => (
+                ValidationCheckStatus::InfrastructureError,
+                "protected input enforcement is unavailable",
+            ),
         };
+        let mut summary = format!(
+            "{summary}; isolation={} scope-v{}={} scratch={}",
+            self.isolation.backend,
+            self.isolation.scope_version,
+            self.isolation.scope_digest,
+            self.isolation.scratch_id
+        );
+        if let Some(detail) = self.detail.as_ref() {
+            summary.push_str("; ");
+            summary.push_str(detail);
+        }
         ValidationCheckSummary {
             diagnostic_digest: None,
             name: self.command_id.clone(),
             status,
-            summary: summary.to_owned(),
+            summary: bounded_check_summary(&summary),
         }
     }
+}
+
+fn bounded_check_summary(summary: &str) -> String {
+    summary.chars().take(500).collect()
+}
+
+const fn validation_receipt_status(infrastructure: bool, failed: bool) -> ValidationReceiptStatus {
+    if infrastructure {
+        ValidationReceiptStatus::InfrastructureError
+    } else if failed {
+        ValidationReceiptStatus::Failed
+    } else {
+        ValidationReceiptStatus::Passed
+    }
+}
+
+fn exact_validation_commands<'a>(
+    configuration: Option<
+        &'a winwincode_execution_port::validation_config::ParsedValidationConfiguration,
+    >,
+    selection: &ValidationProfileSelection,
+) -> Result<Vec<&'a ValidationCommandSpec>, JobWorkspaceError> {
+    if !selection.executable {
+        return Ok(Vec::new());
+    }
+    let configuration = configuration.ok_or_else(|| {
+        change_batch_error("executable validation profile has no exact configuration")
+    })?;
+    let mut seen = HashSet::new();
+    let mut selected = Vec::new();
+    for command_id in &selection.command_ids {
+        if !seen.insert(command_id.as_str()) {
+            return Err(change_batch_error(
+                "validation profile repeats a command binding",
+            ));
+        }
+        let matching: Vec<_> = configuration
+            .configuration()
+            .commands
+            .iter()
+            .filter(|command| &command.id == command_id)
+            .collect();
+        let command = match matching.as_slice() {
+            [command] => *command,
+            _ => {
+                return Err(change_batch_error(
+                    "validation profile command binding is missing or ambiguous",
+                ));
+            }
+        };
+        if matches!(command.phase, ValidationCommandPhase::Validation) {
+            selected.push(command);
+        }
+    }
+    Ok(selected)
+}
+
+fn verification_helper_executable() -> Option<PathBuf> {
+    std::env::var_os("WWC_WORKER_HELPER_EXECUTABLE").map(PathBuf::from)
 }
 
 /// Maps a canonical environment variable name to its process key.
@@ -2640,7 +2840,7 @@ fn load_validation_configuration(
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::large_futures)]
 async fn run_validation_command(
-    checkout: &Path,
+    isolation: &VerificationIsolation,
     command: &ValidationCommandSpec,
     ordinal: usize,
     event: &ChangeBatchProposalEvent,
@@ -2651,6 +2851,7 @@ async fn run_validation_command(
             "validation command exceeds the read-only validation boundary",
         ));
     }
+    let checkout = isolation.scope().root();
     let working_directory = if command.working_directory == "." {
         checkout.to_path_buf()
     } else {
@@ -2661,75 +2862,28 @@ async fn run_validation_command(
             "validation command working directory leaves the checkout",
         ));
     }
-    let mut process = Command::new(&command.argv[0]);
-    process
-        .args(&command.argv[1..])
-        .current_dir(&working_directory)
-        .env_clear()
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0);
+    let mut environment = HashMap::new();
+    environment.insert("PATH".to_owned(), std::env::var("PATH").unwrap_or_default());
     for variable in &command.environment {
-        process.env(environment_name(&variable.name), &variable.value);
+        environment.insert(
+            environment_name(&variable.name).to_owned(),
+            variable.value.clone(),
+        );
     }
     let deadline =
         tokio::time::Duration::from_millis(u64::try_from(command.timeout_millis).unwrap_or(1));
     let started = std::time::Instant::now();
-    let mut child = process
-        .spawn()
-        .map_err(|_| change_batch_error("validation command cannot be started"))?;
-    let mut stdout_pipe = child
-        .stdout
-        .take()
-        .ok_or_else(|| change_batch_error("validation command output cannot be captured"))?;
-    let mut stderr_pipe = child
-        .stderr
-        .take()
-        .ok_or_else(|| change_batch_error("validation command output cannot be captured"))?;
     let limit = usize::try_from(command.output_limit_bytes).unwrap_or(1);
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
-    let mut overflow = false;
-    let read = async {
-        loop {
-            let mut out_chunk = [0_u8; 8192];
-            let mut err_chunk = [0_u8; 8192];
-            let (left, right) = tokio::join!(
-                stdout_pipe.read(&mut out_chunk),
-                stderr_pipe.read(&mut err_chunk)
-            );
-            let (left, right) = (left.unwrap_or(0), right.unwrap_or(0));
-            if left == 0 && right == 0 {
-                break;
-            }
-            for (target, source) in [
-                (&mut stdout, &out_chunk[..left]),
-                (&mut stderr, &err_chunk[..right]),
-            ] {
-                if target.len() >= limit {
-                    overflow = true;
-                } else {
-                    let remaining = limit - target.len();
-                    let bound = source.len().min(remaining);
-                    target.extend_from_slice(&source[..bound]);
-                    overflow |= bound < source.len();
-                }
-            }
-        }
-    };
-    let timed_out = tokio::time::timeout(deadline, read).await.is_err();
-    let exited_success = if timed_out {
-        let _ = child.start_kill();
-        false
-    } else {
-        let status = child
-            .wait()
-            .await
-            .map_err(|_| change_batch_error("validation command cannot be reaped"))?;
-        status.success()
-    };
+    let output = isolation
+        .run(
+            &command.argv,
+            &working_directory,
+            environment,
+            deadline,
+            limit,
+        )
+        .await
+        .map_err(|_| change_batch_error("isolated validation command failed"))?;
     let duration_millis = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
     let mut artifact_refs = Vec::new();
     let stdout_media = command
@@ -2741,12 +2895,12 @@ async fn run_validation_command(
     for (stream, bytes, media_type) in [
         (
             ValidationArtifactStream::Stdout,
-            stdout.clone(),
+            output.stdout.clone(),
             stdout_media,
         ),
         (
             ValidationArtifactStream::Stderr,
-            stderr,
+            output.stderr.clone(),
             "text/plain; charset=utf-8",
         ),
     ] {
@@ -2761,11 +2915,11 @@ async fn run_validation_command(
         )?;
         artifact_refs.push(reference);
     }
-    let outcome = if timed_out {
+    let outcome = if output.timed_out {
         ValidationCommandOutcome::TimedOut
-    } else if overflow {
+    } else if output.overflowed {
         ValidationCommandOutcome::Overflowed
-    } else if exited_success {
+    } else if output.status.success() {
         ValidationCommandOutcome::Passed
     } else {
         ValidationCommandOutcome::Failed
@@ -2775,7 +2929,9 @@ async fn run_validation_command(
         outcome,
         duration_millis,
         artifact_refs,
-        output: stdout,
+        output: output.stdout,
+        isolation: IsolationBinding::from(isolation),
+        detail: None,
     })
 }
 
@@ -3108,73 +3264,6 @@ fn authority_error() -> JobWorkspaceError {
         JobWorkspaceErrorCode::AuthorityMismatch,
         "active Job does not own this detached workspace",
     )
-}
-
-/// Freezes one sealed `Snapshot` for a read-only verification checkout.
-///
-/// The snapshot id is allocated here, at freeze, before any verification
-/// product is staged. The candidate identity is the job's own
-/// `work_input.candidate_ref` string, taken verbatim: nothing in the Worker
-/// inputs produces a `cnd_` id. Base, candidate and content come from the
-/// frozen checkout so the writer freeze and the verifier freeze seal the same
-/// code identity.
-fn freeze_verification_snapshot(
-    active: &ActiveJob,
-    workspace: &WorkerWorkspace,
-) -> Result<winwincode_delivery::domain::snapshot::Snapshot, JobWorkspaceError> {
-    use winwincode_delivery::domain::snapshot::SnapshotBuilder;
-
-    let winwincode_execution_port::generated::ExecutionScope::WorkRunExecutionScope(scope) =
-        &active.job.scope
-    else {
-        return Err(JobWorkspaceError::new(
-            JobWorkspaceErrorCode::Candidate,
-            "verification snapshot requires a WorkRun execution scope",
-        ));
-    };
-    let candidate_ref = active
-        .job
-        .work_input
-        .as_ref()
-        .and_then(|input| input.candidate_ref.clone())
-        .unwrap_or_default();
-    let facts = workspace.snapshot_verification()?;
-    let checkout = workspace.layout().checkout();
-    let base_commit_id =
-        crate::workspace::rev_parse(checkout, &format!("{}^", facts.candidate_commit_id))?;
-    let base_tree_id =
-        crate::workspace::rev_parse(checkout, &format!("{base_commit_id}^{{tree}}"))?;
-    let diff = crate::workspace::candidate_diff_sha256(
-        checkout,
-        &base_commit_id,
-        &facts.candidate_commit_id,
-    )?;
-    let created_at_millis = u64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |since| since.as_millis()),
-    )
-    .unwrap_or(u64::MAX);
-    SnapshotBuilder::new(
-        candidate_ref,
-        scope.work_run_id.0.as_str(),
-        active.job.workspace.repository_id.0.as_str(),
-    )
-    .with_base(base_commit_id.as_str(), base_tree_id.as_str())
-    .with_candidate(
-        facts.candidate_commit_id.as_str(),
-        facts.candidate_tree_id.as_str(),
-    )
-    .with_diff_sha256(diff.0.as_str())
-    .with_content_digest(facts.content_digest.0.as_str())
-    .with_created_at_millis(created_at_millis)
-    .build()
-    .map_err(|_| {
-        JobWorkspaceError::new(
-            JobWorkspaceErrorCode::Candidate,
-            "verification snapshot is missing required code identity",
-        )
-    })
 }
 
 fn change_batch_error(message: &'static str) -> JobWorkspaceError {
@@ -3997,8 +4086,14 @@ fn retain_validation_diagnostic_evaluation(
 
 #[cfg(test)]
 mod validation_rerun_tests {
-    use super::{ValidationCommandOutcome, ValidationCommandRun};
-    use winwincode_execution_port::generated::ValidationCheckStatus;
+    use super::{
+        IsolationBinding, ValidationCommandOutcome, ValidationCommandRun,
+        exact_validation_commands, validation_receipt_status,
+    };
+    use winwincode_execution_port::{
+        generated::{ValidationCheckStatus, ValidationReceiptStatus},
+        validation_config::{parse_validation_configuration, resolve_validation_profile},
+    };
 
     #[test]
     fn a_passing_bounded_rerun_cannot_hide_the_original_failure() {
@@ -4019,6 +4114,128 @@ mod validation_rerun_tests {
             duration_millis,
             artifact_refs: Vec::new(),
             output: Vec::new(),
+            isolation: IsolationBinding {
+                scope_version: 1,
+                scope_digest: "sha256:scope".to_owned(),
+                backend: "test-backend".to_owned(),
+                scratch_id: "test-scratch".to_owned(),
+            },
+            detail: None,
+        }
+    }
+
+    #[test]
+    fn executable_command_binding_rejects_missing_and_duplicate_ids() {
+        let configuration = parse_validation_configuration(
+            r#"schemaVersion = 1
+
+[[commands]]
+id = "format"
+phase = "formatter"
+language = "python"
+allowedCompanionPaths = []
+argv = ["/usr/bin/true"]
+workingDirectory = "."
+environment = []
+network = false
+timeoutMillis = 1000
+outputLimitBytes = 1024
+
+[[commands]]
+id = "check"
+phase = "validation"
+language = "python"
+allowedCompanionPaths = []
+argv = ["/usr/bin/true"]
+workingDirectory = "."
+environment = []
+network = false
+timeoutMillis = 1000
+outputLimitBytes = 1024
+
+[[commands]]
+id = "rust"
+phase = "validation"
+language = "rust"
+allowedCompanionPaths = []
+argv = ["/usr/bin/true"]
+workingDirectory = "."
+environment = []
+network = false
+timeoutMillis = 1000
+outputLimitBytes = 1024
+
+[[commands]]
+id = "types"
+phase = "validation"
+language = "typescript"
+allowedCompanionPaths = []
+argv = ["/usr/bin/true"]
+workingDirectory = "."
+environment = []
+network = false
+timeoutMillis = 1000
+outputLimitBytes = 1024
+
+[[profiles]]
+name = "changed"
+commandIds = ["format", "check", "rust", "types"]
+[[profiles]]
+name = "affected"
+commandIds = ["check", "rust", "types"]
+[[profiles]]
+name = "fast"
+commandIds = ["check", "rust", "types"]
+[[profiles]]
+name = "final"
+commandIds = ["check", "rust", "types"]
+"#,
+        )
+        .expect("parse exact test configuration");
+        let selection = resolve_validation_profile(Some(&configuration), "changed", &[])
+            .expect("resolve exact test profile");
+        assert_eq!(
+            exact_validation_commands(Some(&configuration), &selection)
+                .expect("bind exact command")
+                .len(),
+            3
+        );
+
+        let mut missing = selection.clone();
+        missing.command_ids = vec!["missing".to_owned()];
+        assert!(exact_validation_commands(Some(&configuration), &missing).is_err());
+
+        let mut duplicate = selection.clone();
+        duplicate.command_ids = vec!["check".to_owned(), "check".to_owned()];
+        assert!(exact_validation_commands(Some(&configuration), &duplicate).is_err());
+    }
+
+    #[test]
+    fn unavailable_protection_is_infrastructure_and_never_a_pass() {
+        for backend in ["macos-seatbelt-v1", "linux-codex-sandbox-v1"] {
+            let isolation = IsolationBinding {
+                scope_version: 1,
+                scope_digest: "sha256:scope".to_owned(),
+                backend: backend.to_owned(),
+                scratch_id: "test-scratch".to_owned(),
+            };
+            let run = ValidationCommandRun::capability_unavailable(
+                "check",
+                &isolation,
+                "forced capability failure".to_owned(),
+            );
+
+            assert!(run.infrastructure_failure());
+            assert!(!run.failed());
+            assert_eq!(run.artifact_refs.len(), 0);
+            assert_eq!(
+                run.check_summary().status,
+                ValidationCheckStatus::InfrastructureError
+            );
+            assert_eq!(
+                validation_receipt_status(run.infrastructure_failure(), run.failed()),
+                ValidationReceiptStatus::InfrastructureError
+            );
         }
     }
 }

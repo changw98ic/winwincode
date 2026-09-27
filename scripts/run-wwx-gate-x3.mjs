@@ -35,8 +35,6 @@ function compileKnowledgeModule() {
       'apps/client/tsconfig.candidate-run-preview-tests.json',
       '--pretty',
       'false',
-      '--incremental',
-      'false',
     ],
     { cwd: root, encoding: 'utf8' },
   )

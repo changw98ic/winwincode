@@ -644,6 +644,24 @@ fn terminal_lease_replays_exactly_and_stops_counting_as_active_after_restart() {
         registry.claim_execution_job(&lease).expect("lease claim");
         assert!(
             registry
+                .load_live_lease(&lease.job_id, &instant(1))
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            registry
+                .load_live_lease(&lease.job_id, &instant(0))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            registry
+                .load_live_lease(&lease.job_id, &instant(9))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            registry
                 .finish_execution_lease(&terminal)
                 .expect("terminal lease")
         );
@@ -651,6 +669,13 @@ fn terminal_lease_replays_exactly_and_stops_counting_as_active_after_restart() {
             !registry
                 .finish_execution_lease(&terminal)
                 .expect("terminal lease replay")
+        );
+
+        assert!(
+            registry
+                .load_live_lease(&lease.job_id, &instant(5))
+                .unwrap()
+                .is_none()
         );
 
         let mut changed = terminal.clone();

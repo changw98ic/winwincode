@@ -8,9 +8,9 @@
 //! the private candidate snapshot seal.
 //!
 //! ```compile_fail
-//! use winwincode_delivery::domain::candidate::ValidatedGitSnapshotFact;
+//! use winwincode_delivery::domain::candidate::SealedCandidateSource;
 //!
-//! let _caller_built_snapshot = ValidatedGitSnapshotFact {
+//! let _caller_built_snapshot = SealedCandidateSource {
 //!     work_run_id: todo!(),
 //!     ..todo!()
 //! };
@@ -20,7 +20,7 @@
 //! use winwincode_delivery::domain::candidate::FreezeCandidateFacts;
 //!
 //! let _caller_built_freeze = FreezeCandidateFacts {
-//!     git_snapshot: todo!(),
+//!     candidate_source: todo!(),
 //!     terminal_outcome: todo!(),
 //! };
 //! ```
@@ -45,8 +45,9 @@ use super::{
     SessionBindingId, bounded_text, validation_error,
 };
 use winwincode_domain::{
-    ArtifactId, CodexThreadId, DeliveryId, ExecutionJobId, FencingToken, LeaseId, ProductSessionId,
-    Sha256Digest, WorkItemId, WorkRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
+    ArtifactId, CandidateId, CodexThreadId, DeliveryId, ExecutionJobId, FencingToken, LeaseId,
+    ProductSessionId, Sha256Digest, WorkItemId, WorkRunId, WorkerId, WorkerInstanceId,
+    WorkerSessionId,
 };
 
 mod verdict_authority;
@@ -89,7 +90,7 @@ pub struct CandidateHunkFact {
 }
 
 /// Storage-neutral Artifact facts copied from a trusted source adapter.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DurableCandidateArtifactInput {
     pub artifact_id: ArtifactId,
     pub digest: Sha256Digest,
@@ -105,7 +106,7 @@ pub struct DurableCandidateArtifactInput {
 }
 
 /// Storage-neutral Git and Artifact facts rebuilt by a trusted adapter.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DurableCandidateSourceInput {
     pub repository_locator: String,
     pub requested_base_revision: String,
@@ -119,82 +120,65 @@ pub struct DurableCandidateSourceInput {
     pub artifact: DurableCandidateArtifactInput,
 }
 
-/// A Git/Artifact-adapter fact for one exact Job workspace snapshot.
-///
-/// All fields and constructors are private. This type is intentionally not
-/// deserializable: callers and Workers cannot promote format-valid strings into
-/// candidate facts.
+/// Immutable producer source proof. This is not a verification Snapshot:
+/// its authority is the writer's exact Artifact and `SessionBinding`, and it is
+/// consumed only while sealing executor/remediator output.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ValidatedGitSnapshotFact {
-    work_run_id: WorkRunId,
-    session_binding_id: SessionBindingId,
-    product_session_id: ProductSessionId,
-    execution_job_id: ExecutionJobId,
-    attempt: u64,
-    lease_id: LeaseId,
-    fencing_token: FencingToken,
-    worker_id: WorkerId,
-    worker_instance_id: WorkerInstanceId,
-    worker_session_id: WorkerSessionId,
-    codex_thread_id: CodexThreadId,
+pub struct SealedCandidateSource {
+    input: DurableCandidateSourceInput,
+    binding: SessionBinding,
     repository: RepositoryRef,
-    base_commit_id: String,
-    base_tree_id: String,
-    candidate_commit_id: String,
-    candidate_tree_id: String,
-    diff_sha256: String,
-    changed_paths: Vec<CandidatePathFact>,
-    changed_hunks: Vec<CandidateHunkFact>,
-    artifact_ref: String,
-    artifact_digest: Sha256Digest,
     last_event_sequence: u64,
     finished_at_millis: u64,
     validation_seal: [u8; 32],
 }
 
-impl ValidatedGitSnapshotFact {
+impl SealedCandidateSource {
     pub(crate) fn work_run_id(&self) -> &WorkRunId {
-        &self.work_run_id
+        &self.binding.work_run_id
     }
 
     pub(crate) fn session_binding_id(&self) -> &SessionBindingId {
-        &self.session_binding_id
+        &self.binding.id
     }
 
     pub(crate) fn product_session_id(&self) -> &ProductSessionId {
-        &self.product_session_id
+        &self.binding.product_session_id
     }
 
     pub(crate) fn execution_job_id(&self) -> &ExecutionJobId {
-        &self.execution_job_id
+        &self.input.artifact.execution_job_id
     }
 
     pub(crate) const fn attempt(&self) -> u64 {
-        self.attempt
+        self.input.artifact.attempt
     }
 
     pub(crate) fn lease_id(&self) -> &LeaseId {
-        &self.lease_id
+        &self.input.artifact.lease_id
     }
 
     pub(crate) fn fencing_token(&self) -> &FencingToken {
-        &self.fencing_token
+        &self.input.artifact.fencing_token
     }
 
     pub(crate) fn worker_id(&self) -> &WorkerId {
-        &self.worker_id
+        &self.input.artifact.worker_id
     }
 
     pub(crate) fn worker_instance_id(&self) -> &WorkerInstanceId {
-        &self.worker_instance_id
+        &self.input.artifact.worker_instance_id
     }
 
     pub(crate) fn worker_session_id(&self) -> &WorkerSessionId {
-        &self.worker_session_id
+        &self.input.artifact.worker_session_id
     }
 
     pub(crate) fn codex_thread_id(&self) -> &CodexThreadId {
-        &self.codex_thread_id
+        self.binding
+            .codex_thread_id
+            .as_ref()
+            .expect("sealed source thread")
     }
 
     pub(crate) fn repository(&self) -> &RepositoryRef {
@@ -202,66 +186,35 @@ impl ValidatedGitSnapshotFact {
     }
 
     pub(crate) fn base_commit_id(&self) -> &str {
-        &self.base_commit_id
+        &self.input.base_commit_id
     }
 
     pub(crate) fn base_tree_id(&self) -> &str {
-        &self.base_tree_id
+        &self.input.base_tree_id
     }
 
     pub(crate) fn candidate_commit_id(&self) -> &str {
-        &self.candidate_commit_id
+        &self.input.candidate_commit_id
     }
 
     pub(crate) fn candidate_tree_id(&self) -> &str {
-        &self.candidate_tree_id
-    }
-
-    pub(crate) fn diff_sha256(&self) -> &str {
-        &self.diff_sha256
+        &self.input.candidate_tree_id
     }
 
     pub(crate) fn changed_paths(&self) -> &[CandidatePathFact] {
-        &self.changed_paths
+        &self.input.changed_paths
     }
 
     pub(crate) fn changed_hunks(&self) -> &[CandidateHunkFact] {
-        &self.changed_hunks
-    }
-
-    pub(crate) fn artifact_ref(&self) -> &str {
-        &self.artifact_ref
-    }
-
-    pub(crate) fn artifact_digest(&self) -> &Sha256Digest {
-        &self.artifact_digest
-    }
-
-    pub(crate) const fn last_event_sequence(&self) -> u64 {
-        self.last_event_sequence
-    }
-
-    pub(crate) const fn finished_at_millis(&self) -> u64 {
-        self.finished_at_millis
+        &self.input.changed_hunks
     }
 
     pub(crate) fn has_same_terminal_workspace(&self, other: &Self) -> bool {
-        self.work_run_id == other.work_run_id
-            && self.session_binding_id == other.session_binding_id
-            && self.product_session_id == other.product_session_id
-            && self.execution_job_id == other.execution_job_id
-            && self.attempt == other.attempt
-            && self.lease_id == other.lease_id
-            && self.fencing_token == other.fencing_token
-            && self.worker_id == other.worker_id
-            && self.worker_instance_id == other.worker_instance_id
-            && self.worker_session_id == other.worker_session_id
-            && self.codex_thread_id == other.codex_thread_id
+        self.binding == other.binding
+            && self.input.artifact == other.input.artifact
             && self.repository == other.repository
-            && self.candidate_commit_id == other.candidate_commit_id
-            && self.candidate_tree_id == other.candidate_tree_id
-            && self.artifact_ref == other.artifact_ref
-            && self.artifact_digest == other.artifact_digest
+            && self.input.candidate_commit_id == other.input.candidate_commit_id
+            && self.input.candidate_tree_id == other.input.candidate_tree_id
             && self.last_event_sequence == other.last_event_sequence
             && self.finished_at_millis == other.finished_at_millis
     }
@@ -270,13 +223,14 @@ impl ValidatedGitSnapshotFact {
 /// Sealed input accepted by [`freeze_delivery_candidate`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FreezeCandidateFacts {
-    git_snapshot: ValidatedGitSnapshotFact,
+    candidate_id: CandidateId,
+    candidate_source: SealedCandidateSource,
     terminal_outcome: VerifiedTerminalOutcome,
 }
 
 impl FreezeCandidateFacts {
-    pub(crate) fn git_snapshot(&self) -> &ValidatedGitSnapshotFact {
-        &self.git_snapshot
+    pub(crate) fn candidate_source(&self) -> &SealedCandidateSource {
+        &self.candidate_source
     }
 }
 
@@ -285,6 +239,10 @@ impl FreezeCandidateFacts {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FrozenDeliveryCandidate {
+    candidate_id: CandidateId,
+    candidate_digest: Sha256Digest,
+    #[serde(skip)]
+    validation_seal: Sha256Digest,
     candidate_ref: String,
     delivery_id: DeliveryId,
     delivery_spec_id: super::DeliverySpecId,
@@ -318,6 +276,16 @@ pub struct FrozenDeliveryCandidate {
 }
 
 impl FrozenDeliveryCandidate {
+    #[must_use]
+    pub fn candidate_id(&self) -> &CandidateId {
+        &self.candidate_id
+    }
+
+    #[must_use]
+    pub fn candidate_digest(&self) -> &Sha256Digest {
+        &self.candidate_digest
+    }
+
     #[must_use]
     pub fn candidate_ref(&self) -> &str {
         &self.candidate_ref
@@ -465,35 +433,8 @@ impl FrozenDeliveryCandidate {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct GitSnapshotSealIdentity<'fact> {
-    work_run_id: &'fact WorkRunId,
-    session_binding_id: &'fact SessionBindingId,
-    product_session_id: &'fact ProductSessionId,
-    execution_job_id: &'fact ExecutionJobId,
-    attempt: u64,
-    lease_id: &'fact LeaseId,
-    fencing_token: &'fact FencingToken,
-    worker_id: &'fact WorkerId,
-    worker_instance_id: &'fact WorkerInstanceId,
-    worker_session_id: &'fact WorkerSessionId,
-    codex_thread_id: &'fact CodexThreadId,
-    repository: &'fact RepositoryRef,
-    base_commit_id: &'fact str,
-    base_tree_id: &'fact str,
-    candidate_commit_id: &'fact str,
-    candidate_tree_id: &'fact str,
-    diff_sha256: &'fact str,
-    changed_paths: &'fact [CandidatePathFact],
-    changed_hunks: &'fact [CandidateHunkFact],
-    artifact_ref: &'fact str,
-    artifact_digest: &'fact Sha256Digest,
-    last_event_sequence: u64,
-    finished_at_millis: u64,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
 struct CandidateIdentity<'candidate> {
+    candidate_id: &'candidate CandidateId,
     delivery_id: &'candidate DeliveryId,
     delivery_spec_id: &'candidate super::DeliverySpecId,
     delivery_spec_revision: u64,
@@ -556,13 +497,15 @@ pub fn freeze_delivery_candidate_from_source(
     delivery: &Delivery,
     source: &DurableCandidateSourceInput,
     terminal_facts: &DeliveryTerminalOutcomeFacts,
+    candidate_id: CandidateId,
 ) -> Result<FrozenDeliveryCandidate, DeliveryValidationError> {
-    let (git_snapshot, terminal_outcome) =
-        validated_git_snapshot_from_source(delivery, source, terminal_facts)?;
+    let (candidate_source, terminal_outcome) =
+        sealed_candidate_source_from_terminal(delivery, source, terminal_facts)?;
     freeze_delivery_candidate(
         delivery,
         &FreezeCandidateFacts {
-            git_snapshot,
+            candidate_id,
+            candidate_source,
             terminal_outcome,
         },
     )
@@ -578,9 +521,10 @@ pub fn freeze_rework_candidate_from_sources(
     source: &DurableCandidateSourceInput,
     delta: &DurableCandidateSourceInput,
     terminal_facts: &DeliveryTerminalOutcomeFacts,
+    candidate_id: CandidateId,
 ) -> Result<FrozenDeliveryCandidate, DeliveryValidationError> {
-    let (git_snapshot, terminal_outcome) =
-        validated_git_snapshot_from_source(delivery, source, terminal_facts)?;
+    let (candidate_source, terminal_outcome) =
+        sealed_candidate_source_from_terminal(delivery, source, terminal_facts)?;
     if delta.repository_locator != source.repository_locator
         || delta.artifact != source.artifact
         || delta.requested_base_revision != authorization.previous_candidate().candidate_commit_id()
@@ -591,34 +535,40 @@ pub fn freeze_rework_candidate_from_sources(
             "replacement delta differs from its authenticated candidate Artifact",
         ));
     }
-    let mut replacement_delta = git_snapshot.clone();
+    let mut replacement_delta = candidate_source.clone();
     replacement_delta
+        .input
         .base_commit_id
         .clone_from(&delta.base_commit_id);
     replacement_delta
+        .input
         .base_tree_id
         .clone_from(&delta.base_tree_id);
-    replacement_delta.diff_sha256.clone_from(&delta.diff_sha256);
-    replacement_delta.changed_paths = source_path_facts(delta);
-    replacement_delta.changed_hunks = source_hunk_facts(delta);
-    validate_git_snapshot_shape(&replacement_delta)?;
-    replacement_delta.validation_seal = seal_git_snapshot(&replacement_delta)?;
+    replacement_delta
+        .input
+        .diff_sha256
+        .clone_from(&delta.diff_sha256);
+    replacement_delta.input.changed_paths = source_path_facts(delta);
+    replacement_delta.input.changed_hunks = source_hunk_facts(delta);
+    validate_candidate_source_shape(&replacement_delta)?;
+    replacement_delta.validation_seal = seal_candidate_source(&replacement_delta)?;
     super::rework::freeze_rework_replacement_candidate(
         delivery,
         authorization,
         &FreezeCandidateFacts {
-            git_snapshot,
+            candidate_id,
+            candidate_source,
             terminal_outcome,
         },
         &replacement_delta,
     )
 }
 
-pub(super) fn validated_git_snapshot_from_source(
+pub(super) fn sealed_candidate_source_from_terminal(
     delivery: &Delivery,
     source: &DurableCandidateSourceInput,
     terminal_facts: &DeliveryTerminalOutcomeFacts,
-) -> Result<(ValidatedGitSnapshotFact, VerifiedTerminalOutcome), DeliveryValidationError> {
+) -> Result<(SealedCandidateSource, VerifiedTerminalOutcome), DeliveryValidationError> {
     if delivery.snapshot().spec.repository.kind != super::RepositoryKind::LocalGit
         || delivery.snapshot().spec.repository.locator != source.repository_locator
         || delivery.snapshot().spec.base_revision != source.requested_base_revision
@@ -652,10 +602,9 @@ pub(super) fn validated_git_snapshot_from_source(
             "candidate producer must have one exact SessionBinding",
         ));
     };
-    let codex_thread_id = terminal_outcome
-        .codex_thread_id()
-        .cloned()
-        .ok_or_else(|| stale_candidate("candidate producer CodexThread is missing"))?;
+    if terminal_outcome.codex_thread_id().is_none() {
+        return Err(stale_candidate("candidate producer CodexThread is missing"));
+    }
     let last_event_sequence = u64::try_from(terminal_outcome.last_event_sequence().0)
         .map_err(|_| invalid_candidate("candidate terminal event sequence is invalid"))?;
     let artifact = &source.artifact;
@@ -671,110 +620,22 @@ pub(super) fn validated_git_snapshot_from_source(
             "candidate Artifact is incomplete, deleted, or belongs to another Worker outcome",
         ));
     }
-    let changed_paths = source_path_facts(source);
-    let changed_hunks = source_hunk_facts(source);
-    let mut git_snapshot = ValidatedGitSnapshotFact {
-        work_run_id: terminal_outcome.work_run_id().clone(),
-        session_binding_id: binding.id.clone(),
-        product_session_id: binding.product_session_id.clone(),
-        execution_job_id: binding.execution_job_id.clone(),
-        attempt: u64::try_from(producer.attempt)
-            .map_err(|_| invalid_candidate("candidate producer attempt is invalid"))?,
-        lease_id: terminal_outcome.lease_id().clone(),
-        fencing_token: terminal_outcome.fencing_token().clone(),
-        worker_id: terminal_outcome.worker_id().clone(),
-        worker_instance_id: terminal_outcome.worker_instance_id().clone(),
-        worker_session_id: terminal_outcome.worker_session_id().clone(),
-        codex_thread_id,
+    if !matches!(
+        binding.execution_profile.as_deref(),
+        Some("executor" | "remediator")
+    ) {
+        return Err(stale_candidate("only a writer can seal a Candidate source"));
+    }
+    let mut candidate_source = SealedCandidateSource {
+        input: source.clone(),
+        binding: (*binding).clone(),
         repository: delivery.snapshot().spec.repository.clone(),
-        base_commit_id: source.base_commit_id.clone(),
-        base_tree_id: source.base_tree_id.clone(),
-        candidate_commit_id: source.candidate_commit_id.clone(),
-        candidate_tree_id: source.candidate_tree_id.clone(),
-        diff_sha256: source.diff_sha256.clone(),
-        changed_paths,
-        changed_hunks,
-        artifact_ref: artifact.artifact_id.0.clone(),
-        artifact_digest: artifact.digest.clone(),
         last_event_sequence,
         finished_at_millis: terminal_outcome.finished_at_millis(),
         validation_seal: [0; 32],
     };
-    git_snapshot.validation_seal = seal_git_snapshot(&git_snapshot)?;
-    Ok((git_snapshot, terminal_outcome))
-}
-
-/// Rebinds the already-frozen writer Git facts to one read-only verification
-/// Job. Verification Workers consume the writer candidate checkout; they do
-/// not create a second candidate Artifact. The terminal identity still comes
-/// from the verification Job's sealed outcome and lease.
-pub(super) fn validated_git_snapshot_from_candidate(
-    delivery: &Delivery,
-    candidate: &FrozenDeliveryCandidate,
-    terminal_facts: &DeliveryTerminalOutcomeFacts,
-) -> Result<(ValidatedGitSnapshotFact, VerifiedTerminalOutcome), DeliveryValidationError> {
-    assert_frozen_candidate_current(delivery, candidate)?;
-    let terminal_outcome = terminal_facts
-        .verify_successful_report(delivery)
-        .map_err(|error| stale_candidate(&error.to_string()))?;
-    let verification_run = delivery
-        .snapshot()
-        .work_run_aggregate
-        .runs
-        .iter()
-        .find(|run| run.id == *terminal_outcome.work_run_id())
-        .ok_or_else(|| stale_candidate("verification WorkRun is missing"))?;
-    let verification_binding = delivery
-        .snapshot()
-        .session_bindings
-        .iter()
-        .find(|binding| {
-            binding.work_run_id == verification_run.id
-                && binding.execution_job_id == *terminal_outcome.execution_job_id()
-                && binding.attempt == u64::try_from(verification_run.attempt).unwrap_or(0)
-        })
-        .ok_or_else(|| stale_candidate("verification SessionBinding is missing"))?;
-    let binding = exact_producer_binding(delivery, verification_run, &verification_binding.id)?;
-    let codex_thread_id = terminal_outcome
-        .codex_thread_id()
-        .cloned()
-        .ok_or_else(|| stale_candidate("verification CodexThread is missing"))?;
-    let last_event_sequence = u64::try_from(terminal_outcome.last_event_sequence().0)
-        .map_err(|_| invalid_candidate("verification terminal event sequence is invalid"))?;
-    let mut git_snapshot = ValidatedGitSnapshotFact {
-        work_run_id: terminal_outcome.work_run_id().clone(),
-        session_binding_id: binding.id.clone(),
-        product_session_id: binding.product_session_id.clone(),
-        execution_job_id: binding.execution_job_id.clone(),
-        attempt: u64::try_from(verification_run.attempt)
-            .map_err(|_| invalid_candidate("verification attempt is invalid"))?,
-        lease_id: terminal_outcome.lease_id().clone(),
-        fencing_token: terminal_outcome.fencing_token().clone(),
-        worker_id: terminal_outcome.worker_id().clone(),
-        worker_instance_id: terminal_outcome.worker_instance_id().clone(),
-        worker_session_id: terminal_outcome.worker_session_id().clone(),
-        codex_thread_id,
-        repository: candidate.repository.clone(),
-        base_commit_id: candidate.base_commit_id.clone(),
-        base_tree_id: candidate.base_tree_id.clone(),
-        candidate_commit_id: candidate.candidate_commit_id.clone(),
-        candidate_tree_id: candidate.candidate_tree_id.clone(),
-        diff_sha256: candidate.diff_sha256.clone(),
-        changed_paths: candidate.changed_paths.clone(),
-        changed_hunks: candidate.changed_hunks.clone(),
-        // This is the writer's candidate Artifact identity, carried as the
-        // checkout source attestation rather than as a verifier-produced
-        // Artifact reference.
-        artifact_ref: candidate.producer_artifact_ref.clone(),
-        artifact_digest: candidate.producer_artifact_digest.clone(),
-        last_event_sequence,
-        finished_at_millis: terminal_outcome.finished_at_millis(),
-        validation_seal: [0; 32],
-    };
-    validate_git_snapshot(delivery, &git_snapshot)?;
-    validate_git_snapshot_shape(&git_snapshot)?;
-    git_snapshot.validation_seal = seal_git_snapshot(&git_snapshot)?;
-    Ok((git_snapshot, terminal_outcome))
+    candidate_source.validation_seal = seal_candidate_source(&candidate_source)?;
+    Ok((candidate_source, terminal_outcome))
 }
 
 fn source_path_facts(source: &DurableCandidateSourceInput) -> Vec<CandidatePathFact> {
@@ -797,22 +658,30 @@ fn freeze_candidate_for_profile(
     facts: &FreezeCandidateFacts,
     expected_profile: &str,
 ) -> Result<FrozenDeliveryCandidate, DeliveryValidationError> {
-    let snapshot = &facts.git_snapshot;
-    let producer = current_writer(delivery, &snapshot.work_run_id)?;
-    let binding = exact_producer_binding(delivery, producer, &snapshot.session_binding_id)?;
+    if !winwincode_domain::is_canonical_prefixed_id(&facts.candidate_id.0, "cnd_") {
+        return Err(invalid_candidate(
+            "CandidateId must be allocated by Control Plane",
+        ));
+    }
+    let snapshot = &facts.candidate_source;
+    let producer = current_writer(delivery, &snapshot.binding.work_run_id)?;
+    let binding = exact_producer_binding(delivery, producer, &snapshot.binding.id)?;
     if binding.execution_profile.as_deref() != Some(expected_profile) {
         return Err(stale_candidate(
             "candidate producer profile does not match its authorized writer role",
         ));
     }
 
-    assert_validated_git_snapshot_fact(snapshot)?;
-    validate_git_snapshot(delivery, snapshot)?;
-    verify_terminal_snapshot_binding(producer, binding, &facts.terminal_outcome, snapshot)?;
+    assert_sealed_candidate_source(snapshot)?;
+    validate_candidate_source(delivery, snapshot)?;
+    verify_terminal_source_binding(producer, binding, &facts.terminal_outcome, snapshot)?;
 
-    let mut changed_paths = snapshot.changed_paths.clone();
+    let mut changed_paths = snapshot.input.changed_paths.clone();
     changed_paths.sort_by(|left, right| left.path.cmp(&right.path));
     let mut candidate = FrozenDeliveryCandidate {
+        candidate_id: facts.candidate_id.clone(),
+        candidate_digest: Sha256Digest(String::new()),
+        validation_seal: Sha256Digest(String::new()),
         candidate_ref: String::new(),
         delivery_id: delivery.id().clone(),
         delivery_spec_id: delivery.snapshot().spec.id.clone(),
@@ -820,7 +689,7 @@ fn freeze_candidate_for_profile(
         repository: delivery.snapshot().spec.repository.clone(),
         base_revision: delivery.snapshot().spec.base_revision.clone(),
         producer_work_item_id: Some(producer.work_item_id.clone()),
-        producer_work_run_id: snapshot.work_run_id.clone(),
+        producer_work_run_id: snapshot.binding.work_run_id.clone(),
         producer_attempt: u64::try_from(producer.attempt)
             .map_err(|_| stale_candidate("candidate producer attempt is invalid"))?,
         producer_session_binding_id: binding.id.clone(),
@@ -834,23 +703,28 @@ fn freeze_candidate_for_profile(
             .codex_thread_id
             .clone()
             .ok_or_else(|| stale_candidate("candidate producer CodexThread is missing"))?,
-        producer_lease_id: snapshot.lease_id.clone(),
-        producer_fencing_token: snapshot.fencing_token.clone(),
-        producer_worker_id: snapshot.worker_id.clone(),
-        producer_worker_instance_id: snapshot.worker_instance_id.clone(),
-        producer_artifact_ref: snapshot.artifact_ref.clone(),
-        producer_artifact_digest: snapshot.artifact_digest.clone(),
+        producer_lease_id: snapshot.input.artifact.lease_id.clone(),
+        producer_fencing_token: snapshot.input.artifact.fencing_token.clone(),
+        producer_worker_id: snapshot.input.artifact.worker_id.clone(),
+        producer_worker_instance_id: snapshot.input.artifact.worker_instance_id.clone(),
+        producer_artifact_ref: snapshot.input.artifact.artifact_id.0.clone(),
+        producer_artifact_digest: snapshot.input.artifact.digest.clone(),
         producer_last_event_sequence: snapshot.last_event_sequence,
         producer_finished_at_millis: snapshot.finished_at_millis,
-        base_commit_id: snapshot.base_commit_id.clone(),
-        base_tree_id: snapshot.base_tree_id.clone(),
-        candidate_commit_id: snapshot.candidate_commit_id.clone(),
-        candidate_tree_id: snapshot.candidate_tree_id.clone(),
-        diff_sha256: snapshot.diff_sha256.clone(),
+        base_commit_id: snapshot.input.base_commit_id.clone(),
+        base_tree_id: snapshot.input.base_tree_id.clone(),
+        candidate_commit_id: snapshot.input.candidate_commit_id.clone(),
+        candidate_tree_id: snapshot.input.candidate_tree_id.clone(),
+        diff_sha256: snapshot.input.diff_sha256.clone(),
         changed_paths,
-        changed_hunks: snapshot.changed_hunks.clone(),
+        changed_hunks: snapshot.input.changed_hunks.clone(),
     };
-    candidate.candidate_ref = candidate_reference(&candidate)?;
+    candidate.candidate_ref = format!(
+        "refs/winwincode/candidates/{}",
+        candidate.candidate_commit_id
+    );
+    candidate.candidate_digest = candidate_code_digest(&candidate)?;
+    candidate.validation_seal = candidate_identity_digest(&candidate)?;
     Ok(candidate)
 }
 
@@ -899,15 +773,39 @@ pub(crate) fn assert_frozen_candidate_current(
             "candidate writer or complete SessionBinding identity changed",
         ));
     }
-    if candidate.candidate_ref != candidate_reference(candidate)? {
+    if candidate.candidate_ref
+        != format!(
+            "refs/winwincode/candidates/{}",
+            candidate.candidate_commit_id
+        )
+        || candidate.candidate_digest != candidate_code_digest(candidate)?
+        || candidate.validation_seal != candidate_identity_digest(candidate)?
+    {
         return Err(stale_candidate("candidate facts changed after freezing"));
     }
     Ok(())
 }
 
-fn candidate_reference(
+fn candidate_code_digest(
     candidate: &FrozenDeliveryCandidate,
-) -> Result<String, DeliveryValidationError> {
+) -> Result<Sha256Digest, DeliveryValidationError> {
+    let bytes = serde_json::to_vec(&(
+        &candidate.repository,
+        &candidate.base_commit_id,
+        &candidate.base_tree_id,
+        &candidate.candidate_commit_id,
+        &candidate.candidate_tree_id,
+        &candidate.diff_sha256,
+        &candidate.changed_paths,
+        &candidate.changed_hunks,
+    ))
+    .map_err(|error| invalid_candidate(&error.to_string()))?;
+    Ok(Sha256Digest(format!("sha256:{:x}", Sha256::digest(bytes))))
+}
+
+fn candidate_identity_digest(
+    candidate: &FrozenDeliveryCandidate,
+) -> Result<Sha256Digest, DeliveryValidationError> {
     let encoded = serde_json::to_vec(&CandidateIdentity::from(candidate)).map_err(|error| {
         validation_error(
             DeliveryValidationErrorCode::InvalidValue,
@@ -915,15 +813,16 @@ fn candidate_reference(
             format!("candidate identity cannot be encoded: {error}"),
         )
     })?;
-    Ok(format!(
-        "git-candidate:sha256:{:x}",
+    Ok(Sha256Digest(format!(
+        "sha256:{:x}",
         Sha256::digest(encoded)
-    ))
+    )))
 }
 
 impl<'candidate> From<&'candidate FrozenDeliveryCandidate> for CandidateIdentity<'candidate> {
     fn from(candidate: &'candidate FrozenDeliveryCandidate) -> Self {
         Self {
+            candidate_id: &candidate.candidate_id,
             delivery_id: &candidate.delivery_id,
             delivery_spec_id: &candidate.delivery_spec_id,
             delivery_spec_revision: candidate.delivery_spec_revision,
@@ -1031,22 +930,22 @@ fn exact_producer_binding<'delivery>(
     Ok(binding)
 }
 
-pub(crate) fn assert_validated_git_snapshot_fact(
-    snapshot: &ValidatedGitSnapshotFact,
+pub(crate) fn assert_sealed_candidate_source(
+    snapshot: &SealedCandidateSource,
 ) -> Result<(), DeliveryValidationError> {
-    let expected = seal_git_snapshot(snapshot)?;
+    let expected = seal_candidate_source(snapshot)?;
     if snapshot.validation_seal == expected {
-        validate_git_snapshot_shape(snapshot)
+        validate_candidate_source_shape(snapshot)
     } else {
         Err(invalid_candidate(
-            "candidate requires an unchanged sealed ValidatedGitSnapshotFact",
+            "candidate requires an unchanged sealed SealedCandidateSource",
         ))
     }
 }
 
-fn validate_git_snapshot(
+fn validate_candidate_source(
     delivery: &Delivery,
-    snapshot: &ValidatedGitSnapshotFact,
+    snapshot: &SealedCandidateSource,
 ) -> Result<(), DeliveryValidationError> {
     if snapshot.repository != delivery.snapshot().spec.repository {
         return Err(invalid_candidate(
@@ -1054,7 +953,7 @@ fn validate_git_snapshot(
         ));
     }
     if git_object_id(&delivery.snapshot().spec.base_revision)
-        && delivery.snapshot().spec.base_revision != snapshot.base_commit_id
+        && delivery.snapshot().spec.base_revision != snapshot.input.base_commit_id
     {
         return Err(invalid_candidate(
             "candidate base commit does not match DeliverySpec.baseRevision",
@@ -1063,19 +962,21 @@ fn validate_git_snapshot(
     Ok(())
 }
 
-fn validate_git_snapshot_shape(
-    snapshot: &ValidatedGitSnapshotFact,
+fn validate_candidate_source_shape(
+    snapshot: &SealedCandidateSource,
 ) -> Result<(), DeliveryValidationError> {
     let object_ids = [
-        snapshot.base_commit_id.as_str(),
-        snapshot.base_tree_id.as_str(),
-        snapshot.candidate_commit_id.as_str(),
-        snapshot.candidate_tree_id.as_str(),
+        snapshot.input.base_commit_id.as_str(),
+        snapshot.input.base_tree_id.as_str(),
+        snapshot.input.candidate_commit_id.as_str(),
+        snapshot.input.candidate_tree_id.as_str(),
     ];
     if object_ids.iter().any(|value| !git_object_id(value))
-        || !lowercase_sha256(&snapshot.diff_sha256)
+        || !lowercase_sha256(&snapshot.input.diff_sha256)
         || !snapshot
-            .artifact_digest
+            .input
+            .artifact
+            .digest
             .0
             .strip_prefix("sha256:")
             .is_some_and(lowercase_sha256)
@@ -1090,19 +991,23 @@ fn validate_git_snapshot_shape(
             "candidate Git object identities must use one repository object format",
         ));
     }
-    bounded_text(&snapshot.artifact_ref, "candidate.artifactRef", 4_096)?;
+    bounded_text(
+        &snapshot.input.artifact.artifact_id.0,
+        "candidate.artifactRef",
+        4_096,
+    )?;
     if snapshot.last_event_sequence == 0 {
         return Err(invalid_candidate(
             "candidate Job snapshot requires a terminal event sequence",
         ));
     }
-    if snapshot.changed_paths.len() > MAX_CHANGED_PATHS {
+    if snapshot.input.changed_paths.len() > MAX_CHANGED_PATHS {
         return Err(invalid_candidate(
             "candidate changed paths exceed the supported limit",
         ));
     }
-    let mut paths = HashSet::with_capacity(snapshot.changed_paths.len());
-    for fact in &snapshot.changed_paths {
+    let mut paths = HashSet::with_capacity(snapshot.input.changed_paths.len());
+    for fact in &snapshot.input.changed_paths {
         if !portable_path(&fact.path) || !paths.insert(fact.path.as_str()) {
             return Err(invalid_candidate(
                 "candidate changed paths must be unique portable repository-relative paths",
@@ -1120,8 +1025,8 @@ fn validate_git_snapshot_shape(
             ));
         }
     }
-    let mut hunks = HashSet::with_capacity(snapshot.changed_hunks.len());
-    for hunk in &snapshot.changed_hunks {
+    let mut hunks = HashSet::with_capacity(snapshot.input.changed_hunks.len());
+    for hunk in &snapshot.input.changed_hunks {
         if !portable_path(&hunk.file_path)
             || !lowercase_sha256(&hunk.hunk_sha256)
             || hunk
@@ -1139,16 +1044,16 @@ fn validate_git_snapshot_shape(
     Ok(())
 }
 
-fn verify_terminal_snapshot_binding(
+fn verify_terminal_source_binding(
     producer: &winwincode_domain::WorkRun,
     binding: &SessionBinding,
     outcome: &VerifiedTerminalOutcome,
-    snapshot: &ValidatedGitSnapshotFact,
+    snapshot: &SealedCandidateSource,
 ) -> Result<(), DeliveryValidationError> {
     let last_event_sequence = i64::try_from(snapshot.last_event_sequence).ok();
     let exact_artifact = outcome.artifacts().iter().any(|artifact| {
-        artifact.artifact_id.0 == snapshot.artifact_ref
-            && artifact.digest == snapshot.artifact_digest
+        artifact.artifact_id.0 == snapshot.input.artifact.artifact_id.0
+            && artifact.digest == snapshot.input.artifact.digest
     });
     let exact = outcome.status() == TerminalOutcomeStatus::Succeeded
         && outcome.work_run_id() == &producer.id
@@ -1163,14 +1068,21 @@ fn verify_terminal_snapshot_binding(
         && Some(outcome.last_event_sequence().0) == last_event_sequence
         && outcome.finished_at_millis() == snapshot.finished_at_millis
         && exact_artifact
-        && snapshot.work_run_id == producer.id
-        && snapshot.session_binding_id == binding.id
-        && snapshot.product_session_id == binding.product_session_id
-        && snapshot.execution_job_id == binding.execution_job_id
-        && snapshot.attempt == u64::try_from(producer.attempt).unwrap_or(0)
-        && binding.worker_session_id.as_ref() == Some(&snapshot.worker_session_id)
-        && binding.codex_thread_id.as_ref() == Some(&snapshot.codex_thread_id)
-        && producer.attempt == i64::try_from(snapshot.attempt).unwrap_or(-1);
+        && snapshot.binding.work_run_id == producer.id
+        && snapshot.binding.id == binding.id
+        && snapshot.binding.product_session_id == binding.product_session_id
+        && snapshot.input.artifact.execution_job_id == binding.execution_job_id
+        && snapshot.input.artifact.attempt == u64::try_from(producer.attempt).unwrap_or(0)
+        && binding.worker_session_id.as_ref() == Some(&snapshot.input.artifact.worker_session_id)
+        && binding.codex_thread_id.as_ref()
+            == Some(
+                snapshot
+                    .binding
+                    .codex_thread_id
+                    .as_ref()
+                    .expect("sealed source thread"),
+            )
+        && producer.attempt == i64::try_from(snapshot.input.artifact.attempt).unwrap_or(-1);
     if exact {
         Ok(())
     } else {
@@ -1180,37 +1092,17 @@ fn verify_terminal_snapshot_binding(
     }
 }
 
-fn seal_git_snapshot(
-    snapshot: &ValidatedGitSnapshotFact,
+fn seal_candidate_source(
+    source: &SealedCandidateSource,
 ) -> Result<[u8; 32], DeliveryValidationError> {
-    let identity = GitSnapshotSealIdentity {
-        work_run_id: &snapshot.work_run_id,
-        session_binding_id: &snapshot.session_binding_id,
-        product_session_id: &snapshot.product_session_id,
-        execution_job_id: &snapshot.execution_job_id,
-        attempt: snapshot.attempt,
-        lease_id: &snapshot.lease_id,
-        fencing_token: &snapshot.fencing_token,
-        worker_id: &snapshot.worker_id,
-        worker_instance_id: &snapshot.worker_instance_id,
-        worker_session_id: &snapshot.worker_session_id,
-        codex_thread_id: &snapshot.codex_thread_id,
-        repository: &snapshot.repository,
-        base_commit_id: &snapshot.base_commit_id,
-        base_tree_id: &snapshot.base_tree_id,
-        candidate_commit_id: &snapshot.candidate_commit_id,
-        candidate_tree_id: &snapshot.candidate_tree_id,
-        diff_sha256: &snapshot.diff_sha256,
-        changed_paths: &snapshot.changed_paths,
-        changed_hunks: &snapshot.changed_hunks,
-        artifact_ref: &snapshot.artifact_ref,
-        artifact_digest: &snapshot.artifact_digest,
-        last_event_sequence: snapshot.last_event_sequence,
-        finished_at_millis: snapshot.finished_at_millis,
-    };
-    let encoded = serde_json::to_vec(&identity).map_err(|error| {
-        invalid_candidate(&format!("Git snapshot seal cannot be encoded: {error}"))
-    })?;
+    let encoded = serde_json::to_vec(&(
+        &source.input,
+        &source.binding,
+        &source.repository,
+        source.last_event_sequence,
+        source.finished_at_millis,
+    ))
+    .map_err(|error| invalid_candidate(&format!("Candidate source cannot be sealed: {error}")))?;
     Ok(Sha256::digest(encoded).into())
 }
 
@@ -1302,7 +1194,7 @@ pub mod test_support {
         producer_session_binding_id: &SessionBindingId,
         input: CandidateFixtureInput,
     ) -> FrozenDeliveryCandidate {
-        let snapshot = sealed_snapshot_from_input(
+        let snapshot = sealed_source_from_input(
             delivery,
             producer_work_run_id,
             producer_session_binding_id,
@@ -1312,12 +1204,12 @@ pub mod test_support {
             .expect("candidate fixture must match the current executor and sealed observations")
     }
 
-    pub(crate) fn sealed_snapshot_from_input(
+    pub(crate) fn sealed_source_from_input(
         delivery: &Delivery,
         work_run_id: &WorkRunId,
         session_binding_id: &SessionBindingId,
         input: CandidateFixtureInput,
-    ) -> ValidatedGitSnapshotFact {
+    ) -> SealedCandidateSource {
         let binding = delivery
             .snapshot()
             .session_bindings
@@ -1335,45 +1227,47 @@ pub mod test_support {
             .worker_session_id
             .clone()
             .expect("candidate fixture WorkerSession");
-        let codex_thread_id = binding
-            .codex_thread_id
-            .clone()
-            .expect("candidate fixture CodexThread");
+        assert!(
+            binding.codex_thread_id.is_some(),
+            "candidate fixture CodexThread"
+        );
         assert_eq!(
             &work_run.id, work_run_id,
             "candidate binding must identify the exact producer WorkRun"
         );
-        let mut fact = ValidatedGitSnapshotFact {
-            work_run_id: work_run.id.clone(),
-            session_binding_id: binding.id.clone(),
-            product_session_id: binding.product_session_id.clone(),
-            execution_job_id: binding.execution_job_id.clone(),
-            attempt: u64::try_from(work_run.attempt).expect("candidate fixture attempt"),
-            // These are copied from the canonical WorkRun accepted by the
-            // Delivery aggregate. A fixture must not mint a parallel lease
-            // or Worker identity that production candidate validation would
-            // correctly reject.
-            lease_id: work_run.lease_id.clone(),
-            fencing_token: FencingToken(work_run.fencing_token.clone()),
-            worker_id: work_run.worker_id.clone(),
-            worker_instance_id: work_run.worker_instance_id.clone(),
-            worker_session_id,
-            codex_thread_id,
+        let mut fact = SealedCandidateSource {
+            input: DurableCandidateSourceInput {
+                repository_locator: delivery.snapshot().spec.repository.locator.clone(),
+                requested_base_revision: delivery.snapshot().spec.base_revision.clone(),
+                base_commit_id: input.base_commit_id,
+                base_tree_id: input.base_tree_id,
+                candidate_commit_id: input.candidate_commit_id,
+                candidate_tree_id: input.candidate_tree_id,
+                diff_sha256: input.diff_sha256,
+                changed_paths: input.changed_paths,
+                changed_hunks: input.changed_hunks,
+                artifact: DurableCandidateArtifactInput {
+                    artifact_id: ArtifactId(input.artifact_ref),
+                    digest: input.artifact_digest,
+                    complete: true,
+                    deleted_at_millis: None,
+                    execution_job_id: binding.execution_job_id.clone(),
+                    attempt: u64::try_from(work_run.attempt).unwrap(),
+                    lease_id: work_run.lease_id.clone(),
+                    fencing_token: FencingToken(work_run.fencing_token.clone()),
+                    worker_id: work_run.worker_id.clone(),
+                    worker_instance_id: work_run.worker_instance_id.clone(),
+                    worker_session_id,
+                },
+            },
+            binding: binding.clone(),
             repository: delivery.snapshot().spec.repository.clone(),
-            base_commit_id: input.base_commit_id,
-            base_tree_id: input.base_tree_id,
-            candidate_commit_id: input.candidate_commit_id,
-            candidate_tree_id: input.candidate_tree_id,
-            diff_sha256: input.diff_sha256,
-            changed_paths: input.changed_paths,
-            changed_hunks: input.changed_hunks,
-            artifact_ref: input.artifact_ref,
-            artifact_digest: input.artifact_digest,
             last_event_sequence: input.terminal_event_sequence,
             finished_at_millis: input.finished_at_millis,
             validation_seal: [0; 32],
         };
-        fact.validation_seal = seal_git_snapshot(&fact).expect("candidate fixture snapshot seal");
+        fact.validation_seal =
+            seal_candidate_source(&fact).expect("candidate fixture snapshot seal");
         fact
     }
 
@@ -1382,20 +1276,21 @@ pub mod test_support {
         work_run_id: &WorkRunId,
         session_binding_id: &SessionBindingId,
         input: CandidateFixtureInput,
-    ) -> (FreezeCandidateFacts, ValidatedGitSnapshotFact) {
-        let delta = sealed_snapshot_from_input(delivery, work_run_id, session_binding_id, input);
+    ) -> (FreezeCandidateFacts, SealedCandidateSource) {
+        let delta = sealed_source_from_input(delivery, work_run_id, session_binding_id, input);
         let mut candidate_snapshot = delta.clone();
         if git_object_id(&delivery.snapshot().spec.base_revision) {
             candidate_snapshot
+                .input
                 .base_commit_id
                 .clone_from(&delivery.snapshot().spec.base_revision);
             candidate_snapshot.validation_seal =
-                seal_git_snapshot(&candidate_snapshot).expect("rework candidate fixture seal");
+                seal_candidate_source(&candidate_snapshot).expect("rework candidate fixture seal");
         }
         (freeze_facts(delivery, candidate_snapshot), delta)
     }
 
-    pub(crate) fn validated_git_snapshot(
+    pub(crate) fn candidate_source_fixture(
         delivery: &Delivery,
         finished_at_millis: u64,
         session_binding_id: &SessionBindingId,
@@ -1403,13 +1298,13 @@ pub mod test_support {
         candidate_tree_id: &str,
         diff_sha256: &str,
         changed_paths: Vec<CandidatePathFact>,
-    ) -> ValidatedGitSnapshotFact {
+    ) -> SealedCandidateSource {
         let base_commit_id = if git_object_id(&delivery.snapshot().spec.base_revision) {
             delivery.snapshot().spec.base_revision.clone()
         } else {
             "0123456789012345678901234567890123456789".into()
         };
-        validated_git_snapshot_between(
+        candidate_source_between(
             delivery,
             finished_at_millis,
             session_binding_id,
@@ -1422,34 +1317,49 @@ pub mod test_support {
         )
     }
 
-    /// Seals one role workspace observation by copying the complete Git
-    /// identity from an already frozen candidate. Runtime ownership still
-    /// comes only from the role's canonical `WorkRun` and `SessionBinding`.
-    pub(crate) fn validated_candidate_checkout(
-        delivery: &Delivery,
-        finished_at_millis: u64,
-        session_binding_id: &SessionBindingId,
+    /// Canonical product fixture shared by every verification role.
+    pub(crate) fn canonical_snapshot_fixture(
         candidate: &FrozenDeliveryCandidate,
-    ) -> ValidatedGitSnapshotFact {
-        let mut fact = validated_git_snapshot_between(
-            delivery,
-            finished_at_millis,
-            session_binding_id,
-            candidate.base_commit_id(),
-            candidate.base_tree_id(),
-            candidate.candidate_commit_id(),
-            candidate.candidate_tree_id(),
-            candidate.diff_sha256(),
-            candidate.changed_paths().to_vec(),
+    ) -> winwincode_domain::CanonicalSnapshot {
+        use winwincode_domain::{
+            GitObjectId, RepositoryId, SchemaVersion, Snapshot, SnapshotId, seal_snapshot,
+        };
+        let seed = format!(
+            "sha256:{:x}",
+            Sha256::digest(candidate.candidate_id().0.as_bytes())
         );
-        fact.changed_hunks = candidate.changed_hunks().to_vec();
-        fact.validation_seal =
-            seal_git_snapshot(&fact).expect("candidate checkout fixture Git snapshot seal");
-        fact
+        let digest = Sha256::digest(format!("candidate-snapshot\0{seed}").as_bytes());
+        let mut value = u128::from_be_bytes(digest[..16].try_into().unwrap());
+        let mut encoded = [b'0'; 26];
+        for byte in encoded.iter_mut().rev() {
+            *byte = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ"[(value & 31) as usize];
+            value >>= 5;
+        }
+        let mut snapshot = Snapshot {
+            schema_version: SchemaVersion::WinwincodeV1,
+            snapshot_id: SnapshotId(format!(
+                "snap_{}",
+                String::from_utf8(encoded.to_vec()).unwrap()
+            )),
+            candidate_id: candidate.candidate_id().clone(),
+            work_run_id: candidate.producer_work_run_id().clone(),
+            repository_id: RepositoryId("rep_01J00000000000000000000001".into()),
+            base_commit_id: GitObjectId(candidate.base_commit_id().into()),
+            base_tree_id: GitObjectId(candidate.base_tree_id().into()),
+            candidate_commit_id: GitObjectId(candidate.candidate_commit_id().into()),
+            candidate_tree_id: GitObjectId(candidate.candidate_tree_id().into()),
+            diff_sha256: Sha256Digest(format!("sha256:{}", candidate.diff_sha256())),
+            content_digest: Sha256Digest(format!("sha256:{}", "c".repeat(64))),
+            created_at_millis: i64::try_from(candidate.producer_finished_at_millis()).unwrap(),
+            immutable: true,
+            validation_seal: Sha256Digest(String::new()),
+        };
+        snapshot.validation_seal = seal_snapshot(&snapshot);
+        snapshot.try_into().expect("canonical Snapshot fixture")
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn validated_git_snapshot_between(
+    pub(crate) fn candidate_source_between(
         delivery: &Delivery,
         finished_at_millis: u64,
         session_binding_id: &SessionBindingId,
@@ -1459,14 +1369,14 @@ pub mod test_support {
         candidate_tree_id: &str,
         diff_sha256: &str,
         changed_paths: Vec<CandidatePathFact>,
-    ) -> ValidatedGitSnapshotFact {
+    ) -> SealedCandidateSource {
         let binding = delivery
             .snapshot()
             .session_bindings
             .iter()
             .find(|binding| &binding.id == session_binding_id)
             .expect("fixture SessionBinding");
-        sealed_snapshot_from_input(
+        sealed_source_from_input(
             delivery,
             &binding.work_run_id,
             session_binding_id,
@@ -1495,71 +1405,79 @@ pub mod test_support {
 
     #[allow(dead_code)]
     pub(crate) fn with_changed_hunks(
-        mut fact: ValidatedGitSnapshotFact,
+        mut fact: SealedCandidateSource,
         changed_hunks: Vec<CandidateHunkFact>,
-    ) -> ValidatedGitSnapshotFact {
-        fact.changed_hunks = changed_hunks;
-        fact.validation_seal = seal_git_snapshot(&fact).expect("fixture Git snapshot seal");
+    ) -> SealedCandidateSource {
+        fact.input.changed_hunks = changed_hunks;
+        fact.validation_seal = seal_candidate_source(&fact).expect("fixture Git snapshot seal");
         fact
     }
 
     #[allow(dead_code)]
     pub(crate) fn with_foreign_terminal_workspace(
-        mut fact: ValidatedGitSnapshotFact,
-    ) -> ValidatedGitSnapshotFact {
-        fact.lease_id = LeaseId("lease-foreign".into());
-        fact.fencing_token = FencingToken("2".into());
-        fact.worker_id = WorkerId("worker-foreign".into());
-        fact.worker_instance_id = WorkerInstanceId("worker-instance-foreign".into());
-        fact.artifact_ref = "artifact:job:foreign".into();
-        fact.artifact_digest = Sha256Digest(format!("sha256:{}", "8".repeat(64)));
+        mut fact: SealedCandidateSource,
+    ) -> SealedCandidateSource {
+        fact.input.artifact.lease_id = LeaseId("lease-foreign".into());
+        fact.input.artifact.fencing_token = FencingToken("2".into());
+        fact.input.artifact.worker_id = WorkerId("worker-foreign".into());
+        fact.input.artifact.worker_instance_id = WorkerInstanceId("worker-instance-foreign".into());
+        fact.input.artifact.artifact_id.0 = "artifact:job:foreign".into();
+        fact.input.artifact.digest = Sha256Digest(format!("sha256:{}", "8".repeat(64)));
         fact.last_event_sequence += 1;
         fact.finished_at_millis += 1;
-        fact.validation_seal = seal_git_snapshot(&fact).expect("fixture Git snapshot seal");
+        fact.validation_seal = seal_candidate_source(&fact).expect("fixture Git snapshot seal");
         fact
     }
 
     pub(crate) fn with_work_run(
-        mut fact: ValidatedGitSnapshotFact,
+        mut fact: SealedCandidateSource,
         work_run_id: WorkRunId,
-    ) -> ValidatedGitSnapshotFact {
-        fact.work_run_id = work_run_id;
-        fact.validation_seal = seal_git_snapshot(&fact).expect("fixture WorkRun snapshot seal");
+    ) -> SealedCandidateSource {
+        fact.binding.work_run_id = work_run_id;
+        fact.validation_seal = seal_candidate_source(&fact).expect("fixture WorkRun snapshot seal");
         fact
     }
 
     pub(crate) fn freeze_facts(
         delivery: &Delivery,
-        snapshot: ValidatedGitSnapshotFact,
+        snapshot: SealedCandidateSource,
     ) -> FreezeCandidateFacts {
         let outcome = fixture_verified_terminal_outcome(
-            snapshot.work_run_id.clone(),
+            snapshot.binding.work_run_id.clone(),
             active_lease_identity(
-                snapshot.execution_job_id.clone(),
-                snapshot.attempt,
-                snapshot.lease_id.clone(),
-                snapshot.fencing_token.clone(),
-                snapshot.worker_id.clone(),
-                snapshot.worker_instance_id.clone(),
-                snapshot.worker_session_id.clone(),
+                snapshot.input.artifact.execution_job_id.clone(),
+                snapshot.input.artifact.attempt,
+                snapshot.input.artifact.lease_id.clone(),
+                snapshot.input.artifact.fencing_token.clone(),
+                snapshot.input.artifact.worker_id.clone(),
+                snapshot.input.artifact.worker_instance_id.clone(),
+                snapshot.input.artifact.worker_session_id.clone(),
             ),
             TerminalOutcomeStatus::Succeeded,
             terminal_outcome_metadata(
-                Some(snapshot.codex_thread_id.clone()),
+                Some(
+                    snapshot
+                        .binding
+                        .codex_thread_id
+                        .as_ref()
+                        .expect("sealed source thread")
+                        .clone(),
+                ),
                 snapshot.finished_at_millis,
                 ExecutionAckSequence(
                     i64::try_from(snapshot.last_event_sequence)
                         .expect("fixture event sequence fits i64"),
                 ),
                 vec![TerminalArtifactReference {
-                    artifact_id: ArtifactId(snapshot.artifact_ref.clone()),
-                    digest: snapshot.artifact_digest.clone(),
+                    artifact_id: ArtifactId(snapshot.input.artifact.artifact_id.0.clone()),
+                    digest: snapshot.input.artifact.digest.clone(),
                 }],
             ),
         );
         let _ = delivery;
         FreezeCandidateFacts {
-            git_snapshot: snapshot,
+            candidate_id: CandidateId("cnd_01J00000000000000000000001".into()),
+            candidate_source: snapshot,
             terminal_outcome: outcome,
         }
     }
@@ -1569,7 +1487,7 @@ pub mod test_support {
         finished_at_millis: u64,
         session_binding_id: &SessionBindingId,
     ) -> FrozenDeliveryCandidate {
-        let snapshot = validated_git_snapshot(
+        let snapshot = candidate_source_fixture(
             delivery,
             finished_at_millis,
             session_binding_id,
@@ -1590,8 +1508,8 @@ pub mod test_support {
 #[cfg(test)]
 mod tests {
     use super::test_support::{
-        CandidateFixtureInput, freeze_candidate_fixture, freeze_facts, sealed_snapshot_from_input,
-        validated_git_snapshot,
+        CandidateFixtureInput, candidate_source_fixture, freeze_candidate_fixture, freeze_facts,
+        sealed_source_from_input,
     };
     use super::*;
     use crate::domain::{DeliveryStatus, test_fixture};
@@ -1621,8 +1539,8 @@ mod tests {
         Delivery::try_from_snapshot(snapshot).expect("writer Delivery")
     }
 
-    fn snapshot(delivery: &Delivery) -> ValidatedGitSnapshotFact {
-        validated_git_snapshot(
+    fn snapshot(delivery: &Delivery) -> SealedCandidateSource {
+        candidate_source_fixture(
             delivery,
             1_800_000_000_020,
             &SessionBindingId("binding-executor-1".into()),
@@ -1707,7 +1625,7 @@ mod tests {
             changed,
         );
 
-        assert_ne!(first.candidate_ref(), second.candidate_ref());
+        assert_ne!(first.candidate_digest(), second.candidate_digest());
     }
 
     #[test]
@@ -1731,7 +1649,7 @@ mod tests {
         let delivery = writer_delivery();
         let producer = &delivery.snapshot().work_run_aggregate.runs[0].id;
         let binding = &delivery.snapshot().session_bindings[0].id;
-        let original = sealed_snapshot_from_input(&delivery, producer, binding, high_level_input());
+        let original = sealed_source_from_input(&delivery, producer, binding, high_level_input());
         let accepted = freeze_facts(&delivery, original).terminal_outcome;
         for invalid_artifact in [true, false] {
             let mut input = high_level_input();
@@ -1741,7 +1659,8 @@ mod tests {
                 input.terminal_event_sequence = 0;
             }
             let facts = FreezeCandidateFacts {
-                git_snapshot: sealed_snapshot_from_input(&delivery, producer, binding, input),
+                candidate_id: CandidateId("cnd_01J00000000000000000000001".into()),
+                candidate_source: sealed_source_from_input(&delivery, producer, binding, input),
                 terminal_outcome: accepted.clone(),
             };
             assert!(freeze_delivery_candidate(&delivery, &facts).is_err());
@@ -1760,7 +1679,7 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(
             first.candidate_ref().len(),
-            "git-candidate:sha256:".len() + 64
+            "refs/winwincode/candidates/".len() + first.candidate_commit_id().len()
         );
         assert_frozen_candidate_current(&delivery, &first).expect("current");
 
@@ -1777,14 +1696,15 @@ mod tests {
         let rebound_candidate =
             freeze_delivery_candidate(&rebound, &freeze_facts(&rebound, snapshot(&rebound)))
                 .expect("rebound candidate");
-        assert_ne!(first.candidate_ref(), rebound_candidate.candidate_ref());
+        assert_eq!(first.candidate_ref(), rebound_candidate.candidate_ref());
+        assert_ne!(first.validation_seal, rebound_candidate.validation_seal);
     }
 
     #[test]
-    fn candidate_requires_sealed_validated_git_snapshot() {
+    fn candidate_requires_sealed_candidate_source_fixture() {
         let delivery = writer_delivery();
         let mut modified_after_validation = snapshot(&delivery);
-        modified_after_validation.candidate_tree_id = "5".repeat(40);
+        modified_after_validation.input.candidate_tree_id = "5".repeat(40);
         assert!(
             freeze_delivery_candidate(
                 &delivery,
@@ -1799,16 +1719,17 @@ mod tests {
         let delivery = writer_delivery();
         let current = snapshot(&delivery);
         let mut other_job_snapshot = current.clone();
-        other_job_snapshot.execution_job_id = ExecutionJobId("job-foreign".into());
-        other_job_snapshot.artifact_ref = "artifact:job:job-foreign".into();
+        other_job_snapshot.input.artifact.execution_job_id = ExecutionJobId("job-foreign".into());
+        other_job_snapshot.input.artifact.artifact_id.0 = "artifact:job:job-foreign".into();
         other_job_snapshot.validation_seal =
-            seal_git_snapshot(&other_job_snapshot).expect("other sealed Job snapshot");
+            seal_candidate_source(&other_job_snapshot).expect("other sealed Job snapshot");
         let current_outcome = freeze_facts(&delivery, current).terminal_outcome;
         assert!(
             freeze_delivery_candidate(
                 &delivery,
                 &FreezeCandidateFacts {
-                    git_snapshot: other_job_snapshot,
+                    candidate_id: CandidateId("cnd_01J00000000000000000000001".into()),
+                    candidate_source: other_job_snapshot,
                     terminal_outcome: current_outcome,
                 },
             )
@@ -1822,17 +1743,19 @@ mod tests {
         let original = snapshot(&delivery);
         let accepted_outcome = freeze_facts(&delivery, original.clone()).terminal_outcome;
         let mut substituted_artifact = original;
-        substituted_artifact.artifact_ref = "artifact:job:foreign".into();
-        substituted_artifact.artifact_digest = Sha256Digest(format!("sha256:{}", "8".repeat(64)));
+        substituted_artifact.input.artifact.artifact_id.0 = "artifact:job:foreign".into();
+        substituted_artifact.input.artifact.digest =
+            Sha256Digest(format!("sha256:{}", "8".repeat(64)));
         substituted_artifact.last_event_sequence += 1;
         substituted_artifact.validation_seal =
-            seal_git_snapshot(&substituted_artifact).expect("substituted sealed artifact");
+            seal_candidate_source(&substituted_artifact).expect("substituted sealed artifact");
 
         assert!(
             freeze_delivery_candidate(
                 &delivery,
                 &FreezeCandidateFacts {
-                    git_snapshot: substituted_artifact,
+                    candidate_id: CandidateId("cnd_01J00000000000000000000001".into()),
+                    candidate_source: substituted_artifact,
                     terminal_outcome: accepted_outcome,
                 },
             )

@@ -18,7 +18,9 @@ use winwincode_delivery::domain::{
     adjudicate_canonical_decision_from_analysis, evidence::ResolvedDeliveryEvidence,
 };
 
-use crate::fusion_analysis::{FusionAnalysis, FusionClaimPosition, FusionConflict};
+use crate::fusion_analysis::{
+    ConflictLeadingSource, FusionAnalysis, FusionClaimPosition, FusionConflict,
+};
 
 /// Maps one analyzer claim position onto a Delivery criterion outcome.
 ///
@@ -103,7 +105,12 @@ pub fn adjudicate_canonical_decision_from_fusion_analysis(
 }
 
 fn push_conflict_outcomes(fixture: &mut FusionAnalysisFixture, conflict: &FusionConflict) {
-    if let Some(leading) = conflict.leading_position {
+    if let Some(leading) = conflict.leading_position.filter(|_| {
+        matches!(
+            conflict.leading_source,
+            ConflictLeadingSource::Evidence | ConflictLeadingSource::Verifier
+        )
+    }) {
         let side = conflict
             .positions
             .iter()
@@ -220,8 +227,10 @@ mod tests {
                     strongest_evidence: FusionEvidenceQuality::ToolObservation,
                 }],
                 leading_position: Some(FusionClaimPosition::Opposes),
-                leading_source: crate::fusion_analysis::ConflictLeadingSource::Evidence,
+                leading_source: ConflictLeadingSource::Evidence,
                 jev_confidence: None,
+                jev_reason: None,
+                verification_basis: None,
             }],
             unique_insights: vec![FusionFinding {
                 claim_key: "claim:unique".to_owned(),
@@ -286,8 +295,10 @@ mod tests {
                     },
                 ],
                 leading_position: None,
-                leading_source: crate::fusion_analysis::ConflictLeadingSource::Undecided,
+                leading_source: ConflictLeadingSource::Undecided,
                 jev_confidence: None,
+                jev_reason: None,
+                verification_basis: None,
             }],
             unique_insights: Vec::new(),
             unsupported_claims: Vec::new(),
@@ -302,6 +313,66 @@ mod tests {
             vec![CriterionVerdict::Pass, CriterionVerdict::Fail,]
         );
         assert!(fixture.unsupported_model_claims.is_empty());
+    }
+
+    #[test]
+    fn provisional_leaders_wait_for_verification_instead_of_entering_final_outcomes() {
+        let candidates = [
+            FusionCandidateClaims {
+                candidate_id: "model-a".to_owned(),
+                claims: vec![claim(
+                    "claim:tests-pass",
+                    "The tests pass",
+                    FusionClaimPosition::Supports,
+                    tool_observation(),
+                )],
+            },
+            FusionCandidateClaims {
+                candidate_id: "model-b".to_owned(),
+                claims: vec![claim(
+                    "claim:tests-pass",
+                    "The tests pass",
+                    FusionClaimPosition::Opposes,
+                    tool_observation(),
+                )],
+            },
+        ];
+        let mut analysis = analyze_fusion(&candidates).expect("fixture is valid");
+        assert!(
+            crate::fusion_analysis::apply_jev_conflict_leading_with_reason(
+                &mut analysis,
+                "claim:tests-pass",
+                FusionClaimPosition::Supports,
+                73,
+                "provisional source-path explanation",
+                true,
+            )
+        );
+
+        let provisional = map_fusion_analysis_to_fixture(&analysis);
+        assert_eq!(
+            provisional.conflict_outcomes,
+            vec![CriterionVerdict::Pass, CriterionVerdict::Fail]
+        );
+
+        assert!(
+            crate::fusion_analysis::resolve_jev_conflict_with_verification(
+                &mut analysis,
+                "claim:tests-pass",
+                crate::fusion_analysis::JevVerificationConclusion::Opposes,
+                "verified counter test",
+            )
+        );
+        let verified = map_fusion_analysis_to_fixture(&analysis);
+        assert_eq!(verified.conflict_outcomes, vec![CriterionVerdict::Fail]);
+        assert_eq!(
+            analysis.conflicts[0].jev_reason.as_deref(),
+            Some("provisional source-path explanation")
+        );
+        assert_eq!(
+            analysis.conflicts[0].verification_basis.as_deref(),
+            Some("verified counter test")
+        );
     }
 
     #[test]
