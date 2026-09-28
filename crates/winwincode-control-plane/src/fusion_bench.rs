@@ -83,6 +83,8 @@ pub struct ContextSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct IntegrityReport {
     pub pass: bool,
+    /// JEV may re-present canonical truth, but only Fusion/Verifier may update it.
+    pub canonical_changed: bool,
     pub missing_constraints: Vec<String>,
     pub missing_confirmed_claims: Vec<String>,
     pub dangling_evidence_ids: Vec<String>,
@@ -191,7 +193,13 @@ pub fn rebuild_gate(
     previous: &ContextSnapshot,
     candidate: &ContextSnapshot,
 ) -> (ContextSnapshot, IntegrityReport) {
-    let report = check_rebuild_integrity(&previous.canonical, &candidate.canonical);
+    let mut report = check_rebuild_integrity(&previous.canonical, &candidate.canonical);
+    // Apply authoritative Fusion/Verifier changes before taking `previous`.
+    // Context rebuilding cannot introduce even an apparently justified update.
+    report.canonical_changed = previous.canonical != candidate.canonical;
+    report.stale_refuted_in_active =
+        stale_refuted_in_active(&candidate.canonical, &candidate.active);
+    report.pass &= !report.canonical_changed && report.stale_refuted_in_active.is_empty();
     if report.pass {
         (candidate.clone(), report)
     } else {
@@ -476,6 +484,55 @@ mod tests {
             stale_refuted_in_active(&state, &active),
             vec!["root:network-flake".to_owned()]
         );
+    }
+
+    #[test]
+    fn rebuild_preserves_canonical_truth_and_rejects_reactivated_refutations() {
+        let mut previous = ContextSnapshot {
+            label: "before".to_owned(),
+            canonical: base_state(),
+            active: ActiveContext::default(),
+            archive: Vec::new(),
+        };
+        previous.canonical.claims[0].state = ClaimState::Refuted;
+        let mut candidate = previous.clone();
+        candidate.label = "rebuilt".to_owned();
+        candidate.active.recent_observations = vec!["compressed history".to_owned()];
+        assert_eq!(
+            rebuild_gate(&previous, &candidate),
+            (
+                candidate.clone(),
+                IntegrityReport {
+                    pass: true,
+                    ..IntegrityReport::default()
+                }
+            )
+        );
+
+        let mutations: [fn(&mut CanonicalState); 6] = [
+            |state| state.task_objective.clear(),
+            |state| state.acceptance_criteria.clear(),
+            |state| state.current_plan = None,
+            |state| state.claims[0].state = ClaimState::Confirmed,
+            |state| state.evidence[0].facts = vec!["altered fact".to_owned()],
+            |state| state.evidence[0].source_refs.clear(),
+        ];
+        for mutate in mutations {
+            let mut altered = candidate.clone();
+            mutate(&mut altered.canonical);
+            let (kept, report) = rebuild_gate(&previous, &altered);
+            assert!(!report.pass, "rebuild changed canonical truth");
+            assert!(report.canonical_changed);
+            assert_eq!(kept, previous);
+        }
+        candidate.active.priority_claims = vec![previous.canonical.claims[0].display_key.clone()];
+        let (kept, report) = rebuild_gate(&previous, &candidate);
+        assert!(!report.pass);
+        assert_eq!(
+            report.stale_refuted_in_active,
+            candidate.active.priority_claims
+        );
+        assert_eq!(kept, previous);
     }
 
     #[test]
