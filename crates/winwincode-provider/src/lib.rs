@@ -5,8 +5,10 @@
 
 pub mod credential_leak_gate;
 mod jev;
+mod jev_context;
 mod provider_anthropic;
 pub mod provider_https_sse;
+mod provider_openai;
 pub mod provider_stream;
 mod types;
 
@@ -24,6 +26,7 @@ pub use jev::{
     contract_capability_mocks, jev_provider_order, parse_jev_score_list, parse_jev_scores,
     portable_scores,
 };
+pub use jev_context::{JevContextEvaluation, JevContextRequest};
 pub use provider_anthropic::ProviderTokenPricing;
 pub use provider_https_sse::{
     HttpsSseProviderAdapter, HttpsSseProviderCompletion, HttpsSseProviderConfig,
@@ -48,9 +51,15 @@ pub use types::{
 mod device_store;
 pub use device_store::{DeviceProviderError, DeviceProviderStore, valid_device_provider_config};
 
+mod device_jev_context;
+pub use device_jev_context::{DeviceJevReceipt, StoredJevContext};
+
 mod device_model;
 pub use device_model::{model_failure, public_model_chunk};
 
 mod device_extensions;
 mod mcp_connection;
 pub use device_extensions::InstalledMcpTools;
+
+mod device_jev_judge;
+pub use device_jev_judge::StoredJevJudge;

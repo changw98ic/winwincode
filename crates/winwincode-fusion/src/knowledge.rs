@@ -10,11 +10,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::evidence::{ClaimTargetLike, EvidenceLedger};
 use serde::{Deserialize, Serialize};
 use winwincode_delivery::domain::EvidenceRefType;
-use winwincode_fusion::evidence::{ClaimTargetLike, EvidenceLedger};
 
-use crate::fusion_analysis::{FusionCandidateClaims, FusionClaim, FusionClaimPosition};
+use crate::analysis::{FusionCandidateClaims, FusionClaim, FusionClaimPosition};
 
 /// P0: canonical claim identity. Display keeps `claim:{namespace}:{key}`.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -71,56 +71,7 @@ impl ClaimIdentity {
     }
 }
 
-/// P3 claim lifecycle (ADR-0037). `Refuted` requires verified counter-evidence.
-/// `UnverifiedAbsence` = unanimous "not present" without direct safety proof
-/// (false-consensus blind spot; still needs verification).
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum ClaimState {
-    Discovered,
-    Supported,
-    Confirmed,
-    Disputed,
-    Investigating,
-    Refuted,
-    Escalated,
-    Unresolved,
-    UnverifiedAbsence,
-}
-
-/// Evidence strength is categorical — never a fake-precise score.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum EvidenceStrength {
-    Direct,
-    StrongInference,
-    WeakInference,
-    Speculation,
-}
-
-/// P2: one evidence object (models explain evidence; they do not invent facts).
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FusionEvidenceRecord {
-    pub id: String,
-    pub claim_id: String,
-    pub provider: String,
-    pub direction: EvidenceDirection,
-    pub kind: String,
-    pub strength: EvidenceStrength,
-    pub facts: Vec<String>,
-    pub source_refs: Vec<String>,
-    pub independence_group: String,
-    pub verified: bool,
-    pub invalidated: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum EvidenceDirection {
-    Support,
-    Counter,
-}
+pub use crate::context::{ClaimState, EvidenceDirection, EvidenceStrength, FusionEvidenceRecord};
 
 /// P1/P3: one node of the claim graph.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -213,7 +164,7 @@ fn independence_group_for(claim: &FusionClaim) -> String {
     sources.dedup();
     format!(
         "ig:{}:{}",
-        crate::fusion_analysis::claim_group_key(&claim.claim_key),
+        crate::analysis::claim_group_key(&claim.claim_key),
         sources.join("|")
     )
 }
@@ -364,15 +315,14 @@ pub fn needs_investigation(node: &ClaimNode) -> bool {
     match node.state {
         // `UnverifiedAbsence` joins the disputed set: unanimous "not present"
         // without direct safety proof is a false-consensus blind spot.
+        // A citation is still a model claim. Verified support must transition
+        // the node to Confirmed before it can leave the investigation queue.
         ClaimState::Disputed
         | ClaimState::Investigating
         | ClaimState::Escalated
-        | ClaimState::UnverifiedAbsence => true,
-        ClaimState::Supported => {
-            // Weakly-supported consensus: support without verified evidence.
-            node.evidence_ids.is_empty() && node.supporter_count > 0
-        }
-        ClaimState::Discovered => is_high_risk_absence(node) && node.opponent_count > 0,
+        | ClaimState::UnverifiedAbsence
+        | ClaimState::Supported
+        | ClaimState::Discovered => true,
         _ => false,
     }
 }
@@ -448,11 +398,11 @@ fn simple_hash(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fusion_analysis::FusionEvidence;
-    use winwincode_delivery::domain::verification::VerificationFindingConclusion;
-    use winwincode_fusion::evidence::{
+    use crate::analysis::FusionEvidence;
+    use crate::evidence::{
         ClaimTarget, ClaimVerification, SourceReceipt, SourceReceiptKind, VerificationConclusion,
     };
+    use winwincode_delivery::domain::verification::VerificationFindingConclusion;
 
     fn claim(key: &str, position: FusionClaimPosition, verified: bool) -> FusionClaim {
         FusionClaim {
@@ -541,6 +491,8 @@ mod tests {
             .find(|c| c.identity.canonical_key() == "defect:unique-path")
             .expect("unique claim retained");
         assert_eq!(unique.state, ClaimState::Supported);
+        assert!(!unique.evidence_ids.is_empty());
+        assert_eq!(graph.needs_investigation().len(), 2);
     }
 
     #[test]

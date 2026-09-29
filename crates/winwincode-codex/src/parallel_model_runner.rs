@@ -108,14 +108,14 @@ impl FusionPanelSeat {
     }
 }
 
-/// Shared limits for one parallel batch.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Optional shared limits for one parallel batch. `None` means no limit.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ParallelModelBudget {
-    pub max_attempts: u64,
-    pub max_total_tokens: u64,
-    pub max_total_cost_micros: u64,
-    pub max_wall_time: Duration,
-    pub attempt_timeout: Duration,
+    pub max_attempts: Option<u64>,
+    pub max_total_tokens: Option<u64>,
+    pub max_total_cost_micros: Option<u64>,
+    pub max_wall_time: Option<Duration>,
+    pub attempt_timeout: Option<Duration>,
 }
 
 /// A clonable cancellation sender for one batch.
@@ -246,56 +246,27 @@ impl ParallelModelRunner {
         &self,
         targets: Vec<ParallelModelTarget>,
         budget: ParallelModelBudget,
-        mut cancel: ParallelModelCancelSignal,
+        cancel: ParallelModelCancelSignal,
     ) -> Result<ParallelModelBatchResult, ParallelModelRunError> {
         validate(&targets, budget)?;
         let started = Instant::now();
         let tracker = Arc::new(BudgetTracker::new(budget));
         let mut pending = FuturesUnordered::new();
-        let mut target_ids = Vec::with_capacity(targets.len());
+        let target_count = targets.len();
         for (index, target) in targets.into_iter().enumerate() {
-            target_ids.push(target.target_id.clone());
             pending.push(run_target(
                 index,
                 target,
                 Arc::clone(&self.port),
                 Arc::clone(&tracker),
-                budget.attempt_timeout,
+                started,
+                cancel.0.clone(),
             ));
         }
-
-        let deadline = tokio::time::sleep(budget.max_wall_time);
-        tokio::pin!(deadline);
-        let mut results = Vec::with_capacity(target_ids.len());
-        let remainder = loop {
-            if pending.is_empty() {
-                break None;
-            }
-            tokio::select! {
-                () = cancellation(&mut cancel.0) => break Some(ParallelModelStatus::Cancelled),
-                () = &mut deadline => break Some(ParallelModelStatus::TimedOut),
-                result = pending.next() => {
-                    if let Some(result) = result {
-                        results.push(result);
-                    }
-                }
-            }
-        };
-        drop(pending);
-
-        if let Some(status) = remainder {
-            let completed = results
-                .iter()
-                .map(|indexed| indexed.index)
-                .collect::<HashSet<_>>();
-            for (index, target_id) in target_ids.into_iter().enumerate() {
-                if !completed.contains(&index) {
-                    results.push(IndexedResult {
-                        index,
-                        result: terminal_result(target_id, status, started.elapsed()),
-                    });
-                }
-            }
+        let mut results = Vec::with_capacity(target_count);
+        // Members observe stop signals themselves so their attempt records survive.
+        while let Some(result) = pending.next().await {
+            results.push(result);
         }
         results.sort_unstable_by_key(|result| result.index);
 
@@ -347,7 +318,15 @@ impl BudgetTracker {
         }
         self.attempts
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |attempts| {
-                (attempts < self.budget.max_attempts).then_some(attempts + 1)
+                if self
+                    .budget
+                    .max_attempts
+                    .is_none_or(|limit| attempts < limit)
+                {
+                    attempts.checked_add(1)
+                } else {
+                    None
+                }
             })
             .is_ok()
     }
@@ -371,8 +350,14 @@ impl BudgetTracker {
             .input_tokens
             .load(Ordering::Acquire)
             .saturating_add(self.output_tokens.load(Ordering::Acquire));
-        if total_tokens > self.budget.max_total_tokens
-            || self.known_cost_micros.load(Ordering::Acquire) > self.budget.max_total_cost_micros
+        if self
+            .budget
+            .max_total_tokens
+            .is_some_and(|limit| total_tokens > limit)
+            || self
+                .budget
+                .max_total_cost_micros
+                .is_some_and(|limit| self.known_cost_micros.load(Ordering::Acquire) > limit)
         {
             self.exhausted.store(true, Ordering::Release);
         }
@@ -397,28 +382,56 @@ async fn run_target(
     target: ParallelModelTarget,
     port: Arc<dyn ModelPort>,
     tracker: Arc<BudgetTracker>,
-    attempt_timeout: Duration,
+    batch_started: Instant,
+    mut cancel: watch::Receiver<bool>,
 ) -> IndexedResult {
     let started = Instant::now();
     let mut records = Vec::with_capacity(target.attempts.len());
     let mut last_status = ParallelModelStatus::Failed;
     for attempt in target.attempts {
+        if *cancel.borrow() {
+            last_status = ParallelModelStatus::Cancelled;
+            break;
+        }
+        let remaining = tracker
+            .budget
+            .max_wall_time
+            .map(|limit| limit.saturating_sub(batch_started.elapsed()));
+        if remaining.is_some_and(|limit| limit.is_zero()) {
+            last_status = ParallelModelStatus::TimedOut;
+            break;
+        }
         if !tracker.reserve_attempt() {
             last_status = ParallelModelStatus::BudgetExceeded;
             break;
         }
         let attempt_started = Instant::now();
         let route = attempt.route;
-        match tokio::time::timeout(attempt_timeout, execute(&*port, attempt.request)).await {
-            Ok(Ok(success)) => {
+        let result = tokio::select! {
+            biased;
+            () = cancellation(&mut cancel) => Err((ParallelModelStatus::Cancelled,
+                ModelPortFailure::new("CANCELLED", "parallel model batch cancelled"), true)),
+            () = wait_for_limit(remaining) => Err((ParallelModelStatus::TimedOut,
+                ModelPortFailure::new("BATCH_TIMEOUT", "parallel model batch timed out"), true)),
+            () = wait_for_limit(tracker.budget.attempt_timeout) => Err((ParallelModelStatus::TimedOut,
+                ModelPortFailure::new("TIMEOUT", "parallel model attempt timed out"), false)),
+            result = execute(&*port, attempt.request) => result.map_err(|failure|
+                (ParallelModelStatus::Failed, failure, false)),
+        };
+        match result {
+            Ok(success) => {
                 tracker.record(success.usage, success.cost_micros);
                 records.push(ParallelModelAttemptRecord {
                     route: route.clone(),
                     latency: attempt_started.elapsed(),
                     usage: success.usage,
                     cost_micros: success.cost_micros,
-                    failure: None,
+                    failure: success.failure.clone(),
                 });
+                if success.failure.is_some() {
+                    last_status = ParallelModelStatus::Failed;
+                    continue;
+                }
                 return IndexedResult {
                     index,
                     result: ParallelModelResult {
@@ -431,8 +444,8 @@ async fn run_target(
                     },
                 };
             }
-            Ok(Err(failure)) => {
-                last_status = ParallelModelStatus::Failed;
+            Err((status, failure, stop)) => {
+                last_status = status;
                 records.push(ParallelModelAttemptRecord {
                     route,
                     latency: attempt_started.elapsed(),
@@ -440,22 +453,13 @@ async fn run_target(
                     cost_micros: None,
                     failure: Some(failure),
                 });
-            }
-            Err(_) => {
-                last_status = ParallelModelStatus::TimedOut;
-                records.push(ParallelModelAttemptRecord {
-                    route,
-                    latency: attempt_started.elapsed(),
-                    usage: None,
-                    cost_micros: None,
-                    failure: Some(ModelPortFailure::new(
-                        "TIMEOUT",
-                        "parallel model attempt timed out",
-                    )),
-                });
+                if stop {
+                    break;
+                }
             }
         }
     }
+
     IndexedResult {
         index,
         result: ParallelModelResult {
@@ -469,30 +473,31 @@ async fn run_target(
     }
 }
 
-struct AttemptSuccess {
+struct AttemptOutcome {
     frames: Vec<String>,
     usage: Option<ProviderTokenUsage>,
     cost_micros: Option<u64>,
+    failure: Option<ModelPortFailure>,
 }
 
 async fn execute(
     port: &dyn ModelPort,
     request: ModelPortRequest,
-) -> Result<AttemptSuccess, ModelPortFailure> {
+) -> Result<AttemptOutcome, ModelPortFailure> {
     let mut stream = port.stream(request).await?;
     let mut frames = Vec::new();
     while let Some(frame) = stream.next().await {
         let frame = frame?;
         match terminal(&frame)? {
-            Some(Terminal::Completed { usage, cost_micros }) => {
+            Some(terminal) => {
                 frames.push(frame);
-                return Ok(AttemptSuccess {
+                return Ok(AttemptOutcome {
                     frames,
-                    usage,
-                    cost_micros,
+                    usage: terminal.usage,
+                    cost_micros: terminal.cost_micros,
+                    failure: terminal.failure,
                 });
             }
-            Some(Terminal::Failed(failure)) => return Err(failure),
             None => frames.push(frame),
         }
     }
@@ -502,49 +507,49 @@ async fn execute(
     ))
 }
 
-enum Terminal {
-    Completed {
-        usage: Option<ProviderTokenUsage>,
-        cost_micros: Option<u64>,
-    },
-    Failed(ModelPortFailure),
+struct Terminal {
+    usage: Option<ProviderTokenUsage>,
+    cost_micros: Option<u64>,
+    failure: Option<ModelPortFailure>,
 }
 
 fn terminal(frame: &str) -> Result<Option<Terminal>, ModelPortFailure> {
     let value: Value = serde_json::from_str(frame)
         .map_err(|_| ModelPortFailure::new("PROTOCOL", "model stream frame is invalid"))?;
     match value.get("type").and_then(Value::as_str) {
-        Some("completed") => Ok(Some(Terminal::Completed {
+        Some("completed" | "error") => Ok(Some(Terminal {
             usage: value
                 .get("tokenUsage")
                 .or_else(|| value.get("token_usage"))
                 .map(parse_usage)
                 .transpose()?,
             cost_micros: optional_u64(&value, "actualCostMicros", "actual_cost_micros")?,
+            failure: if value["type"] == "error" {
+                let error = value
+                    .get("error")
+                    .ok_or_else(|| ModelPortFailure::new("PROTOCOL", "model error is invalid"))?;
+                Some(ModelPortFailure {
+                    code: required_string(error, "code")?,
+                    message: required_string(error, "message")?,
+                    status: optional_u64(error, "status", "status")?
+                        .map(u16::try_from)
+                        .transpose()
+                        .map_err(|_| ModelPortFailure::new("PROTOCOL", "model error is invalid"))?,
+                    provider_retry_after_millis: optional_u64(
+                        error,
+                        "providerRetryAfterMillis",
+                        "provider_retry_after_millis",
+                    )?,
+                    provider_request_id: optional_string(
+                        error,
+                        "providerRequestId",
+                        "provider_request_id",
+                    )?,
+                })
+            } else {
+                None
+            },
         })),
-        Some("error") => {
-            let error = value
-                .get("error")
-                .ok_or_else(|| ModelPortFailure::new("PROTOCOL", "model error is invalid"))?;
-            Ok(Some(Terminal::Failed(ModelPortFailure {
-                code: required_string(error, "code")?,
-                message: required_string(error, "message")?,
-                status: optional_u64(error, "status", "status")?
-                    .map(u16::try_from)
-                    .transpose()
-                    .map_err(|_| ModelPortFailure::new("PROTOCOL", "model error is invalid"))?,
-                provider_retry_after_millis: optional_u64(
-                    error,
-                    "providerRetryAfterMillis",
-                    "provider_retry_after_millis",
-                )?,
-                provider_request_id: optional_string(
-                    error,
-                    "providerRequestId",
-                    "provider_request_id",
-                )?,
-            })))
-        }
         Some(_) => Ok(None),
         None => Err(ModelPortFailure::new(
             "PROTOCOL",
@@ -618,11 +623,11 @@ fn validate(
     budget: ParallelModelBudget,
 ) -> Result<(), ParallelModelRunError> {
     if targets.is_empty()
-        || budget.max_attempts == 0
-        || budget.max_total_tokens == 0
-        || budget.max_total_cost_micros == 0
-        || budget.max_wall_time.is_zero()
-        || budget.attempt_timeout.is_zero()
+        || budget.max_attempts == Some(0)
+        || budget.max_total_tokens == Some(0)
+        || budget.max_total_cost_micros == Some(0)
+        || budget.max_wall_time.is_some_and(|limit| limit.is_zero())
+        || budget.attempt_timeout.is_some_and(|limit| limit.is_zero())
     {
         return Err(ParallelModelRunError);
     }
@@ -642,6 +647,13 @@ fn validate(
     Ok(())
 }
 
+async fn wait_for_limit(limit: Option<Duration>) {
+    match limit {
+        Some(duration) => tokio::time::sleep(duration).await,
+        None => pending::<()>().await,
+    }
+}
+
 async fn cancellation(receiver: &mut watch::Receiver<bool>) {
     if *receiver.borrow_and_update() {
         return;
@@ -652,21 +664,6 @@ async fn cancellation(receiver: &mut watch::Receiver<bool>) {
         }
     }
     pending::<()>().await;
-}
-
-fn terminal_result(
-    target_id: String,
-    status: ParallelModelStatus,
-    latency: Duration,
-) -> ParallelModelResult {
-    ParallelModelResult {
-        target_id,
-        status,
-        selected_route: None,
-        frames: Vec::new(),
-        attempts: Vec::new(),
-        latency,
-    }
 }
 
 fn saturating_add(value: &AtomicU64, amount: u64) {
@@ -743,6 +740,9 @@ mod tests {
             Box::pin(async move {
                 let inner: Pin<Box<dyn Stream<Item = Result<String, ModelPortFailure>> + Send>> =
                     match request_id.as_str() {
+                        "measured-failure" => Box::pin(stream::iter([Ok(
+                            r#"{"type":"error","error":{"code":"MAX_TOKENS","message":"output limit"},"tokenUsage":{"input_tokens":10,"cached_input_tokens":2,"cache_write_input_tokens":0,"output_tokens":4,"reasoning_output_tokens":1}}"#.into(),
+                        )])),
                         id if id.ends_with(":fail") || id == "fail" => {
                             Box::pin(stream::iter([Err(ModelPortFailure::new(
                                 "SERVER",
@@ -782,12 +782,43 @@ mod tests {
 
     fn budget(max_attempts: u64) -> ParallelModelBudget {
         ParallelModelBudget {
-            max_attempts,
-            max_total_tokens: 100,
-            max_total_cost_micros: 100,
-            max_wall_time: Duration::from_secs(1),
-            attempt_timeout: Duration::from_millis(40),
+            max_attempts: Some(max_attempts),
+            max_total_tokens: Some(100),
+            max_total_cost_micros: Some(100),
+            max_wall_time: Some(Duration::from_secs(1)),
+            attempt_timeout: Some(Duration::from_millis(40)),
         }
+    }
+
+    #[tokio::test]
+    async fn failed_attempt_keeps_measured_usage_before_fallback() {
+        let runner = ParallelModelRunner::new(Arc::new(FixturePort::default()));
+        let (_cancel, signal) = parallel_model_cancellation();
+        let batch = runner
+            .run(
+                vec![ParallelModelTarget {
+                    target_id: "measured".into(),
+                    attempts: vec![
+                        attempt("first", "measured-failure"),
+                        attempt("second", "ok"),
+                    ],
+                }],
+                ParallelModelBudget::default(),
+                signal,
+            )
+            .await
+            .unwrap();
+        let result = &batch.results[0];
+        assert_eq!(result.status, ParallelModelStatus::Succeeded);
+        assert_eq!(result.selected_route.as_deref(), Some("second"));
+        assert_eq!(
+            result.attempts[0].failure.as_ref().unwrap().code,
+            "MAX_TOKENS"
+        );
+        assert_eq!(result.attempts[0].usage.unwrap().input_tokens, 10);
+        assert_eq!(result.attempts[0].cost_micros, None);
+        assert_eq!(batch.totals.input_tokens, 13);
+        assert_eq!(batch.totals.output_tokens, 6);
     }
 
     #[tokio::test]
@@ -869,6 +900,120 @@ mod tests {
             limited.results[0].status,
             ParallelModelStatus::BudgetExceeded
         );
+    }
+
+    #[tokio::test]
+    async fn unlimited_batch_records_usage_and_remains_cancellable() {
+        let port = Arc::new(FixturePort::default());
+        let runner = ParallelModelRunner::new(port.clone());
+        let (_cancel, signal) = parallel_model_cancellation();
+        let batch = runner
+            .run(
+                vec![ParallelModelTarget {
+                    target_id: "unlimited".into(),
+                    attempts: vec![attempt("first", "fail"), attempt("second", "ok")],
+                }],
+                ParallelModelBudget::default(),
+                signal,
+            )
+            .await
+            .unwrap();
+        assert_eq!(batch.results[0].status, ParallelModelStatus::Succeeded);
+        assert_eq!(batch.results[0].attempts.len(), 2);
+        assert!(batch.results[0].attempts[0].failure.is_some());
+        assert_eq!(batch.totals.attempts, 2);
+        assert_eq!(batch.totals.input_tokens, 3);
+        assert_eq!(batch.totals.output_tokens, 2);
+        assert_eq!(batch.totals.known_cost_micros, 7);
+        let tracker = BudgetTracker::new(ParallelModelBudget::default());
+        tracker.record(None, Some(u64::MAX));
+        assert!(tracker.reserve_attempt());
+        let (cancel, signal) = parallel_model_cancellation();
+        let task = runner.run(
+            vec![ParallelModelTarget {
+                target_id: "cancel-unlimited".into(),
+                attempts: vec![attempt("hanging", "hang")],
+            }],
+            ParallelModelBudget::default(),
+            signal,
+        );
+        let cancel_after_open = async {
+            while port.state.active.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+            cancel.cancel();
+        };
+        let (cancelled, ()) = tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::join!(task, cancel_after_open)
+        })
+        .await
+        .expect("unlimited cancellation must finish");
+        assert_eq!(
+            cancelled.unwrap().results[0].status,
+            ParallelModelStatus::Cancelled
+        );
+        assert_eq!(port.state.active.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn batch_stop_preserves_prior_failure_and_interrupted_attempt() {
+        for timed_out in [false, true] {
+            let port = Arc::new(FixturePort::default());
+            let runner = ParallelModelRunner::new(port.clone());
+            let (cancel, signal) = parallel_model_cancellation();
+            let task = runner.run(
+                vec![ParallelModelTarget {
+                    target_id: "interrupted".into(),
+                    attempts: vec![
+                        attempt("first", "fail"),
+                        attempt("second", "hang"),
+                        attempt("never-opened", "ok"),
+                    ],
+                }],
+                ParallelModelBudget {
+                    max_wall_time: timed_out.then_some(Duration::from_millis(40)),
+                    ..ParallelModelBudget::default()
+                },
+                signal,
+            );
+            let stop = async {
+                if !timed_out {
+                    while port.state.requests.lock().unwrap().len() < 2 {
+                        tokio::task::yield_now().await;
+                    }
+                    cancel.cancel();
+                }
+            };
+            let (batch, ()) =
+                tokio::time::timeout(Duration::from_secs(1), async { tokio::join!(task, stop) })
+                    .await
+                    .unwrap();
+            let batch = batch.unwrap();
+            let result = &batch.results[0];
+            assert_eq!(
+                result.status,
+                if timed_out {
+                    ParallelModelStatus::TimedOut
+                } else {
+                    ParallelModelStatus::Cancelled
+                }
+            );
+            assert_eq!(result.attempts.len(), 2);
+            assert_eq!(result.attempts[0].failure.as_ref().unwrap().code, "SERVER");
+            assert_eq!(
+                result.attempts[1].failure.as_ref().unwrap().code,
+                if timed_out {
+                    "BATCH_TIMEOUT"
+                } else {
+                    "CANCELLED"
+                }
+            );
+            assert!(result.attempts[1].usage.is_none());
+            assert!(result.attempts[1].cost_micros.is_none());
+            assert_eq!(batch.totals.attempts, 2);
+            assert_eq!(port.state.requests.lock().unwrap().len(), 2);
+            assert_eq!(port.state.active.load(Ordering::SeqCst), 0);
+        }
     }
 
     /// Seven dynasty seats; FABLE fails and QWEN hangs so partial success,

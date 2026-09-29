@@ -17,7 +17,7 @@ use crate::{
     },
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use futures::{future::BoxFuture, stream};
+use futures::{StreamExt as _, future::BoxFuture, stream};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
@@ -104,11 +104,12 @@ impl SharedAuthoritySource {
         let process_root_same = self
             .read_authorities()?
             .get(&job_id)
-            .is_some_and(|existing| existing == &authority);
+            .is_some_and(|existing| same_binding_with_extended_lease(existing, &authority));
         let persisted_root_same =
             self.load_lineage_binding(&thread_id)?
                 .is_some_and(|(existing_run_key, existing)| {
-                    existing_run_key == run_key && existing == authority
+                    existing_run_key == run_key
+                        && same_binding_with_extended_lease(&existing, &authority)
                 });
         // A durable source is authoritative for run identity.  The
         // process-local job map stores only the lease authority, so it cannot
@@ -126,7 +127,20 @@ impl SharedAuthoritySource {
         // A replacement lease invalidates all old descendants before a new
         // root is made available.  Never leave an old child bound to a new
         // attempt/fencing token.
-        if !same_root {
+        if same_root {
+            lineage.retain(|_, candidate| {
+                if candidate.lease.job_id.0 != job_id {
+                    return true;
+                }
+                let mut renewed = candidate.clone();
+                renewed.lease.expires_at = authority.lease.expires_at.clone();
+                if !common_authority(&renewed, &authority) {
+                    return false;
+                }
+                *candidate = renewed;
+                true
+            });
+        } else {
             lineage.retain(|_, candidate| candidate.lease.job_id.0 != job_id);
         }
         lineage.insert(
@@ -279,6 +293,59 @@ impl SharedAuthoritySource {
 }
 
 impl ModelLeaseAuthoritySource for SharedAuthoritySource {
+    fn validate_exchange(
+        &self,
+        authority: &ModelLeaseAuthority,
+        exchange: &ModelExchangeId,
+        now: &Instant,
+    ) -> Result<(), ModelAuthorityRejection> {
+        let thread = &authority.session_identity.codex_thread_id.0;
+        let cached = self
+            .lineage
+            .read()
+            .map_err(|_| ModelAuthorityRejection::Unavailable)?
+            .get(thread)
+            .cloned();
+        let expected = match cached {
+            Some(expected) => expected,
+            None => self
+                .load_lineage(thread)
+                .map_err(|_| ModelAuthorityRejection::Unavailable)?
+                .ok_or(ModelAuthorityRejection::StaleLease)?,
+        };
+        if !same_binding_with_extended_lease(authority, &expected) {
+            return Err(ModelAuthorityRejection::StaleLease);
+        }
+        let open = self
+            .store
+            .as_ref()
+            .map(|store| ExecutionOutbox::read_model_open(store, exchange))
+            .transpose()
+            .map_err(|_| ModelAuthorityRejection::Unavailable)?
+            .flatten();
+        if let Some(open) = open {
+            if open.lease != authority.lease
+                || open.worker_session_id != authority.worker_session_id
+                || open.session_identity != authority.session_identity
+            {
+                return Err(ModelAuthorityRejection::StaleLease);
+            }
+        } else if expected != *authority {
+            return Err(ModelAuthorityRejection::StaleLease);
+        }
+        let observed = self
+            .observed_now()
+            .map_err(|_| ModelAuthorityRejection::Unavailable)?;
+        let effective = observed
+            .as_ref()
+            .filter(|observed| observed.0 > now.0)
+            .unwrap_or(now);
+        if effective.0 < expected.lease.issued_at.0 || effective.0 >= expected.lease.expires_at.0 {
+            return Err(ModelAuthorityRejection::ExpiredLease);
+        }
+        self.validate_current(&expected, effective)
+    }
+
     fn validate_current(
         &self,
         authority: &ModelLeaseAuthority,
@@ -512,6 +579,8 @@ impl ModelChunkSink for KernelStreamSink {
 pub(crate) struct ExecutionPortModelBridge {
     route: ModelGatewayRoute,
     expected_provider: String,
+    tool_repeat_guard: bool,
+    device_provider_directory: std::sync::OnceLock<std::path::PathBuf>,
     queue: QueuedModelPort,
     sink: KernelStreamSink,
     authority: SharedAuthoritySource,
@@ -545,7 +614,11 @@ struct OpenStreamExchange {
 }
 
 enum OpenStreamPreparation {
-    Replay(ModelPortStream),
+    Replay {
+        stream: ModelPortStream,
+        run_key: String,
+        model_call_id: String,
+    },
     Open(Box<OpenStreamExchange>),
 }
 
@@ -569,6 +642,8 @@ impl ExecutionPortModelBridge {
         Self {
             route,
             expected_provider,
+            tool_repeat_guard: false,
+            device_provider_directory: std::sync::OnceLock::new(),
             queue,
             sink,
             authority,
@@ -579,6 +654,46 @@ impl ExecutionPortModelBridge {
             exchanges: Mutex::new(HashMap::new()),
             action_gate: RwLock::new(None),
         }
+    }
+
+    pub(crate) fn attach_device_provider_directory(
+        &self,
+        directory: std::path::PathBuf,
+    ) -> Result<(), BridgeError> {
+        if self.device_provider_directory.get() == Some(&directory) {
+            return Ok(());
+        }
+        self.device_provider_directory
+            .set(directory)
+            .map_err(|_| BridgeError::Conflict)
+    }
+
+    pub(crate) fn with_tool_repeat_guard(mut self, enabled: bool) -> Self {
+        self.tool_repeat_guard = enabled;
+        self
+    }
+
+    fn guard_stream(
+        &self,
+        stream: ModelPortStream,
+        run_key: String,
+        model_call_id: String,
+    ) -> ModelPortStream {
+        let store = self.ordinal_store.clone();
+        Box::pin(stream.map(move |item| {
+            let output = item?;
+            match store.admit_tool_output(&run_key, &model_call_id, &output) {
+                Ok(true) => Ok(output),
+                Ok(false) => Err(ModelPortFailure::new(
+                    crate::tool_repeat::STOP_REASON,
+                    "sixth identical tool request blocked before execution",
+                )),
+                Err(_) => Err(ModelPortFailure::new(
+                    "INVALID_REQUEST",
+                    "tool admission ledger rejected model output",
+                )),
+            }
+        }))
     }
 
     pub(crate) fn attach_action_gate(
@@ -637,6 +752,14 @@ impl ExecutionPortModelBridge {
     pub(crate) fn model_port(self: &Arc<Self>) -> Arc<dyn ModelPort> {
         Arc::new(KernelModelPort {
             bridge: Arc::clone(self),
+            fusion_member: None,
+        })
+    }
+
+    pub(crate) fn fusion_model_port(self: &Arc<Self>, member: String) -> Arc<dyn ModelPort> {
+        Arc::new(KernelModelPort {
+            bridge: Arc::clone(self),
+            fusion_member: Some(member),
         })
     }
 
@@ -664,6 +787,9 @@ impl ExecutionPortModelBridge {
             .bindings
             .write()
             .map_err(|_| BridgeError::Unavailable)?;
+        if replace_fenced_run && extend_binding_lineage(&mut bindings, &binding) {
+            return Ok(());
+        }
         // An idempotent root rebind after restart must not fence child
         // aliases which were already restored for the same immutable
         // authority.  A changed root remains the only operation that fences
@@ -934,7 +1060,35 @@ impl ExecutionPortModelBridge {
         chunk: &ModelChunkMessage,
         received_at: &Instant,
     ) -> Result<(), BridgeError> {
-        let usage = primary_model_usage(chunk)?;
+        if let Some(directory) = self.device_provider_directory.get() {
+            let open = self
+                .outbox
+                .retained_model_open(&chunk.model_exchange_id)
+                .map_err(|_| BridgeError::Unavailable)?
+                .ok_or(BridgeError::Conflict)?;
+            let device = winwincode_provider::DeviceProviderStore::open(directory)
+                .map_err(|_| BridgeError::Unavailable)?;
+            for receipt in device
+                .model_jev_receipts(&open)
+                .map_err(|_| BridgeError::Unavailable)?
+            {
+                self.ordinal_store
+                    .retain_jev_performance(&owner.run_key, &receipt, received_at)
+                    .map_err(model_frame_store_error)?;
+            }
+            for receipt in device
+                .model_jev_judge_receipts(&open)
+                .map_err(|_| BridgeError::Unavailable)?
+            {
+                self.ordinal_store
+                    .retain_jev_performance(&owner.run_key, &receipt, received_at)
+                    .map_err(model_frame_store_error)?;
+            }
+        }
+        let Some(usage) = primary_model_usage(chunk)? else {
+            // A terminal transport error does not establish zero model usage.
+            return Ok(());
+        };
         self.ordinal_store
             .record_performance_completion(
                 &owner.run_key,
@@ -966,14 +1120,21 @@ impl ExecutionPortModelBridge {
         if !canonical_instant(received_at)
             || received_at.0 < binding.authority.lease.issued_at.0
             || received_at.0 >= binding.authority.lease.expires_at.0
-            || chunk.lease != binding.authority.lease
             || chunk.worker_session_id != binding.authority.worker_session_id
             || chunk.session_identity != binding.authority.session_identity
         {
             return Err(BridgeError::StaleAuthority);
         }
         self.authority
-            .validate_current(&binding.authority, received_at)
+            .validate_exchange(
+                &ModelLeaseAuthority {
+                    lease: chunk.lease.clone(),
+                    worker_session_id: chunk.worker_session_id.clone(),
+                    session_identity: chunk.session_identity.clone(),
+                },
+                &chunk.model_exchange_id,
+                received_at,
+            )
             .map_err(|rejection| match rejection {
                 ModelAuthorityRejection::ExpiredLease
                 | ModelAuthorityRejection::StaleLease
@@ -1005,8 +1166,7 @@ impl ExecutionPortModelBridge {
             self.durable_binding_for_thread(&thread_id)?
                 .ok_or(BridgeError::StaleAuthority)?
         };
-        if chunk.lease != binding.authority.lease
-            || chunk.worker_session_id != binding.authority.worker_session_id
+        if chunk.worker_session_id != binding.authority.worker_session_id
             || chunk.session_identity != binding.authority.session_identity
         {
             return Err(BridgeError::StaleAuthority);
@@ -1240,10 +1400,15 @@ impl ExecutionPortModelBridge {
     async fn open_stream(
         self: Arc<Self>,
         request: ModelPortRequest,
+        fusion_member: Option<String>,
     ) -> Result<ModelPortStream, ModelPortFailure> {
-        let prepared = self.prepare_open_stream(&request)?;
+        let prepared = self.prepare_member_stream(&request, fusion_member.as_deref())?;
         let exchange = match prepared {
-            OpenStreamPreparation::Replay(stream) => return Ok(stream),
+            OpenStreamPreparation::Replay {
+                stream,
+                run_key,
+                model_call_id,
+            } => return Ok(self.guard_stream(stream, run_key, model_call_id)),
             OpenStreamPreparation::Open(exchange) => *exchange,
         };
         let command = self.open_command(&exchange)?;
@@ -1259,7 +1424,7 @@ impl ExecutionPortModelBridge {
                 ModelExchangeOwner {
                     thread_id: exchange.binding.canonical_thread_id.clone(),
                     run_key: exchange.binding.run_key.clone(),
-                    model_call_id: exchange.model_call_id,
+                    model_call_id: exchange.model_call_id.clone(),
                 },
             );
         let opened = self.client.lock().await.open(command).await;
@@ -1273,12 +1438,58 @@ impl ExecutionPortModelBridge {
         let stream = stream::unfold(receiver, |mut receiver| async move {
             receiver.recv().await.map(|item| (item, receiver))
         });
-        Ok(Box::pin(stream) as ModelPortStream)
+        Ok(self.guard_stream(
+            Box::pin(stream),
+            exchange.binding.run_key,
+            exchange.model_call_id,
+        ))
     }
 
+    #[cfg(test)]
     fn prepare_open_stream(
         &self,
         request: &ModelPortRequest,
+    ) -> Result<OpenStreamPreparation, ModelPortFailure> {
+        self.prepare_member_stream(request, None)
+    }
+
+    fn prepare_host_payload(
+        &self,
+        request: &ModelPortRequest,
+        stored: Option<&serde_json::Value>,
+        run_key: &str,
+        is_fusion_member: bool,
+    ) -> Result<Vec<u8>, ModelPortFailure> {
+        let mut payload_bytes = if is_fusion_member {
+            request.payload_json.as_bytes().to_vec()
+        } else {
+            sealed_context_payload(request, stored)?
+        };
+        let mut payload: serde_json::Value = serde_json::from_slice(&payload_bytes)
+            .map_err(|_| model_failure(BridgeError::InvalidPayload))?;
+        if payload
+            .pointer("/winwincodeJevContext/profile/source/settings/jevJudge")
+            .is_some()
+        {
+            let job = stored
+                .as_ref()
+                .and_then(|run| run.get("job"))
+                .ok_or_else(|| model_failure(BridgeError::InvalidPayload))?;
+            payload["winwincodeJevJudge"] = serde_json::to_value(
+                crate::judge_bridge::requests(&self.ordinal_store, run_key, &payload, job)
+                    .map_err(model_store_failure)?,
+            )
+            .map_err(|_| model_failure(BridgeError::InvalidPayload))?;
+            payload_bytes = serde_json::to_vec(&payload)
+                .map_err(|_| model_failure(BridgeError::InvalidPayload))?;
+        }
+        Ok(payload_bytes)
+    }
+
+    fn prepare_member_stream(
+        &self,
+        request: &ModelPortRequest,
+        fusion_member: Option<&str>,
     ) -> Result<OpenStreamPreparation, ModelPortFailure> {
         let envelope: KernelRequestEnvelope = serde_json::from_str(&request.payload_json)
             .map_err(|_| model_failure(BridgeError::InvalidPayload))?;
@@ -1286,29 +1497,46 @@ impl ExecutionPortModelBridge {
             return Err(model_failure(BridgeError::InvalidPayload));
         }
         let binding = self.binding_for(&envelope).map_err(model_failure)?;
+        if self.tool_repeat_guard {
+            self.ordinal_store
+                .enable_tool_repeat_guard(&binding.run_key)
+                .map_err(model_store_failure)?;
+        }
+        if self
+            .ordinal_store
+            .tool_repeat_stopped(&binding.run_key)
+            .map_err(model_store_failure)?
+        {
+            return Err(ModelPortFailure::new(
+                crate::tool_repeat::STOP_REASON,
+                "run stopped after repeated tool requests",
+            ));
+        }
         // A session can select a different configured provider from the Worker
         // default. Root and child requests use the same sealed run settings.
         let stored = self
             .ordinal_store
             .load_run::<serde_json::Value>(&binding.run_key)
             .map_err(model_store_failure)?;
-        let provider = match stored.as_ref() {
-            Some(run) => run
-                .pointer("/agentConfig/profile/source/settings/provider")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| model_failure(BridgeError::InvalidPayload))?,
-            None => &self.expected_provider,
-        };
-        if envelope.provider != provider {
-            return Err(model_failure(BridgeError::InvalidPayload));
+        if let Some(member) = fusion_member {
+            validate_fusion_model_selection(&envelope, stored.as_ref(), member)?;
+        } else {
+            validate_model_selection(&envelope, stored.as_ref(), &self.expected_provider)?;
         }
         // Child bindings can be restored from the durable lineage table while
         // the Kernel is already processing the replayed model response.  Put
         // the exact binding in the action gate before Core can authorize a
         // tool, rather than waiting for the outer adapter poll loop.
         self.sync_action_binding(&binding).map_err(model_failure)?;
-        let payload_bytes = request.payload_json.as_bytes().to_vec();
-        let request_digest = model_call_digest(&envelope.request).map_err(model_failure)?;
+        let payload_bytes = self.prepare_host_payload(
+            request,
+            stored.as_ref(),
+            &binding.run_key,
+            fusion_member.is_some(),
+        )?;
+        let request_digest = model_call_digest(&if let Some(member) = fusion_member {
+            serde_json::json!({"fusionMember":member,"provider":envelope.provider,"request":envelope.request})
+        } else { envelope.request.clone() }).map_err(model_failure)?;
         let model_call_id = envelope.request_id.clone();
         let exchange_identity = format!("{}:{model_call_id}", binding.run_key);
         let exchange = ModelExchangeId(canonical_id(
@@ -1337,40 +1565,29 @@ impl ExecutionPortModelBridge {
             .ordinal_store
             .model_call_phase(&binding.run_key, &model_call_id)
             .map_err(model_store_failure)?;
+        let frames = self.load_model_call_frames(&binding.run_key, &model_call_id)?;
         if matches!(
             phase,
             Some(ModelCallPhase::ProviderFinal | ModelCallPhase::CoreCommitted)
-        ) {
-            let frames = self.load_model_call_frames(&binding.run_key, &model_call_id)?;
-            return Ok(OpenStreamPreparation::Replay(replay_model_call_frames(
-                &frames,
-                &binding,
-                &exchange,
-                &self.authority,
-            )?));
-        }
-        // If the process stopped after the exact final frame was durably
-        // retained but before the phase update, the frame itself is the
-        // recovery witness. Promote it before replaying; this keeps the
-        // provider from being opened a second time for the same call.
-        if phase == Some(ModelCallPhase::InFlight) {
-            let frames = self.load_model_call_frames(&binding.run_key, &model_call_id)?;
-            if frames.last().is_some_and(|frame| frame.is_final) {
+        ) || frames.last().is_some_and(|frame| frame.is_final)
+        {
+            // A retained final frame also recovers a crash before the phase
+            // update, without opening another Provider call.
+            if phase == Some(ModelCallPhase::InFlight) {
                 self.ordinal_store
                     .mark_model_call_provider_final(&binding.run_key, &model_call_id)
                     .map_err(model_store_failure)?;
-                return Ok(OpenStreamPreparation::Replay(replay_model_call_frames(
-                    &frames,
-                    &binding,
-                    &exchange,
-                    &self.authority,
-                )?));
             }
+            return Ok(OpenStreamPreparation::Replay {
+                stream: replay_model_call_frames(&frames, &binding, &exchange, &self.authority)?,
+                run_key: binding.run_key,
+                model_call_id,
+            });
         }
         Ok(OpenStreamPreparation::Open(Box::new(OpenStreamExchange {
             binding,
             payload_bytes,
-            request_digest,
+            request_digest: model_call_digest(&envelope.request).map_err(model_failure)?,
             model_call_id,
             exchange_identity,
             exchange,
@@ -1400,8 +1617,15 @@ impl ExecutionPortModelBridge {
                 let original_request = decode_payload(&open.request).map_err(model_failure)?;
                 let original_digest =
                     model_open_request_digest(&original_request).map_err(model_failure)?;
-                if open.lease != exchange.binding.authority.lease
-                    || open.worker_session_id != exchange.binding.authority.worker_session_id
+                let original_authority = ModelLeaseAuthority {
+                    lease: open.lease.clone(),
+                    worker_session_id: open.worker_session_id.clone(),
+                    session_identity: open.session_identity.clone(),
+                };
+                if !same_binding_with_extended_lease(
+                    &original_authority,
+                    &exchange.binding.authority,
+                ) || open.worker_session_id != exchange.binding.authority.worker_session_id
                     || open.session_identity != exchange.binding.authority.session_identity
                     || open.route != self.route
                     || original_digest != exchange.request_digest
@@ -1413,7 +1637,7 @@ impl ExecutionPortModelBridge {
                         message_id: open.message_id,
                         sent_at: open.sent_at,
                     },
-                    authority: exchange.binding.authority.clone(),
+                    authority: original_authority,
                     model_exchange_id: exchange.exchange.clone(),
                     request_id: open.request_id,
                     route: open.route,
@@ -1452,6 +1676,7 @@ impl fmt::Debug for ExecutionPortModelBridge {
 #[derive(Debug)]
 struct KernelModelPort {
     bridge: Arc<ExecutionPortModelBridge>,
+    fusion_member: Option<String>,
 }
 
 impl ModelPort for KernelModelPort {
@@ -1460,8 +1685,51 @@ impl ModelPort for KernelModelPort {
         request: ModelPortRequest,
     ) -> BoxFuture<'static, Result<ModelPortStream, ModelPortFailure>> {
         let bridge = Arc::clone(&self.bridge);
-        Box::pin(async move { bridge.open_stream(request).await })
+        let member = self.fusion_member.clone();
+        Box::pin(async move { bridge.open_stream(request, member).await })
     }
+}
+
+pub(crate) fn sealed_context_payload(
+    request: &ModelPortRequest,
+    stored: Option<&serde_json::Value>,
+) -> Result<Vec<u8>, ModelPortFailure> {
+    use winwincode_execution_port::agent_config::{
+        AgentSessionConfigSnapshot, validate_agent_session_config,
+    };
+    let Some(run) = stored else {
+        return Ok(request.payload_json.as_bytes().to_vec());
+    };
+    let config = run
+        .get("agentConfig")
+        .ok_or_else(|| model_failure(BridgeError::InvalidPayload))?;
+    let snapshot: AgentSessionConfigSnapshot = serde_json::from_value(config.clone())
+        .map_err(|_| model_failure(BridgeError::InvalidPayload))?;
+    validate_agent_session_config(&snapshot)
+        .map_err(|_| model_failure(BridgeError::InvalidPayload))?;
+    if snapshot.profile.source.settings.jev_context.is_none()
+        && snapshot.profile.source.settings.jev_judge.is_none()
+    {
+        return Ok(request.payload_json.as_bytes().to_vec());
+    }
+    let job_value = run
+        .get("job")
+        .ok_or_else(|| model_failure(BridgeError::InvalidPayload))?;
+    let job: winwincode_execution_port::generated::ExecutionJob =
+        serde_json::from_value(job_value.clone())
+            .map_err(|_| model_failure(BridgeError::InvalidPayload))?;
+    let digest = crate::stage_product::stage_product_job_digest(&job)
+        .map_err(|_| model_failure(BridgeError::InvalidPayload))?;
+    if run.get("jobDigest").and_then(serde_json::Value::as_str) != Some(digest.0.as_str()) {
+        return Err(model_failure(BridgeError::InvalidPayload));
+    }
+    let mut payload: serde_json::Value = serde_json::from_str(&request.payload_json)
+        .map_err(|_| model_failure(BridgeError::InvalidPayload))?;
+    // Core cannot supply this field: KernelRequestEnvelope rejects unknown fields.
+    // The outer payload digest binds this host-owned snapshot to the original request.
+    payload["winwincodeJevContext"] = config.clone();
+    payload["winwincodeJevTask"] = serde_json::json!({"job": job, "jobDigest": digest});
+    serde_json::to_vec(&payload).map_err(|_| model_failure(BridgeError::InvalidPayload))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1474,6 +1742,92 @@ struct KernelRequestEnvelope {
     #[serde(default, rename = "turnId")]
     _turn_id: Option<String>,
     request: serde_json::Value,
+}
+
+// Only the host-created member port can select a route from this frozen list.
+// Ordinary Core requests continue through validate_model_selection.
+fn validate_fusion_model_selection(
+    envelope: &KernelRequestEnvelope,
+    stored: Option<&serde_json::Value>,
+    member_id: &str,
+) -> Result<(), ModelPortFailure> {
+    use winwincode_execution_port::agent_config::{
+        AgentSessionConfigSnapshot, validate_agent_session_config,
+    };
+    let invalid = || model_failure(BridgeError::InvalidPayload);
+    let snapshot: AgentSessionConfigSnapshot = serde_json::from_value(
+        stored
+            .and_then(|run| run.get("agentConfig"))
+            .cloned()
+            .ok_or_else(invalid)?,
+    )
+    .map_err(|_| invalid())?;
+    validate_agent_session_config(&snapshot).map_err(|_| invalid())?;
+    let fusion = snapshot
+        .profile
+        .source
+        .settings
+        .fusion
+        .ok_or_else(invalid)?;
+    let member = fusion
+        .members
+        .iter()
+        .find(|member| member.id == member_id)
+        .ok_or_else(invalid)?;
+    if envelope.provider != member.provider
+        || envelope.request["model"].as_str() != Some(&member.model)
+        || envelope
+            .request
+            .pointer("/reasoning/effort")
+            .and_then(serde_json::Value::as_str)
+            != Some(&member.reasoning)
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+/// Every Core descendant inherits the same frozen run model selection.
+fn validate_model_selection(
+    envelope: &KernelRequestEnvelope,
+    stored: Option<&serde_json::Value>,
+    expected_provider: &str,
+) -> Result<(), ModelPortFailure> {
+    let provider = match stored {
+        Some(run) => run
+            .pointer("/agentConfig/profile/source/settings/provider")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| model_failure(BridgeError::InvalidPayload))?,
+        None => expected_provider,
+    };
+    if envelope.provider != provider {
+        return Err(model_failure(BridgeError::InvalidPayload));
+    }
+    if let Some(run) = stored {
+        let settings = run
+            .pointer("/agentConfig/profile/source/settings")
+            .ok_or_else(|| model_failure(BridgeError::InvalidPayload))?;
+        let model = settings["model"]
+            .as_str()
+            .ok_or_else(|| model_failure(BridgeError::InvalidPayload))?;
+        let reasoning = settings["reasoning"]
+            .as_str()
+            .ok_or_else(|| model_failure(BridgeError::InvalidPayload))?;
+        if envelope.request["model"].as_str() != Some(model)
+            || (reasoning != "provider_default"
+                && envelope
+                    .request
+                    .pointer("/reasoning/effort")
+                    .and_then(serde_json::Value::as_str)
+                    != Some(reasoning))
+        {
+            return Err(ModelPortFailure::new(
+                "INVALID_REQUEST",
+                "model request differs from sealed session settings",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn model_call_digest(
@@ -1499,6 +1853,33 @@ fn model_open_request_digest(
     model_call_digest(&envelope.request)
 }
 
+/// A same-root extension preserves child aliases and pending operations.
+pub(crate) fn extend_binding_lineage(
+    bindings: &mut HashMap<String, ModelRunBinding>,
+    binding: &ModelRunBinding,
+) -> bool {
+    let Some(previous) = bindings.get(&binding.canonical_thread_id.0).cloned() else {
+        return false;
+    };
+    let mut extended = previous.clone();
+    extended.authority.lease.expires_at = binding.authority.lease.expires_at.clone();
+    if !same_binding(&extended, binding)
+        || !same_binding_with_extended_lease(&previous.authority, &binding.authority)
+    {
+        return false;
+    }
+    for existing in bindings.values_mut() {
+        if existing.run_key == previous.run_key
+            && common_authority(&existing.authority, &previous.authority)
+        {
+            existing.authority.lease.expires_at = binding.authority.lease.expires_at.clone();
+        }
+    }
+    bindings.insert(binding.kernel_session_id.clone(), binding.clone());
+    bindings.insert(binding.canonical_thread_id.0.clone(), binding.clone());
+    true
+}
+
 fn same_binding(left: &ModelRunBinding, right: &ModelRunBinding) -> bool {
     left.run_key == right.run_key
         && left.canonical_thread_id == right.canonical_thread_id
@@ -1506,7 +1887,20 @@ fn same_binding(left: &ModelRunBinding, right: &ModelRunBinding) -> bool {
         && left.authority == right.authority
 }
 
-fn common_authority(left: &ModelLeaseAuthority, right: &ModelLeaseAuthority) -> bool {
+/// Only the deadline may advance; identities, attempt and fencing stay exact.
+pub(crate) fn same_binding_with_extended_lease(
+    previous: &ModelLeaseAuthority,
+    current: &ModelLeaseAuthority,
+) -> bool {
+    if current.lease.expires_at.0 < previous.lease.expires_at.0 {
+        return false;
+    }
+    let mut extended = previous.clone();
+    extended.lease.expires_at = current.lease.expires_at.clone();
+    extended == *current
+}
+
+pub(crate) fn common_authority(left: &ModelLeaseAuthority, right: &ModelLeaseAuthority) -> bool {
     left.lease == right.lease
         && left.worker_session_id == right.worker_session_id
         && left.session_identity.product_session_id == right.session_identity.product_session_id
@@ -1559,16 +1953,18 @@ fn decode_payload(payload: &EncodedPayload) -> Result<serde_json::Value, BridgeE
     Ok(request)
 }
 
-fn primary_model_usage(chunk: &ModelChunkMessage) -> Result<PrimaryModelUsage, BridgeError> {
+fn primary_model_usage(
+    chunk: &ModelChunkMessage,
+) -> Result<Option<PrimaryModelUsage>, BridgeError> {
     let Some(payload) = &chunk.payload else {
-        return Ok(PrimaryModelUsage::default());
+        return Ok(None);
     };
     let payload = decode_payload(payload)?;
     let usage = payload
         .get("tokenUsage")
         .or_else(|| payload.get("token_usage"));
     let Some(usage) = usage else {
-        return Ok(PrimaryModelUsage::default());
+        return Ok(None);
     };
     let input = non_negative_metric(usage, "inputTokens", "input_tokens")?;
     let cached = non_negative_metric(usage, "cachedInputTokens", "cached_input_tokens")?;
@@ -1581,12 +1977,12 @@ fn primary_model_usage(chunk: &ModelChunkMessage) -> Result<PrimaryModelUsage, B
     if cached > input {
         return Err(BridgeError::InvalidPayload);
     }
-    Ok(PrimaryModelUsage {
+    Ok(Some(PrimaryModelUsage {
         input: input.saturating_sub(cached),
         cached,
         output,
         actual_cost_microunits,
-    })
+    }))
 }
 
 fn non_negative_metric(
@@ -1627,7 +2023,6 @@ fn replay_model_call_frames(
             i64::try_from(index + 1).map_err(|_| model_failure(BridgeError::InvalidPayload))?;
         if chunk.sequence.0 != expected_sequence
             || chunk.model_exchange_id != *exchange
-            || chunk.lease != binding.authority.lease
             || chunk.worker_session_id != binding.authority.worker_session_id
             || chunk.session_identity != binding.authority.session_identity
             || (chunk.is_final && index + 1 != frames.len())
@@ -1635,6 +2030,17 @@ fn replay_model_call_frames(
         {
             return Err(model_failure(BridgeError::Conflict));
         }
+        authority
+            .validate_exchange(
+                &ModelLeaseAuthority {
+                    lease: chunk.lease.clone(),
+                    worker_session_id: chunk.worker_session_id.clone(),
+                    session_identity: chunk.session_identity.clone(),
+                },
+                exchange,
+                &binding.opened_at,
+            )
+            .map_err(|_| model_failure(BridgeError::StaleAuthority))?;
         if let Some(error) = &chunk.error {
             items.push(Err(ModelPortFailure::new(
                 format!("{:?}", error.code),
@@ -1890,6 +2296,98 @@ mod tests {
     use winwincode_execution_port::typed_replay::frame_from_message;
     use winwincode_kernel::ModelPortRequest;
 
+    #[tokio::test]
+    async fn tool_repeat_guard_intercepts_live_and_replayed_output_before_core() {
+        let root = std::env::temp_dir().join(format!("wwc-tool-stream-{}", uuid::Uuid::now_v7()));
+        let store = AdapterStore::open(&root).unwrap();
+        let authority = authority(&id("cdx", 'A'));
+        let bridge = Arc::new(
+            installed_loopback_bridge(
+                &store,
+                SharedAuthoritySource::default(),
+                "tool repeat",
+                "run",
+                &authority,
+                "kernel",
+            )
+            .with_tool_repeat_guard(true),
+        );
+        for occurrence in 0..6 {
+            let request_id = format!("model-{occurrence}");
+            let request = ModelPortRequest {
+                request_id: request_id.clone(),
+                payload_json: json!({
+                    "requestId":request_id, "provider":"loopback", "sessionId":"kernel",
+                    "threadId":authority.session_identity.codex_thread_id.0,
+                    "request":{"model":"loopback", "input":[]},
+                })
+                .to_string(),
+            };
+            let mut stream = bridge.model_port().stream(request.clone()).await.unwrap();
+            let open = bridge
+                .take_messages()
+                .unwrap()
+                .into_iter()
+                .find_map(|message| match message {
+                    ExecutionPortMessage::ModelOpenMessage(open) => Some(open),
+                    _ => None,
+                })
+                .unwrap();
+            let output = json!({"type":"output_item_done", "item":{
+                "type":"function_call", "call_id":"same-provider-call-id", "name":"exec_command",
+                "arguments":json!({"cmd":"ls", "requestId":occurrence}).to_string(),
+            }})
+            .to_string();
+            let chunk = test_chunk(
+                &authority,
+                &open.model_exchange_id,
+                1,
+                true,
+                output.as_bytes(),
+                'R',
+            );
+            bridge
+                .accept_chunk(&chunk, &authority.lease.issued_at)
+                .await
+                .unwrap();
+            let received = stream.next().await.unwrap();
+            if occurrence == 5 {
+                assert_eq!(received.unwrap_err().code, crate::tool_repeat::STOP_REASON);
+                assert!(store.tool_repeat_stopped("run").unwrap());
+                assert!(bridge.model_port().stream(request).await.is_err());
+                assert!(
+                    !bridge
+                        .take_messages()
+                        .unwrap()
+                        .iter()
+                        .any(|message| matches!(
+                            message,
+                            ExecutionPortMessage::ModelOpenMessage(_)
+                        ))
+                );
+            } else {
+                assert_eq!(received.unwrap(), output);
+                // ProviderFinal recovery goes through the same guard but must
+                // neither open another provider call nor consume another count.
+                let mut replay = bridge.model_port().stream(request).await.unwrap();
+                assert_eq!(replay.next().await.unwrap().unwrap(), output);
+                assert!(
+                    !bridge
+                        .take_messages()
+                        .unwrap()
+                        .iter()
+                        .any(|message| matches!(
+                            message,
+                            ExecutionPortMessage::ModelOpenMessage(_)
+                        ))
+                );
+            }
+        }
+        drop(bridge);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     /// Builds one Provider frame from already-resolved lease/session identity.
     fn test_chunk(
         authority: &ModelLeaseAuthority,
@@ -2126,11 +2624,27 @@ mod tests {
             session_identity: authority(&id("cdx", 'A')).session_identity,
             worker_session_id: WorkerSessionId(id("wsn", 'A')),
         };
-        let usage = primary_model_usage(&chunk).expect("decode terminal usage");
+        let usage = primary_model_usage(&chunk)
+            .expect("decode terminal usage")
+            .expect("measured usage");
         assert_eq!(usage.input, 85);
         assert_eq!(usage.cached, 35);
         assert_eq!(usage.output, 20);
         assert_eq!(usage.actual_cost_microunits, Some(47));
+
+        let mut missing = chunk.clone();
+        missing.payload = None;
+        assert_eq!(primary_model_usage(&missing).unwrap(), None);
+        let bytes = br#"{"type":"completed","endTurn":true}"#;
+        missing.payload = Some(EncodedPayload {
+            content_type: "application/json".into(),
+            data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+            payload_digest: winwincode_domain::Sha256Digest(format!(
+                "sha256:{:x}",
+                Sha256::digest(bytes)
+            )),
+        });
+        assert_eq!(primary_model_usage(&missing).unwrap(), None);
 
         let mut invalid = payload;
         invalid["tokenUsage"]["cached_input_tokens"] = json!(121);
@@ -2274,6 +2788,182 @@ mod tests {
             .expect("mark provider terminal phase");
 
         (root, bridge, chunk)
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Keep exact request, renewal and restart assertions in one end-to-end scenario"
+    )]
+    async fn inflight_model_response_survives_renewal_and_replays_after_restart() {
+        for restart_before_response in [false, true] {
+            let root =
+                std::env::temp_dir().join(format!("wwc-inflight-renewal-{}", uuid::Uuid::now_v7()));
+            let store = AdapterStore::open(&root).unwrap();
+            let original = authority(&id("cdx", 'A'));
+            let bridge = Arc::new(installed_loopback_bridge(
+                &store,
+                SharedAuthoritySource::default(),
+                "renewal",
+                "run",
+                &original,
+                "kernel",
+            ));
+            let request = ModelPortRequest {
+                request_id: "inflight".into(),
+                payload_json: json!({
+                    "requestId":"inflight", "provider":"loopback", "sessionId":"kernel",
+                    "threadId":original.session_identity.codex_thread_id.0,
+                    "request":{"model":"loopback","input":[]}
+                })
+                .to_string(),
+            };
+            let mut stream = bridge.model_port().stream(request.clone()).await.unwrap();
+            let open = bridge
+                .take_messages()
+                .unwrap()
+                .into_iter()
+                .find_map(|m| match m {
+                    ExecutionPortMessage::ModelOpenMessage(m) => Some(m),
+                    _ => None,
+                })
+                .unwrap();
+            bridge
+                .outbox
+                .retain(&ExecutionPortMessage::ModelOpenMessage(open.clone()))
+                .unwrap();
+            let mut renewed = original.clone();
+            renewed.lease.expires_at = Instant("2030-01-01T02:00:00.000Z".into());
+            bridge
+                .install_binding(ModelRunBinding {
+                    run_key: "run".into(),
+                    canonical_thread_id: renewed.session_identity.codex_thread_id.clone(),
+                    kernel_session_id: "kernel".into(),
+                    opened_at: renewed.lease.issued_at.clone(),
+                    authority: renewed.clone(),
+                })
+                .unwrap();
+            let now = Instant("2030-01-01T01:01:00.000Z".into());
+            let bridge = if restart_before_response {
+                drop(stream);
+                drop(bridge);
+                let restarted = Arc::new(installed_loopback_bridge(
+                    &store,
+                    SharedAuthoritySource::default(),
+                    "inflight restart",
+                    "run",
+                    &renewed,
+                    "kernel",
+                ));
+                restarted.authority.update_now(&now).unwrap();
+                stream = restarted
+                    .model_port()
+                    .stream(request.clone())
+                    .await
+                    .expect("reopen original exchange under renewed lease");
+                assert_eq!(
+                    restarted.take_messages().unwrap(),
+                    vec![ExecutionPortMessage::ModelOpenMessage(open.clone())]
+                );
+                restarted
+            } else {
+                bridge
+            };
+            assert!(
+                bridge
+                    .authority
+                    .validate_exchange(&original, &ModelExchangeId(id("mdl", 'Z')), &now)
+                    .is_err()
+            );
+            let first = test_chunk(
+                &original,
+                &open.model_exchange_id,
+                1,
+                false,
+                br#"{"type":"response.created"}"#,
+                'P',
+            );
+            let mut chunk = final_chunk(&open, 'R');
+            chunk.sequence = ExecutionSequence(2);
+            for change in 0..4 {
+                let mut forged = chunk.clone();
+                match change {
+                    0 => forged.lease.expires_at = Instant("2030-01-01T01:30:00.000Z".into()),
+                    1 => forged.lease.fencing_token = FencingToken("2".into()),
+                    2 => forged.lease.expires_at = renewed.lease.expires_at.clone(),
+                    _ => forged.session_identity.codex_thread_id = CodexThreadId(id("cdx", 'B')),
+                }
+                assert!(bridge.accept_chunk(&forged, &now).await.is_err());
+            }
+            bridge
+                .accept_chunk(&first, &now)
+                .await
+                .expect("first old-period chunk");
+            assert_eq!(
+                stream.next().await,
+                Some(Ok(r#"{"type":"response.created"}"#.into()))
+            );
+            bridge
+                .outbox
+                .acknowledge_response(&ExecutionPortMessage::ModelChunkMessage(first.clone()))
+                .expect("compact acknowledged open from pending queue");
+            assert!(bridge.outbox.pending().unwrap().is_empty());
+            assert_eq!(
+                bridge
+                    .outbox
+                    .retained_model_open(&open.model_exchange_id)
+                    .unwrap(),
+                Some(open.clone())
+            );
+            bridge
+                .accept_chunk(&chunk, &now)
+                .await
+                .expect("original request period stays admissible under live renewal");
+            assert_eq!(
+                stream.next().await,
+                Some(Ok(r#"{"type":"response.completed","call":"R"}"#.into()))
+            );
+            assert_eq!(
+                store.load_model_call_frames("run", "inflight").unwrap(),
+                vec![first, chunk.clone()]
+            );
+            assert!(bridge.take_messages().unwrap().iter().any(|m| matches!(m, ExecutionPortMessage::ModelAckMessage(ack) if ack.lease == original.lease)));
+            drop(stream);
+            drop(bridge);
+            let restarted = Arc::new(installed_loopback_bridge(
+                &store,
+                SharedAuthoritySource::default(),
+                "renewal restart",
+                "run",
+                &renewed,
+                "kernel",
+            ));
+            restarted.authority.update_now(&now).unwrap();
+            let mut replay = restarted
+                .model_port()
+                .stream(request.clone())
+                .await
+                .expect("replay old exact frames with current lease");
+            assert_eq!(
+                replay.next().await,
+                Some(Ok(r#"{"type":"response.created"}"#.into()))
+            );
+            assert_eq!(
+                replay.next().await,
+                Some(Ok(r#"{"type":"response.completed","call":"R"}"#.into()))
+            );
+            assert!(restarted.take_messages().unwrap().is_empty());
+            assert!(
+                restarted
+                    .accept_chunk(&chunk, &renewed.lease.expires_at)
+                    .await
+                    .is_err()
+            );
+            drop(replay);
+            drop(restarted);
+            drop(store);
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[tokio::test]
@@ -2560,12 +3250,179 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    fn sealed_profile(provider: &str, model: &str, reasoning: &str) -> serde_json::Value {
+        use winwincode_execution_port::agent_config::{
+            AgentProfileSettings, resolve_agent_session_config,
+        };
+        let capabilities = serde_json::from_value(json!({
+            "capabilityDigest":format!("sha256:{}", "a".repeat(64)),
+            "features":[], "maxConcurrentJobs":1, "platform":"aarch64-apple-darwin"
+        }))
+        .unwrap();
+        let snapshot = resolve_agent_session_config(
+            &WorkerId(id("wrk", 'A')),
+            &capabilities,
+            "executor",
+            AgentProfileSettings {
+                fusion: None,
+                jev_judge: None,
+                jev_context: None,
+                provider: provider.to_owned(),
+                model: model.to_owned(),
+                reasoning: reasoning.to_owned(),
+                tools: Vec::new(),
+                sandbox: "candidate".to_owned(),
+                instructions: None,
+            },
+        )
+        .unwrap();
+        serde_json::to_value(snapshot).unwrap()
+    }
+
+    #[test]
+    fn core_cannot_supply_host_jev_context() {
+        let (root, store, binding, route, mut request, _) = child_model_fixture();
+        let bridge = ExecutionPortModelBridge::new(
+            store.clone(),
+            ExecutionOutbox::open(store.clone()).unwrap(),
+            route,
+            "loopback".to_owned(),
+            SharedAuthoritySource::default(),
+        );
+        bridge.install_binding(binding.clone()).unwrap();
+        let mut payload: serde_json::Value = serde_json::from_str(&request.payload_json).unwrap();
+        for field in ["winwincodeJevContext", "winwincodeJevTask"] {
+            payload[field] = json!({"provider":"injected"});
+            request.payload_json = payload.to_string();
+            assert!(bridge.prepare_open_stream(&request).is_err());
+            assert_eq!(
+                store
+                    .model_call_phase(&binding.run_key, &request.request_id)
+                    .unwrap(),
+                None
+            );
+            assert!(bridge.take_messages().unwrap().is_empty());
+            payload.as_object_mut().unwrap().remove(field);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fusion_member_routes_require_sealed_config_and_host_port_before_admission() {
+        use winwincode_execution_port::agent_config::{
+            AgentSessionConfigSnapshot, resolve_agent_session_config,
+        };
+        let (root, store, binding, route, mut request, _) = child_model_fixture();
+        let base: AgentSessionConfigSnapshot =
+            serde_json::from_value(sealed_profile("primary", "primary-model", "max")).unwrap();
+        let mut settings = base.profile.source.settings;
+        settings.fusion = Some(
+            serde_json::from_value(json!({"members":[
+                {"id":"glm","provider":"zhipu-glm","model":"glm-5.3-flash","reasoning":"max"},
+                {"id":"mimo","provider":"xiaomi-mimo","model":"mimo-v2.6-pro","reasoning":"max"},
+                {"id":"ds","provider":"deepseek","model":"deepseek-flash","reasoning":"max"},
+                {"id":"qwen","provider":"opencode","model":"qwen3.8-flash","reasoning":"max"}
+            ]}))
+            .unwrap(),
+        );
+        let capabilities = serde_json::from_value(json!({"capabilityDigest":format!("sha256:{}", "a".repeat(64)),"features":[],"maxConcurrentJobs":1,"platform":"aarch64-apple-darwin"})).unwrap();
+        let resolve = |settings| {
+            resolve_agent_session_config(
+                &WorkerId(id("wrk", 'A')),
+                &capabilities,
+                "executor",
+                settings,
+            )
+        };
+        let sealed = resolve(settings.clone()).unwrap();
+        let mut duplicate = settings.clone();
+        duplicate.fusion.as_mut().unwrap().members[1] =
+            duplicate.fusion.as_ref().unwrap().members[0].clone();
+        assert!(resolve(duplicate).is_err());
+        let mut tampered = serde_json::to_value(&sealed).unwrap();
+        tampered["profile"]["source"]["settings"]["fusion"]["members"][0]["model"] =
+            json!("changed");
+        store
+            .save_run(&binding.run_key, &json!({"agentConfig":sealed}))
+            .unwrap();
+        let bridge = ExecutionPortModelBridge::new(
+            store.clone(),
+            ExecutionOutbox::open(store.clone()).unwrap(),
+            route,
+            "primary".into(),
+            SharedAuthoritySource::default(),
+        );
+        bridge.install_binding(binding.clone()).unwrap();
+        let mut payload: serde_json::Value = serde_json::from_str(&request.payload_json).unwrap();
+        payload["provider"] = json!("zhipu-glm");
+        payload["request"]["model"] = json!("glm-5.3-flash");
+        payload["request"]["reasoning"] = json!({"effort":"max"});
+        request.payload_json = payload.to_string();
+        assert!(bridge.prepare_open_stream(&request).is_err());
+        assert!(
+            bridge
+                .prepare_member_stream(&request, Some("unknown"))
+                .is_err()
+        );
+        assert!(
+            bridge
+                .prepare_member_stream(&request, Some("mimo"))
+                .is_err()
+        );
+        let mut wrong_effort = request.clone();
+        payload["request"]["reasoning"]["effort"] = json!("high");
+        wrong_effort.payload_json = payload.to_string();
+        assert!(
+            bridge
+                .prepare_member_stream(&wrong_effort, Some("glm"))
+                .is_err()
+        );
+        assert!(bridge.take_messages().unwrap().is_empty());
+        assert_eq!(
+            store
+                .model_call_phase(&binding.run_key, &request.request_id)
+                .unwrap(),
+            None
+        );
+        store
+            .save_run(&binding.run_key, &json!({"agentConfig":tampered}))
+            .unwrap();
+        assert!(bridge.prepare_member_stream(&request, Some("glm")).is_err());
+        store
+            .save_run(
+                &binding.run_key,
+                &json!({"agentConfig":resolve(settings).unwrap()}),
+            )
+            .unwrap();
+        let super::OpenStreamPreparation::Open(exchange) =
+            bridge.prepare_member_stream(&request, Some("glm")).unwrap()
+        else {
+            panic!("first member request must open");
+        };
+        let command = bridge.open_command(&exchange).unwrap();
+        futures::executor::block_on(async {
+            bridge.client.lock().await.open(command).await.unwrap();
+        });
+        for message in bridge.take_messages().unwrap() {
+            bridge.outbox.retain(&message).unwrap();
+        }
+        // Exact replay compares the same envelope digest, while the durable
+        // call identity separately binds the sealed member and provider.
+        assert!(bridge.open_command(&exchange).is_ok());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn model_provider_is_bound_to_the_selected_run_instead_of_the_worker_default() {
         let (root, store, binding, route, mut request, _) = child_model_fixture();
-        store.save_run(&binding.run_key, &json!({
-            "agentConfig": { "profile": { "source": { "settings": { "provider": "selected" } } } }
-        })).expect("persist selected provider");
+        store
+            .save_run(
+                &binding.run_key,
+                &json!({
+                    "agentConfig": sealed_profile("selected", "loopback", "provider_default")
+                }),
+            )
+            .expect("persist selected provider");
         let bridge = ExecutionPortModelBridge::new(
             store.clone(),
             ExecutionOutbox::open(store).unwrap(),
@@ -2581,6 +3438,59 @@ mod tests {
         payload["provider"] = json!("loopback");
         request.payload_json = payload.to_string();
         assert!(bridge.prepare_open_stream(&request).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn frozen_model_and_reasoning_are_checked_before_model_call_admission() {
+        let (root, store, binding, route, request, _) = child_model_fixture();
+        store
+            .save_run(
+                &binding.run_key,
+                &json!({
+                    "agentConfig": sealed_profile("loopback", "selected-model", "max")
+                }),
+            )
+            .unwrap();
+        let bridge = ExecutionPortModelBridge::new(
+            store.clone(),
+            ExecutionOutbox::open(store.clone()).unwrap(),
+            route,
+            "loopback".to_owned(),
+            SharedAuthoritySource::default(),
+        );
+        bridge.install_binding(binding.clone()).unwrap();
+        let original: serde_json::Value = serde_json::from_str(&request.payload_json).unwrap();
+        for (model, effort) in [
+            (json!("different-model"), json!("max")),
+            (json!("selected-model"), json!("high")),
+            (json!("selected-model"), serde_json::Value::Null),
+            (serde_json::Value::Null, json!("max")),
+        ] {
+            let mut payload = original.clone();
+            payload["request"]["model"] = model;
+            payload["request"]["reasoning"] = json!({"effort": effort});
+            let mut changed = request.clone();
+            changed.payload_json = payload.to_string();
+            let failure = bridge
+                .prepare_open_stream(&changed)
+                .err()
+                .expect("unsealed settings rejected");
+            assert_eq!(failure.code, "INVALID_REQUEST");
+            assert_eq!(
+                store
+                    .model_call_phase(&binding.run_key, &request.request_id)
+                    .unwrap(),
+                None
+            );
+            assert!(bridge.take_messages().unwrap().is_empty());
+        }
+        let mut payload = original;
+        payload["request"]["model"] = json!("selected-model");
+        payload["request"]["reasoning"] = json!({"effort": "max"});
+        let mut accepted = request;
+        accepted.payload_json = payload.to_string();
+        assert!(bridge.prepare_open_stream(&accepted).is_ok());
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -2855,11 +3765,74 @@ mod tests {
             .performance_report("child-run", 60_000)
             .expect("child performance report after restart replay");
         assert_eq!(report.primary_model_call_count, 2);
-        assert_eq!(report.primary_model_wait_ms, 120_000);
+        // These terminal frames carry no usage. Transport completion must not
+        // turn either accounting row into a measured zero, even after replay.
+        assert_eq!(report.primary_model_wait_ms, 0);
+        assert_eq!(
+            store
+                .delegated_performance_totals("child-run")
+                .unwrap()
+                .pending_model_calls,
+            2
+        );
+        assert_eq!(
+            store.retained_outcome_usage("child-run", 60_000).unwrap(),
+            None
+        );
         assert_eq!(report.primary_model_input_tokens, 0);
         assert_eq!(report.primary_model_cached_tokens, 0);
         assert_eq!(report.primary_model_output_tokens, 0);
         std::fs::remove_dir_all(root).expect("remove child model-call store");
+    }
+
+    #[test]
+    fn root_extension_preserves_model_child_aliases() {
+        let (root, store, original, _, _, _) = child_model_fixture();
+        let bridge = installed_loopback_bridge(
+            &store,
+            SharedAuthoritySource::default(),
+            "renew model aliases",
+            &original.run_key,
+            &original.authority,
+            &original.kernel_session_id,
+        );
+        let mut child = original.clone();
+        child.canonical_thread_id = CodexThreadId(id("cdx", 'C'));
+        child.kernel_session_id = "kernel-child".to_owned();
+        child.authority.session_identity.codex_thread_id = child.canonical_thread_id.clone();
+        bridge
+            .install_child_binding(child.clone())
+            .expect("install child");
+        let mut renewed = original;
+        renewed.authority.lease.expires_at = Instant("2030-01-01T02:00:00.000Z".to_owned());
+        bridge
+            .install_binding(renewed.clone())
+            .expect("extend root");
+        bridge
+            .install_binding(renewed.clone())
+            .expect("replay extension");
+        {
+            let bindings = bridge.bindings.read().expect("bindings");
+            for alias in [&child.kernel_session_id, &child.canonical_thread_id.0] {
+                let current = bindings.get(alias).expect("child alias retained");
+                assert_eq!(
+                    current.authority.lease.expires_at,
+                    renewed.authority.lease.expires_at
+                );
+                assert_eq!(current.canonical_thread_id, child.canonical_thread_id);
+            }
+        }
+        renewed.authority.lease.attempt += 1;
+        renewed.authority.lease.fencing_token = FencingToken("2".to_owned());
+        bridge.install_binding(renewed).expect("replace attempt");
+        assert!(
+            !bridge
+                .bindings
+                .read()
+                .expect("bindings")
+                .contains_key(&child.kernel_session_id)
+        );
+        std::fs::remove_dir_all(root).expect("remove model alias fixture");
     }
 
     #[test]
@@ -2928,6 +3901,47 @@ mod tests {
                 .is_err()
         );
         std::fs::remove_dir_all(root).expect("remove lineage store");
+    }
+
+    #[test]
+    fn lease_extension_preserves_child_authority_across_restart() {
+        let root = std::env::temp_dir().join(format!("codex-renew-{}", uuid::Uuid::now_v7()));
+        let store = AdapterStore::open(&root).unwrap();
+        let source = SharedAuthoritySource::default().with_store(store.clone());
+        let original = authority(&id("cdx", 'R'));
+        source.install("run", original.clone()).unwrap();
+        let mut child = original.clone();
+        child.session_identity.codex_thread_id = CodexThreadId(id("cdx", 'C'));
+        source.install_child("run", child.clone()).unwrap();
+        let mut renewed = original.clone();
+        renewed.lease.expires_at = Instant("2030-01-01T02:00:00.000Z".into());
+        source.install("run", renewed.clone()).unwrap();
+        let after_prior_expiry = Instant("2030-01-01T01:30:00.000Z".into());
+        source.update_now(&after_prior_expiry).unwrap();
+        assert!(
+            source
+                .validate_current(&child, &after_prior_expiry)
+                .is_err()
+        );
+        child.lease = renewed.lease.clone();
+        assert!(source.validate_current(&child, &after_prior_expiry).is_ok());
+        let restarted = SharedAuthoritySource::default().with_store(store);
+        restarted.install("run", renewed.clone()).unwrap();
+        restarted.update_now(&after_prior_expiry).unwrap();
+        assert!(
+            restarted
+                .validate_current(&child, &after_prior_expiry)
+                .is_ok()
+        );
+        renewed.lease.attempt += 1;
+        renewed.lease.fencing_token = FencingToken("2".into());
+        restarted.install("next-run", renewed).unwrap();
+        assert!(
+            restarted
+                .validate_current(&child, &after_prior_expiry)
+                .is_err()
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -210,6 +210,7 @@ impl WorkerExecutionPort for RecordingPort {
 
 #[derive(Default)]
 struct CodexState {
+    retained_usage: HashMap<String, ExecutionOutcomeUsage>,
     calls: Vec<String>,
     threads: VecDeque<CodexThreadId>,
     workspaces: HashMap<String, PathBuf>,
@@ -439,6 +440,28 @@ fn execution_port_fixture(kind: &str) -> ExecutionPortMessage {
 impl CodexCoreAdapter for FakeCodex {
     type Error = ();
 
+    fn retained_outcome_usage(
+        &mut self,
+        thread_id: &CodexThreadId,
+    ) -> Result<Option<ExecutionOutcomeUsage>, Self::Error> {
+        Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .retained_usage
+            .get(&thread_id.0)
+            .cloned())
+    }
+
+    fn renew_lease(
+        &mut self,
+        _thread_id: &CodexThreadId,
+        _renewal: &winwincode_execution_port::generated::LeaseRenewMessage,
+        _now: &Instant,
+    ) -> Result<bool, Self::Error> {
+        Ok(true)
+    }
+
     fn ensure_thread(
         &mut self,
         start: CodexThreadStart<'_>,
@@ -448,6 +471,9 @@ impl CodexCoreAdapter for FakeCodex {
             &worker_config(1).capabilities,
             &start.job.execution_profile,
             AgentProfileSettings {
+                fusion: None,
+                jev_judge: None,
+                jev_context: None,
                 provider: "fixture-provider".to_owned(),
                 model: "fixture-model".to_owned(),
                 reasoning: "provider_default".to_owned(),
@@ -1000,7 +1026,7 @@ fn measured_completion_usage() -> ExecutionOutcomeUsage {
     ExecutionOutcomeUsage {
         runtime_millis: 17,
         tokens: 23,
-        cost_microunits: 29,
+        cost_microunits: Some(29),
     }
 }
 
@@ -1096,9 +1122,9 @@ fn dispatch(job_suffix: char, scope: ExecutionScope) -> JobDispatchMessage {
             goal: goal.to_owned(),
             job_id: lease.job_id.clone(),
             limits: ExecutionLimits {
-                deadline_at: Instant("2027-01-15T08:04:30.000Z".to_owned()),
+                deadline_at: Some(Instant("2027-01-15T08:04:30.000Z".to_owned())),
                 max_artifact_bytes: 1_000_000,
-                max_runtime_seconds: 240,
+                max_runtime_seconds: Some(240),
             },
             payload_digest: Sha256Digest(format!(
                 "sha256:{}",
@@ -1106,6 +1132,7 @@ fn dispatch(job_suffix: char, scope: ExecutionScope) -> JobDispatchMessage {
             )),
             scope,
             work_input: delivery_stage.then(|| WorkRunInput {
+                work_plan: None,
                 device_target: None,
                 delivery_spec_id: "spec-fixture".into(),
                 delivery_spec_revision: Revision(2),
@@ -2125,7 +2152,10 @@ async fn same_run_changed_job_fields_are_conflicts_before_codex_submission() {
     changed_profile.execution_profile = "reviewer".to_owned();
     changed_jobs.push(changed_profile);
     let mut changed_limits = original.job.clone();
-    changed_limits.limits.max_runtime_seconds -= 1;
+    changed_limits.limits.max_runtime_seconds = changed_limits
+        .limits
+        .max_runtime_seconds
+        .map(|seconds| seconds - 1);
     changed_jobs.push(changed_limits);
     let mut changed_workspace = original.job.clone();
     changed_workspace.workspace.checkout_revision =
@@ -2281,7 +2311,7 @@ async fn sealed_replacement_reuses_the_writer_checkout_and_auto_emits_one_candid
         Ok(CodexPoll::Completed(CodexTurnCompletion {
             summary: secret_safe_runtime_summary("predecessor writer completed").unwrap(),
             artifacts: Vec::new(),
-            usage: measured_completion_usage(),
+            usage: Some(measured_completion_usage()),
         })),
     );
     first
@@ -2396,7 +2426,7 @@ async fn sealed_replacement_reuses_the_writer_checkout_and_auto_emits_one_candid
         Ok(CodexPoll::Completed(CodexTurnCompletion {
             summary: secret_safe_runtime_summary("replacement writer completed").unwrap(),
             artifacts: Vec::new(),
-            usage: measured_completion_usage(),
+            usage: Some(measured_completion_usage()),
         })),
     );
     restarted
@@ -2522,7 +2552,7 @@ async fn retained_trace_and_terminal_outcome_preserve_exact_session_order() {
         Ok(CodexPoll::Completed(CodexTurnCompletion {
             summary: secret_safe_runtime_summary("Codex turn completed").unwrap(),
             artifacts: Vec::new(),
-            usage: measured_completion_usage(),
+            usage: Some(measured_completion_usage()),
         })),
     );
 
@@ -2752,10 +2782,15 @@ async fn accepted_final_delegated_batch_freezes_without_another_primary_turn() {
     assert_eq!(outcomes.len(), 1);
     assert_eq!(
         outcomes[0].outcome.status,
-        ExecutionOutcomeStatus::Succeeded
+        ExecutionOutcomeStatus::InfrastructureError
     );
     assert_eq!(outcomes[0].outcome.artifacts, vec![artifact]);
+    // Candidate freezing succeeds; this fixture has no complete model accounting.
     assert!(outcomes[0].outcome.usage.is_none());
+    assert_eq!(
+        outcomes[0].outcome.error.as_ref().unwrap().message,
+        "execution completed with incomplete usage accounting"
+    );
     let freezes = pump.final_freezes();
     assert_eq!(freezes.len(), 1);
     assert!(freezes[0].final_observation.is_none());
@@ -2890,7 +2925,7 @@ async fn delegated_freeze_before_persist_restarts_from_one_accepted_candidate() 
     assert_eq!(outcomes.len(), 1);
     assert_eq!(
         outcomes[0].outcome.status,
-        ExecutionOutcomeStatus::Succeeded
+        ExecutionOutcomeStatus::InfrastructureError
     );
     assert_eq!(outcomes[0].outcome.artifacts, vec![artifact]);
     assert_eq!(pump.final_freezes().len(), 1);
@@ -3477,6 +3512,270 @@ async fn delegated_outcome_survives_job_end_and_new_run_progress_starts_fresh() 
 }
 
 #[tokio::test]
+async fn unknown_usage_finishes_with_infrastructure_error_and_keeps_candidate() {
+    let port = RecordingPort::default();
+    let messages = Rc::clone(&port.messages);
+    let codex = FakeCodex::with_threads([thread('A')]);
+    let pump = codex.clone();
+    let mut worker = test_worker(worker_config(1), port, codex);
+    register(&mut worker).await;
+    worker
+        .accept_control(
+            &ExecutionPortMessage::JobDispatchMessage(writer_dispatch('A')),
+            now(),
+        )
+        .await
+        .unwrap();
+    let active = worker.active_jobs()[0].clone();
+    std::fs::write(
+        pump.workspace(&active.codex_thread_id)
+            .join("candidate.txt"),
+        b"candidate\n",
+    )
+    .unwrap();
+    pump.queue_poll(
+        &active.codex_thread_id,
+        Ok(CodexPoll::Completed(CodexTurnCompletion {
+            summary: secret_safe_runtime_summary("successful retry with unknown earlier usage")
+                .unwrap(),
+            artifacts: Vec::new(),
+            usage: None,
+        })),
+    );
+    worker.poll_codex_boxed().await.unwrap();
+    let artifact = observed_candidate_reference(&messages);
+    acknowledge_candidate(&mut worker, &active, &artifact, 0, 'O')
+        .await
+        .unwrap();
+    acknowledge_candidate(&mut worker, &active, &artifact, 1, 'F')
+        .await
+        .unwrap();
+    let outcomes = observed_outcomes(&messages);
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(
+        outcomes[0].outcome.status,
+        ExecutionOutcomeStatus::InfrastructureError
+    );
+    assert_eq!(outcomes[0].outcome.usage, None);
+    assert_eq!(
+        outcomes[0].outcome.error.as_ref().unwrap().message,
+        "execution completed with incomplete usage accounting"
+    );
+    assert!(outcomes[0].outcome.artifacts.contains(&artifact));
+}
+
+#[tokio::test]
+async fn invalid_writer_candidate_fails_without_losing_completion_usage() {
+    let port = RecordingPort::default();
+    let messages = Rc::clone(&port.messages);
+    let codex = FakeCodex::with_threads([thread('A')]);
+    let pump = codex.clone();
+    let mut worker = test_worker(worker_config(1), port, codex);
+    register(&mut worker).await;
+    worker
+        .accept_control(
+            &ExecutionPortMessage::JobDispatchMessage(writer_dispatch('A')),
+            now(),
+        )
+        .await
+        .unwrap();
+    let active = worker.active_jobs()[0].clone();
+    pump.queue_poll(
+        &active.codex_thread_id,
+        Ok(CodexPoll::Completed(CodexTurnCompletion {
+            summary: secret_safe_runtime_summary("writer completed without changing source")
+                .unwrap(),
+            artifacts: vec![],
+            usage: Some(measured_completion_usage()),
+        })),
+    );
+    worker.poll_codex_boxed().await.unwrap();
+    let outcomes = observed_outcomes(&messages);
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0].outcome.status, ExecutionOutcomeStatus::Failed);
+    assert_eq!(outcomes[0].outcome.usage, Some(measured_completion_usage()));
+    assert_no_candidate_product(&messages);
+    assert!(worker.active_jobs().is_empty());
+}
+
+#[tokio::test]
+async fn generated_bytecode_rework_reports_failure_and_retains_usage_and_source() {
+    let (workspaces, sources) = test_workspace_paths();
+    let repository = sources.join(id("rpo", 'A'));
+    let revision = |name: &str| {
+        let result = Command::new("git")
+            .arg("-C")
+            .arg(&repository)
+            .args(["rev-parse", name])
+            .output()
+            .unwrap();
+        assert!(result.status.success());
+        String::from_utf8(result.stdout).unwrap().trim().to_owned()
+    };
+    let original = (0..24).fold(String::new(), |mut lines, line| {
+        use std::fmt::Write as _;
+        writeln!(lines, "line-{line}").unwrap();
+        lines
+    });
+    std::fs::write(repository.join("fixture.txt"), &original).unwrap();
+    run_git(&repository, &["add", "fixture.txt"]);
+    run_git(
+        &repository,
+        &[
+            "-c",
+            "user.name=WinWinCode Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "expanded source",
+        ],
+    );
+    let base = revision("HEAD");
+    std::fs::write(
+        repository.join("fixture.txt"),
+        original.replace("line-2\n", "source-change\n"),
+    )
+    .unwrap();
+    run_git(&repository, &["add", "fixture.txt"]);
+    run_git(
+        &repository,
+        &[
+            "-c",
+            "user.name=WinWinCode Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "source candidate",
+        ],
+    );
+    let commit = revision("HEAD");
+    let tree = revision("HEAD^{tree}");
+    let candidate_ref = format!("refs/winwincode/candidates/{commit}");
+    run_git(&repository, &["update-ref", &candidate_ref, &commit]);
+    let source_diff = Command::new("git")
+        .arg("-C")
+        .arg(&repository)
+        .args([
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--binary",
+            "--full-index",
+            &format!("{base}..{commit}"),
+            "--",
+            "fixture.txt",
+        ])
+        .output()
+        .unwrap();
+    assert!(source_diff.status.success());
+    let source_hunk_sha256 =
+        winwincode_domain::rework_hunk_origins(&source_diff.stdout, &source_diff.stdout)
+            .unwrap()
+            .remove(0)
+            .1;
+    let mut dispatch = writer_dispatch('A');
+    dispatch.job.execution_profile = "remediator".into();
+    dispatch.job.workspace.checkout_revision = commit.clone();
+    dispatch.job.work_input.as_mut().unwrap().candidate_ref = Some(candidate_ref.clone());
+    let ExecutionScope::WorkRunExecutionScope(scope) = &mut dispatch.job.scope else {
+        unreachable!()
+    };
+    scope.rework_authorization = Some(
+        serde_json::from_value(serde_json::json!({
+            "authorizationDigest": format!("sha256:{}", "b".repeat(64)),
+            "candidateRef": candidate_ref, "diffSha256": "c".repeat(64),
+            "requiresFullReverification": true, "sourceCandidateCommitId": commit,
+            "sourceCandidateTreeId": tree, "targets": [{"workItemId": scope.work_item_id,
+                "filePath": "fixture.txt", "sourceHunkSha256": source_hunk_sha256,
+                "evidenceRefIds": ["evd_00000000000000000000000001"]}]
+        }))
+        .unwrap(),
+    );
+    let port = RecordingPort::default();
+    let messages = Rc::clone(&port.messages);
+    let codex = FakeCodex::with_threads([thread('A')]);
+    let pump = codex.clone();
+    let mut worker = WorkerMain::new(
+        worker_config(1),
+        port,
+        codex,
+        JobWorkspaceRuntime::open(workspaces, &sources).unwrap(),
+    );
+    register(&mut worker).await;
+    worker
+        .accept_control(&ExecutionPortMessage::JobDispatchMessage(dispatch), now())
+        .await
+        .unwrap();
+    let active = worker.active_jobs()[0].clone();
+    let checkout = pump.workspace(&active.codex_thread_id);
+    std::fs::write(
+        checkout.join("fixture.txt"),
+        original.replace("line-2\n", "reworked-source\n"),
+    )
+    .unwrap();
+    let generated = checkout.join("__pycache__/main.cpython-314.pyc");
+    std::fs::create_dir_all(generated.parent().unwrap()).unwrap();
+    std::fs::write(&generated, b"generated bytecode").unwrap();
+    pump.queue_poll(
+        &active.codex_thread_id,
+        Ok(CodexPoll::Completed(CodexTurnCompletion {
+            summary: secret_safe_runtime_summary("rework completed").unwrap(),
+            artifacts: vec![],
+            usage: Some(measured_completion_usage()),
+        })),
+    );
+    worker.poll_codex_boxed().await.unwrap();
+    let outcomes = observed_outcomes(&messages);
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0].outcome.status, ExecutionOutcomeStatus::Failed);
+    assert_eq!(outcomes[0].outcome.usage, Some(measured_completion_usage()));
+    assert_no_candidate_product(&messages);
+    assert!(worker.active_jobs().is_empty());
+    let refs = Command::new("git")
+        .arg("-C")
+        .arg(&repository)
+        .args([
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/winwincode/candidates/",
+        ])
+        .output()
+        .unwrap();
+    assert!(refs.status.success());
+    let reference = String::from_utf8(refs.stdout).unwrap();
+    assert_eq!(reference.lines().count(), 2);
+    let failed_candidate = reference
+        .lines()
+        .find(|candidate| *candidate != candidate_ref)
+        .expect("rejected output source is retained");
+    let retained = Command::new("git")
+        .arg("-C")
+        .arg(&repository)
+        .args(["show", &format!("{failed_candidate}:fixture.txt")])
+        .output()
+        .unwrap();
+    assert!(retained.status.success());
+    assert!(
+        String::from_utf8(retained.stdout)
+            .unwrap()
+            .contains("reworked-source")
+    );
+    let retained_generated = Command::new("git")
+        .arg("-C")
+        .arg(&repository)
+        .args([
+            "show",
+            &format!("{failed_candidate}:__pycache__/main.cpython-314.pyc"),
+        ])
+        .output()
+        .unwrap();
+    assert!(retained_generated.status.success());
+    assert_eq!(retained_generated.stdout, b"generated bytecode");
+}
+
+#[tokio::test]
 async fn writer_outcome_waits_for_one_exact_final_candidate_ack() {
     let port = RecordingPort::default();
     let messages = Rc::clone(&port.messages);
@@ -3504,7 +3803,7 @@ async fn writer_outcome_waits_for_one_exact_final_candidate_ack() {
         Ok(CodexPoll::Completed(CodexTurnCompletion {
             summary: secret_safe_runtime_summary("writer completed").unwrap(),
             artifacts: vec![injected],
-            usage: measured_completion_usage(),
+            usage: Some(measured_completion_usage()),
         })),
     );
     let rejected = worker
@@ -3519,7 +3818,7 @@ async fn writer_outcome_waits_for_one_exact_final_candidate_ack() {
         Ok(CodexPoll::Completed(CodexTurnCompletion {
             summary: secret_safe_runtime_summary("writer completed").unwrap(),
             artifacts: Vec::new(),
-            usage: measured_completion_usage(),
+            usage: Some(measured_completion_usage()),
         })),
     );
     worker.poll_codex_boxed().await.unwrap();
@@ -3620,7 +3919,7 @@ async fn chat_files_survive_cleanup_and_wait_for_final_artifact_ack() {
             Ok(CodexPoll::Completed(CodexTurnCompletion {
                 summary: secret_safe_runtime_summary("writer completed").unwrap(),
                 artifacts: vec![injected],
-                usage: measured_completion_usage(),
+                usage: Some(measured_completion_usage()),
             })),
         );
         let rejected = worker
@@ -3640,7 +3939,7 @@ async fn chat_files_survive_cleanup_and_wait_for_final_artifact_ack() {
                 CodexPoll::Completed(CodexTurnCompletion {
                     summary: secret_safe_runtime_summary("writer completed").unwrap(),
                     artifacts: Vec::new(),
-                    usage: measured_completion_usage(),
+                    usage: Some(measured_completion_usage()),
                 })
             }),
         );
@@ -3766,7 +4065,7 @@ async fn duplicate_final_candidate_ack_after_outcome_send_loss_replays_one_origi
         Ok(CodexPoll::Completed(CodexTurnCompletion {
             summary: secret_safe_runtime_summary("writer completed").unwrap(),
             artifacts: Vec::new(),
-            usage: measured_completion_usage(),
+            usage: Some(measured_completion_usage()),
         })),
     );
     first.poll_codex_boxed().await.expect("retain candidate");
@@ -3848,7 +4147,7 @@ async fn accepted_candidate_survives_outcome_retention_restart_before_workspace_
         Ok(CodexPoll::Completed(CodexTurnCompletion {
             summary: secret_safe_runtime_summary("writer completed").unwrap(),
             artifacts: Vec::new(),
-            usage: measured_completion_usage(),
+            usage: Some(measured_completion_usage()),
         })),
     );
     first.poll_codex_boxed().await.expect("retain candidate");
@@ -3907,7 +4206,7 @@ async fn accepted_candidate_survives_outcome_retention_restart_before_workspace_
         Ok(CodexPoll::Completed(CodexTurnCompletion {
             summary: secret_safe_runtime_summary("writer completed").unwrap(),
             artifacts: Vec::new(),
-            usage: measured_completion_usage(),
+            usage: Some(measured_completion_usage()),
         })),
     );
     restarted
@@ -3968,7 +4267,7 @@ async fn writer_restart_defers_and_replays_the_original_candidate_until_completi
         Ok(CodexPoll::Completed(CodexTurnCompletion {
             summary: secret_safe_runtime_summary("writer completed").unwrap(),
             artifacts: Vec::new(),
-            usage: measured_completion_usage(),
+            usage: Some(measured_completion_usage()),
         })),
     );
     first
@@ -4005,7 +4304,7 @@ async fn writer_restart_defers_and_replays_the_original_candidate_until_completi
         Ok(CodexPoll::Completed(CodexTurnCompletion {
             summary: secret_safe_runtime_summary("writer completed").unwrap(),
             artifacts: Vec::new(),
-            usage: measured_completion_usage(),
+            usage: Some(measured_completion_usage()),
         })),
     );
     restarted
@@ -4059,7 +4358,7 @@ async fn cancelling_a_writer_before_completion_emits_no_candidate_product() {
         Ok(CodexPoll::Completed(CodexTurnCompletion {
             summary: secret_safe_runtime_summary("writer stopped").unwrap(),
             artifacts: Vec::new(),
-            usage: measured_completion_usage(),
+            usage: Some(measured_completion_usage()),
         })),
     );
     worker.poll_codex_boxed().await.unwrap();
@@ -4199,7 +4498,7 @@ async fn failed_candidate_cancel_is_retryable_and_never_flushes_a_post_cancel_ar
         Ok(CodexPoll::Completed(CodexTurnCompletion {
             summary: secret_safe_runtime_summary("writer completed").unwrap(),
             artifacts: Vec::new(),
-            usage: measured_completion_usage(),
+            usage: Some(measured_completion_usage()),
         })),
     );
     worker.poll_codex_boxed().await.expect("retain candidate");
@@ -4240,7 +4539,7 @@ async fn failed_candidate_cancel_is_retryable_and_never_flushes_a_post_cancel_ar
         Ok(CodexPoll::Completed(CodexTurnCompletion {
             summary: secret_safe_runtime_summary("writer stopped").unwrap(),
             artifacts: Vec::new(),
-            usage: measured_completion_usage(),
+            usage: Some(measured_completion_usage()),
         })),
     );
     worker
@@ -4567,7 +4866,7 @@ async fn pending_runtime_and_diagnostic_artifact_flush_after_server_restart_wind
         Ok(CodexPoll::Completed(CodexTurnCompletion {
             summary: secret_safe_runtime_summary("Codex turn completed").unwrap(),
             artifacts: Vec::new(),
-            usage: measured_completion_usage(),
+            usage: Some(measured_completion_usage()),
         })),
     );
     pump.inject_pending_delivery(&diagnostic_chunk);
@@ -4729,4 +5028,140 @@ async fn forward_runtime_trace_retains_and_sends_when_in_memory_job_is_gone() {
         )),
         "late runtime frame must flush after Server returns"
     );
+}
+
+#[tokio::test]
+async fn lease_renewal_extends_current_attempt_without_restarting_core() {
+    use winwincode_execution_port::generated::{LeaseRenewMessage, LeaseRenewMessageKind};
+
+    let port = RecordingPort::default();
+    let codex = FakeCodex::with_threads([thread('A')]);
+    let calls = codex.clone();
+    let mut worker = test_worker(worker_config(1), port.clone(), codex);
+    register(&mut worker).await;
+    worker
+        .accept_control(
+            &ExecutionPortMessage::JobDispatchMessage(dispatch('A', delivery_scope('A'))),
+            now(),
+        )
+        .await
+        .expect("dispatch");
+    assert_eq!(worker.active_jobs().len(), 1);
+    let before = worker.active_jobs()[0].clone();
+    let initial_calls = calls.calls();
+    let mut extended = before.lease.clone();
+    extended.expires_at = Instant("2027-01-15T08:10:00.000Z".into());
+    let renewal = ExecutionPortMessage::LeaseRenewMessage(LeaseRenewMessage {
+        kind: LeaseRenewMessageKind::LeaseRenew,
+        lease: extended.clone(),
+        message_id: ExecutionMessageId(id("xmsg", 'R')),
+        prior_expires_at: before.lease.expires_at.clone(),
+        request_id: RequestId(id("req", 'R')),
+        schema_version: SchemaVersion::WinwincodeV1,
+        sent_at: now(),
+    });
+    assert_invalid_renewals(&mut worker, &renewal, &before).await;
+    worker
+        .accept_control(&renewal, now())
+        .await
+        .expect("current lease renewal must be handled");
+    worker
+        .accept_control(&renewal, now())
+        .await
+        .expect("exact renewal replay is idempotent");
+    assert_eq!(worker.active_jobs().len(), 1);
+    let current = worker.active_jobs()[0];
+    assert_eq!(current.lease, extended);
+    assert_eq!(current.job, before.job);
+    assert_eq!(current.codex_thread_id, before.codex_thread_id);
+    assert_eq!(current.session_identity, before.session_identity);
+    assert_eq!(calls.calls(), initial_calls);
+    worker.heartbeat(now()).await.expect("renewed heartbeat");
+    assert!(port.messages.borrow().iter().any(|message| matches!(message,
+        ExecutionPortMessage::WorkerHeartbeatMessage(heartbeat)
+        if heartbeat.active_leases.iter().any(|lease| lease.expires_at == extended.expires_at)
+    )));
+}
+
+async fn assert_invalid_renewals(
+    worker: &mut WorkerMain<RecordingPort, FakeCodex>,
+    message: &ExecutionPortMessage,
+    before: &winwincode_worker::ActiveJob,
+) {
+    use winwincode_execution_port::generated::LeaseRenewMessage;
+    let ExecutionPortMessage::LeaseRenewMessage(renewal) = message else {
+        panic!("renewal");
+    };
+    let mutations: [fn(&mut LeaseRenewMessage); 9] = [
+        |value| value.lease.worker_instance_id.0 = id("wki", 'Z'),
+        |value| value.lease.worker_id.0 = id("wrk", 'Z'),
+        |value| value.lease.attempt += 1,
+        |value| "99".clone_into(&mut value.lease.fencing_token.0),
+        |value| value.lease.lease_id.0 = id("lse", 'Z'),
+        |value| "2027-01-15T08:04:00.000Z".clone_into(&mut value.prior_expires_at.0),
+        |value| "2027-01-15T08:03:00.000Z".clone_into(&mut value.lease.expires_at.0),
+        |value| "2027-01-15T08:06:00.000Z".clone_into(&mut value.sent_at.0),
+        |value| "invalid".clone_into(&mut value.lease.expires_at.0),
+    ];
+    for mutate in mutations {
+        let mut invalid = renewal.clone();
+        mutate(&mut invalid);
+        assert!(
+            worker
+                .accept_control(&ExecutionPortMessage::LeaseRenewMessage(invalid), now())
+                .await
+                .is_err()
+        );
+        assert_eq!(worker.active_jobs()[0], before);
+    }
+    assert!(
+        worker
+            .accept_control(message, before.lease.expires_at.clone())
+            .await
+            .is_err()
+    );
+    assert_eq!(worker.active_jobs()[0], before);
+}
+
+#[tokio::test]
+async fn unsuccessful_outcomes_retain_known_usage_without_changing_status() {
+    for status in [
+        ExecutionOutcomeStatus::Failed,
+        ExecutionOutcomeStatus::Cancelled,
+        ExecutionOutcomeStatus::InfrastructureError,
+    ] {
+        let port = RecordingPort::default();
+        let messages = Rc::clone(&port.messages);
+        let codex = FakeCodex::with_threads([thread('A')]);
+        let pump = codex.clone();
+        let mut usage = measured_completion_usage();
+        usage.cost_microunits = None;
+        pump.state
+            .lock()
+            .unwrap()
+            .retained_usage
+            .insert(thread('A').0, usage.clone());
+        let mut worker = test_worker(worker_config(1), port, codex);
+        register(&mut worker).await;
+        worker
+            .accept_control(
+                &ExecutionPortMessage::JobDispatchMessage(dispatch('A', delivery_scope('A'))),
+                now(),
+            )
+            .await
+            .unwrap();
+        let summary = secret_safe_runtime_summary("unsuccessful measured run").unwrap();
+        let poll = match status {
+            ExecutionOutcomeStatus::Failed => CodexPoll::Failed(summary),
+            ExecutionOutcomeStatus::Cancelled => CodexPoll::Cancelled(summary),
+            ExecutionOutcomeStatus::InfrastructureError => CodexPoll::InfrastructureFailed(summary),
+            ExecutionOutcomeStatus::Succeeded => unreachable!(),
+        };
+        pump.queue_poll(&thread('A'), Ok(poll));
+        worker.poll_codex_boxed().await.unwrap();
+        let outcomes = observed_outcomes(&messages);
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].outcome.status, status);
+        assert_eq!(outcomes[0].outcome.usage, Some(usage));
+    }
 }

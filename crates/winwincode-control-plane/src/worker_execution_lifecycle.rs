@@ -150,30 +150,30 @@ impl DurableWorkerExecutionLifecycle {
         ))
     }
 
-    /// Settles local admission for an authenticated successful Worker outcome.
+    /// Settles recorded usage for an authenticated terminal Worker outcome.
     /// Embedded executions have no authenticated placement and return `None`.
     ///
     /// # Errors
     ///
-    /// Rejects missing Usage, changed placement, stale session authority, or
-    /// a non-successful outcome.
+    /// Rejects missing Usage, changed placement, or stale session authority.
     pub fn settle_terminal_outcome(
         &mut self,
         message: &JobOutcomeMessage,
     ) -> Result<Option<ExecutionAdmissionReceipt>, WorkerExecutionLifecycleError> {
-        if message.outcome.status != ExecutionOutcomeStatus::Succeeded {
-            return Err(authority_error());
-        }
         if !self.matches_authenticated_placement(message)? {
             return Ok(None);
         }
         let usage = message.outcome.usage.as_ref().ok_or_else(authority_error)?;
         self.settle_usage(&WorkerUsageSettlement {
+            outcome_status: message.outcome.status.clone(),
             job_id: message.lease.job_id.clone(),
             worker_session_id: message.worker_session_id.clone(),
             request_id: stable_request_id("terminal-settle", &message.message_id.0),
             actual_tokens: u64::try_from(usage.tokens).map_err(|_| authority_error())?,
-            actual_cost_microunits: u64::try_from(usage.cost_microunits)
+            actual_cost_microunits: usage
+                .cost_microunits
+                .map(u64::try_from)
+                .transpose()
                 .map_err(|_| authority_error())?,
             actual_runtime_millis: u64::try_from(usage.runtime_millis)
                 .map_err(|_| authority_error())?,
@@ -182,8 +182,8 @@ impl DurableWorkerExecutionLifecycle {
         .map(Some)
     }
 
-    /// Releases local admission for an authenticated failed or cancelled
-    /// Worker outcome. Embedded executions return `None`.
+    /// Settles known usage or releases admission for an authenticated failed
+    /// or cancelled Worker outcome. Embedded executions return `None`.
     ///
     /// # Errors
     ///
@@ -200,6 +200,9 @@ impl DurableWorkerExecutionLifecycle {
             }
             ExecutionOutcomeStatus::Succeeded => return Err(authority_error()),
         };
+        if message.outcome.usage.is_some() {
+            return self.settle_terminal_outcome(message);
+        }
         if !self.matches_authenticated_placement(message)? {
             return Ok(None);
         }
@@ -330,11 +333,12 @@ impl DurableWorkerExecutionLifecycle {
 }
 
 struct WorkerUsageSettlement {
+    outcome_status: ExecutionOutcomeStatus,
     job_id: ExecutionJobId,
     worker_session_id: WorkerSessionId,
     request_id: RequestId,
     actual_tokens: u64,
-    actual_cost_microunits: u64,
+    actual_cost_microunits: Option<u64>,
     actual_runtime_millis: u64,
     completed_at: Instant,
 }
@@ -373,10 +377,20 @@ fn require_terminal_authority(
         || slot.authority.worker_instance_id != lease.worker_instance_id
         || slot.authority.attempt != lease.attempt
         || slot.authority.fencing_token != lease.fencing_token
-        || !matches!(
-            slot.state,
-            WorkerSlotState::Running | WorkerSlotState::Completed
-        )
+        || !match slot.state {
+            WorkerSlotState::Running => true,
+            WorkerSlotState::Cancelling | WorkerSlotState::Cancelled => {
+                command.outcome_status == ExecutionOutcomeStatus::Cancelled
+            }
+            WorkerSlotState::Completed => {
+                command.outcome_status == ExecutionOutcomeStatus::Succeeded
+            }
+            WorkerSlotState::Failed => matches!(
+                command.outcome_status,
+                ExecutionOutcomeStatus::Failed | ExecutionOutcomeStatus::InfrastructureError
+            ),
+            WorkerSlotState::RecoveryFailed => false,
+        }
         || command.completed_at.0 < lease.issued_at.0
     {
         return Err(authority_error());

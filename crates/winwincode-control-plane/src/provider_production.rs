@@ -1113,6 +1113,7 @@ impl StandaloneModelExecutionApplication {
             Sha256::digest(open.adapter_request_id.as_bytes())
         );
         let mut events = vec![ProviderStreamEvent::ResponseStarted {
+            observed_model_id: None,
             provider_response_id: response_id,
         }];
         let finish_reason =

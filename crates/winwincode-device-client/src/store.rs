@@ -3140,7 +3140,12 @@ CREATE TABLE client_connection_policy (
 ";
 
 fn apply_migrations(connection: &mut Connection) -> Result<(), DeviceStoreError> {
-    let version = connection
+    // Other processes may finish initialization while this connection waits.
+    // Read the version only after taking the same lock that protects schema writes.
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(sql_error)?;
+    let version = transaction
         .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
         .map_err(sql_error)?;
     if !matches!(version, 0 | 6 | CLIENT_STORE_SCHEMA_VERSION) {
@@ -3148,10 +3153,6 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), DeviceStoreError>
             "unsupported schema version {version}"
         )));
     }
-
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(sql_error)?;
     if version == 0 {
         transaction.execute_batch(STORE_SCHEMA).map_err(sql_error)?;
     } else if version == 6 {
@@ -3486,4 +3487,63 @@ fn remaining_sqlite_open_time(open_deadline: StdInstant) -> Result<Duration, Dev
         .ok_or_else(|| {
             DeviceStoreError::adapter("SQLite device client open exceeded its five-second limit")
         })
+}
+
+#[cfg(test)]
+mod migration_concurrency_tests {
+    use super::{CLIENT_STORE_SCHEMA_VERSION, STORE_SCHEMA, apply_migrations};
+    use rusqlite::{Connection, TransactionBehavior};
+    use std::fs;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant as StdInstant};
+
+    static WAITING_FOR_SCHEMA_LOCK: AtomicBool = AtomicBool::new(false);
+
+    #[test]
+    fn migration_reads_version_after_acquiring_the_database_lock() {
+        let root =
+            std::env::temp_dir().join(format!("wwc-device-schema-race-{}", std::process::id()));
+        fs::create_dir_all(&root).expect("create fixture");
+        let path = root.join("device-client.sqlite3");
+        let mut first = Connection::open(&path).expect("first connection");
+        first
+            .pragma_update(None, "journal_mode", "WAL")
+            .expect("WAL");
+        let transaction = first
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .expect("hold schema lock");
+        WAITING_FOR_SCHEMA_LOCK.store(false, Ordering::SeqCst);
+        let second = std::thread::spawn(move || {
+            let mut connection = Connection::open(path).expect("second connection");
+            connection
+                .busy_handler(Some(|attempt| {
+                    WAITING_FOR_SCHEMA_LOCK.store(true, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(1));
+                    attempt < 2_000
+                }))
+                .expect("observe lock contention");
+            apply_migrations(&mut connection)
+        });
+        let deadline = StdInstant::now() + Duration::from_secs(2);
+        while !WAITING_FOR_SCHEMA_LOCK.load(Ordering::SeqCst) && StdInstant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            WAITING_FOR_SCHEMA_LOCK.load(Ordering::SeqCst),
+            "second initializer must contend"
+        );
+        transaction
+            .execute_batch(STORE_SCHEMA)
+            .expect("first initializer creates schema");
+        transaction
+            .pragma_update(None, "user_version", CLIENT_STORE_SCHEMA_VERSION)
+            .expect("version");
+        transaction.commit().expect("first initializer commits");
+        second
+            .join()
+            .expect("second thread")
+            .expect("second initializer must reread committed version");
+        drop(first);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
 }

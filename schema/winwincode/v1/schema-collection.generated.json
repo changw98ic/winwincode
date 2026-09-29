@@ -465,6 +465,7 @@
     "ApprovalActionReasonCode": {
       "enum": [
         "sandbox_escalation",
+        "mcp_permission",
         "network_access",
         "filesystem_write"
       ],
@@ -964,6 +965,7 @@
         "reasonCode": {
           "enum": [
             "sandbox_escalation",
+            "mcp_permission",
             "network_access",
             "filesystem_write"
           ],
@@ -12911,6 +12913,7 @@
     "DeviceProviderProtocol": {
       "enum": [
         "anthropic_messages",
+        "openai_chat_completions",
         "canonical"
       ],
       "type": "string"
@@ -14439,9 +14442,42 @@
     },
     "ExecutionLimits": {
       "additionalProperties": false,
+      "allOf": [
+        {
+          "else": {
+            "properties": {
+              "deadlineAt": {
+                "$ref": "#/$defs/Instant"
+              }
+            }
+          },
+          "if": {
+            "properties": {
+              "maxRuntimeSeconds": {
+                "type": "null"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "deadlineAt": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ],
       "properties": {
         "deadlineAt": {
-          "$ref": "#/$defs/Instant"
+          "description": "Null explicitly means no runtime deadline. Must be null together with maxRuntimeSeconds.",
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Instant"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "maxArtifactBytes": {
           "maximum": 1099511627776,
@@ -14449,9 +14485,17 @@
           "type": "integer"
         },
         "maxRuntimeSeconds": {
-          "maximum": 604800,
-          "minimum": 1,
-          "type": "integer"
+          "description": "Null explicitly means no runtime deadline. Must be null together with deadlineAt.",
+          "oneOf": [
+            {
+              "maximum": 604800,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -14577,7 +14621,10 @@
         "costMicrounits": {
           "maximum": 9007199254740991,
           "minimum": 0,
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "runtimeMillis": {
           "maximum": 9007199254740991,
@@ -28040,6 +28087,15 @@
         },
         "workItem": {
           "$ref": "#/$defs/WorkItem"
+        },
+        "workPlan": {
+          "description": "Control Plane-owned task DAG for this WorkContract revision. The dispatched workItem must be an identical node in this plan.",
+          "items": {
+            "$ref": "#/$defs/WorkItem"
+          },
+          "maxItems": 1000,
+          "minItems": 1,
+          "type": "array"
         }
       },
       "required": [
@@ -28200,7 +28256,7 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:acc233729685e6be6f9234ff369616e3acff79653db292788482d5f6cf210fd4",
+  "x-source-digest": "sha256:b4232c9fab25565fa3f293601c39d884732be6e220efc3dda5f546a5e216c150",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {

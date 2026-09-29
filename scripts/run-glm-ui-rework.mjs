@@ -83,6 +83,11 @@ try {
     devicePrerequisites: true,
     deviceRoute,
     deviceProviderSecrets,
+    deviceProvider: {
+      ...deviceRoute,
+      endpoint: `${url.href.replace(/\/$/u, '')}/v1/messages`,
+      displayName: 'GLM live acceptance',
+    },
     wwcBinary: process.env.WWC_CLI_BINARY ?? resolve('target/debug/wwc'),
     serverEnvironment,
     timeoutMillis: 600_000,

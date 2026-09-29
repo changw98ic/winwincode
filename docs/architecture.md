@@ -119,6 +119,15 @@ WinWinCode 的可执行交付模型由 [ADR-0033](decisions/0033-community-engin
 
 ## Plan、WorkItem 和证据
 
+Control Plane 下发的 `WorkRunInput.workPlan` 保存当前 WorkContract 下的完整 WorkItem 依赖图。
+当前 `workItem` 必须与图中的节点逐值一致；合同版本、节点唯一性和依赖关系沿用调度器校验。
+该计划随 ExecutionJob 摘要封存，Device 的 JEV 上下文评分要求它存在，并将其纳入任务依据。
+这份调度计划与 Core 的执行步骤计划各自保持原有所有权。
+JEV 删除旧进度文字前，会按当前模型请求及评分记录取回已保存的原文，校验请求摘要及逐项内容。
+评分记录不能跨请求使用；来源不一致时保留原始记录并拒绝本次重建。
+旧进度文字的 `ARCHIVE` 决策会将其移出当前模型请求，原文仍由 Core 历史和 Device 请求记录保留，按原请求身份取回。后续请求重新评分；系统约束、工具记录和最新进度不会进入此归档路径。
+Device 在评分前保存输入、策略、执行选项及配置摘要，读取和重放时校验原始字节；旧记录缺失的输入保持为空。
+
 Codex Plan 回答“当前一次执行要做哪些步骤”；`WorkItem` 回答“哪些工作可以独立验收、失败、返工和批准”。Plan 只由 Kernel 保存，WorkItem 和 Delivery 只由 Control Plane 保存；页面显示两者的投影，不建立第三份任务状态。
 
 WorkItem 使用 `backlog`、`ready`、`in_progress`、`waiting_dependency`、`waiting_human`、`candidate_ready`、`validating`、`rework`、`done`、`failed` 和 `cancelled`。每次执行只创建一个绑定具体 WorkItem revision 的 `WorkRun`；一个未解决的 `AttentionItem` 会把相关工作置为 `waiting_human`。
@@ -140,6 +149,10 @@ flowchart TD
 ```
 
 最终结论由当前候选、冻结提交、运行结果和独立角色计算。`submitVerdict()` 不接受调用方直接制作的 Evidence 或 Verdict；Server 重新验证候选、事件身份、角色完整性和每项条件后才写入结论。Agent 的文本回复不是交付证据。最终结果使用 `winwincode.independent-verification-result.v1` 结构。
+
+验证角色向 Core 提交封闭的 JSON 输出 schema；首次提交与重启恢复使用相同参数并绑定提交摘要。Device 将格式约束传递到对应协议，保留 reasoning effort。Worker 解析一个完整 JSON 对象后绑定已观察到的证据，再生成规范事件；字段顺序和空白不改变证据身份。说明文字、额外字段、多个对象和虚构来源仍被拒绝。输出格式约束不能替代候选、验收条件及证据校验。
+
+完成状态与计量完整性分别保存。只要主模型、Observer 或 JEV 仍有请求未取得完整用量，终态 `usage` 就为空，包括失败后重试成功的任务。已知小计仍保留在原始账本中，不能作为完整总量结算；候选提交和成功状态不因此改写。实时完成、重启恢复及制品确认均使用同一计量读取路径。
 
 ### 执行图状态
 

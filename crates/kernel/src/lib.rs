@@ -553,6 +553,8 @@ pub enum ApprovalKind {
     Exec,
     /// Patch application approval.
     Patch,
+    /// MCP elicitation; operation id is a JSON (server, request id) tuple.
+    Mcp,
 }
 
 /// Human decision sent back to one suspended Codex operation.
@@ -1123,6 +1125,15 @@ impl Kernel {
         config.model_provider = kernel_provider_info(&provider);
         config.model_provider_id = provider;
         config.model = Some(model);
+        config.model_reasoning_effort = if settings.reasoning == "provider_default" {
+            None
+        } else {
+            Some(
+                serde_json::from_value(Value::String(settings.reasoning.clone())).map_err(
+                    |_| KernelFailure::new("INVALID_AGENT_CONFIG", "Invalid reasoning effort"),
+                )?,
+            )
+        };
         if let Some(policy) = &options.role_policy {
             if options.agent_config.identity.role != role_id_name(&policy.role_id)
                 || settings.sandbox != workspace_mode_name(&policy.workspace_mode)
@@ -1499,29 +1510,11 @@ impl Kernel {
     /// closed, or Codex rejects the response submission.
     pub async fn resolve_approval(&self, response: ApprovalResponse) -> KernelResult<String> {
         Self::guard(async {
-            if response.operation_id.trim().is_empty() {
-                return Err(KernelFailure::new(
-                    "INVALID_APPROVAL_RESPONSE",
-                    "approval operation id must be non-empty",
-                ));
-            }
-            let decision = codex_review_decision(response.decision)?;
+            let session_id = response.session_id.clone();
+            let operation = codex_approval_operation(response)?;
             let runtime = self.runtime().await?;
-            let session = self.session(&runtime, &response.session_id).await?;
+            let session = self.session(&runtime, &session_id).await?;
             self.enforce_private_permissions()?;
-            let operation = match response.kind {
-                ApprovalKind::Exec => Op::ExecApproval {
-                    id: response.operation_id,
-                    turn_id: response
-                        .turn_id
-                        .filter(|turn_id| !turn_id.trim().is_empty()),
-                    decision,
-                },
-                ApprovalKind::Patch => Op::PatchApproval {
-                    id: response.operation_id,
-                    decision,
-                },
-            };
             session
                 .thread
                 .submit(operation)
@@ -2020,6 +2013,59 @@ fn model_route(provider: &str, model: &str) -> KernelResult<(String, String)> {
     Ok((provider.to_string(), model.to_string()))
 }
 
+fn codex_approval_operation(response: ApprovalResponse) -> KernelResult<Op> {
+    if response.operation_id.trim().is_empty() {
+        return Err(KernelFailure::new(
+            "INVALID_APPROVAL_RESPONSE",
+            "approval id must be non-empty",
+        ));
+    }
+    if response.kind == ApprovalKind::Mcp {
+        use codex_protocol::approvals::ElicitationAction;
+        let (server_name, request_id): (String, codex_protocol::mcp::RequestId) =
+            serde_json::from_str(&response.operation_id).map_err(|_| {
+                KernelFailure::new("INVALID_APPROVAL_RESPONSE", "invalid MCP callback identity")
+            })?;
+        if server_name.trim().is_empty() {
+            return Err(KernelFailure::new(
+                "INVALID_APPROVAL_RESPONSE",
+                "MCP server is missing",
+            ));
+        }
+        let decision = match response.decision {
+            ApprovalDecision::Approved => ElicitationAction::Accept,
+            ApprovalDecision::Denied { .. } => ElicitationAction::Decline,
+            ApprovalDecision::Abort => ElicitationAction::Cancel,
+            ApprovalDecision::ApprovedForSession => {
+                return Err(KernelFailure::new(
+                    "INVALID_APPROVAL_RESPONSE",
+                    "MCP approvals must be single-use",
+                ));
+            }
+        };
+        return Ok(Op::ResolveElicitation {
+            server_name,
+            request_id,
+            decision,
+            content: None,
+            meta: None,
+        });
+    }
+    let decision = codex_review_decision(response.decision)?;
+    match response.kind {
+        ApprovalKind::Exec => Ok(Op::ExecApproval {
+            id: response.operation_id,
+            turn_id: response.turn_id.filter(|id| !id.trim().is_empty()),
+            decision,
+        }),
+        ApprovalKind::Patch => Ok(Op::PatchApproval {
+            id: response.operation_id,
+            decision,
+        }),
+        ApprovalKind::Mcp => unreachable!("MCP callback handled above"),
+    }
+}
+
 fn codex_review_decision(decision: ApprovalDecision) -> KernelResult<CodexReviewDecision> {
     match decision {
         ApprovalDecision::Approved => Ok(CodexReviewDecision::Approved),
@@ -2140,6 +2186,8 @@ mod tests {
 
     use super::AbsolutePathBuf;
     use super::ApprovalDecision;
+    use super::ApprovalKind;
+    use super::ApprovalResponse;
     use super::CODEX_COMMIT;
     use super::CodexReviewDecision;
     use super::ConfigBuilder;
@@ -2164,6 +2212,7 @@ mod tests {
     use super::RoleSessionPolicyWorkspaceMode;
     use super::TurnSubmissionOptions;
     use super::canonical_role_policy;
+    use super::codex_approval_operation;
     use super::codex_review_decision;
     use super::descriptor;
     use super::kernel_provider_info;
@@ -2222,6 +2271,58 @@ mod tests {
                 ))
             })
         }
+    }
+
+    #[test]
+    fn mcp_approval_callback_preserves_typed_id_and_single_use_decision() {
+        for id in [serde_json::json!(42), serde_json::json!("42")] {
+            for (decision, expected) in [
+                (ApprovalDecision::Approved, "accept"),
+                (
+                    ApprovalDecision::Denied {
+                        rejection: "no".into(),
+                    },
+                    "decline",
+                ),
+                (ApprovalDecision::Abort, "cancel"),
+            ] {
+                let response = ApprovalResponse {
+                    session_id: "session".into(),
+                    kind: ApprovalKind::Mcp,
+                    operation_id: serde_json::to_string(&("server", &id)).expect("callback id"),
+                    turn_id: Some("turn".into()),
+                    decision,
+                };
+                let super::Op::ResolveElicitation {
+                    server_name,
+                    request_id,
+                    decision,
+                    content,
+                    meta,
+                } = codex_approval_operation(response).expect("MCP callback")
+                else {
+                    panic!("expected MCP callback");
+                };
+                assert_eq!(
+                    serde_json::to_value(request_id).expect("typed request id"),
+                    id
+                );
+                assert_eq!(server_name, "server");
+                assert_eq!(serde_json::to_value(decision).expect("decision"), expected);
+                assert!(content.is_none());
+                assert!(meta.is_none());
+            }
+        }
+        assert!(
+            codex_approval_operation(ApprovalResponse {
+                session_id: "session".into(),
+                kind: ApprovalKind::Mcp,
+                operation_id: "[\"server\",42]".into(),
+                turn_id: None,
+                decision: ApprovalDecision::ApprovedForSession,
+            })
+            .is_err()
+        );
     }
 
     #[test]
@@ -2501,6 +2602,16 @@ mod tests {
         }
     }
 
+    fn prepare_chat_permission_workspace(workspace: &std::path::Path, home: &std::path::Path) {
+        std::fs::create_dir_all(workspace).expect("create workspace");
+        std::fs::create_dir_all(home).expect("create home");
+        // Candidate-controlled config is outside the Device extension authority.
+        std::fs::create_dir_all(workspace.join(".git")).expect("repository marker");
+        std::fs::create_dir_all(workspace.join(".codex")).expect("repository config directory");
+        std::fs::write(workspace.join(".codex/config.toml"), "not valid TOML [")
+            .expect("candidate config");
+    }
+
     #[tokio::test]
     async fn chat_session_applies_its_declared_workspace_permissions() {
         use winwincode_execution_port::agent_config::{
@@ -2513,13 +2624,7 @@ mod tests {
         ));
         let workspace = root.join("workspace");
         let home = root.join("home");
-        std::fs::create_dir_all(&workspace).expect("create workspace");
-        std::fs::create_dir_all(&home).expect("create home");
-        // Candidate-controlled config is outside the Device extension authority.
-        std::fs::create_dir_all(workspace.join(".git")).expect("repository marker");
-        std::fs::create_dir_all(workspace.join(".codex")).expect("repository config directory");
-        std::fs::write(workspace.join(".codex/config.toml"), "not valid TOML [")
-            .expect("candidate config");
+        prepare_chat_permission_workspace(&workspace, &home);
         let kernel = Kernel::new(
             KernelOptions::new(home, std::env::current_exe().expect("test executable")),
             Arc::new(UnusedModelPort),
@@ -2547,9 +2652,12 @@ mod tests {
                 &capabilities,
                 "codex-chat",
                 AgentProfileSettings {
+                    fusion: None,
+                    jev_judge: None,
+                    jev_context: None,
                     provider: "fixture-provider".into(),
                     model: "fixture-model".into(),
-                    reasoning: "provider_default".into(),
+                    reasoning: if writer { "max" } else { "provider_default" }.into(),
                     tools: vec!["worker:sandbox".into()],
                     sandbox: sandbox.into(),
                     instructions: None,
@@ -2582,6 +2690,13 @@ mod tests {
                 continue;
             }
             let config = result.expect("session config");
+            assert_eq!(
+                config
+                    .model_reasoning_effort
+                    .as_ref()
+                    .map(codex_protocol::openai_models::ReasoningEffort::as_str),
+                writer.then_some("max"),
+            );
             assert_eq!(config.mcp_servers.get().contains_key("live"), writer);
             let policy = config.permissions.file_system_sandbox_policy();
             assert_eq!(

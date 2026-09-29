@@ -6,10 +6,38 @@ import { readFile, readdir } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { promisify } from 'node:util'
 
+import { openBenchmarkLedger } from './benchmark-ledger.mjs'
+
 const runFile = promisify(execFile)
 
-const PROVIDERS = Object.freeze(['glm5.1flash', 'mimov2.6pro', 'ds4.1flash', 'qwen3.8flash'])
+const PROVIDERS = Object.freeze(['glm-5.3-flash', 'mimo-v2.6-pro', 'deepseek-flash', 'qwen3.8-flash'])
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u
+
+const CONFIGURATIONS = Object.freeze([
+  ['main-A', 'main', false, false, false],
+  ['main-B', 'main', false, true, true],
+  ['main-C', 'main', true, false, false],
+  ['main-D', 'main', true, true, true],
+  ['jev-context-only', 'jev-ablation', false, true, false],
+  ['jev-judge-only', 'jev-ablation', false, false, true],
+  ['jev-full', 'jev-ablation', false, true, true],
+].map(([configurationId, track, fusion, jevContext, jevJudge]) => Object.freeze({
+  configurationId, track, fusion, jev: jevContext || jevJudge, jevContext, jevJudge,
+})))
+
+export function benchmarkConfiguration(configurationId) {
+  const configuration = CONFIGURATIONS.find(value => value.configurationId === configurationId)
+  if (!configuration) fail('BENCHMARK_CONFIGURATION_INVALID', 'unknown or missing experimental configuration')
+  return configuration
+}
+
+export function validateBenchmarkConfiguration(value) {
+  const configuration = benchmarkConfiguration(value.configurationId)
+  if (Object.entries(configuration).some(([key, expected]) => value[key] !== expected)) {
+    fail('BENCHMARK_CONFIGURATION_INVALID', 'experimental switches do not match the frozen configuration')
+  }
+  return configuration
+}
 
 export class BenchmarkError extends Error {
   constructor(code, message) {
@@ -21,6 +49,11 @@ export class BenchmarkError extends Error {
 
 function fail(code, message) {
   throw new BenchmarkError(code, message)
+}
+
+function runnerFailureCode(error) {
+  return typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{0,127}$/u.test(error.code)
+    ? error.code : 'RUNNER_UNEXPECTED'
 }
 
 function normalizeRepositoryUrl(value) {
@@ -46,6 +79,9 @@ export async function validateFrozenTaskSource({ repositoryRoot, repositoryUrl, 
     fail('SOURCE_REPOSITORY_MISMATCH', `${actualUrl} is not ${repositoryUrl}`)
   }
   if (actualRevision !== revision) fail('SOURCE_REVISION_MISMATCH', `${actualRevision} is not ${revision}`)
+  if (await gitOutput(root, 'status', '--porcelain=v1', '--untracked-files=all')) {
+    fail('SOURCE_WORKTREE_DIRTY', 'frozen task repository has modified or untracked files')
+  }
 
   const catalog = JSON.parse(await readFile(resolve(root, 'catalog.json'), 'utf8'))
   if (!Array.isArray(catalog) || catalog.length !== 20) fail('TASK_COUNT_INVALID', 'catalog must contain exactly 20 tasks')
@@ -57,11 +93,7 @@ export async function validateFrozenTaskSource({ repositoryRoot, repositoryUrl, 
     fail('TASK_IDENTITY_INVALID', 'task directories must exactly match catalog.json')
   }
   const digest = createHash('sha256')
-  const digestPaths = ['catalog.json', ...catalogTaskIds.flatMap(taskId => [
-    `tasks/${taskId}/examples.json`,
-    `tasks/${taskId}/task.json`,
-    `tasks/${taskId}/task.md`,
-  ])].sort()
+  const digestPaths = (await gitOutput(root, 'ls-files', '-z')).split('\0').filter(Boolean).sort()
   for (const path of digestPaths) {
     const bytes = await readFile(resolve(root, path))
     digest.update(`${path}\0${createHash('sha256').update(bytes).digest('hex')}\n`)
@@ -80,6 +112,10 @@ function canonicalJson(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
   if (value === null || typeof value !== 'object') return JSON.stringify(value)
   return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`
+}
+
+export function benchmarkAggregationDigest(runId, taskId, members) {
+  return createHash('sha256').update(canonicalJson({ runId, taskId, members })).digest('hex')
 }
 
 const TOOL_METADATA_KEYS = new Set([
@@ -176,17 +212,8 @@ function taskIdentities(taskIds) {
 
 export function buildBenchmarkPlan({ taskIds }) {
   const tasks = taskIdentities(taskIds)
-  const configurations = [
-    { configurationId: 'main-A', track: 'main', fusion: false, jev: false },
-    { configurationId: 'main-B', track: 'main', fusion: false, jev: true },
-    { configurationId: 'main-C', track: 'main', fusion: true, jev: false },
-    { configurationId: 'main-D', track: 'main', fusion: true, jev: true },
-    { configurationId: 'jev-context-only', track: 'jev-ablation', fusion: false, jev: true },
-    { configurationId: 'jev-judge-only', track: 'jev-ablation', fusion: false, jev: true },
-    { configurationId: 'jev-full', track: 'jev-ablation', fusion: false, jev: true },
-  ]
   const cells = []
-  for (const configuration of configurations) {
+  for (const configuration of CONFIGURATIONS) {
     for (const taskId of tasks) {
       for (const comparison of [...PROVIDERS, 'fusion-4']) {
         cells.push({
@@ -205,13 +232,19 @@ export function buildBenchmarkPlan({ taskIds }) {
   return Object.freeze({ schemaVersion: 1, kind: 'winwincode.real-task-benchmark-plan.v1', cells: Object.freeze(cells) })
 }
 
-export async function executeBenchmarkCell(cell, adapter, { toolGate = createToolRequestGuard() } = {}) {
+export async function executeBenchmarkCell(cell, adapter, {
+  toolGate = createToolRequestGuard(),
+  recordCall = () => {},
+  registerLaunch = () => fail('LEDGER_REQUIRED', 'product launch registration requires a durable ledger'),
+} = {}) {
   if (cell.budgetLimits !== null) throw new TypeError('formal benchmark cells cannot set budget limits')
   if (cell.reasoningEffort !== 'max') throw new TypeError('formal benchmark model calls require max reasoning effort')
+  const configuration = validateBenchmarkConfiguration(cell)
 
   const requestFor = (provider, callId) => ({
     runId: cell.runId,
     taskId: cell.taskId,
+    ...configuration,
     callId,
     provider,
     comparison: cell.comparison,
@@ -219,10 +252,18 @@ export async function executeBenchmarkCell(cell, adapter, { toolGate = createToo
     reasoningEffort: cell.reasoningEffort,
     budgetLimits: cell.budgetLimits,
   })
+  let persistenceFailure = null
   const runner = Object.freeze({
+    registerLaunch: async target => {
+      try { await registerLaunch(target) } catch (error) {
+        persistenceFailure = error
+        error.benchmarkPersistenceFailure = true
+        throw error
+      }
+    },
     requestTool: async (request, executor) => {
       const result = await executeToolRequest(request, toolGate, executor)
-      if (result.status === 'terminated') {
+      if (result?.status === 'terminated') {
         const error = new Error(result.reason)
         error.code = result.reason
         error.termination = result
@@ -232,23 +273,66 @@ export async function executeBenchmarkCell(cell, adapter, { toolGate = createToo
     },
   })
 
+  const persistCall = call => {
+    try { recordCall(call) } catch (error) {
+      persistenceFailure = error
+      error.benchmarkPersistenceFailure = true
+      throw error
+    }
+  }
+
+  const executeCall = async (request, execute) => {
+    let result
+    try {
+      result = await execute(request, runner)
+      if (persistenceFailure) throw persistenceFailure
+    } catch (error) {
+      const code = runnerFailureCode(error)
+      persistCall({ callId: request.callId, status: 'failed', failure: { code } })
+      throw error
+    }
+    persistCall({ callId: request.callId, status: 'returned', result })
+    const termination = runnerTermination(result)
+    if (termination) {
+      throw Object.assign(new Error('product execution terminated the benchmark runner'), {
+        code: termination.reason, termination,
+        ...(result.claims !== undefined ? { claims: result.claims } : {}),
+      })
+    }
+    return result
+  }
+
   if (cell.fusionKind === 'independent-aggregate') {
     const members = []
     for (const provider of PROVIDERS) {
-      members.push(await adapter.runModel(requestFor(provider, `${cell.runId}:member:${provider}`), runner))
+      const request = requestFor(provider, `${cell.runId}:member:${provider}`)
+      try {
+        const member = await executeCall(request, (input, context) => adapter.runModel(input, context))
+        members.push(member?.status === 'failed'
+          ? { status: 'failed', provider, callId: request.callId, failure: member.failure }
+          : member)
+      } catch (error) {
+        if (runnerTermination(error) || error.benchmarkPersistenceFailure
+          || ['BENCHMARK_EVIDENCE_FAILED', 'LEDGER_RUN_UNRESOLVED'].includes(error.code)) throw error
+        // A failed model is one retained member outcome, not permission to
+        // omit the remaining independent members or reuse another cell.
+        members.push({ status: 'failed', provider, callId: request.callId,
+          failure: { code: runnerFailureCode(error) } })
+      }
     }
-    const inputDigest = createHash('sha256').update(canonicalJson({ runId: cell.runId, taskId: cell.taskId, members })).digest('hex')
-    const aggregate = await adapter.aggregate({
+    const inputDigest = benchmarkAggregationDigest(cell.runId, cell.taskId, members)
+    const aggregate = await executeCall({
       runId: cell.runId,
       taskId: cell.taskId,
       callId: `${cell.runId}:aggregation`,
+      ...configuration,
       comparison: cell.comparison,
       engine: 'fusion-engine',
       algorithmVersion: 'fusion-4-v1',
       inputDigest,
       members,
-    }, runner)
-    return {
+    }, (request, context) => adapter.aggregate(request, context))
+    const result = {
       members,
       aggregate,
       aggregateReceipt: {
@@ -260,73 +344,158 @@ export async function executeBenchmarkCell(cell, adapter, { toolGate = createToo
         callCount: 1,
       },
     }
+    return aggregate?.status === 'failed'
+      ? { ...result, status: 'failed', failure: aggregate.failure, productOutcome: aggregate }
+      : result
   }
 
-  const model = await adapter.runModel(requestFor(cell.comparison, `${cell.runId}:model`), runner)
-  return { model }
+  const model = await executeCall(requestFor(cell.comparison, `${cell.runId}:model`), (request, context) => adapter.runModel(request, context))
+  return model?.status === 'failed'
+    ? { model, status: 'failed', failure: model.failure, productOutcome: model }
+    : { model }
+}
+
+function runnerTermination(value) {
+  if (value?.termination) return value.termination
+  if ((value?.code ?? value?.failure?.code) === 'STUCK_TOOL_REPEAT_LIMIT') {
+    return { reason: 'STUCK_TOOL_REPEAT_LIMIT' }
+  }
+  return null
+}
+
+// Reconstruct the same cell from durable calls. Missing model results may only
+// come from the registered product; aggregation is never dispatched again.
+export async function recoverBenchmarkCell(cell, observed, resolveModel) {
+  const recoveredCalls = []
+  const replay = async request => {
+    const retained = observed.calls.find(call => call.callId === request.callId)
+    if (retained?.status === 'returned') return retained.result
+    if (retained?.status === 'failed' && retained.failure.code !== 'BENCHMARK_EVIDENCE_FAILED') {
+      throw Object.assign(new Error(retained.failure.code), { code: retained.failure.code, retainedFailure: true })
+    }
+    const launch = observed.launches.find(target => target.callId === request.callId)
+    if ((request.provider || request.engine === 'fusion-engine') && launch && resolveModel) return resolveModel(request, launch)
+    fail('LEDGER_RUN_UNRESOLVED', 'registered execution has no final result')
+  }
+  let result
+  try {
+    result = await executeBenchmarkCell(cell, { runModel: replay, aggregate: replay }, {
+      recordCall: call => recoveredCalls.push(call),
+    })
+    const terminalProductCall = cell.fusionKind === 'independent-aggregate' ? result.aggregate : result.model
+    if (terminalProductCall?.status === 'failed') {
+      result = { ...result, status: 'failed', failure: terminalProductCall.failure,
+        productOutcome: terminalProductCall }
+    }
+  } catch (error) {
+    if (!error.retainedFailure && !runnerTermination(error)) throw error
+    const code = runnerFailureCode(error)
+    result = { status: 'failed', termination: runnerTermination(error), failure: { code, message: code } }
+  }
+  return { ...result, calls: recoveredCalls, recovery: { kind: 'retained-product-result',
+    originalCalls: observed.calls } }
 }
 
 export async function runBenchmarkPlan(plan, {
   executeCell,
   createToolGate = () => createToolRequestGuard(),
   onRecord = () => {},
+  ledgerPath,
+  experimentBinding,
+  recoverCell,
 }) {
-  const records = plan.cells.map(cell => ({ ...cell, status: 'planned', termination: null }))
-  for (const [index, cell] of plan.cells.entries()) {
-    try {
-      const result = await executeCell(cell, { toolGate: createToolGate(cell) })
-      const termination = result.termination ?? null
-      records[index] = {
-        ...records[index],
-        ...result,
-        status: termination ? 'failed' : result.status ?? 'completed',
-        verdict: termination ? null : result.verdict ?? null,
-        score: termination ? 0 : result.score,
-        termination,
+  const store = ledgerPath
+    ? openBenchmarkLedger(ledgerPath, canonicalJson({ plan, experimentBinding }), plan.cells)
+    : null
+  const records = []
+  let stopped = null
+  try {
+    for (const [index, cell] of plan.cells.entries()) {
+      let claim
+      try {
+        claim = store?.claim(index)
+      } catch (error) {
+        if (error.code !== 'LEDGER_RUN_UNRESOLVED' || !recoverCell) throw error
+        const result = await recoverCell(cell, { launches: error.launches, calls: error.calls })
+        const termination = runnerTermination(result)
+        const recovered = { ...cell, ...result, runId: cell.runId,
+          status: termination ? 'failed' : result.status ?? 'completed',
+          verdict: null, score: null, termination, launches: error.launches }
+        store.recover(index, error, recovered)
+        claim = { record: recovered }
       }
-      await onRecord(records[index], index)
-      if (termination) {
-        for (let pending = index + 1; pending < records.length; pending += 1) {
-          records[pending] = {
-            ...records[pending],
-            status: 'not_run_runner_terminated',
-            verdict: null,
-            score: 0,
-            termination,
+      let record = claim?.record
+      if (!record) {
+        let persistenceError = null
+        const registerLaunch = target => {
+          try {
+            if (!store) fail('LEDGER_REQUIRED', 'product launch registration requires a durable ledger')
+            store.registerLaunch(index, claim.token, target)
+          } catch (error) {
+            persistenceError = error
+            throw error
           }
-          await onRecord(records[pending], pending)
         }
-        break
-      }
-    } catch (error) {
-      const termination = error && typeof error === 'object' ? error.termination : null
-      records[index] = {
-        ...records[index],
-        ...(error && typeof error === 'object' && error.claims !== undefined ? { claims: error.claims } : {}),
-        status: 'failed',
-        verdict: null,
-        score: 0,
-        termination: termination ?? null,
-        failure: {
-          code: termination?.reason ?? (error && typeof error === 'object' && error.code) ?? 'RUNNER_UNEXPECTED',
-          message: error instanceof Error ? error.message : String(error),
-        },
-      }
-      await onRecord(records[index], index)
-      if (termination) {
-        for (let pending = index + 1; pending < records.length; pending += 1) {
-          records[pending] = {
-            ...records[pending],
-            status: 'not_run_runner_terminated',
-            verdict: null,
-            score: 0,
-            termination,
+        const recordCall = call => {
+          try {
+            store?.recordCall(index, claim.token, call)
+          } catch (error) {
+            persistenceError = error
+            throw error
           }
-          await onRecord(records[pending], pending)
         }
-        break
+        record = { ...cell, status: 'planned', termination: null }
+        if (stopped) {
+          record = { ...record, status: 'not_run_runner_terminated', verdict: null, score: null, termination: stopped }
+        } else {
+          try {
+            const result = await executeCell(cell, { toolGate: createToolGate(cell), registerLaunch, recordCall })
+            if (persistenceError) throw persistenceError
+            const termination = runnerTermination(result)
+            record = {
+              ...record,
+              ...result,
+              runId: cell.runId,
+              status: termination ? 'failed' : result.status ?? 'completed',
+              // Benchmark grades belong to the user's independent grading machine.
+              verdict: null,
+              score: null,
+              termination,
+            }
+          } catch (error) {
+            if (persistenceError) throw persistenceError
+            if (error?.code === 'BENCHMARK_EVIDENCE_FAILED') throw error
+            const termination = runnerTermination(error)
+            record = {
+              ...record,
+              ...(error?.claims !== undefined ? { claims: error.claims } : {}),
+              status: 'failed',
+              verdict: null,
+              score: null,
+              termination,
+              failure: {
+                code: termination?.reason ?? runnerFailureCode(error),
+                // Raw adapter errors can contain request headers or credentials.
+                // Detailed diagnostics remain in the sanitized product evidence.
+                message: termination?.reason ?? runnerFailureCode(error),
+              },
+            }
+          }
+        }
+        // Storage/export failures must escape. They are not model failures and
+        // must never overwrite a completed task or allow the next task to start.
+        if (store) {
+          record.launches = store.launches(index)
+          record.calls = store.calls(index)
+        }
+        store?.finish(index, claim.token, record)
       }
+      records.push(record)
+      stopped ??= record.termination
+      await onRecord(record, index)
     }
+  } finally {
+    store?.close()
   }
   return Object.freeze({
     schemaVersion: 1,
@@ -360,21 +529,32 @@ export async function executeFormalBenchmark(plan, { providerEvidence, ...option
       fail('REASONING_EFFORT_UNSUPPORTED', `${provider} cannot prove max reasoning effort`)
     }
   }
+  if (!options.ledgerPath || !options.experimentBinding?.experimentId) {
+    fail('LEDGER_REQUIRED', 'formal execution requires a durable ledger and experiment identity')
+  }
   return runBenchmarkPlan(plan, options)
 }
 
 function metricRatio(records, numeratorField, denominatorField) {
   let numerator = 0
   let denominator = 0
+  let observedRuns = 0
   for (const record of records) {
-    if (!record.quality) continue
-    numerator += record.quality[numeratorField]
-    denominator += record.quality[denominatorField]
+    const top = record.quality?.[numeratorField]
+    const bottom = record.quality?.[denominatorField]
+    if (top == null || bottom == null) continue
+    if (!Number.isSafeInteger(top) || !Number.isSafeInteger(bottom) || top < 0 || bottom < top) {
+      fail('QUALITY_INVALID', `${record.runId} has invalid ${numeratorField}/${denominatorField}`)
+    }
+    observedRuns += 1
+    numerator += top
+    denominator += bottom
   }
   if (denominator === 0) {
     return Object.freeze({
       numerator,
       denominator,
+      observedRuns,
       rate: 'insufficient_evidence',
       interval95: null,
     })
@@ -390,6 +570,7 @@ function metricRatio(records, numeratorField, denominatorField) {
   return Object.freeze({
     numerator,
     denominator,
+    observedRuns,
     rate: Number(proportion.toFixed(6)),
     interval95: Object.freeze({
       lower: Number(Math.max(0, center - halfWidth).toFixed(6)),
@@ -490,9 +671,9 @@ function contextEffects(records) {
 }
 
 function benchmarkGates(records, quality) {
-  const complete = records.length > 0 && records.every(record => record.status === 'completed')
+  const complete = records.length > 0 && records.every(record => record.status === 'completed' && record.score != null)
   const status = (metric, threshold, direction) => {
-    if (!complete || metric.rate === 'insufficient_evidence') return 'insufficient_evidence'
+    if (!complete || metric.observedRuns !== records.length || metric.rate === 'insufficient_evidence') return 'insufficient_evidence'
     return direction === 'min' ? (metric.rate >= threshold ? 'pass' : 'fail')
       : (metric.rate <= threshold ? 'pass' : 'fail')
   }
@@ -502,9 +683,9 @@ function benchmarkGates(records, quality) {
     capture: Object.freeze({ threshold: 0.95, direction: 'min', status: status(quality.capture, 0.95, 'min') }),
     constraintRecall: Object.freeze({ threshold: 1, direction: 'min', status: status(quality.constraintRecall, 1, 'min') }),
     confirmedRecall: Object.freeze({ threshold: 1, direction: 'min', status: status(quality.confirmedRecall, 1, 'min') }),
-    bindingError: Object.freeze({ threshold: 0, direction: 'max', status: complete ? (quality.bindingErrors === 0 ? 'pass' : 'fail') : 'insufficient_evidence' }),
-    stateRegression: Object.freeze({ threshold: 0, direction: 'max', status: complete ? (quality.stateRegressions === 0 ? 'pass' : 'fail') : 'insufficient_evidence' }),
-    hallucinated: Object.freeze({ threshold: 0, direction: 'max', status: complete ? (quality.hallucinated === 0 ? 'pass' : 'fail') : 'insufficient_evidence' }),
+    bindingError: Object.freeze({ threshold: 0, direction: 'max', status: complete && quality.bindingErrors != null ? (quality.bindingErrors === 0 ? 'pass' : 'fail') : 'insufficient_evidence' }),
+    stateRegression: Object.freeze({ threshold: 0, direction: 'max', status: complete && quality.stateRegressions != null ? (quality.stateRegressions === 0 ? 'pass' : 'fail') : 'insufficient_evidence' }),
+    hallucinated: Object.freeze({ threshold: 0, direction: 'max', status: complete && quality.hallucinated != null ? (quality.hallucinated === 0 ? 'pass' : 'fail') : 'insufficient_evidence' }),
   })
 }
 
@@ -514,10 +695,16 @@ function strategyReferences(plan, records) {
   const configurations = [...new Set(plan.cells.map(cell => cell.configurationId))]
   const comparisons = [...PROVIDERS, 'fusion-4']
   return configurations.map(configurationId => {
+    if (plan.cells.some(cell => cell.configurationId === configurationId && byCell.get(cell.runId) == null)) {
+      return Object.freeze({
+        configurationId, gradingStatus: 'pending', providerMeans: null,
+        batchBestSingleModels: null, postHocPerTaskBestIsRetrospective: true, regrets: null,
+      })
+    }
     const scoreFor = (comparison, taskId) => byCell.get(
       plan.cells.find(cell => cell.configurationId === configurationId
         && cell.comparison === comparison && cell.taskId === taskId).runId,
-    ) ?? 0
+    )
     const providerMeans = Object.fromEntries(PROVIDERS.map(provider => [provider, Number(
       (taskIds.reduce((sum, taskId) => sum + scoreFor(provider, taskId), 0) / taskIds.length).toFixed(6),
     )]))
@@ -538,6 +725,7 @@ function strategyReferences(plan, records) {
     }))
     return Object.freeze({
       configurationId,
+      gradingStatus: 'complete',
       providerMeans: Object.freeze(providerMeans),
       batchBestSingleModels: Object.freeze(tiedBatchBest),
       postHocPerTaskBestIsRetrospective: true,
@@ -560,8 +748,8 @@ export function aggregateBenchmarkReport(plan, { records, experimentId, ...bindi
       || record.verdict != null || terminatedScoreIsSuccess)) {
       fail('TERMINATION_STATE_INVALID', `${record.runId} has a termination recorded as success`)
     }
-    if (record.status === 'completed' && (!Number.isFinite(record.score) || record.score < 0 || record.score > 1)) {
-      fail('SCORE_INVALID', `${record.runId} completed without a normalized score`)
+    if (record.score != null && (!Number.isFinite(record.score) || record.score < 0 || record.score > 1)) {
+      fail('SCORE_INVALID', `${record.runId} has an invalid normalized score`)
     }
     for (const call of record.usage ?? []) {
       if (call.callKind === 'fusion-engine') {
@@ -580,13 +768,18 @@ export function aggregateBenchmarkReport(plan, { records, experimentId, ...bindi
   }
 
   const completed = records.filter(record => record.status === 'completed')
-  const qualityCounts = ['bindingErrors', 'stateRegressions', 'hallucinated'].reduce((counts, field) => ({
-    ...counts,
-    [field]: records.reduce((sum, record) => sum + (record.quality?.[field] ?? 0), 0),
-  }), {})
+  const scored = records.filter(record => record.score != null).length
+  const qualityCounts = Object.fromEntries(['bindingErrors', 'stateRegressions', 'hallucinated'].map(field => {
+    const values = records.map(record => record.quality?.[field])
+    if (values.some(value => value != null && (!Number.isSafeInteger(value) || value < 0))) {
+      fail('QUALITY_INVALID', `invalid ${field} count`)
+    }
+    return [field, values.some(value => value == null) ? null : values.reduce((sum, value) => sum + value, 0)]
+  }))
   const usage = sumUsage(records)
   const quality = Object.freeze({
-    meanScore: Number((records.reduce((sum, record) => sum + (record.score ?? 0), 0) / records.length).toFixed(6)),
+    meanScore: scored === records.length
+      ? Number((records.reduce((sum, record) => sum + record.score, 0) / records.length).toFixed(6)) : null,
     minority: metricRatio(records, 'minorityRetained', 'minorityTotal'),
     capture: metricRatio(records, 'captureRetained', 'captureTotal'),
     constraintRecall: metricRatio(records, 'constraintsRetained', 'constraintsTotal'),
@@ -603,6 +796,7 @@ export function aggregateBenchmarkReport(plan, { records, experimentId, ...bindi
     kind: 'winwincode.real-task-benchmark-report.v1',
     experimentId,
     binding: Object.freeze(binding),
+    grading: Object.freeze({ status: scored === records.length ? 'complete' : 'pending', scored, pending: records.length - scored }),
     failureAccounting: Object.freeze({
       denominator: records.length,
       completed: completed.length,

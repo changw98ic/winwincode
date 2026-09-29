@@ -20,6 +20,64 @@ use winwincode_fusion::FusionProviderRouter;
 use winwincode_fusion::FusionTokenUsage;
 use winwincode_fusion::MapFusionProviderRouter;
 use winwincode_fusion::run_blind_panel;
+use winwincode_fusion::validate_panel_result;
+
+#[tokio::test]
+async fn collected_panel_requires_every_exact_original_member_once() {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let barrier = Arc::new(Barrier::new(3));
+    let input = sample_input();
+    let panel = run_blind_panel(
+        "retained",
+        input.clone(),
+        router(
+            &barrier,
+            &requests,
+            [
+                ("provider-a", Behavior::Answer("a")),
+                ("provider-b", Behavior::Fail("unavailable")),
+                ("provider-c", Behavior::Answer("c")),
+            ],
+        ),
+    )
+    .await
+    .unwrap();
+    let bytes = serde_json::to_vec(&panel).unwrap();
+    let restored = serde_json::from_slice(&bytes).unwrap();
+    validate_panel_result("retained", &input, &restored).unwrap();
+    let original = serde_json::to_value(&panel).unwrap();
+    for pointer in [
+        "/panelId",
+        "/inputDigest",
+        "/candidates/0/audit/panelId",
+        "/candidates/0/audit/candidateId",
+        "/candidates/0/audit/requestId",
+        "/candidates/0/audit/inputDigest",
+        "/candidates/0/audit/requestPayloadDigest",
+        "/candidates/0/audit/provider",
+        "/candidates/0/audit/model",
+        "/failures/0/candidateId",
+        "/failures/0/requestPayloadDigest",
+    ] {
+        let mut changed = original.clone();
+        *changed.pointer_mut(pointer).unwrap() = json!("foreign");
+        let changed = serde_json::from_value(changed).unwrap();
+        assert!(
+            validate_panel_result("retained", &input, &changed).is_err(),
+            "{pointer}"
+        );
+    }
+    let mut missing = panel.clone();
+    missing.failures.clear();
+    assert!(validate_panel_result("retained", &input, &missing).is_err());
+    let mut duplicate = panel.clone();
+    duplicate.candidates.push(panel.candidates[0].clone());
+    assert!(validate_panel_result("retained", &input, &duplicate).is_err());
+    let mut changed = input;
+    changed.provider_candidates[0].reasoning_effort = Some("max".into());
+    assert!(validate_panel_result("retained", &changed, &panel).is_err());
+    assert_eq!(requests.lock().unwrap().len(), 3);
+}
 
 #[derive(Debug, Clone, Copy)]
 enum Behavior {

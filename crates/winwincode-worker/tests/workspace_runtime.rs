@@ -261,9 +261,9 @@ fn active_job() -> ActiveJob {
             goal: "Implement fixture".to_owned(),
             job_id: ExecutionJobId("job_00000000000000000000000001".to_owned()),
             limits: ExecutionLimits {
-                deadline_at: Instant("2026-08-28T01:00:00.000Z".to_owned()),
+                deadline_at: Some(Instant("2026-08-28T01:00:00.000Z".to_owned())),
                 max_artifact_bytes: 1_048_576,
-                max_runtime_seconds: 300,
+                max_runtime_seconds: Some(300),
             },
             payload_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
             scope: ExecutionScope::WorkRunExecutionScope(WorkRunExecutionScope {
@@ -278,6 +278,7 @@ fn active_job() -> ActiveJob {
                 work_run_id: WorkRunId("wrn_01J00000000000000000000001".to_owned()),
             }),
             work_input: Some(WorkRunInput {
+                work_plan: None,
                 device_target: None,
                 delivery_spec_id: "spec-fixture".into(),
                 delivery_spec_revision: Revision(2),
@@ -667,6 +668,42 @@ fn sealed_replacement_rotates_authority_and_preserves_the_predecessor_checkout()
     replayed
         .close_job(&successor.job.job_id, WorkspaceCloseReason::Completed)
         .expect("close replacement checkout");
+}
+
+#[test]
+fn renewed_workspace_survives_replacement_and_successor_renewal() {
+    let fixture = Fixture::new("renewed-replacement");
+    let mut predecessor = active_job();
+    let mut first = fixture.runtime();
+    let checkout = first
+        .open_for_job(&predecessor, None)
+        .expect("open predecessor");
+    predecessor.lease.expires_at = Instant("2026-08-28T01:05:00.000Z".to_owned());
+    first.renew_lease(&predecessor).expect("renew predecessor");
+    drop(first);
+    let mut successor = replacement_successor(&predecessor);
+    let receipt = replacement_authority(&predecessor, &successor);
+    let mut second = fixture.runtime();
+    assert_eq!(
+        second
+            .open_for_job(&successor, Some(&receipt))
+            .expect("replace renewed predecessor"),
+        checkout
+    );
+    successor.lease.expires_at = Instant("2026-08-28T01:15:00.000Z".to_owned());
+    second.renew_lease(&successor).expect("renew successor");
+    drop(second);
+    let mut recovered = fixture.runtime();
+    assert_eq!(
+        recovered
+            .open_for_job(&successor, Some(&receipt))
+            .expect("recover with original replacement receipt"),
+        checkout
+    );
+    recovered
+        .close_job(&successor.job.job_id, WorkspaceCloseReason::Completed)
+        .expect("cleanup preserves original allocation identity");
+    assert!(!checkout.exists());
 }
 
 #[test]
@@ -1610,7 +1647,7 @@ fn retain_terminal_frame_without_receipt(
                 )),
                 response_delta: &[],
                 model_usage: Some(ExecutionOutcomeUsage {
-                    cost_microunits: 53,
+                    cost_microunits: Some(53),
                     runtime_millis: 0,
                     tokens: 100,
                 }),
@@ -1870,7 +1907,7 @@ async fn diagnostic_baseline_does_not_blame_history_then_routes_one_new_missing_
                     )),
                     response_delta: &[],
                     model_usage: Some(ExecutionOutcomeUsage {
-                        cost_microunits: 47,
+                        cost_microunits: Some(47),
                         runtime_millis: 0,
                         tokens: 100,
                     }),
@@ -1985,7 +2022,7 @@ async fn diagnostic_baseline_does_not_blame_history_then_routes_one_new_missing_
             .as_ref()
             .and_then(|receipt| receipt.model_usage.as_ref())
             .map(|usage| usage.cost_microunits),
-        Some(47),
+        Some(Some(47)),
         "the exact settled Observer charge survives terminal replay"
     );
     assert!(

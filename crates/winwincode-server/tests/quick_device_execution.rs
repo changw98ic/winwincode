@@ -133,6 +133,13 @@ fn principal(user: &str) -> AuthenticatedPrincipal {
 }
 
 fn compose_application(root: &Path) -> StandaloneControlPlaneApplication {
+    compose_application_with_runtime(root, Some(3_600))
+}
+
+fn compose_application_with_runtime(
+    root: &Path,
+    runtime: Option<i64>,
+) -> StandaloneControlPlaneApplication {
     let hub = Arc::new(
         DurableEventHub::open(root.join("events"), DurableEventHubConfig::default())
             .expect("open event hub"),
@@ -154,7 +161,7 @@ fn compose_application(root: &Path) -> StandaloneControlPlaneApplication {
         repository_scope,
         "fixture-checkout-revision",
         "codex-chat",
-        3_600,
+        runtime,
         1_073_741_824,
     )
     .expect("execution config");
@@ -481,8 +488,18 @@ fn claim_locally(
 
 #[test]
 fn a_device_anchored_turn_is_dispatched_to_the_launched_worker_session() {
+    assert_anchored_runtime(Some(3_600));
+}
+
+#[test]
+fn unlimited_device_turn_persists_unlimited_job_and_reservation() {
+    assert_anchored_runtime(None);
+}
+
+#[allow(clippy::too_many_lines)]
+fn assert_anchored_runtime(runtime: Option<i64>) {
     let root = temporary_root("anchored-dispatch");
-    let application = compose_application(&root);
+    let application = compose_application_with_runtime(&root, runtime);
     let holder = id("usr", 1);
     {
         let mut storage = open_storage(&root);
@@ -548,6 +565,25 @@ fn a_device_anchored_turn_is_dispatched_to_the_launched_worker_session() {
             .load_execution_job_record(&job_id)
             .expect("job record")
             .expect("queued job");
+        let job: serde_json::Value =
+            serde_json::from_slice(&record.dispatch_payload).expect("durable job");
+        assert_eq!(
+            job["limits"]["maxRuntimeSeconds"],
+            serde_json::json!(runtime)
+        );
+        assert_eq!(job["limits"]["deadlineAt"].is_null(), runtime.is_none());
+        let reservation = storage
+            .execution_admission()
+            .expect("admission")
+            .load_reservation_by_job(&job_id)
+            .expect("reservation lookup")
+            .expect("reservation");
+        assert_eq!(reservation.reserved_tokens, None);
+        assert_eq!(reservation.reserved_cost_microunits, None);
+        assert_eq!(
+            reservation.runtime_limit_millis,
+            runtime.map(|seconds| u64::try_from(seconds).unwrap() * 1000)
+        );
         assert_eq!(record.state, ExecutionJobState::Queued);
         job_id
     };

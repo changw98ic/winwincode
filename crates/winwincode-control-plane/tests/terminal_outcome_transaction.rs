@@ -285,9 +285,9 @@ fn execution_job(delivery: &Delivery, scope: &RepositoryScope) -> ExecutionJob {
             .clone(),
         job_id: binding.execution_job_id.clone(),
         limits: ExecutionLimits {
-            deadline_at: Instant("2027-01-15T09:00:00.000Z".into()),
+            deadline_at: Some(Instant("2027-01-15T09:00:00.000Z".into())),
             max_artifact_bytes: 10_000_000,
-            max_runtime_seconds: 3_600,
+            max_runtime_seconds: Some(3_600),
         },
         payload_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
         scope: ExecutionScope::WorkRunExecutionScope(WorkRunExecutionScope {
@@ -302,6 +302,7 @@ fn execution_job(delivery: &Delivery, scope: &RepositoryScope) -> ExecutionJob {
             work_run_id: binding.work_run_id.clone(),
         }),
         work_input: Some(winwincode_execution_port::generated::WorkRunInput {
+            work_plan: None,
             device_target: None,
             delivery_spec_id: delivery.snapshot().spec.id.0.clone(),
             delivery_spec_revision: Revision(
@@ -736,9 +737,9 @@ fn seed_worker_execution_admission(
                 limits: ExecutionAdmissionLimits {
                     max_concurrent: 4,
                     max_queued: 4,
-                    token_budget: 10_000,
-                    cost_budget_microunits: 100_000,
-                    max_runtime_millis: 3_600_000,
+                    token_budget: Some(10_000),
+                    cost_budget_microunits: Some(100_000),
+                    max_runtime_millis: Some(3_600_000),
                 },
             })
             .expect("execution admission policy");
@@ -751,9 +752,9 @@ fn seed_worker_execution_admission(
             job_id: job.job_id.clone(),
             request_id: RequestId(canonical_id("req", seed + 9_002)),
             repository_access: ExecutionRepositoryAccess::ReadOnly,
-            reserved_tokens: 100,
-            reserved_cost_microunits: 1_000,
-            runtime_limit_millis: 120_000,
+            reserved_tokens: Some(100),
+            reserved_cost_microunits: Some(1_000),
+            runtime_limit_millis: Some(120_000),
             submitted_at,
         })
         .expect("execution reservation");
@@ -1142,7 +1143,7 @@ fn terminal_message(
             status,
             summary: "Final verifier completed".into(),
             usage: Some(ExecutionOutcomeUsage {
-                cost_microunits: 400,
+                cost_microunits: Some(400),
                 runtime_millis: 60_000,
                 tokens: 40,
             }),
@@ -1345,7 +1346,35 @@ fn authenticated_worker_terminal_settles_or_releases_once_across_restart() {
             "settled",
             1,
         ),
+        (
+            74,
+            "unknown-cost",
+            ExecutionOutcomeStatus::Succeeded,
+            "settled",
+            1,
+        ),
         (71, "failed", ExecutionOutcomeStatus::Failed, "released", 0),
+        (
+            75,
+            "failed-known-usage",
+            ExecutionOutcomeStatus::Failed,
+            "settled",
+            1,
+        ),
+        (
+            76,
+            "cancelled-known-usage",
+            ExecutionOutcomeStatus::Cancelled,
+            "settled",
+            1,
+        ),
+        (
+            77,
+            "infrastructure-known-usage",
+            ExecutionOutcomeStatus::InfrastructureError,
+            "settled",
+            1,
+        ),
         (
             72,
             "cancelled",
@@ -1354,46 +1383,96 @@ fn authenticated_worker_terminal_settles_or_releases_once_across_restart() {
             0,
         ),
     ] {
-        let root = temporary_directory(&format!("Worker-quota-{name}"));
-        let scope = repository_scope(seed);
-        let (delivery, _candidate) = running_final_verifier(seed);
-        let job = execution_job(&delivery, &scope);
-        let message = terminal_message(&job, &delivery, seed, status);
-        let facts = outcome_facts(&delivery, &message);
-        seed_delivery_and_job(&root, &delivery, &job);
-        seed_authenticated_worker_execution(&root, &scope, &job, &message, seed);
-
-        let mut control_plane = ControlPlane::start_local(
-            ControlPlaneConfig::local(&root),
-            Box::new(RecordingPublisher),
-        )
-        .expect("Control Plane start");
-        let first = control_plane
-            .commit_delivery_terminal_outcome(&scope, &message, &facts, &message.sent_at)
-            .expect("authenticated Worker terminal commit");
-        assert!(!first.receipt().idempotent_replay);
-        control_plane.shutdown().expect("Control Plane shutdown");
-        assert_eq!(
-            worker_terminal_state(&root, &job.job_id),
-            (expected_state.to_owned(), expected_sources)
+        assert_authenticated_worker_terminal_case(
+            seed,
+            name,
+            status,
+            expected_state,
+            expected_sources,
         );
-
-        let mut restarted = ControlPlane::start_local(
-            ControlPlaneConfig::local(&root),
-            Box::new(RecordingPublisher),
-        )
-        .expect("Control Plane restart");
-        let replay = restarted
-            .commit_delivery_terminal_outcome(&scope, &message, &facts, &message.sent_at)
-            .expect("exact Worker terminal replay");
-        assert!(replay.receipt().idempotent_replay);
-        restarted.shutdown().expect("restart shutdown");
-        assert_eq!(
-            worker_terminal_state(&root, &job.job_id),
-            (expected_state.to_owned(), expected_sources)
-        );
-        fs::remove_dir_all(root).expect("directory release");
     }
+}
+
+fn assert_authenticated_worker_terminal_case(
+    seed: u64,
+    name: &str,
+    status: ExecutionOutcomeStatus,
+    expected_state: &str,
+    expected_sources: i64,
+) {
+    let root = temporary_directory(&format!("Worker-quota-{name}"));
+    let scope = repository_scope(seed);
+    let (delivery, _candidate) = running_final_verifier(seed);
+    let job = execution_job(&delivery, &scope);
+    let mut message = terminal_message(&job, &delivery, seed, status);
+    if expected_state == "released" {
+        message.outcome.usage = None;
+    }
+    if name.ends_with("known-usage") {
+        message.outcome.usage = Some(ExecutionOutcomeUsage {
+            tokens: 47,
+            runtime_millis: 30_000,
+            cost_microunits: None,
+        });
+    }
+    if name == "unknown-cost" {
+        message
+            .outcome
+            .usage
+            .as_mut()
+            .expect("usage")
+            .cost_microunits = None;
+    }
+    let facts = outcome_facts(&delivery, &message);
+    seed_delivery_and_job(&root, &delivery, &job);
+    seed_authenticated_worker_execution(&root, &scope, &job, &message, seed);
+
+    let mut control_plane = ControlPlane::start_local(
+        ControlPlaneConfig::local(&root),
+        Box::new(RecordingPublisher),
+    )
+    .expect("Control Plane start");
+    let first = control_plane
+        .commit_delivery_terminal_outcome(&scope, &message, &facts, &message.sent_at)
+        .expect("authenticated Worker terminal commit");
+    assert!(!first.receipt().idempotent_replay);
+    control_plane.shutdown().expect("Control Plane shutdown");
+    assert_eq!(
+        worker_terminal_state(&root, &job.job_id),
+        (expected_state.to_owned(), expected_sources)
+    );
+
+    let mut restarted = ControlPlane::start_local(
+        ControlPlaneConfig::local(&root),
+        Box::new(RecordingPublisher),
+    )
+    .expect("Control Plane restart");
+    let replay = restarted
+        .commit_delivery_terminal_outcome(&scope, &message, &facts, &message.sent_at)
+        .expect("exact Worker terminal replay");
+    assert!(replay.receipt().idempotent_replay);
+    restarted.shutdown().expect("restart shutdown");
+    assert_eq!(
+        worker_terminal_state(&root, &job.job_id),
+        (expected_state.to_owned(), expected_sources)
+    );
+    if let Some(usage) = &message.outcome.usage
+        && expected_state == "settled"
+    {
+        let connection =
+            rusqlite::Connection::open(root.join("control-plane.sqlite3")).expect("settled usage");
+        let cost: Option<i64> = connection.query_row("SELECT actual_cost_microunits FROM execution_admission_reservations WHERE job_id = ?1", [&job.job_id.0], |row| row.get(0)).expect("actual charge");
+        assert_eq!(cost, usage.cost_microunits);
+        let tokens: i64 = connection
+            .query_row(
+                "SELECT actual_tokens FROM execution_admission_reservations WHERE job_id = ?1",
+                [&job.job_id.0],
+                |row| row.get(0),
+            )
+            .expect("actual tokens");
+        assert_eq!(tokens, usage.tokens);
+    }
+    fs::remove_dir_all(root).expect("directory release");
 }
 
 #[test]
@@ -2134,7 +2213,8 @@ fn terminal_commit_restarts_and_releases_worker_resources_after_a_write_crash() 
     let scope = repository_scope(seed);
     let (delivery, _candidate) = running_final_verifier(seed);
     let job = execution_job(&delivery, &scope);
-    let message = terminal_message(&job, &delivery, seed, ExecutionOutcomeStatus::Cancelled);
+    let mut message = terminal_message(&job, &delivery, seed, ExecutionOutcomeStatus::Cancelled);
+    message.outcome.usage = None;
     let facts = outcome_facts(&delivery, &message);
     seed_delivery_and_job(&root, &delivery, &job);
     seed_authenticated_worker_execution(&root, &scope, &job, &message, seed);

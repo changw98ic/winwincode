@@ -1402,57 +1402,6 @@ fn hunk_sections(diff: &[u8]) -> Result<Vec<&[u8]>, ArtifactError> {
         .collect())
 }
 
-/// Maps replacement hunks to one containing source hunk using trusted Git ranges.
-// ponytail: require whole-hunk containment; add changed-line mapping if wider
-// Git context prevents an otherwise in-scope repair from being accepted.
-pub(crate) fn rework_hunk_origins(
-    previous: &[u8],
-    delta: &[u8],
-) -> Result<Vec<(String, String)>, ArtifactError> {
-    fn range(hunk: &[u8], index: usize, sign: char) -> Result<(u64, u64), ArtifactError> {
-        let header = hunk.split(|byte| *byte == b'\n').next().unwrap_or_default();
-        let field = std::str::from_utf8(header)
-            .ok()
-            .filter(|line| line.starts_with("@@ "))
-            .and_then(|line| line.split_ascii_whitespace().nth(index))
-            .and_then(|field| field.strip_prefix(sign))
-            .ok_or_else(|| ArtifactError::invalid("rework requires text Git hunks"))?;
-        let (start, count) = field.split_once(',').unwrap_or((field, "1"));
-        let start = start
-            .parse::<u64>()
-            .map_err(|_| ArtifactError::invalid("invalid Git hunk start"))?;
-        let count = count
-            .parse::<u64>()
-            .map_err(|_| ArtifactError::invalid("invalid Git hunk length"))?;
-        Ok((
-            start,
-            start
-                .checked_add(count)
-                .ok_or_else(|| ArtifactError::invalid("Git hunk range overflow"))?,
-        ))
-    }
-    let sources = hunk_sections(previous)?
-        .into_iter()
-        .map(|hunk| Ok((format!("{:x}", Sha256::digest(hunk)), range(hunk, 2, '+')?)))
-        .collect::<Result<Vec<_>, ArtifactError>>()?;
-    hunk_sections(delta)?
-        .into_iter()
-        .map(|hunk| {
-            let (start, end) = range(hunk, 1, '-')?;
-            let matches = sources
-                .iter()
-                .filter(|(_, (left, right))| *left <= start && end <= *right)
-                .collect::<Vec<_>>();
-            let [source] = matches.as_slice() else {
-                return Err(ArtifactError::conflict(
-                    "replacement hunk escapes or ambiguously overlaps its source scope",
-                ));
-            };
-            Ok((format!("{:x}", Sha256::digest(hunk)), source.0.clone()))
-        })
-        .collect()
-}
-
 fn git_output(
     repository: &Path,
     arguments: &[OsString],
@@ -1569,17 +1518,4 @@ fn git_object_id(value: &str, field: &str) -> Result<(), ArtifactError> {
         )));
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod rework_hunk_tests {
-    use super::rework_hunk_origins;
-    #[test]
-    fn maps_only_an_exact_contained_source_range() {
-        let source = b"@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n";
-        let delta = b"@@ -1,3 +1,3 @@\n a\n-B\n+C\n c\n";
-        assert_eq!(rework_hunk_origins(source, delta).unwrap().len(), 1);
-        assert!(rework_hunk_origins(source, b"@@ -8,3 +8,3 @@\n-x\n+y\n").is_err());
-        assert!(rework_hunk_origins(source, b"Binary files differ\n").is_err());
-    }
 }

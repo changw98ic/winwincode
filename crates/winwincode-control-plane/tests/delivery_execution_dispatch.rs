@@ -97,9 +97,9 @@ fn execution_config(seed: u64) -> DeliveryExecutionConfig {
                 winwincode_execution_port::generated::ExecutionWorkspaceWriteMode::Candidate,
         },
         limits: ExecutionLimits {
-            deadline_at: Instant("2026-08-25T12:00:00.000Z".into()),
+            deadline_at: Some(Instant("2026-08-25T12:00:00.000Z".into())),
             max_artifact_bytes: 10_000_000,
-            max_runtime_seconds: 3_600,
+            max_runtime_seconds: Some(3_600),
         },
         managed_app_run_config: None,
     }
@@ -121,6 +121,17 @@ fn pending_execution(seed: u64) -> PendingDeliveryExecution {
     )
     .expect("prepared execution job");
     let input = job.work_input.as_ref().expect("execution input");
+    assert_eq!(
+        input.work_plan.as_deref(),
+        Some(
+            transition
+                .delivery
+                .snapshot()
+                .work_run_aggregate
+                .items
+                .as_slice()
+        )
+    );
     assert_eq!(
         input.delivery_spec_id,
         transition.delivery.snapshot().spec.id.0
@@ -679,10 +690,10 @@ fn assert_invalid_config_values(seed: u64, request_id: &RequestId) {
             config.workspace.checkout_revision.clear();
         }),
         ("deadlineAt", |config| {
-            config.limits.deadline_at = Instant("2026-08-25T12:00:00Z".into());
+            config.limits.deadline_at = Some(Instant("2026-08-25T12:00:00Z".into()));
         }),
         ("maxRuntimeSeconds", |config| {
-            config.limits.max_runtime_seconds = 604_801;
+            config.limits.max_runtime_seconds = Some(604_801);
         }),
         ("maxArtifactBytes", |config| {
             config.limits.max_artifact_bytes = 1_099_511_627_777;
@@ -703,7 +714,7 @@ fn assert_invalid_config_values(seed: u64, request_id: &RequestId) {
         long_checkout,
     );
     let mut zero_limits = execution_config(seed);
-    zero_limits.limits.max_runtime_seconds = 0;
+    zero_limits.limits.max_runtime_seconds = Some(0);
     zero_limits.limits.max_artifact_bytes = -1;
     assert_prepare_rejected(
         "limit minima",

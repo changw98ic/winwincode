@@ -517,9 +517,9 @@ mod tests {
         let limits = ExecutionAdmissionLimits {
             max_concurrent: 4,
             max_queued: 4,
-            token_budget: 10_000,
-            cost_budget_microunits: 10_000,
-            max_runtime_millis: 60_000,
+            token_budget: Some(10_000),
+            cost_budget_microunits: Some(10_000),
+            max_runtime_millis: Some(60_000),
         };
         {
             let mut admission = storage.execution_admission().expect("admission");
@@ -562,9 +562,9 @@ mod tests {
                     job_id: ExecutionJobId(id("job", seed)),
                     request_id: RequestId(id("req", seed + 13)),
                     repository_access: ExecutionRepositoryAccess::ReadOnly,
-                    reserved_tokens: 100,
-                    reserved_cost_microunits: 1_000,
-                    runtime_limit_millis: 30_000,
+                    reserved_tokens: Some(100),
+                    reserved_cost_microunits: Some(1_000),
+                    runtime_limit_millis: Some(30_000),
                     submitted_at: instant(T2),
                 })
                 .expect("reserve");

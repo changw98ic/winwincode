@@ -17,9 +17,14 @@
 
 #![allow(clippy::doc_markdown)]
 
+pub mod analysis;
+pub mod claims;
+pub mod context;
 mod contract;
 pub mod evidence;
+pub mod knowledge;
 mod panel;
+pub mod planner;
 mod provider;
 
 pub use contract::FusionBlindPrompt;
@@ -35,13 +40,17 @@ pub use contract::FusionProviderRequest;
 pub use contract::FusionTokenUsage;
 pub use panel::FusionPanelError;
 pub use panel::run_blind_panel;
+pub use panel::validate_panel_result;
 pub use provider::FusionProvider;
 pub use provider::FusionProviderError;
 pub use provider::FusionProviderRouter;
 pub use provider::MapFusionProviderRouter;
+pub use provider::answer_from_frames;
 
 /// Minimum distinct Providers required by a valid blind panel.
 pub const MIN_PROVIDER_COUNT: usize = 3;
 
 /// Maximum Providers accepted by a single panel.
 pub const MAX_PROVIDER_COUNT: usize = 16;
+
+pub mod judge;

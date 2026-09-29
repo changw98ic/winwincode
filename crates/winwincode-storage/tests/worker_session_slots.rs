@@ -170,9 +170,9 @@ fn prepare_admission(
     let limits = ExecutionAdmissionLimits {
         max_concurrent: 20,
         max_queued: 20,
-        token_budget: 100_000,
-        cost_budget_microunits: 1_000_000,
-        max_runtime_millis: 60_000,
+        token_budget: Some(100_000),
+        cost_budget_microunits: Some(1_000_000),
+        max_runtime_millis: Some(60_000),
     };
     for boundary in admission_boundaries(request_scope, worker_pool) {
         admission
@@ -187,9 +187,9 @@ fn prepare_admission(
             job_id: ExecutionJobId(id("job", *job)),
             request_id: RequestId(id("req", 1_000 + *job)),
             repository_access: ExecutionRepositoryAccess::ReadOnly,
-            reserved_tokens: 100,
-            reserved_cost_microunits: 1_000,
-            runtime_limit_millis: 30_000,
+            reserved_tokens: Some(100),
+            reserved_cost_microunits: Some(1_000),
+            runtime_limit_millis: Some(30_000),
             submitted_at: at(3),
         };
         admission.reserve(&reservation).expect("admission reserve");

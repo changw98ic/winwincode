@@ -130,7 +130,7 @@ fn execution_config(repository: u64) -> ProductSessionExecutionConfig {
         },
         "0123456789abcdef0123456789abcdef01234567",
         "codex-chat",
-        3_600,
+        Some(3_600),
         1_073_741_824,
     )
     .expect("execution config")
@@ -313,9 +313,9 @@ fn prepare_slot_for_job(
     let limits = ExecutionAdmissionLimits {
         max_concurrent: 10,
         max_queued: 10,
-        token_budget: 100_000,
-        cost_budget_microunits: 1_000_000,
-        max_runtime_millis: 60_000,
+        token_budget: Some(100_000),
+        cost_budget_microunits: Some(1_000_000),
+        max_runtime_millis: Some(60_000),
     };
     {
         let mut admission = storage.execution_admission().expect("admission");
@@ -332,9 +332,9 @@ fn prepare_slot_for_job(
                 job_id: job_id.clone(),
                 request_id: RequestId(id("req", request_seed)),
                 repository_access: ExecutionRepositoryAccess::ReadOnly,
-                reserved_tokens: 100,
-                reserved_cost_microunits: 1_000,
-                runtime_limit_millis: 30_000,
+                reserved_tokens: Some(100),
+                reserved_cost_microunits: Some(1_000),
+                runtime_limit_millis: Some(30_000),
                 submitted_at: at(4),
             })
             .expect("admission reserve");
@@ -533,7 +533,7 @@ fn assistant_command(
                 usage: Some(ExecutionOutcomeUsage {
                     runtime_millis: 15,
                     tokens: 10,
-                    cost_microunits: 1,
+                    cost_microunits: Some(1),
                 }),
                 last_event_sequence: ExecutionAckSequence(
                     i64::try_from(stream_sequence).expect("stream sequence"),

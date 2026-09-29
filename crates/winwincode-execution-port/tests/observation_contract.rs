@@ -255,7 +255,7 @@ fn request_and_receipt_round_trip_with_exact_authority_and_no_raw_payloads() {
         identity: intent.identity.clone(),
         input_digest: intent.input_digest.clone(),
         model_usage: Some(ExecutionOutcomeUsage {
-            cost_microunits: 9,
+            cost_microunits: Some(9),
             runtime_millis: 12,
             tokens: 34,
         }),

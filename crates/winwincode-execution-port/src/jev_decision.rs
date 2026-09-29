@@ -436,7 +436,11 @@ fn validate_importance(value: ImportanceSignals) -> Result<(), JevDecisionError>
     }
 }
 
-fn validate_policy(policy: &JevPolicy) -> Result<(), JevDecisionError> {
+/// Validates system-owned thresholds before a host starts paid inference.
+///
+/// # Errors
+/// Returns `InvalidPolicy` for malformed or inconsistent thresholds.
+pub fn validate_policy(policy: &JevPolicy) -> Result<(), JevDecisionError> {
     let thresholds = [
         policy.minimum_confidence,
         policy.pin_threshold,

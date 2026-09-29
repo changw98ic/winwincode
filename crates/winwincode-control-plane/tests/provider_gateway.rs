@@ -287,9 +287,9 @@ fn commit_execution_job(storage: &mut SqliteStorage, message: &ModelOpenMessage)
         goal: "execute the authenticated model request".to_owned(),
         job_id: message.lease.job_id.clone(),
         limits: ExecutionLimits {
-            deadline_at: Instant("2030-01-01T00:05:00.000Z".to_owned()),
+            deadline_at: Some(Instant("2030-01-01T00:05:00.000Z".to_owned())),
             max_artifact_bytes: 1_000_000,
-            max_runtime_seconds: 300,
+            max_runtime_seconds: Some(300),
         },
         payload_digest: message.request.payload_digest.clone(),
         scope: ExecutionScope::WorkRunExecutionScope(WorkRunExecutionScope {
@@ -575,6 +575,7 @@ fn pause_frames(
     let mut converter = ProviderStreamConverter::from_gateway_receipt(receipt);
     let mut events = vec![
         ProviderStreamEvent::ResponseStarted {
+            observed_model_id: None,
             provider_response_id: "response-runtime-pause".to_owned(),
         },
         ProviderStreamEvent::TextStarted { index: 0 },
@@ -584,6 +585,7 @@ fn pause_frames(
         delta: format!("fragment-{index}"),
     }));
     events.push(ProviderStreamEvent::TextEnded { index: 0 });
+    events.push(ProviderStreamEvent::TextStarted { index: 1 });
     let frames = events
         .into_iter()
         .flat_map(|event| converter.ingest(event).expect("convert pause frame"))
@@ -599,6 +601,7 @@ fn terminal_frames(
     let mut converter = ProviderStreamConverter::from_gateway_receipt(receipt);
     [
         ProviderStreamEvent::ResponseStarted {
+            observed_model_id: None,
             provider_response_id: "response-runtime-terminal".to_owned(),
         },
         ProviderStreamEvent::TextStarted { index: 0 },

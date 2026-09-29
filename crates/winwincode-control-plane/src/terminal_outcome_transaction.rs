@@ -130,6 +130,7 @@ pub(crate) fn execute_at(
     message: &JobOutcomeMessage,
     facts: &DeliveryTerminalOutcomeFacts,
     server_time: &Instant,
+    accepted_period: &Instant,
 ) -> Result<DeliveryTerminalOutcomeCommitReceipt, DeliveryTerminalOutcomeCommitError> {
     let phase = TerminalPhase::new(scope, message)?;
     if let Some(receipt) = storage.load_receipt(&phase.receipt_identity, &phase.command_digest)? {
@@ -151,7 +152,14 @@ pub(crate) fn execute_at(
             return Ok(DeliveryTerminalOutcomeCommitReceipt { receipt });
         }
     };
-    validate_message_authority(message, &job, &context, facts, &session_identity)?;
+    validate_message_authority(
+        message,
+        &job,
+        &context,
+        facts,
+        &session_identity,
+        accepted_period,
+    )?;
     let receipt = commit_terminal(
         storage,
         message,
@@ -444,7 +452,9 @@ fn validate_message_shape(message: &JobOutcomeMessage) -> Result<(), StorageErro
     }
     if let Some(usage) = &message.outcome.usage
         && (!(0..=9_007_199_254_740_991).contains(&usage.tokens)
-            || !(0..=9_007_199_254_740_991).contains(&usage.cost_microunits)
+            || !usage
+                .cost_microunits
+                .is_none_or(|cost| (0..=9_007_199_254_740_991).contains(&cost))
             || !(0..=9_007_199_254_740_991).contains(&usage.runtime_millis))
     {
         return Err(StorageError::invalid_input(
@@ -497,6 +507,7 @@ fn validate_message_authority(
     context: &TerminalContext,
     facts: &DeliveryTerminalOutcomeFacts,
     session_identity: &SessionIdentity,
+    accepted_period: &Instant,
 ) -> Result<(), StorageError> {
     let active = facts.authority().active_lease();
     let attempt = u64::try_from(message.lease.attempt)
@@ -523,7 +534,8 @@ fn validate_message_authority(
         || active.worker_instance_id() != &message.lease.worker_instance_id
         || active.worker_session_id() != &message.worker_session_id
         || facts.authority().issued_at() != &message.lease.issued_at
-        || facts.authority().expires_at() != &message.lease.expires_at
+        || accepted_period != &message.lease.expires_at
+        || accepted_period.0 > facts.authority().expires_at().0
         || facts.status() != expected_status
         || metadata.codex_thread_id() != message.outcome.codex_thread_id.as_ref()
         || metadata.finished_at_millis() != message_finished_at

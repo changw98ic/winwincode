@@ -166,9 +166,9 @@ fn dispatch() -> JobDispatchMessage {
             goal: goal.clone(),
             job_id: lease.job_id.clone(),
             limits: ExecutionLimits {
-                deadline_at: Instant("2032-01-02T03:08:05.000Z".to_owned()),
+                deadline_at: Some(Instant("2032-01-02T03:08:05.000Z".to_owned())),
                 max_artifact_bytes: 1_000_000,
-                max_runtime_seconds: 180,
+                max_runtime_seconds: Some(180),
             },
             payload_digest: Sha256Digest(format!("sha256:{}", "b".repeat(64))),
             scope: ExecutionScope::WorkRunExecutionScope(WorkRunExecutionScope {
@@ -183,6 +183,7 @@ fn dispatch() -> JobDispatchMessage {
                 work_run_id: WorkRunId(id("wrn", 'L')),
             }),
             work_input: Some(WorkRunInput {
+                work_plan: None,
                 device_target: None,
                 candidate_ref: None,
                 delivery_spec_id: "spec-local-fixture".to_owned(),
@@ -325,11 +326,11 @@ impl FixtureCodex {
                 CodexTurnCompletion {
                     summary: secret_safe_runtime_summary("local fixture completed").unwrap(),
                     artifacts: Vec::new(),
-                    usage: ExecutionOutcomeUsage {
+                    usage: Some(ExecutionOutcomeUsage {
                         runtime_millis: 17,
                         tokens: 23,
-                        cost_microunits: 29,
-                    },
+                        cost_microunits: Some(29),
+                    }),
                 },
             )));
         codex
@@ -478,6 +479,9 @@ impl CodexCoreAdapter for FixtureCodex {
             &worker_config().capabilities,
             &start.job.execution_profile,
             AgentProfileSettings {
+                fusion: None,
+                jev_judge: None,
+                jev_context: None,
                 provider: "fixture-provider".into(),
                 model: "fixture-model".into(),
                 reasoning: "provider_default".into(),

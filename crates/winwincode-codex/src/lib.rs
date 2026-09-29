@@ -12,11 +12,16 @@ mod adapter;
 pub mod candidate_artifact_outbox;
 mod contract;
 pub mod diagnostic_artifact_outbox;
+mod durable_fusion;
+pub use durable_fusion::FusionPanelFuture;
+pub mod fusion_provider;
 mod helper_release;
+mod judge_bridge;
 mod model_bridge;
 pub mod model_port_client;
 mod outbox;
-pub mod parallel_model_runner;
+pub use fusion_provider::FusionModelPortProvider;
+mod parallel_model_runner;
 pub use parallel_model_runner::{
     FusionPanelSeat, ParallelModelAttempt, ParallelModelAttemptRecord, ParallelModelBatchResult,
     ParallelModelBudget, ParallelModelCancelHandle, ParallelModelCancelSignal, ParallelModelResult,
@@ -27,6 +32,7 @@ mod performance;
 pub mod performance_evidence;
 pub mod stage_product;
 mod store;
+mod tool_repeat;
 pub mod workrun_runtime_projection;
 
 pub use adapter::{

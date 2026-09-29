@@ -205,7 +205,9 @@ impl GateDecisionFact {
 pub struct GateInteractionAuthority {
     pub execution_scope: ExecutionQueueScope,
     pub worker_pool_id: WorkerPoolId,
-    pub product_session_revision: u64,
+    /// None names a Delivery-owned role session; Some seals a Chat catalog revision.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub product_session_revision: Option<u64>,
     pub work_contract_id: Option<winwincode_domain::WorkContractId>,
     pub work_contract_revision: Option<winwincode_domain::Revision>,
     pub work_item_id: Option<winwincode_domain::WorkItemId>,
@@ -242,7 +244,7 @@ impl GateInteractionAuthority {
         Ok(Self {
             execution_scope: source.execution_scope.clone(),
             worker_pool_id: source.worker_pool_id.clone(),
-            product_session_revision: source.product_session_revision,
+            product_session_revision: Some(source.product_session_revision),
             work_contract_id: source.work_contract_id.clone(),
             work_contract_revision: source.work_contract_revision.clone(),
             work_item_id: source.work_item_id.clone(),
@@ -721,16 +723,20 @@ impl<'storage> GateInteractionService<'storage> {
                 "Worker lease has expired",
             ));
         }
-        let record = ProductSessionService::new(self.storage)
-            .get(scope, &authority.execution_scope.product_session_id)
-            .map_err(|error| product_session_error(&error))?
-            .ok_or_else(|| {
-                error(
-                    GateInteractionServiceErrorCode::AuthorityMismatch,
-                    "ProductSession is not current in this receipt scope",
-                )
-            })?;
-        require_product_session(&record, authority)?;
+        if authority.product_session_revision.is_none() {
+            require_workrun_binding(self.storage, scope, authority)?;
+        } else {
+            let record = ProductSessionService::new(self.storage)
+                .get(scope, &authority.execution_scope.product_session_id)
+                .map_err(|error| product_session_error(&error))?
+                .ok_or_else(|| {
+                    error(
+                        GateInteractionServiceErrorCode::AuthorityMismatch,
+                        "ProductSession is not current in this receipt scope",
+                    )
+                })?;
+            require_product_session(&record, authority)?;
+        }
         let current = self
             .storage
             .load_worker_interaction_source(
@@ -757,11 +763,21 @@ impl<'storage> GateInteractionService<'storage> {
             || lease.worker_instance_id != authority.runtime.worker_instance_id
             || lease.attempt != authority.runtime.attempt
             || lease.fencing_token != authority.runtime.fencing_token
-            || lease.expires_at != authority.lease_expires_at
         {
             return Err(authority_mismatch(
                 "current Worker slot, lease, fence, or admission does not match",
             ));
+        }
+        if lease.expires_at != authority.lease_expires_at {
+            let mut period = lease.clone();
+            period.expires_at.clone_from(&authority.lease_expires_at);
+            let proven = self
+                .storage
+                .load_live_lease_for_period(&period, now)
+                .map_err(|error| storage_error(&error))?;
+            if proven.as_ref() != Some(&lease) {
+                return Err(authority_mismatch("Gate lease period is unproven"));
+            }
         }
         Ok(())
     }
@@ -938,12 +954,96 @@ fn rebuild_router(
     Ok(router)
 }
 
+/// Internal role sessions are owned by Delivery, not the Chat session catalog.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the exact WorkRun identity join stays one fail-closed seam"
+)]
+pub(crate) fn require_workrun_binding(
+    storage: &mut dyn ProductSessionPersistence,
+    scope: &ReceiptScopeKey,
+    authority: &GateInteractionAuthority,
+) -> Result<(), GateInteractionServiceError> {
+    use winwincode_delivery::domain::{Delivery, SessionBindingSourceKind};
+    let execution = &authority.execution_scope;
+    let expected_scope =
+        winwincode_storage::receipt_scope_key(&winwincode_storage::PublicEventScope::Repository {
+            organization_id: execution.organization_id.clone(),
+            workspace_id: execution.workspace_id.clone(),
+            project_id: execution.project_id.clone(),
+            repository_id: execution.repository_id.clone(),
+        })
+        .map_err(|error| storage_error(&error))?;
+    if scope != &expected_scope || authority.product_session_revision.is_some() {
+        return Err(authority_mismatch("WorkRun receipt scope differs"));
+    }
+    let delivery_id = execution
+        .delivery_id
+        .as_ref()
+        .ok_or_else(|| authority_mismatch("WorkRun Delivery is missing"))?;
+    let state = storage
+        .load_state(&format!("delivery:{}", delivery_id.0))
+        .map_err(|error| storage_error(&error))?
+        .ok_or_else(|| authority_mismatch("WorkRun Delivery is missing"))?;
+    let delivery = Delivery::decode_json(&state.payload)
+        .map_err(|_| authority_mismatch("WorkRun Delivery is invalid"))?;
+    if delivery.id() != delivery_id || delivery.revision() != state.revision {
+        return Err(authority_mismatch("WorkRun Delivery is stale"));
+    }
+    let runtime = &authority.runtime;
+    let mut bindings = delivery
+        .snapshot()
+        .session_bindings
+        .iter()
+        .filter(|binding| {
+            binding.delivery_id == *delivery_id
+                && Some(&binding.work_contract_id) == authority.work_contract_id.as_ref()
+                && Some(&binding.work_contract_revision)
+                    == authority.work_contract_revision.as_ref()
+                && Some(&binding.work_item_id) == authority.work_item_id.as_ref()
+                && Some(&binding.work_item_revision) == authority.work_item_revision.as_ref()
+                && Some(&binding.work_run_id) == authority.work_run_id.as_ref()
+                && binding.product_session_id == execution.product_session_id
+                && binding.execution_job_id == runtime.job_id
+                && binding.worker_session_id.as_ref() == Some(&runtime.worker_session_id)
+                && binding.codex_thread_id.as_ref() == Some(&runtime.codex_thread_id)
+                && binding.worker_id.as_ref() == Some(&runtime.worker_id)
+                && binding.worker_instance_id.as_ref() == Some(&runtime.worker_instance_id)
+                && binding.lease_id.as_ref() == Some(&runtime.lease_id)
+                && binding.fencing_token.as_ref() == Some(&runtime.fencing_token)
+                && binding.attempt == runtime.attempt
+                && binding.source_provenance.kind() == SessionBindingSourceKind::ExecutionPort
+        });
+    let binding = bindings
+        .next()
+        .ok_or_else(|| authority_mismatch("WorkRun binding differs"))?;
+    if bindings.next().is_some()
+        || !delivery
+            .snapshot()
+            .work_run_aggregate
+            .runs
+            .iter()
+            .any(|run| {
+                run.id == binding.work_run_id
+                    && run.work_contract_id == binding.work_contract_id
+                    && run.contract_revision == binding.work_contract_revision
+                    && run.work_item_id == binding.work_item_id
+                    && run.work_item_revision == binding.work_item_revision
+                    && u64::try_from(run.attempt).ok() == Some(runtime.attempt)
+                    && run.state == winwincode_domain::WorkRunState::Running
+            })
+    {
+        return Err(authority_mismatch("WorkRun is no longer current"));
+    }
+    Ok(())
+}
+
 fn require_product_session(
     record: &crate::ProductSessionRecord,
     authority: &GateInteractionAuthority,
 ) -> Result<(), GateInteractionServiceError> {
     let session = record.session();
-    if session.revision() != authority.product_session_revision
+    if Some(session.revision()) != authority.product_session_revision
         || session.id() != &authority.execution_scope.product_session_id
         || session.project_id() != &authority.execution_scope.project_id
         || session.repository_id() != &authority.execution_scope.repository_id
@@ -1000,8 +1100,9 @@ fn validate_authority_shape(
         || authority.runtime.job_id.0.is_empty()
         || authority.runtime.attempt == 0
         || authority.runtime.attempt > 1_000
-        || authority.product_session_revision == 0
-        || authority.product_session_revision > MAX_SAFE_INTEGER
+        || authority
+            .product_session_revision
+            .is_some_and(|revision| revision == 0 || revision > MAX_SAFE_INTEGER)
         || authority.job_revision == 0
         || authority.job_revision > MAX_SAFE_INTEGER
         || authority.worker_slot_revision == 0

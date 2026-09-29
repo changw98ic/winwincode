@@ -1,0 +1,188 @@
+import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import { globSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { join, relative } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
+
+const digest = bytes => createHash('sha256').update(bytes).digest('hex')
+const objectId = /^[0-9a-f]{40}$/u
+
+function retain(path, bytes) {
+  try {
+    writeFileSync(path, bytes, { flag: 'wx', mode: 0o600 })
+  } catch (error) {
+    if (error.code !== 'EEXIST') throw error
+    assert.deepEqual(readFileSync(path), Buffer.from(bytes), 'candidate export must not replace prior evidence')
+  }
+}
+
+function decodeReceipt(payload) {
+  const bytes = Buffer.from(payload.dataBase64, 'base64')
+  assert.equal(bytes.toString('base64'), payload.dataBase64)
+  assert.equal(`sha256:${digest(bytes)}`, payload.payloadDigest, 'model receipt digest mismatch')
+  return JSON.parse(bytes)
+}
+
+// Export identity/accounting facts only; prompts, tool output and credentials stay private.
+export function exportDeviceExecutionReceipts(directory, evidenceDirectory = directory) {
+  const calls = []
+  const jev = []
+  const identities = new Set()
+  for (const path of globSync('device-data/**/providers.sqlite3', { cwd: directory }).sort()) {
+    const database = new DatabaseSync(join(directory, path), { readOnly: true })
+    try {
+      database.exec('PRAGMA busy_timeout=5000')
+      const exchanges = new Map()
+      for (const row of database.prepare('SELECT exchange_id, request_open, chunks FROM exchanges WHERE request_open IS NOT NULL ORDER BY exchange_id').all()) {
+        assert.ok(!identities.has(row.exchange_id), 'duplicate model exchange across Device stores')
+        identities.add(row.exchange_id)
+        const opened = JSON.parse(row.request_open)
+        assert.equal(opened.modelExchangeId, row.exchange_id)
+        const request = decodeReceipt(opened.request)
+        const actualModels = []
+        let terminal = null
+        for (const chunk of JSON.parse(row.chunks ?? '[]')) {
+          assert.equal(chunk.modelExchangeId, row.exchange_id)
+          if (!chunk.payload) continue
+          const frame = decodeReceipt(chunk.payload)
+          if (frame.type === 'server_model') actualModels.push(frame.model)
+          if (frame.type === 'completed' || frame.type === 'error') {
+            assert.equal(terminal, null, 'multiple terminal model receipts')
+            terminal = frame
+          }
+        }
+        const usage = terminal?.tokenUsage ?? null
+        if (usage !== null) for (const key of ['input_tokens', 'output_tokens', 'total_tokens']) {
+          assert.ok(Number.isSafeInteger(usage[key]) && usage[key] >= 0, 'invalid measured usage')
+        }
+        const call = { exchangeId: row.exchange_id, jobId: opened.lease.jobId,
+          workerSessionId: opened.workerSessionId, provider: request.provider,
+          requestedModel: request.request.model, reasoningEffort: request.request.reasoning?.effort ?? null,
+          actualModels, terminalType: terminal?.type ?? null,
+          usage: usage === null ? null : { inputTokens: usage.input_tokens, outputTokens: usage.output_tokens, totalTokens: usage.total_tokens },
+          requestSha256: digest(row.request_open), chunksSha256: digest(row.chunks ?? '[]'), source: path }
+        exchanges.set(row.exchange_id, call)
+        calls.push(call)
+      }
+      for (const kind of ['context', 'judge']) {
+        const table = `jev_${kind}_exchanges`
+        if (!database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table)) continue
+        for (const row of database.prepare(`SELECT operation_id, request_json, result FROM ${table} ORDER BY operation_id`).all()) {
+          const exchangeId = row.operation_id.split(':')[1]
+          const call = exchanges.get(exchangeId)
+          assert.ok(call, 'JEV receipt must belong to a retained model exchange')
+          const run = row.result === null ? null : JSON.parse(row.result)
+          const observation = run?.observation
+          jev.push({ operationId: row.operation_id, exchangeId, jobId: call.jobId, kind,
+            provider: observation?.providerId ?? null, requestedModel: observation?.modelId ?? null,
+            actualModel: observation?.resolvedModelId ?? null,
+            inputTokens: observation?.inputTokens ?? null, outputTokens: observation?.outputTokens ?? null,
+            failureCount: run?.failures?.length ?? null,
+            requestSha256: row.request_json === null ? null : digest(row.request_json),
+            resultSha256: row.result === null ? null : digest(row.result), source: path })
+        }
+      }
+    } finally {
+      database.close()
+    }
+  }
+  const completeUsage = calls.length > 0 && calls.every(call => call.usage !== null)
+    && jev.every(call => call.inputTokens !== null && call.outputTokens !== null && call.failureCount === 0)
+  const evidence = { calls, jev, completeUsage,
+    totalTokens: completeUsage ? calls.reduce((sum, call) => sum + call.usage.totalTokens, 0)
+      + jev.reduce((sum, call) => sum + call.inputTokens + call.outputTokens, 0) : null,
+    actualCost: null, externalVerdict: null, externalScore: null }
+  const bytes = `${JSON.stringify(evidence, null, 2)}\n`
+  retain(join(evidenceDirectory, 'execution-receipts.json'), bytes)
+  return { evidence, sha256: digest(bytes) }
+}
+
+// Export retained Git objects, never the mutable Worker checkout or model text.
+export function exportDeviceCandidate(directory, taskInputPath, evidenceDirectory = directory) {
+  const reportBytes = readFileSync(join(evidenceDirectory, 'device-task-result.json'))
+  const report = JSON.parse(reportBytes)
+  const candidate = report.delivery?.detail?.currentCandidate
+  assert.ok(candidate && objectId.test(candidate.candidateCommitId) && objectId.test(candidate.candidateTreeId))
+  const commit = candidate.candidateCommitId
+  assert.equal(report.candidateRef, `refs/winwincode/candidates/${commit}`)
+  assert.equal(candidate.candidateRef, report.candidateRef)
+  const task = readFileSync(taskInputPath)
+  assert.equal(digest(task), report.taskInputDigest, 'task input changed after execution')
+  const seal = readFileSync(join(directory, 'product-source-seal.json'))
+  const objects = join(directory, 'server-data/artifacts/objects/sha256')
+  let artifactBytes
+  let artifactPath
+  let bundle
+  for (const path of globSync('*/*', { cwd: objects })) {
+    const bytes = readFileSync(join(objects, path))
+    if (bytes[0] !== 123) continue
+    let artifact
+    try { artifact = JSON.parse(bytes) } catch { continue }
+    if (artifact.candidateCommitId !== commit) continue
+    assert.equal(digest(bytes), path.split('/').join(''), 'retained artifact digest mismatch')
+    assert.equal(artifact.schemaVersion, 2)
+    const decoded = Buffer.from(artifact.bundleBase64, 'base64')
+    assert.equal(decoded.toString('base64'), artifact.bundleBase64, 'invalid candidate bundle encoding')
+    assert.equal(`sha256:${digest(decoded)}`, artifact.bundleDigest)
+    if (bundle) assert.deepEqual(decoded, bundle, 'conflicting candidate artifacts')
+    bundle = decoded
+    artifactBytes = bytes
+    artifactPath = join(objects, path)
+  }
+  assert.ok(bundle, 'candidate has no retained Git bundle')
+  const output = join(evidenceDirectory, 'submission-evidence', commit)
+  mkdirSync(output, { recursive: true, mode: 0o700 })
+  const scratch = mkdtempSync(join(output, '.verify-'))
+  let parents
+  const files = []
+  try {
+    const gitBytes = (...args) => execFileSync('git', args, { stdio: ['ignore', 'pipe', 'pipe'],
+      env: { PATH: process.env.PATH, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' } })
+    const git = (...args) => gitBytes(...args).toString('utf8').trim()
+    const repository = join(scratch, 'candidate.git')
+    const bundlePath = join(scratch, 'candidate.bundle')
+    writeFileSync(bundlePath, bundle, { mode: 0o600 })
+    git('init', '--bare', '--quiet', repository)
+    git('--git-dir', repository, 'bundle', 'verify', bundlePath)
+    git('--git-dir', repository, 'bundle', 'unbundle', bundlePath)
+    assert.equal(git('--git-dir', repository, 'rev-parse', `${commit}^{commit}`), commit)
+    assert.equal(git('--git-dir', repository, 'rev-parse', `${commit}^{tree}`), candidate.candidateTreeId)
+    parents = git('--git-dir', repository, 'show', '-s', '--format=%P', commit).split(' ').filter(Boolean)
+    for (const row of gitBytes('--git-dir', repository, 'ls-tree', '-r', '-z', commit).toString('utf8').split('\0').filter(Boolean)) {
+      const separator = row.indexOf('\t')
+      assert.ok(separator > 0)
+      const [mode, kind, objectId] = row.slice(0, separator).split(' ')
+      const file = { path: row.slice(separator + 1), mode, kind, objectId }
+      if (kind === 'blob') {
+        const bytes = gitBytes('--git-dir', repository, 'cat-file', 'blob', objectId)
+        const utf8 = bytes.toString('utf8')
+        Object.assign(file, Buffer.from(utf8).equals(bytes) ? { encoding: 'utf8', content: utf8 }
+          : { encoding: 'base64', content: bytes.toString('base64') })
+      }
+      files.push(file)
+    }
+  } finally {
+    rmSync(scratch, { recursive: true, force: true })
+  }
+  const receipts = exportDeviceExecutionReceipts(directory, evidenceDirectory)
+  const candidateFiles = `${JSON.stringify({ commit, tree: candidate.candidateTreeId, files }, null, 2)}\n`
+  const manifest = {
+    candidateFilesSha256: digest(candidateFiles),
+    executionReceiptsSha256: receipts.sha256,
+    candidate, parents, productComplete: report.complete === true,
+    productSessionId: report.productSessionId, deliveryId: report.deliveryId,
+    configuration: report.benchmarkConfiguration, modelRoute: report.modelRoute,
+    externalVerdict: null, externalScore: null,
+    bundleSha256: digest(bundle), taskInputSha256: digest(task), productSourceSealSha256: digest(seal),
+    originalReportSha256: digest(reportBytes), artifactSha256: digest(artifactBytes),
+    artifactPath: relative(directory, artifactPath),
+  }
+  retain(join(output, 'execution-receipts.json'), readFileSync(join(evidenceDirectory, 'execution-receipts.json')))
+  retain(join(output, 'candidate.bundle'), bundle)
+  retain(join(output, 'candidate-files.json'), candidateFiles)
+  retain(join(output, 'task-input.json'), task)
+  retain(join(output, 'product-source-seal.json'), seal)
+  retain(join(output, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`)
+  return manifest
+}

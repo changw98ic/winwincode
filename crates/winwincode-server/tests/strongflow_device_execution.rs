@@ -195,6 +195,13 @@ fn git(repository: &Path, arguments: &[&str]) {
 // ---- composed application with the production-local Delivery authority -----
 
 fn compose_application(root: &Path) -> StandaloneControlPlaneApplication {
+    compose_application_with_runtime(root, Some(3_600))
+}
+
+fn compose_application_with_runtime(
+    root: &Path,
+    runtime: Option<i64>,
+) -> StandaloneControlPlaneApplication {
     let hub = Arc::new(
         DurableEventHub::open(root.join("events"), DurableEventHubConfig::default())
             .expect("open event hub"),
@@ -204,7 +211,8 @@ fn compose_application(root: &Path) -> StandaloneControlPlaneApplication {
         Box::new(HubPublisher {
             hub: Arc::clone(&hub),
         }),
-        LocalDeliveryAdapterConfig::new(root.join("repository"), api_scope()),
+        LocalDeliveryAdapterConfig::new(root.join("repository"), api_scope())
+            .with_execution_limits(runtime, 1_073_741_824),
     )
     .expect("open Control Plane with the local Delivery authority");
     let storage = SqliteStorage::open(root).expect("open application storage");
@@ -217,7 +225,7 @@ fn compose_application(root: &Path) -> StandaloneControlPlaneApplication {
         serde_json::from_value(repository_scope_json()).expect("repository scope"),
         "fixture-checkout-revision",
         "codex-chat",
-        3_600,
+        runtime,
         1_073_741_824,
     )
     .expect("execution config");
@@ -590,10 +598,20 @@ fn claim_locally(
 #[test]
 #[allow(clippy::too_many_lines)]
 fn a_device_anchored_work_run_is_dispatched_to_its_launched_worker_session() {
+    assert_anchored_runtime(Some(3_600));
+}
+
+#[test]
+fn unlimited_work_run_persists_unlimited_job_and_reservation() {
+    assert_anchored_runtime(None);
+}
+
+#[allow(clippy::too_many_lines)]
+fn assert_anchored_runtime(runtime: Option<i64>) {
     let root = temporary_root("anchored-work-run-dispatch");
     std::fs::create_dir_all(root.join("repository")).expect("repository directory");
     let baseline = initialize_repository(&root.join("repository"));
-    let application = compose_application(&root);
+    let application = compose_application_with_runtime(&root, runtime);
     let holder = canonical_id("usr", 1);
     // The holder creates the Delivery and advances it once: the first Codex
     // WorkRun's job (the requirements role) is committed with no device anchor
@@ -687,6 +705,25 @@ fn a_device_anchored_work_run_is_dispatched_to_its_launched_worker_session() {
             .load_execution_job_record(&job_id)
             .expect("job record")
             .expect("queued job");
+        let job: serde_json::Value =
+            serde_json::from_slice(&record.dispatch_payload).expect("durable job");
+        assert_eq!(
+            job["limits"]["maxRuntimeSeconds"],
+            serde_json::json!(runtime)
+        );
+        assert_eq!(job["limits"]["deadlineAt"].is_null(), runtime.is_none());
+        let reservation = storage
+            .execution_admission()
+            .expect("admission")
+            .load_reservation_by_job(&job_id)
+            .expect("reservation lookup")
+            .expect("reservation");
+        assert_eq!(reservation.reserved_tokens, None);
+        assert_eq!(reservation.reserved_cost_microunits, None);
+        assert_eq!(
+            reservation.runtime_limit_millis,
+            runtime.map(|seconds| u64::try_from(seconds).unwrap() * 1000)
+        );
         assert_eq!(record.state, ExecutionJobState::Queued);
         facts
     };

@@ -1407,9 +1407,9 @@ mod runtime_router_fixture {
                     write_mode: ExecutionWorkspaceWriteMode::Candidate,
                 },
                 limits: ExecutionLimits {
-                    deadline_at: Instant("2027-01-15T09:00:00.000Z".into()),
+                    deadline_at: Some(Instant("2027-01-15T09:00:00.000Z".into())),
                     max_artifact_bytes: 10_000_000,
-                    max_runtime_seconds: 3_600,
+                    max_runtime_seconds: Some(3_600),
                 },
                 managed_app_run_config: None,
             },

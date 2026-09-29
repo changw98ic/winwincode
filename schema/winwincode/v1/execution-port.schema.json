@@ -407,12 +407,28 @@
       "additionalProperties": false,
       "properties": {
         "deadlineAt": {
-          "$ref": "./domain.schema.json#/$defs/Instant"
+          "description": "Null explicitly means no runtime deadline. Must be null together with maxRuntimeSeconds.",
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/Instant"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "maxRuntimeSeconds": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 604800
+          "description": "Null explicitly means no runtime deadline. Must be null together with deadlineAt.",
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 604800
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "maxArtifactBytes": {
           "type": "integer",
@@ -424,6 +440,31 @@
         "deadlineAt",
         "maxRuntimeSeconds",
         "maxArtifactBytes"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "maxRuntimeSeconds": {
+                "type": "null"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "deadlineAt": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "deadlineAt": {
+                "$ref": "./domain.schema.json#/$defs/Instant"
+              }
+            }
+          }
+        }
       ]
     },
     "ExecutionJob": {
@@ -736,6 +777,7 @@
       "type": "string",
       "enum": [
         "sandbox_escalation",
+        "mcp_permission",
         "network_access",
         "filesystem_write"
       ]
@@ -845,7 +887,10 @@
           "maximum": 9007199254740991
         },
         "costMicrounits": {
-          "type": "integer",
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 0,
           "maximum": 9007199254740991
         }
@@ -10353,6 +10398,15 @@
         },
         "snapshotId": {
           "$ref": "./domain.schema.json#/$defs/SnapshotId"
+        },
+        "workPlan": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1000,
+          "items": {
+            "$ref": "./domain.schema.json#/$defs/WorkItem"
+          },
+          "description": "Control Plane-owned task DAG for this WorkContract revision. The dispatched workItem must be an identical node in this plan."
         }
       },
       "required": [

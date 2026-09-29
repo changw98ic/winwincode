@@ -92,3 +92,43 @@ impl FusionProviderRouter for MapFusionProviderRouter {
         self.routes.get(provider).map(Arc::clone)
     }
 }
+
+/// Reads only a completed final JSON object from canonical model frames.
+/// Deltas, tool requests, errors and incomplete turns never count as answers.
+#[must_use]
+pub fn answer_from_frames(frames: &[String]) -> Option<serde_json::Value> {
+    let mut text = String::new();
+    let mut completed = false;
+    for frame in frames {
+        if completed {
+            return None;
+        }
+        let value: serde_json::Value = serde_json::from_str(frame).ok()?;
+        match value.get("type")?.as_str()? {
+            "error" => return None,
+            "completed" => {
+                if value.get("endTurn").and_then(serde_json::Value::as_bool) != Some(true) {
+                    return None;
+                }
+                completed = true;
+            }
+            "output_item_done" => {
+                let item = value.get("item")?;
+                if item.get("type")?.as_str()? == "message"
+                    && item.get("role")?.as_str()? == "assistant"
+                    && item.get("phase").and_then(serde_json::Value::as_str) == Some("final_answer")
+                {
+                    for part in item.get("content")?.as_array()? {
+                        if part.get("type")?.as_str()? != "output_text" {
+                            return None;
+                        }
+                        text.push_str(part.get("text")?.as_str()?);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let answer: serde_json::Value = serde_json::from_str(&text).ok()?;
+    (completed && answer.is_object()).then_some(answer)
+}

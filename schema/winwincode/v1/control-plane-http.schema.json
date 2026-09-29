@@ -8558,6 +8558,7 @@
           "type": "string",
           "enum": [
             "sandbox_escalation",
+            "mcp_permission",
             "network_access",
             "filesystem_write"
           ]

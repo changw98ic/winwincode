@@ -45,10 +45,12 @@ enum Fault {
     Timeout,
     Transport,
     Invalid,
+    Recovered,
 }
 #[derive(Debug)]
 struct FaultTransport {
     fault: Fault,
+    attempts: AtomicUsize,
     inputs: Arc<Mutex<Vec<JevHypothesis>>>,
 }
 impl JevRemoteTransport for FaultTransport {
@@ -60,13 +62,30 @@ impl JevRemoteTransport for FaultTransport {
     ) -> BoxFuture<'static, Result<RemoteJevScoreBatch, JevProviderError>> {
         self.inputs.lock().unwrap().extend(items);
         let fault = self.fault;
+        let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
         Box::pin(async move {
             match fault {
+                Fault::Recovered if attempt == 0 => {
+                    Err(JevProviderError::new(JevProviderErrorKind::Unavailable))
+                }
+                Fault::Recovered => Ok(RemoteJevScoreBatch {
+                    evaluations: vec![JevScores {
+                        entailment: 0.8,
+                        contradiction: 0.1,
+                        neutral: 0.1,
+                    }],
+                    input_tokens: 42,
+                    output_tokens: Some(7),
+                    resolved_model_id: Some("judge-actual-model".into()),
+                    device: JevDevice::Cpu,
+                }),
                 Fault::Timeout => std::future::pending().await,
                 Fault::Transport => Err(JevProviderError::new(JevProviderErrorKind::Unavailable)),
                 Fault::Invalid => Ok(RemoteJevScoreBatch {
                     evaluations: vec![],
                     input_tokens: 0,
+                    output_tokens: None,
+                    resolved_model_id: None,
                     device: JevDevice::Cpu,
                 }),
             }
@@ -149,9 +168,10 @@ impl FusionInvestigationPort for Investigation {
 )]
 async fn public_composition_preserves_disputes_across_provider_faults_and_escalates_empty_rounds() {
     for (fault, code) in [
-        (Fault::Timeout, "JEV_TIMEOUT"),
-        (Fault::Transport, "JEV_TRANSPORT"),
-        (Fault::Invalid, "JEV_INVALID_RESPONSE"),
+        (Fault::Timeout, Some("JEV_TIMEOUT")),
+        (Fault::Transport, Some("JEV_TRANSPORT")),
+        (Fault::Invalid, Some("JEV_INVALID_RESPONSE")),
+        (Fault::Recovered, None),
     ] {
         let captured = Arc::new(Mutex::new(Vec::new()));
         let config = OpenJevRemoteConfig::try_new(OpenJevRemoteConfigRequest {
@@ -169,6 +189,7 @@ async fn public_composition_preserves_disputes_across_provider_faults_and_escala
             config,
             Arc::new(FaultTransport {
                 fault,
+                attempts: AtomicUsize::new(0),
                 inputs: captured.clone(),
             }),
         );
@@ -177,7 +198,7 @@ async fn public_composition_preserves_disputes_across_provider_faults_and_escala
                 vec![Arc::new(provider)],
                 JevRuntimeConfig {
                     timeout: Duration::from_millis(20),
-                    retries: 0,
+                    retries: u8::from(matches!(fault, Fault::Recovered)),
                 },
             )),
             JevExecutionOptions {
@@ -222,10 +243,33 @@ async fn public_composition_preserves_disputes_across_provider_faults_and_escala
             .await
             .unwrap();
             assert_eq!(investigation.0.load(Ordering::SeqCst), 2);
-            assert_eq!(report.stop_reason, FusionStopReason::Unresolvable);
-            assert_eq!(report.jev_unavailable.len(), 1);
-            assert_eq!(report.jev_unavailable[0].code, code);
-            assert!(report.judged.is_empty());
+            assert_eq!(report.jev_calls.len(), 1);
+            let call = &report.jev_calls[0];
+            assert_eq!(call.claim_key, "claim:behavior");
+            if let Some(code) = code {
+                assert_eq!(report.stop_reason, FusionStopReason::Unresolvable);
+                assert_eq!(report.jev_unavailable.len(), 1);
+                assert_eq!(report.jev_unavailable[0].code, code);
+                assert!(report.judged.is_empty());
+                assert!(call.observation.is_none());
+                assert_eq!(call.failures.len(), 1);
+                assert_eq!(call.failures[0].provider_id, "judge-route");
+            } else {
+                assert_eq!(report.judged.len(), 1);
+                assert!(report.jev_unavailable.is_empty());
+                assert_eq!(call.failures.len(), usize::from(!reversed));
+                if !reversed {
+                    assert_eq!(call.failures[0].kind, JevProviderErrorKind::Unavailable);
+                }
+                let stored = serde_json::to_value(call).unwrap();
+                assert_eq!(stored["observation"]["modelId"], "judge-model");
+                assert_eq!(
+                    stored["observation"]["resolvedModelId"],
+                    "judge-actual-model"
+                );
+                assert_eq!(stored["observation"]["inputTokens"], 42);
+                assert_eq!(stored["observation"]["outputTokens"], 7);
+            }
             assert!(composed.answers.len() >= 2);
             let conflict = composed
                 .analysis
@@ -243,6 +287,11 @@ async fn public_composition_preserves_disputes_across_provider_faults_and_escala
         );
         for forbidden in [
             "hidden",
+            "judge-route",
+            "judge-model",
+            "judge-actual-model",
+            "inputTokens",
+            "outputTokens",
             "model-left",
             "model-right",
             "original-left",

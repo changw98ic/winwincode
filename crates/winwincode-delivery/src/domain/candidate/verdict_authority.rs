@@ -419,6 +419,16 @@ struct VerificationResultPayload {
     delivery_spec_revision: u64,
     candidate_ref: String,
     findings: Vec<StructuredFinding>,
+    #[serde(default)]
+    fusion_investigations: Option<Vec<StructuredFusionInvestigation>>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StructuredFusionInvestigation {
+    claim_key: String,
+    status: String,
+    evidence_sources: Vec<StructuredEvidenceSource>,
 }
 
 #[derive(Deserialize)]
@@ -484,6 +494,7 @@ fn structured_result<'events>(
             "verification result names a stale candidate, specification, or empty finding set",
         ));
     }
+    validate_fusion_investigation_events(events, result)?;
     Ok(ParsedVerificationResult {
         event: result.event,
         payload: VerificationResultPayload {
@@ -492,8 +503,41 @@ fn structured_result<'events>(
             delivery_spec_revision: result.payload.delivery_spec_revision,
             candidate_ref: result.payload.candidate_ref.clone(),
             findings: result.payload.findings.clone(),
+            fusion_investigations: result.payload.fusion_investigations.clone(),
         },
     })
+}
+
+fn validate_fusion_investigation_events(
+    events: &[AcceptedRuntimeEvent<'_>],
+    result: &ParsedVerificationResult<'_>,
+) -> Result<(), ProductionVerdictResolutionError> {
+    let Some(investigations) = result.payload.fusion_investigations.as_ref() else {
+        return Ok(());
+    };
+    let mut claims = HashSet::with_capacity(investigations.len());
+    if investigations.is_empty()
+        || investigations.iter().any(|investigation| {
+            investigation.claim_key.trim().is_empty()
+                || !claims.insert(investigation.claim_key.as_str())
+                || !matches!(investigation.status.as_str(), "investigated" | "unresolved")
+                || investigation.evidence_sources.is_empty()
+        })
+    {
+        return Err(error("Fusion investigation result is malformed"));
+    }
+    for investigation in investigations {
+        for source in &investigation.evidence_sources {
+            let source_event = exact_source_event(events, &source.event_id)?;
+            if source_event.sequence >= result.event.sequence {
+                return Err(error(
+                    "Fusion investigation Evidence must precede its structured result",
+                ));
+            }
+            runtime_outcome(source_event, source.evidence_type)?;
+        }
+    }
+    Ok(())
 }
 
 impl Clone for StructuredFinding {
@@ -525,6 +569,7 @@ impl Clone for VerificationResultPayload {
             delivery_spec_revision: self.delivery_spec_revision,
             candidate_ref: self.candidate_ref.clone(),
             findings: self.findings.clone(),
+            fusion_investigations: self.fusion_investigations.clone(),
         }
     }
 }

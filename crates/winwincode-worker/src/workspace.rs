@@ -270,6 +270,18 @@ impl WorkspaceProvenance {
     }
 }
 
+fn same_provenance_with_extended_lease(
+    previous: &WorkspaceProvenance,
+    current: &WorkspaceProvenance,
+) -> bool {
+    if current.lease_expires_at.0 < previous.lease_expires_at.0 {
+        return false;
+    }
+    let mut expected = previous.clone();
+    expected.lease_expires_at = current.lease_expires_at.clone();
+    expected == *current
+}
+
 fn logical_execution_job_digest(job: &ExecutionJob) -> Result<Sha256Digest, WorkspaceError> {
     let mut value = serde_json::to_value(job).map_err(|error| {
         WorkspaceError::io("logical ExecutionJob authority cannot be encoded", error)
@@ -309,7 +321,7 @@ fn validate_replacement_authority(
     };
     bounded_identity(&replacement.receipt_id.0, "replacement receipt")?;
     if !valid_sha256_digest(&replacement.receipt_digest)
-        || replacement.successor_lease != active.lease
+        || !lease_extends(&replacement.successor_lease, &active.lease)
         || !same_replacement_scope(&replacement.scope, &active.job.scope)
         || replacement.logical_job_digest != current.logical_execution_job_digest
         || replacement.predecessor_lease.job_id != active.job.job_id
@@ -319,7 +331,7 @@ fn validate_replacement_authority(
         || replacement.predecessor_lease.worker_id != replacement.successor_lease.worker_id
         || replacement.predecessor_lease.worker_instance_id
             == replacement.successor_lease.worker_instance_id
-        || !provenance_matches_lease(current, &replacement.successor_lease)
+        || !provenance_extends_lease(current, &replacement.successor_lease)
         || !provenance_matches_session(current, Some(&active.session_identity))
     {
         return Err(WorkspaceError::conflict(
@@ -378,6 +390,19 @@ fn validate_replacement_predecessor(
         ));
     }
     Ok(())
+}
+
+fn lease_extends(previous: &ExecutionLeaseStamp, current: &ExecutionLeaseStamp) -> bool {
+    let mut expected = previous.clone();
+    expected.expires_at = current.expires_at.clone();
+    current.expires_at.0 >= previous.expires_at.0 && expected == *current
+}
+
+fn provenance_extends_lease(provenance: &WorkspaceProvenance, lease: &ExecutionLeaseStamp) -> bool {
+    let mut original = provenance.clone();
+    original.lease_expires_at = lease.expires_at.clone();
+    provenance.lease_expires_at.0 >= lease.expires_at.0
+        && provenance_matches_lease(&original, lease)
 }
 
 fn provenance_matches_lease(provenance: &WorkspaceProvenance, lease: &ExecutionLeaseStamp) -> bool {
@@ -1292,10 +1317,41 @@ impl WorkerWorkspace {
         &self.layout
     }
 
-    /// Immutable authority bound to all snapshots produced here.
+    /// Current authority bound to new snapshots produced here.
     #[must_use]
     pub const fn provenance(&self) -> &WorkspaceProvenance {
         &self.current_provenance
+    }
+
+    /// Persists a validated same-attempt lease extension before changing memory.
+    /// The caller owns control-message authentication and expiry checks.
+    ///
+    /// # Errors
+    /// Rejects changed authority, shorter leases, or a changed durable manifest.
+    pub fn renew_lease(&mut self, active: &ActiveJob) -> Result<(), WorkspaceError> {
+        let current = WorkspaceProvenance::from_active_job(active)?;
+        if !same_provenance_with_extended_lease(&self.current_provenance, &current) {
+            return Err(WorkspaceError::conflict(
+                "workspace renewal changed authority",
+            ));
+        }
+        let mut manifest = read_recovery_manifest(&self.layout.root)?;
+        if manifest.phase != WorkspaceRecoveryPhase::Active
+            || manifest.origin_provenance != self.origin_provenance
+            || (manifest.current_provenance != self.current_provenance
+                && manifest.current_provenance != current)
+        {
+            return Err(WorkspaceError::conflict(
+                "workspace renewal manifest changed",
+            ));
+        }
+        if current != self.current_provenance {
+            manifest.current_provenance = current.clone();
+            validate_cleanup_provenance(&manifest)?;
+            replace_recovery_manifest(&self.layout.root, &manifest)?;
+            self.current_provenance = current;
+        }
+        Ok(())
     }
 
     /// Immutable authority that originally allocated this checkout and binds
@@ -2441,7 +2497,10 @@ fn validate_cleanup_provenance(manifest: &RecoveryManifest) -> Result<(), Worksp
         }
     }
     let Some(replacement) = manifest.replacement.as_ref() else {
-        if manifest.origin_provenance != manifest.current_provenance {
+        if !same_provenance_with_extended_lease(
+            &manifest.origin_provenance,
+            &manifest.current_provenance,
+        ) {
             return Err(WorkspaceError::new(
                 WorkspaceErrorCode::Corrupt,
                 "cleanup intent current authority has no replacement receipt",
@@ -2456,14 +2515,17 @@ fn validate_cleanup_provenance(manifest: &RecoveryManifest) -> Result<(), Worksp
         || replacement.predecessor_lease.job_id != replacement.successor_lease.job_id
         || replacement.predecessor_lease.attempt.saturating_add(1)
             != replacement.successor_lease.attempt
-        || !provenance_matches_lease(&manifest.current_provenance, &replacement.successor_lease)
+        || !provenance_extends_lease(&manifest.current_provenance, &replacement.successor_lease)
     {
         return Err(WorkspaceError::new(
             WorkspaceErrorCode::Corrupt,
             "cleanup intent replacement authority changed",
         ));
     }
-    if manifest.origin_provenance == manifest.current_provenance {
+    if same_provenance_with_extended_lease(
+        &manifest.origin_provenance,
+        &manifest.current_provenance,
+    ) {
         if replacement.predecessor_session_identity.is_some() {
             return Err(WorkspaceError::new(
                 WorkspaceErrorCode::Corrupt,
@@ -2486,12 +2548,17 @@ fn validate_cleanup_provenance(manifest: &RecoveryManifest) -> Result<(), Worksp
     if manifest.origin_provenance.attempt
         == u64::try_from(replacement.predecessor_lease.attempt).unwrap_or_default()
     {
-        validate_replacement_predecessor(
-            &manifest.origin_provenance,
-            &manifest.current_provenance,
-            replacement,
-        )
-        .map_err(|_| {
+        let mut predecessor = manifest.origin_provenance.clone();
+        if predecessor.lease_expires_at.0 > replacement.predecessor_lease.expires_at.0 {
+            return Err(WorkspaceError::new(
+                WorkspaceErrorCode::Corrupt,
+                "cleanup intent predecessor lease was shortened",
+            ));
+        }
+        predecessor.lease_expires_at = replacement.predecessor_lease.expires_at.clone();
+        let mut successor = manifest.current_provenance.clone();
+        successor.lease_expires_at = replacement.successor_lease.expires_at.clone();
+        validate_replacement_predecessor(&predecessor, &successor, replacement).map_err(|_| {
             WorkspaceError::new(
                 WorkspaceErrorCode::Corrupt,
                 "cleanup intent predecessor authority changed",

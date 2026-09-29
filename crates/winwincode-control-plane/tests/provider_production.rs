@@ -403,9 +403,9 @@ fn commit_execution_job(storage: &mut SqliteStorage, message: &ModelOpenMessage)
         goal: "execute authenticated model request".to_owned(),
         job_id: message.lease.job_id.clone(),
         limits: ExecutionLimits {
-            deadline_at: at("2030-01-01T00:05:00.000Z"),
+            deadline_at: Some(at("2030-01-01T00:05:00.000Z")),
             max_artifact_bytes: 1_000_000,
-            max_runtime_seconds: 300,
+            max_runtime_seconds: Some(300),
         },
         payload_digest: message.request.payload_digest.clone(),
         scope: ExecutionScope::WorkRunExecutionScope(
@@ -547,9 +547,9 @@ fn start_execution_admission(storage: &mut SqliteStorage, message: &ModelOpenMes
     let limits = ExecutionAdmissionLimits {
         max_concurrent: 1,
         max_queued: 1,
-        token_budget: 10_000,
-        cost_budget_microunits: 10_000,
-        max_runtime_millis: 300_000,
+        token_budget: Some(10_000),
+        cost_budget_microunits: Some(10_000),
+        max_runtime_millis: Some(300_000),
     };
     {
         let mut admission = storage.execution_admission().expect("execution admission");
@@ -566,9 +566,9 @@ fn start_execution_admission(storage: &mut SqliteStorage, message: &ModelOpenMes
                 job_id: message.lease.job_id.clone(),
                 request_id: RequestId(id("req", 7)),
                 repository_access: ExecutionRepositoryAccess::ReadOnly,
-                reserved_tokens: 100,
-                reserved_cost_microunits: 100,
-                runtime_limit_millis: 300_000,
+                reserved_tokens: Some(100),
+                reserved_cost_microunits: Some(100),
+                runtime_limit_millis: Some(300_000),
                 submitted_at: at("2029-12-31T23:59:56.000Z"),
             })
             .expect("reserve execution");

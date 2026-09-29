@@ -48,7 +48,7 @@ impl ProviderTokenPricing {
         Ok(())
     }
 
-    fn cost_micros(self, usage: ProviderTokenUsage) -> Result<u64, AnthropicCodecError> {
+    pub(crate) fn cost_micros(self, usage: ProviderTokenUsage) -> Result<u64, AnthropicCodecError> {
         let standard_input_tokens = usage
             .input_tokens
             .checked_sub(usage.cached_input_tokens)
@@ -112,19 +112,19 @@ pub(crate) struct AnthropicCodecError {
 }
 
 impl AnthropicCodecError {
-    const fn invalid_request() -> Self {
+    pub(crate) const fn invalid_request() -> Self {
         Self {
             kind: AnthropicCodecErrorKind::InvalidRequest,
         }
     }
 
-    const fn protocol() -> Self {
+    pub(crate) const fn protocol() -> Self {
         Self {
             kind: AnthropicCodecErrorKind::Protocol,
         }
     }
 
-    const fn size_limit() -> Self {
+    pub(crate) const fn size_limit() -> Self {
         Self {
             kind: AnthropicCodecErrorKind::SizeLimit,
         }
@@ -163,7 +163,7 @@ impl AnthropicToolBindings {
         Ok(())
     }
 
-    fn identity(&self, exposed_name: &str) -> Option<&ProviderToolIdentity> {
+    pub(crate) fn identity(&self, exposed_name: &str) -> Option<&ProviderToolIdentity> {
         self.by_exposed_name.get(exposed_name)
     }
 
@@ -258,12 +258,13 @@ pub(crate) fn prepare_anthropic_request(
     }
     let mut body = Map::new();
     body.insert("model".to_owned(), upstream_model_id.to_owned().into());
-    body.insert(
-        "max_tokens".to_owned(),
-        Value::Number(options.max_output_tokens.into()),
-    );
+    body.insert("max_tokens".to_owned(), options.max_output_tokens.into());
     body.insert("stream".to_owned(), Value::Bool(true));
-    insert_reasoning_controls(&mut body, reasoning_effort);
+    insert_output_controls(
+        &mut body,
+        reasoning_effort,
+        structured_output_format(request)?,
+    );
     if !system.is_empty() {
         body.insert("system".to_owned(), Value::String(system));
     }
@@ -285,19 +286,24 @@ pub(crate) fn prepare_anthropic_request(
     })
 }
 
-fn insert_reasoning_controls(body: &mut Map<String, Value>, effort: Option<&str>) {
+fn insert_output_controls(
+    body: &mut Map<String, Value>,
+    effort: Option<&str>,
+    format: Option<&Map<String, Value>>,
+) {
     if let Some(effort) = effort {
         body.insert("thinking".to_owned(), json!({"type": "adaptive"}));
         body.insert("output_config".to_owned(), json!({"effort": effort}));
+    }
+    if let Some(format) = format {
+        let output = body.entry("output_config").or_insert_with(|| json!({}));
+        output["format"] = json!({"type": "json_schema", "schema": format["schema"]});
     }
 }
 
 fn validate_request_controls(
     request: &Map<String, Value>,
 ) -> Result<Option<&str>, AnthropicCodecError> {
-    if request.get("text").is_some_and(|value| !value.is_null()) {
-        return Err(AnthropicCodecError::invalid_request());
-    }
     let mut effort = None;
     if let Some(reasoning) = request.get("reasoning")
         && !reasoning.is_null()
@@ -343,6 +349,27 @@ fn validate_request_controls(
         }
     }
     Ok(effort)
+}
+
+fn structured_output_format(
+    request: &Map<String, Value>,
+) -> Result<Option<&Map<String, Value>>, AnthropicCodecError> {
+    let Some(text) = request.get("text").filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let text = object(text)?;
+    exact_keys(text, &["format", "verbosity"])?;
+    if text.get("verbosity").is_some_and(|value| !value.is_null()) {
+        return Err(AnthropicCodecError::invalid_request());
+    }
+    let format = object(required(text, "format")?)?;
+    exact_keys(format, &["type", "name", "strict", "schema"])?;
+    if string(format, "type")? != "json_schema" || !boolean(format, "strict")? {
+        return Err(AnthropicCodecError::invalid_request());
+    }
+    validate_token(string(format, "name")?, 64)?;
+    object(required(format, "schema")?)?;
+    Ok(Some(format))
 }
 
 fn translate_tools(
@@ -1109,6 +1136,7 @@ impl<'a> AnthropicStreamParser<'a> {
         self.started = true;
         self.events.push(ProviderStreamEvent::ResponseStarted {
             provider_response_id: response_id.to_owned(),
+            observed_model_id: optional_string(message, "model")?.map(str::to_owned),
         });
         Ok(())
     }
@@ -1487,20 +1515,23 @@ fn usage_counter(
     }
 }
 
-fn exact_keys(object: &Map<String, Value>, allowed: &[&str]) -> Result<(), AnthropicCodecError> {
+pub(crate) fn exact_keys(
+    object: &Map<String, Value>,
+    allowed: &[&str],
+) -> Result<(), AnthropicCodecError> {
     if object.keys().any(|key| !allowed.contains(&key.as_str())) {
         return Err(AnthropicCodecError::invalid_request());
     }
     Ok(())
 }
 
-fn object(value: &Value) -> Result<&Map<String, Value>, AnthropicCodecError> {
+pub(crate) fn object(value: &Value) -> Result<&Map<String, Value>, AnthropicCodecError> {
     value
         .as_object()
         .ok_or_else(AnthropicCodecError::invalid_request)
 }
 
-fn required<'a>(
+pub(crate) fn required<'a>(
     object: &'a Map<String, Value>,
     key: &str,
 ) -> Result<&'a Value, AnthropicCodecError> {
@@ -1509,13 +1540,16 @@ fn required<'a>(
         .ok_or_else(AnthropicCodecError::invalid_request)
 }
 
-fn string<'a>(object: &'a Map<String, Value>, key: &str) -> Result<&'a str, AnthropicCodecError> {
+pub(crate) fn string<'a>(
+    object: &'a Map<String, Value>,
+    key: &str,
+) -> Result<&'a str, AnthropicCodecError> {
     required(object, key)?
         .as_str()
         .ok_or_else(AnthropicCodecError::invalid_request)
 }
 
-fn optional_string<'a>(
+pub(crate) fn optional_string<'a>(
     object: &'a Map<String, Value>,
     key: &str,
 ) -> Result<Option<&'a str>, AnthropicCodecError> {
@@ -1547,7 +1581,7 @@ fn boolean(object: &Map<String, Value>, key: &str) -> Result<bool, AnthropicCode
         .ok_or_else(AnthropicCodecError::invalid_request)
 }
 
-fn array<'a>(
+pub(crate) fn array<'a>(
     object: &'a Map<String, Value>,
     key: &str,
 ) -> Result<&'a [Value], AnthropicCodecError> {
@@ -1577,14 +1611,14 @@ fn index(object: &Map<String, Value>) -> Result<u32, AnthropicCodecError> {
         .ok_or_else(AnthropicCodecError::protocol)
 }
 
-fn validate_text(value: &str) -> Result<(), AnthropicCodecError> {
+pub(crate) fn validate_text(value: &str) -> Result<(), AnthropicCodecError> {
     if value.len() > MAX_REQUEST_TEXT_BYTES || value.contains('\0') {
         return Err(AnthropicCodecError::size_limit());
     }
     Ok(())
 }
 
-fn validate_token(value: &str, max_len: usize) -> Result<(), AnthropicCodecError> {
+pub(crate) fn validate_token(value: &str, max_len: usize) -> Result<(), AnthropicCodecError> {
     if value.is_empty()
         || value.len() > max_len
         || value.trim() != value
@@ -1961,6 +1995,11 @@ mod tests {
             options(),
         )
         .expect("parse Anthropic SSE");
+        assert!(matches!(
+            &parsed.events[0],
+            ProviderStreamEvent::ResponseStarted { observed_model_id: Some(model), .. }
+                if model == "glm-5.2"
+        ));
         assert!(parsed.events.iter().any(|event| matches!(
             event,
             ProviderStreamEvent::ReasoningContentDelta { delta, .. } if delta == "check"

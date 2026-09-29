@@ -85,9 +85,9 @@ fn execution_job() -> ExecutionJob {
         goal: "Return one exact local response".into(),
         job_id: ExecutionJobId(id("job", 6)),
         limits: ExecutionLimits {
-            deadline_at: at(50),
+            deadline_at: Some(at(50)),
             max_artifact_bytes: 1_024,
-            max_runtime_seconds: 30,
+            max_runtime_seconds: Some(30),
         },
         payload_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
         scope: ExecutionScope::ProductSessionExecutionScope(ProductSessionExecutionScope {
@@ -240,9 +240,9 @@ fn prepare_running_admission(storage: &mut SqliteStorage, job_id: &ExecutionJobI
     let limits = ExecutionAdmissionLimits {
         max_concurrent: 2,
         max_queued: 2,
-        token_budget: 10_000,
-        cost_budget_microunits: 100_000,
-        max_runtime_millis: 60_000,
+        token_budget: Some(10_000),
+        cost_budget_microunits: Some(100_000),
+        max_runtime_millis: Some(60_000),
     };
     let boundaries = [
         ExecutionAdmissionBoundary::Organization {
@@ -281,9 +281,9 @@ fn prepare_running_admission(storage: &mut SqliteStorage, job_id: &ExecutionJobI
             job_id: job_id.clone(),
             request_id: RequestId(id("req", 19)),
             repository_access: ExecutionRepositoryAccess::ReadOnly,
-            reserved_tokens: 100,
-            reserved_cost_microunits: 1_000,
-            runtime_limit_millis: 30_000,
+            reserved_tokens: Some(100),
+            reserved_cost_microunits: Some(1_000),
+            runtime_limit_millis: Some(30_000),
             submitted_at: at(3),
         })
         .expect("reserve");

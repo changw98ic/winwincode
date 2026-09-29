@@ -229,6 +229,7 @@ pub fn prepare_candidate_artifact(
             "candidate snapshot does not match its Job workspace",
         ));
     }
+    validate_rework_paths(active, workspace, &freeze_fact)?;
     let bytes = if active.job.execution_profile == "codex-chat" {
         crate::workspace::git_output(
             workspace.layout().checkout(),
@@ -238,6 +239,123 @@ pub fn prepare_candidate_artifact(
         freeze_fact.manifest_bytes().to_vec()
     };
     prepared_artifact(active, freeze_fact, bytes)
+}
+
+fn validate_rework_paths(
+    active: &ActiveJob,
+    workspace: &WorkerWorkspace,
+    freeze_fact: &CandidateFreezeFact,
+) -> Result<(), CandidateProductError> {
+    if let ExecutionScope::WorkRunExecutionScope(scope) = &active.job.scope
+        && let Some(rework) = &scope.rework_authorization
+    {
+        if freeze_fact.source_commit_id() != rework.source_candidate_commit_id {
+            return Err(CandidateProductError::new(
+                CandidateProductErrorCode::InvalidScope,
+                "rework candidate does not start from its sealed source commit",
+            ));
+        }
+        let paths = crate::workspace::git_output(
+            workspace.layout().checkout(),
+            &[
+                "diff",
+                "--name-only",
+                "--no-renames",
+                "-z",
+                freeze_fact.source_commit_id(),
+                freeze_fact.candidate_commit_id(),
+                "--",
+            ],
+        )?;
+        if freeze_fact.source_tree_id() != rework.source_candidate_tree_id
+            || paths
+                .split(|byte| *byte == 0)
+                .filter(|path| !path.is_empty())
+                .any(|path| {
+                    !rework
+                        .targets
+                        .iter()
+                        .any(|target| target.file_path.as_bytes() == path)
+                })
+        {
+            return Err(CandidateProductError::new(
+                CandidateProductErrorCode::InvalidScope,
+                "rework candidate changes paths outside its sealed authorization",
+            ));
+        }
+        let source_parent = format!("{}^1", rework.source_candidate_commit_id);
+        let source_range = format!("{source_parent}..{}", rework.source_candidate_commit_id);
+        let replacement_range = format!(
+            "{}..{}",
+            rework.source_candidate_commit_id,
+            freeze_fact.candidate_commit_id()
+        );
+        for path in paths
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+        {
+            let path = std::str::from_utf8(path).map_err(|_| {
+                CandidateProductError::new(
+                    CandidateProductErrorCode::InvalidScope,
+                    "rework candidate path is not UTF-8",
+                )
+            })?;
+            let targets = rework
+                .targets
+                .iter()
+                .filter(|target| target.file_path == path)
+                .collect::<Vec<_>>();
+            if targets.is_empty() {
+                return Err(CandidateProductError::new(
+                    CandidateProductErrorCode::InvalidScope,
+                    "rework candidate changes paths outside its sealed authorization",
+                ));
+            }
+            let source_diff =
+                candidate_path_diff(workspace.layout().checkout(), &source_range, path)?;
+            let replacement_diff =
+                candidate_path_diff(workspace.layout().checkout(), &replacement_range, path)?;
+            let origins = winwincode_domain::rework_hunk_origins(&source_diff, &replacement_diff)
+                .map_err(|_| {
+                CandidateProductError::new(
+                    CandidateProductErrorCode::InvalidScope,
+                    "rework candidate changes hunks outside its sealed authorization",
+                )
+            })?;
+            if origins.iter().any(|(_, source_hunk)| {
+                !targets
+                    .iter()
+                    .any(|target| target.source_hunk_sha256 == *source_hunk)
+            }) {
+                return Err(CandidateProductError::new(
+                    CandidateProductErrorCode::InvalidScope,
+                    "rework candidate changes hunks outside its sealed authorization",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn candidate_path_diff(
+    repository: &std::path::Path,
+    revision_range: &str,
+    path: &str,
+) -> Result<Vec<u8>, CandidateProductError> {
+    crate::workspace::git_output(
+        repository,
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--binary",
+            "--full-index",
+            revision_range,
+            "--",
+            path,
+        ],
+    )
+    .map_err(CandidateProductError::from)
 }
 
 /// Captures the already-frozen candidate from a read-only verification

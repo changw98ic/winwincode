@@ -9,7 +9,10 @@
 //! for assigning the lease-bound runtime event identity and retaining it in its
 //! existing outbox before delivery.
 
-use std::{collections::HashSet, fmt};
+use std::{
+    collections::{BTreeSet, HashSet},
+    fmt,
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -485,7 +488,7 @@ pub fn stage_product_prompt(job: &ExecutionJob) -> Result<String, StageProductEr
                     "command, cite the original exec_command call ID, not the write_stdin poll. ",
                     "Evidence references contain only source_id; the Worker derives their type ",
                     "from its saved Command/Test events. Do not supply a type or event_id. ",
-                    "Return compact JSON with exactly this field order and shape (replace all ",
+                    "Return one JSON object with exactly this shape (replace all ",
                     "capitalized values with actual input or observed evidence): ",
                     "{\"protocol\":\"winwincode.independent-verification-result.v1\",",
                     "\"delivery_spec_id\":\"DELIVERY_SPEC_ID\",\"delivery_spec_revision\":1,",
@@ -500,7 +503,7 @@ pub fn stage_product_prompt(job: &ExecutionJob) -> Result<String, StageProductEr
                     "A pass must cite successful checks of the assigned criterion; a failed assigned ",
                     "check means fail. Do not cite failed exploratory commands as proof of a pass. ",
                     "A nonzero exit is failing evidence for every criterion using that command; do not infer passes from partial progress. ",
-                    "No Markdown fences, whitespace outside strings, extra fields, or trailing text."
+                    "No Markdown fences, extra fields, or trailing text."
                 ),
                 "requirements" | "solution" => {
                     "Use only the sealed Delivery specification and report the requested stage result."
@@ -905,6 +908,19 @@ pub fn prepare_verification_result_activity(
     job: &ExecutionJob,
     final_message: &[u8],
 ) -> Result<PreparedStageProduct, StageProductError> {
+    prepare_verification_result_activity_for_fusion(job, final_message, None)
+}
+
+/// Converts a verification result while requiring each frozen Fusion claim to
+/// be linked to an observed command or test from this review run.
+///
+/// # Errors
+/// Rejects missing, duplicate, extra, or unbound Fusion investigation claims.
+pub fn prepare_verification_result_activity_for_fusion(
+    job: &ExecutionJob,
+    final_message: &[u8],
+    expected_claim_keys: Option<&[String]>,
+) -> Result<PreparedStageProduct, StageProductError> {
     ensure_verification_role(job)?;
     if final_message.is_empty() || final_message.len() > MAX_PLANNER_SOLUTION_BYTES {
         return Err(invalid_output());
@@ -913,6 +929,7 @@ pub fn prepare_verification_result_activity(
         serde_json::from_slice(final_message).map_err(|_| invalid_output())?;
     if !result.is_structurally_valid()
         || !verification_matches_work_run_input(&result, validate_work_run_input(job)?)
+        || !fusion_investigations_match(&result, expected_claim_keys)
     {
         return Err(invalid_output());
     }
@@ -930,6 +947,33 @@ pub fn prepare_verification_result_activity(
         bytes: canonical,
         summary: "verification role produced a canonical independent result",
     })
+}
+
+fn fusion_investigations_match(
+    result: &VerificationResultV1,
+    expected_claim_keys: Option<&[String]>,
+) -> bool {
+    let Some(expected_claim_keys) = expected_claim_keys else {
+        return result.fusion_investigations.is_none();
+    };
+    if expected_claim_keys.is_empty() {
+        return result
+            .fusion_investigations
+            .as_ref()
+            .is_none_or(Vec::is_empty);
+    }
+    let expected: BTreeSet<_> = expected_claim_keys.iter().map(String::as_str).collect();
+    if expected.len() != expected_claim_keys.len() {
+        return false;
+    }
+    let Some(investigations) = result.fusion_investigations.as_ref() else {
+        return false;
+    };
+    let actual: BTreeSet<_> = investigations
+        .iter()
+        .map(|investigation| investigation.claim_key.as_str())
+        .collect();
+    actual.len() == investigations.len() && actual == expected
 }
 
 fn ensure_verification_role(job: &ExecutionJob) -> Result<(), StageProductError> {
@@ -1256,6 +1300,8 @@ struct VerificationResultV1 {
     delivery_spec_revision: u64,
     candidate_ref: String,
     findings: Vec<VerificationFinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fusion_investigations: Option<Vec<FusionInvestigation>>,
 }
 
 impl VerificationResultV1 {
@@ -1266,7 +1312,39 @@ impl VerificationResultV1 {
             && valid_candidate_ref(&self.candidate_ref)
             && !self.findings.is_empty()
             && self.findings.iter().all(VerificationFinding::is_valid)
+            && self
+                .fusion_investigations
+                .as_ref()
+                .is_none_or(|investigations| {
+                    investigations.iter().all(FusionInvestigation::is_valid)
+                })
     }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct FusionInvestigation {
+    claim_key: String,
+    status: FusionInvestigationStatus,
+    evidence_sources: Vec<VerificationEvidenceSource>,
+}
+
+impl FusionInvestigation {
+    fn is_valid(&self) -> bool {
+        bounded_text(&self.claim_key)
+            && !self.evidence_sources.is_empty()
+            && self
+                .evidence_sources
+                .iter()
+                .all(VerificationEvidenceSource::is_valid)
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum FusionInvestigationStatus {
+    Investigated,
+    Unresolved,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1500,9 +1578,9 @@ mod tests {
             goal: "Implement fixture".to_owned(),
             job_id: ExecutionJobId("job_00000000000000000000000001".to_owned()),
             limits: ExecutionLimits {
-                deadline_at: Instant("2026-08-28T00:00:00Z".to_owned()),
+                deadline_at: Some(Instant("2026-08-28T00:00:00Z".to_owned())),
                 max_artifact_bytes: 1_048_576,
-                max_runtime_seconds: 300,
+                max_runtime_seconds: Some(300),
             },
             payload_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
             scope: ExecutionScope::WorkRunExecutionScope(WorkRunExecutionScope {
@@ -1517,6 +1595,7 @@ mod tests {
                 work_run_id: run_id,
             }),
             work_input: Some(WorkRunInput {
+                work_plan: None,
                 device_target: None,
                 delivery_spec_id: "spec-fixture".into(),
                 delivery_spec_revision: Revision(2),
@@ -1930,7 +2009,7 @@ mod tests {
 
     #[test]
     fn delegated_change_batch_schema_is_closed_and_bounded() {
-        fn collect_keywords(value: &Value, keywords: &mut std::collections::BTreeSet<String>) {
+        fn collect_keywords(value: &Value, keywords: &mut BTreeSet<String>) {
             let Some(object) = value.as_object() else {
                 return;
             };
@@ -1966,7 +2045,7 @@ mod tests {
             schema["properties"]["acceptanceCriteriaIds"]["items"]["pattern"],
             "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$"
         );
-        let mut keywords = std::collections::BTreeSet::new();
+        let mut keywords = BTreeSet::new();
         collect_keywords(&schema, &mut keywords);
         assert!(keywords.iter().all(|keyword| matches!(
             keyword.as_str(),
@@ -2028,6 +2107,19 @@ mod tests {
                 .expect("verification result");
         assert_eq!(result.category(), &ExecutionEventCategory::Activity);
         assert_eq!(result.bytes(), VERIFICATION_RESULT_JSON.as_bytes());
+    }
+
+    #[test]
+    fn fusion_review_with_no_claims_keeps_the_independent_result_valid() {
+        let mut result: VerificationResultV1 =
+            serde_json::from_str(VERIFICATION_RESULT_JSON).expect("verification result");
+        result.fusion_investigations = Some(Vec::new());
+        assert!(result.is_structurally_valid());
+        assert!(fusion_investigations_match(&result, Some(&[])));
+        assert!(!fusion_investigations_match(
+            &result,
+            Some(&["missing-claim".to_owned()])
+        ));
     }
 
     #[test]

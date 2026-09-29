@@ -14,23 +14,6 @@ corepack pnpm verify:api-production-vertical
 
 生产纵向检查通过后，说明 Client 可用的 Chat/StrongFlow API、Server、Control Plane、Worker、内嵌 Codex Core 和 Delivery 结算可以沿同一条路径运行。
 
-## 领取工作
-
-仓库使用 Beads 保存需求、依赖和进度。开始修改前运行：
-
-```bash
-bd prime
-bd ready
-bd show ISSUE_ID
-bd update ISSUE_ID --claim
-```
-
-一个改动对应一个已有 Beads issue。实施中发现独立后续工作时，用 `bd create` 建立新 issue，并用 `bd dep add` 记录依赖；不要用 Markdown 文件维护另一份任务清单。只有验收条件已经满足并完成相应检查时，才运行：
-
-```bash
-bd close ISSUE_ID --reason="Completed and verified"
-```
-
 ## 代码位置
 
 | 目录 | 内容 |
@@ -85,7 +68,6 @@ corepack pnpm verify
 
 提交前完成以下内容：
 
-- Beads issue 的目标和验收条件与改动一致；
 - 生产行为、测试和文档使用同一个当前名称与数据结构；
 - 需求或方案变化会使旧人工决定失效；
 - 新 Evidence 可以追溯到命令、测试、Diff、文件、提交、运行事件或独立审查发现；

@@ -95,6 +95,7 @@ export type DeviceProviderProjection = {
 
 export enum DeviceProviderProtocol {
   AnthropicMessages = "anthropic_messages",
+  OpenaiChatCompletions = "openai_chat_completions",
   Canonical = "canonical",
 }
 

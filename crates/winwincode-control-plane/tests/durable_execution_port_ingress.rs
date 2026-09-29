@@ -455,13 +455,14 @@ fn workrun_job(seed: u64, delivery: &Delivery, scope: &RepositoryScope) -> Execu
         goal: item.goal.clone(),
         job_id,
         limits: ExecutionLimits {
-            deadline_at: Instant("2027-01-15T09:00:00.000Z".into()),
+            deadline_at: Some(Instant("2027-01-15T09:00:00.000Z".into())),
             max_artifact_bytes: 10_000_000,
-            max_runtime_seconds: 3600,
+            max_runtime_seconds: Some(3600),
         },
         payload_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
         scope: ExecutionScope::WorkRunExecutionScope(wr_scope),
         work_input: Some(winwincode_execution_port::generated::WorkRunInput {
+            work_plan: None,
             device_target: None,
             delivery_spec_id: "spec-fixture".into(),
             delivery_spec_revision: Revision(2),
@@ -659,9 +660,9 @@ fn public_admission(
     let limits = ExecutionAdmissionLimits {
         max_concurrent: 2,
         max_queued: 2,
-        token_budget: 10_000,
-        cost_budget_microunits: 100_000,
-        max_runtime_millis: 60_000,
+        token_budget: Some(10_000),
+        cost_budget_microunits: Some(100_000),
+        max_runtime_millis: Some(60_000),
     };
     let boundaries = [
         ExecutionAdmissionBoundary::Organization {
@@ -706,9 +707,9 @@ fn public_admission(
             repository_access: ExecutionRepositoryAccess::IsolatedWrite {
                 worktree_key: job.job_id.0.clone(),
             },
-            reserved_tokens: 100,
-            reserved_cost_microunits: 100,
-            runtime_limit_millis: 30_000,
+            reserved_tokens: Some(100),
+            reserved_cost_microunits: Some(100),
+            runtime_limit_millis: Some(30_000),
             submitted_at: public_attempt_time(10),
         })
         .expect("public admission reserve");
@@ -1114,9 +1115,9 @@ fn install_product_dispatch(fixture: &mut Fixture, seed: u64) -> ProductDispatch
         goal: "Advance ProductSession chat".to_owned(),
         job_id: ExecutionJobId(canonical_id("job", seed)),
         limits: ExecutionLimits {
-            deadline_at: Instant("2027-01-15T09:00:00.000Z".to_owned()),
+            deadline_at: Some(Instant("2027-01-15T09:00:00.000Z".to_owned())),
             max_artifact_bytes: 10_000_000,
-            max_runtime_seconds: 3_600,
+            max_runtime_seconds: Some(3_600),
         },
         payload_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
         scope: ExecutionScope::ProductSessionExecutionScope(ProductSessionExecutionScope {
@@ -1230,6 +1231,7 @@ fn registration_result(output: &[ExecutionPortMessage]) -> WorkerRegistrationRes
 
 #[derive(Default)]
 struct RecordingDelegate {
+    expected_server_time: Option<Instant>,
     seen: Vec<&'static str>,
 }
 
@@ -1250,7 +1252,12 @@ impl DurableExecutionPortDelegate for RecordingDelegate {
             context.repository_scope().kind,
             RepositoryScopeKind::Repository
         );
-        assert_eq!(context.server_time().0, "2027-01-15T08:00:02.100Z");
+        assert_eq!(
+            context.server_time().0,
+            self.expected_server_time
+                .as_ref()
+                .map_or("2027-01-15T08:00:02.100Z", |instant| instant.0.as_str())
+        );
         match supplement {
             DurableExecutionPortSupplement::ProductSessionBinding {
                 job,
@@ -1419,6 +1426,130 @@ fn product_terminal_model_cancel_and_action_share_one_sealed_delegate_core() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
+fn delegated_old_period_requires_accepted_history_and_a_live_current_lease() {
+    let mut fixture = Fixture::open("renewed-delegate", 89);
+    let dispatch = install_product_dispatch(&mut fixture, 89);
+    let lease = &dispatch.lease;
+    let renewal = winwincode_storage::ExecutionLeaseRenewal {
+        expires_at: Instant("2027-01-15T08:10:00.000Z".into()),
+        prior_expires_at: lease.expires_at.clone(),
+        fencing_token: lease.fencing_token.clone(),
+        job_id: lease.job_id.clone(),
+        lease_id: lease.lease_id.clone(),
+        message_id: ExecutionMessageId(canonical_id("xmsg", 890)),
+        request_id: RequestId(canonical_id("req", 890)),
+        sent_at: Instant("2027-01-15T08:04:00.000Z".into()),
+        worker_id: lease.worker_id.clone(),
+        worker_instance_id: lease.worker_instance_id.clone(),
+        attempt: 1,
+    };
+    assert_eq!(
+        fixture
+            .storage
+            .execution_registry()
+            .expect("registry")
+            .renew_execution_lease(&renewal)
+            .expect("accepted renewal")
+            .status,
+        winwincode_storage::LeaseWriteStatus::Accepted
+    );
+    let mut fixture = fixture.restart();
+    let now = Instant("2027-01-15T08:06:00.000Z".into());
+    let mut delegate = RecordingDelegate {
+        expected_server_time: Some(now.clone()),
+        ..RecordingDelegate::default()
+    };
+    for kind in ["model.open", "job.cancel_ack", "action.enforcement_request"] {
+        let mut message = execution_message(kind);
+        align_delegated_message(&mut message, &dispatch, 20);
+        fixture
+            .accept_with_delegate(&message, now.clone(), &mut delegate)
+            .expect("accepted old period reaches its owner");
+    }
+    assert_eq!(delegate.seen.len(), 3);
+    for (index, kind) in ["model.open", "job.cancel_ack", "action.enforcement_request"]
+        .into_iter()
+        .enumerate()
+    {
+        let mut message = execution_message(kind);
+        align_delegated_message(&mut message, &dispatch, 30 + index as u64);
+        match &mut message {
+            ExecutionPortMessage::ModelOpenMessage(message) => {
+                message.lease.expires_at.clone_from(&renewal.expires_at);
+            }
+            ExecutionPortMessage::JobCancelAckMessage(message) => {
+                message.lease.expires_at.clone_from(&renewal.expires_at);
+            }
+            ExecutionPortMessage::ActionEnforcementRequestMessage(message) => {
+                message.lease.expires_at.clone_from(&renewal.expires_at);
+            }
+            _ => unreachable!(),
+        }
+        fixture
+            .accept_with_delegate(&message, now.clone(), &mut delegate)
+            .expect("accepted renewed period reaches its owner");
+    }
+    assert_eq!(delegate.seen.len(), 6);
+    for invalid in 0..3 {
+        let mut message = execution_message("model.open");
+        align_delegated_message(&mut message, &dispatch, 21);
+        let ExecutionPortMessage::ModelOpenMessage(model) = &mut message else {
+            unreachable!()
+        };
+        match invalid {
+            0 => model.lease.expires_at = Instant("2027-01-15T08:04:59.000Z".into()),
+            1 => model.lease.fencing_token = FencingToken("6".into()),
+            _ => model.worker_session_id = WorkerSessionId(canonical_id("wsn", 999)),
+        }
+        assert!(
+            fixture
+                .accept_with_delegate(&message, now.clone(), &mut delegate)
+                .is_err()
+        );
+    }
+    let mut message = execution_message("model.open");
+    align_delegated_message(&mut message, &dispatch, 22);
+    assert!(
+        fixture
+            .accept_with_delegate(&message, renewal.expires_at.clone(), &mut delegate)
+            .is_err()
+    );
+    let terminal = ExecutionLeaseTerminalRequest {
+        job_id: lease.job_id.clone(),
+        lease_id: lease.lease_id.clone(),
+        worker_id: lease.worker_id.clone(),
+        worker_instance_id: lease.worker_instance_id.clone(),
+        attempt: 1,
+        fencing_token: lease.fencing_token.clone(),
+        outcome: ExecutionLeaseTerminalOutcome::Completed,
+        terminal_at: Instant("2027-01-15T08:07:00.000Z".into()),
+        request_id: RequestId(canonical_id("req", 891)),
+    };
+    fixture
+        .storage
+        .execution_registry()
+        .expect("registry")
+        .finish_execution_lease(&terminal)
+        .expect("terminal");
+    assert!(
+        fixture
+            .accept_with_delegate(
+                &message,
+                Instant("2027-01-15T08:08:00.000Z".into()),
+                &mut delegate
+            )
+            .is_err()
+    );
+    assert_eq!(
+        delegate.seen.len(),
+        6,
+        "invalid frames never reach the owner"
+    );
+    fixture.close();
+}
+
+#[test]
 fn local_and_remote_adapters_share_the_same_durable_ingress_core() {
     let message = worker_register();
     let frame = TypedFrame::new(
@@ -1554,9 +1685,9 @@ fn accepted_dispatch_seals_product_session_runtime_and_replays_exactly() {
         goal: "Advance ProductSession chat".to_owned(),
         job_id: ExecutionJobId(canonical_id("job", seed)),
         limits: ExecutionLimits {
-            deadline_at: Instant("2027-01-15T09:00:00.000Z".to_owned()),
+            deadline_at: Some(Instant("2027-01-15T09:00:00.000Z".to_owned())),
             max_artifact_bytes: 10_000_000,
-            max_runtime_seconds: 3_600,
+            max_runtime_seconds: Some(3_600),
         },
         payload_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
         scope: ExecutionScope::ProductSessionExecutionScope(ProductSessionExecutionScope {
@@ -1861,9 +1992,9 @@ fn prepare_workrun_admission(
     let limits = ExecutionAdmissionLimits {
         max_concurrent: 4,
         max_queued: 4,
-        token_budget: 100_000,
-        cost_budget_microunits: 100_000,
-        max_runtime_millis: 60_000,
+        token_budget: Some(100_000),
+        cost_budget_microunits: Some(100_000),
+        max_runtime_millis: Some(60_000),
     };
     let boundaries = [
         ExecutionAdmissionBoundary::Organization {
@@ -1913,9 +2044,9 @@ fn prepare_workrun_admission(
             job_id: job.job_id.clone(),
             request_id: RequestId(canonical_id("req", seed * 100 + 200)),
             repository_access: ExecutionRepositoryAccess::ReadOnly,
-            reserved_tokens: 100,
-            reserved_cost_microunits: 100,
-            runtime_limit_millis: 30_000,
+            reserved_tokens: Some(100),
+            reserved_cost_microunits: Some(100),
+            runtime_limit_millis: Some(30_000),
             submitted_at: Instant("2027-01-15T08:00:00.050Z".into()),
         })
         .expect("admission reserve");
@@ -2012,84 +2143,13 @@ fn install_workrun_dispatch_for_terminal(
     (delivery, job, lease, worker_session_id)
 }
 
-fn terminal_workrun_outcome(
+fn prepare_workrun_slot(
+    fixture: &mut Fixture,
     job: &ExecutionJob,
-    lease: ExecutionLeaseStamp,
+    lease: &ExecutionLeaseStamp,
     worker_session_id: &WorkerSessionId,
     seed: u64,
-) -> winwincode_execution_port::generated::JobOutcomeMessage {
-    let ExecutionPortMessage::JobOutcomeMessage(mut message) = execution_message("job.outcome")
-    else {
-        panic!("job.outcome variant");
-    };
-    let thread_id = CodexThreadId(canonical_id("cdx", seed));
-    let product_session_id = match &job.scope {
-        ExecutionScope::WorkRunExecutionScope(scope) => scope.product_session_id.clone(),
-        ExecutionScope::ProductSessionExecutionScope(scope) => scope.product_session_id.clone(),
-    };
-    let work_run_id = match &job.scope {
-        ExecutionScope::WorkRunExecutionScope(scope) => scope.work_run_id.clone(),
-        ExecutionScope::ProductSessionExecutionScope(_) => {
-            panic!("terminal fixture requires WorkRun")
-        }
-    };
-    message.lease = lease;
-    message.message_id = ExecutionMessageId(canonical_id("xmsg", seed + 3));
-    message.sent_at = Instant("2027-01-15T08:01:00.100Z".into());
-    message.worker_session_id = worker_session_id.clone();
-    message.outcome.status = ExecutionOutcomeStatus::Failed;
-    message.outcome.summary = "Verifier failed".into();
-    message.outcome.codex_thread_id = Some(thread_id.clone());
-    message.outcome.finished_at = Instant("2027-01-15T08:01:00.000Z".into());
-    message.session_identity = SessionIdentity {
-        codex_thread_id: thread_id,
-        product_session_id,
-        worker_session_id: worker_session_id.clone(),
-        work_run_id: Some(work_run_id),
-    };
-    message
-}
-
-fn outcome_ack_status(
-    output: Vec<ExecutionPortMessage>,
-) -> winwincode_execution_port::generated::JobOutcomeAckMessageStatus {
-    let mut output = output.into_iter();
-    let Some(ExecutionPortMessage::JobOutcomeAckMessage(ack)) = output.next() else {
-        panic!("job.outcome_ack response");
-    };
-    assert!(output.next().is_none(), "single job.outcome_ack response");
-    ack.status
-}
-
-fn lease_terminal_count(root: &Path, job_id: &ExecutionJobId) -> i64 {
-    let connection =
-        rusqlite::Connection::open(root.join("control-plane.sqlite3")).expect("Registry inspect");
-    connection
-        .query_row(
-            "SELECT COUNT(*) FROM execution_lease_terminals WHERE job_id = ?1",
-            [&job_id.0],
-            |row| row.get(0),
-        )
-        .expect("Registry terminal count")
-}
-
-#[test]
-#[allow(
-    clippy::too_many_lines,
-    reason = "the fault-injected restart test keeps Delivery, Registry, and replay assertions together"
-)]
-fn committed_delivery_outcome_replay_finishes_registry_once_after_restart_gap() {
-    let seed = 397;
-    let mut fixture = Fixture::open("terminal-registry-gap", seed);
-    let (delivery, job, lease, worker_session_id) =
-        install_workrun_dispatch_for_terminal(&mut fixture, seed);
-    let binding = workrun_binding(&job, &lease, seed, seed);
-    fixture
-        .accept(
-            &ExecutionPortMessage::SessionBindingMessage(binding),
-            Instant("2027-01-15T08:00:02.100Z".into()),
-        )
-        .expect("session binding");
+) {
     let ExecutionPortMessage::WorkerHeartbeatMessage(mut heartbeat) =
         execution_message("worker.heartbeat")
     else {
@@ -2112,8 +2172,8 @@ fn committed_delivery_outcome_replay_finishes_registry_once_after_restart_gap() 
         )
         .expect("worker heartbeat");
     let pool = prepare_workrun_admission(
-        &mut fixture,
-        &job,
+        fixture,
+        job,
         Some(DeliveryId(canonical_id("dlv", seed))),
         seed,
     );
@@ -2157,97 +2217,417 @@ fn committed_delivery_outcome_replay_finishes_registry_once_after_restart_gap() 
         })
         .expect("slot open");
     assert_eq!(pool, WorkerPoolId(canonical_id("wpl", seed)));
-    let outcome = terminal_workrun_outcome(&job, lease, &worker_session_id, seed);
+}
 
-    let connection = rusqlite::Connection::open(fixture.root.join("control-plane.sqlite3"))
-        .expect("Registry failure injector");
+fn terminal_workrun_outcome(
+    job: &ExecutionJob,
+    lease: ExecutionLeaseStamp,
+    worker_session_id: &WorkerSessionId,
+    seed: u64,
+) -> winwincode_execution_port::generated::JobOutcomeMessage {
+    let ExecutionPortMessage::JobOutcomeMessage(mut message) = execution_message("job.outcome")
+    else {
+        panic!("job.outcome variant");
+    };
+    let thread_id = CodexThreadId(canonical_id("cdx", seed));
+    let product_session_id = match &job.scope {
+        ExecutionScope::WorkRunExecutionScope(scope) => scope.product_session_id.clone(),
+        ExecutionScope::ProductSessionExecutionScope(scope) => scope.product_session_id.clone(),
+    };
+    let work_run_id = match &job.scope {
+        ExecutionScope::WorkRunExecutionScope(scope) => scope.work_run_id.clone(),
+        ExecutionScope::ProductSessionExecutionScope(_) => {
+            panic!("terminal fixture requires WorkRun")
+        }
+    };
+    message.lease = lease;
+    message.message_id = ExecutionMessageId(canonical_id("xmsg", seed + 3));
+    message.sent_at = Instant("2027-01-15T08:01:00.100Z".into());
+    message.worker_session_id = worker_session_id.clone();
+    message.outcome.status = ExecutionOutcomeStatus::Failed;
+    message.outcome.summary = "Verifier failed".into();
+    message.outcome.usage = None;
+    message.outcome.codex_thread_id = Some(thread_id.clone());
+    message.outcome.finished_at = Instant("2027-01-15T08:01:00.000Z".into());
+    message.session_identity = SessionIdentity {
+        codex_thread_id: thread_id,
+        product_session_id,
+        worker_session_id: worker_session_id.clone(),
+        work_run_id: Some(work_run_id),
+    };
+    message
+}
+
+fn outcome_ack_status(
+    output: Vec<ExecutionPortMessage>,
+) -> winwincode_execution_port::generated::JobOutcomeAckMessageStatus {
+    let mut output = output.into_iter();
+    let Some(ExecutionPortMessage::JobOutcomeAckMessage(ack)) = output.next() else {
+        panic!("job.outcome_ack response");
+    };
+    assert!(output.next().is_none(), "single job.outcome_ack response");
+    ack.status
+}
+
+fn lease_terminal_count(root: &Path, job_id: &ExecutionJobId) -> i64 {
+    let connection =
+        rusqlite::Connection::open(root.join("control-plane.sqlite3")).expect("Registry inspect");
     connection
-        .execute_batch(
-            "CREATE TRIGGER fail_registry_terminal_after_delivery_commit
+        .query_row(
+            "SELECT COUNT(*) FROM execution_lease_terminals WHERE job_id = ?1",
+            [&job_id.0],
+            |row| row.get(0),
+        )
+        .expect("Registry terminal count")
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the fault-injected restart test keeps Delivery, Registry, and replay assertions together"
+)]
+fn committed_delivery_outcome_replay_finishes_registry_once_after_restart_gap() {
+    for renewal_stage in [0, 1, 2] {
+        let seed = 397;
+        let mut fixture = Fixture::open("terminal-registry-gap", seed);
+        let (delivery, job, lease, worker_session_id) =
+            install_workrun_dispatch_for_terminal(&mut fixture, seed);
+        let binding = workrun_binding(&job, &lease, seed, seed);
+        fixture
+            .accept(
+                &ExecutionPortMessage::SessionBindingMessage(binding),
+                Instant("2027-01-15T08:00:02.100Z".into()),
+            )
+            .expect("session binding");
+        prepare_workrun_slot(&mut fixture, &job, &lease, &worker_session_id, seed);
+        let outcome = terminal_workrun_outcome(&job, lease, &worker_session_id, seed);
+
+        let renew = |fixture: &mut Fixture| {
+            let lease = &outcome.lease;
+            assert_eq!(
+                fixture
+                    .storage
+                    .execution_registry()
+                    .expect("registry")
+                    .renew_execution_lease(&winwincode_storage::ExecutionLeaseRenewal {
+                        expires_at: Instant("2027-01-15T08:06:00.000Z".into()),
+                        prior_expires_at: lease.expires_at.clone(),
+                        job_id: lease.job_id.clone(),
+                        lease_id: lease.lease_id.clone(),
+                        worker_id: lease.worker_id.clone(),
+                        worker_instance_id: lease.worker_instance_id.clone(),
+                        attempt: 1,
+                        fencing_token: lease.fencing_token.clone(),
+                        message_id: ExecutionMessageId(canonical_id("xmsg", 99011)),
+                        request_id: RequestId(canonical_id("req", 99011)),
+                        sent_at: Instant(
+                            if renewal_stage == 1 {
+                                "2027-01-15T08:00:03.050Z"
+                            } else {
+                                "2027-01-15T08:01:01.000Z"
+                            }
+                            .into()
+                        ),
+                    })
+                    .expect("renew around terminal commit")
+                    .status,
+                winwincode_storage::LeaseWriteStatus::Accepted
+            );
+        };
+        if renewal_stage == 1 {
+            renew(&mut fixture);
+        }
+
+        assert_eq!(
+            outcome_ack_status(
+                fixture
+                    .accept(
+                        &ExecutionPortMessage::JobOutcomeMessage(outcome.clone()),
+                        Instant("2027-01-15T08:06:00.000Z".into()),
+                    )
+                    .expect("first-seen outcome at expiry rejected")
+            ),
+            winwincode_execution_port::generated::JobOutcomeAckMessageStatus::RejectedConflict
+        );
+
+        let connection = rusqlite::Connection::open(fixture.root.join("control-plane.sqlite3"))
+            .expect("Registry failure injector");
+        connection
+            .execute_batch(
+                "CREATE TRIGGER fail_registry_terminal_after_delivery_commit
              BEFORE INSERT ON execution_lease_terminals
              BEGIN SELECT RAISE(ABORT, 'injected Registry terminal failure'); END;",
+            )
+            .expect("install Registry failure");
+        drop(connection);
+        let first_error = fixture
+            .accept(
+                &ExecutionPortMessage::JobOutcomeMessage(outcome.clone()),
+                outcome.sent_at.clone(),
+            )
+            .expect_err("Registry settlement fails after Delivery commit");
+        assert!(matches!(first_error, DurableExecutionPortError::Storage(_)));
+        let committed = fixture
+            .control_plane
+            .load_state(&format!("delivery:{}", delivery.id().0))
+            .expect("committed Delivery read")
+            .expect("committed Delivery state");
+        assert_eq!(committed.revision, 5);
+        assert_eq!(lease_terminal_count(&fixture.root, &job.job_id), 0);
+        if renewal_stage == 2 {
+            renew(&mut fixture);
+        }
+
+        let connection = rusqlite::Connection::open(fixture.root.join("control-plane.sqlite3"))
+            .expect("Registry failure removal");
+        connection
+            .execute_batch("DROP TRIGGER fail_registry_terminal_after_delivery_commit;")
+            .expect("remove Registry failure");
+        drop(connection);
+        fixture = fixture.restart();
+        assert_eq!(
+            outcome_ack_status(
+                fixture
+                    .accept(
+                        &ExecutionPortMessage::JobOutcomeMessage(outcome.clone()),
+                        Instant("2027-01-15T08:06:00.000Z".into()),
+                    )
+                    .expect("exact terminal recovery replay"),
+            ),
+            winwincode_execution_port::generated::JobOutcomeAckMessageStatus::Duplicate
+        );
+        assert_eq!(lease_terminal_count(&fixture.root, &job.job_id), 1);
+
+        if renewal_stage != 0 {
+            let mut unaccepted = outcome.clone();
+            unaccepted.lease.expires_at = Instant("2027-01-15T08:04:00.000Z".into());
+            assert_eq!(
+                outcome_ack_status(
+                    fixture
+                        .accept(
+                            &ExecutionPortMessage::JobOutcomeMessage(unaccepted),
+                            Instant("2027-01-15T08:06:00.000Z".into()),
+                        )
+                        .expect("unaccepted period rejection")
+                ),
+                winwincode_execution_port::generated::JobOutcomeAckMessageStatus::RejectedConflict
+            );
+        }
+        let mut changed = outcome.clone();
+        changed.outcome.summary = "changed replay body".into();
+        assert_eq!(
+            outcome_ack_status(
+                fixture
+                    .accept(
+                        &ExecutionPortMessage::JobOutcomeMessage(changed),
+                        Instant("2027-01-15T08:06:00.000Z".into()),
+                    )
+                    .expect("changed terminal replay rejection"),
+            ),
+            winwincode_execution_port::generated::JobOutcomeAckMessageStatus::RejectedConflict
+        );
+        assert_eq!(lease_terminal_count(&fixture.root, &job.job_id), 1);
+
+        let mut forged = outcome.clone();
+        forged.message_id = ExecutionMessageId(canonical_id("xmsg", seed + 30));
+        assert_eq!(
+            outcome_ack_status(
+                fixture
+                    .accept(
+                        &ExecutionPortMessage::JobOutcomeMessage(forged),
+                        Instant("2027-01-15T08:06:00.000Z".into()),
+                    )
+                    .expect("fresh terminal conflict"),
+            ),
+            winwincode_execution_port::generated::JobOutcomeAckMessageStatus::RejectedConflict
+        );
+        assert_eq!(lease_terminal_count(&fixture.root, &job.job_id), 1);
+        let mut premature = outcome;
+        premature.message_id = ExecutionMessageId(canonical_id("xmsg", seed + 31));
+        assert_eq!(
+            outcome_ack_status(
+                fixture
+                    .accept(
+                        &ExecutionPortMessage::JobOutcomeMessage(premature),
+                        Instant("2027-01-15T07:59:59.000Z".into()),
+                    )
+                    .expect("premature terminal conflict"),
+            ),
+            winwincode_execution_port::generated::JobOutcomeAckMessageStatus::RejectedConflict
+        );
+        assert_eq!(lease_terminal_count(&fixture.root, &job.job_id), 1);
+        fixture.close();
+    }
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "approval ingress, replay, visibility, and denial use the same leased WorkRun"
+)]
+fn workrun_core_approval_reaches_product_ingress() {
+    for renewed in [false, true] {
+        let seed = 398;
+        let mut fixture = Fixture::open("workrun-core-approval", seed);
+        let (_, job, lease, worker_session_id) =
+            install_workrun_dispatch_for_terminal(&mut fixture, seed);
+        prepare_workrun_slot(&mut fixture, &job, &lease, &worker_session_id, seed);
+        let binding = workrun_binding(&job, &lease, seed, seed);
+        fixture
+            .accept(
+                &ExecutionPortMessage::SessionBindingMessage(binding.clone()),
+                Instant("2027-01-15T08:00:02.100Z".into()),
+            )
+            .expect("accepted WorkRun binding");
+        let ExecutionPortMessage::ApprovalRequestMessage(mut request) =
+            execution_message("approval.request")
+        else {
+            panic!("approval fixture");
+        };
+        request.lease = lease;
+        request.worker_session_id = worker_session_id;
+        request.session_identity = binding.session_identity;
+        request.sent_at = Instant("2027-01-15T08:00:03.000Z".into());
+        request.expires_at = Instant("2027-01-15T08:04:00.000Z".into());
+        if renewed {
+            let lease = &request.lease;
+            assert_eq!(
+                fixture
+                    .storage
+                    .execution_registry()
+                    .expect("registry")
+                    .renew_execution_lease(&winwincode_storage::ExecutionLeaseRenewal {
+                        expires_at: Instant("2027-01-15T08:06:00.000Z".into()),
+                        prior_expires_at: lease.expires_at.clone(),
+                        job_id: lease.job_id.clone(),
+                        lease_id: lease.lease_id.clone(),
+                        worker_id: lease.worker_id.clone(),
+                        worker_instance_id: lease.worker_instance_id.clone(),
+                        attempt: 1,
+                        fencing_token: lease.fencing_token.clone(),
+                        message_id: ExecutionMessageId(canonical_id("xmsg", 99010)),
+                        request_id: RequestId(canonical_id("req", 99010)),
+                        sent_at: Instant("2027-01-15T08:00:03.050Z".into()),
+                    })
+                    .expect("renew before original WorkRun approval arrives")
+                    .status,
+                winwincode_storage::LeaseWriteStatus::Accepted
+            );
+        }
+        let mut delegate = winwincode_control_plane::ProductSessionExecutionApplication::new(
+            RecordingDelegate::default(),
+        );
+        for field in ["thread", "run", "fence"] {
+            let mut foreign = request.clone();
+            match field {
+                "thread" => {
+                    foreign.session_identity.codex_thread_id =
+                        CodexThreadId(canonical_id("cdx", 999));
+                }
+                "run" => {
+                    foreign.session_identity.work_run_id =
+                        Some(WorkRunId(canonical_id("wrn", 999)));
+                }
+                _ => foreign.lease.fencing_token = FencingToken("999".into()),
+            }
+            assert!(
+                fixture
+                    .accept_with_delegate(
+                        &ExecutionPortMessage::ApprovalRequestMessage(foreign),
+                        Instant("2027-01-15T08:00:03.100Z".into()),
+                        &mut delegate
+                    )
+                    .is_err()
+            );
+        }
+        fixture
+            .accept_with_delegate(
+                &ExecutionPortMessage::ApprovalRequestMessage(request.clone()),
+                Instant("2027-01-15T08:00:03.100Z".into()),
+                &mut delegate,
+            )
+            .expect("Core approval must reach the WorkRun owner");
+        fixture = fixture.restart();
+        fixture
+            .accept_with_delegate(
+                &ExecutionPortMessage::ApprovalRequestMessage(request.clone()),
+                Instant("2027-01-15T08:00:03.200Z".into()),
+                &mut delegate,
+            )
+            .expect("approval replay after restart");
+        let public_scope = PublicEventScope::Repository {
+            organization_id: fixture.scope.organization_id.clone(),
+            workspace_id: fixture.scope.workspace_id.clone(),
+            project_id: fixture.scope.project_id.clone(),
+            repository_id: fixture.scope.repository_id.clone(),
+        };
+        let scope_key = receipt_scope_key(&public_scope).expect("receipt scope");
+        let query = from_value(serde_json::json!({
+            "actor":{"kind":"user","id":canonical_id("usr",seed)},
+            "page":{"cursor":null,"limit":10},"parameters":{"approvalId":request.approval_id},
+            "query":"approval.get","requestId":canonical_id("req",99000),
+            "schemaVersion":"winwincode/v1","scope":fixture.scope,
+        }))
+        .expect("approval query");
+        let projection =
+            winwincode_control_plane::ChatInteractionService::new(&mut fixture.storage)
+                .approval_get(
+                    &scope_key,
+                    &query,
+                    &Instant("2027-01-15T08:00:04.000Z".into()),
+                )
+                .expect("visible WorkRun approval")
+                .result;
+        assert_eq!(projection.state, "pending");
+        assert!(projection.decision_enabled);
+        let list_query = from_value(serde_json::json!({
+            "actor":{"kind":"user","id":canonical_id("usr",seed)},
+            "page":{"cursor":null,"limit":10},"parameters":{"states":["pending"]},
+            "query":"approval.list","requestId":canonical_id("req",99002),
+            "schemaVersion":"winwincode/v1","scope":fixture.scope,
+        }))
+        .expect("approval list query");
+        let listed = winwincode_control_plane::ChatInteractionService::new(&mut fixture.storage)
+            .approval_list(
+                &scope_key,
+                &list_query,
+                &Instant("2027-01-15T08:00:04.000Z".into()),
+            )
+            .expect("pending WorkRun approval list");
+        assert_eq!(listed.result.items.len(), 1);
+        assert_eq!(listed.result.items[0].id, request.approval_id);
+        let command: winwincode_api::generated::ApprovalDecideCommand = from_value(serde_json::json!({
+        "actor":{"kind":"user","id":canonical_id("usr",seed)},"command":"approval.decide",
+        "expectedRevision":projection.revision,"payload":{"approvalId":request.approval_id,
+        "binding":projection.binding,"decision":"reject","reason":"Keep candidate execution sandboxed"},
+        "requestId":canonical_id("req",99001),"schemaVersion":"winwincode/v1","scope":fixture.scope,
+    })).expect("approval command");
+        let context = winwincode_control_plane::product_session_command_context(
+            &command.actor,
+            &fixture.scope,
+            command.request_id.clone(),
+            &command.expected_revision,
+            winwincode_domain::ControlPlaneEventId(canonical_id("evt", 99001)),
+            Instant("2027-01-15T08:00:04.100Z".into()),
         )
-        .expect("install Registry failure");
-    drop(connection);
-    let first_error = fixture
-        .accept(
-            &ExecutionPortMessage::JobOutcomeMessage(outcome.clone()),
-            outcome.sent_at.clone(),
-        )
-        .expect_err("Registry settlement fails after Delivery commit");
-    assert!(matches!(first_error, DurableExecutionPortError::Storage(_)));
-    let committed = fixture
-        .control_plane
-        .load_state(&format!("delivery:{}", delivery.id().0))
-        .expect("committed Delivery read")
-        .expect("committed Delivery state");
-    assert_eq!(committed.revision, 5);
-    assert_eq!(lease_terminal_count(&fixture.root, &job.job_id), 0);
-
-    let connection = rusqlite::Connection::open(fixture.root.join("control-plane.sqlite3"))
-        .expect("Registry failure removal");
-    connection
-        .execute_batch("DROP TRIGGER fail_registry_terminal_after_delivery_commit;")
-        .expect("remove Registry failure");
-    drop(connection);
-    fixture = fixture.restart();
-    assert_eq!(
-        outcome_ack_status(
-            fixture
-                .accept(
-                    &ExecutionPortMessage::JobOutcomeMessage(outcome.clone()),
-                    Instant("2027-01-15T08:06:00.000Z".into()),
-                )
-                .expect("exact terminal recovery replay"),
-        ),
-        winwincode_execution_port::generated::JobOutcomeAckMessageStatus::Duplicate
-    );
-    assert_eq!(lease_terminal_count(&fixture.root, &job.job_id), 1);
-
-    let mut changed = outcome.clone();
-    changed.outcome.summary = "changed replay body".into();
-    assert_eq!(
-        outcome_ack_status(
-            fixture
-                .accept(
-                    &ExecutionPortMessage::JobOutcomeMessage(changed),
-                    Instant("2027-01-15T08:06:00.000Z".into()),
-                )
-                .expect("changed terminal replay rejection"),
-        ),
-        winwincode_execution_port::generated::JobOutcomeAckMessageStatus::RejectedConflict
-    );
-    assert_eq!(lease_terminal_count(&fixture.root, &job.job_id), 1);
-
-    let mut forged = outcome.clone();
-    forged.message_id = ExecutionMessageId(canonical_id("xmsg", seed + 30));
-    assert_eq!(
-        outcome_ack_status(
-            fixture
-                .accept(
-                    &ExecutionPortMessage::JobOutcomeMessage(forged),
-                    Instant("2027-01-15T08:06:00.000Z".into()),
-                )
-                .expect("fresh terminal conflict"),
-        ),
-        winwincode_execution_port::generated::JobOutcomeAckMessageStatus::RejectedConflict
-    );
-    assert_eq!(lease_terminal_count(&fixture.root, &job.job_id), 1);
-    let mut premature = outcome;
-    premature.message_id = ExecutionMessageId(canonical_id("xmsg", seed + 31));
-    assert_eq!(
-        outcome_ack_status(
-            fixture
-                .accept(
-                    &ExecutionPortMessage::JobOutcomeMessage(premature),
-                    Instant("2027-01-15T07:59:59.000Z".into()),
-                )
-                .expect("premature terminal conflict"),
-        ),
-        winwincode_execution_port::generated::JobOutcomeAckMessageStatus::RejectedConflict
-    );
-    assert_eq!(lease_terminal_count(&fixture.root, &job.job_id), 1);
-    fixture.close();
+        .expect("decision context");
+        let mut foreign = command.clone();
+        foreign.actor = from_value(serde_json::json!({"kind":"user","id":canonical_id("usr",999)}))
+            .expect("foreign actor");
+        assert!(
+            winwincode_control_plane::ChatInteractionService::new(&mut fixture.storage)
+                .decide_approval(&context, &foreign)
+                .is_err()
+        );
+        let receipt = winwincode_control_plane::ChatInteractionService::new(&mut fixture.storage)
+            .decide_approval(&context, &command)
+            .expect("owner rejects WorkRun approval");
+        assert_eq!(receipt.approval.state, "rejected");
+        let decision = receipt.worker_decision.expect("Worker denial");
+        assert_eq!(decision.session_identity, request.session_identity);
+        assert_eq!(decision.lease, request.lease);
+        fixture.close();
+    }
 }
 
 #[test]

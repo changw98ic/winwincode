@@ -6,11 +6,11 @@ use std::fmt;
 
 use sha2::{Digest, Sha256};
 use winwincode_domain::{
-    CodexThreadId, ExecutionJobId, FencingToken, Sha256Digest, WorkerId, WorkerInstanceId,
+    CodexThreadId, ExecutionJobId, FencingToken, Instant, Sha256Digest, WorkerId, WorkerInstanceId,
     WorkerSessionId,
 };
 
-use crate::generated::JobDispatchMessage;
+use crate::generated::{ExecutionLeaseStamp, JobDispatchMessage, LeaseRenewMessage};
 
 /// Secret-free failure to encode one canonical execution identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -108,4 +108,63 @@ fn canonical_run_bytes(
 ) -> Result<Vec<u8>, ExecutionIdentityError> {
     serde_json::to_vec(&(job_id, attempt, fencing_token, payload_digest))
         .map_err(|_| ExecutionIdentityError)
+}
+
+/// Checks canonical UTC timestamps used by execution authority comparisons.
+#[must_use]
+pub fn canonical_instant(instant: &Instant) -> bool {
+    let value = instant.0.as_bytes();
+    value.len() == 24
+        && value[4] == b'-'
+        && value[7] == b'-'
+        && value[10] == b'T'
+        && value[13] == b':'
+        && value[16] == b':'
+        && value[19] == b'.'
+        && value[23] == b'Z'
+        && value.iter().enumerate().all(|(index, byte)| {
+            matches!(index, 4 | 7 | 10 | 13 | 16 | 19 | 23) || byte.is_ascii_digit()
+        })
+        && number(value, 5, 7).is_some_and(|month| (1..=12).contains(&month))
+        && number(value, 8, 10).is_some_and(|day| (1..=31).contains(&day))
+        && number(value, 11, 13).is_some_and(|hour| hour <= 23)
+        && number(value, 14, 16).is_some_and(|minute| minute <= 59)
+        && number(value, 17, 19).is_some_and(|second| second <= 59)
+}
+
+fn number(value: &[u8], start: usize, end: usize) -> Option<u8> {
+    value
+        .get(start..end)?
+        .iter()
+        .try_fold(0_u8, |number, byte| {
+            number.checked_mul(10)?.checked_add(byte - b'0')
+        })
+}
+
+/// Validates a live same-attempt lease extension or its unchanged replay.
+#[must_use]
+pub fn valid_lease_renewal(
+    current: &ExecutionLeaseStamp,
+    renewal: &LeaseRenewMessage,
+    now: &Instant,
+) -> bool {
+    let mut expected = current.clone();
+    expected.expires_at = renewal.lease.expires_at.clone();
+    [
+        &current.issued_at,
+        &current.expires_at,
+        &renewal.prior_expires_at,
+        &renewal.lease.expires_at,
+        &renewal.sent_at,
+        now,
+    ]
+    .into_iter()
+    .all(canonical_instant)
+        && expected == renewal.lease
+        && current.issued_at.0 <= renewal.sent_at.0
+        && renewal.sent_at.0 <= now.0
+        && renewal.sent_at.0 < renewal.prior_expires_at.0
+        && renewal.prior_expires_at.0 < renewal.lease.expires_at.0
+        && now.0 < current.expires_at.0
+        && (current.expires_at == renewal.prior_expires_at || *current == renewal.lease)
 }

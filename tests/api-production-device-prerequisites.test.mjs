@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { createHash } from 'node:crypto'
 import test from 'node:test'
+import { execFileSync } from 'node:child_process'
 import { DatabaseSync } from 'node:sqlite'
 
 import {
@@ -18,6 +19,8 @@ import {
   deviceProviderSecretBundle,
 } from '../scripts/run-api-production-vertical.mjs'
 import {
+  runtimeChildEnvironment,
+  resolveDeviceTaskApprovals,
   DETERMINISTIC_VERIFICATION_BEHAVIOR_MARKER,
   DETERMINISTIC_VERIFICATION_CALL_ID,
   DETERMINISTIC_VERIFICATION_POLL_CALL_ID,
@@ -281,4 +284,93 @@ test('device connection waits for the exact code publication acknowledgement', (
   } finally {
     database.close()
   }
+})
+
+
+test('runtime children do not inherit orchestration credentials or injected startup code', () => {
+  const environment = runtimeChildEnvironment({
+    PATH: '/usr/bin:/bin', HOME: '/tmp/isolated-benchmark-home', LANG: 'C',
+    ZHIPU_API_KEY: 'synthetic-provider-secret', OPENCODE_SESSION_VALUE: 'synthetic-session',
+    GH_TOKEN: 'synthetic-publisher-secret', PRIVATE_GRADER_CREDENTIAL: 'synthetic-grader-secret',
+    WWC_DEVICE_PROVIDER_API_KEY: 'synthetic-device-secret',
+    NODE_OPTIONS: '--eval=throw new Error("injected")',
+    DYLD_INSERT_LIBRARIES: '/tmp/untrusted.dylib',
+  })
+  const actual = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e',
+    'process.stdout.write(JSON.stringify(process.env))'], { env: environment, encoding: 'utf8' }))
+  // CoreFoundation adds this platform-owned setting on macOS process startup.
+  delete actual.__CF_USER_TEXT_ENCODING
+  assert.deepEqual(actual, { PATH: '/usr/bin:/bin', HOME: '/tmp/isolated-benchmark-home', LANG: 'C' })
+})
+
+
+test('Device task approves only installed public smoke once with an exact current WorkRun binding', async () => {
+  const run = {
+    id: 'run', state: 'running', productSessionId: 'product', codexThreadId: 'core',
+    workerSessionId: 'worker', executionJobId: 'job',
+  }
+  const original = {
+    id: 'approval', revision: 3, state: 'pending', decisionEnabled: true,
+    category: 'mcp', effectiveDecisionScope: 'once',
+    binding: {
+      executionJobId: 'job', productSessionId: 'product', workerSessionId: 'worker',
+      sessionIdentity: { workRunId: 'run', codexThreadId: 'core', productSessionId: 'product', workerSessionId: 'worker' },
+    },
+    sanitizedDetail: {
+      kind: 'available', operation: 'execute', reasonCode: 'mcp_permission',
+      targetCount: 1, targetSummaries: ['server:benchmark_public_smoke'],
+    },
+  }
+  const cases = [
+    ['approve', () => {}],
+    ['reject', a => { a.category = 'exec' }],
+    ['reject', a => { a.category = 'patch' }],
+    ['reject', a => { a.effectiveDecisionScope = 'session' }],
+    ['reject', a => { a.sanitizedDetail.reasonCode = 'unknown' }],
+    ['reject', a => { a.sanitizedDetail.kind = 'unavailable' }],
+    ['reject', a => { a.sanitizedDetail.operation = 'write' }],
+    ['reject', a => { a.sanitizedDetail.targetSummaries = ['server:other'] }],
+    ['reject', a => { a.sanitizedDetail.targetCount = 2 }],
+    ['reject', a => { a.sanitizedDetail.targetSummaries.push('server:other') }],
+    [null, a => { a.state = 'resolved' }],
+    [null, a => { a.decisionEnabled = false }],
+    ...['executionJobId', 'productSessionId', 'workerSessionId'].map(key =>
+      [null, a => { a.binding[key] = 'foreign' }]),
+    ...['workRunId', 'codexThreadId', 'productSessionId', 'workerSessionId'].map(key =>
+      [null, a => { a.binding.sessionIdentity[key] = 'foreign' }]),
+  ]
+  for (const [expected, mutate] of cases) {
+    const approval = structuredClone(original)
+    mutate(approval)
+    const decisions = []
+    const receipts = []
+    const api = {
+      query: async name => ({ page: { hasMore: false }, result: name === 'approval.list' ? { items: [original] } : approval }),
+      command: async (name, revision, payload) => {
+        assert.equal(name, 'approval.decide')
+        assert.equal(revision, 3)
+        assert.deepEqual(payload.binding, approval.binding)
+        decisions.push(payload.decision)
+        return { outcome: 'completed' }
+      },
+    }
+    await resolveDeviceTaskApprovals({ api, runs: [run], publicSmokeId: 'benchmark_public_smoke', onDecision: receipt => receipts.push(receipt) })
+    assert.deepEqual(decisions, expected === null ? [] : [expected])
+    assert.equal(receipts.length, decisions.length)
+    if (receipts.length) assert.equal(receipts[0].decision, expected)
+  }
+  const api = {
+    query: async name => ({ page: { hasMore: false }, result: name === 'approval.list' ? { items: [original] } : original }),
+    command: async (_name, _revision, payload) => {
+      assert.equal(payload.decision, 'reject', 'uninstalled public smoke cannot be approved')
+      return { outcome: 'completed' }
+    },
+  }
+  await resolveDeviceTaskApprovals({ api, runs: [run], onDecision: () => {} })
+  api.command = async () => { throw Object.assign(new Error('changed'), { code: 'REVISION_CONFLICT' }) }
+  await resolveDeviceTaskApprovals({ api, runs: [run], onDecision: () => assert.fail('no receipt for failed command') })
+  api.command = async () => { throw new Error('transport lost') }
+  await assert.rejects(resolveDeviceTaskApprovals({ api, runs: [run], onDecision: () => {} }), /transport lost/u)
+  api.query = async () => ({ page: { hasMore: true }, result: { items: [original] } })
+  await assert.rejects(resolveDeviceTaskApprovals({ api, runs: [run], onDecision: () => {} }), /must be complete/u)
 })

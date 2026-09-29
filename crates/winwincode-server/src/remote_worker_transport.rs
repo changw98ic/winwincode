@@ -585,38 +585,41 @@ where
         .map_err(|_| RemoteWorkerTransportError::new("remote Worker authentication failed"))?;
         let principal = connection.principal().clone();
 
-        let responses = match frame.message() {
+        let responses = if matches!(
+            frame.message(),
             ExecutionPortMessage::WorkerRegisterMessage(_)
-            | ExecutionPortMessage::WorkerHeartbeatMessage(_) => Ok(vec![
+        ) {
+            Ok(vec![
                 pool.accept(&mut connection, frame.message(), now)
                     .map_err(|_| {
                         RemoteWorkerTransportError::new("remote Worker Registry rejected a frame")
                     })?,
-            ]),
-            _ => {
-                pool.authorize_registered_message(
-                    &mut connection,
-                    request.worker_id(),
-                    request.worker_instance_id(),
-                    now,
-                )
+            ])
+        } else {
+            // Heartbeats must reach the shared Core's durable lease renewal.
+            // Authenticate their frame identity as well as the envelope.
+            let (worker_id, instance_id) = match frame.message() {
+                ExecutionPortMessage::WorkerHeartbeatMessage(heartbeat) => {
+                    (&heartbeat.worker_id, &heartbeat.worker_instance_id)
+                }
+                _ => (request.worker_id(), request.worker_instance_id()),
+            };
+            pool.authorize_registered_message(&mut connection, worker_id, instance_id, now)
                 .map_err(|_| {
                     RemoteWorkerTransportError::new("remote Worker authentication failed")
                 })?;
-                let mut core = self.core.lock().map_err(|_| {
-                    RemoteWorkerTransportError::new("remote Worker ingress is unavailable")
-                })?;
-                log_dispatch_result(frame.message());
-                let encoded = RemoteTransportAdapter::<NoopCore>::encode(frame).map_err(|_| {
-                    RemoteWorkerTransportError::new("remote Worker frame is invalid")
-                })?;
-                RemoteTransportAdapter::new(&mut *core, EndpointSide::ControlPlane)
-                    .accept(&encoded)
-                    .map_err(|error| {
-                        log_ingress_rejection(frame, &error);
-                        RemoteWorkerTransportError::new("remote Worker ingress rejected a frame")
-                    })
-            }
+            let mut core = self.core.lock().map_err(|_| {
+                RemoteWorkerTransportError::new("remote Worker ingress is unavailable")
+            })?;
+            log_dispatch_result(frame.message());
+            let encoded = RemoteTransportAdapter::<NoopCore>::encode(frame)
+                .map_err(|_| RemoteWorkerTransportError::new("remote Worker frame is invalid"))?;
+            RemoteTransportAdapter::new(&mut *core, EndpointSide::ControlPlane)
+                .accept(&encoded)
+                .map_err(|error| {
+                    log_ingress_rejection(frame, &error);
+                    RemoteWorkerTransportError::new("remote Worker ingress rejected a frame")
+                })
         }?;
         Ok((responses, principal))
     }

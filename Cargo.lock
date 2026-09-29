@@ -12650,6 +12650,7 @@ dependencies = [
  "uuid",
  "winwincode-domain",
  "winwincode-execution-port",
+ "winwincode-fusion",
  "winwincode-kernel",
  "winwincode-provider",
 ]
@@ -12869,6 +12870,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tokio",
+ "winwincode-delivery",
 ]
 
 [[package]]

@@ -1228,128 +1228,16 @@ impl<'storage> ExecutionRegistry<'storage> {
     ///
     /// Returns an input error for a malformed request or an adapter error for
     /// a failed `SQLite` read/write.
-    #[allow(clippy::too_many_lines)]
     pub fn renew_execution_lease(
         &mut self,
         request: &ExecutionLeaseRenewal,
     ) -> Result<ExecutionLeaseReceipt, StorageError> {
-        validate_renewal(request)?;
-        let request_digest = digest(request)?;
         let transaction = self
             .storage
             .connection_mut()?
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(sql_error)?;
-        if let Some(receipt) = lease_request_replay(
-            &transaction,
-            "renew",
-            &request.job_id,
-            &request.request_id,
-            &request_digest,
-        )? {
-            transaction.commit().map_err(sql_error)?;
-            return Ok(receipt);
-        }
-        if !worker_instance_is_current(
-            &transaction,
-            &request.worker_id,
-            &request.worker_instance_id,
-        )? {
-            transaction.commit().map_err(sql_error)?;
-            return Ok(lease_receipt(
-                LeaseWriteStatus::RejectedWorkerInstance,
-                None,
-                false,
-            ));
-        }
-        let Some(current) = load_lease_in_transaction(&transaction, &request.job_id)? else {
-            transaction.commit().map_err(sql_error)?;
-            return Ok(lease_receipt(
-                LeaseWriteStatus::RejectedConflict,
-                None,
-                false,
-            ));
-        };
-        if execution_lease_is_terminal(&transaction, &current.lease_id)? {
-            transaction.commit().map_err(sql_error)?;
-            return Ok(lease_receipt(
-                LeaseWriteStatus::RejectedConflict,
-                Some(current),
-                false,
-            ));
-        }
-        if less_decimal(&request.fencing_token.0, &current.fencing_token.0) {
-            transaction.commit().map_err(sql_error)?;
-            return Ok(lease_receipt(
-                LeaseWriteStatus::RejectedStaleFencingToken,
-                Some(current),
-                false,
-            ));
-        }
-        if request.worker_id != current.worker_id
-            || request.worker_instance_id != current.worker_instance_id
-            || request.lease_id != current.lease_id
-            || request.attempt != current.attempt
-            || request.fencing_token != current.fencing_token
-        {
-            transaction.commit().map_err(sql_error)?;
-            return Ok(lease_receipt(
-                LeaseWriteStatus::RejectedConflict,
-                Some(current),
-                false,
-            ));
-        }
-        if request.sent_at.0 >= current.expires_at.0 {
-            transaction.commit().map_err(sql_error)?;
-            return Ok(lease_receipt(
-                LeaseWriteStatus::RejectedExpiredLease,
-                Some(current),
-                false,
-            ));
-        }
-        if request.prior_expires_at != current.expires_at {
-            transaction.commit().map_err(sql_error)?;
-            return Ok(lease_receipt(
-                LeaseWriteStatus::RejectedConflict,
-                Some(current),
-                false,
-            ));
-        }
-        if request.expires_at.0 <= current.expires_at.0 {
-            transaction.commit().map_err(sql_error)?;
-            return Ok(lease_receipt(
-                LeaseWriteStatus::RejectedConflict,
-                Some(current),
-                false,
-            ));
-        }
-        let lease = ExecutionLeaseRecord {
-            expires_at: request.expires_at.clone(),
-            ..current
-        };
-        let response = lease_receipt(LeaseWriteStatus::Accepted, Some(lease.clone()), false);
-        transaction
-            .execute(
-                "UPDATE execution_leases SET expires_at = ?1
-                 WHERE job_id = ?2 AND lease_id = ?3 AND attempt = ?4 AND fencing_token = ?5",
-                params![
-                    request.expires_at.0,
-                    request.job_id.0,
-                    request.lease_id.0,
-                    i64::try_from(request.attempt)
-                        .map_err(|_| StorageError::invalid_input("attempt is out of range"))?,
-                    request.fencing_token.0,
-                ],
-            )
-            .map_err(sql_error)?;
-        insert_lease_request_receipt(
-            &transaction,
-            "renew",
-            &request.job_id,
-            &request.request_id,
-            &request_digest,
-            &response,
-        )?;
+        let response = renew_execution_lease_in_transaction(&transaction, request)?;
         transaction.commit().map_err(sql_error)?;
         Ok(response)
     }
@@ -1879,6 +1767,48 @@ impl<'storage> ExecutionRegistry<'storage> {
             return Ok(None);
         }
         Ok(Some(lease))
+    }
+
+    /// Resolves an accepted historical lease period to its still-live current lease.
+    /// Every identity and payload field must remain identical; both periods must
+    /// occur in accepted claim/renewal receipts. An arbitrary earlier expiry is
+    /// not authority, and neither a terminal nor expired lease can be revived.
+    ///
+    /// # Errors
+    /// Rejects malformed records and propagates corrupt receipt or `SQLite` errors.
+    pub fn load_live_lease_for_period(
+        &self,
+        period: &ExecutionLeaseRecord,
+        now: &Instant,
+    ) -> Result<Option<ExecutionLeaseRecord>, StorageError> {
+        validate_stored_lease(period)?;
+        if self.load_live_lease(&period.job_id, now)?.is_none() {
+            return Ok(None);
+        }
+        self.load_accepted_lease_for_period(period)
+    }
+
+    /// Proves an accepted lease period against the current lease, including after
+    /// terminal settlement or expiry. This proves identity only: callers must
+    /// resolve exact receipts before authorizing any first-seen operation.
+    ///
+    /// # Errors
+    /// Rejects malformed records and propagates corrupt receipt or `SQLite` errors.
+    pub fn load_accepted_lease_for_period(
+        &self,
+        period: &ExecutionLeaseRecord,
+    ) -> Result<Option<ExecutionLeaseRecord>, StorageError> {
+        validate_stored_lease(period)?;
+        let Some(current) = self.load_lease(&period.job_id)? else {
+            return Ok(None);
+        };
+        let mut extended = period.clone();
+        extended.expires_at.clone_from(&current.expires_at);
+        if extended != current || period.expires_at.0 > current.expires_at.0 {
+            return Ok(None);
+        }
+        let history = accepted_lease_history(self.storage.connection()?, &period.job_id)?;
+        Ok((history.contains(period) && history.contains(&current)).then_some(current))
     }
 
     /// Loads the authenticated pool placement frozen beside the current lease.
@@ -3675,7 +3605,7 @@ pub(crate) fn load_dispatch_authority_in_transaction(
         .ok()
         .filter(|attempt| (1..=MAX_LEASE_ATTEMPT).contains(attempt))
         .ok_or_else(|| StorageError::adapter("stored dispatch attempt is invalid"))?;
-    let authority = ExecutionDispatchAuthority {
+    let mut authority = ExecutionDispatchAuthority {
         lease: ExecutionLeaseRecord {
             job_id: job_id.clone(),
             lease_id: LeaseId(lease_id),
@@ -3709,9 +3639,21 @@ pub(crate) fn load_dispatch_authority_in_transaction(
     let current = load_lease_in_transaction(connection, job_id)?
         .ok_or_else(|| StorageError::adapter("dispatch authority lost its lease"))?;
     if current != authority.lease {
-        return Err(StorageError::adapter(
-            "dispatch authority differs from the current lease",
-        ));
+        let history = accepted_lease_history(connection, job_id)?;
+        let mut extended = authority.lease.clone();
+        extended.expires_at.clone_from(&current.expires_at);
+        if extended != current
+            || current.expires_at.0 <= authority.lease.expires_at.0
+            || !history.contains(&authority.lease)
+            || !history.contains(&current)
+        {
+            return Err(StorageError::adapter(
+                "dispatch authority differs from the current lease",
+            ));
+        }
+        // Keep the original accepted dispatch immutable; expose its proven
+        // current lease to first-seen execution owners after renewal.
+        authority.lease = current;
     }
     Ok(Some(authority))
 }
@@ -3810,6 +3752,148 @@ fn less_decimal(left: &str, right: &str) -> bool {
 #[allow(clippy::needless_pass_by_value)]
 fn sql_error(error: rusqlite::Error) -> StorageError {
     StorageError::adapter(format!("execution registry SQLite error: {error}"))
+}
+
+/// Reads only accepted, immutable claim/renewal receipts for one job.
+pub(crate) fn accepted_lease_history(
+    connection: &rusqlite::Connection,
+    job_id: &ExecutionJobId,
+) -> Result<Vec<ExecutionLeaseRecord>, StorageError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT response_json FROM execution_lease_request_receipts
+         WHERE job_id = ?1 AND operation IN ('claim', 'renew')",
+        )
+        .map_err(sql_error)?;
+    let rows = statement
+        .query_map([&job_id.0], |row| row.get::<_, String>(0))
+        .map_err(sql_error)?;
+    let mut leases = Vec::new();
+    for row in rows {
+        let receipt: ExecutionLeaseReceipt = serde_json::from_str(&row.map_err(sql_error)?)
+            .map_err(|_| StorageError::adapter("invalid stored lease receipt"))?;
+        if receipt.status == LeaseWriteStatus::Accepted {
+            let lease = receipt
+                .lease
+                .ok_or_else(|| StorageError::adapter("accepted lease receipt has no lease"))?;
+            validate_stored_lease(&lease)?;
+            if lease.job_id != *job_id {
+                return Err(StorageError::adapter(
+                    "stored lease receipt belongs to another job",
+                ));
+            }
+            leases.push(lease);
+        }
+    }
+    Ok(leases)
+}
+
+/// Shared by the registry and the atomic renewal/outbound write.
+#[allow(clippy::too_many_lines)]
+pub(crate) fn renew_execution_lease_in_transaction(
+    connection: &rusqlite::Connection,
+    request: &ExecutionLeaseRenewal,
+) -> Result<ExecutionLeaseReceipt, StorageError> {
+    validate_renewal(request)?;
+    let request_digest = digest(request)?;
+    if let Some(receipt) = lease_request_replay(
+        connection,
+        "renew",
+        &request.job_id,
+        &request.request_id,
+        &request_digest,
+    )? {
+        return Ok(receipt);
+    }
+    if !worker_instance_is_current(connection, &request.worker_id, &request.worker_instance_id)? {
+        return Ok(lease_receipt(
+            LeaseWriteStatus::RejectedWorkerInstance,
+            None,
+            false,
+        ));
+    }
+    let Some(current) = load_lease_in_transaction(connection, &request.job_id)? else {
+        return Ok(lease_receipt(
+            LeaseWriteStatus::RejectedConflict,
+            None,
+            false,
+        ));
+    };
+    if execution_lease_is_terminal(connection, &current.lease_id)? {
+        return Ok(lease_receipt(
+            LeaseWriteStatus::RejectedConflict,
+            Some(current),
+            false,
+        ));
+    }
+    if less_decimal(&request.fencing_token.0, &current.fencing_token.0) {
+        return Ok(lease_receipt(
+            LeaseWriteStatus::RejectedStaleFencingToken,
+            Some(current),
+            false,
+        ));
+    }
+    if request.worker_id != current.worker_id
+        || request.worker_instance_id != current.worker_instance_id
+        || request.lease_id != current.lease_id
+        || request.attempt != current.attempt
+        || request.fencing_token != current.fencing_token
+    {
+        return Ok(lease_receipt(
+            LeaseWriteStatus::RejectedConflict,
+            Some(current),
+            false,
+        ));
+    }
+    if request.sent_at.0 >= current.expires_at.0 {
+        return Ok(lease_receipt(
+            LeaseWriteStatus::RejectedExpiredLease,
+            Some(current),
+            false,
+        ));
+    }
+    if request.prior_expires_at != current.expires_at {
+        return Ok(lease_receipt(
+            LeaseWriteStatus::RejectedConflict,
+            Some(current),
+            false,
+        ));
+    }
+    if request.expires_at.0 <= current.expires_at.0 {
+        return Ok(lease_receipt(
+            LeaseWriteStatus::RejectedConflict,
+            Some(current),
+            false,
+        ));
+    }
+    let lease = ExecutionLeaseRecord {
+        expires_at: request.expires_at.clone(),
+        ..current
+    };
+    let response = lease_receipt(LeaseWriteStatus::Accepted, Some(lease.clone()), false);
+    connection
+        .execute(
+            "UPDATE execution_leases SET expires_at = ?1
+             WHERE job_id = ?2 AND lease_id = ?3 AND attempt = ?4 AND fencing_token = ?5",
+            params![
+                request.expires_at.0,
+                request.job_id.0,
+                request.lease_id.0,
+                i64::try_from(request.attempt)
+                    .map_err(|_| StorageError::invalid_input("attempt is out of range"))?,
+                request.fencing_token.0,
+            ],
+        )
+        .map_err(sql_error)?;
+    insert_lease_request_receipt(
+        connection,
+        "renew",
+        &request.job_id,
+        &request.request_id,
+        &request_digest,
+        &response,
+    )?;
+    Ok(response)
 }
 
 #[cfg(test)]

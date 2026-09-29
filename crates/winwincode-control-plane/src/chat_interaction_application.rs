@@ -700,7 +700,32 @@ impl<'storage> ChatInteractionService<'storage> {
             )
             .map_err(storage_error)?
             .ok_or_else(|| authority_mismatch("current Worker authority does not exist"))?;
+        if current.2.expires_at != authority.lease.expires_at {
+            let mut period = current.2.clone();
+            period.expires_at.clone_from(&authority.lease.expires_at);
+            let proven = self
+                .storage
+                .load_live_lease_for_period(&period, now)
+                .map_err(storage_error)?;
+            if proven.as_ref() != Some(&current.2) {
+                return Err(authority_mismatch(
+                    "Worker interaction lease period is unproven",
+                ));
+            }
+        }
         require_current_source(authority, &current.0, &current.1, &current.2)?;
+        if authority.product_session_revision.is_none() {
+            let gate = authority
+                .gate_authority
+                .as_ref()
+                .ok_or_else(|| authority_mismatch("WorkRun interaction requires a sealed Gate"))?;
+            return crate::gate_interaction_service::require_workrun_binding(
+                self.storage,
+                scope,
+                gate,
+            )
+            .map_err(|_| authority_mismatch("WorkRun interaction binding is no longer current"));
+        }
         let session = ProductSessionService::new(self.storage)
             .get(scope, &authority.execution_scope.product_session_id)
             .map_err(product_session_error)?
@@ -1089,7 +1114,8 @@ struct WorkerCommandContext {
 struct PersistedInteractionAuthority {
     execution_scope: ExecutionQueueScope,
     worker_pool_id: WorkerPoolId,
-    product_session_revision: u64,
+    #[serde(deserialize_with = "Option::deserialize")]
+    product_session_revision: Option<u64>,
     job_revision: u64,
     worker_slot_revision: u64,
     runtime: WorkerSlotAuthority,
@@ -1285,7 +1311,7 @@ fn persisted_authority_from_input(
     Ok(PersistedInteractionAuthority {
         execution_scope: command.authority.execution_scope.clone(),
         worker_pool_id: command.authority.worker_pool_id.clone(),
-        product_session_revision: command.authority.product_session_revision,
+        product_session_revision: Some(command.authority.product_session_revision),
         job_revision: command.authority.job_revision,
         worker_slot_revision: command.authority.worker_slot_revision,
         runtime,
@@ -1388,7 +1414,6 @@ fn require_current_source(
         || i64::try_from(lease.attempt).ok() != Some(expected.lease.attempt)
         || lease.fencing_token != expected.lease.fencing_token
         || lease.issued_at != expected.lease.issued_at
-        || lease.expires_at != expected.lease.expires_at
     {
         return Err(authority_mismatch(
             "Worker slot, lease, fence, or reservation is no longer current",
@@ -1402,7 +1427,7 @@ fn require_product_session(
     authority: &PersistedInteractionAuthority,
 ) -> Result<(), ChatInteractionServiceError> {
     let session = record.session();
-    if session.revision() != authority.product_session_revision
+    if Some(session.revision()) != authority.product_session_revision
         || session.id() != &authority.execution_scope.product_session_id
         || session.project_id() != &authority.execution_scope.project_id
         || session.repository_id() != &authority.execution_scope.repository_id

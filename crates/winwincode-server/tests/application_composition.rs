@@ -267,7 +267,7 @@ fn execution_config(seed: u64) -> ProductSessionExecutionConfig {
         repository_scope,
         "fixture-checkout-revision",
         "codex-chat",
-        3_600,
+        Some(3_600),
         1_073_741_824,
     )
     .expect("execution config")
@@ -1074,4 +1074,116 @@ fn assert_empty_publication_catalog(
     let response = serde_json::to_value(response).expect("encode Publication catalog");
     assert_eq!(response["result"]["items"], serde_json::json!([]));
     assert_eq!(response["page"]["hasMore"], false);
+}
+
+struct RecordingRemoteCore(
+    Arc<std::sync::Mutex<Vec<winwincode_execution_port::generated::ExecutionPortMessage>>>,
+);
+impl winwincode_execution_port::transport::ExecutionPortCore for RecordingRemoteCore {
+    type Output = Vec<winwincode_execution_port::generated::ExecutionPortMessage>;
+    type Error = std::convert::Infallible;
+    fn accept(
+        &mut self,
+        message: &winwincode_execution_port::generated::ExecutionPortMessage,
+    ) -> Result<Self::Output, Self::Error> {
+        self.0
+            .lock()
+            .expect("recorded frames")
+            .push(message.clone());
+        Ok(vec![])
+    }
+}
+
+#[test]
+fn remote_heartbeat_reaches_shared_core_after_authentication() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::Mutex;
+    use std::time::Duration;
+    use winwincode_domain::Instant;
+    use winwincode_execution_port::generated::ExecutionPortMessage;
+    use winwincode_execution_port::transport::{
+        FrameDirection, RemoteExchangeRequest, RemoteTransportAdapter, TypedFrame,
+    };
+    use winwincode_server::{
+        FileRemoteWorkerAuthenticator, ProductionRemoteWorkerExchange, RemoteWorkerExchangePort,
+        RepositoryRuntimeScheduler,
+    };
+    let root = temporary_root("remote-heartbeat");
+    let application = open_application(&root, "fixture").expect("application");
+    let worker = WorkerId(id("wrk", 1));
+    let instance = WorkerInstanceId(id("wki", 1));
+    let now = Instant("2027-01-15T08:00:02.000Z".into());
+    let token = root.join("worker.token");
+    fs::write(&token, b"fixture-remote-proof").expect("token");
+    fs::set_permissions(&token, fs::Permissions::from_mode(0o600)).expect("private token");
+    let auth = FileRemoteWorkerAuthenticator::open(
+        &token,
+        worker.clone(),
+        winwincode_storage::WorkerPoolId(id("wpl", 1)),
+        worker_scope(1),
+        "fixture-issuer".into(),
+        "worker-1".into(),
+        "build-local".into(),
+        Instant("2027-01-15T09:00:00.000Z".into()),
+        &now,
+    )
+    .expect("authenticator");
+    let scope = serde_json::from_value(repository_scope_json(1)).expect("scope");
+    let scheduler = RepositoryRuntimeScheduler::from_application(
+        &application,
+        scope,
+        worker.clone(),
+        instance.clone(),
+        "remote-test",
+        Duration::from_secs(10),
+    )
+    .expect("scheduler");
+    let recorded = Arc::new(Mutex::new(vec![]));
+    let exchange = ProductionRemoteWorkerExchange::new(
+        &root,
+        Arc::new(auth),
+        scheduler,
+        RecordingRemoteCore(recorded.clone()),
+    );
+    let send = |message: ExecutionPortMessage| {
+        let frame = TypedFrame::new(FrameDirection::WorkerToControlPlane, message).expect("frame");
+        let bytes = RemoteTransportAdapter::<RecordingRemoteCore>::encode(&frame).expect("encoded");
+        let request = RemoteExchangeRequest::new(worker.clone(), instance.clone(), vec![], bytes)
+            .expect("request")
+            .encode()
+            .expect("request bytes");
+        exchange.exchange(b"fixture-remote-proof".to_vec(), &request, now.clone())
+    };
+    let register = serde_json::from_value(serde_json::json!({
+        "kind":"worker.register", "schemaVersion":SchemaVersion::WinwincodeV1,
+        "messageId":id("xmsg",1), "requestId":id("req",1),
+        "sentAt":now, "startedAt":now, "workerId":worker, "workerInstanceId":instance,
+        "capabilities": {"platform":"x86_64-unknown-linux-gnu",
+            "features":["shell"], "capabilityDigest":format!("sha256:{}", "a".repeat(64)), "maxConcurrentJobs":1}
+    })).expect("register frame");
+    send(register).expect("register");
+    let heartbeat: ExecutionPortMessage = serde_json::from_value(serde_json::json!({
+        "kind":"worker.heartbeat", "schemaVersion":SchemaVersion::WinwincodeV1, "messageId":id("xmsg",2),
+        "sentAt":now, "observedAt":now, "workerId":worker, "workerInstanceId":instance,
+        "heartbeatSequence":1, "activeLeases":[], "capacity":{"availableSlots":1,"runningJobs":0}
+    })).expect("heartbeat frame");
+    send(heartbeat.clone()).expect("authenticated heartbeat");
+    assert_eq!(*recorded.lock().expect("frames"), vec![heartbeat.clone()]);
+    for foreign_worker in [true, false] {
+        let ExecutionPortMessage::WorkerHeartbeatMessage(mut forged) = heartbeat.clone() else {
+            unreachable!()
+        };
+        if foreign_worker {
+            forged.worker_id = WorkerId(id("wrk", 2));
+        } else {
+            forged.worker_instance_id = WorkerInstanceId(id("wki", 2));
+        }
+        assert!(send(ExecutionPortMessage::WorkerHeartbeatMessage(forged)).is_err());
+    }
+    fs::write(&token, b"rotated-fixture-proof").expect("rotate");
+    assert!(send(heartbeat).is_err());
+    assert_eq!(recorded.lock().expect("frames").len(), 1);
+    drop(exchange);
+    drop(application);
+    fs::remove_dir_all(root).expect("cleanup");
 }

@@ -631,6 +631,7 @@ fn terminal_frame(receipt: &ProviderGatewayOpenReceipt, event: ProviderStreamEve
     let mut converter = ProviderStreamConverter::from_gateway_receipt(receipt);
     converter
         .ingest(ProviderStreamEvent::ResponseStarted {
+            observed_model_id: None,
             provider_response_id: "response-differential".to_owned(),
         })
         .expect("start Provider response");

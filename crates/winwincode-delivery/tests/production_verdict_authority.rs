@@ -205,6 +205,7 @@ fn durable_sources_resolve_one_replay_stable_production_verdict() {
                 candidate.candidate_ref(),
                 role,
                 None,
+                None,
             )
         })
         .collect::<Vec<_>>();
@@ -214,6 +215,7 @@ fn durable_sources_resolve_one_replay_stable_production_verdict() {
     let replay = resolve_production_verdict(&delivery, candidate.clone(), verification)
         .expect("restart replay");
     assert_eq!(first, replay);
+    let expected_verdict = first.clone();
     let (candidate, verification, evidence, produced_at_millis) = first.into_parts();
     assert_eq!(candidate.candidate_commit_id(), candidate_commit);
     assert_eq!(verification.settlements().len(), 2);
@@ -241,6 +243,46 @@ fn durable_sources_resolve_one_replay_stable_production_verdict() {
     );
     assert!(produced_at_millis > 1_800_000_000_060);
 
+    let fusion_verification = verification_sources
+        .iter()
+        .map(|(role, run, settled)| {
+            verification_runtime(
+                &delivery,
+                run,
+                settled,
+                &snapshot,
+                candidate.candidate_ref(),
+                role,
+                None,
+                (*role == "reviewer").then_some("event-reviewer-source"),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        resolve_production_verdict(&delivery, candidate.clone(), fusion_verification)
+            .expect("Fusion trail linked to direct reviewer evidence"),
+        expected_verdict,
+        "the Fusion trail is auditable metadata, not extra verdict authority"
+    );
+
+    let invalid_fusion_verification = verification_sources
+        .iter()
+        .map(|(role, run, settled)| {
+            verification_runtime(
+                &delivery,
+                run,
+                settled,
+                &snapshot,
+                candidate.candidate_ref(),
+                role,
+                None,
+                (*role == "reviewer").then_some("event-reviewer-policy"),
+            )
+        })
+        .collect::<Vec<_>>();
+    resolve_production_verdict(&delivery, candidate.clone(), invalid_fusion_verification)
+        .expect_err("Fusion trail cannot cite policy metadata as test or command Evidence");
+
     let stale_runtime = verification_sources
         .iter()
         .map(|(role, run, settled)| {
@@ -251,6 +293,7 @@ fn durable_sources_resolve_one_replay_stable_production_verdict() {
                 &snapshot,
                 "git-candidate:stale-runtime",
                 role,
+                None,
                 None,
             )
         })
@@ -269,6 +312,7 @@ fn durable_sources_resolve_one_replay_stable_production_verdict() {
                 candidate.candidate_ref(),
                 role,
                 Some(&format!("event-{role}-binary")),
+                None,
             )
         })
         .collect::<Vec<_>>();
@@ -295,6 +339,7 @@ fn verification_runtime(
     candidate_ref: &str,
     role: &str,
     evidence_event_override: Option<&str>,
+    fusion_evidence_event_override: Option<&str>,
 ) -> ProductionVerificationRuntime {
     ProductionVerificationRuntime::from_durable(
         match role {
@@ -316,6 +361,7 @@ fn verification_runtime(
                 .expect("fixture verification method"),
             role,
             evidence_event_override,
+            fusion_evidence_event_override,
         ),
     )
 }
@@ -480,6 +526,7 @@ fn runtime_events(
     verification_method: &str,
     role: &str,
     evidence_event_override: Option<&str>,
+    fusion_evidence_event_override: Option<&str>,
 ) -> Vec<ProductionRuntimeEvent> {
     let finished = run.bound_at_millis + 9;
     let source_id = ExecutionEventId(format!("event-{role}-source"));
@@ -489,6 +536,32 @@ fn runtime_events(
         ProductionRuntimeEventCategory::Test
     };
     let binary_bytes = b"\0verification-binary\xff";
+    let mut result = json!({
+        "protocol": "winwincode.independent-verification-result.v1",
+        "delivery_spec_id": delivery_spec_id,
+        "delivery_spec_revision": delivery_spec_revision,
+        "candidate_ref": candidate_ref,
+        "findings": [{
+            "finding_id": format!("finding-{role}"),
+            "criterion_id": criterion_id,
+            "verdict": "pass",
+            "explanation": format!("{role} accepted the current candidate"),
+            "evidence_sources": [{
+                "type": if role == "reviewer" { "command" } else { "test" },
+                "event_id": evidence_event_override.unwrap_or(&source_id.0),
+            }],
+        }],
+    });
+    if let Some(event_id) = fusion_evidence_event_override {
+        result["fusion_investigations"] = json!([{
+            "claim_key": "claim:runtime-trace",
+            "status": "investigated",
+            "evidence_sources": [{
+                "type": if role == "reviewer" { "command" } else { "test" },
+                "event_id": event_id,
+            }],
+        }]);
+    }
     [
         (
             1,
@@ -531,25 +604,7 @@ fn runtime_events(
         (
             4,
             ProductionRuntimeEventCategory::Activity,
-            encoded_payload(
-                &serde_json::to_vec(&json!({
-                    "protocol": "winwincode.independent-verification-result.v1",
-                    "delivery_spec_id": delivery_spec_id,
-                    "delivery_spec_revision": delivery_spec_revision,
-                    "candidate_ref": candidate_ref,
-                    "findings": [{
-                        "finding_id": format!("finding-{role}"),
-                        "criterion_id": criterion_id,
-                        "verdict": "pass",
-                        "explanation": format!("{role} accepted the current candidate"),
-                        "evidence_sources": [{
-                            "type": if role == "reviewer" { "command" } else { "test" },
-                            "event_id": evidence_event_override.unwrap_or(&source_id.0),
-                        }],
-                    }],
-                }))
-                .expect("JSON"),
-            ),
+            encoded_payload(&serde_json::to_vec(&result).expect("JSON")),
             ExecutionEventId(format!("event-{role}-result")),
         ),
     ]

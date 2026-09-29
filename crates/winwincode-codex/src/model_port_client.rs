@@ -56,6 +56,22 @@ pub trait ModelLeaseAuthoritySource: Send + Sync {
         authority: &ModelLeaseAuthority,
         now: &Instant,
     ) -> Result<(), ModelAuthorityRejection>;
+
+    /// Validates current authority or a proven original request period for this exchange.
+    ///
+    /// # Errors
+    /// Rejects expired or unproven authority. Sources without renewal proof stay exact.
+    fn validate_exchange(
+        &self,
+        authority: &ModelLeaseAuthority,
+        _exchange: &ModelExchangeId,
+        now: &Instant,
+    ) -> Result<(), ModelAuthorityRejection> {
+        if now.0 >= authority.lease.expires_at.0 {
+            return Err(ModelAuthorityRejection::ExpiredLease);
+        }
+        self.validate_current(authority, now)
+    }
 }
 
 /// Stable current-authority rejection.
@@ -498,7 +514,11 @@ where
         command: OpenModelExchangeCommand,
     ) -> Result<ModelOpenOutcome, ModelPortClientError> {
         require_authority_shape(&command.authority)?;
-        self.require_current(&command.authority, &command.metadata.sent_at)?;
+        self.require_current(
+            &command.authority,
+            &command.model_exchange_id,
+            &command.metadata.sent_at,
+        )?;
         let message = ModelOpenMessage {
             kind: ModelOpenMessageKind::ModelOpen,
             schema_version: SchemaVersion::WinwincodeV1,
@@ -558,10 +578,10 @@ where
     pub async fn accept_chunk(
         &mut self,
         chunk: &ModelChunkMessage,
-        acknowledgement: ModelMessageMetadata,
+        ack: ModelMessageMetadata,
     ) -> Result<ModelChunkDisposition, ModelPortClientError> {
         let active = self.active_exchange(&chunk.model_exchange_id)?.clone();
-        self.require_current(&active.authority, &acknowledgement.sent_at)?;
+        self.require_current(&active.authority, &active.model_exchange_id, &ack.sent_at)?;
         require_exact_chunk(&active, chunk)?;
         let mapped = frame_from_message(&ExecutionPortMessage::ModelChunkMessage(chunk.clone()))
             .map_err(|_| canonical_mapping_error())?;
@@ -585,7 +605,7 @@ where
         }
         if sequence <= snapshot.confirmed_sequence {
             return self
-                .handle_duplicate(&active, &snapshot, &fingerprint, chunk, acknowledgement)
+                .handle_duplicate(&active, &snapshot, &fingerprint, chunk, ack)
                 .await;
         }
         let expected = snapshot
@@ -595,7 +615,7 @@ where
         if sequence > expected {
             self.send_ack(
                 &active,
-                acknowledgement,
+                ack,
                 LeaseWriteStatus::Gap,
                 snapshot.confirmed_sequence,
                 Some(expected),
@@ -647,7 +667,7 @@ where
         }
         self.send_ack(
             &active,
-            acknowledgement,
+            ack,
             LeaseWriteStatus::Accepted,
             sequence,
             None,
@@ -674,7 +694,11 @@ where
         acknowledgement: ModelMessageMetadata,
     ) -> Result<ModelChunkDisposition, ModelPortClientError> {
         require_authority_shape(&authority)?;
-        self.require_current(&authority, &acknowledgement.sent_at)?;
+        self.require_current(
+            &authority,
+            &chunk.model_exchange_id,
+            &acknowledgement.sent_at,
+        )?;
         if chunk.lease != authority.lease
             || chunk.worker_session_id != authority.worker_session_id
             || chunk.session_identity != authority.session_identity
@@ -771,7 +795,11 @@ where
         metadata: ModelMessageMetadata,
     ) -> Result<ModelCancellationReceipt, ModelPortClientError> {
         let active = self.active_exchange(model_exchange_id)?.clone();
-        self.require_current(&active.authority, &metadata.sent_at)?;
+        self.require_current(
+            &active.authority,
+            &active.model_exchange_id,
+            &metadata.sent_at,
+        )?;
         let snapshot = self.load_cursor(&active.stream)?;
         let fingerprint =
             cancellation_fingerprint(&active, &metadata, snapshot.confirmed_sequence)?;
@@ -864,7 +892,11 @@ where
             return Ok(ModelDisconnectOutcome::AlreadyTerminal(reason));
         }
         if self
-            .require_current(&active.authority, &metadata.sent_at)
+            .require_current(
+                &active.authority,
+                &active.model_exchange_id,
+                &metadata.sent_at,
+            )
             .is_err()
         {
             self.terminate_sink_once(&active, ModelTerminationReason::StaleAuthority)
@@ -959,16 +991,17 @@ where
     fn require_current(
         &self,
         authority: &ModelLeaseAuthority,
+        exchange: &ModelExchangeId,
         now: &Instant,
     ) -> Result<(), ModelPortClientError> {
-        if !canonical_instant(now) || now.0 >= authority.lease.expires_at.0 {
+        if !canonical_instant(now) {
             return Err(client_error(
                 ModelPortClientErrorCode::ExpiredLease,
                 "model exchange lease has expired",
             ));
         }
         self.authority
-            .validate_current(authority, now)
+            .validate_exchange(authority, exchange, now)
             .map_err(|rejection| match rejection {
                 ModelAuthorityRejection::ExpiredLease => client_error(
                     ModelPortClientErrorCode::ExpiredLease,

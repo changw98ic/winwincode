@@ -142,6 +142,8 @@ pub(crate) fn resolve_current_candidate_with_source(
         winwincode_domain::WorkRunState::Queued
             | winwincode_domain::WorkRunState::Leased
             | winwincode_domain::WorkRunState::Running
+            | winwincode_domain::WorkRunState::Failed
+            | winwincode_domain::WorkRunState::Cancelled
     ) {
         return Ok(None);
     }

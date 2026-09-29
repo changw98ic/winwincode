@@ -44,6 +44,7 @@ import { pathToFileURL } from 'node:url'
 
 import { projectSourceDigest } from './product-build-contract.mjs'
 import {
+  runtimeChildEnvironment,
   DEVICE_ONLY_PREREQUISITES,
   FORBIDDEN_SERVER_MODEL_ENVIRONMENT_KEYS,
   assertDeviceSecretsNeverOnServer,
@@ -86,7 +87,7 @@ const HELPER_RELEASE_BINARY_MODE = 0o755
 const TEST_HELPER_RELEASE_PRIVATE_KEY_HEX = '2a'.repeat(32)
 const API_SOURCE_SEAL_NAME = 'winwincode-api-production.source.json'
 const API_SOURCE_SEAL_PROTOCOL = 'winwincode-api-production-source-seal'
-const API_SOURCE_SEAL_VERSION = 1
+const API_SOURCE_SEAL_VERSION = 2
 const API_SOURCE_SEAL_MAX_BYTES = 32 * 1024
 const API_RUNNER_SOURCE_PATH = 'scripts/run-api-production-vertical.mjs'
 const API_SOURCE_TRACKED_PATHS = [
@@ -98,6 +99,9 @@ const API_SOURCE_TRACKED_PATHS = [
   'scripts/product-build-contract.mjs',
 ]
 const API_SOURCE_SEAL_KEYS = [
+  'cliBinaryMode',
+  'cliBinaryPath',
+  'cliBinarySha256',
   'gitHead',
   'helperBinaryMode',
   'helperBinaryPath',
@@ -114,6 +118,9 @@ const API_SOURCE_SEAL_KEYS = [
   'sourceSha256',
   'trackedDiffSha256',
   'version',
+  'workerBinaryMode',
+  'workerBinaryPath',
+  'workerBinarySha256',
 ].toSorted()
 const HELPER_RELEASE_MANIFEST_KEYS = [
   'binaryMode',
@@ -441,13 +448,15 @@ function validateSourceSealShape(seal) {
     API_SOURCE_SEAL_KEYS,
     'API production source seal fields are not canonical',
   )
-  assert.equal(seal.schemaVersion, 1)
+  assert.equal(seal.schemaVersion, 2)
   assert.equal(seal.protocol, API_SOURCE_SEAL_PROTOCOL)
   assert.equal(seal.version, API_SOURCE_SEAL_VERSION)
   for (const field of [
     'sourceSha256',
     'trackedDiffSha256',
     'serverBinarySha256',
+    'cliBinarySha256',
+    'workerBinarySha256',
     'helperBinarySha256',
     'helperReleaseManifestSha256',
   ]) {
@@ -461,6 +470,10 @@ function validateSourceSealShape(seal) {
   )
   assert.equal(seal.serverBinaryPath, 'winwincode-server')
   assert.equal(seal.serverBinaryMode, 0o755)
+  assert.equal(seal.cliBinaryPath, 'wwc')
+  assert.equal(seal.cliBinaryMode, 0o755)
+  assert.equal(seal.workerBinaryPath, 'winwincode-worker')
+  assert.equal(seal.workerBinaryMode, 0o755)
   assert.equal(seal.helperBinaryPath, HELPER_RELEASE_BINARY_NAME)
   assert.equal(seal.helperBinaryMode, HELPER_RELEASE_BINARY_MODE)
   assert.equal(seal.helperReleaseManifestMode, 0o644)
@@ -496,10 +509,16 @@ function validateSourceSealFiles({ root, serverBinary, helperExecutable, sealPat
   )
   const serverIdentity = fileIdentity(serverBinary, 'Server binary')
   const helperIdentity = fileIdentity(helperExecutable, 'kernel helper binary')
+  const cliIdentity = fileIdentity(join(dirname(serverBinary), seal.cliBinaryPath), 'Device CLI binary')
+  const workerIdentity = fileIdentity(join(dirname(serverBinary), seal.workerBinaryPath), 'Device Worker binary')
   assert.equal(serverIdentity.mode, seal.serverBinaryMode, 'Server binary mode changed')
   assert.equal(helperIdentity.mode, seal.helperBinaryMode, 'kernel helper mode changed')
+  assert.equal(cliIdentity.mode, seal.cliBinaryMode, 'Device CLI binary mode changed')
+  assert.equal(workerIdentity.mode, seal.workerBinaryMode, 'Device Worker binary mode changed')
   assert.equal(serverIdentity.sha256, seal.serverBinarySha256, 'Server binary digest changed')
   assert.equal(helperIdentity.sha256, seal.helperBinarySha256, 'kernel helper digest changed')
+  assert.equal(cliIdentity.sha256, seal.cliBinarySha256, 'Device CLI binary digest changed')
+  assert.equal(workerIdentity.sha256, seal.workerBinarySha256, 'Device Worker binary digest changed')
   const manifestPath = join(dirname(serverBinary), seal.helperReleaseManifestPath)
   assert.equal(
     resolve(manifestPath),
@@ -539,12 +558,14 @@ function validateSourceSealFiles({ root, serverBinary, helperExecutable, sealPat
     seal,
     serverIdentity,
     helperIdentity,
+    cliIdentity,
+    workerIdentity,
     manifest,
   }
 }
 
 /**
- * Emit a source seal after a fresh Server/helper build.  The seal is kept
+ * Emit a source seal after a fresh Server, CLI, Worker and helper build. The seal is kept
  * beside the binaries and is never rewritten by a skip-build invocation.
  */
 export function writeApiProductionSourceSeal({
@@ -559,8 +580,12 @@ export function writeApiProductionSourceSeal({
   assert.equal(typeof helperReleaseManifest, 'string', 'helper release manifest is required for source sealing')
   const serverIdentity = fileIdentity(serverBinary, 'Server binary')
   const helperIdentity = fileIdentity(helperExecutable, 'kernel helper binary')
+  const cliIdentity = fileIdentity(join(dirname(serverBinary), 'wwc'), 'Device CLI binary')
+  const workerIdentity = fileIdentity(join(dirname(serverBinary), 'winwincode-worker'), 'Device Worker binary')
   assert.equal(serverIdentity.mode, 0o755, 'Server binary must have mode 0755')
   assert.equal(helperIdentity.mode, HELPER_RELEASE_BINARY_MODE, 'kernel helper must have mode 0755')
+  assert.equal(cliIdentity.mode, 0o755, 'Device CLI binary must have mode 0755')
+  assert.equal(workerIdentity.mode, 0o755, 'Device Worker binary must have mode 0755')
   assert.equal(
     dirname(resolve(serverBinary)),
     dirname(resolve(helperExecutable)),
@@ -589,7 +614,7 @@ export function writeApiProductionSourceSeal({
     )
   }
   const seal = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     protocol: API_SOURCE_SEAL_PROTOCOL,
     version: API_SOURCE_SEAL_VERSION,
     sourceSha256: source.sourceSha256,
@@ -598,6 +623,12 @@ export function writeApiProductionSourceSeal({
     serverBinaryPath: 'winwincode-server',
     serverBinaryMode: serverIdentity.mode,
     serverBinarySha256: serverIdentity.sha256,
+    cliBinaryPath: 'wwc',
+    cliBinaryMode: cliIdentity.mode,
+    cliBinarySha256: cliIdentity.sha256,
+    workerBinaryPath: 'winwincode-worker',
+    workerBinaryMode: workerIdentity.mode,
+    workerBinarySha256: workerIdentity.sha256,
     helperBinaryPath: HELPER_RELEASE_BINARY_NAME,
     helperBinaryMode: helperIdentity.mode,
     helperBinarySha256: helperIdentity.sha256,
@@ -722,6 +753,7 @@ function requestJson(url, {
   authorization = null,
   body = undefined,
   timeoutMillis = 30_000,
+  ca,
 } = {}) {
   const target = new URL(url)
   const serialized = body === undefined ? null : JSON.stringify(body)
@@ -740,7 +772,8 @@ function requestJson(url, {
     const request = httpsRequest(target, {
       method,
       headers,
-      rejectUnauthorized: false,
+      rejectUnauthorized: ca !== undefined,
+      ...(ca === undefined ? {} : { ca }),
       servername: 'control.localhost',
       timeout: timeoutMillis,
     }, response => {
@@ -774,10 +807,11 @@ function requestJson(url, {
 }
 
 class ApiClient {
-  constructor(baseUrl, origin, nextRequest = 1) {
+  constructor(baseUrl, origin, nextRequest = 1, ca = undefined) {
     assert.equal(Number.isSafeInteger(nextRequest) && nextRequest > 0, true)
     this.baseUrl = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl
     this.origin = origin
+    this.ca = ca
     this.cookie = null
     this.nextRequest = nextRequest
     this.actor = ACTOR
@@ -799,6 +833,7 @@ class ApiClient {
       // session GET returns it without password or bootstrap proof.
       const response = await requestJson(`${this.baseUrl}/api/v1/auth/session`, {
         origin: this.origin,
+        ca: this.ca,
       })
       assert.equal(response.status, 200, `local-open API bootstrap must return 200: ${response.text}`)
       this.cookie = responseSetCookie(response.headers)
@@ -811,6 +846,7 @@ class ApiClient {
     const response = await requestJson(`${this.baseUrl}/api/v1/auth/session`, {
       method: 'POST',
       origin: this.origin,
+      ca: this.ca,
       ...(login ? {} : { authorization: proof }),
       body: {
         schemaVersion: SCHEMA_VERSION,
@@ -839,6 +875,7 @@ class ApiClient {
     const response = await requestJson(`${this.baseUrl}/api/v1/commands`, {
       method: 'POST',
       origin: this.origin,
+      ca: this.ca,
       cookie: this.cookie,
       body: request,
     })
@@ -861,6 +898,7 @@ class ApiClient {
     const response = await requestJson(`${this.baseUrl}/api/v1/queries`, {
       method: 'POST',
       origin: this.origin,
+      ca: this.ca,
       cookie: this.cookie,
       body: request,
     })
@@ -882,6 +920,7 @@ class ApiClient {
     return requestJson(`${this.baseUrl}${path}`, {
       ...options,
       origin: this.origin,
+      ca: this.ca,
       cookie: this.cookie,
     })
   }
@@ -1121,7 +1160,7 @@ function spawnStandaloneServer({
     cwd: root,
     detached: process.platform !== 'win32',
     env: {
-      ...process.env,
+      ...runtimeChildEnvironment(),
       // Community loopback production Server: local-open initializes the Owner
       // at process start. Password mode requires a pre-seeded Owner and is not
       // the isolated vertical path.
@@ -1206,7 +1245,13 @@ function spawnStandaloneWorker({
     cwd: root,
     detached: process.platform !== 'win32',
     env: {
-      ...process.env,
+      ...runtimeChildEnvironment(),
+      WWC_WORKER_MODEL_REASONING_EFFORT: process.env.WWC_WORKER_MODEL_REASONING_EFFORT,
+      WWC_WORKER_FUSION: process.env.WWC_WORKER_FUSION,
+      WWC_WORKER_JEV_JUDGE: process.env.WWC_WORKER_JEV_JUDGE,
+      WWC_WORKER_JEV_CONTEXT: process.env.WWC_WORKER_JEV_CONTEXT,
+      WWC_DEVICE_JEV_SETTINGS_FILE: process.env.WWC_DEVICE_JEV_SETTINGS_FILE,
+      WWC_BENCHMARK_TOOL_REPEAT_GUARD: process.env.WWC_BENCHMARK_TOOL_REPEAT_GUARD,
       WWC_WORKER_ID: IDS.remoteWorker,
       WWC_WORKER_INSTANCE_ID: IDS.remoteWorkerInstance,
       WWC_WORKER_STARTED_AT: fixture.startedAt,
@@ -1346,11 +1391,40 @@ async function startServer({
       timeoutMillis,
     )
     started.health = health
+    writeJsonAtomically(join(directory, 'server-endpoint.json'), {
+      controlUrl: started.controlUrl, origin,
+    })
   } catch (error) {
     await stopServer(started.child).catch(() => {})
     throw error
   }
   return { ...started, origin }
+}
+
+export async function inspectRegisteredDeviceTask(launch) {
+  assert.equal(resolve(launch.directory), launch.directory, 'registered directory must be absolute')
+  const endpoint = JSON.parse(readFileSync(join(launch.directory, 'server-endpoint.json'), 'utf8'))
+  const target = new URL(endpoint.controlUrl)
+  assert.equal(target.protocol, 'https:')
+  assert.equal(target.hostname, '127.0.0.1')
+  assert.equal(target.username + target.password + target.search + target.hash, '')
+  assert.equal(target.pathname, '/')
+  assert.equal(endpoint.origin, `https://api.localhost:${target.port}`)
+  const api = new ApiClient(endpoint.controlUrl, endpoint.origin, 1,
+    readFileSync(join(launch.directory, 'fixture-cert.pem')))
+  await api.bootstrap(null, { localOpen: true })
+  const delivery = (await api.query('delivery.get', { deliveryId: launch.deliveryId })).result
+  assert.equal(delivery.deliveryId, launch.deliveryId)
+  assert.equal(delivery.readCursor.deliveryId, launch.deliveryId)
+  const workRunAggregate = (await api.query('workrun.get', {
+    deliveryId: launch.deliveryId, workItemId: null, atCursor: delivery.readCursor,
+  })).result
+  assert.deepEqual(workRunAggregate.readCursor, delivery.readCursor)
+  const productSession = (await api.query('session.get', {
+    productSessionId: launch.productSessionId,
+  })).result
+  assert.equal(productSession.id, launch.productSessionId)
+  return { registeredLaunch: launch, delivery, workRunAggregate, productSession }
 }
 
 async function runChat(
@@ -1579,6 +1653,23 @@ export function appendDeliveryTransition(trace, observation) {
   return true
 }
 
+export function terminalDeviceFailure(observation) {
+  const { delivery, workRunAggregate } = observation
+  const runs = workRunAggregate?.runs ?? []
+  const items = workRunAggregate?.items ?? []
+  if (delivery?.attention?.some(item => item.status === 'open') || runs.length === 0 || items.length === 0
+      || runs.some(run => !['settled', 'candidate_ready', 'failed', 'cancelled'].includes(run.state))
+      || items.some(item => !['done', 'candidate_ready', 'failed', 'cancelled'].includes(item.state))
+      || !runs.some(run => ['failed', 'cancelled'].includes(run.state))) return null
+  if (['failed', 'cancelled'].includes(delivery.status)
+      && !items.some(item => ['failed', 'cancelled'].includes(item.state))) return null
+  if (!['failed', 'cancelled'].includes(delivery.status) && delivery.status !== 'candidate_ready') return null
+  const stalled = delivery.status === 'candidate_ready'
+  return { code: stalled ? 'DEVICE_PRODUCT_STALLED'
+    : delivery.status === 'failed' ? 'DEVICE_PRODUCT_FAILED' : 'DEVICE_PRODUCT_CANCELLED',
+  status: delivery.status }
+}
+
 export async function driveDelivery(
   client,
   timeoutMillis,
@@ -1589,12 +1680,13 @@ export async function driveDelivery(
   const transitionTrace = { observations: [], totalTransitionCount: 0 }
   const actions = []
   const transientErrors = []
-  const deadline = now() + timeoutMillis
+  const deadline = timeoutMillis === null ? Infinity : now() + timeoutMillis
   let detail = null
   let terminalCommand = null
   let idlePolls = 0
   const stuckPollLimit = 80
   for (;;) {
+    await hooks.assertRunning?.()
     detail = (await client.query('delivery.get', { deliveryId: IDS.delivery })).result
     // Scheduling and completion use the current WorkRun aggregate.
     let workRunAggregate
@@ -1608,17 +1700,22 @@ export async function driveDelivery(
       if (error?.code === 'REVISION_CONFLICT' || error?.code === 'READ_CURSOR_EXPIRED') continue
       throw error
     }
+    await hooks.onProjection?.({ detail, workRunAggregate })
     const workRuns = Array.isArray(workRunAggregate?.runs) ? workRunAggregate.runs : []
     const activeWorkRuns = workRuns
       .filter(run => ['queued', 'leased', 'running'].includes(run.state))
+    const terminalFailure = terminalDeviceFailure({ delivery: detail, workRunAggregate })
+    if (terminalFailure) {
+      throw Object.assign(new Error(`Product execution ended in ${terminalFailure.status}`), terminalFailure)
+    }
     // Queued Device WorkRuns are not projected into workRunAggregate.runs
     // (append_run accepts only Leased/Running). The Client launch anchor is
-    // still product authority: while the caller expects a Device WorkRun,
-    // keep polling until lease/registration instead of declaring a stall.
+    // still product authority until that run appears in the aggregate.
+    // Already projected terminal runs cannot keep this launch wait alive.
     const pendingDeviceWorkRunIds = typeof hooks.pendingDeviceWorkRunIds === 'function'
-      ? hooks.pendingDeviceWorkRunIds()
+      ? hooks.pendingDeviceWorkRunIds().filter(id => !workRuns.some(run => run.id === id))
       : []
-    const expectDeviceWorkRun = hooks.expectDeviceWorkRun === true
+    const expectDeviceWorkRun = (hooks.expectDeviceWorkRun === true && workRuns.length === 0)
       || pendingDeviceWorkRunIds.length > 0
     const observation = { revision: detail.deliveryRevision, status: detail.status }
     appendDeliveryTransition(transitionTrace, observation)
@@ -1665,13 +1762,33 @@ export async function driveDelivery(
     }
     const attention = detail.attention.find(item => item.status === 'open')
     if (attention !== undefined) {
+      const candidate = detail.currentCandidate
+      const verdict = detail.verdict
+      const verifiedCandidate = attention.type === 'delivery_approval'
+        && detail.attention.filter(item => item.status === 'open').length === 1
+        && detail.requirements?.publicationTarget === null
+        && candidate?.candidateId && verdict?.status === 'pass'
+        && verdict.candidateId === candidate.candidateId
+        && verdict.candidateRef === candidate.candidateRef
+        && verdict.deliverySpecId === candidate.deliverySpecId
+        && verdict.deliverySpecRevision === candidate.deliverySpecRevision
+        && detail.requirements.deliverySpecId === candidate.deliverySpecId
+        && detail.requirements.deliverySpecRevision === candidate.deliverySpecRevision
+        && attention.deliverySpecId === candidate.deliverySpecId
+        && attention.workRunId === candidate.producerWorkRunId
+      if (hooks.resolveAttention === false
+          || (hooks.resolveAttention === 'verified-candidate' && !verifiedCandidate)) {
+        throw Object.assign(new Error('Device task requires attention; execution evidence is retained'), { code: 'DEVICE_TASK_ATTENTION' })
+      }
       idlePolls = 0
       command = 'delivery.resolve_attention'
       payload = {
         deliveryId: IDS.delivery,
         attentionItemId: attention.id,
         decision: 'resolve',
-        resolution: 'Resolve the bounded API workflow attention item.',
+        resolution: hooks.resolveAttention === 'verified-candidate'
+          ? 'Confirm the current independently verified test candidate under the authorized task.'
+          : 'Resolve the bounded API workflow attention item.',
         remediation: null,
       }
     } else if (expectDeviceWorkRun) {
@@ -1748,16 +1865,28 @@ export async function driveDelivery(
   }
 
   const terminal = detail
-  assert.equal(terminal.status, 'done')
-  assert.notEqual(terminal.currentCandidate, null, 'Done projection must contain a frozen candidate')
-  assert.equal(terminal.verdict?.status, 'pass', 'Done projection must contain a passing verdict')
-  assert.equal(terminal.attention.filter(item => item.status === 'open').length, 0)
-  assert.ok(terminal.evidence.length > 0, 'Done projection must expose canonical evidence')
   const terminalWorkRunAggregate = (await client.query('workrun.get', {
     deliveryId: IDS.delivery,
     workItemId: null,
     atCursor: terminal.readCursor ?? null,
   })).result
+  assertCompletedDelivery(terminal, terminalWorkRunAggregate)
+  return {
+    actions,
+    detail: terminal,
+    observations: transitionTrace.observations,
+    terminalCommand,
+    totalTransitionCount: transitionTrace.totalTransitionCount,
+    workRunAggregate: terminalWorkRunAggregate,
+  }
+}
+
+export function assertCompletedDelivery(terminal, terminalWorkRunAggregate) {
+  assert.equal(terminal.status, 'done')
+  assert.notEqual(terminal.currentCandidate, null, 'Done projection must contain a frozen candidate')
+  assert.equal(terminal.verdict?.status, 'pass', 'Done projection must contain a passing verdict')
+  assert.equal(terminal.attention.filter(item => item.status === 'open').length, 0)
+  assert.ok(terminal.evidence.length > 0, 'Done projection must expose canonical evidence')
   assert.ok(Array.isArray(terminalWorkRunAggregate.items)
     && terminalWorkRunAggregate.items.length > 0,
   'Done projection must contain canonical WorkItems')
@@ -1773,14 +1902,6 @@ export async function driveDelivery(
     assert.equal(typeof run.state, 'string')
   }
   assert.equal(terminal.verdict.criteria.every(criterion => criterion.verdict === 'pass'), true)
-  return {
-    actions,
-    detail: terminal,
-    observations: transitionTrace.observations,
-    terminalCommand,
-    totalTransitionCount: transitionTrace.totalTransitionCount,
-    workRunAggregate: terminalWorkRunAggregate,
-  }
 }
 
 async function commandEventually(client, command, expectedRevision, payload, timeoutMillis) {
@@ -1850,13 +1971,17 @@ export async function runApiProductionVertical({
   devicePrerequisites = true,
   wwcBinary = null,
   deviceProviderSecrets = [],
+  deviceProvider = deterministicDeviceProvider(),
+  deviceAgentEnvironment = process.env,
   scenario = null,
   timeoutMillis = DEFAULT_TIMEOUT_MILLIS,
 } = {}) {
   assertServerEnvironmentIsDeviceOnly(serverEnvironment)
   assertDeviceSecretsNeverOnServer(serverEnvironment, deviceProviderSecrets)
   const modelRoute = configuredModelRoute(deviceRoute ?? {})
-  const deviceProvider = deterministicDeviceProvider()
+  if (deviceProvider?.endpoint) {
+    assert.ok(deviceProviderSecrets[0], 'External Device Provider requires a credential')
+  }
   const plannedDevicePrerequisites = devicePrerequisites
     ? [...DEVICE_ONLY_PREREQUISITES]
     : null
@@ -1925,9 +2050,18 @@ export async function runApiProductionVertical({
     })
     helperReleaseManifest = join(dirname(binary), HELPER_RELEASE_MANIFEST_NAME)
   }
+  if (workerIdentity !== null) {
+    assert.equal(workerIdentity.sha256, sourceSeal.seal.workerBinarySha256,
+      'selected Worker binary differs from the sealed Device Worker')
+  }
+  if (wwcBinary !== null) {
+    assert.equal(fileIdentity(wwcBinary, 'Device CLI binary').sha256,
+      sourceSeal.seal.cliBinarySha256, 'selected Device CLI differs from the sealed CLI')
+  }
   const ownedDirectory = directory === null
   const fixtureDirectory = directory ?? mkdtempSync(join(tmpdir(), 'winwincode-api-production-'))
   mkdirSync(fixtureDirectory, { recursive: true })
+  writeJsonAtomically(join(fixtureDirectory, 'product-source-seal.json'), sourceSeal.seal)
   const certificate = createCertificate(fixtureDirectory)
   const remoteFixture = remoteWorkerBinary === null
     ? null
@@ -2091,8 +2225,7 @@ export async function runApiProductionVertical({
     }
 
     if (devicePrerequisites) {
-      const wwc = wwcBinary
-        ?? resolve(serverTargetDirectory(root), 'debug/wwc')
+      const wwc = wwcBinary ?? resolve(dirname(binary), 'wwc')
       if (!existsSync(wwc)) {
         fail(
           'Device-only production vertical requires the wwc CLI '
@@ -2102,6 +2235,7 @@ export async function runApiProductionVertical({
       }
       devicePath = await establishDeviceOnlyExecutionPath({
         api,
+        agentEnvironment: deviceAgentEnvironment,
         wwc,
         directory: fixtureDirectory,
         repository: controlledRepository.repository,

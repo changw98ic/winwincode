@@ -19,11 +19,22 @@ import {
   X509Certificate,
 } from 'node:crypto'
 import { spawn, spawnSync } from 'node:child_process'
-import { chmodSync, openSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, openSync, readFileSync, writeFileSync } from 'node:fs'
 import { createServer as createHttpsServer } from 'node:https'
 import { createServer as createNetServer } from 'node:net'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+
+/** Runtime children receive platform settings, never the orchestrator's credentials. */
+export function runtimeChildEnvironment(environment = process.env) {
+  const keys = [
+    'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'TMP', 'TEMP',
+    'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'PATHEXT',
+  ]
+  return Object.fromEntries(keys
+    .filter(key => environment[key] !== undefined)
+    .map(key => [key, environment[key]]))
+}
 
 /** Server environment keys that encode the removed Server-local model path. */
 export const FORBIDDEN_SERVER_MODEL_ENVIRONMENT_KEYS = Object.freeze([
@@ -630,11 +641,90 @@ export function startDeterministicDeviceModelServer({
   }
 }
 
-/**
- * Seeds one Device-local Provider through the production encrypted Web → Device
- * HTTP apply path. Secrets are sealed to the Device store; Server only relays
- * ciphertext and public receipts.
- */
+/** Install and discover public smoke before any Worker loads Device extensions. */
+export async function installDevicePublicSmoke({ api, publicClientId, configuration, timeoutMillis = 60_000 }) {
+  const { encryptDeviceExtension } = await import('../apps/client/dist/module/device-provider-encryption.js')
+  const base = `/api/v1/clients/${encodeURIComponent(publicClientId)}/extensions`
+  const id = 'benchmark_public_smoke'
+  const receipts = []
+  for (const mutation of [
+    { operation: 'save_mcp', id, configuration: JSON.stringify(configuration), enabled: true },
+    { operation: 'test_mcp', id },
+  ]) {
+    const current = await api.request(base)
+    assert.equal(current.status, 200)
+    assert.equal(current.json?.online, true, 'Device must be online to configure public smoke')
+    const requestId = `extension_${randomBytes(16).toString('hex')}`
+    const envelope = await encryptDeviceExtension(current.json.snapshot, requestId, mutation)
+    const applied = await api.request(base, { method: 'POST', body: envelope })
+    assert.equal(applied.status, 202, 'Device extension apply was rejected')
+    const expected = mutation.operation === 'save_mcp' ? 'saved' : 'tested'
+    const completed = await waitFor(async () => {
+      const response = await api.request(`${base}/receipts/${requestId}`)
+      if (!response.json?.receipt) return false
+      assert.equal(response.status, 200)
+      assert.equal(response.json.receipt.outcome, expected, 'Device public smoke configuration failed')
+      return response.json
+    }, `Device public smoke ${expected}`, timeoutMillis)
+    receipts.push(completed.receipt)
+    if (expected === 'tested') {
+      const server = completed.snapshot?.mcpServers?.find(server => server.id === id)
+      assert.equal(server?.enabled, true)
+      assert.equal(server?.connectionStatus, 'ready')
+      assert.deepEqual(server?.toolNames, ['public_smoke'])
+    }
+  }
+  return { id, toolNames: ['public_smoke'], receipts }
+}
+
+/** Resolve only approvals belonging to the currently observed Device WorkRuns. */
+export async function resolveDeviceTaskApprovals({ api, runs, publicSmokeId, onDecision }) {
+  const currentRun = approval => runs.find(run => {
+    const binding = approval.binding
+    const identity = binding?.sessionIdentity
+    return ['leased', 'running'].includes(run.state)
+      && run.productSessionId && run.codexThreadId
+      && identity?.workRunId === run.id
+      && identity.codexThreadId === run.codexThreadId
+      && identity.productSessionId === run.productSessionId
+      && identity.workerSessionId === run.workerSessionId
+      && binding.productSessionId === run.productSessionId
+      && binding.workerSessionId === run.workerSessionId
+      && binding.executionJobId === run.executionJobId
+  })
+  const pending = await api.query('approval.list', { states: ['pending'] })
+  assert.equal(pending.page?.hasMore, false, 'Device task approval list must be complete')
+  assert.ok(Array.isArray(pending.result?.items), 'Device task approval list is invalid')
+  for (const item of pending.result.items) {
+    if (!currentRun(item)) continue
+    const approval = (await api.query('approval.get', { approvalId: item.id })).result
+    if (approval.state !== 'pending' || !approval.decisionEnabled || !currentRun(approval)) continue
+    const detail = approval.sanitizedDetail
+    const allow = publicSmokeId === 'benchmark_public_smoke'
+      && approval.category === 'mcp' && approval.effectiveDecisionScope === 'once'
+      && detail?.kind === 'available' && detail.operation === 'execute'
+      && detail.reasonCode === 'mcp_permission' && detail.targetCount === 1
+      && detail.targetSummaries?.length === 1
+      && detail.targetSummaries[0] === `server:${publicSmokeId}`
+    const decision = allow ? 'approve' : 'reject'
+    let result
+    try {
+      result = await api.command('approval.decide', approval.revision, {
+        approvalId: approval.id, binding: approval.binding, decision,
+        reason: allow
+          ? 'Run the configured public_smoke in the frozen offline sandbox.'
+          : 'Continue within the configured workspace and public_smoke tool; escalation is not authorized.',
+      })
+    } catch (error) {
+      if (['REVISION_CONFLICT', 'WRONG_STATE'].includes(error?.code)) continue
+      throw error
+    }
+    assert.equal(result.outcome, 'completed', 'Device approval decision did not complete')
+    await onDecision({ approval, decision, result })
+  }
+}
+
+/** Seed a Device-local Provider through the encrypted Web → Device HTTP path. */
 export async function seedDeviceLocalProvider({
   api,
   publicClientId,
@@ -642,6 +732,8 @@ export async function seedDeviceLocalProvider({
   modelId,
   endpoint,
   apiKey,
+  protocol = 'anthropic_messages',
+  customHeaders,
   displayName = 'WinWinCode Device deterministic Provider',
   timeoutMillis = 60_000,
 }) {
@@ -666,11 +758,12 @@ export async function seedDeviceLocalProvider({
       providerId,
       displayName,
       endpoint,
-      protocol: 'anthropic_messages',
+      protocol,
       modelIds: [modelId],
       enabled: true,
     },
     apiKey,
+    ...(customHeaders === undefined ? {} : { customHeaders }),
   })
   const applied = await api.request(providerPath, { method: 'POST', body: encrypted })
   assert.equal(applied.status, 202, `Device Provider apply failed: ${applied.text}`)
@@ -751,6 +844,30 @@ export function deviceConnectCodePublished(database, connectCodeId) {
   `).get(connectCodeId) !== undefined
 }
 
+/** Read the owned Workers' authoritative Core admission records, never model text. */
+export function assertDeviceBenchmarkRunning(deviceData, workerSessionIds) {
+  for (const workerSessionId of workerSessionIds) {
+    assert.match(workerSessionId, /^wsn_[0-9A-HJKMNP-TV-Z]{26}$/u)
+    const path = join(deviceData, 'worker-sessions', workerSessionId, 'data', 'codex-runtime', 'worker-codex.sqlite3')
+    // A launch anchor can precede Worker startup and database creation.
+    if (!existsSync(path)) continue
+    const database = new DatabaseSync(path, { readOnly: true })
+    try {
+      database.exec('PRAGMA busy_timeout = 5000')
+      // The file is visible before Core finishes its schema migration.
+      if (!database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tool_repeat_run'").get()) continue
+      const stopped = database.prepare('SELECT run_key FROM tool_repeat_run WHERE stopped = 1 LIMIT 1').get()
+      if (stopped) {
+        throw Object.assign(new Error('Core stopped before the sixth identical tool request'), {
+          code: 'STUCK_TOOL_REPEAT_LIMIT', workerSessionId, runKey: stopped.run_key,
+        })
+      }
+    } finally {
+      database.close()
+    }
+  }
+}
+
 export async function waitFor(check, label, timeoutMillis = 30_000, pollMillis = 200) {
   const deadline = Date.now() + timeoutMillis
   for (;;) {
@@ -808,6 +925,7 @@ export async function establishDeviceOnlyExecutionPath({
   seedDeviceProvider = true,
   repositoryScope = null,
   logName = 'device-process.log',
+  agentEnvironment = process.env,
 }) {
   assert.equal(typeof wwc, 'string')
   assert.equal(typeof api?.request, 'function')
@@ -818,9 +936,18 @@ export async function establishDeviceOnlyExecutionPath({
     destination: join(directory, 'device-provider-trust-root.der'),
   })
   const deviceEnvironment = {
-    ...process.env,
+    ...runtimeChildEnvironment(),
+    ...(agentEnvironment.PYTHONDONTWRITEBYTECODE === '1' ? { PYTHONDONTWRITEBYTECODE: '1' } : {}),
+    WWC_WORKER_MODEL_REASONING_EFFORT: agentEnvironment.WWC_WORKER_MODEL_REASONING_EFFORT,
+    WWC_WORKER_FUSION: agentEnvironment.WWC_WORKER_FUSION,
+    WWC_WORKER_JEV_JUDGE: agentEnvironment.WWC_WORKER_JEV_JUDGE,
+    WWC_WORKER_JEV_CONTEXT: agentEnvironment.WWC_WORKER_JEV_CONTEXT,
+    WWC_DEVICE_JEV_SETTINGS_FILE: agentEnvironment.WWC_DEVICE_JEV_SETTINGS_FILE,
+    WWC_BENCHMARK_TOOL_REPEAT_GUARD: agentEnvironment.WWC_BENCHMARK_TOOL_REPEAT_GUARD,
     WWC_DEVICE_TLS_ROOT_DER_FILE: tlsRoot,
-    WWC_DEVICE_PROVIDER_TLS_ROOT_DER_FILE: tlsRoot,
+    WWC_DEVICE_PROVIDER_TLS_ROOT_DER_FILE: deviceProvider?.endpoint
+      ? process.env.WWC_DEVICE_PROVIDER_TLS_ROOT_DER_FILE
+      : tlsRoot,
     WWC_WORKER_TLS_ROOT_DER_FILE: tlsRoot,
     ...(helperReleaseManifest === undefined ? {} : {
       WWC_WORKER_HELPER_RELEASE_MANIFEST: helperReleaseManifest,
@@ -843,11 +970,6 @@ export async function establishDeviceOnlyExecutionPath({
     deviceEnvironment.WWC_WORKER_MODEL_PROVIDER_ID = modelRouteSource.providerId
     deviceEnvironment.WWC_WORKER_MODEL_ID = modelRouteSource.modelId
   }
-  if (deviceSecret !== null && deviceSecret !== undefined) {
-    // Secret stays on the Device process environment only.
-    deviceEnvironment.WWC_DEVICE_PROVIDER_API_KEY = deviceSecret
-  }
-
   const deviceLog = openSync(join(directory, logName), 'a', 0o600)
   const device = spawn(wwc, [
     'device', 'serve',
@@ -930,18 +1052,24 @@ export async function establishDeviceOnlyExecutionPath({
     let seededProvider = null
     if (deviceProvider !== null && seedDeviceProvider) {
       // Production path: Device-local HTTPS Provider + encrypted Web→Device apply.
-      modelServer = await startDeterministicDeviceModelServer({
-        certificatePath,
-        privateKeyPath,
-      }).listen()
+      if (deviceProvider.endpoint) {
+        assert.ok(deviceSecret, 'External Provider requires a Device-local credential')
+      } else {
+        modelServer = await startDeterministicDeviceModelServer({
+          certificatePath,
+          privateKeyPath,
+        }).listen()
+      }
       providerApiKey = deviceSecret ?? `device-local-${randomBytes(24).toString('hex')}`
       seededProvider = await seedDeviceLocalProvider({
         api,
         publicClientId: status.publicClientId,
         providerId: deviceProvider.providerId,
         modelId: deviceProvider.modelId,
-        endpoint: modelServer.endpoint,
+        endpoint: deviceProvider.endpoint ?? modelServer.endpoint,
         apiKey: providerApiKey,
+        protocol: deviceProvider.protocol,
+        customHeaders: deviceProvider.customHeaders,
         displayName: deviceProvider.displayName
           ?? 'WinWinCode Device deterministic Provider',
         timeoutMillis,
@@ -955,7 +1083,7 @@ export async function establishDeviceOnlyExecutionPath({
         configured: 'encrypted-web-to-device-apply',
         secretPlacement: 'device-local-only',
       }
-      steps.push('device-local-model-server')
+      if (modelServer !== null) steps.push('device-local-model-server')
       steps.push('device-local-provider-seeded')
     } else if (deviceProvider !== null) {
       report.deviceProvider = {
@@ -983,8 +1111,15 @@ export async function establishDeviceOnlyExecutionPath({
           ?? 'device-deterministic-model',
       })
     report.modelRoute = modelRoute
+    const launchedWorkerSessions = new Set()
+    const assertBenchmarkRunning = () => {
+      if (deviceEnvironment.WWC_BENCHMARK_TOOL_REPEAT_GUARD === '1') {
+        assertDeviceBenchmarkRunning(deviceData, launchedWorkerSessions)
+      }
+    }
 
     return {
+      assertBenchmarkRunning,
       ...report,
       api,
       device,
@@ -1005,6 +1140,7 @@ export async function establishDeviceOnlyExecutionPath({
        * `workRunId` for the Controller-dispatched execution job.
        */
       async launchAnchor({ workRunId = null, productSessionId = null } = {}) {
+        assertBenchmarkRunning()
         const body = {
           schemaVersion,
           clientId: status.publicClientId,
@@ -1034,6 +1170,7 @@ export async function establishDeviceOnlyExecutionPath({
         steps.push(productSessionId === null
           ? 'launch-anchor'
           : `launch-anchor:${productSessionId}`)
+        launchedWorkerSessions.add(launched.json.workerSessionId)
         report.workerSessionId = launched.json.workerSessionId
         report.workerId = launched.json.workerId
         report.workerInstanceId = launched.json.workerInstanceId

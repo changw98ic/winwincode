@@ -485,6 +485,7 @@ fn flow_coordinator_drives_provider_watermarks_and_cancellation_once() {
         let mut converter = ProviderStreamConverter::from_gateway_receipt(&receipt);
         let frames = converter
             .ingest(ProviderStreamEvent::ResponseStarted {
+                observed_model_id: Some("observed-fixture-model".to_owned()),
                 provider_response_id: "response-flow-control".to_owned(),
             })
             .expect("convert Provider start");
@@ -538,6 +539,7 @@ fn flow_coordinator_drives_provider_watermarks_and_cancellation_once() {
 fn positive_events(fragmented: bool) -> Vec<ProviderStreamEvent> {
     let mut events = vec![
         ProviderStreamEvent::ResponseStarted {
+            observed_model_id: Some("observed-fixture-model".to_owned()),
             provider_response_id: "response-stream-1".to_owned(),
         },
         ProviderStreamEvent::TextStarted { index: 0 },
@@ -606,6 +608,129 @@ fn positive_events(fragmented: bool) -> Vec<ProviderStreamEvent> {
 }
 
 #[test]
+fn model_identity_comes_from_provider_observation_not_requested_route() {
+    let receipt = gateway_receipt();
+    for observed in [None, Some("different-upstream-model".to_owned())] {
+        let mut converter = ProviderStreamConverter::from_gateway_receipt(&receipt);
+        let frames = converter
+            .ingest(ProviderStreamEvent::ResponseStarted {
+                provider_response_id: "identity-response".to_owned(),
+                observed_model_id: observed.clone(),
+            })
+            .expect("convert identity");
+        let payloads = values(&frames);
+        let model = payloads
+            .iter()
+            .find(|value| value["type"] == "server_model");
+        assert_eq!(
+            model.and_then(|value| value["model"].as_str()),
+            observed.as_deref()
+        );
+    }
+    let mut converter = ProviderStreamConverter::from_gateway_receipt(&receipt);
+    assert!(
+        converter
+            .ingest(ProviderStreamEvent::ResponseStarted {
+                provider_response_id: "leaking-identity".to_owned(),
+                observed_model_id: Some(
+                    String::from_utf8(PROVIDER_SECRET.to_vec()).expect("test secret")
+                ),
+            })
+            .is_err()
+    );
+}
+
+#[test]
+fn assistant_phase_distinguishes_tool_progress_from_final_answer() {
+    let receipt = gateway_receipt();
+    for fragmented in [false, true] {
+        let final_frames = values(&convert(&receipt, positive_events(fragmented)));
+        let final_message = final_frames
+            .iter()
+            .find(|frame| frame["type"] == "output_item_done" && frame["item"]["type"] == "message")
+            .unwrap();
+        assert_eq!(final_message["item"]["phase"], "final_answer");
+        for text_after_tool in [false, true] {
+            let mut events = parallel_tool_events(fragmented);
+            let text = [
+                ProviderStreamEvent::TextStarted { index: 0 },
+                ProviderStreamEvent::TextDelta {
+                    index: 0,
+                    delta: "I will inspect the file".into(),
+                },
+                ProviderStreamEvent::TextEnded { index: 0 },
+            ];
+            let position = if text_after_tool { events.len() - 1 } else { 1 };
+            events.splice(position..position, text);
+            let frames = values(&convert(&receipt, events));
+            let message = frames
+                .iter()
+                .find(|frame| {
+                    frame["type"] == "output_item_done" && frame["item"]["type"] == "message"
+                })
+                .unwrap();
+            assert_eq!(message["item"]["phase"], "commentary");
+            assert_eq!(
+                message["item"]["content"][0]["text"],
+                "I will inspect the file"
+            );
+            assert_eq!(
+                frames
+                    .iter()
+                    .filter(|frame| frame["type"] == "output_item_done"
+                        && (frame["item"]["type"] == "function_call"
+                            || frame["item"]["type"] == "custom_tool_call"))
+                    .count(),
+                2
+            );
+        }
+    }
+    let mut events = positive_events(false);
+    events.pop();
+    events.push(ProviderStreamEvent::Finished(
+        ProviderFinishReason::MaxTokens,
+    ));
+    let frames = values(&convert(&receipt, events));
+    let message = frames
+        .iter()
+        .find(|frame| frame["type"] == "output_item_done" && frame["item"]["type"] == "message")
+        .unwrap();
+    assert!(message["item"].get("phase").is_none());
+    assert_eq!(frames.last().unwrap()["type"], "error");
+}
+
+#[test]
+fn interrupted_text_is_preserved_without_inventing_a_final_phase() {
+    let receipt = gateway_receipt();
+    for terminal in [
+        ProviderStreamEvent::Cancelled,
+        ProviderStreamEvent::Disconnected,
+        ProviderStreamEvent::Failed(ProviderStreamFailure::new(
+            ProviderStreamFailureKind::Transport,
+        )),
+    ] {
+        let mut events = positive_events(false);
+        events.pop();
+        events.push(terminal);
+        let frames = values(&convert(&receipt, events));
+        let message = frames
+            .iter()
+            .find(|frame| frame["type"] == "output_item_done" && frame["item"]["type"] == "message")
+            .unwrap();
+        assert_eq!(message["item"]["content"][0]["text"], "hello");
+        assert!(message["item"].get("phase").is_none());
+        assert!(
+            frames
+                .iter()
+                .filter(|frame| frame["type"] == "output_item_added"
+                    && frame["item"]["type"] == "message")
+                .all(|frame| frame["item"].get("phase").is_none())
+        );
+        assert_eq!(frames.last().unwrap()["type"], "error");
+    }
+}
+
+#[test]
 fn fragmentation_replay_reasoning_usage_and_sequence_are_deterministic() {
     let receipt = gateway_receipt();
     let fragmented = convert(&receipt, positive_events(true));
@@ -670,6 +795,7 @@ fn fragmentation_replay_reasoning_usage_and_sequence_are_deterministic() {
 fn parallel_tool_events(fragmented: bool) -> Vec<ProviderStreamEvent> {
     let mut events = vec![
         ProviderStreamEvent::ResponseStarted {
+            observed_model_id: Some("observed-fixture-model".to_owned()),
             provider_response_id: "response-tools".to_owned(),
         },
         ProviderStreamEvent::ToolCallStarted {
@@ -761,6 +887,7 @@ fn parallel_tool_identities_are_stable_and_identity_drift_is_terminal() {
     let mut converter = ProviderStreamConverter::from_gateway_receipt(&receipt);
     converter
         .ingest(ProviderStreamEvent::ResponseStarted {
+            observed_model_id: Some("observed-fixture-model".to_owned()),
             provider_response_id: "response-drift".to_owned(),
         })
         .expect("start drift fixture");
@@ -800,6 +927,7 @@ fn cancellation_disconnect_failure_and_split_secret_are_fail_closed() {
     let mut leaking = ProviderStreamConverter::from_gateway_receipt(&receipt);
     leaking
         .ingest(ProviderStreamEvent::ResponseStarted {
+            observed_model_id: Some("observed-fixture-model".to_owned()),
             provider_response_id: "response-leak".to_owned(),
         })
         .expect("start leak fixture");
@@ -837,6 +965,7 @@ fn cancellation_disconnect_failure_and_split_secret_are_fail_closed() {
         let mut converter = ProviderStreamConverter::from_gateway_receipt(&receipt);
         converter
             .ingest(ProviderStreamEvent::ResponseStarted {
+                observed_model_id: Some("observed-fixture-model".to_owned()),
                 provider_response_id: format!("response-{code}"),
             })
             .expect("start terminal fixture");
@@ -854,6 +983,7 @@ fn cancellation_disconnect_failure_and_split_secret_are_fail_closed() {
     let mut failed = ProviderStreamConverter::from_gateway_receipt(&receipt);
     failed
         .ingest(ProviderStreamEvent::ResponseStarted {
+            observed_model_id: Some("observed-fixture-model".to_owned()),
             provider_response_id: "response-failed".to_owned(),
         })
         .expect("start failure fixture");
@@ -882,6 +1012,7 @@ fn max_tokens_is_a_terminal_error_and_debug_never_renders_provider_content() {
         &receipt,
         vec![
             ProviderStreamEvent::ResponseStarted {
+                observed_model_id: Some("observed-fixture-model".to_owned()),
                 provider_response_id: "response-max-tokens".to_owned(),
             },
             ProviderStreamEvent::Finished(ProviderFinishReason::MaxTokens),
@@ -890,6 +1021,21 @@ fn max_tokens_is_a_terminal_error_and_debug_never_renders_provider_content() {
     let terminal = values(&frames).pop().expect("max-token terminal frame");
     assert_eq!(terminal["type"], "error");
     assert_eq!(terminal["error"]["code"], "MAX_TOKENS");
+    assert!(terminal.get("tokenUsage").is_none());
+    for ending in [
+        ProviderStreamEvent::Finished(ProviderFinishReason::MaxTokens),
+        ProviderStreamEvent::Disconnected,
+        ProviderStreamEvent::Cancelled,
+    ] {
+        let mut events = positive_events(false);
+        events.pop();
+        events.push(ending);
+        let measured = values(&convert(&receipt, events)).pop().unwrap();
+        assert_eq!(measured["type"], "error");
+        assert_eq!(measured["tokenUsage"]["input_tokens"], 10);
+        assert_eq!(measured["tokenUsage"]["cached_input_tokens"], 2);
+        assert_eq!(measured["tokenUsage"]["output_tokens"], 4);
+    }
     assert!(
         frames
             .last()
@@ -912,6 +1058,7 @@ fn empty_stop_matches_dsh_retryable_failure_and_terminal_is_exact_once() {
     let mut converter = ProviderStreamConverter::from_gateway_receipt(&receipt);
     converter
         .ingest(ProviderStreamEvent::ResponseStarted {
+            observed_model_id: Some("observed-fixture-model".to_owned()),
             provider_response_id: "response-empty".to_owned(),
         })
         .expect("start empty response");

@@ -1232,7 +1232,10 @@ impl ChangeBatchStore {
             .map(|bytes| {
                 let usage: winwincode_execution_port::generated::ExecutionOutcomeUsage =
                     decode(&bytes)?;
-                if usage.tokens < 0 || usage.runtime_millis < 0 || usage.cost_microunits < 0 {
+                if usage.tokens < 0
+                    || usage.runtime_millis < 0
+                    || usage.cost_microunits.is_some_and(|cost| cost < 0)
+                {
                     return Err(corrupt());
                 }
                 Ok(usage)
@@ -2155,7 +2158,9 @@ fn valid_frame(frame: &ObservationModelFrame<'_>) -> bool {
         && valid_digest(&frame.chunk_digest)
         && frame.model_exchange_id.0.len() <= 256
         && frame.model_usage.as_ref().is_none_or(|usage| {
-            usage.tokens >= 0 && usage.runtime_millis >= 0 && usage.cost_microunits >= 0
+            usage.tokens >= 0
+                && usage.runtime_millis >= 0
+                && usage.cost_microunits.is_none_or(|cost| cost >= 0)
         })
         && frame
             .terminal_status
@@ -2471,7 +2476,7 @@ mod tests {
             identity: intent.identity.clone(),
             input_digest: intent.input_digest.clone(),
             model_usage: Some(ExecutionOutcomeUsage {
-                cost_microunits: 1,
+                cost_microunits: Some(1),
                 runtime_millis: 5,
                 tokens: 7,
             }),

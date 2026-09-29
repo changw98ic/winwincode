@@ -93,7 +93,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
             },
             "fixture-checkout-revision",
             "codex-chat",
-            3_600,
+            Some(3_600),
             1_073_741_824,
         )?,
     )?);
@@ -295,9 +295,9 @@ fn configure_admission(storage: &mut SqliteStorage) -> Result<(), Box<dyn Error>
     let limits = ExecutionAdmissionLimits {
         max_concurrent: 2,
         max_queued: 2,
-        token_budget: 10_000,
-        cost_budget_microunits: 10_000,
-        max_runtime_millis: 60_000,
+        token_budget: Some(10_000),
+        cost_budget_microunits: Some(10_000),
+        max_runtime_millis: Some(60_000),
     };
     let mut admission = storage.execution_admission()?;
     for boundary in admission_boundaries(&scope) {
@@ -310,9 +310,9 @@ fn configure_admission(storage: &mut SqliteStorage) -> Result<(), Box<dyn Error>
         job_id: ExecutionJobId(id("job", 1)),
         request_id: RequestId(id("req", 210)),
         repository_access: ExecutionRepositoryAccess::ReadOnly,
-        reserved_tokens: 100,
-        reserved_cost_microunits: 100,
-        runtime_limit_millis: 30_000,
+        reserved_tokens: Some(100),
+        reserved_cost_microunits: Some(100),
+        runtime_limit_millis: Some(30_000),
         submitted_at: at(3),
     })?;
     admission.start(&ExecutionReservationStart {
@@ -445,7 +445,7 @@ fn prepare_approval(
     let authority = GateInteractionAuthority {
         execution_scope: execution_scope(),
         worker_pool_id: pool(),
-        product_session_revision,
+        product_session_revision: Some(product_session_revision),
         work_contract_id: None,
         work_contract_revision: None,
         work_item_id: None,

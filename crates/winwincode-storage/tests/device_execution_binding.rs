@@ -257,9 +257,9 @@ fn seed_reservation_for_user(
     let limits = ExecutionAdmissionLimits {
         max_concurrent: 4,
         max_queued: 4,
-        token_budget: 10_000,
-        cost_budget_microunits: 10_000,
-        max_runtime_millis: 60_000,
+        token_budget: Some(10_000),
+        cost_budget_microunits: Some(10_000),
+        max_runtime_millis: Some(60_000),
     };
     {
         let mut admission = storage.execution_admission().expect("admission");
@@ -302,9 +302,9 @@ fn seed_reservation_for_user(
                 job_id: ExecutionJobId(id("job", seed)),
                 request_id: RequestId(id("req", seed + 13)),
                 repository_access: ExecutionRepositoryAccess::ReadOnly,
-                reserved_tokens: 100,
-                reserved_cost_microunits: 1_000,
-                runtime_limit_millis: 30_000,
+                reserved_tokens: Some(100),
+                reserved_cost_microunits: Some(1_000),
+                runtime_limit_millis: Some(30_000),
                 submitted_at: instant(T1),
             })
             .expect("reserve");
@@ -770,7 +770,7 @@ fn attach_refuses_mismatched_unknown_or_terminal_reservations() {
                 request_id: RequestId(id("req", 7820)),
                 expected_revision: 2,
                 actual_tokens: 100,
-                actual_cost_microunits: 1_000,
+                actual_cost_microunits: Some(1_000),
                 actual_runtime_millis: 1_000,
                 completed_at: instant(T3),
             })

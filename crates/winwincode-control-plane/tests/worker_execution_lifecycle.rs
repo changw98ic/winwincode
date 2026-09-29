@@ -81,9 +81,9 @@ fn authenticated_claim_replays_after_restart() {
     let limits = ExecutionAdmissionLimits {
         max_concurrent: 8,
         max_queued: 8,
-        token_budget: 10_000,
-        cost_budget_microunits: 100_000,
-        max_runtime_millis: 60_000,
+        token_budget: Some(10_000),
+        cost_budget_microunits: Some(100_000),
+        max_runtime_millis: Some(60_000),
     };
     let boundaries = [
         ExecutionAdmissionBoundary::Organization {
@@ -122,9 +122,9 @@ fn authenticated_claim_replays_after_restart() {
             job_id: job_id.clone(),
             request_id: RequestId(id("req", 12)),
             repository_access: ExecutionRepositoryAccess::ReadOnly,
-            reserved_tokens: 100,
-            reserved_cost_microunits: 1_000,
-            runtime_limit_millis: 30_000,
+            reserved_tokens: Some(100),
+            reserved_cost_microunits: Some(1_000),
+            runtime_limit_millis: Some(30_000),
             submitted_at: at(2),
         })
         .expect("reserve admission");

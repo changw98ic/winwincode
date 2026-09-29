@@ -27,6 +27,7 @@ tokio = { workspace = true, features = ["macros"] }
 uuid.workspace = true
 winwincode-domain.workspace = true
 winwincode-provider.workspace = true
+winwincode-fusion.workspace = true
 winwincode-execution-port.workspace = true
 winwincode-kernel = { path = "../kernel" }
 

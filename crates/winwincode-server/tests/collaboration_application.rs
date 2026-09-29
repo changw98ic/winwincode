@@ -211,7 +211,7 @@ impl Fixture {
             self.repository_scope(),
             "fixture-checkout-revision",
             "codex-chat",
-            3_600,
+            Some(3_600),
             1_073_741_824,
         )
         .expect("execution config")
@@ -341,7 +341,7 @@ fn fixed_execution_config() -> ProductSessionExecutionConfig {
         },
         "fixture-checkout-revision",
         "codex-chat",
-        3_600,
+        Some(3_600),
         1_073_741_824,
     )
     .expect("execution config")

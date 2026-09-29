@@ -46,7 +46,6 @@ use winwincode_control_plane::{
     },
 };
 use winwincode_delivery::{
-    application::attention::{AttentionDecision, ResolveAttentionInput, resolve_attention},
     application::verdict::test_support::{VerdictFixtureOutcome, verdict_fixture},
     application::workrun_execution::{
         TerminalArtifactReference, TerminalOutcomeStatus,
@@ -54,6 +53,10 @@ use winwincode_delivery::{
             active_lease_identity, delivery_terminal_outcome_facts, session_binding_authority,
             terminal_outcome_metadata, terminal_worker_outcome,
         },
+    },
+    application::{
+        attention::{AttentionDecision, ResolveAttentionInput, resolve_attention},
+        verdict::{SubmitVerdictFacts, compute_verdict_transition},
     },
     domain::{
         AcceptanceCriterionId, AttentionItem, AttentionItemStatus, AttentionItemType,
@@ -2938,6 +2941,67 @@ fn delivery_get_projects_current_diagram_execution_through_the_generated_contrac
             .work_item_id
     );
     assert_eq!(execution.affected_file_count.0, 1);
+}
+
+#[test]
+fn delivery_get_keeps_rework_status_readable_without_stale_candidate_verdict() {
+    let fixture = verdict_fixture(
+        &DeliveryId("dlv_01J00000000000000000000000".into()),
+        VerdictFixtureOutcome::Fail,
+    );
+    let failed = compute_verdict_transition(
+        &fixture.delivery,
+        SubmitVerdictFacts {
+            expected_revision: fixture.delivery.revision(),
+            candidate: &fixture.candidate,
+            verification: &fixture.verification,
+            evidence: &fixture.evidence,
+            produced_at_millis: 1_800_000_000_100,
+        },
+    )
+    .expect("compute failed verdict")
+    .delivery()
+    .clone();
+    let attention = failed
+        .snapshot()
+        .attention_items
+        .iter()
+        .find(|item| {
+            item.options
+                .iter()
+                .any(|option| option.id == "start-rework")
+        })
+        .expect("bounded rework attention");
+    let reworking = resolve_attention(
+        &failed,
+        ResolveAttentionInput {
+            expected_revision: failed.revision(),
+            attention_item_id: attention.id.clone(),
+            work_run_id: attention.work_run_id.clone(),
+            expected_context: attention.context.clone(),
+            actor: "usr_01J00000000000000000000005".into(),
+            decision: AttentionDecision::Resolved,
+            resolution: "Begin the authorized rework.".into(),
+            now_millis: 1_800_000_000_101,
+        },
+    )
+    .expect("start bounded rework")
+    .delivery()
+    .clone();
+    assert_eq!(reworking.snapshot().status, DeliveryStatus::Reworking);
+
+    let projection = fixture_with_delivery(
+        normalize_projection_read_revision(&reworking),
+        false,
+        false,
+        false,
+        None,
+    );
+    let detail = detail_and_cursor(&projection).0;
+    assert_eq!(detail.status, WorkItemState::Failed);
+    assert!(detail.current_candidate.is_none());
+    assert!(detail.evidence.is_empty());
+    assert!(detail.verdict.is_none());
 }
 
 #[test]

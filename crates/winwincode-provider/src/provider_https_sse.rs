@@ -82,7 +82,7 @@ impl fmt::Debug for ProviderTlsRoots {
 }
 
 /// Bounded HTTPS/SSE transport configuration.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct HttpsSseProviderConfig {
     provider_id: String,
     endpoint: String,
@@ -94,13 +94,61 @@ pub struct HttpsSseProviderConfig {
     max_events: usize,
     tls_roots: ProviderTlsRoots,
     protocol: HttpsSseProviderProtocol,
+    custom_headers: Vec<(String, String)>,
+}
+
+impl fmt::Debug for HttpsSseProviderConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HttpsSseProviderConfig")
+            .field("provider_id", &self.provider_id)
+            .field("endpoint", &"[REDACTED]")
+            .field("protocol", &self.protocol)
+            .field(
+                "custom_headers",
+                &self
+                    .custom_headers
+                    .iter()
+                    .map(|(name, _)| name.as_str())
+                    .collect::<Vec<_>>(),
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
 enum HttpsSseProviderProtocol {
     Canonical,
     AnthropicMessages(AnthropicMessagesOptions),
+    OpenAiChatCompletions(AnthropicMessagesOptions),
 }
+
+/// Maximum number of extra request headers accepted on one Provider.
+pub const MAX_CUSTOM_HEADERS: usize = 32;
+/// Maximum custom header name length in bytes.
+pub const MAX_CUSTOM_HEADER_NAME_BYTES: usize = 128;
+/// Maximum custom header value length in bytes.
+pub const MAX_CUSTOM_HEADER_VALUE_BYTES: usize = 2_048;
+
+/// Hop-by-hop and credential-bearing headers that custom headers may never set.
+const FORBIDDEN_CUSTOM_HEADERS: &[&str] = &[
+    "authorization",
+    "content-type",
+    "accept",
+    "idempotency-key",
+    "x-winwincode-model",
+    "anthropic-version",
+    "host",
+    "content-length",
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+];
 
 impl HttpsSseProviderConfig {
     /// Creates one WebPKI-verified external Provider configuration.
@@ -126,6 +174,7 @@ impl HttpsSseProviderConfig {
             max_events: limits.events,
             tls_roots: ProviderTlsRoots::WebPki,
             protocol: HttpsSseProviderProtocol::Canonical,
+            custom_headers: Vec::new(),
         };
         config.validate()?;
         Ok(config)
@@ -179,6 +228,45 @@ impl HttpsSseProviderConfig {
         Ok(self)
     }
 
+    /// Selects the `OpenAI` chat/completions request and `chat.completion.chunk`
+    /// streaming protocol. The configured endpoint is used verbatim.
+    ///
+    /// # Errors
+    ///
+    /// Rejects zero output limits or unsafe token pricing.
+    pub fn with_openai_chat_completions(
+        mut self,
+        max_output_tokens: u32,
+        pricing: ProviderTokenPricing,
+    ) -> Result<Self, HttpsSseProviderError> {
+        let options = AnthropicMessagesOptions {
+            max_output_tokens,
+            pricing,
+        };
+        options.validate().map_err(map_anthropic_configuration)?;
+        self.protocol = HttpsSseProviderProtocol::OpenAiChatCompletions(options);
+        self.validate()?;
+        Ok(self)
+    }
+
+    /// Replaces any previous extra request headers with a bounded validated set.
+    ///
+    /// # Errors
+    ///
+    /// Rejects more than [`MAX_CUSTOM_HEADERS`] entries, names or values outside
+    /// their bounds, CR/LF in values, and hop-by-hop or credential-bearing
+    /// header names (`Authorization`, `Host`, `Content-Length`, `Connection`, …).
+    pub fn with_custom_headers(
+        mut self,
+        headers: impl IntoIterator<Item = (String, String)>,
+    ) -> Result<Self, HttpsSseProviderError> {
+        let headers: Vec<(String, String)> = headers.into_iter().collect();
+        validate_custom_headers(&headers)?;
+        self.custom_headers = headers;
+        self.validate()?;
+        Ok(self)
+    }
+
     fn validate(&self) -> Result<(), HttpsSseProviderError> {
         if !valid_token(&self.provider_id, MAX_PROVIDER_ID_BYTES)
             || self.endpoint.len() > MAX_ENDPOINT_BYTES
@@ -198,8 +286,13 @@ impl HttpsSseProviderConfig {
                 HttpsSseProviderErrorKind::InvalidConfiguration,
             ));
         }
-        if let HttpsSseProviderProtocol::AnthropicMessages(options) = self.protocol {
-            options.validate().map_err(map_anthropic_configuration)?;
+        validate_custom_headers(&self.custom_headers)?;
+        match self.protocol {
+            HttpsSseProviderProtocol::AnthropicMessages(options)
+            | HttpsSseProviderProtocol::OpenAiChatCompletions(options) => {
+                options.validate().map_err(map_anthropic_configuration)?;
+            }
+            HttpsSseProviderProtocol::Canonical => {}
         }
         Ok(())
     }
@@ -423,6 +516,14 @@ impl HttpsSseProviderAdapter {
         body: &mut ureq::Body,
         tool_bindings: &AnthropicToolBindings,
     ) -> Result<HttpsSseProviderCompletion, HttpsSseProviderError> {
+        let mut receipt = receipt.clone();
+        for (_, value) in &self.shared.config.custom_headers {
+            let secret = ResolvedSecret::from_bytes(value.as_bytes().to_vec()).map_err(|_| {
+                HttpsSseProviderError::new(HttpsSseProviderErrorKind::InvalidConfiguration)
+            })?;
+            receipt.stream_leak_gate.track_secret(&secret);
+        }
+        let receipt = &receipt;
         let bytes = self.read_bounded(receipt, body)?;
         let (events, terminal) = match self.shared.config.protocol {
             HttpsSseProviderProtocol::Canonical => {
@@ -435,6 +536,17 @@ impl HttpsSseProviderAdapter {
             }
             HttpsSseProviderProtocol::AnthropicMessages(options) => {
                 let parsed = parse_anthropic_sse(
+                    &bytes,
+                    self.shared.config.max_event_bytes,
+                    self.shared.config.max_events,
+                    tool_bindings,
+                    options,
+                )
+                .map_err(map_anthropic_response)?;
+                (parsed.events, parsed.terminal)
+            }
+            HttpsSseProviderProtocol::OpenAiChatCompletions(options) => {
+                let parsed = crate::provider_openai::parse_openai_chat_sse(
                     &bytes,
                     self.shared.config.max_event_bytes,
                     self.shared.config.max_events,
@@ -728,6 +840,14 @@ impl HttpsSseProviderAdapter {
                 prepare_anthropic_request(invocation.payload, invocation.model_id, options)
                     .map_err(map_anthropic_request)?,
             ),
+            HttpsSseProviderProtocol::OpenAiChatCompletions(options) => Some(
+                crate::provider_openai::prepare_openai_chat_request(
+                    invocation.payload,
+                    invocation.model_id,
+                    options,
+                )
+                .map_err(map_anthropic_request)?,
+            ),
         };
         let tool_bindings = prepared
             .as_ref()
@@ -746,10 +866,18 @@ impl HttpsSseProviderAdapter {
             .header("Authorization", &authorization)
             .header("Idempotency-Key", invocation.adapter_request_id)
             .header("X-WinWinCode-Model", invocation.model_id);
+        for (name, value) in &self.shared.config.custom_headers {
+            request = request.header(name.as_str(), value.as_str());
+        }
         let payload = if let Some(prepared) = prepared.as_ref() {
-            request = request
-                .header("Content-Type", "application/json")
-                .header("Anthropic-Version", "2023-06-01");
+            request = request.header("Content-Type", "application/json");
+            match self.shared.config.protocol {
+                HttpsSseProviderProtocol::AnthropicMessages(_) => {
+                    request = request.header("Anthropic-Version", "2023-06-01");
+                }
+                HttpsSseProviderProtocol::Canonical
+                | HttpsSseProviderProtocol::OpenAiChatCompletions(_) => {}
+            }
             prepared.body.as_slice()
         } else {
             request = request.header("Content-Type", invocation.content_type);
@@ -985,11 +1113,13 @@ impl CanonicalEvents {
 
     fn push_output(&mut self, event: ProviderWireEvent) -> Result<(), HttpsSseProviderError> {
         let event = match event {
-            ProviderWireEvent::ResponseStarted { response_id } => {
-                ProviderStreamEvent::ResponseStarted {
-                    provider_response_id: response_id,
-                }
-            }
+            ProviderWireEvent::ResponseStarted {
+                response_id,
+                model_id,
+            } => ProviderStreamEvent::ResponseStarted {
+                provider_response_id: response_id,
+                observed_model_id: model_id,
+            },
             ProviderWireEvent::TextStarted { index } => ProviderStreamEvent::TextStarted { index },
             ProviderWireEvent::TextDelta { index, delta } => {
                 ProviderStreamEvent::TextDelta { index, delta }
@@ -1172,7 +1302,10 @@ impl CanonicalEvents {
 )]
 enum ProviderWireEvent {
     #[serde(rename = "response.started")]
-    ResponseStarted { response_id: String },
+    ResponseStarted {
+        response_id: String,
+        model_id: Option<String>,
+    },
     #[serde(rename = "text.started")]
     TextStarted { index: u32 },
     #[serde(rename = "text.delta")]
@@ -1311,6 +1444,36 @@ impl WireFailureKind {
             Self::Unknown => ProviderStreamFailureKind::Unknown,
         }
     }
+}
+
+pub(crate) fn validate_custom_headers(
+    headers: &[(String, String)],
+) -> Result<(), HttpsSseProviderError> {
+    if headers.len() > MAX_CUSTOM_HEADERS {
+        return Err(HttpsSseProviderError::new(
+            HttpsSseProviderErrorKind::InvalidConfiguration,
+        ));
+    }
+    let mut names = std::collections::BTreeSet::new();
+    for (name, value) in headers {
+        if !names.insert(name.to_ascii_lowercase())
+            || name.is_empty()
+            || name.len() > MAX_CUSTOM_HEADER_NAME_BYTES
+            || name.trim() != name
+            || !name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "!#$%&'*+.^_`|~-".contains(c))
+            || FORBIDDEN_CUSTOM_HEADERS.contains(&name.to_ascii_lowercase().as_str())
+            || value.is_empty()
+            || value.len() > MAX_CUSTOM_HEADER_VALUE_BYTES
+            || value.chars().any(char::is_control)
+        {
+            return Err(HttpsSseProviderError::new(
+                HttpsSseProviderErrorKind::InvalidConfiguration,
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn map_anthropic_configuration(
@@ -1660,6 +1823,78 @@ mod tests {
     }
 
     #[test]
+    fn chat_transport_sends_private_headers_and_blocks_echoed_values() {
+        for (body, leaks) in [
+            (
+                "data: {\"id\":\"r1\",\"model\":\"observed-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\",\"reasoning_content\":\"Check the request.\"}}]}\n\ndata: {\"id\":\"r1\",\"model\":\"observed-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1}}\n\ndata: [DONE]\n\n",
+                false,
+            ),
+            (
+                "data: {\"id\":\"r1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"private-session-value\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1}}\n\ndata: [DONE]\n\n",
+                true,
+            ),
+        ] {
+            let fixture = TlsFixture::start(vec![TestResponse {
+                status: "200 OK",
+                content_type: "text/event-stream",
+                body,
+                declared_length: None,
+                delay: Duration::ZERO,
+            }]);
+            let settings = config(&fixture)
+                .with_openai_chat_completions(8192, ProviderTokenPricing::default())
+                .expect("chat")
+                .with_custom_headers([(
+                    "x-opencode-session".into(),
+                    "private-session-value".into(),
+                )])
+                .expect("headers");
+            assert!(!format!("{settings:?}").contains("private-session-value"));
+            let adapter = HttpsSseProviderAdapter::try_new(settings).expect("adapter");
+            let exchange = ModelExchangeId("mdl_00000000000000000000000001".into());
+            let request_id = RequestId("req_00000000000000000000000001".into());
+            let payload = serde_json::to_vec(&serde_json::json!({"requestId":"req-1","provider":"p","sessionId":"s","threadId":"t","request":{"model":"requested-model","instructions":"Reply briefly","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}],"stream":true,"store":false,"tool_choice":"none","parallel_tool_calls":false,"reasoning":{"effort":"max"}}})).expect("payload");
+            let mut request = invocation(&exchange, &request_id);
+            request.payload = &payload;
+            adapter.open_https(request, SECRET).expect("open");
+            let receipt = ProviderGatewayOpenReceipt {
+                model_exchange_id: exchange,
+                request_id,
+                route: winwincode_api::generated::ModelRoute {
+                    provider_id: "provider-https-fixture".into(),
+                    model_id: "fixture-model".into(),
+                    credential_reference_id: winwincode_domain::CredentialReferenceId(
+                        "crd_00000000000000000000000001".into(),
+                    ),
+                },
+                adapter_request_id: "pad_00000000000000000000000001".into(),
+                idempotent_replay: false,
+                stream_leak_gate: crate::CredentialLeakGate::new(),
+            };
+            let result = adapter.drain_canonical(&receipt);
+            if leaks {
+                assert_eq!(
+                    result.expect_err("header echo blocked").kind(),
+                    HttpsSseProviderErrorKind::CredentialLeak
+                );
+            } else {
+                assert!(result.is_ok());
+            }
+            let requests = fixture.finish();
+            assert!(contains_ascii_case_insensitive(
+                &requests[0],
+                b"x-opencode-session: private-session-value"
+            ));
+            let bytes = &requests[0];
+            let start = find_bytes(bytes, b"\r\n\r\n").expect("headers") + 4;
+            let body: serde_json::Value =
+                serde_json::from_slice(&bytes[start..]).expect("request body");
+            assert_eq!(body["reasoning_effort"], "max");
+            assert_eq!(body["model"], "fixture-model");
+        }
+    }
+
+    #[test]
     fn verified_tls_open_uses_bounded_headers_and_exact_idempotency() {
         let fixture = TlsFixture::start(vec![TestResponse {
             status: "200 OK",
@@ -1920,6 +2155,35 @@ mod tests {
         assert_eq!(
             result.expect_err("fragment-bearing endpoint").kind(),
             HttpsSseProviderErrorKind::InvalidConfiguration
+        );
+    }
+}
+
+#[cfg(test)]
+mod custom_header_tests {
+    use super::validate_custom_headers;
+
+    #[test]
+    fn custom_headers_reject_transport_overrides_injection_and_duplicates() {
+        assert!(
+            validate_custom_headers(&[("x-opencode-session".into(), "private-session".into())])
+                .is_ok()
+        );
+        for (name, value) in [
+            ("Authorization", "Bearer secret"),
+            ("Host", "another.host"),
+            ("Content-Type", "text/plain"),
+            ("safe", "x\r\nInjected: yes"),
+            ("bad name", "value"),
+        ] {
+            assert!(validate_custom_headers(&[(name.into(), value.into())]).is_err());
+        }
+        assert!(
+            validate_custom_headers(&[
+                ("X-Session".into(), "a".into()),
+                ("x-session".into(), "b".into())
+            ])
+            .is_err()
         );
     }
 }

@@ -199,7 +199,7 @@ fn measured_fixture_usage() -> ExecutionOutcomeUsage {
     ExecutionOutcomeUsage {
         runtime_millis: 50,
         tokens: 2,
-        cost_microunits: 3,
+        cost_microunits: Some(3),
     }
 }
 
@@ -228,6 +228,9 @@ impl CodexCoreAdapter for RealKernelAdapter {
             &capabilities,
             &start.job.execution_profile,
             AgentProfileSettings {
+                fusion: None,
+                jev_judge: None,
+                jev_context: None,
                 provider: "fixture-provider".to_owned(),
                 model: "fixture-coder".to_owned(),
                 reasoning: "provider_default".to_owned(),
@@ -300,7 +303,7 @@ impl CodexCoreAdapter for RealKernelAdapter {
                 summary: secret_safe_runtime_summary("embedded Codex fixture interrupted")
                     .map_err(|error| error.to_string())?,
                 artifacts: Vec::new(),
-                usage: measured_fixture_usage(),
+                usage: Some(measured_fixture_usage()),
             }));
         }
         let session_id = self.session_id(thread_id)?.to_owned();
@@ -315,7 +318,7 @@ impl CodexCoreAdapter for RealKernelAdapter {
                     summary: secret_safe_runtime_summary("embedded Codex fixture completed")
                         .map_err(|error| error.to_string())?,
                     artifacts: Vec::new(),
-                    usage: measured_fixture_usage(),
+                    usage: Some(measured_fixture_usage()),
                 }))
             }
             EventPoll::Event(event) if event.kind == "error" => Ok(CodexPoll::Failed(
@@ -575,9 +578,9 @@ fn dispatch(suffix: char, goal: &str) -> JobDispatchMessage {
             goal: goal.to_owned(),
             job_id: lease.job_id.clone(),
             limits: ExecutionLimits {
-                deadline_at: Instant("2027-01-15T08:04:30.000Z".to_owned()),
+                deadline_at: Some(Instant("2027-01-15T08:04:30.000Z".to_owned())),
                 max_artifact_bytes: 1_000_000,
-                max_runtime_seconds: 240,
+                max_runtime_seconds: Some(240),
             },
             payload_digest: Sha256Digest(format!(
                 "sha256:{}",

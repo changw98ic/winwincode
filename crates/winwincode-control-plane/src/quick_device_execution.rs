@@ -65,13 +65,10 @@ pub const QUICK_DEVICE_WORKER_POOL_ID: &str = "wpl_000000000000000000000000D3";
 const QUICK_DEVICE_ADMISSION_LIMITS: ExecutionAdmissionLimits = ExecutionAdmissionLimits {
     max_concurrent: 1,
     max_queued: 10_000,
-    token_budget: 1_000_000_000,
-    cost_budget_microunits: 1_000_000_000,
-    max_runtime_millis: 604_800_000,
+    token_budget: None,
+    cost_budget_microunits: None,
+    max_runtime_millis: Some(604_800_000),
 };
-
-const RESERVED_TOKENS: u64 = 1_000_000;
-const RESERVED_COST_MICROUNITS: u64 = 1_000_000;
 
 /// Stable Quick device dispatch failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -326,7 +323,7 @@ fn ensure_device_admission_reservation(
     }
     let policy_limits = ExecutionAdmissionLimits {
         max_runtime_millis: runtime_limit_millis
-            .max(QUICK_DEVICE_ADMISSION_LIMITS.max_runtime_millis),
+            .and(QUICK_DEVICE_ADMISSION_LIMITS.max_runtime_millis),
         ..QUICK_DEVICE_ADMISSION_LIMITS
     };
     for boundary in admission_boundaries(&record.scope) {
@@ -348,8 +345,8 @@ fn ensure_device_admission_reservation(
             &record.job_id.0,
         )),
         repository_access: repository_access(&job, &record.job_id),
-        reserved_tokens: RESERVED_TOKENS,
-        reserved_cost_microunits: RESERVED_COST_MICROUNITS,
+        reserved_tokens: None,
+        reserved_cost_microunits: None,
         runtime_limit_millis,
         submitted_at: record.submitted_at.clone(),
     };
@@ -394,14 +391,26 @@ fn decode_execution_job(
     Ok(job)
 }
 
-fn job_runtime_limit_millis(job: &ExecutionJob) -> Result<u64, QuickDeviceDispatchError> {
-    u64::try_from(job.limits.max_runtime_seconds)
-        .ok()
-        .filter(|seconds| *seconds > 0)
-        .and_then(|seconds| seconds.checked_mul(1_000))
-        .ok_or_else(|| {
-            QuickDeviceDispatchError::corrupt("the queued job execution deadline is invalid")
+fn job_runtime_limit_millis(job: &ExecutionJob) -> Result<Option<u64>, QuickDeviceDispatchError> {
+    if job.limits.deadline_at.is_some() != job.limits.max_runtime_seconds.is_some() {
+        return Err(QuickDeviceDispatchError::corrupt(
+            "the queued job runtime policy is inconsistent",
+        ));
+    }
+    job.limits
+        .max_runtime_seconds
+        .map(|seconds| {
+            u64::try_from(seconds)
+                .ok()
+                .filter(|seconds| (1..=604_800).contains(seconds))
+                .and_then(|seconds| seconds.checked_mul(1_000))
+                .ok_or_else(|| {
+                    QuickDeviceDispatchError::corrupt(
+                        "the queued job execution deadline is invalid",
+                    )
+                })
         })
+        .transpose()
 }
 
 fn repository_access(job: &ExecutionJob, job_id: &ExecutionJobId) -> ExecutionRepositoryAccess {

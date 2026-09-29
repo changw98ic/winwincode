@@ -388,6 +388,51 @@ fn production_rework_dispatch_uses_failed_candidate_and_replays_after_restart() 
     cleanup(seeded);
 }
 
+#[test]
+fn failed_or_cancelled_writer_has_no_current_candidate() {
+    use winwincode_control_plane::strongflow_projection::{
+        SqliteTrustedPublicationProjectionAdapter, TrustedPublicationProjectionAdapter,
+    };
+    use winwincode_domain::WorkRunState;
+
+    let seeded = seed_verdict("failed-writer-read", RuntimeFixture::LaterWriterFailed);
+    let storage = SqliteStorage::open(&seeded.data).expect("storage");
+    let objects =
+        LocalArtifactObjectStore::open(seeded.data.join("artifacts")).expect("Artifact objects");
+    let artifacts = ArtifactStore::open(seeded.data.join("artifact-catalog"), Box::new(objects))
+        .expect("Artifact catalog");
+    let resolver = LocalGitSourceResolver::open(&seeded.root).expect("source resolver");
+    for state in [WorkRunState::Failed, WorkRunState::Cancelled] {
+        let mut snapshot = seeded.delivery.clone().into_snapshot();
+        snapshot
+            .work_run_aggregate
+            .runs
+            .last_mut()
+            .expect("latest writer")
+            .state = state;
+        let delivery = Delivery::try_from_snapshot(snapshot).expect("terminal Delivery");
+        let read = SqliteTrustedPublicationProjectionAdapter
+            .read_current_with_storage(
+                &storage,
+                Some(&artifacts),
+                Some(&resolver),
+                &delivery,
+                &seeded.scope,
+                delivery.id(),
+                delivery.revision(),
+                None,
+            )
+            .expect("unsuccessful writer remains readable");
+        assert!(
+            read.candidate().is_none(),
+            "must not reuse the older successful candidate"
+        );
+    }
+    drop(artifacts);
+    drop(storage);
+    cleanup(seeded);
+}
+
 fn seed_verdict(label: &str, runtime_fixture: RuntimeFixture) -> SeededVerdict {
     let root = unique_root(label);
     let data = root.join("data");

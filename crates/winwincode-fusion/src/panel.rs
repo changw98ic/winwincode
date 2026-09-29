@@ -103,6 +103,85 @@ enum CandidateOutcome {
     Failure(FusionCandidateFailure),
 }
 
+/// Checks a collected panel against the original input without calling Providers.
+/// This binds identities and request digests, not the truth of model claims.
+///
+/// # Errors
+/// Rejects incomplete, duplicate, foreign or changed member records.
+pub fn validate_panel_result(
+    panel_id: &str,
+    input: &FusionInput,
+    panel: &FusionPanelResult,
+) -> Result<(), FusionPanelError> {
+    validate_input(panel_id, input)?;
+    let prompt = blind_prompt(input);
+    let dispatch = PanelDispatch {
+        panel_id: panel_id.to_owned(),
+        input_digest: digest_prompt(&prompt)?,
+        timeout: None,
+        max_total_tokens: input.budget.max_total_tokens,
+        prompt,
+    };
+    let invalid = || FusionPanelError("Fusion panel does not match its original input");
+    if panel.panel_id != panel_id || panel.input_digest != dispatch.input_digest {
+        return Err(invalid());
+    }
+    let mut seen = HashSet::new();
+    let successes = panel.candidates.iter().map(|candidate| {
+        let audit = &candidate.audit;
+        (
+            &audit.panel_id,
+            &audit.candidate_id,
+            &audit.request_id,
+            &audit.input_digest,
+            &audit.request_payload_digest,
+            &audit.provider,
+            &audit.model,
+        )
+    });
+    let failures = panel.failures.iter().map(|row| {
+        (
+            &row.panel_id,
+            &row.candidate_id,
+            &row.request_id,
+            &row.input_digest,
+            &row.request_payload_digest,
+            &row.provider,
+            &row.model,
+        )
+    });
+    for (owner, member, request_id, digest, payload_digest, provider, model) in
+        successes.chain(failures)
+    {
+        let route = input
+            .provider_candidates
+            .iter()
+            .find(|route| &route.id == member)
+            .ok_or_else(invalid)?;
+        let request = provider_request(&dispatch, route);
+        let bytes = serde_json::to_vec(&request).map_err(|_| invalid())?;
+        if !seen.insert(member)
+            || owner != panel_id
+            || digest != &dispatch.input_digest
+            || request_id != &request.request_id
+            || payload_digest != &sha256(&bytes)
+            || provider != &route.provider
+            || model != &route.model
+        {
+            return Err(invalid());
+        }
+    }
+    if seen.len() != input.provider_candidates.len()
+        || panel.candidates.iter().any(|candidate| {
+            !candidate.answer.is_object() || candidate.audit.provider_response_id.trim().is_empty()
+        })
+        || panel.failures.iter().any(|row| row.code.trim().is_empty())
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 struct PanelDispatch {
     panel_id: String,

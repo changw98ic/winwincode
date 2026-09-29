@@ -138,7 +138,7 @@ fn compose_application(root: &Path) -> StandaloneControlPlaneApplication {
         repository_scope,
         "fixture-checkout-revision",
         "codex-chat",
-        3_600,
+        Some(3_600),
         1_073_741_824,
     )
     .expect("execution config");

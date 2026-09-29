@@ -2927,7 +2927,7 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
             status: ExecutionOutcomeStatus::Succeeded,
             summary: "executor completed".into(),
             usage: Some(ExecutionOutcomeUsage {
-                cost_microunits: 100,
+                cost_microunits: Some(100),
                 runtime_millis: 2_000,
                 tokens: 20,
             }),
@@ -3095,7 +3095,7 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
             status: ExecutionOutcomeStatus::Succeeded,
             summary: "verification completed".into(),
             usage: Some(ExecutionOutcomeUsage {
-                cost_microunits: 100,
+                cost_microunits: Some(100),
                 runtime_millis: 2_000,
                 tokens: 20,
             }),
@@ -3226,7 +3226,7 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
             status: ExecutionOutcomeStatus::Succeeded,
             summary: "second verification completed".into(),
             usage: Some(ExecutionOutcomeUsage {
-                cost_microunits: 100,
+                cost_microunits: Some(100),
                 runtime_millis: 2_000,
                 tokens: 20,
             }),

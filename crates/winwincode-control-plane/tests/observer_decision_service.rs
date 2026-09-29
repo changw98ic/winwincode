@@ -281,9 +281,9 @@ fn prepare_running_fixture(storage: &mut SqliteStorage) -> RunningFixture {
     let limits = ExecutionAdmissionLimits {
         max_concurrent: 1,
         max_queued: 1,
-        token_budget: 10_000,
-        cost_budget_microunits: 100_000,
-        max_runtime_millis: 60_000,
+        token_budget: Some(10_000),
+        cost_budget_microunits: Some(100_000),
+        max_runtime_millis: Some(60_000),
     };
     {
         let mut admission = storage.execution_admission().expect("admission");
@@ -302,9 +302,9 @@ fn prepare_running_fixture(storage: &mut SqliteStorage) -> RunningFixture {
                 repository_access: ExecutionRepositoryAccess::IsolatedWrite {
                     worktree_key: "worktree-observer-1".into(),
                 },
-                reserved_tokens: 100,
-                reserved_cost_microunits: 1_000,
-                runtime_limit_millis: 30_000,
+                reserved_tokens: Some(100),
+                reserved_cost_microunits: Some(1_000),
+                runtime_limit_millis: Some(30_000),
                 submitted_at: at(4),
             })
             .expect("reservation");

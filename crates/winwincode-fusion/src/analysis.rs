@@ -12,14 +12,14 @@ const MAX_TEXT_BYTES: usize = 65_536;
 const MAX_REFERENCE_BYTES: usize = 4_096;
 
 /// One candidate's already-extracted claims. The analyzer does no model or text inference.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, Clone, Debug, Eq, PartialEq)]
 pub struct FusionCandidateClaims {
     pub candidate_id: String,
     pub claims: Vec<FusionClaim>,
 }
 
 /// One canonical claim made by a candidate.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, Clone, Debug, Eq, PartialEq)]
 pub struct FusionClaim {
     pub claim_key: String,
     pub summary: String,
@@ -29,14 +29,14 @@ pub struct FusionClaim {
 }
 
 /// A candidate's position on one canonical claim.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(serde::Serialize, Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum FusionClaimPosition {
     Supports,
     Opposes,
 }
 
 /// Evidence cited by a candidate. A validated verification finding outranks an observation.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, Clone, Debug, Eq, PartialEq)]
 pub struct FusionEvidence {
     pub evidence_type: EvidenceRefType,
     pub source_ref: String,
@@ -44,7 +44,7 @@ pub struct FusionEvidence {
 }
 
 /// Evidence strength used by analysis. Candidate counts never increase this value.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(serde::Serialize, Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum FusionEvidenceQuality {
     Unsupported,
     ToolObservation,
@@ -52,7 +52,7 @@ pub enum FusionEvidenceQuality {
 }
 
 /// Complete claim analysis. Categories may overlap: a unique claim can also be unsupported.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, Clone, Debug, Eq, PartialEq)]
 pub struct FusionAnalysis {
     pub consensus: Vec<FusionFinding>,
     pub conflicts: Vec<FusionConflict>,
@@ -62,7 +62,7 @@ pub struct FusionAnalysis {
 }
 
 /// One consensus or unique finding and its strongest evidence quality.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, Clone, Debug, Eq, PartialEq)]
 pub struct FusionFinding {
     pub claim_key: String,
     pub summary: String,
@@ -73,7 +73,7 @@ pub struct FusionFinding {
 
 /// How a conflict leader was chosen. JEV can only fill an undecided slot
 /// (ADR-0035); it never outranks tool/verified evidence.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConflictLeadingSource {
     Evidence,
     JevProvisional,
@@ -82,7 +82,7 @@ pub enum ConflictLeadingSource {
 }
 
 /// Opposing positions on one claim. `leading_position` is evidence-ranked, never vote-ranked.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, Clone, Debug, Eq, PartialEq)]
 pub struct FusionConflict {
     pub claim_key: String,
     pub summary: String,
@@ -95,7 +95,7 @@ pub struct FusionConflict {
 }
 
 /// Verifier conclusion applied to a reversible JEV provisional decision.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, Clone, Copy, Debug, Eq, PartialEq)]
 pub enum JevVerificationConclusion {
     Supports,
     Opposes,
@@ -103,7 +103,7 @@ pub enum JevVerificationConclusion {
 }
 
 /// Candidates and evidence quality behind one side of a conflict.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, Clone, Debug, Eq, PartialEq)]
 pub struct FusionPositionFinding {
     pub position: FusionClaimPosition,
     pub candidate_ids: Vec<String>,
@@ -111,7 +111,7 @@ pub struct FusionPositionFinding {
 }
 
 /// One claim assertion that cites no evidence.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, Clone, Debug, Eq, PartialEq)]
 pub struct FusionUnsupportedClaim {
     pub candidate_id: String,
     pub claim_key: String,
@@ -119,7 +119,7 @@ pub struct FusionUnsupportedClaim {
 }
 
 /// One evidence type explicitly required by a claim but not cited for it.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, Clone, Debug, Eq, PartialEq)]
 pub struct FusionMissingEvidence {
     pub candidate_id: String,
     pub claim_key: String,
@@ -127,7 +127,7 @@ pub struct FusionMissingEvidence {
 }
 
 /// Invalid fixture/input shape.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FusionAnalysisError {
     InvalidInput,
     DuplicateCandidate,
@@ -135,7 +135,7 @@ pub enum FusionAnalysisError {
     ClaimMismatch,
 }
 
-#[derive(Default)]
+#[derive(serde::Serialize, Default)]
 struct ClaimGroup<'input> {
     display_key: &'input str,
     summary: &'input str,
@@ -309,7 +309,7 @@ fn prefer_claim_key(left: &str, right: &str) -> String {
 }
 
 /// Multi-round Fusion phase (ADR-0036). Each round has a distinct goal.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FusionRound {
     /// R1 maximize claim/root-cause/evidence/edge-case coverage → Union.
     Discovery,
@@ -324,7 +324,7 @@ pub enum FusionRound {
 }
 
 /// Why multi-round Fusion stopped (ADR-0036 terminal conditions).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FusionStopReason {
     ConsensusConvergence,
     EvidenceConvergence,
@@ -333,7 +333,7 @@ pub enum FusionStopReason {
 }
 
 /// Next control-plane action for the Fusion state machine (ADR-0036).
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, Clone, Debug, Eq, PartialEq)]
 pub enum FusionNextAction {
     Finish {
         reason: FusionStopReason,

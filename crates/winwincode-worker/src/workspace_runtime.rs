@@ -1128,6 +1128,18 @@ impl JobWorkspaceRuntime {
             })
     }
 
+    /// Persists a validated extension of the active workspace lease.
+    ///
+    /// # Errors
+    /// Rejects missing workspaces, changed bindings, shorter leases, or I/O failures.
+    pub fn renew_lease(&mut self, active: &ActiveJob) -> Result<(), JobWorkspaceError> {
+        self.active
+            .get_mut(&active.job.job_id.0)
+            .ok_or_else(authority_error)?
+            .renew_lease(active)
+            .map_err(Into::into)
+    }
+
     pub(crate) fn workspace_authorities(&self) -> impl Iterator<Item = &WorkspaceProvenance> {
         self.active.values().map(WorkerWorkspace::provenance)
     }
@@ -3693,13 +3705,11 @@ fn terminal_model_usage(
         .and_then(serde_json::Value::as_u64)
         .and_then(|cost| i64::try_from(cost).ok())
         .filter(|cost| (0..=9_007_199_254_740_991).contains(cost));
-    total_tokens
-        .zip(actual_cost_microunits)
-        .map(|(tokens, cost_microunits)| ExecutionOutcomeUsage {
-            cost_microunits,
-            runtime_millis: 0,
-            tokens,
-        })
+    total_tokens.map(|tokens| ExecutionOutcomeUsage {
+        cost_microunits: actual_cost_microunits,
+        runtime_millis: 0,
+        tokens,
+    })
 }
 
 fn observation_receipt_from_terminal(

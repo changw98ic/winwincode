@@ -10,6 +10,7 @@ import {
 import { resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import test from 'node:test'
+import { loadDeviceAgentTask } from '../scripts/device-agent-task.mjs'
 
 import {
   prepareControlledRepository,
@@ -18,11 +19,22 @@ import {
   driveDelivery,
   workItemCreatePayload,
   verifyApiProductionSourceSeal,
+  writeApiProductionSourceSeal,
+  writeHelperReleaseManifest,
+  runApiProductionVertical,
 } from '../scripts/run-api-production-vertical.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 const runnerPath = resolve(root, 'scripts/run-api-production-vertical.mjs')
 const browserGatePath = resolve(root, 'tests/browser-chat-production.test.mjs')
+
+test('external Provider without a credential fails before build or deterministic fallback', async () => {
+  await assert.rejects(runApiProductionVertical({
+    deviceProvider: {
+      providerId: 'live-model', modelId: 'live-model', endpoint: 'https://provider.invalid/v1/messages',
+    },
+  }), /External Device Provider requires a credential/u)
+})
 
 function deliveryDriverClient(terminalTransitionCount = null) {
   let revision = 0
@@ -323,6 +335,33 @@ test('skip-build rejects an old target before any API process starts', () => {
   }
 })
 
+test('source seal binds the Device Worker and CLI binaries', () => {
+  const target = mkdtempSync(resolve(tmpdir(), 'winwincode-api-full-source-seal-'))
+  const serverBinary = resolve(target, 'winwincode-server')
+  const helperExecutable = resolve(target, 'winwincode-kernel-helper')
+  const workerBinary = resolve(target, 'winwincode-worker')
+  const cliBinary = resolve(target, 'wwc')
+  try {
+    for (const path of [serverBinary, helperExecutable, workerBinary, cliBinary]) {
+      writeFileSync(path, '#!/bin/sh\nexit 0\n')
+      chmodSync(path, 0o755)
+    }
+    const helperReleaseManifest = writeHelperReleaseManifest(root, helperExecutable)
+    const sealed = writeApiProductionSourceSeal({ root, serverBinary, helperExecutable,
+      helperReleaseManifest })
+    assert.equal(sealed.seal.workerBinaryPath, 'winwincode-worker')
+    assert.equal(sealed.seal.cliBinaryPath, 'wwc')
+    verifyApiProductionSourceSeal({ root, serverBinary, helperExecutable })
+    writeFileSync(workerBinary, '#!/bin/sh\nexit 1\n')
+    assert.throws(() => verifyApiProductionSourceSeal({ root, serverBinary, helperExecutable }),
+      /Device Worker binary digest changed/u)
+    writeFileSync(workerBinary, '#!/bin/sh\nexit 0\n')
+    writeFileSync(cliBinary, '#!/bin/sh\nexit 1\n')
+    assert.throws(() => verifyApiProductionSourceSeal({ root, serverBinary, helperExecutable }),
+      /Device CLI binary digest changed/u)
+  } finally { rmSync(target, { recursive: true, force: true }) }
+})
+
 test('browser skip-build verifies the production source seal before replacing artifacts', () => {
   const source = readFileSync(browserGatePath, 'utf8')
   const verification = source.indexOf('verifyApiProductionSourceSeal({')
@@ -342,5 +381,134 @@ test('production scenario files enter the committed repository and reject path e
     assert.throws(() => prepareControlledRepository({ fixtureDirectory: resolve(directory, 'invalid'), files: { '../outside.html': 'bad' } }), /must stay inside/u)
   } finally {
     rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+
+test('explicit Device task input validates repository boundaries and preserves task content', t => {
+  const directory = mkdtempSync(resolve(tmpdir(), 'wwc-device-input-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const path = resolve(directory, 'task.json')
+  const task = {
+    title: 'Frozen task', goal: 'Implement main.py', scope: ['main.py'], constraints: [], outOfScope: [],
+    files: { 'main.py': 'print("starter")\n' }, verificationCommand: 'python3 verify.py',
+    acceptanceCriteria: [{ id: 'public-example', title: 'Public example passes', required: true }],
+  }
+  writeFileSync(path, JSON.stringify(task))
+  const loaded = loadDeviceAgentTask(path)
+  assert.deepEqual(loaded.task, task)
+  assert.match(loaded.digest, /^[a-f0-9]{64}$/u)
+  for (const files of [{ '../escape': '' }, { '/escape': '' }, { '.git/config': '' }, { 'a/../../escape': '' }, { 'a': 1 }]) {
+    writeFileSync(path, JSON.stringify({ ...task, files }))
+    assert.throws(() => loadDeviceAgentTask(path))
+  }
+  writeFileSync(path, JSON.stringify({ ...task, acceptanceCriteria: [...task.acceptanceCriteria, ...task.acceptanceCriteria] }))
+  assert.throws(() => loadDeviceAgentTask(path), /unique/u)
+})
+
+test('uncapped Device task stops on attention without automatically resolving it', async () => {
+  const detail = { deliveryRevision: 1, status: 'running', attention: [{ id: 'attention', status: 'open' }] }
+  let commands = 0
+  const client = {
+    query: async name => ({ result: name === 'delivery.get' ? detail : { runs: [] } }),
+    command: async () => { commands += 1 },
+  }
+  await assert.rejects(driveDelivery(client, null, undefined, () => Number.MAX_SAFE_INTEGER, {
+    resolveAttention: false,
+    expectDeviceWorkRun: true,
+  }), error => error.code === 'DEVICE_TASK_ATTENTION')
+  assert.equal(commands, 0)
+})
+
+test('terminal Device WorkRuns cannot keep the initial launch wait alive', async () => {
+  let polls = 0
+  const runs = [{ id: 'executor', state: 'candidate_ready' }, { id: 'verifier', state: 'failed' }]
+  const client = {
+    query: async name => ({ result: name === 'delivery.get'
+      ? { deliveryRevision: 17, status: 'draft', attention: [] }
+      : { runs } }),
+  }
+  await assert.rejects(driveDelivery(client, null, undefined, Date.now, {
+    expectDeviceWorkRun: true,
+    pendingDeviceWorkRunIds: () => runs.map(run => run.id),
+    assertRunning: () => {
+      if (++polls > 85) throw new Error('terminal runs are still waiting for launch')
+    },
+  }), /StrongFlow stalled without a dispatchable next action/u)
+})
+
+test('terminal product failure stops the Device driver after saving its final projection', async () => {
+  const cursor = { token: 'failed-cursor' }
+  const detail = { deliveryRevision: 7, status: 'failed', readCursor: cursor, attention: [] }
+  const workRunAggregate = { readCursor: cursor,
+    items: [{ state: 'failed' }], runs: [{ id: 'executor', state: 'failed' }] }
+  const projections = []
+  const client = {
+    query: async name => ({ result: name === 'delivery.get' ? detail : workRunAggregate }),
+    command: () => assert.fail('terminal failure must not issue another command'),
+  }
+  await assert.rejects(driveDelivery(client, null, undefined, Date.now, {
+    onProjection: projection => projections.push(projection),
+  }), { code: 'DEVICE_PRODUCT_FAILED' })
+  assert.deepEqual(projections, [{ detail, workRunAggregate }])
+})
+
+test('Device runner confirms only the current verified candidate without publication', async () => {
+  const candidate = { candidateId: 'candidate', candidateRef: 'ref', deliverySpecId: 'spec', deliverySpecRevision: 1, producerWorkRunId: 'writer' }
+  const initial = {
+    deliveryRevision: 18, status: 'needs-attention',
+    requirements: { deliverySpecId: 'spec', deliverySpecRevision: 1, publicationTarget: null },
+    currentCandidate: candidate,
+    verdict: { ...candidate, status: 'pass', criteria: [{ verdict: 'pass' }] },
+    evidence: [{ id: 'command-evidence' }],
+    attention: [{ id: 'approval', type: 'delivery_approval', status: 'open', deliverySpecId: 'spec', workRunId: 'writer' }],
+  }
+  const cases = [
+    [true, () => {}],
+    [false, d => { d.attention[0].type = 'scope_change' }],
+    [false, d => { d.attention[0].workRunId = 'another-writer' }],
+    [false, d => { d.attention[0].deliverySpecId = 'another-spec' }],
+    [false, d => { d.attention.push({ id: 'other', status: 'open' }) }],
+    [false, d => { d.verdict.status = 'fail' }],
+    [false, d => { d.verdict.candidateId = 'other-candidate' }],
+    [false, d => { d.verdict.candidateRef = 'other-ref' }],
+    [false, d => { d.verdict.deliverySpecRevision = 2 }],
+    [false, d => { d.verdict.deliverySpecId = 'other-spec' }],
+    [false, d => { d.requirements.deliverySpecRevision = 2 }],
+    [false, d => { d.requirements.deliverySpecId = 'other-spec' }],
+    [false, d => { d.requirements.publicationTarget = { kind: 'pull-request' } }],
+    [false, d => { delete d.requirements.publicationTarget }],
+    [false, d => { d.currentCandidate = null }],
+    [false, d => { d.verdict = null }],
+  ]
+  for (const [allowed, mutate] of cases) {
+    const detail = structuredClone(initial)
+    mutate(detail)
+    const commands = []
+    const client = {
+      query: async name => ({ result: name === 'delivery.get' ? detail : {
+        items: [{ id: 'item', state: detail.status === 'done' ? 'done' : 'candidate_ready' }],
+        runs: [{ id: 'writer', workItemId: 'item', executionJobId: 'job', state: 'candidate_ready' }],
+      } }),
+      requestId: () => 'request',
+      command: async (command, revision, payload) => {
+        commands.push({ command, revision, payload })
+        detail.status = 'done'
+        detail.attention[0].status = 'resolved'
+        detail.deliveryRevision += 1
+        return { command, outcome: 'completed', previousRevision: revision, currentRevision: revision + 1 }
+      },
+    }
+    const run = driveDelivery(client, null, undefined, Date.now, { resolveAttention: 'verified-candidate' })
+    if (allowed) {
+      assert.equal((await run).detail.status, 'done')
+      assert.equal(commands.length, 1)
+      assert.equal(commands[0].command, 'delivery.resolve_attention')
+      assert.equal(commands[0].revision, 18)
+      assert.equal(commands[0].payload.attentionItemId, 'approval')
+    } else {
+      await assert.rejects(run, error => error.code === 'DEVICE_TASK_ATTENTION')
+      assert.equal(commands.length, 0)
+    }
   }
 })

@@ -73,7 +73,7 @@ pub struct LocalDeliveryAdapterConfig {
     repository_scope: RepositoryScope,
     execution_mode: ExecutionMode,
     max_rework_attempts: u64,
-    max_runtime_seconds: i64,
+    max_runtime_seconds: Option<i64>,
     max_artifact_bytes: i64,
 }
 
@@ -85,16 +85,16 @@ impl LocalDeliveryAdapterConfig {
             repository_scope,
             execution_mode: ExecutionMode::React,
             max_rework_attempts: DEFAULT_MAX_REWORK_ATTEMPTS,
-            max_runtime_seconds: DEFAULT_MAX_RUNTIME_SECONDS,
+            max_runtime_seconds: Some(DEFAULT_MAX_RUNTIME_SECONDS),
             max_artifact_bytes: DEFAULT_MAX_ARTIFACT_BYTES,
         }
     }
 
-    /// Sets the bounded runtime policy applied to every generated job.
+    /// Sets the explicit runtime policy (`None` means unlimited) applied to every generated job.
     #[must_use]
     pub const fn with_execution_limits(
         mut self,
-        max_runtime_seconds: i64,
+        max_runtime_seconds: Option<i64>,
         max_artifact_bytes: i64,
     ) -> Self {
         self.max_runtime_seconds = max_runtime_seconds;
@@ -456,16 +456,22 @@ impl LocalDeliveryAuthority {
         let WorkRunStartEffect::Dispatch(intent) = &transition.effect else {
             return Ok(None);
         };
-        let deadline_millis = now_millis
-            .checked_add(
-                u64::try_from(self.config.max_runtime_seconds)
-                    .unwrap_or_default()
-                    .saturating_mul(1_000),
-            )
-            .filter(|value| *value <= MAX_SAFE_INTEGER)
-            .ok_or_else(|| {
-                DeliveryAuthorityError::new("Delivery execution deadline exceeds the range")
-            })?;
+        let deadline_at = self
+            .config
+            .max_runtime_seconds
+            .map(|seconds| {
+                let deadline_millis = u64::try_from(seconds)
+                    .ok()
+                    .and_then(|seconds| seconds.checked_mul(1_000))
+                    .and_then(|runtime| now_millis.checked_add(runtime))
+                    .filter(|value| *value <= MAX_SAFE_INTEGER)
+                    .ok_or_else(|| {
+                        DeliveryAuthorityError::new("Delivery execution deadline exceeds the range")
+                    })?;
+                crate::instant_from_millis(deadline_millis)
+                    .map_err(|error| storage_authority_error(&error))
+            })
+            .transpose()?;
         let device = self.require_delivery_repository(delivery)?;
         let payload = serde_json::to_vec(&(
             &self.config.repository_scope,
@@ -553,8 +559,7 @@ impl LocalDeliveryAuthority {
                 write_mode,
             },
             limits: ExecutionLimits {
-                deadline_at: crate::instant_from_millis(deadline_millis)
-                    .map_err(|error| storage_authority_error(&error))?,
+                deadline_at,
                 max_artifact_bytes: self.config.max_artifact_bytes,
                 max_runtime_seconds: self.config.max_runtime_seconds,
             },
@@ -1151,7 +1156,9 @@ fn validate_config(config: &LocalDeliveryAdapterConfig) -> Result<(), LocalDeliv
     }
     if config.repository_root.as_os_str().is_empty()
         || !(0..=100).contains(&config.max_rework_attempts)
-        || !(1..=604_800).contains(&config.max_runtime_seconds)
+        || config
+            .max_runtime_seconds
+            .is_some_and(|seconds| !(1..=604_800).contains(&seconds))
         || !(0..=1_099_511_627_776).contains(&config.max_artifact_bytes)
     {
         return Err(LocalDeliveryAdapterError::new(

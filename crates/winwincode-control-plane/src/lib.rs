@@ -62,12 +62,12 @@ pub mod device_session_gate;
 mod durable_execution_port;
 pub mod execution_port_service;
 pub mod fusion_adjudication_host;
-pub mod fusion_analysis;
+pub use winwincode_fusion::analysis as fusion_analysis;
 pub mod fusion_bench;
 pub mod fusion_compose;
 pub mod fusion_investigation;
-pub mod fusion_knowledge;
-pub mod fusion_planner;
+pub use winwincode_fusion::knowledge as fusion_knowledge;
+pub use winwincode_fusion::planner as fusion_planner;
 mod gate_interaction_service;
 pub mod heartbeat;
 pub mod knowledge;
@@ -513,7 +513,14 @@ pub mod test_support {
         super::DeliveryTerminalOutcomeCommitReceipt,
         super::DeliveryTerminalOutcomeCommitError,
     > {
-        super::terminal_outcome_transaction::execute_at(storage, scope, message, facts, server_time)
+        super::terminal_outcome_transaction::execute_at(
+            storage,
+            scope,
+            message,
+            facts,
+            server_time,
+            facts.authority().expires_at(),
+        )
     }
 
     /// Complete product-owned Spec semantics used by integration fixtures.
@@ -2137,11 +2144,37 @@ impl ControlPlane {
         facts: &winwincode_delivery::application::workrun_execution::DeliveryTerminalOutcomeFacts,
         server_time: &Instant,
     ) -> Result<DeliveryTerminalOutcomeCommitReceipt, DeliveryTerminalOutcomeCommitError> {
+        self.commit_delivery_terminal_outcome_for_period(
+            scope,
+            message,
+            facts,
+            server_time,
+            facts.authority().expires_at(),
+        )
+    }
+
+    /// Internal ingress has already proved this exact message period in accepted
+    /// Registry history. The facts still carry the current lease for time checks.
+    pub(crate) fn commit_delivery_terminal_outcome_for_period(
+        &mut self,
+        scope: &RepositoryScope,
+        message: &execution_port::JobOutcomeMessage,
+        facts: &winwincode_delivery::application::workrun_execution::DeliveryTerminalOutcomeFacts,
+        server_time: &Instant,
+        accepted_period: &Instant,
+    ) -> Result<DeliveryTerminalOutcomeCommitReceipt, DeliveryTerminalOutcomeCommitError> {
         let commit = {
             let storage = self
                 .storage_mut()
                 .map_err(DeliveryTerminalOutcomeCommitError::Storage)?;
-            terminal_outcome_transaction::execute_at(storage, scope, message, facts, server_time)?
+            terminal_outcome_transaction::execute_at(
+                storage,
+                scope,
+                message,
+                facts,
+                server_time,
+                accepted_period,
+            )?
         };
         if let Some(data_directory) = self.local_database_path.as_deref().and_then(Path::parent) {
             let worker_terminal = DurableWorkerExecutionLifecycle::open(data_directory).and_then(

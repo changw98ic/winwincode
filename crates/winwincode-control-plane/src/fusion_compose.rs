@@ -26,10 +26,9 @@
 //!   claims; they never cancel successful siblings.
 //!
 //! Live `ModelPort` / Provider Runtime plug-in later:
-//! - FUSION-01 production: implement [`winwincode_fusion::FusionProvider`] /
-//!   [`winwincode_fusion::FusionProviderRouter`] adapters that wrap the
-//!   Device Provider Runtime. The panel boundary already isolates credentials
-//!   from this seam.
+//! - FUSION-01 adapter: `winwincode_codex::FusionModelPortProvider` implements
+//!   [`winwincode_fusion::FusionProvider`] over the execution's durable `ModelPort`.
+//!   Production host registration remains required; this seam owns no credentials.
 //! - FUSION-02 production: run `winwincode_codex::ParallelModelRunner` over
 //!   kernel `ModelPort`, then feed succeeded `(target_id, frames)` rows into
 //!   [`answers_from_parallel_model_frames`] or implement
@@ -48,14 +47,17 @@ use winwincode_delivery::domain::{
     CanonicalDecision, ComputedDeliveryVerdict, Delivery, DeliveryValidationError, EvidenceRefType,
     FrozenDeliveryCandidate, evidence::ResolvedDeliveryEvidence,
 };
+use winwincode_fusion::answer_from_frames;
 use winwincode_fusion::evidence::{
     ClaimTarget, ClaimVerification, EvidenceLedger, ModelClaim, SourceReceipt, SourceReceiptKind,
     VerificationConclusion,
 };
 use winwincode_fusion::{
     FusionBudget, FusionCandidate, FusionInput, FusionPanelResult, FusionProviderCandidate,
-    FusionProviderRouter, run_blind_panel,
+    FusionProviderRouter, run_blind_panel, validate_panel_result,
 };
+
+use winwincode_provider::{JevAttemptFailure, JevObservation, JevRun};
 
 use crate::fusion_adjudication_host::adjudicate_canonical_decision_from_fusion_analysis;
 use crate::fusion_analysis::{
@@ -171,155 +173,22 @@ pub fn build_fusion_input(
     }
 }
 
-/// Default claim schema object used when an answer does not carry claims.
-#[must_use]
-pub fn default_claim_output_schema() -> Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "claims": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "claimKey": { "type": "string" },
-                        "summary": { "type": "string" },
-                        "position": { "type": "string", "enum": ["supports", "opposes"] },
-                        "evidence": { "type": "array" },
-                        "requiredEvidence": { "type": "array" }
-                    },
-                    "required": ["claimKey", "summary", "position"],
-                    "additionalProperties": true
-                }
-            }
-        },
-        "required": ["claims"],
-        "additionalProperties": true
-    })
-}
+pub use winwincode_fusion::claims::default_claim_output_schema;
 
-/// Extracts one candidate's claims from an isolated answer payload.
-///
-/// Expected answer shape (`camelCase` or `snake_case` accepted):
-/// `{ "claims": [{ "claimKey", "summary", "position", "evidence"?, "requiredEvidence"? }] }`
-///
-/// Extraction is purely local to `answer`. Sibling outputs are never an input.
+/// Extracts one isolated answer using the shared Fusion parser.
 ///
 /// # Errors
-///
-/// Returns [`FusionComposeError::ClaimExtraction`] when the answer is not an
-/// object, has no parseable `claims` array, or a claim row is invalid.
+/// Rejects invalid model claims; model assertions never become verified facts.
 pub fn extract_claims_from_answer(
     candidate_id: &str,
     answer: &Value,
 ) -> Result<FusionCandidateClaims, FusionComposeError> {
-    let fail = |message: &str| FusionComposeError::ClaimExtraction {
-        candidate_id: candidate_id.to_owned(),
-        message: message.to_owned(),
-    };
-    let object = answer
-        .as_object()
-        .ok_or_else(|| fail("answer must be a JSON object"))?;
-    let claims_value = object
-        .get("claims")
-        .or_else(|| object.get("Claims"))
-        .ok_or_else(|| fail("answer is missing claims"))?;
-    let claim_rows = claims_value
-        .as_array()
-        .ok_or_else(|| fail("claims must be an array"))?;
-    if claim_rows.is_empty() {
-        return Err(fail("claims must not be empty"));
-    }
-
-    let mut claims = Vec::with_capacity(claim_rows.len());
-    for row in claim_rows {
-        claims.push(parse_claim(row).map_err(|message| fail(&message))?);
-    }
-    Ok(FusionCandidateClaims {
-        candidate_id: candidate_id.to_owned(),
-        claims,
-    })
-}
-
-fn parse_claim(row: &Value) -> Result<FusionClaim, String> {
-    let claim_key = required_text(row, "claimKey", "claim_key")?;
-    let summary = required_text(row, "summary", "summary")?;
-    let position = parse_position(
-        row.get("position")
-            .or_else(|| row.get("Position"))
-            .and_then(Value::as_str)
-            .ok_or("claim position is required")?,
-    )?;
-    let mut evidence = Vec::new();
-    if let Some(rows) = row.get("evidence").or_else(|| row.get("Evidence")) {
-        let rows = rows.as_array().ok_or("claim evidence must be an array")?;
-        for item in rows {
-            evidence.push(parse_evidence(item)?);
+    winwincode_fusion::claims::extract_claims_from_answer(candidate_id, answer).map_err(|error| {
+        FusionComposeError::ClaimExtraction {
+            candidate_id: error.candidate_id,
+            message: error.message,
         }
-    }
-    let mut required_evidence = Vec::new();
-    if let Some(types) = row
-        .get("requiredEvidence")
-        .or_else(|| row.get("required_evidence"))
-    {
-        let types = types
-            .as_array()
-            .ok_or("requiredEvidence must be an array")?;
-        for item in types {
-            let text = item
-                .as_str()
-                .ok_or("requiredEvidence entries must be strings")?;
-            required_evidence.push(parse_evidence_type(text)?);
-        }
-    }
-    Ok(FusionClaim {
-        claim_key,
-        summary,
-        position,
-        evidence,
-        required_evidence,
     })
-}
-
-fn required_text(row: &Value, camel: &str, snake: &str) -> Result<String, String> {
-    row.get(camel)
-        .or_else(|| row.get(snake))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| format!("{camel} is required"))
-}
-
-fn parse_position(position: &str) -> Result<FusionClaimPosition, String> {
-    match position.trim().to_ascii_lowercase().as_str() {
-        "supports" | "support" => Ok(FusionClaimPosition::Supports),
-        "opposes" | "oppose" => Ok(FusionClaimPosition::Opposes),
-        other => Err(format!("unsupported claim position: {other}")),
-    }
-}
-
-fn parse_evidence(item: &Value) -> Result<FusionEvidence, String> {
-    let evidence_type = parse_evidence_type(
-        item.get("evidenceType")
-            .or_else(|| item.get("evidence_type"))
-            .and_then(Value::as_str)
-            .ok_or("evidenceType is required")?,
-    )?;
-    let source_ref = required_text(item, "sourceRef", "source_ref")?;
-    Ok(FusionEvidence {
-        evidence_type,
-        source_ref,
-        // A candidate's answer is model prose. It can cite a source, but it
-        // cannot promote that citation to a verified fact by naming a result.
-        verified_conclusion: None,
-    })
-}
-
-fn parse_evidence_type(text: &str) -> Result<EvidenceRefType, String> {
-    let normalized = text.trim().to_ascii_lowercase();
-    let json = Value::String(normalized);
-    serde_json::from_value(json).map_err(|_| format!("unsupported evidence type: {text}"))
 }
 
 /// Converts isolated answers into claim rows and runs FUSION-03 analysis.
@@ -352,9 +221,23 @@ pub async fn compose_blind_panel(
     input: FusionInput,
     router: Arc<dyn FusionProviderRouter>,
 ) -> Result<ComposedFusionOutcome, FusionComposeError> {
-    let panel = run_blind_panel(panel_id, input, router)
+    let panel = run_blind_panel(panel_id, input.clone(), router)
         .await
         .map_err(FusionComposeError::Panel)?;
+    compose_collected_panel(panel_id, &input, panel)
+}
+
+/// Consumes a retained execution panel without issuing new member requests.
+/// Model claims remain subordinate to independently verified Evidence.
+///
+/// # Errors
+/// Rejects a mismatched or incomplete panel, invalid claims or invalid analysis.
+pub fn compose_collected_panel(
+    panel_id: &str,
+    input: &FusionInput,
+    panel: FusionPanelResult,
+) -> Result<ComposedFusionOutcome, FusionComposeError> {
+    validate_panel_result(panel_id, input, &panel).map_err(FusionComposeError::Panel)?;
     let answers = answers_from_panel_candidates(&panel.candidates);
     let (claims, analysis) = claims_and_analysis(&answers)?;
     Ok(ComposedFusionOutcome {
@@ -426,16 +309,7 @@ pub struct InvestigationEvidenceItem {
     pub claim_verification: ClaimVerification,
 }
 
-/// R4 judge input is an evidence pack (R1+R3), never vote counts (ADR-0036).
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct JudgeRequest {
-    pub claim_key: String,
-    pub summary: String,
-    pub question: String,
-    pub canonical_context: Value,
-    pub evidence_pack: Vec<Value>,
-}
+pub use winwincode_fusion::judge::JudgeRequest;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct JudgeAnswer {
@@ -465,7 +339,7 @@ pub trait FusionJudgePort: fmt::Debug + Send + Sync {
     fn judge(
         &self,
         request: JudgeRequest,
-    ) -> BoxFuture<'static, Result<JudgeAnswer, FusionComposeError>>;
+    ) -> BoxFuture<'static, Result<JevRun<JudgeAnswer>, FusionComposeError>>;
 }
 
 /// Provider-backed semantic judge. Its answer still requires independent
@@ -490,16 +364,13 @@ impl FusionJudgePort for RuntimeFusionJudge {
     fn judge(
         &self,
         request: JudgeRequest,
-    ) -> BoxFuture<'static, Result<JudgeAnswer, FusionComposeError>> {
+    ) -> BoxFuture<'static, Result<JevRun<JudgeAnswer>, FusionComposeError>> {
         let runtime = Arc::clone(&self.runtime);
         let options = self.options;
         Box::pin(async move {
-            let premise = serde_json::to_string(&json!({
-                "question": request.question,
-                "context": blind_context_value(request.canonical_context),
-                "evidence": blind_context_value(Value::Array(request.evidence_pack)),
-            }))
-            .map_err(|error| FusionComposeError::MultiRound(error.to_string()))?;
+            let premise = request
+                .premise()
+                .map_err(|error| FusionComposeError::MultiRound(error.to_string()))?;
             let run = runtime
                 .evaluate(
                     winwincode_provider::JevHypothesis {
@@ -509,18 +380,11 @@ impl FusionJudgePort for RuntimeFusionJudge {
                     options,
                 )
                 .await;
-            let Some(evaluation) = run.value else {
-                use winwincode_provider::JevProviderErrorKind;
-                let code = match run.failures.last().map(|failure| failure.kind) {
-                    Some(JevProviderErrorKind::Timeout) => "JEV_TIMEOUT",
-                    Some(JevProviderErrorKind::InvalidResponse) => "JEV_INVALID_RESPONSE",
-                    _ => "JEV_TRANSPORT",
-                };
-                return Err(FusionComposeError::MultiRound(code.to_owned()));
-            };
-            let scores = evaluation.scores;
-            let outcome =
-                if scores.entailment > scores.contradiction && scores.entailment > scores.neutral {
+            let value = run.value.map(|evaluation| {
+                let scores = evaluation.scores;
+                let outcome = if scores.entailment > scores.contradiction
+                    && scores.entailment > scores.neutral
+                {
                     JudgeClaimOutcome::ConfirmedSupports
                 } else if scores.contradiction > scores.entailment
                     && scores.contradiction > scores.neutral
@@ -529,20 +393,35 @@ impl FusionJudgePort for RuntimeFusionJudge {
                 } else {
                     JudgeClaimOutcome::Unresolved
                 };
-            #[allow(
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss,
-                reason = "JevRuntime validates finite probabilities in [0, 1]"
-            )]
-            let confidence = (scores.confidence() * 100.0).round() as u8;
-            Ok(JudgeAnswer {
-                claim_key: request.claim_key,
-                outcome,
-                confidence,
-                reason: "Semantic judgment requires independent verification".to_owned(),
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "JevRuntime validates finite probabilities in [0, 1]"
+                )]
+                let confidence = (scores.confidence() * 100.0).round() as u8;
+                JudgeAnswer {
+                    claim_key: request.claim_key,
+                    outcome,
+                    confidence,
+                    reason: "Semantic judgment requires independent verification".to_owned(),
+                }
+            });
+            Ok(JevRun {
+                value,
+                observation: run.observation,
+                failures: run.failures,
             })
         })
     }
+}
+
+/// Host accounting only; never included in the blinded judge request or evidence.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JevJudgeCall {
+    pub claim_key: String,
+    pub observation: Option<JevObservation>,
+    pub failures: Vec<JevAttemptFailure>,
 }
 
 /// Terminal reason and per-round audit for multi-round Fusion (ADR-0036).
@@ -551,6 +430,7 @@ pub struct MultiRoundReport {
     pub stop_reason: FusionStopReason,
     pub rounds: Vec<MultiRoundStep>,
     pub judged: Vec<JudgeAnswer>,
+    pub jev_calls: Vec<JevJudgeCall>,
     pub jev_unavailable: Vec<crate::fusion_investigation::JevUnavailableRecord>,
 }
 
@@ -581,109 +461,13 @@ pub fn build_blind_judge_request(
     question: &str,
     canonical_context: Value,
 ) -> JudgeRequest {
-    JudgeRequest {
-        claim_key: claim_key.to_owned(),
-        summary: summary.to_owned(),
-        question: question.to_owned(),
-        canonical_context: blind_context_value(canonical_context),
-        evidence_pack: build_judge_evidence_pack(composed, claim_key),
-    }
-}
-
-fn blind_context_value(value: Value) -> Value {
-    match value {
-        Value::Object(object) => Value::Object(
-            object
-                .into_iter()
-                .filter(|(key, _)| !is_blind_metadata_key(key))
-                .map(|(key, value)| (key, blind_context_value(value)))
-                .collect(),
-        ),
-        Value::Array(values) => Value::Array(values.into_iter().map(blind_context_value).collect()),
-        other => other,
-    }
-}
-
-fn is_blind_metadata_key(key: &str) -> bool {
-    let normalized: String = key
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .map(|character| character.to_ascii_lowercase())
-        .collect();
-    matches!(
-        normalized.as_str(),
-        "provider"
-            | "providerid"
-            | "providername"
-            | "model"
-            | "modelid"
-            | "modelname"
-            | "seat"
-            | "seatid"
-            | "seatname"
-            | "candidate"
-            | "candidateid"
-            | "candidatename"
-            | "vote"
-            | "votes"
-            | "votecount"
-            | "supportcount"
-            | "supportercount"
-            | "majority"
-            | "minority"
+    winwincode_fusion::judge::build_blind_judge_request(
+        &composed.claims,
+        claim_key,
+        summary,
+        question,
+        canonical_context,
     )
-}
-
-/// R3 evidence rows collected for disputed claims, canonicalized and deduped.
-///
-/// Evidence provenance is retained as evidence content; respondent identity is
-/// deliberately omitted. Repeated identical support therefore cannot become a
-/// vote-count signal.
-fn build_judge_evidence_pack(composed: &ComposedFusionOutcome, claim_key: &str) -> Vec<Value> {
-    let mut rows = BTreeMap::<(String, String, String), Value>::new();
-    for candidate in &composed.claims {
-        for claim in &candidate.claims {
-            if claim.claim_key != claim_key {
-                continue;
-            }
-            let position = match claim.position {
-                FusionClaimPosition::Supports => "supports",
-                FusionClaimPosition::Opposes => "opposes",
-            };
-            if claim.evidence.is_empty() {
-                rows.entry((position.to_owned(), String::new(), String::new()))
-                    .or_insert_with(|| json!({ "position": position, "evidence": [] }));
-                continue;
-            }
-            for evidence in &claim.evidence {
-                let evidence_type = format!("{:?}", evidence.evidence_type);
-                rows.entry((
-                    position.to_owned(),
-                    evidence_type.clone(),
-                    evidence.source_ref.clone(),
-                ))
-                .or_insert_with(|| {
-                    json!({
-                        "position": position,
-                        "evidenceType": evidence_type,
-                        "sourceRef": evidence.source_ref
-                    })
-                });
-            }
-        }
-    }
-    rows.into_values()
-        .enumerate()
-        .map(|(index, mut row)| {
-            if let Value::Object(object) = &mut row {
-                object.insert(
-                    "evidenceId".to_owned(),
-                    json!(format!("evidence-{index:04}")),
-                );
-            }
-            row
-        })
-        .collect()
 }
 
 fn same_claim_text(left: &str, right: &str) -> bool {
@@ -959,6 +743,7 @@ async fn run_verification(
     composed: &mut ComposedFusionOutcome,
     rounds: &mut Vec<MultiRoundStep>,
     judged: &mut Vec<JudgeAnswer>,
+    jev_calls: &mut Vec<JevJudgeCall>,
     claim_keys: Vec<String>,
     input: &FusionInput,
     judge: &Arc<dyn FusionJudgePort>,
@@ -986,7 +771,23 @@ async fn run_verification(
             &input.question,
             input.canonical_context.clone(),
         );
-        let judged_answer = match judge.judge(request).await {
+        let result = judge.judge(request).await.and_then(|run| {
+            let code = match run.failures.last().map(|failure| failure.kind) {
+                Some(winwincode_provider::JevProviderErrorKind::Timeout) => "JEV_TIMEOUT",
+                Some(winwincode_provider::JevProviderErrorKind::InvalidResponse) => {
+                    "JEV_INVALID_RESPONSE"
+                }
+                _ => "JEV_TRANSPORT",
+            };
+            jev_calls.push(JevJudgeCall {
+                claim_key: claim_key.clone(),
+                observation: run.observation,
+                failures: run.failures,
+            });
+            run.value
+                .ok_or_else(|| FusionComposeError::MultiRound(code.to_owned()))
+        });
+        let judged_answer = match result {
             Ok(answer) => answer,
             Err(error) => {
                 let detail = error.to_string();
@@ -1064,6 +865,7 @@ pub async fn compose_multiround(
     let mut composed = compose_blind_panel(panel_id, input.clone(), Arc::clone(&router)).await?;
     let mut rounds: Vec<MultiRoundStep> = Vec::new();
     let mut judged = Vec::new();
+    let mut jev_calls = Vec::new();
     let mut extra_answers: Vec<ComposedFusionAnswer> = composed.answers.clone();
     let mut evidence_ledger = EvidenceLedger::default();
     let mut target_by_claim = BTreeMap::new();
@@ -1133,6 +935,7 @@ pub async fn compose_multiround(
                     &mut composed,
                     &mut rounds,
                     &mut judged,
+                    &mut jev_calls,
                     claim_keys,
                     &input,
                     &judge,
@@ -1155,6 +958,7 @@ pub async fn compose_multiround(
             stop_reason,
             rounds,
             judged,
+            jev_calls,
             jev_unavailable,
         },
     ))
@@ -1224,9 +1028,9 @@ pub async fn compose_via_runner_port(
 /// Converts FUSION-02 `(target_id, frames)` rows into compose answers.
 ///
 /// Production callers pass `ParallelModelRunner` succeeded-target frames.
-/// The last JSON object frame that exposes `answer` / `Answer` (or a bare
-/// object payload) becomes the candidate answer. `target_id` is the
-/// Fusion `candidate_id`.
+/// Final assistant message items carry the JSON answer; the terminal frame only
+/// carries completion and usage. Progress, deltas and reasoning are not answers.
+/// `target_id` remains the Fusion `candidate_id`.
 ///
 /// # Errors
 ///
@@ -1248,21 +1052,6 @@ pub fn answers_from_parallel_model_frames(
         });
     }
     Ok(answers)
-}
-
-fn answer_from_frames(frames: &[String]) -> Option<Value> {
-    for frame in frames.iter().rev() {
-        let Ok(value) = serde_json::from_str::<Value>(frame) else {
-            continue;
-        };
-        if let Some(answer) = value.get("answer").or_else(|| value.get("Answer")) {
-            return Some(answer.clone());
-        }
-        if value.is_object() && value.get("type").is_none() {
-            return Some(value);
-        }
-    }
-    None
 }
 
 /// Host adjudication for a composed Fusion outcome.
@@ -1548,7 +1337,7 @@ mod tests {
         fn judge(
             &self,
             _request: JudgeRequest,
-        ) -> BoxFuture<'static, Result<JudgeAnswer, FusionComposeError>> {
+        ) -> BoxFuture<'static, Result<JevRun<JudgeAnswer>, FusionComposeError>> {
             Box::pin(async {
                 Err(FusionComposeError::MultiRound(
                     "ADR-0036 forbids JEV before new evidence".to_owned(),
@@ -1565,7 +1354,7 @@ mod tests {
         fn judge(
             &self,
             _request: JudgeRequest,
-        ) -> BoxFuture<'static, Result<JudgeAnswer, FusionComposeError>> {
+        ) -> BoxFuture<'static, Result<JevRun<JudgeAnswer>, FusionComposeError>> {
             let code = self.code;
             Box::pin(async move { Err(FusionComposeError::MultiRound(code.to_owned())) })
         }
@@ -1731,32 +1520,18 @@ mod tests {
 
     impl MockParallelModelSource {
         fn frame_rows() -> Vec<(String, Vec<String>)> {
-            vec![
-                (
-                    "candidate-a".to_owned(),
-                    vec![
-                        r#"{"type":"chunk","text":"thinking"}"#.to_owned(),
-                        format!(
-                            r#"{{"type":"completed","answer":{}}}"#,
-                            claims_answer("runner-a", "supports", None)
-                        ),
-                    ],
-                ),
-                (
-                    "candidate-b".to_owned(),
-                    vec![format!(
-                        r#"{{"type":"completed","answer":{}}}"#,
-                        claims_answer("runner-b", "supports", None)
-                    )],
-                ),
-                (
-                    "candidate-c".to_owned(),
-                    vec![format!(
-                        r#"{{"type":"completed","answer":{}}}"#,
-                        claims_answer("runner-c", "supports", None)
-                    )],
-                ),
-            ]
+            ["a", "b", "c"].into_iter().map(|seat| (
+                format!("candidate-{seat}"),
+                vec![
+                    json!({"type":"output_text_delta", "delta":"ignored delta"}).to_string(),
+                    json!({"type":"output_item_done","item":{
+                        "type":"message","role":"assistant","phase":"final_answer",
+                        "content":[{"type":"output_text","text":
+                            claims_answer(&format!("runner-{seat}"), "supports", None).to_string()}]
+                    }}).to_string(),
+                    json!({"type":"completed","responseId":format!("response-{seat}"),"endTurn":true}).to_string(),
+                ],
+            )).collect()
         }
     }
 
@@ -1839,6 +1614,15 @@ mod tests {
             .expect("panel compose succeeds with partial failure");
 
         let panel = composed.panel.as_ref().expect("panel record present");
+        let collected = compose_collected_panel(
+            "panel-compose",
+            &sample_input(300),
+            serde_json::from_slice(&serde_json::to_vec(panel).unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(collected.analysis, composed.analysis);
+        assert_eq!(collected.claims, composed.claims);
+        assert_eq!(collected.panel.as_ref(), Some(panel));
         assert_eq!(panel.candidates.len(), 2);
         assert_eq!(panel.failures.len(), 1);
         assert_eq!(panel.failures[0].candidate_id, "candidate-b");
@@ -2011,6 +1795,29 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn parallel_answer_requires_completed_final_message() {
+        let (_, frames) = MockParallelModelSource::frame_rows().remove(0);
+        let expected = claims_answer("runner-a", "supports", None);
+        assert_eq!(answer_from_frames(&frames), Some(expected));
+        assert!(answer_from_frames(&frames[..2]).is_none());
+        let mut progress = frames.clone();
+        progress[1] = progress[1].replace("final_answer", "commentary");
+        assert!(answer_from_frames(&progress).is_none());
+        let mut failed = frames.clone();
+        failed[2] = json!({"type":"error","error":{"code":"FAILED"}}).to_string();
+        assert!(answer_from_frames(&failed).is_none());
+        let mut unfinished = frames.clone();
+        unfinished[2] = json!({"type":"completed","endTurn":false}).to_string();
+        assert!(answer_from_frames(&unfinished).is_none());
+        let mut trailing = frames.clone();
+        trailing.push(frames[1].clone());
+        assert!(answer_from_frames(&trailing).is_none());
+        assert!(
+            answer_from_frames(&[json!({"type":"completed","answer":{}}).to_string()]).is_none()
+        );
+    }
+
     #[tokio::test]
     async fn compose_multiround_blocks_jev_without_new_evidence() {
         use crate::fusion_analysis::{
@@ -2068,6 +1875,7 @@ mod tests {
             let before_analysis = composed.analysis.clone();
             let mut rounds = Vec::new();
             let mut judged = Vec::new();
+            let mut jev_calls = Vec::new();
             let mut unavailable = Vec::new();
             let judge: Arc<dyn FusionJudgePort> = Arc::new(UnavailableJudge { code });
 
@@ -2075,6 +1883,7 @@ mod tests {
                 &mut composed,
                 &mut rounds,
                 &mut judged,
+                &mut jev_calls,
                 vec!["claim:tests-pass".to_owned()],
                 &sample_input(310),
                 &judge,
@@ -2093,6 +1902,7 @@ mod tests {
             assert_eq!(unavailable[0].code, code);
             assert_eq!(unavailable[0].claim_id, "claim:tests-pass");
             assert!(judged.is_empty());
+            assert!(jev_calls.is_empty());
             assert_eq!(composed.claims, before_claims);
             assert_eq!(composed.answers, before_answers);
             assert_eq!(composed.analysis, before_analysis);

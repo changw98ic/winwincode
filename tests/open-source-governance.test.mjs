@@ -65,13 +65,9 @@ test('public contribution, security, conduct, release, and upstream guides are l
   }
 })
 
-test('contribution guide provides the Beads path, exact checks, and one Delivery migration path', () => {
+test('contribution guide provides exact checks and one Delivery migration path', () => {
   const guide = read('CONTRIBUTING.md')
   for (const command of [
-    'bd prime',
-    'bd ready',
-    'bd show ISSUE_ID',
-    'bd update ISSUE_ID --claim',
     'corepack pnpm install --frozen-lockfile',
     'corepack pnpm typecheck',
     'corepack pnpm test',

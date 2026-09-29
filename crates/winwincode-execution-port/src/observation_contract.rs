@@ -367,7 +367,9 @@ pub fn validate_observation_receipt(
     let valid_usage = receipt.model_usage.as_ref().is_none_or(|usage| {
         (0..=9_007_199_254_740_991).contains(&usage.runtime_millis)
             && (0..=9_007_199_254_740_991).contains(&usage.tokens)
-            && (0..=9_007_199_254_740_991).contains(&usage.cost_microunits)
+            && usage
+                .cost_microunits
+                .is_none_or(|cost| (0..=9_007_199_254_740_991).contains(&cost))
     });
     let source_usage = match receipt.source {
         ObservationSource::Model => receipt.model_usage.is_some(),

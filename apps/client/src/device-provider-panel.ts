@@ -59,7 +59,7 @@ export function mountDeviceProviderPanel(options: DeviceProviderPanelOptions) {
   endpoint.placeholder = 'https://open.bigmodel.cn/api/anthropic/v1/messages'
   const protocol = node('select')
   protocol.id = 'wwc-device-provider-protocol'
-  for (const [value, label] of [[DeviceProviderProtocol.AnthropicMessages, 'Anthropic Messages'], [DeviceProviderProtocol.Canonical, 'Canonical SSE']] as const) {
+  for (const [value, label] of [[DeviceProviderProtocol.AnthropicMessages, 'Anthropic Messages'], [DeviceProviderProtocol.OpenaiChatCompletions, 'OpenAI Chat Completions'], [DeviceProviderProtocol.Canonical, 'Canonical SSE']] as const) {
     const option = node('option', label); option.value = value; protocol.append(option)
   }
   const protocolLabel = node('label', '接口协议'); protocolLabel.htmlFor = protocol.id; protocolLabel.append(protocol); form.append(protocolLabel)
@@ -68,6 +68,16 @@ export function mountDeviceProviderPanel(options: DeviceProviderPanelOptions) {
   const key = field('key', 'API Key', 'password')
   key.autocomplete = 'new-password'
   key.spellcheck = false
+  const headers = node('textarea')
+  headers.id = 'wwc-device-provider-headers'
+  headers.maxLength = 48_000
+  headers.spellcheck = false
+  headers.autocomplete = 'off'
+  headers.placeholder = '{"x-opencode-session":"…"}'
+  const headersLabel = node('label', '自定义请求头（JSON；留空保留，{} 清除）')
+  headersLabel.htmlFor = headers.id
+  headersLabel.append(headers)
+  form.append(headersLabel)
   const note = node('p', '配置保存在所选设备。编辑时留空 API Key，可继续使用设备中的密钥。')
   const enabled = node('input'); enabled.type = 'checkbox'; enabled.checked = true; enabled.id = 'wwc-device-provider-enabled'
   const enabledLabel = node('label', '启用此服务商'); enabledLabel.htmlFor = enabled.id; enabledLabel.append(enabled)
@@ -93,7 +103,7 @@ export function mountDeviceProviderPanel(options: DeviceProviderPanelOptions) {
   function lock(): void {
     devices.disabled = busy
     refresh.disabled = busy
-    for (const control of [provider, name, endpoint, protocol, models, key, enabled, save, test, remove, clear]) {
+    for (const control of [provider, name, endpoint, protocol, models, key, headers, enabled, save, test, remove, clear]) {
       control.disabled = busy || options.readOnly === true || view?.online !== true || view.snapshot === null
     }
   }
@@ -103,7 +113,7 @@ export function mountDeviceProviderPanel(options: DeviceProviderPanelOptions) {
   }
   function edit(config: DeviceProviderConfig): void {
     provider.value = config.providerId; name.value = config.displayName; endpoint.value = config.endpoint
-    protocol.value = config.protocol; models.value = config.modelIds.join(', '); enabled.checked = config.enabled; key.value = ''
+    protocol.value = config.protocol; models.value = config.modelIds.join(', '); enabled.checked = config.enabled; key.value = ''; headers.value = ''
   }
   function show(): void {
     list.replaceChildren()
@@ -118,7 +128,7 @@ export function mountDeviceProviderPanel(options: DeviceProviderPanelOptions) {
   }
   async function load(): Promise<void> {
     const current = ++generation
-    key.value = ''; view = null; lock()
+    key.value = ''; headers.value = ''; view = null; lock()
     if (devices.value === '') { status.textContent = '请先在设备页面连接一台设备，再设置服务商。'; return }
     try {
       const result = providerView(await request(`/api/v1/clients/${encodeURIComponent(devices.value)}/providers`))
@@ -142,14 +152,23 @@ export function mountDeviceProviderPanel(options: DeviceProviderPanelOptions) {
     if (options.readOnly === true || busy || view?.online !== true || view.snapshot === null || !form.reportValidity()) return
     const snapshot = view.snapshot
     const selected = devices.value
+    let customHeaders: Record<string, string> | undefined
+    if (headers.value.trim() !== '') {
+      try {
+        const parsed: unknown = JSON.parse(headers.value)
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)
+          || Object.keys(parsed).length > 32 || Object.values(parsed).some(value => typeof value !== 'string')) throw new Error()
+        customHeaders = parsed as Record<string, string>
+      } catch { status.textContent = '请求头需要填写 JSON 对象，名称和值都必须是字符串。'; return }
+    }
     const secret = key.value
     const mutation: DeviceProviderMutation = { operation, config: { providerId: provider.value.trim(), displayName: name.value.trim(), endpoint: endpoint.value.trim(),
-      protocol: protocol.value as DeviceProviderProtocol, modelIds: models.value.split(',').map(value => value.trim()).filter(Boolean), enabled: enabled.checked }, ...(secret === '' ? {} : { apiKey: secret }) }
+      protocol: protocol.value as DeviceProviderProtocol, modelIds: models.value.split(',').map(value => value.trim()).filter(Boolean), enabled: enabled.checked }, ...(secret === '' ? {} : { apiKey: secret }), ...(customHeaders === undefined ? {} : { customHeaders }) }
     busy = true; show(); status.textContent = operation === 'test' ? '等待设备测试连接…' : '等待设备保存回执…'
     try {
       const id = `provider_${(browser?.crypto ?? crypto).randomUUID().replaceAll('-', '')}`
       const encrypted = await encryptDeviceProvider(snapshot, id, mutation, browser?.crypto ?? crypto)
-      key.value = ''
+      key.value = ''; headers.value = ''
       await request(`/api/v1/clients/${encodeURIComponent(selected)}/providers`, 'POST', encrypted)
       const deadline = Date.now() + 120_000
       while (!closed && Date.now() < deadline) {
@@ -175,6 +194,6 @@ export function mountDeviceProviderPanel(options: DeviceProviderPanelOptions) {
   devices.addEventListener('change', () => { form.reset(); void load() })
   refresh.addEventListener('click', () => { void directory() })
   lock(); void directory()
-  return { close() { closed = true; controller.abort(); key.value = ''; options.root.replaceChildren() },
+  return { close() { closed = true; controller.abort(); key.value = ''; headers.value = ''; options.root.replaceChildren() },
     refresh: directory, get online() { return view?.online === true }, get configured() { return (view?.snapshot?.providers.length ?? 0) > 0 } }
 }

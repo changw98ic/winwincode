@@ -9,6 +9,7 @@
       "type": "string",
       "enum": [
         "anthropic_messages",
+        "openai_chat_completions",
         "canonical"
       ]
     },

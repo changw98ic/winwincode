@@ -99,7 +99,7 @@ use winwincode_execution_port::generated::{
 use winwincode_execution_port::{
     change_batch_identity::validate_change_batch_identity_derivation,
     change_batch_progress::ChangeBatchProgressLedger,
-    execution_identity::canonical_dispatch_session_identity,
+    execution_identity::{canonical_dispatch_session_identity, valid_lease_renewal},
     repair_loop_context::seal_repair_loop_context_pack,
 };
 
@@ -284,7 +284,7 @@ enum CandidateTerminalFact {
     },
     ReactCompletion {
         summary: String,
-        usage: ExecutionOutcomeUsage,
+        usage: Option<ExecutionOutcomeUsage>,
     },
     DelegatedFinalAccepted {
         seed: Box<DelegatedFinalFreezeSeed>,
@@ -329,8 +329,8 @@ struct DelegatedFinalFreezeSeed {
 impl CandidateTerminalFact {
     fn outcome(&self) -> (&str, Option<ExecutionOutcomeUsage>) {
         match self {
-            Self::ChatTerminal { summary, usage, .. } => (summary, usage.clone()),
-            Self::ReactCompletion { summary, usage } => (summary, Some(usage.clone())),
+            Self::ChatTerminal { summary, usage, .. }
+            | Self::ReactCompletion { summary, usage } => (summary, usage.clone()),
             Self::DelegatedFinalAccepted { .. } => {
                 ("final delegated ChangeBatch accepted and frozen", None)
             }
@@ -832,6 +832,9 @@ where
             }
             ExecutionPortMessage::SnapshotVerificationDispatchMessage(message) => {
                 Box::pin(self.accept_snapshot_dispatch(message, now)).await
+            }
+            ExecutionPortMessage::LeaseRenewMessage(renewal) => {
+                self.accept_lease_renewal(renewal, &now)
             }
             ExecutionPortMessage::JobCancelMessage(cancel) => self.accept_cancel(cancel, now).await,
             ExecutionPortMessage::ArtifactAckMessage(acknowledgement) => {
@@ -2291,7 +2294,7 @@ where
                 None,
             )
         };
-        let usage = (!cancelling).then_some(completion.usage);
+        let usage = if cancelling { None } else { completion.usage };
         let terminal_artifacts = if diagnostic_artifacts.is_empty() {
             completion.artifacts
         } else {
@@ -2316,6 +2319,7 @@ where
         diagnostic_artifacts: Vec<ArtifactReference>,
         now: Instant,
     ) -> Result<(), WorkerError> {
+        let usage_for_failure = completion.usage.clone();
         let diagnostics_for_failure = diagnostic_artifacts.clone();
         if let Some(artifact) =
             self.hold_candidate_completion(job_id, completion, diagnostic_artifacts)?
@@ -2339,7 +2343,7 @@ where
             ExecutionOutcomeStatus::Failed,
             "writer completed without a valid candidate",
             diagnostics_for_failure,
-            None,
+            usage_for_failure,
             Some(port_error(
                 ExecutionPortErrorCode::ExecutionFailed,
                 "writer completed without a valid candidate",
@@ -2357,6 +2361,7 @@ where
         diagnostic_artifacts: Vec<ArtifactReference>,
         now: Instant,
     ) -> Result<(), WorkerError> {
+        let usage_for_failure = completion.usage.clone();
         let diagnostics_for_failure = diagnostic_artifacts.clone();
         if let Some(artifact) =
             self.hold_candidate_completion(job_id, completion, diagnostic_artifacts)?
@@ -2377,7 +2382,7 @@ where
             ExecutionOutcomeStatus::Failed,
             "verification completed without a valid candidate",
             diagnostics_for_failure,
-            None,
+            usage_for_failure,
             Some(port_error(
                 ExecutionPortErrorCode::ExecutionFailed,
                 "verification completed without a valid candidate",
@@ -3553,6 +3558,49 @@ where
         result
     }
 
+    fn accept_lease_renewal(
+        &mut self,
+        renewal: &winwincode_execution_port::generated::LeaseRenewMessage,
+        now: &Instant,
+    ) -> Result<(), WorkerError> {
+        let key = &renewal.lease.job_id.0;
+        let active = self
+            .active
+            .get(key)
+            .filter(|active| {
+                active.lifecycle == ActiveJobLifecycle::Running
+                    && valid_lease_renewal(&active.lease, renewal, now)
+            })
+            .ok_or_else(|| {
+                worker_error(
+                    WorkerErrorCode::InvalidDispatchAuthority,
+                    "lease renewal authority is invalid",
+                )
+            })?;
+        // Active state advances only after both durable updates succeeded.
+        // Replayed delivery must not re-enter a Core turn that may now be done.
+        if active.lease == renewal.lease {
+            return Ok(());
+        }
+        let mut renewed = active.clone();
+        renewed.lease = renewal.lease.clone();
+        if !self
+            .codex
+            .renew_lease(&active.codex_thread_id, renewal, now)
+            .map_err(|_| codex_model_error())?
+        {
+            return Err(worker_error(
+                WorkerErrorCode::InvalidLifecycle,
+                "Core lease renewal is unavailable",
+            ));
+        }
+        self.workspaces
+            .renew_lease(&renewed)
+            .map_err(|_| workspace_error())?;
+        self.active.insert(key.clone(), renewed);
+        Ok(())
+    }
+
     async fn accept_cancel(
         &mut self,
         cancel: &JobCancelMessage,
@@ -3759,6 +3807,12 @@ where
                 "terminal result has no active Job",
             )
         })?;
+        let usage = if usage.is_none() && status != ExecutionOutcomeStatus::Succeeded {
+            self.codex.retained_outcome_usage(&active.codex_thread_id)
+                .map_err(|_| codex_model_error())?
+        } else {
+            usage
+        };
         if active.job.execution_profile == "codex-chat"
             && self.workspaces.has_source_changes(&active).map_err(|_| workspace_error())?
         {
@@ -3828,6 +3882,22 @@ where
                 ));
             }
         }
+        // The Server cannot accept a successful terminal without immutable Usage.
+        // Preserve the candidate and unknown total, but finish rather than replaying
+        // an outcome that can never satisfy the execution accounting contract.
+        let (status, summary, error) = if status == ExecutionOutcomeStatus::Succeeded && usage.is_none() {
+            (
+                ExecutionOutcomeStatus::InfrastructureError,
+                "execution completed with incomplete usage accounting",
+                Some(port_error(
+                    ExecutionPortErrorCode::ExecutionFailed,
+                    "execution completed with incomplete usage accounting",
+                    false,
+                )),
+            )
+        } else {
+            (status, summary, error)
+        };
         self.cancel_observation_open(&active, &now).await?;
         let close_reason = match status {
             ExecutionOutcomeStatus::Succeeded => WorkspaceCloseReason::Completed,

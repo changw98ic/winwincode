@@ -3,7 +3,7 @@
 //! Device-private Provider settings. The server relays authenticated ciphertext only.
 
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
-use std::{fmt, fs, path::Path, time::Duration};
+use std::{collections::BTreeMap, fmt, fs, path::Path, time::Duration};
 
 use aes_gcm::{
     Aes256Gcm, Nonce,
@@ -62,6 +62,7 @@ struct Mutation {
     operation: String,
     config: DeviceProviderConfig,
     api_key: Option<String>,
+    custom_headers: Option<BTreeMap<String, String>>,
 }
 
 /// One private database, shared by the Device daemon and its managed Workers.
@@ -107,32 +108,7 @@ impl DeviceProviderStore {
         )?;
         let transaction =
             connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let version: i64 = transaction.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if version == 0 {
-            transaction.execute_batch(
-                "CREATE TABLE identity (singleton INTEGER PRIMARY KEY CHECK(singleton=1), private_key BLOB NOT NULL, revision INTEGER NOT NULL CHECK(revision>=0));
-                 CREATE TABLE providers (provider_id TEXT PRIMARY KEY, config TEXT NOT NULL, secret BLOB NOT NULL);
-                 CREATE TABLE receipts (request_id TEXT PRIMARY KEY, digest TEXT NOT NULL, receipt TEXT NOT NULL);
-                 CREATE TABLE exchanges (exchange_id TEXT PRIMARY KEY, digest TEXT NOT NULL, chunks TEXT, cancelled INTEGER NOT NULL DEFAULT 0);
-                 PRAGMA user_version=1;"
-            )?;
-            let key = new_secret_key()?;
-            transaction.execute(
-                "INSERT INTO identity VALUES (1, ?1, 0)",
-                [key.to_bytes().as_slice()],
-            )?;
-        } else if ![1, 2].contains(&version) {
-            return Err(DeviceProviderError);
-        }
-        if version < 2 {
-            transaction.execute_batch(
-                "CREATE TABLE extension_state (singleton INTEGER PRIMARY KEY CHECK(singleton=1), revision INTEGER NOT NULL CHECK(revision>=0));
-                 INSERT INTO extension_state VALUES (1, 0);
-                 CREATE TABLE extensions (kind TEXT NOT NULL, id TEXT NOT NULL, data TEXT NOT NULL, projection TEXT NOT NULL, PRIMARY KEY(kind,id));
-                 CREATE TABLE extension_receipts (request_id TEXT PRIMARY KEY, digest TEXT NOT NULL, receipt TEXT NOT NULL);
-                 PRAGMA user_version=2;",
-            )?;
-        }
+        migrate_device_store(&transaction)?;
         let mut bytes: Vec<u8> = transaction.query_row(
             "SELECT private_key FROM identity WHERE singleton=1",
             [],
@@ -338,7 +314,17 @@ impl DeviceProviderStore {
     }
 
     fn mutate(&self, mut mutation: Mutation) -> Result<DeviceProviderOutcome, DeviceProviderError> {
-        if !valid_device_provider_config(&mutation.config) {
+        if !valid_device_provider_config(&mutation.config)
+            || mutation.custom_headers.as_ref().is_some_and(|headers| {
+                crate::provider_https_sse::validate_custom_headers(
+                    &headers
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect::<Vec<_>>(),
+                )
+                .is_err()
+            })
+        {
             return Ok(DeviceProviderOutcome::InvalidRequest);
         }
         match mutation.operation.as_str() {
@@ -368,6 +354,12 @@ impl DeviceProviderStore {
                 }
                 self.connection.execute("INSERT INTO providers VALUES (?1, ?2, ?3) ON CONFLICT(provider_id) DO UPDATE SET config=excluded.config, secret=excluded.secret",
                     params![mutation.config.provider_id, serde_json::to_string(&mutation.config)?, secret.expose()])?;
+                if let Some(headers) = &mutation.custom_headers {
+                    self.connection.execute(
+                        "INSERT INTO provider_headers VALUES (?1, ?2) ON CONFLICT(provider_id) DO UPDATE SET headers=excluded.headers",
+                        params![mutation.config.provider_id, serde_json::to_string(headers)?],
+                    )?;
+                }
                 self.connection.execute(
                     "UPDATE identity SET revision=revision+1 WHERE singleton=1",
                     [],
@@ -376,6 +368,10 @@ impl DeviceProviderStore {
             }
             "test" => Ok(DeviceProviderOutcome::Interrupted),
             "delete" => {
+                self.connection.execute(
+                    "DELETE FROM provider_headers WHERE provider_id=?1",
+                    [&mutation.config.provider_id],
+                )?;
                 self.connection.execute(
                     "DELETE FROM providers WHERE provider_id=?1",
                     [&mutation.config.provider_id],
@@ -426,7 +422,11 @@ impl DeviceProviderStore {
         let payload = serde_json::to_vec(
             &serde_json::json!({"requestId":request.0,"provider":mutation.config.provider_id,"sessionId":"provider-connection-test","threadId":"provider-connection-test", "request":{"model":model,"instructions":"Reply concisely.","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Reply OK."}]}],"stream":true,"store":false,"tool_choice":"none","parallel_tool_calls":false}}),
         )?;
-        let adapter = adapter(&mutation.config)?;
+        let headers = match mutation.custom_headers {
+            Some(headers) => headers,
+            None => self.custom_headers(&mutation.config.provider_id)?,
+        };
+        let adapter = adapter(&mutation.config, headers)?;
         let mut leak_gate = CredentialLeakGate::new();
         leak_gate.track_secret(&secret);
         adapter
@@ -462,6 +462,24 @@ impl DeviceProviderStore {
             return Err(DeviceProviderError);
         }
         Ok(())
+    }
+
+    pub(crate) fn custom_headers(
+        &self,
+        provider_id: &str,
+    ) -> Result<BTreeMap<String, String>, DeviceProviderError> {
+        let json: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT headers FROM provider_headers WHERE provider_id=?1",
+                [provider_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(match json {
+            Some(value) => serde_json::from_str(&value)?,
+            None => BTreeMap::new(),
+        })
     }
 
     /// Reads one configured route for a device-local request.
@@ -525,7 +543,11 @@ pub fn valid_device_provider_config(config: &DeviceProviderConfig) -> bool {
 
 pub(crate) fn adapter(
     config: &DeviceProviderConfig,
+    headers: BTreeMap<String, String>,
 ) -> Result<HttpsSseProviderAdapter, DeviceProviderError> {
+    // Reasoning tokens count toward this per-response limit. The previous
+    // 8,192-token value truncated real Fusion review responses mid-turn.
+    const MAX_OUTPUT_TOKENS: u32 = 32_768;
     let mut transport = HttpsSseProviderConfig::try_new(
         config.provider_id.clone(),
         config.endpoint.clone(),
@@ -546,10 +568,86 @@ pub(crate) fn adapter(
             .with_specific_tls_roots(vec![fs::read(path)?])
             .map_err(|_| DeviceProviderError)?;
     }
-    if config.protocol == DeviceProviderProtocol::AnthropicMessages {
-        transport = transport
-            .with_anthropic_messages(8192, ProviderTokenPricing::default())
-            .map_err(|_| DeviceProviderError)?;
+    transport = transport
+        .with_custom_headers(headers)
+        .map_err(|_| DeviceProviderError)?;
+    transport = match config.protocol {
+        DeviceProviderProtocol::AnthropicMessages => {
+            transport.with_anthropic_messages(MAX_OUTPUT_TOKENS, ProviderTokenPricing::default())
+        }
+        DeviceProviderProtocol::OpenaiChatCompletions => transport
+            .with_openai_chat_completions(MAX_OUTPUT_TOKENS, ProviderTokenPricing::default()),
+        DeviceProviderProtocol::Canonical => Ok(transport),
     }
+    .map_err(|_| DeviceProviderError)?;
     HttpsSseProviderAdapter::try_new(transport).map_err(|_| DeviceProviderError)
+}
+
+fn migrate_device_store(
+    transaction: &rusqlite::Transaction<'_>,
+) -> Result<(), DeviceProviderError> {
+    let version: i64 = transaction.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if version == 0 {
+        transaction.execute_batch(
+                "CREATE TABLE identity (singleton INTEGER PRIMARY KEY CHECK(singleton=1), private_key BLOB NOT NULL, revision INTEGER NOT NULL CHECK(revision>=0));
+                 CREATE TABLE providers (provider_id TEXT PRIMARY KEY, config TEXT NOT NULL, secret BLOB NOT NULL);
+                 CREATE TABLE receipts (request_id TEXT PRIMARY KEY, digest TEXT NOT NULL, receipt TEXT NOT NULL);
+                 CREATE TABLE exchanges (exchange_id TEXT PRIMARY KEY, digest TEXT NOT NULL, chunks TEXT, cancelled INTEGER NOT NULL DEFAULT 0);
+                 PRAGMA user_version=1;"
+            )?;
+        let key = new_secret_key()?;
+        transaction.execute(
+            "INSERT INTO identity VALUES (1, ?1, 0)",
+            [key.to_bytes().as_slice()],
+        )?;
+    } else if ![1, 2, 3, 4, 5, 6, 7, 8].contains(&version) {
+        return Err(DeviceProviderError);
+    }
+    if version < 2 {
+        transaction.execute_batch(
+                "CREATE TABLE extension_state (singleton INTEGER PRIMARY KEY CHECK(singleton=1), revision INTEGER NOT NULL CHECK(revision>=0));
+                 INSERT INTO extension_state VALUES (1, 0);
+                 CREATE TABLE extensions (kind TEXT NOT NULL, id TEXT NOT NULL, data TEXT NOT NULL, projection TEXT NOT NULL, PRIMARY KEY(kind,id));
+                 CREATE TABLE extension_receipts (request_id TEXT PRIMARY KEY, digest TEXT NOT NULL, receipt TEXT NOT NULL);
+                 PRAGMA user_version=2;",
+            )?;
+    }
+    if version < 3 {
+        transaction.execute_batch(
+            "CREATE TABLE provider_headers (provider_id TEXT PRIMARY KEY, headers TEXT NOT NULL);
+                 PRAGMA user_version=3;",
+        )?;
+    }
+    if version < 4 {
+        transaction.execute_batch(
+                "CREATE TABLE jev_context_exchanges (operation_id TEXT PRIMARY KEY, digest TEXT NOT NULL, result TEXT);
+                 PRAGMA user_version=4;",
+            )?;
+    }
+    if version < 5 {
+        transaction.execute_batch(
+            "CREATE TABLE jev_settings (provider_id TEXT PRIMARY KEY, settings TEXT NOT NULL);
+                 PRAGMA user_version=5;",
+        )?;
+    }
+    if version < 6 {
+        transaction.execute_batch(
+            "ALTER TABLE exchanges ADD COLUMN request_open TEXT;
+                 ALTER TABLE exchanges ADD COLUMN prepared_payload BLOB;
+                 PRAGMA user_version=6;",
+        )?;
+    }
+    if version < 7 {
+        transaction.execute_batch(
+            "ALTER TABLE jev_context_exchanges ADD COLUMN request_json TEXT;
+                 PRAGMA user_version=7;",
+        )?;
+    }
+    if version < 8 {
+        transaction.execute_batch(
+                "CREATE TABLE jev_judge_exchanges (operation_id TEXT PRIMARY KEY, request_json TEXT NOT NULL, result TEXT);
+                 PRAGMA user_version=8;",
+            )?;
+    }
+    Ok(())
 }

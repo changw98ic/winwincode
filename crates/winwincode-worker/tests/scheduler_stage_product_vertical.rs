@@ -530,6 +530,9 @@ impl CodexCoreAdapter for ScriptedStageProductAdapter {
             },
             &start.job.execution_profile,
             AgentProfileSettings {
+                fusion: None,
+                jev_judge: None,
+                jev_context: None,
                 provider: "fixture-provider".to_owned(),
                 model: "fixture-model".to_owned(),
                 reasoning: "provider_default".to_owned(),
@@ -629,11 +632,13 @@ impl CodexCoreAdapter for ScriptedStageProductAdapter {
                 summary: secret_safe_runtime_summary("scripted stage product completed")
                     .map_err(|_| ())?,
                 artifacts: Vec::new(),
-                usage: winwincode_execution_port::generated::ExecutionOutcomeUsage {
-                    runtime_millis: 17,
-                    tokens: 23,
-                    cost_microunits: 29,
-                },
+                usage: Some(
+                    winwincode_execution_port::generated::ExecutionOutcomeUsage {
+                        runtime_millis: 17,
+                        tokens: 23,
+                        cost_microunits: Some(29),
+                    },
+                ),
             })));
             self.state
                 .lock()
@@ -995,6 +1000,7 @@ fn stage_job(role: &str, seed: u64, revision: &str, candidate_ref: Option<&str>)
         work_run_id: WorkRunId(format!("wrn_01J000000000000000000000{:02}", seed % 100)),
     });
     let input = WorkRunInput {
+        work_plan: None,
         device_target: None,
         delivery_spec_id: "spec-scheduler-vertical".into(),
         delivery_spec_revision: Revision(1),
@@ -1041,9 +1047,9 @@ fn stage_job(role: &str, seed: u64, revision: &str, candidate_ref: Option<&str>)
         goal,
         job_id,
         limits: ExecutionLimits {
-            deadline_at: at(55),
+            deadline_at: Some(at(55)),
             max_artifact_bytes: 1_048_576,
-            max_runtime_seconds: 300,
+            max_runtime_seconds: Some(300),
         },
         payload_digest: Sha256Digest(format!("sha256:{:x}", Sha256::digest(payload.as_bytes()))),
         scope,
@@ -1065,9 +1071,9 @@ fn configure_admission(storage: &mut SqliteStorage) {
     let limits = ExecutionAdmissionLimits {
         max_concurrent: 8,
         max_queued: 16,
-        token_budget: 100_000,
-        cost_budget_microunits: 100_000,
-        max_runtime_millis: 60_000,
+        token_budget: Some(100_000),
+        cost_budget_microunits: Some(100_000),
+        max_runtime_millis: Some(60_000),
     };
     let boundaries = [
         ExecutionAdmissionBoundary::Organization {
@@ -1123,9 +1129,9 @@ fn reserve_and_start(storage: &mut SqliteStorage, job: &ExecutionJob, seed: u64)
             job_id: job.job_id.clone(),
             request_id: RequestId(id("req", 20_000 + seed)),
             repository_access: access,
-            reserved_tokens: 1_000,
-            reserved_cost_microunits: 1_000,
-            runtime_limit_millis: 30_000,
+            reserved_tokens: Some(1_000),
+            reserved_cost_microunits: Some(1_000),
+            runtime_limit_millis: Some(30_000),
             submitted_at: at(5 + seed),
         })
         .expect("reserve admission");
@@ -1176,7 +1182,7 @@ fn settle_admission(storage: &mut SqliteStorage, job: &ExecutionJob, seed: u64, 
                 request_id: RequestId(id("req", 23_000 + seed)),
                 expected_revision: current.revision,
                 actual_tokens: 23,
-                actual_cost_microunits: 29,
+                actual_cost_microunits: Some(29),
                 actual_runtime_millis: 17,
                 completed_at: at(40 + (seed % 10)),
             })

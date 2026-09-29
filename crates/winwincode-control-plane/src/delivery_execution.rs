@@ -160,6 +160,7 @@ pub fn prepare_workrun_start(
         payload_digest: config.payload_digest,
         scope: ExecutionScope::WorkRunExecutionScope(scope),
         work_input: Some(WorkRunInput {
+            work_plan: Some(aggregate.items.clone()),
             device_target: config.device_target,
             delivery_spec_id: spec.id.0.clone(),
             delivery_spec_revision: winwincode_domain::Revision(
@@ -273,6 +274,7 @@ pub(crate) fn validate_workrun_execution_job(
             "WorkRun execution profile and workspace write mode are incompatible".to_owned(),
         ));
     }
+    validate_workrun_plan(input)?;
     if scope.rework_authorization.is_some() != (job.execution_profile == "remediator") {
         return Err(DeliveryExecutionError::InvalidEffect(
             "rework authorization requires remediator profile".to_owned(),
@@ -299,6 +301,29 @@ pub(crate) fn validate_workrun_execution_job(
         return Err(DeliveryExecutionError::InvalidEffect(
             "WorkRun rework authorization digest or candidate is invalid".to_owned(),
         ));
+    }
+    Ok(())
+}
+
+fn validate_workrun_plan(input: &WorkRunInput) -> Result<(), DeliveryExecutionError> {
+    if let Some(plan) = &input.work_plan {
+        if !plan.iter().any(|item| item == &input.work_item) {
+            return Err(DeliveryExecutionError::InvalidEffect(
+                "WorkRun input differs from its authoritative task plan".to_owned(),
+            ));
+        }
+        winwincode_delivery::application::workrun::WorkRunAggregate {
+            schema_version: input.schema_version.clone(),
+            contract: input.work_contract.clone(),
+            items: plan.clone(),
+            runs: Vec::new(),
+        }
+        .validate()
+        .map_err(|_| {
+            DeliveryExecutionError::InvalidEffect(
+                "WorkRun task plan has invalid contract or dependency bindings".to_owned(),
+            )
+        })?;
     }
     Ok(())
 }
@@ -666,11 +691,17 @@ fn validate_job_fields(job: &ExecutionJob) -> Result<(), DeliveryExecutionError>
         ("executionJob.goal", bounded_length(&job.goal, 1, 20_000)),
         (
             "executionJob.limits.deadlineAt",
-            instant(&job.limits.deadline_at.0),
+            job.limits
+                .deadline_at
+                .as_ref()
+                .is_none_or(|deadline| instant(&deadline.0))
+                && job.limits.deadline_at.is_some() == job.limits.max_runtime_seconds.is_some(),
         ),
         (
             "executionJob.limits.maxRuntimeSeconds",
-            (1..=604_800).contains(&job.limits.max_runtime_seconds),
+            job.limits
+                .max_runtime_seconds
+                .is_none_or(|seconds| (1..=604_800).contains(&seconds)),
         ),
         (
             "executionJob.limits.maxArtifactBytes",
@@ -879,9 +910,11 @@ mod tests {
             goal: "fixture".into(),
             job_id: winwincode_domain::ExecutionJobId("job_00000000000000000000000001".into()),
             limits: ExecutionLimits {
-                deadline_at: winwincode_domain::Instant("2026-08-28T00:00:00.000Z".into()),
+                deadline_at: Some(winwincode_domain::Instant(
+                    "2026-08-28T00:00:00.000Z".into(),
+                )),
                 max_artifact_bytes: 1_048_576,
-                max_runtime_seconds: 300,
+                max_runtime_seconds: Some(300),
             },
             payload_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
             scope: ExecutionScope::WorkRunExecutionScope(WorkRunExecutionScope {
@@ -898,6 +931,7 @@ mod tests {
                 work_run_id: WorkRunId("wrn_00000000000000000000000001".into()),
             }),
             work_input: Some(WorkRunInput {
+                work_plan: Some(vec![item.clone()]),
                 device_target: None,
                 delivery_spec_id: "spec-fixture".into(),
                 delivery_spec_revision: winwincode_domain::Revision(2),
@@ -926,6 +960,57 @@ mod tests {
         validate_workrun_execution_job(&workrun_job("executor")).unwrap();
     }
     #[test]
+    fn workrun_plan_rejects_changed_current_node_and_invalid_dependencies() {
+        let job = workrun_job("executor");
+        let mut dependent = job.work_input.as_ref().unwrap().work_item.clone();
+        dependent.id.0 = "wit_00000000000000000000000002".into();
+        dependent.depends_on = vec![job.work_input.as_ref().unwrap().work_item.id.clone()];
+        let mut valid = job;
+        valid
+            .work_input
+            .as_mut()
+            .unwrap()
+            .work_plan
+            .as_mut()
+            .unwrap()
+            .push(dependent);
+        validate_workrun_execution_job(&valid).unwrap();
+        for mutation in 0..4 {
+            let mut invalid = valid.clone();
+            let input = invalid.work_input.as_mut().unwrap();
+            let plan = input.work_plan.as_mut().unwrap();
+            match mutation {
+                0 => plan[0].goal.push_str(" changed"),
+                1 => plan[1].depends_on[0].0 = "wit_00000000000000000000000003".into(),
+                2 => plan.push(plan[1].clone()),
+                _ => {
+                    plan[0].depends_on = vec![plan[1].id.clone()];
+                    input.work_item = plan[0].clone();
+                }
+            }
+            assert!(validate_workrun_execution_job(&invalid).is_err());
+        }
+    }
+    #[test]
+    fn workrun_runtime_policy_requires_a_complete_explicit_pair() {
+        let mut job = workrun_job("executor");
+        job.limits.deadline_at = None;
+        assert!(validate_workrun_execution_job(&job).is_err());
+        job.limits.max_runtime_seconds = None;
+        validate_workrun_execution_job(&job).expect("explicit unlimited");
+        let mut json = serde_json::to_value(&job).expect("encode");
+        json["limits"]
+            .as_object_mut()
+            .expect("limits")
+            .remove("maxRuntimeSeconds");
+        assert!(serde_json::from_value::<ExecutionJob>(json).is_err());
+        job.limits.deadline_at = Some(winwincode_domain::Instant(
+            "2026-08-28T00:00:00.000Z".into(),
+        ));
+        assert!(validate_workrun_execution_job(&job).is_err());
+    }
+
+    #[test]
     fn workrun_rejects_legacy_ids_and_invalid_limits_before_queue_publication() {
         let mut job = workrun_job("executor");
         if let ExecutionScope::WorkRunExecutionScope(scope) = &mut job.scope {
@@ -933,7 +1018,7 @@ mod tests {
         }
         assert!(validate_workrun_execution_job(&job).is_err());
         let mut job = workrun_job("executor");
-        job.limits.max_runtime_seconds = 0;
+        job.limits.max_runtime_seconds = Some(0);
         assert!(validate_workrun_execution_job(&job).is_err());
         let mut job = workrun_job("executor");
         job.payload_digest.0 = "unsealed".into();

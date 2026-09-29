@@ -7,7 +7,10 @@
 //! gives the complete generated frame to the existing runtime replay state
 //! machine before the caller may expose it or complete the turn.
 
-use std::{collections::HashMap, fmt};
+use std::{
+    collections::{BTreeSet, HashMap},
+    fmt,
+};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use codex_shell_command::bash::{
@@ -34,7 +37,7 @@ use crate::stage_product::{
     PreparedStageProduct, StageProductError, VerificationEvidenceKind, VerificationEvidenceStatus,
     prepare_planner_solution_activity, prepare_verification_command_evidence_with_artifact,
     prepare_verification_policy_attestation, prepare_verification_result_activity,
-    stage_product_job_digest,
+    prepare_verification_result_activity_for_fusion, stage_product_job_digest,
 };
 
 const MAX_SOURCE_ID_BYTES: usize = 4_096;
@@ -259,6 +262,30 @@ impl WorkRunRuntimeProjector {
         S: ReplayStore,
         A: ReplayAuthority<Context = RuntimeReplayIdentity>,
     {
+        self.retain_turn_completed_with_fusion_claims(
+            store, authority, context, job, completion, None,
+        )
+    }
+
+    /// Retains the independent verification result together with exact claims
+    /// recovered from this run's durable Fusion panel.
+    ///
+    /// # Errors
+    /// Rejects malformed final output, invalid or stale Evidence, and durable
+    /// replay conflicts.
+    pub fn retain_turn_completed_with_fusion_claims<S, A>(
+        &self,
+        store: &mut S,
+        authority: &A,
+        context: WorkRunRuntimeContext<'_>,
+        job: &ExecutionJob,
+        completion: StageTurnCompletion<'_>,
+        expected_fusion_claim_keys: Option<&[String]>,
+    ) -> Result<Option<WorkRunRuntimeRetention>, WorkRunRuntimeProjectionError<A::Error, S::Error>>
+    where
+        S: ReplayStore,
+        A: ReplayAuthority<Context = RuntimeReplayIdentity>,
+    {
         if completion.failed {
             return Ok(None);
         }
@@ -281,9 +308,22 @@ impl WorkRunRuntimeProjector {
                 if !snapshot_has_policy(&snapshot, &policy_id) {
                     return Err(WorkRunRuntimeProjectionError::InvalidEvidence);
                 }
-                let bound = bind_verification_evidence(final_message.as_bytes(), &snapshot)?;
-                prepare_verification_result_activity(job, &bound)
+                let bound = bind_verification_evidence(
+                    final_message,
+                    &snapshot,
+                    expected_fusion_claim_keys,
+                )?;
+                if expected_fusion_claim_keys.is_some() {
+                    prepare_verification_result_activity_for_fusion(
+                        job,
+                        &bound,
+                        expected_fusion_claim_keys,
+                    )
                     .map_err(WorkRunRuntimeProjectionError::Product)?
+                } else {
+                    prepare_verification_result_activity(job, &bound)
+                        .map_err(WorkRunRuntimeProjectionError::Product)?
+                }
             }
             _ => return Ok(None),
         };
@@ -496,15 +536,32 @@ fn snapshot_has_policy(snapshot: &ReplaySnapshot, policy_id: &ExecutionEventId) 
 }
 
 fn bind_verification_evidence<AuthorityError, StoreError>(
-    final_message: &[u8],
+    final_message: &str,
     snapshot: &ReplaySnapshot,
+    expected_fusion_claim_keys: Option<&[String]>,
 ) -> Result<Vec<u8>, WorkRunRuntimeProjectionError<AuthorityError, StoreError>> {
-    let result: ModelVerificationResult = serde_json::from_slice(final_message)
-        .map_err(|_| WorkRunRuntimeProjectionError::InvalidEvidence)?;
-    if serde_json::to_vec(&result).ok().as_deref() != Some(final_message) {
-        return Err(WorkRunRuntimeProjectionError::InvalidEvidence);
-    }
+    // Some providers wrap even schema-constrained output in one Markdown fence.
+    // Unwrap only a complete JSON block; all typed and evidence checks still apply.
+    let message = final_message.trim();
+    let json = message
+        .strip_prefix("```json\n")
+        .and_then(|body| body.strip_suffix("\n```"))
+        .or_else(|| {
+            message
+                .strip_prefix("```json\r\n")
+                .and_then(|body| body.strip_suffix("\r\n```"))
+        })
+        .unwrap_or(message);
+    let result: ModelVerificationResult =
+        serde_json::from_str(json).map_err(|_| WorkRunRuntimeProjectionError::InvalidEvidence)?;
+    // Providers may serialize schema-constrained JSON with different key order
+    // or whitespace. Bind typed fields, then serialize the authoritative result.
     let catalog = evidence_catalog(snapshot)?;
+    let fusion_investigations = bind_fusion_investigations(
+        expected_fusion_claim_keys,
+        result.fusion_investigations,
+        &catalog,
+    )?;
     let findings = result
         .findings
         .into_iter()
@@ -541,8 +598,75 @@ fn bind_verification_evidence<AuthorityError, StoreError>(
         delivery_spec_revision: result.delivery_spec_revision,
         candidate_ref: result.candidate_ref,
         findings,
+        fusion_investigations,
     })
     .map_err(|_| WorkRunRuntimeProjectionError::InvalidEvidence)
+}
+
+fn bind_fusion_investigations<AuthorityError, StoreError>(
+    expected_claim_keys: Option<&[String]>,
+    investigations: Option<Vec<ModelFusionInvestigation>>,
+    catalog: &HashMap<String, EvidenceBinding>,
+) -> Result<
+    Option<Vec<BoundFusionInvestigation>>,
+    WorkRunRuntimeProjectionError<AuthorityError, StoreError>,
+> {
+    match (expected_claim_keys, investigations) {
+        (None | Some([]), None) => Ok(None),
+        (Some(expected), Some(investigations)) => {
+            let expected_keys: BTreeSet<_> = expected.iter().map(String::as_str).collect();
+            let actual_keys: BTreeSet<_> = investigations
+                .iter()
+                .map(|investigation| investigation.claim_key.as_str())
+                .collect();
+            if expected_keys.len() != expected.len()
+                || actual_keys.len() != investigations.len()
+                || actual_keys != expected_keys
+                || investigations.iter().any(|investigation| {
+                    investigation.claim_key.trim().is_empty()
+                        || !matches!(investigation.status.as_str(), "investigated" | "unresolved")
+                        || !matches!(
+                            (&investigation.evidence_sources, &investigation.source_id),
+                            (Some(sources), None) if !sources.is_empty()
+                        ) && !matches!(
+                            (&investigation.evidence_sources, &investigation.source_id),
+                            (None, Some(source_id)) if !source_id.trim().is_empty()
+                        )
+                })
+            {
+                return Err(WorkRunRuntimeProjectionError::InvalidEvidence);
+            }
+            let bound = investigations
+                .into_iter()
+                .map(|investigation| {
+                    let sources = investigation.evidence_sources.unwrap_or_else(|| {
+                        vec![ModelVerificationEvidenceSource {
+                            source_id: investigation.source_id.expect("validated shorthand source"),
+                        }]
+                    });
+                    let evidence_sources = sources
+                        .iter()
+                        .map(|source| {
+                            let evidence = catalog
+                                .get(&source.source_id)
+                                .ok_or(WorkRunRuntimeProjectionError::InvalidEvidence)?;
+                            Ok(BoundVerificationEvidenceSource {
+                                evidence_type: evidence.kind,
+                                event_id: evidence.event_id.clone(),
+                            })
+                        })
+                        .collect::<Result<Vec<_>, WorkRunRuntimeProjectionError<AuthorityError, StoreError>>>()?;
+                    Ok(BoundFusionInvestigation {
+                        claim_key: investigation.claim_key,
+                        status: investigation.status,
+                        evidence_sources,
+                    })
+                })
+                .collect::<Result<Vec<_>, WorkRunRuntimeProjectionError<AuthorityError, StoreError>>>()?;
+            Ok(Some(bound))
+        }
+        (Some(_), None) | (None, Some(_)) => Err(WorkRunRuntimeProjectionError::InvalidEvidence),
+    }
 }
 
 /// Reconciles one model finding with the sealed runtime outcomes it cites.
@@ -618,6 +742,85 @@ fn sealed_command_outcome(value: &Value) -> BoundEvidenceOutcome {
     }
 }
 
+/// Core's final-output constraint. Runtime evidence binding remains authoritative.
+pub(crate) fn verification_result_json_schema() -> Value {
+    verification_result_schema(false)
+}
+
+pub(crate) fn fusion_verification_result_json_schema() -> Value {
+    verification_result_schema(true)
+}
+
+fn verification_result_schema(require_fusion: bool) -> Value {
+    let mut required = vec![
+        "protocol",
+        "delivery_spec_id",
+        "delivery_spec_revision",
+        "candidate_ref",
+        "findings",
+    ];
+    let mut properties = serde_json::json!({
+        "protocol": {"type": "string", "enum": [crate::stage_product::VERIFICATION_RESULT_PROTOCOL]},
+        "delivery_spec_id": {"type": "string"},
+        "delivery_spec_revision": {"type": "integer"},
+        "candidate_ref": {"type": "string"},
+        "findings": {
+            "type": "array",
+            "items": {
+                "type": "object", "additionalProperties": false,
+                "required": ["finding_id", "criterion_id", "verdict", "explanation", "evidence_sources"],
+                "properties": {
+                    "finding_id": {"type": "string"},
+                    "criterion_id": {"type": "string"},
+                    "verdict": {"type": "string", "enum": ["pass", "fail"]},
+                    "explanation": {"type": "string"},
+                    "evidence_sources": {
+                        "type": "array",
+                        "items": {
+                            "type": "object", "additionalProperties": false,
+                            "required": ["source_id"],
+                            "properties": {"source_id": {"type": "string"}}
+                        }
+                    }
+                }
+            }
+        },
+        "fusion_investigations": {
+            "type": "array",
+            "items": {
+                "type": "object", "additionalProperties": false,
+                "required": ["claim_key", "status", "evidence_sources"],
+                "properties": {
+                    "claim_key": {"type": "string"},
+                    "status": {"type": "string", "enum": ["investigated", "unresolved"]},
+                    "evidence_sources": {
+                        "type": "array", "minItems": 1,
+                        "items": {
+                            "type": "object", "additionalProperties": false,
+                            "required": ["source_id"],
+                            "properties": {"source_id": {"type": "string"}}
+                        }
+                    }
+                }
+            }
+        }
+    });
+    if require_fusion {
+        required.push("fusion_investigations");
+    } else {
+        properties
+            .as_object_mut()
+            .expect("schema object")
+            .remove("fusion_investigations");
+    }
+    serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": required,
+        "properties": properties
+    })
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ModelVerificationResult {
@@ -626,6 +829,19 @@ struct ModelVerificationResult {
     delivery_spec_revision: u64,
     candidate_ref: String,
     findings: Vec<ModelVerificationFinding>,
+    #[serde(default)]
+    fusion_investigations: Option<Vec<ModelFusionInvestigation>>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ModelFusionInvestigation {
+    claim_key: String,
+    status: String,
+    #[serde(default)]
+    evidence_sources: Option<Vec<ModelVerificationEvidenceSource>>,
+    #[serde(default)]
+    source_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -651,6 +867,15 @@ struct BoundVerificationResult {
     delivery_spec_revision: u64,
     candidate_ref: String,
     findings: Vec<BoundVerificationFinding>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fusion_investigations: Option<Vec<BoundFusionInvestigation>>,
+}
+
+#[derive(Serialize)]
+struct BoundFusionInvestigation {
+    claim_key: String,
+    status: String,
+    evidence_sources: Vec<BoundVerificationEvidenceSource>,
 }
 
 #[derive(Serialize)]
@@ -819,7 +1044,7 @@ fn classify_evidence(command: &[String]) -> VerificationEvidenceKind {
     }
 }
 
-fn verification_role(role: &str) -> bool {
+pub(crate) fn verification_role(role: &str) -> bool {
     matches!(role, "reviewer" | "verifier" | "adversarial-verifier")
 }
 
@@ -1093,9 +1318,9 @@ mod tests {
             goal: "Implement fixture".to_owned(),
             job_id: ExecutionJobId("job_00000000000000000000000001".to_owned()),
             limits: ExecutionLimits {
-                deadline_at: Instant("2026-08-28T01:00:00.000Z".to_owned()),
+                deadline_at: Some(Instant("2026-08-28T01:00:00.000Z".to_owned())),
                 max_artifact_bytes: 1_048_576,
-                max_runtime_seconds: 300,
+                max_runtime_seconds: Some(300),
             },
             payload_digest: Sha256Digest(format!("sha256:{}", "b".repeat(64))),
             scope: ExecutionScope::WorkRunExecutionScope(WorkRunExecutionScope {
@@ -1110,6 +1335,7 @@ mod tests {
                 work_run_id: WorkRunId("wrn_00000000000000000000000001".to_owned()),
             }),
             work_input: Some(WorkRunInput {
+                work_plan: None,
                 device_target: None,
                 delivery_spec_id: "spec-fixture".into(),
                 delivery_spec_revision: Revision(2),
@@ -1484,6 +1710,185 @@ mod tests {
             panic!("expected exact duplicate")
         };
         assert_eq!(message, result);
+    }
+
+    #[test]
+    fn fusion_claim_investigation_is_bound_to_a_direct_review_event() {
+        let fixture = fixture();
+        let mut store = MemoryStore::default();
+        let projector = WorkRunRuntimeProjector::new();
+        let job = job("reviewer");
+        ready(
+            projector
+                .retain_turn_started(
+                    &mut store,
+                    &AllowAuthority,
+                    fixture.context(),
+                    &job,
+                    "turn-reviewer",
+                )
+                .expect("retain reviewer policy"),
+        );
+        let mut test_event_id = None;
+        for (call_id, command) in [
+            ("call-test", vec!["cargo".to_owned(), "test".to_owned()]),
+            ("call-command", vec!["git".to_owned(), "status".to_owned()]),
+        ] {
+            let message = ready(
+                projector
+                    .retain_exec_command_end(
+                        &mut store,
+                        &AllowAuthority,
+                        fixture.context(),
+                        &job,
+                        StageCommandEnd {
+                            command: &command,
+                            turn_id: "turn-reviewer",
+                            call_id,
+                            status: VerificationEvidenceStatus::Completed,
+                            exit_code: 0,
+                            artifact: None,
+                        },
+                    )
+                    .expect("retain direct review evidence"),
+            );
+            if call_id == "call-test" {
+                test_event_id = Some(message.event.event_id.0.clone());
+            }
+        }
+        let mut result: Value = serde_json::from_str(VERIFICATION_RESULT).expect("result");
+        result["fusion_investigations"] = serde_json::json!([{
+            "claim_key":"claim:root-race",
+            "status":"investigated",
+            "source_id":"call-test"
+        }]);
+        let final_message = serde_json::to_string(&result).expect("Fusion review JSON");
+        let expected = vec!["claim:root-race".to_owned()];
+        let retained = projector
+            .retain_turn_completed_with_fusion_claims(
+                &mut store,
+                &AllowAuthority,
+                fixture.context(),
+                &job,
+                StageTurnCompletion {
+                    turn_id: "turn-reviewer",
+                    final_message: Some(&final_message),
+                    failed: false,
+                },
+                Some(&expected),
+            )
+            .expect("bind Fusion review result");
+        let message = ready(Some(retained.expect("review Activity")));
+        let payload = message.event.payload.as_ref().expect("payload");
+        let bytes = STANDARD
+            .decode(&payload.data_base64)
+            .expect("payload bytes");
+        let bound: Value = serde_json::from_slice(&bytes).expect("bound result");
+        assert_eq!(
+            bound["fusion_investigations"][0]["claim_key"],
+            "claim:root-race"
+        );
+        assert_eq!(
+            bound["fusion_investigations"][0]["evidence_sources"][0]["event_id"],
+            test_event_id.expect("retained test event id")
+        );
+
+        let mismatch = projector.retain_turn_completed_with_fusion_claims(
+            &mut store,
+            &AllowAuthority,
+            fixture.context(),
+            &job,
+            StageTurnCompletion {
+                turn_id: "turn-reviewer",
+                final_message: Some(&final_message),
+                failed: false,
+            },
+            Some(&["claim:other".to_owned()]),
+        );
+        assert!(matches!(
+            mismatch,
+            Err(WorkRunRuntimeProjectionError::InvalidEvidence)
+        ));
+    }
+
+    #[test]
+    fn empty_fusion_panel_binds_no_investigations() {
+        let expected: Vec<String> = Vec::new();
+        let catalog = HashMap::new();
+        let bound =
+            bind_fusion_investigations::<(), ()>(Some(&expected), Some(Vec::new()), &catalog)
+                .expect("empty panel");
+        assert!(bound.as_ref().is_some_and(Vec::is_empty));
+        assert!(
+            bind_fusion_investigations::<(), ()>(Some(&expected), None, &catalog)
+                .expect("omitted empty panel")
+                .is_none()
+        );
+        assert!(bind_fusion_investigations::<(), ()>(None, Some(Vec::new()), &catalog).is_err());
+    }
+
+    #[test]
+    fn verification_json_formatting_keeps_identical_evidence_and_replay_identity() {
+        let fixture = fixture();
+        let mut store = MemoryStore::default();
+        let projector = WorkRunRuntimeProjector::new();
+        let job = job("verifier");
+        let [_, _, _, original] =
+            retain_verification_sequence(&projector, &mut store, &fixture, &job);
+        let value: Value = serde_json::from_str(VERIFICATION_RESULT).expect("result");
+        let formatted = serde_json::to_string_pretty(&value).expect("formatted result");
+        for representation in [
+            formatted.clone(),
+            format!("```json\n{formatted}\n```"),
+            format!(" \r\n```json\r\n{formatted}\r\n```\r\n"),
+        ] {
+            let replay = projector
+                .retain_turn_completed(
+                    &mut store,
+                    &AllowAuthority,
+                    fixture.context(),
+                    &job,
+                    StageTurnCompletion {
+                        turn_id: "turn-verifier",
+                        final_message: Some(&representation),
+                        failed: false,
+                    },
+                )
+                .expect("equivalent result");
+            assert!(
+                matches!(replay, Some(WorkRunRuntimeRetention::Ready { message, duplicate: true }) if message == original)
+            );
+        }
+        for invalid in [
+            format!("Checks passed.\n{formatted}"),
+            format!("Checks passed.\n```json\n{formatted}\n```"),
+            format!("```json\n{formatted}\n```\nExplanation"),
+            format!("```json\n{formatted}\n```\n```json\n{formatted}\n```"),
+            format!(
+                "```json\n{}\n```",
+                VERIFICATION_RESULT.replace("call-test", "invented")
+            ),
+            format!("{formatted}\n{formatted}"),
+            VERIFICATION_RESULT
+                .replace("\"source_id\":\"call-test\"", "\"source_id\":\"invented\""),
+            VERIFICATION_RESULT.replacen("\"protocol\":", "\"extra\":true,\"protocol\":", 1),
+        ] {
+            assert!(
+                projector
+                    .retain_turn_completed(
+                        &mut store,
+                        &AllowAuthority,
+                        fixture.context(),
+                        &job,
+                        StageTurnCompletion {
+                            turn_id: "turn-verifier",
+                            final_message: Some(&invalid),
+                            failed: false
+                        },
+                    )
+                    .is_err()
+            );
+        }
     }
 
     #[test]

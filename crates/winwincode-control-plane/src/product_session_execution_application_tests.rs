@@ -281,7 +281,7 @@ fn seed_product_session(
         repository_scope.clone(),
         "0123456789abcdef0123456789abcdef01234567",
         "codex-chat",
-        3_600,
+        Some(3_600),
         1_073_741_824,
     )
     .expect("execution config");
@@ -480,9 +480,9 @@ fn seed_execution_admission(
     let limits = ExecutionAdmissionLimits {
         max_concurrent: 2,
         max_queued: 2,
-        token_budget: 100_000,
-        cost_budget_microunits: 1_000_000,
-        max_runtime_millis: 60_000,
+        token_budget: Some(100_000),
+        cost_budget_microunits: Some(1_000_000),
+        max_runtime_millis: Some(60_000),
     };
     {
         let mut admission = storage.execution_admission().expect("admission");
@@ -499,9 +499,9 @@ fn seed_execution_admission(
                 job_id: job_id.clone(),
                 request_id: RequestId(id("req", seed * 100 + 4)),
                 repository_access: ExecutionRepositoryAccess::ReadOnly,
-                reserved_tokens: 100,
-                reserved_cost_microunits: 1_000,
-                runtime_limit_millis: 30_000,
+                reserved_tokens: Some(100),
+                reserved_cost_microunits: Some(1_000),
+                runtime_limit_millis: Some(30_000),
                 submitted_at: at(4),
             })
             .expect("reserve execution");

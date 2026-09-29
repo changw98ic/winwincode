@@ -156,7 +156,8 @@ pub struct CodexThreadSession {
 pub struct CodexTurnCompletion {
     pub summary: SecretSafeTraceSummary,
     pub artifacts: Vec<ArtifactReference>,
-    pub usage: ExecutionOutcomeUsage,
+    /// None when any paid model request has unknown usage.
+    pub usage: Option<ExecutionOutcomeUsage>,
 }
 
 /// Follow-up phase chosen from one accepted or repair-required `ChangeBatch`.
@@ -311,6 +312,18 @@ pub type ActionRequestTransport =
 pub trait CodexCoreAdapter {
     type Error: Send + 'static;
 
+    /// Reads complete, durable model usage for a terminal result. Missing or
+    /// unfinished measurements remain unknown, including on failure.
+    ///
+    /// # Errors
+    /// Rejects unknown thread authority or unavailable accounting storage.
+    fn retained_outcome_usage(
+        &mut self,
+        _thread_id: &CodexThreadId,
+    ) -> Result<Option<ExecutionOutcomeUsage>, Self::Error> {
+        Ok(None)
+    }
+
     fn ensure_thread(
         &mut self,
         start: CodexThreadStart<'_>,
@@ -327,6 +340,20 @@ pub trait CodexCoreAdapter {
     /// The default implementation always succeeds.
     fn observe_now(&mut self, _now: &Instant) -> Result<(), Self::Error> {
         Ok(())
+    }
+
+    /// Extends an existing live Core run without restarting its turn.
+    /// Unsupported adapters fail closed by returning false.
+    ///
+    /// # Errors
+    /// Reports invalid authority or durable update failures.
+    fn renew_lease(
+        &mut self,
+        _thread_id: &CodexThreadId,
+        _renewal: &winwincode_execution_port::generated::LeaseRenewMessage,
+        _now: &Instant,
+    ) -> Result<bool, Self::Error> {
+        Ok(false)
     }
 
     /// Installs the local-only action request transport.  The default keeps

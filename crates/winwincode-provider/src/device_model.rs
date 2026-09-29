@@ -30,10 +30,11 @@ impl DeviceProviderStore {
         if self.model_cancelled(&open.model_exchange_id.0)? {
             return Ok(Vec::new());
         }
-        let digest = format!("{:x}", Sha256::digest(serde_json::to_vec(open)?));
+        let request_open = serde_json::to_string(open)?;
+        let digest = format!("{:x}", Sha256::digest(request_open.as_bytes()));
         let inserted = self.connection.execute(
-            "INSERT OR IGNORE INTO exchanges (exchange_id, digest) VALUES (?1, ?2)",
-            params![open.model_exchange_id.0, digest],
+            "INSERT OR IGNORE INTO exchanges (exchange_id, digest, request_open) VALUES (?1, ?2, ?3)",
+            params![open.model_exchange_id.0, digest, request_open],
         )?;
         let (original, previous): (String, Option<String>) = self.connection.query_row(
             "SELECT digest, chunks FROM exchanges WHERE exchange_id=?1",
@@ -70,40 +71,51 @@ impl DeviceProviderStore {
         &self,
         open: &ModelOpenMessage,
     ) -> Result<Vec<ModelChunkMessage>, DeviceProviderError> {
-        if open.request.data_base64.len() > 24 * 1024 * 1024
-            || open.request.content_type != "application/json"
-        {
-            return Err(DeviceProviderError);
-        }
-        let payload = STANDARD
-            .decode(&open.request.data_base64)
-            .map_err(|_| DeviceProviderError)?;
-        if format!("sha256:{:x}", Sha256::digest(&payload)) != open.request.payload_digest.0 {
-            return Err(DeviceProviderError);
-        }
-        let request: serde_json::Value = serde_json::from_slice(&payload)?;
+        let mut payload = validated_model_payload(open)?;
+        let mut request: serde_json::Value = serde_json::from_slice(&payload)?;
         let provider_id = request
             .get("provider")
             .and_then(serde_json::Value::as_str)
-            .ok_or(DeviceProviderError)?;
+            .ok_or(DeviceProviderError)?
+            .to_owned();
         let model_id = request
             .pointer("/request/model")
             .and_then(serde_json::Value::as_str)
-            .ok_or(DeviceProviderError)?;
-        let (config, secret) = self.resolve(provider_id)?;
-        if !config.enabled || !config.model_ids.iter().any(|model| model == model_id) {
+            .ok_or(DeviceProviderError)?
+            .to_owned();
+        let (config, secret) = self.resolve(&provider_id)?;
+        if !config.enabled || !config.model_ids.iter().any(|model| model == &model_id) {
             return Err(DeviceProviderError);
         }
-        let adapter = crate::device_store::adapter(&config)?;
+        if request.get("winwincodeJevContext").is_some()
+            || request.get("winwincodeJevTask").is_some()
+        {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .map_err(|_| DeviceProviderError)?;
+            if runtime
+                .block_on(self.prepare_jev_model_request(open, &mut request))
+                .is_err()
+            {
+                return Ok(vec![model_failure(
+                    open,
+                    "DEVICE_JEV_UNAVAILABLE: request preparation failed",
+                )]);
+            }
+            payload = serde_json::to_vec(&request)?;
+        }
+        let adapter = crate::device_store::adapter(&config, self.custom_headers(&provider_id)?)?;
         let adapter_request_id = format!("device-{}", open.model_exchange_id.0);
         let mut leak_gate = CredentialLeakGate::new();
         leak_gate.track_secret(&secret);
+        self.retain_prepared_payload(open, &payload)?;
         if let Err(error) = adapter.open(
             &ProviderAdapterInvocation {
                 model_exchange_id: &open.model_exchange_id,
                 request_id: &open.request_id,
                 adapter_request_id: &adapter_request_id,
-                model_id,
+                model_id: &model_id,
                 content_type: &open.request.content_type,
                 payload: &payload,
             },
@@ -111,14 +123,7 @@ impl DeviceProviderStore {
         ) {
             return Ok(vec![model_failure(
                 open,
-                match error.kind() {
-                    crate::ProviderAdapterErrorKind::Rejected => "DEVICE_PROVIDER_REQUEST_REJECTED",
-                    crate::ProviderAdapterErrorKind::RateLimited => "DEVICE_PROVIDER_RATE_LIMITED",
-                    crate::ProviderAdapterErrorKind::Unavailable => {
-                        "DEVICE_PROVIDER_CONNECTION_FAILED"
-                    }
-                    crate::ProviderAdapterErrorKind::Protocol => "DEVICE_PROVIDER_PROTOCOL_FAILED",
-                },
+                adapter_error_message(error.kind()),
             )]);
         }
         drop(secret);
@@ -126,8 +131,8 @@ impl DeviceProviderStore {
             model_exchange_id: open.model_exchange_id.clone(),
             request_id: open.request_id.clone(),
             route: ModelRoute {
-                provider_id: provider_id.to_owned(),
-                model_id: model_id.to_owned(),
+                provider_id: provider_id.clone(),
+                model_id,
                 credential_reference_id: CredentialReferenceId(format!(
                     "crd_0{}",
                     &format!("{:X}", Sha256::digest(provider_id.as_bytes()))[..25]
@@ -165,6 +170,24 @@ impl DeviceProviderStore {
                 Ok(chunk)
             })
             .collect()
+    }
+
+    // Retain the exact adapter input before any network side effect. Prepared does
+    // not mean sent or accepted; terminal chunks separately describe the outcome.
+    fn retain_prepared_payload(
+        &self,
+        open: &ModelOpenMessage,
+        payload: &[u8],
+    ) -> Result<(), DeviceProviderError> {
+        let digest = format!("{:x}", Sha256::digest(serde_json::to_vec(open)?));
+        let changed = self.connection.execute(
+            "UPDATE exchanges SET prepared_payload=?1 WHERE exchange_id=?2 AND digest=?3 AND request_open IS NOT NULL AND prepared_payload IS NULL AND chunks IS NULL AND cancelled=0",
+            params![payload, open.model_exchange_id.0, digest],
+        )?;
+        if changed != 1 {
+            return Err(DeviceProviderError);
+        }
+        Ok(())
     }
 
     /// Durably fences later opens and replay after Worker cancellation.
@@ -259,6 +282,33 @@ impl DeviceProviderStore {
             .into_iter()
             .filter(|chunk| chunk.sequence.0 >= from)
             .collect())
+    }
+}
+
+pub(crate) fn validated_model_payload(
+    open: &ModelOpenMessage,
+) -> Result<Vec<u8>, DeviceProviderError> {
+    if open.request.data_base64.len() > 24 * 1024 * 1024
+        || open.request.content_type != "application/json"
+    {
+        return Err(DeviceProviderError);
+    }
+    let payload = STANDARD
+        .decode(&open.request.data_base64)
+        .map_err(|_| DeviceProviderError)?;
+    if format!("sha256:{:x}", Sha256::digest(&payload)) != open.request.payload_digest.0 {
+        return Err(DeviceProviderError);
+    }
+    Ok(payload)
+}
+
+fn adapter_error_message(kind: crate::ProviderAdapterErrorKind) -> &'static str {
+    use crate::ProviderAdapterErrorKind as Kind;
+    match kind {
+        Kind::Rejected => "DEVICE_PROVIDER_REQUEST_REJECTED",
+        Kind::RateLimited => "DEVICE_PROVIDER_RATE_LIMITED",
+        Kind::Unavailable => "DEVICE_PROVIDER_CONNECTION_FAILED",
+        Kind::Protocol => "DEVICE_PROVIDER_PROTOCOL_FAILED",
     }
 }
 
@@ -383,4 +433,69 @@ pub fn public_model_chunk(
         }
     }
     Ok(public)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prepared_payload_is_exact_single_write_and_fenced() {
+        let directory =
+            std::env::temp_dir().join(format!("wwc-prepared-model-{}", std::process::id()));
+        let store = DeviceProviderStore::open(&directory).unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/contracts/execution-port.valid.json"
+        ))
+        .unwrap();
+        let open: ModelOpenMessage = serde_json::from_value(
+            fixture["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|message| message["kind"] == "model.open")
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        let original = serde_json::to_string(&open).unwrap();
+        let digest = format!("{:x}", Sha256::digest(original.as_bytes()));
+        store
+            .connection
+            .execute(
+                "INSERT INTO exchanges (exchange_id, digest, request_open) VALUES (?1, ?2, ?3)",
+                params![open.model_exchange_id.0, digest, original],
+            )
+            .unwrap();
+        let mut changed = open.clone();
+        changed.request_id.0.push('X');
+        assert!(store.retain_prepared_payload(&changed, b"wrong").is_err());
+        let prepared = b"{\n  \"request\": {\"input\": []}\n}";
+        store.retain_prepared_payload(&open, prepared).unwrap();
+        assert!(store.retain_prepared_payload(&open, b"overwrite").is_err());
+        drop(store);
+        let store = DeviceProviderStore::open(&directory).unwrap();
+        let saved: Vec<u8> = store
+            .connection
+            .query_row(
+                "SELECT prepared_payload FROM exchanges WHERE exchange_id=?1",
+                [&open.model_exchange_id.0],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(saved, prepared);
+        assert!(store.retain_prepared_payload(&open, prepared).is_err());
+        for (cancelled, chunks) in [(1, None), (0, Some("[]"))] {
+            store
+                .connection
+                .execute(
+                    "UPDATE exchanges SET prepared_payload=NULL, cancelled=?1, chunks=?2",
+                    params![cancelled, chunks],
+                )
+                .unwrap();
+            assert!(store.retain_prepared_payload(&open, prepared).is_err());
+        }
+        drop(store);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 }

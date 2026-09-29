@@ -6,6 +6,7 @@ export interface DeviceProviderMutation {
   readonly operation: 'save' | 'delete' | 'test'
   readonly config: DeviceProviderConfig
   readonly apiKey?: string
+  readonly customHeaders?: Readonly<Record<string, string>>
 }
 
 export type DeviceExtensionMutation =

@@ -31,6 +31,8 @@
 
 当前支持本地运行环境和显式认证配置。工具名使用字母、数字、下划线或短横线，服务标识与工具名合计最多 121 字节，每个服务最多 128 个工具。大小写冲突的标识、需要重命名的工具和 HTTP header helper 会被拒绝。需交互登录的 OAuth 服务目前没有 Web 登录流程。
 
+Core 请求工具许可时，页面通过现有审批列表显示 MCP 服务、请求摘要和 `mcp_permission` 原因。批准只对该次请求生效，拒绝会回传 Core。需要填写数据的表单和 URL 登录请求目前不能通过普通审批代填或批准；可以拒绝以结束等待。
+
 ## 配置生效与保存
 
 设备将配置保存在私有 SQLite 数据库中。Web 使用所选设备的公钥加密配置；Server 校验管理权限并转发密文，只保留技能元数据、MCP 工具名、版本和操作回执。MCP 环境变量、请求头及技能正文不进入 Server 的公开状态。
@@ -40,3 +42,17 @@
 管理接口为 `GET/POST /api/v1/clients/{clientId}/extensions`；回执为 `GET /api/v1/clients/{clientId}/extensions/receipts/{requestId}`。设备公开元数据合计最多 192 KiB，以确保报告能通过设备消息通道。配置操作使用设备版本号和请求 ID 防止过期覆盖、篡改重试及重复执行。
 
 可运行检查：`cargo test -p winwincode-provider --test device_extensions`。测试覆盖旧 Provider 数据迁移、WebCrypto、回放、同 Worker 配置刷新、任务恢复、资源导入，以及真实 stdio / HTTP MCP 握手。
+
+## Device Provider 请求协议与私有请求头
+
+设备的模型设置支持 `anthropic_messages`、`openai_chat_completions` 和
+`canonical`。API 地址必须填写所选协议的完整 HTTPS 请求地址；设备不会改写路径。
+模型名使用服务商的 API 标识。
+
+“自定义请求头”输入 JSON 对象，例如 `{"x-opencode-session":"<session>"}`。
+留空保留设备已有值，填写 `{}` 清除。请求头与 API Key 一起加密发送到设备，
+仅存储在设备的私有数据库中，服务器配置查询不返回名称或值。请求头不能覆盖
+认证、目标主机、内容类型、请求身份或连接控制字段。
+
+设备数据库从版本 2 升级到 3 时，在事务中增加 `provider_headers` 表，保留
+已有 Provider、密钥和设备身份。升级后只运行当前版本；不要用旧程序打开新库。

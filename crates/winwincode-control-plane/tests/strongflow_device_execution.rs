@@ -271,9 +271,9 @@ fn work_run_role_job(
         goal: "Execute the exact sealed WorkRun goal.".to_owned(),
         job_id: job_id.clone(),
         limits: ExecutionLimits {
-            deadline_at: instant("2026-09-05T12:00:00.000Z"),
+            deadline_at: Some(instant("2026-09-05T12:00:00.000Z")),
             max_artifact_bytes: 10_000_000,
-            max_runtime_seconds: 3_600,
+            max_runtime_seconds: Some(3_600),
         },
         payload_digest: Sha256Digest(format!("sha256:{seed:064}")),
         scope: ExecutionScope::WorkRunExecutionScope(WorkRunExecutionScope {

@@ -839,7 +839,11 @@ fn valid_approval_detail(
                             | ApprovalActionReasonCode::NetworkAccess
                     )
             }
-            ApprovalActionCategory::Mcp => false,
+            ApprovalActionCategory::Mcp => {
+                detail.operation == ApprovalActionOperation::Execute
+                    && detail.reason_code == ApprovalActionReasonCode::McpPermission
+                    && detail.working_directory.is_none()
+            }
         }
 }
 
@@ -858,6 +862,7 @@ fn project_approval_detail(
                 ApprovalActionReasonCode::SandboxEscalation => "sandbox_escalation",
                 ApprovalActionReasonCode::NetworkAccess => "network_access",
                 ApprovalActionReasonCode::FilesystemWrite => "filesystem_write",
+                ApprovalActionReasonCode::McpPermission => "mcp_permission",
             }
             .to_owned(),
             request_sha256: detail.request_sha256.clone(),

@@ -34,6 +34,7 @@ import {
   verifyReleaseArtifactDirectory,
 } from './release-artifact-contract.mjs'
 import {
+  serverTargetDirectory,
   writeApiProductionSourceSeal,
   writeHelperReleaseManifest,
 } from './run-api-production-vertical.mjs'
@@ -328,6 +329,12 @@ function runReleaseApiVertical(buildRoot, rustBuildResult) {
   const helperReleaseManifest = resolve(binaryRoot, HELPER_RELEASE_MANIFEST_NAME)
   copyFileSync(rustBuildResult.helperReleaseManifestPath, helperReleaseManifest)
   chmodSync(helperReleaseManifest, 0o644)
+  // The production source seal also binds the Device CLI used by this
+  // vertical. Build it for the host, beside the copied release binaries.
+  run('cargo', ['build', '-p', 'winwincode-cli', '--bin', 'wwc', '--locked', '--offline'])
+  const cliBinary = resolve(binaryRoot, 'wwc')
+  copyFileSync(resolve(serverTargetDirectory(root), 'debug/wwc'), cliBinary)
+  chmodSync(cliBinary, 0o755)
   writeApiProductionSourceSeal({
     root,
     serverBinary: paths['winwincode-server'],

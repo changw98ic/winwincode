@@ -2071,9 +2071,9 @@ mod tests {
             goal: "test".to_owned(),
             job_id: ExecutionJobId(job_id.to_owned()),
             limits: ExecutionLimits {
-                deadline_at: Instant("2027-01-15T09:00:00.000Z".to_owned()),
+                deadline_at: Some(Instant("2027-01-15T09:00:00.000Z".to_owned())),
                 max_artifact_bytes: 1,
-                max_runtime_seconds: 1,
+                max_runtime_seconds: Some(1),
             },
             payload_digest: Sha256Digest(
                 "sha256:0000000000000000000000000000000000000000000000000000000000000000"

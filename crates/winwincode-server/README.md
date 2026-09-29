@@ -60,6 +60,20 @@ request; HTTP publication commands do not supply policy or provider facts.
 `WWC_SERVER_BOOTSTRAP_WINDOW_SECONDS` optionally changes the ten-minute
 initialization window, and `WWC_SERVER_SESSION_TTL_SECONDS` optionally changes
 the eight-hour browser-session lifetime (live sessions renew while in use).
+
+`WWC_SERVER_MAX_RUNTIME_SECONDS` sets the same runtime policy for Chat and
+Delivery jobs: an integer from 1 through 604800 (default 3600), or `unlimited`.
+Unlimited jobs persist both `limits.maxRuntimeSeconds` and `limits.deadlineAt`
+as explicit nulls, and their admission reservations have no runtime ceiling.
+Choose this policy before the scope's first reservation; an existing finite
+admission policy cannot be weakened by submitting an unlimited job. Worker
+leases still expire and renew normally. This setting only controls runtime;
+token and cost admission limits are separate. New Quick, StrongFlow, and local
+execution scopes use explicit null token/cost budgets and reservations: usage
+is still settled from worker facts, but has no fixed token or monetary ceiling.
+Existing finite admission policies remain immutable; schema migration preserves
+their values and recorded usage. Concurrent execution and queue limits remain
+in effect.
 `WWC_SERVER_PREVIEW_PUBLIC_URL` optionally enables the separate preview origin.
 It must differ from `WWC_SERVER_PUBLIC_URL` and use the same TLS scheme. Preview
 access is issued for five minutes to the current Client occupancy holder and

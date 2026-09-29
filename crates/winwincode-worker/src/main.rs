@@ -383,10 +383,105 @@ fn production_codex(
         execution_mode,
         observer_mode,
     };
-    Ok(
-        ProductionCodexAdapter::open(ProductionCodexConfig::try_new(options)?)?
-            .with_device_extensions(provider_directory.to_path_buf())?,
-    )
+    let mut config = ProductionCodexConfig::try_new(options)?;
+    if let Some(value) = env::var_os("WWC_BENCHMARK_TOOL_REPEAT_GUARD") {
+        if value != "1" {
+            return Err("invalid benchmark tool repeat guard".into());
+        }
+        config = config.with_benchmark_tool_repeat_guard();
+    }
+    if let Some(effort) = env::var_os("WWC_WORKER_MODEL_REASONING_EFFORT") {
+        config =
+            config.with_reasoning_effort(effort.to_str().ok_or("invalid reasoning effort")?)?;
+    }
+    if let Some(settings) = configured_fusion(env::var_os("WWC_WORKER_FUSION").as_deref())? {
+        config = config.with_fusion(settings)?;
+    }
+    let judge = env::var_os("WWC_WORKER_JEV_JUDGE");
+    let context = env::var_os("WWC_WORKER_JEV_CONTEXT");
+    let file = env::var_os("WWC_DEVICE_JEV_SETTINGS_FILE");
+    if let Some(provider) = configured_jev_judge(&store, judge.as_deref(), file.as_deref())? {
+        config = config.with_jev_judge(provider)?;
+    }
+    if let Some(settings) = configured_jev_context(
+        &store,
+        context.as_deref(),
+        if judge.is_some() && context.is_none() {
+            None
+        } else {
+            file.as_deref()
+        },
+    )? {
+        config = config.with_jev_context(settings)?;
+    }
+    Ok(ProductionCodexAdapter::open(config)?
+        .with_device_extensions(provider_directory.to_path_buf())?)
+}
+
+fn configured_fusion(
+    profile: Option<&std::ffi::OsStr>,
+) -> Result<
+    Option<winwincode_execution_port::agent_config::AgentFusionSettings>,
+    Box<dyn std::error::Error>,
+> {
+    let Some(profile) = profile else {
+        return Ok(None);
+    };
+    let settings = serde_json::from_str(profile.to_str().ok_or("invalid Fusion profile")?)
+        .map_err(|_| "invalid Fusion profile")?;
+    winwincode_execution_port::agent_config::validate_fusion_settings(&settings)
+        .map_err(|_| "invalid Fusion members")?;
+    Ok(Some(settings))
+}
+
+fn configured_jev_judge(
+    store: &winwincode_provider::DeviceProviderStore,
+    profile: Option<&std::ffi::OsStr>,
+    settings_file: Option<&std::ffi::OsStr>,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let Some(profile) = profile else {
+        return Ok(None);
+    };
+    let provider = profile.to_str().ok_or("invalid JEV Judge provider")?;
+    if provider.is_empty()
+        || provider.len() > 200
+        || !provider
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
+    {
+        return Err("invalid JEV Judge provider".into());
+    }
+    if let Some(path) = settings_file {
+        store.import_jev_settings(std::path::Path::new(path), provider)?;
+    }
+    store.resolve_jev_settings(provider)?;
+    Ok(Some(provider.to_owned()))
+}
+
+fn configured_jev_context(
+    store: &winwincode_provider::DeviceProviderStore,
+    profile: Option<&std::ffi::OsStr>,
+    settings_file: Option<&std::ffi::OsStr>,
+) -> Result<
+    Option<winwincode_execution_port::agent_config::AgentJevContextSettings>,
+    Box<dyn std::error::Error>,
+> {
+    let Some(profile) = profile else {
+        if settings_file.is_some() {
+            return Err("JEV settings file requires WWC_WORKER_JEV_CONTEXT".into());
+        }
+        return Ok(None);
+    };
+    let settings: winwincode_execution_port::agent_config::AgentJevContextSettings =
+        serde_json::from_str(profile.to_str().ok_or("invalid JEV context profile")?)
+            .map_err(|_| "invalid JEV context profile")?;
+    winwincode_execution_port::jev_decision::validate_policy(&settings.policy)
+        .map_err(|_| "invalid JEV context policy")?;
+    if let Some(path) = settings_file {
+        store.import_jev_settings(std::path::Path::new(path), &settings.provider)?;
+    }
+    store.resolve_jev_settings(&settings.provider)?;
+    Ok(Some(settings))
 }
 
 /// Canonical model route used when no managed config override exists —
@@ -535,6 +630,117 @@ mod tests {
         ExecutionMode, ObserverMode, configured_observation_model,
         released_worker_execution_mode_required,
     };
+
+    #[test]
+    fn fusion_startup_validates_exact_members_without_echoing_input() {
+        use std::ffi::OsStr;
+        assert!(super::configured_fusion(None).unwrap().is_none());
+        let mut profile = serde_json::json!({"members":[
+            {"id":"glm","provider":"zhipu-glm","model":"glm-5.3-flash","reasoning":"max"},
+            {"id":"mimo","provider":"xiaomi-mimo","model":"mimo-v2.6-pro","reasoning":"max"},
+            {"id":"ds","provider":"deepseek","model":"deepseek-flash","reasoning":"max"},
+            {"id":"qwen","provider":"qwen","model":"qwen3.8-flash","reasoning":"max"}
+        ]});
+        let parse = |value: &serde_json::Value| {
+            super::configured_fusion(Some(OsStr::new(&value.to_string())))
+        };
+        let settings = parse(&profile).unwrap().unwrap();
+        assert_eq!(serde_json::to_value(settings).unwrap(), profile);
+        profile["members"][1] = profile["members"][0].clone();
+        assert!(parse(&profile).is_err());
+        for input in ["", "private-key", "{\"apiKey\":\"private-key\"}"] {
+            let error = super::configured_fusion(Some(OsStr::new(input))).unwrap_err();
+            assert!(!error.to_string().contains("private-key"));
+        }
+    }
+
+    #[test]
+    fn jev_startup_requires_private_matching_settings() {
+        use std::ffi::OsStr;
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        use winwincode_provider::DeviceProviderStore;
+
+        let directory = tempfile::tempdir().unwrap();
+        let store = DeviceProviderStore::open(&directory.path().join("device")).unwrap();
+        let path = directory.path().join("jev.toml");
+        let text = "providerId = 'device-jev'\nendpoint = 'https://nli.invalid/score'\napiKey = 'test-private-key'\ntimeoutMs = 1000\nretries = 0\n";
+        std::fs::write(&path, text).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let profile = serde_json::json!({
+            "provider": "device-jev",
+            "policy": {
+                "version": "jev-policy.v1", "minimumConfidence": 0.55,
+                "pinThreshold": 0.9, "keepThreshold": 0.75, "compactThreshold": 0.75,
+                "dropThreshold": 0.9, "taskMemoryThreshold": 0.4,
+                "projectMemoryThreshold": 0.6, "longTermMemoryThreshold": 0.8,
+            }
+        });
+        let serialized = profile.to_string();
+        let profile_arg = Some(OsStr::new(&serialized));
+        let configure = |profile, file| super::configured_jev_context(&store, profile, file);
+        assert!(configure(None, None).unwrap().is_none());
+        assert!(configure(None, Some(path.as_os_str())).is_err());
+        assert!(configure(profile_arg, None).is_err());
+        assert!(configure(Some(OsStr::new("")), Some(path.as_os_str())).is_err());
+        let configured = configure(profile_arg, Some(path.as_os_str()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(configured.provider, "device-jev");
+        assert_eq!(
+            super::configured_jev_judge(&store, Some(OsStr::new("device-jev")), None).unwrap(),
+            Some("device-jev".into())
+        );
+        assert!(
+            super::configured_jev_judge(&store, Some(OsStr::new("other-provider")), None).is_err()
+        );
+        assert!(
+            super::configured_jev_judge(&store, Some(OsStr::new("device-jev\n")), None).is_err()
+        );
+        assert!(
+            super::configured_jev_judge(&store, None, None)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(configure(profile_arg, None).unwrap(), Some(configured));
+        let mut invalid = profile.clone();
+        invalid["apiKey"] = "do-not-print-this".into();
+        let invalid_secret = invalid.to_string();
+        let error = configure(Some(OsStr::new(&invalid_secret)), None).unwrap_err();
+        assert!(!error.to_string().contains("do-not-print-this"));
+        invalid = profile;
+        invalid["policy"]["dropThreshold"] = 2.0.into();
+        let invalid_policy = invalid.to_string();
+        assert!(configure(Some(OsStr::new(&invalid_policy)), None).is_err());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(configure(profile_arg, Some(path.as_os_str())).is_err());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let link = directory.path().join("link.toml");
+        symlink(&path, &link).unwrap();
+        assert!(configure(profile_arg, Some(link.as_os_str())).is_err());
+        for bad in [
+            text.replace("device-jev", "other-provider"),
+            "broken secret".into(),
+            "x".repeat(65_537),
+        ] {
+            std::fs::write(&path, bad).unwrap();
+            assert!(configure(profile_arg, Some(path.as_os_str())).is_err());
+            assert_eq!(
+                store
+                    .resolve_jev_settings("device-jev")
+                    .unwrap()
+                    .api_key
+                    .as_deref(),
+                Some("test-private-key")
+            );
+        }
+        drop(store);
+        let reopened = DeviceProviderStore::open(&directory.path().join("device")).unwrap();
+        assert!(
+            super::configured_jev_context(&reopened, profile_arg, None)
+                .unwrap()
+                .is_some()
+        );
+    }
 
     #[test]
     fn execution_modes_fail_closed_until_debug_probe_routing_exists() {

@@ -375,3 +375,31 @@ fn websocket_event_is_only_a_bound_reload_invalidation() {
     assert!(json.get("prompt").is_none());
     assert!(json.get("binding").is_none());
 }
+
+#[test]
+fn mcp_permission_is_visible_with_single_use_decision() {
+    use winwincode_execution_port::generated::{ApprovalActionCategory, ApprovalActionReasonCode};
+    let (_, mut approval) = worker_messages();
+    approval.action.category = ApprovalActionCategory::Mcp;
+    let detail = approval.action.sanitized_detail.as_mut().expect("detail");
+    detail.reason_code = ApprovalActionReasonCode::McpPermission;
+    detail.working_directory = None;
+    detail.target_summaries = vec!["server:benchmark_public_smoke".into()];
+    let mut ledger = ChatInteractionProjectionLedger::default();
+    ledger
+        .record_approval_request(&approval)
+        .expect("MCP approval");
+    let projection = ledger
+        .approval(
+            &approval.approval_id,
+            &Instant("2026-08-24T12:01:00.000Z".into()),
+        )
+        .expect("query")
+        .expect("projection");
+    assert_eq!(projection.category, ApprovalProjectionCategory::Mcp);
+    assert!(projection.decision_enabled);
+    assert_eq!(
+        projection.effective_decision_scope,
+        ApprovalEffectiveDecisionScope::Once
+    );
+}

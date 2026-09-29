@@ -143,6 +143,16 @@ pub trait ProductSessionPersistence: ProductStateStorage {
         StorageError,
     >;
 
+    /// Resolves an accepted historical lease period to the live current lease.
+    ///
+    /// # Errors
+    /// Returns malformed-record, receipt-corruption, or storage errors.
+    fn load_live_lease_for_period(
+        &mut self,
+        period: &ExecutionLeaseRecord,
+        now: &Instant,
+    ) -> Result<Option<ExecutionLeaseRecord>, StorageError>;
+
     /// Lists scheduler jobs under a repository scope for cancelled-route recovery.
     ///
     /// # Errors
@@ -305,6 +315,15 @@ impl ProductSessionPersistence for SqliteStorage {
                 StorageError::adapter(format!("execution reservation cannot be read: {error}"))
             })?;
         Ok(reservation.map(|reservation| (slot, reservation)))
+    }
+
+    fn load_live_lease_for_period(
+        &mut self,
+        period: &ExecutionLeaseRecord,
+        now: &Instant,
+    ) -> Result<Option<ExecutionLeaseRecord>, StorageError> {
+        self.execution_registry()?
+            .load_live_lease_for_period(period, now)
     }
 
     fn load_worker_interaction_source(

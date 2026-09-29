@@ -96,7 +96,7 @@ corepack pnpm verify:api-production-vertical
 
 ## 参与贡献
 
-贡献代码前阅读[参与指南](CONTRIBUTING.md),用 Beads 领取工作,并按 [Pull Request 模板](.github/pull_request_template.md) 记录实际检查结果。
+贡献代码前阅读[参与指南](CONTRIBUTING.md),并按 [Pull Request 模板](.github/pull_request_template.md) 记录实际检查结果。
 
 常用检查:
 

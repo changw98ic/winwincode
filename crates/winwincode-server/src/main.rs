@@ -81,7 +81,7 @@ fn load_production_startup() -> Result<ProductionStartup, Box<dyn std::error::Er
         repository_scope.clone(),
         required_environment("WWC_SERVER_CHECKOUT_REVISION")?,
         required_environment_or("WWC_SERVER_EXECUTION_PROFILE", "codex-chat")?,
-        optional_i64("WWC_SERVER_MAX_RUNTIME_SECONDS", 3_600)?,
+        execution_runtime_seconds()?,
         optional_i64("WWC_SERVER_MAX_ARTIFACT_BYTES", 1_073_741_824)?,
     )?;
     let bootstrap_proof = required_environment("WWC_SERVER_BOOTSTRAP_PROOF")?;
@@ -293,8 +293,13 @@ async fn run_composed_server(
         DeviceModelBoundary,
         ActionEnforcementIssuer::new(action_signing_key.clone()),
     );
-    let execution_port =
-        ServerExecutionPortCore::from_application(&application, repository_scope.clone(), delegate);
+    let lease_duration = optional_duration_seconds("WWC_SERVER_EXECUTION_LEASE_SECONDS", 900)?;
+    let execution_port = ServerExecutionPortCore::from_application(
+        &application,
+        repository_scope.clone(),
+        delegate,
+        lease_duration,
+    )?;
     let worker_id = WorkerId(required_environment_or(
         "WWC_SERVER_WORKER_ID",
         "wrk_00000000000000000000000001",
@@ -315,9 +320,7 @@ async fn run_composed_server(
         worker_id.clone(),
         worker_instance_id.clone(),
         scheduler_generation,
-        // ponytail: execution leases have a fixed deadline; tasks over 15 minutes
-        // need an explicit longer lease until protocol-level renewal is implemented.
-        optional_duration_seconds("WWC_SERVER_EXECUTION_LEASE_SECONDS", 900)?,
+        lease_duration,
     )?
     .with_admission_identity(
         owner.as_ref().map(|owner| owner.user_id.clone()),
@@ -535,6 +538,10 @@ fn local_production_configs() -> Result<
     let delivery = LocalDeliveryAdapterConfig::new(
         PathBuf::from(required_environment("WWC_SERVER_REPOSITORY_ROOT")?),
         scope.clone(),
+    )
+    .with_execution_limits(
+        execution_runtime_seconds()?,
+        optional_i64("WWC_SERVER_MAX_ARTIFACT_BYTES", 1_073_741_824)?,
     );
     let requester_ids = comma_separated_environment("PUBLICATION_REQUESTERS")?;
     let approvers = comma_separated_environment("PUBLICATION_APPROVERS")?
@@ -607,6 +614,22 @@ fn required_environment_or(
     }
 }
 
+fn execution_runtime_seconds() -> Result<Option<i64>, Box<dyn std::error::Error>> {
+    let value = required_environment_or("WWC_SERVER_MAX_RUNTIME_SECONDS", "3600")?;
+    parse_execution_runtime_seconds(&value)
+}
+
+fn parse_execution_runtime_seconds(value: &str) -> Result<Option<i64>, Box<dyn std::error::Error>> {
+    if value == "unlimited" {
+        return Ok(None);
+    }
+    let seconds: i64 = value.parse()?;
+    if !(1..=604_800).contains(&seconds) {
+        return Err("WWC_SERVER_MAX_RUNTIME_SECONDS must be 1..604800 or unlimited".into());
+    }
+    Ok(Some(seconds))
+}
+
 fn optional_i64(name: &str, default: i64) -> Result<i64, Box<dyn std::error::Error>> {
     match env::var(name) {
         Ok(value) => Ok(value.parse()?),
@@ -638,4 +661,18 @@ fn optional_duration_seconds(
         Err(error) => return Err(error.into()),
     };
     Ok(Duration::from_secs(seconds))
+}
+
+#[cfg(test)]
+mod execution_runtime_tests {
+    use super::parse_execution_runtime_seconds;
+
+    #[test]
+    fn runtime_policy_requires_an_explicit_finite_value_or_unlimited() {
+        assert_eq!(parse_execution_runtime_seconds("unlimited").unwrap(), None);
+        assert_eq!(parse_execution_runtime_seconds("3600").unwrap(), Some(3600));
+        for value in ["", "0", "-1", "604801", "null", "UNLIMITED"] {
+            assert!(parse_execution_runtime_seconds(value).is_err(), "{value}");
+        }
+    }
 }

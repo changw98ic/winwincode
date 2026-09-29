@@ -1362,9 +1362,6 @@ fn controller_followup_is_safe(
     if delivery.revision() < terminal_revision {
         return false;
     }
-    if delivery.revision() == terminal_revision {
-        return true;
-    }
     let Some(completed) = delivery
         .snapshot()
         .work_run_aggregate
@@ -2105,5 +2102,37 @@ fn storage_error_code(error: &StorageError) -> ErrorCode {
         | StorageErrorKind::EventCursorExpired
         | StorageErrorKind::Adapter
         | StorageErrorKind::Closed => ErrorCode::ServiceUnavailable,
+    }
+}
+
+#[cfg(test)]
+mod controller_tests {
+    use super::*;
+    use winwincode_delivery::application::verdict::test_support::{
+        VerdictFixtureOutcome, verdict_fixture,
+    };
+
+    #[test]
+    fn rejected_terminal_cannot_start_review_at_the_current_revision() {
+        let delivery = verdict_fixture(
+            &DeliveryId("dlv_00000000000000000000000001".into()),
+            VerdictFixtureOutcome::Pass,
+        )
+        .delivery;
+        assert!(!controller_followup_is_safe(
+            &delivery,
+            delivery.revision(),
+            &ExecutionJobId("job_000000000000000000000000ZZ".into()),
+        ));
+        let mut snapshot = delivery.into_snapshot();
+        let run = snapshot.work_run_aggregate.runs.first_mut().unwrap();
+        let job = run.execution_job_id.clone();
+        run.state = winwincode_domain::WorkRunState::Running;
+        let delivery = Delivery::try_from_snapshot(snapshot).unwrap();
+        assert!(!controller_followup_is_safe(
+            &delivery,
+            delivery.revision(),
+            &job
+        ));
     }
 }

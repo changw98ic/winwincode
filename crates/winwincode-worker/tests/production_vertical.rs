@@ -760,9 +760,9 @@ fn pending_workrun_execution(
                 },
             },
             limits: ExecutionLimits {
-                deadline_at: at("2030-01-01T00:04:30.000Z"),
+                deadline_at: Some(at("2030-01-01T00:04:30.000Z")),
                 max_artifact_bytes: 1_000_000,
-                max_runtime_seconds: 240,
+                max_runtime_seconds: Some(240),
             },
             managed_app_run_config: None,
         },
@@ -892,9 +892,9 @@ fn start_execution_admission(
     let limits = ExecutionAdmissionLimits {
         max_concurrent: 1,
         max_queued: 1,
-        token_budget: 10_000,
-        cost_budget_microunits: 10_000,
-        max_runtime_millis: 300_000,
+        token_budget: Some(10_000),
+        cost_budget_microunits: Some(10_000),
+        max_runtime_millis: Some(300_000),
     };
     let mut admission = storage.execution_admission().expect("execution admission");
     for boundary in admission_boundaries(&scope) {
@@ -910,9 +910,9 @@ fn start_execution_admission(
             job_id: message.lease.job_id.clone(),
             request_id: RequestId(id("req", 7)),
             repository_access: ExecutionRepositoryAccess::ReadOnly,
-            reserved_tokens: 100,
-            reserved_cost_microunits: 100,
-            runtime_limit_millis: 300_000,
+            reserved_tokens: Some(100),
+            reserved_cost_microunits: Some(100),
+            runtime_limit_millis: Some(300_000),
             submitted_at: at("2029-12-31T23:59:56.000Z"),
         })
         .expect("reserve execution");
@@ -1273,7 +1273,7 @@ fn input_dispatch(root: &TestDirectory) -> JobDispatchMessage {
         scope.clone(),
         root.source_revision(),
         "chat",
-        240,
+        Some(240),
         1_000_000,
     )
     .expect("build ProductSession execution config");
@@ -1387,6 +1387,143 @@ fn adapter_config_with_mode(
 }
 
 #[test]
+fn benchmark_repeat_guard_stops_core_before_sixth_shell_execution() {
+    run_on_large_stack(async {
+        let root = TestDirectory::new("production-tool-repeat");
+        let mut dispatch = dispatch(&root);
+        dispatch.job.workspace.write_mode = ExecutionWorkspaceWriteMode::ReadOnly;
+        let port = RecordedPort::default();
+        let adapter = winwincode_codex::ProductionCodexAdapter::open(
+            adapter_config_with_mode(&root, winwincode_codex::ExecutionMode::DelegatedPatch)
+                .with_benchmark_tool_repeat_guard(),
+        )
+        .expect("open guarded embedded Core");
+        let mut worker = winwincode_worker::WorkerMain::new(
+            worker_config(),
+            port.clone(),
+            adapter,
+            root.workspace_runtime(),
+        );
+        register(&mut worker, &port).await;
+        worker
+            .accept_control(
+                &ExecutionPortMessage::JobDispatchMessage(dispatch.clone()),
+                at("2030-01-01T00:00:00.000Z"),
+            )
+            .await
+            .unwrap();
+        let now = at("2030-01-01T00:00:02.000Z");
+        // Script canonical model responses at the Worker boundary; the Core,
+        // shell, action gate, durable admission and terminal path are real.
+        for occurrence in 0..6 {
+            let open = poll_until_message(
+                &mut worker,
+                &port,
+                &now,
+                |messages| {
+                    messages
+                        .iter()
+                        .filter_map(|message| match message {
+                            ExecutionPortMessage::ModelOpenMessage(open) => Some(open.clone()),
+                            _ => None,
+                        })
+                        .nth(occurrence)
+                },
+                "Core did not request the next model turn",
+            )
+            .await;
+            let frames = [
+                serde_json::json!({"type":"created"}),
+                serde_json::json!({"type":"output_item_done", "item": {
+                    "type":"function_call", "name":"shell_command", "namespace":"functions",
+                    "call_id":format!("repeat-call-{occurrence}"),
+                    "arguments":serde_json::json!({"command":"cat src/lib.rs",
+                        "workdir":detached_checkout(&root).to_string_lossy(), "sandbox_permissions":"use_default"}).to_string(),
+                }}),
+                serde_json::json!({"type":"completed", "responseId":format!("repeat-response-{occurrence}"),
+                    "tokenUsage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":5,"reasoning_output_tokens":0,"total_tokens":15}, "endTurn":false}),
+            ];
+            for (index, frame) in frames.iter().enumerate() {
+                let bytes = serde_json::to_vec(frame).unwrap();
+                let chunk = ModelChunkMessage {
+                    error: None,
+                    is_final: index == 2,
+                    kind: ModelChunkMessageKind::ModelChunk,
+                    lease: open.lease.clone(),
+                    message_id: ExecutionMessageId(id(
+                        "xmsg",
+                        12_000 + u64::try_from(occurrence * 10 + index).unwrap(),
+                    )),
+                    model_exchange_id: open.model_exchange_id.clone(),
+                    payload: Some(winwincode_execution_port::generated::EncodedPayload {
+                        content_type: "application/json".into(),
+                        data_base64: STANDARD.encode(&bytes),
+                        payload_digest: Sha256Digest(format!(
+                            "sha256:{:x}",
+                            Sha256::digest(&bytes)
+                        )),
+                    }),
+                    schema_version: SchemaVersion::WinwincodeV1,
+                    sent_at: now.clone(),
+                    sequence: ExecutionSequence(i64::try_from(index + 1).unwrap()),
+                    session_identity: open.session_identity.clone(),
+                    worker_session_id: open.worker_session_id.clone(),
+                };
+                worker
+                    .accept_control(&ExecutionPortMessage::ModelChunkMessage(chunk), now.clone())
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!("model occurrence {occurrence} frame {index}: {error:?}")
+                    });
+            }
+        }
+        let outcome = poll_until_candidate_outcome(&mut worker, &port, &now).await;
+        assert_eq!(outcome.outcome.status, ExecutionOutcomeStatus::Failed);
+        assert_eq!(outcome.outcome.summary, "STUCK_TOOL_REPEAT_LIMIT");
+        let run = stored_run_json(&root);
+        assert_eq!(run["terminal"]["kind"], "tool_repeat_limit");
+        let rollout = fs::read_to_string(run["rolloutPath"].as_str().unwrap()).unwrap();
+        let executed = rollout
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|item| {
+                item["type"] == "response_item" && item["payload"]["type"] == "function_call_output"
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            executed.len(),
+            5,
+            "Core must execute exactly the first five commands"
+        );
+        assert!(executed.iter().all(|item| {
+            item["payload"]["output"]
+                .to_string()
+                .contains("pub fn fixture_value() -> u64 { 1 }")
+        }));
+        assert_eq!(
+            port.messages()
+                .iter()
+                .filter(|message| matches!(message, ExecutionPortMessage::ModelOpenMessage(_)))
+                .count(),
+            6
+        );
+        let connection =
+            rusqlite::Connection::open(root.worker().join("worker-codex.sqlite3")).unwrap();
+        let completed: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM performance_operation WHERE operation_kind = 'tool' AND completed = 1",
+            [], |row| row.get(0)).unwrap();
+        assert_eq!(
+            completed, 5,
+            "Worker must observe five actual Core command completions"
+        );
+        let stopped: bool = connection
+            .query_row("SELECT stopped FROM tool_repeat_run", [], |row| row.get(0))
+            .unwrap();
+        assert!(stopped);
+    });
+}
+
+#[test]
 fn delegated_structured_proposal_is_retained_once_without_terminal_outcome() {
     run_on_large_stack(async {
         let root = TestDirectory::new("production-delegated-proposal");
@@ -1468,6 +1605,7 @@ fn delegated_structured_proposal_is_retained_once_without_terminal_outcome() {
             &first_gateway,
             [
                 ProviderStreamEvent::ResponseStarted {
+                    observed_model_id: None,
                     provider_response_id: "provider-delegated-read-response-1".to_owned(),
                 },
                 ProviderStreamEvent::ToolCallStarted {
@@ -1594,6 +1732,7 @@ fn delegated_structured_proposal_is_retained_once_without_terminal_outcome() {
             &second_gateway,
             [
                 ProviderStreamEvent::ResponseStarted {
+                    observed_model_id: None,
                     provider_response_id: "provider-delegated-response".to_owned(),
                 },
                 ProviderStreamEvent::ToolCallStarted {
@@ -1802,6 +1941,7 @@ fn delegated_proposal_restart_replays_one_intent_without_second_composer() {
             &gateway,
             [
                 ProviderStreamEvent::ResponseStarted {
+                    observed_model_id: None,
                     provider_response_id: "provider-delegated-proposal-restart".to_owned(),
                 },
                 ProviderStreamEvent::ToolCallStarted {
@@ -2032,6 +2172,7 @@ fn delegated_invalid_output_gets_one_format_repair_then_becomes_inconclusive() {
             &first_gateway,
             [
                 ProviderStreamEvent::ResponseStarted {
+                    observed_model_id: None,
                     provider_response_id: "provider-delegated-invalid-1".to_owned(),
                 },
                 ProviderStreamEvent::TextStarted { index: 0 },
@@ -2096,6 +2237,7 @@ fn delegated_invalid_output_gets_one_format_repair_then_becomes_inconclusive() {
             &repair_gateway,
             [
                 ProviderStreamEvent::ResponseStarted {
+                    observed_model_id: None,
                     provider_response_id: "provider-delegated-invalid-2".to_owned(),
                 },
                 ProviderStreamEvent::TextStarted { index: 0 },
@@ -2226,6 +2368,7 @@ async fn assert_delegated_repair_provider_failure(
         &first_gateway,
         [
             ProviderStreamEvent::ResponseStarted {
+                observed_model_id: None,
                 provider_response_id: format!("provider-delegated-invalid-{label}"),
             },
             ProviderStreamEvent::TextStarted { index: 0 },
@@ -2436,6 +2579,7 @@ fn delegated_repair_kernel_recovery_failure_is_retryable_without_an_extra_provid
             &gateway,
             [
                 ProviderStreamEvent::ResponseStarted {
+                    observed_model_id: None,
                     provider_response_id: "provider-delegated-kernel-recovery".to_owned(),
                 },
                 ProviderStreamEvent::TextStarted { index: 0 },
@@ -3253,6 +3397,7 @@ async fn run_verification_work_run(root: &TestDirectory, role: &str, command: &s
         &first_gateway,
         [
             ProviderStreamEvent::ResponseStarted {
+                observed_model_id: None,
                 provider_response_id: format!("provider-{role}-response-1"),
             },
             ProviderStreamEvent::ToolCallStarted {
@@ -3393,6 +3538,7 @@ async fn run_verification_work_run(root: &TestDirectory, role: &str, command: &s
         &second_gateway,
         [
             ProviderStreamEvent::ResponseStarted {
+                observed_model_id: None,
                 provider_response_id: format!("provider-{role}-response-2"),
             },
             ProviderStreamEvent::TextStarted { index: 0 },
@@ -3968,8 +4114,16 @@ fn production_worker_kernel_gateway_loopback_and_restart_replay_are_exact() {
             .expect("successful Worker outcome");
         assert_eq!(outcome.outcome.status, ExecutionOutcomeStatus::Succeeded);
         assert_eq!(
+            outcome
+                .outcome
+                .usage
+                .as_ref()
+                .and_then(|usage| usage.cost_microunits),
+            None
+        );
+        assert_eq!(
             outcome.outcome.usage.as_ref().map(|usage| usage.tokens),
-            Some(15)
+            Some(30)
         );
         first
             .shutdown(at("2030-01-01T00:00:03.000Z"))
@@ -4127,7 +4281,7 @@ fn completed_rollout_before_adapter_terminal_restarts_without_provider_work() {
         );
         assert_eq!(
             outcomes[0].outcome.usage.as_ref().map(|usage| usage.tokens),
-            Some(15)
+            Some(30)
         );
         assert_eq!(
             outcomes[0].outcome.artifacts.len(),
@@ -4184,7 +4338,10 @@ fn failed_rollout_before_adapter_terminal_restarts_without_provider_work() {
             .collect::<Vec<_>>();
         assert_eq!(outcomes.len(), 1);
         assert_eq!(outcomes[0].outcome.status, ExecutionOutcomeStatus::Failed);
-        assert!(outcomes[0].outcome.usage.is_none());
+        assert_eq!(
+            outcomes[0].outcome.usage.as_ref().map(|usage| usage.tokens),
+            Some(30)
+        );
         let run = stored_run_json(&root);
         assert_eq!(run["terminal"]["kind"], "failed");
         replay
@@ -4642,7 +4799,10 @@ fn changed_job_replay_is_rejected_before_kernel_or_provider_work() {
         changed_profile.execution_profile = "planner".to_owned();
         changed_jobs.push(changed_profile);
         let mut changed_limits = original.job.clone();
-        changed_limits.limits.max_runtime_seconds -= 1;
+        changed_limits.limits.max_runtime_seconds = changed_limits
+            .limits
+            .max_runtime_seconds
+            .map(|seconds| seconds - 1);
         changed_jobs.push(changed_limits);
         let mut changed_workspace = original.job.clone();
         changed_workspace.workspace.checkout_revision =
@@ -4761,6 +4921,7 @@ fn real_request_user_input_resumes_after_response_loss_and_rejects_forged_replay
             &first_gateway,
             [
                 ProviderStreamEvent::ResponseStarted {
+                    observed_model_id: None,
                     provider_response_id: "provider-input-response-1".to_owned(),
                 },
                 ProviderStreamEvent::ToolCallStarted {
@@ -5070,6 +5231,7 @@ fn real_request_user_input_resumes_after_response_loss_and_rejects_forged_replay
             &recovery_gateway,
             [
                 ProviderStreamEvent::ResponseStarted {
+                    observed_model_id: None,
                     provider_response_id: "provider-input-response-recovery-1".to_owned(),
                 },
                 ProviderStreamEvent::ToolCallStarted {
@@ -5180,6 +5342,7 @@ fn real_request_user_input_resumes_after_response_loss_and_rejects_forged_replay
             &second_gateway,
             [
                 ProviderStreamEvent::ResponseStarted {
+                    observed_model_id: None,
                     provider_response_id: "provider-input-response-2".to_owned(),
                 },
                 ProviderStreamEvent::TextStarted { index: 0 },
@@ -5323,6 +5486,7 @@ fn real_shell_approval_and_action_receipt_reach_one_kernel_handler() {
             &first_gateway,
             [
                 ProviderStreamEvent::ResponseStarted {
+                    observed_model_id: None,
                     provider_response_id: "provider-shell-response-1".to_owned(),
                 },
                 ProviderStreamEvent::ToolCallStarted {
@@ -5513,6 +5677,7 @@ fn real_shell_approval_and_action_receipt_reach_one_kernel_handler() {
             &second_gateway,
             [
                 ProviderStreamEvent::ResponseStarted {
+                    observed_model_id: None,
                     provider_response_id: "provider-shell-response-2".to_owned(),
                 },
                 ProviderStreamEvent::TextStarted { index: 0 },

@@ -203,6 +203,7 @@ pub struct ProviderTokenUsage {
 pub enum ProviderStreamEvent {
     ResponseStarted {
         provider_response_id: String,
+        observed_model_id: Option<String>,
     },
     TextStarted {
         index: u32,
@@ -421,10 +422,10 @@ enum OpenBlock {
 /// Stateful converter tied to one successful Gateway open receipt.
 pub struct ProviderStreamConverter {
     model_exchange_id: String,
-    model_id: String,
     leak_gate: CredentialLeakGate,
     provider_response_id: Option<String>,
     blocks: BTreeMap<u32, OpenBlock>,
+    pending_text: Vec<TextBlock>,
     used_indices: BTreeSet<u32>,
     tool_calls: BTreeMap<String, u32>,
     usage: Option<ProviderTokenUsage>,
@@ -439,10 +440,10 @@ impl ProviderStreamConverter {
     pub fn from_gateway_receipt(receipt: &ProviderGatewayOpenReceipt) -> Self {
         Self {
             model_exchange_id: receipt.model_exchange_id.0.clone(),
-            model_id: receipt.route.model_id.clone(),
             leak_gate: receipt.stream_leak_gate(),
             provider_response_id: None,
             blocks: BTreeMap::new(),
+            pending_text: Vec::new(),
             used_indices: BTreeSet::new(),
             tool_calls: BTreeMap::new(),
             usage: None,
@@ -473,6 +474,7 @@ impl ProviderStreamConverter {
         let result = self.ingest_inner(event);
         if result.is_err() {
             self.blocks.clear();
+            self.pending_text.clear();
             self.terminal = true;
         }
         result
@@ -486,6 +488,7 @@ impl ProviderStreamConverter {
         match event {
             ProviderStreamEvent::ResponseStarted {
                 provider_response_id,
+                observed_model_id,
             } => {
                 if self.provider_response_id.is_some() || !self.blocks.is_empty() {
                     return Err(ProviderStreamConversionError::protocol());
@@ -498,12 +501,15 @@ impl ProviderStreamConverter {
                     )
                     .map_err(|_| credential_leak())?;
                 self.provider_response_id = Some(provider_response_id);
-                self.emit(vec![
-                    ModelPortMessage::Created,
-                    ModelPortMessage::ServerModel {
-                        model: self.model_id.clone(),
-                    },
-                ])
+                let mut messages = vec![ModelPortMessage::Created];
+                if let Some(model) = observed_model_id {
+                    validate_token(&model, 256)?;
+                    self.leak_gate
+                        .inspect_bytes(CredentialOutputBoundary::Event, model.as_bytes())
+                        .map_err(|_| credential_leak())?;
+                    messages.push(ModelPortMessage::ServerModel { model });
+                }
+                self.emit(messages)
             }
             ProviderStreamEvent::TextStarted { index } => {
                 self.require_started()?;
@@ -517,7 +523,7 @@ impl ProviderStreamConverter {
                     }),
                 );
                 self.emit(vec![ModelPortMessage::OutputItemAdded {
-                    item: ModelOutputItem::assistant_message(item_id, String::new()),
+                    item: ModelOutputItem::assistant_message(item_id, String::new(), None),
                 }])
             }
             ProviderStreamEvent::TextDelta { index, delta } => {
@@ -540,15 +546,21 @@ impl ProviderStreamConverter {
                 else {
                     return Err(ProviderStreamConversionError::protocol());
                 };
+                self.leak_gate
+                    .inspect_bytes(CredentialOutputBoundary::Event, block.text.as_bytes())
+                    .map_err(|_| credential_leak())?;
                 let mut messages = Vec::new();
                 if !block.text.is_empty() {
                     messages.push(ModelPortMessage::OutputTextDelta {
                         delta: block.text.clone(),
                     });
                 }
-                messages.push(ModelPortMessage::OutputItemDone {
-                    item: ModelOutputItem::assistant_message(block.item_id, block.text),
-                });
+                // Text may precede the tool call which identifies it as progress.
+                // Do not publish a final-answer phase until the response has ended.
+                self.pending_text.push(block);
+                if !self.tool_calls.is_empty() {
+                    messages.extend(self.finish_text(Some("commentary")));
+                }
                 self.emit(messages)
             }
             ProviderStreamEvent::ReasoningStarted {
@@ -632,6 +644,11 @@ impl ProviderStreamConverter {
                 else {
                     return Err(ProviderStreamConversionError::protocol());
                 };
+                for content in [&block.summary, &block.content] {
+                    self.leak_gate
+                        .inspect_bytes(CredentialOutputBoundary::Event, content.as_bytes())
+                        .map_err(|_| credential_leak())?;
+                }
                 let mut messages = block
                     .segments
                     .into_iter()
@@ -688,9 +705,11 @@ impl ProviderStreamConverter {
                         arguments: String::new(),
                     }),
                 );
-                self.emit(vec![ModelPortMessage::OutputItemAdded {
+                let mut messages = self.finish_text(Some("commentary"));
+                messages.push(ModelPortMessage::OutputItemAdded {
                     item: ModelOutputItem::tool(identity, item_id, provider_call_id, String::new()),
-                }])
+                });
+                self.emit(messages)
             }
             ProviderStreamEvent::ToolCallArgumentsDelta {
                 index,
@@ -725,6 +744,9 @@ impl ProviderStreamConverter {
                 if block.provider_call_id != provider_call_id {
                     return Err(ProviderStreamConversionError::protocol());
                 }
+                self.leak_gate
+                    .inspect_bytes(CredentialOutputBoundary::Event, block.arguments.as_bytes())
+                    .map_err(|_| credential_leak())?;
                 let mut messages = Vec::new();
                 if !block.arguments.is_empty() {
                     messages.push(ModelPortMessage::ToolCallInputDelta {
@@ -760,6 +782,7 @@ impl ProviderStreamConverter {
                 let message = match reason {
                     ProviderFinishReason::Stop if self.used_indices.is_empty() => {
                         ModelPortMessage::Error {
+                            token_usage: self.usage.map(ModelTokenUsage::from),
                             error: ModelFailure::new(
                                 "EMPTY_RESPONSE",
                                 "Provider completed without any response content",
@@ -777,6 +800,7 @@ impl ProviderStreamConverter {
                         }
                     }
                     ProviderFinishReason::MaxTokens => ModelPortMessage::Error {
+                        token_usage: self.usage.map(ModelTokenUsage::from),
                         error: ModelFailure::new(
                             "MAX_TOKENS",
                             "Provider response reached its output-token limit",
@@ -790,6 +814,7 @@ impl ProviderStreamConverter {
             ProviderStreamEvent::Failed(failure) => {
                 validate_failure(&self.leak_gate, &failure)?;
                 let frames = self.emit(vec![ModelPortMessage::Error {
+                    token_usage: self.usage.map(ModelTokenUsage::from),
                     error: ModelFailure::from_provider(failure),
                 }])?;
                 self.blocks.clear();
@@ -798,6 +823,7 @@ impl ProviderStreamConverter {
             }
             ProviderStreamEvent::Cancelled => {
                 let frames = self.emit(vec![ModelPortMessage::Error {
+                    token_usage: self.usage.map(ModelTokenUsage::from),
                     error: ModelFailure::new("CANCELLED", "Model stream was cancelled"),
                 }])?;
                 self.blocks.clear();
@@ -806,6 +832,7 @@ impl ProviderStreamConverter {
             }
             ProviderStreamEvent::Disconnected => {
                 let frames = self.emit(vec![ModelPortMessage::Error {
+                    token_usage: self.usage.map(ModelTokenUsage::from),
                     error: ModelFailure::new(
                         "STREAM_CLOSED",
                         "Provider stream ended without a terminal event",
@@ -835,10 +862,30 @@ impl ProviderStreamConverter {
         Ok(())
     }
 
+    fn finish_text(&mut self, phase: Option<&'static str>) -> Vec<ModelPortMessage> {
+        self.pending_text
+            .drain(..)
+            .map(|block| ModelPortMessage::OutputItemDone {
+                item: ModelOutputItem::assistant_message(block.item_id, block.text, phase),
+            })
+            .collect()
+    }
+
     fn emit(
         &mut self,
-        messages: Vec<ModelPortMessage>,
+        mut messages: Vec<ModelPortMessage>,
     ) -> Result<Vec<CanonicalModelStreamFrame>, ProviderStreamConversionError> {
+        if let Some(terminal) = messages.iter().find(|message| message.is_terminal()) {
+            let phase = match terminal {
+                ModelPortMessage::Completed {
+                    end_turn: Some(true),
+                    ..
+                } if self.tool_calls.is_empty() => Some("final_answer"),
+                ModelPortMessage::Completed { .. } => Some("commentary"),
+                _ => None,
+            };
+            messages.splice(0..0, self.finish_text(phase));
+        }
         let mut payloads = Vec::with_capacity(messages.len());
         for message in &messages {
             let payload = serde_json::to_vec(message)
@@ -879,6 +926,7 @@ fn append_checked(
     current: &mut String,
     delta: &str,
 ) -> Result<(), ProviderStreamConversionError> {
+    let previous_len = current.len();
     let next_length = current
         .len()
         .checked_add(delta.len())
@@ -887,7 +935,11 @@ fn append_checked(
     current.push_str(delta);
     debug_assert_eq!(current.len(), next_length);
     leak_gate
-        .inspect_bytes(CredentialOutputBoundary::Event, current.as_bytes())
+        .inspect_appended_bytes(
+            CredentialOutputBoundary::Event,
+            current.as_bytes(),
+            previous_len,
+        )
         .map_err(|_| credential_leak())
 }
 
@@ -1088,6 +1140,8 @@ enum ModelPortMessage {
     },
     Error {
         error: ModelFailure,
+        #[serde(rename = "tokenUsage", skip_serializing_if = "Option::is_none")]
+        token_usage: Option<ModelTokenUsage>,
     },
 }
 
@@ -1105,7 +1159,8 @@ enum ModelOutputItem {
         id: String,
         role: &'static str,
         content: Vec<ModelOutputContent>,
-        phase: &'static str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        phase: Option<&'static str>,
     },
     #[serde(rename = "reasoning")]
     Reasoning {
@@ -1134,7 +1189,7 @@ enum ModelOutputItem {
 }
 
 impl ModelOutputItem {
-    fn assistant_message(id: String, text: String) -> Self {
+    fn assistant_message(id: String, text: String, phase: Option<&'static str>) -> Self {
         Self::Message {
             id,
             role: "assistant",
@@ -1142,7 +1197,7 @@ impl ModelOutputItem {
                 kind: "output_text",
                 text,
             }],
-            phase: "final_answer",
+            phase,
         }
     }
 

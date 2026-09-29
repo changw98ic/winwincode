@@ -33,7 +33,6 @@ use winwincode_storage::{
 
 use crate::delivery_transaction::load_durable_execution_job;
 use crate::durable_execution_port::product_session_outcome_output;
-use crate::execution_port_service::lease_stamp;
 use crate::{
     AppendAssistantMessageCommand, ChatInteractionService, ChatInteractionServiceError,
     ContinueProductSessionCommand, DurableExecutionPortContext, DurableExecutionPortDelegate,
@@ -813,14 +812,9 @@ fn accept_approval_request(
     dispatch: &ExecutionDispatchAuthority,
     request: &ApprovalRequestMessage,
 ) -> Result<(), DurableExecutionPortError> {
-    let authority = product_interaction_authority(
-        context,
-        dispatch,
-        &ExecutionPortMessage::ApprovalRequestMessage(request.clone()),
-    )?;
     let trusted_now = context.server_time().clone();
     let public_scope = public_repository_scope(context.repository_scope());
-    register_core_approval(context, dispatch, request, authority)?;
+    register_core_approval(context, dispatch, request)?;
     ChatInteractionService::new(context.storage())
         .record_approval_at(
             &RecordApprovalInteractionCommand {
@@ -833,26 +827,100 @@ fn accept_approval_request(
         .map_err(interaction_ingress)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "Chat and WorkRun approvals converge on one sealed Gate registration"
+)]
 fn register_core_approval(
     context: &mut DurableExecutionPortContext<'_>,
     dispatch: &ExecutionDispatchAuthority,
     request: &ApprovalRequestMessage,
-    authority: WorkerInteractionAuthority,
 ) -> Result<(), DurableExecutionPortError> {
     use crate::{
         GateDecisionFact, GateInteractionActor, GateInteractionAuthority,
         GateInteractionCommandContext, GateInteractionService, GateInteractionSubject,
         RegisterGateInteractionCommand,
     };
-    let (durable, _) = load_durable_execution_job(context.storage(), &request.lease.job_id)
+    let (durable, job) = load_durable_execution_job(context.storage(), &request.lease.job_id)
         .map_err(DurableExecutionPortError::Storage)?;
-    let actor =
+    let mut actor =
         winwincode_storage::public_actor_from_receipt_key(durable.receipt_identity().actor_key())
             .map_err(DurableExecutionPortError::Storage)?;
+    let (
+        execution_scope,
+        worker_pool_id,
+        product_session_revision,
+        job_revision,
+        worker_slot_revision,
+        work_scope,
+    ) = match &job.scope {
+        ExecutionScope::ProductSessionExecutionScope(_) => {
+            let authority = product_interaction_authority(
+                context,
+                dispatch,
+                &ExecutionPortMessage::ApprovalRequestMessage(request.clone()),
+            )?;
+            (
+                authority.execution_scope,
+                authority.worker_pool_id,
+                Some(authority.product_session_revision),
+                authority.job_revision,
+                authority.worker_slot_revision,
+                None,
+            )
+        }
+        ExecutionScope::WorkRunExecutionScope(scope) => {
+            let now = context.server_time().clone();
+            let current = crate::execution_port_service::load_runtime_replay_authority(
+                context.storage(),
+                &job,
+                &now,
+            )
+            .map_err(|_| storage_ingress("WorkRun approval binding is invalid"))?;
+            crate::durable_execution_port::require_exact_dispatch_message(
+                &request.lease,
+                &request.worker_session_id,
+                &request.session_identity.worker_session_id,
+                dispatch,
+                context.storage(),
+                &now,
+            )?;
+            if current.session_identity != request.session_identity
+                || current.worker_session_id != request.worker_session_id
+                || request.worker_session_id != *dispatch.worker_session_id()
+                || now.0 < request.lease.issued_at.0
+            {
+                return Err(storage_ingress("WorkRun approval identity differs"));
+            }
+            let reservation = context
+                .storage()
+                .execution_admission()
+                .map_err(|_| storage_ingress("WorkRun admission is unavailable"))?
+                .load_reservation_by_job(&job.job_id)
+                .map_err(|_| storage_ingress("WorkRun admission is invalid"))?
+                .ok_or_else(|| storage_ingress("WorkRun admission is missing"))?;
+            let slot = context
+                .storage()
+                .worker_session_slots()
+                .map_err(worker_slot_storage)?
+                .load(&request.worker_session_id)
+                .map_err(worker_slot_storage)?
+                .ok_or_else(|| storage_ingress("WorkRun Worker slot is missing"))?;
+            actor = PublicEventActor::User {
+                id: reservation.user_id.clone(),
+            };
+            (
+                reservation.scope,
+                reservation.worker_pool_id,
+                None,
+                reservation.revision,
+                slot.revision,
+                Some(scope),
+            )
+        }
+    };
     let PublicEventActor::User { id } = &actor else {
-        return Err(storage_ingress(
-            "Core approval has no authenticated Chat owner",
-        ));
+        return Err(storage_ingress("Core approval has no authenticated owner"));
     };
     let public_scope = public_repository_scope(context.repository_scope());
     let receipt_identity =
@@ -878,16 +946,17 @@ fn register_core_approval(
             },
             subject: GateInteractionSubject::Approval(request.approval_id.clone()),
             authority: GateInteractionAuthority {
-                execution_scope: authority.execution_scope,
-                worker_pool_id: authority.worker_pool_id,
-                product_session_revision: authority.product_session_revision,
-                work_contract_id: None,
-                work_contract_revision: None,
-                work_item_id: None,
-                work_item_revision: None,
-                work_run_id: None,
-                job_revision: authority.job_revision,
-                worker_slot_revision: authority.worker_slot_revision,
+                execution_scope,
+                worker_pool_id,
+                product_session_revision,
+                work_contract_id: work_scope.map(|scope| scope.work_contract_id.clone()),
+                work_contract_revision: work_scope
+                    .map(|scope| scope.work_contract_revision.clone()),
+                work_item_id: work_scope.map(|scope| scope.work_item_id.clone()),
+                work_item_revision: work_scope.map(|scope| scope.work_item_revision.clone()),
+                work_run_id: work_scope.map(|scope| scope.work_run_id.clone()),
+                job_revision,
+                worker_slot_revision,
                 runtime,
                 lease_expires_at: request.lease.expires_at.clone(),
                 gate,
@@ -925,13 +994,21 @@ fn product_interaction_authority(
             "Worker interaction belongs to another Job scope",
         ));
     };
+    let now = context.server_time().clone();
+    crate::durable_execution_port::require_exact_dispatch_message(
+        lease,
+        worker_session_id,
+        &session_identity.worker_session_id,
+        dispatch,
+        context.storage(),
+        &now,
+    )?;
     if session_identity.work_run_id.is_some()
         || session_identity.product_session_id != job_scope.product_session_id
         || worker_session_id != dispatch.worker_session_id()
         || session_identity.worker_session_id != *worker_session_id
-        || lease != &lease_stamp(dispatch.lease())
-        || context.server_time().0 < lease.issued_at.0
-        || context.server_time().0 >= lease.expires_at.0
+        || now.0 < lease.issued_at.0
+        || now.0 >= dispatch.lease().expires_at.0
     {
         return Err(storage_ingress(
             "Worker interaction identity differs from its accepted dispatch",
@@ -1504,70 +1581,70 @@ fn finish_local_admission(
         .load_reservation_by_job(&message.lease.job_id)
         .map_err(|_| storage_ingress("local execution admission cannot be read"))?
         .ok_or_else(|| storage_ingress("local execution admission is missing"))?;
-    match message.outcome.status {
-        ExecutionOutcomeStatus::Succeeded => {
-            if current.state == ExecutionReservationState::Settled {
-                return Ok(());
-            }
-            let usage = message
-                .outcome
-                .usage
-                .as_ref()
-                .ok_or_else(|| storage_ingress("successful local outcome has no Usage"))?;
-            storage
-                .execution_admission()
-                .map_err(|_| storage_ingress("local execution admission cannot be opened"))?
-                .settle(&ExecutionReservationSettlement {
-                    scope: execution_scope.clone(),
-                    worker_pool_id: worker_pool_id.clone(),
-                    job_id: message.lease.job_id.clone(),
-                    request_id: derived_request_id(
-                        b"local-admission-settle",
-                        message.message_id.0.as_bytes(),
-                    ),
-                    expected_revision: current.revision,
-                    actual_tokens: u64::try_from(usage.tokens)
-                        .map_err(|_| storage_ingress("local Usage tokens are invalid"))?,
-                    actual_cost_microunits: u64::try_from(usage.cost_microunits)
-                        .map_err(|_| storage_ingress("local Usage cost is invalid"))?,
-                    actual_runtime_millis: u64::try_from(usage.runtime_millis)
-                        .map_err(|_| storage_ingress("local Usage runtime is invalid"))?,
-                    completed_at: message.outcome.finished_at.clone(),
-                })
-                .map_err(|_| storage_ingress("local execution admission cannot settle"))?;
+    if message.outcome.usage.is_some()
+        || message.outcome.status == ExecutionOutcomeStatus::Succeeded
+    {
+        if current.state == ExecutionReservationState::Settled {
+            return Ok(());
         }
-        ExecutionOutcomeStatus::Cancelled
-        | ExecutionOutcomeStatus::Failed
-        | ExecutionOutcomeStatus::InfrastructureError => {
-            if current.state == ExecutionReservationState::Released {
-                return Ok(());
-            }
-            storage
-                .execution_admission()
-                .map_err(|_| storage_ingress("local execution admission cannot be opened"))?
-                .release(&ExecutionReservationRelease {
-                    scope: execution_scope.clone(),
-                    worker_pool_id: worker_pool_id.clone(),
-                    job_id: message.lease.job_id.clone(),
-                    request_id: derived_request_id(
-                        b"local-admission-release",
-                        message.message_id.0.as_bytes(),
-                    ),
-                    expected_revision: current.revision,
-                    reason: match message.outcome.status {
-                        ExecutionOutcomeStatus::Cancelled => {
-                            ExecutionReservationReleaseReason::Cancelled
-                        }
-                        ExecutionOutcomeStatus::Failed
-                        | ExecutionOutcomeStatus::InfrastructureError => {
-                            ExecutionReservationReleaseReason::Failed
-                        }
-                        ExecutionOutcomeStatus::Succeeded => unreachable!(),
-                    },
-                    released_at: message.outcome.finished_at.clone(),
-                })
-                .map_err(|_| storage_ingress("local execution admission cannot release"))?;
+        let usage = message
+            .outcome
+            .usage
+            .as_ref()
+            .ok_or_else(|| storage_ingress("successful local outcome has no Usage"))?;
+        storage
+            .execution_admission()
+            .map_err(|_| storage_ingress("local execution admission cannot be opened"))?
+            .settle(&ExecutionReservationSettlement {
+                scope: execution_scope.clone(),
+                worker_pool_id: worker_pool_id.clone(),
+                job_id: message.lease.job_id.clone(),
+                request_id: derived_request_id(
+                    b"local-admission-settle",
+                    message.message_id.0.as_bytes(),
+                ),
+                expected_revision: current.revision,
+                actual_tokens: u64::try_from(usage.tokens)
+                    .map_err(|_| storage_ingress("local Usage tokens are invalid"))?,
+                actual_cost_microunits: usage
+                    .cost_microunits
+                    .map(u64::try_from)
+                    .transpose()
+                    .map_err(|_| storage_ingress("local Usage cost is invalid"))?,
+                actual_runtime_millis: u64::try_from(usage.runtime_millis)
+                    .map_err(|_| storage_ingress("local Usage runtime is invalid"))?,
+                completed_at: message.outcome.finished_at.clone(),
+            })
+            .map_err(|_| storage_ingress("local execution admission cannot settle"))?;
+    } else {
+        if current.state == ExecutionReservationState::Released {
+            return Ok(());
         }
+        storage
+            .execution_admission()
+            .map_err(|_| storage_ingress("local execution admission cannot be opened"))?
+            .release(&ExecutionReservationRelease {
+                scope: execution_scope.clone(),
+                worker_pool_id: worker_pool_id.clone(),
+                job_id: message.lease.job_id.clone(),
+                request_id: derived_request_id(
+                    b"local-admission-release",
+                    message.message_id.0.as_bytes(),
+                ),
+                expected_revision: current.revision,
+                reason: match message.outcome.status {
+                    ExecutionOutcomeStatus::Cancelled => {
+                        ExecutionReservationReleaseReason::Cancelled
+                    }
+                    ExecutionOutcomeStatus::Failed
+                    | ExecutionOutcomeStatus::InfrastructureError => {
+                        ExecutionReservationReleaseReason::Failed
+                    }
+                    ExecutionOutcomeStatus::Succeeded => unreachable!(),
+                },
+                released_at: message.outcome.finished_at.clone(),
+            })
+            .map_err(|_| storage_ingress("local execution admission cannot release"))?;
     }
     Ok(())
 }

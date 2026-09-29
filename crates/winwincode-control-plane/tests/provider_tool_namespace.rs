@@ -443,6 +443,7 @@ fn namespaced_parallel_tool_calls_round_trip_in_added_and_done_items() {
     let mut converter = ProviderStreamConverter::from_gateway_receipt(&receipt);
     let events = [
         ProviderStreamEvent::ResponseStarted {
+            observed_model_id: None,
             provider_response_id: "response-tool-namespace".to_owned(),
         },
         ProviderStreamEvent::ToolCallStarted {

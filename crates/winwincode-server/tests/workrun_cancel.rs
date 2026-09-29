@@ -76,7 +76,7 @@ fn execution_config(scope: &RepositoryScope) -> ProductSessionExecutionConfig {
         scope.clone(),
         "fixture-checkout-revision",
         "codex-chat",
-        3_600,
+        Some(3_600),
         1_073_741_824,
     )
     .expect("execution config")

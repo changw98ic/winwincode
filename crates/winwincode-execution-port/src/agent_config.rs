@@ -29,10 +29,71 @@ pub struct AgentIdentity {
     pub capabilities: WorkerCapabilitySet,
 }
 
+/// Device provider and deterministic retention policy sealed for one session.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct AgentJevContextSettings {
+    pub provider: String,
+    pub policy: crate::jev_decision::JevPolicy,
+}
+
+/// One permitted independent Fusion member sealed into the session.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct AgentFusionMember {
+    pub id: String,
+    pub provider: String,
+    pub model: String,
+    pub reasoning: String,
+}
+
+/// Exact members authorized for the frozen candidate's independent review panel.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct AgentFusionSettings {
+    pub members: Vec<AgentFusionMember>,
+}
+
+/// Validates bounded, distinct routes before any member inference.
+///
+/// # Errors
+/// Rejects ambiguous identities, duplicate routes and fewer than three providers.
+pub fn validate_fusion_settings(settings: &AgentFusionSettings) -> Result<(), AgentConfigError> {
+    if !(3..=16).contains(&settings.members.len()) {
+        return Err(AgentConfigError);
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    let mut routes = std::collections::BTreeSet::new();
+    let mut providers = std::collections::BTreeSet::new();
+    for member in &settings.members {
+        for field in [&member.id, &member.provider, &member.model] {
+            validate_text(field, 200)?;
+        }
+        validate_text(&member.reasoning, 100)?;
+        if !ids.insert(&member.id) || !routes.insert((&member.provider, &member.model)) {
+            return Err(AgentConfigError);
+        }
+        providers.insert(&member.provider);
+    }
+    if providers.len() < 3 {
+        return Err(AgentConfigError);
+    }
+    Ok(())
+}
+
 /// Effective model, tool, sandbox, and instruction settings for one profile.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct AgentProfileSettings {
+    /// Host-owned member routes; absent sessions cannot dispatch a Fusion panel.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fusion: Option<AgentFusionSettings>,
+    /// None retains the Core context; Some binds the Device JEV policy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jev_context: Option<AgentJevContextSettings>,
+    /// Device-local semantic Judge provider, sealed independently of context retention.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jev_judge: Option<String>,
     /// Provider selected by the embedded runtime.
     pub provider: String,
     /// Model selected within the provider.
@@ -48,7 +109,7 @@ pub struct AgentProfileSettings {
 }
 
 /// Explainable inputs of one resolved profile revision.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct AgentProfileSource {
     /// Execution profile selected by the dispatched job.
@@ -60,7 +121,7 @@ pub struct AgentProfileSource {
 }
 
 /// Immutable profile revision copied into a newly accepted Session.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct AgentProfile {
     /// Content-derived revision of the profile source.
@@ -113,6 +174,16 @@ pub fn resolve_agent_session_config(
     validate_text(worker_id.0.as_str(), 200)?;
     validate_text(execution_profile, 100)?;
     validate_text(&settings.provider, 200)?;
+    if let Some(fusion) = &settings.fusion {
+        validate_fusion_settings(fusion)?;
+    }
+    if let Some(provider) = &settings.jev_judge {
+        validate_text(provider, 200)?;
+    }
+    if let Some(context) = &settings.jev_context {
+        validate_text(&context.provider, 200)?;
+        crate::jev_decision::validate_policy(&context.policy).map_err(|_| AgentConfigError)?;
+    }
     validate_text(&settings.model, 200)?;
     validate_text(&settings.reasoning, 100)?;
     validate_text(&settings.sandbox, 100)?;
@@ -216,6 +287,9 @@ mod tests {
 
     fn settings(model: &str) -> AgentProfileSettings {
         AgentProfileSettings {
+            fusion: None,
+            jev_judge: None,
+            jev_context: None,
             provider: "fixture-provider".to_owned(),
             model: model.to_owned(),
             reasoning: "provider_default".to_owned(),
@@ -223,6 +297,85 @@ mod tests {
             sandbox: "candidate-write".to_owned(),
             instructions: Some("Implement the current task.".to_owned()),
         }
+    }
+
+    #[test]
+    fn judge_route_is_independently_sealed_and_tampering_is_rejected() {
+        let resolve = |settings| {
+            resolve_agent_session_config(
+                &WorkerId("wrk_agent_fixture".into()),
+                &capabilities('a'),
+                "executor",
+                settings,
+            )
+        };
+        let baseline = resolve(settings("fixture-model")).unwrap();
+        let mut configured = settings("fixture-model");
+        configured.jev_judge = Some("device-judge".into());
+        let mut sealed = resolve(configured.clone()).unwrap();
+        assert_ne!(baseline.snapshot_digest, sealed.snapshot_digest);
+        assert!(sealed.profile.source.settings.jev_context.is_none());
+        sealed.profile.source.settings.jev_judge = Some("changed".into());
+        assert!(validate_agent_session_config(&sealed).is_err());
+        configured.jev_judge = Some("\n".into());
+        assert!(resolve(configured).is_err());
+    }
+
+    #[test]
+    fn jev_context_policy_is_sealed_and_invalid_policy_is_rejected() {
+        let resolve = |settings| {
+            resolve_agent_session_config(
+                &WorkerId("wrk_agent_fixture".into()),
+                &capabilities('a'),
+                "executor",
+                settings,
+            )
+        };
+        let mut configured = settings("fixture-model-a");
+        let plain = resolve(configured.clone()).unwrap();
+        configured.jev_context = Some(AgentJevContextSettings {
+            provider: "device-jev".into(),
+            policy: crate::jev_decision::JevPolicy {
+                version: "jev-policy.v1".into(),
+                minimum_confidence: 0.55,
+                pin_threshold: 0.90,
+                keep_threshold: 0.75,
+                compact_threshold: 0.75,
+                drop_threshold: 0.90,
+                task_memory_threshold: 0.40,
+                project_memory_threshold: 0.60,
+                long_term_memory_threshold: 0.80,
+            },
+        });
+        let sealed = resolve(configured.clone()).unwrap();
+        assert_ne!(plain.profile.revision, sealed.profile.revision);
+        let stored: AgentSessionConfigSnapshot =
+            serde_json::from_slice(&serde_json::to_vec(&sealed).unwrap()).unwrap();
+        validate_agent_session_config(&stored).unwrap();
+        let mut tampered = stored;
+        tampered
+            .profile
+            .source
+            .settings
+            .jev_context
+            .as_mut()
+            .unwrap()
+            .policy
+            .drop_threshold = 0.95;
+        assert!(validate_agent_session_config(&tampered).is_err());
+        configured
+            .jev_context
+            .as_mut()
+            .unwrap()
+            .policy
+            .drop_threshold = 1.1;
+        assert!(resolve(configured).is_err());
+        assert!(
+            serde_json::to_value(plain.profile.source.settings)
+                .unwrap()
+                .get("jevContext")
+                .is_none()
+        );
     }
 
     #[test]

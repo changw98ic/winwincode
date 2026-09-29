@@ -29,7 +29,10 @@ use winwincode_kernel::{
     KernelExecutableAuthorization, KernelFileOperation,
 };
 
-use crate::{ActionRequestTransport, model_bridge::ModelRunBinding};
+use crate::{
+    ActionRequestTransport,
+    model_bridge::{ModelRunBinding, extend_binding_lineage},
+};
 
 #[derive(Clone)]
 pub(crate) struct ExecutionPortActionGate {
@@ -192,6 +195,9 @@ impl ExecutionPortActionGate {
                 .bindings
                 .write()
                 .map_err(|_| ActionBridgeError::Unavailable)?;
+            if replace_fenced_run && extend_binding_lineage(&mut bindings, &binding) {
+                return Ok(());
+            }
             // Re-installing the exact root authority is an idempotent
             // recovery operation, not a new fencing event.  Preserve its
             // already-discovered child aliases; only a changed root may
@@ -212,7 +218,8 @@ impl ExecutionPortActionGate {
             let stale_session_ids = bindings
                 .values()
                 .filter(|existing| {
-                    existing.authority.lease.job_id == binding.authority.lease.job_id
+                    replace_fenced_run
+                        && existing.authority.lease.job_id == binding.authority.lease.job_id
                         && !same_binding(existing, &binding)
                         && (!fence_lineage
                             || existing.run_key != binding.run_key
@@ -403,7 +410,13 @@ impl ExecutionPortActionGate {
             .get(session_id)
             .cloned();
         let stale = current_binding.as_ref().is_none_or(|binding| {
-            binding.authority.lease != action.authority.lease
+            // This request is retained in the pending map and its signature
+            // remains bound to the original stamp. Only the current deadline
+            // may have advanced while the exact request was in flight.
+            let mut expected = action.authority.lease.clone();
+            expected.expires_at = binding.authority.lease.expires_at.clone();
+            binding.authority.lease != expected
+                || binding.authority.lease.expires_at.0 < action.authority.lease.expires_at.0
                 || binding.authority.worker_session_id != action.authority.worker_session_id
                 || binding.authority.session_identity != action.authority.session_identity
                 || !canonical_instant(received_at)
@@ -1857,6 +1870,11 @@ mod tests {
 
     #[tokio::test]
     async fn kernel_action_round_trips_through_signed_execution_port_receipt() {
+        action_receipt_round_trip(false).await;
+        action_receipt_round_trip(true).await;
+    }
+
+    async fn action_receipt_round_trip(renew: bool) {
         let root =
             std::env::temp_dir().join(format!("winwincode-codex-action-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -1872,7 +1890,7 @@ mod tests {
         .expect("open action gate");
         gate.install_binding(binding(), None)
             .expect("install binding");
-        let now = Instant("2030-01-01T00:00:02.000Z".to_owned());
+        let mut now = Instant("2030-01-01T00:00:02.000Z".to_owned());
         gate.update_now(&now).expect("install trusted time");
 
         let action_request = KernelActionRequest {
@@ -1899,14 +1917,34 @@ mod tests {
         assert!(messages.is_empty());
         assert_pending_shell_request(&gate, &request);
         let receipt = signed_permit(request, &now);
+        if renew {
+            let mut renewed = binding();
+            renewed.authority.lease.expires_at = Instant("2030-01-01T02:00:00.000Z".to_owned());
+            gate.install_binding(renewed, None)
+                .expect("renew pending action");
+            now = Instant("2030-01-01T01:30:00.000Z".to_owned());
+        }
         gate.accept_receipt(&receipt, &now)
             .expect("accept signed permit");
         let authorization = task
             .await
             .expect("Kernel authorization task")
             .expect("Kernel action authorized");
-        assert_consumed_action_is_fenced(&gate, action_request, authorization, &receipt, &now)
-            .await;
+        if renew {
+            gate.revalidate(action_request.clone(), authorization.clone())
+                .await
+                .expect("old signed request remains usable during renewed lease");
+            gate.update_now(&Instant("2030-01-01T02:00:00.000Z".to_owned()))
+                .expect("reach renewed deadline");
+            assert!(
+                gate.revalidate(action_request, authorization)
+                    .await
+                    .is_err()
+            );
+        } else {
+            assert_consumed_action_is_fenced(&gate, action_request, authorization, &receipt, &now)
+                .await;
+        }
         std::fs::remove_dir_all(root).expect("remove action fixture");
     }
 
@@ -2117,6 +2155,32 @@ mod tests {
         std::fs::remove_dir_all(root).expect("remove executable identity fixture");
     }
 
+    fn assert_renewed_child_binding(
+        gate: &ExecutionPortActionGate,
+        original: &ModelRunBinding,
+        child: &ModelRunBinding,
+    ) -> ModelRunBinding {
+        let mut renewed = original.clone();
+        renewed.authority.lease.expires_at = Instant("2030-01-01T02:00:00.000Z".to_owned());
+        gate.install_binding(renewed.clone(), None)
+            .expect("renew root binding");
+        assert_eq!(gate.state.pending.lock().expect("pending").len(), 1);
+        {
+            let bindings = gate.state.bindings.read().expect("bindings");
+            assert_eq!(
+                bindings
+                    .get(&child.kernel_session_id)
+                    .expect("child survives")
+                    .authority
+                    .lease
+                    .expires_at,
+                renewed.authority.lease.expires_at
+            );
+        }
+
+        renewed
+    }
+
     #[tokio::test]
     async fn replacing_kernel_binding_cancels_pending_action_generation() {
         let root = std::env::temp_dir().join(format!(
@@ -2161,6 +2225,7 @@ mod tests {
         child.authority.session_identity.codex_thread_id = child.canonical_thread_id.clone();
         gate.install_child_binding(child.clone())
             .expect("install descendant binding");
+        assert_eq!(gate.state.pending.lock().expect("parent pending").len(), 1);
         gate.install_binding(original.clone(), None)
             .expect("idempotent root rebind preserves descendant");
         assert!(
@@ -2171,7 +2236,11 @@ mod tests {
                 .contains_key(&child.kernel_session_id)
         );
 
-        let mut replacement = original.clone();
+        let mut replacement = assert_renewed_child_binding(&gate, &original, &child);
+        assert!(
+            !task.is_finished(),
+            "renewal must preserve pending authorization"
+        );
         replacement.kernel_session_id = "kernel-session-rebound".to_owned();
         gate.install_binding(replacement.clone(), None)
             .expect("replace binding");

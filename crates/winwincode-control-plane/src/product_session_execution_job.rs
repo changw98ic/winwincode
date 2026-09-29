@@ -69,7 +69,7 @@ pub struct ProductSessionExecutionConfig {
     repository_scope: RepositoryScope,
     checkout_revision: String,
     execution_profile: String,
-    max_runtime_seconds: i64,
+    max_runtime_seconds: Option<i64>,
     max_artifact_bytes: i64,
 }
 
@@ -100,7 +100,7 @@ impl ProductSessionExecutionConfig {
         repository_scope: RepositoryScope,
         checkout_revision: impl Into<String>,
         execution_profile: impl Into<String>,
-        max_runtime_seconds: i64,
+        max_runtime_seconds: Option<i64>,
         max_artifact_bytes: i64,
     ) -> Result<Self, ProductSessionServiceError> {
         repository_scope_key(&repository_scope).map_err(|error| storage_error(&error))?;
@@ -110,7 +110,8 @@ impl ProductSessionExecutionConfig {
             || checkout_revision.len() > 200
             || execution_profile.is_empty()
             || execution_profile.len() > 100
-            || !(1..=MAX_RUNTIME_SECONDS).contains(&max_runtime_seconds)
+            || max_runtime_seconds
+                .is_some_and(|seconds| !(1..=MAX_RUNTIME_SECONDS).contains(&seconds))
             || !(0..=MAX_ARTIFACT_BYTES).contains(&max_artifact_bytes)
         {
             return Err(service_error(
@@ -156,24 +157,24 @@ impl ProductSessionExecutionConfig {
         }
         let start_millis = crate::session_binding_transaction::instant_millis(&context.occurred_at)
             .map_err(|error| storage_error(&error))?;
-        let runtime_millis = u64::try_from(self.max_runtime_seconds)
-            .ok()
-            .and_then(|seconds| seconds.checked_mul(1_000))
-            .ok_or_else(|| {
-                service_error(
-                    ProductSessionServiceErrorCode::InvalidInput,
-                    "ProductSession execution deadline is invalid",
-                )
-            })?;
-        let deadline_millis = start_millis.checked_add(runtime_millis).ok_or_else(|| {
-            service_error(
-                ProductSessionServiceErrorCode::InvalidInput,
-                "ProductSession execution deadline is out of range",
-            )
-        })?;
+        let deadline_at = self
+            .max_runtime_seconds
+            .map(|seconds| {
+                let deadline_millis = u64::try_from(seconds)
+                    .ok()
+                    .and_then(|seconds| seconds.checked_mul(1_000))
+                    .and_then(|runtime| start_millis.checked_add(runtime))
+                    .ok_or_else(|| {
+                        service_error(
+                            ProductSessionServiceErrorCode::InvalidInput,
+                            "ProductSession execution deadline is out of range",
+                        )
+                    })?;
+                instant_from_millis(deadline_millis).map_err(|error| storage_error(&error))
+            })
+            .transpose()?;
         let limits = ExecutionLimits {
-            deadline_at: instant_from_millis(deadline_millis)
-                .map_err(|error| storage_error(&error))?,
+            deadline_at,
             max_artifact_bytes: self.max_artifact_bytes,
             max_runtime_seconds: self.max_runtime_seconds,
         };

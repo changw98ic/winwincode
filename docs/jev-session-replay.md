@@ -106,3 +106,33 @@ non-production evidence even when fixture numbers look favorable.
 - BD-02 decision engine: auditable PIN/KEEP/TRUNCATE/DROP/ARCHIVE actions
 - BD-03 deterministic GC: the `deterministic-gc` arm and the GC stage before Jev
 - BD-04 this harness: comparative measurement only; it does not implement GC or Jev
+
+## Remote scoring transports
+
+The Rust `HttpsJevRemoteTransport::try_new` constructor targets self-hosted NLI
+services. For TypeSafe, use `try_new_system_one` with the configured HTTPS
+`/v1/systemone` endpoint, a model returned by `/v1/models`, `devices = [Remote]`
+and `dtypes = [Auto]`. The service controls accelerator placement and precision.
+
+The adapter maps each premise/hypothesis pair to a named `choice` question with
+entailment, contradiction and neutral criteria. It matches returned answers by
+name, validates normalized probabilities and requires reported token usage.
+Requests and responses are bounded to 2 MiB. Credentials stay in the Bearer
+header; configuration and transport debug output redact them.
+
+The wire contract is defined by the [TypeSafe OpenAPI document](https://api.typesafe.ai/openapi.json).
+A direct service check can run the ignored Rust test `system_one_live_transport`
+with `WWC_TYPESAFE_ENDPOINT`, `WWC_TYPESAFE_MODEL` and `WWC_TYPESAFE_API_KEY` supplied
+through the process environment. Its result is transport evidence. Production
+Fusion/JEV runs still require the corresponding Worker composition and evidence.
+SystemOne results retain input tokens, output tokens and the response model through
+single/batch evaluation and runtime observations. The configured model alias stays
+in `model_id`; `resolved_model_id` identifies the actual response model. Providers
+that do not report output usage or a resolved model leave those fields absent.
+Formal reporting must treat absence as unknown rather than zero or the requested alias.
+
+`RuntimeFusionJudge` returns the complete JEV run record, including failed
+attempts before recovery. `MultiRoundReport.jev_calls` groups successful usage
+and failed attempts by claim for host accounting. These records can be
+serialized separately; they never enter the judge premise or authorize a claim.
+The production benchmark adapter must persist them with its task ledger.

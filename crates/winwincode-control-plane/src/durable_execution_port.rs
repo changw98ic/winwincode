@@ -382,6 +382,8 @@ impl<'application> DurableExecutionPortIngress<'application> {
                     &binding.worker_session_id,
                     &binding.session_identity.worker_session_id,
                     &authority,
+                    self.storage,
+                    &self.server_time,
                 )?;
                 let (_, job) = load_durable_execution_job(self.storage, &binding.lease.job_id)
                     .map_err(DurableExecutionPortError::Storage)?;
@@ -576,6 +578,8 @@ impl<'application> DurableExecutionPortIngress<'application> {
             worker_session_id,
             identity_worker_session_id,
             &dispatch,
+            self.storage,
+            &self.server_time,
         )?;
         self.delegate_supplement(DurableExecutionPortSupplement::JobScopedWorkerMessage {
             dispatch: &dispatch,
@@ -619,7 +623,7 @@ impl<'application> DurableExecutionPortIngress<'application> {
             }
             Err(error) => return Err(error),
         };
-        if let Some(rejection) = outcome_authority_rejection(message, &authority) {
+        if let Some(rejection) = outcome_authority_rejection(message, &authority, self.storage)? {
             return Ok(outcome_output(rejection));
         }
         let (durable, job) = load_durable_execution_job(self.storage, &message.lease.job_id)
@@ -858,12 +862,15 @@ impl<'application> DurableExecutionPortIngress<'application> {
         message: &JobOutcomeMessage,
         facts: &DeliveryTerminalOutcomeFacts,
     ) -> Result<Result<(bool, u64), JobOutcomeAckMessage>, DurableExecutionPortError> {
-        let commit = match self.control_plane.commit_delivery_terminal_outcome(
-            self.repository_scope,
-            message,
-            facts,
-            &self.server_time,
-        ) {
+        let commit = match self
+            .control_plane
+            .commit_delivery_terminal_outcome_for_period(
+                self.repository_scope,
+                message,
+                facts,
+                &self.server_time,
+                &message.lease.expires_at,
+            ) {
             Ok(commit) => commit,
             Err(DeliveryTerminalOutcomeCommitError::Storage(error))
                 if matches!(
@@ -923,11 +930,13 @@ fn delegated_message_authority(
     }
 }
 
-fn require_exact_dispatch_message(
+pub(crate) fn require_exact_dispatch_message(
     lease: &ExecutionLeaseStamp,
     worker_session_id: &winwincode_domain::WorkerSessionId,
     identity_worker_session_id: &winwincode_domain::WorkerSessionId,
     authority: &ExecutionDispatchAuthority,
+    storage: &mut SqliteStorage,
+    now: &Instant,
 ) -> Result<(), DurableExecutionPortError> {
     let accepted = authority.lease();
     let attempt = u64::try_from(lease.attempt).ok();
@@ -938,18 +947,29 @@ fn require_exact_dispatch_message(
         && attempt == Some(accepted.attempt)
         && lease.fencing_token == accepted.fencing_token
         && lease.issued_at == accepted.issued_at
-        && lease.expires_at == accepted.expires_at
         && worker_session_id == authority.worker_session_id()
         && identity_worker_session_id == worker_session_id;
     if exact {
-        Ok(())
-    } else {
-        Err(DurableExecutionPortError::Storage(
-            StorageError::invalid_input(
-                "Worker message differs from its accepted dispatch authority",
-            ),
-        ))
+        if lease.expires_at == accepted.expires_at {
+            return Ok(());
+        }
+        let mut period = accepted.clone();
+        period.expires_at.clone_from(&lease.expires_at);
+        let current = storage
+            .execution_registry()
+            .and_then(|registry| registry.load_live_lease_for_period(&period, now))
+            .map_err(DurableExecutionPortError::Storage)?;
+        // The registry validates the renewed period against the accepted
+        // history and the live lease. Its current expiry is later than the
+        // original dispatch expiry, so full-record equality would reject
+        // every valid message after renewal.
+        if current.is_some() {
+            return Ok(());
+        }
     }
+    Err(DurableExecutionPortError::Storage(
+        StorageError::invalid_input("Worker message differs from its accepted dispatch authority"),
+    ))
 }
 
 impl ExecutionPortCore for DurableExecutionPortIngress<'_> {
@@ -964,25 +984,26 @@ impl ExecutionPortCore for DurableExecutionPortIngress<'_> {
 fn outcome_authority_rejection(
     message: &JobOutcomeMessage,
     authority: &ExecutionDispatchAuthority,
-) -> Option<JobOutcomeAckMessage> {
+    storage: &mut SqliteStorage,
+) -> Result<Option<JobOutcomeAckMessage>, DurableExecutionPortError> {
     let lease = authority.lease();
     if message.lease.worker_instance_id != lease.worker_instance_id {
-        return Some(outcome_rejection(
+        return Ok(Some(outcome_rejection(
             message,
             JobOutcomeAckMessageStatus::RejectedWorkerInstance,
             ExecutionPortErrorCode::WorkerInstanceChanged,
             "job.outcome uses another Worker instance",
-        ));
+        )));
     }
     if message.lease.fencing_token != lease.fencing_token
         && decimal_is_less(&message.lease.fencing_token.0, &lease.fencing_token.0)
     {
-        return Some(outcome_rejection(
+        return Ok(Some(outcome_rejection(
             message,
             JobOutcomeAckMessageStatus::RejectedStaleFencingToken,
             ExecutionPortErrorCode::StaleFencingToken,
             "job.outcome uses a stale fencing token",
-        ));
+        )));
     }
     let attempt = u64::try_from(message.lease.attempt).ok();
     let exact = message.lease.job_id == lease.job_id
@@ -992,16 +1013,27 @@ fn outcome_authority_rejection(
         && attempt == Some(lease.attempt)
         && message.lease.fencing_token == lease.fencing_token
         && message.lease.issued_at == lease.issued_at
-        && message.lease.expires_at == lease.expires_at
         && message.worker_session_id == *authority.worker_session_id();
-    (!exact).then(|| {
+    let accepted_period = if exact && message.lease.expires_at != lease.expires_at {
+        let mut period = lease.clone();
+        period.expires_at.clone_from(&message.lease.expires_at);
+        storage
+            .execution_registry()
+            .and_then(|registry| registry.load_accepted_lease_for_period(&period))
+            .map_err(DurableExecutionPortError::Storage)?
+            .as_ref()
+            == Some(lease)
+    } else {
+        exact
+    };
+    Ok((!accepted_period).then(|| {
         outcome_rejection(
             message,
             JobOutcomeAckMessageStatus::RejectedConflict,
             ExecutionPortErrorCode::JobDispatchConflict,
             "job.outcome differs from its accepted dispatch authority",
         )
-    })
+    }))
 }
 
 fn outcome_rejection(

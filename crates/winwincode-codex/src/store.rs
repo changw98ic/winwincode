@@ -49,6 +49,51 @@ pub(crate) struct AdapterStore {
     connection: Arc<Mutex<Connection>>,
 }
 
+fn extend_existing_model_lineage(
+    transaction: &Transaction<'_>,
+    run_key: &str,
+    existing_root: Option<&(String, Vec<u8>)>,
+    authority_json: &[u8],
+) -> Result<bool, AdapterStoreError> {
+    let Some((existing_run_key, bytes)) = existing_root else {
+        return Ok(false);
+    };
+    let previous: ModelLeaseAuthority =
+        serde_json::from_slice(bytes).map_err(|_| AdapterStoreError::Corrupt)?;
+    let current: ModelLeaseAuthority =
+        serde_json::from_slice(authority_json).map_err(|_| AdapterStoreError::Corrupt)?;
+    if existing_run_key != run_key
+        || !crate::model_bridge::same_binding_with_extended_lease(&previous, &current)
+    {
+        return Ok(false);
+    }
+    let mut statement = transaction
+        .prepare("SELECT thread_id, authority_json FROM model_thread_lineage WHERE run_key = ?1")
+        .map_err(|_| AdapterStoreError::Unavailable)?;
+    let rows = statement
+        .query_map([run_key], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .map_err(|_| AdapterStoreError::Unavailable)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| AdapterStoreError::Unavailable)?;
+    drop(statement);
+    for (child_id, bytes) in rows {
+        let mut child: ModelLeaseAuthority =
+            serde_json::from_slice(&bytes).map_err(|_| AdapterStoreError::Corrupt)?;
+        if !crate::model_bridge::common_authority(&previous, &child) {
+            return Err(AdapterStoreError::Conflict);
+        }
+        child.lease.expires_at = current.lease.expires_at.clone();
+        let bytes = serde_json::to_vec(&child).map_err(|_| AdapterStoreError::Corrupt)?;
+        transaction.execute(
+                            "UPDATE model_thread_lineage SET authority_json = ?1 WHERE thread_id = ?2 AND run_key = ?3",
+                            params![bytes, child_id, run_key],
+                        ).map_err(|_| AdapterStoreError::Unavailable)?;
+    }
+    Ok(true)
+}
+
 #[allow(clippy::too_many_lines)]
 fn initialize_schema(connection: &Connection) -> Result<(), AdapterStoreError> {
     connection
@@ -59,6 +104,13 @@ fn initialize_schema(connection: &Connection) -> Result<(), AdapterStoreError> {
                  CREATE TABLE IF NOT EXISTS codex_run (
                    run_key TEXT PRIMARY KEY NOT NULL,
                    record_json BLOB NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS fusion_panel (
+                   run_key TEXT NOT NULL,
+                   panel_id TEXT NOT NULL,
+                   input_json BLOB NOT NULL,
+                   result_json BLOB,
+                   PRIMARY KEY (run_key, panel_id)
                  );
                  CREATE TABLE IF NOT EXISTS codex_store_migration (
                    migration_key TEXT PRIMARY KEY NOT NULL
@@ -93,6 +145,19 @@ fn initialize_schema(connection: &Connection) -> Result<(), AdapterStoreError> {
                    frame_json BLOB NOT NULL,
                    PRIMARY KEY (run_key, model_call_id, sequence)
                  );
+                 CREATE TABLE IF NOT EXISTS tool_repeat_run (
+                   run_key TEXT PRIMARY KEY NOT NULL,
+                   stopped INTEGER NOT NULL DEFAULT 0 CHECK(stopped IN (0, 1))
+                 );
+                 CREATE TABLE IF NOT EXISTS tool_repeat_admission (
+                   run_key TEXT NOT NULL REFERENCES tool_repeat_run(run_key),
+                   model_call_id TEXT NOT NULL,
+                   call_id TEXT NOT NULL,
+                   request_digest TEXT NOT NULL,
+                   PRIMARY KEY(run_key, model_call_id, call_id)
+                 );
+                 CREATE INDEX IF NOT EXISTS tool_repeat_identity_idx
+                   ON tool_repeat_admission(run_key, request_digest);
                  CREATE TABLE IF NOT EXISTS model_thread_lineage (
                    thread_id TEXT PRIMARY KEY NOT NULL,
                    run_key TEXT NOT NULL,
@@ -123,7 +188,7 @@ fn initialize_schema(connection: &Connection) -> Result<(), AdapterStoreError> {
                    approval_id TEXT PRIMARY KEY NOT NULL,
                    run_key TEXT NOT NULL,
                    kernel_session_id TEXT NOT NULL,
-                   operation_kind TEXT NOT NULL CHECK(operation_kind IN ('exec', 'patch')),
+                   operation_kind TEXT NOT NULL CHECK(operation_kind IN ('exec', 'patch', 'mcp')),
                    operation_id TEXT NOT NULL,
                    turn_id TEXT,
                    request_digest TEXT NOT NULL,
@@ -152,7 +217,42 @@ fn initialize_schema(connection: &Connection) -> Result<(), AdapterStoreError> {
                  );",
             )
             .map_err(|_| AdapterStoreError::Unavailable)?;
+    migrate_mcp_approval_schema(connection)?;
     initialize_performance_schema(connection)
+}
+
+fn migrate_mcp_approval_schema(connection: &Connection) -> Result<(), AdapterStoreError> {
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|_| AdapterStoreError::Unavailable)?;
+    let schema: String = transaction
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'approval_operation'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| AdapterStoreError::Unavailable)?;
+    if !schema.contains("'mcp'") {
+        let replacement = schema
+            .replacen("approval_operation", "approval_operation_migrating", 1)
+            .replace("'exec', 'patch'", "'exec', 'patch', 'mcp'");
+        if !replacement.contains("'mcp'") {
+            return Err(AdapterStoreError::Corrupt);
+        }
+        transaction
+            .execute_batch(&replacement)
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+        transaction
+            .execute_batch(
+                "INSERT INTO approval_operation_migrating SELECT * FROM approval_operation;
+             DROP TABLE approval_operation;
+             ALTER TABLE approval_operation_migrating RENAME TO approval_operation;",
+            )
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+    }
+    transaction
+        .commit()
+        .map_err(|_| AdapterStoreError::Unavailable)
 }
 
 fn initialize_performance_schema(connection: &Connection) -> Result<(), AdapterStoreError> {
@@ -195,6 +295,15 @@ fn initialize_performance_schema(connection: &Connection) -> Result<(), AdapterS
                      (completed = 0 AND completed_at IS NULL)
                      OR (completed = 1 AND completed_at IS NOT NULL)
                    )
+                 );
+                 CREATE TABLE IF NOT EXISTS performance_jev_receipt (
+                   run_key TEXT NOT NULL,
+                   operation_id TEXT NOT NULL,
+                   receipt_json TEXT NOT NULL,
+                   completed INTEGER NOT NULL CHECK(completed IN (0,1)),
+                   input_tokens INTEGER NOT NULL CHECK(input_tokens>=0),
+                   output_tokens INTEGER NOT NULL CHECK(output_tokens>=0),
+                   PRIMARY KEY(run_key,operation_id)
                  );
                  CREATE TABLE IF NOT EXISTS performance_changed_file (
                    run_key TEXT NOT NULL,
@@ -536,6 +645,98 @@ impl AdapterStore {
     /// budgets. Any pending model operation or completed operation without a
     /// settled charge is reported as incomplete rather than silently counted
     /// as zero cost.
+    pub(crate) fn execution_outcome_usage(
+        &self,
+        run_key: &str,
+        runtime_millis: i64,
+    ) -> Result<winwincode_execution_port::generated::ExecutionOutcomeUsage, AdapterStoreError>
+    {
+        let totals = self.delegated_performance_totals(run_key)?;
+        Ok(
+            winwincode_execution_port::generated::ExecutionOutcomeUsage {
+                runtime_millis,
+                tokens: totals.total_tokens,
+                cost_microunits: totals.cost_complete.then_some(totals.total_cost_microunits),
+            },
+        )
+    }
+
+    pub(crate) fn retained_outcome_usage(
+        &self,
+        run_key: &str,
+        runtime_millis: i64,
+    ) -> Result<
+        Option<winwincode_execution_port::generated::ExecutionOutcomeUsage>,
+        AdapterStoreError,
+    > {
+        let totals = self.delegated_performance_totals(run_key)?;
+        if totals.primary_model_calls + totals.observer_calls == 0 || totals.pending_model_calls > 0
+        {
+            return Ok(None);
+        }
+        self.execution_outcome_usage(run_key, runtime_millis)
+            .map(Some)
+    }
+
+    /// Imports an immutable Device receipt separately from primary model usage.
+    /// Unknown or failed attempts keep the accounting row incomplete and cost unknown.
+    pub(crate) fn retain_jev_performance<T: Serialize + DeserializeOwned>(
+        &self,
+        run_key: &str,
+        receipt: &winwincode_provider::DeviceJevReceipt<T>,
+        observed_at: &winwincode_domain::Instant,
+    ) -> Result<(), AdapterStoreError> {
+        validate_performance_identity(run_key, &receipt.operation_id, observed_at)?;
+        let observation = receipt
+            .run
+            .as_ref()
+            .and_then(|run| run.observation.as_ref());
+        let input = i64::try_from(observation.map_or(0, |value| value.input_tokens))
+            .map_err(|_| AdapterStoreError::Corrupt)?;
+        let output = i64::try_from(
+            observation
+                .and_then(|value| value.output_tokens)
+                .unwrap_or(0),
+        )
+        .map_err(|_| AdapterStoreError::Corrupt)?;
+        validate_metric(input)?;
+        validate_metric(output)?;
+        let complete = observation.is_some_and(|value| value.output_tokens.is_some())
+            && receipt
+                .run
+                .as_ref()
+                .is_some_and(|run| run.failures.is_empty());
+        let serialized = serde_json::to_string(receipt).map_err(|_| AdapterStoreError::Corrupt)?;
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+        let previous: Option<(String, bool)> = transaction.query_row(
+            "SELECT receipt_json,completed FROM performance_jev_receipt WHERE run_key=?1 AND operation_id=?2",
+            params![run_key,receipt.operation_id], |row| Ok((row.get(0)?,row.get(1)?)),
+        ).optional().map_err(|_| AdapterStoreError::Unavailable)?;
+        if let Some((previous, completed)) = previous {
+            if previous == serialized {
+                return Ok(());
+            }
+            let stored: winwincode_provider::DeviceJevReceipt<T> =
+                serde_json::from_str(&previous).map_err(|_| AdapterStoreError::Corrupt)?;
+            if completed || stored.input_digest != receipt.input_digest || stored.run.is_some() {
+                return Err(AdapterStoreError::Conflict);
+            }
+        }
+        transaction.execute(
+            "INSERT INTO performance_jev_receipt VALUES (?1,?2,?3,?4,?5,?6)
+             ON CONFLICT(run_key,operation_id) DO UPDATE SET receipt_json=excluded.receipt_json,
+             completed=excluded.completed,input_tokens=excluded.input_tokens,output_tokens=excluded.output_tokens",
+            params![run_key,receipt.operation_id,serialized,complete,input,output],
+        ).map_err(|_| AdapterStoreError::Unavailable)?;
+        transaction
+            .commit()
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+        Ok(())
+    }
+
     pub(crate) fn delegated_performance_totals(
         &self,
         run_key: &str,
@@ -545,18 +746,24 @@ impl AdapterStore {
             .query_row(
                 "SELECT
                    COALESCE(SUM(operation_kind = 'primary_model'), 0),
-                   COALESCE(SUM(CASE WHEN operation_kind IN ('primary_model', 'observer')
+                   COALESCE(SUM(CASE WHEN operation_kind IN ('primary_model', 'observer', 'jev')
                      THEN input_tokens + cached_tokens + output_tokens ELSE 0 END), 0),
-                   COALESCE(SUM(CASE WHEN operation_kind IN ('primary_model', 'observer')
+                   COALESCE(SUM(CASE WHEN operation_kind IN ('primary_model', 'observer', 'jev')
                      THEN actual_cost_microunits ELSE 0 END), 0),
                    COALESCE(SUM(CASE WHEN operation_kind = 'primary_model'
                      THEN duration_millis ELSE 0 END), 0),
-                   COALESCE(SUM(CASE WHEN operation_kind IN ('primary_model', 'observer')
+                   COALESCE(SUM(CASE WHEN operation_kind IN ('primary_model', 'observer', 'jev')
                      AND actual_cost_microunits IS NULL THEN 1 ELSE 0 END), 0)
-                   , COALESCE(SUM(CASE WHEN operation_kind IN ('primary_model', 'observer')
+                   , COALESCE(SUM(CASE WHEN operation_kind IN ('primary_model', 'observer', 'jev')
                      AND completed = 0 THEN 1 ELSE 0 END), 0)
                    , COALESCE(SUM(operation_kind = 'observer'), 0)
-                 FROM performance_operation WHERE run_key = ?1",
+                 FROM (
+                   SELECT operation_kind,input_tokens,cached_tokens,output_tokens,actual_cost_microunits,duration_millis,completed
+                   FROM performance_operation WHERE run_key=?1
+                   UNION ALL
+                   SELECT 'jev',input_tokens,0,output_tokens,NULL,0,completed
+                   FROM performance_jev_receipt WHERE run_key=?1
+                 )",
                 params![run_key],
                 |row| {
                     let missing_costs = row.get::<_, i64>(4)?;
@@ -1629,6 +1836,14 @@ impl AdapterStore {
             {
                 return Ok(());
             }
+            if extend_existing_model_lineage(
+                transaction,
+                run_key,
+                existing_root.as_ref(),
+                authority_json,
+            )? {
+                return Ok(());
+            }
             if let Some(job_id) = job_id {
                 let stale_run_keys = {
                     let mut statement = transaction
@@ -2101,6 +2316,7 @@ impl fmt::Debug for AdapterStore {
 pub(crate) enum StoredApprovalOperationKind {
     Exec,
     Patch,
+    Mcp,
 }
 
 impl StoredApprovalOperationKind {
@@ -2108,6 +2324,7 @@ impl StoredApprovalOperationKind {
         match self {
             Self::Exec => "exec",
             Self::Patch => "patch",
+            Self::Mcp => "mcp",
         }
     }
 
@@ -2115,6 +2332,7 @@ impl StoredApprovalOperationKind {
         match value {
             "exec" => Ok(Self::Exec),
             "patch" => Ok(Self::Patch),
+            "mcp" => Ok(Self::Mcp),
             _ => Err(AdapterStoreError::Corrupt),
         }
     }
@@ -2815,6 +3033,7 @@ mod tests {
     use winwincode_execution_port::runtime_trace_outbox::{
         ExecutionMode, ObserverMode, PerformanceBaselineReport,
     };
+    use winwincode_provider::{DeviceJevReceipt, JevDevice, JevObservation, JevRun};
 
     fn test_root(name: &str) -> PathBuf {
         let unique = std::time::SystemTime::now()
@@ -2825,6 +3044,151 @@ mod tests {
             "winwincode-codex-store-{name}-{}-{unique}",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn jev_receipts_settle_once_and_preserve_unknown_usage() {
+        let root = test_root("jev-accounting");
+        let store = AdapterStore::open(&root).unwrap();
+        let now = Instant("2030-01-01T00:00:00Z".into());
+        store
+            .record_performance_completion(
+                "run",
+                PerformanceOperationKind::PrimaryModel,
+                "primary",
+                &now,
+                PerformanceOperationCompletion {
+                    input_tokens: 10,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        store
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TABLE performance_jev_receipt")
+            .unwrap();
+        drop(store);
+        let store = AdapterStore::open(&root).unwrap();
+        assert_eq!(store.execution_outcome_usage("run", 0).unwrap().tokens, 10);
+
+        let mut receipt: DeviceJevReceipt = DeviceJevReceipt {
+            operation_id: "jev:exchange:1".into(),
+            input_digest: "a".repeat(64),
+            run: None,
+        };
+        store.retain_jev_performance("run", &receipt, &now).unwrap();
+        let pending = store.delegated_performance_totals("run").unwrap();
+        assert_eq!(pending.pending_model_calls, 1);
+        assert!(!pending.cost_complete);
+        assert_eq!(store.retained_outcome_usage("run", 30).unwrap(), None);
+        receipt.run = Some(JevRun {
+            value: None,
+            failures: vec![],
+            observation: Some(JevObservation {
+                provider_id: "jev-provider".into(),
+                model_id: "jev-latest".into(),
+                resolved_model_id: Some("jev-actual".into()),
+                latency: std::time::Duration::from_millis(20),
+                input_tokens: 40,
+                output_tokens: Some(8),
+                batch_size: 4,
+                device: JevDevice::Remote,
+                confidence: 0.9,
+            }),
+        });
+        store.retain_jev_performance("run", &receipt, &now).unwrap();
+        store.retain_jev_performance("run", &receipt, &now).unwrap();
+        let usage = store.execution_outcome_usage("run", 30).unwrap();
+        assert_eq!(usage.tokens, 58);
+        assert_eq!(usage.cost_microunits, None);
+        assert_eq!(
+            store.retained_outcome_usage("run", 30).unwrap(),
+            Some(usage.clone())
+        );
+        let totals = store.delegated_performance_totals("run").unwrap();
+        assert_eq!(totals.primary_model_calls, 1);
+        drop(store);
+        let store = AdapterStore::open(&root).unwrap();
+        store.retain_jev_performance("run", &receipt, &now).unwrap();
+        assert_eq!(store.execution_outcome_usage("run", 30).unwrap().tokens, 58);
+        assert_eq!(
+            store.retained_outcome_usage("run", 30).unwrap(),
+            Some(usage)
+        );
+        assert_eq!(store.retained_outcome_usage("other-run", 30).unwrap(), None);
+        let mut changed = receipt.clone();
+        changed.input_digest = "b".repeat(64);
+        assert!(store.retain_jev_performance("run", &changed, &now).is_err());
+        let mut partial = receipt.clone();
+        partial.operation_id = "jev:exchange:2".into();
+        partial
+            .run
+            .as_mut()
+            .unwrap()
+            .observation
+            .as_mut()
+            .unwrap()
+            .output_tokens = None;
+        store.retain_jev_performance("run", &partial, &now).unwrap();
+        let total = store.delegated_performance_totals("run").unwrap();
+        assert_eq!(total.total_tokens, 98);
+        assert_eq!(total.pending_model_calls, 1);
+        assert!(!total.cost_complete);
+        let other_usage = store.execution_outcome_usage("other-run", 0).unwrap();
+        assert_eq!(other_usage.tokens, 0);
+        let stored: String = store.lock().unwrap().query_row(
+            "SELECT receipt_json FROM performance_jev_receipt WHERE run_key='run' AND operation_id=?1",
+            [partial.operation_id], |row| row.get(0)).unwrap();
+        let saved: DeviceJevReceipt = serde_json::from_str(&stored).unwrap();
+        assert_eq!(saved.run.unwrap().observation.unwrap().output_tokens, None);
+        assert_judge_receipt_usage_is_counted_once(&store, &now, receipt);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn assert_judge_receipt_usage_is_counted_once(
+        store: &AdapterStore,
+        now: &Instant,
+        receipt: DeviceJevReceipt,
+    ) {
+        let mut judge: DeviceJevReceipt<[f32; 3]> = DeviceJevReceipt {
+            operation_id: "judge:exchange:0".into(),
+            input_digest: "c".repeat(64),
+            run: None,
+        };
+        store
+            .retain_jev_performance("judge-run", &judge, now)
+            .unwrap();
+        assert_eq!(
+            store
+                .delegated_performance_totals("judge-run")
+                .unwrap()
+                .pending_model_calls,
+            1
+        );
+        let run = receipt.run.expect("primary JEV run");
+        judge.run = Some(JevRun {
+            value: Some([0.1, 0.8, 0.1]),
+            observation: run.observation,
+            failures: run.failures,
+        });
+        store
+            .retain_jev_performance("judge-run", &judge, now)
+            .unwrap();
+        store
+            .retain_jev_performance("judge-run", &judge, now)
+            .unwrap();
+        assert_eq!(
+            store
+                .execution_outcome_usage("judge-run", 0)
+                .unwrap()
+                .tokens,
+            48
+        );
+        let totals = store.delegated_performance_totals("judge-run").unwrap();
+        assert_eq!(totals.pending_model_calls, 0);
+        assert!(!totals.cost_complete);
     }
 
     fn record_primary_performance_fixture(
@@ -2953,6 +3317,11 @@ mod tests {
         assert_eq!(delegated.total_tokens, 125);
         assert_eq!(delegated.total_cost_microunits, 37);
         assert!(delegated.cost_complete);
+        let outcome = store
+            .execution_outcome_usage("run", 5_000)
+            .expect("settled usage");
+        assert_eq!(outcome.tokens, 125);
+        assert_eq!(outcome.cost_microunits, Some(37));
         assert_eq!(
             store
                 .performance_total_runtime("run", &Instant("2030-01-01T00:00:05.000Z".to_owned()),)
@@ -3008,6 +3377,12 @@ mod tests {
             assert_eq!(totals.total_tokens, 9, "{name}");
             assert_eq!(totals.total_cost_microunits, expected_cost, "{name}");
             assert_eq!(totals.cost_complete, cost_complete, "{name}");
+            let outcome = store
+                .execution_outcome_usage("run", 123)
+                .expect("outcome usage");
+            assert_eq!(outcome.tokens, 9);
+            assert_eq!(outcome.cost_microunits, actual_cost_microunits);
+            assert_eq!(outcome.runtime_millis, 123);
         }
 
         for (name, kind, expected_primary, expected_observer) in [
@@ -3040,6 +3415,11 @@ mod tests {
             assert_eq!(pending.primary_model_calls, expected_primary, "{name}");
             assert_eq!(pending.observer_calls, expected_observer, "{name}");
             assert_eq!(pending.pending_model_calls, 1, "{name}");
+            assert_eq!(
+                store.retained_outcome_usage("run", 123).unwrap(),
+                None,
+                "{name}"
+            );
             assert!(!pending.cost_complete, "{name}");
         }
     }
@@ -3220,6 +3600,80 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(root).expect("remove phase store");
+    }
+
+    #[test]
+    fn mcp_approval_migration_preserves_existing_pending_and_resolved_records() {
+        let root = test_root("mcp-approval-migration");
+        let store = AdapterStore::open(&root).expect("open store");
+        let operation = StoredApprovalOperation {
+            approval_id: "apr-existing".into(),
+            run_key: "run".into(),
+            kernel_session_id: "session".into(),
+            operation_kind: StoredApprovalOperationKind::Exec,
+            operation_id: "call".into(),
+            turn_id: Some("turn".into()),
+            request_digest: format!("sha256:{}", "1".repeat(64)),
+            detail: None,
+            resolution_digest: None,
+            state: StoredApprovalOperationState::Pending,
+        };
+        store
+            .retain_approval_operation(&operation)
+            .expect("pending operation");
+        let resolved = StoredApprovalOperation {
+            approval_id: "apr-resolved".into(),
+            resolution_digest: Some(format!("sha256:{}", "2".repeat(64))),
+            state: StoredApprovalOperationState::Resolved,
+            ..operation.clone()
+        };
+        store
+            .retain_approval_operation(&resolved)
+            .expect("resolved operation");
+        {
+            let connection = store.lock().expect("database");
+            let schema: String = connection
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE name='approval_operation'",
+                    [],
+                    |r| r.get(0),
+                )
+                .expect("schema");
+            let old_schema = schema
+                .replace("approval_operation", "approval_operation_old")
+                .replace(", 'mcp'", "");
+            connection
+                .execute_batch(&old_schema)
+                .expect("old constraint");
+            connection
+                .execute_batch(
+                    "INSERT INTO approval_operation_old SELECT * FROM approval_operation;
+                DROP TABLE approval_operation;
+                ALTER TABLE approval_operation_old RENAME TO approval_operation;",
+                )
+                .expect("old schema with records");
+        }
+        drop(store);
+        for _ in 0..2 {
+            let reopened = AdapterStore::open(&root).expect("migrate or reopen");
+            for expected in [&operation, &resolved] {
+                assert_eq!(
+                    reopened
+                        .load_approval_operation(&expected.approval_id)
+                        .expect("existing record"),
+                    Some(expected.clone())
+                );
+            }
+            reopened
+                .retain_approval_operation(&StoredApprovalOperation {
+                    approval_id: "apr-mcp".into(),
+                    operation_kind: StoredApprovalOperationKind::Mcp,
+                    operation_id: "[\"server\",42]".into(),
+                    ..operation.clone()
+                })
+                .expect("MCP accepted by migrated constraint");
+        }
+        std::fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[test]

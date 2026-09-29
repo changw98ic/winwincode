@@ -288,6 +288,61 @@ fn cancellation_removes_private_files_while_restart_preserves_active_checkout() 
 }
 
 #[test]
+fn lease_extension_preserves_workspace_and_recovers_exact_authority() {
+    let fixture = Fixture::new();
+    let manager = fixture.manager();
+    let mut active = active_job(&fixture.repository_id, "renew", 1);
+    let original = active.clone();
+    let mut workspace = manager.create(&active).expect("create workspace");
+    let origin = workspace.origin_provenance().clone();
+    let checkout = workspace.layout().checkout().to_path_buf();
+    active.lease.expires_at = Instant("2030-01-02T00:00:00.000Z".to_owned());
+    // Inject the state after rename succeeds but before the owner advances in memory.
+    let manifest_path = workspace.layout().root().join(".winwincode-workspace.json");
+    let mut manifest = fs::read_to_string(&manifest_path).expect("read manifest");
+    let current_start = manifest
+        .find("\"currentProvenance\"")
+        .expect("current provenance");
+    let expiry_start = current_start
+        + manifest[current_start..]
+            .find(&original.lease.expires_at.0)
+            .expect("current expiry");
+    manifest.replace_range(
+        expiry_start..expiry_start + original.lease.expires_at.0.len(),
+        &active.lease.expires_at.0,
+    );
+    fs::write(&manifest_path, manifest).expect("inject canonical installed renewal");
+    workspace
+        .renew_lease(&active)
+        .expect("recover installed renewal");
+    workspace.renew_lease(&active).expect("replay renewal");
+    assert_eq!(workspace.origin_provenance(), &origin);
+    assert_eq!(
+        workspace.provenance().lease_expires_at,
+        active.lease.expires_at
+    );
+    assert!(workspace.renew_lease(&original).is_err());
+    let mut foreign = active.clone();
+    foreign.lease.worker_instance_id = WorkerInstanceId("wki_foreign".to_owned());
+    assert!(workspace.renew_lease(&foreign).is_err());
+    drop(workspace);
+    assert!(manager.create_or_recover(&original, None).is_err());
+    let recovered = manager
+        .create_or_recover(&active, None)
+        .expect("recover renewal");
+    assert_eq!(recovered.layout().checkout(), checkout);
+    assert_eq!(recovered.origin_provenance(), &origin);
+    assert_eq!(
+        recovered.provenance().lease_expires_at,
+        active.lease.expires_at
+    );
+    recovered
+        .close(WorkspaceCloseReason::Failed)
+        .expect("cleanup renewed workspace");
+    assert!(!checkout.exists());
+}
+
+#[test]
 fn artifact_snapshot_detects_byte_changes() {
     let fixture = Fixture::new();
     let manager = fixture.manager();
@@ -334,9 +389,9 @@ fn active_job(repository_id: &RepositoryId, suffix: &str, attempt: i64) -> Activ
             goal: "verify isolated workspace".to_owned(),
             job_id,
             limits: ExecutionLimits {
-                deadline_at: Instant("2030-01-01T00:00:00.000Z".to_owned()),
+                deadline_at: Some(Instant("2030-01-01T00:00:00.000Z".to_owned())),
                 max_artifact_bytes: 1_048_576,
-                max_runtime_seconds: 300,
+                max_runtime_seconds: Some(300),
             },
             payload_digest: Sha256Digest("a".repeat(64)),
             scope: ExecutionScope::ProductSessionExecutionScope(ProductSessionExecutionScope {

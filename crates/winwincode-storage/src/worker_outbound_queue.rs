@@ -7,17 +7,23 @@
 //! outbox events, audit records, errors, and `Debug` output contain only
 //! authority, identifiers, digests, states, and counts.
 
-use std::{fmt, fs};
+use std::{collections::BTreeMap, fmt, fs};
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use winwincode_domain::{ExecutionMessageId, Instant, Sha256Digest};
 
+use crate::execution_registry::{
+    accepted_lease_history, load_lease_in_transaction, renew_execution_lease_in_transaction,
+};
 use crate::worker_session_slots::{
     require_running_slot_authority, require_terminal_slot_authority,
 };
-use crate::{SqliteStorage, WorkerSlotAuthority, WorkerSlotError, WorkerSlotErrorCode};
+use crate::{
+    ExecutionLeaseReceipt, ExecutionLeaseRenewal, LeaseWriteStatus, SqliteStorage,
+    WorkerSlotAuthority, WorkerSlotError, WorkerSlotErrorCode,
+};
 
 const WORKER_OUTBOUND_SCHEMA: &str = r"
 CREATE TABLE IF NOT EXISTS internal_worker_outbound_messages (
@@ -209,6 +215,7 @@ pub struct WorkerOutboundEnqueueReceipt {
 /// One claimed frame. `Debug` deliberately omits the raw bytes.
 #[derive(Clone, Eq, PartialEq)]
 pub struct WorkerOutboundClaim {
+    authority: WorkerOutboundAuthority,
     message_id: ExecutionMessageId,
     payload_digest: Sha256Digest,
     frame_bytes: Vec<u8>,
@@ -217,6 +224,12 @@ pub struct WorkerOutboundClaim {
 }
 
 impl WorkerOutboundClaim {
+    /// The exact accepted lease authority under which this frame was retained.
+    #[must_use]
+    pub const fn authority(&self) -> &WorkerOutboundAuthority {
+        &self.authority
+    }
+
     #[must_use]
     pub const fn message_id(&self) -> &ExecutionMessageId {
         &self.message_id
@@ -247,6 +260,7 @@ impl fmt::Debug for WorkerOutboundClaim {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("WorkerOutboundClaim")
+            .field("authority", &self.authority)
             .field("message_id", &self.message_id)
             .field("payload_digest", &self.payload_digest)
             .field("frame_bytes", &"<redacted>")
@@ -441,95 +455,65 @@ impl<'storage> WorkerOutboundQueue<'storage> {
         &mut self,
         request: &WorkerOutboundEnqueueRequest,
     ) -> Result<WorkerOutboundEnqueueReceipt, WorkerOutboundQueueError> {
-        validate_enqueue(request, self.config)?;
-        let authority_digest = authority_digest(&request.authority)?;
         let transaction = self
             .storage
             .connection_mut()
             .map_err(|_| WorkerOutboundQueueError::storage())?
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| WorkerOutboundQueueError::storage())?;
-        if let Some(receipt) = replay_settlement(
-            &transaction,
-            &request.message_id,
-            &authority_digest,
-            &request.payload_digest,
-        )? {
-            transaction
-                .commit()
-                .map_err(|_| WorkerOutboundQueueError::storage())?;
-            return Ok(receipt);
-        }
-        if let Some(receipt) = replay_active(&transaction, request, &authority_digest)? {
-            transaction
-                .commit()
-                .map_err(|_| WorkerOutboundQueueError::storage())?;
-            return Ok(receipt);
-        }
-        require_running_slot_authority(
-            &transaction,
-            &request.authority.slot,
-            &request.authority.lease_issued_at,
-            &request.authority.lease_expires_at,
-            &request.sent_at,
-            false,
-        )?;
-        let (authority_pending, retained_bytes) = transaction
-            .query_row(
-                "SELECT
-                    COUNT(*) FILTER (WHERE authority_digest = ?1),
-                    COALESCE(SUM(length(payload)), 0)
-                 FROM internal_worker_outbound_messages",
-                [&authority_digest],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-            )
-            .map_err(|_| WorkerOutboundQueueError::storage())?;
-        let authority_pending =
-            usize::try_from(authority_pending).map_err(|_| WorkerOutboundQueueError::storage())?;
-        let retained_bytes =
-            usize::try_from(retained_bytes).map_err(|_| WorkerOutboundQueueError::storage())?;
-        let next_retained_bytes = retained_bytes
-            .checked_add(request.frame_bytes.len())
-            .ok_or_else(WorkerOutboundQueueError::capacity)?;
-        if authority_pending >= self.config.max_pending_messages_per_authority
-            || next_retained_bytes > self.config.max_retained_bytes
-        {
-            return Err(WorkerOutboundQueueError::capacity());
-        }
-        transaction
-            .execute(
-                "INSERT INTO internal_worker_outbound_messages
-                    (message_id, authority_digest, worker_id, worker_instance_id,
-                     worker_session_id, job_id, lease_id, attempt, fencing_token,
-                     sent_at, payload_digest, payload, state, delivery_attempts, claimed_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                         'pending', 0, NULL)",
-                params![
-                    request.message_id.0,
-                    authority_digest,
-                    request.authority.slot.worker_id.0,
-                    request.authority.slot.worker_instance_id.0,
-                    request.authority.slot.worker_session_id.0,
-                    request.authority.slot.job_id.0,
-                    request.authority.slot.lease_id.0,
-                    to_sql(request.authority.slot.attempt)?,
-                    request.authority.slot.fencing_token.0,
-                    request.sent_at.0,
-                    request.payload_digest.0,
-                    request.frame_bytes,
-                ],
-            )
-            .map_err(|_| WorkerOutboundQueueError::storage())?;
+        let receipt = enqueue_in_transaction(&transaction, request, self.config)?;
         transaction
             .commit()
             .map_err(|_| WorkerOutboundQueueError::storage())?;
-        Ok(WorkerOutboundEnqueueReceipt {
-            message_id: request.message_id.clone(),
-            payload_digest: request.payload_digest.clone(),
-            state: Some(WorkerOutboundMessageState::Pending),
-            settlement: None,
-            replayed: false,
-        })
+        Ok(receipt)
+    }
+
+    /// Atomically extends a lease and retains its exact outbound control frame.
+    /// The caller encodes the protocol frame; its envelope must match the renewal.
+    /// A rejected renewal retains no frame. Any queue failure rolls back the lease
+    /// and its replay receipt, so retry cannot lose the control message.
+    ///
+    /// # Errors
+    ///
+    /// Rejects mismatched envelopes, invalid queue authority, capacity exhaustion,
+    /// changed-body replay, and storage failures.
+    pub fn renew_lease_and_enqueue(
+        &mut self,
+        renewal: &ExecutionLeaseRenewal,
+        frame: &WorkerOutboundEnqueueRequest,
+    ) -> Result<ExecutionLeaseReceipt, WorkerOutboundQueueError> {
+        let authority = &frame.authority;
+        let slot = &authority.slot;
+        if frame.message_id != renewal.message_id
+            || frame.sent_at != renewal.sent_at
+            || authority.lease_expires_at != renewal.expires_at
+            || slot.worker_id != renewal.worker_id
+            || slot.worker_instance_id != renewal.worker_instance_id
+            || slot.job_id != renewal.job_id
+            || slot.lease_id != renewal.lease_id
+            || slot.attempt != renewal.attempt
+            || slot.fencing_token != renewal.fencing_token
+        {
+            return Err(WorkerOutboundQueueError::invalid());
+        }
+        let transaction = self
+            .storage
+            .connection_mut()
+            .map_err(|_| WorkerOutboundQueueError::storage())?
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| WorkerOutboundQueueError::storage())?;
+        let receipt = renew_execution_lease_in_transaction(&transaction, renewal)
+            .map_err(|_| WorkerOutboundQueueError::storage())?;
+        if matches!(
+            receipt.status,
+            LeaseWriteStatus::Accepted | LeaseWriteStatus::Duplicate
+        ) {
+            enqueue_in_transaction(&transaction, frame, self.config)?;
+        }
+        transaction
+            .commit()
+            .map_err(|_| WorkerOutboundQueueError::storage())?;
+        Ok(receipt)
     }
 
     /// Claims a stable authority-bound page for one healthy reconnected Worker.
@@ -566,11 +550,13 @@ impl<'storage> WorkerOutboundQueue<'storage> {
             observed_at,
             true,
         )?;
+        let history = authority_history(&transaction, authority)?;
+        let digests = history_digests(&history)?;
         let (after_sequence, snapshot_sequence) =
-            page_cut(&transaction, &authority_digest, cursor, page_size)?;
+            page_cut(&transaction, &authority_digest, &digests, cursor, page_size)?;
         let mut rows = load_claim_rows(
             &transaction,
-            &authority_digest,
+            &digests,
             after_sequence,
             snapshot_sequence,
             page_size.saturating_add(1),
@@ -599,7 +585,7 @@ impl<'storage> WorkerOutboundQueue<'storage> {
                         to_sql(next_attempt)?,
                         observed_at.0,
                         to_sql(row.sequence)?,
-                        authority_digest,
+                        row.authority_digest,
                     ],
                 )
                 .map_err(|_| WorkerOutboundQueueError::storage())?;
@@ -608,6 +594,10 @@ impl<'storage> WorkerOutboundQueue<'storage> {
             }
             last_sequence = Some(row.sequence);
             claims.push(WorkerOutboundClaim {
+                authority: history
+                    .get(&row.authority_digest)
+                    .ok_or_else(WorkerOutboundQueueError::storage)?
+                    .clone(),
                 message_id: row.message_id,
                 payload_digest: row.payload_digest,
                 frame_bytes: row.frame_bytes,
@@ -649,14 +639,14 @@ impl<'storage> WorkerOutboundQueue<'storage> {
         validate_authority(authority)?;
         validate_message_id(message_id)?;
         validate_instant(acknowledged_at)?;
-        let authority_digest = authority_digest(authority)?;
         let transaction = self
             .storage
             .connection_mut()
             .map_err(|_| WorkerOutboundQueueError::storage())?
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| WorkerOutboundQueueError::storage())?;
-        if let Some(acknowledgement) = replay_ack(&transaction, message_id, &authority_digest)? {
+        let history = authority_history(&transaction, authority)?;
+        if let Some(acknowledgement) = replay_ack(&transaction, message_id, &history)? {
             transaction
                 .commit()
                 .map_err(|_| WorkerOutboundQueueError::storage())?;
@@ -689,7 +679,7 @@ impl<'storage> WorkerOutboundQueue<'storage> {
         else {
             return Err(WorkerOutboundQueueError::state());
         };
-        if stored_authority != authority_digest {
+        if !history.contains_key(&stored_authority) {
             return Err(WorkerOutboundQueueError::authority());
         }
         if WorkerOutboundMessageState::parse(&state)? != WorkerOutboundMessageState::Claimed {
@@ -698,7 +688,7 @@ impl<'storage> WorkerOutboundQueue<'storage> {
         insert_settlement(
             &transaction,
             message_id,
-            &authority_digest,
+            &stored_authority,
             &payload_digest,
             WorkerOutboundSettlement::Acknowledged,
             acknowledged_at,
@@ -727,7 +717,6 @@ impl<'storage> WorkerOutboundQueue<'storage> {
     ) -> Result<usize, WorkerOutboundQueueError> {
         validate_authority(authority)?;
         validate_instant(settled_at)?;
-        let authority_digest = authority_digest(authority)?;
         let transaction = self
             .storage
             .connection_mut()
@@ -735,39 +724,33 @@ impl<'storage> WorkerOutboundQueue<'storage> {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| WorkerOutboundQueueError::storage())?;
         require_terminal_slot_authority(&transaction, &authority.slot)?;
-        let messages = load_settlement_rows(&transaction, &authority_digest)?;
-        for (message_id, payload_digest) in &messages {
-            insert_settlement(
-                &transaction,
-                message_id,
-                &authority_digest,
-                payload_digest,
-                WorkerOutboundSettlement::Terminal,
-                settled_at,
-            )?;
+        let history = authority_history(&transaction, authority)?;
+        let mut cleared = 0;
+        for digest in history.keys() {
+            let messages = load_settlement_rows(&transaction, digest)?;
+            for (message_id, payload_digest) in &messages {
+                insert_settlement(
+                    &transaction,
+                    message_id,
+                    digest,
+                    payload_digest,
+                    WorkerOutboundSettlement::Terminal,
+                    settled_at,
+                )?;
+                delete_message(&transaction, message_id)?;
+            }
+            cleared += messages.len();
         }
-        transaction
-            .execute(
-                "UPDATE internal_worker_outbound_messages
-                 SET payload = zeroblob(length(payload)) WHERE authority_digest = ?1",
-                [&authority_digest],
-            )
-            .map_err(|_| WorkerOutboundQueueError::storage())?;
-        transaction
-            .execute(
-                "DELETE FROM internal_worker_outbound_messages WHERE authority_digest = ?1",
-                [&authority_digest],
-            )
-            .map_err(|_| WorkerOutboundQueueError::storage())?;
         transaction
             .commit()
             .map_err(|_| WorkerOutboundQueueError::storage())?;
         secure_checkpoint(self.storage)?;
-        Ok(messages.len())
+        Ok(cleared)
     }
 }
 
 struct StoredClaimRow {
+    authority_digest: String,
     sequence: u64,
     message_id: ExecutionMessageId,
     payload_digest: Sha256Digest,
@@ -945,6 +928,7 @@ fn replay_active(
 fn page_cut(
     connection: &Connection,
     authority_digest: &str,
+    digests: &str,
     cursor: Option<&WorkerOutboundPageCursor>,
     page_size: usize,
 ) -> Result<(u64, u64), WorkerOutboundQueueError> {
@@ -960,8 +944,8 @@ fn page_cut(
     let snapshot = connection
         .query_row(
             "SELECT COALESCE(MAX(sequence), 0)
-             FROM internal_worker_outbound_messages WHERE authority_digest = ?1",
-            [authority_digest],
+             FROM internal_worker_outbound_messages WHERE authority_digest IN (SELECT value FROM json_each(?1))",
+            [digests],
             |row| row.get::<_, i64>(0),
         )
         .map_err(|_| WorkerOutboundQueueError::storage())?;
@@ -973,23 +957,23 @@ fn page_cut(
 
 fn load_claim_rows(
     connection: &Connection,
-    authority_digest: &str,
+    digests: &str,
     after_sequence: u64,
     snapshot_sequence: u64,
     limit: usize,
 ) -> Result<Vec<StoredClaimRow>, WorkerOutboundQueueError> {
     let mut statement = connection
         .prepare(
-            "SELECT sequence, message_id, payload_digest, payload, state, delivery_attempts
+            "SELECT sequence, message_id, payload_digest, payload, state, delivery_attempts, authority_digest
              FROM internal_worker_outbound_messages
-             WHERE authority_digest = ?1 AND sequence > ?2 AND sequence <= ?3
+             WHERE authority_digest IN (SELECT value FROM json_each(?1)) AND sequence > ?2 AND sequence <= ?3
              ORDER BY sequence, message_id LIMIT ?4",
         )
         .map_err(|_| WorkerOutboundQueueError::storage())?;
     statement
         .query_map(
             params![
-                authority_digest,
+                digests,
                 to_sql(after_sequence)?,
                 to_sql(snapshot_sequence)?,
                 i64::try_from(limit).map_err(|_| WorkerOutboundQueueError::invalid())?,
@@ -1002,14 +986,23 @@ fn load_claim_rows(
                     row.get::<_, Vec<u8>>(3)?,
                     row.get::<_, String>(4)?,
                     row.get::<_, i64>(5)?,
+                    row.get::<_, String>(6)?,
                 ))
             },
         )
         .map_err(|_| WorkerOutboundQueueError::storage())?
         .map(|row| {
-            let (sequence, message_id, payload_digest, frame_bytes, state, delivery_attempts) =
-                row.map_err(|_| WorkerOutboundQueueError::storage())?;
+            let (
+                sequence,
+                message_id,
+                payload_digest,
+                frame_bytes,
+                state,
+                delivery_attempts,
+                authority_digest,
+            ) = row.map_err(|_| WorkerOutboundQueueError::storage())?;
             Ok(StoredClaimRow {
+                authority_digest,
                 sequence: u64::try_from(sequence)
                     .map_err(|_| WorkerOutboundQueueError::storage())?,
                 message_id: ExecutionMessageId(message_id),
@@ -1026,7 +1019,7 @@ fn load_claim_rows(
 fn replay_ack(
     connection: &Connection,
     message_id: &ExecutionMessageId,
-    authority_digest: &str,
+    history: &BTreeMap<String, WorkerOutboundAuthority>,
 ) -> Result<Option<WorkerOutboundAcknowledgement>, WorkerOutboundQueueError> {
     let stored = connection
         .query_row(
@@ -1040,7 +1033,7 @@ fn replay_ack(
     let Some((stored_authority, settlement)) = stored else {
         return Ok(None);
     };
-    if stored_authority != authority_digest {
+    if !history.contains_key(&stored_authority) {
         return Err(WorkerOutboundQueueError::authority());
     }
     Ok(Some(WorkerOutboundAcknowledgement {
@@ -1160,4 +1153,136 @@ fn secure_checkpoint(storage: &SqliteStorage) -> Result<(), WorkerOutboundQueueE
     } else {
         Err(WorkerOutboundQueueError::storage())
     }
+}
+
+fn enqueue_in_transaction(
+    connection: &Connection,
+    request: &WorkerOutboundEnqueueRequest,
+    config: WorkerOutboundQueueConfig,
+) -> Result<WorkerOutboundEnqueueReceipt, WorkerOutboundQueueError> {
+    validate_enqueue(request, config)?;
+    let request_authority_digest = authority_digest(&request.authority)?;
+    if let Some(receipt) = replay_settlement(
+        connection,
+        &request.message_id,
+        &request_authority_digest,
+        &request.payload_digest,
+    )? {
+        return Ok(receipt);
+    }
+    if let Some(receipt) = replay_active(connection, request, &request_authority_digest)? {
+        return Ok(receipt);
+    }
+    let history = authority_history(connection, &request.authority)?;
+    let current = load_lease_in_transaction(connection, &request.authority.slot.job_id)
+        .map_err(|_| WorkerOutboundQueueError::storage())?
+        .ok_or_else(WorkerOutboundQueueError::authority)?;
+    let mut current_authority = request.authority.clone();
+    current_authority
+        .lease_expires_at
+        .clone_from(&current.expires_at);
+    if current.expires_at.0 < request.authority.lease_expires_at.0
+        || !history.contains_key(&authority_digest(&current_authority)?)
+    {
+        return Err(WorkerOutboundQueueError::authority());
+    }
+    require_running_slot_authority(
+        connection,
+        &current_authority.slot,
+        &current_authority.lease_issued_at,
+        &current_authority.lease_expires_at,
+        &request.sent_at,
+        false,
+    )?;
+    let digests = history_digests(&history)?;
+    let (authority_pending, retained_bytes) = connection
+        .query_row(
+            "SELECT
+                COUNT(*) FILTER (WHERE authority_digest IN (SELECT value FROM json_each(?1))),
+                COALESCE(SUM(length(payload)), 0)
+             FROM internal_worker_outbound_messages",
+            [&digests],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .map_err(|_| WorkerOutboundQueueError::storage())?;
+    let authority_pending =
+        usize::try_from(authority_pending).map_err(|_| WorkerOutboundQueueError::storage())?;
+    let retained_bytes =
+        usize::try_from(retained_bytes).map_err(|_| WorkerOutboundQueueError::storage())?;
+    let next_retained_bytes = retained_bytes
+        .checked_add(request.frame_bytes.len())
+        .ok_or_else(WorkerOutboundQueueError::capacity)?;
+    if authority_pending >= config.max_pending_messages_per_authority
+        || next_retained_bytes > config.max_retained_bytes
+    {
+        return Err(WorkerOutboundQueueError::capacity());
+    }
+    connection
+        .execute(
+            "INSERT INTO internal_worker_outbound_messages
+                (message_id, authority_digest, worker_id, worker_instance_id,
+                 worker_session_id, job_id, lease_id, attempt, fencing_token,
+                 sent_at, payload_digest, payload, state, delivery_attempts, claimed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                     'pending', 0, NULL)",
+            params![
+                request.message_id.0,
+                request_authority_digest,
+                request.authority.slot.worker_id.0,
+                request.authority.slot.worker_instance_id.0,
+                request.authority.slot.worker_session_id.0,
+                request.authority.slot.job_id.0,
+                request.authority.slot.lease_id.0,
+                to_sql(request.authority.slot.attempt)?,
+                request.authority.slot.fencing_token.0,
+                request.sent_at.0,
+                request.payload_digest.0,
+                request.frame_bytes,
+            ],
+        )
+        .map_err(|_| WorkerOutboundQueueError::storage())?;
+    Ok(WorkerOutboundEnqueueReceipt {
+        message_id: request.message_id.clone(),
+        payload_digest: request.payload_digest.clone(),
+        state: Some(WorkerOutboundMessageState::Pending),
+        settlement: None,
+        replayed: false,
+    })
+}
+
+fn authority_history(
+    connection: &Connection,
+    authority: &WorkerOutboundAuthority,
+) -> Result<BTreeMap<String, WorkerOutboundAuthority>, WorkerOutboundQueueError> {
+    let slot = &authority.slot;
+    let mut history = BTreeMap::new();
+    // ponytail: scan one job's receipts; index by lease if long-lived jobs make this material.
+    for lease in accepted_lease_history(connection, &slot.job_id)
+        .map_err(|_| WorkerOutboundQueueError::storage())?
+    {
+        if lease.job_id != slot.job_id
+            || lease.lease_id != slot.lease_id
+            || lease.worker_id != slot.worker_id
+            || lease.worker_instance_id != slot.worker_instance_id
+            || lease.attempt != slot.attempt
+            || lease.fencing_token != slot.fencing_token
+            || lease.issued_at != authority.lease_issued_at
+        {
+            continue;
+        }
+        let mut historical = authority.clone();
+        historical.lease_expires_at = lease.expires_at;
+        history.insert(authority_digest(&historical)?, historical);
+    }
+    if !history.contains_key(&authority_digest(authority)?) {
+        return Err(WorkerOutboundQueueError::authority());
+    }
+    Ok(history)
+}
+
+fn history_digests(
+    history: &BTreeMap<String, WorkerOutboundAuthority>,
+) -> Result<String, WorkerOutboundQueueError> {
+    serde_json::to_string(&history.keys().collect::<Vec<_>>())
+        .map_err(|_| WorkerOutboundQueueError::storage())
 }

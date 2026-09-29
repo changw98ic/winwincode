@@ -381,6 +381,9 @@ fn agent_profile() -> AgentProfile {
             execution_profile: "executor".to_owned(),
             worker_capability_digest: Sha256Digest(format!("sha256:{}", "b".repeat(64))),
             settings: AgentProfileSettings {
+                fusion: None,
+                jev_judge: None,
+                jev_context: None,
                 provider: "provider-1".to_owned(),
                 model: "model-1".to_owned(),
                 reasoning: "high".to_owned(),

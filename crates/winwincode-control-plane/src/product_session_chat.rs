@@ -1741,7 +1741,9 @@ fn validate_terminal_usage(
         || outcome.usage.as_ref().is_some_and(|usage| {
             !(0..=MAX_SAFE_INTEGER).contains(&usage.runtime_millis)
                 || !(0..=MAX_SAFE_INTEGER).contains(&usage.tokens)
-                || !(0..=MAX_SAFE_INTEGER).contains(&usage.cost_microunits)
+                || usage
+                    .cost_microunits
+                    .is_some_and(|cost| !(0..=MAX_SAFE_INTEGER).contains(&cost))
         })
     {
         return Err(binding_mismatch(

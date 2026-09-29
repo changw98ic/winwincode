@@ -231,7 +231,15 @@ impl ExecutionOutbox {
         &self,
         model_exchange_id: &ModelExchangeId,
     ) -> Result<Option<ModelOpenMessage>, AdapterStoreError> {
-        let connection = self.store.lock()?;
+        Self::read_model_open(&self.store, model_exchange_id)
+    }
+
+    /// Reads original exchange authority without reopening or mutating the outbox.
+    pub(crate) fn read_model_open(
+        store: &crate::store::AdapterStore,
+        model_exchange_id: &ModelExchangeId,
+    ) -> Result<Option<ModelOpenMessage>, AdapterStoreError> {
+        let connection = store.lock()?;
         let mut statement = connection
             .prepare(
                 "SELECT frame_json FROM execution_outbox
@@ -273,13 +281,22 @@ impl ExecutionOutbox {
             return Err(AdapterStoreError::Conflict);
         };
         let connection = self.store.lock()?;
-        let changed = connection
-            .execute(
+        // Keep the original ModelOpen as exchange authority after its first chunk.
+        // It is no longer pending, but renewed streams and restart replay need its exact bytes.
+        let changed = if matches!(family, Family::ModelOpen) {
+            connection.execute(
+                "UPDATE execution_outbox SET acknowledgement_required = 0, state = ?3
+                 WHERE family = ?1 AND correlation_key = ?2 AND acknowledgement_required = 1",
+                params![family.as_str(), correlation_key, SENT_ATTEMPT],
+            )
+        } else {
+            connection.execute(
                 "DELETE FROM execution_outbox WHERE family = ?1 AND correlation_key = ?2
                  AND acknowledgement_required = 1",
                 params![family.as_str(), correlation_key],
             )
-            .map_err(|_| AdapterStoreError::Unavailable)?;
+        }
+        .map_err(|_| AdapterStoreError::Unavailable)?;
         if changed != 1 {
             if matches!(acknowledgement, ExecutionPortMessage::ModelAckMessage(ack) if public_model_ack(ack))
             {

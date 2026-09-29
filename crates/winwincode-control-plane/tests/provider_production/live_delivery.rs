@@ -714,7 +714,7 @@ fn prepare_current_stage(
     let fencing_token = FencingToken(seed.to_string());
     let lease = ExecutionLeaseStamp {
         attempt: job.attempt,
-        expires_at: job.limits.deadline_at.clone(),
+        expires_at: job.limits.deadline_at.clone().expect("bounded fixture"),
         fencing_token: fencing_token.clone(),
         issued_at: submitted_at.clone(),
         job_id: job.job_id.clone(),
@@ -934,9 +934,9 @@ fn configure_stage_admission(
     let limits = ExecutionAdmissionLimits {
         max_concurrent: 8,
         max_queued: 8,
-        token_budget: 1_000_000,
-        cost_budget_microunits: 1_000_000,
-        max_runtime_millis: 3_600_000,
+        token_budget: Some(1_000_000),
+        cost_budget_microunits: Some(1_000_000),
+        max_runtime_millis: Some(3_600_000),
     };
     let pool = WorkerPoolId(id("wpl", 1));
     let boundaries = admission_boundaries(&queue_scope, &pool);
@@ -957,9 +957,9 @@ fn configure_stage_admission(
                 repository_access: ExecutionRepositoryAccess::IsolatedWrite {
                     worktree_key: format!("live-delivery:{}", job.job_id.0),
                 },
-                reserved_tokens: 100_000,
-                reserved_cost_microunits: 100_000,
-                runtime_limit_millis: 3_600_000,
+                reserved_tokens: Some(100_000),
+                reserved_cost_microunits: Some(100_000),
+                runtime_limit_millis: Some(3_600_000),
                 submitted_at: message.lease.issued_at.clone(),
             })
             .expect("reserve Delivery execution");
@@ -1313,8 +1313,10 @@ fn commit_stage_success(
             status: ExecutionOutcomeStatus::Succeeded,
             summary: "real Provider Delivery stage completed".to_owned(),
             usage: Some(ExecutionOutcomeUsage {
-                cost_microunits: i64::try_from(provider.terminal.admission.actual_cost_micros)
-                    .expect("safe Provider cost"),
+                cost_microunits: Some(
+                    i64::try_from(provider.terminal.admission.actual_cost_micros)
+                        .expect("safe Provider cost"),
+                ),
                 runtime_millis: 1,
                 tokens: i64::try_from(provider.terminal.admission.actual_tokens)
                     .expect("safe Provider tokens"),
@@ -1603,7 +1605,7 @@ fn settle_stage_resources(root: &TestDirectory, stage: &StageAuthority, provider
             request_id: RequestId(id("req", runtime_seed(stage, 91))),
             expected_revision: 2,
             actual_tokens: provider.terminal.admission.actual_tokens,
-            actual_cost_microunits: provider.terminal.admission.actual_cost_micros,
+            actual_cost_microunits: Some(provider.terminal.admission.actual_cost_micros),
             actual_runtime_millis: 1,
             completed_at: provider.terminal.settled_at.clone(),
         })

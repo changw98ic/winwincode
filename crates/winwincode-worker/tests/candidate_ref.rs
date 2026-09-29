@@ -328,9 +328,9 @@ fn active_job(repository_id: &RepositoryId, suffix: &str, attempt: i64) -> Activ
             goal: "verify stable candidate refs".to_owned(),
             job_id,
             limits: ExecutionLimits {
-                deadline_at: Instant("2030-01-01T00:00:00.000Z".to_owned()),
+                deadline_at: Some(Instant("2030-01-01T00:00:00.000Z".to_owned())),
                 max_artifact_bytes: 1_048_576,
-                max_runtime_seconds: 300,
+                max_runtime_seconds: Some(300),
             },
             payload_digest: Sha256Digest("a".repeat(64)),
             scope: ExecutionScope::ProductSessionExecutionScope(ProductSessionExecutionScope {

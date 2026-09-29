@@ -8,12 +8,14 @@
 
 mod generated;
 mod git_candidate_artifact;
+mod git_diff;
 mod snapshot;
 mod user_account;
 mod verification_command;
 
 pub use generated::*;
 pub use git_candidate_artifact::{GitCandidateArtifactManifest, GitCandidateArtifactManifestError};
+pub use git_diff::{GitHunkOriginError, rework_hunk_origins};
 pub use snapshot::{
     CanonicalSnapshot, SnapshotBindingError, SnapshotIdentityError, SnapshotVerificationBinding,
     seal_snapshot, verify_snapshot_seal,

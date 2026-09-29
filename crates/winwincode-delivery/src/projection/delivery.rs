@@ -578,6 +578,9 @@ fn validate_current_candidate(
 ) -> Result<Option<CurrentCandidateProjection>, ProjectionError> {
     let snapshot = delivery.snapshot();
     let Some(candidate) = candidate else {
+        if snapshot.status == crate::domain::DeliveryStatus::Reworking {
+            return Ok(None);
+        }
         if snapshot.evidence.is_empty() && snapshot.verdict.is_none() {
             return Ok(None);
         }
@@ -699,6 +702,11 @@ fn project_current_verdict(
     let Some(verdict) = &snapshot.verdict else {
         return Ok(None);
     };
+    if current_candidate_ref.is_none()
+        && snapshot.status == crate::domain::DeliveryStatus::Reworking
+    {
+        return Ok(None);
+    }
     if current_candidate_ref != Some(verdict.candidate_ref.as_str()) {
         return Err(ProjectionError::new(
             ProjectionErrorCode::InconsistentCurrentVerdict,

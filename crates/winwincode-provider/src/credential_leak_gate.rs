@@ -253,6 +253,42 @@ impl CredentialLeakGate {
         Ok(())
     }
 
+    /// Checks a newly appended suffix without rehashing the already checked
+    /// prefix. Complete blocks still pass through `inspect_bytes` before any
+    /// content frame is emitted, including syntax spanning many deltas.
+    pub(crate) fn inspect_appended_bytes(
+        &self,
+        boundary: CredentialOutputBoundary,
+        bytes: &[u8],
+        previous_len: usize,
+    ) -> Result<(), CredentialLeakError> {
+        let Some(delta) = bytes.get(previous_len..) else {
+            return Err(CredentialLeakError {
+                boundary,
+                kind: CredentialLeakErrorKind::InvalidOutput,
+            });
+        };
+        self.inspect_bytes(boundary, delta)?;
+        for fingerprint in &self.fingerprints {
+            let length = fingerprint.byte_length;
+            if length <= 1 || previous_len == 0 || length > bytes.len() {
+                continue;
+            }
+            let start = previous_len.saturating_sub(length - 1);
+            let end = previous_len.saturating_add(length - 1).min(bytes.len());
+            if bytes[start..end]
+                .windows(length)
+                .any(|window| <[u8; 32]>::from(Sha256::digest(window)) == fingerprint.sha256)
+            {
+                return Err(CredentialLeakError {
+                    boundary,
+                    kind: CredentialLeakErrorKind::ExactSecret,
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Inspects a typed serializable output before it crosses a public or
     /// durable seam.
     ///

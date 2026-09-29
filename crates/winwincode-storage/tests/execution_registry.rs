@@ -1334,3 +1334,150 @@ fn worker_and_heartbeat_receipt_failures_roll_back_their_authority_rows() {
     Box::new(storage).close().expect("storage close");
     fs::remove_dir_all(root).expect("directory release");
 }
+
+#[test]
+fn dispatch_authority_follows_only_accepted_same_attempt_renewals() {
+    let root = temporary_directory("renewed-dispatch-authority");
+    let mut storage = SqliteStorage::open(&root).expect("storage");
+    let lease = claim(70, 1, 12, 1, 7, 1, 5);
+    let result = dispatch_result(&lease, 22, 2);
+    let original;
+    {
+        let mut registry = storage.execution_registry().expect("registry");
+        registry
+            .register_worker(&registration(70, 1, 20))
+            .expect("register");
+        registry.claim_execution_job(&lease).expect("claim");
+        registry
+            .record_dispatch_result(&result)
+            .expect("accepted dispatch");
+        original = registry
+            .load_dispatch_authority(&lease.job_id)
+            .expect("load")
+            .expect("proof");
+        assert_eq!(
+            registry
+                .renew_execution_lease(&renew(70, 1, 23, 1, 7, 5, 9, 3))
+                .expect("renew")
+                .status,
+            LeaseWriteStatus::Accepted
+        );
+        let current = registry
+            .load_dispatch_authority(&lease.job_id)
+            .expect("accepted renewal preserves dispatch authority")
+            .expect("current proof");
+        assert_eq!(current.lease().expires_at, instant(9));
+        assert_eq!(current.worker_session_id(), original.worker_session_id());
+        assert_eq!(
+            current.dispatch_request_id(),
+            original.dispatch_request_id()
+        );
+        assert_eq!(current.accepted_at(), original.accepted_at());
+        let mut replay = result.clone();
+        replay.checked_at = instant(6);
+        assert_eq!(
+            registry
+                .record_dispatch_result(&replay)
+                .expect("original result replay")
+                .status,
+            DispatchResultStatus::Duplicate
+        );
+    }
+    Box::new(storage).close().expect("close");
+    let mut storage = SqliteStorage::open(&root).expect("reopen");
+    let registry = storage.execution_registry().expect("registry");
+    assert_eq!(
+        registry
+            .load_dispatch_authority(&lease.job_id)
+            .expect("restart load")
+            .expect("proof")
+            .lease()
+            .expires_at,
+        instant(9)
+    );
+    assert_eq!(
+        registry
+            .load_live_lease_for_period(original.lease(), &instant(6))
+            .expect("historical period")
+            .expect("live renewal")
+            .expires_at,
+        instant(9)
+    );
+    assert!(
+        registry
+            .load_live_lease_for_period(original.lease(), &instant(9))
+            .expect("expired current lease")
+            .is_none()
+    );
+    for invalid in 0..4 {
+        let mut period = original.lease().clone();
+        match invalid {
+            0 => period.expires_at = instant(4),
+            1 => period.expires_at = instant(6),
+            2 => period.fencing_token = FencingToken("8".into()),
+            _ => period.payload_digest = Sha256Digest(format!("sha256:{}", "b".repeat(64))),
+        }
+        assert!(
+            registry
+                .load_live_lease_for_period(&period, &instant(6))
+                .expect("unaccepted period")
+                .is_none()
+        );
+    }
+    drop(registry);
+    let connection = Connection::open(storage.database_path()).expect("inspection");
+    let recorded: String = connection
+        .query_row(
+            "SELECT expires_at FROM execution_dispatch_authorities WHERE job_id = ?1",
+            [&lease.job_id.0],
+            |row| row.get(0),
+        )
+        .expect("original dispatch fact");
+    assert_eq!(recorded, instant(5).0);
+    for (table, invalid, restore) in [
+        ("execution_leases", instant(10), instant(9)),
+        ("execution_dispatch_authorities", instant(6), instant(5)),
+    ] {
+        let sql = format!("UPDATE {table} SET expires_at = ?1 WHERE job_id = ?2");
+        connection
+            .execute(&sql, [&invalid.0, &lease.job_id.0])
+            .expect("corrupt fixture");
+        assert!(
+            storage
+                .execution_registry()
+                .expect("registry")
+                .load_dispatch_authority(&lease.job_id)
+                .is_err(),
+            "unaccepted expiry must fail closed"
+        );
+        connection
+            .execute(&sql, [&restore.0, &lease.job_id.0])
+            .expect("restore fixture");
+    }
+    drop(connection);
+    let mut terminal_request = terminal(&lease, 24, ExecutionLeaseTerminalOutcome::Completed);
+    terminal_request.terminal_at = instant(7);
+    let mut registry = storage.execution_registry().expect("registry");
+    assert!(
+        registry
+            .finish_execution_lease(&terminal_request)
+            .expect("terminal")
+    );
+    assert!(
+        registry
+            .load_live_lease_for_period(original.lease(), &instant(8))
+            .expect("terminal period")
+            .is_none()
+    );
+    assert_eq!(
+        registry
+            .load_accepted_lease_for_period(original.lease())
+            .expect("terminal history proof")
+            .expect("accepted period")
+            .expires_at,
+        instant(9)
+    );
+    drop(registry);
+    Box::new(storage).close().expect("close");
+    fs::remove_dir_all(root).expect("remove fixture");
+}

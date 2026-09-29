@@ -11,7 +11,7 @@ use std::sync::Arc;
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 
-use crate::fusion_knowledge::{
+use crate::knowledge::{
     ClaimNode, ClaimState, EvidenceDirection, EvidenceStrength, FusionEvidenceRecord,
 };
 
@@ -228,7 +228,7 @@ pub fn plan_investigation(
     capabilities: &[ProviderCapability],
 ) -> InvestigationPlan {
     let kind = classify_claim_kind(claim);
-    let disputed = crate::fusion_knowledge::needs_investigation(claim);
+    let disputed = crate::knowledge::needs_investigation(claim);
     let mut modes = vec![
         InvestigationMode::EvidenceExpansion,
         InvestigationMode::Falsification,
@@ -453,7 +453,7 @@ pub fn strongest_evidence(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fusion_knowledge::{ClaimIdentity, ClaimState};
+    use crate::knowledge::{ClaimIdentity, ClaimState};
 
     fn disputed_claim() -> ClaimNode {
         ClaimNode {

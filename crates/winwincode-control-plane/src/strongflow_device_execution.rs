@@ -75,18 +75,15 @@ pub const STRONGFLOW_DEVICE_WORKER_POOL_ID: &str = "wpl_000000000000000000000000
 const STRONGFLOW_DEVICE_ADMISSION_LIMITS: ExecutionAdmissionLimits = ExecutionAdmissionLimits {
     max_concurrent: 1,
     max_queued: 10_000,
-    token_budget: 1_000_000_000,
-    cost_budget_microunits: 1_000_000_000,
-    max_runtime_millis: 604_800_000,
+    token_budget: None,
+    cost_budget_microunits: None,
+    max_runtime_millis: Some(604_800_000),
 };
 
 /// The concurrency capacity of the `StrongFlow` device worker pool itself:
 /// the flow's roles may hold reservations at the same time, each on its own
 /// `WorkerSession`, within the Client's worker-session capacity.
 const STRONGFLOW_DEVICE_POOL_MAX_CONCURRENT: u64 = 4;
-
-const RESERVED_TOKENS: u64 = 1_000_000;
-const RESERVED_COST_MICROUNITS: u64 = 1_000_000;
 
 /// The canonical Delivery execution roles a `WorkRun` job can dispatch as. A job
 /// whose profile is not in this set is not a `StrongFlow` role execution and
@@ -459,7 +456,7 @@ fn ensure_device_admission_reservation(
     for boundary in admission_boundaries(&record.scope) {
         // The pool boundary carries the multi-role concurrency headroom; the
         // shared boundaries repeat the exact policy every path configures.
-        let limits = if matches!(boundary, ExecutionAdmissionBoundary::WorkerPool { .. }) {
+        let mut limits = if matches!(boundary, ExecutionAdmissionBoundary::WorkerPool { .. }) {
             ExecutionAdmissionLimits {
                 max_concurrent: STRONGFLOW_DEVICE_POOL_MAX_CONCURRENT,
                 ..STRONGFLOW_DEVICE_ADMISSION_LIMITS
@@ -467,6 +464,7 @@ fn ensure_device_admission_reservation(
         } else {
             STRONGFLOW_DEVICE_ADMISSION_LIMITS
         };
+        limits.max_runtime_millis = runtime_limit_millis.and(limits.max_runtime_millis);
         admission
             .configure_policy(&ExecutionAdmissionPolicy { boundary, limits })
             .map_err(|error| admission_error(&error))?;
@@ -482,8 +480,8 @@ fn ensure_device_admission_reservation(
             &record.job_id.0,
         )),
         repository_access: repository_access(job, &record.job_id),
-        reserved_tokens: RESERVED_TOKENS,
-        reserved_cost_microunits: RESERVED_COST_MICROUNITS,
+        reserved_tokens: None,
+        reserved_cost_microunits: None,
         runtime_limit_millis,
         submitted_at: record.submitted_at.clone(),
     };
@@ -510,14 +508,28 @@ fn decode_execution_job(
     Ok(job)
 }
 
-fn job_runtime_limit_millis(job: &ExecutionJob) -> Result<u64, StrongflowDeviceDispatchError> {
-    u64::try_from(job.limits.max_runtime_seconds)
-        .ok()
-        .filter(|seconds| *seconds > 0)
-        .and_then(|seconds| seconds.checked_mul(1_000))
-        .ok_or_else(|| {
-            StrongflowDeviceDispatchError::corrupt("the queued job execution deadline is invalid")
+fn job_runtime_limit_millis(
+    job: &ExecutionJob,
+) -> Result<Option<u64>, StrongflowDeviceDispatchError> {
+    if job.limits.deadline_at.is_some() != job.limits.max_runtime_seconds.is_some() {
+        return Err(StrongflowDeviceDispatchError::corrupt(
+            "the queued job runtime policy is inconsistent",
+        ));
+    }
+    job.limits
+        .max_runtime_seconds
+        .map(|seconds| {
+            u64::try_from(seconds)
+                .ok()
+                .filter(|seconds| (1..=604_800).contains(seconds))
+                .and_then(|seconds| seconds.checked_mul(1_000))
+                .ok_or_else(|| {
+                    StrongflowDeviceDispatchError::corrupt(
+                        "the queued job execution deadline is invalid",
+                    )
+                })
         })
+        .transpose()
 }
 
 fn repository_access(job: &ExecutionJob, job_id: &ExecutionJobId) -> ExecutionRepositoryAccess {
