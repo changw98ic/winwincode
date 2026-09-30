@@ -28,6 +28,7 @@ function decodeReceipt(payload) {
 export function exportDeviceExecutionReceipts(directory, evidenceDirectory = directory) {
   const calls = []
   const jev = []
+  const performance = []
   const identities = new Set()
   for (const path of globSync('device-data/**/providers.sqlite3', { cwd: directory }).sort()) {
     const database = new DatabaseSync(join(directory, path), { readOnly: true })
@@ -60,7 +61,13 @@ export function exportDeviceExecutionReceipts(directory, evidenceDirectory = dir
           workerSessionId: opened.workerSessionId, provider: request.provider,
           requestedModel: request.request.model, reasoningEffort: request.request.reasoning?.effort ?? null,
           actualModels, terminalType: terminal?.type ?? null,
-          usage: usage === null ? null : { inputTokens: usage.input_tokens, outputTokens: usage.output_tokens, totalTokens: usage.total_tokens },
+          usage: usage === null ? null : {
+            inputTokens: usage.input_tokens, outputTokens: usage.output_tokens,
+            totalTokens: usage.total_tokens,
+            cachedTokens: usage.cached_input_tokens ?? null,
+            cacheWriteTokens: usage.cache_write_input_tokens ?? null,
+            reasoningTokens: usage.reasoning_output_tokens ?? null,
+          },
           requestSha256: digest(row.request_open), chunksSha256: digest(row.chunks ?? '[]'), source: path }
         exchanges.set(row.exchange_id, call)
         calls.push(call)
@@ -87,9 +94,47 @@ export function exportDeviceExecutionReceipts(directory, evidenceDirectory = dir
       database.close()
     }
   }
+  for (const path of globSync('device-data/**/worker-codex.sqlite3', { cwd: directory }).sort()) {
+    const database = new DatabaseSync(join(directory, path), { readOnly: true })
+    try {
+      database.exec('PRAGMA busy_timeout=5000')
+      if (!database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='performance_projection'").get()) continue
+      const projections = database.prepare('SELECT run_key, record_json FROM performance_projection ORDER BY run_key').all()
+      const operations = database.prepare(`SELECT run_key, operation_kind, completed, duration_millis,
+        actual_cost_microunits FROM performance_operation ORDER BY run_key, operation_kind, operation_id`).all()
+      for (const projection of projections) {
+        const stored = JSON.parse(Buffer.from(projection.record_json).toString('utf8'))
+        const report = stored.report
+        for (const key of ['primaryModelWaitMs', 'totalRuntimeMs']) {
+          assert.ok(Number.isSafeInteger(report?.[key]) && report[key] >= 0, 'invalid retained performance time')
+        }
+        const selected = operations.filter(operation => operation.run_key === projection.run_key)
+        const duration = kind => {
+          const matching = selected.filter(operation => operation.operation_kind === kind)
+          return matching.every(operation => Number.isSafeInteger(operation.duration_millis)
+            && operation.duration_millis >= 0)
+            ? matching.reduce((sum, operation) => sum + operation.duration_millis, 0) : null
+        }
+        const modelOperations = selected.filter(operation => operation.operation_kind === 'primary_model')
+        const costComplete = modelOperations.length > 0 && modelOperations.every(operation =>
+          operation.completed === 1 && Number.isSafeInteger(operation.actual_cost_microunits)
+            && operation.actual_cost_microunits >= 0)
+        performance.push({ runKey: projection.run_key, source: path,
+          projectionSha256: digest(Buffer.from(projection.record_json)),
+          modelCalls: modelOperations.length,
+          totalRuntimeMs: report.totalRuntimeMs,
+          modelWaitMs: report.primaryModelWaitMs,
+          toolMs: duration('tool'),
+          actualCostMicros: costComplete
+            ? modelOperations.reduce((sum, operation) => sum + operation.actual_cost_microunits, 0) : null })
+      }
+    } finally {
+      database.close()
+    }
+  }
   const completeUsage = calls.length > 0 && calls.every(call => call.usage !== null)
     && jev.every(call => call.inputTokens !== null && call.outputTokens !== null && call.failureCount === 0)
-  const evidence = { calls, jev, completeUsage,
+  const evidence = { calls, jev, performance, completeUsage,
     totalTokens: completeUsage ? calls.reduce((sum, call) => sum + call.usage.totalTokens, 0)
       + jev.reduce((sum, call) => sum + call.inputTokens + call.outputTokens, 0) : null,
     actualCost: null, externalVerdict: null, externalScore: null }

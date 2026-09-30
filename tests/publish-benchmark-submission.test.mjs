@@ -55,16 +55,23 @@ async function fixture(root, { path = 'main.py', mode = '100644', content = 'pri
   const bindingBytes = Buffer.from(`${JSON.stringify(binding)}\n`)
   await writeFile(resolve(directory, 'task-source-binding.json'), bindingBytes)
   const productSourceSealSha256 = 'd'.repeat(64)
+  const executionReceipts = { calls: [{ exchangeId: 'mdl_fixture', requestedModel: cell.comparison,
+    reasoningEffort: 'max', actualModels: [cell.comparison], terminalType: 'completed',
+    usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 } }], jev: [],
+  completeUsage: true, totalTokens: 2, actualCost: null }
+  const receiptBytes = Buffer.from(`${JSON.stringify(executionReceipts)}\n`)
+  await writeFile(resolve(manifestDirectory, 'execution-receipts.json'), receiptBytes)
   const manifest = { productComplete: true, candidate, configuration: validateBenchmarkConfiguration(cell),
     productSourceSealSha256, taskInputSha256,
-    candidateFilesSha256: sha256(filesBytes), bundleSha256: sha256(await readFile(bundlePath)) }
+    candidateFilesSha256: sha256(filesBytes), executionReceiptsSha256: sha256(receiptBytes),
+    bundleSha256: sha256(await readFile(bundlePath)) }
   const manifestBytes = Buffer.from(`${JSON.stringify(manifest)}\n`)
   const manifestPath = resolve(manifestDirectory, 'manifest.json')
   await writeFile(manifestPath, manifestBytes)
   const record = { ...cell, status: 'completed', termination: null,
     model: { status: 'completed', directory, candidate,
       submissionManifest: { path: manifestPath, sha256: sha256(manifestBytes) },
-      taskSourceBindingSha256: sha256(bindingBytes), productSourceSealSha256 } }
+      taskSourceBindingSha256: sha256(bindingBytes), productSourceSealSha256, executionReceipts } }
   const options = { experimentId: 'formal-700', preparedInputsDirectory,
     preparedCatalogSha256: sha256(JSON.stringify(catalog)) }
   return { record, options, manifestPath, manifestDirectory }
@@ -98,6 +105,14 @@ test('rejects uncompleted, changed, unsafe, and oversized candidate evidence bef
     { code: 'SUBMISSION_NOT_COMPLETED' })
   assert.throws(() => prepareBenchmarkSubmission(valid.record, { ...valid.options,
     preparedCatalogSha256: '0'.repeat(64) }), { code: 'SUBMISSION_TASK_INVALID' })
+  const wrongModel = structuredClone(valid.record)
+  wrongModel.model.executionReceipts.calls[0].actualModels = ['deepseek-flash']
+  assert.throws(() => prepareBenchmarkSubmission(wrongModel, valid.options),
+    { code: 'SUBMISSION_EVIDENCE_INVALID' })
+  const wrongEffort = structuredClone(valid.record)
+  wrongEffort.model.executionReceipts.calls[0].reasoningEffort = 'low'
+  assert.throws(() => prepareBenchmarkSubmission(wrongEffort, valid.options),
+    { code: 'SUBMISSION_EVIDENCE_INVALID' })
   await writeFile(valid.manifestPath, '{"productComplete":false}')
   assert.throws(() => prepareBenchmarkSubmission(valid.record, valid.options),
     { code: 'SUBMISSION_EVIDENCE_INVALID' })

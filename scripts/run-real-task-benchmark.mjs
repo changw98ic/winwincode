@@ -7,6 +7,7 @@ import { resolve } from 'node:path'
 import { promisify } from 'node:util'
 
 import { openBenchmarkLedger } from './benchmark-ledger.mjs'
+import { assertBenchmarkExecutionReceipts } from './benchmark-execution-receipts.mjs'
 
 const runFile = promisify(execFile)
 
@@ -296,6 +297,7 @@ export async function executeBenchmarkCell(cell, adapter, {
     if (termination) {
       throw Object.assign(new Error('product execution terminated the benchmark runner'), {
         code: termination.reason, termination,
+        productOutcome: result,
         ...(result.claims !== undefined ? { claims: result.claims } : {}),
       })
     }
@@ -366,6 +368,13 @@ function runnerTermination(value) {
 // Reconstruct the same cell from durable calls. Missing model results may only
 // come from the registered product; aggregation is never dispatched again.
 export async function recoverBenchmarkCell(cell, observed, resolveModel) {
+  // registerLaunch is committed before the first product command. A claimed
+  // cell with no launch or call therefore never entered the product loop.
+  // Preserve it as an explicit failed denominator row instead of retrying it.
+  if (observed.launches.length === 0 && observed.calls.length === 0) {
+    return { status: 'failed', failure: { code: 'BENCHMARK_UNLAUNCHED_CLAIM' }, calls: [],
+      recovery: { kind: 'unlaunched-claim', originalCalls: [] } }
+  }
   const recoveredCalls = []
   const replay = async request => {
     const retained = observed.calls.find(call => call.callId === request.callId)
@@ -426,6 +435,7 @@ export async function runBenchmarkPlan(plan, {
       }
       let record = claim?.record
       if (!record) {
+        const startedAtMs = Date.now()
         let persistenceError = null
         const registerLaunch = target => {
           try {
@@ -469,6 +479,7 @@ export async function runBenchmarkPlan(plan, {
             record = {
               ...record,
               ...(error?.claims !== undefined ? { claims: error.claims } : {}),
+              ...(error?.productOutcome !== undefined ? { productOutcome: error.productOutcome } : {}),
               status: 'failed',
               verdict: null,
               score: null,
@@ -488,6 +499,7 @@ export async function runBenchmarkPlan(plan, {
           record.launches = store.launches(index)
           record.calls = store.calls(index)
         }
+        if (record.status !== 'not_run_runner_terminated') record.wallMs ??= Date.now() - startedAtMs
         store?.finish(index, claim.token, record)
       }
       records.push(record)
@@ -579,6 +591,50 @@ function metricRatio(records, numeratorField, denominatorField) {
   })
 }
 
+function retainedUsage(record) {
+  if (!Array.isArray(record.calls)) return { rows: record.usage ?? [], performance: [],
+    unmeasuredProductCalls: 0, jevCalls: 0, real: false }
+  const rows = []
+  const performance = []
+  let unmeasuredProductCalls = 0
+  let jevCalls = 0
+  for (const call of record.calls) {
+    const receipt = call.result?.executionReceipts
+    if (!receipt || !Array.isArray(receipt.calls) || receipt.calls.length === 0) {
+      unmeasuredProductCalls += 1
+      continue
+    }
+    assertBenchmarkExecutionReceipts(receipt)
+    for (const exchange of receipt.calls) {
+      const cached = exchange.usage?.cachedTokens ?? null
+      rows.push({ callKind: 'model', requestedModelId: exchange.requestedModel,
+        observedModelId: exchange.actualModels.at(-1) ?? null,
+        reasoningEffort: exchange.reasoningEffort,
+        status: exchange.terminalType === 'completed' ? 'completed' : 'failed',
+        cacheScenario: cached === null ? 'unknown' : cached > 0 ? 'cached' : 'uncached',
+        inputTokens: exchange.usage?.inputTokens ?? null,
+        outputTokens: exchange.usage?.outputTokens ?? null,
+        cachedTokens: cached,
+        cacheHits: cached === null ? null : Number(cached > 0),
+        cacheMisses: cached === null ? null : Number(cached === 0),
+        sourceExchangeId: exchange.exchangeId })
+    }
+    for (const jev of receipt.jev ?? []) {
+      jevCalls += 1
+      rows.push({ callKind: 'jev-model', requestedModelId: jev.requestedModel,
+        observedModelId: jev.actualModel,
+        status: jev.failureCount === 0 && jev.actualModel ? 'completed' : 'failed',
+        cacheScenario: 'jev', inputTokens: jev.inputTokens, outputTokens: jev.outputTokens,
+        cachedTokens: null, cacheHits: null, cacheMisses: null,
+        sourceExchangeId: jev.exchangeId })
+    }
+    performance.push(...(receipt.performance ?? []))
+  }
+  if (record.aggregateReceipt) rows.push({ ...record.aggregateReceipt,
+    cacheScenario: 'fusion-engine', costUsd: 0 })
+  return { rows, performance, unmeasuredProductCalls, jevCalls, real: true }
+}
+
 function sumUsage(records) {
   const totals = {
     calls: 0,
@@ -597,8 +653,24 @@ function sumUsage(records) {
   const cacheScenarios = new Map()
   let costUsd = 0
   const time = { wallMs: 0, modelWaitMs: 0, toolMs: 0, rebuildMs: 0 }
+  const missing = { inputTokens: 0, outputTokens: 0, cachedTokens: 0,
+    rebuildTokens: 0, toolTokens: 0, cacheHits: 0, cacheMisses: 0,
+    cost: 0, wallMs: 0, modelWaitMs: 0, toolMs: 0,
+    rebuildMs: 0, productCalls: 0 }
+  let jevModelCalls = 0
   for (const record of records) {
-    for (const call of record.usage ?? []) {
+    const evidence = retainedUsage(record)
+    missing.productCalls += evidence.unmeasuredProductCalls
+    jevModelCalls += evidence.jevCalls
+    if (evidence.unmeasuredProductCalls > 0) {
+      for (const field of ['inputTokens', 'outputTokens', 'cachedTokens', 'rebuildTokens',
+        'toolTokens', 'cacheHits', 'cacheMisses']) {
+        missing[field] += evidence.unmeasuredProductCalls
+      }
+      missing.cost += evidence.unmeasuredProductCalls
+      for (const field of Object.keys(time)) missing[field] += evidence.unmeasuredProductCalls
+    }
+    for (const call of evidence.rows) {
       totals.calls += call.callCount ?? 1
       totals[call.callKind === 'fusion-engine' ? 'fusionEngineCalls' : 'modelCalls'] += call.callCount ?? 1
       totals.failedCalls += call.status === 'failed' ? 1 : 0
@@ -616,36 +688,87 @@ function sumUsage(records) {
         cacheHits: 0,
         cacheMisses: 0,
         costUsd: 0,
+        costUnknown: 0,
       }
       scenario.calls += call.callCount ?? 1
       scenario[call.callKind === 'fusion-engine' ? 'fusionEngineCalls' : 'modelCalls'] += call.callCount ?? 1
       for (const field of ['inputTokens', 'outputTokens', 'cachedTokens', 'rebuildTokens', 'toolTokens', 'cacheHits', 'cacheMisses']) {
-        totals[field] += call[field] ?? 0
-        scenario[field] += call[field] ?? 0
+        if (call[field] == null) {
+          if (field in missing && call.callKind !== 'fusion-engine') missing[field] += 1
+        } else {
+          if (!Number.isSafeInteger(call[field]) || call[field] < 0) fail('USAGE_INVALID', `${record.runId} has invalid ${field}`)
+          totals[field] += call[field]
+          scenario[field] += call[field]
+        }
       }
-      costUsd += call.costUsd ?? 0
-      scenario.costUsd += call.costUsd ?? 0
-      for (const field of Object.keys(time)) time[field] += call[field] ?? 0
+      if (call.costUsd != null) {
+        if (!Number.isFinite(call.costUsd) || call.costUsd < 0) fail('USAGE_INVALID', `${record.runId} has invalid cost`)
+        costUsd += call.costUsd
+        scenario.costUsd += call.costUsd
+      } else if (!evidence.real && call.callKind !== 'fusion-engine') {
+        missing.cost += 1
+        scenario.costUnknown += 1
+      } else if (evidence.real && call.callKind !== 'fusion-engine') {
+        scenario.costUnknown += 1
+      }
+      if (!evidence.real) for (const field of Object.keys(time)) {
+        if (call[field] != null) time[field] += call[field]
+        else if (call.callKind !== 'fusion-engine') missing[field] += 1
+      }
       cacheScenarios.set(cacheScenario, scenario)
     }
+    if (evidence.real && record.calls.length > 0) {
+      const primaryCalls = evidence.rows.filter(call => call.callKind === 'model').length
+      const measuredCalls = evidence.performance.reduce((sum, run) => sum + run.modelCalls, 0)
+      if (evidence.performance.length === 0 || measuredCalls !== primaryCalls || evidence.jevCalls > 0
+          || evidence.performance.some(run => run.actualCostMicros == null)) {
+        missing.cost += 1
+      } else {
+        costUsd += evidence.performance.reduce((sum, run) => sum + run.actualCostMicros, 0) / 1_000_000
+      }
+      if (evidence.performance.length === 0) {
+        for (const field of Object.keys(time)) missing[field] += 1
+      } else {
+        for (const run of evidence.performance) {
+          for (const [field, value] of [['wallMs', run.totalRuntimeMs], ['modelWaitMs', run.modelWaitMs],
+            ['toolMs', run.toolMs], ['rebuildMs', run.rebuildMs]]) {
+            if (value == null) missing[field] += 1
+            else time[field] += value
+          }
+        }
+      }
+    }
   }
+  const reported = field => missing[field] === 0 ? totals[field] : null
   return {
     tokenAndCache: Object.freeze({
       ...totals,
+      inputTokens: reported('inputTokens'), outputTokens: reported('outputTokens'),
+      cachedTokens: reported('cachedTokens'), rebuildTokens: reported('rebuildTokens'),
+      toolTokens: reported('toolTokens'), cacheHits: reported('cacheHits'),
+      cacheMisses: reported('cacheMisses'),
+      measured: Object.freeze({ inputTokens: totals.inputTokens, outputTokens: totals.outputTokens,
+        cachedTokens: totals.cachedTokens }),
+      unknownUsageExchanges: Math.max(missing.inputTokens, missing.outputTokens),
       cacheScenarios: Object.freeze(Object.fromEntries(
         [...cacheScenarios.entries()].sort(([left], [right]) => left.localeCompare(right))
           .map(([scenario, values]) => [scenario, Object.freeze({
-            ...values,
-            costUsd: Number(values.costUsd.toFixed(6)),
+            ...Object.fromEntries(Object.entries(values).filter(([key]) => key !== 'costUnknown')),
+            costUsd: values.costUnknown === 0 ? Number(values.costUsd.toFixed(6)) : null,
           })]),
       )),
     }),
     callAccounting: Object.freeze({
       modelCalls: totals.modelCalls,
       fusionEngineCalls: totals.fusionEngineCalls,
+      jevModelCalls,
+      unmeasuredProductCalls: missing.productCalls,
     }),
-    cost: Object.freeze({ costUsd: Number(costUsd.toFixed(6)) }),
-    time: Object.freeze(Object.fromEntries(Object.entries(time).map(([key, value]) => [key, Math.round(value)]))),
+    cost: Object.freeze({ costUsd: missing.cost === 0 ? Number(costUsd.toFixed(6)) : null,
+      measuredCostUsd: Number(costUsd.toFixed(6)), unknownCostSources: missing.cost }),
+    time: Object.freeze(Object.fromEntries(Object.entries(time).map(([key, value]) =>
+      [key, missing[key] === 0 ? Math.round(value) : null]))),
+    coverage: Object.freeze(missing),
   }
 }
 
@@ -751,7 +874,7 @@ export function aggregateBenchmarkReport(plan, { records, experimentId, ...bindi
     if (record.score != null && (!Number.isFinite(record.score) || record.score < 0 || record.score > 1)) {
       fail('SCORE_INVALID', `${record.runId} has an invalid normalized score`)
     }
-    for (const call of record.usage ?? []) {
+    for (const call of retainedUsage(record).rows) {
       if (call.callKind === 'fusion-engine') {
         const masqueradesAsModel = ['provider', 'requestedModelId', 'observedModelId', 'reasoningEffort']
           .some(field => field in call)
@@ -760,8 +883,16 @@ export function aggregateBenchmarkReport(plan, { records, experimentId, ...bindi
           || !SHA256_PATTERN.test(call.inputDigest ?? '') || !SHA256_PATTERN.test(call.outputDigest ?? '')) {
           fail('USAGE_IDENTITY_INVALID', `${record.runId} has an invalid fusion-engine call`)
         }
+      } else if (call.callKind === 'jev-model') {
+        if (call.status === 'completed' && (typeof call.requestedModelId !== 'string'
+          || !call.requestedModelId || typeof call.observedModelId !== 'string'
+          || !call.observedModelId)) {
+          fail('USAGE_IDENTITY_INVALID', `${record.runId} has an unproven JEV call`)
+        }
       } else if (call.callKind !== 'model' || !PROVIDERS.includes(call.requestedModelId)
-        || call.requestedModelId !== call.observedModelId || call.reasoningEffort !== 'max') {
+        || (call.observedModelId !== null && call.requestedModelId !== call.observedModelId)
+        || (call.status !== 'failed' && call.observedModelId === null)
+        || call.reasoningEffort !== 'max') {
         fail('USAGE_IDENTITY_INVALID', `${record.runId} has an unproven model call`)
       }
     }
@@ -786,7 +917,14 @@ export function aggregateBenchmarkReport(plan, { records, experimentId, ...bindi
     confirmedRecall: metricRatio(records, 'confirmedRetained', 'confirmedTotal'),
     ...Object.fromEntries(Object.entries(qualityCounts).map(([field, count]) => [field, count])),
   })
-  const endToEndWallMs = completed.map(record => record.wallMs ?? 0).sort((left, right) => left - right)
+  const timedRecords = completed
+  const endToEndComplete = timedRecords.every(record => Number.isSafeInteger(record.wallMs) && record.wallMs >= 0)
+  const endToEndWallMs = timedRecords.map(record => record.wallMs).filter(value => value != null)
+    .sort((left, right) => left - right)
+  const executedRecords = records.filter(record => record.status === 'completed' || record.status === 'failed')
+  const executionComplete = executedRecords.every(record => Number.isSafeInteger(record.wallMs) && record.wallMs >= 0)
+  const executionWallMs = executedRecords.map(record => record.wallMs).filter(value => value != null)
+    .sort((left, right) => left - right)
   const p95Index = endToEndWallMs.length === 0 ? 0 : Math.min(
     endToEndWallMs.length - 1,
     Math.ceil(endToEndWallMs.length * 0.95) - 1,
@@ -808,13 +946,24 @@ export function aggregateBenchmarkReport(plan, { records, experimentId, ...bindi
     strategyReferences: Object.freeze(strategyReferences(plan, records)),
     tokenAndCache: usage.tokenAndCache,
     callAccounting: usage.callAccounting,
+    accountingCoverage: usage.coverage,
     cost: usage.cost,
     time: Object.freeze({
       ...usage.time,
       callWallMs: usage.time.wallMs,
       endToEnd: Object.freeze({
-        totalWallMs: endToEndWallMs.reduce((total, wallMs) => total + wallMs, 0),
-        p95Ms: endToEndWallMs[p95Index] ?? 0,
+        totalWallMs: endToEndComplete && endToEndWallMs.length > 0
+          ? endToEndWallMs.reduce((total, wallMs) => total + wallMs, 0) : null,
+        p95Ms: endToEndComplete ? endToEndWallMs[p95Index] ?? null : null,
+        observedRuns: endToEndWallMs.length, missingRuns: timedRecords.length - endToEndWallMs.length,
+      }),
+      execution: Object.freeze({
+        totalWallMs: executionComplete && executionWallMs.length > 0
+          ? executionWallMs.reduce((total, wallMs) => total + wallMs, 0) : null,
+        p95Ms: executionComplete && executionWallMs.length > 0
+          ? executionWallMs[Math.ceil(executionWallMs.length * 0.95) - 1] : null,
+        observedRuns: executionWallMs.length,
+        missingRuns: executedRecords.length - executionWallMs.length,
       }),
     }),
     contextEffects: contextEffects(records),

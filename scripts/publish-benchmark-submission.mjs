@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { pathToFileURL } from 'node:url'
+import { assertBenchmarkExecutionReceipts } from './benchmark-execution-receipts.mjs'
 import { validateBenchmarkConfiguration } from './run-real-task-benchmark.mjs'
 
 const digest = bytes => createHash('sha256').update(bytes).digest('hex')
@@ -50,6 +51,15 @@ export function prepareBenchmarkSubmission(record, { experimentId, preparedInput
       || (productSourceSealSha256 && manifest.productSourceSealSha256 !== productSourceSealSha256)) {
     throw fail('SUBMISSION_EVIDENCE_INVALID')
   }
+  try {
+    const receiptBytes = readFileSync(join(dirname(manifestPath), 'execution-receipts.json'))
+    if (digest(receiptBytes) !== manifest.executionReceiptsSha256
+        || JSON.stringify(JSON.parse(receiptBytes)) !== JSON.stringify(model.executionReceipts)) {
+      throw fail('SUBMISSION_EVIDENCE_INVALID')
+    }
+    assertBenchmarkExecutionReceipts(model.executionReceipts)
+  }
+  catch { throw fail('SUBMISSION_EVIDENCE_INVALID') }
   const bindingBytes = readFileSync(join(directory, 'task-source-binding.json'))
   const binding = JSON.parse(bindingBytes)
   if (digest(bindingBytes) !== model.taskSourceBindingSha256 || binding.runId !== record.runId

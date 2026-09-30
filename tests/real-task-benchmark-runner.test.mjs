@@ -13,7 +13,7 @@ import { assertDeviceBenchmarkRunning } from '../scripts/device-production-fixtu
 import { driveDelivery } from '../scripts/run-api-production-vertical.mjs'
 import { openBenchmarkLedger } from '../scripts/benchmark-ledger.mjs'
 import { benchmarkAggregationInput, executeDeviceBenchmark, recoverBenchmarkDeviceCell,
-  runBenchmarkDeviceAggregation, terminalBenchmarkDeviceFailure,
+  runBenchmarkDeviceAggregation, stoppedDeviceResult, terminalBenchmarkDeviceFailure,
   terminalDeviceFailure } from '../scripts/benchmark-device-adapter.mjs'
 import { runDeviceTaskVertical, fusionDeviceProviders, inspectUnresolvedDeviceTasks, benchmarkDeviceEnvironment,
   expiredCrashedDeviceWorkRun, expiredDeviceWorkRunLease,
@@ -273,6 +273,69 @@ test('recovery finalizes retained calls after process death and fences stale wri
     assert.throws(() => store.finish(0, token, { runId: cell.runId }), { code: 'LEDGER_COMPLETION_CONFLICT' })
     assert.throws(() => store.recordCall(0, token, { callId: `${cell.runId}:late`, status: 'returned' }), { code: 'LEDGER_CLAIM_MISMATCH' })
   } finally { store.close() }
+})
+
+test('recovered product calls are committed to the call table with the final record', async t => {
+  const directory = await mkdtemp(resolve(tmpdir(), 'benchmark-recovered-call-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const cell = buildBenchmarkPlan({ taskIds: Array.from({ length: 20 }, (_, i) => `task-${i}`) }).cells[0]
+  const plan = { cells: [cell] }
+  const ledgerPath = resolve(directory, 'ledger.sqlite3')
+  const options = { ledgerPath, experimentBinding: { experimentId: 'recovered-call' } }
+  const launch = { callId: `${cell.runId}:model`, directory: resolve(directory, 'product'),
+    productSessionId: 'psn_01J00000000000000000000001', deliveryId: 'dlv_01J00000000000000000000001' }
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
+    const { runBenchmarkPlan } = await import(process.argv[1]);
+    await runBenchmarkPlan(JSON.parse(process.argv[2]), { ...JSON.parse(process.argv[3]),
+      executeCell: (_cell, context) => {
+        context.registerLaunch(JSON.parse(process.argv[4]));
+        process.exit(86);
+      },
+    });
+  `, new URL('../scripts/run-real-task-benchmark.mjs', import.meta.url).href,
+  JSON.stringify(plan), JSON.stringify(options), JSON.stringify(launch)], { encoding: 'utf8' })
+  assert.equal(child.status, 86, child.stderr)
+
+  const result = await runBenchmarkPlan(plan, { ...options,
+    executeCell: () => assert.fail('product must not be executed again'),
+    recoverCell: (value, observed) => recoverBenchmarkCell(value, observed, async (_request, target) => {
+      assert.deepEqual(target, launch)
+      return { status: 'failed', failure: { code: 'DEVICE_PRODUCT_FAILED' }, productComplete: false }
+    }),
+  })
+  const database = new DatabaseSync(ledgerPath, { readOnly: true })
+  try {
+    const calls = database.prepare('SELECT record FROM benchmark_call ORDER BY rowid').all()
+      .map(row => JSON.parse(row.record))
+    assert.deepEqual(calls, result.records[0].calls)
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].status, 'returned')
+  } finally { database.close() }
+})
+
+test('a prelaunch crash becomes an explicit failed row without starting a product', async t => {
+  const directory = await mkdtemp(resolve(tmpdir(), 'benchmark-prelaunch-crash-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const cell = buildBenchmarkPlan({ taskIds: Array.from({ length: 20 }, (_, i) => `task-${i}`) }).cells[0]
+  const plan = { cells: [cell] }
+  const options = { ledgerPath: resolve(directory, 'ledger.sqlite3'),
+    experimentBinding: { experimentId: 'prelaunch-crash' } }
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
+    const { runBenchmarkPlan } = await import(process.argv[1]);
+    await runBenchmarkPlan(JSON.parse(process.argv[2]), { ...JSON.parse(process.argv[3]),
+      executeCell: () => process.exit(86),
+    });
+  `, new URL('../scripts/run-real-task-benchmark.mjs', import.meta.url).href,
+  JSON.stringify(plan), JSON.stringify(options)], { encoding: 'utf8' })
+  assert.equal(child.status, 86, child.stderr)
+  const result = await runBenchmarkPlan(plan, { ...options,
+    executeCell: () => assert.fail('claimed cell must not be retried'),
+    recoverCell: recoverBenchmarkCell })
+  assert.equal(result.records[0].status, 'failed')
+  assert.equal(result.records[0].failure.code, 'BENCHMARK_UNLAUNCHED_CLAIM')
+  assert.equal(result.records[0].recovery.kind, 'unlaunched-claim')
+  assert.deepEqual(result.records[0].launches, [])
+  assert.deepEqual(result.records[0].calls, [])
 })
 
 test('recovery leaves incomplete Fusion unresolved and propagates retained stops', async () => {
@@ -888,11 +951,49 @@ test('benchmark report recomputes fixed denominators and keeps usage dimensions 
   assert.equal(report.time.callWallMs, 160)
   assert.equal(report.time.endToEnd.totalWallMs, 150)
   assert.equal(report.time.endToEnd.p95Ms, 150)
+  assert.equal(report.time.execution.totalWallMs, 150)
   assert.equal(report.contextEffects.rebuildCount, 1)
   assert.equal(report.contextEffects.evidenceStatus, 'insufficient_evidence')
-  assert.deepEqual(report.callAccounting, { modelCalls: 1, fusionEngineCalls: 1 })
+  assert.deepEqual(report.callAccounting, { modelCalls: 1, fusionEngineCalls: 1,
+    jevModelCalls: 0, unmeasuredProductCalls: 0 })
   assert.equal(report.gates.regret.status, 'insufficient_evidence')
   assert.equal(report.gates.minority.status, 'insufficient_evidence')
+})
+
+test('formal report recomputes actual nested receipts and leaves missing cost or tokens unknown', () => {
+  const plan = buildBenchmarkPlan({ taskIds: Array.from({ length: 20 }, (_, index) => `task-${index + 1}`) })
+  const records = plan.cells.map((cell, index) => ({ ...cell,
+    status: index === 0 ? 'completed' : 'failed', verdict: null, score: null,
+    wallMs: index === 0 ? 2000 : 0, calls: index === 0 ? [{
+      callId: `${cell.runId}:model`, status: 'returned', result: { executionReceipts: {
+        calls: [{ exchangeId: 'observed-1', requestedModel: 'glm-5.3-flash',
+          actualModels: ['glm-5.3-flash'], reasoningEffort: 'max', terminalType: 'completed',
+          usage: { inputTokens: 11, outputTokens: 4, totalTokens: 15, cachedTokens: 3 } },
+        { exchangeId: 'observed-2', requestedModel: 'glm-5.3-flash',
+          actualModels: [], reasoningEffort: 'max', terminalType: 'error', usage: null }],
+        jev: [{ exchangeId: 'observed-1', requestedModel: 'jev-latest', actualModel: 'jev-1.13.0',
+          inputTokens: 2, outputTokens: 1, failureCount: 0 }],
+        performance: [{ modelCalls: 2, totalRuntimeMs: 1500, modelWaitMs: 800,
+          toolMs: 200, actualCostMicros: null }],
+      } },
+    }] : [] }))
+  const report = aggregateBenchmarkReport(plan, { records, experimentId: 'actual-receipts' })
+  assert.equal(report.callAccounting.modelCalls, 3)
+  assert.equal(report.callAccounting.jevModelCalls, 1)
+  assert.equal(report.tokenAndCache.inputTokens, null)
+  assert.equal(report.tokenAndCache.measured.inputTokens, 13)
+  assert.equal(report.tokenAndCache.unknownUsageExchanges, 1)
+  assert.equal(report.cost.costUsd, null)
+  assert.ok(report.cost.unknownCostSources > 0)
+  assert.equal(report.time.callWallMs, 1500)
+  assert.equal(report.time.modelWaitMs, 800)
+  assert.equal(report.time.toolMs, 200)
+  assert.equal(report.time.endToEnd.totalWallMs, 2000)
+  assert.equal(report.time.execution.totalWallMs, 2000)
+  const failedReport = aggregateBenchmarkReport(plan, { records: records.map((record, index) =>
+    index === 0 ? { ...record, status: 'failed' } : record), experimentId: 'actual-failed-receipts' })
+  assert.equal(failedReport.time.endToEnd.totalWallMs, null)
+  assert.equal(failedReport.time.execution.totalWallMs, 2000)
 })
 
 test('frozen source validation binds repository, exact revision and 20 task directories', async t => {
@@ -1251,6 +1352,76 @@ test('Device Core stop ledger terminates the delivery driver and all remaining b
   assert.equal(database.prepare('SELECT stopped FROM tool_repeat_run').get().stopped, 1)
 })
 
+test('a persisted Core stop settles a claimed product call before Delivery terminal projection', async t => {
+  const directory = await mkdtemp(resolve(tmpdir(), 'wwc-core-stop-product-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const workerSessionId = 'wsn_01J00000000000000000000001'
+  const productSessionId = 'psn_01J00000000000000000000001'
+  const deliveryId = 'dlv_01J00000000000000000000001'
+  const runId = 'main-A:task-0:glm-5.3-flash'
+  const callId = `${runId}:model`
+  const runtime = resolve(directory, 'device-data/worker-sessions', workerSessionId, 'data/codex-runtime')
+  await mkdir(runtime, { recursive: true })
+  const database = new DatabaseSync(resolve(runtime, 'worker-codex.sqlite3'))
+  database.exec("CREATE TABLE tool_repeat_run (run_key TEXT PRIMARY KEY, stopped INTEGER NOT NULL); INSERT INTO tool_repeat_run VALUES ('owned-core-run', 1)")
+  database.close()
+  const launch = { callId, directory, productSessionId, deliveryId }
+  const report = { errorCode: 'STUCK_TOOL_REPEAT_LIMIT', complete: false, productSessionId, deliveryId,
+    delivery: { detail: { status: 'in_progress' },
+      workRunAggregate: { runs: [{ id: 'wrn_01J00000000000000000000001', workerSessionId, state: 'running' }] } } }
+  await writeFile(resolve(directory, 'device-task-result.json'), JSON.stringify(report))
+  await writeFile(resolve(directory, 'task-source-binding.json'), JSON.stringify({ runId, callId, taskId: 'task-0' }))
+  await writeFile(resolve(directory, 'execution-receipts.json'), JSON.stringify({ calls: [], jev: [] }))
+  const result = stoppedDeviceResult({ runId, callId, taskId: 'task-0', provider: 'glm-5.3-flash' },
+    launch, report)
+  assert.equal(result.failure.code, 'STUCK_TOOL_REPEAT_LIMIT')
+  assert.equal(result.termination.reason, 'STUCK_TOOL_REPEAT_LIMIT')
+  assert.equal(result.productComplete, false)
+  assert.equal(result.delivery.detail.status, 'in_progress')
+  assert.equal(result.stopProof.workerSessionId, workerSessionId)
+  assert.throws(() => stoppedDeviceResult({ runId, callId, taskId: 'other', provider: 'glm-5.3-flash' },
+    launch, report))
+})
+
+test('recovery retains a Core stop and receipts when the driver dies before writing its stop report', async t => {
+  const directory = await mkdtemp(resolve(tmpdir(), 'wwc-core-stop-recovery-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const cell = buildBenchmarkPlan({ taskIds: Array.from({ length: 20 }, (_, index) => `task-${index}`) }).cells[0]
+  const launch = { callId: `${cell.runId}:model`, directory,
+    productSessionId: 'psn_01J00000000000000000000001',
+    deliveryId: 'dlv_01J00000000000000000000001' }
+  const workerSessionId = 'wsn_01J00000000000000000000001'
+  const runtime = resolve(directory, 'device-data/worker-sessions', workerSessionId, 'data/codex-runtime')
+  await mkdir(runtime, { recursive: true })
+  const database = new DatabaseSync(resolve(runtime, 'worker-codex.sqlite3'))
+  database.exec("CREATE TABLE tool_repeat_run (run_key TEXT PRIMARY KEY, stopped INTEGER NOT NULL); INSERT INTO tool_repeat_run VALUES ('owned-core-run', 1)")
+  database.close()
+  await writeFile(resolve(directory, 'device-task-result.json'), JSON.stringify({ complete: false,
+    productSessionId: launch.productSessionId, deliveryId: launch.deliveryId,
+    modelRoute: { modelId: cell.comparison }, benchmarkConfiguration: benchmarkConfiguration(cell.configurationId),
+    delivery: { detail: { status: 'in_progress' }, workRunAggregate: { runs: [{ workerSessionId,
+      state: 'running' }] } } }))
+  await writeFile(resolve(directory, 'task-source-binding.json'), JSON.stringify({ runId: cell.runId,
+    callId: launch.callId, taskId: cell.taskId }))
+  await writeFile(resolve(directory, 'product-source-seal.json'), '{}')
+  const options = { ledgerPath: resolve(directory, 'ledger.sqlite3'),
+    experimentBinding: { experimentId: 'retained-stop' } }
+  await assert.rejects(runBenchmarkPlan({ cells: [cell] }, { ...options,
+    executeCell: (_cell, runner) => {
+      runner.registerLaunch(launch)
+      throw Object.assign(new Error('driver died'), { code: 'BENCHMARK_EVIDENCE_FAILED' })
+    } }), { code: 'BENCHMARK_EVIDENCE_FAILED' })
+  const restored = await runBenchmarkPlan({ cells: [cell] }, { ...options,
+    executeCell: () => assert.fail('recovery must not restart the product'),
+    recoverCell: (value, observed) => recoverBenchmarkDeviceCell(value, observed, {}) })
+  assert.equal(restored.records[0].status, 'failed')
+  assert.equal(restored.records[0].termination.reason, 'STUCK_TOOL_REPEAT_LIMIT')
+  assert.equal(restored.records[0].calls[0].result.stopProof.workerSessionId, workerSessionId)
+  assert.equal(restored.records[0].calls[0].result.recovery.kind, 'retained-core-stop')
+  assert.deepEqual(await runBenchmarkPlan({ cells: [cell] }, { ...options,
+    executeCell: () => assert.fail('completed recovery cannot restart') }), restored)
+})
+
 test('execution completion leaves external grading pending and never fabricates zero scores', async () => {
   const plan = buildBenchmarkPlan({ taskIds: Array.from({ length: 20 }, (_, index) => `task-${index + 1}`) })
   const ledger = await runBenchmarkPlan(plan, {
@@ -1574,6 +1745,23 @@ test('candidate export verifies a self-contained Git bundle and preserves failed
   const cell = buildBenchmarkPlan({ taskIds: Array.from({ length: 20 }, (_, i) => `task-${i}`) }).cells[0]
   const launch = { callId: `${cell.runId}:model`, directory,
     deliveryId: 'dlv_01J00000000000000000000001', productSessionId: 'psn_01J00000000000000000000001' }
+  const providerDirectory = resolve(directory, 'device-data', 'providers')
+  await mkdir(providerDirectory, { recursive: true })
+  const providerDatabase = new DatabaseSync(resolve(providerDirectory, 'providers.sqlite3'))
+  providerDatabase.exec('CREATE TABLE exchanges(exchange_id TEXT,request_open TEXT,chunks TEXT)')
+  const encode = object => {
+    const bytes = Buffer.from(JSON.stringify(object))
+    return { dataBase64: bytes.toString('base64'), payloadDigest: `sha256:${sha(bytes)}` }
+  }
+  providerDatabase.prepare('INSERT INTO exchanges VALUES (?,?,?)').run('fixture-exchange',
+    JSON.stringify({ modelExchangeId: 'fixture-exchange', lease: { jobId: 'fixture-job' },
+      workerSessionId: 'fixture-worker', request: encode({ provider: 'fixture',
+        request: { model: cell.comparison, reasoning: { effort: 'max' } } }) }),
+    JSON.stringify([{ modelExchangeId: 'fixture-exchange',
+      payload: encode({ type: 'server_model', model: cell.comparison }) },
+    { modelExchangeId: 'fixture-exchange', payload: encode({ type: 'completed',
+      tokenUsage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } }) }]))
+  providerDatabase.close()
   const report = { complete: false, candidateRef, taskInputDigest: sha(await readFile(taskPath)),
     productSessionId: launch.productSessionId, deliveryId: launch.deliveryId,
     modelRoute: { modelId: cell.comparison }, benchmarkConfiguration: benchmarkConfiguration('main-A'),
@@ -1796,12 +1984,30 @@ test('execution receipt export validates payloads, omits private text and preser
     ]
     database.prepare('INSERT INTO exchanges VALUES (?,?,?)').run(exchange, JSON.stringify(opened), JSON.stringify(chunks))
   }
+  const runtime = resolve(directory, 'device-data', 'worker-sessions', 'fixture-worker',
+    'data', 'codex-runtime')
+  await mkdir(runtime, { recursive: true })
+  const performanceDatabase = new DatabaseSync(resolve(runtime, 'worker-codex.sqlite3'))
+  t.after(() => performanceDatabase.close())
+  performanceDatabase.exec(`CREATE TABLE performance_projection(run_key TEXT, record_json BLOB);
+    CREATE TABLE performance_operation(run_key TEXT, operation_kind TEXT, operation_id TEXT,
+      completed INTEGER, duration_millis INTEGER, actual_cost_microunits INTEGER);`)
+  performanceDatabase.prepare('INSERT INTO performance_projection VALUES (?,?)').run('sha256:fixture',
+    Buffer.from(JSON.stringify({ report: { primaryModelWaitMs: 42, totalRuntimeMs: 60 } })))
+  performanceDatabase.prepare('INSERT INTO performance_operation VALUES (?,?,?,?,?,?)')
+    .run('sha256:fixture', 'primary_model', 'model-1', 1, 42, null)
+  performanceDatabase.prepare('INSERT INTO performance_operation VALUES (?,?,?,?,?,?)')
+    .run('sha256:fixture', 'tool', 'tool-1', 1, 10, null)
   const { evidence } = exportDeviceExecutionReceipts(directory)
   assert.equal(evidence.calls.length, 2)
   assert.equal(evidence.completeUsage, false)
   assert.equal(evidence.totalTokens, null)
   assert.equal(evidence.calls[0].usage.totalTokens, 7)
   assert.equal(evidence.calls[1].usage, null)
+  assert.equal(evidence.performance[0].totalRuntimeMs, 60)
+  assert.equal(evidence.performance[0].modelWaitMs, 42)
+  assert.equal(evidence.performance[0].toolMs, 10)
+  assert.equal(evidence.performance[0].actualCostMicros, null)
   const saved = await readFile(resolve(directory, 'execution-receipts.json'), 'utf8')
   assert.equal(saved.includes('private-'), false)
   const opened = JSON.parse(database.prepare('SELECT request_open FROM exchanges LIMIT 1').get().request_open)

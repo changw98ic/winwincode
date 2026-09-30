@@ -559,8 +559,17 @@ impl HttpsSseProviderAdapter {
         };
         let mut converter = ProviderStreamConverter::from_gateway_receipt(receipt);
         let mut frames = Vec::new();
-        for event in events {
+        for (index, event) in events.into_iter().enumerate() {
             frames.extend(converter.ingest(event).map_err(|error| {
+                if matches!(
+                    self.shared.config.protocol,
+                    HttpsSseProviderProtocol::OpenAiChatCompletions(_)
+                ) {
+                    eprintln!(
+                        "openai_sse_protocol stage=converter index={index} kind={:?}",
+                        error.kind()
+                    );
+                }
                 if error.kind() == crate::ProviderStreamConversionErrorKind::CredentialLeak {
                     HttpsSseProviderError::new(HttpsSseProviderErrorKind::CredentialLeak)
                 } else {

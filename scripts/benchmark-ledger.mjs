@@ -137,6 +137,21 @@ export function openBenchmarkLedger(path, identity, cells) {
           || row.run_id !== record.runId
           || JSON.stringify(launches(index)) !== JSON.stringify(observed.launches)
           || JSON.stringify(calls(index)) !== JSON.stringify(observed.calls)) reject('LEDGER_RECOVERY_CONFLICT')
+        if (record.calls !== undefined) {
+          if (!Array.isArray(record.calls) || record.calls.length < observed.calls.length
+            || JSON.stringify(record.calls.slice(0, observed.calls.length)) !== JSON.stringify(observed.calls)) {
+            reject('LEDGER_RECOVERY_CONFLICT')
+          }
+          const insert = database.prepare('INSERT INTO benchmark_call VALUES (?, ?, ?)')
+          for (const call of record.calls.slice(observed.calls.length)) {
+            if (!call || typeof call.callId !== 'string' || !call.callId.startsWith(`${row.run_id}:`)
+              || !['returned', 'failed'].includes(call.status)
+              || database.prepare('SELECT 1 FROM benchmark_call WHERE ordinal = ? AND call_id = ?').get(index, call.callId)) {
+              reject('LEDGER_RECOVERY_CONFLICT')
+            }
+            insert.run(index, call.callId, JSON.stringify(call))
+          }
+        }
         // Fence the old driver and commit the recovered result together. Never clear a claim.
         database.prepare('UPDATE benchmark_cell SET token = ?, record = ? WHERE ordinal = ?')
           .run(randomUUID(), JSON.stringify(record), index)

@@ -229,12 +229,35 @@ pub(crate) fn parse_openai_chat_sse(
     options: AnthropicMessagesOptions,
 ) -> Result<ParsedOpenAiStream, AnthropicCodecError> {
     options.validate()?;
-    let wire = parse_openai_sse_envelopes(bytes, max_event_bytes, max_events)?;
+    let wire =
+        parse_openai_sse_envelopes(bytes, max_event_bytes, max_events).inspect_err(|error| {
+            eprintln!("openai_sse_protocol stage=envelope kind={:?}", error.kind());
+        })?;
     let mut parser = OpenAiStreamParser::new(tool_bindings, options.pricing, wire.len());
-    for envelope in &wire {
-        parser.push(envelope)?;
+    for (index, envelope) in wire.iter().enumerate() {
+        parser.push(envelope).inspect_err(|error| {
+            let data = envelope.data.as_object();
+            let choices = data.and_then(|value| value.get("choices")).and_then(Value::as_array);
+            let delta = choices.and_then(|value| value.first())
+                .and_then(|value| value.get("delta")).and_then(Value::as_object);
+            eprintln!(
+                "openai_sse_protocol stage=chunk index={index} kind={:?} choices={} usage={} finish={} tool_calls={} reasoning={} content={}",
+                error.kind(), choices.map_or(0, Vec::len),
+                data.is_some_and(|value| value.get("usage").is_some_and(|value| !value.is_null())),
+                choices.is_some_and(|value| value.iter().any(|choice| choice.get("finish_reason")
+                    .is_some_and(|value| !value.is_null()))),
+                delta.is_some_and(|value| value.contains_key("tool_calls")),
+                delta.is_some_and(|value| value.contains_key("reasoning_content") || value.contains_key("reasoning")),
+                delta.is_some_and(|value| value.contains_key("content")),
+            );
+        })?;
     }
-    parser.finish()
+    let finished = parser.finish_reason.is_some();
+    let measured = parser.usage.is_some();
+    let open_tools = parser.open_tools.len();
+    parser.finish().inspect_err(|error| {
+        eprintln!("openai_sse_protocol stage=finish kind={:?} finish_seen={finished} usage_seen={measured} open_tools={open_tools}", error.kind());
+    })
 }
 
 struct OpenAiEnvelope {

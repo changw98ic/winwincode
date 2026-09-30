@@ -5,6 +5,7 @@ import { basename, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { benchmarkAggregationDigest, buildBenchmarkPlan, executeBenchmarkCell, executeFormalBenchmark,
   recoverBenchmarkCell, validateBenchmarkConfiguration, validateFrozenTaskSource } from './run-real-task-benchmark.mjs'
+import { assertBenchmarkExecutionReceipts } from './benchmark-execution-receipts.mjs'
 import { benchmarkDeviceEnvironment, expiredCrashedDeviceWorkRun, loadDeviceProviderEnvironment,
   runDeviceTaskVertical } from './run-device-task-vertical.mjs'
 import { loadDeviceAgentTask } from './device-agent-task.mjs'
@@ -252,6 +253,10 @@ export async function runBenchmarkDeviceModel(request, runner, options) {
       providerEnvironment: options.providerEnvironment ?? process.env })
   } catch (error) {
     if (!registeredLaunch) throw error
+    if (error?.code === 'STUCK_TOOL_REPEAT_LIMIT') {
+      try { return stoppedDeviceResult(request, registeredLaunch, error.report) }
+      catch { throw evidenceFailure() }
+    }
     if (error?.code === 'DEVICE_WORKER_CRASHED') {
       try { return crashedDeviceResult(request, registeredLaunch, options, error.report) }
       catch { throw evidenceFailure() }
@@ -283,11 +288,53 @@ function deviceResult(directory, evidenceDirectory, commit) {
   const manifestPath = resolve(evidenceDirectory, 'submission-evidence', commit, 'manifest.json')
   const manifestBytes = readFileSync(manifestPath)
   const manifest = JSON.parse(manifestBytes)
+  const executionReceipts = assertBenchmarkExecutionReceipts(
+    JSON.parse(readFileSync(resolve(evidenceDirectory, 'execution-receipts.json'), 'utf8')))
   return { status: 'completed', directory, candidate: manifest.candidate,
     productSourceSealSha256: manifest.productSourceSealSha256,
     submissionManifest: { path: manifestPath, sha256: sha256(manifestBytes) },
-    executionReceipts: JSON.parse(readFileSync(resolve(evidenceDirectory, 'execution-receipts.json'), 'utf8')),
+    executionReceipts,
     taskSourceBindingSha256: sha256(readFileSync(resolve(directory, 'task-source-binding.json'))),
+    externalVerdict: null, externalScore: null }
+}
+
+export function stoppedDeviceResult(request, launch, expectedReport, { recovering = false } = {}) {
+  const reportBytes = readFileSync(resolve(launch.directory, 'device-task-result.json'))
+  const report = JSON.parse(reportBytes)
+  if (expectedReport !== null) assert.deepEqual(report, expectedReport, 'Core stop must match the persisted product report')
+  assert.ok(recovering ? report.errorCode === undefined || report.errorCode === 'STUCK_TOOL_REPEAT_LIMIT'
+    : report.errorCode === 'STUCK_TOOL_REPEAT_LIMIT')
+  assert.equal(report.productSessionId, launch.productSessionId)
+  assert.equal(report.deliveryId, launch.deliveryId)
+  assert.equal(report.complete, false)
+  const runs = report.delivery?.workRunAggregate?.runs ?? []
+  const workerSessionIds = runs.map(run => run.workerSessionId).filter(Boolean)
+  if (recovering && workerSessionIds.length === 0) workerSessionIds.push(...globSync(
+    'device-data/worker-sessions/*', { cwd: launch.directory }).map(path => basename(path)))
+  assert.ok(workerSessionIds.length > 0, 'Core stop has no registered product WorkRun')
+  let stop = null
+  try { assertDeviceBenchmarkRunning(resolve(launch.directory, 'device-data'), workerSessionIds) }
+  catch (error) { stop = error }
+  assert.equal(stop?.code, 'STUCK_TOOL_REPEAT_LIMIT')
+  assert.ok(workerSessionIds.includes(stop.workerSessionId))
+  const evidenceDirectory = recovering
+    ? resolve(launch.directory, 'recovery', `core-stop-${sha256(reportBytes)}`) : launch.directory
+  if (recovering) mkdirSync(evidenceDirectory, { recursive: true, mode: 0o700 })
+  const executionReceipts = recovering
+    ? exportDeviceExecutionReceipts(launch.directory, evidenceDirectory).evidence
+    : JSON.parse(readFileSync(resolve(launch.directory, 'execution-receipts.json')))
+  assert.ok(Array.isArray(executionReceipts.calls), 'Core stop has no model receipt ledger')
+  const binding = JSON.parse(readFileSync(resolve(launch.directory, 'task-source-binding.json')))
+  assert.equal(binding.runId, request.runId)
+  assert.equal(binding.callId, request.callId)
+  assert.equal(binding.taskId, request.taskId)
+  return { status: 'failed', failure: { code: 'STUCK_TOOL_REPEAT_LIMIT' },
+    termination: { reason: 'STUCK_TOOL_REPEAT_LIMIT' }, productComplete: false,
+    provider: request.provider, callId: request.callId, directory: launch.directory,
+    executionReceipts, delivery: report.delivery,
+    stopProof: { workerSessionId: stop.workerSessionId, runKey: stop.runKey,
+      productReportSha256: sha256(reportBytes) },
+    ...(recovering ? { recovery: { kind: 'retained-core-stop' } } : {}),
     externalVerdict: null, externalScore: null }
 }
 
@@ -357,8 +404,13 @@ async function resolveRegisteredDeviceTask(request, launch, options = {}, persis
     if (original.errorCode === 'DEVICE_WORKER_CRASHED') {
       return crashedDeviceResult(request, launch, options)
     }
-    assertDeviceBenchmarkRunning(resolve(launch.directory, 'device-data'),
-      globSync('device-data/worker-sessions/*', { cwd: launch.directory }).map(path => basename(path)))
+    try {
+      assertDeviceBenchmarkRunning(resolve(launch.directory, 'device-data'),
+        globSync('device-data/worker-sessions/*', { cwd: launch.directory }).map(path => basename(path)))
+    } catch (error) {
+      if (error.code !== 'STUCK_TOOL_REPEAT_LIMIT' || original.complete !== false) throw error
+      return stoppedDeviceResult(request, launch, null, { recovering: true })
+    }
     if (persisted) {
       assert.deepEqual(originalBytes, persisted.reportBytes)
       assert.deepEqual(original, persisted.report)
