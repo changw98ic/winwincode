@@ -24,6 +24,20 @@ const evidenceFailure = () => Object.assign(new Error('Frozen benchmark evidence
 
 export { terminalDeviceFailure }
 
+export function terminalBenchmarkDeviceFailure(observation) {
+  const productFailure = terminalDeviceFailure(observation)
+  if (productFailure !== null) return productFailure
+  const { delivery, workRunAggregate } = observation
+  const runs = workRunAggregate?.runs ?? []
+  const items = workRunAggregate?.items ?? []
+  if (delivery?.status !== 'waiting_human'
+      || !delivery.attention?.some(item => item.status === 'open' && item.blocking === true)
+      || runs.length === 0 || items.length === 0
+      || runs.some(run => !['settled', 'candidate_ready', 'failed', 'cancelled'].includes(run.state))
+      || items.some(item => !['done', 'candidate_ready', 'failed', 'cancelled'].includes(item.state))) return null
+  return { code: 'DEVICE_TASK_ATTENTION', status: 'waiting_human' }
+}
+
 function benchmarkSourceIdentity(agentSettings) {
   const hash = createHash('sha256')
   for (const path of globSync('**/*.{mjs,py}', { cwd: import.meta.dirname }).sort()) {
@@ -247,7 +261,7 @@ export async function runBenchmarkDeviceModel(request, runner, options) {
       const report = JSON.parse(reportBytes)
       assert.deepEqual(error.report, report, 'thrown product result must match its persisted projection')
       const observation = persistedDeviceObservation(report, registeredLaunch)
-      assert.ok(terminalDeviceFailure(observation), 'only a persisted terminal product result can be finalized')
+      assert.ok(terminalBenchmarkDeviceFailure(observation), 'only a persisted terminal product result can be finalized')
       return await resolveRegisteredDeviceTask(request, registeredLaunch, options, {
         report, reportBytes, observation,
       })
@@ -356,13 +370,13 @@ async function resolveRegisteredDeviceTask(request, launch, options = {}, persis
       } catch (error) {
         if (!loopbackUnavailable(error)) throw error
         observation = persistedDeviceObservation(original, launch)
-        assert.ok(terminalDeviceFailure(observation) || observation.delivery.status === 'done',
+        assert.ok(terminalBenchmarkDeviceFailure(observation) || observation.delivery.status === 'done',
           'an unavailable product can only recover from a durable terminal projection')
       }
     }
     assert.ok(observation.workRunAggregate.runs.every(run => !['queued', 'leased', 'running'].includes(run.state)),
       'active product execution cannot be finalized by recovery')
-    const terminalFailure = terminalDeviceFailure(observation)
+    const terminalFailure = terminalBenchmarkDeviceFailure(observation)
     if (terminalFailure !== null) {
       const candidate = observation.delivery.currentCandidate
       const evidenceDirectory = resolve(launch.directory, 'recovery', sha256(JSON.stringify(observation)))

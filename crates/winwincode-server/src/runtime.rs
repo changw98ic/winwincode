@@ -834,16 +834,32 @@ impl RepositoryRuntimeScheduler {
         Ok(())
     }
 
+    fn interaction_delivery_targets(&self) -> Vec<WorkerOutboundAuthority> {
+        let is_current_worker = |authority: &WorkerOutboundAuthority| {
+            authority.slot.worker_id == self.worker_id
+                && authority.slot.worker_instance_id == self.worker_instance_id
+        };
+        if self
+            .pending_interaction_acknowledgements
+            .iter()
+            .any(|(authority, _)| is_current_worker(authority))
+        {
+            return Vec::new();
+        }
+        self.active_worker_authorities
+            .iter()
+            .filter(|authority| is_current_worker(authority))
+            .cloned()
+            .collect()
+    }
+
     fn dispatch_interactions(
         &mut self,
         state: &mut ApplicationState,
         now: &Instant,
         execution_port: &dyn RuntimeControlOutbound,
     ) -> Result<(), RuntimeSupervisorError> {
-        if !self.pending_interaction_acknowledgements.is_empty() {
-            return Ok(());
-        }
-        for authority in self.active_worker_authorities.clone() {
+        for authority in self.interaction_delivery_targets() {
             let claims = state
                 .worker_outbound
                 .claim_pending(&authority, now)
@@ -2299,6 +2315,65 @@ mod tests {
             active_worker_authorities: Vec::new(),
             pending_interaction_acknowledgements: Vec::new(),
         }
+    }
+
+    #[test]
+    fn remote_interaction_delivery_is_scoped_to_the_polling_worker() {
+        let root = unique_directory("remote-interaction-routing");
+        std::fs::create_dir_all(&root).expect("temp directory");
+        let mut scheduler = scheduler_with_user(UserId(DEFAULT_RUNTIME_USER_ID.to_owned()), &root);
+        let authority = |suffix: char| WorkerOutboundAuthority {
+            slot: WorkerSlotAuthority {
+                worker_id: WorkerId(format!("wrk_{}", suffix.to_string().repeat(26))),
+                worker_instance_id: WorkerInstanceId(format!(
+                    "wki_{}",
+                    suffix.to_string().repeat(26)
+                )),
+                worker_session_id: winwincode_domain::WorkerSessionId(format!(
+                    "wsn_{}",
+                    suffix.to_string().repeat(26)
+                )),
+                codex_thread_id: winwincode_domain::CodexThreadId(format!(
+                    "cdx_{}",
+                    suffix.to_string().repeat(26)
+                )),
+                job_id: ExecutionJobId(format!("job_{}", suffix.to_string().repeat(26))),
+                lease_id: winwincode_domain::LeaseId(format!(
+                    "lse_{}",
+                    suffix.to_string().repeat(26)
+                )),
+                attempt: 1,
+                fencing_token: winwincode_domain::FencingToken("1".to_owned()),
+            },
+            lease_issued_at: fixed_instant("2026-09-29T00:00:00.000Z"),
+            lease_expires_at: fixed_instant("2026-09-29T01:00:00.000Z"),
+        };
+        let executor = authority('A');
+        let ordinary = authority('B');
+        scheduler.active_worker_authorities = vec![executor.clone(), ordinary.clone()];
+        scheduler.worker_id = ordinary.slot.worker_id.clone();
+        scheduler.worker_instance_id = ordinary.slot.worker_instance_id.clone();
+
+        assert_eq!(
+            scheduler.interaction_delivery_targets(),
+            vec![ordinary.clone()]
+        );
+        scheduler.pending_interaction_acknowledgements.push((
+            executor.clone(),
+            winwincode_domain::ExecutionMessageId(fixed_id("xmsg_")),
+        ));
+        assert_eq!(
+            scheduler.interaction_delivery_targets(),
+            vec![ordinary.clone()]
+        );
+        scheduler.pending_interaction_acknowledgements.push((
+            ordinary,
+            winwincode_domain::ExecutionMessageId(format!("xmsg_{}", "B".repeat(26))),
+        ));
+        assert!(scheduler.interaction_delivery_targets().is_empty());
+
+        drop(scheduler);
+        std::fs::remove_dir_all(root).expect("cleanup");
     }
 
     fn queued_job_record(scope: &ExecutionQueueScope) -> (ExecutionJobRecord, ExecutionJob) {

@@ -13,7 +13,8 @@ import { assertDeviceBenchmarkRunning } from '../scripts/device-production-fixtu
 import { driveDelivery } from '../scripts/run-api-production-vertical.mjs'
 import { openBenchmarkLedger } from '../scripts/benchmark-ledger.mjs'
 import { benchmarkAggregationInput, executeDeviceBenchmark, recoverBenchmarkDeviceCell,
-  runBenchmarkDeviceAggregation, terminalDeviceFailure } from '../scripts/benchmark-device-adapter.mjs'
+  runBenchmarkDeviceAggregation, terminalBenchmarkDeviceFailure,
+  terminalDeviceFailure } from '../scripts/benchmark-device-adapter.mjs'
 import { runDeviceTaskVertical, fusionDeviceProviders, inspectUnresolvedDeviceTasks, benchmarkDeviceEnvironment,
   expiredCrashedDeviceWorkRun, expiredDeviceWorkRunLease,
   loadDeviceProviderEnvironment } from '../scripts/run-device-task-vertical.mjs'
@@ -91,6 +92,13 @@ test('device recovery settles only complete terminal failures and leaves product
   assert.deepEqual(terminalDeviceFailure({ delivery: { status: 'candidate_ready', attention: [] },
     workRunAggregate: { items: [{ state: 'candidate_ready' }], runs: [{ state: 'candidate_ready' }, { state: 'failed' }] } }),
   { code: 'DEVICE_PRODUCT_STALLED', status: 'candidate_ready' })
+  const waitingHuman = { delivery: { status: 'waiting_human', attention: [{ status: 'open', blocking: true }] },
+    workRunAggregate: { items: [{ state: 'candidate_ready' }], runs: [{ state: 'settled' }] } }
+  assert.equal(terminalDeviceFailure(waitingHuman), null)
+  assert.deepEqual(terminalBenchmarkDeviceFailure(waitingHuman),
+    { code: 'DEVICE_TASK_ATTENTION', status: 'waiting_human' })
+  assert.equal(terminalBenchmarkDeviceFailure({ ...waitingHuman,
+    workRunAggregate: { ...waitingHuman.workRunAggregate, runs: [{ state: 'running' }] } }), null)
 })
 
 test('a returned terminal Device failure remains a failed benchmark row', async () => {
@@ -117,6 +125,28 @@ test('a returned failed Fusion aggregation remains a failed cell after retaining
   assert.equal(result.members.length, 4)
   assert.equal(result.aggregateReceipt.callCount, 1)
   assert.deepEqual(result.productOutcome, result.aggregate)
+})
+
+test('a settled attention failure retains its Fusion member and runs the remaining providers', async () => {
+  const plan = buildBenchmarkPlan({ taskIds: Array.from({ length: 20 }, (_, index) => `task-${index}`) })
+  const cell = plan.cells.find(value => value.configurationId === 'main-C' && value.comparison === 'fusion-4')
+  const called = []
+  const calls = []
+  const result = await executeBenchmarkCell(cell, {
+    runModel: async request => {
+      called.push(request.provider)
+      if (called.length === 1) return { status: 'failed', provider: request.provider,
+        failure: { code: 'DEVICE_TASK_ATTENTION', status: 'waiting_human' } }
+      return { status: 'completed', provider: request.provider }
+    },
+    aggregate: async request => ({ status: 'failed', failure: { code: 'DEVICE_TASK_ATTENTION' },
+      memberCount: request.members.length }),
+  }, { recordCall: call => calls.push(call) })
+  assert.equal(called.length, 4)
+  assert.equal(result.members[0].failure.code, 'DEVICE_TASK_ATTENTION')
+  assert.equal(result.aggregate.memberCount, 4)
+  assert.equal(calls.length, 5)
+  assert.equal(calls[0].status, 'returned')
 })
 
 test('the durable benchmark row keeps a returned product failure failed and never reexecutes it', async t => {
