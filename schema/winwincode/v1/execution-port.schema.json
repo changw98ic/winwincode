@@ -1703,6 +1703,10 @@
         },
         "snapshotId": {
           "$ref": "./domain.schema.json#/$defs/SnapshotId"
+        },
+        "replacesArtifactId": {
+          "$ref": "./domain.schema.json#/$defs/ArtifactId",
+          "description": "Replaces an unfinished upload of identical candidate bytes under the same authority, or retains its completed reference. Uses a new artifact and message identity."
         }
       },
       "required": [
@@ -1819,6 +1823,10 @@
         },
         "sessionIdentity": {
           "$ref": "./domain.schema.json#/$defs/SessionIdentity"
+        },
+        "retainedArtifact": {
+          "$ref": "#/$defs/ArtifactReference",
+          "description": "An already complete predecessor retained instead of uploading it again. Only returned for a replacement open, with ackSequence zero."
         }
       },
       "required": [

@@ -3165,6 +3165,7 @@ fn candidate_ack(
     sequence: i64,
 ) -> ArtifactAckMessage {
     ArtifactAckMessage {
+        retained_artifact: None,
         ack_sequence: winwincode_domain::ExecutionAckSequence(sequence),
         artifact_id: artifact.artifact_id.clone(),
         error: None,

@@ -9031,6 +9031,7 @@ mod tests {
             .expect("reopen diagnostic adapter");
         let accepted = reopened
             .accept_artifact_ack(&ArtifactAckMessage {
+                retained_artifact: None,
                 ack_sequence: ExecutionAckSequence(ack_sequence),
                 artifact_id: artifact.artifact_id.clone(),
                 error: None,

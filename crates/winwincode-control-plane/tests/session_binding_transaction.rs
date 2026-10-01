@@ -498,6 +498,7 @@ fn accept_verification_artifact(
     seed: u64,
 ) {
     let open = ArtifactOpenMessage {
+        replaces_artifact_id: None,
         artifact: ArtifactDescriptor {
             artifact_id: artifact_id.clone(),
             digest: digest.clone(),
@@ -1118,6 +1119,7 @@ fn assert_delivery_predecessor_is_fenced(
 
 fn artifact_open_message(seed: u64, binding: &SessionBindingMessage) -> ArtifactOpenMessage {
     ArtifactOpenMessage {
+        replaces_artifact_id: None,
         artifact: ArtifactDescriptor {
             artifact_id: ArtifactId(canonical_id("art", seed)),
             digest: Sha256Digest(
@@ -2355,6 +2357,96 @@ fn replay_rejects_changed_receipt_digest_or_event_membership() {
 }
 
 #[test]
+fn artifact_replacement_ingress_preserves_completed_candidates_and_rejects_changed_bytes() {
+    for complete in [false, true] {
+        let seed = if complete { 1490 } else { 1480 };
+        let (root, mut control_plane, _pending, authority, binding) =
+            running_fixture(seed, "artifact-replacement");
+        control_plane
+            .commit_delivery_session_binding(&binding, &authority, &binding.sent_at)
+            .unwrap();
+        let Scope::RepositoryScope(scope) = workrun_start_command(seed).scope else {
+            panic!("scope")
+        };
+        let mut old = artifact_open_message(seed, &binding);
+        old.artifact.kind = ArtifactKind::Candidate;
+        control_plane
+            .accept_artifact_open(&scope, &old, &authority)
+            .unwrap();
+        let chunk = |artifact_id, message_seed| ArtifactChunkMessage {
+            artifact_id,
+            is_final: true,
+            kind: ArtifactChunkMessageKind::ArtifactChunk,
+            lease: binding.lease.clone(),
+            message_id: ExecutionMessageId(canonical_id("xmsg", message_seed)),
+            payload: EncodedPayload {
+                content_type: "text/plain".into(),
+                data_base64: "aGVsbG8=".into(),
+                payload_digest: old.artifact.digest.clone(),
+            },
+            schema_version: SchemaVersion::WinwincodeV1,
+            sent_at: Instant("2027-01-15T08:00:08.000Z".into()),
+            sequence: ExecutionSequence(1),
+            session_identity: binding.session_identity.clone(),
+            snapshot_id: None,
+            worker_session_id: binding.worker_session_id.clone(),
+        };
+        if complete {
+            control_plane
+                .accept_artifact_chunk(
+                    &scope,
+                    &chunk(old.artifact.artifact_id.clone(), seed + 2),
+                    &authority,
+                )
+                .unwrap();
+        }
+        let mut replacement = old.clone();
+        replacement.replaces_artifact_id = Some(old.artifact.artifact_id.clone());
+        replacement.artifact.artifact_id = ArtifactId(canonical_id("art", seed + 3));
+        replacement.message_id = ExecutionMessageId(canonical_id("xmsg", seed + 3));
+        replacement.request_id = RequestId(canonical_id("req", seed + 3));
+        let mut forged = replacement.clone();
+        forged.artifact.digest = Sha256Digest(format!("sha256:{}", "0".repeat(64)));
+        assert_eq!(
+            control_plane
+                .accept_artifact_open(&scope, &forged, &authority)
+                .unwrap()
+                .status,
+            LeaseWriteStatus::RejectedConflict
+        );
+        let accepted = control_plane
+            .accept_artifact_open(&scope, &replacement, &authority)
+            .unwrap();
+        assert_eq!(accepted.ack_sequence.0, 0);
+        if complete {
+            assert_eq!(
+                accepted.retained_artifact,
+                Some(ArtifactReference {
+                    artifact_id: old.artifact.artifact_id.clone(),
+                    digest: old.artifact.digest.clone()
+                })
+            );
+        } else {
+            assert!(accepted.retained_artifact.is_none());
+            control_plane
+                .accept_artifact_chunk(
+                    &scope,
+                    &chunk(replacement.artifact.artifact_id.clone(), seed + 4),
+                    &authority,
+                )
+                .unwrap();
+        }
+        let replay = control_plane
+            .accept_artifact_open(&scope, &replacement, &authority)
+            .unwrap();
+        assert_eq!(replay.status, LeaseWriteStatus::Duplicate);
+        assert_eq!(replay.retained_artifact, accepted.retained_artifact);
+        control_plane.shutdown().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
 #[allow(clippy::too_many_lines)]
 fn generated_artifact_messages_use_the_exact_durable_job_and_binding_authority() {
     let seed = 1_401;
@@ -2601,6 +2693,7 @@ fn start_local_accepts_diagnostic_open_and_charset_chunk() {
     let bytes = b"[stdout]\n\n> verify\n> node verify.mjs\n\n[stderr]\n";
     let digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(bytes)));
     let open = ArtifactOpenMessage {
+        replaces_artifact_id: None,
         artifact: ArtifactDescriptor {
             artifact_id: ArtifactId(canonical_id("art", seed)),
             digest: digest.clone(),
@@ -2688,6 +2781,7 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
     .expect("manifest encoding");
     let digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(&manifest)));
     let open = ArtifactOpenMessage {
+        replaces_artifact_id: None,
         artifact: ArtifactDescriptor {
             artifact_id: artifact_id.clone(),
             digest: digest.clone(),

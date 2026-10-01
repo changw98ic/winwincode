@@ -839,8 +839,7 @@ where
             }
             ExecutionPortMessage::JobCancelMessage(cancel) => self.accept_cancel(cancel, now).await,
             ExecutionPortMessage::ArtifactAckMessage(acknowledgement) => {
-                self.accept_candidate_artifact_ack(acknowledgement, now)
-                    .await
+                Box::pin(self.accept_candidate_artifact_ack(acknowledgement, now)).await
             }
             ExecutionPortMessage::ModelChunkMessage(chunk) => {
                 self.accept_model_chunk_control(chunk, message, &now).await
@@ -3379,6 +3378,13 @@ where
                 {
                     return self.flush_durable_execution_deliveries().await;
                 }
+                if acknowledgement.retained_artifact.as_ref() == Some(&artifact) {
+                    // The durable adapter authenticated this completed predecessor;
+                    // retain its reference before sealing the terminal outcome.
+                    if let Some(pending) = self.pending_candidates.get_mut(&job_id) {
+                        pending.artifact = Some(artifact.clone());
+                    }
+                }
                 self.finish_candidate_job(&job_id, artifact, now).await
             }
         }
@@ -3429,10 +3435,11 @@ where
                 .as_ref()
                 .is_some_and(|artifact| artifact.artifact_id != acknowledgement.artifact_id)
             || accepted.is_some_and(|artifact| {
-                pending
-                    .artifact
-                    .as_ref()
-                    .is_some_and(|expected| expected != artifact)
+                pending.artifact.as_ref().is_some_and(|expected| {
+                    expected != artifact
+                        && !(acknowledgement.retained_artifact.as_ref() == Some(artifact)
+                            && expected.digest == artifact.digest)
+                })
             })
         {
             return Err(candidate_artifact_error(

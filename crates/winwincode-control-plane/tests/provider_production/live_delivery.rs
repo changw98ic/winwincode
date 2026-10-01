@@ -1240,6 +1240,7 @@ fn upload_candidate(
     let digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(&bytes)));
     let artifact_id = ArtifactId(id("art", seed));
     let open = ArtifactOpenMessage {
+        replaces_artifact_id: None,
         artifact: ArtifactDescriptor {
             artifact_id: artifact_id.clone(),
             digest: digest.clone(),

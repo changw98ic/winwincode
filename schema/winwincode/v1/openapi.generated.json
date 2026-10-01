@@ -1128,6 +1128,10 @@
           "replayFromSequence": {
             "$ref": "#/components/schemas/ExecutionSequence"
           },
+          "retainedArtifact": {
+            "$ref": "#/components/schemas/ArtifactReference",
+            "description": "An already complete predecessor retained instead of uploading it again. Only returned for a replacement open, with ackSequence zero."
+          },
           "schemaVersion": {
             "$ref": "#/components/schemas/SchemaVersion"
           },
@@ -1289,6 +1293,10 @@
           },
           "messageId": {
             "$ref": "#/components/schemas/ExecutionMessageId"
+          },
+          "replacesArtifactId": {
+            "$ref": "#/components/schemas/ArtifactId",
+            "description": "Replaces an unfinished upload of identical candidate bytes under the same authority, or retains its completed reference. Uses a new artifact and message identity."
           },
           "requestId": {
             "$ref": "#/components/schemas/RequestId"
@@ -28817,7 +28825,7 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:fb58bdfbfb87922e969fbd212c4a6034f98324d268d2e3fe1cc56b22c96c18b0",
+  "x-source-digest": "sha256:021609a0f7b04c8057310336c1b476c32cd7d50914fbdde937ab82163e2ee551",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {

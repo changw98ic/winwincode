@@ -1094,6 +1094,166 @@ impl winwincode_execution_port::transport::ExecutionPortCore for RecordingRemote
     }
 }
 
+struct FloodRemoteCore(
+    Arc<std::sync::Mutex<Vec<winwincode_execution_port::generated::ExecutionPortMessage>>>,
+);
+impl winwincode_execution_port::transport::ExecutionPortCore for FloodRemoteCore {
+    type Output = Vec<winwincode_execution_port::generated::ExecutionPortMessage>;
+    type Error = std::convert::Infallible;
+    fn accept(
+        &mut self,
+        message: &winwincode_execution_port::generated::ExecutionPortMessage,
+    ) -> Result<Self::Output, Self::Error> {
+        use winwincode_execution_port::generated::ExecutionPortMessage;
+        let mut recorded = self.0.lock().unwrap();
+        recorded.push(message.clone());
+        if recorded.len() > 2 {
+            return Ok(vec![]);
+        }
+        let ExecutionPortMessage::WorkerHeartbeatMessage(heartbeat) = message else {
+            panic!("heartbeat")
+        };
+        Ok((0..128).map(|seed|serde_json::from_value(serde_json::json!({
+            "kind":"worker.heartbeat_ack","schemaVersion":SchemaVersion::WinwincodeV1,
+            "messageId":id("xmsg",1000 * recorded.len() as u64+seed),"sentAt":heartbeat.sent_at,"serverTime":heartbeat.sent_at,
+            "workerId":heartbeat.worker_id,"workerInstanceId":heartbeat.worker_instance_id,
+            "heartbeatSequence":heartbeat.heartbeat_sequence,"status":"accepted","nextHeartbeatWithinMs":1000,
+            "error":{"code":"INFRASTRUCTURE_ERROR","message":"z".repeat(32*1024),"retryable":true}
+        })).unwrap()).collect())
+    }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn production_backpressure_returns_pages_without_accepting_the_upstream_frame() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::Mutex;
+    use std::time::Duration;
+    use winwincode_domain::Instant;
+    use winwincode_execution_port::generated::ExecutionPortMessage;
+    use winwincode_execution_port::transport::{
+        FrameDirection, RemoteExchangeRequest, RemoteExchangeResponse, RemoteTransportAdapter,
+        TypedFrame,
+    };
+    use winwincode_server::{
+        FileRemoteWorkerAuthenticator, ProductionRemoteWorkerExchange, RemoteWorkerExchangePort,
+        RepositoryRuntimeScheduler,
+    };
+    let root = temporary_root("remote-heartbeat");
+    let application = open_application(&root, "fixture").expect("application");
+    let worker = WorkerId(id("wrk", 1));
+    let instance = WorkerInstanceId(id("wki", 1));
+    let now = Instant("2027-01-15T08:00:02.000Z".into());
+    let token = root.join("worker.token");
+    fs::write(&token, b"fixture-remote-proof").expect("token");
+    fs::set_permissions(&token, fs::Permissions::from_mode(0o600)).expect("private token");
+    let auth = FileRemoteWorkerAuthenticator::open(
+        &token,
+        worker.clone(),
+        winwincode_storage::WorkerPoolId(id("wpl", 1)),
+        worker_scope(1),
+        "fixture-issuer".into(),
+        "worker-1".into(),
+        "build-local".into(),
+        Instant("2027-01-15T09:00:00.000Z".into()),
+        &now,
+    )
+    .expect("authenticator");
+    let scope = serde_json::from_value(repository_scope_json(1)).expect("scope");
+    let scheduler = RepositoryRuntimeScheduler::from_application(
+        &application,
+        scope,
+        worker.clone(),
+        instance.clone(),
+        "remote-test",
+        Duration::from_secs(10),
+    )
+    .expect("scheduler");
+    let recorded = Arc::new(Mutex::new(vec![]));
+    let exchange = ProductionRemoteWorkerExchange::new(
+        &root,
+        Arc::new(auth),
+        scheduler,
+        FloodRemoteCore(recorded.clone()),
+    );
+    let send = |message: ExecutionPortMessage, acknowledgements, v2: bool| {
+        let frame = TypedFrame::new(FrameDirection::WorkerToControlPlane, message).expect("frame");
+        let bytes = RemoteTransportAdapter::<RecordingRemoteCore>::encode(&frame).expect("encoded");
+        let request =
+            RemoteExchangeRequest::new(worker.clone(), instance.clone(), acknowledgements, bytes)
+                .expect("request");
+        let request = if v2 {
+            request.with_acceptance_receipt()
+        } else {
+            request
+        };
+        let request = request.encode().expect("request bytes");
+        exchange.exchange(b"fixture-remote-proof".to_vec(), &request, now.clone())
+    };
+    let register = serde_json::from_value(serde_json::json!({
+        "kind":"worker.register", "schemaVersion":SchemaVersion::WinwincodeV1,
+        "messageId":id("xmsg",1), "requestId":id("req",1),
+        "sentAt":now, "startedAt":now, "workerId":worker, "workerInstanceId":instance,
+        "capabilities": {"platform":"x86_64-unknown-linux-gnu",
+            "features":["shell"], "capabilityDigest":format!("sha256:{}", "a".repeat(64)), "maxConcurrentJobs":1}, "usageAccountingVersion":2
+    })).expect("register frame");
+    let registration =
+        RemoteExchangeResponse::decode(&send(register, vec![], true).expect("register")).unwrap();
+    let registration_id = registration.deliveries()[0].delivery_id.clone();
+    let heartbeat: ExecutionPortMessage = serde_json::from_value(serde_json::json!({
+        "kind":"worker.heartbeat", "schemaVersion":SchemaVersion::WinwincodeV1, "messageId":id("xmsg",2),
+        "sentAt":now, "observedAt":now, "workerId":worker, "workerInstanceId":instance,
+        "heartbeatSequence":1, "activeLeases":[], "capacity":{"availableSlots":1,"runningJobs":0}
+    })).expect("heartbeat frame");
+    send(heartbeat.clone(), vec![], true).expect("authenticated heartbeat");
+    send(heartbeat.clone(), vec![registration_id], true)
+        .expect("second accepted batch fills the queue to 256");
+    assert_eq!(recorded.lock().unwrap().len(), 2);
+    assert_eq!(
+        send(heartbeat.clone(), vec![], false)
+            .unwrap_err()
+            .status_code(),
+        503
+    );
+    let mut acknowledgements = Vec::new();
+    let mut received = std::collections::HashSet::new();
+    let mut saw_backpressure = false;
+    loop {
+        let response = RemoteExchangeResponse::decode(
+            &send(heartbeat.clone(), acknowledgements, true).unwrap(),
+        )
+        .unwrap();
+        if !response.frame_accepted() {
+            saw_backpressure = true;
+            assert_eq!(
+                recorded.lock().unwrap().len(),
+                2,
+                "blocked upstream never reached business ingress"
+            );
+        }
+        acknowledgements = response
+            .deliveries()
+            .iter()
+            .map(|delivery| delivery.delivery_id.clone())
+            .collect();
+        if acknowledgements.is_empty() {
+            break;
+        }
+        assert!(acknowledgements.len() < 128, "byte budget limits this page");
+        for id in &acknowledgements {
+            assert!(
+                received.insert(id.clone()),
+                "ACKed controls leave the queue"
+            );
+        }
+    }
+    assert!(saw_backpressure);
+    assert_eq!(received.len(), 256, "every queued control drains");
+    drop(exchange);
+    drop(application);
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 #[allow(clippy::too_many_lines)]
 fn remote_heartbeat_reaches_shared_core_after_authentication() {

@@ -27,6 +27,8 @@ const MAX_HTTP_RESPONSE_BYTES: usize =
 pub enum RemoteWorkerPortError {
     /// Connection, timeout, or temporary Server authority failure.
     Transport,
+    /// ACKs and controls were exchanged; the upstream frame must be retried.
+    Backpressure,
     /// The Server permanently rejected authentication or protocol authority.
     Rejected,
     /// A permanent protocol failure; execution authority remains distinct.
@@ -39,6 +41,7 @@ impl fmt::Display for RemoteWorkerPortError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::Transport => "REMOTE_WORKER_TRANSPORT_UNAVAILABLE",
+            Self::Backpressure => "REMOTE_WORKER_BACKPRESSURE",
             Self::Rejected => "REMOTE_WORKER_AUTHENTICATION_REJECTED",
             Self::Protocol => "REMOTE_WORKER_PROTOCOL_INVALID",
             Self::TooLarge => "REMOTE_WORKER_MESSAGE_TOO_LARGE",
@@ -62,6 +65,42 @@ struct SharedRemoteState {
 }
 
 impl SharedRemoteState {
+    fn receive_response(
+        &mut self,
+        response: &RemoteExchangeResponse,
+        acknowledgements: &[ExecutionMessageId],
+    ) -> Result<(), RemoteWorkerPortError> {
+        if !response.has_acceptance_receipt() {
+            return Err(RemoteWorkerPortError::Protocol);
+        }
+
+        let state = self;
+        state
+            .acknowledgements
+            .retain(|id| !acknowledgements.contains(id));
+        for delivery in response.deliveries() {
+            if state
+                .inbox
+                .iter()
+                .any(|(existing, _)| existing == &delivery.delivery_id)
+                || state.processing.contains(&delivery.delivery_id)
+                || state.acknowledgements.contains(&delivery.delivery_id)
+            {
+                continue;
+            }
+            let frame = RemoteTransportAdapter::<NoopCore>::decode(&delivery.frame)
+                .map_err(remote_frame_error)?;
+            state
+                .inbox
+                .push_back((delivery.delivery_id.clone(), frame.message().clone()));
+        }
+        if response.frame_accepted() {
+            Ok(())
+        } else {
+            Err(RemoteWorkerPortError::Backpressure)
+        }
+    }
+
     fn acknowledgements_for_exchange(&self) -> Vec<ExecutionMessageId> {
         self.acknowledgements
             .iter()
@@ -372,7 +411,7 @@ impl RemoteWorkerPort {
             acknowledgements.clone(),
             frame,
         )
-        .and_then(|request| request.encode())
+        .and_then(|request| request.with_acceptance_receipt().encode())
         .map_err(remote_frame_error)?;
         let credential = read_private_credential(&self.credential_path).inspect_err(|_| {
             remote_transport_debug("credential file failed private-file validation");
@@ -387,30 +426,10 @@ impl RemoteWorkerPort {
             RemoteWorkerPortError::Transport
         })??;
         let response = RemoteExchangeResponse::decode(&response).map_err(remote_frame_error)?;
-        let mut state = self
-            .state
+        self.state
             .lock()
-            .map_err(|_| RemoteWorkerPortError::Transport)?;
-        state
-            .acknowledgements
-            .retain(|id| !acknowledgements.contains(id));
-        for delivery in response.deliveries() {
-            if state
-                .inbox
-                .iter()
-                .any(|(existing, _)| existing == &delivery.delivery_id)
-                || state.processing.contains(&delivery.delivery_id)
-                || state.acknowledgements.contains(&delivery.delivery_id)
-            {
-                continue;
-            }
-            let frame = RemoteTransportAdapter::<NoopCore>::decode(&delivery.frame)
-                .map_err(remote_frame_error)?;
-            state
-                .inbox
-                .push_back((delivery.delivery_id.clone(), frame.message().clone()));
-        }
-        Ok(())
+            .map_err(|_| RemoteWorkerPortError::Transport)?
+            .receive_response(&response, &acknowledgements)
     }
 }
 
@@ -563,6 +582,70 @@ fn read_private_credential(path: &Path) -> Result<Vec<u8>, RemoteWorkerPortError
 #[cfg(test)]
 mod tests {
     use super::{RemoteWorkerPortError, bounded_http_response, parse_origin};
+
+    #[test]
+    fn backpressure_delivers_controls_and_acknowledges_the_sent_prefix_without_accepting_upstream()
+    {
+        use super::*;
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/contracts/execution-port.valid.json"
+        ))
+        .unwrap();
+        let message: ExecutionPortMessage = serde_json::from_value(
+            fixture["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|message| message["kind"] == "worker.heartbeat_ack")
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        let id = winwincode_execution_port::transport::execution_message_id(&message).unwrap();
+        let delivery = winwincode_execution_port::transport::RemoteExchangeDelivery {
+            delivery_id: id.clone(),
+            frame: RemoteTransportAdapter::<NoopCore>::encode(
+                &TypedFrame::new(FrameDirection::ControlPlaneToWorker, message).unwrap(),
+            )
+            .unwrap(),
+        };
+        let sent = ExecutionMessageId("xmsg_00000000000000000000000011".into());
+        let suffix = ExecutionMessageId("xmsg_00000000000000000000000012".into());
+        let mut state = SharedRemoteState {
+            inbox: VecDeque::new(),
+            processing: Vec::new(),
+            acknowledgements: vec![sent.clone(), suffix.clone()],
+            terminal_error: None,
+        };
+        let response = RemoteExchangeResponse::with_acceptance(vec![delivery], false).unwrap();
+        assert_eq!(
+            state.receive_response(&response, std::slice::from_ref(&sent)),
+            Err(RemoteWorkerPortError::Backpressure)
+        );
+        assert_eq!(state.acknowledgements, vec![suffix]);
+        assert_eq!(state.inbox.len(), 1);
+        assert!(state.terminal_error.is_none());
+        assert_eq!(
+            state.receive_response(&response, std::slice::from_ref(&sent)),
+            Err(RemoteWorkerPortError::Backpressure)
+        );
+        assert_eq!(
+            state.inbox.len(),
+            1,
+            "lost response replay deduplicates controls"
+        );
+        assert_eq!(
+            state.receive_response(
+                &RemoteExchangeResponse::with_acceptance(Vec::new(), true).unwrap(),
+                &[]
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            state.receive_response(&RemoteExchangeResponse::new(Vec::new()).unwrap(), &[]),
+            Err(RemoteWorkerPortError::Protocol)
+        );
+    }
 
     #[test]
     fn queued_confirmations_fit_one_exchange_and_keep_the_unsent_suffix() {

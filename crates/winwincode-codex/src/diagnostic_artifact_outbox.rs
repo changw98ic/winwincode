@@ -590,6 +590,7 @@ impl StoredDiagnosticArtifact {
                 .map_err(|_| AdapterStoreError::Conflict)?,
         };
         let open = ArtifactOpenMessage {
+            replaces_artifact_id: None,
             artifact: descriptor.clone(),
             kind: ArtifactOpenMessageKind::ArtifactOpen,
             lease: upload.lease.clone(),
@@ -1023,6 +1024,7 @@ mod tests {
         retained: &RetainedDiagnosticArtifact,
     ) -> ArtifactAckMessage {
         ArtifactAckMessage {
+            retained_artifact: None,
             ack_sequence: ExecutionAckSequence(
                 i64::try_from(upload.bytes.chunks(DIAGNOSTIC_CHUNK_BYTES).len())
                     .expect("diagnostic chunk count"),

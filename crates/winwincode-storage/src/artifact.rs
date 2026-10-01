@@ -33,7 +33,7 @@ use crate::ReceiptScopeKey;
 const CATALOG_FILE_NAME: &str = "artifact-catalog.sqlite3";
 const MAX_UNFINISHED_ARTIFACTS_PER_JOB: usize = 4_096;
 const CATALOG_STARTUP_LOCK_FILE_NAME: &str = "artifact-catalog.startup.lock";
-const CATALOG_SCHEMA_VERSION: i64 = 2;
+const CATALOG_SCHEMA_VERSION: i64 = 3;
 const MAX_ARTIFACT_BYTES: u64 = 1_099_511_627_776;
 /// Largest Artifact byte range returned by one storage read.
 pub const MAX_ARTIFACT_RANGE_BYTES: u64 = 256 * 1024;
@@ -279,6 +279,7 @@ pub struct ArtifactOpen {
     metering_attribution: ArtifactMeteringAttribution,
     retention: ArtifactRetention,
     created_at_millis: u64,
+    replaces_artifact_id: Option<ArtifactId>,
 }
 
 impl ArtifactOpen {
@@ -313,7 +314,15 @@ impl ArtifactOpen {
             metering_attribution,
             retention,
             created_at_millis,
+            replaces_artifact_id: None,
         }
+    }
+
+    /// Binds an explicit upload replacement to the immutable open identity.
+    #[must_use]
+    pub fn with_replaced_artifact(mut self, predecessor: Option<ArtifactId>) -> Self {
+        self.replaces_artifact_id = predecessor;
+        self
     }
 
     /// Returns the immutable Artifact identity sealed before storage admission.
@@ -350,6 +359,14 @@ impl ArtifactOpen {
         canonical_id(&self.message_id.0, "xmsg_", "messageId")?;
         canonical_id(&self.request_id.0, "req_", "requestId")?;
         canonical_id(&self.artifact_id.0, "art_", "artifactId")?;
+        if let Some(predecessor) = &self.replaces_artifact_id {
+            canonical_id(&predecessor.0, "art_", "replacesArtifactId")?;
+            if predecessor == &self.artifact_id || self.kind != "candidate" {
+                return Err(ArtifactError::invalid(
+                    "only a new candidate identity may replace an upload",
+                ));
+            }
+        }
         self.provenance.validate()?;
         self.metering_attribution.validate()?;
         sha256_hex(&self.digest)?;
@@ -862,6 +879,46 @@ impl ArtifactStore {
             transaction.commit().map_err(sql_error)?;
             return Ok(ArtifactWriteReceipt {
                 record: existing,
+                duplicate: true,
+            });
+        }
+        let mut retained = None;
+        if let Some(predecessor) = &open.replaces_artifact_id {
+            if let Some(old) = load_record(&transaction, predecessor)? {
+                let mut expected = open.clone();
+                expected.artifact_id = old.open.artifact_id.clone();
+                expected.message_id = old.open.message_id.clone();
+                expected.request_id = old.open.request_id.clone();
+                expected
+                    .replaces_artifact_id
+                    .clone_from(&old.open.replaces_artifact_id);
+                if expected != old.open || old.deleted_at_millis.is_some() {
+                    return Err(ArtifactError::conflict(
+                        "replacement must preserve candidate bytes and exact authority",
+                    ));
+                }
+                if old.complete {
+                    retained = Some(old);
+                } else {
+                    transaction
+                        .execute(
+                            "UPDATE artifacts SET deleted_at_millis=?2 WHERE artifact_id=?1",
+                            params![
+                                predecessor.0,
+                                i64::try_from(open.created_at_millis).map_err(|_| {
+                                    ArtifactError::invalid("replacement time exceeds storage range")
+                                })?
+                            ],
+                        )
+                        .map_err(sql_error)?;
+                }
+            }
+            transaction.execute("INSERT INTO artifact_upload_replacements(new_artifact_id, old_artifact_id, open_message_id, open_request_id, open_fingerprint, accepted_artifact_id) VALUES(?1,?2,?3,?4,?5,?6)", params![open.artifact_id.0, predecessor.0, open.message_id.0, open.request_id.0, replacement_fingerprint(&open)?, retained.as_ref().map_or(&open.artifact_id.0, |record| &record.open.artifact_id.0)]).map_err(sql_error)?;
+        }
+        if let Some(record) = retained {
+            transaction.commit().map_err(sql_error)?;
+            return Ok(ArtifactWriteReceipt {
+                record,
                 duplicate: true,
             });
         }
@@ -2041,7 +2098,7 @@ fn migrate_catalog(connection: &mut Connection) -> Result<(), ArtifactError> {
     let version = connection
         .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
         .map_err(sql_error)?;
-    if !matches!(version, 0 | 1 | CATALOG_SCHEMA_VERSION) {
+    if !matches!(version, 0 | 1 | 2 | CATALOG_SCHEMA_VERSION) {
         return Err(ArtifactError::adapter(format!(
             "unsupported Artifact catalog schema version {version}"
         )));
@@ -2093,6 +2150,14 @@ fn migrate_catalog(connection: &mut Connection) -> Result<(), ArtifactError> {
                  complete INTEGER NOT NULL DEFAULT 0 CHECK (complete IN (0, 1)),
                  deleted_at_millis INTEGER CHECK (deleted_at_millis > 0),
                  metering_attribution_json TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS artifact_upload_replacements (
+                 new_artifact_id TEXT PRIMARY KEY NOT NULL,
+                 old_artifact_id TEXT NOT NULL UNIQUE,
+                 open_message_id TEXT NOT NULL UNIQUE,
+                 open_request_id TEXT NOT NULL UNIQUE,
+                 open_fingerprint TEXT NOT NULL,
+                 accepted_artifact_id TEXT NOT NULL
              );
              CREATE INDEX IF NOT EXISTS artifacts_digest ON artifacts (digest);
              CREATE TABLE IF NOT EXISTS artifact_chunks (
@@ -2276,7 +2341,7 @@ fn load_record(
     connection: &Connection,
     artifact_id: &ArtifactId,
 ) -> Result<Option<ArtifactRecord>, ArtifactError> {
-    let record = connection
+    let mut record = connection
         .query_row(
             "SELECT scope_key, open_message_id, open_request_id, kind, media_type, digest,
                     size_bytes, file_name, execution_job_id, attempt, lease_id, fencing_token, worker_id,
@@ -2289,7 +2354,16 @@ fn load_record(
         )
         .optional()
         .map_err(sql_error)?;
-    if let Some(record) = &record {
+    if let Some(record) = &mut record {
+        record.open.replaces_artifact_id = connection
+            .query_row(
+                "SELECT old_artifact_id FROM artifact_upload_replacements WHERE new_artifact_id=?1",
+                [&artifact_id.0],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(sql_error)?
+            .map(ArtifactId);
         record.open.validate().map_err(|_| {
             ArtifactError::corrupt("Artifact catalog contains invalid immutable metadata")
         })?;
@@ -2359,6 +2433,7 @@ fn artifact_record_row(
             metering_attribution,
             retention,
             created_at_millis: created_at_millis.cast_unsigned(),
+            replaces_artifact_id: None,
         },
         acknowledged_sequence: acknowledged_sequence.cast_unsigned(),
         complete: row.get::<_, i64>(19)? == 1,
@@ -2448,10 +2523,43 @@ fn unfinished_quota_opens_for_job(
         .collect()
 }
 
+fn replacement_fingerprint(open: &ArtifactOpen) -> Result<String, ArtifactError> {
+    let provenance = &open.provenance;
+    let retention = match open.retention {
+        ArtifactRetention::Indefinite => None,
+        ArtifactRetention::UntilMillis(until) => Some(until),
+    };
+    let value = serde_json::json!({
+        "scope": open.scope_key.as_bytes(), "message": open.message_id, "request": open.request_id,
+        "artifact": open.artifact_id, "replaces": open.replaces_artifact_id, "kind": open.kind,
+        "media": open.media_type, "digest": open.digest, "size": open.size_bytes, "file": open.file_name,
+        "provenance": [provenance.execution_job_id.0, provenance.attempt.to_string(), provenance.lease_id.0, provenance.fencing_token.0, provenance.worker_id.0, provenance.worker_instance_id.0, provenance.worker_session_id.0],
+        "attribution": open.metering_attribution, "retention": retention, "created": open.created_at_millis,
+    });
+    let bytes = serde_json::to_vec(&value)
+        .map_err(|_| ArtifactError::corrupt("replacement metadata cannot be encoded"))?;
+    Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
+}
+
 fn replay_open_identity(
     connection: &Connection,
     open: &ArtifactOpen,
 ) -> Result<Option<ArtifactRecord>, ArtifactError> {
+    let replacement: Option<(String, String)> = connection.query_row(
+        "SELECT open_fingerprint, accepted_artifact_id FROM artifact_upload_replacements WHERE new_artifact_id=?1 OR open_message_id=?2 OR open_request_id=?3",
+        params![open.artifact_id.0, open.message_id.0, open.request_id.0],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional().map_err(sql_error)?;
+    if let Some((fingerprint, accepted)) = replacement {
+        if fingerprint != replacement_fingerprint(open)? {
+            return Err(ArtifactError::conflict(
+                "replacement identity was reused with different metadata",
+            ));
+        }
+        return load_record(connection, &ArtifactId(accepted))?
+            .map(Some)
+            .ok_or_else(|| ArtifactError::corrupt("replacement receipt is missing"));
+    }
     if let Some(existing) =
         load_record_by_open_identity(connection, &open.message_id, &open.request_id)?
     {

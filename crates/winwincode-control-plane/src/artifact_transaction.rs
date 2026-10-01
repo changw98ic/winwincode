@@ -169,7 +169,8 @@ fn frozen_artifact_open(
         metering_attribution(scope, durable, job, session_identity)?,
         ArtifactRetention::Indefinite,
         context.sent_at_millis,
-    ))
+    )
+    .with_replaced_artifact(message.replaces_artifact_id.clone()))
 }
 
 fn metering_attribution(
@@ -856,7 +857,7 @@ fn ack_open(
     receipt: &ArtifactWriteReceipt,
     session_identity: &SessionIdentity,
 ) -> Result<ArtifactAckMessage, ArtifactMessageError> {
-    ack(
+    let mut acknowledgement = ack(
         message.message_id.clone(),
         message.sent_at.clone(),
         message.lease.clone(),
@@ -864,7 +865,16 @@ fn ack_open(
         message.artifact.artifact_id.clone(),
         receipt,
         session_identity,
-    )
+    )?;
+    if receipt.record().artifact_id() != &message.artifact.artifact_id {
+        acknowledgement.ack_sequence = ExecutionAckSequence(0);
+        acknowledgement.retained_artifact =
+            Some(winwincode_execution_port::generated::ArtifactReference {
+                artifact_id: receipt.record().artifact_id().clone(),
+                digest: receipt.record().digest().clone(),
+            });
+    }
+    Ok(acknowledgement)
 }
 
 fn ack_chunk(
@@ -1005,6 +1015,7 @@ fn ack_response(
     session_identity: &SessionIdentity,
 ) -> ArtifactAckMessage {
     ArtifactAckMessage {
+        retained_artifact: None,
         ack_sequence,
         artifact_id,
         error,

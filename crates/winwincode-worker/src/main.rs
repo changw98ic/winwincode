@@ -183,19 +183,15 @@ where
     while worker.lifecycle() == WorkerLifecycleState::Booting
         || worker.lifecycle() == WorkerLifecycleState::Registering
     {
-        match Box::pin(worker.start(started_at.clone())).await {
-            Ok(()) => {
-                Box::pin(drain_controls(worker, handle)).await?;
-            }
-            Err(error) => {
-                eprintln!(
-                    "winwincode-worker: registration/start retry category={:?} reason={} lifecycle={:?}",
-                    error.code,
-                    error.reason,
-                    worker.lifecycle()
-                );
-            }
+        if let Err(error) = Box::pin(worker.start(started_at.clone())).await {
+            eprintln!(
+                "winwincode-worker: registration/start retry category={:?} reason={} lifecycle={:?}",
+                error.code,
+                error.reason,
+                worker.lifecycle()
+            );
         }
+        Box::pin(drain_controls(worker, handle)).await?;
         if let Some(error) = handle.terminal_error() {
             return Err(error.into());
         }

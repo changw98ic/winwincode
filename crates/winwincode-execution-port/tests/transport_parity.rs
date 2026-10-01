@@ -119,6 +119,46 @@ fn all_canonical_fixture_messages_round_trip_through_remote_json() {
 }
 
 #[test]
+fn v2_exchange_requires_an_explicit_acceptance_receipt_and_keeps_v1_compatibility() {
+    let request = RemoteExchangeRequest::new(
+        winwincode_domain::WorkerId("wrk_00000000000000000000000001".into()),
+        winwincode_domain::WorkerInstanceId("wki_00000000000000000000000001".into()),
+        Vec::new(),
+        RemoteTransportAdapter::<ScriptedCore>::encode(&worker_frame()).unwrap(),
+    )
+    .unwrap()
+    .with_acceptance_receipt();
+    let decoded = RemoteExchangeRequest::decode(&request.encode().unwrap()).unwrap();
+    assert_eq!(decoded, request);
+    assert!(decoded.supports_acceptance_receipt());
+    for accepted in [false, true] {
+        let response = RemoteExchangeResponse::with_acceptance(Vec::new(), accepted).unwrap();
+        assert_eq!(
+            RemoteExchangeResponse::decode(&response.encode().unwrap())
+                .unwrap()
+                .frame_accepted(),
+            accepted
+        );
+    }
+    assert!(
+        RemoteExchangeResponse::decode(
+            br#"{"schemaVersion":"execution-port.remote-exchange.v2","deliveries":[]}"#
+        )
+        .is_err()
+    );
+    assert!(RemoteExchangeResponse::decode(br#"{"schemaVersion":"execution-port.remote-exchange.v1","frameAccepted":false,"deliveries":[]}"#).is_err());
+    let legacy = RemoteExchangeResponse::decode(
+        &RemoteExchangeResponse::new(Vec::new())
+            .unwrap()
+            .encode()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(!legacy.has_acceptance_receipt());
+    assert!(legacy.frame_accepted());
+}
+
+#[test]
 fn remote_exchange_round_trips_bounded_canonical_frames_and_exact_delivery_ids() {
     let worker = worker_frame();
     let worker_bytes =

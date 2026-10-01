@@ -136,6 +136,11 @@ impl CandidateArtifactOutbox {
                    artifact_id TEXT NOT NULL UNIQUE,
                    record_json BLOB NOT NULL
                  );
+                 CREATE TABLE IF NOT EXISTS candidate_artifact_retired (
+                   artifact_id TEXT PRIMARY KEY NOT NULL,
+                   successor_artifact_id TEXT NOT NULL UNIQUE,
+                   record_json BLOB NOT NULL
+                 );
                  CREATE TABLE IF NOT EXISTS candidate_artifact_content (
                    authority_key TEXT PRIMARY KEY NOT NULL,
                    bytes BLOB NOT NULL
@@ -218,8 +223,9 @@ impl CandidateArtifactOutbox {
         acknowledgement: &ArtifactAckMessage,
     ) -> Result<CandidateArtifactAckOutcome, AdapterStoreError> {
         self.store.transaction(|transaction| {
-            let mut record = load_by_artifact(transaction, &acknowledgement.artifact_id)?
-                .ok_or(AdapterStoreError::Conflict)?;
+            let Some(mut record) = load_ack_record(transaction, acknowledgement)? else {
+                return Ok(CandidateArtifactAckOutcome::Pending);
+            };
             record.validate()?;
             record.validate_ack_authority(acknowledgement)?;
             if record.cancel_requested {
@@ -231,6 +237,19 @@ impl CandidateArtifactOutbox {
                 } else {
                     Err(AdapterStoreError::Conflict)
                 };
+            }
+            if acknowledgement.retained_artifact.is_some() {
+                if !record.transport_upgrade_pending
+                    || !valid_retained_reference(&record, acknowledgement)
+                {
+                    return Err(AdapterStoreError::Conflict);
+                }
+                compact_prefix(transaction, &record, record.final_sequence())?;
+                record.transport_upgrade_pending = false;
+                record.final_ack = Some(acknowledgement.clone());
+                record.ack_sequence = 0;
+                save_record(transaction, &record)?;
+                return Ok(CandidateArtifactAckOutcome::Accepted(record.reference()));
             }
             let acknowledged = u64::try_from(acknowledgement.ack_sequence.0)
                 .map_err(|_| AdapterStoreError::Conflict)?;
@@ -245,16 +264,28 @@ impl CandidateArtifactOutbox {
                     {
                         return Err(AdapterStoreError::Conflict);
                     }
+                    if record.transport_upgrade_pending {
+                        if acknowledged != 0
+                            || acknowledgement.message_id != record.open_message.message_id
+                        {
+                            return Err(AdapterStoreError::Conflict);
+                        }
+                        let replay = queue_upgrade_chunks(transaction, &record)?;
+                        record.transport_upgrade_pending = false;
+                        compact_prefix(transaction, &record, 0)?;
+                        save_record(transaction, &record)?;
+                        return Ok(CandidateArtifactAckOutcome::Replay(replay));
+                    }
                     compact_prefix(transaction, &record, acknowledged)?;
                     record.ack_sequence = acknowledged;
-                    if acknowledged == final_sequence {
+                    let outcome = if acknowledged == final_sequence {
                         record.final_ack = Some(acknowledgement.clone());
-                        save_record(transaction, &record)?;
-                        Ok(CandidateArtifactAckOutcome::Accepted(record.reference()))
+                        CandidateArtifactAckOutcome::Accepted(record.reference())
                     } else {
-                        save_record(transaction, &record)?;
-                        Ok(CandidateArtifactAckOutcome::Pending)
-                    }
+                        CandidateArtifactAckOutcome::Pending
+                    };
+                    save_record(transaction, &record)?;
+                    Ok(outcome)
                 }
                 LeaseWriteStatus::Gap => {
                     let replay_from = acknowledgement
@@ -388,7 +419,10 @@ impl CandidateArtifactOutbox {
         if !exact_frame {
             return Err(AdapterStoreError::Conflict);
         }
-        Ok(!record.cancel_requested && record.final_ack.is_none())
+        Ok(!record.cancel_requested
+            && record.final_ack.is_none()
+            && (!record.transport_upgrade_pending
+                || matches!(message, ExecutionPortMessage::ArtifactOpenMessage(_))))
     }
 
     pub(crate) fn cancel(
@@ -466,14 +500,23 @@ struct StoredCandidateArtifact {
     cancel_requested: bool,
     #[serde(default)]
     replacement_authority: Option<ExecutionJobReplacementAuthority>,
+    #[serde(default)]
+    transport_upgrade_pending: bool,
 }
 
 impl StoredCandidateArtifact {
+    fn from_upload(upload: &CandidateArtifactUpload) -> Result<Self, AdapterStoreError> {
+        Self::from_upload_plan(upload, None)
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "one immutable wire plan is built and validated before retention"
     )]
-    fn from_upload(upload: &CandidateArtifactUpload) -> Result<Self, AdapterStoreError> {
+    fn from_upload_plan(
+        upload: &CandidateArtifactUpload,
+        replaces: Option<ArtifactId>,
+    ) -> Result<Self, AdapterStoreError> {
         validate_upload(upload)?;
         if let Some(replacement) = upload.replacement_authority.as_ref() {
             validate_replacement_upload(upload, replacement)?;
@@ -483,11 +526,7 @@ impl StoredCandidateArtifact {
             &upload.worker_session_id,
             &upload.session_identity,
         )?;
-        let artifact_id = ArtifactId(canonical_id(
-            "art",
-            b"winwincode.candidate-artifact.v1",
-            &[authority_key.as_bytes(), upload.digest.0.as_bytes()],
-        ));
+        let artifact_id = candidate_artifact_id(&authority_key, &upload.digest, replaces.as_ref());
         let size_bytes =
             i64::try_from(upload.bytes.len()).map_err(|_| AdapterStoreError::Conflict)?;
         let (file_name, media_type) = candidate_artifact_format(&upload.execution_profile);
@@ -500,6 +539,7 @@ impl StoredCandidateArtifact {
             size_bytes,
         };
         let open_message = ArtifactOpenMessage {
+            replaces_artifact_id: replaces,
             artifact: descriptor.clone(),
             kind: ArtifactOpenMessageKind::ArtifactOpen,
             lease: upload.lease.clone(),
@@ -573,6 +613,7 @@ impl StoredCandidateArtifact {
             final_ack: None,
             cancel_requested: false,
             replacement_authority: upload.replacement_authority.clone(),
+            transport_upgrade_pending: false,
         };
         record.validate()?;
         check_remote_candidate_frame(
@@ -599,13 +640,10 @@ impl StoredCandidateArtifact {
             &self.open_message.worker_session_id,
             &self.open_message.session_identity,
         )?;
-        let exact_artifact_id = canonical_id(
-            "art",
-            b"winwincode.candidate-artifact.v1",
-            &[
-                exact_authority_key.as_bytes(),
-                self.descriptor.digest.0.as_bytes(),
-            ],
+        let exact_artifact_id = candidate_artifact_id(
+            &exact_authority_key,
+            &self.descriptor.digest,
+            self.open_message.replaces_artifact_id.as_ref(),
         );
         if !winwincode_execution_port::snapshot_freeze::snapshot_role_binding_valid(
             &self.execution_profile,
@@ -618,7 +656,7 @@ impl StoredCandidateArtifact {
             || !scope_matches_session(&self.scope, &self.open_message.session_identity)
             || self.authority_key != exact_authority_key
             || !lowercase_sha256(&self.descriptor.digest.0)
-            || self.descriptor.artifact_id.0 != exact_artifact_id
+            || self.descriptor.artifact_id != exact_artifact_id
             || self.descriptor.kind != ArtifactKind::Candidate
             || self.descriptor.media_type != candidate_artifact_format(&self.execution_profile).1
             || self.descriptor.file_name.as_deref()
@@ -690,10 +728,21 @@ impl StoredCandidateArtifact {
             if !matches!(
                 ack.status,
                 LeaseWriteStatus::Accepted | LeaseWriteStatus::Duplicate
-            ) || u64::try_from(ack.ack_sequence.0).ok() != Some(final_sequence)
+            ) || u64::try_from(ack.ack_sequence.0).ok()
+                != Some(if ack.retained_artifact.is_some() {
+                    0
+                } else {
+                    final_sequence
+                })
                 || ack.replay_from_sequence.is_some()
                 || ack.error.is_some()
-                || self.ack_sequence != final_sequence
+                || self.ack_sequence
+                    != if ack.retained_artifact.is_some() {
+                        0
+                    } else {
+                        final_sequence
+                    }
+                || (ack.retained_artifact.is_some() && !valid_retained_reference(self, ack))
             {
                 return Err(AdapterStoreError::Corrupt);
             }
@@ -768,7 +817,11 @@ impl StoredCandidateArtifact {
             && self.logical_job_digest == other.logical_job_digest
             && self.execution_profile == other.execution_profile
             && self.scope == other.scope
-            && self.descriptor == other.descriptor
+            && self.descriptor.digest == other.descriptor.digest
+            && self.descriptor.size_bytes == other.descriptor.size_bytes
+            && self.descriptor.kind == other.descriptor.kind
+            && self.descriptor.media_type == other.descriptor.media_type
+            && self.descriptor.file_name == other.descriptor.file_name
             && self.replacement_authority == other.replacement_authority
     }
 
@@ -777,6 +830,13 @@ impl StoredCandidateArtifact {
     }
 
     fn reference(&self) -> ArtifactReference {
+        if let Some(reference) = self
+            .final_ack
+            .as_ref()
+            .and_then(|ack| ack.retained_artifact.as_ref())
+        {
+            return reference.clone();
+        }
         ArtifactReference {
             artifact_id: self.descriptor.artifact_id.clone(),
             digest: self.descriptor.digest.clone(),
@@ -995,7 +1055,7 @@ fn save_record(
         .execute(
             "INSERT INTO candidate_artifact_upload(authority_key, artifact_id, record_json)
              VALUES (?1, ?2, ?3)
-             ON CONFLICT(authority_key) DO UPDATE SET record_json = excluded.record_json",
+             ON CONFLICT(authority_key) DO UPDATE SET record_json = excluded.record_json, artifact_id = excluded.artifact_id",
             params![
                 &record.authority_key,
                 &record.descriptor.artifact_id.0,
@@ -1086,6 +1146,28 @@ fn load_cancel_record(
         return Err(AdapterStoreError::Conflict);
     }
     Ok(Some((record, false)))
+}
+
+// Late acknowledgements of a retired transport plan never advance its successor.
+fn load_ack_record(
+    transaction: &Transaction<'_>,
+    acknowledgement: &ArtifactAckMessage,
+) -> Result<Option<StoredCandidateArtifact>, AdapterStoreError> {
+    if let Some(record) = load_by_artifact(transaction, &acknowledgement.artifact_id)? {
+        return Ok(Some(record));
+    }
+    let bytes: Option<Vec<u8>> = transaction
+        .query_row(
+            "SELECT record_json FROM candidate_artifact_retired WHERE artifact_id=?1",
+            [&acknowledgement.artifact_id.0],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| AdapterStoreError::Unavailable)?;
+    let retired = decode_record(bytes)?.ok_or(AdapterStoreError::Conflict)?;
+    retired.validate()?;
+    retired.validate_ack_authority(acknowledgement)?;
+    Ok(None)
 }
 
 fn load_by_artifact(
@@ -1223,9 +1305,105 @@ fn migrate_candidate_content(store: &AdapterStore) -> Result<(), AdapterStoreErr
                 record.validate()?;
                 save_record(tx, &record)?;
             }
+            if record.final_ack.is_none()
+                && !record.cancel_requested
+                && record.chunk_messages.iter().any(|chunk| {
+                    check_remote_candidate_frame(
+                        &ExecutionPortMessage::ArtifactChunkMessage(chunk.clone()),
+                        &record.open_message,
+                    )
+                    .is_err()
+                })
+            {
+                upgrade_transport_plan(tx, &record)?;
+            }
         }
         Ok(())
     })
+}
+
+fn upgrade_transport_plan(
+    tx: &Transaction<'_>,
+    old: &StoredCandidateArtifact,
+) -> Result<(), AdapterStoreError> {
+    let upload = CandidateArtifactUpload {
+        snapshot_id: old.open_message.snapshot_id.clone(),
+        job_digest: old.job_digest.clone(),
+        logical_job_digest: old.logical_job_digest.clone(),
+        execution_profile: old.execution_profile.clone(),
+        scope: old.scope.clone(),
+        lease: old.open_message.lease.clone(),
+        worker_session_id: old.open_message.worker_session_id.clone(),
+        session_identity: old.open_message.session_identity.clone(),
+        digest: old.descriptor.digest.clone(),
+        bytes: old.bytes.clone(),
+        created_at: old.open_message.sent_at.clone(),
+        replacement_authority: old.replacement_authority.clone(),
+    };
+    let mut replacement = StoredCandidateArtifact::from_upload_plan(
+        &upload,
+        Some(old.descriptor.artifact_id.clone()),
+    )?;
+    replacement.transport_upgrade_pending = true;
+    compact_prefix(tx, old, old.final_sequence())?;
+    tx.execute(
+        "INSERT INTO candidate_artifact_retired VALUES(?1,?2,?3)",
+        params![
+            old.descriptor.artifact_id.0,
+            replacement.descriptor.artifact_id.0,
+            serde_json::to_vec(old).map_err(|_| AdapterStoreError::Corrupt)?
+        ],
+    )
+    .map_err(|_| AdapterStoreError::Unavailable)?;
+    tx.execute(
+        "DELETE FROM candidate_artifact_chunks WHERE authority_key=?1",
+        [&old.authority_key],
+    )
+    .map_err(|_| AdapterStoreError::Unavailable)?;
+    tx.execute(
+        "DELETE FROM candidate_artifact_content WHERE authority_key=?1",
+        [&old.authority_key],
+    )
+    .map_err(|_| AdapterStoreError::Unavailable)?;
+    save_record(tx, &replacement)?;
+    ExecutionOutbox::retain_in_transaction(
+        tx,
+        &ExecutionPortMessage::ArtifactOpenMessage(replacement.open_message.clone()),
+    )?;
+    Ok(())
+}
+
+fn candidate_artifact_id(
+    authority: &str,
+    digest: &Sha256Digest,
+    predecessor: Option<&ArtifactId>,
+) -> ArtifactId {
+    ArtifactId(match predecessor {
+        None => canonical_id(
+            "art",
+            b"winwincode.candidate-artifact.v1",
+            &[authority.as_bytes(), digest.0.as_bytes()],
+        ),
+        Some(old) => canonical_id(
+            "art",
+            b"winwincode.candidate-artifact.transport-plan.v2",
+            &[authority.as_bytes(), digest.0.as_bytes(), old.0.as_bytes()],
+        ),
+    })
+}
+
+fn valid_retained_reference(record: &StoredCandidateArtifact, ack: &ArtifactAckMessage) -> bool {
+    ack.retained_artifact.as_ref().is_some_and(|reference| {
+        Some(&reference.artifact_id) == record.open_message.replaces_artifact_id.as_ref()
+            && reference.digest == record.descriptor.digest
+    }) && ack.message_id == record.open_message.message_id
+        && ack.ack_sequence.0 == 0
+        && matches!(
+            ack.status,
+            LeaseWriteStatus::Accepted | LeaseWriteStatus::Duplicate
+        )
+        && ack.error.is_none()
+        && ack.replay_from_sequence.is_none()
 }
 
 fn chunk_budget(open: &ArtifactOpenMessage) -> Result<usize, AdapterStoreError> {
@@ -1306,7 +1484,8 @@ impl winwincode_execution_port::transport::ExecutionPortCore for CandidateNoopCo
 }
 
 fn final_ack_matches_retry(retained: &ArtifactAckMessage, retry: &ArtifactAckMessage) -> bool {
-    retained.ack_sequence == retry.ack_sequence
+    retained.retained_artifact == retry.retained_artifact
+        && retained.ack_sequence == retry.ack_sequence
         && retained.artifact_id == retry.artifact_id
         && retained.error == retry.error
         && retained.kind == retry.kind
@@ -1335,6 +1514,26 @@ fn compact_prefix(
     delete_delivery(transaction, &record.open_message.message_id.0)?;
     transaction.execute("DELETE FROM execution_outbox WHERE delivery_id IN (SELECT message_id FROM candidate_artifact_chunks WHERE authority_key=?1 AND sequence<=?2)", params![record.authority_key, i64::try_from(acknowledged).map_err(|_| AdapterStoreError::Corrupt)?]).map_err(|_| AdapterStoreError::Unavailable)?;
     Ok(())
+}
+
+fn queue_upgrade_chunks(
+    transaction: &Transaction<'_>,
+    record: &StoredCandidateArtifact,
+) -> Result<Vec<DurableExecutionDelivery>, AdapterStoreError> {
+    let mut replay = Vec::new();
+    for sequence in 1..=record.chunk_count {
+        let chunk = load_chunk(
+            transaction,
+            record,
+            i64::try_from(sequence).map_err(|_| AdapterStoreError::Corrupt)?,
+        )?
+        .ok_or(AdapterStoreError::Corrupt)?;
+        replay.push(ExecutionOutbox::retain_in_transaction(
+            transaction,
+            &ExecutionPortMessage::ArtifactChunkMessage(chunk),
+        )?);
+    }
+    Ok(replay)
 }
 
 fn requeue_suffix(
@@ -1484,6 +1683,7 @@ mod tests {
     ) -> ArtifactAckMessage {
         let gap = status == LeaseWriteStatus::Gap;
         ArtifactAckMessage {
+            retained_artifact: None,
             ack_sequence: ExecutionAckSequence(sequence),
             artifact_id: retained.artifact.artifact_id.clone(),
             error: gap.then(|| ExecutionPortError {
@@ -1561,120 +1761,278 @@ mod tests {
         ))
     }
 
-    #[test]
-    #[allow(
-        clippy::too_many_lines,
-        reason = "the migration checks small and oversized legacy plans across restart"
-    )]
-    fn legacy_records_migrate_without_rewriting_the_original_wire_plan() {
-        use winwincode_execution_port::transport::{
-            FrameDirection, FrameError, MAX_REMOTE_FRAME_BYTES, RemoteTransportAdapter, TypedFrame,
+    fn persist_legacy_fixture(
+        root: &Path,
+        size: usize,
+        acknowledged: u64,
+        complete: bool,
+        split: bool,
+    ) -> (CandidateArtifactUpload, StoredCandidateArtifact) {
+        let upload = upload(vec![0x7f; size]);
+        let mut old = StoredCandidateArtifact::from_upload(&upload).unwrap();
+        old.chunk_size_bytes = legacy_chunk_bytes();
+        let template = old.chunk_messages[0].clone();
+        old.chunk_messages = upload
+            .bytes
+            .chunks(legacy_chunk_bytes())
+            .enumerate()
+            .map(|(index, bytes)| {
+                let sequence = (index + 1) as u64;
+                let mut chunk = template.clone();
+                chunk.sequence = ExecutionSequence(i64::try_from(sequence).unwrap());
+                chunk.message_id = ExecutionMessageId(canonical_id(
+                    "xmsg",
+                    b"winwincode.candidate-artifact.chunk-message.v1",
+                    &[
+                        old.descriptor.artifact_id.0.as_bytes(),
+                        &sequence.to_be_bytes(),
+                    ],
+                ));
+                chunk.payload.data_base64 = BASE64_STANDARD.encode(bytes);
+                chunk.payload.payload_digest =
+                    Sha256Digest(format!("sha256:{:x}", Sha256::digest(bytes)));
+                chunk.is_final = index + 1 == upload.bytes.chunks(legacy_chunk_bytes()).len();
+                chunk
+            })
+            .collect();
+        old.chunk_count = old.chunk_messages.len() as u64;
+        old.ack_sequence = acknowledged;
+        let retained = RetainedCandidateArtifact {
+            artifact: old.reference(),
+            authority: old.authority(),
+            deliveries: Vec::new(),
+            already_accepted: complete,
         };
-        for size in [100, 300 * 1024] {
-            let root = test_root("legacy-content-migration");
-            let upload = upload(vec![0x7f; size]);
-            let mut record = StoredCandidateArtifact::from_upload(&upload).unwrap();
-            record.chunk_size_bytes = legacy_chunk_bytes();
-            record.chunk_count = 1;
-            record.chunk_messages.truncate(1);
-            let chunk = &mut record.chunk_messages[0];
-            chunk.is_final = true;
-            chunk.payload.data_base64 = BASE64_STANDARD.encode(&upload.bytes);
-            chunk.payload.payload_digest = upload.digest.clone();
-            record.validate().unwrap();
-            let mut legacy = serde_json::to_value(&record).unwrap();
-            legacy["bytes"] = serde_json::json!(record.bytes);
-            legacy["chunk_messages"] = serde_json::json!(record.chunk_messages);
-            legacy.as_object_mut().unwrap().remove("chunk_count");
-            legacy.as_object_mut().unwrap().remove("chunk_size_bytes");
-            let (candidate, execution) = open_ledgers(&root).unwrap();
-            candidate
-                .store
-                .transaction(|tx| {
+        if complete {
+            old.final_ack = Some(acknowledgement(
+                &retained,
+                &upload,
+                i64::try_from(old.chunk_count).unwrap(),
+                LeaseWriteStatus::Accepted,
+            ));
+        }
+        old.validate().unwrap();
+        let (candidate, execution) = open_ledgers(root).unwrap();
+        candidate
+            .store
+            .transaction(|tx| {
+                if split {
+                    save_record(tx, &old)?;
+                } else {
+                    let mut legacy = serde_json::to_value(&old).unwrap();
+                    legacy["bytes"] = serde_json::json!(old.bytes);
+                    legacy["chunk_messages"] = serde_json::json!(old.chunk_messages);
+                    legacy.as_object_mut().unwrap().remove("chunk_count");
+                    legacy.as_object_mut().unwrap().remove("chunk_size_bytes");
                     tx.execute(
                         "INSERT INTO candidate_artifact_upload VALUES(?1,?2,?3)",
                         params![
-                            record.authority_key,
-                            record.descriptor.artifact_id.0,
+                            old.authority_key,
+                            old.descriptor.artifact_id.0,
                             serde_json::to_vec(&legacy).unwrap()
                         ],
                     )
                     .unwrap();
+                }
+                if !complete {
                     ExecutionOutbox::retain_in_transaction(
                         tx,
-                        &ExecutionPortMessage::ArtifactOpenMessage(record.open_message.clone()),
+                        &ExecutionPortMessage::ArtifactOpenMessage(old.open_message.clone()),
                     )?;
-                    ExecutionOutbox::retain_in_transaction(
-                        tx,
-                        &ExecutionPortMessage::ArtifactChunkMessage(
-                            record.chunk_messages[0].clone(),
-                        ),
-                    )?;
-                    Ok(())
-                })
-                .unwrap();
-            let original = execution.pending().unwrap();
-            drop(candidate);
-            drop(execution);
-            let (candidate, execution) = open_ledgers(&root).unwrap();
-            assert_eq!(execution.pending().unwrap(), original);
-            for delivery in &original {
-                assert!(candidate.delivery_allowed(&delivery.message).unwrap());
-            }
-            let frame = RemoteTransportAdapter::<CandidateNoopCore>::encode(
-                &TypedFrame::new(
-                    FrameDirection::WorkerToControlPlane,
-                    ExecutionPortMessage::ArtifactChunkMessage(record.chunk_messages[0].clone()),
-                )
-                .unwrap(),
-            )
+                    for chunk in old
+                        .chunk_messages
+                        .iter()
+                        .filter(|chunk| chunk.sequence.0 > i64::try_from(acknowledged).unwrap())
+                    {
+                        ExecutionOutbox::retain_in_transaction(
+                            tx,
+                            &ExecutionPortMessage::ArtifactChunkMessage(chunk.clone()),
+                        )?;
+                    }
+                }
+                Ok(())
+            })
             .unwrap();
-            if frame.len() > MAX_REMOTE_FRAME_BYTES {
-                assert_eq!(
-                    check_remote_candidate_frame(
-                        &ExecutionPortMessage::ArtifactChunkMessage(
-                            record.chunk_messages[0].clone()
-                        ),
-                        &record.open_message
-                    ),
-                    Err(AdapterStoreError::Conflict)
-                );
-                assert_eq!(
-                    winwincode_execution_port::transport::RemoteExchangeRequest::new(
-                        upload.lease.worker_id.clone(),
-                        upload.lease.worker_instance_id.clone(),
-                        Vec::new(),
-                        frame
-                    ),
-                    Err(FrameError::TooLarge)
-                );
+        drop(execution);
+        drop(candidate);
+        (upload, old)
+    }
+
+    #[test]
+    fn legacy_sqlite_plans_upgrade_atomically_and_preserve_completed_candidates() {
+        for (size, acknowledged, complete, split) in [
+            (100, 0, false, false),
+            (3 * 1024 * 1024 + 17000, 0, false, false),
+            (3 * 1024 * 1024 + 17000, 1, false, false),
+            (3 * 1024 * 1024 + 17000, 1, false, true),
+            (3 * 1024 * 1024 + 17000, 2, true, false),
+        ] {
+            let root = test_root("legacy-upgrade");
+            let (upload, old) = persist_legacy_fixture(&root, size, acknowledged, complete, split);
+            let (candidate, execution) = open_ledgers(&root).unwrap();
+            let retained = candidate.retain(&upload).unwrap();
+            if size == 100 || complete {
+                assert_eq!(retained.artifact, old.reference());
+                assert_eq!(retained.already_accepted, complete);
+                if complete {
+                    assert!(execution.pending().unwrap().is_empty());
+                }
             } else {
-                check_remote_candidate_frame(
-                    &ExecutionPortMessage::ArtifactChunkMessage(record.chunk_messages[0].clone()),
-                    &record.open_message,
-                )
-                .unwrap();
+                assert_ne!(retained.artifact.artifact_id, old.descriptor.artifact_id);
+                assert_eq!(retained.artifact.digest, old.descriptor.digest);
+                let pending = execution.pending().unwrap();
+                assert_eq!(
+                    pending.len(),
+                    1,
+                    "only the replacement open may precede its handshake"
+                );
+                let ExecutionPortMessage::ArtifactOpenMessage(open) = &pending[0].message else {
+                    panic!("replacement open")
+                };
+                assert_eq!(
+                    open.replaces_artifact_id,
+                    Some(old.descriptor.artifact_id.clone())
+                );
+                check_remote_candidate_frame(&pending[0].message, open).unwrap();
+                let late = acknowledgement(
+                    &RetainedCandidateArtifact {
+                        artifact: old.reference(),
+                        authority: old.authority(),
+                        deliveries: Vec::new(),
+                        already_accepted: false,
+                    },
+                    &upload,
+                    i64::try_from(acknowledged).unwrap(),
+                    LeaseWriteStatus::Accepted,
+                );
+                assert_eq!(
+                    candidate.apply_ack(&late).unwrap(),
+                    CandidateArtifactAckOutcome::Pending
+                );
+                let mut ack = acknowledgement(&retained, &upload, 0, LeaseWriteStatus::Accepted);
+                ack.message_id = open.message_id.clone();
+                let CandidateArtifactAckOutcome::Replay(chunks) =
+                    candidate.apply_ack(&ack).unwrap()
+                else {
+                    panic!("bounded plan is released after handshake")
+                };
+                assert!(chunks.len() > 48);
+                for delivery in &chunks {
+                    check_remote_candidate_frame(&delivery.message, open).unwrap();
+                    assert!(candidate.delivery_allowed(&delivery.message).unwrap());
+                }
+                assert!(
+                    !candidate
+                        .delivery_allowed(&ExecutionPortMessage::ArtifactChunkMessage(
+                            old.chunk_messages[0].clone()
+                        ))
+                        .unwrap()
+                );
+                drop(candidate);
+                drop(execution);
+                let (candidate, execution) = open_ledgers(&root).unwrap();
+                assert_eq!(
+                    candidate.retain(&upload).unwrap().artifact,
+                    retained.artifact
+                );
+                assert_eq!(execution.pending().unwrap().len(), chunks.len());
+                let final_ack = acknowledgement(
+                    &retained,
+                    &upload,
+                    i64::try_from(chunks.len()).unwrap(),
+                    LeaseWriteStatus::Accepted,
+                );
+                assert_eq!(
+                    candidate.apply_ack(&final_ack).unwrap(),
+                    CandidateArtifactAckOutcome::Accepted(retained.artifact)
+                );
+                assert!(execution.pending().unwrap().is_empty());
+                drop(candidate);
+                drop(execution);
+                std::fs::remove_dir_all(root).unwrap();
+                continue;
             }
-            let connection = candidate.store.lock().unwrap();
-            let metadata: Vec<u8> = connection
-                .query_row(
-                    "SELECT record_json FROM candidate_artifact_upload",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            assert!(metadata.len() < 16 * 1024);
-            let migrated: Vec<u8> = connection
-                .query_row("SELECT bytes FROM candidate_artifact_content", [], |row| {
-                    row.get(0)
-                })
-                .unwrap();
-            assert_eq!(migrated, upload.bytes);
-            drop(connection);
             drop(candidate);
             drop(execution);
             std::fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[test]
+    fn interrupted_transport_upgrade_keeps_the_old_sqlite_and_outbox_until_commit() {
+        let root = test_root("upgrade-rollback");
+        let (_, old) = persist_legacy_fixture(&root, 300 * 1024, 0, false, false);
+        let store = AdapterStore::open(&root).unwrap();
+        store.lock().unwrap().execute_batch("CREATE TRIGGER fail_upgrade BEFORE INSERT ON candidate_artifact_retired BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
+        assert!(CandidateArtifactOutbox::open(store.clone()).is_err());
+        let execution = ExecutionOutbox::open(store.clone()).unwrap();
+        assert_eq!(execution.pending().unwrap().len(), 2);
+        assert_eq!(
+            load_by_authority_connection(&store.lock().unwrap(), &old.authority_key)
+                .unwrap()
+                .unwrap()
+                .descriptor
+                .artifact_id,
+            old.descriptor.artifact_id
+        );
+        store
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail_upgrade")
+            .unwrap();
+        let candidate = CandidateArtifactOutbox::open(store.clone()).unwrap();
+        let first = execution.pending().unwrap();
+        assert_eq!(first.len(), 1);
+        drop(candidate);
+        drop(execution);
+        drop(store);
+        let (candidate, execution) = open_ledgers(&root).unwrap();
+        assert!(
+            execution.pending().unwrap() == first,
+            "restart before handshake preserves the replacement identity"
+        );
+        drop(candidate);
+        drop(execution);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn upgraded_open_retains_a_server_completed_predecessor_without_sending_chunks() {
+        let root = test_root("legacy-server-complete");
+        let (upload, old) = persist_legacy_fixture(&root, 300 * 1024, 0, false, true);
+        let (candidate, execution) = open_ledgers(&root).unwrap();
+        let retained = candidate.retain(&upload).unwrap();
+        let pending = execution.pending().unwrap();
+        let ExecutionPortMessage::ArtifactOpenMessage(open) = &pending[0].message else {
+            panic!("open")
+        };
+        let mut ack = acknowledgement(&retained, &upload, 0, LeaseWriteStatus::Duplicate);
+        ack.message_id = open.message_id.clone();
+        ack.retained_artifact = Some(old.reference());
+        let mut forged = ack.clone();
+        forged.retained_artifact.as_mut().unwrap().digest =
+            Sha256Digest(format!("sha256:{}", "0".repeat(64)));
+        assert!(candidate.apply_ack(&forged).is_err());
+        assert_eq!(
+            candidate.apply_ack(&ack).unwrap(),
+            CandidateArtifactAckOutcome::Accepted(old.reference())
+        );
+        assert!(execution.pending().unwrap().is_empty());
+        drop(candidate);
+        drop(execution);
+        let (candidate, execution) = open_ledgers(&root).unwrap();
+        assert_eq!(
+            candidate.accepted_reference(&upload.authority()).unwrap(),
+            Some(old.reference())
+        );
+        assert_eq!(
+            candidate.apply_ack(&ack).unwrap(),
+            CandidateArtifactAckOutcome::Accepted(old.reference())
+        );
+        assert!(execution.pending().unwrap().is_empty());
+        drop(candidate);
+        drop(execution);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

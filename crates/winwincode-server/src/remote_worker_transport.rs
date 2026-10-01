@@ -464,7 +464,7 @@ impl RemoteDeliveryQueue {
         &self,
         request: &RemoteExchangeRequest,
         principal: &RemoteWorkerPrincipal,
-    ) -> Result<(), RemoteWorkerTransportError> {
+    ) -> Result<bool, RemoteWorkerTransportError> {
         self.acknowledge(
             request.worker_id(),
             request.worker_instance_id(),
@@ -473,19 +473,14 @@ impl RemoteDeliveryQueue {
         let pending = self.pending.lock().map_err(|_| {
             RemoteWorkerTransportError::new("remote Worker delivery queue is unavailable")
         })?;
-        if pending
+        let can_accept = pending
             .iter()
             .filter(|(worker, instance, _, _)| {
                 worker == request.worker_id() && instance == request.worker_instance_id()
             })
             .count()
-            > MAX_PENDING_REMOTE_DELIVERIES
-                - winwincode_execution_port::transport::MAX_REMOTE_DELIVERIES
-        {
-            return Err(RemoteWorkerTransportError::new(
-                "remote Worker response backlog must be acknowledged",
-            ));
-        }
+            <= MAX_PENDING_REMOTE_DELIVERIES
+                - winwincode_execution_port::transport::MAX_REMOTE_DELIVERIES;
         drop(pending);
         self.authorities
             .lock()
@@ -499,7 +494,7 @@ impl RemoteDeliveryQueue {
                 ),
                 principal.clone(),
             );
-        Ok(())
+        Ok(can_accept)
     }
     fn retire_other_instances(
         &self,
@@ -538,7 +533,7 @@ impl RemoteDeliveryQueue {
             RemoteWorkerTransportError::new("remote Worker delivery queue is unavailable")
         })?;
         let mut deliveries = Vec::new();
-        let mut bytes = RemoteExchangeResponse::new(Vec::new())
+        let mut bytes = RemoteExchangeResponse::with_acceptance(Vec::new(), false)
             .and_then(|response| response.encode())
             .map_err(RemoteWorkerTransportError::frame_error)?
             .len();
@@ -755,7 +750,7 @@ where
         let mut storage = SqliteStorage::open(&self.data_directory).map_err(|_| {
             RemoteWorkerTransportError::new("remote Worker Registry is unavailable")
         })?;
-        let (responses, principal) =
+        let (responses, principal, frame_accepted) =
             self.accept_ingress(&mut storage, &credential, &request, &frame, &now)?;
         Box::new(storage)
             .close()
@@ -795,7 +790,7 @@ where
         // A later scheduler failure must not erase an accepted registration:
         // the Worker already joined the Registry and will retry drive on the
         // next heartbeat.
-        let drive_result = {
+        let drive_result = if frame_accepted {
             let worker_queue = WorkerDeliveryQueue {
                 queue: &self.queue,
                 worker_id: request.worker_id().clone(),
@@ -808,17 +803,23 @@ where
                 request.worker_instance_id().clone(),
                 principal.worker_pool_id().clone(),
             )
+        } else {
+            Ok(())
         };
         if let Err(error) = drive_result
             && std::env::var_os("WWC_DEBUG_RUNTIME").is_some()
         {
             eprintln!("remote Worker scheduler drive after exchange failed: {error}");
         }
-        let response = RemoteExchangeResponse::new(
-            self.queue
-                .snapshot(request.worker_id(), request.worker_instance_id())?,
-        )
-        .map_err(|_| RemoteWorkerTransportError::new("remote Worker response is invalid"))?;
+        let deliveries = self
+            .queue
+            .snapshot(request.worker_id(), request.worker_instance_id())?;
+        let response = if request.supports_acceptance_receipt() {
+            RemoteExchangeResponse::with_acceptance(deliveries, frame_accepted)
+        } else {
+            RemoteExchangeResponse::new(deliveries)
+        }
+        .map_err(RemoteWorkerTransportError::frame_error)?;
         response
             .encode()
             .map_err(|_| RemoteWorkerTransportError::new("remote Worker response is invalid"))
@@ -838,7 +839,7 @@ where
         request: &RemoteExchangeRequest,
         frame: &TypedFrame,
         now: &Instant,
-    ) -> Result<(Vec<ExecutionPortMessage>, RemoteWorkerPrincipal), RemoteWorkerTransportError>
+    ) -> Result<(Vec<ExecutionPortMessage>, RemoteWorkerPrincipal, bool), RemoteWorkerTransportError>
     {
         let frame_identity = match frame.message() {
             ExecutionPortMessage::WorkerRegisterMessage(message) => {
@@ -930,7 +931,15 @@ where
 
         // The exchange gate keeps this response reservation through business commit.
         // ACKs are accepted only after authenticating the exact Worker instance.
-        self.queue.prepare_ingress(request, &principal)?;
+        let can_accept = self.queue.prepare_ingress(request, &principal)?;
+        if !can_accept {
+            if request.supports_acceptance_receipt() {
+                return Ok((Vec::new(), principal, false));
+            }
+            return Err(RemoteWorkerTransportError::new(
+                "remote Worker response backlog must be acknowledged",
+            ));
+        }
 
         let responses = if matches!(
             frame.message(),
@@ -979,7 +988,7 @@ where
                     )
                 })?;
         }
-        Ok((responses, principal))
+        Ok((responses, principal, true))
     }
 }
 
@@ -1072,6 +1081,73 @@ mod tests {
             value["error"] = serde_json::json!({"code":"INFRASTRUCTURE_ERROR","message":"z".repeat(padding),"retryable":true});
         }
         serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn byte_limited_pages_can_drain_a_backpressured_worker() {
+        let queue = RemoteDeliveryQueue::default();
+        let worker = WorkerId("wrk_00000000000000000000000001".into());
+        let instance = WorkerInstanceId("wki_00000000000000000000000001".into());
+        let principal = RemoteWorkerPrincipal::new_bound(
+            worker.clone(),
+            instance.clone(),
+            WorkerPoolId("wpl_00000000000000000000000001".into()),
+            WorkerRegistryScope::local_default(),
+            "issuer".into(),
+            "subject".into(),
+            winwincode_domain::Sha256Digest(format!("sha256:{}", "e".repeat(64))),
+            "zone".into(),
+        )
+        .unwrap();
+        for seed in 0..MAX_PENDING_REMOTE_DELIVERIES {
+            queue
+                .enqueue_for(
+                    &worker,
+                    &instance,
+                    queue_message(seed, &worker, &instance, 32 * 1024),
+                )
+                .unwrap();
+        }
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/contracts/execution-port.valid.json"
+        ))
+        .unwrap();
+        let mut heartbeat = fixture["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["kind"] == "worker.heartbeat")
+            .unwrap()
+            .clone();
+        heartbeat["workerId"] = serde_json::json!(worker.0);
+        heartbeat["workerInstanceId"] = serde_json::json!(instance.0);
+        let frame = RemoteTransportAdapter::<NoopCore>::encode(
+            &TypedFrame::new(
+                FrameDirection::WorkerToControlPlane,
+                serde_json::from_value(heartbeat).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let mut delivered = 0;
+        loop {
+            let page = queue.snapshot(&worker, &instance).unwrap();
+            if page.is_empty() {
+                break;
+            }
+            assert!(page.len() < 128);
+            let ids = page.into_iter().map(|d| d.delivery_id).collect::<Vec<_>>();
+            delivered += ids.len();
+            let request =
+                RemoteExchangeRequest::new(worker.clone(), instance.clone(), ids, frame.clone())
+                    .unwrap();
+            assert!(
+                queue.prepare_ingress(&request, &principal).is_ok(),
+                "ACK and pull must remain available under backpressure"
+            );
+            assert!(delivered <= 256);
+        }
+        assert_eq!(delivered, 256);
     }
 
     #[test]
@@ -1240,7 +1316,7 @@ mod tests {
             .get(&(live, instance))
             .unwrap()
             .clone();
-        assert!(queue.prepare_ingress(&request, &principal).is_err());
+        assert!(!queue.prepare_ingress(&request, &principal).unwrap());
     }
 
     #[test]

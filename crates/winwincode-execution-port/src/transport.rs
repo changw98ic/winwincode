@@ -76,6 +76,18 @@ impl RemoteExchangeRequest {
         Ok(request)
     }
 
+    /// Opts into explicit upstream acceptance receipts and backlog draining.
+    #[must_use]
+    pub fn with_acceptance_receipt(mut self) -> Self {
+        "execution-port.remote-exchange.v2".clone_into(&mut self.schema_version);
+        self
+    }
+
+    #[must_use]
+    pub fn supports_acceptance_receipt(&self) -> bool {
+        self.schema_version == "execution-port.remote-exchange.v2"
+    }
+
     /// Decodes and validates one bounded JSON request body.
     ///
     /// # Errors
@@ -90,17 +102,24 @@ impl RemoteExchangeRequest {
         }
         let request: Self = serde_json::from_slice(bytes)
             .map_err(|error| FrameError::Malformed(error.to_string()))?;
-        if request.schema_version != "execution-port.remote-exchange.v1" {
+        if !matches!(
+            request.schema_version.as_str(),
+            "execution-port.remote-exchange.v1" | "execution-port.remote-exchange.v2"
+        ) {
             return Err(FrameError::Malformed(
                 "unsupported remote exchange schema".to_owned(),
             ));
         }
-        Self::new(
+        let version = request.schema_version.clone();
+        let mut checked = Self::new(
             request.worker_id,
             request.worker_instance_id,
             request.acknowledgements,
             request.frame,
-        )
+        )?;
+        checked.schema_version = version;
+        checked.encode()?;
+        Ok(checked)
     }
 
     /// Encodes the bounded request for HTTPS transport.
@@ -146,6 +165,8 @@ pub struct RemoteExchangeDelivery {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RemoteExchangeResponse {
     schema_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    frame_accepted: Option<bool>,
     deliveries: Vec<RemoteExchangeDelivery>,
 }
 
@@ -182,10 +203,35 @@ impl RemoteExchangeResponse {
         }
         let response = Self {
             schema_version: "execution-port.remote-exchange.v1".to_owned(),
+            frame_accepted: None,
             deliveries,
         };
         response.encode()?;
         Ok(response)
+    }
+
+    /// Emits a v2 receipt: false means only ACKs and pulls were processed.
+    /// # Errors
+    /// Rejects deliveries or the final encoding exceeding the wire budget.
+    pub fn with_acceptance(
+        deliveries: Vec<RemoteExchangeDelivery>,
+        accepted: bool,
+    ) -> Result<Self, FrameError> {
+        let mut response = Self::new(deliveries)?;
+        "execution-port.remote-exchange.v2".clone_into(&mut response.schema_version);
+        response.frame_accepted = Some(accepted);
+        response.encode()?;
+        Ok(response)
+    }
+
+    #[must_use]
+    pub fn frame_accepted(&self) -> bool {
+        self.frame_accepted.unwrap_or(true)
+    }
+
+    #[must_use]
+    pub const fn has_acceptance_receipt(&self) -> bool {
+        self.frame_accepted.is_some()
     }
 
     /// Decodes and validates one bounded JSON response.
@@ -202,12 +248,20 @@ impl RemoteExchangeResponse {
         }
         let response: Self = serde_json::from_slice(bytes)
             .map_err(|error| FrameError::Malformed(error.to_string()))?;
-        if response.schema_version != "execution-port.remote-exchange.v1" {
+        if !matches!(
+            (response.schema_version.as_str(), response.frame_accepted),
+            ("execution-port.remote-exchange.v1", None)
+                | ("execution-port.remote-exchange.v2", Some(_))
+        ) {
             return Err(FrameError::Malformed(
                 "unsupported remote exchange schema".to_owned(),
             ));
         }
-        Self::new(response.deliveries)
+        let mut checked = Self::new(response.deliveries)?;
+        checked.schema_version = response.schema_version;
+        checked.frame_accepted = response.frame_accepted;
+        checked.encode()?;
+        Ok(checked)
     }
 
     /// Encodes this response for HTTPS transport.
