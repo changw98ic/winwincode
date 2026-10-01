@@ -43,8 +43,12 @@ pub fn candidate_artifact_format(profile: &str) -> (&'static str, &'static str) 
     }
 }
 
-// Leaves ample room below EncodedPayload's base64 ceiling.
-const RAW_CHUNK_BYTES: usize = 3 * 1024 * 1024;
+// A conservative raw ceiling; the actual plan also accounts for canonical
+// frame metadata and validates the final remote encoding before retention.
+const RAW_CHUNK_BYTES: usize = 64 * 1024;
+fn legacy_chunk_bytes() -> usize {
+    3 * 1024 * 1024
+}
 const PENDING: &str = "pending";
 
 /// Exact verified bytes and execution authority entering the durable ledger.
@@ -131,9 +135,21 @@ impl CandidateArtifactOutbox {
                    authority_key TEXT PRIMARY KEY NOT NULL,
                    artifact_id TEXT NOT NULL UNIQUE,
                    record_json BLOB NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS candidate_artifact_content (
+                   authority_key TEXT PRIMARY KEY NOT NULL,
+                   bytes BLOB NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS candidate_artifact_chunks (
+                   authority_key TEXT NOT NULL,
+                   sequence INTEGER NOT NULL,
+                   message_id TEXT NOT NULL UNIQUE,
+                   message_json BLOB NOT NULL,
+                   PRIMARY KEY(authority_key, sequence)
                  );",
             )
             .map_err(|_| AdapterStoreError::Unavailable)?;
+        migrate_candidate_content(&store)?;
         Ok(Self { store })
     }
 
@@ -218,7 +234,7 @@ impl CandidateArtifactOutbox {
             }
             let acknowledged = u64::try_from(acknowledgement.ack_sequence.0)
                 .map_err(|_| AdapterStoreError::Conflict)?;
-            let final_sequence = record.final_sequence()?;
+            let final_sequence = record.final_sequence();
             if acknowledged < record.ack_sequence || acknowledged > final_sequence {
                 return Err(AdapterStoreError::Conflict);
             }
@@ -363,10 +379,10 @@ impl CandidateArtifactOutbox {
         record.validate()?;
         let exact_frame = match message {
             ExecutionPortMessage::ArtifactOpenMessage(open) => open == &record.open_message,
-            ExecutionPortMessage::ArtifactChunkMessage(chunk) => record
-                .chunk_messages
-                .iter()
-                .any(|retained| retained == chunk),
+            ExecutionPortMessage::ArtifactChunkMessage(chunk) => {
+                let retained = load_chunk(&connection, &record, chunk.sequence.0)?;
+                retained.as_ref() == Some(chunk)
+            }
             _ => false,
         };
         if !exact_frame {
@@ -400,9 +416,19 @@ impl CandidateArtifactOutbox {
                 return Err(AdapterStoreError::Conflict);
             }
             delete_delivery(transaction, &record.open_message.message_id.0)?;
-            for chunk in &record.chunk_messages {
-                delete_delivery(transaction, &chunk.message_id.0)?;
-            }
+            compact_prefix(transaction, &record, record.final_sequence())?;
+            transaction
+                .execute(
+                    "DELETE FROM candidate_artifact_chunks WHERE authority_key=?1",
+                    [&record.authority_key],
+                )
+                .map_err(|_| AdapterStoreError::Unavailable)?;
+            transaction
+                .execute(
+                    "DELETE FROM candidate_artifact_content WHERE authority_key=?1",
+                    [&record.authority_key],
+                )
+                .map_err(|_| AdapterStoreError::Unavailable)?;
             let changed = transaction
                 .execute(
                     "DELETE FROM candidate_artifact_upload WHERE authority_key = ?1",
@@ -424,10 +450,16 @@ struct StoredCandidateArtifact {
     logical_job_digest: Sha256Digest,
     execution_profile: String,
     scope: ExecutionScope,
+    #[serde(default, skip_serializing)]
     bytes: Vec<u8>,
     descriptor: ArtifactDescriptor,
     open_message: ArtifactOpenMessage,
+    #[serde(default, skip_serializing)]
     chunk_messages: Vec<ArtifactChunkMessage>,
+    #[serde(default = "legacy_chunk_bytes")]
+    chunk_size_bytes: usize,
+    #[serde(default)]
+    chunk_count: u64,
     ack_sequence: u64,
     final_ack: Option<ArtifactAckMessage>,
     #[serde(default)]
@@ -437,6 +469,10 @@ struct StoredCandidateArtifact {
 }
 
 impl StoredCandidateArtifact {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one immutable wire plan is built and validated before retention"
+    )]
     fn from_upload(upload: &CandidateArtifactUpload) -> Result<Self, AdapterStoreError> {
         validate_upload(upload)?;
         if let Some(replacement) = upload.replacement_authority.as_ref() {
@@ -483,9 +519,10 @@ impl StoredCandidateArtifact {
             snapshot_id: upload.snapshot_id.clone(),
             worker_session_id: upload.worker_session_id.clone(),
         };
+        let chunk_size_bytes = chunk_budget(&open_message)?;
         let chunk_messages = upload
             .bytes
-            .chunks(RAW_CHUNK_BYTES)
+            .chunks(chunk_size_bytes)
             .enumerate()
             .map(|(index, bytes)| {
                 let sequence = u64::try_from(index)
@@ -497,7 +534,7 @@ impl StoredCandidateArtifact {
                 let payload_digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(bytes)));
                 Ok(ArtifactChunkMessage {
                     artifact_id: artifact_id.clone(),
-                    is_final: index + 1 == upload.bytes.chunks(RAW_CHUNK_BYTES).len(),
+                    is_final: index + 1 == upload.bytes.chunks(chunk_size_bytes).len(),
                     kind: ArtifactChunkMessageKind::ArtifactChunk,
                     lease: upload.lease.clone(),
                     message_id: ExecutionMessageId(canonical_id(
@@ -528,6 +565,9 @@ impl StoredCandidateArtifact {
             bytes: upload.bytes.clone(),
             descriptor,
             open_message,
+            chunk_count: u64::try_from(chunk_messages.len())
+                .map_err(|_| AdapterStoreError::Conflict)?,
+            chunk_size_bytes,
             chunk_messages,
             ack_sequence: 0,
             final_ack: None,
@@ -535,12 +575,25 @@ impl StoredCandidateArtifact {
             replacement_authority: upload.replacement_authority.clone(),
         };
         record.validate()?;
+        check_remote_candidate_frame(
+            &ExecutionPortMessage::ArtifactOpenMessage(record.open_message.clone()),
+            &record.open_message,
+        )?;
+        for chunk in &record.chunk_messages {
+            check_remote_candidate_frame(
+                &ExecutionPortMessage::ArtifactChunkMessage(chunk.clone()),
+                &record.open_message,
+            )?;
+        }
         Ok(record)
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "candidate identity, progress, and immutable content are checked together"
+    )]
     fn validate(&self) -> Result<(), AdapterStoreError> {
-        let digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(&self.bytes)));
-        let final_sequence = self.final_sequence()?;
+        let final_sequence = self.final_sequence();
         let exact_authority_key = authority_key(
             &self.open_message.lease,
             &self.open_message.worker_session_id,
@@ -558,18 +611,18 @@ impl StoredCandidateArtifact {
             &self.execution_profile,
             self.open_message.snapshot_id.as_ref(),
         ) || !candidate_artifact_role(&self.execution_profile)
-            || self.bytes.is_empty()
+            || self.descriptor.size_bytes <= 0
+            || self.chunk_size_bytes == 0
             || !lowercase_sha256(&self.job_digest.0)
             || !lowercase_sha256(&self.logical_job_digest.0)
             || !scope_matches_session(&self.scope, &self.open_message.session_identity)
             || self.authority_key != exact_authority_key
-            || digest != self.descriptor.digest
+            || !lowercase_sha256(&self.descriptor.digest.0)
             || self.descriptor.artifact_id.0 != exact_artifact_id
             || self.descriptor.kind != ArtifactKind::Candidate
             || self.descriptor.media_type != candidate_artifact_format(&self.execution_profile).1
             || self.descriptor.file_name.as_deref()
                 != Some(candidate_artifact_format(&self.execution_profile).0)
-            || usize::try_from(self.descriptor.size_bytes).ok() != Some(self.bytes.len())
             || self.open_message.artifact != self.descriptor
             || self.open_message.kind != ArtifactOpenMessageKind::ArtifactOpen
             || self.open_message.schema_version != SchemaVersion::WinwincodeV1
@@ -587,13 +640,24 @@ impl StoredCandidateArtifact {
                     b"winwincode.candidate-artifact.open-request.v1",
                     &[self.descriptor.artifact_id.0.as_bytes()],
                 )
-            || self.chunk_messages.is_empty()
+            || self.chunk_count == 0
+            || u64::try_from(self.descriptor.size_bytes)
+                .ok()
+                .map(|size| size.div_ceil(self.chunk_size_bytes as u64))
+                != Some(self.chunk_count)
             || self.ack_sequence > final_sequence
             || (self.cancel_requested && self.final_ack.is_some())
         {
             return Err(AdapterStoreError::Corrupt);
         }
-        if self.rebuild_chunk_bytes()? != self.bytes {
+        // Immutable material is checked once at retention/recovery, never on
+        // each ACK or eligibility lookup. Those paths load metadata only.
+        if !self.bytes.is_empty()
+            && (i64::try_from(self.bytes.len()).map_err(|_| AdapterStoreError::Corrupt)?
+                != self.descriptor.size_bytes
+                || format!("sha256:{:x}", Sha256::digest(&self.bytes)) != self.descriptor.digest.0
+                || self.rebuild_chunk_bytes()? != self.bytes)
+        {
             return Err(AdapterStoreError::Corrupt);
         }
         if let Some(replacement) = &self.replacement_authority {
@@ -638,12 +702,12 @@ impl StoredCandidateArtifact {
     }
 
     fn rebuild_chunk_bytes(&self) -> Result<Vec<u8>, AdapterStoreError> {
-        if self.chunk_messages.len() != self.bytes.chunks(RAW_CHUNK_BYTES).len() {
+        if self.chunk_messages.len() != self.bytes.chunks(self.chunk_size_bytes).len() {
             return Err(AdapterStoreError::Corrupt);
         }
         self.chunk_messages
             .iter()
-            .zip(self.bytes.chunks(RAW_CHUNK_BYTES))
+            .zip(self.bytes.chunks(self.chunk_size_bytes))
             .enumerate()
             .try_fold(Vec::new(), |mut bytes, (index, (chunk, expected_bytes))| {
                 let expected = i64::try_from(index + 1).map_err(|_| AdapterStoreError::Corrupt)?;
@@ -704,13 +768,12 @@ impl StoredCandidateArtifact {
             && self.logical_job_digest == other.logical_job_digest
             && self.execution_profile == other.execution_profile
             && self.scope == other.scope
-            && self.bytes == other.bytes
             && self.descriptor == other.descriptor
             && self.replacement_authority == other.replacement_authority
     }
 
-    fn final_sequence(&self) -> Result<u64, AdapterStoreError> {
-        u64::try_from(self.chunk_messages.len()).map_err(|_| AdapterStoreError::Corrupt)
+    fn final_sequence(&self) -> u64 {
+        self.chunk_count
     }
 
     fn reference(&self) -> ArtifactReference {
@@ -761,7 +824,8 @@ fn replacement_record(
     if record.logical_job_digest != upload.logical_job_digest
         || record.execution_profile != upload.execution_profile
         || !same_work_run_identity(&record.scope, &upload.scope)
-        || record.bytes != upload.bytes
+        || record.descriptor.size_bytes
+            != i64::try_from(upload.bytes.len()).map_err(|_| AdapterStoreError::Conflict)?
         || record.descriptor.digest != upload.digest
     {
         return Err(AdapterStoreError::Conflict);
@@ -914,6 +978,18 @@ fn save_record(
     transaction: &Transaction<'_>,
     record: &StoredCandidateArtifact,
 ) -> Result<(), AdapterStoreError> {
+    if !record.bytes.is_empty() {
+        transaction
+            .execute(
+                "INSERT INTO candidate_artifact_content(authority_key,bytes) VALUES (?1,?2)",
+                params![record.authority_key, record.bytes],
+            )
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+        for chunk in &record.chunk_messages {
+            let bytes = serde_json::to_vec(chunk).map_err(|_| AdapterStoreError::Corrupt)?;
+            transaction.execute("INSERT INTO candidate_artifact_chunks(authority_key,sequence,message_id,message_json) VALUES (?1,?2,?3,?4)", params![record.authority_key, chunk.sequence.0, chunk.message_id.0, bytes]).map_err(|_| AdapterStoreError::Unavailable)?;
+        }
+    }
     let bytes = serde_json::to_vec(record).map_err(|_| AdapterStoreError::Corrupt)?;
     transaction
         .execute(
@@ -1046,8 +1122,187 @@ fn decode_record(
     bytes: Option<Vec<u8>>,
 ) -> Result<Option<StoredCandidateArtifact>, AdapterStoreError> {
     bytes
-        .map(|bytes| serde_json::from_slice(&bytes).map_err(|_| AdapterStoreError::Corrupt))
+        .map(|bytes| {
+            let mut record: StoredCandidateArtifact =
+                serde_json::from_slice(&bytes).map_err(|_| AdapterStoreError::Corrupt)?;
+            if record.chunk_count == 0 && !record.chunk_messages.is_empty() {
+                record.chunk_count = record.chunk_messages.len() as u64;
+            }
+            Ok(record)
+        })
         .transpose()
+}
+
+fn load_chunk(
+    connection: &rusqlite::Connection,
+    record: &StoredCandidateArtifact,
+    sequence: i64,
+) -> Result<Option<ArtifactChunkMessage>, AdapterStoreError> {
+    let bytes: Option<Vec<u8>> = connection.query_row("SELECT message_json FROM candidate_artifact_chunks WHERE authority_key=?1 AND sequence=?2", params![record.authority_key,sequence], |r| r.get(0)).optional().map_err(|_| AdapterStoreError::Unavailable)?;
+    bytes
+        .map(|bytes| {
+            let chunk: ArtifactChunkMessage =
+                serde_json::from_slice(&bytes).map_err(|_| AdapterStoreError::Corrupt)?;
+            if sequence < 1
+                || u64::try_from(sequence)
+                    .ok()
+                    .is_none_or(|sequence| sequence > record.chunk_count)
+            {
+                return Err(AdapterStoreError::Corrupt);
+            }
+            let raw = BASE64_STANDARD
+                .decode(&chunk.payload.data_base64)
+                .map_err(|_| AdapterStoreError::Corrupt)?;
+            if raw.len() > record.chunk_size_bytes
+                || raw.is_empty()
+                || chunk.artifact_id != record.descriptor.artifact_id
+                || chunk.lease != record.open_message.lease
+                || chunk.worker_session_id != record.open_message.worker_session_id
+                || chunk.session_identity != record.open_message.session_identity
+                || chunk.sequence.0 != sequence
+                || chunk.is_final != (u64::try_from(sequence).ok() == Some(record.chunk_count))
+                || chunk.payload.content_type != record.descriptor.media_type
+                || chunk.payload.payload_digest.0 != format!("sha256:{:x}", Sha256::digest(&raw))
+                || chunk.snapshot_id != record.open_message.snapshot_id
+                || chunk.sent_at != record.open_message.sent_at
+                || chunk.schema_version != SchemaVersion::WinwincodeV1
+                || chunk.message_id.0
+                    != canonical_id(
+                        "xmsg",
+                        b"winwincode.candidate-artifact.chunk-message.v1",
+                        &[
+                            record.descriptor.artifact_id.0.as_bytes(),
+                            &u64::try_from(sequence)
+                                .map_err(|_| AdapterStoreError::Corrupt)?
+                                .to_be_bytes(),
+                        ],
+                    )
+            {
+                return Err(AdapterStoreError::Corrupt);
+            }
+            Ok(chunk)
+        })
+        .transpose()
+}
+
+fn migrate_candidate_content(store: &AdapterStore) -> Result<(), AdapterStoreError> {
+    store.transaction(|tx| {
+        let rows = {
+            let mut statement = tx
+                .prepare("SELECT authority_key FROM candidate_artifact_upload")
+                .map_err(|_| AdapterStoreError::Unavailable)?;
+
+            statement
+                .query_map([], |r| r.get::<_, String>(0))
+                .map_err(|_| AdapterStoreError::Unavailable)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| AdapterStoreError::Unavailable)?
+        };
+        for key in rows {
+            let mut record = load_by_authority(tx, &key)?.ok_or(AdapterStoreError::Corrupt)?;
+            if record.bytes.is_empty() {
+                record.bytes = tx
+                    .query_row(
+                        "SELECT bytes FROM candidate_artifact_content WHERE authority_key=?1",
+                        [&record.authority_key],
+                        |r| r.get(0),
+                    )
+                    .map_err(|_| AdapterStoreError::Corrupt)?;
+                record.chunk_messages = (1..=record.chunk_count)
+                    .map(|sequence| {
+                        load_chunk(
+                            tx,
+                            &record,
+                            i64::try_from(sequence).map_err(|_| AdapterStoreError::Corrupt)?,
+                        )?
+                        .ok_or(AdapterStoreError::Corrupt)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                record.validate()?;
+            } else {
+                record.validate()?;
+                save_record(tx, &record)?;
+            }
+        }
+        Ok(())
+    })
+}
+
+fn chunk_budget(open: &ArtifactOpenMessage) -> Result<usize, AdapterStoreError> {
+    use winwincode_execution_port::transport::{
+        FrameDirection, MAX_REMOTE_FRAME_BYTES, RemoteExchangeRequest, RemoteTransportAdapter,
+        TypedFrame,
+    };
+    let chunk = ArtifactChunkMessage {
+        artifact_id: open.artifact.artifact_id.clone(),
+        is_final: false,
+        kind: ArtifactChunkMessageKind::ArtifactChunk,
+        lease: open.lease.clone(),
+        message_id: ExecutionMessageId("xmsg_00000000000000000000000000".into()),
+        payload: EncodedPayload {
+            content_type: open.artifact.media_type.clone(),
+            data_base64: String::new(),
+            payload_digest: Sha256Digest(format!("sha256:{}", "0".repeat(64))),
+        },
+        schema_version: SchemaVersion::WinwincodeV1,
+        sent_at: open.sent_at.clone(),
+        sequence: ExecutionSequence(i64::MAX),
+        session_identity: open.session_identity.clone(),
+        snapshot_id: open.snapshot_id.clone(),
+        worker_session_id: open.worker_session_id.clone(),
+    };
+    let frame = TypedFrame::new(
+        FrameDirection::WorkerToControlPlane,
+        ExecutionPortMessage::ArtifactChunkMessage(chunk),
+    )
+    .and_then(|f| RemoteTransportAdapter::<CandidateNoopCore>::encode(&f))
+    .map_err(|_| AdapterStoreError::Conflict)?;
+    RemoteExchangeRequest::new(
+        open.lease.worker_id.clone(),
+        open.lease.worker_instance_id.clone(),
+        Vec::new(),
+        frame.clone(),
+    )
+    .map_err(|_| AdapterStoreError::Conflict)?;
+    let budget = MAX_REMOTE_FRAME_BYTES
+        .checked_sub(frame.len())
+        .ok_or(AdapterStoreError::Conflict)?
+        / 4
+        * 3;
+    let budget = budget.min(RAW_CHUNK_BYTES);
+    if budget == 0 {
+        return Err(AdapterStoreError::Conflict);
+    }
+    Ok(budget)
+}
+fn check_remote_candidate_frame(
+    message: &ExecutionPortMessage,
+    open: &ArtifactOpenMessage,
+) -> Result<(), AdapterStoreError> {
+    use winwincode_execution_port::transport::{
+        FrameDirection, RemoteExchangeRequest, RemoteTransportAdapter, TypedFrame,
+    };
+    let frame = TypedFrame::new(FrameDirection::WorkerToControlPlane, message.clone())
+        .and_then(|frame| RemoteTransportAdapter::<CandidateNoopCore>::encode(&frame))
+        .map_err(|_| AdapterStoreError::Conflict)?;
+    let request = RemoteExchangeRequest::new(
+        open.lease.worker_id.clone(),
+        open.lease.worker_instance_id.clone(),
+        Vec::new(),
+        frame,
+    )
+    .map_err(|_| AdapterStoreError::Conflict)?;
+    let bytes = request.encode().map_err(|_| AdapterStoreError::Conflict)?;
+    RemoteExchangeRequest::decode(&bytes).map_err(|_| AdapterStoreError::Conflict)?;
+    Ok(())
+}
+struct CandidateNoopCore;
+impl winwincode_execution_port::transport::ExecutionPortCore for CandidateNoopCore {
+    type Output = ();
+    type Error = std::convert::Infallible;
+    fn accept(&mut self, _: &ExecutionPortMessage) -> Result<(), Self::Error> {
+        Ok(())
+    }
 }
 
 fn final_ack_matches_retry(retained: &ArtifactAckMessage, retry: &ArtifactAckMessage) -> bool {
@@ -1078,12 +1333,7 @@ fn compact_prefix(
     acknowledged: u64,
 ) -> Result<(), AdapterStoreError> {
     delete_delivery(transaction, &record.open_message.message_id.0)?;
-    for chunk in &record.chunk_messages {
-        let sequence = u64::try_from(chunk.sequence.0).map_err(|_| AdapterStoreError::Corrupt)?;
-        if sequence <= acknowledged {
-            delete_delivery(transaction, &chunk.message_id.0)?;
-        }
-    }
+    transaction.execute("DELETE FROM execution_outbox WHERE delivery_id IN (SELECT message_id FROM candidate_artifact_chunks WHERE authority_key=?1 AND sequence<=?2)", params![record.authority_key, i64::try_from(acknowledged).map_err(|_| AdapterStoreError::Corrupt)?]).map_err(|_| AdapterStoreError::Unavailable)?;
     Ok(())
 }
 
@@ -1093,9 +1343,14 @@ fn requeue_suffix(
     replay_from: u64,
 ) -> Result<Vec<DurableExecutionDelivery>, AdapterStoreError> {
     let mut replay = Vec::new();
-    for chunk in &record.chunk_messages {
-        let sequence = u64::try_from(chunk.sequence.0).map_err(|_| AdapterStoreError::Corrupt)?;
-        if sequence >= replay_from {
+    for sequence in replay_from..=record.chunk_count {
+        let chunk = load_chunk(
+            transaction,
+            record,
+            i64::try_from(sequence).map_err(|_| AdapterStoreError::Corrupt)?,
+        )?
+        .ok_or(AdapterStoreError::Corrupt)?;
+        {
             let changed = transaction
                 .execute(
                     "UPDATE execution_outbox SET state = ?1 WHERE delivery_id = ?2",
@@ -1304,6 +1559,183 @@ mod tests {
             CandidateArtifactOutbox::open(store.clone())?,
             ExecutionOutbox::open(store)?,
         ))
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the migration checks small and oversized legacy plans across restart"
+    )]
+    fn legacy_records_migrate_without_rewriting_the_original_wire_plan() {
+        use winwincode_execution_port::transport::{
+            FrameDirection, FrameError, MAX_REMOTE_FRAME_BYTES, RemoteTransportAdapter, TypedFrame,
+        };
+        for size in [100, 300 * 1024] {
+            let root = test_root("legacy-content-migration");
+            let upload = upload(vec![0x7f; size]);
+            let mut record = StoredCandidateArtifact::from_upload(&upload).unwrap();
+            record.chunk_size_bytes = legacy_chunk_bytes();
+            record.chunk_count = 1;
+            record.chunk_messages.truncate(1);
+            let chunk = &mut record.chunk_messages[0];
+            chunk.is_final = true;
+            chunk.payload.data_base64 = BASE64_STANDARD.encode(&upload.bytes);
+            chunk.payload.payload_digest = upload.digest.clone();
+            record.validate().unwrap();
+            let mut legacy = serde_json::to_value(&record).unwrap();
+            legacy["bytes"] = serde_json::json!(record.bytes);
+            legacy["chunk_messages"] = serde_json::json!(record.chunk_messages);
+            legacy.as_object_mut().unwrap().remove("chunk_count");
+            legacy.as_object_mut().unwrap().remove("chunk_size_bytes");
+            let (candidate, execution) = open_ledgers(&root).unwrap();
+            candidate
+                .store
+                .transaction(|tx| {
+                    tx.execute(
+                        "INSERT INTO candidate_artifact_upload VALUES(?1,?2,?3)",
+                        params![
+                            record.authority_key,
+                            record.descriptor.artifact_id.0,
+                            serde_json::to_vec(&legacy).unwrap()
+                        ],
+                    )
+                    .unwrap();
+                    ExecutionOutbox::retain_in_transaction(
+                        tx,
+                        &ExecutionPortMessage::ArtifactOpenMessage(record.open_message.clone()),
+                    )?;
+                    ExecutionOutbox::retain_in_transaction(
+                        tx,
+                        &ExecutionPortMessage::ArtifactChunkMessage(
+                            record.chunk_messages[0].clone(),
+                        ),
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+            let original = execution.pending().unwrap();
+            drop(candidate);
+            drop(execution);
+            let (candidate, execution) = open_ledgers(&root).unwrap();
+            assert_eq!(execution.pending().unwrap(), original);
+            for delivery in &original {
+                assert!(candidate.delivery_allowed(&delivery.message).unwrap());
+            }
+            let frame = RemoteTransportAdapter::<CandidateNoopCore>::encode(
+                &TypedFrame::new(
+                    FrameDirection::WorkerToControlPlane,
+                    ExecutionPortMessage::ArtifactChunkMessage(record.chunk_messages[0].clone()),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            if frame.len() > MAX_REMOTE_FRAME_BYTES {
+                assert_eq!(
+                    check_remote_candidate_frame(
+                        &ExecutionPortMessage::ArtifactChunkMessage(
+                            record.chunk_messages[0].clone()
+                        ),
+                        &record.open_message
+                    ),
+                    Err(AdapterStoreError::Conflict)
+                );
+                assert_eq!(
+                    winwincode_execution_port::transport::RemoteExchangeRequest::new(
+                        upload.lease.worker_id.clone(),
+                        upload.lease.worker_instance_id.clone(),
+                        Vec::new(),
+                        frame
+                    ),
+                    Err(FrameError::TooLarge)
+                );
+            } else {
+                check_remote_candidate_frame(
+                    &ExecutionPortMessage::ArtifactChunkMessage(record.chunk_messages[0].clone()),
+                    &record.open_message,
+                )
+                .unwrap();
+            }
+            let connection = candidate.store.lock().unwrap();
+            let metadata: Vec<u8> = connection
+                .query_row(
+                    "SELECT record_json FROM candidate_artifact_upload",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(metadata.len() < 16 * 1024);
+            let migrated: Vec<u8> = connection
+                .query_row("SELECT bytes FROM candidate_artifact_content", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(migrated, upload.bytes);
+            drop(connection);
+            drop(candidate);
+            drop(execution);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn large_candidate_frames_round_trip_and_ack_writes_only_small_metadata() {
+        let root = test_root("wire-budget-immutable-acks");
+        let upload = upload(vec![0x7f; 4 * 1024 * 1024 + 1]);
+        let (candidate, execution) = open_ledgers(&root).unwrap();
+        let retained = candidate.retain(&upload).unwrap();
+        assert!(retained.deliveries.len() > 32);
+        for delivery in &retained.deliveries {
+            let ExecutionPortMessage::ArtifactOpenMessage(open) = &retained.deliveries[0].message
+            else {
+                panic!("candidate open")
+            };
+            check_remote_candidate_frame(&delivery.message, open).unwrap();
+            assert!(candidate.delivery_allowed(&delivery.message).unwrap());
+        }
+        let connection = candidate.store.lock().unwrap();
+        let metadata: Vec<u8> = connection
+            .query_row(
+                "SELECT record_json FROM candidate_artifact_upload",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(metadata.len() < 16 * 1024);
+        connection.execute_batch("CREATE TRIGGER immutable_content BEFORE UPDATE ON candidate_artifact_content BEGIN SELECT RAISE(ABORT,'immutable content'); END;
+            CREATE TRIGGER immutable_chunks BEFORE UPDATE ON candidate_artifact_chunks BEGIN SELECT RAISE(ABORT,'immutable chunks'); END;
+            CREATE TRIGGER no_reinsert_content BEFORE INSERT ON candidate_artifact_content BEGIN SELECT RAISE(ABORT,'content already retained'); END;
+            CREATE TRIGGER no_reinsert_chunks BEFORE INSERT ON candidate_artifact_chunks BEGIN SELECT RAISE(ABORT,'chunks already retained'); END;").unwrap();
+        drop(connection);
+        for sequence in 0..i64::try_from(retained.deliveries.len()).unwrap() {
+            candidate
+                .apply_ack(&acknowledgement(
+                    &retained,
+                    &upload,
+                    sequence,
+                    LeaseWriteStatus::Accepted,
+                ))
+                .unwrap();
+        }
+        assert!(
+            candidate
+                .accepted_reference(&upload.authority())
+                .unwrap()
+                .is_some()
+        );
+        assert!(execution.pending().unwrap().is_empty());
+        drop(candidate);
+        drop(execution);
+        let (candidate, execution) = open_ledgers(&root).unwrap();
+        assert!(
+            candidate
+                .accepted_reference(&upload.authority())
+                .unwrap()
+                .is_some()
+        );
+        assert!(execution.pending().unwrap().is_empty());
+        drop(candidate);
+        drop(execution);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

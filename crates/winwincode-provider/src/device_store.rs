@@ -602,7 +602,7 @@ fn migrate_device_store(
             "INSERT INTO identity VALUES (1, ?1, 0)",
             [key.to_bytes().as_slice()],
         )?;
-    } else if ![1, 2, 3, 4, 5, 6, 7, 8].contains(&version) {
+    } else if ![1, 2, 3, 4, 5, 6, 7, 8, 9].contains(&version) {
         return Err(DeviceProviderError);
     }
     if version < 2 {
@@ -650,6 +650,11 @@ fn migrate_device_store(
                 "CREATE TABLE jev_judge_exchanges (operation_id TEXT PRIMARY KEY, request_json TEXT NOT NULL, result TEXT);
                  PRAGMA user_version=8;",
             )?;
+    }
+    if version < 9 {
+        transaction.execute_batch("ALTER TABLE exchanges ADD COLUMN accounting_chunks TEXT;
+            CREATE TABLE accounting_closed_attempts (job_id TEXT NOT NULL,attempt INTEGER NOT NULL,lease_id TEXT NOT NULL,PRIMARY KEY(job_id,attempt));
+            PRAGMA user_version=9;")?;
     }
     Ok(())
 }

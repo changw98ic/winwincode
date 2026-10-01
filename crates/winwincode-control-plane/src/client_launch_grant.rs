@@ -551,9 +551,14 @@ mod tests {
         (node, lease_id, token, binding)
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "fixture names each independently authenticated issuance identity"
+    )]
     fn issuance_for(
         seed: u64,
         node: &str,
+        instance: &str,
         holder: &str,
         lease_id: &str,
         token: u64,
@@ -562,7 +567,7 @@ mod tests {
         LaunchGrantIssuance::try_new(
             format!("wlg_{}", suffix(seed)),
             node,
-            format!("cix_{}", suffix(seed + 2)),
+            instance,
             holder,
             lease_id,
             token,
@@ -700,8 +705,24 @@ mod tests {
         let mut storage = SqliteStorage::open(temporary_directory("happy")).expect("storage");
         let seed = 200;
         let (node, lease_id, token, binding) = seed_fixture(&mut storage, seed);
+        let instance = storage
+            .client_node_registry()
+            .unwrap()
+            .snapshot(&node)
+            .unwrap()
+            .unwrap()
+            .current_instance_id
+            .unwrap();
         let holder = format!("usr_{}", suffix(seed + 1));
-        let issuance = issuance_for(seed + 20, &node, &holder, &lease_id, token, &binding);
+        let issuance = issuance_for(
+            seed + 20,
+            &node,
+            &instance,
+            &holder,
+            &lease_id,
+            token,
+            &binding,
+        );
         let grant_id = issuance.worker_launch_grant_id().to_owned();
         {
             let mut service = WorkerLaunchGrantService::new(&mut storage);
@@ -761,12 +782,28 @@ mod tests {
         let mut storage = SqliteStorage::open(temporary_directory("gate")).expect("storage");
         let seed = 300;
         let (node, lease_id, token, binding) = seed_fixture(&mut storage, seed);
+        let instance = storage
+            .client_node_registry()
+            .unwrap()
+            .snapshot(&node)
+            .unwrap()
+            .unwrap()
+            .current_instance_id
+            .unwrap();
         let holder = format!("usr_{}", suffix(seed + 1));
         let outsider = format!("usr_{}", suffix(seed + 13));
         let mut service = WorkerLaunchGrantService::new(&mut storage);
         let error = service
             .issue(
-                &issuance_for(seed + 20, &node, &outsider, &lease_id, token, &binding),
+                &issuance_for(
+                    seed + 20,
+                    &node,
+                    &instance,
+                    &outsider,
+                    &lease_id,
+                    token,
+                    &binding,
+                ),
                 &instant("2026-01-01T00:02:00.000Z"),
             )
             .expect_err("a foreign holder must be refused");
@@ -776,7 +813,15 @@ mod tests {
         );
         let error = service
             .issue(
-                &issuance_for(seed + 21, &node, &holder, &lease_id, token + 1, &binding),
+                &issuance_for(
+                    seed + 21,
+                    &node,
+                    &instance,
+                    &holder,
+                    &lease_id,
+                    token + 1,
+                    &binding,
+                ),
                 &instant("2026-01-01T00:02:01.000Z"),
             )
             .expect_err("a stale token must be refused");
@@ -789,6 +834,7 @@ mod tests {
                 &issuance_for(
                     seed + 22,
                     &format!("cnd_{}", suffix(999)),
+                    &instance,
                     &holder,
                     &lease_id,
                     token,

@@ -473,10 +473,18 @@ mod tests {
         binding: &str,
         product_session_id: &str,
     ) -> String {
+        let instance = storage
+            .client_node_registry()
+            .unwrap()
+            .snapshot(node)
+            .unwrap()
+            .unwrap()
+            .current_instance_id
+            .unwrap();
         let issuance = LaunchGrantIssuance::try_new(
             format!("wlg_{}", suffix(seed)),
             node,
-            format!("cix_{}", suffix(seed + 40)),
+            instance,
             user,
             lease_id,
             token,

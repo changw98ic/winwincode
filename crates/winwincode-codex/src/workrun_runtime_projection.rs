@@ -615,7 +615,6 @@ fn bind_verification_evidence<AuthorityError, StoreError>(
             {
                 return Err(WorkRunRuntimeProjectionError::InvalidEvidence);
             }
-            let mut cited_outcomes = Vec::with_capacity(finding.evidence_sources.len());
             let evidence_sources = finding
                 .evidence_sources
                 .iter()
@@ -623,20 +622,20 @@ fn bind_verification_evidence<AuthorityError, StoreError>(
                     let evidence = catalog
                         .get(&source.source_id)
                         .ok_or(WorkRunRuntimeProjectionError::InvalidEvidence)?;
-                    cited_outcomes.push(evidence.outcome);
                     Ok(BoundVerificationEvidenceSource {
                         evidence_type: evidence.kind,
                         event_id: evidence.event_id.clone(),
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let (verdict, explanation) =
-                sealed_finding_verdict(finding.verdict, finding.explanation, &cited_outcomes);
             Ok(BoundVerificationFinding {
                 finding_id: finding.finding_id,
                 criterion_id: finding.criterion_id,
-                verdict,
-                explanation,
+                // A successful inspection proves that the command ran, not
+                // that its output satisfies the business criterion. Retain
+                // the model finding and bind execution facts separately.
+                verdict: finding.verdict,
+                explanation: finding.explanation,
                 evidence_sources,
             })
         })
@@ -716,42 +715,6 @@ fn bind_fusion_investigations<AuthorityError, StoreError>(
         }
         (Some(_), None) | (None, Some(_)) => Err(WorkRunRuntimeProjectionError::InvalidEvidence),
     }
-}
-
-/// Reconciles one model finding with the sealed runtime outcomes it cites.
-///
-/// Product authority must not ship an agent conclusion that conflicts with
-/// direct command/test evidence for the same source identity. Successful
-/// sealed evidence supports `pass`; any sealed failure forces `fail`.
-/// Unobserved outcomes keep the agent claim so Delivery authority can still
-/// fail-closed on incomplete evidence.
-fn sealed_finding_verdict(
-    agent_verdict: String,
-    agent_explanation: String,
-    cited: &[BoundEvidenceOutcome],
-) -> (String, String) {
-    if cited.is_empty() {
-        return (agent_verdict, agent_explanation);
-    }
-    if cited
-        .iter()
-        .any(|outcome| matches!(outcome, BoundEvidenceOutcome::Failed))
-    {
-        return (
-            "fail".to_owned(),
-            "Sealed runtime command or test evidence for this finding failed.".to_owned(),
-        );
-    }
-    if cited
-        .iter()
-        .all(|outcome| matches!(outcome, BoundEvidenceOutcome::Succeeded))
-    {
-        return (
-            "pass".to_owned(),
-            "Sealed runtime command or test evidence for this finding succeeded.".to_owned(),
-        );
-    }
-    (agent_verdict, agent_explanation)
 }
 
 fn sealed_command_outcome(value: &Value) -> BoundEvidenceOutcome {
@@ -2351,31 +2314,7 @@ mod tests {
     }
 
     #[test]
-    fn bind_reconciles_agent_finding_with_sealed_runtime_outcome() {
-        let (pass, pass_explanation) = sealed_finding_verdict(
-            "fail".to_owned(),
-            "agent saw no exit code".to_owned(),
-            &[BoundEvidenceOutcome::Succeeded],
-        );
-        assert_eq!(pass, "pass");
-        assert!(pass_explanation.contains("succeeded"));
-
-        let (fail, fail_explanation) = sealed_finding_verdict(
-            "pass".to_owned(),
-            "agent claimed success".to_owned(),
-            &[BoundEvidenceOutcome::Failed],
-        );
-        assert_eq!(fail, "fail");
-        assert!(fail_explanation.contains("failed"));
-
-        let (kept, kept_explanation) = sealed_finding_verdict(
-            "fail".to_owned(),
-            "agent saw no exit code".to_owned(),
-            &[BoundEvidenceOutcome::Unobserved],
-        );
-        assert_eq!(kept, "fail");
-        assert_eq!(kept_explanation, "agent saw no exit code");
-
+    fn command_execution_outcomes_remain_separate_from_findings() {
         assert_eq!(
             sealed_command_outcome(
                 &serde_json::json!({"status":"completed","exit_code":0,"source_id":"call"})
@@ -2391,7 +2330,7 @@ mod tests {
     }
 
     #[test]
-    fn bind_rewrites_conflicting_agent_verdict_before_stage_product() {
+    fn successful_inspection_preserves_business_failure_and_explanation() {
         let fixture = fixture();
         let mut store = MemoryStore::default();
         let projector = WorkRunRuntimeProjector::new();
@@ -2434,7 +2373,7 @@ mod tests {
             .replace("\"verdict\":\"pass\"", "\"verdict\":\"fail\"")
             .replace(
                 "\"explanation\":\"Direct command and test evidence passed.\"",
-                "\"explanation\":\"The observed command did not report exit code 0.\"",
+                "\"explanation\":\"The inspected configuration omits the required business rule.\"",
             );
         let retained = ready(
             projector
@@ -2454,12 +2393,12 @@ mod tests {
         let payload = retained.event.payload.as_ref().expect("result payload");
         let bytes = STANDARD.decode(&payload.data_base64).expect("result bytes");
         let json: Value = serde_json::from_slice(&bytes).expect("result JSON");
-        assert_eq!(json["findings"][0]["verdict"], "pass");
+        assert_eq!(json["findings"][0]["verdict"], "fail");
         assert!(
             json["findings"][0]["explanation"]
                 .as_str()
                 .expect("explanation")
-                .contains("succeeded")
+                .eq("The inspected configuration omits the required business rule.")
         );
         assert_eq!(json["findings"][0]["evidence_sources"][0]["type"], "test");
         assert_eq!(

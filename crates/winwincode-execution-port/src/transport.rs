@@ -17,6 +17,10 @@ use crate::generated::ExecutionPortMessage;
 
 /// Maximum canonical frame size accepted by the remote exchange endpoint.
 pub const MAX_REMOTE_FRAME_BYTES: usize = 256 * 1024;
+/// A v1 byte-array frame can occupy four JSON bytes per original byte.
+pub const MAX_REMOTE_REQUEST_BYTES: usize = 4 * MAX_REMOTE_FRAME_BYTES + 64 * 1024;
+/// Bound the encoded response, independently of its delivery count.
+pub const MAX_REMOTE_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 /// Maximum number of delivery acknowledgements accepted in one exchange.
 pub const MAX_REMOTE_ACKNOWLEDGEMENTS: usize = 128;
 /// Maximum number of Control Plane deliveries returned by one exchange.
@@ -46,13 +50,13 @@ impl RemoteExchangeRequest {
         acknowledgements: Vec<ExecutionMessageId>,
         frame: Vec<u8>,
     ) -> Result<Self, FrameError> {
+        if frame.is_empty() {
+            return Err(FrameError::Malformed("remote frame is empty".into()));
+        }
         if acknowledgements.len() > MAX_REMOTE_ACKNOWLEDGEMENTS
-            || frame.is_empty()
             || frame.len() > MAX_REMOTE_FRAME_BYTES
         {
-            return Err(FrameError::Malformed(
-                "remote exchange request exceeds a transport bound".to_owned(),
-            ));
+            return Err(FrameError::TooLarge);
         }
         let typed = RemoteTransportAdapter::<NoopCore>::decode(&frame)?;
         if typed.direction() != FrameDirection::WorkerToControlPlane {
@@ -61,13 +65,15 @@ impl RemoteExchangeRequest {
                 expected: FrameDirection::WorkerToControlPlane,
             });
         }
-        Ok(Self {
+        let request = Self {
             schema_version: "execution-port.remote-exchange.v1".to_owned(),
             worker_id,
             worker_instance_id,
             acknowledgements,
             frame,
-        })
+        };
+        request.encode()?;
+        Ok(request)
     }
 
     /// Decodes and validates one bounded JSON request body.
@@ -76,10 +82,11 @@ impl RemoteExchangeRequest {
     ///
     /// Rejects oversized, malformed, version-skewed, or wrong-direction input.
     pub fn decode(bytes: &[u8]) -> Result<Self, FrameError> {
-        if bytes.is_empty() || bytes.len() > MAX_REMOTE_FRAME_BYTES + 64 * 1024 {
-            return Err(FrameError::Malformed(
-                "remote exchange body exceeds a transport bound".to_owned(),
-            ));
+        if bytes.is_empty() {
+            return Err(FrameError::Malformed("remote request is empty".into()));
+        }
+        if bytes.len() > MAX_REMOTE_REQUEST_BYTES {
+            return Err(FrameError::TooLarge);
         }
         let request: Self = serde_json::from_slice(bytes)
             .map_err(|error| FrameError::Malformed(error.to_string()))?;
@@ -102,7 +109,7 @@ impl RemoteExchangeRequest {
     ///
     /// Returns a serialization error if the request cannot be represented.
     pub fn encode(&self) -> Result<Vec<u8>, FrameError> {
-        serde_json::to_vec(self).map_err(|error| FrameError::Serialization(error.to_string()))
+        bounded_encoding(self, MAX_REMOTE_REQUEST_BYTES)
     }
 
     #[must_use]
@@ -151,15 +158,14 @@ impl RemoteExchangeResponse {
     /// Rejects oversized batches, frames, and mismatched delivery identities.
     pub fn new(deliveries: Vec<RemoteExchangeDelivery>) -> Result<Self, FrameError> {
         if deliveries.len() > MAX_REMOTE_DELIVERIES {
-            return Err(FrameError::Malformed(
-                "remote exchange response exceeds a transport bound".to_owned(),
-            ));
+            return Err(FrameError::TooLarge);
         }
         for delivery in &deliveries {
-            if delivery.frame.is_empty() || delivery.frame.len() > MAX_REMOTE_FRAME_BYTES {
-                return Err(FrameError::Malformed(
-                    "remote exchange delivery exceeds a transport bound".to_owned(),
-                ));
+            if delivery.frame.is_empty() {
+                return Err(FrameError::Malformed("remote delivery is empty".into()));
+            }
+            if delivery.frame.len() > MAX_REMOTE_FRAME_BYTES {
+                return Err(FrameError::TooLarge);
             }
             let typed = RemoteTransportAdapter::<NoopCore>::decode(&delivery.frame)?;
             if typed.direction() != FrameDirection::ControlPlaneToWorker {
@@ -174,10 +180,12 @@ impl RemoteExchangeResponse {
                 ));
             }
         }
-        Ok(Self {
+        let response = Self {
             schema_version: "execution-port.remote-exchange.v1".to_owned(),
             deliveries,
-        })
+        };
+        response.encode()?;
+        Ok(response)
     }
 
     /// Decodes and validates one bounded JSON response.
@@ -186,12 +194,11 @@ impl RemoteExchangeResponse {
     ///
     /// Rejects malformed, version-skewed, wrong-direction, or oversized input.
     pub fn decode(bytes: &[u8]) -> Result<Self, FrameError> {
-        if bytes.is_empty()
-            || bytes.len() > MAX_REMOTE_DELIVERIES * (MAX_REMOTE_FRAME_BYTES + 1024) + 64 * 1024
-        {
-            return Err(FrameError::Malformed(
-                "remote exchange response exceeds a transport bound".to_owned(),
-            ));
+        if bytes.is_empty() {
+            return Err(FrameError::Malformed("remote response is empty".into()));
+        }
+        if bytes.len() > MAX_REMOTE_RESPONSE_BYTES {
+            return Err(FrameError::TooLarge);
         }
         let response: Self = serde_json::from_slice(bytes)
             .map_err(|error| FrameError::Malformed(error.to_string()))?;
@@ -209,13 +216,22 @@ impl RemoteExchangeResponse {
     ///
     /// Returns a serialization error if the response cannot be represented.
     pub fn encode(&self) -> Result<Vec<u8>, FrameError> {
-        serde_json::to_vec(self).map_err(|error| FrameError::Serialization(error.to_string()))
+        bounded_encoding(self, MAX_REMOTE_RESPONSE_BYTES)
     }
 
     #[must_use]
     pub fn deliveries(&self) -> &[RemoteExchangeDelivery] {
         &self.deliveries
     }
+}
+
+fn bounded_encoding(value: &impl Serialize, limit: usize) -> Result<Vec<u8>, FrameError> {
+    let bytes =
+        serde_json::to_vec(value).map_err(|error| FrameError::Serialization(error.to_string()))?;
+    if bytes.len() > limit {
+        return Err(FrameError::TooLarge);
+    }
+    Ok(bytes)
 }
 
 /// Returns the generated message identity used for transport confirmation.
@@ -377,6 +393,8 @@ impl TypedFrame {
 /// Errors raised while validating or decoding an `ExecutionPort` frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FrameError {
+    /// A deterministic frame or encoded body resource limit was exceeded.
+    TooLarge,
     /// The JSON envelope or generated message is malformed.
     Malformed(String),
     /// The declared direction differs from the canonical message direction.
@@ -397,6 +415,7 @@ pub enum FrameError {
 impl fmt::Display for FrameError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::TooLarge => formatter.write_str("execution-port message exceeds its byte budget"),
             Self::Malformed(reason) => {
                 write!(formatter, "malformed execution-port frame: {reason}")
             }

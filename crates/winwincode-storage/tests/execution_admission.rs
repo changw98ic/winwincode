@@ -138,6 +138,235 @@ fn generous_limits() -> ExecutionAdmissionLimits {
 }
 
 #[test]
+fn late_predecessor_receipts_are_additive_idempotent_and_do_not_revive_cancelled_work() {
+    for tokens_first in [true, false] {
+        reconcile_late_predecessor(tokens_first);
+    }
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the fixture checks both arrival orders across a restart and conflicting replays"
+)]
+fn reconcile_late_predecessor(tokens_first: bool) {
+    use winwincode_domain::{
+        FencingToken, LeaseId, ModelExchangeId, Sha256Digest, WorkerId, WorkerInstanceId,
+    };
+    use winwincode_execution_port::{
+        accounting::{AttemptAccountingStatement, ProviderAccountingReceipt},
+        action_enforcement::ActionEnforcementSigningKey,
+        generated::{
+            ExecutionLeaseStamp, ExecutionOutcomeUsage, ExecutionOutcomeUsageAccountingStatus,
+        },
+    };
+    use winwincode_storage::ExecutionLeaseRecord;
+    let root = temporary_directory("late-predecessor-provider-receipts");
+    let scope = scope(190);
+    let pool = pool(190);
+    let request = reservation(&scope, &pool, 190, 190, ExecutionRepositoryAccess::ReadOnly);
+    let mut storage = SqliteStorage::open(&root).unwrap();
+    let mut admission = storage.execution_admission().unwrap();
+    configure(&mut admission, &scope, &pool, generous_limits());
+    admission.reserve(&request).unwrap();
+    admission.start(&start(&request, 191)).unwrap();
+    let terminal = ExecutionReservationRelease {
+        scope: scope.clone(),
+        worker_pool_id: pool.clone(),
+        job_id: request.job_id.clone(),
+        request_id: RequestId(id("req", 192)),
+        expected_revision: 2,
+        reason: ExecutionReservationReleaseReason::Cancelled,
+        released_at: at(3),
+    };
+    let lease = ExecutionLeaseStamp {
+        job_id: request.job_id.clone(),
+        lease_id: LeaseId(id("lse", 190)),
+        worker_id: WorkerId(id("wrk", 190)),
+        worker_instance_id: WorkerInstanceId(id("wki", 190)),
+        attempt: 1,
+        fencing_token: FencingToken("1".into()),
+        issued_at: at(1),
+        expires_at: at(2),
+    };
+    let previous = ExecutionLeaseRecord {
+        job_id: lease.job_id.clone(),
+        lease_id: lease.lease_id.clone(),
+        payload_digest: Sha256Digest(format!("sha256:{}", "e".repeat(64))),
+        worker_id: lease.worker_id.clone(),
+        worker_instance_id: lease.worker_instance_id.clone(),
+        attempt: 1,
+        fencing_token: lease.fencing_token.clone(),
+        issued_at: lease.issued_at.clone(),
+        expires_at: lease.expires_at.clone(),
+    };
+    let mut current = lease.clone();
+    current.attempt = 2;
+    current.lease_id = LeaseId(id("lse", 191));
+    current.fencing_token = FencingToken("2".into());
+    storage.execution_registry().unwrap();
+    let fixture = rusqlite::Connection::open(storage.database_path()).unwrap();
+    fixture
+        .execute(
+            "INSERT INTO execution_attempt_accounting_pending VALUES(?1,1,?2,?3)",
+            rusqlite::params![
+                request.job_id.0,
+                serde_json::to_string(&previous).unwrap(),
+                at(2).0
+            ],
+        )
+        .unwrap();
+    fixture
+        .execute(
+            "INSERT INTO execution_leases VALUES(?1,?2,?3,?4,?5,2,?6,?7,?8)",
+            rusqlite::params![
+                current.job_id.0,
+                current.lease_id.0,
+                previous.payload_digest.0,
+                current.worker_id.0,
+                current.worker_instance_id.0,
+                current.fencing_token.0,
+                current.issued_at.0,
+                current.expires_at.0
+            ],
+        )
+        .unwrap();
+    drop(fixture);
+    let current_usage = ExecutionOutcomeUsage {
+        runtime_millis: 1000,
+        tokens: Some(20),
+        known_tokens: 20,
+        cost_microunits: Some(30),
+        accounting_status: ExecutionOutcomeUsageAccountingStatus::Known,
+    };
+    let combined = storage
+        .combine_execution_attempt_usage(&current, &current_usage)
+        .unwrap();
+    assert_eq!(combined.tokens, None);
+    storage
+        .execution_admission()
+        .unwrap()
+        .release_with_unknown_usage(&terminal, &combined)
+        .unwrap();
+    let key = ActionEnforcementSigningKey::from_bytes([7; 32]).unwrap();
+    let mut statement = AttemptAccountingStatement {
+        lease: lease.clone(),
+        manifest: vec!["primary:mdl_00000000000000000000000190".into()],
+        receipts: vec![ProviderAccountingReceipt {
+            slot: "primary:mdl_00000000000000000000000190".into(),
+            model_exchange_id: ModelExchangeId(id("mdl", 190)),
+            provider_id: "provider".into(),
+            provider_receipt_id: "provider-response-190".into(),
+            source_digest: Sha256Digest(format!("sha256:{}", "b".repeat(64))),
+            tokens: tokens_first.then_some(11),
+            cost_microunits: (!tokens_first).then_some(7),
+        }],
+        signature: Sha256Digest(String::new()),
+    };
+    statement.sign(&key).unwrap();
+    statement.verify(&key).unwrap();
+    storage
+        .reconcile_provider_attempt(&statement.verified(&key).unwrap(), &at(4))
+        .unwrap();
+    let fixture = rusqlite::Connection::open(storage.database_path()).unwrap();
+    let usage:String=fixture.query_row("SELECT usage_json FROM execution_admission_reconciliation_facts ORDER BY sequence DESC LIMIT 1",[],|row|row.get(0)).unwrap();
+    let usage: ExecutionOutcomeUsage = serde_json::from_str(&usage).unwrap();
+    assert_eq!(usage.tokens, tokens_first.then_some(31));
+    assert_eq!(usage.cost_microunits, (!tokens_first).then_some(37));
+    assert!(
+        storage
+            .execution_has_unknown_predecessor(&request.job_id)
+            .unwrap()
+    );
+    drop(fixture);
+    drop(storage);
+    let mut storage = SqliteStorage::open(&root).unwrap();
+    storage
+        .reconcile_provider_attempt(&statement.verified(&key).unwrap(), &at(5))
+        .unwrap();
+    let token_only = statement.clone();
+    statement.receipts[0].cost_microunits = Some(7);
+    statement.receipts[0].tokens = Some(11);
+    statement.receipts[0].source_digest = Sha256Digest(format!("sha256:{}", "c".repeat(64)));
+    statement.sign(&key).unwrap();
+    storage
+        .reconcile_provider_attempt(&statement.verified(&key).unwrap(), &at(6))
+        .unwrap();
+    storage
+        .reconcile_provider_attempt(&token_only.verified(&key).unwrap(), &at(7))
+        .unwrap();
+    assert!(
+        !storage
+            .execution_has_unknown_predecessor(&request.job_id)
+            .unwrap()
+    );
+    let record = storage
+        .execution_admission()
+        .unwrap()
+        .load_reservation_by_job(&request.job_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.state, ExecutionReservationState::Released);
+    let fixture = rusqlite::Connection::open(storage.database_path()).unwrap();
+    let final_usage: String = fixture
+        .query_row(
+            "SELECT settlement_usage_json FROM execution_admission_reconciliation WHERE job_id=?1",
+            [&request.job_id.0],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let final_usage: ExecutionOutcomeUsage = serde_json::from_str(&final_usage).unwrap();
+    assert_eq!(
+        (final_usage.tokens, final_usage.cost_microunits),
+        (Some(31), Some(37))
+    );
+    assert_eq!(
+        fixture
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM execution_attempt_accounting_pending",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        1,
+        "original marker remains as audit evidence"
+    );
+    let mut foreign = statement.clone();
+    foreign.lease.fencing_token = FencingToken("999".into());
+    foreign.sign(&key).unwrap();
+    assert!(
+        storage
+            .reconcile_provider_attempt(&foreign.verified(&key).unwrap(), &at(8))
+            .is_err()
+    );
+    let mut changed = statement.clone();
+    changed.receipts[0].tokens = Some(12);
+    changed.sign(&key).unwrap();
+    assert!(
+        storage
+            .reconcile_provider_attempt(&changed.verified(&key).unwrap(), &at(8))
+            .is_err()
+    );
+    let mut reused = statement.clone();
+    reused.lease = current;
+    reused.manifest = vec!["primary:current".into()];
+    reused.receipts[0].slot = "primary:current".into();
+    reused.receipts[0].tokens = Some(20);
+    reused.receipts[0].cost_microunits = Some(30);
+    reused.sign(&key).unwrap();
+    assert_eq!(
+        storage
+            .reconcile_provider_attempt(&reused.verified(&key).unwrap(), &at(8))
+            .unwrap_err()
+            .kind(),
+        winwincode_storage::StorageErrorKind::InvalidInput,
+        "one Provider receipt cannot charge another attempt"
+    );
+    drop(fixture);
+    drop(storage);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn concurrent_queue_and_budget_reservation_has_exactly_one_winner() {
     let root = temporary_directory("atomic");
     let request_scope = scope(1);

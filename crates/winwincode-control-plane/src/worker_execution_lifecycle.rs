@@ -179,14 +179,34 @@ impl DurableWorkerExecutionLifecycle {
                 0,
             )
         };
+        // Verify terminal session authority before retaining any usage fact.
+        require_terminal_authority(
+            &mut self.storage,
+            &WorkerUsageSettlement {
+                outcome_status: message.outcome.status.clone(),
+                job_id: message.lease.job_id.clone(),
+                worker_session_id: message.worker_session_id.clone(),
+                request_id: stable_request_id("terminal-authority", &message.message_id.0),
+                actual_tokens: u64::try_from(usage.known_tokens).map_err(|_| authority_error())?,
+                actual_cost_microunits: usage
+                    .cost_microunits
+                    .map(u64::try_from)
+                    .transpose()
+                    .map_err(|_| authority_error())?,
+                actual_runtime_millis: u64::try_from(usage.runtime_millis)
+                    .map_err(|_| authority_error())?,
+                completed_at: message.outcome.finished_at.clone(),
+            },
+        )?;
+        usage = self
+            .storage
+            .combine_execution_attempt_usage(&message.lease, &usage)
+            .map_err(|_| authority_error())?;
         if self
             .storage
             .execution_has_unknown_predecessor(&message.lease.job_id)
             .map_err(|_| authority_error())?
         {
-            usage.tokens = None;
-            usage.accounting_status=winwincode_execution_port::generated::ExecutionOutcomeUsageAccountingStatus::Unknown;
-            usage.cost_microunits = None;
             usage.runtime_millis =
                 trusted_execution_runtime_millis(&trusted, &message.outcome.finished_at)?;
         }

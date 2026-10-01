@@ -41,6 +41,22 @@ const RECEIPT_USE_SCHEMA_VERSION: &str = "winwincode.action-enforcement-use.v1";
 pub struct ActionEnforcementSigningKey([u8; 32]);
 
 impl ActionEnforcementSigningKey {
+    /// Authenticates the financial-only reconciliation endpoint, including after
+    /// execution credentials have expired. This token grants no execution rights.
+    #[must_use]
+    pub fn accounting_query_token(&self) -> Sha256Digest {
+        self.accounting_signature(b"pending-attempt-query.v1")
+    }
+    pub(crate) fn accounting_signature(&self, bytes: &[u8]) -> Sha256Digest {
+        Sha256Digest(format!(
+            "sha256:{}",
+            hex(&hmac_sha256_in_domain(
+                &self.0,
+                b"winwincode.attempt-provider-accounting.v1",
+                bytes
+            ))
+        ))
+    }
     /// Constructs a signing key from 256 bits of caller-owned secret material.
     ///
     /// # Errors
@@ -486,6 +502,10 @@ fn receipt_signature(
 }
 
 fn hmac_sha256(key: &[u8], value: &[u8]) -> [u8; 32] {
+    hmac_sha256_in_domain(key, RECEIPT_SIGNATURE_NAMESPACE, value)
+}
+
+fn hmac_sha256_in_domain(key: &[u8], namespace: &[u8], value: &[u8]) -> [u8; 32] {
     let mut block = [0_u8; 64];
     if key.len() > block.len() {
         block[..32].copy_from_slice(&Sha256::digest(key));
@@ -500,7 +520,7 @@ fn hmac_sha256(key: &[u8], value: &[u8]) -> [u8; 32] {
     }
     let inner = Sha256::new()
         .chain_update(inner_pad)
-        .chain_update(RECEIPT_SIGNATURE_NAMESPACE)
+        .chain_update(namespace)
         .chain_update(value)
         .finalize();
     Sha256::new()

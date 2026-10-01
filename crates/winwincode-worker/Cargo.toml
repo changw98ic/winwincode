@@ -34,6 +34,7 @@ codex-utils-pty = { path = "../../third_party/codex/codex-rs/utils/pty" }
 codex-utils-path-uri = { path = "../../third_party/codex/codex-rs/utils/path-uri" }
 futures.workspace = true
 rusqlite.workspace = true
+reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

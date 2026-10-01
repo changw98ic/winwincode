@@ -442,6 +442,10 @@ fn router(state: ServerState) -> Router {
             post(remote_worker_exchange),
         )
         .route(
+            "/internal/v1/execution-port/accounting",
+            get(remote_worker_accounting).post(remote_worker_accounting),
+        )
+        .route(
             "/internal/v1/client/exchange",
             post(client_control_exchange),
         )
@@ -786,6 +790,49 @@ async fn remote_worker_exchange(
                 .unwrap_or(StatusCode::SERVICE_UNAVAILABLE)
                 .into_response()
         }
+    }
+}
+
+async fn remote_worker_accounting(
+    State(state): State<ServerState>,
+    method: http::Method,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let Some(exchange) = &state.remote_worker else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if headers.get_all(AUTHORIZATION).iter().count() != 1 {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Some(token) = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let statement = (method == http::Method::POST).then_some(body.as_ref());
+    let offset = match headers.get("X-Accounting-Offset").map(|value| {
+        value
+            .to_str()
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+    }) {
+        Some(Some(offset)) => offset,
+        None => 0,
+        _ => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    match exchange.accounting(
+        token,
+        statement,
+        offset,
+        SystemStandaloneApplicationClock.now_instant(),
+    ) {
+        Ok(bytes) => (StatusCode::OK, [(CONTENT_TYPE, "application/json")], bytes).into_response(),
+        Err(error) => StatusCode::from_u16(error.status_code())
+            .unwrap_or(StatusCode::SERVICE_UNAVAILABLE)
+            .into_response(),
     }
 }
 

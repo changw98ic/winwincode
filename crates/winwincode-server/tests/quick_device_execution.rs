@@ -28,8 +28,8 @@ use winwincode_control_plane::{
 };
 use winwincode_domain::{
     ExecutionJobId, ExecutionMessageId, Instant, OrganizationId, ProjectId, RepositoryId,
-    RequestId, Sha256Digest, UserActor, UserActorKind, UserId, WorkRunId, WorkerId,
-    WorkerInstanceId, WorkspaceId,
+    RequestId, Sha256Digest, UserActor, UserActorKind, UserId, WorkerId, WorkerInstanceId,
+    WorkspaceId,
 };
 use winwincode_server::{
     ApiError, AuthenticatedPrincipal, CommandDispatchResponse, CommandFamily, DurableEventHub,
@@ -47,6 +47,172 @@ use winwincode_storage::{
 };
 
 static NEXT_ROOT: AtomicU64 = AtomicU64::new(1);
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one fixture crosses production authentication, durable import, and replay"
+)]
+fn production_accounting_consumes_signed_receipts_after_execution_authority_expires() {
+    use winwincode_control_plane::{
+        RemoteWorkerAuthenticationError, RemoteWorkerAuthenticator, RemoteWorkerCredential,
+        RemoteWorkerPrincipal,
+    };
+    use winwincode_execution_port::{
+        accounting::{
+            AttemptAccountingStatement, PendingAccountingPage, ProviderAccountingReceipt,
+        },
+        action_enforcement::ActionEnforcementSigningKey,
+        generated::{ExecutionLeaseStamp, ExecutionPortMessage},
+        transport::ExecutionPortCore,
+    };
+    use winwincode_server::{
+        ProductionRemoteWorkerExchange, RemoteWorkerExchangePort, RepositoryRuntimeScheduler,
+    };
+    struct Expired;
+    impl RemoteWorkerAuthenticator for Expired {
+        fn authenticate(
+            &self,
+            _: &RemoteWorkerCredential,
+            _: &Instant,
+        ) -> Result<RemoteWorkerPrincipal, RemoteWorkerAuthenticationError> {
+            Err(RemoteWorkerAuthenticationError::revoked())
+        }
+        fn ensure_active(
+            &self,
+            _: &RemoteWorkerPrincipal,
+            _: &Instant,
+        ) -> Result<(), RemoteWorkerAuthenticationError> {
+            Err(RemoteWorkerAuthenticationError::revoked())
+        }
+    }
+    struct NoExecution;
+    impl ExecutionPortCore for NoExecution {
+        type Output = Vec<ExecutionPortMessage>;
+        type Error = std::convert::Infallible;
+        fn accept(&mut self, _: &ExecutionPortMessage) -> Result<Self::Output, Self::Error> {
+            panic!("financial authority must not execute")
+        }
+    }
+    let root = temporary_root("production-accounting");
+    let application = compose_application(&root);
+    let repository = serde_json::from_value(repository_scope_json(1)).unwrap();
+    let scheduler = RepositoryRuntimeScheduler::from_application(
+        &application,
+        repository,
+        WorkerId(id("wrk", 1)),
+        WorkerInstanceId(id("wki", 1)),
+        "financial-test",
+        std::time::Duration::from_secs(30),
+    )
+    .unwrap();
+    let key = ActionEnforcementSigningKey::from_bytes([9; 32]).unwrap();
+    let exchange =
+        ProductionRemoteWorkerExchange::new(&root, Arc::new(Expired), scheduler, NoExecution)
+            .with_accounting_key(key.clone());
+    let mut storage = SqliteStorage::open(&root).unwrap();
+    assert!(storage.pending_accounting_leases(0).unwrap().is_empty());
+    storage.execution_registry().unwrap();
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/contracts/execution-port.valid.json"
+    ))
+    .unwrap();
+    let lease: ExecutionLeaseStamp = serde_json::from_value(
+        fixture["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["kind"] == "model.open")
+            .unwrap()["lease"]
+            .clone(),
+    )
+    .unwrap();
+    let record = winwincode_storage::ExecutionLeaseRecord {
+        job_id: lease.job_id.clone(),
+        lease_id: lease.lease_id.clone(),
+        payload_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+        worker_id: lease.worker_id.clone(),
+        worker_instance_id: lease.worker_instance_id.clone(),
+        attempt: u64::try_from(lease.attempt).unwrap(),
+        fencing_token: lease.fencing_token.clone(),
+        issued_at: lease.issued_at.clone(),
+        expires_at: lease.expires_at.clone(),
+    };
+    let fixture_db = rusqlite::Connection::open(storage.database_path()).unwrap();
+    fixture_db
+        .execute(
+            "INSERT INTO execution_attempt_accounting_pending VALUES(?1,?2,?3,?4)",
+            rusqlite::params![
+                lease.job_id.0,
+                lease.attempt,
+                serde_json::to_string(&record).unwrap(),
+                lease.expires_at.0
+            ],
+        )
+        .unwrap();
+    drop(fixture_db);
+    let token = key.accounting_query_token();
+    let now = instant("2027-01-15T08:00:00.000Z");
+    assert_eq!(
+        exchange
+            .accounting("wrong", None, 0, now.clone())
+            .unwrap_err()
+            .status_code(),
+        401
+    );
+    let page: PendingAccountingPage =
+        serde_json::from_slice(&exchange.accounting(&token.0, None, 0, now.clone()).unwrap())
+            .unwrap();
+    assert_eq!(page.leases, vec![lease.clone()]);
+    let mut statement = AttemptAccountingStatement {
+        lease,
+        manifest: vec!["primary:receipt".into()],
+        receipts: vec![ProviderAccountingReceipt {
+            slot: "primary:receipt".into(),
+            model_exchange_id: winwincode_domain::ModelExchangeId(id("mdl", 1)),
+            provider_id: "provider-fixture".into(),
+            provider_receipt_id: "receipt-1".into(),
+            source_digest: Sha256Digest(format!("sha256:{}", "b".repeat(64))),
+            tokens: Some(9),
+            cost_microunits: Some(4),
+        }],
+        signature: Sha256Digest(String::new()),
+    };
+    statement.sign(&key).unwrap();
+    let body = statement.encode().unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            exchange
+                .accounting(&token.0, Some(&body), 0, now.clone())
+                .unwrap(),
+            b"{}"
+        );
+    }
+    let page: PendingAccountingPage =
+        serde_json::from_slice(&exchange.accounting(&token.0, None, 0, now.clone()).unwrap())
+            .unwrap();
+    assert!(page.leases.is_empty());
+    statement.receipts[0].tokens = Some(10);
+    assert_eq!(
+        exchange
+            .accounting(&token.0, Some(&statement.encode().unwrap()), 0, now.clone())
+            .unwrap_err()
+            .status_code(),
+        401
+    );
+    statement.sign(&key).unwrap();
+    assert_eq!(
+        exchange
+            .accounting(&token.0, Some(&statement.encode().unwrap()), 0, now)
+            .unwrap_err()
+            .status_code(),
+        400
+    );
+    drop(storage);
+    drop(exchange);
+    drop(application);
+    std::fs::remove_dir_all(root).unwrap();
+}
 
 struct RecordingPublisher;
 
@@ -308,6 +474,14 @@ fn stage_anchor(
     binding: &str,
     product_session_id: &str,
 ) -> AnchorLaunch {
+    let client_instance = storage
+        .client_node_registry()
+        .unwrap()
+        .snapshot(node)
+        .unwrap()
+        .unwrap()
+        .current_instance_id
+        .unwrap();
     let worker_launch_grant_id = format!("wlg_{}", suffix(seed));
     let worker_session_id = format!("wsn_{}", suffix(seed + 50));
     let worker_id = format!("wrk_{}", suffix(seed + 51));
@@ -315,7 +489,7 @@ fn stage_anchor(
     let issuance = LaunchGrantIssuance::try_new(
         worker_launch_grant_id.clone(),
         node,
-        format!("cix_{}", suffix(seed + 40)),
+        client_instance,
         user,
         lease_id,
         fencing_token,
@@ -325,7 +499,7 @@ fn stage_anchor(
         worker_instance_id.clone(),
         "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
         Some(product_session_id.to_owned()),
-        Some(WorkRunId(format!("wrn_{}", suffix(seed + 53)))),
+        None,
         instant("2100-01-01T00:00:00.000Z"),
     )
     .expect("issuance");

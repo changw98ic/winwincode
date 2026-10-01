@@ -389,10 +389,17 @@ mod tests {
 
     #[test]
     fn judge_receipts_survive_restart_and_never_retry_unknown_calls() {
-        let root = std::env::temp_dir().join(format!("wwc-judge-store-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "wwc-judge-store-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let store = DeviceProviderStore::open(&root).unwrap();
         // Upgrade an existing version-7 store without changing its context rows.
-        store.connection.execute_batch("DROP TABLE jev_judge_exchanges; PRAGMA user_version=7;
+        store.connection.execute_batch("DROP TABLE jev_judge_exchanges; DROP TABLE accounting_closed_attempts; ALTER TABLE exchanges DROP COLUMN accounting_chunks; PRAGMA user_version=7;
             INSERT INTO jev_context_exchanges(operation_id,digest,request_json) VALUES('retained','digest','input');").unwrap();
         drop(store);
         let store = DeviceProviderStore::open(&root).unwrap();

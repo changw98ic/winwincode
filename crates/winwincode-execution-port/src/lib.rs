@@ -6,6 +6,7 @@
 //! `schema/winwincode/v1/execution-port.schema.json`; the schema remains the
 //! only source of public message shapes.
 
+pub mod accounting;
 pub mod action_enforcement;
 pub mod action_gateway;
 pub mod action_normalizer;

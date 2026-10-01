@@ -27,6 +27,7 @@ mod device_execution_recovery;
 pub use device_execution_recovery::stage_device_execution_recovery;
 mod device_scheduler;
 mod execution_admission;
+mod execution_attempt_accounting;
 mod execution_queue;
 mod execution_registry;
 mod execution_scope_replacement;
@@ -2559,7 +2560,7 @@ impl SqliteStorage {
     ) -> Result<bool, StorageError> {
         self.connection()?
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM execution_attempt_accounting_pending WHERE job_id=?1)",
+                "SELECT EXISTS(SELECT 1 FROM execution_attempt_accounting_pending p LEFT JOIN execution_attempt_accounting_totals t ON t.job_id=p.job_id AND t.attempt=p.attempt WHERE p.job_id=?1 AND (t.tokens IS NULL OR t.cost IS NULL))",
                 [&job.0],
                 |r| r.get(0),
             )

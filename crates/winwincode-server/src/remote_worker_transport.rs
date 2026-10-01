@@ -2,6 +2,7 @@
 
 //! Authenticated HTTPS exchange for a separated Execution Worker.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -16,8 +17,9 @@ use winwincode_control_plane::{
 use winwincode_domain::{ExecutionMessageId, Instant, WorkerId, WorkerInstanceId};
 use winwincode_execution_port::generated::ExecutionPortMessage;
 use winwincode_execution_port::transport::{
-    EndpointSide, ExecutionPortCore, FrameDirection, RemoteExchangeDelivery, RemoteExchangeRequest,
-    RemoteExchangeResponse, RemoteTransportAdapter, TypedFrame, execution_message_id,
+    EndpointSide, ExecutionPortCore, FrameDirection, FrameError, RemoteExchangeDelivery,
+    RemoteExchangeRequest, RemoteExchangeResponse, RemoteTransportAdapter, TypedFrame,
+    execution_message_id,
 };
 use winwincode_storage::{
     SqliteStorage, WorkerPoolId, WorkerRegistryScope, WorkerSessionCredentialState,
@@ -48,6 +50,20 @@ impl RemoteWorkerTransportError {
         Self {
             message: "remote Worker frame is invalid",
             status: 400,
+        }
+    }
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "owned error callback for Result::map_err"
+    )]
+    fn frame_error(error: FrameError) -> Self {
+        if matches!(error, FrameError::TooLarge) {
+            Self {
+                message: "remote Worker message exceeds wire budget",
+                status: 413,
+            }
+        } else {
+            Self::invalid_frame()
         }
     }
     const fn authentication() -> Self {
@@ -89,6 +105,18 @@ impl std::error::Error for RemoteWorkerTransportError {}
 /// HTTP boundary used by the Server route without exposing the route through
 /// the generated public API.
 pub trait RemoteWorkerExchangePort: Send + Sync {
+    /// Financial-only reconciliation under the explicit trusted Device key.
+    /// # Errors
+    /// Rejects missing authority, altered receipts, or unavailable accounting.
+    fn accounting(
+        &self,
+        _token: &str,
+        _body: Option<&[u8]>,
+        _offset: u64,
+        _now: Instant,
+    ) -> Result<Vec<u8>, RemoteWorkerTransportError> {
+        Err(RemoteWorkerTransportError::authentication())
+    }
     /// Applies one authenticated bounded exchange.
     ///
     /// # Errors
@@ -407,9 +435,72 @@ type RemoteDelivery = (WorkerId, WorkerInstanceId, ExecutionMessageId, Vec<u8>);
 #[derive(Default)]
 struct RemoteDeliveryQueue {
     pending: Mutex<Vec<RemoteDelivery>>,
+    authorities: Mutex<HashMap<(WorkerId, WorkerInstanceId), RemoteWorkerPrincipal>>,
 }
 
 impl RemoteDeliveryQueue {
+    fn retire_inactive(
+        &self,
+        authenticator: &dyn RemoteWorkerAuthenticator,
+        now: &Instant,
+    ) -> Result<(), RemoteWorkerTransportError> {
+        // Only the credential authority may retire unacknowledged controls.
+        // Authority unavailability preserves them for the durable scheduler to replay.
+        let mut authorities = self.authorities.lock().map_err(|_| {
+            RemoteWorkerTransportError::new("remote Worker authority cache is unavailable")
+        })?;
+        let mut pending = self.pending.lock().map_err(|_| {
+            RemoteWorkerTransportError::new("remote Worker delivery queue is unavailable")
+        })?;
+        authorities.retain(|(worker, instance), principal| {
+            let retired = authenticator.ensure_active(principal, now).is_err_and(|error| matches!(error.kind(), winwincode_control_plane::RemoteWorkerAuthenticationErrorKind::Revoked | winwincode_control_plane::RemoteWorkerAuthenticationErrorKind::Rejected));
+            if retired { pending.retain(|(target, boot, _, _)| target != worker || boot != instance); }
+            !retired && pending.iter().any(|(target, boot, _, _)| target == worker && boot == instance)
+        });
+        Ok(())
+    }
+
+    fn prepare_ingress(
+        &self,
+        request: &RemoteExchangeRequest,
+        principal: &RemoteWorkerPrincipal,
+    ) -> Result<(), RemoteWorkerTransportError> {
+        self.acknowledge(
+            request.worker_id(),
+            request.worker_instance_id(),
+            request.acknowledgements(),
+        )?;
+        let pending = self.pending.lock().map_err(|_| {
+            RemoteWorkerTransportError::new("remote Worker delivery queue is unavailable")
+        })?;
+        if pending
+            .iter()
+            .filter(|(worker, instance, _, _)| {
+                worker == request.worker_id() && instance == request.worker_instance_id()
+            })
+            .count()
+            > MAX_PENDING_REMOTE_DELIVERIES
+                - winwincode_execution_port::transport::MAX_REMOTE_DELIVERIES
+        {
+            return Err(RemoteWorkerTransportError::new(
+                "remote Worker response backlog must be acknowledged",
+            ));
+        }
+        drop(pending);
+        self.authorities
+            .lock()
+            .map_err(|_| {
+                RemoteWorkerTransportError::new("remote Worker authority cache is unavailable")
+            })?
+            .insert(
+                (
+                    request.worker_id().clone(),
+                    request.worker_instance_id().clone(),
+                ),
+                principal.clone(),
+            );
+        Ok(())
+    }
     fn retire_other_instances(
         &self,
         worker: &WorkerId,
@@ -446,15 +537,32 @@ impl RemoteDeliveryQueue {
         let pending = self.pending.lock().map_err(|_| {
             RemoteWorkerTransportError::new("remote Worker delivery queue is unavailable")
         })?;
-        Ok(pending
+        let mut deliveries = Vec::new();
+        let mut bytes = RemoteExchangeResponse::new(Vec::new())
+            .and_then(|response| response.encode())
+            .map_err(RemoteWorkerTransportError::frame_error)?
+            .len();
+        for (_, _, delivery_id, frame) in pending
             .iter()
             .filter(|(target, instance, _, _)| target == worker_id && instance == instance_id)
-            .take(winwincode_execution_port::transport::MAX_REMOTE_DELIVERIES)
-            .map(|(_, _, delivery_id, frame)| RemoteExchangeDelivery {
+        {
+            let delivery = RemoteExchangeDelivery {
                 delivery_id: delivery_id.clone(),
                 frame: frame.clone(),
-            })
-            .collect())
+            };
+            let size = serde_json::to_vec(&delivery)
+                .map_err(|_| RemoteWorkerTransportError::invalid_frame())?
+                .len()
+                + usize::from(!deliveries.is_empty());
+            if deliveries.len() == winwincode_execution_port::transport::MAX_REMOTE_DELIVERIES
+                || bytes + size > winwincode_execution_port::transport::MAX_REMOTE_RESPONSE_BYTES
+            {
+                break;
+            }
+            bytes += size;
+            deliveries.push(delivery);
+        }
+        Ok(deliveries)
     }
 
     fn enqueue_for(
@@ -467,13 +575,23 @@ impl RemoteDeliveryQueue {
         let frame = TypedFrame::new(FrameDirection::ControlPlaneToWorker, message)
             .and_then(|frame| RemoteTransportAdapter::<NoopCore>::encode(&frame))
             .map_err(|_| remote_queue_failure())?;
+        RemoteExchangeResponse::new(vec![RemoteExchangeDelivery {
+            delivery_id: delivery_id.clone(),
+            frame: frame.clone(),
+        }])
+        .map_err(|_| remote_queue_failure())?;
         let mut pending = self.pending.lock().map_err(|_| remote_queue_failure())?;
         if pending.iter().any(|(target, instance, id, _)| {
             target == worker_id && instance == instance_id && id == &delivery_id
         }) {
             return Ok(());
         }
-        if pending.len() >= MAX_PENDING_REMOTE_DELIVERIES {
+        if pending
+            .iter()
+            .filter(|(target, instance, _, _)| target == worker_id && instance == instance_id)
+            .count()
+            >= MAX_PENDING_REMOTE_DELIVERIES
+        {
             return Err(remote_queue_failure());
         }
         pending.push((worker_id.clone(), instance_id.clone(), delivery_id, frame));
@@ -512,6 +630,9 @@ impl ExecutionPortCore for NoopCore {
 /// Production exchange over the Server's one application, scheduler, and
 /// durable storage directory.
 pub struct ProductionRemoteWorkerExchange<Core> {
+    accounting_key:
+        Option<winwincode_execution_port::action_enforcement::ActionEnforcementSigningKey>,
+    exchange_gate: Mutex<()>,
     data_directory: PathBuf,
     authenticator: Arc<dyn RemoteWorkerAuthenticator>,
     scheduler: Mutex<RepositoryRuntimeScheduler>,
@@ -528,12 +649,23 @@ impl<Core> ProductionRemoteWorkerExchange<Core> {
         core: Core,
     ) -> Self {
         Self {
+            accounting_key: None,
+            exchange_gate: Mutex::new(()),
             data_directory: data_directory.into(),
             authenticator,
             scheduler: Mutex::new(scheduler),
             core: Mutex::new(core),
             queue: RemoteDeliveryQueue::default(),
         }
+    }
+    /// Enables the separate financial-only Provider receipt consumer.
+    #[must_use]
+    pub fn with_accounting_key(
+        mut self,
+        key: winwincode_execution_port::action_enforcement::ActionEnforcementSigningKey,
+    ) -> Self {
+        self.accounting_key = Some(key);
+        self
     }
 }
 
@@ -542,18 +674,84 @@ where
     Core: ExecutionPortCore<Output = Vec<ExecutionPortMessage>> + Send,
     Core::Error: Send + fmt::Display,
 {
+    fn accounting(
+        &self,
+        token: &str,
+        body: Option<&[u8]>,
+        offset: u64,
+        now: Instant,
+    ) -> Result<Vec<u8>, RemoteWorkerTransportError> {
+        let key = self
+            .accounting_key
+            .as_ref()
+            .ok_or_else(RemoteWorkerTransportError::authentication)?;
+        let expected = key.accounting_query_token();
+        if token.len() != expected.0.len()
+            || token
+                .bytes()
+                .zip(expected.0.bytes())
+                .fold(0_u8, |difference, (a, b)| difference | (a ^ b))
+                != 0
+        {
+            return Err(RemoteWorkerTransportError::authentication());
+        }
+        let mut storage = SqliteStorage::open(&self.data_directory)
+            .map_err(|_| RemoteWorkerTransportError::new("accounting storage unavailable"))?;
+        if let Some(body) = body {
+            let statement =
+                winwincode_execution_port::accounting::AttemptAccountingStatement::decode(body)
+                    .map_err(|_| RemoteWorkerTransportError::invalid_frame())?;
+            let verified = statement
+                .verified(key)
+                .map_err(|_| RemoteWorkerTransportError::authentication())?;
+            storage
+                .reconcile_provider_attempt(&verified, &now)
+                .map_err(|error| {
+                    if error.kind() == winwincode_storage::StorageErrorKind::InvalidInput {
+                        RemoteWorkerTransportError::invalid_frame()
+                    } else {
+                        RemoteWorkerTransportError::new("accounting import unavailable")
+                    }
+                })?;
+            Ok(b"{}".to_vec())
+        } else {
+            let leases = storage.pending_accounting_leases(offset).map_err(|_| {
+                RemoteWorkerTransportError::new("accounting lease query unavailable")
+            })?;
+            let next_offset = if leases.len() == 100 {
+                Some(
+                    offset
+                        .checked_add(100)
+                        .ok_or_else(RemoteWorkerTransportError::invalid_frame)?,
+                )
+            } else {
+                None
+            };
+            serde_json::to_vec(
+                &winwincode_execution_port::accounting::PendingAccountingPage {
+                    leases,
+                    next_offset,
+                },
+            )
+            .map_err(|_| RemoteWorkerTransportError::invalid_frame())
+        }
+    }
+
     fn exchange(
         &self,
         credential: Vec<u8>,
         request_body: &[u8],
         now: Instant,
     ) -> Result<Vec<u8>, RemoteWorkerTransportError> {
+        let _gate = self.exchange_gate.lock().map_err(|_| {
+            RemoteWorkerTransportError::new("remote Worker exchange is unavailable")
+        })?;
         let request = RemoteExchangeRequest::decode(request_body)
-            .map_err(|_| RemoteWorkerTransportError::invalid_frame())?;
+            .map_err(RemoteWorkerTransportError::frame_error)?;
         let credential = RemoteWorkerCredential::new(credential)
             .map_err(|_| RemoteWorkerTransportError::authentication())?;
         let frame = RemoteTransportAdapter::<NoopCore>::decode(request.frame())
-            .map_err(|_| RemoteWorkerTransportError::invalid_frame())?;
+            .map_err(RemoteWorkerTransportError::frame_error)?;
         let mut storage = SqliteStorage::open(&self.data_directory).map_err(|_| {
             RemoteWorkerTransportError::new("remote Worker Registry is unavailable")
         })?;
@@ -720,6 +918,19 @@ where
         }
         .map_err(RemoteWorkerTransportError::from_pool)?;
         let principal = connection.principal().clone();
+        if principal.worker_id() != request.worker_id()
+            || principal
+                .worker_instance_id()
+                .is_some_and(|instance| instance != request.worker_instance_id())
+        {
+            return Err(RemoteWorkerTransportError::authentication());
+        }
+        self.queue
+            .retire_inactive(self.authenticator.as_ref(), now)?;
+
+        // The exchange gate keeps this response reservation through business commit.
+        // ACKs are accepted only after authenticating the exact Worker instance.
+        self.queue.prepare_ingress(request, &principal)?;
 
         let responses = if matches!(
             frame.message(),
@@ -836,6 +1047,201 @@ mod tests {
     };
 
     use super::*;
+
+    fn queue_message(
+        seed: usize,
+        worker: &WorkerId,
+        instance: &WorkerInstanceId,
+        padding: usize,
+    ) -> ExecutionPortMessage {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/contracts/execution-port.valid.json"
+        ))
+        .unwrap();
+        let mut value = fixture["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|value| value["kind"] == "worker.heartbeat_ack")
+            .unwrap()
+            .clone();
+        value["messageId"] = serde_json::json!(format!("xmsg_{seed:026}"));
+        value["workerId"] = serde_json::json!(worker.0);
+        value["workerInstanceId"] = serde_json::json!(instance.0);
+        if padding > 0 {
+            value["error"] = serde_json::json!({"code":"INFRASTRUCTURE_ERROR","message":"z".repeat(padding),"retryable":true});
+        }
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn dead_worker_backlog_cannot_block_another_worker_and_pages_keep_the_suffix() {
+        let queue = RemoteDeliveryQueue::default();
+        let dead = WorkerId("wrk_00000000000000000000000001".into());
+        let live = WorkerId("wrk_00000000000000000000000002".into());
+        let instance = WorkerInstanceId("wki_00000000000000000000000001".into());
+        for seed in 0..MAX_PENDING_REMOTE_DELIVERIES {
+            queue
+                .enqueue_for(&dead, &instance, queue_message(seed, &dead, &instance, 0))
+                .unwrap();
+        }
+        assert!(
+            queue
+                .enqueue_for(&dead, &instance, queue_message(300, &dead, &instance, 0))
+                .is_err()
+        );
+        for seed in 400..408 {
+            queue
+                .enqueue_for(
+                    &live,
+                    &instance,
+                    queue_message(seed, &live, &instance, 200 * 1024),
+                )
+                .unwrap();
+        }
+        let page = queue.snapshot(&live, &instance).unwrap();
+        assert!(!page.is_empty() && page.len() < 8);
+        let encoded = RemoteExchangeResponse::new(page.clone())
+            .unwrap()
+            .encode()
+            .unwrap();
+        assert!(encoded.len() <= winwincode_execution_port::transport::MAX_REMOTE_RESPONSE_BYTES);
+        assert_eq!(
+            RemoteExchangeResponse::decode(&encoded)
+                .unwrap()
+                .deliveries(),
+            page
+        );
+        assert_eq!(
+            queue.snapshot(&live, &instance).unwrap(),
+            page,
+            "lost response retains the same page"
+        );
+        queue
+            .acknowledge(
+                &live,
+                &instance,
+                &page
+                    .iter()
+                    .map(|delivery| delivery.delivery_id.clone())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        assert!(
+            !queue.snapshot(&live, &instance).unwrap().is_empty(),
+            "undelivered suffix stays queued"
+        );
+        assert_eq!(
+            queue
+                .pending
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(worker, _, _, _)| worker == &dead)
+                .count(),
+            256
+        );
+    }
+
+    #[test]
+    fn retirement_requires_authoritative_revocation_and_backpressure_precedes_ingress() {
+        struct Authority {
+            retired: WorkerId,
+        }
+        impl RemoteWorkerAuthenticator for Authority {
+            fn authenticate(
+                &self,
+                _: &RemoteWorkerCredential,
+                _: &Instant,
+            ) -> Result<RemoteWorkerPrincipal, RemoteWorkerAuthenticationError> {
+                Err(RemoteWorkerAuthenticationError::rejected())
+            }
+            fn ensure_active(
+                &self,
+                principal: &RemoteWorkerPrincipal,
+                _: &Instant,
+            ) -> Result<(), RemoteWorkerAuthenticationError> {
+                if principal.worker_id() == &self.retired {
+                    Err(RemoteWorkerAuthenticationError::revoked())
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        let queue = RemoteDeliveryQueue::default();
+        let dead = WorkerId("wrk_00000000000000000000000001".into());
+        let live = WorkerId("wrk_00000000000000000000000002".into());
+        let instance = WorkerInstanceId("wki_00000000000000000000000001".into());
+        for worker in [&dead, &live] {
+            let principal = RemoteWorkerPrincipal::new_bound(
+                worker.clone(),
+                instance.clone(),
+                WorkerPoolId("wpl_00000000000000000000000001".into()),
+                WorkerRegistryScope::local_default(),
+                "issuer".into(),
+                "subject".into(),
+                winwincode_domain::Sha256Digest(format!("sha256:{}", "e".repeat(64))),
+                "zone".into(),
+            )
+            .unwrap();
+            queue
+                .authorities
+                .lock()
+                .unwrap()
+                .insert((worker.clone(), instance.clone()), principal);
+            queue
+                .enqueue_for(worker, &instance, queue_message(1, worker, &instance, 0))
+                .unwrap();
+        }
+        queue
+            .retire_inactive(
+                &Authority {
+                    retired: dead.clone(),
+                },
+                &Instant("2026-10-02T00:00:00.000Z".into()),
+            )
+            .unwrap();
+        assert!(queue.snapshot(&dead, &instance).unwrap().is_empty());
+        assert_eq!(queue.snapshot(&live, &instance).unwrap().len(), 1);
+        for seed in 2..=130 {
+            queue
+                .enqueue_for(&live, &instance, queue_message(seed, &live, &instance, 0))
+                .unwrap();
+        }
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/contracts/execution-port.valid.json"
+        ))
+        .unwrap();
+        let mut heartbeat = fixture["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|value| value["kind"] == "worker.heartbeat")
+            .unwrap()
+            .clone();
+        heartbeat["workerId"] = serde_json::json!(live.0);
+        heartbeat["workerInstanceId"] = serde_json::json!(instance.0);
+        let frame = TypedFrame::new(
+            FrameDirection::WorkerToControlPlane,
+            serde_json::from_value(heartbeat).unwrap(),
+        )
+        .unwrap();
+        let request = RemoteExchangeRequest::new(
+            live.clone(),
+            instance.clone(),
+            Vec::new(),
+            RemoteTransportAdapter::<NoopCore>::encode(&frame).unwrap(),
+        )
+        .unwrap();
+        let principal = queue
+            .authorities
+            .lock()
+            .unwrap()
+            .get(&(live, instance))
+            .unwrap()
+            .clone();
+        assert!(queue.prepare_ingress(&request, &principal).is_err());
+    }
 
     #[test]
     fn renewal_requires_one_matching_fresh_accepted_lease_heartbeat() {

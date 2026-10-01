@@ -86,8 +86,8 @@ impl DeviceProviderStore {
         let request_open = serde_json::to_string(open)?;
         let digest = format!("{:x}", Sha256::digest(request_open.as_bytes()));
         let inserted = self.connection.execute(
-            "INSERT OR IGNORE INTO exchanges (exchange_id, digest, request_open) VALUES (?1, ?2, ?3)",
-            params![open.model_exchange_id.0, digest, request_open],
+            "INSERT OR IGNORE INTO exchanges (exchange_id, digest, request_open) SELECT ?1, ?2, ?3 WHERE NOT EXISTS(SELECT 1 FROM accounting_closed_attempts WHERE job_id=?4 AND attempt=?5)",
+            params![open.model_exchange_id.0, digest, request_open,open.lease.job_id.0,open.lease.attempt],
         )?;
         let (original, previous): (String, Option<String>) = self.connection.query_row(
             "SELECT digest, chunks FROM exchanges WHERE exchange_id=?1",
@@ -122,6 +122,8 @@ impl DeviceProviderStore {
         let chunks = self
             .invoke_model(open)
             .unwrap_or_else(|error| vec![model_failure(open, error.code())]);
+        // Paid receipts survive cancellation even when runtime replay is fenced.
+        self.connection.execute("UPDATE exchanges SET accounting_chunks=?1 WHERE exchange_id=?2 AND accounting_chunks IS NULL",params![serde_json::to_string(&chunks)?,open.model_exchange_id.0])?;
         self.connection.execute(
             "UPDATE exchanges SET chunks=?1 WHERE exchange_id=?2 AND cancelled=0",
             params![serde_json::to_string(&chunks)?, open.model_exchange_id.0],

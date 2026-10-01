@@ -131,6 +131,9 @@ const MAX_SETTLEMENT_SOURCE_PAGE_SIZE: u64 = 200;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 fn prepare_admission_schema(connection: &mut Connection) -> Result<(), ExecutionAdmissionError> {
+    connection
+        .execute_batch(crate::execution_attempt_accounting::SCHEMA)
+        .map_err(sql_error)?;
     let needs_migration: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('execution_admission_policies') WHERE name IN ('max_runtime_millis', 'token_budget', 'cost_budget_microunits') AND \"notnull\" = 1) OR EXISTS(SELECT 1 FROM pragma_table_info('execution_admission_reservations') WHERE name IN ('runtime_limit_millis', 'reserved_tokens', 'reserved_cost_microunits') AND \"notnull\" = 1)",
         [], |row| row.get(0),
@@ -978,12 +981,15 @@ impl<'storage> ExecutionAdmission<'storage> {
             .connection()
             .map_err(storage_error)?
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM execution_attempt_accounting_pending WHERE job_id=?1)",
+                "SELECT EXISTS(SELECT 1 FROM execution_attempt_accounting_pending p LEFT JOIN execution_attempt_accounting_totals t ON t.job_id=p.job_id AND t.attempt=p.attempt WHERE p.job_id=?1 AND t.cost IS NULL)",
                 [&job_id.0],
                 |r| r.get(0),
             )
             .map_err(sql_error)?;
-        if unresolved && (usage.tokens.is_some() || usage.cost_microunits.is_some()) {
+        let missing_tokens: bool = self.storage.connection().map_err(storage_error)?.query_row("SELECT EXISTS(SELECT 1 FROM execution_attempt_accounting_pending p LEFT JOIN execution_attempt_accounting_totals t ON t.job_id=p.job_id AND t.attempt=p.attempt WHERE p.job_id=?1 AND t.tokens IS NULL)",[&job_id.0],|row|row.get(0)).map_err(sql_error)?;
+        if (missing_tokens && usage.tokens.is_some())
+            || (unresolved && usage.cost_microunits.is_some())
+        {
             return Err(ExecutionAdmissionError::invalid(
                 "predecessor attempt accounting remains unresolved",
             ));
@@ -1053,17 +1059,23 @@ impl<'storage> ExecutionAdmission<'storage> {
         request: &ExecutionReservationSettlement,
     ) -> Result<ExecutionAdmissionReceipt, ExecutionAdmissionError> {
         validate_settlement(request)?;
+        let missing_tokens: bool = self.storage.connection().map_err(storage_error)?.query_row("SELECT EXISTS(SELECT 1 FROM execution_attempt_accounting_pending p LEFT JOIN execution_attempt_accounting_totals t ON t.job_id=p.job_id AND t.attempt=p.attempt WHERE p.job_id=?1 AND t.tokens IS NULL)",[&request.job_id.0],|row|row.get(0)).map_err(sql_error)?;
+        if missing_tokens {
+            return Err(ExecutionAdmissionError::invalid(
+                "predecessor token accounting remains unresolved",
+            ));
+        }
         let unresolved: bool = self
             .storage
             .connection()
             .map_err(storage_error)?
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM execution_attempt_accounting_pending WHERE job_id=?1)",
+                "SELECT EXISTS(SELECT 1 FROM execution_attempt_accounting_pending p LEFT JOIN execution_attempt_accounting_totals t ON t.job_id=p.job_id AND t.attempt=p.attempt WHERE p.job_id=?1 AND t.cost IS NULL)",
                 [&request.job_id.0],
                 |r| r.get(0),
             )
             .map_err(sql_error)?;
-        if unresolved {
+        if unresolved && request.actual_cost_microunits.is_some() {
             return Err(ExecutionAdmissionError::invalid(
                 "predecessor attempt accounting remains unresolved",
             ));
@@ -1648,7 +1660,7 @@ fn load_usage(
             ExecutionReservationState::Released => {}
         }
     }
-    let pending:i64=connection.query_row("SELECT COUNT(*) FROM execution_attempt_accounting_pending p JOIN execution_admission_reservation_boundaries b ON b.job_id=p.job_id JOIN execution_admission_reservations r ON r.job_id=p.job_id WHERE b.boundary_key=?1 ",[boundary_key],|r|r.get(0)).map_err(sql_error)?;
+    let pending:i64=connection.query_row("SELECT COUNT(*) FROM execution_attempt_accounting_pending p JOIN execution_admission_reservation_boundaries b ON b.job_id=p.job_id JOIN execution_admission_reservations r ON r.job_id=p.job_id WHERE b.boundary_key=?1 AND NOT EXISTS(SELECT 1 FROM execution_attempt_accounting_totals t WHERE t.job_id=p.job_id AND t.attempt=p.attempt AND t.tokens IS NOT NULL AND t.cost IS NOT NULL) ",[boundary_key],|r|r.get(0)).map_err(sql_error)?;
     if pending > 0 {
         usage.accounting_pending = checked_add(
             usage.accounting_pending,

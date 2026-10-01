@@ -196,11 +196,8 @@ where
                 );
             }
         }
-        if handle.authority_rejected() {
-            return Err(
-                "Worker authority permanently rejected; Device must report exit before relaunch"
-                    .into(),
-            );
+        if let Some(error) = handle.terminal_error() {
+            return Err(error.into());
         }
         if worker.lifecycle() != WorkerLifecycleState::Active {
             tokio::time::sleep(Duration::from_millis(250)).await;
@@ -209,6 +206,10 @@ where
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the composition owns registration, control delivery, and bounded shutdown"
+)]
 async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error::Error>> {
     let WorkerBootstrap {
         exit_after_work,
@@ -235,6 +236,12 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
         worker_instance_id.clone(),
         Duration::from_secs(15),
     )?;
+    let _accounting_reconciler = port.spawn_accounting_reconciler(
+        provider_directory.clone(),
+        ActionEnforcementSigningKey::from_bytes(parse_hex_key(&required(
+            "WWC_WORKER_ACTION_SIGNING_KEY_HEX",
+        )?)?)?,
+    );
     let codex = production_codex(
         &data_directory,
         &provider_directory,
@@ -302,13 +309,13 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
                 if exit_after_work && worker.work_drained() { break; }
             }
         }
-        if handle.authority_rejected() {
+        if handle.terminal_error().is_some() {
             break;
         }
     }
     let _ = Box::pin(worker.shutdown(now_instant()?)).await;
-    if handle.authority_rejected() {
-        return Err("Worker authority permanently rejected".into());
+    if let Some(error) = handle.terminal_error() {
+        return Err(error.into());
     }
     Ok(())
 }

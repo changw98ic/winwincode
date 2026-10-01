@@ -272,6 +272,8 @@ fn resolved_owner(
 }
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    // Reject missing trust configuration before opening or mutating runtime state.
+    let _ = configured_action_signing_key()?;
     let startup = load_production_startup()?;
     let composition = open_production_application(startup)?;
     Box::pin(run_composed_server(composition)).await
@@ -385,13 +387,15 @@ where
         remote_worker_scope,
     );
     let remote_authenticator = Arc::new(session_authenticator);
-    let exchange: Arc<dyn RemoteWorkerExchangePort> =
-        Arc::new(ProductionRemoteWorkerExchange::new(
+    let exchange: Arc<dyn RemoteWorkerExchangePort> = Arc::new(
+        ProductionRemoteWorkerExchange::new(
             config.data_directory(),
             remote_authenticator,
             scheduler,
             execution_port,
-        ));
+        )
+        .with_accounting_key(configured_action_signing_key()?),
+    );
     let client_exchange: Arc<dyn ClientExchangePort> = Arc::new(
         ClientExchangeApplication::open(config.data_directory(), &ClientExchangeConfig::default())
             .map_err(|error| error.to_string())?,
@@ -433,13 +437,23 @@ async fn serve_remote_runtime(
 
 fn configured_action_signing_key() -> Result<ActionEnforcementSigningKey, Box<dyn std::error::Error>>
 {
+    let value = env::var("WWC_SERVER_ACTION_SIGNING_KEY_HEX").ok();
+    action_signing_key_from(value.as_deref())
+}
+
+fn action_signing_key_from(
+    value: Option<&str>,
+) -> Result<ActionEnforcementSigningKey, Box<dyn std::error::Error>> {
+    let value = value
+        .filter(|value| !value.is_empty())
+        .ok_or("WWC_SERVER_ACTION_SIGNING_KEY_HEX is required")?;
     Ok(ActionEnforcementSigningKey::from_bytes(parse_hex_key(
-        &required_environment_or("WWC_SERVER_ACTION_SIGNING_KEY_HEX", &"1f".repeat(32))?,
+        value,
     )?)?)
 }
 
 fn parse_hex_key(value: &str) -> Result<[u8; 32], Box<dyn std::error::Error>> {
-    if value.len() != 64 {
+    if value.len() != 64 || !value.is_ascii() {
         return Err("WWC_SERVER_ACTION_SIGNING_KEY_HEX must contain 32 bytes".into());
     }
     let mut result = [0_u8; 32];
@@ -666,6 +680,20 @@ fn optional_duration_seconds(
 #[cfg(test)]
 mod execution_runtime_tests {
     use super::parse_execution_runtime_seconds;
+
+    #[test]
+    fn action_signing_authority_requires_an_explicit_key() {
+        for value in [
+            None,
+            Some(""),
+            Some("1f"),
+            Some("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"),
+            Some("éééééééééééééééééééééééééééééééé"),
+        ] {
+            assert!(super::action_signing_key_from(value).is_err());
+        }
+        assert!(super::action_signing_key_from(Some(&"af".repeat(32))).is_ok());
+    }
 
     #[test]
     fn runtime_policy_requires_an_explicit_finite_value_or_unlimited() {

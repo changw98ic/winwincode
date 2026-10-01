@@ -216,7 +216,7 @@ Provider 配置使用 Web「设置」中的设备选择、保存和测试按钮�
 7. [ ] 会话策略：确认 `WWC_SERVER_SESSION_TTL_SECONDS` 满足运维要求（默认 8 小时，活跃滑动续期）；验证禁用账号后其会话立即失效、WebSocket 以 4403 关闭（核查项 10）。
 8. [ ] 配置缺失演练：移除任一必填变量后启动，进程必须以非零码退出且 systemd 显示 failed；修复后正常启动（核查项 12）。
 9. [ ] 进程守护：`systemctl restart` 走 `KillSignal=SIGINT` 优雅停机，`TimeoutStopSec` 大于 30 秒停机宽限；重启后 Device Client 按退避自动恢复 exchange（`device-client/daemon.rs` `DaemonConfig`）（1.5 节）。
-10. [ ] 秘钥与凭据：`WWC_SERVER_ACTION_SIGNING_KEY_HEX` 已显式设置为随机 64 位十六进制（默认值仅供开发）；远程 Worker 凭据文件 0600 且 `WWC_SERVER_REMOTE_WORKER_EXPIRES_AT` 有轮换计划；`SECRET_DIRECTORY` 仅属主可访问（核查项 4、3.3 节；`local_secret_store.rs`）。
+10. [ ] 密钥与凭据：`WWC_SERVER_ACTION_SIGNING_KEY_HEX` 必须显式设置为随机 64 位十六进制，并持久保存；缺少配置时 Server 启动失败。Worker 的 `WWC_WORKER_ACTION_SIGNING_KEY_HEX` 必须配置相同密钥；轮换时协调 Server 与 Worker，旧密钥签发的许可须重新申请。远程 Worker 凭据文件 0600 且 `WWC_SERVER_REMOTE_WORKER_EXPIRES_AT` 有轮换计划；`SECRET_DIRECTORY` 仅属主可访问（核查项 4、3.3 节；`local_secret_store.rs`）。
 11. [ ] 备份：`WWC_SERVER_DATA_DIRECTORY` 与 `SECRET_DIRECTORY` 已纳入备份与恢复演练（1.6 节）。
 12. [ ] 产物与版本：使用按 `docs/releasing.md` 冻结、按 `docs/release-gate.md` 校验过的四平台 artifact；浏览器静态包的 `runtime-config.js` 仅通过 `serverUrl` 指向本 Server（`docs/releasing.md` 第 4 节）。
 

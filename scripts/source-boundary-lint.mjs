@@ -321,7 +321,12 @@ function executionNetworkFindings() {
       if (!path.endsWith('.rs')) continue
       const text = readText(path)
       if (text === null) continue
-      if (/\b(?:ureq|reqwest|hyper)::|@deepseek-ai\/|\bDshModelPort\b|\bctx\.llm\b/iu.test(text)) {
+      // The canonical Execution Port transport talks only to Server HTTPS.
+      // Provider networking remains in the Device adapter; legacy model APIs
+      // stay forbidden even inside this transport module.
+      const serverTransport = relativePath(path) === 'crates/winwincode-worker/src/remote_transport.rs'
+      if (/@deepseek-ai\/|\bDshModelPort\b|\bctx\.llm\b/iu.test(text)
+        || (!serverTransport && /\b(?:ureq|reqwest|hyper)::/u.test(text))) {
         findings.push(finding(path, 'execution-network-or-legacy-authority'))
       }
     }
