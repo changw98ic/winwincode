@@ -1008,7 +1008,7 @@ impl RuntimeFixture {
                     &frames,
                     Some(ProviderGatewayTerminal::Completed {
                         usage: usage(),
-                        actual_cost_micros: 15,
+                        actual_cost_micros: Some(15),
                     }),
                     &self.message.sent_at,
                 )
@@ -1444,7 +1444,7 @@ impl ProviderGatewayAdmissionPort for AdmissionProbe {
                 }
             },
             actual_tokens: 0,
-            actual_cost_micros: 0,
+            actual_cost_micros: Some(0),
             revision,
             idempotent_replay: revision > 1,
         })
@@ -1475,7 +1475,7 @@ impl ProviderGatewayAdmissionPort for AdmissionProbe {
         original_request_id: &RequestId,
         model_exchange_id: &ModelExchangeId,
         usage: ProviderTokenUsage,
-        actual_cost_micros: u64,
+        actual_cost_micros: Option<u64>,
     ) -> Result<ModelReservationTerminalReceipt, ProviderAdmissionError> {
         let revision = self.terminals.fetch_add(1, Ordering::Relaxed) + 1;
         Ok(ModelReservationTerminalReceipt {
@@ -1494,7 +1494,7 @@ impl ProviderGatewayAdmissionPort for AdmissionProbe {
 const fn usage() -> ProviderTokenUsage {
     ProviderTokenUsage {
         input_tokens: 10,
-        cached_input_tokens: 0,
+        cached_input_tokens: Some(0),
         cache_write_input_tokens: 0,
         output_tokens: 5,
         reasoning_output_tokens: 0,
@@ -1555,7 +1555,7 @@ fn admission_policy(decision: ModelRoutePolicyDecision) -> ModelAdmissionPolicyL
             tokens_per_minute: 100_000,
             concurrent_requests: 100,
             token_budget: 1_000_000,
-            cost_budget_micros: 1_000_000,
+            cost_budget_micros: Some(1_000_000),
         },
     )
     .expect("Gateway policy fixture")
@@ -1782,7 +1782,7 @@ fn route_secret_adapter_replay_and_settlement_boundaries_are_deterministic() {
                 &message_a.model_exchange_id,
                 ProviderGatewayTerminal::Completed {
                     usage: usage(),
-                    actual_cost_micros: 15,
+                    actual_cost_micros: Some(15),
                 },
                 &message_a.sent_at,
             )
@@ -1793,7 +1793,7 @@ fn route_secret_adapter_replay_and_settlement_boundaries_are_deterministic() {
                 &message_a.model_exchange_id,
                 ProviderGatewayTerminal::Completed {
                     usage: usage(),
-                    actual_cost_micros: 15,
+                    actual_cost_micros: Some(15),
                 },
                 &message_a.sent_at,
             )
@@ -1827,7 +1827,7 @@ fn route_secret_adapter_replay_and_settlement_boundaries_are_deterministic() {
                 &message_a2.model_exchange_id,
                 ProviderGatewayTerminal::Completed {
                     usage: usage(),
-                    actual_cost_micros: 15,
+                    actual_cost_micros: Some(15),
                 },
                 &message_a2.sent_at,
             )
@@ -1927,7 +1927,7 @@ fn route_secret_adapter_replay_and_settlement_boundaries_are_deterministic() {
             .as_ref()
             .expect("completed settlement charge")
             .cost_micros,
-        15
+        Some(15)
     );
     assert_eq!(
         accepted[2]
@@ -2971,6 +2971,48 @@ fn assert_provider_error_releases_admission(
 #[test]
 fn provider_admission_release_preserves_every_adapter_failure_category() {
     for (label, seed, error, expected) in [
+        (
+            "quota-adapter-request-invalid",
+            341,
+            ProviderAdapterError::request_invalid(),
+            ProviderGatewayErrorKind::AdapterRequestInvalid,
+        ),
+        (
+            "quota-adapter-request-translation",
+            351,
+            ProviderAdapterError::request_translation(),
+            ProviderGatewayErrorKind::AdapterRequestTranslation,
+        ),
+        (
+            "quota-adapter-request-limit",
+            361,
+            ProviderAdapterError::request_size_limit(),
+            ProviderGatewayErrorKind::AdapterRequestSizeLimit,
+        ),
+        (
+            "quota-adapter-response-content-type",
+            371,
+            ProviderAdapterError::response_content_type(),
+            ProviderGatewayErrorKind::AdapterResponseContentType,
+        ),
+        (
+            "quota-adapter-connection",
+            381,
+            ProviderAdapterError::connection(),
+            ProviderGatewayErrorKind::AdapterConnection,
+        ),
+        (
+            "quota-adapter-upstream",
+            391,
+            ProviderAdapterError::upstream(),
+            ProviderGatewayErrorKind::AdapterUpstream,
+        ),
+        (
+            "quota-adapter-identity",
+            401,
+            ProviderAdapterError::identity_conflict(),
+            ProviderGatewayErrorKind::AdapterIdentityConflict,
+        ),
         (
             "quota-adapter-rejected",
             301,

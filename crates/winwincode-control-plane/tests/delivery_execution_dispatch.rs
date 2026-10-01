@@ -588,6 +588,50 @@ type ConfigMutation = fn(&mut DeliveryExecutionConfig);
 type IntentMutation = fn(&mut ExecutionIntent);
 
 #[test]
+fn goal_schema_limit_is_a_nonretryable_request_error_before_dispatch() {
+    let seed = 14;
+    let request_id = RequestId(canonical_id("req", seed));
+    for characters in [20_000, 20_001] {
+        let mut transition = workrun_dispatch(seed);
+        dispatch_intent_mut(&mut transition).goal = "目".repeat(characters);
+        let mut snapshot = transition.delivery.clone().into_snapshot();
+        snapshot.work_run_aggregate.items[0].goal = "目".repeat(characters);
+        transition.delivery = Delivery::try_from_snapshot(snapshot).expect("matching item goal");
+        let WorkRunStartEffect::Dispatch(intent) = &transition.effect else {
+            panic!("dispatch intent");
+        };
+        let prepared = prepare_workrun_start(
+            &request_id,
+            &transition.delivery.snapshot().work_run_aggregate,
+            &transition.delivery.snapshot().spec,
+            intent,
+            execution_config(seed),
+        );
+        if characters == 20_000 {
+            assert_eq!(
+                prepared
+                    .expect("schema limit accepts Unicode characters")
+                    .goal
+                    .len(),
+                60_000
+            );
+        } else {
+            let error = prepared.expect_err("goal exceeds canonical schema");
+            assert!(error.to_string().contains("executionJob.goal"));
+            let public = winwincode_control_plane::DeliveryApplicationError::Execution(error);
+            assert_eq!(
+                public.code(),
+                winwincode_api::generated::ErrorCode::InvalidRequest
+            );
+            assert!(
+                !public.retryable(),
+                "invalid fields must not be retried as a service outage"
+            );
+        }
+    }
+}
+
+#[test]
 fn malformed_execution_job_config_fails_before_pending_publication() {
     let seed = 11;
     let request_id = RequestId(canonical_id("req", seed));

@@ -2929,7 +2929,9 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
             usage: Some(ExecutionOutcomeUsage {
                 cost_microunits: Some(100),
                 runtime_millis: 2_000,
-                tokens: 20,
+                tokens: Some(20),
+ known_tokens: 20,
+ accounting_status: winwincode_execution_port::generated::ExecutionOutcomeUsageAccountingStatus::Known,
             }),
         },
         schema_version: SchemaVersion::WinwincodeV1,
@@ -3097,7 +3099,9 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
             usage: Some(ExecutionOutcomeUsage {
                 cost_microunits: Some(100),
                 runtime_millis: 2_000,
-                tokens: 20,
+                tokens: Some(20),
+ known_tokens: 20,
+ accounting_status: winwincode_execution_port::generated::ExecutionOutcomeUsageAccountingStatus::Known,
             }),
         },
         schema_version: SchemaVersion::WinwincodeV1,
@@ -3228,7 +3232,9 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
             usage: Some(ExecutionOutcomeUsage {
                 cost_microunits: Some(100),
                 runtime_millis: 2_000,
-                tokens: 20,
+                tokens: Some(20),
+ known_tokens: 20,
+ accounting_status: winwincode_execution_port::generated::ExecutionOutcomeUsageAccountingStatus::Known,
             }),
         },
         schema_version: SchemaVersion::WinwincodeV1,

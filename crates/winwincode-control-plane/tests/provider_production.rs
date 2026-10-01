@@ -669,7 +669,7 @@ fn policy() -> LocalModelPolicyAuthority {
             tokens_per_minute: 100_000,
             concurrent_requests: 100,
             token_budget: 1_000_000,
-            cost_budget_micros: 1_000_000,
+            cost_budget_micros: Some(1_000_000),
         },
     )
     .expect("model admission policy");
@@ -1183,7 +1183,7 @@ fn anthropic_messages_translation_stream_usage_and_secret_gate_share_the_durable
         winwincode_control_plane::ModelReservationTerminalOutcome::Completed
     );
     assert_eq!(terminal.admission.actual_tokens, 22);
-    assert_eq!(terminal.admission.actual_cost_micros, 10);
+    assert_eq!(terminal.admission.actual_cost_micros, Some(10));
     let payloads = batch
         .chunks
         .iter()

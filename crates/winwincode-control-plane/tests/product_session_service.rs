@@ -532,7 +532,9 @@ fn assistant_command(
                 status: ExecutionOutcomeStatus::Succeeded,
                 usage: Some(ExecutionOutcomeUsage {
                     runtime_millis: 15,
-                    tokens: 10,
+                    tokens: Some(10),
+ known_tokens: 10,
+ accounting_status: winwincode_execution_port::generated::ExecutionOutcomeUsageAccountingStatus::Known,
                     cost_microunits: Some(1),
                 }),
                 last_event_sequence: ExecutionAckSequence(

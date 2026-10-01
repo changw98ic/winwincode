@@ -1119,6 +1119,11 @@ fn worker_registration_request(
     security_zone: String,
 ) -> Result<WorkerRegistrationRequest, ExecutionPortServiceError> {
     validate_worker_register(message)?;
+    if message.usage_accounting_version != 2 {
+        return Err(ExecutionPortServiceError::Protocol(
+            "usageAccountingVersion",
+        ));
+    }
     let max_slots = u64::try_from(message.capabilities.max_concurrent_jobs)
         .map_err(|_| ExecutionPortServiceError::Protocol("capabilities.maxConcurrentJobs"))?;
     Ok(WorkerRegistrationRequest {

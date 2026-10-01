@@ -50,6 +50,7 @@ const SYSTEM_ACTOR_ID: &str = "sys_00000000000000000000000001";
 const BINDING_STREAM_NAMESPACE: &[u8] = b"winwincode.product-session-worker-binding.v1";
 const BINDING_RECEIPT_NAMESPACE: &[u8] = b"binding-receipt";
 const MODEL_BINDING_RECEIPT_NAMESPACE: &[u8] = b"model-binding-receipt";
+const MODEL_FRAME_AUTHORITY_RECEIPT_NAMESPACE: &[u8] = b"chat-model-frame-authority";
 const MODEL_FRAME_RECEIPT_NAMESPACE: &[u8] = b"model-frame-receipt";
 const MODEL_FRAME_SOURCE_RECEIPT_NAMESPACE: &[u8] = b"model-frame-source-receipt";
 const MODEL_FRAME_PROJECTED_RECEIPT_NAMESPACE: &[u8] = b"model-frame-projected-receipt";
@@ -1243,6 +1244,7 @@ fn accept_worker_binding(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn attach_model_exchange(
     context: &mut DurableExecutionPortContext<'_>,
     dispatch: &ExecutionDispatchAuthority,
@@ -1255,6 +1257,8 @@ fn attach_model_exchange(
     let staged = load_staged_binding(context.storage(), &stream_id)?;
     if staged.runtime_authority.job_id != message.lease.job_id
         || staged.runtime_authority.worker_session_id != message.worker_session_id
+        || staged.runtime_authority.worker_session_id != message.session_identity.worker_session_id
+        || staged.runtime_authority.codex_thread_id != message.session_identity.codex_thread_id
         || staged.product_session_id != message.session_identity.product_session_id
         || message.session_identity.work_run_id.is_some()
     {
@@ -1262,6 +1266,8 @@ fn attach_model_exchange(
             "public model frame differs from staged Chat binding",
         ));
     }
+    public_text_delta(message).map_err(application_ingress)?;
+    retain_chat_model_frame_authority(context, dispatch, message)?;
     let record = ProductSessionService::new(context.storage())
         .get(&scope_key, &staged.product_session_id)
         .map_err(|error| product_session_ingress(&error))?
@@ -1286,6 +1292,20 @@ fn attach_model_exchange(
         staged.execution_job_id.clone(),
     )
     .map_err(|_| storage_ingress("staged Chat binding identity is invalid"))?;
+    let successor_binding = record.bindings().iter().find(|binding| {
+        binding.binding().identity() == &binding_identity
+            && binding.slot().authority == staged.runtime_authority
+            && binding.execution_scope() == &staged.execution_scope
+            && binding.worker_pool_id() == &staged.worker_pool_id
+    });
+    if successor_binding
+        .is_some_and(|binding| binding.includes_model_exchange(&message.model_exchange_id))
+    {
+        // The original durable binding already attached this exact exchange.
+        // Its receipt can be Continued or ExecutionBindingReplaced; never
+        // reinterpret that receipt through a different command on later frames.
+        return Ok(());
+    }
     let replacement = context
         .storage()
         .load_execution_scope_replacement_authority(&message.lease.job_id)
@@ -1293,7 +1313,13 @@ fn attach_model_exchange(
         .filter(|authority| {
             i64::try_from(authority.replacement_attempt()).ok() == Some(message.lease.attempt)
         })
-        .filter(|authority| authority.predecessor_slot().is_some());
+        .filter(|authority| {
+            successor_binding.is_none()
+                && record.bindings().iter().any(|binding| {
+                    binding.binding().identity() == &binding_identity
+                        && authority.predecessor_slot() == Some(&binding.slot().authority)
+                })
+        });
     if let Some(replacement) = replacement {
         let command = ReplaceProductSessionExecutionBindingCommand {
             context: command_context,
@@ -1309,7 +1335,6 @@ fn attach_model_exchange(
             .replay_replace_execution_binding(&command)
             .map_err(|error| product_session_ingress(&error))?;
         if replay.is_none() {
-            context.validate_first_seen_dispatch(dispatch)?;
             ProductSessionService::new(context.storage())
                 .replace_execution_binding(&command)
                 .map_err(|error| product_session_ingress(&error))?;
@@ -1328,7 +1353,6 @@ fn attach_model_exchange(
             .replay_continue_session(&command)
             .map_err(|error| product_session_ingress(&error))?;
         if replay.is_none() {
-            context.validate_first_seen_dispatch(dispatch)?;
             let already_bound = record
                 .bindings()
                 .iter()
@@ -1343,6 +1367,91 @@ fn attach_model_exchange(
         }
     }
     Ok(())
+}
+
+/// Seals one exact public frame before projection. A known exchange alone is
+/// not a receipt for a new frame; renewed lease history is checked for new input.
+fn retain_chat_model_frame_authority(
+    context: &mut DurableExecutionPortContext<'_>,
+    dispatch: &ExecutionDispatchAuthority,
+    message: &ModelChunkMessage,
+) -> Result<(), DurableExecutionPortError> {
+    let request_id = chat_model_frame_request_id(message)?;
+    let identity = internal_receipt_identity(context.repository_scope(), &request_id)?;
+    let digest = json_digest(&("winwincode.chat-model-frame-authority.v1", message))?;
+    let stream_id = format!("chat-model-frame-authority:{}", request_id.0);
+    let scope = context.repository_scope().clone();
+    if retained_chat_model_frame(context.storage(), &scope, message)? {
+        return Ok(());
+    }
+    let now = context.server_time().clone();
+    let live = context
+        .storage()
+        .execution_registry()
+        .and_then(|registry| registry.load_live_lease_for_period(dispatch.lease(), &now))
+        .map_err(DurableExecutionPortError::Storage)?;
+    if live.is_none() {
+        return Err(storage_ingress(
+            "new Chat model frame requires a current live lease",
+        ));
+    }
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "protocol":"winwincode.chat-model-frame-authority.v1",
+        "messageId":message.message_id,"modelExchangeId":message.model_exchange_id,
+        "lease":message.lease,"sequence":message.sequence,"frameDigest":digest,
+    }))
+    .map_err(|_| storage_ingress("Chat model frame cannot encode"))?;
+    context
+        .storage()
+        .commit(&StateCommit::new(
+            identity,
+            digest,
+            stream_id,
+            0,
+            bytes,
+            vec![internal_execution_event(&request_id)],
+        ))
+        .map_err(DurableExecutionPortError::Storage)?;
+    Ok(())
+}
+
+fn chat_model_frame_request_id(
+    message: &ModelChunkMessage,
+) -> Result<RequestId, DurableExecutionPortError> {
+    let key = serde_json::to_vec(&(
+        &message.lease.job_id,
+        message.lease.attempt,
+        &message.model_exchange_id,
+        message.sequence.0,
+    ))
+    .map_err(|_| storage_ingress("Chat model frame identity cannot encode"))?;
+    Ok(derived_request_id(
+        MODEL_FRAME_AUTHORITY_RECEIPT_NAMESPACE,
+        &key,
+    ))
+}
+
+pub(crate) fn retained_chat_model_frame(
+    storage: &SqliteStorage,
+    scope: &RepositoryScope,
+    message: &ModelChunkMessage,
+) -> Result<bool, DurableExecutionPortError> {
+    let request_id = chat_model_frame_request_id(message)?;
+    let identity = internal_receipt_identity(scope, &request_id)?;
+    let digest = json_digest(&("winwincode.chat-model-frame-authority.v1", message))?;
+    let stream_id = format!("chat-model-frame-authority:{}", request_id.0);
+    if let Some(receipt) = storage
+        .load_receipt(&identity, &digest)
+        .map_err(DurableExecutionPortError::Storage)?
+    {
+        if receipt.stream_id != stream_id {
+            return Err(storage_ingress(
+                "Chat model frame authority receipt differs",
+            ));
+        }
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1569,6 +1678,7 @@ pub(crate) fn finish_execution_resources(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn finish_local_admission(
     storage: &mut SqliteStorage,
     message: &JobOutcomeMessage,
@@ -1592,6 +1702,35 @@ fn finish_local_admission(
             .usage
             .as_ref()
             .ok_or_else(|| storage_ingress("successful local outcome has no Usage"))?;
+        if usage.tokens.is_none() {
+            storage
+                .execution_admission()
+                .map_err(|_| storage_ingress("local admission unavailable"))?
+                .release_with_unknown_usage(
+                    &ExecutionReservationRelease {
+                        scope: execution_scope.clone(),
+                        worker_pool_id: worker_pool_id.clone(),
+                        job_id: message.lease.job_id.clone(),
+                        request_id: derived_request_id(
+                            b"local-admission-unknown",
+                            message.message_id.0.as_bytes(),
+                        ),
+                        expected_revision: if current.state == ExecutionReservationState::Released {
+                            current
+                                .revision
+                                .checked_sub(1)
+                                .ok_or_else(|| storage_ingress("invalid terminal revision"))?
+                        } else {
+                            current.revision
+                        },
+                        reason: ExecutionReservationReleaseReason::Failed,
+                        released_at: message.outcome.finished_at.clone(),
+                    },
+                    usage,
+                )
+                .map_err(|_| storage_ingress("local unknown accounting failed"))?;
+            return Ok(());
+        }
         storage
             .execution_admission()
             .map_err(|_| storage_ingress("local execution admission cannot be opened"))?
@@ -1604,8 +1743,12 @@ fn finish_local_admission(
                     message.message_id.0.as_bytes(),
                 ),
                 expected_revision: current.revision,
-                actual_tokens: u64::try_from(usage.tokens)
-                    .map_err(|_| storage_ingress("local Usage tokens are invalid"))?,
+                actual_tokens: u64::try_from(
+                    usage
+                        .tokens
+                        .ok_or_else(|| storage_ingress("missing token total"))?,
+                )
+                .map_err(|_| storage_ingress("local Usage tokens are invalid"))?,
                 actual_cost_microunits: usage
                     .cost_microunits
                     .map(u64::try_from)
@@ -1617,34 +1760,42 @@ fn finish_local_admission(
             })
             .map_err(|_| storage_ingress("local execution admission cannot settle"))?;
     } else {
-        if current.state == ExecutionReservationState::Released {
-            return Ok(());
-        }
+        let runtime = crate::worker_execution_lifecycle::trusted_execution_runtime_millis(
+            &current,
+            &message.outcome.finished_at,
+        )
+        .map_err(|_| storage_ingress("local runtime authority unavailable"))?;
+        let expected_revision = if current.state == ExecutionReservationState::Released {
+            current
+                .revision
+                .checked_sub(1)
+                .ok_or_else(|| storage_ingress("invalid terminal revision"))?
+        } else {
+            current.revision
+        };
         storage
             .execution_admission()
-            .map_err(|_| storage_ingress("local execution admission cannot be opened"))?
-            .release(&ExecutionReservationRelease {
-                scope: execution_scope.clone(),
-                worker_pool_id: worker_pool_id.clone(),
-                job_id: message.lease.job_id.clone(),
-                request_id: derived_request_id(
-                    b"local-admission-release",
-                    message.message_id.0.as_bytes(),
-                ),
-                expected_revision: current.revision,
-                reason: match message.outcome.status {
-                    ExecutionOutcomeStatus::Cancelled => {
+            .map_err(|_| storage_ingress("local admission unavailable"))?
+            .release_with_unknown_usage(
+                &ExecutionReservationRelease {
+                    scope: execution_scope.clone(),
+                    worker_pool_id: worker_pool_id.clone(),
+                    job_id: message.lease.job_id.clone(),
+                    request_id: derived_request_id(
+                        b"local-admission-unknown",
+                        message.message_id.0.as_bytes(),
+                    ),
+                    expected_revision,
+                    reason: if message.outcome.status == ExecutionOutcomeStatus::Cancelled {
                         ExecutionReservationReleaseReason::Cancelled
-                    }
-                    ExecutionOutcomeStatus::Failed
-                    | ExecutionOutcomeStatus::InfrastructureError => {
+                    } else {
                         ExecutionReservationReleaseReason::Failed
-                    }
-                    ExecutionOutcomeStatus::Succeeded => unreachable!(),
+                    },
+                    released_at: message.outcome.finished_at.clone(),
                 },
-                released_at: message.outcome.finished_at.clone(),
-            })
-            .map_err(|_| storage_ingress("local execution admission cannot release"))?;
+                &winwincode_execution_port::generated::ExecutionOutcomeUsage::unknown(runtime, 0),
+            )
+            .map_err(|_| storage_ingress("local accounting cannot release"))?;
     }
     Ok(())
 }

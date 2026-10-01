@@ -199,7 +199,10 @@ fn capacity_health_and_labels_reconcile_from_registry_facts() {
         pool.labels
             .contains(&"platform:x86_64-unknown-linux-gnu".to_owned())
     );
-    assert!(pool.labels.contains(&"protocol:winwincode/v1".to_owned()));
+    assert!(
+        pool.labels
+            .contains(&format!("protocol:{EXECUTION_PROTOCOL_VERSION}"))
+    );
     assert!(
         pool.labels
             .contains(&"capability:repository_read".to_owned())

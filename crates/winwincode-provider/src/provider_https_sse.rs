@@ -17,6 +17,7 @@ use std::{
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use ureq::unversioned::transport::{Connector as _, RustlsConnector};
 use winwincode_domain::{ModelExchangeId, RequestId};
 
 use crate::provider_anthropic::{
@@ -89,6 +90,7 @@ pub struct HttpsSseProviderConfig {
     connect_timeout: Duration,
     idle_timeout: Duration,
     total_timeout: Duration,
+    deadlines_enabled: bool,
     max_response_bytes: usize,
     max_event_bytes: usize,
     max_events: usize,
@@ -169,6 +171,7 @@ impl HttpsSseProviderConfig {
             connect_timeout: timeouts.connect,
             idle_timeout: timeouts.idle,
             total_timeout: timeouts.total,
+            deadlines_enabled: true,
             max_response_bytes: limits.response_bytes,
             max_event_bytes: limits.event_bytes,
             max_events: limits.events,
@@ -267,6 +270,13 @@ impl HttpsSseProviderConfig {
         Ok(self)
     }
 
+    /// Lets an active task keep a provider stream open until it completes or is cancelled.
+    #[must_use]
+    pub fn without_deadlines(mut self) -> Self {
+        self.deadlines_enabled = false;
+        self
+    }
+
     fn validate(&self) -> Result<(), HttpsSseProviderError> {
         if !valid_token(&self.provider_id, MAX_PROVIDER_ID_BYTES)
             || self.endpoint.len() > MAX_ENDPOINT_BYTES
@@ -312,7 +322,10 @@ pub enum HttpsSseProviderErrorKind {
     Rejected,
     Unavailable,
     Transport,
-    Protocol,
+    SseFraming,
+    SseEvent,
+    IncompleteStream,
+    StreamConversion,
     SizeLimit,
     Paused,
     CredentialLeak,
@@ -346,7 +359,10 @@ impl HttpsSseProviderError {
                 kind: crate::ModelAttemptFailureKind::InvalidRequest,
                 certainty: ModelExecutionCertainty::RejectedBeforeAcceptance,
             },
-            HttpsSseProviderErrorKind::Protocol
+            HttpsSseProviderErrorKind::SseFraming
+            | HttpsSseProviderErrorKind::SseEvent
+            | HttpsSseProviderErrorKind::IncompleteStream
+            | HttpsSseProviderErrorKind::StreamConversion
             | HttpsSseProviderErrorKind::SizeLimit
             | HttpsSseProviderErrorKind::CredentialLeak => ModelAttemptFailureFact {
                 kind: crate::ModelAttemptFailureKind::Protocol,
@@ -400,8 +416,8 @@ pub struct HttpsSseProviderAdapter {
 
 struct SharedAdapter {
     config: HttpsSseProviderConfig,
-    agent: ureq::Agent,
     streams: Mutex<BTreeMap<String, StreamRecord>>,
+    cancellation: Mutex<Option<Arc<crate::provider_transport::ExchangeCancellation>>>,
 }
 
 struct StreamRecord {
@@ -410,6 +426,7 @@ struct StreamRecord {
     controls: u8,
     tool_bindings: AnthropicToolBindings,
     state: StreamState,
+    io: Arc<crate::provider_transport::ExchangeIo>,
 }
 
 #[derive(Clone, Copy)]
@@ -445,13 +462,10 @@ enum StreamState {
 }
 
 impl HttpsSseProviderAdapter {
-    /// Builds a verified no-proxy HTTP agent from one validated configuration.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed explicit TLS roots or transport configuration.
-    pub fn try_new(config: HttpsSseProviderConfig) -> Result<Self, HttpsSseProviderError> {
-        config.validate()?;
+    fn agent(
+        config: &HttpsSseProviderConfig,
+        io: Arc<crate::provider_transport::ExchangeIo>,
+    ) -> ureq::Agent {
         let root_certs = match &config.tls_roots {
             ProviderTlsRoots::WebPki => ureq::tls::RootCerts::WebPki,
             ProviderTlsRoots::Specific(values) => values
@@ -466,25 +480,62 @@ impl HttpsSseProviderAdapter {
             .use_sni(true)
             .disable_verification(false)
             .build();
-        let agent: ureq::Agent = ureq::Agent::config_builder()
+        let agent_config = ureq::Agent::config_builder()
             .http_status_as_error(false)
             .max_redirects(0)
             .proxy(None)
             .timeout_connect(Some(config.connect_timeout))
             // ureq 3.1.4 also applies recv_response's deadline while reading the body.
-            // Let the global deadline bound both headers and the complete stream.
-            .timeout_recv_body(Some(config.idle_timeout))
-            .timeout_global(Some(config.total_timeout))
+            // When enabled, the global deadline bounds headers and the complete stream.
+            .timeout_resolve(Some(config.connect_timeout))
+            .timeout_global(config.deadlines_enabled.then_some(config.total_timeout))
             .tls_config(tls)
-            .build()
-            .into();
+            .build();
+        let connector =
+            crate::provider_transport::ExchangeConnector(io).chain(RustlsConnector::default());
+        ureq::Agent::with_parts(
+            agent_config,
+            connector,
+            ureq::unversioned::resolver::DefaultResolver::default(),
+        )
+    }
+
+    /// Builds a verified no-proxy HTTP agent from one validated configuration.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed explicit TLS roots or transport configuration.
+    pub fn try_new(config: HttpsSseProviderConfig) -> Result<Self, HttpsSseProviderError> {
+        config.validate()?;
         Ok(Self {
             shared: Arc::new(SharedAdapter {
                 config,
-                agent,
                 streams: Mutex::new(BTreeMap::new()),
+                cancellation: Mutex::new(None),
             }),
         })
+    }
+
+    pub(crate) fn with_cancellation(
+        self,
+        cancellation: Arc<crate::provider_transport::ExchangeCancellation>,
+    ) -> Self {
+        if let Ok(mut current) = self.shared.cancellation.lock() {
+            *current = Some(cancellation);
+        }
+        self
+    }
+    fn exchange_io(&self) -> Arc<crate::provider_transport::ExchangeIo> {
+        let io = crate::provider_transport::ExchangeIo::new(
+            self.shared.config.connect_timeout,
+            self.shared.config.idle_timeout,
+        );
+        if let Ok(current) = self.shared.cancellation.lock()
+            && let Some(current) = current.as_ref()
+        {
+            current.attach(&io);
+        }
+        io
     }
 
     /// Drains the accepted response once and converts it through the unique
@@ -573,7 +624,7 @@ impl HttpsSseProviderAdapter {
                 if error.kind() == crate::ProviderStreamConversionErrorKind::CredentialLeak {
                     HttpsSseProviderError::new(HttpsSseProviderErrorKind::CredentialLeak)
                 } else {
-                    HttpsSseProviderError::new(HttpsSseProviderErrorKind::Protocol)
+                    HttpsSseProviderError::new(HttpsSseProviderErrorKind::StreamConversion)
                 }
             })?);
         }
@@ -733,7 +784,7 @@ impl HttpsSseProviderAdapter {
             return Ok(None);
         };
         if record.model_exchange_id != *invocation.model_exchange_id {
-            return Err(ProviderAdapterError::protocol());
+            return Err(ProviderAdapterError::identity_conflict());
         }
         if matches!(
             record.state,
@@ -742,7 +793,7 @@ impl HttpsSseProviderAdapter {
             return Err(ProviderAdapterError::rejected());
         }
         if record.invocation_digest != *digest {
-            return Err(ProviderAdapterError::protocol());
+            return Err(ProviderAdapterError::identity_conflict());
         }
         match record.state {
             StreamState::Open(_) | StreamState::Drained => {
@@ -778,6 +829,7 @@ impl HttpsSseProviderAdapter {
                 controls: 0,
                 tool_bindings,
                 state: StreamState::Pending,
+                io: self.exchange_io(),
             },
         );
         Ok(())
@@ -797,7 +849,7 @@ impl HttpsSseProviderAdapter {
             .get_mut(invocation.adapter_request_id)
             .ok_or_else(ProviderAdapterError::unavailable)?;
         if record.model_exchange_id != *invocation.model_exchange_id {
-            return Err(ProviderAdapterError::protocol());
+            return Err(ProviderAdapterError::identity_conflict());
         }
         match record.state {
             StreamState::Pending => {
@@ -807,7 +859,9 @@ impl HttpsSseProviderAdapter {
             StreamState::Cancelled | StreamState::Released | StreamState::Fenced => {
                 Err(ProviderAdapterError::rejected())
             }
-            StreamState::Open(_) | StreamState::Drained => Err(ProviderAdapterError::protocol()),
+            StreamState::Open(_) | StreamState::Drained => {
+                Err(ProviderAdapterError::identity_conflict())
+            }
         }
     }
 
@@ -820,17 +874,24 @@ impl HttpsSseProviderAdapter {
             .streams
             .lock()
             .map_err(|_| ProviderAdapterError::unavailable())?;
-        let is_exact_pending = streams
+        let record = streams
             .get(invocation.adapter_request_id)
-            .is_some_and(|record| {
-                record.model_exchange_id == *invocation.model_exchange_id
-                    && matches!(record.state, StreamState::Pending)
-            });
+            .ok_or_else(ProviderAdapterError::identity_conflict)?;
+        if record.model_exchange_id != *invocation.model_exchange_id {
+            return Err(ProviderAdapterError::identity_conflict());
+        }
+        if matches!(
+            record.state,
+            StreamState::Cancelled | StreamState::Released | StreamState::Fenced
+        ) {
+            return Err(ProviderAdapterError::rejected());
+        }
+        let is_exact_pending = matches!(record.state, StreamState::Pending);
         if is_exact_pending {
             streams.remove(invocation.adapter_request_id);
             Ok(())
         } else {
-            Err(ProviderAdapterError::protocol())
+            Err(ProviderAdapterError::identity_conflict())
         }
     }
 
@@ -867,9 +928,16 @@ impl HttpsSseProviderAdapter {
         let authorization = authorization_value(credential).inspect_err(|_error| {
             let _ = self.finish_open(invocation, StreamState::Fenced);
         })?;
-        let mut request = self
+        let io = self
             .shared
-            .agent
+            .streams
+            .lock()
+            .map_err(|_| ProviderAdapterError::unavailable())?
+            .get(invocation.adapter_request_id)
+            .map(|record| Arc::clone(&record.io))
+            .ok_or_else(ProviderAdapterError::unavailable)?;
+        let agent = Self::agent(&self.shared.config, Arc::clone(&io));
+        let mut request = agent
             .post(&self.shared.config.endpoint)
             .header("Accept", "text/event-stream")
             .header("Authorization", &authorization)
@@ -896,16 +964,16 @@ impl HttpsSseProviderAdapter {
         drop(authorization);
         let Ok(response) = response else {
             self.abandon_retryable_open(invocation)?;
-            return Err(ProviderAdapterError::unavailable());
+            return Err(ProviderAdapterError::connection());
         };
         let status = response.status().as_u16();
         if status == 429 {
             self.abandon_retryable_open(invocation)?;
             return Err(ProviderAdapterError::rate_limited());
         }
-        if status >= 500 {
+        if (500..=599).contains(&status) {
             self.abandon_retryable_open(invocation)?;
-            return Err(ProviderAdapterError::unavailable());
+            return Err(ProviderAdapterError::upstream());
         }
         if !(200..=299).contains(&status) {
             self.finish_open(invocation, StreamState::Fenced)?;
@@ -918,8 +986,9 @@ impl HttpsSseProviderAdapter {
             .is_some_and(canonical_event_stream_content_type)
         {
             self.finish_open(invocation, StreamState::Fenced)?;
-            return Err(ProviderAdapterError::protocol());
+            return Err(ProviderAdapterError::response_content_type());
         }
+        io.body_started();
         self.finish_open(invocation, StreamState::Open(Some(response.into_body())))?;
         ProviderAdapterOpenReceipt::try_new(invocation.adapter_request_id.to_owned())
     }
@@ -948,7 +1017,7 @@ impl ProviderAdapterPort for HttpsSseProviderAdapter {
         action: ProviderStreamControlAction,
     ) -> Result<(), ProviderAdapterError> {
         if !valid_token(adapter_request_id, MAX_ADAPTER_REQUEST_ID_BYTES) {
-            return Err(ProviderAdapterError::protocol());
+            return Err(ProviderAdapterError::identity_conflict());
         }
         let mut streams = self
             .shared
@@ -963,9 +1032,10 @@ impl ProviderAdapterPort for HttpsSseProviderAdapter {
                 controls: 0,
                 tool_bindings: AnthropicToolBindings::default(),
                 state: StreamState::Fenced,
+                io: self.exchange_io(),
             });
         if record.model_exchange_id != *model_exchange_id {
-            return Err(ProviderAdapterError::protocol());
+            return Err(ProviderAdapterError::identity_conflict());
         }
         let bit = control_bit(action);
         if record.controls & bit != 0 {
@@ -985,10 +1055,12 @@ impl ProviderAdapterPort for HttpsSseProviderAdapter {
                 }
             }
             ProviderStreamControlAction::Cancel => {
+                record.io.cancel();
                 record.state = StreamState::Cancelled;
                 record.controls |= CONTROL_CANCEL;
             }
             ProviderStreamControlAction::Release => {
+                record.io.cancel();
                 record.state = StreamState::Released;
                 record.controls |= CONTROL_RELEASE;
             }
@@ -1017,47 +1089,32 @@ fn parse_sse(
     max_event_bytes: usize,
     max_events: usize,
 ) -> Result<ParsedStream, HttpsSseProviderError> {
-    if bytes.contains(&0) {
-        return Err(HttpsSseProviderError::new(
-            HttpsSseProviderErrorKind::Protocol,
-        ));
-    }
-    let text = std::str::from_utf8(bytes)
-        .map_err(|_| HttpsSseProviderError::new(HttpsSseProviderErrorKind::Protocol))?;
-    let normalized = text.replace("\r\n", "\n");
-    if normalized.contains('\r') {
-        return Err(HttpsSseProviderError::new(
-            HttpsSseProviderErrorKind::Protocol,
-        ));
-    }
+    let frames = crate::provider_sse_framing::parse(bytes, max_event_bytes, max_events).map_err(
+        |error| {
+            HttpsSseProviderError::new(match error {
+                crate::provider_sse_framing::SseFramingError::Utf8 => {
+                    HttpsSseProviderErrorKind::SseFraming
+                }
+                crate::provider_sse_framing::SseFramingError::SizeLimit => {
+                    HttpsSseProviderErrorKind::SizeLimit
+                }
+            })
+        },
+    )?;
     let mut wire_events = Vec::new();
-    let mut data = String::new();
-    for line in normalized.split('\n') {
-        if line.len() > max_event_bytes {
+    for frame in frames {
+        if frame
+            .event
+            .as_deref()
+            .is_some_and(|name| !name.is_empty() && name != "message")
+        {
             return Err(HttpsSseProviderError::new(
-                HttpsSseProviderErrorKind::SizeLimit,
+                HttpsSseProviderErrorKind::SseEvent,
             ));
         }
-        if line.is_empty() {
-            dispatch_event(&mut wire_events, &mut data, max_event_bytes, max_events)?;
-        } else if line.starts_with(':') || line == "event: message" {
-        } else if let Some(value) = line.strip_prefix("data:") {
-            if !data.is_empty() {
-                data.push('\n');
-            }
-            data.push_str(value.strip_prefix(' ').unwrap_or(value));
-            if data.len() > max_event_bytes {
-                return Err(HttpsSseProviderError::new(
-                    HttpsSseProviderErrorKind::SizeLimit,
-                ));
-            }
-        } else {
-            return Err(HttpsSseProviderError::new(
-                HttpsSseProviderErrorKind::Protocol,
-            ));
-        }
+        let mut data = frame.data;
+        dispatch_event(&mut wire_events, &mut data, max_event_bytes, max_events)?;
     }
-    dispatch_event(&mut wire_events, &mut data, max_event_bytes, max_events)?;
     canonical_events(wire_events)
 }
 
@@ -1076,7 +1133,7 @@ fn dispatch_event(
         ));
     }
     let event = serde_json::from_str(data)
-        .map_err(|_| HttpsSseProviderError::new(HttpsSseProviderErrorKind::Protocol))?;
+        .map_err(|_| HttpsSseProviderError::new(HttpsSseProviderErrorKind::SseEvent))?;
     events.push(event);
     data.clear();
     Ok(())
@@ -1087,18 +1144,20 @@ fn canonical_events(wire: Vec<ProviderWireEvent>) -> Result<ParsedStream, HttpsS
     for event in wire {
         if canonical.terminal.is_some() {
             return Err(HttpsSseProviderError::new(
-                HttpsSseProviderErrorKind::Protocol,
+                HttpsSseProviderErrorKind::SseEvent,
             ));
         }
         canonical.push(event)?;
     }
-    Ok(canonical.finish())
+    canonical.finish()
 }
 
 struct CanonicalEvents {
     events: Vec<ProviderStreamEvent>,
     usage: Option<ProviderTokenUsage>,
-    cost_micros: Option<u64>,
+    // Outer None means no cost meter; inner None means an explicit unknown cost.
+    #[allow(clippy::option_option)]
+    cost_micros: Option<Option<u64>>,
     terminal: Option<ProviderGatewayTerminal>,
 }
 
@@ -1172,7 +1231,7 @@ impl CanonicalEvents {
                 index,
                 provider_call_id,
                 identity: ProviderToolIdentity::try_new(kind.into_tool_kind(), name, namespace)
-                    .map_err(|_| HttpsSseProviderError::new(HttpsSseProviderErrorKind::Protocol))?,
+                    .map_err(|_| HttpsSseProviderError::new(HttpsSseProviderErrorKind::SseEvent))?,
             },
             ProviderWireEvent::ToolCallArgumentsDelta {
                 index,
@@ -1192,7 +1251,7 @@ impl CanonicalEvents {
             },
             _ => {
                 return Err(HttpsSseProviderError::new(
-                    HttpsSseProviderErrorKind::Protocol,
+                    HttpsSseProviderErrorKind::SseEvent,
                 ));
             }
         };
@@ -1222,20 +1281,20 @@ impl CanonicalEvents {
                 };
                 if self.usage.replace(value).is_some()
                     || self.cost_micros.replace(actual_cost_micros).is_some()
-                    || actual_cost_micros > MAX_SAFE_INTEGER
+                    || actual_cost_micros.is_some_and(|cost| cost > MAX_SAFE_INTEGER)
                 {
                     return Err(HttpsSseProviderError::new(
-                        HttpsSseProviderErrorKind::Protocol,
+                        HttpsSseProviderErrorKind::SseEvent,
                     ));
                 }
                 self.events.push(ProviderStreamEvent::Usage(value));
             }
             ProviderWireEvent::Finished { reason } => {
                 let usage = self.usage.ok_or_else(|| {
-                    HttpsSseProviderError::new(HttpsSseProviderErrorKind::Protocol)
+                    HttpsSseProviderError::new(HttpsSseProviderErrorKind::SseEvent)
                 })?;
                 let cost = self.cost_micros.ok_or_else(|| {
-                    HttpsSseProviderError::new(HttpsSseProviderErrorKind::Protocol)
+                    HttpsSseProviderError::new(HttpsSseProviderErrorKind::SseEvent)
                 })?;
                 let reason = reason.into_finish_reason();
                 self.events.push(ProviderStreamEvent::Finished(reason));
@@ -1277,28 +1336,21 @@ impl CanonicalEvents {
             }
             _ => {
                 return Err(HttpsSseProviderError::new(
-                    HttpsSseProviderErrorKind::Protocol,
+                    HttpsSseProviderErrorKind::SseEvent,
                 ));
             }
         }
         Ok(())
     }
 
-    fn finish(mut self) -> ParsedStream {
-        if self.terminal.is_none() {
-            self.events.push(ProviderStreamEvent::Disconnected);
-            self.terminal = Some(ProviderGatewayTerminal::Failed {
-                failure: ModelAttemptFailureFact::from_stream(
-                    ProviderStreamFailureKind::Transport,
-                    ModelExecutionCertainty::AcceptanceUnknown,
-                ),
-                charge: None,
-            });
-        }
-        ParsedStream {
+    fn finish(self) -> Result<ParsedStream, HttpsSseProviderError> {
+        let terminal = self.terminal.ok_or_else(|| {
+            HttpsSseProviderError::new(HttpsSseProviderErrorKind::IncompleteStream)
+        })?;
+        Ok(ParsedStream {
             events: self.events,
-            terminal: self.terminal.expect("terminal was synthesized"),
-        }
+            terminal,
+        })
     }
 }
 
@@ -1359,11 +1411,11 @@ enum ProviderWireEvent {
     #[serde(rename = "usage")]
     Usage {
         input_tokens: u64,
-        cached_input_tokens: u64,
+        cached_input_tokens: Option<u64>,
         cache_write_input_tokens: u64,
         output_tokens: u64,
         reasoning_output_tokens: u64,
-        actual_cost_micros: u64,
+        actual_cost_micros: Option<u64>,
     },
     #[serde(rename = "response.finished")]
     Finished { reason: WireFinishReason },
@@ -1495,10 +1547,11 @@ fn map_anthropic_request(
     error: crate::provider_anthropic::AnthropicCodecError,
 ) -> ProviderAdapterError {
     match error.kind() {
-        AnthropicCodecErrorKind::InvalidRequest | AnthropicCodecErrorKind::SizeLimit => {
-            ProviderAdapterError::rejected()
-        }
-        AnthropicCodecErrorKind::Protocol => ProviderAdapterError::protocol(),
+        AnthropicCodecErrorKind::InvalidRequest => ProviderAdapterError::request_invalid(),
+        AnthropicCodecErrorKind::SizeLimit => ProviderAdapterError::request_size_limit(),
+        AnthropicCodecErrorKind::Protocol
+        | AnthropicCodecErrorKind::InvalidSse
+        | AnthropicCodecErrorKind::IncompleteStream => ProviderAdapterError::request_translation(),
     }
 }
 
@@ -1507,8 +1560,10 @@ fn map_anthropic_response(
 ) -> HttpsSseProviderError {
     HttpsSseProviderError::new(match error.kind() {
         AnthropicCodecErrorKind::InvalidRequest | AnthropicCodecErrorKind::Protocol => {
-            HttpsSseProviderErrorKind::Protocol
+            HttpsSseProviderErrorKind::SseEvent
         }
+        AnthropicCodecErrorKind::InvalidSse => HttpsSseProviderErrorKind::SseFraming,
+        AnthropicCodecErrorKind::IncompleteStream => HttpsSseProviderErrorKind::IncompleteStream,
         AnthropicCodecErrorKind::SizeLimit => HttpsSseProviderErrorKind::SizeLimit,
     })
 }
@@ -1566,11 +1621,11 @@ pub fn canonical_https_endpoint(value: &str) -> bool {
 }
 
 fn canonical_event_stream_content_type(value: &str) -> bool {
-    let normalized = value.to_ascii_lowercase();
-    matches!(
-        normalized.as_str(),
-        "text/event-stream" | "text/event-stream; charset=utf-8"
-    )
+    // SSE is always decoded as UTF-8; MIME parameters do not alter that.
+    value
+        .split(';')
+        .next()
+        .is_some_and(|essence| essence.trim().eq_ignore_ascii_case("text/event-stream"))
 }
 
 const fn control_bit(action: ProviderStreamControlAction) -> u8 {
@@ -1692,15 +1747,18 @@ mod tests {
         response: &TestResponse,
         chunk_delay: Duration,
     ) {
-        write!(
+        if write!(
             stream,
             "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             response.status,
             response.content_type,
             response.declared_length.unwrap_or(response.body.len()),
         )
-        .expect("write TLS response");
-        stream.flush().expect("flush TLS response");
+        .is_err()
+            || stream.flush().is_err()
+        {
+            return;
+        }
         for chunk in response.body.as_bytes().chunks(64) {
             thread::sleep(chunk_delay);
             if stream.write_all(chunk).is_err() || stream.flush().is_err() {
@@ -1794,10 +1852,161 @@ mod tests {
     }
 
     #[test]
+    fn sse_representation_accepts_mime_parameters_and_metadata() {
+        for header in [
+            "text/event-stream",
+            "text/event-stream;charset=utf-8",
+            "text/event-stream; charset=\"UTF-8\"",
+            "TEXT/EVENT-STREAM;CHARSET=utf-8",
+            "text/event-stream; charset=latin1",
+            "text/event-stream; x-provider=stream",
+        ] {
+            assert!(canonical_event_stream_content_type(header), "{header}");
+        }
+        for header in [
+            "application/json",
+            "text/event-streaming",
+            "text/event-stream, application/json",
+        ] {
+            assert!(!canonical_event_stream_content_type(header), "{header}");
+        }
+        let wire =
+            successful_sse().replace("data:", "id: 42\nretry: 1000\nx-provider: ignored\ndata:");
+        for ending in ["\n", "\r\n", "\r"] {
+            let body = format!("\u{feff}{}", wire.replace('\n', ending));
+            assert!(parse_sse(body.as_bytes(), 2048, 16).is_ok());
+        }
+    }
+
+    #[test]
+    fn canonical_sse_normalizes_framing_without_changing_event_semantics() {
+        for name in ["", "message"] {
+            let wire = successful_sse().replace("data:", &format!("event: {name}\ndata:"));
+            assert!(parse_sse(wire.as_bytes(), 2048, 16).is_ok());
+        }
+        for name in ["error", "foreign", "Message"] {
+            let wire = successful_sse().replace("data:", &format!("event: {name}\ndata:"));
+            assert_eq!(
+                parsing_error_kind(parse_sse(wire.as_bytes(), 2048, 16)),
+                HttpsSseProviderErrorKind::SseEvent
+            );
+        }
+    }
+
+    #[test]
+    fn response_codec_failure_codes_cover_anthropic_and_openai_boundaries() {
+        let bindings = AnthropicToolBindings::default();
+        let options = AnthropicMessagesOptions {
+            max_output_tokens: 32768,
+            pricing: ProviderTokenPricing::default(),
+        };
+        for (body, expected) in [
+            (
+                &b"data: \xff\n\n"[..],
+                HttpsSseProviderErrorKind::SseFraming,
+            ),
+            (
+                &b"data: {invalid}\n\n"[..],
+                HttpsSseProviderErrorKind::SseEvent,
+            ),
+            (&b""[..], HttpsSseProviderErrorKind::IncompleteStream),
+        ] {
+            let anthropic = parse_anthropic_sse(body, 4096, 32, &bindings, options)
+                .err()
+                .unwrap();
+            let openai =
+                crate::provider_openai::parse_openai_chat_sse(body, 4096, 32, &bindings, options)
+                    .err()
+                    .unwrap();
+            for error in [anthropic, openai] {
+                assert_eq!(map_anthropic_response(error).kind(), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn https_failure_codes_distinguish_open_and_stream_validation() {
+        for (status, content_type, body, expected) in [
+            (
+                "503 Service Unavailable",
+                "application/json",
+                "{}",
+                "Upstream",
+            ),
+            ("200 OK", "application/json", "{}", "ResponseContentType"),
+            (
+                "200 OK",
+                "text/event-stream",
+                "invalid\n",
+                "IncompleteStream",
+            ),
+            (
+                "200 OK",
+                "text/event-stream",
+                "data: {invalid}\n\n",
+                "SseEvent",
+            ),
+            ("200 OK", "text/event-stream", "", "IncompleteStream"),
+            (
+                "200 OK",
+                "text/event-stream",
+                concat!(
+                    "data: {\"type\":\"text.delta\",\"index\":0,\"delta\":\"x\"}\n\n",
+                    "data: {\"type\":\"usage\",\"inputTokens\":1,\"cachedInputTokens\":0,",
+                    "\"cacheWriteInputTokens\":0,\"outputTokens\":1,\"reasoningOutputTokens\":0,",
+                    "\"actualCostMicros\":0}\n\n",
+                    "data: {\"type\":\"response.finished\",\"reason\":\"stop\"}\n\n"
+                ),
+                "StreamConversion",
+            ),
+        ] {
+            let fixture = TlsFixture::start(vec![TestResponse {
+                status,
+                content_type,
+                body,
+                declared_length: None,
+                delay: Duration::ZERO,
+            }]);
+            let adapter = HttpsSseProviderAdapter::try_new(config(&fixture)).unwrap();
+            let exchange = ModelExchangeId("mdl_00000000000000000000000001".into());
+            let request_id = RequestId("req_00000000000000000000000001".into());
+            let result = adapter.open_https(invocation(&exchange, &request_id), SECRET);
+            let kind = if let Err(error) = result {
+                format!("{:?}", error.kind())
+            } else {
+                let receipt = ProviderGatewayOpenReceipt {
+                    model_exchange_id: exchange,
+                    request_id,
+                    route: winwincode_api::generated::ModelRoute {
+                        provider_id: "provider-https-fixture".into(),
+                        model_id: "fixture-model".into(),
+                        credential_reference_id: winwincode_domain::CredentialReferenceId(
+                            "crd_00000000000000000000000001".into(),
+                        ),
+                    },
+                    adapter_request_id: "pad_00000000000000000000000001".into(),
+                    idempotent_replay: false,
+                    stream_leak_gate: crate::CredentialLeakGate::new(),
+                };
+                format!(
+                    "{:?}",
+                    adapter
+                        .drain_canonical(&receipt)
+                        .expect_err("failure boundary")
+                        .kind()
+                )
+            };
+            assert_eq!(fixture.finish().len(), 1);
+            assert_eq!(kind, expected, "{status} / {content_type}");
+        }
+    }
+
+    #[test]
     fn slow_response_body_uses_the_total_request_deadline() {
-        for (total, succeeds) in [
-            (Duration::from_secs(3), true),
-            (Duration::from_millis(250), false),
+        for (total, without_deadlines, succeeds) in [
+            (Duration::from_secs(3), false, true),
+            (Duration::from_millis(250), false, false),
+            (Duration::from_millis(250), true, true),
         ] {
             let fixture = TlsFixture::start_streaming(
                 vec![TestResponse {
@@ -1813,16 +2022,27 @@ mod tests {
             settings.connect_timeout = total.min(Duration::from_secs(1));
             settings.idle_timeout = Duration::from_millis(250);
             settings.total_timeout = total;
+            if without_deadlines {
+                settings = settings.without_deadlines();
+            }
             let adapter = HttpsSseProviderAdapter::try_new(settings).expect("adapter");
-            let mut response = adapter
-                .shared
-                .agent
+            let io = crate::provider_transport::ExchangeIo::new(
+                adapter.shared.config.connect_timeout,
+                adapter.shared.config.idle_timeout,
+            );
+            let agent = HttpsSseProviderAdapter::agent(&adapter.shared.config, Arc::clone(&io));
+            let mut response = agent
                 .post(&fixture.endpoint)
                 .send(PAYLOAD)
                 .expect("headers");
+            io.body_started();
             let mut body = Vec::new();
             let result = response.body_mut().as_reader().read_to_end(&mut body);
-            assert_eq!(result.is_ok(), succeeds, "total={total:?}: {result:?}");
+            assert_eq!(
+                result.is_ok(),
+                succeeds,
+                "total={total:?}, without_deadlines={without_deadlines}: {result:?}"
+            );
             if succeeds {
                 assert_eq!(body, successful_sse().as_bytes());
             }
@@ -2015,7 +2235,7 @@ mod tests {
         let request = invocation(&exchange, &request_id);
         assert_eq!(
             adapter.open_https(request, SECRET).expect_err("5xx"),
-            ProviderAdapterError::unavailable()
+            ProviderAdapterError::upstream()
         );
         assert_eq!(
             adapter.open_https(request, SECRET).expect_err("429"),
@@ -2043,17 +2263,17 @@ mod tests {
             ProviderGatewayTerminal::Completed {
                 usage: ProviderTokenUsage {
                     input_tokens: 11,
-                    cached_input_tokens: 2,
+                    cached_input_tokens: Some(2),
                     cache_write_input_tokens: 3,
                     output_tokens: 5,
                     reasoning_output_tokens: 7,
                 },
-                actual_cost_micros: 19,
+                actual_cost_micros: Some(19),
             }
         ));
         assert_eq!(
             parsing_error_kind(parse_sse(b"data: {\"type\":\"unknown\"}\n\n", 1024, 2,)),
-            HttpsSseProviderErrorKind::Protocol
+            HttpsSseProviderErrorKind::SseEvent
         );
         assert_eq!(
             parsing_error_kind(parse_sse(b"data: {}\n\n", 4, 2)),
@@ -2104,7 +2324,7 @@ mod tests {
                     ProviderStreamControlAction::Release,
                 )
                 .expect_err("foreign control"),
-            ProviderAdapterError::protocol()
+            ProviderAdapterError::identity_conflict()
         );
         assert!(fixture.finish().is_empty());
     }

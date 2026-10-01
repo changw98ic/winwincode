@@ -292,7 +292,7 @@ fn limits() -> ModelAdmissionLimits {
         tokens_per_minute: 10_000,
         concurrent_requests: 100,
         token_budget: 100_000,
-        cost_budget_micros: 100_000,
+        cost_budget_micros: Some(100_000),
     }
 }
 
@@ -406,7 +406,7 @@ fn every_limit_has_a_durable_fail_closed_denial() {
         (
             "cost-budget",
             ModelAdmissionLimits {
-                cost_budget_micros: 10,
+                cost_budget_micros: Some(10),
                 ..limits()
             },
             (1, 6),
@@ -548,12 +548,12 @@ fn release_and_completion_settle_once_and_recover_after_restart() {
         model_exchange_id: second.model_exchange_id().clone(),
         usage: ProviderTokenUsage {
             input_tokens: 5,
-            cached_input_tokens: 2,
+            cached_input_tokens: Some(2),
             cache_write_input_tokens: 1,
             output_tokens: 3,
             reasoning_output_tokens: 1,
         },
-        actual_cost_micros: 4,
+        actual_cost_micros: Some(4),
     };
     {
         let mut service = ModelAdmissionService::new(&mut storage, &FixedClock(31_556_020));
@@ -567,7 +567,7 @@ fn release_and_completion_settle_once_and_recover_after_restart() {
         let settled = service.complete(&authority, &completion).expect("settle");
         assert_eq!(settled.route_authority_fingerprint, authority.fingerprint());
         assert_eq!(settled.actual_tokens, 8);
-        assert_eq!(settled.actual_cost_micros, 4);
+        assert_eq!(settled.actual_cost_micros, Some(4));
         let snapshot = service
             .snapshot(&authority, "budget-2030-01")
             .expect("snapshot");
@@ -899,7 +899,7 @@ fn durable_provider_admission_replays_reserve_and_actual_completion_after_restar
 
     let actual_usage = ProviderTokenUsage {
         input_tokens: 5,
-        cached_input_tokens: 1,
+        cached_input_tokens: Some(1),
         cache_write_input_tokens: 0,
         output_tokens: 3,
         reasoning_output_tokens: 1,
@@ -910,11 +910,11 @@ fn durable_provider_admission_replays_reserve_and_actual_completion_after_restar
             &facts.message.request_id,
             &facts.message.model_exchange_id,
             actual_usage,
-            4,
+            Some(4),
         )
         .expect("complete exact reservation");
     assert_eq!(completed.actual_tokens, 8);
-    assert_eq!(completed.actual_cost_micros, 4);
+    assert_eq!(completed.actual_cost_micros, Some(4));
     admission.close().expect("close completed connection");
 
     let mut admission = durable_admission(&root, &clock, &policy_authority, reservation);
@@ -925,7 +925,7 @@ fn durable_provider_admission_replays_reserve_and_actual_completion_after_restar
                 &facts.message.request_id,
                 &facts.message.model_exchange_id,
                 actual_usage,
-                4,
+                Some(4),
             )
             .expect("completion replay")
             .idempotent_replay
@@ -1110,4 +1110,75 @@ fn local_production_policy_config_freezes_the_community_policy() {
 
     drop(storage);
     fs::remove_dir_all(root).expect("remove fixture");
+}
+
+#[test]
+fn unknown_cost_releases_capacity_but_retains_financial_reservation_after_restart() {
+    let (root, mut storage, authority) = setup("unknown-cost-restart");
+    let frozen = policy(limits());
+    let request = reservation(&authority, 701, 20, 9);
+    let completion = ModelReservationCompletion {
+        request_id: RequestId(id("req", 702)),
+        model_exchange_id: request.model_exchange_id().clone(),
+        usage: ProviderTokenUsage {
+            input_tokens: 10,
+            cached_input_tokens: None,
+            cache_write_input_tokens: 0,
+            output_tokens: 5,
+            reasoning_output_tokens: 0,
+        },
+        actual_cost_micros: None,
+    };
+    {
+        let mut service = ModelAdmissionService::new(&mut storage, &FixedClock(31_556_020));
+        assert!(
+            service
+                .reserve(&authority, &frozen, &request)
+                .unwrap()
+                .admitted()
+        );
+        assert_eq!(
+            service
+                .complete(&authority, &completion)
+                .unwrap()
+                .actual_cost_micros,
+            None
+        );
+    }
+    drop(storage);
+    let mut storage = SqliteStorage::open(&root).unwrap();
+    let mut service = ModelAdmissionService::new(&mut storage, &FixedClock(31_556_021));
+    let snapshot = service.snapshot(&authority, "budget-2030-01").unwrap();
+    assert_eq!(snapshot.active_reservations, 0);
+    assert_eq!(snapshot.budget_reserved_tokens, 0);
+    assert_eq!(snapshot.budget_settled_tokens, 15);
+    assert_eq!(snapshot.budget_reserved_cost_micros, 9);
+    assert_eq!(snapshot.budget_settled_cost_micros, 0);
+    assert_eq!(snapshot.pending_cost_settlements, 1);
+    assert!(
+        service
+            .complete(&authority, &completion)
+            .unwrap()
+            .idempotent_replay
+    );
+    assert!(
+        !service
+            .reserve(&authority, &frozen, &reservation(&authority, 703, 20, 9))
+            .unwrap()
+            .admitted()
+    );
+    let mut unlimited = limits();
+    unlimited.cost_budget_micros = None;
+    assert!(
+        service
+            .reserve(
+                &authority,
+                &policy(unlimited),
+                &reservation(&authority, 704, 20, 9)
+            )
+            .unwrap()
+            .admitted()
+    );
+    drop(storage);
+    fs::remove_dir_all(root).unwrap();
 }

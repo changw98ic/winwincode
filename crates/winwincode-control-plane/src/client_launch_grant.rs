@@ -193,6 +193,21 @@ impl<'storage> WorkerLaunchGrantService<'storage> {
             .issue(issuance, now)?)
     }
 
+    /// Issues a unique launch successor under trusted exit authority.
+    /// # Errors
+    /// Rejects altered identity, duplicate launch or storage failure.
+    pub fn issue_replacement(
+        &mut self,
+        issuance: &LaunchGrantIssuance,
+        predecessor: &str,
+        now: &Instant,
+    ) -> Result<WorkerLaunchGrantRecord, WorkerLaunchGrantServiceError> {
+        Ok(self
+            .storage
+            .worker_launch_grant_ledger()?
+            .issue_replacement(issuance, Some(predecessor), now)?)
+    }
+
     /// Settles one `client.worker.launch_ack` exactly once (plan 14.3 step
     /// 10): an accepted acknowledgement consumes an `issued` grant, a replay
     /// of a consumed grant is an idempotent no-op, and a rejection keeps the
@@ -202,6 +217,22 @@ impl<'storage> WorkerLaunchGrantService<'storage> {
     ///
     /// Rejects an unknown grant, a field mismatch, a stale token, an expired
     /// grant, an illegal transition, or storage failure.
+    pub fn settle_device_launch_ack(
+        &mut self,
+        node_id: &str,
+        settlement: &LaunchAckSettlement,
+        now: &Instant,
+    ) -> Result<LaunchAckOutcome, WorkerLaunchGrantServiceError> {
+        Ok(self
+            .storage
+            .worker_launch_grant_ledger()?
+            .settle_device_launch_ack(node_id, settlement, now)?)
+    }
+
+    /// Settles an exact durable launch receipt.
+    ///
+    /// # Errors
+    /// Returns an authority or storage failure without changing the receipt.
     pub fn settle_launch_ack(
         &mut self,
         settlement: &LaunchAckSettlement,
@@ -274,6 +305,33 @@ impl<'storage> WorkerLaunchGrantService<'storage> {
             .storage
             .worker_launch_grant_ledger()?
             .active_grant_for_session(worker_session_id)?)
+    }
+
+    /// Settles an authenticated current Device's exact process exit.
+    /// # Errors
+    /// Rejects invalid report identity or unavailable storage.
+    pub fn observe_trusted_exit(
+        &mut self,
+        node: &str,
+        session: &str,
+        instance: &str,
+        occupancy: &str,
+        now: &Instant,
+    ) -> Result<bool, WorkerLaunchGrantServiceError> {
+        Ok(self
+            .storage
+            .worker_launch_grant_ledger()?
+            .observe_trusted_exit(node, session, instance, occupancy, now)?)
+    }
+
+    /// Returns durable current-Device exit evidence for a launch grant.
+    /// # Errors
+    /// Rejects malformed identity or unavailable storage.
+    pub fn has_trusted_exit(&mut self, grant: &str) -> Result<bool, WorkerLaunchGrantServiceError> {
+        Ok(self
+            .storage
+            .worker_launch_grant_ledger()?
+            .has_trusted_exit(grant)?)
     }
 
     /// Returns the newest launch grant anchored to one product session, if

@@ -43,6 +43,7 @@ use crate::stage_product::{
 const MAX_SOURCE_ID_BYTES: usize = 4_096;
 const JSON_CONTENT_TYPE: &str = "application/json";
 const VERIFICATION_POLICY_PROTOCOL: &str = "winwincode.verification-session-policy.v1";
+pub(crate) const VERIFICATION_POLICY_SOURCE: &str = "policy:session";
 
 /// Lease-bound identity and timestamps supplied by the production adapter.
 #[derive(Clone, Copy, Debug)]
@@ -96,6 +97,7 @@ pub enum WorkRunRuntimeProjectionError<AuthorityError, StoreError> {
     Store(StoreError),
     Replay(RuntimeReplayError<AuthorityError, StoreError>),
     InvalidSource,
+    InvalidModelResult,
     InvalidEvidence,
     CorruptOriginal,
 }
@@ -109,6 +111,7 @@ impl<AuthorityError: fmt::Debug, StoreError: fmt::Debug> fmt::Display
             Self::Store(_) => "stage runtime replay store failed",
             Self::Replay(_) => "stage runtime replay rejected the event",
             Self::InvalidSource => "Codex stage-product source identity is invalid",
+            Self::InvalidModelResult => "model result does not match the required JSON structure",
             Self::InvalidEvidence => "verification result does not cite retained direct evidence",
             Self::CorruptOriginal => "retained stage runtime frame is corrupt",
         })
@@ -141,7 +144,30 @@ impl WorkRunRuntimeProjector {
         }
     }
 
-    /// Retains the verification read-only policy before direct evidence.
+    /// Feedback for correcting a rejected result, derived only from this
+    /// lease's retained command receipts and sealed stage input.
+    pub(crate) fn verification_repair_prompt<S: ReplayStore>(
+        store: &mut S,
+        context: WorkRunRuntimeContext<'_>,
+        job: &ExecutionJob,
+    ) -> Result<String, WorkRunRuntimeProjectionError<(), S::Error>> {
+        let snapshot = load_snapshot(store, &replay_identity(context))?;
+        let catalog = evidence_catalog(&snapshot)?;
+        let mut sources = catalog.into_iter().map(|(source_id, binding)| {
+            serde_json::json!({"source_id":source_id, "outcome":format!("{:?}", binding.outcome)})
+        }).collect::<Vec<_>>();
+        sources.sort_by(|left, right| left["source_id"].as_str().cmp(&right["source_id"].as_str()));
+        let input = serde_json::to_string(&job.work_input)
+            .map_err(|_| WorkRunRuntimeProjectionError::InvalidSource)?;
+        Ok(format!(
+            "The preceding verification result was rejected: its JSON, sealed input identities, or evidence references are invalid. Return one corrected JSON object matching the active independent-verification-result schema. Use the exact delivery specification, revision, candidate and assigned criterion IDs in the sealed input below. Choose a unique finding_id and describe the actual observed result in explanation. Cite only source_id values from the retained direct command receipts below; their outcomes are authoritative. If further evidence is needed, run the exact assigned verification command in this same read-only candidate checkout. Do not modify files or invent evidence. Preserve every required Fusion investigation and claim key from the original instructions.\nSealed workInput: {input}\nRetained direct receipts: {}",
+            serde_json::to_string(&sources)
+                .map_err(|_| WorkRunRuntimeProjectionError::InvalidSource)?
+        ))
+    }
+
+    /// Retains one verification read-only policy for this runtime before direct
+    /// evidence; later turns replay that same attestation.
     ///
     /// Non-verification roles produce no stage product at turn start.
     ///
@@ -177,7 +203,7 @@ impl WorkRunRuntimeProjector {
             authority,
             context,
             job,
-            &source_key("policy", turn_id, None),
+            VERIFICATION_POLICY_SOURCE,
             &product,
         )
         .map(Some)
@@ -208,9 +234,7 @@ impl WorkRunRuntimeProjector {
         validate_source_id(command_end.call_id)?;
         let identity = replay_identity(context);
         let snapshot = load_snapshot(store, &identity)?;
-        let policy_id = projected_event_id(job, &source_key("policy", command_end.turn_id, None))
-            .map_err(WorkRunRuntimeProjectionError::Product)?;
-        if !snapshot_has_policy(&snapshot, &policy_id) {
+        if !snapshot_has_policy(&snapshot, job)? {
             return Err(WorkRunRuntimeProjectionError::InvalidEvidence);
         }
         let product = prepare_verification_command_evidence_with_artifact(
@@ -292,7 +316,7 @@ impl WorkRunRuntimeProjector {
         validate_source_id(completion.turn_id)?;
         let Some(final_message) = completion.final_message else {
             if job.execution_profile == "planner" || verification_role(&job.execution_profile) {
-                return Err(WorkRunRuntimeProjectionError::InvalidSource);
+                return Err(WorkRunRuntimeProjectionError::InvalidModelResult);
             }
             return Ok(None);
         };
@@ -302,11 +326,8 @@ impl WorkRunRuntimeProjector {
             "planner" => prepare_planner_solution_activity(job, final_message.as_bytes())
                 .map_err(WorkRunRuntimeProjectionError::Product)?,
             role if verification_role(role) => {
-                let policy_id =
-                    projected_event_id(job, &source_key("policy", completion.turn_id, None))
-                        .map_err(WorkRunRuntimeProjectionError::Product)?;
-                if !snapshot_has_policy(&snapshot, &policy_id) {
-                    return Err(WorkRunRuntimeProjectionError::InvalidEvidence);
+                if !snapshot_has_policy(&snapshot, job)? {
+                    return Err(WorkRunRuntimeProjectionError::InvalidSource);
                 }
                 let bound = bind_verification_evidence(
                     final_message,
@@ -382,13 +403,23 @@ impl WorkRunRuntimeProjector {
     {
         let event_id = projected_event_id(projection.job, projection.source)
             .map_err(WorkRunRuntimeProjectionError::Product)?;
-        let existing = snapshot
-            .events
-            .iter()
-            .find(|frame| frame.event_id == event_id.0);
-        let message = if let Some(frame) = existing {
-            let original: RuntimeEventMessage = serde_json::from_slice(&frame.frame)
-                .map_err(|_| WorkRunRuntimeProjectionError::CorruptOriginal)?;
+        // The policy attests this runtime's frozen candidate, not a single
+        // model turn. Reuse its original identity, including a frame retained
+        // by an older adapter, when a format correction starts another turn.
+        let existing = if projection.source == VERIFICATION_POLICY_SOURCE {
+            retained_policy(snapshot)?
+        } else {
+            snapshot
+                .events
+                .iter()
+                .find(|frame| frame.event_id == event_id.0)
+                .map(|frame| {
+                    serde_json::from_slice::<RuntimeEventMessage>(&frame.frame)
+                        .map_err(|_| WorkRunRuntimeProjectionError::CorruptOriginal)
+                })
+                .transpose()?
+        };
+        let message = if let Some(original) = existing {
             if !same_semantic_product(&original, projection.product) {
                 return Ok(WorkRunRuntimeRetention::Conflict {
                     highest_sequence: snapshot.highest_sequence,
@@ -515,24 +546,49 @@ fn same_semantic_product(message: &RuntimeEventMessage, product: &PreparedStageP
         })
 }
 
-fn snapshot_has_policy(snapshot: &ReplaySnapshot, policy_id: &ExecutionEventId) -> bool {
-    snapshot.events.iter().any(|frame| {
-        if frame.event_id != policy_id.0 {
-            return false;
+fn retained_policy<AuthorityError, StoreError>(
+    snapshot: &ReplaySnapshot,
+) -> Result<Option<RuntimeEventMessage>, WorkRunRuntimeProjectionError<AuthorityError, StoreError>>
+{
+    let mut policy = None;
+    for frame in &snapshot.events {
+        let message: RuntimeEventMessage = serde_json::from_slice(&frame.frame)
+            .map_err(|_| WorkRunRuntimeProjectionError::CorruptOriginal)?;
+        if message.event.category != ExecutionEventCategory::Lifecycle {
+            continue;
         }
-        let Ok(message) = serde_json::from_slice::<RuntimeEventMessage>(&frame.frame) else {
-            return false;
+        let Some(payload) = &message.event.payload else {
+            continue;
         };
-        message.event.category == ExecutionEventCategory::Lifecycle
-            && message.event.payload.as_ref().is_some_and(|payload| {
-                decode_payload(payload).is_some_and(|bytes| {
-                    serde_json::from_slice::<Value>(&bytes).is_ok_and(|value| {
-                        value.get("protocol").and_then(Value::as_str)
-                            == Some(VERIFICATION_POLICY_PROTOCOL)
-                    })
-                })
-            })
-    })
+        if payload.content_type != JSON_CONTENT_TYPE {
+            continue;
+        }
+        let bytes =
+            decode_payload(payload).ok_or(WorkRunRuntimeProjectionError::CorruptOriginal)?;
+        let value: Value = serde_json::from_slice(&bytes)
+            .map_err(|_| WorkRunRuntimeProjectionError::CorruptOriginal)?;
+        if value.get("protocol").and_then(Value::as_str) != Some(VERIFICATION_POLICY_PROTOCOL) {
+            continue;
+        }
+        if policy.replace(message).is_some() {
+            return Err(WorkRunRuntimeProjectionError::InvalidEvidence);
+        }
+    }
+    Ok(policy)
+}
+
+fn snapshot_has_policy<AuthorityError, StoreError>(
+    snapshot: &ReplaySnapshot,
+    job: &ExecutionJob,
+) -> Result<bool, WorkRunRuntimeProjectionError<AuthorityError, StoreError>> {
+    let candidate_ref = job
+        .work_input
+        .as_ref()
+        .and_then(|input| input.candidate_ref.as_deref())
+        .unwrap_or_default();
+    let expected = prepare_verification_policy_attestation(job, candidate_ref)
+        .map_err(WorkRunRuntimeProjectionError::Product)?;
+    Ok(retained_policy(snapshot)?.is_some_and(|policy| same_semantic_product(&policy, &expected)))
 }
 
 fn bind_verification_evidence<AuthorityError, StoreError>(
@@ -540,20 +596,8 @@ fn bind_verification_evidence<AuthorityError, StoreError>(
     snapshot: &ReplaySnapshot,
     expected_fusion_claim_keys: Option<&[String]>,
 ) -> Result<Vec<u8>, WorkRunRuntimeProjectionError<AuthorityError, StoreError>> {
-    // Some providers wrap even schema-constrained output in one Markdown fence.
-    // Unwrap only a complete JSON block; all typed and evidence checks still apply.
-    let message = final_message.trim();
-    let json = message
-        .strip_prefix("```json\n")
-        .and_then(|body| body.strip_suffix("\n```"))
-        .or_else(|| {
-            message
-                .strip_prefix("```json\r\n")
-                .and_then(|body| body.strip_suffix("\r\n```"))
-        })
-        .unwrap_or(message);
-    let result: ModelVerificationResult =
-        serde_json::from_str(json).map_err(|_| WorkRunRuntimeProjectionError::InvalidEvidence)?;
+    let result: ModelVerificationResult = crate::structured_result::decode(final_message)
+        .map_err(|()| WorkRunRuntimeProjectionError::InvalidModelResult)?;
     // Providers may serialize schema-constrained JSON with different key order
     // or whitespace. Bind typed fields, then serialize the authoritative result.
     let catalog = evidence_catalog(snapshot)?;
@@ -566,6 +610,11 @@ fn bind_verification_evidence<AuthorityError, StoreError>(
         .findings
         .into_iter()
         .map(|finding| {
+            if finding.finding_id.trim() == "UNIQUE_FINDING_ID"
+                || finding.explanation.trim() == "OBSERVED_RESULT"
+            {
+                return Err(WorkRunRuntimeProjectionError::InvalidEvidence);
+            }
             let mut cited_outcomes = Vec::with_capacity(finding.evidence_sources.len());
             let evidence_sources = finding
                 .evidence_sources
@@ -1632,6 +1681,305 @@ mod tests {
     }
 
     #[test]
+    fn verification_normalizes_unique_result_and_preserves_evidence_guards() {
+        for message in [
+            VERIFICATION_RESULT.to_owned(),
+            format!("Corrected result follows.\n\n```json\r\n{VERIFICATION_RESULT}\r\n```\nDone."),
+            format!("\u{feff}  Result follows:\n{VERIFICATION_RESULT}\nEnd."),
+        ] {
+            let fixture = fixture();
+            let mut store = MemoryStore::default();
+            let projector = WorkRunRuntimeProjector::new();
+            let job = job("verifier");
+            retain_verification_sequence(&projector, &mut store, &fixture, &job);
+            assert!(
+                projector
+                    .retain_turn_completed(
+                        &mut store,
+                        &AllowAuthority,
+                        fixture.context(),
+                        &job,
+                        StageTurnCompletion {
+                            turn_id: "turn-verifier",
+                            final_message: Some(&message),
+                            failed: false
+                        }
+                    )
+                    .is_ok(),
+                "unique result"
+            );
+        }
+        for message in [
+            format!("{VERIFICATION_RESULT}\n{VERIFICATION_RESULT}"),
+            format!("[{VERIFICATION_RESULT}]"),
+            VERIFICATION_RESULT.replacen(
+                "\"protocol\":",
+                "\"protocol\":\"duplicate\",\"protocol\":",
+                1,
+            ),
+            VERIFICATION_RESULT.replace("call-test", "invented-source"),
+            format!("```text\n{VERIFICATION_RESULT}\n```"),
+            format!("```json\n{VERIFICATION_RESULT}\n```\n```json\n{{}}\n```"),
+        ] {
+            let fixture = fixture();
+            let mut store = MemoryStore::default();
+            let projector = WorkRunRuntimeProjector::new();
+            let job = job("verifier");
+            retain_verification_sequence(&projector, &mut store, &fixture, &job);
+            let before = store.0.clone();
+            assert!(
+                projector
+                    .retain_turn_completed(
+                        &mut store,
+                        &AllowAuthority,
+                        fixture.context(),
+                        &job,
+                        StageTurnCompletion {
+                            turn_id: "turn-verifier",
+                            final_message: Some(&message),
+                            failed: false
+                        }
+                    )
+                    .is_err(),
+                "invalid result"
+            );
+            assert_eq!(store.0, before);
+        }
+    }
+
+    #[test]
+    fn repair_feedback_preserves_receipts_and_rejects_remaining_placeholders() {
+        let fixture = fixture();
+        let mut store = MemoryStore::default();
+        let projector = WorkRunRuntimeProjector::new();
+        let job = job("verifier");
+        retain_verification_sequence(&projector, &mut store, &fixture, &job);
+        let prompt = WorkRunRuntimeProjector::verification_repair_prompt(
+            &mut store,
+            fixture.context(),
+            &job,
+        )
+        .expect("retained evidence feedback");
+        assert!(prompt.contains("call-test"));
+        assert!(prompt.contains("call-command"));
+        assert!(!prompt.contains("FUNCTION_CALL_ID"));
+        let before = store.0.clone();
+        for invalid in [
+            VERIFICATION_RESULT.replace("finding-fixture", "UNIQUE_FINDING_ID"),
+            VERIFICATION_RESULT.replace(
+                "Direct command and test evidence passed.",
+                "OBSERVED_RESULT",
+            ),
+            VERIFICATION_RESULT.replace("call-test", "FUNCTION_CALL_ID"),
+        ] {
+            assert!(matches!(
+                projector.retain_turn_completed(
+                    &mut store,
+                    &AllowAuthority,
+                    fixture.context(),
+                    &job,
+                    StageTurnCompletion {
+                        turn_id: "turn-verifier",
+                        final_message: Some(&invalid),
+                        failed: false
+                    }
+                ),
+                Err(WorkRunRuntimeProjectionError::InvalidEvidence)
+            ));
+            assert_eq!(
+                store.0, before,
+                "rejected output cannot alter direct evidence"
+            );
+        }
+        projector
+            .retain_turn_started(
+                &mut store,
+                &AllowAuthority,
+                fixture.context(),
+                &job,
+                "turn-repair",
+            )
+            .expect("repair read-only policy");
+        assert_eq!(
+            store.0, before,
+            "format correction must reuse the sole policy event"
+        );
+        assert!(
+            projector
+                .retain_turn_completed(
+                    &mut store,
+                    &AllowAuthority,
+                    fixture.context(),
+                    &job,
+                    StageTurnCompletion {
+                        turn_id: "turn-repair",
+                        final_message: Some(VERIFICATION_RESULT),
+                        failed: false
+                    }
+                )
+                .expect("bind corrected result to original actual receipts")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn verification_policy_is_reused_across_turns_and_rejects_a_changed_candidate() {
+        for role in ["reviewer", "verifier"] {
+            let fixture = fixture();
+            let mut store = MemoryStore::default();
+            let projector = WorkRunRuntimeProjector::new();
+            let mut job = job(role);
+            let first = ready(
+                projector
+                    .retain_turn_started(
+                        &mut store,
+                        &AllowAuthority,
+                        fixture.context(),
+                        &job,
+                        "turn-first",
+                    )
+                    .expect("first policy"),
+            );
+            let before = store.0.clone();
+            let second = projector
+                .retain_turn_started(
+                    &mut store,
+                    &AllowAuthority,
+                    fixture.context(),
+                    &job,
+                    "turn-repair",
+                )
+                .expect("reused policy");
+            assert!(matches!(
+                second,
+                Some(WorkRunRuntimeRetention::Ready {
+                    duplicate: true,
+                    ..
+                })
+            ));
+            assert_eq!(ready(second).event, first.event);
+            assert_eq!(store.0, before);
+            let command = projector
+                .retain_exec_command_end(
+                    &mut store,
+                    &AllowAuthority,
+                    fixture.context(),
+                    &job,
+                    StageCommandEnd {
+                        command: &["cargo".to_owned(), "test".to_owned()],
+                        turn_id: "turn-repair",
+                        call_id: "repair-command",
+                        status: VerificationEvidenceStatus::Completed,
+                        exit_code: 0,
+                        artifact: None,
+                    },
+                )
+                .expect("command in correction turn uses original policy");
+            assert_eq!(ready(command).event.sequence.0, 2);
+            let before = store.0.clone();
+            job.work_input.as_mut().unwrap().candidate_ref =
+                Some(format!("refs/winwincode/candidates/{}", "b".repeat(64)));
+            assert!(matches!(
+                projector.retain_turn_started(
+                    &mut store,
+                    &AllowAuthority,
+                    fixture.context(),
+                    &job,
+                    "turn-stale",
+                ),
+                Ok(Some(WorkRunRuntimeRetention::Conflict { .. }))
+            ));
+            assert!(matches!(
+                projector.retain_exec_command_end(
+                    &mut store,
+                    &AllowAuthority,
+                    fixture.context(),
+                    &job,
+                    StageCommandEnd {
+                        command: &["cargo".to_owned(), "test".to_owned()],
+                        turn_id: "turn-stale",
+                        call_id: "stale-command",
+                        status: VerificationEvidenceStatus::Completed,
+                        exit_code: 0,
+                        artifact: None,
+                    },
+                ),
+                Err(WorkRunRuntimeProjectionError::InvalidEvidence)
+            ));
+            assert_eq!(
+                store.0, before,
+                "stale candidate cannot add policy or evidence"
+            );
+        }
+    }
+
+    #[test]
+    fn verification_restart_reuses_original_policy_and_rejects_multiple_attestations() {
+        let fixture = fixture();
+        let mut store = MemoryStore::default();
+        let projector = WorkRunRuntimeProjector::new();
+        let job = job("verifier");
+        let product = prepare_verification_policy_attestation(&job, CANDIDATE_REF).unwrap();
+        let original = ready(Some(
+            projector
+                .retain_product(
+                    &mut store,
+                    &AllowAuthority,
+                    fixture.context(),
+                    &job,
+                    &source_key("policy", "turn-before-upgrade", None),
+                    &product,
+                )
+                .expect("policy retained by the previous adapter"),
+        ));
+        let before = store.0.clone();
+        let reopened = WorkRunRuntimeProjector::new();
+        let replay = reopened
+            .retain_turn_started(
+                &mut store,
+                &AllowAuthority,
+                fixture.context(),
+                &job,
+                "turn-after-restart",
+            )
+            .expect("replay existing policy");
+        assert!(matches!(
+            replay,
+            Some(WorkRunRuntimeRetention::Ready {
+                duplicate: true,
+                ..
+            })
+        ));
+        assert_eq!(ready(replay).event, original.event);
+        assert_eq!(store.0, before);
+        projector
+            .retain_product(
+                &mut store,
+                &AllowAuthority,
+                fixture.context(),
+                &job,
+                &source_key("policy", "turn-duplicate-old-bug", None),
+                &product,
+            )
+            .expect("reproduce prior duplicate attestation");
+        let before = store.0.clone();
+        assert!(matches!(
+            reopened.retain_turn_started(
+                &mut store,
+                &AllowAuthority,
+                fixture.context(),
+                &job,
+                "turn-new",
+            ),
+            Err(WorkRunRuntimeProjectionError::InvalidEvidence)
+        ));
+        assert_eq!(
+            store.0, before,
+            "multiple attestations are rejected, never silently discarded"
+        );
+    }
+
+    #[test]
     fn verification_policy_evidence_and_result_are_contiguous_and_exact() {
         let fixture = fixture();
         let mut store = MemoryStore::default();
@@ -1841,6 +2189,9 @@ mod tests {
             formatted.clone(),
             format!("```json\n{formatted}\n```"),
             format!(" \r\n```json\r\n{formatted}\r\n```\r\n"),
+            format!("Checks passed.\n{formatted}"),
+            format!("Checks passed.\n```json\n{formatted}\n```"),
+            format!("```json\n{formatted}\n```\nExplanation"),
         ] {
             let replay = projector
                 .retain_turn_completed(
@@ -1860,9 +2211,6 @@ mod tests {
             );
         }
         for invalid in [
-            format!("Checks passed.\n{formatted}"),
-            format!("Checks passed.\n```json\n{formatted}\n```"),
-            format!("```json\n{formatted}\n```\nExplanation"),
             format!("```json\n{formatted}\n```\n```json\n{formatted}\n```"),
             format!(
                 "```json\n{}\n```",

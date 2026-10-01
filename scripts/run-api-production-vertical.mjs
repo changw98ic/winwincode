@@ -1049,7 +1049,7 @@ function sourceRevision() {
   return result.stdout.trim()
 }
 
-export function prepareControlledRepository({ fixtureDirectory, files = {} }) {
+export function prepareControlledRepository({ fixtureDirectory, files = {}, verificationCommand = null }) {
   const sourceRoot = resolve(fixtureDirectory, 'source-repositories')
   const repository = join(sourceRoot, IDS.repository)
   mkdirSync(sourceRoot, { recursive: true })
@@ -1059,7 +1059,7 @@ export function prepareControlledRepository({ fixtureDirectory, files = {} }) {
     { cwd: sourceRoot, encoding: 'utf8', stdio: 'pipe' },
   )
   assert.equal(init.status, 0, `controlled API fixture repository creation failed: ${init.stderr}`)
-  writeFileSync(
+  if (verificationCommand === null) writeFileSync(
     join(repository, 'package.json'),
     `${JSON.stringify({
       name: 'winwincode-api-fixture',
@@ -1071,8 +1071,8 @@ export function prepareControlledRepository({ fixtureDirectory, files = {} }) {
   )
   // Prefer npm over pnpm/corepack so the Worker sandbox can execute the
   // scanned verification command without a package-manager bootstrap.
-  writeFileSync(join(repository, 'package-lock.json'), '{}\n')
-  writeFileSync(
+  if (verificationCommand === null) writeFileSync(join(repository, 'package-lock.json'), '{}\n')
+  if (verificationCommand === null) writeFileSync(
     join(repository, '.winwincode-api-candidate'),
     'deterministic StrongFlow candidate baseline\n',
   )
@@ -2083,6 +2083,7 @@ export async function runApiProductionVertical({
   const controlledRepository = prepareControlledRepository({
     fixtureDirectory,
     files: scenario?.files,
+    verificationCommand: scenario?.verificationCommand ?? null,
   })
   const baseline = controlledRepository.revision
   let started = null

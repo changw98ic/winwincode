@@ -5840,6 +5840,16 @@
           "occurredAt": {
             "$ref": "#/components/schemas/Instant"
           },
+          "processClosure": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ClientWorkerProcessClosure"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "schemaVersion": {
             "$ref": "#/components/schemas/SchemaVersion"
           },
@@ -5946,6 +5956,46 @@
         "x-authority": "control-command",
         "x-direction": "control-plane-to-client",
         "x-message-class": "command"
+      },
+      "ClientWorkerProcessClosure": {
+        "additionalProperties": false,
+        "description": "Authenticated Device proof of an exact launch process closure; current reporter instance is distinct from the original launch instance.",
+        "properties": {
+          "clientInstanceId": {
+            "$ref": "#/components/schemas/ClientInstanceId"
+          },
+          "neverStarted": {
+            "type": "boolean"
+          },
+          "occupancyFencingToken": {
+            "$ref": "#/components/schemas/OccupancyFencingToken"
+          },
+          "processBootDigest": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Sha256Digest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reportingClientInstanceId": {
+            "$ref": "#/components/schemas/ClientInstanceId"
+          },
+          "workerLaunchGrantId": {
+            "$ref": "#/components/schemas/WorkerLaunchGrantId"
+          }
+        },
+        "required": [
+          "workerLaunchGrantId",
+          "clientInstanceId",
+          "reportingClientInstanceId",
+          "occupancyFencingToken",
+          "neverStarted",
+          "processBootDigest"
+        ],
+        "type": "object"
       },
       "ClientWorkerReconcileMessage": {
         "additionalProperties": false,
@@ -6093,6 +6143,16 @@
           },
           "occurredAt": {
             "$ref": "#/components/schemas/Instant"
+          },
+          "processClosure": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ClientWorkerProcessClosure"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "schemaVersion": {
             "$ref": "#/components/schemas/SchemaVersion"
@@ -14619,6 +14679,13 @@
       "ExecutionOutcomeUsage": {
         "additionalProperties": false,
         "properties": {
+          "accountingStatus": {
+            "enum": [
+              "known",
+              "unknown"
+            ],
+            "type": "string"
+          },
           "costMicrounits": {
             "maximum": 9007199254740991,
             "minimum": 0,
@@ -14626,6 +14693,11 @@
               "integer",
               "null"
             ]
+          },
+          "knownTokens": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
           },
           "runtimeMillis": {
             "maximum": 9007199254740991,
@@ -14635,13 +14707,18 @@
           "tokens": {
             "maximum": 9007199254740991,
             "minimum": 0,
-            "type": "integer"
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [
           "runtimeMillis",
           "tokens",
-          "costMicrounits"
+          "costMicrounits",
+          "knownTokens",
+          "accountingStatus"
         ],
         "type": "object"
       },
@@ -14682,11 +14759,35 @@
           "SNAPSHOT_BINDING_MISSING",
           "SNAPSHOT_BINDING_MISMATCH",
           "MODEL_STREAM_FAILED",
+          "DEVICE_PROVIDER_REQUEST_INVALID",
+          "DEVICE_PROVIDER_REQUEST_TRANSLATION_FAILED",
+          "DEVICE_PROVIDER_REQUEST_TOO_LARGE",
+          "DEVICE_PROVIDER_RESPONSE_CONTENT_TYPE_INVALID",
+          "DEVICE_PROVIDER_SSE_FRAMING_INVALID",
+          "DEVICE_PROVIDER_SSE_EVENT_INVALID",
+          "DEVICE_PROVIDER_RESPONSE_INCOMPLETE",
+          "DEVICE_PROVIDER_STREAM_CONVERSION_FAILED",
+          "DEVICE_PROVIDER_CONNECTION_FAILED",
+          "DEVICE_PROVIDER_UPSTREAM_FAILED",
+          "DEVICE_PROVIDER_REQUEST_REJECTED",
+          "DEVICE_PROVIDER_RATE_LIMITED",
+          "DEVICE_PROVIDER_UNAVAILABLE",
+          "DEVICE_PROVIDER_INVALID_CONFIGURATION",
+          "DEVICE_PROVIDER_ADAPTER_PROTOCOL_FAILED",
+          "DEVICE_PROVIDER_TRANSPORT_FAILED",
+          "DEVICE_PROVIDER_RESPONSE_TOO_LARGE",
+          "DEVICE_PROVIDER_CREDENTIAL_LEAK_BLOCKED",
+          "DEVICE_MODEL_IDENTITY_CONFLICT",
+          "DEVICE_MODEL_PAUSED",
+          "DEVICE_MODEL_INTERRUPTED",
+          "DEVICE_JEV_UNAVAILABLE",
           "INPUT_CLOSED",
           "APPROVAL_DENIED",
           "CANCELLED",
           "EXECUTION_FAILED",
-          "INFRASTRUCTURE_ERROR"
+          "INFRASTRUCTURE_ERROR",
+          "CANDIDATE_UNCHANGED",
+          "CANDIDATE_PREPARATION_FAILED"
         ],
         "type": "string"
       },
@@ -21357,7 +21458,7 @@
       },
       "RepairLoopBudget": {
         "additionalProperties": false,
-        "description": "Immutable upper bounds for one repair loop. maxRepairRounds is canonically fixed at three; Observer calls, primary-model calls, tokens, cost, wall time, ChangeBatches, and serialized context bytes are audited independently.",
+        "description": "Immutable bounds for one repair loop. Null usage, elapsed-time and call limits are unbounded. Structural repair rounds, batches and context bytes remain bounded.",
         "properties": {
           "maxChangeBatches": {
             "maximum": 4,
@@ -21372,12 +21473,18 @@
           "maxObserverCalls": {
             "maximum": 4,
             "minimum": 1,
-            "type": "integer"
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "maxPrimaryModelCalls": {
             "maximum": 8,
             "minimum": 1,
-            "type": "integer"
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "maxRepairRounds": {
             "const": 3,
@@ -21388,17 +21495,26 @@
           "maxTotalCostMicrounits": {
             "maximum": 9007199254740991,
             "minimum": 1,
-            "type": "integer"
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "maxTotalTokens": {
             "maximum": 10000000,
             "minimum": 1,
-            "type": "integer"
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "maxWallTimeMillis": {
             "maximum": 3600000,
             "minimum": 1000,
-            "type": "integer"
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [
@@ -21528,17 +21644,17 @@
             "type": "integer"
           },
           "elapsedMillis": {
-            "maximum": 3600000,
+            "maximum": 9007199254740991,
             "minimum": 0,
             "type": "integer"
           },
           "observerCalls": {
-            "maximum": 4,
+            "maximum": 9007199254740991,
             "minimum": 0,
             "type": "integer"
           },
           "primaryModelCalls": {
-            "maximum": 8,
+            "maximum": 9007199254740991,
             "minimum": 0,
             "type": "integer"
           },
@@ -21553,7 +21669,7 @@
             "type": "integer"
           },
           "totalTokens": {
-            "maximum": 10000000,
+            "maximum": 9007199254740991,
             "minimum": 0,
             "type": "integer"
           }
@@ -27026,7 +27142,15 @@
             "$ref": "#/components/schemas/WorkerSessionId"
           },
           "workRunId": {
-            "$ref": "#/components/schemas/WorkRunId"
+            "description": "WorkRun anchor; omitted or null for ProductSession Chat.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/WorkRunId"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -27037,7 +27161,6 @@
           "occupancyFencingToken",
           "repositoryBindingId",
           "productSessionId",
-          "workRunId",
           "workerSessionId",
           "workerId",
           "workerInstanceId",
@@ -27221,6 +27344,11 @@
           "startedAt": {
             "$ref": "#/components/schemas/Instant"
           },
+          "usageAccountingVersion": {
+            "maximum": 2,
+            "minimum": 2,
+            "type": "integer"
+          },
           "workerId": {
             "$ref": "#/components/schemas/WorkerId"
           },
@@ -27237,7 +27365,8 @@
           "workerId",
           "workerInstanceId",
           "startedAt",
-          "capabilities"
+          "capabilities",
+          "usageAccountingVersion"
         ],
         "title": "worker.register",
         "type": "object",
@@ -28688,7 +28817,7 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:b4232c9fab25565fa3f293601c39d884732be6e220efc3dda5f546a5e216c150",
+  "x-source-digest": "sha256:fb58bdfbfb87922e969fbd212c4a6034f98324d268d2e3fe1cc56b22c96c18b0",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {

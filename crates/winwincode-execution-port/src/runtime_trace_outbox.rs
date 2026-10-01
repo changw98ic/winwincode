@@ -194,11 +194,16 @@ impl ObserverMode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PerformanceBaselineReport {
+    /// False means token counters are known lower bounds, not settled totals.
+    #[serde(default, skip_serializing_if = "usage_incomplete")]
+    pub usage_complete: bool,
     pub execution_mode: ExecutionMode,
     pub observer_mode: ObserverMode,
     pub primary_model_call_count: i64,
-    pub primary_model_input_tokens: i64,
-    pub primary_model_cached_tokens: i64,
+    pub primary_model_input_tokens: Option<i64>,
+    pub primary_model_cached_tokens: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_model_inclusive_input_tokens: Option<i64>,
     pub primary_model_output_tokens: i64,
     pub primary_model_wait_ms: i64,
     pub tool_call_count: i64,
@@ -211,6 +216,12 @@ pub struct PerformanceBaselineReport {
     pub repair_rounds: i64,
     pub turn_count: i64,
     pub total_runtime_ms: i64,
+}
+
+// Serde's skip predicate takes a borrowed field.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn usage_incomplete(value: &bool) -> bool {
+    !value
 }
 
 /// Stable gate outcome retained without free-form policy details.
@@ -699,7 +710,8 @@ fn validate_trace_fact(fact: &RuntimeTraceFact) -> Result<(), RuntimeTraceInputE
         }
         RuntimeTraceFact::PerformanceBaseline { report }
             if performance_values(report)
-                .any(|value| !(0..=MAX_SAFE_SEQUENCE).contains(&value)) =>
+                .any(|value| !(0..=MAX_SAFE_SEQUENCE).contains(&value))
+                || !valid_cache_breakdown(report) =>
         {
             return Err(RuntimeTraceInputError::InvalidIdentity);
         }
@@ -708,11 +720,28 @@ fn validate_trace_fact(fact: &RuntimeTraceFact) -> Result<(), RuntimeTraceInputE
     Ok(())
 }
 
+fn valid_cache_breakdown(report: &PerformanceBaselineReport) -> bool {
+    let sum = match (
+        report.primary_model_input_tokens,
+        report.primary_model_cached_tokens,
+    ) {
+        (Some(input), Some(cached)) => input.checked_add(cached),
+        (None, None) => report.primary_model_inclusive_input_tokens,
+        _ => None,
+    };
+    sum.is_some_and(|sum| {
+        (0..=MAX_SAFE_SEQUENCE).contains(&sum)
+            && report
+                .primary_model_inclusive_input_tokens
+                .is_none_or(|inclusive| inclusive == sum)
+    })
+}
+
 fn performance_values(report: &PerformanceBaselineReport) -> impl Iterator<Item = i64> {
     [
         report.primary_model_call_count,
-        report.primary_model_input_tokens,
-        report.primary_model_cached_tokens,
+        report.primary_model_input_tokens.unwrap_or(0),
+        report.primary_model_cached_tokens.unwrap_or(0),
         report.primary_model_output_tokens,
         report.primary_model_wait_ms,
         report.tool_call_count,

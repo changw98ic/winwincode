@@ -181,13 +181,42 @@ enum ModelPortMessage {
         #[serde(rename = "responseId")]
         response_id: String,
         #[serde(rename = "tokenUsage")]
-        token_usage: Option<TokenUsage>,
+        token_usage: Option<ModelTokenUsageWire>,
         #[serde(rename = "endTurn")]
         end_turn: Option<bool>,
     },
     Error {
         error: ModelPortFailureWire,
     },
+}
+
+// The Kernel consumes inclusive counters for context management. Cache details
+// may be unavailable; billing retains the original nullable wire fact in Host.
+#[allow(clippy::struct_field_names)] // Canonical token field names belong to the wire contract.
+#[derive(Debug, Deserialize)]
+struct ModelTokenUsageWire {
+    input_tokens: i64,
+    #[serde(default)]
+    cached_input_tokens: Option<i64>,
+    #[serde(default)]
+    cache_write_input_tokens: i64,
+    output_tokens: i64,
+    #[serde(default)]
+    reasoning_output_tokens: i64,
+    total_tokens: i64,
+}
+impl From<ModelTokenUsageWire> for TokenUsage {
+    fn from(value: ModelTokenUsageWire) -> Self {
+        Self {
+            input_tokens: value.input_tokens,
+            cached_input_tokens: value.cached_input_tokens.unwrap_or(0),
+            cache_write_input_tokens: value.cache_write_input_tokens,
+            output_tokens: value.output_tokens,
+            reasoning_output_tokens: value.reasoning_output_tokens,
+            total_tokens: value.total_tokens,
+            ..Default::default()
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -261,7 +290,7 @@ impl ModelPortMessage {
                 end_turn,
             } => Ok(ResponseEvent::Completed {
                 response_id,
-                token_usage,
+                token_usage: token_usage.map(Into::into),
                 end_turn,
             }),
             Self::Error { error } => Err(error.into()),

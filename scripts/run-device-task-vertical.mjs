@@ -16,7 +16,8 @@ import { pathToFileURL } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import { parseEnv } from 'node:util'
 import { loadDeviceAgentTask } from './device-agent-task.mjs'
-import { exportDeviceCandidate, exportDeviceExecutionReceipts } from './export-device-candidate.mjs'
+import { exportDeviceCandidate, exportDeviceExecutionReceipts, readDeviceExecutionReceipts } from './export-device-candidate.mjs'
+import { deviceFailureWithModelCauses } from './device-model-failures.mjs'
 import { installDevicePublicSmoke, resolveDeviceTaskApprovals, seedDeviceLocalProvider } from './device-production-fixture.mjs'
 import { BenchmarkError, validateBenchmarkConfiguration } from './run-real-task-benchmark.mjs'
 
@@ -202,6 +203,25 @@ export function expiredDeviceWorkRunLease(directory, workRunId, workerSessionId,
 export function expiredCrashedDeviceWorkRun(directory, workRunId, workerSessionId, now = Date.now()) {
   const expired = expiredDeviceWorkRunLease(directory, workRunId, workerSessionId, now)
   return expired?.workerState === 'crashed' ? expired : null
+}
+
+// A queued WorkRun has no aggregate run yet. Read the scheduler's durable
+// terminal state so an invalid dispatch cannot leave the Device driver waiting.
+export function failedDeviceDispatch(directory, workRunId, deliveryId) {
+  const path = join(directory, 'server-data', 'control-plane.sqlite3')
+  if (!existsSync(path)) return null
+  const server = new DatabaseSync(path, { readOnly: true })
+  let job
+  try {
+    job = server.prepare(`SELECT job_id, state, attempt, revision, updated_at
+      FROM scheduler_execution_jobs WHERE work_run_id = ? AND delivery_id = ?
+      ORDER BY updated_at DESC, attempt DESC, revision DESC, job_id DESC LIMIT 1`)
+      .get(workRunId, deliveryId)
+  } finally { server.close() }
+  return job?.state === 'failed'
+    ? { workRunId, deliveryId, jobId: job.job_id, state: job.state,
+      attempt: job.attempt, revision: job.revision, updatedAt: job.updated_at }
+    : null
 }
 
 export async function runDeviceTaskVertical({
@@ -419,10 +439,23 @@ export async function runDeviceTaskVertical({
           save()
 
           const anchored = new Map([[workRunId, launched.workerSessionId]])
+          const checkDispatchFailure = id => {
+            if (!input) return
+            const failure = failedDeviceDispatch(directory, id, deliveryId)
+            if (!failure) return
+            report.dispatchFailure = failure
+            report.failure = deviceFailureWithModelCauses(
+              { code: 'DEVICE_DISPATCH_FAILED', status: 'failed' },
+              readDeviceExecutionReceipts(directory), [failure.jobId])
+            save()
+            throw new BenchmarkError(report.failure.code,
+              'Device scheduler persisted a failed WorkRun dispatch')
+          }
           const delivery = await driveDelivery(api, input ? null : 600_000, modelRoute, Date.now, {
             resolveAttention: input === null ? true : 'verified-candidate',
             expectDeviceWorkRun: true,
             strictLaunchAnchor: true,
+            pendingDeviceWorkRunIds: () => [...anchored.keys()],
             assertRunning: devicePath.assertBenchmarkRunning,
             onProjection: ({ detail, workRunAggregate }) => {
               if (report.delivery?.detail?.readCursor?.token === detail.readCursor?.token) return
@@ -433,6 +466,7 @@ export async function runDeviceTaskVertical({
             onActiveWorkRuns: async runs => {
               report.workRuns = runs
               save()
+              for (const run of runs) checkDispatchFailure(run.id)
               for (const run of runs) {
                 if (anchored.has(run.id)) continue
                 const launched = await devicePath.launchAnchor({ workRunId: run.id })
@@ -461,6 +495,9 @@ export async function runDeviceTaskVertical({
                   },
                 })
               }
+            },
+            onPendingDeviceWorkRuns: async ids => {
+              for (const id of ids) checkDispatchFailure(id)
             },
           })
           const detail = delivery.detail

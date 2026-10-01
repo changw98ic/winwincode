@@ -401,12 +401,12 @@ pub struct SettledModelUsage {
     pub provider_id: String,
     pub model_id: String,
     pub input_tokens: u64,
-    pub cached_input_tokens: u64,
+    pub cached_input_tokens: Option<u64>,
     pub cache_write_input_tokens: u64,
     pub output_tokens: u64,
     pub reasoning_output_tokens: u64,
     pub total_tokens: u64,
-    pub cost_micros: u64,
+    pub cost_micros: Option<u64>,
 }
 
 /// Durable successful settlement result.
@@ -470,13 +470,13 @@ pub struct ModelUsageSourcePage {
 }
 
 /// Summed immutable Usage facts.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelUsageTotals {
     pub entries: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub total_tokens: u64,
-    pub cost_micros: u64,
+    pub cost_micros: Option<u64>,
 }
 
 /// Reconciliation result plus exact Provider subtotals.
@@ -1346,10 +1346,15 @@ fn normalized_usage(
     charge: &ModelAttemptCharge,
 ) -> Result<SettledModelUsage, ModelRetryUsageError> {
     validate_token(&charge.provider_usage_id, 200)?;
-    if charge.usage.cached_input_tokens > charge.usage.input_tokens
+    if charge
+        .usage
+        .cached_input_tokens
+        .is_some_and(|cached| cached > charge.usage.input_tokens)
         || charge.usage.cache_write_input_tokens > charge.usage.input_tokens
         || charge.usage.reasoning_output_tokens > charge.usage.output_tokens
-        || charge.cost_micros > MAX_SAFE_INTEGER
+        || charge
+            .cost_micros
+            .is_some_and(|cost| cost > MAX_SAFE_INTEGER)
     {
         return Err(ModelRetryUsageError::invalid());
     }
@@ -1809,11 +1814,15 @@ fn normalized_stored_usage(
     validate_token(&usage.model_id, 200)?;
     if usage.attempt == 0
         || usage.attempt > MAX_TOTAL_ATTEMPTS
-        || usage.cached_input_tokens > usage.input_tokens
+        || usage
+            .cached_input_tokens
+            .is_some_and(|cached| cached > usage.input_tokens)
         || usage.cache_write_input_tokens > usage.input_tokens
         || usage.reasoning_output_tokens > usage.output_tokens
         || usage.total_tokens != checked_add(usage.input_tokens, usage.output_tokens)?
-        || usage.cost_micros > MAX_SAFE_INTEGER
+        || usage
+            .cost_micros
+            .is_some_and(|cost| cost > MAX_SAFE_INTEGER)
     {
         return Err(ModelRetryUsageError::corrupt());
     }
@@ -2227,7 +2236,10 @@ fn add_usage(
     totals.input_tokens = checked_add(totals.input_tokens, usage.input_tokens)?;
     totals.output_tokens = checked_add(totals.output_tokens, usage.output_tokens)?;
     totals.total_tokens = checked_add(totals.total_tokens, usage.total_tokens)?;
-    totals.cost_micros = checked_add(totals.cost_micros, usage.cost_micros)?;
+    totals.cost_micros = match (totals.cost_micros, usage.cost_micros) {
+        (Some(a), Some(b)) => Some(checked_add(a, b)?),
+        _ => None,
+    };
     Ok(())
 }
 
@@ -2445,4 +2457,16 @@ fn storage_retry_exhausted() -> ModelRetryUsageError {
         ModelRetryUsageErrorKind::Storage,
         "model retry storage concurrency limit was exhausted",
     )
+}
+
+impl Default for ModelUsageTotals {
+    fn default() -> Self {
+        Self {
+            entries: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            total_tokens: 0,
+            cost_micros: Some(0),
+        }
+    }
 }

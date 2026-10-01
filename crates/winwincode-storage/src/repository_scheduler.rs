@@ -508,6 +508,30 @@ impl<'storage> RepositoryScheduler<'storage> {
         Ok(scope)
     }
 
+    /// Lists Device jobs whose exact current launch has trusted exit evidence.
+    /// # Errors
+    /// Rejects corrupt payloads or unavailable recovery authority.
+    pub fn pending_device_recoveries(&self) -> Result<Vec<Vec<u8>>, StorageError> {
+        let available: bool = self
+            .storage
+            .connection()?
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='worker_launch_grant_exits')",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(sql_error)?;
+        if !available {
+            return Ok(Vec::new());
+        }
+        let mut statement=self.storage.connection()?.prepare("SELECT j.dispatch_payload FROM scheduler_execution_jobs j JOIN device_execution_current_facts f ON f.job_id=j.job_id JOIN worker_launch_grant_exits e ON e.worker_launch_grant_id=f.worker_launch_grant_id WHERE j.state IN ('queued','leased','running') AND j.cancellation_request_id IS NULL ORDER BY j.submitted_at,j.job_id LIMIT 100").map_err(sql_error)?;
+        statement
+            .query_map([], |r| r.get(0))
+            .map_err(sql_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sql_error)
+    }
+
     /// Persists one cancellation and either returns exact Worker cancel
     /// authority or terminalizes work which never reached an accepted dispatch.
     ///
@@ -1315,9 +1339,6 @@ fn recover_active_job(
             .optional()
             .map_err(sql_error)?
             .is_some();
-        if offered {
-            continue;
-        }
         let lease = load_lease_in_transaction(connection, &job.job_id)?
             .ok_or_else(|| StorageError::adapter("active queue job has no Registry lease"))?;
         require_job_lease(&job, &lease)?;
@@ -1325,7 +1346,18 @@ fn recover_active_job(
             continue;
         }
         if lease.worker_instance_id == request.worker_instance_id {
+            if offered {
+                continue;
+            }
             return Ok(Some(ActiveJobRecovery::Reoffer(job)));
+        }
+        if !crate::device_execution_recovery::recovery_ready(
+            connection,
+            &lease,
+            &request.worker_id,
+            &request.worker_instance_id,
+        )? {
+            continue;
         }
         if request.issued_at.0 < lease.expires_at.0 {
             return Ok(Some(ActiveJobRecovery::Wait));
@@ -1335,6 +1367,7 @@ fn recover_active_job(
     Ok(None)
 }
 
+#[allow(clippy::too_many_lines)]
 fn replacement_receipt(
     connection: &Connection,
     request: &RepositorySchedulerClaimRequest,
@@ -1428,6 +1461,13 @@ fn replacement_receipt(
             created_at: &request.issued_at,
         },
     )?;
+    crate::device_execution_recovery::commit_recovery(
+        connection,
+        previous_lease,
+        &lease,
+        replacement.work_run_id.as_ref(),
+        &request.issued_at,
+    )?;
     Ok(RepositorySchedulerClaimReceipt {
         job: replaced,
         lease,
@@ -1463,6 +1503,14 @@ fn retry_failed_receipt(
     job: &ExecutionJobRecord,
     next_attempt: u64,
 ) -> Result<RepositorySchedulerClaimReceipt, StorageError> {
+    if crate::device_execution_binding::load_facts(connection, &job.job_id.0)
+        .map_err(|e| StorageError::adapter(e.to_string()))?
+        .is_some()
+    {
+        return Err(StorageError::invalid_input(
+            "Device retry requires trusted launch replacement authority",
+        ));
+    }
     let predecessor_lease = load_lease_in_transaction(connection, &job.job_id)?
         .ok_or_else(|| StorageError::adapter("failed execution Job has no Registry lease"))?;
     require_job_lease(job, &predecessor_lease)?;
@@ -1579,11 +1627,11 @@ fn select_ready_job(
                )
                AND (
                    (json_extract(CASE WHEN json_valid(CAST(j.dispatch_payload AS TEXT)) THEN CAST(j.dispatch_payload AS TEXT) ELSE '{}' END, '$.workInput.deviceTarget') IS NULL AND NOT EXISTS (
-                       SELECT 1 FROM device_execution_reservation_facts device_dispatch
+                       SELECT 1 FROM device_execution_current_facts device_dispatch
                        WHERE device_dispatch.job_id = j.job_id
                    ))
                    OR EXISTS (
-                       SELECT 1 FROM device_execution_reservation_facts device_dispatch
+                       SELECT 1 FROM device_execution_current_facts device_dispatch
                        WHERE device_dispatch.job_id = j.job_id
                          AND device_dispatch.worker_id = ?6
                          AND device_dispatch.worker_instance_id = ?7
@@ -1701,7 +1749,9 @@ fn record_offer(
         .execute(
             "INSERT INTO repository_scheduler_offers
                 (scope_key, scheduler_generation, job_id, message_id, offered_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(scope_key,scheduler_generation,job_id) DO UPDATE
+             SET message_id=excluded.message_id,offered_at=excluded.offered_at",
             params![
                 scope_key,
                 request.scheduler_generation,

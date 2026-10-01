@@ -1017,7 +1017,9 @@ impl<'storage> ExecutionRegistry<'storage> {
                 worker: None,
             });
         };
-        if current.worker_instance_id != request.worker_instance_id {
+        if current.protocol_version != EXECUTION_PROTOCOL_VERSION
+            || current.worker_instance_id != request.worker_instance_id
+        {
             transaction.commit().map_err(sql_error)?;
             return Ok(WorkerHeartbeatReceipt {
                 status: LeaseWriteStatus::RejectedWorkerInstance,
@@ -1714,10 +1716,10 @@ impl<'storage> ExecutionRegistry<'storage> {
         let mut healthy_max_slots = 0_u64;
         let mut healthy_running_slots = 0_u64;
         let mut healthy_available_slots = 0_u64;
-        for worker in workers
-            .iter()
-            .filter(|worker| worker.health == WorkerHealth::Healthy)
-        {
+        for worker in workers.iter().filter(|worker| {
+            worker.health == WorkerHealth::Healthy
+                && worker.protocol_version == EXECUTION_PROTOCOL_VERSION
+        }) {
             healthy_max_slots = checked_capacity_add(healthy_max_slots, worker.max_slots)?;
             healthy_running_slots =
                 checked_capacity_add(healthy_running_slots, worker.running_slots)?;
@@ -2811,7 +2813,9 @@ fn validate_worker_record(worker: &WorkerRecord) -> Result<(), StorageError> {
     }
     validate_authentication_identity(&worker.authentication_identity)?;
     validate_bounded_ascii(&worker.protocol_version, "protocolVersion")?;
-    if worker.protocol_version != EXECUTION_PROTOCOL_VERSION {
+    if worker.protocol_version != EXECUTION_PROTOCOL_VERSION
+        && worker.protocol_version != "winwincode/v1"
+    {
         return Err(StorageError::invalid_input(
             "Worker protocol version is unsupported",
         ));

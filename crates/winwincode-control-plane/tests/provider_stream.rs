@@ -216,7 +216,7 @@ impl ProviderGatewayAdmissionPort for Admission {
                 }
             },
             actual_tokens: 0,
-            actual_cost_micros: 0,
+            actual_cost_micros: Some(0),
             revision: 2,
             idempotent_replay: false,
         })
@@ -228,7 +228,7 @@ impl ProviderGatewayAdmissionPort for Admission {
         original_request_id: &RequestId,
         model_exchange_id: &ModelExchangeId,
         usage: ProviderTokenUsage,
-        actual_cost_micros: u64,
+        actual_cost_micros: Option<u64>,
     ) -> Result<ModelReservationTerminalReceipt, ProviderAdmissionError> {
         Ok(ModelReservationTerminalReceipt {
             request_id: original_request_id.clone(),
@@ -597,7 +597,7 @@ fn positive_events(fragmented: bool) -> Vec<ProviderStreamEvent> {
         ProviderStreamEvent::ReasoningEnded { index: 1 },
         ProviderStreamEvent::Usage(ProviderTokenUsage {
             input_tokens: 10,
-            cached_input_tokens: 2,
+            cached_input_tokens: Some(2),
             cache_write_input_tokens: 1,
             output_tokens: 4,
             reasoning_output_tokens: 2,
@@ -1003,6 +1003,33 @@ fn cancellation_disconnect_failure_and_split_secret_are_fail_closed() {
         failure["error"]["providerRequestId"],
         "sha256:b39c43372e7181a79a28eeb0e5259c53e1f9f743febc65005d7b39376179c18d"
     );
+}
+
+#[test]
+fn source_code_with_credential_field_names_survives_provider_conversion() {
+    let receipt = gateway_receipt();
+    let source =
+        "let token: i32 = 1;\nlet secret = false;\nstruct Config { authorization: String }";
+    let frames = convert(
+        &receipt,
+        vec![
+            ProviderStreamEvent::ResponseStarted {
+                observed_model_id: Some("observed-fixture-model".to_owned()),
+                provider_response_id: "response-source".to_owned(),
+            },
+            ProviderStreamEvent::TextStarted { index: 0 },
+            ProviderStreamEvent::TextDelta {
+                index: 0,
+                delta: source.to_owned(),
+            },
+            ProviderStreamEvent::TextEnded { index: 0 },
+            ProviderStreamEvent::Finished(ProviderFinishReason::Stop),
+        ],
+    );
+    let payloads = values(&frames);
+    assert!(payloads.iter().any(|value| {
+        value["type"] == "output_item_done" && value["item"]["content"][0]["text"] == source
+    }));
 }
 
 #[test]

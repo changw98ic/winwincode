@@ -161,7 +161,7 @@ impl From<PoolConfigEvidence> for ModelRequestPoolConfig {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ExpectedProviderUsage {
     input_tokens: u64,
-    cached_input_tokens: u64,
+    cached_input_tokens: Option<u64>,
     cache_write_input_tokens: u64,
     output_tokens: u64,
     reasoning_output_tokens: u64,
@@ -216,7 +216,7 @@ fn restricted_byte_scan_catches_a_marker_split_across_read_chunks() {
 fn provider_total_does_not_double_count_cached_or_reasoning_subtotals() {
     let usage = ExpectedProviderUsage {
         input_tokens: 10,
-        cached_input_tokens: 4,
+        cached_input_tokens: Some(4),
         cache_write_input_tokens: 3,
         output_tokens: 7,
         reasoning_output_tokens: 5,
@@ -324,7 +324,10 @@ fn load_evidence(path: &Path) -> Result<LiveProviderDeliveryEvidence, AuditError
     for run in &evidence.provider_runs {
         if run.budget_period_id.is_empty()
             || run.provider_usage_id.is_empty()
-            || run.expected_usage.cached_input_tokens > run.expected_usage.input_tokens
+            || run
+                .expected_usage
+                .cached_input_tokens
+                .is_some_and(|cached| cached > run.expected_usage.input_tokens)
             || run.expected_usage.cache_write_input_tokens > run.expected_usage.input_tokens
             || run.expected_usage.reasoning_output_tokens > run.expected_usage.output_tokens
             || run.expected_usage.cost_micros > MAX_SAFE_INTEGER
@@ -445,7 +448,7 @@ fn audit_gateway_terminal(
         || terminal.admission.model_exchange_id != run.model_exchange_id
         || terminal.admission.outcome != ModelReservationTerminalOutcome::Completed
         || terminal.admission.actual_tokens != run.expected_usage.total_tokens()?
-        || terminal.admission.actual_cost_micros != run.expected_usage.cost_micros
+        || terminal.admission.actual_cost_micros != Some(run.expected_usage.cost_micros)
         || !terminal.idempotent_replay
     {
         return Err(AuditError::durable());
@@ -480,7 +483,7 @@ fn audit_usage(
         || usage.usage.output_tokens != expected.output_tokens
         || usage.usage.reasoning_output_tokens != expected.reasoning_output_tokens
         || usage.usage.total_tokens != expected.total_tokens()?
-        || usage.usage.cost_micros != expected.cost_micros
+        || usage.usage.cost_micros != Some(expected.cost_micros)
         || usage.route_authority_fingerprint != authority.fingerprint()
         || &usage.settled_at != settled_at
     {

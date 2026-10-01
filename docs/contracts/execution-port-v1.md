@@ -175,6 +175,61 @@ Heartbeat 只更新存活、容量和当前 Lease 进度，不隐式派发 Job�
 - Cancel 是 Control Plane 发出的协作式请求。最终状态以租约内 `job.outcome` 为准，
   `job.cancel_ack` 本身不等同于执行已经结束。
 
+`ExecutionJob.goal` 保存任务目标，长度上限为 20,000 个 Unicode 字符；候选源码和
+成员结果通过仓库输入文件提供，输入文件摘要随任务绑定保留。派发前发现字段不符合
+规范时返回不可重试的 `INVALID_REQUEST`（HTTP 400）。
+
+独立 reviewer/verifier 的同一运行只保留一份绑定冻结 Candidate 的只读策略凭证。
+格式修正轮次与进程重启复用原凭证；不同 Candidate 或重复的策略凭证仍拒绝验证。
+
+### Device 模型失败码
+
+Device 在终止 `model.chunk` 的 `error.code` 中保留失败环节，`error.message`
+只使用固定文本；上游响应正文、HTTP 错误文本和凭据不进入公开报告。
+下表中的模型失败均保留 `retryable: false`：错误分类本身不授权重复计费，
+已发出的请求不会因为重新分类而重试。
+
+模型文本和工具输出中的 NUL 作为合法 JSON 文本保留并转义。请求大小限制按实际
+文本及序列化后的请求字节数检查，NUL 本身不会触发 `DEVICE_PROVIDER_REQUEST_TOO_LARGE`。
+
+| `error.code` | 失败环节 |
+| --- | --- |
+| `DEVICE_PROVIDER_REQUEST_INVALID` | 本地请求结构或字段不合法 |
+| `DEVICE_PROVIDER_REQUEST_TRANSLATION_FAILED` | 转换为服务商请求格式时失败 |
+| `DEVICE_PROVIDER_REQUEST_TOO_LARGE` | 请求超过适配器大小限制 |
+| `DEVICE_PROVIDER_CONNECTION_FAILED` | 建立 HTTP 请求或响应时失败 |
+| `DEVICE_PROVIDER_UPSTREAM_FAILED` | 服务商返回 HTTP 5xx |
+| `DEVICE_PROVIDER_REQUEST_REJECTED` | Provider 或适配器拒绝请求 |
+| `DEVICE_PROVIDER_RATE_LIMITED` | 服务商返回 HTTP 429 |
+| `DEVICE_PROVIDER_RESPONSE_CONTENT_TYPE_INVALID` | 成功 HTTP 响应不是 `text/event-stream` |
+| `DEVICE_PROVIDER_SSE_FRAMING_INVALID` | SSE 文本编码、行或帧结构不合法 |
+| `DEVICE_PROVIDER_SSE_EVENT_INVALID` | SSE 的 JSON、事件字段或生命周期不合法 |
+| `DEVICE_PROVIDER_RESPONSE_INCOMPLETE` | 响应缺少协议要求的终止或记账信息 |
+| `DEVICE_PROVIDER_STREAM_CONVERSION_FAILED` | 服务商事件无法转换为 Core 事件 |
+| `DEVICE_PROVIDER_TRANSPORT_FAILED` | 读取响应正文时传输失败 |
+| `DEVICE_PROVIDER_RESPONSE_TOO_LARGE` | 响应、事件或事件数超过适配器限制 |
+| `DEVICE_PROVIDER_CREDENTIAL_LEAK_BLOCKED` | 输出被凭据泄漏检查拦截 |
+| `DEVICE_PROVIDER_INVALID_CONFIGURATION` | 本地 Provider 配置不合法 |
+| `DEVICE_PROVIDER_UNAVAILABLE` | 本地 Provider 或其存储不可用 |
+| `DEVICE_PROVIDER_ADAPTER_PROTOCOL_FAILED` | 其他适配器未提供具体环节的协议错误 |
+| `DEVICE_MODEL_IDENTITY_CONFLICT` | 本地 exchange、请求或流身份冲突 |
+| `DEVICE_MODEL_PAUSED` | 流处于暂停状态 |
+| `DEVICE_MODEL_INTERRUPTED` | 重启后前次请求结果未知 |
+| `DEVICE_JEV_UNAVAILABLE` | JEV 请求准备失败 |
+
+`MODEL_STREAM_FAILED` 继续用于其他模型流错误和旧记录。旧记录中的
+`DEVICE_PROVIDER_PROTOCOL_FAILED` 保持未分类，不推断其失败环节。
+错误枚举的来源是 `schema/winwincode/v1/execution-port.schema.json`；新增码需要
+Worker、Control Plane、Core 接口和客户端使用同一套生成合同。
+
+基准执行回执的 `calls[].failure` 保留固定错误码和 `retryable`；从旧
+`MODEL_STREAM_FAILED` 文本恢复的类别标记 `legacy: true`，不把旧的宽泛类别
+解释为新码对应的具体环节。回执通过
+`exchangeId`、`jobId` 关联实际调用。失败报告在能从失败 Job 确认单一模型原因时，
+使用具体码作为 `failure.code`，同时在 `failure.category` 保留作业失败类别，
+在 `failure.causes` 保留调用来源；多个原因时保留作业类别并逐项列出原因。
+恢复路径不会把其他 Job 的错误归给当前失败 Job，也不会改写既有实验的冻结记录。
+
 ## 可执行样本
 
 - `tests/fixtures/contracts/execution-port.valid.json` 为 26 种消息各提供一个合法样本，并为
@@ -183,3 +238,9 @@ Heartbeat 只更新存活、容量和当前 Lease 进度，不隐式派发 Job�
   泄露 Credential、非法 sequence/fence、缺失重放点和传输字段泄露等拒绝样本。
 - `tests/execution-port-contract.test.mjs` 使用 Draft 2020-12 validator 验证 schema、样本、
   所有权边界和固定恢复结果。
+
+### 可缺省的缓存与费用事实
+
+Provider 的输入、输出总 token 已知而缓存明细缺省、`null` 或空对象时，保留已知总数，缓存拆分为未知。Host 的 `PerformanceBaselineReport` 与 performance evidence 使用可空 input/cache 拆分，并以 `primaryModelInclusiveInputTokens` 或 `inclusiveInputTokens` 保留包含缓存的输入总数；拆分已知时，二者之和必须与该总数一致。后续可信用量结算可补齐缓存拆分，并保持原总数与终结回执不变。
+
+未配置价格或缺少必要缓存价格拆分时，实际费用为 `null`。调用终结释放执行并发；金额预算有上限时，未知费用继续保留原金融预留并阻止新的金额预算消耗。无金额上限的策略继续允许后续调用。重启校验统计活跃调用及已终结但费用待结算的预留，精确重复结算保持幂等。

@@ -29,6 +29,7 @@ pub enum CandidateProductErrorCode {
     InvalidScope,
     AuthorityMismatch,
     Workspace,
+    UnchangedCandidate,
 }
 
 /// Bounded failure which does not retain repository content.
@@ -59,9 +60,13 @@ impl fmt::Display for CandidateProductError {
 impl std::error::Error for CandidateProductError {}
 
 impl From<WorkspaceError> for CandidateProductError {
-    fn from(_: WorkspaceError) -> Self {
+    fn from(error: WorkspaceError) -> Self {
         Self::new(
-            CandidateProductErrorCode::Workspace,
+            if error.code() == crate::workspace::WorkspaceErrorCode::UnchangedCandidate {
+                CandidateProductErrorCode::UnchangedCandidate
+            } else {
+                CandidateProductErrorCode::Workspace
+            },
             "candidate workspace snapshot or verification failed",
         )
     }
@@ -158,6 +163,7 @@ impl PreparedCandidateArtifact {
 /// Rejects another lifecycle, role or scope, a workspace from another exact
 /// attempt/session, unchanged or invalid Git state, and a manifest whose size
 /// cannot be represented by the `ExecutionPort` descriptor.
+#[allow(clippy::too_many_lines)]
 pub fn prepare_candidate_artifact(
     active: &ActiveJob,
     workspace: &mut WorkerWorkspace,
@@ -213,6 +219,37 @@ pub fn prepare_candidate_artifact(
         )?;
     }
     let provenance = candidate_workspace_provenance(active, workspace)?;
+
+    if active.job.execution_profile == "remediator" {
+        let ExecutionScope::WorkRunExecutionScope(scope) = &active.job.scope else {
+            return Err(CandidateProductError::new(
+                CandidateProductErrorCode::InvalidScope,
+                "rework scope missing",
+            ));
+        };
+        let rework = scope.rework_authorization.as_ref().ok_or_else(|| {
+            CandidateProductError::new(
+                CandidateProductErrorCode::InvalidScope,
+                "rework authorization missing",
+            )
+        })?;
+        let head =
+            crate::workspace::git_text(workspace.layout().checkout(), &["rev-parse", "HEAD"])?;
+        let head_tree = crate::workspace::git_text(
+            workspace.layout().checkout(),
+            &["rev-parse", "HEAD^{tree}"],
+        )?;
+        if workspace.source_commit_id() != rework.source_candidate_commit_id
+            || head != rework.source_candidate_commit_id
+            || head_tree != rework.source_candidate_tree_id
+            || !rework.requires_full_reverification
+        {
+            return Err(CandidateProductError::new(
+                CandidateProductErrorCode::AuthorityMismatch,
+                "rework source differs from its sealed authority",
+            ));
+        }
+    }
 
     let freeze_fact = workspace
         .freeze_candidate()

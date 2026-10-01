@@ -47,8 +47,8 @@ use winwincode_storage::WorkerSessionCredentialState;
 use winwincode_storage::WorkerSessionCredentialStoreError;
 use winwincode_storage::WorkerSessionCredentialStoreErrorKind;
 
-/// Default time-to-live of one issued credential. Short by design: a worker
-/// session keeps authenticating only while it rotates before the deadline.
+/// Idle time-to-live. Fresh accepted heartbeats under an active execution
+/// lease extend it; expired, revoked and rotated material cannot be renewed.
 pub const DEFAULT_CREDENTIAL_TTL: Duration = Duration::from_mins(30);
 
 /// Issuance and rotation TTL policy of the credential service.
@@ -256,6 +256,51 @@ impl<'storage> WorkerSessionCredentialService<'storage> {
         }
     }
 
+    /// Extends the current secret's idle TTL after the production boundary has
+    /// matched exactly one fresh Accepted/error-free heartbeat acknowledgement.
+    /// Storage rechecks durable lease, launch, occupancy and credential authority
+    /// atomically; registration, empty heartbeats and duplicates never call this.
+    ///
+    /// # Errors
+    /// Returns invalid-clock or storage failures without exposing secret material.
+    pub fn renew_after_accepted_heartbeat(
+        &mut self,
+        credential_digest: &str,
+        heartbeat: &winwincode_execution_port::generated::WorkerHeartbeatMessage,
+        now: &Instant,
+    ) -> Result<Option<WorkerSessionCredentialRecord>, WorkerSessionCredentialError> {
+        let Some(record) = self
+            .storage
+            .worker_session_credential_ledger()?
+            .find_by_digest(credential_digest)?
+        else {
+            return Ok(None);
+        };
+        if record.state != WorkerSessionCredentialState::Active
+            || record.expires_at.0 <= now.0
+            || heartbeat.active_leases.is_empty()
+            || record.worker_id != heartbeat.worker_id.0
+            || record.worker_instance_id != heartbeat.worker_instance_id.0
+        {
+            return Ok(None);
+        }
+        let threshold = credential_deadline(&(self.policy.ttl / 2), now)?;
+        if record.expires_at.0 > threshold.0 {
+            return Ok(None);
+        }
+        let expires_at = credential_deadline(&self.policy.ttl, now)?;
+        for lease in &heartbeat.active_leases {
+            if let Some(renewed) = self
+                .storage
+                .worker_session_credential_ledger()?
+                .renew_after_accepted_heartbeat(&record, heartbeat, lease, &expires_at, now)?
+            {
+                return Ok(Some(renewed));
+            }
+        }
+        Ok(None)
+    }
+
     /// Builds one service with an explicit TTL policy.
     ///
     /// # Errors
@@ -293,6 +338,29 @@ impl<'storage> WorkerSessionCredentialService<'storage> {
         credential_digest: &str,
         now: &Instant,
     ) -> Result<WorkerSessionCredentialRecord, WorkerSessionCredentialError> {
+        let issuance = self.prepare_launch_issuance(
+            worker_session_id,
+            worker_id,
+            worker_instance_id,
+            worker_launch_grant_id,
+            credential_digest,
+            now,
+        )?;
+        Ok(self
+            .storage
+            .worker_session_credential_ledger()?
+            .issue(&issuance, now)?)
+    }
+
+    pub(crate) fn prepare_launch_issuance(
+        &self,
+        worker_session_id: &str,
+        worker_id: &str,
+        worker_instance_id: &str,
+        worker_launch_grant_id: &str,
+        credential_digest: &str,
+        now: &Instant,
+    ) -> Result<CredentialIssuance, WorkerSessionCredentialError> {
         let expires_at = credential_deadline(&self.policy.ttl, now)?;
         let issuance = CredentialIssuance::try_new(
             generate_credential_id()?,
@@ -303,10 +371,7 @@ impl<'storage> WorkerSessionCredentialService<'storage> {
             credential_digest,
             expires_at,
         )?;
-        Ok(self
-            .storage
-            .worker_session_credential_ledger()?
-            .issue(&issuance, now)?)
+        Ok(issuance)
     }
 
     /// Rotates one worker session's credential (plan 17.2): the `active`
@@ -502,6 +567,15 @@ impl<'storage> WorkerSessionCredentialService<'storage> {
         }
         let canonical_now = canonical_instant(&now.0);
         if !canonical_now || now.0.as_str() >= record.expires_at.0.as_str() {
+            return Err(rejected());
+        }
+        if self
+            .storage
+            .worker_launch_grant_ledger()
+            .map_err(|_| rejected())?
+            .has_trusted_exit(&record.worker_launch_grant_id)
+            .map_err(|_| rejected())?
+        {
             return Err(rejected());
         }
         Ok(record)

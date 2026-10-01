@@ -196,7 +196,7 @@ pub fn fusion_compose_frame_rows(batch: &ParallelModelBatchResult) -> Vec<(Strin
 pub struct ParallelModelTotals {
     pub attempts: u64,
     pub input_tokens: u64,
-    pub cached_input_tokens: u64,
+    pub cached_input_tokens: Option<u64>,
     pub cache_write_input_tokens: u64,
     pub output_tokens: u64,
     pub reasoning_output_tokens: u64,
@@ -289,6 +289,7 @@ struct BudgetTracker {
     attempts: AtomicU64,
     input_tokens: AtomicU64,
     cached_input_tokens: AtomicU64,
+    cache_unknown: AtomicBool,
     cache_write_input_tokens: AtomicU64,
     output_tokens: AtomicU64,
     reasoning_output_tokens: AtomicU64,
@@ -304,6 +305,7 @@ impl BudgetTracker {
             attempts: AtomicU64::new(0),
             input_tokens: AtomicU64::new(0),
             cached_input_tokens: AtomicU64::new(0),
+            cache_unknown: AtomicBool::new(false),
             cache_write_input_tokens: AtomicU64::new(0),
             output_tokens: AtomicU64::new(0),
             reasoning_output_tokens: AtomicU64::new(0),
@@ -334,13 +336,20 @@ impl BudgetTracker {
     fn record(&self, usage: Option<ProviderTokenUsage>, cost_micros: Option<u64>) {
         if let Some(usage) = usage {
             saturating_add(&self.input_tokens, usage.input_tokens);
-            saturating_add(&self.cached_input_tokens, usage.cached_input_tokens);
+            if let Some(cached) = usage.cached_input_tokens {
+                saturating_add(&self.cached_input_tokens, cached);
+            } else {
+                self.cache_unknown.store(true, Ordering::Release);
+            }
             saturating_add(
                 &self.cache_write_input_tokens,
                 usage.cache_write_input_tokens,
             );
             saturating_add(&self.output_tokens, usage.output_tokens);
             saturating_add(&self.reasoning_output_tokens, usage.reasoning_output_tokens);
+        }
+        if cost_micros.is_none() && self.budget.max_total_cost_micros.is_some() {
+            self.exhausted.store(true, Ordering::Release);
         }
         if let Some(cost_micros) = cost_micros {
             saturating_add(&self.known_cost_micros, cost_micros);
@@ -367,7 +376,8 @@ impl BudgetTracker {
         ParallelModelTotals {
             attempts: self.attempts.load(Ordering::Acquire),
             input_tokens: self.input_tokens.load(Ordering::Acquire),
-            cached_input_tokens: self.cached_input_tokens.load(Ordering::Acquire),
+            cached_input_tokens: (!self.cache_unknown.load(Ordering::Acquire))
+                .then(|| self.cached_input_tokens.load(Ordering::Acquire)),
             cache_write_input_tokens: self.cache_write_input_tokens.load(Ordering::Acquire),
             output_tokens: self.output_tokens.load(Ordering::Acquire),
             reasoning_output_tokens: self.reasoning_output_tokens.load(Ordering::Acquire),
@@ -445,6 +455,7 @@ async fn run_target(
                 };
             }
             Err((status, failure, stop)) => {
+                tracker.record(None, None);
                 last_status = status;
                 records.push(ParallelModelAttemptRecord {
                     route,
@@ -561,8 +572,7 @@ fn terminal(frame: &str) -> Result<Option<Terminal>, ModelPortFailure> {
 fn parse_usage(value: &Value) -> Result<ProviderTokenUsage, ModelPortFailure> {
     Ok(ProviderTokenUsage {
         input_tokens: required_u64(value, "inputTokens", "input_tokens")?,
-        cached_input_tokens: optional_u64(value, "cachedInputTokens", "cached_input_tokens")?
-            .unwrap_or(0),
+        cached_input_tokens: optional_u64(value, "cachedInputTokens", "cached_input_tokens")?,
         cache_write_input_tokens: optional_u64(
             value,
             "cacheWriteInputTokens",
@@ -784,7 +794,7 @@ mod tests {
         ParallelModelBudget {
             max_attempts: Some(max_attempts),
             max_total_tokens: Some(100),
-            max_total_cost_micros: Some(100),
+            max_total_cost_micros: None,
             max_wall_time: Some(Duration::from_secs(1)),
             attempt_timeout: Some(Duration::from_millis(40)),
         }
@@ -1190,6 +1200,72 @@ mod tests {
             .expect_err("duplicate target ids are invalid");
         assert_eq!(duplicate, ParallelModelRunError);
         assert!(port.state.requests.lock().expect("request log").is_empty());
+    }
+
+    #[test]
+    fn unknown_cost_blocks_new_attempts_only_when_an_explicit_amount_cap_exists() {
+        let usage = ProviderTokenUsage {
+            input_tokens: 7,
+            cached_input_tokens: None,
+            output_tokens: 3,
+            cache_write_input_tokens: 0,
+            reasoning_output_tokens: 0,
+        };
+        let tracker = BudgetTracker::new(ParallelModelBudget {
+            max_total_cost_micros: Some(1),
+            ..budget(3)
+        });
+        assert!(tracker.reserve_attempt());
+        tracker.record(Some(usage), None);
+        assert!(!tracker.reserve_attempt());
+        assert_eq!(tracker.totals().input_tokens, 7);
+        let tracker = BudgetTracker::new(ParallelModelBudget {
+            max_total_cost_micros: None,
+            ..budget(3)
+        });
+        tracker.record(Some(usage), None);
+        assert!(tracker.reserve_attempt());
+    }
+
+    #[tokio::test]
+    async fn unknown_transport_or_timeout_cost_stops_capped_fallback() {
+        for request_id in ["fail", "hang"] {
+            for cap in [Some(1), None] {
+                let port = Arc::new(FixturePort::default());
+                let runner = ParallelModelRunner::new(port.clone());
+                let (_cancel, signal) = parallel_model_cancellation();
+                let batch = runner
+                    .run(
+                        vec![ParallelModelTarget {
+                            target_id: "bounded-fallback".to_owned(),
+                            attempts: vec![
+                                attempt("primary", request_id),
+                                attempt("fallback", "fallback"),
+                            ],
+                        }],
+                        ParallelModelBudget {
+                            max_total_cost_micros: cap,
+                            ..budget(3)
+                        },
+                        signal,
+                    )
+                    .await
+                    .expect("valid batch");
+                assert_eq!(
+                    batch.results[0].status,
+                    if cap.is_some() {
+                        ParallelModelStatus::BudgetExceeded
+                    } else {
+                        ParallelModelStatus::Succeeded
+                    }
+                );
+                assert_eq!(
+                    port.state.requests.lock().expect("request log").len(),
+                    if cap.is_some() { 1 } else { 2 }
+                );
+                assert_eq!(port.state.active.load(Ordering::SeqCst), 0);
+            }
+        }
     }
 
     #[test]

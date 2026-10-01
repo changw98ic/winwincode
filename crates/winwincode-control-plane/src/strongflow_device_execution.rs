@@ -290,9 +290,24 @@ fn resolve_work_run_anchor(
     // The WorkRun's device anchor is its own launch grant, whatever its
     // lifecycle state: the anchor proves the role was bound to device
     // execution and stays the permission anchor after the grant ends.
-    let anchor = WorkerLaunchGrantService::new(storage)
-        .newest_grant_for_work_run(work_run_id.0.as_str())
+    let existing = DeviceExecutionBindingService::new(storage)
+        .facts(&record.job_id.0)
         .map_err(|_| StrongflowDeviceDispatchError::storage())?;
+    let anchor = if let Some(facts) = existing {
+        let ledger = storage
+            .worker_launch_grant_ledger()
+            .map_err(|_| StrongflowDeviceDispatchError::storage())?;
+        ledger
+            .recovery_launch_for_grant(&facts.worker_launch_grant_id)
+            .map_err(|_| StrongflowDeviceDispatchError::storage())?
+            .or(ledger
+                .snapshot(&facts.worker_launch_grant_id)
+                .map_err(|_| StrongflowDeviceDispatchError::storage())?)
+    } else {
+        WorkerLaunchGrantService::new(storage)
+            .newest_grant_for_work_run(work_run_id.0.as_str())
+            .map_err(|_| StrongflowDeviceDispatchError::storage())?
+    };
     let Some(anchor) = anchor else {
         return Ok(None);
     };
@@ -374,10 +389,19 @@ fn ensure_work_run_facts(
         if exact {
             return Ok(existing);
         }
-        return Err(StrongflowDeviceDispatchError::new(
-            StrongflowDeviceDispatchErrorKind::DispatchConflict,
-            "the WorkRun job is already dispatched to another device launch or role",
-        ));
+        return winwincode_storage::stage_device_execution_recovery(
+            storage,
+            &record.job_id,
+            &anchor.worker_launch_grant_id,
+            Some(role),
+            now,
+        )
+        .map_err(|_| {
+            StrongflowDeviceDispatchError::new(
+                StrongflowDeviceDispatchErrorKind::DispatchConflict,
+                "the WorkRun recovery authority differs",
+            )
+        });
     }
     // The dispatch reservation runs under the anchor holder's admission
     // identity, so the durable device facts join the reservation user to the

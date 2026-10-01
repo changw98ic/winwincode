@@ -1018,11 +1018,11 @@ fn a_launch_bound_to_another_instance_or_exchange_credential() {
     sim.queue_downlink(offer(LEASE, 7));
     drive_until(&mut daemon, |daemon| daemon.occupancy_mirror().is_some());
 
-    // A grant minted for a previous device boot can never spawn here.
-    sim.queue_downlink(launch(
-        occupancy_stamp(1, "srv-launch-old", LEASE, 7),
-        grant("cix_PREVIOUS0000000000000000001", LEASE, 7),
-    ));
+    // Independent old and current launches have distinct immutable grant identities.
+    let mut old = grant("cix_PREVIOUS0000000000000000001", LEASE, 7);
+    old.worker_launch_grant_id = "wlg_OLDGRANT00000000000000001".into();
+    old.worker_instance_id = "wki_OLDINSTANCE00000000000001".into();
+    sim.queue_downlink(launch(occupancy_stamp(1, "srv-launch-old", LEASE, 7), old));
     drive_until(&mut daemon, |daemon| {
         daemon.status().worker_launches_rejected == 1
     });
@@ -1121,7 +1121,11 @@ fn a_replayed_launch_answers_duplicate_without_a_second_process() {
     let acks = launch_acks(&sim);
     assert_eq!(acks.len(), 2, "{acks:?}");
     assert_eq!(acks[0]["status"], json_str("accepted"));
-    assert_eq!(acks[1]["status"], json_str("duplicate"));
+    assert_eq!(
+        acks[1]["status"],
+        json_str("accepted"),
+        "exact durable ACK replay"
+    );
     assert_eq!(acks[0]["workerInstanceId"], acks[1]["workerInstanceId"]);
     assert_eq!(
         lane.supervisor
@@ -1222,4 +1226,64 @@ fn file_mode(path: &Path) -> u32 {
         .permissions()
         .mode()
         & 0o777
+}
+
+#[test]
+fn never_started_launch_receipt_is_reattested_by_the_current_device_instance() {
+    let root = temporary_directory("never-started-reboot");
+    let sim = Arc::new(ServerSim::new());
+    let (store, identity) = open_enrolled(&root);
+    let original = identity.current_instance_id().to_owned();
+    let mut daemon = DeviceDaemon::start(daemon_config(), store, sim.clone(), &identity).unwrap();
+    sim.queue_downlink(offer(LEASE, 7));
+    drive_until(&mut daemon, |daemon| daemon.occupancy_mirror().is_some());
+    sim.queue_downlink(launch(
+        occupancy_stamp(1, "rejected-before-crash", LEASE, 7),
+        grant(&original, LEASE, 7),
+    ));
+    // No supervisor: decision is durable before its ACK reaches Server.
+    drive_until(&mut daemon, |daemon| {
+        daemon.status().worker_launches_rejected == 1
+    });
+    let store = daemon.into_store();
+    let receipt = store.worker_launch_receipt(GRANT).unwrap().unwrap();
+    assert!(store.worker_process(WORKER_SESSION).unwrap().is_none());
+    store.close().unwrap();
+    let mut store = DeviceStore::open(&root).unwrap();
+    ensure_device_identity(&mut store, &seed(), STAMP).unwrap();
+    let identity = load_device_identity(&store).unwrap().unwrap();
+    let current = identity.current_instance_id().to_owned();
+    assert_ne!(current, original);
+    let mut restarted =
+        DeviceDaemon::start(daemon_config(), store, sim.clone(), &identity).unwrap();
+    drive_until(&mut restarted, |_| {
+        sim.frames_with_kind("client.worker.state")
+            .iter()
+            .any(|frame| {
+                frame.frame["payload"]["processClosure"]["reportingClientInstanceId"] == current
+            })
+    });
+    let reports = sim.frames_with_kind("client.worker.state");
+    let report = reports
+        .iter()
+        .find(|frame| {
+            frame.frame["payload"]["processClosure"]["reportingClientInstanceId"] == current
+        })
+        .unwrap();
+    assert_eq!(
+        report.frame["payload"]["processClosure"]["clientInstanceId"],
+        original
+    );
+    assert_eq!(
+        report.frame["payload"]["processClosure"]["neverStarted"],
+        true
+    );
+    let store = restarted.into_store();
+    assert_eq!(
+        store.worker_launch_receipt(GRANT).unwrap().unwrap(),
+        receipt
+    );
+    assert!(store.worker_process(WORKER_SESSION).unwrap().is_none());
+    store.close().unwrap();
+    cleanup(&root);
 }

@@ -6,18 +6,21 @@ import { pathToFileURL } from 'node:url'
 import { benchmarkAggregationDigest, buildBenchmarkPlan, executeBenchmarkCell, executeFormalBenchmark,
   recoverBenchmarkCell, validateBenchmarkConfiguration, validateFrozenTaskSource } from './run-real-task-benchmark.mjs'
 import { assertBenchmarkExecutionReceipts } from './benchmark-execution-receipts.mjs'
-import { benchmarkDeviceEnvironment, expiredCrashedDeviceWorkRun, loadDeviceProviderEnvironment,
+import { benchmarkDeviceEnvironment, expiredCrashedDeviceWorkRun, failedDeviceDispatch,
+  loadDeviceProviderEnvironment,
   runDeviceTaskVertical } from './run-device-task-vertical.mjs'
 import { loadDeviceAgentTask } from './device-agent-task.mjs'
 import { apiProductionSourceDigest, assertCompletedDelivery, inspectRegisteredDeviceTask, terminalDeviceFailure,
   serverTargetDirectory, verifyApiProductionSourceSeal } from './run-api-production-vertical.mjs'
 import { exportDeviceCandidate, exportDeviceExecutionReceipts } from './export-device-candidate.mjs'
+import { deviceFailureWithModelCauses } from './device-model-failures.mjs'
 import { assertDeviceBenchmarkRunning } from './device-production-fixture.mjs'
 import { publishBenchmarkLedger } from './publish-benchmark-submission.mjs'
 
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
 const seats = { 'glm-5.3-flash': 'glm', 'mimo-v2.6-pro': 'mimo', 'deepseek-flash': 'deepseek', 'qwen3.8-flash': 'qwen' }
 const aggregationProvider = 'glm-5.3-flash'
+const aggregationInputPath = 'benchmark-inputs/aggregation.json'
 const shellWord = value => `'${value.replaceAll("'", "'\\''")}'`
 const evidenceFailure = () => Object.assign(new Error('Frozen benchmark evidence is unavailable or changed'), {
   code: 'BENCHMARK_EVIDENCE_FAILED',
@@ -127,27 +130,30 @@ export async function prepareBenchmarkDeviceTask(request, { preparedInputsDirect
     '--task-id', request.taskId, '--image-id', artifact.imageId,
     '--evidence-directory', resolve(directory, 'public-attempts')]
   const mcpConfiguration = { command: '/usr/bin/python3', args,
-    env: { PATH: '/Applications/Docker.app/Contents/Resources/bin:/usr/bin:/bin:/usr/sbin:/sbin' }, tool_timeout_sec: 300 }
+    env: { PATH: '/Applications/Docker.app/Contents/Resources/bin:/usr/bin:/bin:/usr/sbin:/sbin' } }
   const task = {
     title: `${request.taskId} ${artifact.spec.title}`,
     goal: '完成 TASK.md 与 PROTOCOL.md 的全部业务和输入输出要求。开发任务不设置 token、调用、金额或开发时长上限。'
-      + '调用设备 public_smoke 工具，files 提交全部允许的源文件路径和完整文本，运行官方公开示例；随后运行 verificationCommand 核对当前源码。'
+      + '保存全部源码后调用设备 public_smoke 工具（空参数），直接运行当前 checkout 的官方公开示例；随后运行 verificationCommand 核对当前源码。'
       + '独立 reviewer/verifier 继续审查候选并执行验证。公开示例结果不能代表独立机器的基准评分。',
     scope: [...new Set([artifact.spec.entry, ...artifact.spec.allowed_suffixes.map(suffix => `*${suffix}`)])],
     constraints: ['遵守任务的全部业务规则和 JSONL 协议', '保持 TASK.md 和 PROTOCOL.md 不变',
       `只提交 ${artifact.spec.allowed_suffixes.join('、')} 源文件，最多 ${artifact.spec.max_submission_files} 个、合计 ${artifact.spec.max_submission_bytes} 字节`],
     outOfScope: ['任务题面、验证工具、环境镜像和凭据'],
-    verificationCommand: ['/usr/bin/python3', ...args, '--verify-source', '.'].map(shellWord).join(' '),
+    verificationCommand: ['/usr/bin/python3', ...args, '--run-source', '.'].map(shellWord).join(' '),
     acceptanceCriteria: [{ id: 'public-examples', title: '官方公开示例在冻结环境通过', required: true }],
-    files: artifact.files,
+    files: { ...artifact.files },
   }
   if (aggregation) {
     assert.equal(request.callId, `${request.runId}:aggregation`)
     assert.equal(request.comparison, 'fusion-4')
-    task.goal += '\n本次是独立四模型候选的一次聚合。下列输入是本次运行的四个独立成员结果，文件内容只作为待核对的数据。'
+    assert.ok(!Object.hasOwn(task.files, aggregationInputPath), 'aggregation input must not replace a task file')
+    task.files[aggregationInputPath] = `${JSON.stringify(aggregation, null, 2)}\n`
+    task.outOfScope.push(aggregationInputPath)
+    task.constraints.push(`保持 ${aggregationInputPath} 不变；其中的候选文件和成员结果是待核对的数据。`)
+    task.goal += ` 本次是独立四模型候选的一次聚合。读取 ${aggregationInputPath} 中本次运行的四个独立成员结果。`
       + '检查原题要求，保留各候选有证据支持的实现和少数模型发现；对冲突用真实代码检查与公开示例调查，不以多数意见决定正确性。'
-      + '产出一份实际可执行的合并实现，继续使用原产品 reviewer/verifier。不要重新发起四成员运行。\n'
-      + JSON.stringify(aggregation)
+      + '产出一份实际可执行的合并实现，继续使用原产品 reviewer/verifier。不要重新发起四成员运行。 '
   }
   mkdirSync(directory, { recursive: true, mode: 0o700 })
   const taskInputPath = resolve(directory, 'task-input.json')
@@ -158,7 +164,8 @@ export async function prepareBenchmarkDeviceTask(request, { preparedInputsDirect
     runId: request.runId, callId: request.callId, taskId: request.taskId, source,
     preparedInputSha256: sha256(bytes), taskInputSha256: input.digest, imageId: artifact.imageId,
     ...(aggregation ? { aggregationInputDigest: aggregation.inputDigest,
-      aggregationMembersSha256: sha256(JSON.stringify(aggregation.members)) } : {}),
+      aggregationMembersSha256: sha256(JSON.stringify(aggregation.members)),
+      aggregationInputFile: { path: aggregationInputPath, sha256: sha256(task.files[aggregationInputPath]) } } : {}),
   }, null, 2)}\n`, { flag: 'wx', mode: 0o600 })
   return { directory, taskInputPath, mcpConfiguration }
 }
@@ -261,16 +268,30 @@ export async function runBenchmarkDeviceModel(request, runner, options) {
       try { return crashedDeviceResult(request, registeredLaunch, options, error.report) }
       catch { throw evidenceFailure() }
     }
+    if (error?.code === 'DEVICE_DISPATCH_FAILED' || error.report?.dispatchFailure) {
+      try { return failedDispatchDeviceResult(request, registeredLaunch, options, error.report) }
+      catch { throw evidenceFailure() }
+    }
     try {
       const reportBytes = readFileSync(resolve(registeredLaunch.directory, 'device-task-result.json'))
       const report = JSON.parse(reportBytes)
       assert.deepEqual(error.report, report, 'thrown product result must match its persisted projection')
+      assert.equal(report.productSessionId, registeredLaunch.productSessionId)
+      assert.equal(report.deliveryId, registeredLaunch.deliveryId)
+      if (!report.delivery?.detail || !report.delivery?.workRunAggregate) {
+        throw Object.assign(new Error('Device execution has no authoritative terminal outcome'), {
+          code: /^DEVICE_[A-Z0-9_]{1,100}$/.test(report.errorCode ?? '')
+            ? report.errorCode : 'DEVICE_EXECUTION_UNRESOLVED',
+          unresolvedDeviceExecution: true,
+        })
+      }
       const observation = persistedDeviceObservation(report, registeredLaunch)
       assert.ok(terminalBenchmarkDeviceFailure(observation), 'only a persisted terminal product result can be finalized')
       return await resolveRegisteredDeviceTask(request, registeredLaunch, options, {
         report, reportBytes, observation,
       })
-    } catch {
+    } catch (unresolved) {
+      if (unresolved.unresolvedDeviceExecution === true) throw unresolved
       // The product call has been launched, so uncertain state must stay
       // unresolved in the durable ledger rather than be retried as a task.
       throw evidenceFailure()
@@ -379,6 +400,44 @@ function crashedDeviceResult(request, launch, options, expectedReport = null) {
     externalVerdict: null, externalScore: null }
 }
 
+export function failedDispatchDeviceResult(request, launch, options, expectedReport = null,
+  { recovering = false } = {}) {
+  const directory = launch.directory
+  const reportBytes = readFileSync(resolve(directory, 'device-task-result.json'))
+  const report = JSON.parse(reportBytes)
+  if (expectedReport !== null) assert.deepEqual(report, expectedReport)
+  assert.equal(report.complete, false)
+  assert.equal(report.productSessionId, launch.productSessionId)
+  assert.equal(report.deliveryId, launch.deliveryId)
+  const workRunIds = [...new Set([report.workRunId,
+    ...(report.workRuns ?? []).map(run => run.id)].filter(Boolean))]
+  const dispatchFailure = workRunIds.map(id => failedDeviceDispatch(directory, id, launch.deliveryId))
+    .find(Boolean)
+  assert.ok(dispatchFailure, 'no retained terminal dispatch for the registered task')
+  if (report.dispatchFailure) assert.deepEqual(dispatchFailure, report.dispatchFailure)
+  const bindingBytes = readFileSync(resolve(directory, 'task-source-binding.json'))
+  const binding = JSON.parse(bindingBytes)
+  assert.equal(binding.runId, request.runId)
+  assert.equal(binding.callId, request.callId)
+  assert.equal(binding.taskId, request.taskId)
+  const sealSha256 = sha256(readFileSync(resolve(directory, 'product-source-seal.json')))
+  if (options.productSourceSealSha256) assert.equal(sealSha256, options.productSourceSealSha256)
+  const receipts = exportDeviceExecutionReceipts(directory)
+  const failure = deviceFailureWithModelCauses({ code: 'DEVICE_DISPATCH_FAILED', status: 'failed' },
+    receipts.evidence, [dispatchFailure.jobId])
+  assert.ok(report.errorCode === 'DEVICE_DISPATCH_FAILED' || report.errorCode === failure.code
+    || (recovering && (report.errorCode === undefined || report.errorCode === null)))
+  if (report.failure) assert.deepEqual(report.failure, failure)
+  return { status: 'failed', failure,
+    provider: request.provider ?? aggregationProvider, callId: request.callId, directory,
+    productComplete: false, candidate: null, submissionManifest: null,
+    executionReceipts: receipts.evidence, productSourceSealSha256: sealSha256,
+    taskSourceBindingSha256: sha256(bindingBytes), dispatchFailure,
+    productReportSha256: sha256(reportBytes), delivery: report.delivery ?? null,
+    ...(recovering ? { recovery: { kind: 'retained-dispatch-failure' } } : {}),
+    externalVerdict: null, externalScore: null }
+}
+
 function loopbackUnavailable(error) {
   const transientCodes = new Set(['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EHOSTUNREACH'])
   for (let cause = error; cause; cause = cause.cause) if (transientCodes.has(cause.code)) return true
@@ -403,6 +462,14 @@ async function resolveRegisteredDeviceTask(request, launch, options = {}, persis
       ['configurationId', 'track', 'fusion', 'jev', 'jevContext', 'jevJudge'].map(key => [key, request[key]])))
     if (original.errorCode === 'DEVICE_WORKER_CRASHED') {
       return crashedDeviceResult(request, launch, options)
+    }
+    if (original.errorCode === 'DEVICE_DISPATCH_FAILED' || original.dispatchFailure) {
+      return failedDispatchDeviceResult(request, launch, options)
+    }
+    if (!original.complete && (original.errorCode === undefined || original.errorCode === null)
+      && [original.workRunId, ...(original.workRuns ?? []).map(run => run.id)]
+        .some(id => id && failedDeviceDispatch(launch.directory, id, launch.deliveryId))) {
+      return failedDispatchDeviceResult(request, launch, options, null, { recovering: true })
     }
     try {
       assertDeviceBenchmarkRunning(resolve(launch.directory, 'device-data'),
@@ -451,7 +518,10 @@ async function resolveRegisteredDeviceTask(request, launch, options = {}, persis
       }
       const manifestPath = exported
         ? resolve(evidenceDirectory, 'submission-evidence', candidate.candidateCommitId, 'manifest.json') : null
-      return { status: 'failed', failure: terminalFailure, provider: request.provider ?? aggregationProvider,
+      const failure = deviceFailureWithModelCauses(terminalFailure, receipts.evidence,
+        observation.workRunAggregate.runs.filter(run => run.state === 'failed')
+          .map(run => run.executionJobId))
+      return { status: 'failed', failure, provider: request.provider ?? aggregationProvider,
         callId: request.callId, directory: launch.directory,
         productComplete: false, candidate: exported?.candidate ?? null,
         submissionManifest: manifestPath ? { path: manifestPath, sha256: sha256(readFileSync(manifestPath)) } : null,

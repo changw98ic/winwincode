@@ -198,7 +198,10 @@ impl RealKernelAdapter {
 fn measured_fixture_usage() -> ExecutionOutcomeUsage {
     ExecutionOutcomeUsage {
         runtime_millis: 50,
-        tokens: 2,
+        tokens: Some(2),
+        known_tokens: 2,
+        accounting_status:
+            winwincode_execution_port::generated::ExecutionOutcomeUsageAccountingStatus::Known,
         cost_microunits: Some(3),
     }
 }

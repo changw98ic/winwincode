@@ -718,10 +718,13 @@ pub fn validate_independent_verification(
         let current = snapshot
             .session_bindings
             .iter()
+            .skip(super::same_candidate::verification_round_floor(snapshot))
             .filter(|binding| {
                 binding.execution_profile.as_deref() == Some(required_role.as_str())
                     && binding.work_contract_id == writer_binding.work_contract_id
                     && binding.work_contract_revision == writer_binding.work_contract_revision
+                    && binding.work_item_id == writer_binding.work_item_id
+                    && binding.work_item_revision == writer_binding.work_item_revision
             })
             .max_by_key(|binding| (binding.bound_at_millis, binding.attempt));
         let Some(binding) = current else {
@@ -737,8 +740,11 @@ pub fn validate_independent_verification(
         if snapshot
             .session_bindings
             .iter()
+            .skip(super::same_candidate::verification_round_floor(snapshot))
             .filter(|other| {
                 other.execution_profile == binding.execution_profile
+                    && other.work_item_id == binding.work_item_id
+                    && other.work_item_revision == binding.work_item_revision
                     && other.work_contract_id == binding.work_contract_id
                     && other.work_contract_revision == binding.work_contract_revision
                     && (other.bound_at_millis, other.attempt)

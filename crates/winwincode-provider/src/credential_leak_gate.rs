@@ -501,7 +501,6 @@ fn contains_recognized_credential(value: &str) -> bool {
         || contains_bearer(&normalized)
         || contains_url_userinfo(&normalized)
         || contains_provider_token(&normalized)
-        || contains_sensitive_assignment(&normalized)
 }
 
 fn contains_private_key(value: &str) -> bool {
@@ -558,36 +557,6 @@ fn contains_provider_token(value: &str) -> bool {
                     .take_while(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
                     .count()
                     >= *minimum
-        })
-    })
-}
-
-fn contains_sensitive_assignment(value: &str) -> bool {
-    [
-        "api_key",
-        "apikey",
-        "authorization",
-        "client_secret",
-        "password",
-        "private_key",
-        "secret",
-        "token",
-    ]
-    .iter()
-    .any(|key| {
-        ['=', ':'].iter().any(|separator| {
-            let pattern = format!("{key}{separator}");
-            value.match_indices(&pattern).any(|(index, _)| {
-                let candidate = value[index + pattern.len()..]
-                    .trim_start_matches([' ', '\t', '\"', '\''])
-                    .split(|character: char| {
-                        character.is_ascii_whitespace() || ",;\"'}]".contains(character)
-                    })
-                    .next()
-                    .unwrap_or("");
-                !candidate.is_empty()
-                    && !matches!(candidate, "[redacted" | "<redacted>" | "redacted")
-            })
         })
     })
 }

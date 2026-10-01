@@ -567,6 +567,7 @@ impl SessionSupervisor {
     /// the local bound is full, [`SupervisorError::UnverifiableExisting`]
     /// when a `running` row cannot be verified (fail closed), and the
     /// remaining variants for spawn-time failures.
+    #[allow(clippy::too_many_lines)]
     pub fn spawn(&self, request: SpawnRequest<'_>) -> Result<SpawnOutcome, SupervisorError> {
         let stamp = now_rfc3339();
         let mut store = self.lock_store();
@@ -631,6 +632,24 @@ impl SessionSupervisor {
                 .ok_or_else(|| SupervisorError::invalid("device data directory is unavailable"))?
                 .join("providers"),
         )?;
+        let mut config_value: serde_json::Value = serde_json::from_str(&config_json)
+            .map_err(|_| SupervisorError::invalid("managed config cannot be decoded"))?;
+        let workspace_root = store
+            .database_path()
+            .parent()
+            .ok_or_else(|| SupervisorError::invalid("device data directory is missing"))?
+            .join("execution-workspaces");
+        create_directory(&workspace_root, "Device execution workspace directory")?;
+        config_value["executionWorkspaceDirectory"] = serde_json::Value::String(
+            workspace_root
+                .to_str()
+                .ok_or_else(|| {
+                    SupervisorError::invalid("execution workspace directory is not UTF-8")
+                })?
+                .to_owned(),
+        );
+        let config_json = serde_json::to_string(&config_value)
+            .map_err(|_| SupervisorError::invalid("managed config cannot be encoded"))?;
         write_private_file(&config_path, config_json.as_bytes())?;
 
         let mut child = self.launch_process(&config_path, request)?;
@@ -651,6 +670,22 @@ impl SessionSupervisor {
                 return Err(error);
             }
         };
+        // A managed Worker cannot enter execution until its exact boot is durable.
+        // Parent death before this write closes the pipe and makes the child exit.
+        let release = child
+            .stdin
+            .take()
+            .ok_or_else(|| SupervisorError::invalid("managed start gate unavailable"))
+            .and_then(|mut pipe| {
+                pipe.write_all(&[1])
+                    .map_err(|_| SupervisorError::invalid("managed start gate unavailable"))
+            });
+        if let Err(error) = release {
+            let _ = child.kill();
+            let _ = child.wait();
+            join_log_readers(log_readers);
+            return Err(error);
+        }
         self.lock_children().insert(
             request.worker_session_id.to_owned(),
             TrackedChild { child, log_readers },
@@ -715,6 +750,8 @@ impl SessionSupervisor {
             .arg(MANAGED_SESSION_ARG)
             .arg(config_path)
             .current_dir(request.worker_root)
+            .env("WWC_MANAGED_START_GATE", "1")
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         // Every managed Worker owns a fresh process group. A stop can then
@@ -2045,7 +2082,7 @@ mod tests {
     /// accepts (fail-closed `deny_unknown_fields` reader). If the Worker
     /// entry's contract moves, this pin fails and the config writer must
     /// move with it.
-    const WORKER_CONFIG_CONTRACT_FIELDS: [&str; 16] = [
+    const WORKER_CONFIG_CONTRACT_FIELDS: [&str; 17] = [
         "clientNodeId",
         "clientInstanceId",
         "occupancyLeaseId",
@@ -2058,6 +2095,7 @@ mod tests {
         "workerInstanceId",
         "sourceDirectory",
         "dataDirectory",
+        "executionWorkspaceDirectory",
         "providerDirectory",
         "serverOrigin",
         "workerCredentialPath",
@@ -2216,6 +2254,13 @@ mod tests {
         let stopped = supervisor.stop("wss_ONE", true).expect("graceful stop");
         assert_eq!(stopped.state, WORKER_STATE_EXITED);
         assert_eq!(stopped.exit_code, Some(0));
+        let closure = crate::daemon::worker_process_closure(&stopped, "cix_REBOOTED")
+            .expect("closure decodes actual supervisor config");
+        assert_eq!(closure.client_instance_id, CLIENT_INSTANCE);
+        assert_eq!(closure.reporting_client_instance_id, "cix_REBOOTED");
+        assert_eq!(closure.occupancy_fencing_token, 7);
+        assert!(!closure.never_started);
+
         assert_eq!(
             supervisor
                 .count_worker_processes_in_state(WORKER_STATE_RUNNING)

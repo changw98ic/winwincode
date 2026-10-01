@@ -42,10 +42,9 @@
 //!    mirror (plan 12.6 `WorkerLaunch`), its grant's instance binding is
 //!    checked against the current launch, the one-time worker credential is
 //!    taken from the wired [`WorkerLaunchMaterialSource`] when the local
-//!    bridge already holds it (a placeholder 0600 file is written
-//!    otherwise, filled by [`DeviceDaemon::receive_worker_credential`] once
-//!    the launch response lands — the worker transport re-reads the file
-//!    per exchange), and the wired [`SessionSupervisor`] spawns the managed
+//!    bridge already holds it; otherwise launch waits for the exact credential
+//!    delivered by [`DeviceDaemon::receive_worker_credential`]. The wired
+//!    [`SessionSupervisor`] then spawns the managed
 //!    worker process. Every verdict is answered with a durable
 //!    `client.worker.launch_ack` echoing the grant identities — accepted,
 //!    idempotent duplicate, or rejected with a reason.
@@ -87,7 +86,7 @@ use winwincode_client_port::domain::{
     ClientArchitecture, ClientCapacityReport, ClientControlError, ClientControlErrorCode,
     ClientControlMessageKind, ClientLockState, ClientOccupancyReleaseMode, ClientPlatformTarget,
     CommandAckStatus, OccupancyRejectReason, PresenceState, WorkerLaunchAckStatus,
-    WorkerLaunchGrant,
+    WorkerLaunchGrant, WorkerLaunchGrantState,
 };
 use winwincode_client_port::exchange::{
     AckCursor, FrameCodec, FrameCodecError, FrameOutbox, OutboxBatch, OutboxError, OutboxSession,
@@ -1291,8 +1290,10 @@ impl DeviceDaemon {
             }
             let retained =
                 crate::candidate_registry::retain_worker_candidates(self, &worker).is_ok();
+            let closure = self.process_closure_for_record(&worker);
             self.enqueue(ClientToServerMessage::WorkerState(
                 winwincode_client_port::messages::ClientWorkerStatePayload {
+                    process_closure: closure,
                     occupancy_lease_id: Some(worker.occupancy_lease_id),
                     worker_session_id: worker.worker_session_id,
                     worker_instance_id: worker.worker_instance_id.clone(),
@@ -1304,6 +1305,39 @@ impl DeviceDaemon {
             if retained {
                 self.reported_worker_exits.insert(worker.worker_instance_id);
             }
+        }
+        for bytes in self.store.worker_launch_receipts()? {
+            let stored: serde_json::Value = serde_json::from_slice(&bytes)
+                .map_err(|_| DaemonError::Protocol("Worker launch receipt is corrupt".into()))?;
+            let ack = decode_worker_launch_receipt_ack(&stored)?;
+            let ClientToServerMessage::WorkerLaunchAck(ack) = ack else {
+                continue;
+            };
+            let Some(mut closure) = ack.process_closure.clone() else {
+                continue;
+            };
+            if !closure.never_started
+                || closure.process_boot_digest.is_some()
+                || self.store.worker_process(&ack.worker_session_id)?.is_some()
+                || self.reported_worker_exits.contains(&ack.worker_instance_id)
+            {
+                continue;
+            }
+            closure
+                .reporting_client_instance_id
+                .clone_from(&self.instance_id);
+            self.enqueue(ClientToServerMessage::WorkerState(
+                winwincode_client_port::messages::ClientWorkerStatePayload {
+                    occupancy_lease_id: Some(ack.occupancy.occupancy_lease_id),
+                    worker_session_id: ack.worker_session_id,
+                    worker_instance_id: ack.worker_instance_id.clone(),
+                    state: winwincode_client_port::domain::ClientWorkerRunState::Stopped,
+                    exit_code: None,
+                    observed_at: now_rfc3339(),
+                    process_closure: Some(closure),
+                },
+            ))?;
+            self.reported_worker_exits.insert(ack.worker_instance_id);
         }
         Ok(())
     }
@@ -1572,8 +1606,11 @@ impl DeviceDaemon {
             }
             match self.downlink.observe(envelope.sequence) {
                 SequenceVerdict::Accept => {
-                    let defer_cursor =
-                        matches!(&envelope.message, ServerToClientMessage::WorkerStop(_));
+                    let defer_cursor = matches!(
+                        &envelope.message,
+                        ServerToClientMessage::WorkerStop(_)
+                            | ServerToClientMessage::WorkerLaunch(_)
+                    );
                     if !defer_cursor {
                         self.advance_downlink_cursor(&envelope)?;
                     }
@@ -1605,9 +1642,10 @@ impl DeviceDaemon {
                             self.apply_occupancy_force_fence(&payload, &envelope.message_id)
                                 .map_err(DownlinkFailure::Fatal)?;
                         }
-                        ServerToClientMessage::WorkerLaunch(payload) => {
-                            self.apply_worker_launch(&payload)
-                                .map_err(DownlinkFailure::Fatal)?;
+                        ServerToClientMessage::WorkerLaunch(ref payload) => {
+                            self.apply_worker_launch(payload)
+                                .map_err(|error| DownlinkFailure::Retriable(error.to_string()))?;
+                            self.advance_downlink_cursor(&envelope)?;
                         }
                         ServerToClientMessage::WorkerStop(ref payload) => {
                             self.apply_worker_stop(payload, &envelope.message_id)
@@ -2342,6 +2380,35 @@ impl DeviceDaemon {
         &mut self,
         payload: &ServerWorkerLaunchPayload,
     ) -> Result<(), DaemonError> {
+        if let Some(bytes) = self
+            .store
+            .worker_launch_receipt(&payload.launch_grant.worker_launch_grant_id)?
+        {
+            let stored: serde_json::Value = serde_json::from_slice(&bytes)
+                .map_err(|_| DaemonError::Protocol("Worker launch receipt is corrupt".into()))?;
+            if stored.get("launch")
+                != Some(
+                    &serde_json::to_value(payload).map_err(|_| {
+                        DaemonError::Protocol("Worker launch cannot be encoded".into())
+                    })?,
+                )
+            {
+                return Err(DaemonError::Protocol("Worker launch replay differs".into()));
+            }
+            let ack = decode_worker_launch_receipt_ack(&stored)?;
+            if let ClientToServerMessage::WorkerLaunchAck(payload) = &ack {
+                if matches!(
+                    payload.status,
+                    WorkerLaunchAckStatus::Accepted | WorkerLaunchAckStatus::Duplicate
+                ) {
+                    self.status.worker_launches_accepted += 1;
+                } else {
+                    self.status.worker_launches_rejected += 1;
+                }
+            }
+            self.enqueue(ack)?;
+            return Ok(());
+        }
         let stamp = &payload.occupancy;
         let grant = &payload.launch_grant;
         let current_revision = self
@@ -2408,6 +2475,15 @@ impl DeviceDaemon {
                 None,
             )
         };
+        if grant.state != WorkerLaunchGrantState::Issued {
+            return rejection(
+                self,
+                WorkerLaunchAckStatus::RejectedWrongState,
+                ClientControlErrorCode::GrantInvalid,
+                "the launch grant is not issued".into(),
+                false,
+            );
+        }
         let Some(supervisor) = self.worker_supervisor.clone() else {
             return rejection(
                 self,
@@ -2417,6 +2493,35 @@ impl DeviceDaemon {
                 false,
             );
         };
+        if grant.expires_at <= now_rfc3339() {
+            if let Some(record) = self.store.worker_process(&grant.worker_session_id)? {
+                if record.worker_id != grant.worker_id
+                    || record.worker_instance_id != grant.worker_instance_id
+                    || record.launch_grant_id != grant.worker_launch_grant_id
+                    || record.occupancy_lease_id != stamp.occupancy_lease_id
+                {
+                    return Err(DaemonError::Protocol(
+                        "expired launch process identity differs".into(),
+                    ));
+                }
+                if record.state == crate::supervisor::WORKER_STATE_RUNNING {
+                    supervisor
+                        .stop(&grant.worker_session_id, false)
+                        .map_err(|_| {
+                            DaemonError::Protocol(
+                                "expired launch process could not be stopped".into(),
+                            )
+                        })?;
+                }
+            }
+            return rejection(
+                self,
+                WorkerLaunchAckStatus::RejectedWrongState,
+                ClientControlErrorCode::GrantInvalid,
+                "the launch grant expired before its launch decision was retained".into(),
+                false,
+            );
+        }
         let Some(material) = self.worker_launch_material.as_ref() else {
             return rejection(
                 self,
@@ -2437,17 +2542,19 @@ impl DeviceDaemon {
                 false,
             );
         };
-        // The one-time credential may already sit in the local bridge (the
-        // launch response delivered it there) or land after the launch
-        // acknowledgement — the supervisor then writes a placeholder private
-        // file and [`DeviceDaemon::receive_worker_credential`] fills it once
-        // the material arrives; the worker transport re-reads it on every
+        // The authenticated private credential must arrive before spawning.
+        // Missing material leaves this launch pending for exact replay; the
+        // launch deadline closes a command whose material never arrives.
+        // The worker transport re-reads its private credential on every
         // exchange.
         let credential = self
             .pending_worker_credentials
-            .remove(&grant.credential_digest)
+            .get(&grant.credential_digest)
+            .cloned()
             .or_else(|| material.worker_credential(&grant.credential_digest))
-            .unwrap_or_default();
+            .ok_or_else(|| {
+                DaemonError::Protocol("Worker launch credential has not arrived".into())
+            })?;
         let spawn_request = SpawnRequest {
             worker_session_id: &grant.worker_session_id,
             worker_id: &grant.worker_id,
@@ -2769,6 +2876,13 @@ impl DeviceDaemon {
     /// mirror revision (the revision fact the Server's grant settlement
     /// observes).
     #[allow(clippy::too_many_arguments)]
+    fn process_closure_for_record(
+        &self,
+        record: &crate::store::WorkerProcessRecord,
+    ) -> Option<winwincode_client_port::messages::ClientWorkerProcessClosure> {
+        worker_process_closure(record, &self.instance_id)
+    }
+
     fn enqueue_launch_ack(
         &mut self,
         stamp: &OccupancyCommandContext,
@@ -2780,27 +2894,64 @@ impl DeviceDaemon {
     ) -> Result<(), DaemonError> {
         let (worker_id, worker_instance_id) =
             worker_identity.unwrap_or((&grant.worker_id, &grant.worker_instance_id));
-        self.enqueue(ClientToServerMessage::WorkerLaunchAck(Box::new(
-            ClientWorkerLaunchAckPayload {
-                occupancy: OccupancyCommandContext {
-                    command: CommandContext {
-                        expected_revision,
-                        idempotency_key: format!(
-                            "worker-launch-ack-{}",
-                            grant.worker_launch_grant_id
-                        ),
+        let closure = if matches!(
+            status,
+            WorkerLaunchAckStatus::Accepted | WorkerLaunchAckStatus::Duplicate
+        ) {
+            None
+        } else {
+            match self.store.worker_process(&grant.worker_session_id)? {
+                Some(record)
+                    if record.launch_grant_id == grant.worker_launch_grant_id
+                        && record.worker_instance_id == grant.worker_instance_id =>
+                {
+                    self.process_closure_for_record(&record)
+                }
+                Some(_) => None,
+                None => Some(
+                    winwincode_client_port::messages::ClientWorkerProcessClosure {
+                        worker_launch_grant_id: grant.worker_launch_grant_id.clone(),
+                        client_instance_id: grant.client_instance_id.clone(),
+                        reporting_client_instance_id: self.instance_id.clone(),
+                        occupancy_fencing_token: grant.occupancy_fencing_token,
+                        never_started: true,
+                        process_boot_digest: None,
                     },
-                    occupancy_lease_id: stamp.occupancy_lease_id.clone(),
-                    occupancy_fencing_token: stamp.occupancy_fencing_token,
+                ),
+            }
+        };
+        let ack = ClientToServerMessage::WorkerLaunchAck(Box::new(ClientWorkerLaunchAckPayload {
+            process_closure: closure,
+            occupancy: OccupancyCommandContext {
+                command: CommandContext {
+                    expected_revision,
+                    idempotency_key: format!("worker-launch-ack-{}", grant.worker_launch_grant_id),
                 },
-                worker_launch_grant_id: grant.worker_launch_grant_id.clone(),
-                worker_session_id: grant.worker_session_id.clone(),
-                worker_id: worker_id.to_owned(),
-                worker_instance_id: worker_instance_id.to_owned(),
-                status,
-                error,
+                occupancy_lease_id: stamp.occupancy_lease_id.clone(),
+                occupancy_fencing_token: stamp.occupancy_fencing_token,
             },
-        )))?;
+            worker_launch_grant_id: grant.worker_launch_grant_id.clone(),
+            worker_session_id: grant.worker_session_id.clone(),
+            worker_id: worker_id.to_owned(),
+            worker_instance_id: worker_instance_id.to_owned(),
+            status,
+            error,
+        }));
+        let launch = ServerWorkerLaunchPayload {
+            occupancy: stamp.clone(),
+            launch_grant: grant.clone(),
+        };
+        let receipt = serde_json::to_vec(&serde_json::json!({"launch":launch,"ack":ack}))
+            .map_err(|_| DaemonError::Protocol("Worker launch receipt cannot be encoded".into()))?;
+        self.store.retain_worker_launch_receipt(
+            &grant.worker_launch_grant_id,
+            &grant.worker_session_id,
+            &format!("{status:?}"),
+            &stamp.command.idempotency_key,
+            &receipt,
+            &now_rfc3339(),
+        )?;
+        self.enqueue(ack)?;
         if matches!(
             status,
             WorkerLaunchAckStatus::Accepted | WorkerLaunchAckStatus::Duplicate
@@ -3077,6 +3228,29 @@ const fn fencing_rejection_status(rejection: FencingRejection) -> CommandAckStat
     }
 }
 
+/// Reads only a retained private receipt. Early receipts used numeric closure
+/// tokens; keep their stored bytes immutable while projecting canonical wire text.
+fn decode_worker_launch_receipt_ack(
+    stored: &serde_json::Value,
+) -> Result<ClientToServerMessage, DaemonError> {
+    let corrupt = || DaemonError::Protocol("Worker launch receipt is corrupt".into());
+    let mut ack = stored["ack"].clone();
+    if let Some(token) = ack.pointer_mut("/payload/processClosure/occupancyFencingToken")
+        && token.is_number()
+    {
+        let value = token
+            .as_u64()
+            .filter(|value| *value > 0)
+            .ok_or_else(corrupt)?;
+        *token = serde_json::Value::String(value.to_string());
+    }
+    let ack = serde_json::from_value(ack).map_err(|_| corrupt())?;
+    if !matches!(ack, ClientToServerMessage::WorkerLaunchAck(_)) {
+        return Err(corrupt());
+    }
+    Ok(ack)
+}
+
 /// Builds a non-fencing worker-stop error without exposing local process data.
 fn stop_error(code: ClientControlErrorCode, message: &str, retryable: bool) -> ClientControlError {
     ClientControlError {
@@ -3201,4 +3375,103 @@ struct PendingConfigurationApply {
     envelope: winwincode_api::generated::DeviceConfigurationEnvelope,
     worker:
         thread::JoinHandle<Result<ConfigurationReceipt, winwincode_provider::DeviceProviderError>>,
+}
+
+/// Derives a terminal closure from the supervisor's original private config.
+pub(crate) fn worker_process_closure(
+    record: &crate::store::WorkerProcessRecord,
+    reporting_instance: &str,
+) -> Option<winwincode_client_port::messages::ClientWorkerProcessClosure> {
+    if !matches!(record.state.as_str(), "exited" | "crashed" | "missing") {
+        return None;
+    }
+    let config: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(Path::new(&record.data_directory).join("managed-session.json")).ok()?,
+    )
+    .ok()?;
+    if config["workerSessionId"] != record.worker_session_id
+        || config["workerInstanceId"] != record.worker_instance_id
+        || config["workerId"] != record.worker_id
+        || config["occupancyLeaseId"] != record.occupancy_lease_id
+    {
+        return None;
+    }
+    let token = config["occupancyFencingToken"].as_str()?;
+    let fencing_token = token.parse::<u64>().ok()?;
+    if fencing_token == 0 || fencing_token.to_string() != token {
+        return None;
+    }
+    Some(
+        winwincode_client_port::messages::ClientWorkerProcessClosure {
+            worker_launch_grant_id: record.launch_grant_id.clone(),
+            client_instance_id: config["clientInstanceId"].as_str()?.to_owned(),
+            reporting_client_instance_id: reporting_instance.to_owned(),
+            occupancy_fencing_token: fencing_token,
+            never_started: false,
+            process_boot_digest: Some(format!(
+                "sha256:{:x}",
+                Sha256::digest(record.process_start_identity.as_bytes())
+            )),
+        },
+    )
+}
+
+#[cfg(test)]
+mod receipt_compatibility_tests {
+    use super::*;
+
+    #[test]
+    fn private_numeric_closure_receipt_replays_without_mutating_retained_bytes() {
+        let ack = ClientToServerMessage::WorkerLaunchAck(Box::new(ClientWorkerLaunchAckPayload {
+            occupancy: OccupancyCommandContext {
+                command: CommandContext {
+                    expected_revision: 1,
+                    idempotency_key: "legacy-receipt".into(),
+                },
+                occupancy_lease_id: "ocl_00000000000000000000000001".into(),
+                occupancy_fencing_token: u64::MAX,
+            },
+            worker_launch_grant_id: "wlg_00000000000000000000000001".into(),
+            worker_session_id: "wsn_00000000000000000000000001".into(),
+            worker_id: "wrk_00000000000000000000000001".into(),
+            worker_instance_id: "wki_00000000000000000000000001".into(),
+            status: WorkerLaunchAckStatus::RejectedCapacityExhausted,
+            error: None,
+            process_closure: Some(
+                winwincode_client_port::messages::ClientWorkerProcessClosure {
+                    worker_launch_grant_id: "wlg_00000000000000000000000001".into(),
+                    client_instance_id: "cix_00000000000000000000000001".into(),
+                    reporting_client_instance_id: "cix_00000000000000000000000002".into(),
+                    occupancy_fencing_token: u64::MAX,
+                    never_started: true,
+                    process_boot_digest: None,
+                },
+            ),
+        }));
+        let mut stored = serde_json::json!({"ack":ack});
+        *stored
+            .pointer_mut("/ack/payload/processClosure/occupancyFencingToken")
+            .unwrap() = serde_json::json!(u64::MAX);
+        let original = serde_json::to_vec(&stored).unwrap();
+        assert_eq!(decode_worker_launch_receipt_ack(&stored).unwrap(), ack);
+        assert_eq!(serde_json::to_vec(&stored).unwrap(), original);
+        let replay =
+            serde_json::to_value(decode_worker_launch_receipt_ack(&stored).unwrap()).unwrap();
+        assert_eq!(
+            replay["payload"]["processClosure"]["occupancyFencingToken"],
+            u64::MAX.to_string()
+        );
+        for invalid in [
+            serde_json::json!(0),
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!("01"),
+        ] {
+            let mut wrong = stored.clone();
+            *wrong
+                .pointer_mut("/ack/payload/processClosure/occupancyFencingToken")
+                .unwrap() = invalid;
+            assert!(decode_worker_launch_receipt_ack(&wrong).is_err());
+        }
+    }
 }

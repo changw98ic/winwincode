@@ -143,6 +143,8 @@ pub struct ManagedSessionConfig {
     pub source_directory: PathBuf,
     /// Local Worker data root (workspaces and Codex runtime live under it).
     pub data_directory: PathBuf,
+    /// Device-owned durable checkouts, separate from private session data.
+    pub execution_workspace_directory: Option<PathBuf>,
     /// Private Provider configuration owned by the launching Device.
     pub provider_directory: PathBuf,
     /// `https://HOST:PORT` origin of the `ExecutionPort` exchange endpoint.
@@ -170,6 +172,7 @@ struct ManagedSessionConfigFile {
     worker_instance_id: Option<String>,
     source_directory: Option<String>,
     data_directory: Option<String>,
+    execution_workspace_directory: Option<String>,
     provider_directory: Option<String>,
     server_origin: Option<String>,
     worker_credential_path: Option<String>,
@@ -260,6 +263,10 @@ impl ManagedSessionConfigFile {
         )?);
         let source_directory = local_path("sourceDirectory", self.source_directory)?;
         let data_directory = local_path("dataDirectory", self.data_directory)?;
+        let execution_workspace_directory = self
+            .execution_workspace_directory
+            .map(|value| local_path("executionWorkspaceDirectory", Some(value)))
+            .transpose()?;
         let provider_directory = local_path("providerDirectory", self.provider_directory)?;
         let server_origin = require("serverOrigin", self.server_origin)?;
         if crate::remote_transport::parse_origin(&server_origin).is_err() {
@@ -284,6 +291,7 @@ impl ManagedSessionConfigFile {
             worker_instance_id,
             source_directory,
             data_directory,
+            execution_workspace_directory,
             provider_directory,
             server_origin,
             worker_credential_path,

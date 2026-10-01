@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { ExecutionPortErrorCode } from '../generated/contracts.js'
+
 import {
   ControlPlaneClientError,
   type ControlPlaneClient,
@@ -69,6 +71,7 @@ export interface ConnectionMonitor {
 }
 
 const PUBLIC_CODES = new Set([
+  ...Object.values(ExecutionPortErrorCode).filter(code => code.startsWith('DEVICE_')),
   'APPROVAL_DENIED',
   'APPROVALS_ROUTE_FAILURE',
   'ARTIFACT_DIGEST_MISMATCH',

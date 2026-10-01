@@ -19,12 +19,13 @@ use winwincode_worker::composition::domain::{
 use winwincode_worker::composition::generated::{
     ArtifactAckMessage, ArtifactReference, ExecutionEventCategory, ExecutionEventRecord,
     ExecutionJob, ExecutionLeaseStamp, ExecutionLimits, ExecutionOutcomeUsage,
-    ExecutionPortMessage, ExecutionScope, ExecutionWorkspace, ExecutionWorkspaceWriteMode,
-    JobDispatchMessage, JobDispatchMessageKind, JobOutcomeAckMessage, JobOutcomeAckMessageKind,
-    JobOutcomeAckMessageStatus, LeaseWriteStatus, RuntimeAckMessage, RuntimeAckMessageKind,
-    RuntimeEventMessage, RuntimeEventMessageKind, WorkRunExecutionScope, WorkRunExecutionScopeKind,
-    WorkRunInput, WorkerCapabilityFeature, WorkerCapabilitySet, WorkerCapabilitySetPlatform,
-    WorkerRegisterMessage, WorkerRegistrationResultMessage, WorkerRegistrationResultMessageKind,
+    ExecutionOutcomeUsageAccountingStatus, ExecutionPortMessage, ExecutionScope,
+    ExecutionWorkspace, ExecutionWorkspaceWriteMode, JobDispatchMessage, JobDispatchMessageKind,
+    JobOutcomeAckMessage, JobOutcomeAckMessageKind, JobOutcomeAckMessageStatus, LeaseWriteStatus,
+    RuntimeAckMessage, RuntimeAckMessageKind, RuntimeEventMessage, RuntimeEventMessageKind,
+    WorkRunExecutionScope, WorkRunExecutionScopeKind, WorkRunInput, WorkerCapabilityFeature,
+    WorkerCapabilitySet, WorkerCapabilitySetPlatform, WorkerRegisterMessage,
+    WorkerRegistrationResultMessage, WorkerRegistrationResultMessageKind,
     WorkerRegistrationResultMessageLeaseRecovery, WorkerRegistrationResultMessageStatus,
 };
 use winwincode_worker::composition::{
@@ -328,7 +329,9 @@ impl FixtureCodex {
                     artifacts: Vec::new(),
                     usage: Some(ExecutionOutcomeUsage {
                         runtime_millis: 17,
-                        tokens: 23,
+                        tokens: Some(23),
+                        known_tokens: 23,
+                        accounting_status: ExecutionOutcomeUsageAccountingStatus::Known,
                         cost_microunits: Some(29),
                     }),
                 },

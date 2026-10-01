@@ -4023,6 +4023,19 @@ fn reusable_server_config(url: &str) -> McpServerConfig {
     }
 }
 
+#[test]
+fn configured_mcp_tool_timeout_can_be_disabled() {
+    let mut config = reusable_server_config("https://example.com/mcp");
+    assert_eq!(configured_tool_timeout(&config), Some(DEFAULT_TOOL_TIMEOUT));
+    config.tool_timeout_sec = Some(Duration::ZERO);
+    assert_eq!(configured_tool_timeout(&config), None);
+    config.tool_timeout_sec = Some(Duration::from_secs(7));
+    assert_eq!(
+        configured_tool_timeout(&config),
+        Some(Duration::from_secs(7))
+    );
+}
+
 fn reusable_server_runtime_context() -> McpRuntimeContext {
     McpRuntimeContext::new(
         Arc::new(environment_manager_without_environments()),
@@ -4076,7 +4089,7 @@ async fn manager_with_reusable_ready_server(
             }),
             metadata: McpServerMetadata::from(&server),
             tool_filter: ToolFilter::from_config(config),
-            tool_timeout: Some(config.tool_timeout_sec.unwrap_or(DEFAULT_TOOL_TIMEOUT)),
+            tool_timeout: configured_tool_timeout(config),
             catalog_item_limit: crate::pagination::MAX_MCP_CATALOG_ITEMS,
         },
     );
@@ -4210,7 +4223,7 @@ async fn reconciliation_reuses_connection_without_relisting_regular_tools() -> a
             }),
             metadata: McpServerMetadata::from(&server),
             tool_filter: ToolFilter::from_config(&config),
-            tool_timeout: Some(config.tool_timeout_sec.unwrap_or(DEFAULT_TOOL_TIMEOUT)),
+            tool_timeout: configured_tool_timeout(&config),
             catalog_item_limit: crate::pagination::MAX_MCP_CATALOG_ITEMS,
         },
     );

@@ -27,11 +27,21 @@ const MAX_SERIALIZED_BYTES: usize = 131_072;
 /// Returns `InvalidBudget` when any field is outside its canonical range.
 pub fn validate_repair_loop_budget(budget: &RepairLoopBudget) -> Result<(), RepairLoopBoundsError> {
     if budget.max_repair_rounds != 3
-        || !(1..=4).contains(&budget.max_observer_calls)
-        || !(1..=8).contains(&budget.max_primary_model_calls)
-        || !(1..=10_000_000).contains(&budget.max_total_tokens)
-        || !(1..=9_007_199_254_740_991).contains(&budget.max_total_cost_microunits)
-        || !(1_000..=3_600_000).contains(&budget.max_wall_time_millis)
+        || budget
+            .max_observer_calls
+            .is_some_and(|value| !(1..=4).contains(&value))
+        || budget
+            .max_primary_model_calls
+            .is_some_and(|value| !(1..=8).contains(&value))
+        || budget
+            .max_total_tokens
+            .is_some_and(|value| !(1..=10_000_000).contains(&value))
+        || budget
+            .max_total_cost_microunits
+            .is_some_and(|value| !(1..=9_007_199_254_740_991).contains(&value))
+        || budget
+            .max_wall_time_millis
+            .is_some_and(|value| !(1_000..=3_600_000).contains(&value))
         || !(1..=4).contains(&budget.max_change_batches)
         || !(1_024..=131_072).contains(&budget.max_context_pack_bytes)
     {
@@ -53,11 +63,11 @@ pub fn validate_repair_loop_counters(
     counters: &RepairLoopCounters,
 ) -> Result<(), RepairLoopBoundsError> {
     if !(0..=3).contains(&counters.repair_rounds)
-        || !(0..=4).contains(&counters.observer_calls)
-        || !(0..=8).contains(&counters.primary_model_calls)
-        || !(0..=10_000_000).contains(&counters.total_tokens)
+        || !(0..=9_007_199_254_740_991).contains(&counters.observer_calls)
+        || !(0..=9_007_199_254_740_991).contains(&counters.primary_model_calls)
+        || !(0..=9_007_199_254_740_991).contains(&counters.total_tokens)
         || !(0..=9_007_199_254_740_991).contains(&counters.total_cost_microunits)
-        || !(0..=3_600_000).contains(&counters.elapsed_millis)
+        || !(0..=9_007_199_254_740_991).contains(&counters.elapsed_millis)
         || !(0..=4).contains(&counters.change_batches)
         || !(0..=131_072).contains(&counters.context_pack_bytes)
     {

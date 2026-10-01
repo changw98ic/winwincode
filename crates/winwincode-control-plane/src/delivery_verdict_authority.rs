@@ -301,6 +301,11 @@ fn selected_current_writer(
     delivery: &Delivery,
 ) -> Result<Option<&SessionBinding>, DeliveryAuthorityError> {
     let bindings = &delivery.snapshot().session_bindings;
+    if delivery.snapshot().same_candidate_reverification.is_some() {
+        return Ok(
+            winwincode_delivery::domain::same_candidate::selected_writer(delivery.snapshot()),
+        );
+    }
     let writers = || {
         bindings.iter().filter(|binding| {
             matches!(
@@ -329,6 +334,7 @@ fn selected_current_writer(
 fn current_verification_bindings(
     delivery: &Delivery,
 ) -> Result<Vec<&SessionBinding>, DeliveryAuthorityError> {
+    let writer = current_writer(delivery)?;
     let mut ordered = Vec::new();
     for role in ["reviewer", "verifier", "adversarial-verifier"] {
         let matches = || {
@@ -336,7 +342,18 @@ fn current_verification_bindings(
                 .snapshot()
                 .session_bindings
                 .iter()
-                .filter(|binding| binding.execution_profile.as_deref() == Some(role))
+                .skip(
+                    winwincode_delivery::domain::same_candidate::verification_round_floor(
+                        delivery.snapshot(),
+                    ),
+                )
+                .filter(|binding| {
+                    binding.execution_profile.as_deref() == Some(role)
+                        && binding.work_contract_id == writer.work_contract_id
+                        && binding.work_contract_revision == writer.work_contract_revision
+                        && binding.work_item_id == writer.work_item_id
+                        && binding.work_item_revision == writer.work_item_revision
+                })
         };
         let Some(key) = matches()
             .map(|binding| (binding.bound_at_millis, binding.attempt))

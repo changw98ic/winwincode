@@ -306,6 +306,26 @@ pub struct ClientWorkerLaunchAckPayload {
     pub status: WorkerLaunchAckStatus,
     /// Machine-readable error fact, if the launch was rejected.
     pub error: Option<ClientControlError>,
+    /// Authenticated Device closure; absent reports do not authorize replacement.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "processClosure"
+    )]
+    pub process_closure: Option<ClientWorkerProcessClosure>,
+}
+
+/// Exact Device-owned closure of a launch's local process lifecycle.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ClientWorkerProcessClosure {
+    pub worker_launch_grant_id: String,
+    pub client_instance_id: String,
+    pub reporting_client_instance_id: String,
+    #[serde(with = "crate::wire::fencing_token")]
+    pub occupancy_fencing_token: u64,
+    pub never_started: bool,
+    pub process_boot_digest: Option<String>,
 }
 
 /// Payload of `client.worker.state` (plan section 9.3).
@@ -331,6 +351,13 @@ pub struct ClientWorkerStatePayload {
     /// Observation timestamp (RFC 3339).
     #[serde(rename = "observedAt")]
     pub observed_at: String,
+    /// Authenticated Device closure; absent reports do not authorize replacement.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "processClosure"
+    )]
+    pub process_closure: Option<ClientWorkerProcessClosure>,
 }
 
 /// One reconciled worker process in `client.worker.reconcile` (schema
@@ -824,6 +851,34 @@ mod tests {
         reparsed
     }
 
+    #[test]
+    fn process_closure_preserves_full_u64_fencing_precision_on_wire() {
+        let closure = ClientWorkerProcessClosure {
+            worker_launch_grant_id: "wlg_00000000000000000000000001".into(),
+            client_instance_id: "cix_00000000000000000000000001".into(),
+            reporting_client_instance_id: "cix_00000000000000000000000002".into(),
+            occupancy_fencing_token: u64::MAX,
+            never_started: true,
+            process_boot_digest: None,
+        };
+        let wire = serde_json::to_value(&closure).unwrap();
+        assert_eq!(wire["occupancyFencingToken"], u64::MAX.to_string());
+        assert_eq!(
+            serde_json::from_value::<ClientWorkerProcessClosure>(wire.clone()).unwrap(),
+            closure
+        );
+        for invalid in [
+            serde_json::json!(u64::MAX),
+            serde_json::json!("0"),
+            serde_json::json!("01"),
+            serde_json::json!("18446744073709551616"),
+        ] {
+            let mut wrong = wire.clone();
+            wrong["occupancyFencingToken"] = invalid;
+            assert!(serde_json::from_value::<ClientWorkerProcessClosure>(wrong).is_err());
+        }
+    }
+
     fn command_context() -> CommandContext {
         CommandContext {
             expected_revision: 41,
@@ -1169,6 +1224,7 @@ mod tests {
             (
                 "client.worker.launch_ack",
                 ClientToServerMessage::WorkerLaunchAck(Box::new(ClientWorkerLaunchAckPayload {
+                    process_closure: None,
                     occupancy: occupancy.clone(),
                     worker_launch_grant_id: "wlg_01j2".to_owned(),
                     worker_session_id: "wsn_01j2".to_owned(),
@@ -1181,6 +1237,7 @@ mod tests {
             (
                 "client.worker.state",
                 ClientToServerMessage::WorkerState(ClientWorkerStatePayload {
+                    process_closure: None,
                     occupancy_lease_id: Some("lease_01j2".to_owned()),
                     worker_session_id: "wsn_01j2".to_owned(),
                     worker_instance_id: "winst_01j2".to_owned(),

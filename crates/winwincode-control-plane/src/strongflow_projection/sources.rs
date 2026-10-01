@@ -1083,12 +1083,13 @@ fn persisted_runtime_events(
                 Some(RuntimeTraceFact::PerformanceBaseline { report }) => {
                     let values = [
                         ("input_tokens", report.primary_model_input_tokens),
-                        ("output_tokens", report.primary_model_output_tokens),
-                        ("tool_calls", report.tool_call_count),
-                        ("runtime_ms", report.total_runtime_ms),
+                        ("output_tokens", Some(report.primary_model_output_tokens)),
+                        ("tool_calls", Some(report.tool_call_count)),
+                        ("runtime_ms", Some(report.total_runtime_ms)),
                     ];
                     let totals = values
                         .into_iter()
+                        .filter_map(|(name, value)| value.map(|value| (name, value)))
                         .map(|(name, value)| {
                             u64::try_from(value)
                                 .map(|value| RuntimeUsageMetricProjection {

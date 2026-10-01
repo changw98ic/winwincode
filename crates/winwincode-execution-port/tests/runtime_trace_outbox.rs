@@ -511,11 +511,13 @@ fn performance_baseline_is_bounded_secret_safe_and_replayable() {
     assert_eq!(ExecutionMode::from_config("unknown"), None);
     assert_eq!(ObserverMode::from_config("unknown"), None);
     let report = PerformanceBaselineReport {
+        usage_complete: true,
         execution_mode: ExecutionMode::React,
         observer_mode: ObserverMode::Off,
         primary_model_call_count: 2,
-        primary_model_input_tokens: 100,
-        primary_model_cached_tokens: 25,
+        primary_model_inclusive_input_tokens: None,
+        primary_model_input_tokens: Some(100),
+        primary_model_cached_tokens: Some(25),
         primary_model_output_tokens: 30,
         primary_model_wait_ms: 900,
         tool_call_count: 3,
@@ -561,7 +563,7 @@ fn performance_baseline_is_bounded_secret_safe_and_replayable() {
     assert!(!json.contains("patchContent"));
 
     let mut invalid = report;
-    invalid.primary_model_cached_tokens = -1;
+    invalid.primary_model_cached_tokens = Some(-1);
     let error = outbox
         .retain(
             &mut MemoryStore::default(),

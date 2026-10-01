@@ -310,11 +310,11 @@ struct SerializableAttemptCharge<'a>(Option<&'a ModelAttemptCharge>);
 struct SerializableAttemptChargeValue<'a> {
     provider_usage_id: &'a str,
     input_tokens: u64,
-    cached_input_tokens: u64,
+    cached_input_tokens: Option<u64>,
     cache_write_input_tokens: u64,
     output_tokens: u64,
     reasoning_output_tokens: u64,
-    cost_micros: u64,
+    cost_micros: Option<u64>,
 }
 
 impl Serialize for SerializableAttemptCharge<'_> {
@@ -2042,6 +2042,34 @@ fn map_secret_store_error(_error: &SecretStoreError) -> ProviderGatewayError {
 
 fn map_adapter_error(error: &ProviderAdapterError) -> ProviderGatewayError {
     match error.kind() {
+        ProviderAdapterErrorKind::RequestInvalid => ProviderGatewayError::new(
+            ProviderGatewayErrorKind::AdapterRequestInvalid,
+            "Provider request is invalid",
+        ),
+        ProviderAdapterErrorKind::RequestTranslation => ProviderGatewayError::new(
+            ProviderGatewayErrorKind::AdapterRequestTranslation,
+            "Provider request translation failed",
+        ),
+        ProviderAdapterErrorKind::RequestSizeLimit => ProviderGatewayError::new(
+            ProviderGatewayErrorKind::AdapterRequestSizeLimit,
+            "Provider request exceeds its size limit",
+        ),
+        ProviderAdapterErrorKind::ResponseContentType => ProviderGatewayError::new(
+            ProviderGatewayErrorKind::AdapterResponseContentType,
+            "Provider response is not an event stream",
+        ),
+        ProviderAdapterErrorKind::Connection => ProviderGatewayError::new(
+            ProviderGatewayErrorKind::AdapterConnection,
+            "Provider connection failed",
+        ),
+        ProviderAdapterErrorKind::Upstream => ProviderGatewayError::new(
+            ProviderGatewayErrorKind::AdapterUpstream,
+            "Provider returned a server error",
+        ),
+        ProviderAdapterErrorKind::IdentityConflict => ProviderGatewayError::new(
+            ProviderGatewayErrorKind::AdapterIdentityConflict,
+            "Provider exchange identity conflicts",
+        ),
         ProviderAdapterErrorKind::Rejected => ProviderGatewayError::new(
             ProviderGatewayErrorKind::AdapterRejected,
             "Provider rejected the request",

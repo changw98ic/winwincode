@@ -1145,7 +1145,9 @@ fn terminal_message(
             usage: Some(ExecutionOutcomeUsage {
                 cost_microunits: Some(400),
                 runtime_millis: 60_000,
-                tokens: 40,
+                tokens: Some(40),
+ known_tokens: 40,
+ accounting_status: winwincode_execution_port::generated::ExecutionOutcomeUsageAccountingStatus::Known,
             }),
         },
         schema_version: SchemaVersion::WinwincodeV1,
@@ -1410,7 +1412,10 @@ fn assert_authenticated_worker_terminal_case(
     }
     if name.ends_with("known-usage") {
         message.outcome.usage = Some(ExecutionOutcomeUsage {
-            tokens: 47,
+            tokens: Some(47),
+            known_tokens: 47,
+            accounting_status:
+                winwincode_execution_port::generated::ExecutionOutcomeUsageAccountingStatus::Known,
             runtime_millis: 30_000,
             cost_microunits: None,
         });
@@ -1470,7 +1475,7 @@ fn assert_authenticated_worker_terminal_case(
                 |row| row.get(0),
             )
             .expect("actual tokens");
-        assert_eq!(tokens, usage.tokens);
+        assert_eq!(Some(tokens), usage.tokens);
     }
     fs::remove_dir_all(root).expect("directory release");
 }

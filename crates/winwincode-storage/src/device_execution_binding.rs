@@ -80,6 +80,37 @@ CREATE INDEX IF NOT EXISTS device_execution_reservation_facts_by_session
     ON device_execution_reservation_facts (worker_session_id);
 CREATE INDEX IF NOT EXISTS device_execution_reservation_facts_by_client
     ON device_execution_reservation_facts (client_node_id);
+CREATE TABLE IF NOT EXISTS device_execution_recovery_intents (
+    job_id TEXT NOT NULL, predecessor_attempt INTEGER NOT NULL,
+    predecessor_facts_digest TEXT NOT NULL, successor_grant_id TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL, applied_at TEXT,
+    PRIMARY KEY(job_id,predecessor_attempt)
+);
+CREATE TABLE IF NOT EXISTS device_execution_fact_replacements (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id TEXT NOT NULL, attempt INTEGER NOT NULL, facts_json TEXT NOT NULL,
+    replacement_receipt_id TEXT, created_at TEXT NOT NULL
+);
+CREATE VIEW IF NOT EXISTS device_execution_current_facts AS
+SELECT f.* FROM device_execution_reservation_facts f
+WHERE NOT EXISTS (SELECT 1 FROM device_execution_fact_replacements r WHERE r.job_id=f.job_id)
+UNION ALL
+SELECT r.job_id,
+json_extract(r.facts_json,'$.client_node_id'),
+json_extract(r.facts_json,'$.client_instance_id'),
+json_extract(r.facts_json,'$.holder_user_id'),
+json_extract(r.facts_json,'$.repository_binding_id'),
+json_extract(r.facts_json,'$.occupancy_lease_id'),
+json_extract(r.facts_json,'$.occupancy_fencing_token'),
+json_extract(r.facts_json,'$.worker_launch_grant_id'),
+json_extract(r.facts_json,'$.worker_session_id'),
+json_extract(r.facts_json,'$.worker_id'),
+json_extract(r.facts_json,'$.worker_instance_id'),
+json_extract(r.facts_json,'$.product_session_id'),
+json_extract(r.facts_json,'$.work_run_id'),
+json_extract(r.facts_json,'$.attached_at'),1,json_extract(r.facts_json,'$.role')
+FROM device_execution_fact_replacements r
+WHERE r.sequence=(SELECT MAX(latest.sequence) FROM device_execution_fact_replacements latest WHERE latest.job_id=r.job_id);
 ";
 
 pub(crate) const DEVICE_EXECUTION_BINDINGS_SCHEMA: &str = r"
@@ -1348,7 +1379,7 @@ fn facts_row(
     ))
 }
 
-fn load_facts(
+pub(crate) fn load_facts(
     connection: &Connection,
     job_id: &str,
 ) -> Result<Option<DeviceExecutionReservationFacts>, DeviceExecutionBindingStoreError> {
@@ -1359,7 +1390,7 @@ fn load_facts(
                     worker_launch_grant_id, worker_session_id, worker_id,
                     worker_instance_id, product_session_id, work_run_id, attached_at,
                     role
-             FROM device_execution_reservation_facts WHERE job_id = ?1",
+             FROM device_execution_current_facts WHERE job_id = ?1",
             [job_id],
             facts_row,
         )
@@ -1369,13 +1400,35 @@ fn load_facts(
         .transpose()
 }
 
+pub(crate) fn load_binding_facts_for_work_run(
+    connection: &Connection,
+    job_id: &str,
+    run: &winwincode_domain::WorkRunId,
+) -> Result<Option<WorkRunDeviceBindingFacts>, StorageError> {
+    let replacement:Option<String>=connection.query_row("SELECT facts_json FROM device_execution_fact_replacements WHERE job_id=?1 AND json_extract(facts_json,'$.work_run_id')=?2 ORDER BY sequence DESC LIMIT 1",params![job_id,run.0],|r|r.get(0)).optional().map_err(|e|StorageError::adapter(e.to_string()))?;
+    let facts = if let Some(value) = replacement {
+        Some(serde_json::from_str(&value).map_err(|e| StorageError::adapter(e.to_string()))?)
+    } else {
+        connection.query_row("SELECT job_id,client_node_id,client_instance_id,holder_user_id,repository_binding_id,occupancy_lease_id,occupancy_fencing_token,worker_launch_grant_id,worker_session_id,worker_id,worker_instance_id,product_session_id,work_run_id,attached_at,role FROM device_execution_reservation_facts WHERE job_id=?1 AND work_run_id=?2",params![job_id,run.0],facts_row).optional().map_err(|e|StorageError::adapter(e.to_string()))?.map(complete_facts).transpose().map_err(|e|StorageError::adapter(e.to_string()))?
+    };
+    project_binding_facts(connection, facts)
+}
+
 pub(crate) fn load_work_run_device_binding_facts(
     connection: &Connection,
     job_id: &str,
 ) -> Result<Option<WorkRunDeviceBindingFacts>, StorageError> {
-    let Some(facts) =
-        load_facts(connection, job_id).map_err(|error| StorageError::adapter(error.to_string()))?
-    else {
+    project_binding_facts(
+        connection,
+        load_facts(connection, job_id).map_err(|error| StorageError::adapter(error.to_string()))?,
+    )
+}
+
+fn project_binding_facts(
+    connection: &Connection,
+    facts: Option<DeviceExecutionReservationFacts>,
+) -> Result<Option<WorkRunDeviceBindingFacts>, StorageError> {
+    let Some(facts) = facts else {
         return Ok(None);
     };
     let public_client_id = connection

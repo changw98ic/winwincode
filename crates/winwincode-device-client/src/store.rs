@@ -3489,6 +3489,66 @@ fn remaining_sqlite_open_time(open_deadline: StdInstant) -> Result<Duration, Dev
         })
 }
 
+impl DeviceStore {
+    /// Loads an immutable launch decision for exact replay after a crash.
+    /// # Errors
+    /// Returns unavailable or corrupt storage failures.
+    pub fn worker_launch_receipt(
+        &self,
+        grant_id: &str,
+    ) -> Result<Option<Vec<u8>>, DeviceStoreError> {
+        self.connection()?
+            .query_row(
+                "SELECT receipt_payload FROM worker_launch_receipts WHERE launch_grant_id=?1",
+                [grant_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(sql_error)
+    }
+    /// Loads retained launch decisions for current-instance closure attestation.
+    /// # Errors
+    /// Returns storage failures.
+    pub fn worker_launch_receipts(&self) -> Result<Vec<Vec<u8>>, DeviceStoreError> {
+        let mut statement = self
+            .connection()?
+            .prepare("SELECT receipt_payload FROM worker_launch_receipts ORDER BY launch_grant_id")
+            .map_err(sql_error)?;
+        statement
+            .query_map([], |row| row.get(0))
+            .map_err(sql_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sql_error)
+    }
+    /// Retains the launch decision before its ACK and downlink cursor advance.
+    /// # Errors
+    /// Rejects a changed receipt under the same launch identity.
+    pub fn retain_worker_launch_receipt(
+        &mut self,
+        grant_id: &str,
+        session_id: &str,
+        status: &str,
+        key: &str,
+        payload: &[u8],
+        now: &str,
+    ) -> Result<(), DeviceStoreError> {
+        if let Some(existing) = self.worker_launch_receipt(grant_id)? {
+            return if existing == payload {
+                Ok(())
+            } else {
+                Err(DeviceStoreError::conflict("Worker launch receipt differs"))
+            };
+        }
+        self.connection()?
+            .execute(
+                "INSERT INTO worker_launch_receipts VALUES (?1,?2,?3,?4,?5,?6)",
+                params![grant_id, session_id, status, key, payload, now],
+            )
+            .map_err(sql_error)?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod migration_concurrency_tests {
     use super::{CLIENT_STORE_SCHEMA_VERSION, STORE_SCHEMA, apply_migrations};

@@ -1095,6 +1095,7 @@ impl winwincode_execution_port::transport::ExecutionPortCore for RecordingRemote
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn remote_heartbeat_reaches_shared_core_after_authentication() {
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Mutex;
@@ -1159,7 +1160,7 @@ fn remote_heartbeat_reaches_shared_core_after_authentication() {
         "messageId":id("xmsg",1), "requestId":id("req",1),
         "sentAt":now, "startedAt":now, "workerId":worker, "workerInstanceId":instance,
         "capabilities": {"platform":"x86_64-unknown-linux-gnu",
-            "features":["shell"], "capabilityDigest":format!("sha256:{}", "a".repeat(64)), "maxConcurrentJobs":1}
+            "features":["shell"], "capabilityDigest":format!("sha256:{}", "a".repeat(64)), "maxConcurrentJobs":1}, "usageAccountingVersion":2
     })).expect("register frame");
     send(register).expect("register");
     let heartbeat: ExecutionPortMessage = serde_json::from_value(serde_json::json!({
@@ -1179,6 +1180,24 @@ fn remote_heartbeat_reaches_shared_core_after_authentication() {
             forged.worker_instance_id = WorkerInstanceId(id("wki", 2));
         }
         assert!(send(ExecutionPortMessage::WorkerHeartbeatMessage(forged)).is_err());
+    }
+    for foreign_worker in [true, false] {
+        let message:ExecutionPortMessage=serde_json::from_value(serde_json::json!({
+            "kind":"job.dispatch_result","schemaVersion":SchemaVersion::WinwincodeV1,"messageId":id("xmsg",3),
+            "sentAt":now,"jobId":id("job",1),"payloadDigest":format!("sha256:{}","b".repeat(64)),"requestId":id("req",3),"status":"accepted",
+            "lease":{"jobId":id("job",1),"leaseId":id("lease",1),"attempt":1,"fencingToken":"1","issuedAt":now,"expiresAt":"2027-01-15T09:00:00.000Z",
+                "workerId":if foreign_worker {id("wrk",2)} else {worker.0.clone()},
+                "workerInstanceId":if foreign_worker {instance.0.clone()} else {id("wki",2)}}
+        })).unwrap();
+        assert!(
+            send(message).is_err(),
+            "authenticated Worker may not submit another Worker's job facts"
+        );
+        assert_eq!(
+            recorded.lock().unwrap().len(),
+            1,
+            "foreign lease is rejected before Core"
+        );
     }
     fs::write(&token, b"rotated-fixture-proof").expect("rotate");
     assert!(send(heartbeat).is_err());

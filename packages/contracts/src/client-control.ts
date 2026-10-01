@@ -242,13 +242,14 @@ export const PUBLIC_CLIENT_ID = (
 export const OCCUPANCY_FENCING_TOKEN = (
   value: unknown,
   path: string,
-): OccupancyFencingToken => brandedText(
-  value,
-  path,
-  'OccupancyFencingToken',
-  OCCUPANCY_FENCING_TOKEN_PATTERN,
-  'a decimal-string OccupancyFencingToken without a leading zero',
-)
+): OccupancyFencingToken => {
+  const token = brandedText(value, path, 'OccupancyFencingToken',
+    OCCUPANCY_FENCING_TOKEN_PATTERN, 'a decimal-string OccupancyFencingToken without a leading zero')
+  if (BigInt(token) > 18_446_744_073_709_551_615n) {
+    controlError('INVALID_IDENTIFIER', path, `${path} exceeds the unsigned 64-bit fencing range`)
+  }
+  return token
+}
 
 export const IDEMPOTENCY_KEY = (value: unknown, path: string): IdempotencyKey => brandedText(
   value,
@@ -853,7 +854,7 @@ export interface WorkerLaunchGrant {
   readonly occupancyFencingToken: OccupancyFencingToken
   readonly repositoryBindingId: RepositoryBindingId
   readonly productSessionId: ProductSessionId
-  readonly workRunId: WorkRunIdentifier
+  readonly workRunId?: WorkRunIdentifier | null
   readonly workerSessionId: WorkerSessionId
   readonly workerId: WorkerId
   readonly workerInstanceId: WorkerInstanceId
@@ -1305,7 +1306,6 @@ export function parseWorkerLaunchGrant(value: unknown, path = 'workerLaunchGrant
     'occupancyFencingToken',
     'repositoryBindingId',
     'productSessionId',
-    'workRunId',
     'workerSessionId',
     'workerId',
     'workerInstanceId',
@@ -1313,7 +1313,7 @@ export function parseWorkerLaunchGrant(value: unknown, path = 'workerLaunchGrant
     'expiresAt',
     'state',
     'revision',
-  ], path)
+  ], path, ['workRunId'])
   return Object.freeze({
     workerLaunchGrantId: WORKER_LAUNCH_GRANT_ID(
       input.workerLaunchGrantId,
@@ -1337,7 +1337,7 @@ export function parseWorkerLaunchGrant(value: unknown, path = 'workerLaunchGrant
       `${path}.repositoryBindingId`,
     ),
     productSessionId: PRODUCT_SESSION_ID(input.productSessionId, `${path}.productSessionId`),
-    workRunId: WORK_RUN_ID(input.workRunId, `${path}.workRunId`),
+    ...(Object.hasOwn(input, 'workRunId') ? { workRunId: nullable(input.workRunId, `${path}.workRunId`, WORK_RUN_ID) } : {}),
     workerSessionId: WORKER_SESSION_ID(input.workerSessionId, `${path}.workerSessionId`),
     workerId: WORKER_ID(input.workerId, `${path}.workerId`),
     workerInstanceId: WORKER_INSTANCE_ID(input.workerInstanceId, `${path}.workerInstanceId`),
@@ -1571,6 +1571,15 @@ export interface ClientRepositoryStatusMessage extends ClientControlMessageEnvel
   readonly lastScannedAt: Instant
 }
 
+export interface ClientWorkerProcessClosure {
+  readonly workerLaunchGrantId: WorkerLaunchGrantId
+  readonly clientInstanceId: ClientInstanceId
+  readonly reportingClientInstanceId: ClientInstanceId
+  readonly occupancyFencingToken: OccupancyFencingToken
+  readonly neverStarted: boolean
+  readonly processBootDigest: Sha256Digest | null
+}
+
 export interface ClientWorkerLaunchAckMessage extends ClientControlMessageEnvelopeFields, ClientControlFencedCommandFields {
   readonly kind: 'client.worker.launch_ack'
   readonly workerLaunchGrantId: WorkerLaunchGrantId
@@ -1579,6 +1588,7 @@ export interface ClientWorkerLaunchAckMessage extends ClientControlMessageEnvelo
   readonly workerInstanceId: WorkerInstanceId
   readonly status: WorkerLaunchAckStatus
   readonly error?: ClientControlError
+  readonly processClosure?: ClientWorkerProcessClosure | null
 }
 
 export interface ClientWorkerStateMessage extends ClientControlMessageEnvelopeFields {
@@ -1589,6 +1599,7 @@ export interface ClientWorkerStateMessage extends ClientControlMessageEnvelopeFi
   readonly state: ClientWorkerRunState
   readonly observedAt: Instant
   readonly exitCode?: number | null
+  readonly processClosure?: ClientWorkerProcessClosure | null
 }
 
 export interface ClientWorkerReconcileMessage extends ClientControlMessageEnvelopeFields {
@@ -2246,6 +2257,26 @@ function parseClientRepositoryStatusMessage(
   })
 }
 
+export function parseClientWorkerProcessClosure(value: unknown, path = 'processClosure'): ClientWorkerProcessClosure {
+  const input = record(value, path)
+  exactKeys(input, ['workerLaunchGrantId', 'clientInstanceId', 'reportingClientInstanceId',
+    'occupancyFencingToken', 'neverStarted', 'processBootDigest'], path)
+  return Object.freeze({
+    workerLaunchGrantId: WORKER_LAUNCH_GRANT_ID(input.workerLaunchGrantId, `${path}.workerLaunchGrantId`),
+    clientInstanceId: CLIENT_INSTANCE_ID(input.clientInstanceId, `${path}.clientInstanceId`),
+    reportingClientInstanceId: CLIENT_INSTANCE_ID(input.reportingClientInstanceId, `${path}.reportingClientInstanceId`),
+    occupancyFencingToken: OCCUPANCY_FENCING_TOKEN(input.occupancyFencingToken, `${path}.occupancyFencingToken`),
+    neverStarted: booleanValue(input.neverStarted, `${path}.neverStarted`),
+    processBootDigest: nullable(input.processBootDigest, `${path}.processBootDigest`, SHA256_DIGEST),
+  })
+}
+
+function optionalProcessClosure(input: Readonly<Record<string, unknown>>, path: string): ClientWorkerProcessClosure | null | undefined {
+  return Object.hasOwn(input, 'processClosure')
+    ? nullable(input.processClosure, `${path}.processClosure`, parseClientWorkerProcessClosure)
+    : undefined
+}
+
 function parseClientWorkerLaunchAckMessage(
   input: Readonly<Record<string, unknown>>,
   path: string,
@@ -2267,10 +2298,11 @@ function parseClientWorkerLaunchAckMessage(
     'status',
     'expectedRevision',
     'idempotencyKey',
-  ], path, ['error'])
+  ], path, ['error', 'processClosure'])
   const error = Object.hasOwn(input, 'error')
     ? parseClientControlError(input.error, `${path}.error`)
     : undefined
+  const processClosure = optionalProcessClosure(input, path)
   return Object.freeze({
     ...parseEnvelopeBase(input, path),
     ...parseFencedCommandFields(input, path),
@@ -2284,6 +2316,7 @@ function parseClientWorkerLaunchAckMessage(
     workerInstanceId: WORKER_INSTANCE_ID(input.workerInstanceId, `${path}.workerInstanceId`),
     status: enumValue(input.status, WORKER_LAUNCH_ACK_STATUSES, `${path}.status`),
     ...(error === undefined ? {} : { error }),
+    ...(processClosure === undefined ? {} : { processClosure }),
   })
 }
 
@@ -2304,10 +2337,11 @@ function parseClientWorkerStateMessage(
     'occupancyLeaseId',
     'state',
     'observedAt',
-  ], path, ['exitCode'])
+  ], path, ['exitCode', 'processClosure'])
   const exitCode = Object.hasOwn(input, 'exitCode')
     ? int32OrNull(input.exitCode, `${path}.exitCode`)
     : undefined
+  const processClosure = optionalProcessClosure(input, path)
   return Object.freeze({
     ...parseEnvelopeBase(input, path),
     kind: 'client.worker.state',
@@ -2321,6 +2355,7 @@ function parseClientWorkerStateMessage(
     state: enumValue(input.state, CLIENT_WORKER_RUN_STATES, `${path}.state`),
     observedAt: instant(input.observedAt, `${path}.observedAt`),
     ...(exitCode === undefined ? {} : { exitCode }),
+    ...(processClosure === undefined ? {} : { processClosure }),
   })
 }
 

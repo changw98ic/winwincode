@@ -65,10 +65,10 @@ pub struct ClientDownlinkFrame {
 /// concurrent writers can never interleave a second frame at one position.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClientDownlinkAppend {
-    client_node_id: String,
-    message_id: String,
-    sequence: u64,
-    frame: String,
+    pub(crate) client_node_id: String,
+    pub(crate) message_id: String,
+    pub(crate) sequence: u64,
+    pub(crate) frame: String,
 }
 
 impl ClientDownlinkAppend {
@@ -221,39 +221,8 @@ impl<'storage> ClientDownlinkOutbox<'storage> {
         append: &ClientDownlinkAppend,
         now: &Instant,
     ) -> Result<ClientDownlinkFrame, ClientDownlinkError> {
-        validate_client_node_id(&append.client_node_id)?;
-        validate_instant(now)?;
         let transaction = self.transaction()?;
-        require_client_node(&transaction, &append.client_node_id)?;
-        let cursor = server_to_client_ack(&transaction, &append.client_node_id)?;
-        let highest = highest_sequence(&transaction, &append.client_node_id)?;
-        if append.sequence != cursor.max(highest) + 1 {
-            return Err(error(
-                ClientDownlinkErrorKind::InvalidInput,
-                "downlink sequence is not the next stream position",
-            ));
-        }
-        transaction
-            .execute(
-                "INSERT INTO client_downlink_frames
-                 (client_node_id, sequence, message_id, frame, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    append.client_node_id,
-                    sql_integer(append.sequence)?,
-                    append.message_id,
-                    append.frame,
-                    now.0,
-                ],
-            )
-            .map_err(|sql| sql_error(&sql))?;
-        let stored = ClientDownlinkFrame {
-            client_node_id: append.client_node_id.clone(),
-            sequence: append.sequence,
-            message_id: append.message_id.clone(),
-            frame: append.frame.clone(),
-            created_at: now.clone(),
-        };
+        let stored = append_launch_in_transaction(&transaction, append, now)?;
         transaction.commit().map_err(|sql| sql_error(&sql))?;
         Ok(stored)
     }
@@ -564,6 +533,46 @@ fn error(kind: ClientDownlinkErrorKind, message: impl Into<String>) -> ClientDow
         kind,
         message: message.into(),
     }
+}
+
+pub(crate) fn append_launch_in_transaction(
+    connection: &rusqlite::Connection,
+    append: &ClientDownlinkAppend,
+    now: &Instant,
+) -> Result<ClientDownlinkFrame, ClientDownlinkError> {
+    validate_client_node_id(&append.client_node_id)?;
+    validate_instant(now)?;
+    require_client_node(connection, &append.client_node_id)?;
+    let cursor = server_to_client_ack(connection, &append.client_node_id)?;
+    let highest = highest_sequence(connection, &append.client_node_id)?;
+    if append.sequence != cursor.max(highest) + 1 {
+        return Err(error(
+            ClientDownlinkErrorKind::InvalidInput,
+            "downlink sequence is not the next stream position",
+        ));
+    }
+    connection
+        .execute(
+            "INSERT INTO client_downlink_frames
+                 (client_node_id, sequence, message_id, frame, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                append.client_node_id,
+                sql_integer(append.sequence)?,
+                append.message_id,
+                append.frame,
+                now.0,
+            ],
+        )
+        .map_err(|sql| sql_error(&sql))?;
+    let stored = ClientDownlinkFrame {
+        client_node_id: append.client_node_id.clone(),
+        sequence: append.sequence,
+        message_id: append.message_id.clone(),
+        frame: append.frame.clone(),
+        created_at: now.clone(),
+    };
+    Ok(stored)
 }
 
 #[cfg(test)]

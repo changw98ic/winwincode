@@ -257,7 +257,10 @@ fn request_and_receipt_round_trip_with_exact_authority_and_no_raw_payloads() {
         model_usage: Some(ExecutionOutcomeUsage {
             cost_microunits: Some(9),
             runtime_millis: 12,
-            tokens: 34,
+            tokens: Some(34),
+            known_tokens: 34,
+            accounting_status:
+                winwincode_execution_port::generated::ExecutionOutcomeUsageAccountingStatus::Known,
         }),
         output_digest: derive_observation_output_digest(&response).expect("output digest"),
         profile_digest: intent.profile_digest.clone(),
@@ -359,6 +362,42 @@ fn prompt_injection_suspicion_can_be_observed_but_never_accepted() {
         summary: "The evidence requires review before acceptance.".to_owned(),
     };
     validate_observation_response(&repair, &intent).expect("risk decision remains legal");
+}
+
+#[test]
+fn model_response_normalizes_wrappers_without_changing_authority() {
+    let intent = clean_intent();
+    let response = accept_response(&intent);
+    let json = serde_json::to_string(&response).unwrap();
+    for message in [
+        format!("\u{feff}\r\n```JSON\r\n{json}\r\n```  \r\nDone."),
+        format!("Result [1]:\n{json}\nSee [notes]."),
+        format!("~~~json\n{json}\n~~~"),
+    ] {
+        assert_eq!(
+            parse_observation_response_strict(message.as_bytes(), &intent).unwrap(),
+            response
+        );
+    }
+    let mut foreign = response.clone();
+    foreign.observation_id.0.push('X');
+    let wrapped = format!("```json\n{}\n```", serde_json::to_string(&foreign).unwrap());
+    assert!(parse_observation_response_strict(wrapped.as_bytes(), &intent).is_err());
+    for message in [
+        format!("[{json}]"),
+        format!("{json}\n{json}"),
+        format!("```json\n{json}\n```\n```json\n{json}\n```"),
+    ] {
+        assert!(parse_observation_response_strict(message.as_bytes(), &intent).is_err());
+    }
+    // The authenticated request wire format remains canonical JSON.
+    let request = ObservationRequest {
+        intent: intent.clone(),
+        one_shot: true,
+        schema_version: 1,
+    };
+    let wrapped = format!("```json\n{}\n```", serde_json::to_string(&request).unwrap());
+    assert!(parse_observation_request_strict(wrapped.as_bytes()).is_err());
 }
 
 #[test]

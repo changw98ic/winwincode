@@ -142,6 +142,20 @@ fn provider_token_detection_respects_value_boundaries() {
 }
 
 #[test]
+fn ordinary_source_assignments_are_not_credentials() {
+    let gate = CredentialLeakGate::new();
+    for source in [
+        "let token: i32 = 1;",
+        "let secret = false;",
+        "struct Config { authorization: String }",
+        "password: String",
+    ] {
+        gate.inspect_bytes(CredentialOutputBoundary::WebSocket, source.as_bytes())
+            .expect("ordinary source text must not be rejected as a credential");
+    }
+}
+
+#[test]
 fn credential_reference_flow_passes_only_references_and_stable_diagnostics_to_outputs() {
     let root = temporary_directory();
     let mut storage = SqliteStorage::open(root.join("metadata")).expect("open metadata storage");

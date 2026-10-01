@@ -53,6 +53,7 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
+use codex_config::McpServerConfig;
 use codex_config::McpServerTransportConfig;
 use codex_diagnostics::Gauge;
 use codex_diagnostics::GaugeGuard;
@@ -75,6 +76,13 @@ use tokio::task::JoinSet;
 use tracing::warn;
 
 static LIVE_CONNECTIONS: Gauge = Gauge::new("mcp.connections.live");
+
+fn configured_tool_timeout(config: &McpServerConfig) -> Option<Duration> {
+    config
+        .tool_timeout_sec
+        .or(Some(DEFAULT_TOOL_TIMEOUT))
+        .filter(|timeout| !timeout.is_zero())
+}
 
 pub(crate) struct McpServerConnection {
     identity: Option<McpServerConnectionIdentity>,
@@ -291,11 +299,7 @@ impl McpConnectionSet {
             let metadata = McpServerMetadata::from(&server);
             let configured_config = server.config().clone();
             let configured_tool_filter = ToolFilter::from_config(&configured_config);
-            let configured_tool_timeout = Some(
-                configured_config
-                    .tool_timeout_sec
-                    .unwrap_or(DEFAULT_TOOL_TIMEOUT),
-            );
+            let configured_tool_timeout = configured_tool_timeout(&configured_config);
             let resolved_environment =
                 runtime_context.resolve_server_environment(&server_name, &configured_config);
             // For built-in Codex Apps, `CODEX_CONNECTORS_TOKEN` is a debug

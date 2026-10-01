@@ -782,7 +782,9 @@ async fn remote_worker_exchange(
             if std::env::var_os("WWC_DEBUG_RUNTIME").is_some() {
                 eprintln!("remote Worker exchange error: {error}");
             }
-            StatusCode::UNAUTHORIZED.into_response()
+            StatusCode::from_u16(error.status_code())
+                .unwrap_or(StatusCode::SERVICE_UNAVAILABLE)
+                .into_response()
         }
     }
 }

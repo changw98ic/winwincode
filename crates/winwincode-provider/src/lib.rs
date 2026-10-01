@@ -9,7 +9,9 @@ mod jev_context;
 mod provider_anthropic;
 pub mod provider_https_sse;
 mod provider_openai;
+mod provider_sse_framing;
 pub mod provider_stream;
+mod provider_transport;
 mod types;
 
 pub use credential_leak_gate::{

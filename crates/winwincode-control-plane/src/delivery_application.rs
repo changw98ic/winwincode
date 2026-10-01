@@ -291,7 +291,9 @@ impl DeliveryApplicationError {
     #[must_use]
     pub fn code(&self) -> ErrorCode {
         match self {
-            Self::InvalidRequest(_) => ErrorCode::InvalidRequest,
+            Self::InvalidRequest(_) | Self::Execution(DeliveryExecutionError::InvalidEffect(_)) => {
+                ErrorCode::InvalidRequest
+            }
             Self::TrustedFactsUnavailable(_) => ErrorCode::TrustedFactsUnavailable,
             Self::ResourceNotFound(_) => ErrorCode::ResourceNotFound,
             Self::ReadCursorExpired => ErrorCode::ReadCursorExpired,
@@ -307,6 +309,12 @@ impl DeliveryApplicationError {
 
     #[must_use]
     pub const fn retryable(&self) -> bool {
+        if matches!(
+            self,
+            Self::Execution(DeliveryExecutionError::InvalidEffect(_))
+        ) {
+            return false;
+        }
         matches!(
             self,
             Self::ReadCursorExpired
@@ -771,6 +779,13 @@ impl ControlPlane {
             self.finalize_terminal_candidate_if_current(
                 &command.payload.delivery_id,
                 &receipt,
+                &delivery,
+            )?;
+            self.continue_delivery_after_retry_verification(
+                &command.scope,
+                &command.payload.delivery_id,
+                &command.payload.attention_item_id,
+                &command.actor,
                 &delivery,
             )?;
             return attention_response(command, &receipt, &delivery);
@@ -1367,14 +1382,26 @@ fn controller_followup_is_safe(
         .work_run_aggregate
         .runs
         .iter()
-        .find(|run| run.execution_job_id == *completed_job_id)
+        .filter(|run| run.execution_job_id == *completed_job_id)
+        .max_by_key(|run| run.attempt)
     else {
         return false;
     };
-    if !matches!(
-        completed.state,
-        winwincode_domain::WorkRunState::CandidateReady | winwincode_domain::WorkRunState::Settled
-    ) {
+    let same_candidate = delivery
+        .snapshot()
+        .same_candidate_reverification
+        .as_ref()
+        .is_some_and(|fact| {
+            fact.remediator_job_id == *completed_job_id
+                && fact.remediator_work_run_id == completed.id
+        });
+    if !same_candidate
+        && !matches!(
+            completed.state,
+            winwincode_domain::WorkRunState::CandidateReady
+                | winwincode_domain::WorkRunState::Settled
+        )
+    {
         return false;
     }
     !delivery

@@ -382,7 +382,7 @@ impl ProviderGatewayAdmissionPort for AdmissionProbe {
                 }
             },
             actual_tokens: 0,
-            actual_cost_micros: 0,
+            actual_cost_micros: Some(0),
             revision,
             idempotent_replay: false,
         })
@@ -413,7 +413,7 @@ impl ProviderGatewayAdmissionPort for AdmissionProbe {
         original_request_id: &RequestId,
         model_exchange_id: &ModelExchangeId,
         usage: ProviderTokenUsage,
-        actual_cost_micros: u64,
+        actual_cost_micros: Option<u64>,
     ) -> Result<ModelReservationTerminalReceipt, ProviderAdmissionError> {
         self.reserved
             .lock()
@@ -589,7 +589,7 @@ fn seed_durable_exchange(
 const fn usage() -> ProviderTokenUsage {
     ProviderTokenUsage {
         input_tokens: 10,
-        cached_input_tokens: 0,
+        cached_input_tokens: Some(0),
         cache_write_input_tokens: 0,
         output_tokens: 5,
         reasoning_output_tokens: 0,
@@ -599,7 +599,7 @@ const fn usage() -> ProviderTokenUsage {
 fn completed() -> ProviderGatewayTerminal {
     ProviderGatewayTerminal::Completed {
         usage: usage(),
-        actual_cost_micros: 25,
+        actual_cost_micros: Some(25),
     }
 }
 

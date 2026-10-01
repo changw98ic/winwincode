@@ -1100,7 +1100,15 @@
           "$ref": "./domain.schema.json#/$defs/ProductSessionId"
         },
         "workRunId": {
-          "$ref": "./domain.schema.json#/$defs/WorkRunId"
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/WorkRunId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "WorkRun anchor; omitted or null for ProductSession Chat."
         },
         "workerSessionId": {
           "$ref": "./domain.schema.json#/$defs/WorkerSessionId"
@@ -1133,7 +1141,6 @@
         "occupancyFencingToken",
         "repositoryBindingId",
         "productSessionId",
-        "workRunId",
         "workerSessionId",
         "workerId",
         "workerInstanceId",
@@ -1921,6 +1928,16 @@
         },
         "idempotencyKey": {
           "$ref": "#/$defs/IdempotencyKey"
+        },
+        "processClosure": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ClientWorkerProcessClosure"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -2000,6 +2017,16 @@
               "type": "integer",
               "minimum": -2147483648,
               "maximum": 2147483647
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "processClosure": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ClientWorkerProcessClosure"
             },
             {
               "type": "null"
@@ -3795,6 +3822,46 @@
       "x-direction": "client-to-control-plane",
       "x-authority": "device-repository",
       "x-message-class": "report"
+    },
+    "ClientWorkerProcessClosure": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "workerLaunchGrantId": {
+          "$ref": "#/$defs/WorkerLaunchGrantId"
+        },
+        "clientInstanceId": {
+          "$ref": "#/$defs/ClientInstanceId"
+        },
+        "reportingClientInstanceId": {
+          "$ref": "#/$defs/ClientInstanceId"
+        },
+        "occupancyFencingToken": {
+          "$ref": "#/$defs/OccupancyFencingToken"
+        },
+        "neverStarted": {
+          "type": "boolean"
+        },
+        "processBootDigest": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "workerLaunchGrantId",
+        "clientInstanceId",
+        "reportingClientInstanceId",
+        "occupancyFencingToken",
+        "neverStarted",
+        "processBootDigest"
+      ],
+      "description": "Authenticated Device proof of an exact launch process closure; current reporter instance is distinct from the original launch instance."
     }
   }
 }

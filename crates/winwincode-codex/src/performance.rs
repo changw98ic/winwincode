@@ -34,8 +34,10 @@ impl PerformanceOperationKind {
 }
 
 /// Bounded values recorded when one stable operation completes.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct PerformanceOperationCompletion {
+    pub(crate) usage_known: bool,
+    pub(crate) cache_breakdown_known: bool,
     pub(crate) duration_millis: Option<i64>,
     pub(crate) input_tokens: i64,
     pub(crate) cached_tokens: i64,
@@ -45,11 +47,25 @@ pub(crate) struct PerformanceOperationCompletion {
     pub(crate) actual_cost_microunits: Option<i64>,
 }
 
+impl Default for PerformanceOperationCompletion {
+    fn default() -> Self {
+        Self {
+            usage_known: true,
+            cache_breakdown_known: true,
+            duration_millis: None,
+            input_tokens: 0,
+            cached_tokens: 0,
+            output_tokens: 0,
+            actual_cost_microunits: None,
+        }
+    }
+}
+
 /// Exact terminal model usage decoded from a provider-neutral `ModelPort` frame.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct PrimaryModelUsage {
     pub(crate) input: i64,
-    pub(crate) cached: i64,
+    pub(crate) cached: Option<i64>,
     pub(crate) output: i64,
     pub(crate) actual_cost_microunits: Option<i64>,
 }
@@ -62,6 +78,7 @@ pub(crate) struct DelegatedPerformanceTotals {
     pub(crate) elapsed_millis: i64,
     pub(crate) observer_calls: i64,
     pub(crate) cost_complete: bool,
+    pub(crate) usage_complete: bool,
     pub(crate) pending_model_calls: i64,
 }
 

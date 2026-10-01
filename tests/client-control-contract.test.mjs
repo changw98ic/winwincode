@@ -549,6 +549,8 @@ test('worker launch binds the grant to the command lease and token', () => {
     'INVALID_IDENTIFIER',
   )
   const { workRunId: _workRunId, ...legacyGrant } = workerLaunchGrant()
+  assert.equal(parseWorkerLaunchGrant(legacyGrant).workRunId, undefined)
+  assert.equal(parseWorkerLaunchGrant({ ...legacyGrant, workRunId: null }).workRunId, null)
   assert.equal(
     errorCodeOf(() => parseWorkerLaunchGrant({
       ...legacyGrant,
@@ -556,6 +558,32 @@ test('worker launch binds the grant to the command lease and token', () => {
     })),
     'INVALID_SHAPE',
   )
+})
+
+test('process closure preserves fencing precision across ACK and state reports', () => {
+  const closure = {
+    workerLaunchGrantId: crockfordId('wlg'),
+    clientInstanceId: crockfordId('cix'),
+    reportingClientInstanceId: crockfordId('cix', 2),
+    occupancyFencingToken: '18446744073709551615',
+    neverStarted: true,
+    processBootDigest: null,
+  }
+  for (const kind of ['client.worker.launch_ack', 'client.worker.state']) {
+    const message = validMessage(kind, { processClosure: closure })
+    assert.equal(parseClientToServerMessage(message).processClosure.occupancyFencingToken,
+      '18446744073709551615')
+    assert.equal(parseClientToServerMessage(validMessage(kind, { processClosure: null })).processClosure, null)
+    assert.equal(errorCodeOf(() => parseClientToServerMessage(validMessage(kind, {
+      processClosure: { ...closure, occupancyFencingToken: 3 },
+    }))), 'INVALID_IDENTIFIER')
+    assert.equal(errorCodeOf(() => parseClientToServerMessage(validMessage(kind, {
+      processClosure: { ...closure, occupancyFencingToken: '18446744073709551616' },
+    }))), 'INVALID_IDENTIFIER')
+    assert.equal(errorCodeOf(() => parseClientToServerMessage(validMessage(kind, {
+      processClosure: { ...closure, fabricated: true },
+    }))), 'INVALID_SHAPE')
+  }
 })
 
 test('connect code carries only the sha256 digest, never plaintext', () => {

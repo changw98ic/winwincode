@@ -642,15 +642,19 @@ pub(crate) fn safest_attention_transition(actions: &[VerdictAttentionAction]) ->
     }
 }
 
-/// Returns the next business rework number from accepted remediator bindings.
+/// Returns the next business rework number from distinct accepted dispatches.
 pub(crate) fn next_rework_attempt(delivery: &Delivery) -> u64 {
-    delivery
-        .snapshot()
+    rework_dispatch_count(delivery.snapshot()).saturating_add(1)
+}
+
+pub(crate) fn rework_dispatch_count(snapshot: &DeliverySnapshot) -> u64 {
+    snapshot
         .session_bindings
         .iter()
         .filter(|binding| binding.execution_profile.as_deref() == Some("remediator"))
-        .count()
-        .saturating_add(1) as u64
+        .map(|binding| &binding.execution_job_id)
+        .collect::<HashSet<_>>()
+        .len() as u64
 }
 
 /// Derives sealed rework history from append-only Delivery journal snapshots.
@@ -665,7 +669,7 @@ pub(crate) fn derive_validated_rework_history(
     let mut previous_revision = None;
     let mut prior_candidate_refs = HashSet::new();
     let mut prior_failed_criterion_ids = HashSet::new();
-    let current_candidate_ref = delivery
+    let _current_candidate_ref = delivery
         .snapshot()
         .verdict
         .as_ref()
@@ -693,8 +697,10 @@ pub(crate) fn derive_validated_rework_history(
             continue;
         };
         if verdict.status != DeliveryVerdictStatus::Fail
-            || current_candidate_ref == Some(verdict.candidate_ref.as_str())
-            || !prior_candidate_refs.insert(verdict.candidate_ref.as_str())
+            || delivery.snapshot().verdict.as_ref().is_some_and(|current| {
+                current.id == verdict.id && current.candidate_ref == verdict.candidate_ref
+            })
+            || !prior_candidate_refs.insert((verdict.candidate_ref.as_str(), verdict.id.0.as_str()))
         {
             continue;
         }
@@ -754,6 +760,7 @@ fn seal_rework_history(
 /// Historical records stay in the append-only journal, while the new current
 /// snapshot no longer exposes prior-candidate Evidence or Verdict as usable.
 pub(crate) fn invalidate_candidate_authorization_for_writer_start(snapshot: &mut DeliverySnapshot) {
+    snapshot.same_candidate_reverification = None;
     snapshot.evidence.clear();
     snapshot.verdict = None;
 }
@@ -2694,5 +2701,134 @@ mod tests {
             repeated.effect,
             WorkRunStartEffect::Clarify(ReworkClarificationReason::RepeatedCriterionFailure)
         ));
+    }
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn unchanged_remediation_restores_exact_candidate_and_requires_a_new_review_round() {
+        use crate::application::workrun_execution::{
+            DurableTerminalOutcomeInput, TerminalOutcomeStatus, apply_terminal_outcome,
+            reconcile_durable_terminal_outcome,
+        };
+        use crate::domain::same_candidate::{
+            selected_writer, verification_round_floor, verify_unchanged_rework_recovery,
+        };
+        use winwincode_domain::WorkItemState;
+        let (source, candidate, _, _) = current_failure();
+        let source_writer = selected_writer(source.snapshot())
+            .unwrap()
+            .work_run_id
+            .clone();
+        let current = append_remediator(
+            source.clone(),
+            source.snapshot().work_run_aggregate.items[0].id.clone(),
+            "unchanged-remediator",
+            WorkRunState::Running,
+        );
+        let mut snapshot = current.into_snapshot();
+        snapshot.work_run_aggregate.items[0].state = WorkItemState::InProgress;
+        snapshot.evidence.clear();
+        snapshot.verdict = None;
+        let current = Delivery::try_from_snapshot(snapshot).expect("active remediator");
+        let binding = current.snapshot().session_bindings.last().unwrap();
+        let run = current.snapshot().work_run_aggregate.runs.last().unwrap();
+        let issued = current.snapshot().updated_at_millis;
+        let instant = |millis: u64| {
+            winwincode_domain::Instant(
+                time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(millis) * 1_000_000)
+                    .unwrap()
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .unwrap(),
+            )
+        };
+        let facts = reconcile_durable_terminal_outcome(
+            &current,
+            DurableTerminalOutcomeInput {
+                execution_job_id: binding.execution_job_id.clone(),
+                attempt: binding.attempt,
+                lease_id: binding.lease_id.clone().unwrap(),
+                fencing_token: binding.fencing_token.clone().unwrap(),
+                worker_id: binding.worker_id.clone().unwrap(),
+                worker_instance_id: binding.worker_instance_id.clone().unwrap(),
+                worker_session_id: binding.worker_session_id.clone().unwrap(),
+                issued_at: instant(issued),
+                expires_at: instant(issued + 60000),
+                work_run_id: run.id.clone(),
+                status: TerminalOutcomeStatus::Failed,
+                codex_thread_id: binding.codex_thread_id.clone(),
+                finished_at_millis: issued + 1,
+                last_event_sequence: winwincode_domain::ExecutionAckSequence(0),
+                artifacts: vec![],
+            },
+        )
+        .expect("exact terminal");
+        let recovery = verify_unchanged_rework_recovery(
+            &current,
+            &source,
+            &facts,
+            &Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+            candidate.candidate_ref(),
+        )
+        .expect("recovery authority");
+        let verified = facts.verify_active(&current).unwrap();
+        let terminal = apply_terminal_outcome(
+            &current,
+            current.revision(),
+            facts.authority().active_lease(),
+            &verified,
+        )
+        .unwrap();
+        let restored = recovery
+            .apply(&current, &terminal)
+            .expect("atomic restoration");
+        assert_eq!(
+            selected_writer(restored.snapshot()).unwrap().work_run_id,
+            source_writer
+        );
+        assert_eq!(
+            restored.snapshot().work_run_aggregate.items[0].state,
+            WorkItemState::CandidateReady
+        );
+        assert_eq!(
+            restored
+                .snapshot()
+                .work_run_aggregate
+                .runs
+                .last()
+                .unwrap()
+                .state,
+            WorkRunState::Failed
+        );
+        assert_eq!(
+            verification_round_floor(restored.snapshot()),
+            restored.snapshot().session_bindings.len()
+        );
+        assert_frozen_candidate_current(&restored, &candidate)
+            .expect("same candidate remains current");
+        let decoded = Delivery::decode_json(&restored.encode_json().unwrap()).expect("restart");
+        assert_eq!(decoded, restored);
+        let mut tampered = restored.clone().into_snapshot();
+        tampered
+            .same_candidate_reverification
+            .as_mut()
+            .unwrap()
+            .producer_work_run_id = tampered.work_run_aggregate.runs.last().unwrap().id.clone();
+        assert!(Delivery::try_from_snapshot(tampered).is_err());
+        let mut next = restored.into_snapshot();
+        invalidate_candidate_authorization_for_writer_start(&mut next);
+        assert!(next.same_candidate_reverification.is_none());
+    }
+
+    #[test]
+    fn same_candidate_new_failed_verdict_consumes_one_business_rework_attempt() {
+        let (source, _, _, _) = current_failure();
+        let mut next = source.clone().into_snapshot();
+        next.revision += 1;
+        next.updated_at_millis += 1;
+        next.verdict.as_mut().unwrap().id = DeliveryVerdictId("same-candidate-next-verdict".into());
+        let next = Delivery::try_from_snapshot(next).expect("later failed verification");
+        let history =
+            derive_validated_rework_history(&next, &[source.into_snapshot()]).expect("history");
+        assert_eq!(history.observed_rework_count, 1);
+        assert!(!history.prior_failed_criterion_ids.is_empty());
     }
 }

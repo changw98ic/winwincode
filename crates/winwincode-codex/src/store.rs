@@ -255,6 +255,7 @@ fn migrate_mcp_approval_schema(connection: &Connection) -> Result<(), AdapterSto
         .map_err(|_| AdapterStoreError::Unavailable)
 }
 
+#[allow(clippy::too_many_lines)]
 fn initialize_performance_schema(connection: &Connection) -> Result<(), AdapterStoreError> {
     connection
         .execute_batch(
@@ -295,6 +296,11 @@ fn initialize_performance_schema(connection: &Connection) -> Result<(), AdapterS
                      (completed = 0 AND completed_at IS NULL)
                      OR (completed = 1 AND completed_at IS NOT NULL)
                    )
+                 );
+                 CREATE TABLE IF NOT EXISTS performance_jev_parent_terminal (
+                   run_key TEXT NOT NULL,exchange_id TEXT NOT NULL,
+                   model_call_id TEXT NOT NULL,observed_at TEXT NOT NULL,
+                   PRIMARY KEY(run_key,exchange_id)
                  );
                  CREATE TABLE IF NOT EXISTS performance_jev_receipt (
                    run_key TEXT NOT NULL,
@@ -344,6 +350,48 @@ fn initialize_performance_schema(connection: &Connection) -> Result<(), AdapterS
             )
             .map_err(|_| AdapterStoreError::Unavailable)?;
     }
+    for table in ["performance_operation", "performance_jev_receipt"] {
+        let exists: bool = connection.query_row(&format!("SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name='usage_known')"), [], |row| row.get(0)).map_err(|_| AdapterStoreError::Unavailable)?;
+        if !exists {
+            connection.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN usage_known INTEGER NOT NULL DEFAULT 1 CHECK(usage_known IN (0,1));")).map_err(|_| AdapterStoreError::Unavailable)?;
+        }
+    }
+    connection.execute_batch("CREATE TABLE IF NOT EXISTS performance_usage_settlement (
+        run_key TEXT NOT NULL, operation_kind TEXT NOT NULL, operation_id TEXT NOT NULL,
+        input_tokens INTEGER NOT NULL, cached_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL,
+        actual_cost_microunits INTEGER, observed_at TEXT NOT NULL,
+        usage_known INTEGER NOT NULL CHECK(usage_known IN (0,1)), revision INTEGER NOT NULL,
+        PRIMARY KEY(run_key,operation_kind,operation_id,revision));").map_err(|_|AdapterStoreError::Unavailable)?;
+    for table in ["performance_operation", "performance_usage_settlement"] {
+        let exists:bool=connection.query_row(&format!("SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name='cache_breakdown_known')"),[],|row|row.get(0)).map_err(|_|AdapterStoreError::Unavailable)?;
+        if !exists {
+            connection.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN cache_breakdown_known INTEGER NOT NULL DEFAULT 1 CHECK(cache_breakdown_known IN (0,1));")).map_err(|_|AdapterStoreError::Unavailable)?;
+        }
+    }
+    connection.execute_batch("DROP VIEW IF EXISTS performance_operation_accounted;
+        CREATE VIEW performance_operation_accounted AS
+        SELECT p.run_key,p.operation_kind,p.operation_id,p.started_at,p.completed_at,p.completed,p.duration_millis,
+          COALESCE(s.input_tokens,p.input_tokens) AS input_tokens,
+          COALESCE(s.cached_tokens,p.cached_tokens) AS cached_tokens,
+          COALESCE(s.output_tokens,p.output_tokens) AS output_tokens,
+          CASE WHEN s.operation_id IS NOT NULL THEN s.actual_cost_microunits ELSE p.actual_cost_microunits END AS actual_cost_microunits,
+          COALESCE(s.usage_known,p.usage_known) AS usage_known,
+          COALESCE(s.cache_breakdown_known,p.cache_breakdown_known) AS cache_breakdown_known
+        FROM performance_operation p LEFT JOIN performance_usage_settlement s
+          ON s.run_key=p.run_key AND s.operation_kind=p.operation_kind AND s.operation_id=p.operation_id
+          AND s.revision=(SELECT MAX(q.revision) FROM performance_usage_settlement q
+            WHERE q.run_key=p.run_key AND q.operation_kind=p.operation_kind AND q.operation_id=p.operation_id);
+        UPDATE performance_jev_receipt SET completed=1,
+          usage_known=CASE WHEN json_extract(receipt_json,'$.run.observation.outputTokens') IS NOT NULL
+            AND json_array_length(receipt_json,'$.run.failures')=0 THEN 1 ELSE 0 END
+          WHERE json_type(receipt_json,'$.run')='object';
+        UPDATE performance_jev_receipt SET usage_known=0 WHERE completed=0;
+        UPDATE performance_operation SET completed=1, completed_at=COALESCE((SELECT json_extract(CAST(f.frame_json AS TEXT),'$.sentAt')
+            FROM model_call_frame f WHERE f.run_key=performance_operation.run_key AND f.model_call_id=performance_operation.operation_id
+            ORDER BY f.sequence DESC LIMIT 1),started_at), usage_known=0
+        WHERE operation_kind='primary_model' AND completed=0 AND EXISTS (
+          SELECT 1 FROM model_call_ledger m WHERE m.run_key=performance_operation.run_key
+          AND m.model_call_id=performance_operation.operation_id AND m.completed=1);").map_err(|_| AdapterStoreError::Unavailable)?;
     Ok(())
 }
 impl AdapterStore {
@@ -559,6 +607,46 @@ impl AdapterStore {
         completed_at: &winwincode_domain::Instant,
         completion: PerformanceOperationCompletion,
     ) -> Result<(), AdapterStoreError> {
+        self.record_performance_completion_impl(
+            run_key,
+            kind,
+            operation_id,
+            completed_at,
+            completion,
+            false,
+        )
+    }
+
+    /// A refused open or cancellation closes lifecycle only; a measured terminal wins.
+    pub(crate) fn close_unmeasured_primary(
+        &self,
+        run_key: &str,
+        operation_id: &str,
+        completed_at: &winwincode_domain::Instant,
+    ) -> Result<(), AdapterStoreError> {
+        self.record_performance_completion_impl(
+            run_key,
+            PerformanceOperationKind::PrimaryModel,
+            operation_id,
+            completed_at,
+            PerformanceOperationCompletion {
+                usage_known: false,
+                ..Default::default()
+            },
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn record_performance_completion_impl(
+        &self,
+        run_key: &str,
+        kind: PerformanceOperationKind,
+        operation_id: &str,
+        completed_at: &winwincode_domain::Instant,
+        completion: PerformanceOperationCompletion,
+        only_if_pending: bool,
+    ) -> Result<(), AdapterStoreError> {
         validate_performance_identity(run_key, operation_id, completed_at)?;
         for value in [
             completion.input_tokens,
@@ -590,10 +678,49 @@ impl AdapterStore {
             .as_ref()
             .is_some_and(|(_, completed)| *completed == 1)
         {
+            if only_if_pending {
+                return Ok(());
+            }
+            let original: (String,i64,i64,i64,i64,Option<i64>,bool,bool) = transaction.query_row(
+                "SELECT completed_at,duration_millis,input_tokens,cached_tokens,output_tokens,actual_cost_microunits,usage_known,cache_breakdown_known FROM performance_operation WHERE run_key=?1 AND operation_kind=?2 AND operation_id=?3",
+                params![run_key,kind.as_str(),operation_id], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?)))
+                .map_err(|_| AdapterStoreError::Unavailable)?;
+            let duration = completion
+                .duration_millis
+                .or_else(|| {
+                    elapsed_millis(
+                        &winwincode_domain::Instant(
+                            existing.as_ref().expect("existing completion").0.clone(),
+                        ),
+                        completed_at,
+                    )
+                })
+                .unwrap_or(0);
+            let exact_original = original
+                == (
+                    completed_at.0.clone(),
+                    duration,
+                    completion.input_tokens,
+                    completion.cached_tokens,
+                    completion.output_tokens,
+                    completion.actual_cost_microunits,
+                    completion.usage_known,
+                    completion.cache_breakdown_known,
+                );
             transaction
                 .commit()
                 .map_err(|_| AdapterStoreError::Unavailable)?;
-            return Ok(());
+            drop(connection);
+            if exact_original {
+                return Ok(());
+            }
+            return self.settle_performance_usage(
+                run_key,
+                kind,
+                operation_id,
+                completed_at,
+                completion,
+            );
         }
         let started_at = existing.map_or_else(
             || completed_at.clone(),
@@ -610,8 +737,8 @@ impl AdapterStore {
                    run_key, operation_kind, operation_id, started_at,
                    completed_at, completed, duration_millis, input_tokens,
                    cached_tokens, output_tokens
-                   , actual_cost_microunits
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7, ?8, ?9, ?10)
+                   , actual_cost_microunits, usage_known, cache_breakdown_known
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                  ON CONFLICT(run_key, operation_kind, operation_id) DO UPDATE SET
                    completed_at = excluded.completed_at,
                    completed = 1,
@@ -619,7 +746,9 @@ impl AdapterStore {
                    input_tokens = excluded.input_tokens,
                    cached_tokens = excluded.cached_tokens,
                    output_tokens = excluded.output_tokens,
-                   actual_cost_microunits = excluded.actual_cost_microunits
+                   actual_cost_microunits = excluded.actual_cost_microunits,
+                   usage_known = excluded.usage_known,
+                   cache_breakdown_known = excluded.cache_breakdown_known
                  WHERE performance_operation.completed = 0",
                 params![
                     run_key,
@@ -632,12 +761,89 @@ impl AdapterStore {
                     completion.cached_tokens,
                     completion.output_tokens,
                     completion.actual_cost_microunits,
+                    completion.usage_known,
+                    completion.cache_breakdown_known,
                 ],
             )
             .map_err(|_| AdapterStoreError::Unavailable)?;
         transaction
             .commit()
             .map_err(|_| AdapterStoreError::Unavailable)
+    }
+
+    pub(crate) fn settle_performance_usage(
+        &self,
+        run_key: &str,
+        kind: PerformanceOperationKind,
+        operation_id: &str,
+        observed_at: &winwincode_domain::Instant,
+        usage: PerformanceOperationCompletion,
+    ) -> Result<(), AdapterStoreError> {
+        validate_performance_identity(run_key, operation_id, observed_at)?;
+        for value in [usage.input_tokens, usage.cached_tokens, usage.output_tokens] {
+            validate_metric(value)?;
+        }
+        if let Some(cost) = usage.actual_cost_microunits {
+            validate_metric(cost)?;
+        }
+        let mut connection = self.lock()?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+        let replay: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM performance_usage_settlement WHERE run_key=?1 AND operation_kind=?2 AND operation_id=?3 AND observed_at=?4 AND input_tokens=?5 AND cached_tokens=?6 AND output_tokens=?7 AND actual_cost_microunits IS ?8 AND usage_known=?9 AND cache_breakdown_known=?10)",
+            params![run_key,kind.as_str(),operation_id,observed_at.0,usage.input_tokens,usage.cached_tokens,usage.output_tokens,usage.actual_cost_microunits,usage.usage_known,usage.cache_breakdown_known], |r|r.get(0)).map_err(|_| AdapterStoreError::Unavailable)?;
+        if replay {
+            return Ok(());
+        }
+        let row:(bool,bool,i64,i64,i64,Option<i64>,bool)=tx.query_row(
+            "SELECT completed,usage_known,input_tokens,cached_tokens,output_tokens,actual_cost_microunits,cache_breakdown_known FROM performance_operation_accounted WHERE run_key=?1 AND operation_kind=?2 AND operation_id=?3",
+            params![run_key,kind.as_str(),operation_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).map_err(|_| AdapterStoreError::Conflict)?;
+        let values = (
+            usage.input_tokens,
+            usage.cached_tokens,
+            usage.output_tokens,
+            usage.actual_cost_microunits,
+        );
+        if !row.0
+            || (row.1
+                && (!usage.usage_known
+                    || values.0.checked_add(values.1) != row.2.checked_add(row.3)
+                    || (row.6
+                        && (!usage.cache_breakdown_known
+                            || values.0 != row.2
+                            || values.1 != row.3))
+                    || values.2 != row.4))
+            || (!row.1 && values.0.checked_add(values.1) < row.2.checked_add(row.3))
+            || values.2 < row.4
+            || row.5.is_some_and(|cost| values.3 != Some(cost))
+        {
+            return Err(AdapterStoreError::Conflict);
+        }
+        if (usage.usage_known, usage.cache_breakdown_known, values)
+            == (row.1, row.6, (row.2, row.3, row.4, row.5))
+        {
+            return Ok(());
+        }
+        let revision:i64=tx.query_row("SELECT COALESCE(MAX(revision),0)+1 FROM performance_usage_settlement WHERE run_key=?1 AND operation_kind=?2 AND operation_id=?3",params![run_key,kind.as_str(),operation_id], |r|r.get(0)).map_err(|_| AdapterStoreError::Unavailable)?;
+        tx.execute(
+            "INSERT INTO performance_usage_settlement VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            params![
+                run_key,
+                kind.as_str(),
+                operation_id,
+                values.0,
+                values.1,
+                values.2,
+                values.3,
+                observed_at.0,
+                usage.usage_known,
+                revision,
+                usage.cache_breakdown_known
+            ],
+        )
+        .map_err(|_| AdapterStoreError::Unavailable)?;
+        tx.commit().map_err(|_| AdapterStoreError::Unavailable)
     }
 
     /// Reads the only durable budget ledger used before a delegated follow-up
@@ -655,7 +861,13 @@ impl AdapterStore {
         Ok(
             winwincode_execution_port::generated::ExecutionOutcomeUsage {
                 runtime_millis,
-                tokens: totals.total_tokens,
+                tokens: totals.usage_complete.then_some(totals.total_tokens),
+                known_tokens: totals.total_tokens,
+                accounting_status: if totals.usage_complete {
+                    winwincode_execution_port::generated::ExecutionOutcomeUsageAccountingStatus::Known
+                } else {
+                    winwincode_execution_port::generated::ExecutionOutcomeUsageAccountingStatus::Unknown
+                },
                 cost_microunits: totals.cost_complete.then_some(totals.total_cost_microunits),
             },
         )
@@ -701,7 +913,7 @@ impl AdapterStore {
         .map_err(|_| AdapterStoreError::Corrupt)?;
         validate_metric(input)?;
         validate_metric(output)?;
-        let complete = observation.is_some_and(|value| value.output_tokens.is_some())
+        let usage_known = observation.is_some_and(|value| value.output_tokens.is_some())
             && receipt
                 .run
                 .as_ref()
@@ -726,13 +938,36 @@ impl AdapterStore {
             }
         }
         transaction.execute(
-            "INSERT INTO performance_jev_receipt VALUES (?1,?2,?3,?4,?5,?6)
+            "INSERT INTO performance_jev_receipt (run_key,operation_id,receipt_json,completed,input_tokens,output_tokens,usage_known) VALUES (?1,?2,?3,?4,?5,?6,?7)
              ON CONFLICT(run_key,operation_id) DO UPDATE SET receipt_json=excluded.receipt_json,
-             completed=excluded.completed,input_tokens=excluded.input_tokens,output_tokens=excluded.output_tokens",
-            params![run_key,receipt.operation_id,serialized,complete,input,output],
+             completed=excluded.completed,input_tokens=excluded.input_tokens,output_tokens=excluded.output_tokens,usage_known=excluded.usage_known",
+            params![run_key,receipt.operation_id,serialized,receipt.run.is_some(),input,output,usage_known],
         ).map_err(|_| AdapterStoreError::Unavailable)?;
         transaction
             .commit()
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+        Ok(())
+    }
+
+    /// A durable parent terminal closes pending preprocessors without inventing usage.
+    pub(crate) fn close_pending_jev_parent(
+        &self,
+        run: &str,
+        exchange: &str,
+        call: &str,
+        at: &winwincode_domain::Instant,
+    ) -> Result<(), AdapterStoreError> {
+        validate_performance_identity(run, exchange, at)?;
+        let connection = self.lock()?;
+        let completed:bool=connection.query_row("SELECT EXISTS(SELECT 1 FROM performance_operation WHERE run_key=?1 AND operation_kind='primary_model' AND operation_id=?2 AND completed=1)",params![run,call],|r|r.get(0)).map_err(|_|AdapterStoreError::Unavailable)?;
+        if !completed {
+            return Err(AdapterStoreError::Conflict);
+        }
+        connection
+            .execute(
+                "INSERT OR IGNORE INTO performance_jev_parent_terminal VALUES(?1,?2,?3,?4)",
+                params![run, exchange, call, at.0],
+            )
             .map_err(|_| AdapterStoreError::Unavailable)?;
         Ok(())
     }
@@ -757,12 +992,15 @@ impl AdapterStore {
                    , COALESCE(SUM(CASE WHEN operation_kind IN ('primary_model', 'observer', 'jev')
                      AND completed = 0 THEN 1 ELSE 0 END), 0)
                    , COALESCE(SUM(operation_kind = 'observer'), 0)
+                   , COALESCE(SUM(CASE WHEN operation_kind IN ('primary_model','observer','jev') AND usage_known=0 THEN 1 ELSE 0 END),0)
                  FROM (
-                   SELECT operation_kind,input_tokens,cached_tokens,output_tokens,actual_cost_microunits,duration_millis,completed
-                   FROM performance_operation WHERE run_key=?1
+                   SELECT operation_kind,input_tokens,cached_tokens,output_tokens,actual_cost_microunits,duration_millis,completed,usage_known
+                   FROM performance_operation_accounted WHERE run_key=?1
                    UNION ALL
-                   SELECT 'jev',input_tokens,0,output_tokens,NULL,0,completed
-                   FROM performance_jev_receipt WHERE run_key=?1
+                   SELECT 'jev',input_tokens,0,output_tokens,NULL,0,
+                     CASE WHEN completed=1 OR EXISTS(SELECT 1 FROM performance_jev_parent_terminal p WHERE p.run_key=j.run_key AND (instr(j.operation_id,'jev:'||p.exchange_id||':')=1 OR instr(j.operation_id,'judge:'||p.exchange_id||':')=1)) THEN 1 ELSE 0 END,
+                     usage_known
+                   FROM performance_jev_receipt j WHERE run_key=?1
                  )",
                 params![run_key],
                 |row| {
@@ -774,6 +1012,7 @@ impl AdapterStore {
                         total_cost_microunits: row.get(2)?,
                         elapsed_millis: row.get(3)?,
                         cost_complete: missing_costs == 0 && pending_model_calls == 0,
+                        usage_complete: row.get::<_,i64>(7)? == 0 && pending_model_calls == 0,
                         pending_model_calls,
                         observer_calls: row.get(6)?,
                     })
@@ -813,7 +1052,7 @@ impl AdapterStore {
             .lock()?
             .query_row(
                 "SELECT MIN(started_at), MAX(completed_at)
-                 FROM performance_operation WHERE run_key = ?1",
+                 FROM performance_operation_accounted WHERE run_key = ?1",
                 params![run_key],
                 |row| {
                     Ok((
@@ -874,7 +1113,7 @@ impl AdapterStore {
                    COALESCE(SUM(CASE WHEN operation_kind = 'observer' THEN duration_millis ELSE 0 END), 0),
                    COALESCE(SUM(operation_kind = 'repair'), 0),
                    COALESCE(SUM(operation_kind = 'turn'), 0)
-                 FROM performance_operation WHERE run_key = ?1",
+                 FROM performance_operation_accounted WHERE run_key = ?1",
                 params![run_key],
                 |row| {
                     Ok((
@@ -902,12 +1141,15 @@ impl AdapterStore {
                 |row| row.get::<_, i64>(0),
             )
             .map_err(|_| AdapterStoreError::Unavailable)?;
+        let cache_complete:bool=connection.query_row("SELECT NOT EXISTS(SELECT 1 FROM performance_operation_accounted WHERE run_key=?1 AND operation_kind='primary_model' AND cache_breakdown_known=0)",[run_key],|r|r.get(0)).map_err(|_|AdapterStoreError::Unavailable)?;
         let report = PerformanceBaselineReport {
-            execution_mode,
+            usage_complete: connection.query_row("SELECT NOT EXISTS(SELECT 1 FROM performance_operation_accounted WHERE run_key=?1 AND operation_kind IN ('primary_model','observer') AND (completed=0 OR usage_known=0))",params![run_key],|row|row.get(0)).map_err(|_|AdapterStoreError::Unavailable)?,
+execution_mode,
             observer_mode,
             primary_model_call_count: totals.0,
-            primary_model_input_tokens: totals.1,
-            primary_model_cached_tokens: totals.2,
+                primary_model_inclusive_input_tokens:Some(totals.1+totals.2),
+            primary_model_input_tokens:cache_complete.then_some(totals.1),
+            primary_model_cached_tokens:cache_complete.then_some(totals.2),
             primary_model_output_tokens: totals.3,
             primary_model_wait_ms: totals.4,
             tool_call_count: totals.5,
@@ -2074,8 +2316,8 @@ fn valid_sha256_digest(value: &str) -> bool {
 fn performance_report_values(report: &PerformanceBaselineReport) -> impl Iterator<Item = i64> {
     [
         report.primary_model_call_count,
-        report.primary_model_input_tokens,
-        report.primary_model_cached_tokens,
+        report.primary_model_input_tokens.unwrap_or(0),
+        report.primary_model_cached_tokens.unwrap_or(0),
         report.primary_model_output_tokens,
         report.primary_model_wait_ms,
         report.tool_call_count,
@@ -3047,6 +3289,106 @@ mod tests {
     }
 
     #[test]
+    fn cancellation_closes_pending_jev_without_overwriting_measured_usage() {
+        let root = test_root("cancel-pending-accounting");
+        let store = AdapterStore::open(&root).unwrap();
+        let began = Instant("2030-01-01T00:00:00Z".into());
+        let cancelled = Instant("2030-01-01T00:00:10Z".into());
+        store
+            .record_performance_start(
+                "run",
+                PerformanceOperationKind::PrimaryModel,
+                "call",
+                &began,
+            )
+            .unwrap();
+        let pending: DeviceJevReceipt = DeviceJevReceipt {
+            operation_id: "jev:exchange:1".into(),
+            input_digest: "a".repeat(64),
+            run: None,
+        };
+        store
+            .retain_jev_performance("run", &pending, &began)
+            .unwrap();
+        assert_eq!(
+            store
+                .delegated_performance_totals("run")
+                .unwrap()
+                .pending_model_calls,
+            2
+        );
+        store
+            .close_unmeasured_primary("run", "call", &cancelled)
+            .unwrap();
+        store
+            .close_pending_jev_parent("run", "exchange", "call", &cancelled)
+            .unwrap();
+        let totals = store.delegated_performance_totals("run").unwrap();
+        assert_eq!(totals.pending_model_calls, 0);
+        assert!(!totals.usage_complete);
+        assert!(!totals.cost_complete);
+        assert_eq!(
+            store.performance_total_runtime("run", &cancelled).unwrap(),
+            10_000
+        );
+        let usage = store
+            .retained_outcome_usage("run", 10_000)
+            .unwrap()
+            .unwrap();
+        assert_eq!(usage.tokens, None);
+        assert_eq!(usage.cost_microunits, None);
+        assert_eq!(usage.known_tokens, 0);
+        let known = PerformanceOperationCompletion {
+            usage_known: true,
+            input_tokens: 2,
+            output_tokens: 1,
+            actual_cost_microunits: Some(4),
+            ..Default::default()
+        };
+        store
+            .record_performance_completion(
+                "run",
+                PerformanceOperationKind::PrimaryModel,
+                "call",
+                &cancelled,
+                known,
+            )
+            .unwrap();
+        store
+            .close_unmeasured_primary("run", "call", &cancelled)
+            .unwrap();
+        assert_eq!(
+            store
+                .execution_outcome_usage("run", 10_000)
+                .unwrap()
+                .known_tokens,
+            3
+        );
+        drop(store);
+        let store = AdapterStore::open(&root).unwrap();
+        store
+            .close_unmeasured_primary("run", "call", &cancelled)
+            .unwrap();
+        assert_eq!(
+            store
+                .execution_outcome_usage("run", 10_000)
+                .unwrap()
+                .known_tokens,
+            3
+        );
+        assert_eq!(
+            store
+                .delegated_performance_totals("run")
+                .unwrap()
+                .pending_model_calls,
+            0
+        );
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
     fn jev_receipts_settle_once_and_preserve_unknown_usage() {
         let root = test_root("jev-accounting");
         let store = AdapterStore::open(&root).unwrap();
@@ -3058,6 +3400,7 @@ mod tests {
                 "primary",
                 &now,
                 PerformanceOperationCompletion {
+                    usage_known: true,
                     input_tokens: 10,
                     ..Default::default()
                 },
@@ -3070,7 +3413,13 @@ mod tests {
             .unwrap();
         drop(store);
         let store = AdapterStore::open(&root).unwrap();
-        assert_eq!(store.execution_outcome_usage("run", 0).unwrap().tokens, 10);
+        assert_eq!(
+            store
+                .execution_outcome_usage("run", 0)
+                .unwrap()
+                .known_tokens,
+            10
+        );
 
         let mut receipt: DeviceJevReceipt = DeviceJevReceipt {
             operation_id: "jev:exchange:1".into(),
@@ -3100,7 +3449,7 @@ mod tests {
         store.retain_jev_performance("run", &receipt, &now).unwrap();
         store.retain_jev_performance("run", &receipt, &now).unwrap();
         let usage = store.execution_outcome_usage("run", 30).unwrap();
-        assert_eq!(usage.tokens, 58);
+        assert_eq!(usage.known_tokens, 58);
         assert_eq!(usage.cost_microunits, None);
         assert_eq!(
             store.retained_outcome_usage("run", 30).unwrap(),
@@ -3111,7 +3460,13 @@ mod tests {
         drop(store);
         let store = AdapterStore::open(&root).unwrap();
         store.retain_jev_performance("run", &receipt, &now).unwrap();
-        assert_eq!(store.execution_outcome_usage("run", 30).unwrap().tokens, 58);
+        assert_eq!(
+            store
+                .execution_outcome_usage("run", 30)
+                .unwrap()
+                .known_tokens,
+            58
+        );
         assert_eq!(
             store.retained_outcome_usage("run", 30).unwrap(),
             Some(usage)
@@ -3133,10 +3488,11 @@ mod tests {
         store.retain_jev_performance("run", &partial, &now).unwrap();
         let total = store.delegated_performance_totals("run").unwrap();
         assert_eq!(total.total_tokens, 98);
-        assert_eq!(total.pending_model_calls, 1);
+        assert_eq!(total.pending_model_calls, 0);
+        assert!(!total.usage_complete);
         assert!(!total.cost_complete);
         let other_usage = store.execution_outcome_usage("other-run", 0).unwrap();
-        assert_eq!(other_usage.tokens, 0);
+        assert_eq!(other_usage.known_tokens, 0);
         let stored: String = store.lock().unwrap().query_row(
             "SELECT receipt_json FROM performance_jev_receipt WHERE run_key='run' AND operation_id=?1",
             [partial.operation_id], |row| row.get(0)).unwrap();
@@ -3183,7 +3539,7 @@ mod tests {
             store
                 .execution_outcome_usage("judge-run", 0)
                 .unwrap()
-                .tokens,
+                .known_tokens,
             48
         );
         let totals = store.delegated_performance_totals("judge-run").unwrap();
@@ -3233,6 +3589,8 @@ mod tests {
                 "model-call",
                 completed,
                 PerformanceOperationCompletion {
+                    usage_known: true,
+                    cache_breakdown_known: true,
                     duration_millis: Some(800),
                     input_tokens: 90,
                     cached_tokens: 10,
@@ -3248,6 +3606,8 @@ mod tests {
                 "model-call",
                 completed,
                 PerformanceOperationCompletion {
+                    usage_known: true,
+                    cache_breakdown_known: true,
                     duration_millis: Some(9_999),
                     input_tokens: 9_999,
                     cached_tokens: 9_999,
@@ -3255,7 +3615,7 @@ mod tests {
                     actual_cost_microunits: Some(9_999),
                 },
             )
-            .expect("duplicate completion is ignored");
+            .expect_err("changed duplicate completion conflicts");
         store
             .mark_model_call_provider_final("run", "model-call")
             .expect("retain primary Provider final");
@@ -3320,7 +3680,7 @@ mod tests {
         let outcome = store
             .execution_outcome_usage("run", 5_000)
             .expect("settled usage");
-        assert_eq!(outcome.tokens, 125);
+        assert_eq!(outcome.known_tokens, 125);
         assert_eq!(outcome.cost_microunits, Some(37));
         assert_eq!(
             store
@@ -3367,7 +3727,7 @@ mod tests {
                         ..PerformanceOperationCompletion::default()
                     },
                 )
-                .expect("Observer settlement replay");
+                .expect_err("changed Observer settlement replay conflicts");
 
             let totals = store
                 .delegated_performance_totals("run")
@@ -3380,7 +3740,7 @@ mod tests {
             let outcome = store
                 .execution_outcome_usage("run", 123)
                 .expect("outcome usage");
-            assert_eq!(outcome.tokens, 9);
+            assert_eq!(outcome.known_tokens, 9);
             assert_eq!(outcome.cost_microunits, actual_cost_microunits);
             assert_eq!(outcome.runtime_millis, 123);
         }
@@ -3497,8 +3857,8 @@ mod tests {
         assert_eq!(report.execution_mode, ExecutionMode::DelegatedPatch);
         assert_eq!(report.observer_mode, ObserverMode::Always);
         assert_eq!(report.primary_model_call_count, 1);
-        assert_eq!(report.primary_model_input_tokens, 90);
-        assert_eq!(report.primary_model_cached_tokens, 10);
+        assert_eq!(report.primary_model_input_tokens, Some(90));
+        assert_eq!(report.primary_model_cached_tokens, Some(10));
         assert_eq!(report.primary_model_output_tokens, 20);
         assert_eq!(report.primary_model_wait_ms, 800);
         assert_eq!(report.tool_call_count, 1);
@@ -3926,5 +4286,180 @@ mod tests {
         assert!(!debug.contains(root.to_string_lossy().as_ref()));
         drop(store);
         std::fs::remove_dir_all(root).expect("remove store fixture");
+    }
+    #[test]
+    fn independent_usage_reconciliation_preserves_original_terminal_and_old_fact_replay() {
+        let root = test_root("independent-usage-replay");
+        let store = AdapterStore::open(&root).expect("store");
+        let started = Instant("2030-01-01T00:00:00.000Z".into());
+        let terminal = Instant("2030-01-01T00:00:01.000Z".into());
+        let token_at = Instant("2030-01-01T00:00:02.000Z".into());
+        let cost_at = Instant("2030-01-01T00:00:03.000Z".into());
+        let unknown = PerformanceOperationCompletion {
+            usage_known: false,
+            duration_millis: Some(1000),
+            ..Default::default()
+        };
+        store
+            .record_performance_start(
+                "run",
+                PerformanceOperationKind::PrimaryModel,
+                "call",
+                &started,
+            )
+            .expect("start");
+        store
+            .record_performance_completion(
+                "run",
+                PerformanceOperationKind::PrimaryModel,
+                "call",
+                &terminal,
+                unknown,
+            )
+            .expect("terminal");
+        let tokens = PerformanceOperationCompletion {
+            usage_known: true,
+            input_tokens: 80,
+            output_tokens: 20,
+            duration_millis: Some(1000),
+            ..Default::default()
+        };
+        store
+            .settle_performance_usage(
+                "run",
+                PerformanceOperationKind::PrimaryModel,
+                "call",
+                &token_at,
+                tokens,
+            )
+            .expect("tokens");
+        let cost = PerformanceOperationCompletion {
+            actual_cost_microunits: Some(7),
+            ..tokens
+        };
+        store
+            .settle_performance_usage(
+                "run",
+                PerformanceOperationKind::PrimaryModel,
+                "call",
+                &cost_at,
+                cost,
+            )
+            .expect("cost");
+        drop(store);
+        let store = AdapterStore::open(&root).expect("reopen");
+        store
+            .record_performance_completion(
+                "run",
+                PerformanceOperationKind::PrimaryModel,
+                "call",
+                &terminal,
+                unknown,
+            )
+            .expect("original terminal replay");
+        store
+            .settle_performance_usage(
+                "run",
+                PerformanceOperationKind::PrimaryModel,
+                "call",
+                &token_at,
+                tokens,
+            )
+            .expect("older fact replay");
+        let totals = store.delegated_performance_totals("run").expect("totals");
+        assert_eq!(totals.total_tokens, 100);
+        assert_eq!(totals.total_cost_microunits, 7);
+        assert!(totals.usage_complete && totals.cost_complete);
+        assert_eq!(totals.pending_model_calls, 0);
+        drop(store);
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+    #[test]
+    fn unknown_cache_split_keeps_total_tokens_and_can_be_settled_after_restart() {
+        let root = test_root("cache-split-restart");
+        let store = AdapterStore::open(&root).unwrap();
+        store
+            .register_performance_run("run", ExecutionMode::React, ObserverMode::Off)
+            .unwrap();
+        let at = Instant("2030-01-01T00:00:01.000Z".into());
+        let usage = PerformanceOperationCompletion {
+            usage_known: true,
+            cache_breakdown_known: false,
+            input_tokens: 100,
+            cached_tokens: 0,
+            output_tokens: 20,
+            actual_cost_microunits: None,
+            ..Default::default()
+        };
+        store
+            .record_performance_completion(
+                "run",
+                PerformanceOperationKind::PrimaryModel,
+                "call",
+                &at,
+                usage,
+            )
+            .unwrap();
+        let report = store.performance_report("run", 1000).unwrap();
+        assert_eq!(report.primary_model_input_tokens, None);
+        assert_eq!(report.primary_model_cached_tokens, None);
+        assert_eq!(report.primary_model_inclusive_input_tokens, Some(100));
+        assert!(report.usage_complete);
+        let totals = store.delegated_performance_totals("run").unwrap();
+        assert_eq!(totals.total_tokens, 120);
+        assert!(!totals.cost_complete);
+        drop(store);
+        let store = AdapterStore::open(&root).unwrap();
+        let known = PerformanceOperationCompletion {
+            cache_breakdown_known: true,
+            input_tokens: 80,
+            cached_tokens: 20,
+            ..usage
+        };
+        let later = Instant("2030-01-01T00:00:02.000Z".into());
+        store
+            .settle_performance_usage(
+                "run",
+                PerformanceOperationKind::PrimaryModel,
+                "call",
+                &later,
+                known,
+            )
+            .unwrap();
+        store
+            .settle_performance_usage(
+                "run",
+                PerformanceOperationKind::PrimaryModel,
+                "call",
+                &later,
+                known,
+            )
+            .unwrap();
+        let report = store.performance_report("run", 1000).unwrap();
+        assert_eq!(report.primary_model_input_tokens, Some(80));
+        assert_eq!(report.primary_model_cached_tokens, Some(20));
+        assert_eq!(
+            store
+                .delegated_performance_totals("run")
+                .unwrap()
+                .total_tokens,
+            120
+        );
+        let changed = PerformanceOperationCompletion {
+            input_tokens: 79,
+            ..known
+        };
+        assert_eq!(
+            store.settle_performance_usage(
+                "run",
+                PerformanceOperationKind::PrimaryModel,
+                "call",
+                &Instant("2030-01-01T00:00:03.000Z".into()),
+                changed
+            ),
+            Err(AdapterStoreError::Conflict)
+        );
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

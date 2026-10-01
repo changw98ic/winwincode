@@ -3,6 +3,7 @@ import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { once } from 'node:events'
 import { createHash } from 'node:crypto'
 import { exportDeviceCandidate, exportDeviceExecutionReceipts } from '../scripts/export-device-candidate.mjs'
+import { deviceFailureWithModelCauses } from '../scripts/device-model-failures.mjs'
 import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:https'
 import { tmpdir } from 'node:os'
@@ -12,11 +13,11 @@ import test from 'node:test'
 import { assertDeviceBenchmarkRunning } from '../scripts/device-production-fixture.mjs'
 import { driveDelivery } from '../scripts/run-api-production-vertical.mjs'
 import { openBenchmarkLedger } from '../scripts/benchmark-ledger.mjs'
-import { benchmarkAggregationInput, executeDeviceBenchmark, recoverBenchmarkDeviceCell,
+import { benchmarkAggregationInput, executeDeviceBenchmark, prepareBenchmarkDeviceTask, recoverBenchmarkDeviceCell,
   runBenchmarkDeviceAggregation, stoppedDeviceResult, terminalBenchmarkDeviceFailure,
-  terminalDeviceFailure } from '../scripts/benchmark-device-adapter.mjs'
+  terminalDeviceFailure, failedDispatchDeviceResult } from '../scripts/benchmark-device-adapter.mjs'
 import { runDeviceTaskVertical, fusionDeviceProviders, inspectUnresolvedDeviceTasks, benchmarkDeviceEnvironment,
-  expiredCrashedDeviceWorkRun, expiredDeviceWorkRunLease,
+  expiredCrashedDeviceWorkRun, expiredDeviceWorkRunLease, failedDeviceDispatch,
   loadDeviceProviderEnvironment } from '../scripts/run-device-task-vertical.mjs'
 
 import {
@@ -71,6 +72,128 @@ test('expired crashed Device Worker is diagnosed from both durable authorities',
     assert.equal(expiredCrashedDeviceWorkRun(directory, 'run_one', 'wsn_one',
       Date.parse('2026-01-01T00:11:00Z')), null)
   } finally { device.close(); server.close() }
+})
+
+test('failed dispatch is detected from the bound terminal scheduler job and retained as a failed cell', async t => {
+  const directory = await mkdtemp(resolve(tmpdir(), 'benchmark-dispatch-failed-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  await mkdir(resolve(directory, 'server-data'))
+  const database = new DatabaseSync(resolve(directory, 'server-data/control-plane.sqlite3'))
+  const workRunId = 'wrn_01J00000000000000000000001'
+  const deliveryId = 'dlv_01J00000000000000000000001'
+  const productSessionId = 'psn_01J00000000000000000000001'
+  const runId = 'main-A:rust-001:glm-5.3-flash'
+  const callId = `${runId}:model`
+  const jobId = 'job_01J00000000000000000000001'
+  try {
+    database.exec(`CREATE TABLE scheduler_execution_jobs (job_id TEXT, delivery_id TEXT,
+      work_run_id TEXT, state TEXT, attempt INTEGER, revision INTEGER, updated_at TEXT);
+      INSERT INTO scheduler_execution_jobs VALUES ('${jobId}', '${deliveryId}', '${workRunId}',
+        'queued', 1, 1, '2026-01-01T00:00:00Z')`)
+    assert.equal(failedDeviceDispatch(directory, workRunId, deliveryId), null)
+    database.exec(`UPDATE scheduler_execution_jobs SET state='failed', revision=2,
+      updated_at='2026-01-01T00:01:00Z'`)
+    assert.equal(failedDeviceDispatch(directory, workRunId, 'dlv_wrong'), null)
+    assert.equal(failedDeviceDispatch(directory, 'wrn_wrong', deliveryId), null)
+    const failure = failedDeviceDispatch(directory, workRunId, deliveryId)
+    assert.equal(failure?.jobId, jobId)
+    assert.equal(failure?.state, 'failed')
+    database.exec(`INSERT INTO scheduler_execution_jobs VALUES ('job_retry', '${deliveryId}',
+      '${workRunId}', 'queued', 2, 1, '2026-01-01T00:02:00Z')`)
+    assert.equal(failedDeviceDispatch(directory, workRunId, deliveryId), null,
+      'a newer retry must not be called terminal')
+    database.exec("DELETE FROM scheduler_execution_jobs WHERE job_id='job_retry'")
+    const report = { complete: false, productSessionId, deliveryId, workRunId,
+      errorCode: 'DEVICE_DISPATCH_FAILED', dispatchFailure: failure,
+      taskInputDigest: 'frozen-input', modelRoute: { modelId: 'glm-5.3-flash' },
+      benchmarkConfiguration: benchmarkConfiguration('main-A') }
+    await writeFile(resolve(directory, 'device-task-result.json'), JSON.stringify(report))
+    await writeFile(resolve(directory, 'task-source-binding.json'), JSON.stringify({ runId,
+      callId, taskId: 'rust-001', taskInputSha256: 'frozen-input' }))
+    await writeFile(resolve(directory, 'product-source-seal.json'), '{}')
+    const launch = { callId, directory, productSessionId, deliveryId }
+    const result = failedDispatchDeviceResult({ runId, callId, taskId: 'rust-001',
+      provider: 'glm-5.3-flash' }, launch, {})
+    assert.equal(result.status, 'failed')
+    assert.equal(result.failure.code, 'DEVICE_DISPATCH_FAILED')
+    assert.equal(result.productComplete, false)
+    assert.equal(result.candidate, null)
+    assert.equal(result.externalScore, null)
+    assert.deepEqual(result.dispatchFailure, failure)
+    const cell = buildBenchmarkPlan({ taskIds: ['rust-001',
+      ...Array.from({ length: 19 }, (_, index) => `other-${index}`)] })
+      .cells.find(item => item.runId === runId)
+    const plan = { cells: [cell] }
+    const options = { ledgerPath: resolve(directory, 'ledger.sqlite3'),
+      experimentBinding: { experimentId: 'dispatch-failure-recovery' } }
+    await assert.rejects(runBenchmarkPlan(plan, { ...options,
+      executeCell: (_cell, runner) => {
+        runner.registerLaunch(launch)
+        throw Object.assign(new Error('driver interrupted'), { code: 'BENCHMARK_EVIDENCE_FAILED' })
+      },
+    }), { code: 'BENCHMARK_EVIDENCE_FAILED' })
+    const recovered = await runBenchmarkPlan(plan, { ...options,
+      executeCell: () => assert.fail('terminal dispatch must not execute again'),
+      recoverCell: (value, observed) => recoverBenchmarkDeviceCell(value, observed, {}),
+    })
+    assert.equal(recovered.records[0].status, 'failed')
+    assert.equal(recovered.records[0].failure.code, 'DEVICE_DISPATCH_FAILED')
+    assert.deepEqual(recovered.records[0].calls[0].result.dispatchFailure, failure)
+    const client = { query: async name => ({ result: name === 'delivery.get'
+      ? { deliveryRevision: 3, status: 'ready', attention: [] }
+      : { runs: [] } }) }
+    await assert.rejects(driveDelivery(client, null, undefined, Date.now, {
+      expectDeviceWorkRun: true, strictLaunchAnchor: true,
+      pendingDeviceWorkRunIds: () => [workRunId],
+      onPendingDeviceWorkRuns: ids => {
+        const found = failedDeviceDispatch(directory, ids[0], deliveryId)
+        if (found) throw Object.assign(new Error('terminal dispatch'), { code: 'DEVICE_DISPATCH_FAILED' })
+      },
+    }), { code: 'DEVICE_DISPATCH_FAILED' })
+  } finally { database.close() }
+})
+
+test('dispatch failure reports preserve a model cause only from the failed job', async t => {
+  const directory = await mkdtemp(resolve(tmpdir(), 'benchmark-model-dispatch-failure-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  await mkdir(resolve(directory, 'server-data'))
+  await mkdir(resolve(directory, 'device-data/providers'), { recursive: true })
+  const server = new DatabaseSync(resolve(directory, 'server-data/control-plane.sqlite3'))
+  const providers = new DatabaseSync(resolve(directory, 'device-data/providers/providers.sqlite3'))
+  t.after(() => { server.close(); providers.close() })
+  server.exec(`CREATE TABLE scheduler_execution_jobs (job_id TEXT, delivery_id TEXT,
+    work_run_id TEXT, state TEXT, attempt INTEGER, revision INTEGER, updated_at TEXT);
+    INSERT INTO scheduler_execution_jobs VALUES ('failed-job', 'delivery', 'work-run', 'failed', 1, 1,
+      '2026-01-01T00:00:00Z');`)
+  providers.exec('CREATE TABLE exchanges(exchange_id TEXT,request_open TEXT,chunks TEXT)')
+  for (const [exchangeId, jobId, code] of [
+    ['failed-exchange', 'failed-job', 'DEVICE_PROVIDER_SSE_EVENT_INVALID'],
+    ['other-exchange', 'other-job', 'DEVICE_PROVIDER_CONNECTION_FAILED'],
+  ]) {
+    const bytes = Buffer.from(JSON.stringify({ provider: 'deepseek', request: { model: 'deepseek-flash' } }))
+    const opened = { modelExchangeId: exchangeId, lease: { jobId }, workerSessionId: 'session',
+      request: { dataBase64: bytes.toString('base64'),
+        payloadDigest: `sha256:${createHash('sha256').update(bytes).digest('hex')}` } }
+    providers.prepare('INSERT INTO exchanges VALUES (?,?,?)').run(exchangeId, JSON.stringify(opened),
+      JSON.stringify([{ modelExchangeId: exchangeId, isFinal: true,
+        error: { code, message: 'private diagnostic', retryable: false } }]))
+  }
+  await writeFile(resolve(directory, 'task-source-binding.json'), JSON.stringify({
+    runId: 'run', callId: 'run:model', taskId: 'rust-001' }))
+  await writeFile(resolve(directory, 'product-source-seal.json'), '{}')
+  const report = { complete: false, productSessionId: 'product-session', deliveryId: 'delivery',
+    workRunId: 'work-run', errorCode: 'DEVICE_DISPATCH_FAILED' }
+  const request = { runId: 'run', callId: 'run:model', taskId: 'rust-001', provider: 'deepseek-flash' }
+  const launch = { callId: request.callId, directory, productSessionId: 'product-session', deliveryId: 'delivery' }
+  for (const errorCode of ['DEVICE_DISPATCH_FAILED']) {
+    await writeFile(resolve(directory, 'device-task-result.json'), JSON.stringify({ ...report, errorCode }))
+    const result = failedDispatchDeviceResult(request, launch, {})
+    assert.deepEqual(result.failure, { code: 'DEVICE_DISPATCH_FAILED', status: 'failed',
+      observedProviderFailures: [{ exchangeId: 'failed-exchange', jobId: 'failed-job',
+        code: 'DEVICE_PROVIDER_SSE_EVENT_INVALID', retryable: false }] })
+    assert.equal(result.executionReceipts.calls.length, 2)
+    assert.equal(JSON.stringify(result).includes('private diagnostic'), false)
+  }
 })
 
 test('device recovery settles only complete terminal failures and leaves product work unresolved', () => {
@@ -956,7 +1079,7 @@ test('benchmark report recomputes fixed denominators and keeps usage dimensions 
   assert.equal(report.contextEffects.evidenceStatus, 'insufficient_evidence')
   assert.deepEqual(report.callAccounting, { modelCalls: 1, fusionEngineCalls: 1,
     jevModelCalls: 0, unmeasuredProductCalls: 0 })
-  assert.equal(report.gates.regret.status, 'insufficient_evidence')
+  assert.equal(report.gates.regret.status, 'fail')
   assert.equal(report.gates.minority.status, 'insufficient_evidence')
 })
 
@@ -1027,6 +1150,50 @@ test('frozen source validation binds repository, exact revision and 20 task dire
   assert.equal(source.taskCount, 20)
   assert.deepEqual(source.taskIds, source.catalogTaskIds)
   assert.equal(source.revision, revision)
+  const preparedInputsDirectory = await mkdtemp(resolve(tmpdir(), 'wwc-benchmark-prepared-'))
+  t.after(() => rm(preparedInputsDirectory, { recursive: true, force: true }))
+  const evidenceRoot = await mkdtemp(resolve(tmpdir(), 'wwc-benchmark-aggregation-goal-'))
+  t.after(() => rm(evidenceRoot, { recursive: true, force: true }))
+  const artifact = { taskId: 'task-1', sourceRevision: revision,
+    sourceDigest: source.sourceDigest, imageId: `sha256:${'a'.repeat(64)}`,
+    spec: { id: 'task-1', title: 'Fixture', entry: 'main.py', allowed_suffixes: ['.py'],
+      max_submission_files: 10, max_submission_bytes: 1024 },
+    files: { 'main.py': 'print(1)\n', 'TASK.md': 'Implement fixture\n', 'PROTOCOL.md': 'JSONL\n' } }
+  const artifactBytes = JSON.stringify(artifact)
+  await writeFile(resolve(preparedInputsDirectory, 'task-1.json'), artifactBytes)
+  await writeFile(resolve(preparedInputsDirectory, 'prepared-inputs.json'), JSON.stringify({
+    source, tasks: [{ taskId: 'task-1', sha256: createHash('sha256').update(artifactBytes).digest('hex'),
+      imageId: artifact.imageId }],
+  }))
+  const aggregation = { inputDigest: 'b'.repeat(64), members: [
+    ...['glm-5.3-flash', 'mimo-v2.6-pro', 'deepseek-flash'].map(provider => ({
+      provider, callId: `main-A:task-1:fusion-4:member:${provider}`, status: 'completed',
+      candidate: { files: [{ path: 'main.py', content: `${provider}\n${'源码'.repeat(6000)}\0` }] },
+    })),
+    { provider: 'qwen3.8-flash', callId: 'main-A:task-1:fusion-4:member:qwen3.8-flash',
+      status: 'failed', failure: { code: 'FIXTURE_FAILURE' } },
+  ] }
+  const prepared = await prepareBenchmarkDeviceTask({ taskId: 'task-1',
+    runId: 'main-A:task-1:fusion-4', callId: 'main-A:task-1:fusion-4:aggregation',
+    comparison: 'fusion-4' }, { preparedInputsDirectory, sourceRoot: repositoryRoot,
+    evidenceRoot, aggregation })
+  const aggregationTask = JSON.parse(await readFile(prepared.taskInputPath, 'utf8'))
+  assert.equal([...aggregationTask.goal].some(character => character.codePointAt(0) < 32), false,
+    'aggregation WorkRun goal must satisfy the Worker prompt contract')
+  assert.ok(aggregationTask.goal.includes('独立四模型候选的一次聚合'))
+  assert.ok([...aggregationTask.goal].length < 20000, 'large candidates must stay outside the goal')
+  const aggregationPath = 'benchmark-inputs/aggregation.json'
+  const aggregationBytes = aggregationTask.files[aggregationPath]
+  assert.equal(typeof aggregationBytes, 'string', 'input must reach the seeded task repository')
+  assert.deepEqual(JSON.parse(aggregationBytes), aggregation, 'all four outcomes and source bytes survive')
+  assert.ok(aggregationTask.goal.includes(aggregationPath))
+  assert.ok(!aggregationTask.goal.includes('FIXTURE_FAILURE'))
+  const binding = JSON.parse(await readFile(resolve(prepared.directory, 'task-source-binding.json'), 'utf8'))
+  assert.deepEqual(binding.aggregationInputFile, { path: aggregationPath,
+    sha256: createHash('sha256').update(aggregationBytes).digest('hex') })
+  assert.deepEqual(aggregationTask.files['TASK.md'], artifact.files['TASK.md'])
+  assert.ok(aggregationTask.outOfScope.includes(aggregationPath))
+  assert.ok(aggregationTask.constraints.some(value => value.includes(aggregationPath)))
   const validate = () => validateFrozenTaskSource({ repositoryRoot, repositoryUrl: source.repositoryUrl, revision })
   for (const path of ['tasks/task-1/starter/main.py', 'tools/runner.py']) {
     await writeFile(resolve(repositoryRoot, path), 'changed source\n')
@@ -1460,6 +1627,32 @@ test('execution completion leaves external grading pending and never fabricates 
       experimentId: 'invalid-external-score',
     }), error => error.code === 'SCORE_INVALID')
   }
+})
+
+test('externally scored failures remain in the denominator and Fusion regret is gated', () => {
+  const plan = buildBenchmarkPlan({ taskIds: Array.from({ length: 20 }, (_, index) => `task-${index + 1}`) })
+  const quality = { minorityRetained: 1, minorityTotal: 1, captureRetained: 1, captureTotal: 1,
+    constraintsRetained: 1, constraintsTotal: 1, confirmedRetained: 1, confirmedTotal: 1,
+    bindingErrors: 0, stateRegressions: 0, hallucinated: 0 }
+  const records = plan.cells.map(cell => ({ ...cell, status: 'completed', score: 0.8,
+    verdict: 'pass', quality, launches: [], calls: [], wallMs: 0 }))
+  const failed = records.map((record, index) => index === 0
+    ? { ...record, status: 'failed', score: 0, verdict: null } : record)
+  const report = aggregateBenchmarkReport(plan, { records: failed, experimentId: 'graded-failure' })
+  assert.equal(report.grading.status, 'complete')
+  assert.equal(report.failureAccounting.unsuccessful, 1)
+  assert.equal(report.quality.meanScore, 0.798857)
+  assert.equal(Object.values(report.gates).every(gate => gate.status === 'pass'), true)
+
+  const underperforming = failed.map(record => record.runId === 'main-D:task-1:fusion-4'
+    ? { ...record, status: 'failed', score: 0, verdict: null } : record)
+  const regretReport = aggregateBenchmarkReport(plan, {
+    records: underperforming, experimentId: 'graded-fusion-loss',
+  })
+  assert.equal(regretReport.strategyReferences.find(reference =>
+    reference.configurationId === 'main-D').regrets['fusion-4'].againstBatchBest, 0.04)
+  assert.equal(regretReport.gates.regret.status, 'fail')
+  assert.equal(regretReport.gates.minority.status, 'pass')
 })
 
 test('Fusion member receipts survive aggregation failure and unfinished-ledger reopen', async t => {
@@ -1960,6 +2153,45 @@ test('Device benchmark loads private routes and pins the four frozen model selec
     assert.doesNotMatch(error.message, /file-qwen-key|mimo\.invalid/u)
     return true
   })
+})
+
+test('execution receipt export retains typed model failures without copying upstream text', async t => {
+  const directory = await mkdtemp(resolve(tmpdir(), 'execution-failure-receipts-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const device = resolve(directory, 'device-data', 'providers')
+  await mkdir(device, { recursive: true })
+  const database = new DatabaseSync(resolve(device, 'providers.sqlite3'))
+  t.after(() => database.close())
+  database.exec('CREATE TABLE exchanges(exchange_id TEXT,request_open TEXT,chunks TEXT)')
+  const requestBytes = Buffer.from(JSON.stringify({ provider: 'deepseek', request: { model: 'deepseek-flash' } }))
+  for (const [exchange, code, message, expected] of [
+    ['typed', 'DEVICE_PROVIDER_SSE_EVENT_INVALID', 'private upstream text', 'DEVICE_PROVIDER_SSE_EVENT_INVALID'],
+    ['legacy', 'MODEL_STREAM_FAILED', 'DEVICE_PROVIDER_PROTOCOL_FAILED', 'DEVICE_PROVIDER_PROTOCOL_FAILED'],
+    ['unknown', 'MODEL_STREAM_FAILED', 'private unrecognized diagnostic', 'MODEL_STREAM_FAILED'],
+  ]) {
+    const opened = { modelExchangeId: exchange, lease: { jobId: `job-${exchange}` }, workerSessionId: 'session',
+      request: { dataBase64: requestBytes.toString('base64'),
+        payloadDigest: `sha256:${createHash('sha256').update(requestBytes).digest('hex')}` } }
+    const chunks = [{ modelExchangeId: exchange, isFinal: true,
+      error: { code, message, retryable: false } }]
+    database.prepare('INSERT INTO exchanges VALUES (?,?,?)')
+      .run(exchange, JSON.stringify(opened), JSON.stringify(chunks))
+    const evidenceDirectory = resolve(directory, exchange)
+    await mkdir(evidenceDirectory)
+    const { evidence } = exportDeviceExecutionReceipts(directory, evidenceDirectory)
+    const call = evidence.calls.find(value => value.exchangeId === exchange)
+    assert.deepEqual(call.failure, { code: expected, retryable: false,
+      ...(exchange === 'legacy' ? { legacy: true } : {}) })
+    assert.equal(call.terminalType, 'error')
+    assert.equal(call.usage, null)
+    if (exchange === 'legacy') {
+      const failure = deviceFailureWithModelCauses({ code: 'DEVICE_PRODUCT_FAILED', status: 'failed' },
+        evidence, [call.jobId])
+      assert.equal(failure.code, 'DEVICE_PRODUCT_FAILED', 'legacy categories must not become specific root causes')
+      assert.equal(failure.observedProviderFailures[0].legacy, true)
+    }
+    assert.equal((await readFile(resolve(evidenceDirectory, 'execution-receipts.json'), 'utf8')).includes('private'), false)
+  }
 })
 
 test('execution receipt export validates payloads, omits private text and preserves unknown failed usage', async t => {

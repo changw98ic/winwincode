@@ -51,7 +51,6 @@
 use std::fmt;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 
 use serde::Deserialize;
 use serde::Serialize;
@@ -136,7 +135,7 @@ pub struct ClientExchangeConfig {
 /// Ephemeral Worker credential material waiting to travel beside one
 /// durable `client.worker.launch` frame. The raw value is never written to
 /// the Control Plane database or included in diagnostics.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerCredentialDelivery {
     pub client_node_id: String,
     pub worker_launch_grant_id: String,
@@ -312,7 +311,6 @@ pub trait ClientExchangePort: Send + Sync {
 pub struct ClientExchangeApplication {
     data_directory: PathBuf,
     config: ClientExchangeConfig,
-    worker_credentials: Arc<Mutex<Vec<WorkerCredentialDelivery>>>,
 }
 
 impl ClientExchangeApplication {
@@ -333,7 +331,6 @@ impl ClientExchangeApplication {
         Ok(Self {
             data_directory: data_directory.into(),
             config,
-            worker_credentials: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -774,31 +771,41 @@ impl ClientExchangeApplication {
                     grant.get("workerLaunchGrantId")?.as_str()?,
                     grant.get("workerSessionId")?.as_str()?,
                     grant.get("credentialDigest")?.as_str()?,
+                    grant.get("expiresAt").and_then(Value::as_str),
                 ))
             })
             .collect::<Vec<_>>();
-        let mut pending = self
-            .worker_credentials
-            .lock()
-            .map_err(|_| ClientExchangeError::unavailable())?;
-        pending.retain(|entry| entry.expires_at.0 >= now.0);
-        Ok(pending
-            .iter()
-            .filter(|entry| entry.client_node_id == node_id)
-            .filter(|entry| {
-                launches.iter().any(|(grant_id, session_id, digest)| {
-                    *grant_id == entry.worker_launch_grant_id
-                        && *session_id == entry.worker_session_id
-                        && *digest == entry.credential_digest
-                })
-            })
-            .map(|entry| WorkerCredentialResponse {
-                worker_launch_grant_id: entry.worker_launch_grant_id.clone(),
-                worker_session_id: entry.worker_session_id.clone(),
-                credential_digest: entry.credential_digest.clone(),
-                worker_credential: entry.worker_credential.clone(),
-            })
-            .collect())
+        let mut responses = Vec::new();
+        for (grant_id, session_id, digest, expires_at) in launches {
+            if expires_at.is_some_and(|deadline| deadline <= now.0.as_str()) {
+                continue;
+            }
+            let Ok(bytes) =
+                winwincode_control_plane::PrivateLaunchMaterialStore::open(&self.data_directory)
+                    .and_then(|store| store.get(grant_id))
+            else {
+                continue;
+            };
+            let entry: WorkerCredentialDelivery =
+                serde_json::from_slice(&bytes).map_err(|_| ClientExchangeError::unavailable())?;
+            if entry.client_node_id != node_id
+                || entry.worker_launch_grant_id != grant_id
+                || entry.worker_session_id != session_id
+                || entry.credential_digest != digest
+            {
+                return Err(ClientExchangeError::unavailable());
+            }
+            if entry.expires_at.0 <= now.0 {
+                continue;
+            }
+            responses.push(WorkerCredentialResponse {
+                worker_launch_grant_id: entry.worker_launch_grant_id,
+                worker_session_id: entry.worker_session_id,
+                credential_digest: entry.credential_digest,
+                worker_credential: entry.worker_credential,
+            });
+        }
+        Ok(responses)
     }
 }
 
@@ -978,12 +985,11 @@ impl ClientExchangePort for ClientExchangeApplication {
         if !credential_digest_matches(&secret, &delivery.credential_digest) {
             return Err(ClientExchangeError::invalid_request());
         }
-        let mut pending = self
-            .worker_credentials
-            .lock()
+        let bytes =
+            serde_json::to_vec(&delivery).map_err(|_| ClientExchangeError::unavailable())?;
+        winwincode_control_plane::PrivateLaunchMaterialStore::open(&self.data_directory)
+            .and_then(|store| store.put(&delivery.worker_launch_grant_id, &bytes))
             .map_err(|_| ClientExchangeError::unavailable())?;
-        pending.retain(|entry| entry.worker_launch_grant_id != delivery.worker_launch_grant_id);
-        pending.push(delivery);
         Ok(())
     }
 
@@ -1504,6 +1510,7 @@ fn repository_availability(value: WireRepositoryAvailability) -> RepositoryAvail
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn settle_worker_exit(
     storage: &mut SqliteStorage,
     node_id: &str,
@@ -1520,6 +1527,68 @@ fn settle_worker_exit(
             | ClientWorkerRunState::Missing
     ) {
         return Ok(());
+    }
+    let Some(occupancy) = payload.occupancy_lease_id.as_deref() else {
+        return Ok(());
+    };
+    let closed = if let Some(closure) = &payload.process_closure {
+        let closure = winwincode_storage::DeviceLaunchProcessClosure {
+            worker_launch_grant_id: closure.worker_launch_grant_id.clone(),
+            client_instance_id: closure.client_instance_id.clone(),
+            reporting_client_instance_id: closure.reporting_client_instance_id.clone(),
+            occupancy_fencing_token: closure.occupancy_fencing_token,
+            never_started: closure.never_started,
+            process_boot_digest: closure.process_boot_digest.clone(),
+        };
+        storage
+            .worker_launch_grant_ledger()
+            .map_err(|_| ClientExchangeError::unavailable())?
+            .observe_device_process_closure(
+                node_id,
+                &payload.worker_session_id,
+                &payload.worker_instance_id,
+                occupancy,
+                &closure,
+                now,
+            )
+            .map_err(|_| ClientExchangeError::unavailable())?
+    } else {
+        WorkerLaunchGrantService::new(storage)
+            .observe_trusted_exit(
+                node_id,
+                &payload.worker_session_id,
+                &payload.worker_instance_id,
+                occupancy,
+                now,
+            )
+            .map_err(|_| ClientExchangeError::unavailable())?
+    };
+    if !closed {
+        return Ok(());
+    }
+    let grant = if let Some(closure) = &payload.process_closure {
+        WorkerLaunchGrantService::new(storage).snapshot(&closure.worker_launch_grant_id)
+    } else {
+        WorkerLaunchGrantService::new(storage).active_grant_for_session(&payload.worker_session_id)
+    };
+    if let Some(grant) = grant.map_err(|_| ClientExchangeError::unavailable())? {
+        let mut credentials = crate::WorkerSessionCredentialService::new(storage);
+        if credentials
+            .status_for_session(&payload.worker_session_id)
+            .map_err(|_| ClientExchangeError::unavailable())?
+            .is_some_and(|record| {
+                record.state == winwincode_storage::WorkerSessionCredentialState::Active
+            })
+        {
+            credentials
+                .revoke_for_session(
+                    &payload.worker_session_id,
+                    &grant.holder_user_id,
+                    Some("trusted Device process exit"),
+                    now,
+                )
+                .map_err(|_| ClientExchangeError::unavailable())?;
+        }
     }
     let Some(binding) = DeviceExecutionBindingService::new(storage)
         .snapshot(&payload.worker_session_id)
@@ -1595,6 +1664,14 @@ fn settle_worker_launch_ack(
     payload: &winwincode_client_port::messages::ClientWorkerLaunchAckPayload,
     now: &Instant,
 ) {
+    let Ok(Some(grant)) =
+        WorkerLaunchGrantService::new(storage).snapshot(&payload.worker_launch_grant_id)
+    else {
+        return;
+    };
+    if grant.client_node_id != node_id {
+        return;
+    }
     let _ = crate::client_occupancy::observe_client_mirror_revision(
         data_directory,
         node_id,
@@ -1617,8 +1694,27 @@ fn settle_worker_launch_ack(
     ) else {
         return;
     };
-    let mut grants = WorkerLaunchGrantService::new(storage);
-    let _ = grants.settle_launch_ack(&settlement, now);
+    let _ =
+        WorkerLaunchGrantService::new(storage).settle_device_launch_ack(node_id, &settlement, now);
+    if !accepted
+        && let Some(closure) = &payload.process_closure
+        && closure.worker_launch_grant_id == payload.worker_launch_grant_id
+    {
+        let _ = settle_worker_exit(
+            storage,
+            node_id,
+            &winwincode_client_port::messages::ClientWorkerStatePayload {
+                occupancy_lease_id: Some(payload.occupancy.occupancy_lease_id.clone()),
+                worker_session_id: payload.worker_session_id.clone(),
+                worker_instance_id: payload.worker_instance_id.clone(),
+                state: winwincode_client_port::domain::ClientWorkerRunState::Stopped,
+                exit_code: None,
+                observed_at: now.0.clone(),
+                process_closure: Some(closure.clone()),
+            },
+            now,
+        );
+    }
 }
 
 /// Maps one rejected `client.worker.launch_ack` onto the stable audit
@@ -1978,8 +2074,12 @@ mod tests {
 
     #[test]
     fn worker_credential_is_delivered_only_with_its_launch_frame() {
+        let directory = std::env::temp_dir().join(format!(
+            "worker-launch-credential-{}",
+            generate_prefixed_id("wlg_").unwrap()
+        ));
         let application =
-            ClientExchangeApplication::open("unused", &ClientExchangeConfig::default())
+            ClientExchangeApplication::open(&directory, &ClientExchangeConfig::default())
                 .expect("valid application");
         let secret = [0x42_u8; 32];
         let material = hex_encode(&secret);
@@ -2021,6 +2121,12 @@ mod tests {
             .expect("matching response");
         assert_eq!(delivered.len(), 1);
         assert_eq!(delivered[0].worker_credential, material);
+        drop(application);
+        let reopened =
+            ClientExchangeApplication::open(&directory, &ClientExchangeConfig::default()).unwrap();
+        let again=reopened.worker_credentials_for_frames("cnd_AAAAAAAAAAAAAAAAAAAAAAAAAA",&[serde_json::json!({"kind":"client.worker.launch","payload":{"launchGrant":{"workerLaunchGrantId":"wlg_AAAAAAAAAAAAAAAAAAAAAAAAAA","workerSessionId":"wsn_AAAAAAAAAAAAAAAAAAAAAAAAAA","credentialDigest":digest}}})],&Instant("2026-09-12T00:00:00.000Z".into())).unwrap();
+        assert_eq!(again[0].worker_credential, material);
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -2113,6 +2219,7 @@ mod tests {
             ),
             ClientToServerMessage::WorkerLaunchAck(Box::new(
                 winwincode_client_port::messages::ClientWorkerLaunchAckPayload {
+                    process_closure: None,
                     occupancy: occupancy.clone(),
                     worker_launch_grant_id: "wlg_1".to_owned(),
                     worker_session_id: "wsn_1".to_owned(),
@@ -2198,6 +2305,7 @@ mod tests {
             ),
             ClientToServerMessage::WorkerState(
                 winwincode_client_port::messages::ClientWorkerStatePayload {
+                    process_closure: None,
                     occupancy_lease_id: None,
                     worker_session_id: "wsn_1".to_owned(),
                     worker_instance_id: "wki_1".to_owned(),
@@ -2323,8 +2431,12 @@ mod tests {
 
     #[test]
     fn malformed_request_bodies_are_invalid_requests() {
+        let directory = std::env::temp_dir().join(format!(
+            "worker-launch-credential-{}",
+            generate_prefixed_id("wlg_").unwrap()
+        ));
         let application =
-            ClientExchangeApplication::open("unused", &ClientExchangeConfig::default())
+            ClientExchangeApplication::open(&directory, &ClientExchangeConfig::default())
                 .expect("valid application");
         let now = Instant("2026-01-02T12:00:00.000Z".to_owned());
         for body in ["", "not json", "{}", r#"{"frames":[]}"#] {
@@ -2337,8 +2449,12 @@ mod tests {
 
     #[test]
     fn enroll_rejects_non_enroll_batches_without_a_credential() {
+        let directory = std::env::temp_dir().join(format!(
+            "worker-launch-credential-{}",
+            generate_prefixed_id("wlg_").unwrap()
+        ));
         let application =
-            ClientExchangeApplication::open("unused", &ClientExchangeConfig::default())
+            ClientExchangeApplication::open(&directory, &ClientExchangeConfig::default())
                 .expect("valid application");
         let now = Instant("2026-01-02T12:00:00.000Z".to_owned());
         let body = serde_json::json!({

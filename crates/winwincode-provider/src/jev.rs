@@ -19,6 +19,7 @@ use std::{
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use tokio::time::{Instant, timeout};
+use ureq::unversioned::transport::{Connector, RustlsConnector};
 
 use crate::canonical_https_endpoint;
 
@@ -361,12 +362,25 @@ impl MeasuredJevResult for JevBatchEvaluation {
 pub struct JevRuntime {
     providers: Vec<Arc<dyn JevProvider>>,
     config: JevRuntimeConfig,
+    cancellation: Option<Arc<crate::provider_transport::ExchangeCancellation>>,
 }
 
 impl JevRuntime {
     #[must_use]
     pub fn new(providers: Vec<Arc<dyn JevProvider>>, config: JevRuntimeConfig) -> Self {
-        Self { providers, config }
+        Self {
+            providers,
+            config,
+            cancellation: None,
+        }
+    }
+
+    pub(crate) fn with_cancellation(
+        mut self,
+        cancellation: Option<Arc<crate::provider_transport::ExchangeCancellation>>,
+    ) -> Self {
+        self.cancellation = cancellation;
+        self
     }
 
     pub async fn evaluate(
@@ -403,6 +417,13 @@ impl JevRuntime {
     {
         let mut failures = Vec::new();
         for provider in &self.providers {
+            if self
+                .cancellation
+                .as_ref()
+                .is_some_and(|cancel| cancel.is_cancelled())
+            {
+                break;
+            }
             let capabilities = provider.capabilities();
             if !capabilities.supports(batch_size, options) {
                 failures.push(JevAttemptFailure {
@@ -414,7 +435,25 @@ impl JevRuntime {
             }
             for attempt in 0..=self.config.retries {
                 let started = Instant::now();
-                let result = timeout(self.config.timeout, operation(Arc::clone(provider))).await;
+                if self
+                    .cancellation
+                    .as_ref()
+                    .is_some_and(|cancel| cancel.is_cancelled())
+                {
+                    break;
+                }
+                let inference = Box::pin(timeout(
+                    self.config.timeout,
+                    operation(Arc::clone(provider)),
+                ));
+                let result = if let Some(cancel) = &self.cancellation {
+                    match futures::future::select(inference, Box::pin(cancel.cancelled())).await {
+                        futures::future::Either::Left((result, _)) => result,
+                        futures::future::Either::Right(_) => break,
+                    }
+                } else {
+                    inference.await
+                };
                 let latency = started.elapsed();
                 match result {
                     Ok(Ok(value)) => {
@@ -948,6 +987,8 @@ pub struct HttpsJevRemoteTransport {
     endpoint: String,
     api_key: Option<String>,
     system_one: bool,
+    timeout: Duration,
+    cancellation: Option<Arc<crate::provider_transport::ExchangeCancellation>>,
 }
 
 impl fmt::Debug for HttpsJevRemoteTransport {
@@ -993,7 +1034,17 @@ impl HttpsJevRemoteTransport {
             endpoint: config.endpoint().to_owned(),
             api_key: config.api_key.clone(),
             system_one: false,
+            timeout: config.timeout(),
+            cancellation: None,
         })
+    }
+
+    pub(crate) fn with_cancellation(
+        mut self,
+        cancellation: Option<Arc<crate::provider_transport::ExchangeCancellation>>,
+    ) -> Self {
+        self.cancellation = cancellation;
+        self
     }
 
     /// Selects the `TypeSafe` `SystemOne` wire protocol instead of self-hosted NLI.
@@ -1018,6 +1069,7 @@ impl HttpsJevRemoteTransport {
         model_id: String,
         items: Vec<JevHypothesis>,
         options: JevExecutionOptions,
+        io: Arc<crate::provider_transport::ExchangeIo>,
     ) -> Result<RemoteJevScoreBatch, JevProviderError> {
         let body = if self.system_one {
             system_one_request(&model_id, &items, options)?
@@ -1032,8 +1084,13 @@ impl HttpsJevRemoteTransport {
                 })).collect::<Vec<_>>(),
             })
         };
-        let mut request = self
-            .agent
+        let agent = ureq::Agent::with_parts(
+            self.agent.config().clone(),
+            crate::provider_transport::ExchangeConnector(Arc::clone(&io))
+                .chain(RustlsConnector::default()),
+            ureq::unversioned::resolver::DefaultResolver::default(),
+        );
+        let mut request = agent
             .post(&self.endpoint)
             .header("content-type", "application/json")
             .header("accept", "application/json");
@@ -1219,8 +1276,19 @@ impl JevRemoteTransport for HttpsJevRemoteTransport {
         options: JevExecutionOptions,
     ) -> BoxFuture<'static, Result<RemoteJevScoreBatch, JevProviderError>> {
         let this = self.clone();
+        let io = crate::provider_transport::ExchangeIo::new(self.timeout, self.timeout);
+        if let Some(cancel) = &self.cancellation {
+            cancel.attach(&io);
+        }
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || this.score_blocking(model_id, items, options))
+            struct CloseOnDrop(Arc<crate::provider_transport::ExchangeIo>);
+            impl Drop for CloseOnDrop {
+                fn drop(&mut self) {
+                    self.0.cancel();
+                }
+            }
+            let _close = CloseOnDrop(Arc::clone(&io));
+            tokio::task::spawn_blocking(move || this.score_blocking(model_id, items, options, io))
                 .await
                 .map_err(|_| JevProviderError::new(JevProviderErrorKind::Unavailable))?
         })
@@ -2440,5 +2508,36 @@ dtypes = ["float32", "float16"]
         let batch = parse_jev_score_list(&nested).expect("nested");
         assert_eq!(batch.len(), 2);
         assert!((batch[1].entailment - 0.55).abs() < f32::EPSILON);
+    }
+    #[test]
+    fn shared_cancel_stops_active_jev_and_prevents_retry_or_fallback() {
+        let cancellation = Arc::new(crate::provider_transport::ExchangeCancellation::default());
+        let runtime = runtime_with(
+            vec![Arc::new(
+                MockJevProvider::healthy("slow-cancel").with_delay(Duration::from_secs(5)),
+            )],
+            JevRuntimeConfig {
+                timeout: Duration::from_secs(10),
+                retries: 3,
+            },
+        )
+        .with_cancellation(Some(Arc::clone(&cancellation)));
+        let cancel = Arc::clone(&cancellation);
+        let canceller = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            cancel.cancel();
+        });
+        let clock = std::time::Instant::now();
+        let result = block_on(runtime.evaluate(
+            JevHypothesis {
+                premise: "a".into(),
+                hypothesis: "b".into(),
+            },
+            options(),
+        ));
+        canceller.join().expect("cancel");
+        assert!(clock.elapsed() < Duration::from_secs(1));
+        assert!(result.value.is_none());
+        assert!(result.failures.is_empty());
     }
 }

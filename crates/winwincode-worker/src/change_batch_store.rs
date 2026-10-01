@@ -1232,10 +1232,7 @@ impl ChangeBatchStore {
             .map(|bytes| {
                 let usage: winwincode_execution_port::generated::ExecutionOutcomeUsage =
                     decode(&bytes)?;
-                if usage.tokens < 0
-                    || usage.runtime_millis < 0
-                    || usage.cost_microunits.is_some_and(|cost| cost < 0)
-                {
+                if !winwincode_execution_port::usage::valid_usage(&usage) {
                     return Err(corrupt());
                 }
                 Ok(usage)
@@ -2157,11 +2154,10 @@ fn valid_frame(frame: &ObservationModelFrame<'_>) -> bool {
     valid_progress_sequence(frame.sequence)
         && valid_digest(&frame.chunk_digest)
         && frame.model_exchange_id.0.len() <= 256
-        && frame.model_usage.as_ref().is_none_or(|usage| {
-            usage.tokens >= 0
-                && usage.runtime_millis >= 0
-                && usage.cost_microunits.is_none_or(|cost| cost >= 0)
-        })
+        && frame
+            .model_usage
+            .as_ref()
+            .is_none_or(winwincode_execution_port::usage::valid_usage)
         && frame
             .terminal_status
             .is_none_or(|value| matches!(value, "completed" | "provider_error"))
@@ -2478,7 +2474,9 @@ mod tests {
             model_usage: Some(ExecutionOutcomeUsage {
                 cost_microunits: Some(1),
                 runtime_millis: 5,
-                tokens: 7,
+                tokens: Some(7),
+ known_tokens: 7,
+ accounting_status: winwincode_execution_port::generated::ExecutionOutcomeUsageAccountingStatus::Known,
             }),
             output_digest: derive_observation_output_digest(&response).expect("output digest"),
             profile_digest: intent.profile_digest.clone(),

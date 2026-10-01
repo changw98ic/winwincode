@@ -28,6 +28,13 @@ pub enum ProviderGatewayErrorKind {
     AdapterRateLimited,
     AdapterUnavailable,
     AdapterProtocol,
+    AdapterRequestInvalid,
+    AdapterRequestTranslation,
+    AdapterRequestSizeLimit,
+    AdapterResponseContentType,
+    AdapterConnection,
+    AdapterUpstream,
+    AdapterIdentityConflict,
     ExchangeConflict,
     ExchangeNotFound,
     TerminalConflict,
@@ -101,6 +108,13 @@ impl fmt::Debug for ProviderAdapterInvocation<'_> {
 /// Stable Provider adapter failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProviderAdapterErrorKind {
+    RequestInvalid,
+    RequestTranslation,
+    RequestSizeLimit,
+    ResponseContentType,
+    Connection,
+    Upstream,
+    IdentityConflict,
     Rejected,
     RateLimited,
     Unavailable,
@@ -115,6 +129,66 @@ pub struct ProviderAdapterError {
 }
 
 impl ProviderAdapterError {
+    const fn new(kind: ProviderAdapterErrorKind, message: &'static str) -> Self {
+        Self { kind, message }
+    }
+
+    #[must_use]
+    pub const fn request_invalid() -> Self {
+        Self::new(
+            ProviderAdapterErrorKind::RequestInvalid,
+            "Provider request is invalid",
+        )
+    }
+
+    #[must_use]
+    pub const fn request_translation() -> Self {
+        Self::new(
+            ProviderAdapterErrorKind::RequestTranslation,
+            "Provider request translation failed",
+        )
+    }
+
+    #[must_use]
+    pub const fn request_size_limit() -> Self {
+        Self::new(
+            ProviderAdapterErrorKind::RequestSizeLimit,
+            "Provider request exceeds its size limit",
+        )
+    }
+
+    #[must_use]
+    pub const fn response_content_type() -> Self {
+        Self::new(
+            ProviderAdapterErrorKind::ResponseContentType,
+            "Provider response is not an event stream",
+        )
+    }
+
+    #[must_use]
+    pub const fn connection() -> Self {
+        Self::new(
+            ProviderAdapterErrorKind::Connection,
+            "Provider connection failed",
+        )
+    }
+
+    #[must_use]
+    pub const fn upstream() -> Self {
+        Self::new(
+            ProviderAdapterErrorKind::Upstream,
+            "Provider returned a server error",
+        )
+    }
+
+    #[must_use]
+    pub const fn identity_conflict() -> Self {
+        Self::new(
+            ProviderAdapterErrorKind::IdentityConflict,
+            "Provider exchange identity conflicts",
+        )
+    }
+
     #[must_use]
     pub const fn rejected() -> Self {
         Self {
@@ -179,7 +253,7 @@ impl ProviderAdapterOpenReceipt {
             || adapter_request_id.trim() != adapter_request_id
             || adapter_request_id.chars().any(char::is_control)
         {
-            return Err(ProviderAdapterError::protocol());
+            return Err(ProviderAdapterError::identity_conflict());
         }
         Ok(Self { adapter_request_id })
     }
@@ -311,7 +385,7 @@ impl Eq for ProviderGatewayOpenReceipt {}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProviderGatewayTerminalCharge {
     pub usage: ProviderTokenUsage,
-    pub actual_cost_micros: u64,
+    pub actual_cost_micros: Option<u64>,
 }
 
 /// Trusted terminal command used by the unique stream coordinator.
@@ -324,7 +398,7 @@ pub enum ProviderGatewayTerminal {
     Cancelled,
     Completed {
         usage: ProviderTokenUsage,
-        actual_cost_micros: u64,
+        actual_cost_micros: Option<u64>,
     },
 }
 
@@ -405,13 +479,22 @@ impl ModelAttemptFailureFact {
         let kind = match kind {
             ProviderGatewayErrorKind::AdapterRateLimited => ModelAttemptFailureKind::RateLimit,
             ProviderGatewayErrorKind::AdapterUnavailable
+            | ProviderGatewayErrorKind::AdapterConnection
+            | ProviderGatewayErrorKind::AdapterUpstream
             | ProviderGatewayErrorKind::IdentityUnavailable
             | ProviderGatewayErrorKind::RouteUnavailable
             | ProviderGatewayErrorKind::AdmissionUnavailable
             | ProviderGatewayErrorKind::SettlementUnavailable
             | ProviderGatewayErrorKind::Storage => ModelAttemptFailureKind::ProviderUnavailable,
-            ProviderGatewayErrorKind::AdapterProtocol => ModelAttemptFailureKind::Protocol,
+            ProviderGatewayErrorKind::AdapterProtocol
+            | ProviderGatewayErrorKind::AdapterRequestTranslation
+            | ProviderGatewayErrorKind::AdapterResponseContentType
+            | ProviderGatewayErrorKind::AdapterIdentityConflict => {
+                ModelAttemptFailureKind::Protocol
+            }
             ProviderGatewayErrorKind::AdapterRejected
+            | ProviderGatewayErrorKind::AdapterRequestInvalid
+            | ProviderGatewayErrorKind::AdapterRequestSizeLimit
             | ProviderGatewayErrorKind::InvalidRequest
             | ProviderGatewayErrorKind::IdentityDenied
             | ProviderGatewayErrorKind::RouteMismatch
@@ -479,7 +562,7 @@ pub struct ModelAttemptCharge {
     /// Provider-normalized token usage.
     pub usage: ProviderTokenUsage,
     /// Actual cost in micros.
-    pub cost_micros: u64,
+    pub cost_micros: Option<u64>,
 }
 
 /// Opaque secret bytes returned only across the `SecretStore` boundary.

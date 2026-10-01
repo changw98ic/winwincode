@@ -635,7 +635,9 @@ impl CodexCoreAdapter for ScriptedStageProductAdapter {
                 usage: Some(
                     winwincode_execution_port::generated::ExecutionOutcomeUsage {
                         runtime_millis: 17,
-                        tokens: 23,
+                        tokens: Some(23),
+ known_tokens: 23,
+ accounting_status: winwincode_execution_port::generated::ExecutionOutcomeUsageAccountingStatus::Known,
                         cost_microunits: Some(29),
                     },
                 ),

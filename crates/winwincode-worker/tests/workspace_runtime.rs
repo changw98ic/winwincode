@@ -62,7 +62,7 @@ impl Fixture {
         let root = std::env::temp_dir().join(unique);
         let sources = root.join("sources");
         let workspaces = root.join("workspaces");
-        let repository = sources.join("repo_00000000000000000000000001");
+        let repository = sources.join("rep_00000000000000000000000001");
         std::fs::create_dir_all(&repository).expect("create source repository");
         std::fs::create_dir_all(&workspaces).expect("create workspace root");
         git(&repository, &["init", "-q"]);
@@ -88,7 +88,7 @@ impl Fixture {
     }
 
     fn repository(&self) -> PathBuf {
-        self.sources.join("repo_00000000000000000000000001")
+        self.sources.join("rep_00000000000000000000000001")
     }
 
     fn install_validation_config_text(&self, configuration: &str) {
@@ -318,7 +318,7 @@ fn active_job() -> ActiveJob {
             }),
             workspace: ExecutionWorkspace {
                 checkout_revision: "HEAD".to_owned(),
-                repository_id: RepositoryId("repo_00000000000000000000000001".to_owned()),
+                repository_id: RepositoryId("rep_00000000000000000000000001".to_owned()),
                 write_mode: ExecutionWorkspaceWriteMode::Candidate,
             },
         },
@@ -927,6 +927,138 @@ fn durable_creation_intent_recovers_every_pre_active_crash_point() {
         restarted
             .close_job(&active.job.job_id, WorkspaceCloseReason::Cancelled)
             .expect("close recovered workspace");
+    }
+}
+
+#[cfg(feature = "test-support")]
+fn find_workspace_creation_intent_for_test(root: &std::path::Path) -> Option<PathBuf> {
+    for entry in std::fs::read_dir(root).unwrap() {
+        let entry = entry.unwrap();
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".winwincode-workspace-create-")
+        {
+            return Some(entry.path());
+        }
+        if entry.file_type().unwrap().is_dir()
+            && let Some(path) = find_workspace_creation_intent_for_test(&entry.path())
+        {
+            return Some(path);
+        }
+    }
+    None
+}
+
+#[test]
+#[cfg(feature = "test-support")]
+fn partitioned_workspace_contains_corruption_to_the_exact_job_and_repository() {
+    let fixture = Fixture::new("partitioned-intent");
+    let active = active_job();
+    let open =
+        || JobWorkspaceRuntime::open_partitioned(&fixture.workspaces, &fixture.sources).unwrap();
+    let mut runtime = open();
+    assert!(
+        runtime
+            .interrupt_workspace_creation_for_test(
+                &active,
+                None,
+                WorkspaceCreationInterruption::AfterRootCreated,
+            )
+            .is_err()
+    );
+    drop(runtime);
+    let intent = find_workspace_creation_intent_for_test(&fixture.workspaces)
+        .expect("durable interrupted intent");
+    let bytes = std::fs::read(&intent).unwrap();
+    std::fs::write(&intent, b"{corrupt").unwrap();
+    let second = second_active_job();
+    let mut independent = open();
+    let checkout = independent
+        .open_for_job(&second, None)
+        .expect("foreign Job corruption stays isolated");
+    assert_eq!(
+        std::fs::read(checkout.join("fixture.txt")).unwrap(),
+        b"source\n"
+    );
+    independent
+        .close_job(&second.job.job_id, WorkspaceCloseReason::Cancelled)
+        .unwrap();
+    assert!(
+        independent.open_for_job(&active, None).is_err(),
+        "own corrupt authority remains rejected"
+    );
+    drop(independent);
+    std::fs::write(&intent, bytes).unwrap();
+    let mut recovered = open();
+    let original_checkout = recovered.open_for_job(&active, None).unwrap();
+    std::fs::write(original_checkout.join("fixture.txt"), b"retained change\n").unwrap();
+    drop(recovered);
+    let successor = replacement_successor(&active);
+    let receipt = replacement_authority(&active, &successor);
+    let mut successor_runtime = open();
+    let resumed = successor_runtime
+        .open_for_job(&successor, Some(&receipt))
+        .unwrap();
+    assert_eq!(resumed, original_checkout);
+    assert_eq!(
+        std::fs::read(resumed.join("fixture.txt")).unwrap(),
+        b"retained change\n"
+    );
+    successor_runtime
+        .close_job(&successor.job.job_id, WorkspaceCloseReason::Cancelled)
+        .unwrap();
+}
+
+#[test]
+fn partitioned_workspace_accepts_formal_repository_identity() {
+    let fixture = Fixture::new("partitioned-formal-repository");
+    let mut active = active_job();
+    active.job.job_id = ExecutionJobId("job_3411KWMBB6ZJXY4J03GBP78DZG".into());
+    active.lease.job_id = active.job.job_id.clone();
+    let repository = fixture.repository();
+    for source in [&fixture.sources, &repository] {
+        let mut runtime =
+            JobWorkspaceRuntime::open_partitioned(&fixture.workspaces, source).unwrap();
+        let checkout = runtime.open_for_job(&active, None).unwrap();
+        assert_eq!(
+            std::fs::read(checkout.join("fixture.txt")).unwrap(),
+            b"source\n"
+        );
+        runtime
+            .close_job(&active.job.job_id, WorkspaceCloseReason::Cancelled)
+            .unwrap();
+    }
+}
+
+#[test]
+fn partitioned_workspace_rejects_noncanonical_repository_identity() {
+    let fixture = Fixture::new("partitioned-repository-identity");
+    for invalid in [
+        "",
+        "rep_",
+        "rep_short",
+        "repo_00000000000000000000000001",
+        "rep_../../escape",
+    ] {
+        let mut active = active_job();
+        active.job.workspace.repository_id = RepositoryId(invalid.into());
+        let mut runtime =
+            JobWorkspaceRuntime::open_partitioned(&fixture.workspaces, &fixture.sources).unwrap();
+        assert!(runtime.open_for_job(&active, None).is_err(), "{invalid}");
+    }
+}
+
+#[test]
+fn partitioned_workspace_rejects_noncanonical_job_identity() {
+    let fixture = Fixture::new("partitioned-identity");
+    for invalid in ["", "job_", "job_short", "job_../../escape"] {
+        let mut active = active_job();
+        active.job.job_id = ExecutionJobId(invalid.into());
+        active.lease.job_id = active.job.job_id.clone();
+        let mut runtime =
+            JobWorkspaceRuntime::open_partitioned(&fixture.workspaces, &fixture.sources).unwrap();
+        assert!(runtime.open_for_job(&active, None).is_err(), "{invalid}");
     }
 }
 
@@ -1649,7 +1781,9 @@ fn retain_terminal_frame_without_receipt(
                 model_usage: Some(ExecutionOutcomeUsage {
                     cost_microunits: Some(53),
                     runtime_millis: 0,
-                    tokens: 100,
+                    tokens: Some(100),
+ known_tokens: 100,
+ accounting_status: winwincode_execution_port::generated::ExecutionOutcomeUsageAccountingStatus::Known,
                 }),
                 terminal_status: Some("completed"),
             },
@@ -1909,7 +2043,9 @@ async fn diagnostic_baseline_does_not_blame_history_then_routes_one_new_missing_
                     model_usage: Some(ExecutionOutcomeUsage {
                         cost_microunits: Some(47),
                         runtime_millis: 0,
-                        tokens: 100,
+                        tokens: Some(100),
+ known_tokens: 100,
+ accounting_status: winwincode_execution_port::generated::ExecutionOutcomeUsageAccountingStatus::Known,
                     }),
                     terminal_status: Some("completed"),
                 },
@@ -2356,7 +2492,7 @@ fn unchanged_or_cancelled_writer_produces_no_candidate() {
     let unchanged = runtime
         .prepare_candidate(&active, winwincode_codex::RoleExecutionMode::React)
         .expect_err("unchanged checkout has no candidate");
-    assert_eq!(unchanged.code(), JobWorkspaceErrorCode::Candidate);
+    assert_eq!(unchanged.code(), JobWorkspaceErrorCode::UnchangedCandidate);
     active.lifecycle = ActiveJobLifecycle::Cancelling;
     let cancelling = runtime
         .prepare_candidate(&active, winwincode_codex::RoleExecutionMode::React)

@@ -1121,6 +1121,31 @@ impl Kernel {
         config.mcp_servers = current.mcp_servers;
         runtime.manager.skills_service().clear_cache();
         set_workspace(&mut config, &options.cwd)?;
+        // Resolve unspecified stdio working directories from this immutable Session checkout.
+        // The private home remains the source of configuration, never the execution directory.
+        let mut servers = config.mcp_servers.get().clone();
+        for server in servers.values_mut() {
+            if let codex_core_api::McpServerTransportConfig::Stdio { cwd, .. } =
+                &mut server.transport
+                && cwd.is_none()
+            {
+                *cwd = Some(
+                    serde_json::from_value(Value::String(
+                        options.cwd.to_string_lossy().into_owned(),
+                    ))
+                    .map_err(|_| {
+                        KernelFailure::new("INVALID_WORKSPACE", "Invalid MCP workspace")
+                    })?,
+                );
+            }
+        }
+        config.mcp_servers.set(servers).map_err(|_| {
+            KernelFailure::new(
+                "EXTENSION_CONFIG_UNAVAILABLE",
+                "MCP workspace configuration failed",
+            )
+        })?;
+
         let (provider, model) = model_route(&options.provider, &options.model)?;
         config.model_provider = kernel_provider_info(&provider);
         config.model_provider_id = provider;

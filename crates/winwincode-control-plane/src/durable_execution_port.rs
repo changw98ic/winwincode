@@ -573,14 +573,35 @@ impl<'application> DurableExecutionPortIngress<'application> {
         let (lease, worker_session_id, identity_worker_session_id) =
             delegated_message_authority(message)
                 .ok_or(DurableExecutionPortError::UnsupportedMessage)?;
-        require_exact_dispatch_message(
-            lease,
-            worker_session_id,
-            identity_worker_session_id,
-            &dispatch,
-            self.storage,
-            &self.server_time,
-        )?;
+        let retained_frame = match message {
+            ExecutionPortMessage::ModelChunkMessage(chunk)
+                if chunk.session_identity.work_run_id.is_none() =>
+            {
+                crate::product_session_execution_application::retained_chat_model_frame(
+                    self.storage,
+                    self.repository_scope,
+                    chunk,
+                )?
+            }
+            _ => false,
+        };
+        if !retained_frame
+            || !exact_dispatch_message_identity(
+                lease,
+                worker_session_id,
+                identity_worker_session_id,
+                &dispatch,
+            )
+        {
+            require_exact_dispatch_message(
+                lease,
+                worker_session_id,
+                identity_worker_session_id,
+                &dispatch,
+                self.storage,
+                &self.server_time,
+            )?;
+        }
         self.delegate_supplement(DurableExecutionPortSupplement::JobScopedWorkerMessage {
             dispatch: &dispatch,
             message,
@@ -644,7 +665,11 @@ impl<'application> DurableExecutionPortIngress<'application> {
                 // Terminal is already durable (receipt-first replay or raced
                 // receipt). Retry the Controller follow-up so a prior accept
                 // that failed after commit can still dispatch the next role.
-                if facts.status() == TerminalOutcomeStatus::Succeeded {
+                if facts.status() == TerminalOutcomeStatus::Succeeded
+                    || message.outcome.error.as_ref().is_some_and(|error| {
+                        error.code == ExecutionPortErrorCode::CandidateUnchanged
+                    })
+                {
                     self.continue_delivery_controller_follow_up(&durable, &job, None)?;
                 }
                 return Ok(outcome_output(rejection));
@@ -653,7 +678,10 @@ impl<'application> DurableExecutionPortIngress<'application> {
                 // WorkerResourcesPending / PublicationPending still carry a
                 // committed terminal receipt. Dispatch the next role from that
                 // durable revision, then surface the original resource error.
-                if facts.status() == TerminalOutcomeStatus::Succeeded
+                if (facts.status() == TerminalOutcomeStatus::Succeeded
+                    || message.outcome.error.as_ref().is_some_and(|error| {
+                        error.code == ExecutionPortErrorCode::CandidateUnchanged
+                    }))
                     && let Some(receipt) = error.committed_terminal_receipt()
                 {
                     self.continue_delivery_controller_follow_up(
@@ -666,7 +694,13 @@ impl<'application> DurableExecutionPortIngress<'application> {
             }
         };
         self.finish_delivery_execution_resources(message, &job, &authority, &durable)?;
-        if facts.status() == TerminalOutcomeStatus::Succeeded {
+        if facts.status() == TerminalOutcomeStatus::Succeeded
+            || message
+                .outcome
+                .error
+                .as_ref()
+                .is_some_and(|error| error.code == ExecutionPortErrorCode::CandidateUnchanged)
+        {
             self.continue_delivery_controller_follow_up(&durable, &job, Some(terminal_revision))?;
         }
         Ok(outcome_output(outcome_success(message, replayed)))
@@ -939,16 +973,12 @@ pub(crate) fn require_exact_dispatch_message(
     now: &Instant,
 ) -> Result<(), DurableExecutionPortError> {
     let accepted = authority.lease();
-    let attempt = u64::try_from(lease.attempt).ok();
-    let exact = lease.job_id == accepted.job_id
-        && lease.lease_id == accepted.lease_id
-        && lease.worker_id == accepted.worker_id
-        && lease.worker_instance_id == accepted.worker_instance_id
-        && attempt == Some(accepted.attempt)
-        && lease.fencing_token == accepted.fencing_token
-        && lease.issued_at == accepted.issued_at
-        && worker_session_id == authority.worker_session_id()
-        && identity_worker_session_id == worker_session_id;
+    let exact = exact_dispatch_message_identity(
+        lease,
+        worker_session_id,
+        identity_worker_session_id,
+        authority,
+    );
     if exact {
         if lease.expires_at == accepted.expires_at {
             return Ok(());
@@ -959,10 +989,6 @@ pub(crate) fn require_exact_dispatch_message(
             .execution_registry()
             .and_then(|registry| registry.load_live_lease_for_period(&period, now))
             .map_err(DurableExecutionPortError::Storage)?;
-        // The registry validates the renewed period against the accepted
-        // history and the live lease. Its current expiry is later than the
-        // original dispatch expiry, so full-record equality would reject
-        // every valid message after renewal.
         if current.is_some() {
             return Ok(());
         }
@@ -970,6 +996,25 @@ pub(crate) fn require_exact_dispatch_message(
     Err(DurableExecutionPortError::Storage(
         StorageError::invalid_input("Worker message differs from its accepted dispatch authority"),
     ))
+}
+
+fn exact_dispatch_message_identity(
+    lease: &ExecutionLeaseStamp,
+    worker_session_id: &winwincode_domain::WorkerSessionId,
+    identity_worker_session_id: &winwincode_domain::WorkerSessionId,
+    authority: &ExecutionDispatchAuthority,
+) -> bool {
+    let accepted = authority.lease();
+    let attempt = u64::try_from(lease.attempt).ok();
+    lease.job_id == accepted.job_id
+        && lease.lease_id == accepted.lease_id
+        && lease.worker_id == accepted.worker_id
+        && lease.worker_instance_id == accepted.worker_instance_id
+        && attempt == Some(accepted.attempt)
+        && lease.fencing_token == accepted.fencing_token
+        && lease.issued_at == accepted.issued_at
+        && worker_session_id == authority.worker_session_id()
+        && identity_worker_session_id == worker_session_id
 }
 
 impl ExecutionPortCore for DurableExecutionPortIngress<'_> {

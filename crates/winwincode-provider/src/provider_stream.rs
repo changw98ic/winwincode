@@ -38,7 +38,9 @@ pub enum ProviderToolKind {
 ///
 /// Provider adapters may expose a bounded alias on their wire protocol, but
 /// the alias is never parsed back into this identity. The adapter must retain
-/// an explicit alias-to-identity binding for the whole exchange.
+/// an explicit alias-to-identity binding for the whole exchange. Unadvertised
+/// calls use a reserved unavailable namespace so Core can reject the call and
+/// feed back the error without granting access to a hidden tool.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderToolIdentity {
@@ -110,6 +112,8 @@ pub enum ProviderFinishReason {
     Stop,
     ToolCalls,
     MaxTokens,
+    Interrupted,
+    Filtered,
 }
 
 /// Stable Provider stream failure categories.
@@ -189,7 +193,7 @@ impl fmt::Debug for ProviderStreamFailure {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProviderTokenUsage {
     pub input_tokens: u64,
-    pub cached_input_tokens: u64,
+    pub cached_input_tokens: Option<u64>,
     pub cache_write_input_tokens: u64,
     pub output_tokens: u64,
     pub reasoning_output_tokens: u64,
@@ -799,6 +803,19 @@ impl ProviderStreamConverter {
                             end_turn: Some(reason == ProviderFinishReason::Stop),
                         }
                     }
+                    ProviderFinishReason::Interrupted | ProviderFinishReason::Filtered => {
+                        ModelPortMessage::Error {
+                            token_usage: self.usage.map(ModelTokenUsage::from),
+                            error: ModelFailure::new(
+                                if reason == ProviderFinishReason::Filtered {
+                                    "CONTENT_FILTER"
+                                } else {
+                                    "PROVIDER_INTERRUPTED"
+                                },
+                                "Provider response ended before completion",
+                            ),
+                        }
+                    }
                     ProviderFinishReason::MaxTokens => ModelPortMessage::Error {
                         token_usage: self.usage.map(ModelTokenUsage::from),
                         error: ModelFailure::new(
@@ -1013,7 +1030,7 @@ fn inspect_tool_identity(
 fn validate_usage(usage: ProviderTokenUsage) -> Result<(), ProviderStreamConversionError> {
     let values = [
         usage.input_tokens,
-        usage.cached_input_tokens,
+        usage.cached_input_tokens.unwrap_or(0),
         usage.cache_write_input_tokens,
         usage.output_tokens,
         usage.reasoning_output_tokens,
@@ -1255,7 +1272,7 @@ struct ModelReasoningSummary {
 #[allow(clippy::struct_field_names)] // Exact field names are the canonical ModelPort wire contract.
 struct ModelTokenUsage {
     input_tokens: u64,
-    cached_input_tokens: u64,
+    cached_input_tokens: Option<u64>,
     cache_write_input_tokens: u64,
     output_tokens: u64,
     reasoning_output_tokens: u64,

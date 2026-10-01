@@ -1313,13 +1313,11 @@ fn commit_stage_success(
             status: ExecutionOutcomeStatus::Succeeded,
             summary: "real Provider Delivery stage completed".to_owned(),
             usage: Some(ExecutionOutcomeUsage {
-                cost_microunits: Some(
-                    i64::try_from(provider.terminal.admission.actual_cost_micros)
-                        .expect("safe Provider cost"),
-                ),
+                cost_microunits: provider.terminal.admission.actual_cost_micros.map(|cost| i64::try_from(cost).expect("safe Provider cost")),
                 runtime_millis: 1,
-                tokens: i64::try_from(provider.terminal.admission.actual_tokens)
-                    .expect("safe Provider tokens"),
+                tokens: Some(i64::try_from(provider.terminal.admission.actual_tokens).expect("safe Provider tokens")),
+                known_tokens: i64::try_from(provider.terminal.admission.actual_tokens).expect("safe Provider tokens"),
+                accounting_status: winwincode_execution_port::generated::ExecutionOutcomeUsageAccountingStatus::Known,
             }),
         },
         schema_version: SchemaVersion::WinwincodeV1,
@@ -1605,7 +1603,7 @@ fn settle_stage_resources(root: &TestDirectory, stage: &StageAuthority, provider
             request_id: RequestId(id("req", runtime_seed(stage, 91))),
             expected_revision: 2,
             actual_tokens: provider.terminal.admission.actual_tokens,
-            actual_cost_microunits: Some(provider.terminal.admission.actual_cost_micros),
+            actual_cost_microunits: provider.terminal.admission.actual_cost_micros,
             actual_runtime_millis: 1,
             completed_at: provider.terminal.settled_at.clone(),
         })
@@ -1691,7 +1689,7 @@ struct ProviderRunEvidence {
 #[serde(rename_all = "camelCase")]
 struct ExpectedUsage {
     input_tokens: u64,
-    cached_input_tokens: u64,
+    cached_input_tokens: Option<u64>,
     cache_write_input_tokens: u64,
     output_tokens: u64,
     reasoning_output_tokens: u64,
@@ -1746,7 +1744,10 @@ fn live_evidence(
                     cache_write_input_tokens: source.usage.cache_write_input_tokens,
                     output_tokens: source.usage.output_tokens,
                     reasoning_output_tokens: source.usage.reasoning_output_tokens,
-                    cost_micros: source.usage.cost_micros,
+                    cost_micros: source
+                        .usage
+                        .cost_micros
+                        .expect("fixture includes explicit Provider pricing"),
                 },
             }
         })

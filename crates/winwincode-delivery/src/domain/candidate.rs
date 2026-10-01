@@ -859,6 +859,13 @@ fn current_writer<'delivery>(
     delivery: &'delivery Delivery,
     producer_id: &WorkRunId,
 ) -> Result<&'delivery winwincode_domain::WorkRun, DeliveryValidationError> {
+    if let Some(fact) = &delivery.snapshot().same_candidate_reverification
+        && &fact.producer_work_run_id != producer_id
+    {
+        return Err(stale_candidate(
+            "candidate differs from the current same-candidate recovery authority",
+        ));
+    }
     let runs = &delivery.snapshot().work_run_aggregate.runs;
     let (producer_index, producer) = runs
         .iter()

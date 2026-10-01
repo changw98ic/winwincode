@@ -1738,13 +1738,10 @@ fn validate_terminal_usage(
     const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
     if outcome.last_event_sequence.0 < 0
         || outcome.last_event_sequence.0 > MAX_SAFE_INTEGER
-        || outcome.usage.as_ref().is_some_and(|usage| {
-            !(0..=MAX_SAFE_INTEGER).contains(&usage.runtime_millis)
-                || !(0..=MAX_SAFE_INTEGER).contains(&usage.tokens)
-                || usage
-                    .cost_microunits
-                    .is_some_and(|cost| !(0..=MAX_SAFE_INTEGER).contains(&cost))
-        })
+        || outcome
+            .usage
+            .as_ref()
+            .is_some_and(|usage| !winwincode_execution_port::usage::valid_usage(usage))
     {
         return Err(binding_mismatch(
             "assistant terminal usage is outside the canonical range",

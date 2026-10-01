@@ -86,7 +86,7 @@ impl DeviceProviderStore {
         if !meta.is_dir() || meta.permissions().mode() & 0o077 != 0 {
             return Err(DeviceProviderError);
         }
-        let path = directory.join("providers.sqlite3");
+        let path = fs::canonicalize(directory)?.join("providers.sqlite3");
         match fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -563,6 +563,8 @@ pub(crate) fn adapter(
         },
     )
     .map_err(|_| DeviceProviderError)?;
+    // Task progress has no total development deadline; opening and progress idle timeouts stay finite.
+    transport = transport.without_deadlines();
     if let Some(path) = std::env::var_os(DEVICE_PROVIDER_TLS_ROOT_DER_ENVIRONMENT) {
         transport = transport
             .with_specific_tls_roots(vec![fs::read(path)?])

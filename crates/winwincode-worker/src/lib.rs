@@ -712,6 +712,7 @@ where
                 (self.next_message_id(), now)
             };
         let message = WorkerRegisterMessage {
+            usage_accounting_version: 2,
             capabilities: self.config.capabilities.clone(),
             kind: WorkerRegisterMessageKind::WorkerRegister,
             message_id,
@@ -2329,26 +2330,39 @@ where
         let active = self.active.get(job_id).cloned().ok_or_else(|| {
             candidate_artifact_error("candidate completion has no active workspace authority")
         })?;
-        if let Ok(prepared) = self
+        let preparation_error = match self
             .workspaces
             .prepare_candidate(&active, RoleExecutionMode::React)
         {
-            return self
-                .retain_candidate_artifact(&active.job.job_id, prepared, now)
-                .await;
-        }
+            Ok(prepared) => {
+                return self
+                    .retain_candidate_artifact(&active.job.job_id, prepared, now)
+                    .await;
+            }
+            Err(error) => error,
+        };
+        let (code, summary) = if preparation_error.code()
+            == workspace_runtime::JobWorkspaceErrorCode::UnchangedCandidate
+            && active.job.execution_profile == "remediator"
+        {
+            (
+                ExecutionPortErrorCode::CandidateUnchanged,
+                "remediator completed with the original candidate tree",
+            )
+        } else {
+            (
+                ExecutionPortErrorCode::CandidatePreparationFailed,
+                "candidate preparation failed",
+            )
+        };
         self.pending_candidates.remove(job_id);
         self.finish_job(
             job_id,
             ExecutionOutcomeStatus::Failed,
-            "writer completed without a valid candidate",
+            summary,
             diagnostics_for_failure,
             usage_for_failure,
-            Some(port_error(
-                ExecutionPortErrorCode::ExecutionFailed,
-                "writer completed without a valid candidate",
-                false,
-            )),
+            Some(port_error(code, summary, false)),
             now,
         )
         .await
@@ -4851,12 +4865,12 @@ const fn delegated_loop_budget() -> RepairLoopBudget {
     RepairLoopBudget {
         max_change_batches: 4,
         max_context_pack_bytes: 131_072,
-        max_observer_calls: 4,
-        max_primary_model_calls: 8,
+        max_observer_calls: None,
+        max_primary_model_calls: None,
         max_repair_rounds: 3,
-        max_total_cost_microunits: 9_007_199_254_740_991,
-        max_total_tokens: 10_000_000,
-        max_wall_time_millis: 3_600_000,
+        max_total_cost_microunits: None,
+        max_total_tokens: None,
+        max_wall_time_millis: None,
     }
 }
 

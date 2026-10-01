@@ -456,11 +456,7 @@ fn attention_action(
 ) -> DerivedVerdictAttentionAction {
     match result.verdict {
         CriterionVerdict::Fail => {
-            let attempts = snapshot
-                .session_bindings
-                .iter()
-                .filter(|binding| binding.execution_profile.as_deref() == Some("remediator"))
-                .count() as u64;
+            let attempts = crate::domain::rework::rework_dispatch_count(snapshot);
             if attempts >= snapshot.spec.max_rework_attempts {
                 DerivedVerdictAttentionAction::ClarifyDefinition
             } else {
@@ -748,6 +744,7 @@ fn validate_transition_delta(
         || after.revision != before.revision.saturating_add(1)
         || after.spec != before.spec
         || after.session_bindings != before.session_bindings
+        || after.same_candidate_reverification != before.same_candidate_reverification
         || after.created_at_millis != before.created_at_millis
         || !after.attention_items.starts_with(&before.attention_items)
         || !after.evidence.starts_with(&before.evidence)
@@ -779,16 +776,7 @@ fn validate_transition_delta(
             .iter()
             .any(|appended| appended == reference)
     });
-    let current_writer = after
-        .session_bindings
-        .iter()
-        .filter(|binding| {
-            matches!(
-                binding.execution_profile.as_deref(),
-                Some("executor" | "remediator")
-            )
-        })
-        .max_by_key(|binding| (binding.bound_at_millis, binding.attempt));
+    let current_writer = crate::domain::same_candidate::selected_writer(after);
     let extra_appended_are_producer_commit = appended_evidence
         .iter()
         .filter(|evidence| !event_evidence_ids.contains(evidence.id.0.as_str()))

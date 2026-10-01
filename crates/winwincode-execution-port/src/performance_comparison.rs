@@ -29,8 +29,10 @@ pub struct PerformanceV0RunEvidence {
     pub execution_mode: ExecutionMode,
     pub observer_mode: ObserverMode,
     pub primary_model_call_count: i64,
-    pub primary_model_input_tokens: i64,
-    pub primary_model_cached_tokens: i64,
+    pub primary_model_input_tokens: Option<i64>,
+    pub primary_model_cached_tokens: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_model_inclusive_input_tokens: Option<i64>,
     pub primary_model_output_tokens: i64,
     pub primary_model_wait_ms: i64,
     pub observer_call_count: i64,
@@ -60,8 +62,12 @@ pub struct PerformanceV0ModelCallEvidence {
     pub model_call_id: Sha256Digest,
     pub model_kind: PerformanceV0ModelKind,
     pub completed: bool,
-    pub input_tokens: i64,
-    pub cached_tokens: i64,
+    #[serde(default)]
+    pub usage_known: bool,
+    pub input_tokens: Option<i64>,
+    pub cached_tokens: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inclusive_input_tokens: Option<i64>,
     pub output_tokens: i64,
     pub elapsed_millis: i64,
     pub actual_cost_microunits: Option<i64>,
@@ -86,7 +92,9 @@ pub struct PerformanceV0ArmSummary {
     pub incomplete_strong_model_call_count: i64,
     pub completed_observer_model_call_count: i64,
     pub incomplete_observer_model_call_count: i64,
+    /// Known lower bound when `unknown_usage_call_count` is nonzero.
     pub total_tokens: i64,
+    pub unknown_usage_call_count: i64,
     pub total_strong_model_wait_ms: i64,
     pub total_observer_model_wait_ms: i64,
     pub total_runtime_ms: i64,
@@ -152,11 +160,12 @@ enum ComparisonArm {
     Structured,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct ModelCallTotals {
     count: i64,
-    input_tokens: i64,
-    cached_tokens: i64,
+    inclusive_input_tokens: i64,
+    input_tokens: Option<i64>,
+    cached_tokens: Option<i64>,
     output_tokens: i64,
     elapsed_millis: i64,
 }
@@ -246,6 +255,9 @@ pub fn summarize_performance_v0(
         }
 
         let summary = summary_mut(&mut comparison, arm(run)?);
+        if !call.usage_known {
+            add_metric(&mut summary.unknown_usage_call_count, 1)?;
+        }
         if call.completed {
             match call.model_kind {
                 PerformanceV0ModelKind::Primary => {
@@ -276,17 +288,32 @@ pub fn summarize_performance_v0(
         let totals = calls_by_run
             .entry((call.run_id.0.clone(), call.model_kind))
             .or_default();
-        add_metric(&mut totals.count, 1)?;
-        add_metric(&mut totals.input_tokens, call.input_tokens)?;
-        add_metric(&mut totals.cached_tokens, call.cached_tokens)?;
-        add_metric(&mut totals.output_tokens, call.output_tokens)?;
-        add_metric(&mut totals.elapsed_millis, call.elapsed_millis)?;
+        record_model_call_totals(totals, call)?;
         unique_calls.insert(call_key, call.clone());
     }
 
     reconcile_model_calls(&unique_runs, &calls_by_run)?;
 
     Ok(comparison)
+}
+
+fn record_model_call_totals(
+    totals: &mut ModelCallTotals,
+    call: &PerformanceV0ModelCallEvidence,
+) -> Result<(), PerformanceV0ComparisonError> {
+    add_metric(&mut totals.count, 1)?;
+    add_metric(
+        &mut totals.inclusive_input_tokens,
+        inclusive_tokens(
+            call.input_tokens,
+            call.cached_tokens,
+            call.inclusive_input_tokens,
+        )?,
+    )?;
+    add_optional_metric(&mut totals.input_tokens, call.input_tokens)?;
+    add_optional_metric(&mut totals.cached_tokens, call.cached_tokens)?;
+    add_metric(&mut totals.output_tokens, call.output_tokens)?;
+    add_metric(&mut totals.elapsed_millis, call.elapsed_millis)
 }
 
 fn reconcile_model_calls(
@@ -303,6 +330,12 @@ fn reconcile_model_calls(
             .cloned()
             .unwrap_or_default();
         if primary.count != run.primary_model_call_count
+            || primary.inclusive_input_tokens
+                != inclusive_tokens(
+                    run.primary_model_input_tokens,
+                    run.primary_model_cached_tokens,
+                    run.primary_model_inclusive_input_tokens,
+                )?
             || primary.input_tokens != run.primary_model_input_tokens
             || primary.cached_tokens != run.primary_model_cached_tokens
             || primary.output_tokens != run.primary_model_output_tokens
@@ -339,8 +372,8 @@ const fn summary_mut(
 fn validate_run(run: &PerformanceV0RunEvidence) -> Result<(), PerformanceV0ComparisonError> {
     for value in [
         run.primary_model_call_count,
-        run.primary_model_input_tokens,
-        run.primary_model_cached_tokens,
+        run.primary_model_input_tokens.unwrap_or(0),
+        run.primary_model_cached_tokens.unwrap_or(0),
         run.primary_model_output_tokens,
         run.primary_model_wait_ms,
         run.observer_call_count,
@@ -358,8 +391,8 @@ fn validate_model_call(
     validate_digest(&call.run_id)?;
     validate_digest(&call.model_call_id)?;
     for value in [
-        call.input_tokens,
-        call.cached_tokens,
+        call.input_tokens.unwrap_or(0),
+        call.cached_tokens.unwrap_or(0),
         call.output_tokens,
         call.elapsed_millis,
     ] {
@@ -369,8 +402,9 @@ fn validate_model_call(
         validate_metric(cost)?;
     }
     if !call.completed
-        && (call.input_tokens != 0
-            || call.cached_tokens != 0
+        && (call.input_tokens.is_some_and(|v| v != 0)
+            || call.cached_tokens.is_some_and(|v| v != 0)
+            || call.inclusive_input_tokens.is_some_and(|v| v != 0)
             || call.output_tokens != 0
             || call.elapsed_millis != 0
             || call.actual_cost_microunits.is_some())
@@ -384,8 +418,14 @@ fn run_total_primary_tokens(
     run: &PerformanceV0RunEvidence,
 ) -> Result<i64, PerformanceV0ComparisonError> {
     let mut total = 0;
-    add_metric(&mut total, run.primary_model_input_tokens)?;
-    add_metric(&mut total, run.primary_model_cached_tokens)?;
+    add_metric(
+        &mut total,
+        inclusive_tokens(
+            run.primary_model_input_tokens,
+            run.primary_model_cached_tokens,
+            run.primary_model_inclusive_input_tokens,
+        )?,
+    )?;
     add_metric(&mut total, run.primary_model_output_tokens)?;
     Ok(total)
 }
@@ -394,8 +434,14 @@ fn model_call_total_tokens(
     call: &PerformanceV0ModelCallEvidence,
 ) -> Result<i64, PerformanceV0ComparisonError> {
     let mut total = 0;
-    add_metric(&mut total, call.input_tokens)?;
-    add_metric(&mut total, call.cached_tokens)?;
+    add_metric(
+        &mut total,
+        inclusive_tokens(
+            call.input_tokens,
+            call.cached_tokens,
+            call.inclusive_input_tokens,
+        )?,
+    )?;
     add_metric(&mut total, call.output_tokens)?;
     Ok(total)
 }
@@ -425,4 +471,48 @@ fn add_metric(target: &mut i64, value: i64) -> Result<(), PerformanceV0Compariso
         .filter(|sum| *sum <= MAX_SAFE_METRIC)
         .ok_or(PerformanceV0ComparisonError::MetricOverflow)?;
     Ok(())
+}
+
+impl Default for ModelCallTotals {
+    fn default() -> Self {
+        Self {
+            count: 0,
+            inclusive_input_tokens: 0,
+            input_tokens: Some(0),
+            cached_tokens: Some(0),
+            output_tokens: 0,
+            elapsed_millis: 0,
+        }
+    }
+}
+fn add_optional_metric(
+    total: &mut Option<i64>,
+    value: Option<i64>,
+) -> Result<(), PerformanceV0ComparisonError> {
+    *total = match (*total, value) {
+        (Some(mut a), Some(b)) => {
+            add_metric(&mut a, b)?;
+            Some(a)
+        }
+        _ => None,
+    };
+    Ok(())
+}
+fn inclusive_tokens(
+    input: Option<i64>,
+    cached: Option<i64>,
+    inclusive: Option<i64>,
+) -> Result<i64, PerformanceV0ComparisonError> {
+    let sum = match (input, cached) {
+        (Some(a), Some(b)) => a
+            .checked_add(b)
+            .ok_or(PerformanceV0ComparisonError::MetricOverflow)?,
+        (None, None) => inclusive.ok_or(PerformanceV0ComparisonError::InvalidMetric)?,
+        _ => return Err(PerformanceV0ComparisonError::InvalidMetric),
+    };
+    validate_metric(sum)?;
+    if inclusive.is_some_and(|v| v != sum) {
+        return Err(PerformanceV0ComparisonError::InvalidMetric);
+    }
+    Ok(sum)
 }

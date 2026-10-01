@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto'
 import { globSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { retainedModelFailure } from './device-model-failures.mjs'
 
 const digest = bytes => createHash('sha256').update(bytes).digest('hex')
 const objectId = /^[0-9a-f]{40}$/u
@@ -25,7 +26,7 @@ function decodeReceipt(payload) {
 }
 
 // Export identity/accounting facts only; prompts, tool output and credentials stay private.
-export function exportDeviceExecutionReceipts(directory, evidenceDirectory = directory) {
+export function readDeviceExecutionReceipts(directory) {
   const calls = []
   const jev = []
   const performance = []
@@ -43,14 +44,22 @@ export function exportDeviceExecutionReceipts(directory, evidenceDirectory = dir
         const request = decodeReceipt(opened.request)
         const actualModels = []
         let terminal = null
+        let failure = null
         for (const chunk of JSON.parse(row.chunks ?? '[]')) {
           assert.equal(chunk.modelExchangeId, row.exchange_id)
+          if (chunk.error) {
+            assert.equal(chunk.isFinal, true, 'model failure must be terminal')
+            assert.equal(terminal, null, 'multiple terminal model receipts')
+            failure = retainedModelFailure(chunk.error)
+            terminal = { type: 'error' }
+          }
           if (!chunk.payload) continue
           const frame = decodeReceipt(chunk.payload)
           if (frame.type === 'server_model') actualModels.push(frame.model)
           if (frame.type === 'completed' || frame.type === 'error') {
             assert.equal(terminal, null, 'multiple terminal model receipts')
             terminal = frame
+            if (frame.type === 'error') failure = retainedModelFailure(frame.error, { canonical: true })
           }
         }
         const usage = terminal?.tokenUsage ?? null
@@ -61,6 +70,7 @@ export function exportDeviceExecutionReceipts(directory, evidenceDirectory = dir
           workerSessionId: opened.workerSessionId, provider: request.provider,
           requestedModel: request.request.model, reasoningEffort: request.request.reasoning?.effort ?? null,
           actualModels, terminalType: terminal?.type ?? null,
+          ...(failure === null ? {} : { failure }),
           usage: usage === null ? null : {
             inputTokens: usage.input_tokens, outputTokens: usage.output_tokens,
             totalTokens: usage.total_tokens,
@@ -100,8 +110,10 @@ export function exportDeviceExecutionReceipts(directory, evidenceDirectory = dir
       database.exec('PRAGMA busy_timeout=5000')
       if (!database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='performance_projection'").get()) continue
       const projections = database.prepare('SELECT run_key, record_json FROM performance_projection ORDER BY run_key').all()
+      const operationsTable = database.prepare("SELECT 1 FROM sqlite_master WHERE type='view' AND name='performance_operation_accounted'").get()
+        ? 'performance_operation_accounted' : 'performance_operation'
       const operations = database.prepare(`SELECT run_key, operation_kind, completed, duration_millis,
-        actual_cost_microunits FROM performance_operation ORDER BY run_key, operation_kind, operation_id`).all()
+        actual_cost_microunits FROM ${operationsTable} ORDER BY run_key, operation_kind, operation_id`).all()
       for (const projection of projections) {
         const stored = JSON.parse(Buffer.from(projection.record_json).toString('utf8'))
         const report = stored.report
@@ -138,6 +150,11 @@ export function exportDeviceExecutionReceipts(directory, evidenceDirectory = dir
     totalTokens: completeUsage ? calls.reduce((sum, call) => sum + call.usage.totalTokens, 0)
       + jev.reduce((sum, call) => sum + call.inputTokens + call.outputTokens, 0) : null,
     actualCost: null, externalVerdict: null, externalScore: null }
+  return evidence
+}
+
+export function exportDeviceExecutionReceipts(directory, evidenceDirectory = directory) {
+  const evidence = readDeviceExecutionReceipts(directory)
   const bytes = `${JSON.stringify(evidence, null, 2)}\n`
   retain(join(evidenceDirectory, 'execution-receipts.json'), bytes)
   return { evidence, sha256: digest(bytes) }

@@ -35,6 +35,7 @@
 use std::fmt;
 
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
+use sha2::{Digest, Sha256};
 use winwincode_domain::Instant;
 
 use crate::{SqliteStorage, StorageError};
@@ -77,6 +78,19 @@ CREATE TABLE IF NOT EXISTS worker_session_credentials_audit (
 );
 CREATE INDEX IF NOT EXISTS worker_session_credentials_audit_by_credential
     ON worker_session_credentials_audit (worker_session_credential_id, occurred_at);
+CREATE TABLE IF NOT EXISTS worker_session_credential_renewals (
+    audit_id TEXT PRIMARY KEY NOT NULL,
+    worker_session_credential_id TEXT NOT NULL,
+    worker_session_id TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision > 1),
+    heartbeat_sequence INTEGER NOT NULL CHECK (heartbeat_sequence > 0),
+    job_id TEXT NOT NULL,
+    lease_id TEXT NOT NULL,
+    previous_expires_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
+    UNIQUE (worker_session_credential_id, revision)
+);
 ";
 
 /// Lifecycle state of one `WorkerSessionCredential` (plan 17.2).
@@ -134,6 +148,8 @@ pub enum CredentialAuditAction {
     Revoked,
     /// The expiry sweep terminated the credential.
     Expired,
+    /// A fresh accepted heartbeat extended the active credential's idle TTL.
+    Renewed,
 }
 
 impl CredentialAuditAction {
@@ -144,6 +160,7 @@ impl CredentialAuditAction {
             Self::Rotated => "rotated",
             Self::Revoked => "revoked",
             Self::Expired => "expired",
+            Self::Renewed => "renewed",
         }
     }
 
@@ -155,6 +172,7 @@ impl CredentialAuditAction {
             Self::Rotated => "02",
             Self::Revoked => "03",
             Self::Expired => "04",
+            Self::Renewed => "05",
         }
     }
 }
@@ -166,13 +184,13 @@ impl CredentialAuditAction {
 #[allow(clippy::struct_field_names)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CredentialIssuance {
-    worker_session_credential_id: String,
-    worker_session_id: String,
-    worker_id: String,
-    worker_instance_id: String,
-    worker_launch_grant_id: String,
-    credential_digest: String,
-    expires_at: Instant,
+    pub(crate) worker_session_credential_id: String,
+    pub(crate) worker_session_id: String,
+    pub(crate) worker_id: String,
+    pub(crate) worker_instance_id: String,
+    pub(crate) worker_launch_grant_id: String,
+    pub(crate) credential_digest: String,
+    pub(crate) expires_at: Instant,
 }
 
 impl CredentialIssuance {
@@ -385,6 +403,112 @@ impl<'storage> WorkerSessionCredentialLedger<'storage> {
         Ok(Self { storage })
     }
 
+    /// Extends only the exact active credential under a fresh accepted Core
+    /// heartbeat and a still-current launch, binding, occupancy and Job lease.
+    /// The authority checks, credential CAS and renewal audit commit together.
+    ///
+    /// # Errors
+    /// Rejects malformed input or unavailable durable authority. A lost CAS or
+    /// inactive authority returns `None` and never revives the credential.
+    pub fn renew_after_accepted_heartbeat(
+        &mut self,
+        expected: &WorkerSessionCredentialRecord,
+        heartbeat: &winwincode_execution_port::generated::WorkerHeartbeatMessage,
+        lease: &winwincode_execution_port::generated::ActiveLeaseSummary,
+        expires_at: &Instant,
+        now: &Instant,
+    ) -> Result<Option<WorkerSessionCredentialRecord>, WorkerSessionCredentialStoreError> {
+        validate_instant(now, "renewal time")?;
+        validate_instant(expires_at, "renewal expiry")?;
+        validate_crockford_id(&heartbeat.message_id.0, "xmsg_", "heartbeat message id")?;
+        if heartbeat.worker_id.0 != expected.worker_id
+            || heartbeat.worker_instance_id.0 != expected.worker_instance_id
+            || heartbeat.heartbeat_sequence.0 <= 0
+            || lease.attempt <= 0
+            || expires_at.0 <= expected.expires_at.0
+            || now.0 >= expected.expires_at.0
+        {
+            return Ok(None);
+        }
+        let transaction = self.transaction()?;
+        let updated = transaction.execute(
+            "UPDATE worker_session_credentials AS c
+             SET expires_at=?2, revision=revision+1
+             WHERE c.worker_session_credential_id=?1 AND c.state='active'
+               AND c.credential_digest=?3 AND c.revision=?4 AND c.expires_at>?5
+               AND c.worker_id=?6 AND c.worker_instance_id=?7
+               AND EXISTS (
+                 SELECT 1 FROM worker_launch_grants g
+                 JOIN device_execution_bindings b
+                   ON b.worker_launch_grant_id=g.worker_launch_grant_id
+                 JOIN client_occupancy_leases o ON o.occupancy_lease_id=g.occupancy_lease_id
+                 JOIN client_nodes n ON n.client_node_id=g.client_node_id
+                 WHERE g.worker_launch_grant_id=c.worker_launch_grant_id
+                   AND g.worker_session_id=c.worker_session_id
+                   AND g.worker_id=c.worker_id AND g.worker_instance_id=c.worker_instance_id
+                   AND NOT EXISTS (SELECT 1 FROM worker_launch_grant_exits e WHERE e.worker_launch_grant_id=g.worker_launch_grant_id)
+                   AND g.state='consumed'
+                   AND b.state='bound' AND b.worker_session_id=c.worker_session_id
+                   AND b.client_node_id=g.client_node_id
+                   AND b.client_instance_id=g.client_instance_id
+                   AND n.current_instance_id=g.client_instance_id
+                   AND b.holder_user_id=g.holder_user_id AND o.holder_user_id=g.holder_user_id
+                   AND b.repository_binding_id=g.repository_binding_id
+                   AND b.occupancy_lease_id=o.occupancy_lease_id
+                   AND b.occupancy_fencing_token=o.fencing_token
+                   AND g.occupancy_fencing_token=o.fencing_token
+                   AND o.client_node_id=g.client_node_id AND o.state IN ('occupied','draining')
+               )
+               AND EXISTS (
+                 SELECT 1 FROM execution_leases l
+                 JOIN device_execution_current_facts f ON f.job_id=l.job_id
+                 JOIN execution_dispatch_authorities d ON d.job_id=l.job_id AND d.lease_id=l.lease_id
+                 JOIN execution_workers w ON w.worker_id=l.worker_id
+                 JOIN execution_heartbeats h ON h.worker_id=w.worker_id
+                   AND h.worker_instance_id=w.worker_instance_id
+                 WHERE l.job_id=?8 AND l.lease_id=?9 AND l.attempt=?10
+                   AND l.fencing_token=?11 AND l.worker_id=c.worker_id
+                   AND l.worker_instance_id=c.worker_instance_id AND l.expires_at>?5
+                   AND f.worker_launch_grant_id=c.worker_launch_grant_id
+                   AND f.worker_session_id=c.worker_session_id
+                   AND f.worker_id=c.worker_id AND f.worker_instance_id=c.worker_instance_id
+                   AND d.worker_id=l.worker_id AND d.worker_instance_id=l.worker_instance_id
+                   AND d.attempt=l.attempt AND d.fencing_token=l.fencing_token
+                   AND w.worker_instance_id=c.worker_instance_id
+                   AND w.heartbeat_sequence=?12 AND h.heartbeat_sequence=?12
+                   AND NOT EXISTS (SELECT 1 FROM execution_lease_terminals t
+                     WHERE t.lease_id=l.lease_id)
+               )",
+            params![expected.worker_session_credential_id, expires_at.0,
+                expected.credential_digest, i64::try_from(expected.revision)
+                    .map_err(|_| invalid_id("credential revision"))?, now.0, expected.worker_id,
+                expected.worker_instance_id, lease.job_id.0, lease.lease_id.0,
+                lease.attempt, lease.fencing_token.0, heartbeat.heartbeat_sequence.0],
+        ).map_err(|sql| sql_error(&sql))?;
+        if updated == 0 {
+            return Ok(None);
+        }
+        let record = load_credential(&transaction, &expected.worker_session_credential_id)?
+            .ok_or_else(credential_missing_after_write)?;
+        let audit_digest = format!(
+            "{:x}",
+            Sha256::digest(format!(
+                "{}:{}",
+                record.worker_session_credential_id, record.revision
+            ))
+        );
+        let audit_id = format!("wca_{}", audit_digest[..26].to_ascii_uppercase());
+        transaction.execute(
+            "INSERT INTO worker_session_credential_renewals VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            params![audit_id, record.worker_session_credential_id, record.worker_session_id,
+                i64::try_from(record.revision).map_err(|_| invalid_id("credential revision"))?,
+                heartbeat.heartbeat_sequence.0, lease.job_id.0, lease.lease_id.0,
+                expected.expires_at.0, expires_at.0, now.0],
+        ).map_err(|sql| sql_error(&sql))?;
+        transaction.commit().map_err(|sql| sql_error(&sql))?;
+        Ok(Some(record))
+    }
+
     /// Atomically issues one worker session credential (plan 17.2). The
     /// `active` row and its `issued` audit entry commit together. The worker
     /// session must not already carry an `active` credential.
@@ -398,46 +522,10 @@ impl<'storage> WorkerSessionCredentialLedger<'storage> {
         issuance: &CredentialIssuance,
         now: &Instant,
     ) -> Result<WorkerSessionCredentialRecord, WorkerSessionCredentialStoreError> {
-        validate_instant(now, "issue time")?;
         let transaction = self.transaction()?;
-        let inserted = transaction
-            .execute(
-                "INSERT INTO worker_session_credentials
-                 (worker_session_credential_id, worker_session_id, worker_id,
-                  worker_instance_id, worker_launch_grant_id, credential_digest,
-                  state, expires_at, issued_at, ended_at, revision)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7, ?8, NULL, 1)",
-                params![
-                    issuance.worker_session_credential_id,
-                    issuance.worker_session_id,
-                    issuance.worker_id,
-                    issuance.worker_instance_id,
-                    issuance.worker_launch_grant_id,
-                    issuance.credential_digest,
-                    issuance.expires_at.0,
-                    now.0,
-                ],
-            )
-            .map_err(|sql| map_credential_insert_sql(&sql))?;
-        if inserted != 1 {
-            return Err(error(
-                WorkerSessionCredentialStoreErrorKind::Storage,
-                "worker session credential insert did not store exactly one row",
-            ));
-        }
-        insert_audit(
-            &transaction,
-            CredentialAuditAction::Issued,
-            &issuance.worker_session_credential_id,
-            &issuance.worker_session_id,
-            &issuance.worker_session_id,
-            None,
-            now,
-        )?;
-        let record = load_credential(&transaction, &issuance.worker_session_credential_id)?
-            .ok_or_else(credential_missing_after_write)?;
+        let stored = issue_credential_in_transaction(&transaction, issuance, now)?;
         transaction.commit().map_err(|sql| sql_error(&sql))?;
-        Ok(record)
+        Ok(stored)
     }
 
     /// Atomically rotates one worker session's credential (plan 17.2): the
@@ -751,6 +839,10 @@ impl<'storage> WorkerSessionCredentialLedger<'storage> {
                         worker_session_id, actor_user_id, reason, occurred_at
                  FROM worker_session_credentials_audit
                  WHERE worker_session_credential_id = ?1
+                 UNION ALL
+                 SELECT audit_id,'renewed',worker_session_credential_id,worker_session_id,
+                        worker_session_id,NULL,occurred_at
+                 FROM worker_session_credential_renewals WHERE worker_session_credential_id=?1
                  ORDER BY occurred_at, audit_id",
             )
             .map_err(|sql| sql_error(&sql))?;
@@ -836,6 +928,7 @@ impl CredentialAuditEntry {
             "rotated" => CredentialAuditAction::Rotated,
             "revoked" => CredentialAuditAction::Revoked,
             "expired" => CredentialAuditAction::Expired,
+            "renewed" => CredentialAuditAction::Renewed,
             _ => {
                 return Err(error(
                     WorkerSessionCredentialStoreErrorKind::CorruptState,
@@ -1281,4 +1374,49 @@ fn error(
         kind,
         message: message.into(),
     }
+}
+
+pub(crate) fn issue_credential_in_transaction(
+    connection: &Transaction<'_>,
+    issuance: &CredentialIssuance,
+    now: &Instant,
+) -> Result<WorkerSessionCredentialRecord, WorkerSessionCredentialStoreError> {
+    validate_instant(now, "issue time")?;
+    let inserted = connection
+        .execute(
+            "INSERT INTO worker_session_credentials
+                 (worker_session_credential_id, worker_session_id, worker_id,
+                  worker_instance_id, worker_launch_grant_id, credential_digest,
+                  state, expires_at, issued_at, ended_at, revision)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7, ?8, NULL, 1)",
+            params![
+                issuance.worker_session_credential_id,
+                issuance.worker_session_id,
+                issuance.worker_id,
+                issuance.worker_instance_id,
+                issuance.worker_launch_grant_id,
+                issuance.credential_digest,
+                issuance.expires_at.0,
+                now.0,
+            ],
+        )
+        .map_err(|sql| map_credential_insert_sql(&sql))?;
+    if inserted != 1 {
+        return Err(error(
+            WorkerSessionCredentialStoreErrorKind::Storage,
+            "worker session credential insert did not store exactly one row",
+        ));
+    }
+    insert_audit(
+        connection,
+        CredentialAuditAction::Issued,
+        &issuance.worker_session_credential_id,
+        &issuance.worker_session_id,
+        &issuance.worker_session_id,
+        None,
+        now,
+    )?;
+    let record = load_credential(connection, &issuance.worker_session_credential_id)?
+        .ok_or_else(credential_missing_after_write)?;
+    Ok(record)
 }

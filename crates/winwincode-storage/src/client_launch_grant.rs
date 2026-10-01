@@ -33,6 +33,7 @@
 //! grant suffix and the action, so each of the at-most-once transitions
 //! records exactly one row without the storage layer drawing entropy.
 
+use sha2::{Digest, Sha256};
 use std::fmt;
 
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
@@ -91,6 +92,24 @@ CREATE TABLE IF NOT EXISTS worker_launch_grant_audit (
 );
 CREATE INDEX IF NOT EXISTS worker_launch_grant_audit_by_grant
     ON worker_launch_grant_audit (worker_launch_grant_id, occurred_at);
+CREATE TABLE IF NOT EXISTS worker_replacement_launches (
+ predecessor_grant_id TEXT PRIMARY KEY NOT NULL, successor_grant_id TEXT NOT NULL UNIQUE
+);
+CREATE TABLE IF NOT EXISTS worker_launch_process_closures (
+ grant_id TEXT NOT NULL, reporting_client_instance_id TEXT NOT NULL,
+ closure_digest TEXT NOT NULL, never_started INTEGER NOT NULL, process_boot_digest TEXT,
+ closed_at TEXT NOT NULL, PRIMARY KEY(grant_id,reporting_client_instance_id)
+);
+CREATE TABLE IF NOT EXISTS worker_launch_grant_exits (
+    worker_launch_grant_id TEXT PRIMARY KEY NOT NULL,
+    worker_session_id TEXT NOT NULL UNIQUE,
+    worker_instance_id TEXT NOT NULL,
+    client_node_id TEXT NOT NULL,
+    client_instance_id TEXT NOT NULL,
+    occupancy_lease_id TEXT NOT NULL,
+    occupancy_fencing_token INTEGER NOT NULL,
+    observed_at TEXT NOT NULL
+);
 ";
 
 /// Lifecycle state of one `WorkerLaunchGrant` (plan 7.8).
@@ -168,18 +187,6 @@ impl LaunchAuditAction {
             Self::LaunchRejected => "launch_rejected",
             Self::Revoked => "revoked",
             Self::Expired => "expired",
-        }
-    }
-
-    /// Two-character audit identity discriminator. Crockford Base32 digits
-    /// only, so the derived audit id stays canonical.
-    const fn code(self) -> &'static str {
-        match self {
-            Self::Issued => "01",
-            Self::Consumed => "02",
-            Self::LaunchRejected => "03",
-            Self::Revoked => "04",
-            Self::Expired => "05",
         }
     }
 }
@@ -568,59 +575,23 @@ impl<'storage> WorkerLaunchGrantLedger<'storage> {
         issuance: &LaunchGrantIssuance,
         now: &Instant,
     ) -> Result<WorkerLaunchGrantRecord, WorkerLaunchGrantStoreError> {
-        validate_instant(now, "issue time")?;
+        self.issue_replacement(issuance, None, now)
+    }
+
+    /// Issues a unique successor launch only after an exact trusted Device exit.
+    /// # Errors
+    /// Rejects changed Device authority, duplicate successor launches or storage errors.
+    #[allow(clippy::too_many_lines)]
+    pub fn issue_replacement(
+        &mut self,
+        issuance: &LaunchGrantIssuance,
+        predecessor: Option<&str>,
+        now: &Instant,
+    ) -> Result<WorkerLaunchGrantRecord, WorkerLaunchGrantStoreError> {
         let transaction = self.transaction()?;
-        ensure_issue_gate(&transaction, issuance)?;
-        let inserted = transaction
-            .execute(
-                "INSERT INTO worker_launch_grants
-                 (worker_launch_grant_id, client_node_id, client_instance_id,
-                  holder_user_id, occupancy_lease_id, occupancy_fencing_token,
-                  repository_binding_id, worker_session_id, worker_id,
-                  worker_instance_id, credential_digest, product_session_id,
-                  work_run_id, expires_at, state, consumed_at, ended_at,
-                  created_at, revision)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-                         ?14, 'issued', NULL, NULL, ?15, 1)",
-                params![
-                    issuance.worker_launch_grant_id,
-                    issuance.client_node_id,
-                    issuance.client_instance_id,
-                    issuance.holder_user_id,
-                    issuance.occupancy_lease_id,
-                    sql_integer(issuance.occupancy_fencing_token)?,
-                    issuance.repository_binding_id,
-                    issuance.worker_session_id,
-                    issuance.worker_id,
-                    issuance.worker_instance_id,
-                    issuance.credential_digest,
-                    issuance.product_session_id,
-                    issuance.work_run_id.as_ref().map(|value| value.0.as_str()),
-                    issuance.expires_at.0,
-                    now.0,
-                ],
-            )
-            .map_err(|sql| map_grant_insert_sql(&sql))?;
-        if inserted != 1 {
-            return Err(error(
-                WorkerLaunchGrantStoreErrorKind::Storage,
-                "worker launch grant insert did not store exactly one row",
-            ));
-        }
-        insert_audit(
-            &transaction,
-            LaunchAuditAction::Issued,
-            &issuance.worker_launch_grant_id,
-            &issuance.client_node_id,
-            &issuance.holder_user_id,
-            &issuance.holder_user_id,
-            None,
-            now,
-        )?;
-        let record = load_launch_grant(&transaction, &issuance.worker_launch_grant_id)?
-            .ok_or_else(grant_missing_after_write)?;
+        let stored = issue_launch_in_transaction(&transaction, issuance, predecessor, now)?;
         transaction.commit().map_err(|sql| sql_error(&sql))?;
-        Ok(record)
+        Ok(stored)
     }
 
     /// Settles one `client.worker.launch_ack` (plan 14.3 step 10).
@@ -644,9 +615,36 @@ impl<'storage> WorkerLaunchGrantLedger<'storage> {
         settlement: &LaunchAckSettlement,
         now: &Instant,
     ) -> Result<LaunchAckOutcome, WorkerLaunchGrantStoreError> {
+        self.settle_launch_ack_checked(settlement, None, now)
+    }
+
+    /// Settles a Device report only for the authenticated physical node.
+    /// # Errors
+    /// Rejects cross-Device reports without changing grant or audit state.
+    pub fn settle_device_launch_ack(
+        &mut self,
+        node_id: &str,
+        settlement: &LaunchAckSettlement,
+        now: &Instant,
+    ) -> Result<LaunchAckOutcome, WorkerLaunchGrantStoreError> {
+        validate_client_node_id(node_id)?;
+        self.settle_launch_ack_checked(settlement, Some(node_id), now)
+    }
+    fn settle_launch_ack_checked(
+        &mut self,
+        settlement: &LaunchAckSettlement,
+        node_id: Option<&str>,
+        now: &Instant,
+    ) -> Result<LaunchAckOutcome, WorkerLaunchGrantStoreError> {
         validate_instant(now, "launch acknowledgement time")?;
         let transaction = self.transaction()?;
         let record = require_launch_grant(&transaction, &settlement.worker_launch_grant_id)?;
+        if node_id.is_some_and(|node| node != record.client_node_id) {
+            return Err(error(
+                WorkerLaunchGrantStoreErrorKind::InvalidInput,
+                "launch ACK belongs to another Device",
+            ));
+        }
         ensure_settlement_matches(&record, settlement)?;
         if !settlement.accepted {
             if record.state != WorkerLaunchGrantState::Issued {
@@ -824,6 +822,88 @@ impl<'storage> WorkerLaunchGrantLedger<'storage> {
     ) -> Result<Option<WorkerLaunchGrantRecord>, WorkerLaunchGrantStoreError> {
         validate_worker_launch_grant_id(worker_launch_grant_id)?;
         load_launch_grant(self.connection()?, worker_launch_grant_id)
+    }
+
+    /// Records a process exit reported by the authenticated current Device.
+    /// The exact grant, instance and current occupancy must still agree; an
+    /// idle Chat has no execution binding and needs the same durable closure.
+    /// # Errors
+    /// Rejects malformed identities or storage failures. Stale reports return false.
+    pub fn observe_trusted_exit(
+        &mut self,
+        node_id: &str,
+        session_id: &str,
+        instance_id: &str,
+        occupancy_id: &str,
+        now: &Instant,
+    ) -> Result<bool, WorkerLaunchGrantStoreError> {
+        validate_client_node_id(node_id)?;
+        validate_worker_session_id(session_id)?;
+        validate_worker_instance_id(instance_id)?;
+        validate_instant(now, "exit time")?;
+        let transaction = self.transaction()?;
+        let inserted = transaction
+            .execute(
+                "INSERT OR IGNORE INTO worker_launch_grant_exits
+             SELECT g.worker_launch_grant_id,g.worker_session_id,g.worker_instance_id,
+                    g.client_node_id,g.client_instance_id,g.occupancy_lease_id,
+                    g.occupancy_fencing_token,?5
+             FROM worker_launch_grants g
+             JOIN client_nodes n ON n.client_node_id=g.client_node_id
+             JOIN client_occupancy_leases o ON o.occupancy_lease_id=g.occupancy_lease_id
+             WHERE g.worker_session_id=?2 AND g.worker_instance_id=?3
+               AND g.client_node_id=?1 AND g.client_instance_id=n.current_instance_id
+               AND g.state IN ('issued','consumed') AND g.occupancy_lease_id=?4
+               AND o.client_node_id=g.client_node_id AND o.holder_user_id=g.holder_user_id
+               AND o.fencing_token=g.occupancy_fencing_token
+               AND o.state IN ('occupied','draining')",
+                params![node_id, session_id, instance_id, occupancy_id, now.0],
+            )
+            .map_err(|sql| sql_error(&sql))?;
+        let accepted = inserted == 1
+            || transaction
+                .query_row(
+                    "SELECT 1 FROM worker_launch_grant_exits WHERE client_node_id=?1
+             AND worker_session_id=?2 AND worker_instance_id=?3 AND occupancy_lease_id=?4",
+                    params![node_id, session_id, instance_id, occupancy_id],
+                    |_| Ok(()),
+                )
+                .optional()
+                .map_err(|sql| sql_error(&sql))?
+                .is_some();
+        transaction.commit().map_err(|sql| sql_error(&sql))?;
+        Ok(accepted)
+    }
+
+    /// Whether a trusted Device exit durably closed this grant's process.
+    /// # Errors
+    /// Rejects malformed identities or unavailable storage.
+    pub fn has_trusted_exit(&self, grant_id: &str) -> Result<bool, WorkerLaunchGrantStoreError> {
+        validate_worker_launch_grant_id(grant_id)?;
+        Ok(self
+            .connection()?
+            .query_row(
+                "SELECT 1 FROM worker_launch_grant_exits WHERE worker_launch_grant_id=?1",
+                [grant_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|sql| sql_error(&sql))?
+            .is_some())
+    }
+
+    /// Follows the unique successor lineage of an exited launch.
+    /// # Errors
+    /// Rejects a malformed grant identity or corrupt stored lineage.
+    pub fn recovery_launch_for_grant(
+        &self,
+        grant_id: &str,
+    ) -> Result<Option<WorkerLaunchGrantRecord>, WorkerLaunchGrantStoreError> {
+        validate_worker_launch_grant_id(grant_id)?;
+        let id:Option<String>=self.connection()?.query_row("WITH RECURSIVE chain(id,depth) AS (SELECT successor_grant_id,1 FROM worker_replacement_launches WHERE predecessor_grant_id=?1 UNION ALL SELECT r.successor_grant_id,c.depth+1 FROM worker_replacement_launches r JOIN chain c ON r.predecessor_grant_id=c.id WHERE c.depth<100) SELECT id FROM chain ORDER BY depth DESC LIMIT 1",[grant_id],|r|r.get(0)).optional().map_err(|sql|sql_error(&sql))?;
+        id.map(|id| load_launch_grant(self.connection()?, &id))
+            .transpose()
+            .map(Option::flatten)
     }
 
     /// Returns the one non-terminal grant of a worker session, if any.
@@ -1007,6 +1087,7 @@ pub(crate) fn reserved_worker_sessions(
             .query_row(
                 "SELECT COUNT(*) FROM worker_launch_grants g
                  WHERE g.client_node_id = ?1 AND g.state IN ('issued', 'consumed')
+                   AND NOT EXISTS (SELECT 1 FROM worker_launch_grant_exits e WHERE e.worker_launch_grant_id=g.worker_launch_grant_id)
                    AND NOT EXISTS (SELECT 1 FROM device_execution_bindings b
                      WHERE b.worker_launch_grant_id = g.worker_launch_grant_id AND b.state = 'released')
                    AND EXISTS (SELECT 1 FROM client_occupancy_leases l
@@ -1125,7 +1206,7 @@ fn ensure_device_facts(
 ) -> Result<u64, WorkerLaunchGrantStoreError> {
     let node = transaction
         .query_row(
-            "SELECT presence_state, lock_state, max_concurrent_worker_sessions
+            "SELECT presence_state, lock_state, max_concurrent_worker_sessions, current_instance_id
              FROM client_nodes WHERE client_node_id = ?1",
             [issuance.client_node_id.as_str()],
             |row| {
@@ -1133,14 +1214,21 @@ fn ensure_device_facts(
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, i64>(2)?,
+                    row.get::<_, Option<String>>(3)?,
                 ))
             },
         )
         .optional()
         .map_err(|sql| sql_error(&sql))?;
-    let Some((presence, lock_state, max_slots)) = node else {
+    let Some((presence, lock_state, max_slots, current_instance)) = node else {
         return Err(unknown_client_node());
     };
+    if current_instance.as_deref() != Some(&issuance.client_instance_id) {
+        return Err(error(
+            WorkerLaunchGrantStoreErrorKind::InvalidInput,
+            "Device instance changed before issuance",
+        ));
+    }
     if lock_state == "locked" {
         return Err(error(
             WorkerLaunchGrantStoreErrorKind::ClientLocked,
@@ -1362,27 +1450,20 @@ fn insert_audit(
     Ok(())
 }
 
-/// Deterministic audit identity: the action discriminator followed by the
-/// first 24 characters of the grant suffix. Every action happens at most
-/// once per grant, so identities never collide.
+/// Hashes the complete grant identity and action; no suffix bits are discarded.
 fn audit_identity(
     action: LaunchAuditAction,
     worker_launch_grant_id: &str,
 ) -> Result<String, WorkerLaunchGrantStoreError> {
-    let suffix = worker_launch_grant_id.strip_prefix("wlg_").ok_or_else(|| {
-        error(
-            WorkerLaunchGrantStoreErrorKind::InvalidInput,
-            "worker launch grant id is not canonical",
-        )
-    })?;
-    let mut identity = String::with_capacity(4 + 26);
-    identity.push_str("wla_");
-    identity.push_str(action.code());
-    identity.push_str(&suffix[..24]);
-    Ok(identity)
+    validate_worker_launch_grant_id(worker_launch_grant_id)?;
+    let hash = format!(
+        "{:x}",
+        Sha256::digest(format!("{}:{worker_launch_grant_id}", action.as_str()).as_bytes())
+    );
+    Ok(format!("wla_{}", hash[..26].to_ascii_uppercase()))
 }
 
-fn load_launch_grant(
+pub(crate) fn load_launch_grant(
     connection: &rusqlite::Connection,
     worker_launch_grant_id: &str,
 ) -> Result<Option<WorkerLaunchGrantRecord>, WorkerLaunchGrantStoreError> {
@@ -2907,9 +2988,17 @@ mod tests {
     #[test]
     fn audit_identities_derive_deterministically_per_action() {
         let grant = grant_id(11);
+        let issued = audit_identity(LaunchAuditAction::Issued, &grant).expect("identity");
+        assert_eq!(issued.len(), 30);
         assert_eq!(
-            audit_identity(LaunchAuditAction::Issued, &grant).expect("identity"),
-            format!("wla_01{}", &grant[4..28])
+            issued,
+            audit_identity(LaunchAuditAction::Issued, &grant).unwrap()
+        );
+        let mut other = grant.clone();
+        other.replace_range(29..30, "Z");
+        assert_ne!(
+            issued,
+            audit_identity(LaunchAuditAction::Issued, &other).unwrap()
         );
         assert_ne!(
             audit_identity(LaunchAuditAction::Issued, &grant).expect("identity"),
@@ -2965,5 +3054,350 @@ mod tests {
             })
             .expect("legacy value");
         assert_eq!(value, "run_00000000000000000000000001");
+    }
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn idle_exit_without_binding_closes_capacity_and_uniquely_reserves_a_successor() {
+        let mut storage = SqliteStorage::open(temporary_directory("idle-exit")).unwrap();
+        let holder = user_id(7);
+        let (node, lease, binding, token) = seed_happy_path(&mut storage, 1, &holder);
+        let initial = issuance(
+            50,
+            &node,
+            &format!("cix_{}", crockford(2)),
+            &holder,
+            &lease,
+            token,
+            &binding,
+            60,
+        );
+        let mut ledger = storage.worker_launch_grant_ledger().unwrap();
+        let grant = ledger
+            .issue(&initial, &unit_instant("2026-01-01T00:02:00.000Z"))
+            .unwrap();
+        ledger
+            .settle_launch_ack(
+                &settlement(50, &lease, token, 60, true, None),
+                &unit_instant("2026-01-01T00:02:01.000Z"),
+            )
+            .unwrap();
+        assert_eq!(ledger.non_terminal_count_for_node(&node).unwrap(), 1);
+        let at = unit_instant("2026-01-01T00:03:00.000Z");
+        assert!(
+            !ledger
+                .observe_trusted_exit(
+                    &node,
+                    &grant.worker_session_id,
+                    &format!("wki_{}", crockford(999)),
+                    &lease,
+                    &at
+                )
+                .unwrap()
+        );
+        assert!(
+            !ledger
+                .observe_trusted_exit(
+                    &node,
+                    &grant.worker_session_id,
+                    &grant.worker_instance_id,
+                    &format!("ocl_{}", crockford(999)),
+                    &at
+                )
+                .unwrap()
+        );
+        assert_eq!(ledger.non_terminal_count_for_node(&node).unwrap(), 1);
+        assert!(
+            ledger
+                .observe_trusted_exit(
+                    &node,
+                    &grant.worker_session_id,
+                    &grant.worker_instance_id,
+                    &lease,
+                    &at
+                )
+                .unwrap()
+        );
+        assert!(
+            ledger
+                .observe_trusted_exit(
+                    &node,
+                    &grant.worker_session_id,
+                    &grant.worker_instance_id,
+                    &lease,
+                    &at
+                )
+                .unwrap()
+        );
+        assert_eq!(ledger.non_terminal_count_for_node(&node).unwrap(), 0);
+        let successor = LaunchGrantIssuance::try_new(
+            grant_id(51),
+            &node,
+            &grant.client_instance_id,
+            &holder,
+            &lease,
+            token,
+            &binding,
+            session_id(61),
+            &grant.worker_id,
+            format!("wki_{}", crockford(63)),
+            DIGEST,
+            grant.product_session_id.clone(),
+            grant.work_run_id.clone(),
+            unit_instant("2026-01-01T01:00:00.000Z"),
+        )
+        .unwrap();
+        ledger
+            .issue_replacement(&successor, Some(&grant.worker_launch_grant_id), &at)
+            .unwrap();
+        let mut duplicate = successor.clone();
+        duplicate.worker_launch_grant_id = grant_id(52);
+        duplicate.worker_session_id = session_id(62);
+        duplicate.worker_instance_id = format!("wki_{}", crockford(64));
+        assert!(
+            ledger
+                .issue_replacement(&duplicate, Some(&grant.worker_launch_grant_id), &at)
+                .is_err()
+        );
+        assert_eq!(
+            ledger
+                .recovery_launch_for_grant(&grant.worker_launch_grant_id)
+                .unwrap()
+                .unwrap()
+                .worker_launch_grant_id,
+            grant_id(51)
+        );
+        assert_eq!(ledger.non_terminal_count_for_node(&node).unwrap(), 1);
+        assert_eq!(
+            ledger
+                .snapshot(&grant.worker_launch_grant_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            WorkerLaunchGrantState::Consumed
+        );
+    }
+}
+
+pub(crate) fn issue_launch_in_transaction(
+    connection: &Transaction<'_>,
+    issuance: &LaunchGrantIssuance,
+    predecessor: Option<&str>,
+    now: &Instant,
+) -> Result<WorkerLaunchGrantRecord, WorkerLaunchGrantStoreError> {
+    validate_instant(now, "issue time")?;
+    if issuance.expires_at.0 <= now.0 {
+        return Err(error(
+            WorkerLaunchGrantStoreErrorKind::GrantExpired,
+            "launch issuance deadline expired",
+        ));
+    }
+    ensure_issue_gate(connection, issuance)?;
+    if let Some(id) = predecessor {
+        let previous = load_launch_grant(connection, id)?.ok_or_else(grant_missing_after_write)?;
+        let exited = connection
+            .query_row(
+                "SELECT 1 FROM worker_launch_grant_exits WHERE worker_launch_grant_id=?1",
+                [id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|sql| sql_error(&sql))?
+            .is_some();
+        let closed_current:bool=connection.query_row("SELECT EXISTS(SELECT 1 FROM worker_launch_process_closures WHERE grant_id=?1 AND reporting_client_instance_id=?2)",params![id,issuance.client_instance_id],|row|row.get(0)).map_err(|e|sql_error(&e))?;
+        if !exited
+            || previous.client_node_id != issuance.client_node_id
+            || (previous.client_instance_id != issuance.client_instance_id && !closed_current)
+            || previous.holder_user_id != issuance.holder_user_id
+            || previous.repository_binding_id != issuance.repository_binding_id
+            || previous.occupancy_lease_id != issuance.occupancy_lease_id
+            || previous.occupancy_fencing_token != issuance.occupancy_fencing_token
+            || previous.worker_id != issuance.worker_id
+            || previous.worker_instance_id == issuance.worker_instance_id
+            || previous.product_session_id != issuance.product_session_id
+        {
+            return Err(error(
+                WorkerLaunchGrantStoreErrorKind::InvalidInput,
+                "replacement launch authority differs",
+            ));
+        }
+        connection
+            .execute(
+                "INSERT INTO worker_replacement_launches VALUES (?1,?2)",
+                params![id, issuance.worker_launch_grant_id],
+            )
+            .map_err(|sql| map_grant_insert_sql(&sql))?;
+    }
+    let inserted = connection
+        .execute(
+            "INSERT INTO worker_launch_grants
+                 (worker_launch_grant_id, client_node_id, client_instance_id,
+                  holder_user_id, occupancy_lease_id, occupancy_fencing_token,
+                  repository_binding_id, worker_session_id, worker_id,
+                  worker_instance_id, credential_digest, product_session_id,
+                  work_run_id, expires_at, state, consumed_at, ended_at,
+                  created_at, revision)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                         ?14, 'issued', NULL, NULL, ?15, 1)",
+            params![
+                issuance.worker_launch_grant_id,
+                issuance.client_node_id,
+                issuance.client_instance_id,
+                issuance.holder_user_id,
+                issuance.occupancy_lease_id,
+                sql_integer(issuance.occupancy_fencing_token)?,
+                issuance.repository_binding_id,
+                issuance.worker_session_id,
+                issuance.worker_id,
+                issuance.worker_instance_id,
+                issuance.credential_digest,
+                issuance.product_session_id,
+                issuance.work_run_id.as_ref().map(|value| value.0.as_str()),
+                issuance.expires_at.0,
+                now.0,
+            ],
+        )
+        .map_err(|sql| map_grant_insert_sql(&sql))?;
+    if inserted != 1 {
+        return Err(error(
+            WorkerLaunchGrantStoreErrorKind::Storage,
+            "worker launch grant insert did not store exactly one row",
+        ));
+    }
+    insert_audit(
+        connection,
+        LaunchAuditAction::Issued,
+        &issuance.worker_launch_grant_id,
+        &issuance.client_node_id,
+        &issuance.holder_user_id,
+        &issuance.holder_user_id,
+        None,
+        now,
+    )?;
+    let record = load_launch_grant(connection, &issuance.worker_launch_grant_id)?
+        .ok_or_else(grant_missing_after_write)?;
+    Ok(record)
+}
+
+/// An authenticated Device's exact local process closure. Models never issue it.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct DeviceLaunchProcessClosure {
+    pub worker_launch_grant_id: String,
+    pub client_instance_id: String,
+    pub reporting_client_instance_id: String,
+    pub occupancy_fencing_token: u64,
+    pub never_started: bool,
+    pub process_boot_digest: Option<String>,
+}
+impl WorkerLaunchGrantLedger<'_> {
+    /// Closes an exact original launch after current Device attestation.
+    /// Rebooted Devices must supply the original boot-bound process closure.
+    /// # Errors
+    /// Rejects changed closure replays, foreign Device, occupancy or instance facts.
+    pub fn observe_device_process_closure(
+        &mut self,
+        node_id: &str,
+        session_id: &str,
+        worker_instance_id: &str,
+        occupancy_id: &str,
+        closure: &DeviceLaunchProcessClosure,
+        now: &Instant,
+    ) -> Result<bool, WorkerLaunchGrantStoreError> {
+        validate_client_node_id(node_id)?;
+        validate_instant(now, "process closure time")?;
+        let tx = self.transaction()?;
+        let grant = require_launch_grant(&tx, &closure.worker_launch_grant_id)?;
+        if grant.client_node_id != node_id
+            || grant.worker_session_id != session_id
+            || grant.worker_instance_id != worker_instance_id
+            || grant.occupancy_lease_id != occupancy_id
+            || grant.occupancy_fencing_token != closure.occupancy_fencing_token
+            || grant.client_instance_id != closure.client_instance_id
+        {
+            return Ok(false);
+        }
+        let current:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM client_nodes n JOIN client_occupancy_leases o ON o.client_node_id=n.client_node_id
+         WHERE n.client_node_id=?1 AND n.current_instance_id=?2 AND o.occupancy_lease_id=?3 AND o.fencing_token=?4
+         AND o.holder_user_id=?5 AND o.state IN ('occupied','draining'))",
+         params![node_id,closure.reporting_client_instance_id,occupancy_id,sql_integer(closure.occupancy_fencing_token)?,grant.holder_user_id],|row|row.get(0)).map_err(|e|sql_error(&e))?;
+        if !current
+            || (closure.never_started
+                && (closure.process_boot_digest.is_some()
+                    || grant.state == WorkerLaunchGrantState::Consumed))
+            || (!closure.never_started
+                && !closure
+                    .process_boot_digest
+                    .as_deref()
+                    .is_some_and(|digest| {
+                        digest.len() == 71
+                            && digest.starts_with("sha256:")
+                            && digest[7..].bytes().all(|c| c.is_ascii_hexdigit())
+                    }))
+        {
+            return Ok(false);
+        }
+        let mut stable = closure.clone();
+        stable.reporting_client_instance_id.clear();
+        let digest = format!(
+            "sha256:{:x}",
+            Sha256::digest(serde_json::to_vec(&stable).map_err(|_| error(
+                WorkerLaunchGrantStoreErrorKind::InvalidInput,
+                "process closure invalid"
+            ))?)
+        );
+        let existing: Option<String> = tx
+            .query_row(
+                "SELECT closure_digest FROM worker_launch_process_closures WHERE grant_id=?1",
+                [&grant.worker_launch_grant_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| sql_error(&e))?;
+        if let Some(original) = existing
+            && original != digest
+        {
+            return Err(error(
+                WorkerLaunchGrantStoreErrorKind::InvalidInput,
+                "process closure replay differs",
+            ));
+        }
+        tx.execute(
+            "INSERT OR IGNORE INTO worker_launch_process_closures VALUES (?1,?2,?3,?4,?5,?6)",
+            params![
+                grant.worker_launch_grant_id,
+                closure.reporting_client_instance_id,
+                digest,
+                closure.never_started,
+                closure.process_boot_digest,
+                now.0
+            ],
+        )
+        .map_err(|e| sql_error(&e))?;
+        tx.execute(
+            "INSERT OR IGNORE INTO worker_launch_grant_exits VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            params![
+                grant.worker_launch_grant_id,
+                grant.worker_session_id,
+                grant.worker_instance_id,
+                grant.client_node_id,
+                grant.client_instance_id,
+                grant.occupancy_lease_id,
+                sql_integer(grant.occupancy_fencing_token)?,
+                now.0
+            ],
+        )
+        .map_err(|e| sql_error(&e))?;
+        tx.commit().map_err(|e| sql_error(&e))?;
+        Ok(true)
+    }
+    /// Whether the retained closure was attested by the current Device instance.
+    /// # Errors
+    /// Rejects malformed grant identity or unavailable storage.
+    pub fn closed_for_device_instance(
+        &self,
+        grant_id: &str,
+        instance_id: &str,
+    ) -> Result<bool, WorkerLaunchGrantStoreError> {
+        validate_worker_launch_grant_id(grant_id)?;
+        self.connection()?.query_row("SELECT EXISTS(SELECT 1 FROM worker_launch_process_closures WHERE grant_id=?1 AND reporting_client_instance_id=?2)",params![grant_id,instance_id],|row|row.get(0)).map_err(|e|sql_error(&e))
     }
 }

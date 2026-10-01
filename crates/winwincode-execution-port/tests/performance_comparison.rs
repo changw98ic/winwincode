@@ -22,8 +22,9 @@ fn run_evidence(
         execution_mode,
         observer_mode: ObserverMode::Off,
         primary_model_call_count: calls,
-        primary_model_input_tokens: input_tokens,
-        primary_model_cached_tokens: cached_tokens,
+        primary_model_inclusive_input_tokens: None,
+        primary_model_input_tokens: Some(input_tokens),
+        primary_model_cached_tokens: Some(cached_tokens),
         primary_model_output_tokens: output_tokens,
         primary_model_wait_ms: wait_ms,
         observer_call_count: 0,
@@ -42,12 +43,14 @@ fn model_call(
     actual_cost_microunits: Option<i64>,
 ) -> PerformanceV0ModelCallEvidence {
     PerformanceV0ModelCallEvidence {
+        usage_known: true,
         run_id,
         model_call_id,
         model_kind: PerformanceV0ModelKind::Primary,
         completed: true,
-        input_tokens,
-        cached_tokens,
+        input_tokens: Some(input_tokens),
+        cached_tokens: Some(cached_tokens),
+        inclusive_input_tokens: Some(input_tokens + cached_tokens),
         output_tokens,
         elapsed_millis,
         actual_cost_microunits,
@@ -173,5 +176,29 @@ fn debug_probe_is_rejected_from_react_vs_delegated_performance_evidence() {
     assert_eq!(
         summarize_performance_v0(&[run], &[call]),
         Err(PerformanceV0ComparisonError::UnsupportedExecutionMode)
+    );
+}
+
+#[test]
+fn unknown_cache_split_reconciles_the_exact_inclusive_input_total() {
+    let mut run = run_evidence('a', ExecutionMode::React, (1, 100, 0, 20, 400, 1000));
+    run.primary_model_input_tokens = None;
+    run.primary_model_cached_tokens = None;
+    run.primary_model_inclusive_input_tokens = Some(100);
+    let mut call = model_call(run.run_id.clone(), digest('b'), 100, 0, 20, 400, None);
+    call.input_tokens = None;
+    call.cached_tokens = None;
+    call.inclusive_input_tokens = Some(100);
+    assert_eq!(
+        summarize_performance_v0(&[run.clone()], &[call.clone()])
+            .unwrap()
+            .react
+            .total_tokens,
+        120
+    );
+    call.inclusive_input_tokens = Some(101);
+    assert_eq!(
+        summarize_performance_v0(&[run], &[call]),
+        Err(PerformanceV0ComparisonError::ModelCallReportMismatch)
     );
 }

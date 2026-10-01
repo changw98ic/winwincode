@@ -476,7 +476,7 @@ fn workrun_device_bindings(
     runs.iter()
         .filter_map(|run| {
             storage
-                .load_work_run_device_binding_facts(&run.execution_job_id)
+                .load_device_binding_facts_for_work_run(&run.execution_job_id, &run.id)
                 .map(|facts| facts.map(|facts| (run, facts)))
                 .transpose()
         })

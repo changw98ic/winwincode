@@ -316,6 +316,7 @@ fn create(
         status: DeliveryStatus::Draft,
         spec,
         session_bindings: Vec::new(),
+        same_candidate_reverification: None,
         attention_items: Vec::new(),
         evidence: Vec::new(),
         verdict: None,
@@ -489,6 +490,7 @@ fn update_spec(
     snapshot.work_run_aggregate.items.clear();
     snapshot.work_run_aggregate.runs.clear();
     snapshot.session_bindings.clear();
+    snapshot.same_candidate_reverification = None;
     snapshot.attention_items.clear();
     snapshot.evidence.clear();
     snapshot.verdict = None;

@@ -166,6 +166,25 @@ function visit(node, callback, path = '#') {
   for (const [key, value] of Object.entries(node)) visit(value, callback, `${path}/${key}`)
 }
 
+test('model failure codes validate as terminal chunks and preserve legacy records', () => {
+  const validate = validator(json(schemaPath), 'ModelChunkMessage')
+  const original = json(validFixturePath).messages.find(message => message.kind === 'model.chunk')
+  for (const code of ['MODEL_STREAM_FAILED', 'DEVICE_PROVIDER_RESPONSE_CONTENT_TYPE_INVALID',
+    'DEVICE_PROVIDER_SSE_FRAMING_INVALID', 'DEVICE_PROVIDER_SSE_EVENT_INVALID',
+    'DEVICE_PROVIDER_RESPONSE_INCOMPLETE', 'DEVICE_PROVIDER_STREAM_CONVERSION_FAILED']) {
+    const message = structuredClone(original)
+    delete message.payload
+    message.isFinal = true
+    message.error = { code, message: code, retryable: false }
+    assert.equal(validate(message), true, JSON.stringify(validate.errors))
+  }
+  const invalid = structuredClone(original)
+  delete invalid.payload
+  invalid.isFinal = true
+  invalid.error = { code: 'DEVICE_PROVIDER_UNREGISTERED_FAILURE', message: 'unexpected', retryable: false }
+  assert.equal(validate(invalid), false)
+})
+
 function messageDefinitions(schema) {
   return schema.$defs.ExecutionPortMessage.oneOf.map(({ $ref }) => {
     assert.match($ref, /^#\/\$defs\/[A-Za-z][A-Za-z0-9]+$/u)
@@ -1262,12 +1281,15 @@ test('ChangeBatch contracts have one generated closed and bounded schema surface
   }
   const validateCounters = validator(schema, 'RepairLoopCounters')
   assert.equal(validateCounters(counters), true, JSON.stringify(validateCounters.errors))
+  for (const field of ['maxObserverCalls', 'maxPrimaryModelCalls', 'maxTotalTokens', 'maxTotalCostMicrounits', 'maxWallTimeMillis']) {
+    assert.equal(validateBudget({ ...budget, [field]: null }), true, field)
+  }
+  for (const field of ['observerCalls', 'primaryModelCalls', 'totalTokens', 'elapsedMillis']) {
+    assert.equal(validateCounters({ ...counters, [field]: 9_007_199_254_740_991 }), true, field)
+    assert.equal(validateCounters({ ...counters, [field]: 9_007_199_254_740_992 }), false, field)
+  }
   for (const [field, value] of [
     ['repairRounds', 4],
-    ['observerCalls', 5],
-    ['primaryModelCalls', 9],
-    ['totalTokens', 10_000_001],
-    ['elapsedMillis', 3_600_001],
     ['changeBatches', 5],
     ['contextPackBytes', 131_073],
   ]) {

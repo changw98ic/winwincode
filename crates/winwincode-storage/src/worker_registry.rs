@@ -12,7 +12,7 @@ use winwincode_domain::{
     WorkspaceId,
 };
 
-pub const EXECUTION_PROTOCOL_VERSION: &str = "winwincode/v1";
+pub const EXECUTION_PROTOCOL_VERSION: &str = "winwincode/v1;usage=2";
 
 /// Exact tenant scope that owns one registered Worker.
 ///
@@ -227,7 +227,10 @@ impl WorkerCapacitySnapshot {
     pub fn healthy_worker_count(&self) -> usize {
         self.workers
             .iter()
-            .filter(|worker| worker.health == WorkerHealth::Healthy)
+            .filter(|worker| {
+                worker.health == WorkerHealth::Healthy
+                    && worker.protocol_version == EXECUTION_PROTOCOL_VERSION
+            })
             .count()
     }
 }

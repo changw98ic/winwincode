@@ -143,7 +143,7 @@ pub(crate) fn execute_at(
 
     let (durable, job) = load_durable_execution_job(storage, &message.lease.job_id)?;
     crate::snapshot_production::snapshot_for_job(storage, &job)?;
-    let context = TerminalContext::from_durable(scope, &durable, &job)?;
+    let mut context = TerminalContext::from_durable(scope, &durable, &job)?;
     let current = load_current_delivery(storage, &context.delivery_id)?;
     let session_identity = match validate_current_job_binding(&current, &job, &context) {
         Ok(identity) => identity,
@@ -160,6 +160,51 @@ pub(crate) fn execute_at(
         &session_identity,
         accepted_period,
     )?;
+    if message.outcome.error.as_ref().is_some_and(|error| {
+        error.code
+            == winwincode_execution_port::generated::ExecutionPortErrorCode::CandidateUnchanged
+    }) {
+        let ExecutionScope::WorkRunExecutionScope(job_scope) = &job.scope else {
+            return Err(
+                StorageError::invalid_input("unchanged remediation scope is missing").into(),
+            );
+        };
+        let sealed = job_scope.rework_authorization.as_ref().ok_or_else(|| {
+            StorageError::invalid_input("unchanged remediation authorization is missing")
+        })?;
+        if job.execution_profile != "remediator"
+            || message.outcome.status != ExecutionOutcomeStatus::Failed
+            || !sealed.requires_full_reverification
+            || job.workspace.checkout_revision != sealed.source_candidate_commit_id
+        {
+            return Err(StorageError::invalid_input(
+                "unchanged outcome differs from its accepted rework source",
+            )
+            .into());
+        }
+        let loaded = storage.load_journal(&delivery_journal_key(&context.delivery_id)?)?;
+        let journal = StagedDeliveryJournal::new(context.delivery_id.clone(), loaded);
+        let (source, _history) = DeliveryStore::borrowed(&journal)
+            .rework_dispatch_source(
+                &context.delivery_id,
+                durable.receipt_identity().request_id(),
+            )
+            .map_err(|_| {
+                StorageError::invalid_input("unchanged rework dispatch source is unavailable")
+            })?;
+        context.unchanged_recovery = Some(
+            winwincode_delivery::domain::same_candidate::verify_unchanged_rework_recovery(
+                &current,
+                &source,
+                facts,
+                &sealed.authorization_digest,
+                &sealed.candidate_ref,
+            )
+            .map_err(|_| {
+                StorageError::invalid_input("unchanged rework source or terminal authority differs")
+            })?,
+        );
+    }
     let receipt = commit_terminal(
         storage,
         message,
@@ -232,6 +277,8 @@ struct TerminalContext {
     work_run_id: WorkRunId,
     product_session_id: ProductSessionId,
     job_event: DurableExecutionJobRef,
+    unchanged_recovery:
+        Option<winwincode_delivery::domain::same_candidate::VerifiedUnchangedReworkRecovery>,
 }
 
 impl TerminalContext {
@@ -271,6 +318,7 @@ impl TerminalContext {
             work_run_id: job_scope.work_run_id.clone(),
             product_session_id: job_scope.product_session_id.clone(),
             job_event,
+            unchanged_recovery: None,
         })
     }
 }
@@ -450,15 +498,14 @@ fn validate_message_shape(message: &JobOutcomeMessage) -> Result<(), StorageErro
             "successful job.outcome is missing immutable Usage",
         ));
     }
-    if let Some(usage) = &message.outcome.usage
-        && (!(0..=9_007_199_254_740_991).contains(&usage.tokens)
-            || !usage
-                .cost_microunits
-                .is_none_or(|cost| (0..=9_007_199_254_740_991).contains(&cost))
-            || !(0..=9_007_199_254_740_991).contains(&usage.runtime_millis))
+    if message
+        .outcome
+        .usage
+        .as_ref()
+        .is_some_and(|usage| !winwincode_execution_port::usage::valid_usage(usage))
     {
         return Err(StorageError::invalid_input(
-            "job.outcome Usage is outside the public integer range",
+            "job.outcome Usage is inconsistent",
         ));
     }
     if message
@@ -715,6 +762,7 @@ fn commit_terminal(
                 request_digest: phase.request_digest()?,
                 expected_revision: current.revision(),
                 facts: facts.clone(),
+                unchanged_recovery: context.unchanged_recovery.clone(),
             },
         )))
         .map_err(|error| StorageError::invalid_input(error.to_string()))?;

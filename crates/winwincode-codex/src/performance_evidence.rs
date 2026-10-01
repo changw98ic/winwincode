@@ -124,13 +124,46 @@ pub fn export_performance_v0_evidence(
     let transaction = connection
         .transaction()
         .map_err(|_| ProductionPerformanceEvidenceError::Unavailable)?;
-    let runs = read_retained_runs(&transaction)?;
+    let mut runs = read_retained_runs(&transaction)?;
     let raw_run_keys = runs
         .iter()
         .map(|run| (run.raw_run_key.clone(), run.evidence.run_id.clone()))
         .collect::<BTreeMap<_, _>>();
     let mut model_calls = read_primary_model_calls(&transaction, &raw_run_keys)?;
     model_calls.extend(read_observer_model_calls(&transaction, &raw_run_keys)?);
+    if operation_projection(&transaction)?.1 {
+        for run in &mut runs {
+            let settled: bool = transaction
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM performance_usage_settlement WHERE run_key=?1)",
+                    [&run.raw_run_key],
+                    |row| row.get(0),
+                )
+                .map_err(|_| ProductionPerformanceEvidenceError::Unavailable)?;
+            if settled {
+                let primary = model_calls.iter().filter(|call| {
+                    call.run_id == run.evidence.run_id
+                        && call.model_kind == PerformanceV0ModelKind::Primary
+                });
+                let mut input = Some(0);
+                let mut cached = Some(0);
+                let mut inclusive = 0;
+                let mut output = 0;
+                for call in primary {
+                    input = input.zip(call.input_tokens).map(|(a, b)| a + b);
+                    cached = cached.zip(call.cached_tokens).map(|(a, b)| a + b);
+                    inclusive += call.inclusive_input_tokens.unwrap_or_else(|| {
+                        call.input_tokens.unwrap_or(0) + call.cached_tokens.unwrap_or(0)
+                    });
+                    output += call.output_tokens;
+                }
+                run.evidence.primary_model_input_tokens = input;
+                run.evidence.primary_model_cached_tokens = cached;
+                run.evidence.primary_model_inclusive_input_tokens = Some(inclusive);
+                run.evidence.primary_model_output_tokens = output;
+            }
+        }
+    }
     let evidence = ProductionPerformanceV0Evidence {
         runs: runs.into_iter().map(|run| run.evidence).collect(),
         model_calls,
@@ -230,6 +263,7 @@ fn read_retained_runs(
                 execution_mode: report.execution_mode,
                 observer_mode: report.observer_mode,
                 primary_model_call_count: report.primary_model_call_count,
+                primary_model_inclusive_input_tokens: report.primary_model_inclusive_input_tokens,
                 primary_model_input_tokens: report.primary_model_input_tokens,
                 primary_model_cached_tokens: report.primary_model_cached_tokens,
                 primary_model_output_tokens: report.primary_model_output_tokens,
@@ -289,12 +323,39 @@ fn validate_stored_elapsed(
     Ok(())
 }
 
+fn operation_projection(
+    connection: &Connection,
+) -> Result<(&'static str, bool), ProductionPerformanceEvidenceError> {
+    let updated:bool=connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='performance_operation_accounted' AND type='view')",[],|row|row.get(0)).map_err(|_|ProductionPerformanceEvidenceError::Unavailable)?;
+    Ok((
+        if updated {
+            "performance_operation_accounted"
+        } else {
+            "performance_operation"
+        },
+        updated,
+    ))
+}
+
+#[allow(clippy::too_many_lines)]
 fn read_primary_model_calls(
     connection: &Connection,
     run_ids: &BTreeMap<String, Sha256Digest>,
 ) -> Result<Vec<PerformanceV0ModelCallEvidence>, ProductionPerformanceEvidenceError> {
+    let (table, updated) = operation_projection(connection)?;
+    let known = if updated {
+        "performance_operation.usage_known"
+    } else {
+        "performance_operation.completed"
+    };
+    let cache_flag_exists:bool=connection.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('performance_operation') WHERE name='cache_breakdown_known')",[],|row|row.get(0)).map_err(|_|ProductionPerformanceEvidenceError::Unavailable)?;
+    let cache_known = if cache_flag_exists {
+        "performance_operation.cache_breakdown_known"
+    } else {
+        "1"
+    };
     let mut statement = connection
-        .prepare(
+        .prepare(&format!(
             "SELECT model_call_ledger.run_key,
                     model_call_ledger.model_call_id,
                     model_call_ledger.provider_final,
@@ -304,14 +365,14 @@ fn read_primary_model_calls(
                     performance_operation.input_tokens,
                     performance_operation.cached_tokens,
                     performance_operation.output_tokens,
-                    performance_operation.actual_cost_microunits
+                    performance_operation.actual_cost_microunits, {known}, {cache_known}
              FROM model_call_ledger
-             LEFT JOIN performance_operation
+             LEFT JOIN {table} AS performance_operation
                ON performance_operation.run_key = model_call_ledger.run_key
               AND performance_operation.operation_kind = 'primary_model'
               AND performance_operation.operation_id = model_call_ledger.model_call_id
-             ORDER BY model_call_ledger.run_key, model_call_ledger.model_call_id",
-        )
+             ORDER BY model_call_ledger.run_key, model_call_ledger.model_call_id"
+        ))
         .map_err(|_| ProductionPerformanceEvidenceError::Unavailable)?;
     let rows = statement
         .query_map([], |row| {
@@ -326,6 +387,8 @@ fn read_primary_model_calls(
                 row.get::<_, Option<i64>>(7)?,
                 row.get::<_, Option<i64>>(8)?,
                 row.get::<_, Option<i64>>(9)?,
+                row.get::<_, Option<i64>>(10)?,
+                row.get::<_, Option<i64>>(11)?,
             ))
         })
         .map_err(|_| ProductionPerformanceEvidenceError::Unavailable)?;
@@ -342,6 +405,8 @@ fn read_primary_model_calls(
             cached_tokens,
             output_tokens,
             actual_cost_microunits,
+            usage_known,
+            cache_known,
         ) = row.map_err(|_| ProductionPerformanceEvidenceError::Unavailable)?;
         let Some(run_id) = run_ids.get(&run_key) else {
             continue;
@@ -356,6 +421,7 @@ fn read_primary_model_calls(
             return Err(ProductionPerformanceEvidenceError::Corrupt);
         }
         exported.push(PerformanceV0ModelCallEvidence {
+            usage_known: usage_known == Some(1),
             run_id: run_id.clone(),
             model_call_id: evidence_digest(
                 b"winwincode.performance-v0-model-call.v1",
@@ -363,8 +429,20 @@ fn read_primary_model_calls(
             ),
             model_kind: PerformanceV0ModelKind::Primary,
             completed: completed == 1,
-            input_tokens: input_tokens.ok_or(ProductionPerformanceEvidenceError::Corrupt)?,
-            cached_tokens: cached_tokens.ok_or(ProductionPerformanceEvidenceError::Corrupt)?,
+            input_tokens: if cache_known == Some(1) {
+                input_tokens
+            } else {
+                None
+            },
+            cached_tokens: if cache_known == Some(1) {
+                cached_tokens
+            } else {
+                None
+            },
+            inclusive_input_tokens: Some(
+                input_tokens.ok_or(ProductionPerformanceEvidenceError::Corrupt)?
+                    + cached_tokens.ok_or(ProductionPerformanceEvidenceError::Corrupt)?,
+            ),
             output_tokens: output_tokens.ok_or(ProductionPerformanceEvidenceError::Corrupt)?,
             elapsed_millis: elapsed_millis.ok_or(ProductionPerformanceEvidenceError::Corrupt)?,
             actual_cost_microunits,
@@ -377,15 +455,17 @@ fn read_observer_model_calls(
     connection: &Connection,
     run_ids: &BTreeMap<String, Sha256Digest>,
 ) -> Result<Vec<PerformanceV0ModelCallEvidence>, ProductionPerformanceEvidenceError> {
+    let (table, updated) = operation_projection(connection)?;
+    let known = if updated { "usage_known" } else { "completed" };
     let mut statement = connection
-        .prepare(
+        .prepare(&format!(
             "SELECT run_key, operation_id, completed, duration_millis,
                     input_tokens, cached_tokens, output_tokens,
-                    actual_cost_microunits
-             FROM performance_operation
+                    actual_cost_microunits, {known}
+             FROM {table}
              WHERE operation_kind = 'observer'
-             ORDER BY run_key, operation_id",
-        )
+             ORDER BY run_key, operation_id"
+        ))
         .map_err(|_| ProductionPerformanceEvidenceError::Unavailable)?;
     let rows = statement
         .query_map([], |row| {
@@ -398,6 +478,7 @@ fn read_observer_model_calls(
                 row.get::<_, i64>(5)?,
                 row.get::<_, i64>(6)?,
                 row.get::<_, Option<i64>>(7)?,
+                row.get::<_, i64>(8)?,
             ))
         })
         .map_err(|_| ProductionPerformanceEvidenceError::Unavailable)?;
@@ -412,6 +493,7 @@ fn read_observer_model_calls(
             cached_tokens,
             output_tokens,
             actual_cost_microunits,
+            usage_known,
         ) = row.map_err(|_| ProductionPerformanceEvidenceError::Unavailable)?;
         let Some(run_id) = run_ids.get(&run_key) else {
             continue;
@@ -420,6 +502,7 @@ fn read_observer_model_calls(
             return Err(ProductionPerformanceEvidenceError::Corrupt);
         }
         exported.push(PerformanceV0ModelCallEvidence {
+            usage_known: usage_known == 1,
             run_id: run_id.clone(),
             model_call_id: evidence_digest(
                 b"winwincode.performance-v0-observer-call.v1",
@@ -427,8 +510,9 @@ fn read_observer_model_calls(
             ),
             model_kind: PerformanceV0ModelKind::Observer,
             completed: completed == 1,
-            input_tokens,
-            cached_tokens,
+            input_tokens: Some(input_tokens),
+            cached_tokens: Some(cached_tokens),
+            inclusive_input_tokens: Some(input_tokens + cached_tokens),
             output_tokens,
             elapsed_millis,
             actual_cost_microunits,
@@ -472,6 +556,7 @@ mod tests {
     fn report(mode: ExecutionMode) -> PerformanceBaselineReport {
         let has_observer = mode == ExecutionMode::DelegatedPatch;
         PerformanceBaselineReport {
+            usage_complete: true,
             execution_mode: mode,
             observer_mode: if has_observer {
                 ObserverMode::Always
@@ -479,8 +564,9 @@ mod tests {
                 ObserverMode::Off
             },
             primary_model_call_count: 1,
-            primary_model_input_tokens: 20,
-            primary_model_cached_tokens: 5,
+            primary_model_inclusive_input_tokens: Some(25),
+            primary_model_input_tokens: Some(20),
+            primary_model_cached_tokens: Some(5),
             primary_model_output_tokens: 10,
             primary_model_wait_ms: 400,
             tool_call_count: 0,

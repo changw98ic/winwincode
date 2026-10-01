@@ -1166,7 +1166,11 @@ export async function establishDeviceOnlyExecutionPath({
           timeoutMillis: 30_000,
           body,
         })
-        assert.equal(launched.status, 201, `Worker launch failed: ${launched.text}`)
+        if (launched.status !== 201) {
+          throw Object.assign(new Error(`Worker launch failed: ${launched.text}`), {
+            code: 'DEVICE_LAUNCH_FAILED',
+          })
+        }
         steps.push(productSessionId === null
           ? 'launch-anchor'
           : `launch-anchor:${productSessionId}`)

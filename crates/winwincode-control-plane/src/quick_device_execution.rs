@@ -47,7 +47,6 @@ use winwincode_storage::{
 
 use crate::client_launch_grant::{
     LaunchGrantState, WorkerLaunchGrantRecord, WorkerLaunchGrantService,
-    WorkerLaunchGrantServiceErrorKind,
 };
 use crate::device_execution_binding::DeviceExecutionBindingService;
 use crate::product_session_service::chat_turn_execution_job_id;
@@ -165,30 +164,57 @@ pub fn dispatch_turn_to_device_worker(
     now: &Instant,
 ) -> Result<Option<QuickDeviceDispatch>, QuickDeviceDispatchError> {
     let execution_job_id = chat_turn_execution_job_id(turn_request_id, product_session_id);
-    let anchor = {
-        let mut grants = WorkerLaunchGrantService::new(storage);
-        match grants.newest_grant_for_product_session(&product_session_id.0) {
-            Ok(anchor) => anchor,
-            Err(error) => {
-                return Err(match error.kind() {
-                    WorkerLaunchGrantServiceErrorKind::InvalidInput => {
-                        QuickDeviceDispatchError::invalid_input(
-                            "the ProductSession identity is not canonical for a launch anchor",
-                        )
-                    }
-                    WorkerLaunchGrantServiceErrorKind::CorruptState => {
-                        QuickDeviceDispatchError::corrupt("the launch anchor ledger is corrupt")
-                    }
-                    _ => QuickDeviceDispatchError::storage(),
-                });
-            }
-        }
+    let existing = DeviceExecutionBindingService::new(storage)
+        .facts(&execution_job_id.0)
+        .map_err(|_| QuickDeviceDispatchError::storage())?;
+    let anchor = if let Some(facts) = existing {
+        let ledger = storage
+            .worker_launch_grant_ledger()
+            .map_err(|_| QuickDeviceDispatchError::storage())?;
+        ledger
+            .recovery_launch_for_grant(&facts.worker_launch_grant_id)
+            .map_err(|_| QuickDeviceDispatchError::storage())?
+            .or(ledger
+                .snapshot(&facts.worker_launch_grant_id)
+                .map_err(|_| QuickDeviceDispatchError::storage())?)
+    } else {
+        WorkerLaunchGrantService::new(storage)
+            .newest_grant_for_product_session(&product_session_id.0)
+            .map_err(|_| QuickDeviceDispatchError::storage())?
     };
     let Some(anchor) = anchor else {
         // No device anchor: the session is not a device session and keeps
         // the supervised local execution path unchanged.
         return Ok(None);
     };
+    dispatch_chat_job_to_device_worker(storage, &execution_job_id, &anchor, now).map(Some)
+}
+
+/// Resumes the original Chat job through its sealed Device launch lineage.
+/// No new turn, job or admission reservation is created for an existing route.
+/// # Errors
+/// Rejects cross-session, role, cancellation and unsealed replacement authority.
+pub fn dispatch_chat_job_to_device_worker(
+    storage: &mut SqliteStorage,
+    execution_job_id: &ExecutionJobId,
+    anchor: &WorkerLaunchGrantRecord,
+    now: &Instant,
+) -> Result<QuickDeviceDispatch, QuickDeviceDispatchError> {
+    let record = storage
+        .load_execution_job_record(execution_job_id)
+        .map_err(|_| QuickDeviceDispatchError::storage())?
+        .ok_or_else(|| {
+            QuickDeviceDispatchError::invalid_input("the Chat execution job does not exist")
+        })?;
+    if record.work_run_id.is_some()
+        || record.cancellation.is_some()
+        || anchor.work_run_id.is_some()
+        || anchor.product_session_id.as_deref() != Some(&record.scope.product_session_id.0)
+    {
+        return Err(QuickDeviceDispatchError::invalid_input(
+            "the Chat execution scope differs from its launch",
+        ));
+    }
     if !matches!(
         anchor.state,
         LaunchGrantState::Issued | LaunchGrantState::Consumed
@@ -215,7 +241,7 @@ pub fn dispatch_turn_to_device_worker(
             }
             existing
         } else {
-            let command = bind_command(&anchor)?;
+            let command = bind_command(anchor)?;
             bindings
                 .bind(&command, now)
                 .map_err(|_| QuickDeviceDispatchError::storage())?
@@ -232,22 +258,37 @@ pub fn dispatch_turn_to_device_worker(
             .map_err(|_| QuickDeviceDispatchError::storage())?
         {
             if existing.worker_launch_grant_id == anchor.worker_launch_grant_id {
-                return Ok(Some(QuickDeviceDispatch {
+                if existing.role.is_some() || existing.work_run_id.is_some() {
+                    return Err(QuickDeviceDispatchError::invalid_input(
+                        "the Chat route carries a WorkRun role",
+                    ));
+                }
+                return Ok(QuickDeviceDispatch {
                     binding,
                     facts: existing,
-                }));
+                });
             }
-            return Err(QuickDeviceDispatchError::new(
-                QuickDeviceDispatchErrorKind::DispatchConflict,
-                "the turn is already dispatched to another device launch",
-            ));
+            let facts = winwincode_storage::stage_device_execution_recovery(
+                storage,
+                execution_job_id,
+                &anchor.worker_launch_grant_id,
+                None,
+                now,
+            )
+            .map_err(|_| {
+                QuickDeviceDispatchError::new(
+                    QuickDeviceDispatchErrorKind::DispatchConflict,
+                    "the Chat replacement has no sealed Device recovery authority",
+                )
+            })?;
+            return Ok(QuickDeviceDispatch { binding, facts });
         }
     }
 
     // The dispatch reservation runs under the anchor holder's admission
     // identity, so the durable device facts join the reservation user to the
     // grant holder exactly.
-    ensure_device_admission_reservation(storage, &execution_job_id, &anchor)?;
+    ensure_device_admission_reservation(storage, execution_job_id, anchor)?;
 
     let facts = {
         let mut bindings = DeviceExecutionBindingService::new(storage);
@@ -262,7 +303,7 @@ pub fn dispatch_turn_to_device_worker(
             .map_err(|_| QuickDeviceDispatchError::storage())?
             .facts
     };
-    Ok(Some(QuickDeviceDispatch { binding, facts }))
+    Ok(QuickDeviceDispatch { binding, facts })
 }
 
 /// Echoes every anchor grant field into the validated bind command with

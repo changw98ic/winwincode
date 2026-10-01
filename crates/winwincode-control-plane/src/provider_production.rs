@@ -849,6 +849,10 @@ impl ProviderAdapterPort for DeterministicLoopbackProviderAdapter {
 
 /// Configuration for the one standalone model runtime.
 #[derive(Clone)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Startup-only Provider definitions keep an owned configuration interface"
+)]
 pub enum StandaloneProviderConfig {
     /// Deterministic provider used by offline production and release gates.
     Loopback { provider_id: String },
@@ -1102,7 +1106,7 @@ impl StandaloneModelExecutionApplication {
             .unwrap_or(LoopbackResponseProfile::PlainText);
         let usage = ProviderTokenUsage {
             input_tokens: 10,
-            cached_input_tokens: 0,
+            cached_input_tokens: Some(0),
             cache_write_input_tokens: 0,
             output_tokens: 5,
             reasoning_output_tokens: 0,
@@ -1172,7 +1176,7 @@ impl StandaloneModelExecutionApplication {
                     &frames,
                     Some(ProviderGatewayTerminal::Completed {
                         usage,
-                        actual_cost_micros: 10,
+                        actual_cost_micros: Some(10),
                     }),
                     sent_at,
                 )
@@ -1407,7 +1411,10 @@ fn external_failure(
     let failure = ProviderStreamFailure::new(match error.kind() {
         HttpsSseProviderErrorKind::RateLimited => ProviderStreamFailureKind::RateLimit,
         HttpsSseProviderErrorKind::Rejected => ProviderStreamFailureKind::InvalidRequest,
-        HttpsSseProviderErrorKind::Protocol
+        HttpsSseProviderErrorKind::SseFraming
+        | HttpsSseProviderErrorKind::SseEvent
+        | HttpsSseProviderErrorKind::IncompleteStream
+        | HttpsSseProviderErrorKind::StreamConversion
         | HttpsSseProviderErrorKind::SizeLimit
         | HttpsSseProviderErrorKind::CredentialLeak => ProviderStreamFailureKind::Unknown,
         HttpsSseProviderErrorKind::InvalidConfiguration

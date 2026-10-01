@@ -375,7 +375,8 @@ pub use publication_production::{
 };
 pub use quick_device_execution::{
     QUICK_DEVICE_WORKER_POOL_ID, QuickDeviceDispatch, QuickDeviceDispatchError,
-    QuickDeviceDispatchErrorKind, dispatch_turn_to_device_worker,
+    QuickDeviceDispatchErrorKind, dispatch_chat_job_to_device_worker,
+    dispatch_turn_to_device_worker,
 };
 pub use remote_worker_pool::{
     RemoteWorkerAuthenticationError, RemoteWorkerAuthenticationErrorKind,
@@ -2908,3 +2909,6 @@ fn cleanup_suffix(failures: &[String]) -> String {
         format!("; cleanup also failed: {}", failures.join("; "))
     }
 }
+
+mod private_launch_material;
+pub use private_launch_material::PrivateLaunchMaterialStore;

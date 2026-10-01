@@ -32,6 +32,7 @@ mod performance;
 pub mod performance_evidence;
 pub mod stage_product;
 mod store;
+mod structured_result;
 mod tool_repeat;
 pub mod workrun_runtime_projection;
 

@@ -52,24 +52,13 @@ test('public smoke rejects host controls and unsafe source paths before executio
   const result = spawnSync('python3', ['-I', '-c', `
 import runpy, sys
 m = runpy.run_path(sys.argv[1])
-validate = m['validate_files']
-config = {'suffixes': ['.py'], 'entry': 'main.py'}
-good = {'files': {'main.py': 'print(1)', 'lib/helper.py': ''}}
-assert validate(good, config) == good['files']
-bad = [None, {}, {'files': {}}, {'files': {'main.py': 1}},
-       dict(good, command='id'), dict(good, taskId='another-task'),
-       {'files': {'main.py': 'x' * (m['MAX_SOURCE'] + 1)}},
-       {'files': {'helper.py': ''}}]
-for name in ['/tmp/main.py', '../main.py', 'a/../main.py', 'a//main.py',
-             './main.py', '.git/main.py', 'a\\\\main.py', 'main.sh', 'a\\0.py']:
-    bad.append({'files': {'main.py': '', name: ''}})
-for arguments in bad:
-    try:
-        validate(arguments, config)
-    except (ValueError, UnicodeError):
-        pass
-    else:
-        raise AssertionError(repr(arguments)[:100])
+validate = m['validate_checkout_arguments']
+validate({})
+good = {}
+for arguments in [None, {'files': {'main.py': 'print(1)'}}, {'sourceDirectory':'/tmp'}, {'command':'id'}]:
+    try: validate(arguments)
+    except ValueError: pass
+    else: raise AssertionError('model supplied host controls accepted')
 dispatch = m['dispatch']
 class Service:
     def call(self, arguments):

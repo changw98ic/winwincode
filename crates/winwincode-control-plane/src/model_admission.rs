@@ -79,7 +79,7 @@ pub struct ModelAdmissionLimits {
     /// Settled plus reserved tokens in the named budget period.
     pub token_budget: u64,
     /// Settled plus reserved cost, in micros, in the named budget period.
-    pub cost_budget_micros: u64,
+    pub cost_budget_micros: Option<u64>,
 }
 
 impl ModelAdmissionLimits {
@@ -92,10 +92,12 @@ impl ModelAdmissionLimits {
                 self.tokens_per_minute,
                 self.concurrent_requests,
                 self.token_budget,
-                self.cost_budget_micros,
             ]
             .into_iter()
             .any(|value| value > MAX_SAFE_INTEGER)
+            || self
+                .cost_budget_micros
+                .is_some_and(|value| value > MAX_SAFE_INTEGER)
         {
             return Err(ModelAdmissionError::invalid());
         }
@@ -550,7 +552,7 @@ pub struct ModelReservationCompletion {
     /// Provider-normalized token usage.
     pub usage: ProviderTokenUsage,
     /// Provider-normalized cost in micros; organization billing consumes this fact later.
-    pub actual_cost_micros: u64,
+    pub actual_cost_micros: Option<u64>,
 }
 
 /// Stable reason for a durable admission denial.
@@ -626,7 +628,7 @@ pub struct ModelReservationTerminalReceipt {
     /// Actual settled token count; zero for a release.
     pub actual_tokens: u64,
     /// Actual settled cost in micros; zero for a release.
-    pub actual_cost_micros: u64,
+    pub actual_cost_micros: Option<u64>,
     /// Durable ledger revision.
     pub revision: u64,
     /// Whether this value came from the original durable receipt.
@@ -650,6 +652,8 @@ pub struct ModelAdmissionSnapshot {
     pub budget_settled_tokens: u64,
     /// Actual cost settled in the requested budget period.
     pub budget_settled_cost_micros: u64,
+    /// Completed calls whose actual cost is not yet known.
+    pub pending_cost_settlements: u64,
     /// Current durable ledger revision.
     pub revision: u64,
 }
@@ -779,6 +783,8 @@ struct BudgetLedger {
     reserved_cost_micros: u64,
     settled_tokens: u64,
     settled_cost_micros: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pending_cost_settlements: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -797,6 +803,8 @@ struct ActiveReservation {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct TerminalReservation {
     outcome: ModelReservationTerminalOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_cost: Option<ActiveReservation>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -910,11 +918,11 @@ struct CompletionDigest<'a> {
     request_id: &'a RequestId,
     model_exchange_id: &'a ModelExchangeId,
     input_tokens: u64,
-    cached_input_tokens: u64,
+    cached_input_tokens: Option<u64>,
     cache_write_input_tokens: u64,
     output_tokens: u64,
     reasoning_output_tokens: u64,
-    actual_cost_micros: u64,
+    actual_cost_micros: Option<u64>,
 }
 
 struct CommandReceipt {
@@ -1064,7 +1072,7 @@ impl<'a> ModelAdmissionService<'a> {
                     }
                 };
                 release_capacity(state, active)?;
-                Ok((outcome, 0, 0))
+                Ok((outcome, 0, Some(0)))
             },
         )
     }
@@ -1122,7 +1130,10 @@ impl<'a> ModelAdmissionService<'a> {
         validate_request_id(&request.request_id)?;
         validate_model_exchange_id(&request.model_exchange_id)?;
         let actual_tokens = total_tokens(request.usage)?;
-        if request.actual_cost_micros > MAX_SAFE_INTEGER {
+        if request
+            .actual_cost_micros
+            .is_some_and(|cost| cost > MAX_SAFE_INTEGER)
+        {
             return Err(ModelAdmissionError::invalid());
         }
         let command = completion_command(authority, request)?;
@@ -1178,6 +1189,7 @@ impl<'a> ModelAdmissionService<'a> {
             budget_reserved_cost_micros: budget.reserved_cost_micros,
             budget_settled_tokens: budget.settled_tokens,
             budget_settled_cost_micros: budget.settled_cost_micros,
+            pending_cost_settlements: budget.pending_cost_settlements,
             revision: state.revision,
         })
     }
@@ -1193,7 +1205,8 @@ impl<'a> ModelAdmissionService<'a> {
         F: Fn(
             &mut ModelAdmissionState,
             &ActiveReservation,
-        ) -> Result<(ModelReservationTerminalOutcome, u64, u64), ModelAdmissionError>,
+        )
+            -> Result<(ModelReservationTerminalOutcome, u64, Option<u64>), ModelAdmissionError>,
     {
         for _attempt in 0..MAX_COMMIT_RETRIES {
             if let Some(receipt) = self
@@ -1230,9 +1243,13 @@ impl<'a> ModelAdmissionService<'a> {
             }
             state.active.remove(&model_exchange_id.0);
             let (outcome, actual_tokens, actual_cost_micros) = apply(&mut state, &active)?;
-            state
-                .terminal
-                .insert(model_exchange_id.0.clone(), TerminalReservation { outcome });
+            state.terminal.insert(
+                model_exchange_id.0.clone(),
+                TerminalReservation {
+                    outcome,
+                    pending_cost: actual_cost_micros.is_none().then_some(active),
+                },
+            );
             let revision = next_revision(expected_revision)?;
             state.revision = revision;
             let result = ModelReservationTerminalReceipt {
@@ -1342,7 +1359,11 @@ fn admission_denial(
         checked_add(budget.reserved_cost_micros, budget.settled_cost_micros)?,
         request.estimated_cost_micros,
     )?;
-    if total_cost > policy.limits.cost_budget_micros {
+    if policy
+        .limits
+        .cost_budget_micros
+        .is_some_and(|limit| budget.pending_cost_settlements > 0 || total_cost > limit)
+    {
         return Ok(Some(ModelAdmissionDenialReason::CostBudget));
     }
     Ok(None)
@@ -1426,7 +1447,7 @@ fn settle_capacity(
     state: &mut ModelAdmissionState,
     active: &ActiveReservation,
     actual_tokens: u64,
-    actual_cost_micros: u64,
+    actual_cost_micros: Option<u64>,
 ) -> Result<(), ModelAdmissionError> {
     if state
         .minute
@@ -1445,15 +1466,21 @@ fn settle_capacity(
         .get_mut(&active.budget_period_id)
         .ok_or_else(ModelAdmissionError::corrupt)?;
     budget.reserved_tokens = checked_sub(budget.reserved_tokens, active.estimated_tokens)?;
-    budget.reserved_cost_micros =
-        checked_sub(budget.reserved_cost_micros, active.estimated_cost_micros)?;
     budget.settled_tokens = checked_add(budget.settled_tokens, actual_tokens)?;
-    budget.settled_cost_micros = checked_add(budget.settled_cost_micros, actual_cost_micros)?;
+    if let Some(cost) = actual_cost_micros {
+        budget.reserved_cost_micros =
+            checked_sub(budget.reserved_cost_micros, active.estimated_cost_micros)?;
+        budget.settled_cost_micros = checked_add(budget.settled_cost_micros, cost)?;
+    } else {
+        budget.pending_cost_settlements = checked_add(budget.pending_cost_settlements, 1)?;
+    }
     Ok(())
 }
 
 fn total_tokens(usage: ProviderTokenUsage) -> Result<u64, ModelAdmissionError> {
-    if usage.cached_input_tokens > usage.input_tokens
+    if usage
+        .cached_input_tokens
+        .is_some_and(|cached| cached > usage.input_tokens)
         || usage.reasoning_output_tokens > usage.output_tokens
         || usage.cache_write_input_tokens > usage.input_tokens
     {
@@ -1531,17 +1558,41 @@ fn validate_state_ledgers(state: &ModelAdmissionState) -> Result<(), ModelAdmiss
             Ok::<_, ModelAdmissionError>(totals)
         },
     )?;
+    let mut pending_by_period = BTreeMap::<&str, (u64, u64)>::new();
+    for reservation in state
+        .terminal
+        .values()
+        .filter_map(|terminal| terminal.pending_cost.as_ref())
+    {
+        if reservation.estimated_cost_micros > MAX_SAFE_INTEGER
+            || !state.budgets.contains_key(&reservation.budget_period_id)
+        {
+            return Err(ModelAdmissionError::corrupt());
+        }
+        let entry = pending_by_period
+            .entry(&reservation.budget_period_id)
+            .or_default();
+        entry.0 = checked_add(entry.0, reservation.estimated_cost_micros)?;
+        entry.1 = checked_add(entry.1, 1)?;
+    }
     for (period, ledger) in &state.budgets {
         let expected = reserved_by_period
             .get(period.as_str())
             .copied()
             .unwrap_or((0, 0));
-        if (ledger.reserved_tokens, ledger.reserved_cost_micros) != expected
+        let pending = pending_by_period
+            .get(period.as_str())
+            .copied()
+            .unwrap_or_default();
+        if (ledger.reserved_tokens, ledger.reserved_cost_micros)
+            != (expected.0, checked_add(expected.1, pending.0)?)
+            || ledger.pending_cost_settlements != pending.1
             || [
                 ledger.reserved_tokens,
                 ledger.reserved_cost_micros,
                 ledger.settled_tokens,
                 ledger.settled_cost_micros,
+                ledger.pending_cost_settlements,
             ]
             .into_iter()
             .any(|value| value > MAX_SAFE_INTEGER)
@@ -1849,4 +1900,10 @@ fn validate_token(value: &str, max_len: usize) -> Result<(), ModelAdmissionError
         return Err(ModelAdmissionError::invalid());
     }
     Ok(())
+}
+
+// Serde skip predicates borrow their field.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }

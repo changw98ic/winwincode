@@ -3,6 +3,20 @@
 //! Model exchanges execute on the Device, with local replay records before network effects.
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use std::sync::{Mutex, OnceLock};
+type ActiveDeviceExchange = std::sync::Arc<crate::provider_transport::ExchangeCancellation>;
+static ACTIVE_EXCHANGES: OnceLock<
+    Mutex<std::collections::BTreeMap<(String, String), ActiveDeviceExchange>>,
+> = OnceLock::new();
+struct ExchangeRegistration((String, String));
+impl Drop for ExchangeRegistration {
+    fn drop(&mut self) {
+        if let Ok(mut active) = ACTIVE_EXCHANGES.get_or_init(Mutex::default).lock() {
+            active.remove(&self.0);
+        }
+    }
+}
+
 use rusqlite::{OptionalExtension, params};
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::ModelRoute;
@@ -17,6 +31,34 @@ use crate::{
     ProviderAdapterPort, ProviderGatewayOpenReceipt, ProviderStreamControlAction,
 };
 
+enum DeviceModelFailure {
+    RequestInvalid,
+    InvalidConfiguration,
+    Unavailable,
+}
+
+impl DeviceModelFailure {
+    const fn code(&self) -> &'static str {
+        match self {
+            Self::RequestInvalid => "DEVICE_PROVIDER_REQUEST_INVALID",
+            Self::InvalidConfiguration => "DEVICE_PROVIDER_INVALID_CONFIGURATION",
+            Self::Unavailable => "DEVICE_PROVIDER_UNAVAILABLE",
+        }
+    }
+}
+
+impl From<DeviceProviderError> for DeviceModelFailure {
+    fn from(_: DeviceProviderError) -> Self {
+        Self::Unavailable
+    }
+}
+
+impl From<serde_json::Error> for DeviceModelFailure {
+    fn from(_: serde_json::Error) -> Self {
+        Self::RequestInvalid
+    }
+}
+
 impl DeviceProviderStore {
     /// Executes a model request using this Device's configuration and secret.
     /// A recovered unfinished request fails explicitly: it is never charged a second time.
@@ -30,6 +72,17 @@ impl DeviceProviderStore {
         if self.model_cancelled(&open.model_exchange_id.0)? {
             return Ok(Vec::new());
         }
+        let key = (
+            self.connection
+                .path()
+                .ok_or(DeviceProviderError)?
+                .to_owned(),
+            open.model_exchange_id.0.clone(),
+        );
+        let mut active = ACTIVE_EXCHANGES
+            .get_or_init(Mutex::default)
+            .lock()
+            .map_err(|_| DeviceProviderError)?;
         let request_open = serde_json::to_string(open)?;
         let digest = format!("{:x}", Sha256::digest(request_open.as_bytes()));
         let inserted = self.connection.execute(
@@ -47,19 +100,28 @@ impl DeviceProviderStore {
         if let Some(chunks) = previous {
             return Ok(serde_json::from_str(&chunks)?);
         }
-        let chunks = if inserted == 0 {
-            vec![model_failure(
-                open,
-                "DEVICE_MODEL_INTERRUPTED: previous request outcome is unknown",
-            )]
-        } else {
-            self.invoke_model(open).unwrap_or_else(|_| {
-                vec![model_failure(
-                    open,
-                    "DEVICE_PROVIDER_UNAVAILABLE: check this device's Provider settings",
-                )]
-            })
-        };
+        if inserted == 0 {
+            if active.contains_key(&key) {
+                // A concurrent replay must never overwrite the active call or
+                // detach its cancellation authority.
+                return Err(DeviceProviderError);
+            }
+            let chunks = vec![model_failure(open, "DEVICE_MODEL_INTERRUPTED")];
+            self.connection.execute("UPDATE exchanges SET chunks=?1 WHERE exchange_id=?2 AND chunks IS NULL AND cancelled=0",params![serde_json::to_string(&chunks)?,open.model_exchange_id.0])?;
+            return Ok(chunks);
+        }
+        let cancellation =
+            std::sync::Arc::new(crate::provider_transport::ExchangeCancellation::default());
+        active.insert(key.clone(), std::sync::Arc::clone(&cancellation));
+        drop(active);
+        let _registration = ExchangeRegistration(key);
+        if self.model_cancelled(&open.model_exchange_id.0)? {
+            cancellation.cancel();
+            return Ok(Vec::new());
+        }
+        let chunks = self
+            .invoke_model(open)
+            .unwrap_or_else(|error| vec![model_failure(open, error.code())]);
         self.connection.execute(
             "UPDATE exchanges SET chunks=?1 WHERE exchange_id=?2 AND cancelled=0",
             params![serde_json::to_string(&chunks)?, open.model_exchange_id.0],
@@ -67,25 +129,27 @@ impl DeviceProviderStore {
         Ok(chunks)
     }
 
+    #[allow(clippy::too_many_lines)]
     fn invoke_model(
         &self,
         open: &ModelOpenMessage,
-    ) -> Result<Vec<ModelChunkMessage>, DeviceProviderError> {
-        let mut payload = validated_model_payload(open)?;
+    ) -> Result<Vec<ModelChunkMessage>, DeviceModelFailure> {
+        let mut payload =
+            validated_model_payload(open).map_err(|_| DeviceModelFailure::RequestInvalid)?;
         let mut request: serde_json::Value = serde_json::from_slice(&payload)?;
         let provider_id = request
             .get("provider")
             .and_then(serde_json::Value::as_str)
-            .ok_or(DeviceProviderError)?
+            .ok_or(DeviceModelFailure::RequestInvalid)?
             .to_owned();
         let model_id = request
             .pointer("/request/model")
             .and_then(serde_json::Value::as_str)
-            .ok_or(DeviceProviderError)?
+            .ok_or(DeviceModelFailure::RequestInvalid)?
             .to_owned();
         let (config, secret) = self.resolve(&provider_id)?;
         if !config.enabled || !config.model_ids.iter().any(|model| model == &model_id) {
-            return Err(DeviceProviderError);
+            return Err(DeviceModelFailure::Unavailable);
         }
         if request.get("winwincodeJevContext").is_some()
             || request.get("winwincodeJevTask").is_some()
@@ -98,15 +162,25 @@ impl DeviceProviderStore {
                 .block_on(self.prepare_jev_model_request(open, &mut request))
                 .is_err()
             {
-                return Ok(vec![model_failure(
-                    open,
-                    "DEVICE_JEV_UNAVAILABLE: request preparation failed",
-                )]);
+                return Ok(vec![model_failure(open, "DEVICE_JEV_UNAVAILABLE")]);
             }
             payload = serde_json::to_vec(&request)?;
         }
-        let adapter = crate::device_store::adapter(&config, self.custom_headers(&provider_id)?)?;
+        let adapter = crate::device_store::adapter(&config, self.custom_headers(&provider_id)?)
+            .map_err(|_| DeviceModelFailure::InvalidConfiguration)?;
         let adapter_request_id = format!("device-{}", open.model_exchange_id.0);
+        let adapter = match self.active_cancellation(&open.model_exchange_id.0)? {
+            Some(cancellation) => adapter.with_cancellation(cancellation),
+            None => return Err(DeviceModelFailure::Unavailable),
+        };
+        if self.model_cancelled(&open.model_exchange_id.0)? {
+            let _ = adapter.control(
+                &open.model_exchange_id,
+                &adapter_request_id,
+                ProviderStreamControlAction::Cancel,
+            );
+            return Ok(Vec::new());
+        }
         let mut leak_gate = CredentialLeakGate::new();
         leak_gate.track_secret(&secret);
         self.retain_prepared_payload(open, &payload)?;
@@ -196,7 +270,57 @@ impl DeviceProviderStore {
     /// Returns a bounded storage failure.
     pub fn cancel_model(&self, exchange_id: &str) -> Result<(), DeviceProviderError> {
         self.connection.execute("INSERT INTO exchanges (exchange_id, digest, cancelled) VALUES (?1, '', 1) ON CONFLICT(exchange_id) DO UPDATE SET cancelled=1", [exchange_id])?;
+        let key = (
+            self.connection
+                .path()
+                .ok_or(DeviceProviderError)?
+                .to_owned(),
+            exchange_id.to_owned(),
+        );
+        let active = ACTIVE_EXCHANGES
+            .get_or_init(Mutex::default)
+            .lock()
+            .map_err(|_| DeviceProviderError)?
+            .get(&key)
+            .cloned();
+        if let Some(cancellation) = active {
+            cancellation.cancel();
+        }
         Ok(())
+    }
+
+    pub(crate) fn active_cancellation(
+        &self,
+        exchange_id: &str,
+    ) -> Result<Option<ActiveDeviceExchange>, DeviceProviderError> {
+        let key = (
+            self.connection
+                .path()
+                .ok_or(DeviceProviderError)?
+                .to_owned(),
+            exchange_id.to_owned(),
+        );
+        Ok(ACTIVE_EXCHANGES
+            .get_or_init(Mutex::default)
+            .lock()
+            .map_err(|_| DeviceProviderError)?
+            .get(&key)
+            .cloned())
+    }
+    pub(crate) fn jev_cancellation(
+        &self,
+        operation_id: &str,
+    ) -> Result<Option<ActiveDeviceExchange>, DeviceProviderError> {
+        let Some(rest) = operation_id
+            .strip_prefix("jev:")
+            .or_else(|| operation_id.strip_prefix("judge:"))
+        else {
+            return Ok(None);
+        };
+        let Some((exchange, _)) = rest.rsplit_once(':') else {
+            return Ok(None);
+        };
+        self.active_cancellation(exchange)
     }
 
     /// Checks the durable cancellation fence.
@@ -305,10 +429,17 @@ pub(crate) fn validated_model_payload(
 fn adapter_error_message(kind: crate::ProviderAdapterErrorKind) -> &'static str {
     use crate::ProviderAdapterErrorKind as Kind;
     match kind {
+        Kind::RequestInvalid => "DEVICE_PROVIDER_REQUEST_INVALID",
+        Kind::RequestTranslation => "DEVICE_PROVIDER_REQUEST_TRANSLATION_FAILED",
+        Kind::RequestSizeLimit => "DEVICE_PROVIDER_REQUEST_TOO_LARGE",
+        Kind::ResponseContentType => "DEVICE_PROVIDER_RESPONSE_CONTENT_TYPE_INVALID",
+        Kind::Connection => "DEVICE_PROVIDER_CONNECTION_FAILED",
+        Kind::Upstream => "DEVICE_PROVIDER_UPSTREAM_FAILED",
+        Kind::IdentityConflict => "DEVICE_MODEL_IDENTITY_CONFLICT",
         Kind::Rejected => "DEVICE_PROVIDER_REQUEST_REJECTED",
         Kind::RateLimited => "DEVICE_PROVIDER_RATE_LIMITED",
-        Kind::Unavailable => "DEVICE_PROVIDER_CONNECTION_FAILED",
-        Kind::Protocol => "DEVICE_PROVIDER_PROTOCOL_FAILED",
+        Kind::Unavailable => "DEVICE_PROVIDER_UNAVAILABLE",
+        Kind::Protocol => "DEVICE_PROVIDER_ADAPTER_PROTOCOL_FAILED",
     }
 }
 
@@ -321,7 +452,10 @@ fn provider_error_message(kind: crate::HttpsSseProviderErrorKind) -> &'static st
         Kind::Rejected => "DEVICE_PROVIDER_REQUEST_REJECTED",
         Kind::Unavailable => "DEVICE_PROVIDER_UNAVAILABLE",
         Kind::Transport => "DEVICE_PROVIDER_TRANSPORT_FAILED",
-        Kind::Protocol => "DEVICE_PROVIDER_PROTOCOL_FAILED",
+        Kind::SseFraming => "DEVICE_PROVIDER_SSE_FRAMING_INVALID",
+        Kind::SseEvent => "DEVICE_PROVIDER_SSE_EVENT_INVALID",
+        Kind::IncompleteStream => "DEVICE_PROVIDER_RESPONSE_INCOMPLETE",
+        Kind::StreamConversion => "DEVICE_PROVIDER_STREAM_CONVERSION_FAILED",
         Kind::SizeLimit => "DEVICE_PROVIDER_RESPONSE_TOO_LARGE",
         Kind::Paused => "DEVICE_MODEL_PAUSED",
         Kind::CredentialLeak => "DEVICE_PROVIDER_CREDENTIAL_LEAK_BLOCKED",
@@ -332,7 +466,8 @@ fn provider_error_message(kind: crate::HttpsSseProviderErrorKind) -> &'static st
 pub fn model_failure(open: &ModelOpenMessage, message: &'static str) -> ModelChunkMessage {
     let mut chunk = model_chunk(open, 1);
     chunk.error = Some(ExecutionPortError {
-        code: ExecutionPortErrorCode::ModelStreamFailed,
+        code: serde_json::from_value(serde_json::Value::String(message.to_owned()))
+            .unwrap_or(ExecutionPortErrorCode::ModelStreamFailed),
         message: message.to_owned(),
         retryable: false,
     });
@@ -438,6 +573,96 @@ pub fn public_model_chunk(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_local_model_requests_retain_a_request_failure_before_provider_resolution() {
+        let directory =
+            std::env::temp_dir().join(format!("wwc-invalid-model-request-{}", std::process::id()));
+        let store = DeviceProviderStore::open(&directory).unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/contracts/execution-port.valid.json"
+        ))
+        .unwrap();
+        let original: ModelOpenMessage = serde_json::from_value(
+            fixture["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|message| message["kind"] == "model.open")
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        for ordinal in 1..=2 {
+            let mut open = original.clone();
+            open.model_exchange_id.0 = format!("mdl_{ordinal:026}");
+            if ordinal == 1 {
+                open.request.content_type = "text/plain".into();
+            } else {
+                open.request.content_type = "application/json".into();
+                open.request.data_base64 = STANDARD.encode(b"{}");
+                open.request.payload_digest.0 = format!("sha256:{:x}", Sha256::digest(b"{}"));
+            }
+            let chunks = store.execute_model(&open).unwrap();
+            assert_eq!(chunks.len(), 1);
+            assert_eq!(
+                chunks[0].error.as_ref().unwrap().code,
+                ExecutionPortErrorCode::DeviceProviderRequestInvalid
+            );
+            assert_eq!(
+                store.execute_model(&open).unwrap(),
+                chunks,
+                "stored failures must replay without a Provider call"
+            );
+        }
+        drop(store);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn model_failure_codes_preserve_the_provider_failure_boundary() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/contracts/execution-port.valid.json"
+        ))
+        .unwrap();
+        let open: ModelOpenMessage = serde_json::from_value(
+            fixture["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|message| message["kind"] == "model.open")
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        for code in [
+            "DEVICE_PROVIDER_REQUEST_INVALID",
+            "DEVICE_PROVIDER_REQUEST_TRANSLATION_FAILED",
+            "DEVICE_PROVIDER_REQUEST_TOO_LARGE",
+            "DEVICE_PROVIDER_RESPONSE_CONTENT_TYPE_INVALID",
+            "DEVICE_PROVIDER_SSE_FRAMING_INVALID",
+            "DEVICE_PROVIDER_SSE_EVENT_INVALID",
+            "DEVICE_PROVIDER_RESPONSE_INCOMPLETE",
+            "DEVICE_PROVIDER_STREAM_CONVERSION_FAILED",
+            "DEVICE_PROVIDER_CONNECTION_FAILED",
+            "DEVICE_PROVIDER_UPSTREAM_FAILED",
+        ] {
+            let chunk = model_failure(&open, code);
+            let value = serde_json::to_value(&chunk).unwrap();
+            assert_eq!(value["error"]["code"], code);
+            assert_eq!(value["error"]["message"], code);
+            assert!(chunk.is_final);
+            assert!(!chunk.error.unwrap().retryable);
+        }
+        assert_eq!(
+            model_failure(&open, "DEVICE_PROVIDER_PROTOCOL_FAILED")
+                .error
+                .unwrap()
+                .code,
+            ExecutionPortErrorCode::ModelStreamFailed,
+            "legacy unclassified failures must retain their original category"
+        );
+    }
 
     #[test]
     fn prepared_payload_is_exact_single_write_and_fenced() {

@@ -102,6 +102,7 @@ pub enum JobWorkspaceErrorCode {
     AuthorityMismatch,
     Workspace,
     Candidate,
+    UnchangedCandidate,
     ChangeBatch,
 }
 
@@ -205,9 +206,13 @@ impl From<WorkspaceError> for JobWorkspaceError {
 }
 
 impl From<CandidateProductError> for JobWorkspaceError {
-    fn from(_: CandidateProductError) -> Self {
+    fn from(error: CandidateProductError) -> Self {
         Self::new(
-            JobWorkspaceErrorCode::Candidate,
+            if error.code() == crate::stage_product::CandidateProductErrorCode::UnchangedCandidate {
+                JobWorkspaceErrorCode::UnchangedCandidate
+            } else {
+                JobWorkspaceErrorCode::Candidate
+            },
             "detached Job candidate preparation failed",
         )
     }
@@ -810,6 +815,7 @@ pub struct DelegatedBatchHistory {
 #[derive(Debug)]
 pub struct JobWorkspaceRuntime {
     manager: WorkspaceManager,
+    partition: Option<(PathBuf, PathBuf)>,
     active: HashMap<String, WorkerWorkspace>,
     change_batch_executor: Box<dyn ChangeBatchExecutor>,
     validation_artifacts: Box<dyn ValidationArtifactPort>,
@@ -835,11 +841,52 @@ impl JobWorkspaceRuntime {
         let change_batch_store = ChangeBatchStore::open(change_batch_store_root(&root)?)?;
         Ok(Self {
             manager: WorkspaceManager::open(root, source_root)?,
+            partition: None,
             active: HashMap::new(),
             change_batch_executor: Box::new(DeterministicChangeBatchExecutor),
             validation_artifacts: Box::new(UnavailableValidationArtifactPort),
             change_batch_store,
         })
+    }
+
+    /// Shares durable attempts only within one repository and execution Job.
+    /// # Errors
+    /// Rejects unsafe roots or unavailable repository identity.
+    pub fn open_partitioned(
+        root: impl Into<PathBuf>,
+        source_root: impl Into<PathBuf>,
+    ) -> Result<Self, JobWorkspaceError> {
+        let source = fs::canonicalize(source_root.into()).map_err(|_| authority_error())?;
+        let identity = Sha256::digest(source.as_os_str().as_encoded_bytes());
+        let root = root.into().join(format!("{identity:x}"));
+        let mut runtime = Self::open(root.join("control"), source.clone())?;
+        runtime.partition = Some((root.join("jobs"), source));
+        Ok(runtime)
+    }
+
+    fn partition_manager(
+        &self,
+        active: &ActiveJob,
+    ) -> Result<Option<WorkspaceManager>, JobWorkspaceError> {
+        self.partition
+            .as_ref()
+            .map(|(root, source)| {
+                if !winwincode_domain::is_canonical_prefixed_id(&active.job.job_id.0, "job_")
+                    || !winwincode_domain::is_canonical_prefixed_id(
+                        &active.job.workspace.repository_id.0,
+                        "rep_",
+                    )
+                {
+                    return Err(authority_error());
+                }
+                WorkspaceManager::open(
+                    root.join(&active.job.workspace.repository_id.0)
+                        .join(&active.job.job_id.0),
+                    source,
+                )
+                .map_err(Into::into)
+            })
+            .transpose()
     }
 
     /// Installs the sole deterministic mutation executor.
@@ -882,7 +929,11 @@ impl JobWorkspaceRuntime {
             }
             return Ok(workspace.layout().checkout().to_path_buf());
         }
-        let workspace = self.manager.create_or_recover(active, replacement)?;
+        let manager = self.partition_manager(active)?;
+        let workspace = manager
+            .as_ref()
+            .unwrap_or(&self.manager)
+            .create_or_recover(active, replacement)?;
         let checkout = workspace.layout().checkout().to_path_buf();
         self.active.insert(active.job.job_id.0.clone(), workspace);
         Ok(checkout)
@@ -957,7 +1008,10 @@ impl JobWorkspaceRuntime {
         replacement: Option<&ExecutionJobReplacementAuthority>,
         interruption: WorkspaceCreationInterruption,
     ) -> Result<(), JobWorkspaceError> {
-        self.manager
+        let partition = self.partition_manager(active)?;
+        partition
+            .as_ref()
+            .unwrap_or(&self.manager)
             .create_or_recover_interrupted(active, replacement, interruption)
             .map(|_| ())
             .map_err(Into::into)
@@ -994,7 +1048,10 @@ impl JobWorkspaceRuntime {
         active: &ActiveJob,
         failure: WorkspaceCreationRollbackFailure,
     ) -> Result<(), JobWorkspaceError> {
-        self.manager
+        let partition = self.partition_manager(active)?;
+        partition
+            .as_ref()
+            .unwrap_or(&self.manager)
             .create_with_failed_rollback_for_test(active, failure)
             .map(|_| ())
             .map_err(Into::into)
@@ -3708,7 +3765,10 @@ fn terminal_model_usage(
     total_tokens.map(|tokens| ExecutionOutcomeUsage {
         cost_microunits: actual_cost_microunits,
         runtime_millis: 0,
-        tokens,
+        tokens: Some(tokens),
+        known_tokens: tokens,
+        accounting_status:
+            winwincode_execution_port::generated::ExecutionOutcomeUsageAccountingStatus::Known,
     })
 }
 

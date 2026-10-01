@@ -1874,6 +1874,15 @@ fn gateway_kind(kind: ProviderGatewayErrorKind) -> &'static str {
         ProviderGatewayErrorKind::AdapterRateLimited => "adapter_rate_limited",
         ProviderGatewayErrorKind::AdapterUnavailable => "adapter_unavailable",
         ProviderGatewayErrorKind::AdapterProtocol => "adapter_protocol",
+        ProviderGatewayErrorKind::AdapterRequestInvalid => "adapter_request_invalid",
+        ProviderGatewayErrorKind::AdapterRequestTranslation => "adapter_request_translation_failed",
+        ProviderGatewayErrorKind::AdapterRequestSizeLimit => "adapter_request_too_large",
+        ProviderGatewayErrorKind::AdapterResponseContentType => {
+            "adapter_response_content_type_invalid"
+        }
+        ProviderGatewayErrorKind::AdapterConnection => "adapter_connection_failed",
+        ProviderGatewayErrorKind::AdapterUpstream => "adapter_upstream_failed",
+        ProviderGatewayErrorKind::AdapterIdentityConflict => "adapter_identity_conflict",
         ProviderGatewayErrorKind::ExchangeConflict => "exchange_conflict",
         ProviderGatewayErrorKind::ExchangeNotFound => "exchange_not_found",
         ProviderGatewayErrorKind::TerminalConflict => "terminal_conflict",

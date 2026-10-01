@@ -450,7 +450,8 @@ impl<'storage, 'authenticator> RemoteWorkerPoolAdapter<'storage, 'authenticator>
             .ok_or_else(|| {
                 RemoteWorkerPoolError::new(RemoteWorkerPoolErrorKind::InvalidConnection)
             })?;
-        if worker.worker_instance_id != *worker_instance_id
+        if worker.protocol_version != winwincode_storage::EXECUTION_PROTOCOL_VERSION
+            || worker.worker_instance_id != *worker_instance_id
             || worker.management_scope != *principal.scope()
             || worker.authentication_identity != principal.authentication_identity()
             || placement.worker_pool_id != *principal.worker_pool_id()

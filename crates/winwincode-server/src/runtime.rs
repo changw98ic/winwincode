@@ -790,6 +790,39 @@ impl RepositoryRuntimeScheduler {
         Ok(())
     }
 
+    fn retire_terminal_pending(
+        &mut self,
+        storage: &mut winwincode_storage::SqliteStorage,
+        now: &Instant,
+    ) -> Result<(), RuntimeSupervisorError> {
+        let mut retired = Vec::new();
+        for (authority, id) in &self.pending_interaction_acknowledgements {
+            let slot = storage
+                .worker_session_slots()
+                .map_err(|_| scheduler_failure())?
+                .load(&authority.slot.worker_session_id)
+                .map_err(|_| scheduler_failure())?
+                .ok_or_else(scheduler_failure)?;
+            if slot.authority == authority.slot
+                && !matches!(
+                    slot.state,
+                    winwincode_storage::WorkerSlotState::Running
+                        | winwincode_storage::WorkerSlotState::Cancelling
+                )
+            {
+                storage
+                    .worker_outbound_queue(winwincode_storage::WorkerOutboundQueueConfig::default())
+                    .map_err(|_| scheduler_failure())?
+                    .settle_terminal(authority, now)
+                    .map_err(|_| scheduler_failure())?;
+                retired.push(id.clone());
+            }
+        }
+        self.pending_interaction_acknowledgements
+            .retain(|(_, id)| !retired.contains(id));
+        Ok(())
+    }
+
     fn refresh_worker_authorities(
         &mut self,
         storage: &mut winwincode_storage::SqliteStorage,
@@ -879,6 +912,7 @@ impl RepositoryRuntimeScheduler {
         state: &mut ApplicationState,
         now: &Instant,
     ) -> Result<(), RuntimeSupervisorError> {
+        self.retire_terminal_pending(&mut state.storage, now)?;
         self.refresh_worker_authorities(&mut state.storage)?;
         let pending = std::mem::take(&mut self.pending_interaction_acknowledgements);
         for (index, (authority, message_id)) in pending.iter().enumerate() {
@@ -1242,6 +1276,8 @@ impl RepositoryRuntimeScheduler {
     pub fn acknowledge_remote(
         &mut self,
         now: &Instant,
+        worker_id: &WorkerId,
+        worker_instance_id: &WorkerInstanceId,
         confirmed: &[winwincode_domain::ExecutionMessageId],
     ) -> Result<(), RuntimeSupervisorError> {
         if confirmed.is_empty() {
@@ -1260,12 +1296,16 @@ impl RepositoryRuntimeScheduler {
                 "repository runtime scheduler application has stopped",
             )
         })?;
+        self.retire_terminal_pending(&mut state.storage, now)?;
         self.refresh_worker_authorities(&mut state.storage)?;
         let mut remaining = Vec::new();
         for (authority, message_id) in
             std::mem::take(&mut self.pending_interaction_acknowledgements)
         {
-            if confirmed.contains(&message_id) {
+            if &authority.slot.worker_id == worker_id
+                && &authority.slot.worker_instance_id == worker_instance_id
+                && confirmed.contains(&message_id)
+            {
                 if state
                     .worker_outbound
                     .acknowledge(&authority, &message_id, now)
@@ -1310,6 +1350,7 @@ impl RepositoryRuntimeScheduler {
             admission_ready,
             authenticated_remote,
         )?;
+        self.retire_terminal_pending(&mut state.storage, now)?;
         self.refresh_worker_authorities(&mut state.storage)?;
         self.dispatch_interactions(state, now, execution_port)?;
         self.hub

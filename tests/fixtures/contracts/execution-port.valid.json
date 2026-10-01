@@ -22,7 +22,8 @@
           "shell"
         ],
         "capabilityDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
-      }
+      },
+      "usageAccountingVersion": 2
     },
     {
       "kind": "worker.registration_result",
@@ -833,7 +834,9 @@
         "usage": {
           "runtimeMillis": 17,
           "tokens": 23,
-          "costMicrounits": 29
+          "costMicrounits": 29,
+          "knownTokens": 23,
+          "accountingStatus": "known"
         },
         "codexThreadId": "cdx_0000000000000000000000000G",
         "artifacts": [

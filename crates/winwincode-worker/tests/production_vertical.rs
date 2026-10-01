@@ -1049,7 +1049,7 @@ fn policy() -> LocalModelPolicyAuthority {
             tokens_per_minute: 100_000,
             concurrent_requests: 100,
             token_budget: 1_000_000,
-            cost_budget_micros: 1_000_000,
+            cost_budget_micros: Some(1_000_000),
         },
     )
     .expect("model admission policy");
@@ -1595,7 +1595,7 @@ fn delegated_structured_proposal_is_retained_once_without_terminal_outcome() {
         let call_id = "provider-delegated-read-call".to_owned();
         let usage = ProviderTokenUsage {
             input_tokens: 10,
-            cached_input_tokens: 0,
+            cached_input_tokens: Some(0),
             cache_write_input_tokens: 0,
             output_tokens: 5,
             reasoning_output_tokens: 0,
@@ -1715,7 +1715,7 @@ fn delegated_structured_proposal_is_retained_once_without_terminal_outcome() {
         .to_string();
         let final_usage = ProviderTokenUsage {
             input_tokens: 10,
-            cached_input_tokens: 0,
+            cached_input_tokens: Some(0),
             cache_write_input_tokens: 0,
             output_tokens: 5,
             reasoning_output_tokens: 0,
@@ -1924,7 +1924,7 @@ fn delegated_proposal_restart_replays_one_intent_without_second_composer() {
         .to_string();
         let usage = ProviderTokenUsage {
             input_tokens: 10,
-            cached_input_tokens: 0,
+            cached_input_tokens: Some(0),
             cache_write_input_tokens: 0,
             output_tokens: 5,
             reasoning_output_tokens: 0,
@@ -2162,7 +2162,7 @@ fn delegated_invalid_output_gets_one_format_repair_then_becomes_inconclusive() {
         );
         let usage = ProviderTokenUsage {
             input_tokens: 10,
-            cached_input_tokens: 0,
+            cached_input_tokens: Some(0),
             cache_write_input_tokens: 0,
             output_tokens: 5,
             reasoning_output_tokens: 0,
@@ -2248,7 +2248,7 @@ fn delegated_invalid_output_gets_one_format_repair_then_becomes_inconclusive() {
                 ProviderStreamEvent::TextEnded { index: 0 },
                 ProviderStreamEvent::Usage(ProviderTokenUsage {
                     input_tokens: 10,
-                    cached_input_tokens: 0,
+                    cached_input_tokens: Some(0),
                     cache_write_input_tokens: 0,
                     output_tokens: 5,
                     reasoning_output_tokens: 0,
@@ -3386,7 +3386,7 @@ async fn run_verification_work_run(root: &TestDirectory, role: &str, command: &s
     .expect("canonical verification shell tool");
     let usage = ProviderTokenUsage {
         input_tokens: 10,
-        cached_input_tokens: 0,
+        cached_input_tokens: Some(0),
         cache_write_input_tokens: 0,
         output_tokens: 5,
         reasoning_output_tokens: 0,
@@ -4123,7 +4123,7 @@ fn production_worker_kernel_gateway_loopback_and_restart_replay_are_exact() {
         );
         assert_eq!(
             outcome.outcome.usage.as_ref().map(|usage| usage.tokens),
-            Some(30)
+            Some(Some(30))
         );
         first
             .shutdown(at("2030-01-01T00:00:03.000Z"))
@@ -4281,7 +4281,7 @@ fn completed_rollout_before_adapter_terminal_restarts_without_provider_work() {
         );
         assert_eq!(
             outcomes[0].outcome.usage.as_ref().map(|usage| usage.tokens),
-            Some(30)
+            Some(Some(30))
         );
         assert_eq!(
             outcomes[0].outcome.artifacts.len(),
@@ -4340,7 +4340,7 @@ fn failed_rollout_before_adapter_terminal_restarts_without_provider_work() {
         assert_eq!(outcomes[0].outcome.status, ExecutionOutcomeStatus::Failed);
         assert_eq!(
             outcomes[0].outcome.usage.as_ref().map(|usage| usage.tokens),
-            Some(30)
+            Some(Some(30))
         );
         let run = stored_run_json(&root);
         assert_eq!(run["terminal"]["kind"], "failed");
@@ -4910,7 +4910,7 @@ fn real_request_user_input_resumes_after_response_loss_and_rejects_forged_replay
         .expect("canonical request_user_input tool");
         let usage = ProviderTokenUsage {
             input_tokens: 10,
-            cached_input_tokens: 0,
+            cached_input_tokens: Some(0),
             cache_write_input_tokens: 0,
             output_tokens: 5,
             reasoning_output_tokens: 0,
@@ -5474,7 +5474,7 @@ fn real_shell_approval_and_action_receipt_reach_one_kernel_handler() {
         .expect("canonical built-in shell tool");
         let usage = ProviderTokenUsage {
             input_tokens: 10,
-            cached_input_tokens: 0,
+            cached_input_tokens: Some(0),
             cache_write_input_tokens: 0,
             output_tokens: 5,
             reasoning_output_tokens: 0,

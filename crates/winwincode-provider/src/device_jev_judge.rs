@@ -177,8 +177,10 @@ impl DeviceProviderStore {
         let (config, retry) = settings
             .to_config_and_runtime()
             .map_err(|_| DeviceProviderError)?;
+        let cancellation = self.jev_cancellation(operation_id)?;
         let transport = crate::HttpsJevRemoteTransport::try_new_system_one(&config)
-            .map_err(|_| DeviceProviderError)?;
+            .map_err(|_| DeviceProviderError)?
+            .with_cancellation(cancellation.clone());
         let digest = crate::device_jev_context::configured_context_digest(session, &settings)?;
         let runtime = JevRuntime::new(
             vec![Arc::new(crate::OpenJevRemoteProvider::new(
@@ -186,7 +188,8 @@ impl DeviceProviderStore {
                 Arc::new(transport),
             ))],
             retry,
-        );
+        )
+        .with_cancellation(cancellation);
         self.evaluate_judge_once(
             operation_id,
             &digest,

@@ -312,7 +312,7 @@ fn gateway(
     failure: Option<ModelAttemptFailureFact>,
     charge: Option<ModelAttemptCharge>,
 ) -> ProviderGatewaySettlement {
-    let (actual_tokens, actual_cost_micros) = charge.as_ref().map_or((0, 0), |charge| {
+    let (actual_tokens, actual_cost_micros) = charge.as_ref().map_or((0, Some(0)), |charge| {
         (
             charge.usage.input_tokens + charge.usage.output_tokens,
             charge.cost_micros,
@@ -358,12 +358,12 @@ fn charge(
         provider_usage_id: format!("provider-usage-{seed}"),
         usage: ProviderTokenUsage {
             input_tokens,
-            cached_input_tokens: 0,
+            cached_input_tokens: Some(0),
             cache_write_input_tokens: 0,
             output_tokens,
             reasoning_output_tokens: 0,
         },
-        cost_micros,
+        cost_micros: Some(cost_micros),
     }
 }
 
@@ -955,7 +955,7 @@ fn fallback_and_charged_failures_reconcile_once_across_every_dimension_after_res
             .totals;
         assert_eq!(totals.entries, 2);
         assert_eq!(totals.total_tokens, 35);
-        assert_eq!(totals.cost_micros, 350);
+        assert_eq!(totals.cost_micros, Some(350));
     }
     let provider = ModelRetryUsageService::new(&mut storage)
         .reconcile(&ModelUsageFilter {
@@ -1249,7 +1249,7 @@ fn concurrent_exact_completion_has_one_usage_fact_and_one_replay() {
     assert_eq!(totals.input_tokens, 90);
     assert_eq!(totals.output_tokens, 10);
     assert_eq!(totals.total_tokens, 100);
-    assert_eq!(totals.cost_micros, 1_000);
+    assert_eq!(totals.cost_micros, Some(1_000));
     drop(storage);
     fs::remove_dir_all(root).expect("remove fixture");
 }
@@ -1305,8 +1305,12 @@ fn verify_concurrent_exact_completion(
 
     let mut changed = command.clone();
     let changed_charge = changed.gateway.charge.as_mut().expect("completion charge");
-    changed_charge.cost_micros += 1;
-    changed.gateway.admission_terminal.actual_cost_micros += 1;
+    changed_charge.cost_micros = changed_charge.cost_micros.map(|cost| cost + 1);
+    changed.gateway.admission_terminal.actual_cost_micros = changed
+        .gateway
+        .admission_terminal
+        .actual_cost_micros
+        .map(|cost| cost + 1);
     let mut storage = SqliteStorage::open(root).expect("restart storage");
     assert_eq!(
         ModelRetryUsageService::new(&mut storage)
@@ -1415,7 +1419,7 @@ fn production_settlement_rehydrates_exact_context_and_records_usage_once_after_r
         .totals;
     assert_eq!(totals.entries, 1);
     assert_eq!(totals.total_tokens, 15);
-    assert_eq!(totals.cost_micros, 150);
+    assert_eq!(totals.cost_micros, Some(150));
     drop(storage);
     fs::remove_dir_all(root).expect("remove fixture");
 }

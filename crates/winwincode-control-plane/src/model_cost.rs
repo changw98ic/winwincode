@@ -138,7 +138,7 @@ pub struct ModelCostProjection {
     pub class: ModelCostClass,
     pub cost: ModelCostFact,
     /// Provider-reported value retained for audit, never mixed with catalog pricing.
-    pub provider_reported_cost_micros: u64,
+    pub provider_reported_cost_micros: Option<u64>,
 }
 
 /// Cost grouped under one exact price source/version/semantic identity.
@@ -342,9 +342,10 @@ fn calculate_cost(
     usage: &crate::SettledModelUsage,
     price: &ModelPriceEntry,
 ) -> Result<u64, ModelCostError> {
+    let cached = usage.cached_input_tokens.ok_or(ModelCostError)?;
     let ordinary_input = usage
         .input_tokens
-        .checked_sub(usage.cached_input_tokens)
+        .checked_sub(cached)
         .and_then(|value| value.checked_sub(usage.cache_write_input_tokens))
         .ok_or(ModelCostError)?;
     let ordinary_output = usage
@@ -354,7 +355,7 @@ fn calculate_cost(
     let rates = price.micros_per_million_tokens;
     let components = [
         (ordinary_input, rates.input),
-        (usage.cached_input_tokens, rates.cached_input),
+        (cached, rates.cached_input),
         (usage.cache_write_input_tokens, rates.cache_write_input),
         (ordinary_output, rates.output),
         (usage.reasoning_output_tokens, rates.reasoning_output),

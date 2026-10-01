@@ -930,3 +930,166 @@ fn unknown_charge_survives_settlement_replay_and_blocks_finite_cost_admission() 
         fs::remove_dir_all(root).expect("cleanup");
     }
 }
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn terminal_unknown_accounting_reconciles_tokens_and_cost_independently_across_restart() {
+    use winwincode_execution_port::generated::{
+        ExecutionOutcomeUsage, ExecutionOutcomeUsageAccountingStatus,
+    };
+    let root = temporary_directory("independent-reconciliation");
+    let scope = scope(120);
+    let worker_pool = pool(120);
+    let request = reservation(
+        &scope,
+        &worker_pool,
+        120,
+        120,
+        ExecutionRepositoryAccess::ReadOnly,
+    );
+    let mut storage = SqliteStorage::open(&root).expect("storage");
+    let mut admission = storage.execution_admission().expect("admission");
+    configure(&mut admission, &scope, &worker_pool, generous_limits());
+    admission.reserve(&request).expect("reserve");
+    admission.start(&start(&request, 121)).expect("start");
+    let terminal = ExecutionReservationRelease {
+        scope: scope.clone(),
+        worker_pool_id: worker_pool.clone(),
+        job_id: request.job_id.clone(),
+        request_id: RequestId(id("req", 122)),
+        expected_revision: 2,
+        reason: ExecutionReservationReleaseReason::Failed,
+        released_at: at(3),
+    };
+    let unknown = ExecutionOutcomeUsage::unknown(1000, 10);
+    admission
+        .release_with_unknown_usage(&terminal, &unknown)
+        .expect("terminal unknown");
+    let next = reservation(
+        &scope,
+        &worker_pool,
+        130,
+        130,
+        ExecutionRepositoryAccess::ReadOnly,
+    );
+    assert!(
+        admission.reserve(&next).is_err(),
+        "finite budgets block unknown usage"
+    );
+    let noop = RequestId(id("req", 123));
+    assert!(
+        !admission
+            .settle_reconciliation(
+                &request.job_id,
+                &terminal.request_id,
+                &noop,
+                &unknown,
+                &at(4)
+            )
+            .expect("noop accepted")
+    );
+    let tokens = ExecutionOutcomeUsage {
+        tokens: Some(30),
+        known_tokens: 30,
+        accounting_status: ExecutionOutcomeUsageAccountingStatus::Known,
+        cost_microunits: None,
+        runtime_millis: 1000,
+    };
+    assert!(
+        admission
+            .settle_reconciliation(
+                &request.job_id,
+                &terminal.request_id,
+                &noop,
+                &tokens,
+                &at(4)
+            )
+            .is_err(),
+        "noop identity cannot be changed"
+    );
+    let token_id = RequestId(id("req", 124));
+    assert!(
+        admission
+            .settle_reconciliation(
+                &request.job_id,
+                &terminal.request_id,
+                &token_id,
+                &tokens,
+                &at(5)
+            )
+            .expect("tokens known")
+    );
+    assert!(admission.reserve(&next).is_err(), "cost remains unknown");
+    drop(storage);
+    let mut storage = SqliteStorage::open(&root).expect("reopen");
+    let mut admission = storage.execution_admission().expect("admission");
+    let cost = ExecutionOutcomeUsage {
+        cost_microunits: Some(40),
+        ..tokens.clone()
+    };
+    let cost_id = RequestId(id("req", 125));
+    assert!(
+        admission
+            .settle_reconciliation(
+                &request.job_id,
+                &terminal.request_id,
+                &cost_id,
+                &cost,
+                &at(6)
+            )
+            .expect("cost-only reconciliation")
+    );
+    assert!(
+        !admission
+            .settle_reconciliation(
+                &request.job_id,
+                &terminal.request_id,
+                &token_id,
+                &tokens,
+                &at(5)
+            )
+            .expect("old settlement replay")
+    );
+    assert!(
+        admission
+            .release_with_unknown_usage(&terminal, &unknown)
+            .expect("original terminal replay")
+            .replayed
+    );
+    for boundary in boundaries(&scope, &worker_pool) {
+        let usage = admission.usage(&boundary).expect("usage");
+        assert_eq!(usage.accounting_pending, 0);
+        assert_eq!(usage.committed_tokens, 30);
+        assert_eq!(usage.committed_cost_microunits, Some(40));
+    }
+    admission.reserve(&next).expect("settled budgets reusable");
+    let lower = ExecutionOutcomeUsage {
+        known_tokens: 29,
+        tokens: Some(29),
+        ..cost.clone()
+    };
+    assert!(
+        admission
+            .settle_reconciliation(
+                &request.job_id,
+                &terminal.request_id,
+                &RequestId(id("req", 126)),
+                &lower,
+                &at(7)
+            )
+            .is_err()
+    );
+    assert!(
+        admission
+            .settle_reconciliation(
+                &request.job_id,
+                &terminal.request_id,
+                &RequestId(id("req", 127)),
+                &cost,
+                &Instant("invalid".into())
+            )
+            .is_err()
+    );
+    drop(storage);
+    fs::remove_dir_all(root).expect("cleanup");
+}

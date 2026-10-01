@@ -74,6 +74,7 @@ struct WorkerBootstrap {
     worker_instance_id: WorkerInstanceId,
     started_at: Instant,
     data_directory: PathBuf,
+    execution_workspace_directory: Option<PathBuf>,
     provider_directory: PathBuf,
     source_directory: PathBuf,
     server_origin: String,
@@ -101,6 +102,7 @@ async fn run_remote() -> Result<(), Box<dyn std::error::Error>> {
         worker_instance_id: WorkerInstanceId(required("WWC_WORKER_INSTANCE_ID")?),
         started_at: env::var("WWC_WORKER_STARTED_AT").map_or(now_instant()?, Instant),
         data_directory: PathBuf::from(required("WWC_WORKER_DATA_DIRECTORY")?),
+        execution_workspace_directory: None,
         provider_directory: PathBuf::from(required("WWC_DEVICE_PROVIDER_DIRECTORY")?),
         source_directory: PathBuf::from(required("WWC_WORKER_SOURCE_ROOT")?),
         server_origin: required("WWC_WORKER_SERVER_ORIGIN")?,
@@ -115,7 +117,21 @@ async fn run_remote() -> Result<(), Box<dyn std::error::Error>> {
 /// loop below is the exact `--remote` machinery over the same
 /// `serverOrigin` `ExecutionPort` exchange; nothing is read from or decided
 /// by the Server beyond that existing protocol.
+fn await_managed_start_gate(
+    mut input: impl std::io::Read,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut release = [0u8; 1];
+    input.read_exact(&mut release)?;
+    if release != [1] {
+        return Err("managed start gate rejected".into());
+    }
+    Ok(())
+}
+
 async fn run_managed(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if env::var("WWC_MANAGED_START_GATE").as_deref() == Ok("1") {
+        await_managed_start_gate(std::io::stdin())?;
+    }
     let config = ManagedSessionConfig::read(std::path::Path::new(config_path))?;
     let credential = WorkerSessionCredential::load(&config.worker_credential_path)?;
     eprintln!(
@@ -136,6 +152,7 @@ async fn run_managed(config_path: &str) -> Result<(), Box<dyn std::error::Error>
         worker_instance_id: config.worker_instance_id.clone(),
         started_at: now_instant()?,
         data_directory: config.data_directory.clone(),
+        execution_workspace_directory: config.execution_workspace_directory.clone(),
         provider_directory: config.provider_directory.clone(),
         source_directory: config.source_directory.clone(),
         server_origin: config.server_origin.clone(),
@@ -179,6 +196,12 @@ where
                 );
             }
         }
+        if handle.authority_rejected() {
+            return Err(
+                "Worker authority permanently rejected; Device must report exit before relaunch"
+                    .into(),
+            );
+        }
         if worker.lifecycle() != WorkerLifecycleState::Active {
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
@@ -193,6 +216,7 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
         worker_instance_id,
         started_at,
         data_directory,
+        execution_workspace_directory,
         provider_directory,
         source_directory,
         server_origin,
@@ -221,9 +245,13 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
     )?;
     let validation_artifacts =
         DurableValidationArtifactStore::open(data_directory.join("worker-validation-artifacts"))?;
-    let workspaces =
-        JobWorkspaceRuntime::open(data_directory.join("worker-workspaces"), &source_directory)?
-            .with_validation_artifact_port(validation_artifacts);
+    let workspaces = match execution_workspace_directory {
+        Some(root) => JobWorkspaceRuntime::open_partitioned(root, &source_directory)?,
+        None => {
+            JobWorkspaceRuntime::open(data_directory.join("worker-workspaces"), &source_directory)?
+        }
+    }
+    .with_validation_artifact_port(validation_artifacts);
     let config = WorkerConfig {
         worker_id,
         worker_instance_id: worker_instance_id.clone(),
@@ -242,7 +270,10 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
         worker = worker.with_observation_model(observation_model);
     }
 
-    register_until_active(&mut worker, &handle, &started_at).await?;
+    if let Err(error) = register_until_active(&mut worker, &handle, &started_at).await {
+        let _ = Box::pin(worker.shutdown(now_instant()?)).await;
+        return Err(error);
+    }
 
     let mut heartbeat = tokio::time::interval(Duration::from_secs(1));
     let mut drive = tokio::time::interval(Duration::from_millis(25));
@@ -271,8 +302,14 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
                 if exit_after_work && worker.work_drained() { break; }
             }
         }
+        if handle.authority_rejected() {
+            break;
+        }
     }
     let _ = Box::pin(worker.shutdown(now_instant()?)).await;
+    if handle.authority_rejected() {
+        return Err("Worker authority permanently rejected".into());
+    }
     Ok(())
 }
 
@@ -630,6 +667,13 @@ mod tests {
         ExecutionMode, ObserverMode, configured_observation_model,
         released_worker_execution_mode_required,
     };
+
+    #[test]
+    fn managed_start_gate_requires_the_registered_parent_release() {
+        assert!(super::await_managed_start_gate(std::io::Cursor::new(Vec::<u8>::new())).is_err());
+        assert!(super::await_managed_start_gate(std::io::Cursor::new(vec![0])).is_err());
+        assert!(super::await_managed_start_gate(std::io::Cursor::new(vec![1])).is_ok());
+    }
 
     #[test]
     fn fusion_startup_validates_exact_members_without_echoing_input() {

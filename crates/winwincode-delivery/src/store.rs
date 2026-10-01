@@ -333,6 +333,7 @@ pub struct ApplyDeliveryTerminalOutcome {
     pub request_digest: String,
     pub expected_revision: u64,
     pub facts: DeliveryTerminalOutcomeFacts,
+    pub unchanged_recovery: Option<crate::domain::same_candidate::VerifiedUnchangedReworkRecovery>,
 }
 
 /// Specialized Attention append created only from
@@ -1035,6 +1036,18 @@ impl<'journal> DeliveryStore<'journal> {
             &verified,
         )
         .map_err(|error| map_terminal_outcome_error(&error, &command, &stored.snapshot))?;
+        let snapshot = if let Some(recovery) = &command.unchanged_recovery {
+            recovery
+                .apply(&stored.snapshot, &snapshot)
+                .map_err(|error| {
+                    store_error(
+                        DeliveryStoreErrorCode::InvalidStoreOptions,
+                        error.to_string(),
+                    )
+                })?
+        } else {
+            snapshot
+        };
         let append = AppendDelivery {
             delivery_id: command.delivery_id,
             request_id: command.request_id,
@@ -1043,7 +1056,10 @@ impl<'journal> DeliveryStore<'journal> {
             expected_revision: command.expected_revision,
             snapshot,
         };
-        self.append_authorized(append, AppendAuthority::Terminal(&command.facts))
+        self.append_authorized(
+            append,
+            AppendAuthority::Terminal(&command.facts, command.unchanged_recovery.as_ref()),
+        )
     }
 
     fn resolve_attention(
@@ -1427,6 +1443,13 @@ impl<'journal> DeliveryStore<'journal> {
                     .unwrap_or(&before.work_run_aggregate)
                     != &after.work_run_aggregate
                     || before.session_bindings != after.session_bindings
+                    || after.same_candidate_reverification
+                        != (if matches!(&transition.effect, WorkRunStartEffect::Dispatch(intent) if intent.rework_authorization().is_some())
+                        {
+                            None
+                        } else {
+                            before.same_candidate_reverification.clone()
+                        })
                     || before.attention_items != after.attention_items
                     || match &transition.effect {
                         WorkRunStartEffect::Dispatch(intent)
@@ -1443,7 +1466,7 @@ impl<'journal> DeliveryStore<'journal> {
                     ));
                 }
             }
-            AppendAuthority::Terminal(facts) => {
+            AppendAuthority::Terminal(facts, recovery) => {
                 validate_authorized_operation(
                     command.operation,
                     DeliveryMutationOperation::WorkRunTerminal,
@@ -1459,6 +1482,18 @@ impl<'journal> DeliveryStore<'journal> {
                     &verified,
                 )
                 .map_err(|error| map_transition_error(&error, &command, &stored.snapshot))?;
+                let expected = if let Some(recovery) = recovery {
+                    recovery
+                        .apply(&stored.snapshot, &expected)
+                        .map_err(|error| {
+                            store_error(
+                                DeliveryStoreErrorCode::InvalidStoreOptions,
+                                error.to_string(),
+                            )
+                        })?
+                } else {
+                    expected
+                };
                 if expected != command.snapshot {
                     return Err(store_error(
                         DeliveryStoreErrorCode::InvalidStoreOptions,
@@ -1671,7 +1706,10 @@ enum AppendAuthority<'transition> {
         now_millis: u64,
     },
     WorkRunDispatch(&'transition WorkRunStartResult),
-    Terminal(&'transition DeliveryTerminalOutcomeFacts),
+    Terminal(
+        &'transition DeliveryTerminalOutcomeFacts,
+        Option<&'transition crate::domain::same_candidate::VerifiedUnchangedReworkRecovery>,
+    ),
     Attention(&'transition ResolvedAttentionTransition),
     Verdict(&'transition ComputedVerdictTransition),
     ReworkClarification(&'transition WorkRunStartResult),
@@ -1931,6 +1969,7 @@ fn validate_page_annotation_delta(
         || after.spec != before.spec
         || after.work_run_aggregate != before.work_run_aggregate
         || after.session_bindings != before.session_bindings
+        || after.same_candidate_reverification != before.same_candidate_reverification
         || after.verdict != before.verdict
         || after.status != before.status
         || after.created_at_millis != before.created_at_millis
@@ -1981,6 +2020,7 @@ fn validate_initial_delivery(delivery: &Delivery) -> Result<(), DeliveryStoreErr
     let snapshot = delivery.snapshot();
     if snapshot.revision != 1
         || snapshot.status != DeliveryStatus::Draft
+        || snapshot.same_candidate_reverification.is_some()
         || !snapshot.work_run_aggregate.items.is_empty()
         || !snapshot.work_run_aggregate.runs.is_empty()
         || !snapshot.session_bindings.is_empty()
@@ -2013,6 +2053,7 @@ fn validate_spec_update_delta(
         && after.status == DeliveryStatus::Ready
         && after.created_at_millis == before.created_at_millis
         && after.updated_at_millis >= before.updated_at_millis
+        && after.same_candidate_reverification.is_none()
         && after.spec.delivery_id == before.id
         && after.spec.id != before.spec.id
         && after.spec.revision == before.spec.revision.saturating_add(1)

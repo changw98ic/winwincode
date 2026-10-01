@@ -26,7 +26,12 @@ const MAX_HTTP_RESPONSE_BYTES: usize = 34 * 1024 * 1024;
 
 /// Secret-free separated Worker transport failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RemoteWorkerPortError;
+pub enum RemoteWorkerPortError {
+    /// Connection, timeout, or temporary Server authority failure.
+    Transport,
+    /// The Server permanently rejected authentication or protocol authority.
+    Rejected,
+}
 
 impl fmt::Display for RemoteWorkerPortError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -46,6 +51,7 @@ struct SharedRemoteState {
     inbox: VecDeque<(ExecutionMessageId, ExecutionPortMessage)>,
     processing: Vec<ExecutionMessageId>,
     acknowledgements: Vec<ExecutionMessageId>,
+    rejected: bool,
 }
 
 /// Cloneable Worker-side delivery handle. A delivery is confirmed only after
@@ -56,6 +62,12 @@ pub struct RemoteWorkerTransportHandle {
 }
 
 impl RemoteWorkerTransportHandle {
+    /// A permanent Server rejection ends this process instead of replaying dead authority.
+    #[must_use]
+    pub fn authority_rejected(&self) -> bool {
+        self.state.lock().map_or(true, |state| state.rejected)
+    }
+
     /// Takes the next validated Control Plane delivery.
     ///
     /// # Errors
@@ -64,7 +76,10 @@ impl RemoteWorkerTransportHandle {
     pub fn next_control(
         &self,
     ) -> Result<Option<(ExecutionMessageId, ExecutionPortMessage)>, RemoteWorkerPortError> {
-        let mut state = self.state.lock().map_err(|_| RemoteWorkerPortError)?;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| RemoteWorkerPortError::Transport)?;
         let delivery = state.inbox.pop_front();
         if let Some((id, _)) = &delivery
             && !state.processing.contains(id)
@@ -81,7 +96,10 @@ impl RemoteWorkerTransportHandle {
     ///
     /// Returns a stable transport error if the process queue is unavailable.
     pub fn confirm(&self, id: ExecutionMessageId) -> Result<(), RemoteWorkerPortError> {
-        let mut state = self.state.lock().map_err(|_| RemoteWorkerPortError)?;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| RemoteWorkerPortError::Transport)?;
         state.processing.retain(|processing| processing != &id);
         if !state.acknowledgements.contains(&id) {
             state.acknowledgements.push(id);
@@ -96,7 +114,10 @@ impl RemoteWorkerTransportHandle {
     ///
     /// Returns a stable transport error if the process queue is unavailable.
     pub fn retry(&self, id: &ExecutionMessageId) -> Result<(), RemoteWorkerPortError> {
-        let mut state = self.state.lock().map_err(|_| RemoteWorkerPortError)?;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| RemoteWorkerPortError::Transport)?;
         state.processing.retain(|processing| processing != id);
         Ok(())
     }
@@ -131,7 +152,7 @@ impl RemoteWorkerPort {
         timeout: Duration,
     ) -> Result<(Self, RemoteWorkerTransportHandle), RemoteWorkerPortError> {
         if timeout.is_zero() || timeout > Duration::from_mins(1) {
-            return Err(RemoteWorkerPortError);
+            return Err(RemoteWorkerPortError::Transport);
         }
         let endpoint = parse_origin(origin)?;
         let credential_path = credential_path.into();
@@ -142,16 +163,17 @@ impl RemoteWorkerPort {
             .add(rustls::pki_types::CertificateDer::from(
                 tls_root_der.to_vec(),
             ))
-            .map_err(|_| RemoteWorkerPortError)?;
+            .map_err(|_| RemoteWorkerPortError::Transport)?;
         let tls = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
             .with_safe_default_protocol_versions()
-            .map_err(|_| RemoteWorkerPortError)?
+            .map_err(|_| RemoteWorkerPortError::Transport)?
             .with_root_certificates(roots)
             .with_no_client_auth();
         let state = Arc::new(Mutex::new(SharedRemoteState {
             inbox: VecDeque::new(),
             processing: Vec::new(),
             acknowledgements: Vec::new(),
+            rejected: false,
         }));
         Ok((
             Self {
@@ -175,12 +197,12 @@ impl RemoteWorkerPort {
             .and_then(|frame| RemoteTransportAdapter::<NoopCore>::encode(&frame))
             .map_err(|_| {
                 remote_transport_debug("outbound generated frame is invalid");
-                RemoteWorkerPortError
+                RemoteWorkerPortError::Transport
             })?;
         let acknowledgements = self
             .state
             .lock()
-            .map_err(|_| RemoteWorkerPortError)?
+            .map_err(|_| RemoteWorkerPortError::Transport)?
             .acknowledgements
             .clone();
         let request = RemoteExchangeRequest::new(
@@ -192,7 +214,7 @@ impl RemoteWorkerPort {
         .and_then(|request| request.encode())
         .map_err(|_| {
             remote_transport_debug("outbound exchange request is invalid");
-            RemoteWorkerPortError
+            RemoteWorkerPortError::Transport
         })?;
         let credential = read_private_credential(&self.credential_path).inspect_err(|_| {
             remote_transport_debug("credential file failed private-file validation");
@@ -204,14 +226,24 @@ impl RemoteWorkerPort {
         .await
         .map_err(|_| {
             remote_transport_debug("exchange timed out");
-            RemoteWorkerPortError
+            RemoteWorkerPortError::Transport
         })?
-        .inspect_err(|_| remote_transport_debug("HTTPS request failed"))?;
+        .inspect_err(|error| {
+            remote_transport_debug("HTTPS request failed");
+            if *error == RemoteWorkerPortError::Rejected
+                && let Ok(mut state) = self.state.lock()
+            {
+                state.rejected = true;
+            }
+        })?;
         let response = RemoteExchangeResponse::decode(&response).map_err(|_| {
             remote_transport_debug("exchange response did not match the bounded canonical schema");
-            RemoteWorkerPortError
+            RemoteWorkerPortError::Transport
         })?;
-        let mut state = self.state.lock().map_err(|_| RemoteWorkerPortError)?;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| RemoteWorkerPortError::Transport)?;
         state
             .acknowledgements
             .retain(|id| !acknowledgements.contains(id));
@@ -226,7 +258,7 @@ impl RemoteWorkerPort {
                 continue;
             }
             let frame = RemoteTransportAdapter::<NoopCore>::decode(&delivery.frame)
-                .map_err(|_| RemoteWorkerPortError)?;
+                .map_err(|_| RemoteWorkerPortError::Transport)?;
             state
                 .inbox
                 .push_back((delivery.delivery_id.clone(), frame.message().clone()));
@@ -263,24 +295,24 @@ async fn send_https_request(
     credential: &[u8],
     body: &[u8],
 ) -> Result<Vec<u8>, RemoteWorkerPortError> {
-    let token = std::str::from_utf8(credential).map_err(|_| RemoteWorkerPortError)?;
+    let token = std::str::from_utf8(credential).map_err(|_| RemoteWorkerPortError::Transport)?;
     if token.bytes().any(|byte| !(0x21..=0x7e).contains(&byte)) {
-        return Err(RemoteWorkerPortError);
+        return Err(RemoteWorkerPortError::Transport);
     }
     let stream = TcpStream::connect((endpoint.host.as_str(), endpoint.port))
         .await
         .map_err(|_| {
             remote_transport_debug("TCP connect failed");
-            RemoteWorkerPortError
+            RemoteWorkerPortError::Transport
         })?;
     let server_name = rustls::pki_types::ServerName::try_from(endpoint.host.clone())
-        .map_err(|_| RemoteWorkerPortError)?;
+        .map_err(|_| RemoteWorkerPortError::Transport)?;
     let mut stream = TlsConnector::from(tls)
         .connect(server_name, stream)
         .await
         .map_err(|_| {
             remote_transport_debug("TLS handshake failed");
-            RemoteWorkerPortError
+            RemoteWorkerPortError::Transport
         })?;
     let head = format!(
         "POST /internal/v1/execution-port/exchange HTTP/1.1\r\nHost: {}:{}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -291,29 +323,29 @@ async fn send_https_request(
     );
     stream.write_all(head.as_bytes()).await.map_err(|_| {
         remote_transport_debug("HTTPS header write failed");
-        RemoteWorkerPortError
+        RemoteWorkerPortError::Transport
     })?;
     stream.write_all(body).await.map_err(|_| {
         remote_transport_debug("HTTPS body write failed");
-        RemoteWorkerPortError
+        RemoteWorkerPortError::Transport
     })?;
     stream.flush().await.map_err(|_| {
         remote_transport_debug("HTTPS request flush failed");
-        RemoteWorkerPortError
+        RemoteWorkerPortError::Transport
     })?;
     let mut response = Vec::new();
     let mut chunk = [0_u8; 16 * 1024];
     while !http_response_complete(&response)? {
         let read = stream.read(&mut chunk).await.map_err(|_| {
             remote_transport_debug("HTTPS response read failed");
-            RemoteWorkerPortError
+            RemoteWorkerPortError::Transport
         })?;
         if read == 0 {
             break;
         }
         response.extend_from_slice(&chunk[..read]);
         if response.len() > MAX_HTTP_RESPONSE_BYTES {
-            return Err(RemoteWorkerPortError);
+            return Err(RemoteWorkerPortError::Transport);
         }
     }
     parse_http_response(&response)
@@ -323,7 +355,8 @@ fn http_response_complete(response: &[u8]) -> Result<bool, RemoteWorkerPortError
     let Some(split) = response.windows(4).position(|window| window == b"\r\n\r\n") else {
         return Ok(false);
     };
-    let head = std::str::from_utf8(&response[..split]).map_err(|_| RemoteWorkerPortError)?;
+    let head =
+        std::str::from_utf8(&response[..split]).map_err(|_| RemoteWorkerPortError::Transport)?;
     let content_length = head
         .lines()
         .skip(1)
@@ -334,15 +367,23 @@ fn http_response_complete(response: &[u8]) -> Result<bool, RemoteWorkerPortError
                     .flatten()
             })
         })
-        .ok_or(RemoteWorkerPortError)?;
+        .ok_or(RemoteWorkerPortError::Transport)?;
     let expected = split
         .checked_add(4)
         .and_then(|value| value.checked_add(content_length))
-        .ok_or(RemoteWorkerPortError)?;
+        .ok_or(RemoteWorkerPortError::Transport)?;
     if response.len() > expected {
-        return Err(RemoteWorkerPortError);
+        return Err(RemoteWorkerPortError::Transport);
     }
     Ok(response.len() == expected)
+}
+
+fn http_status(head: &str) -> Option<u16> {
+    let mut words = head.lines().next()?.split_whitespace();
+    if !matches!(words.next()?, "HTTP/1.0" | "HTTP/1.1") {
+        return None;
+    }
+    words.next()?.parse().ok()
 }
 
 fn parse_http_response(response: &[u8]) -> Result<Vec<u8>, RemoteWorkerPortError> {
@@ -351,16 +392,14 @@ fn parse_http_response(response: &[u8]) -> Result<Vec<u8>, RemoteWorkerPortError
         .position(|window| window == b"\r\n\r\n")
         .ok_or_else(|| {
             remote_transport_debug("HTTPS response has no header boundary");
-            RemoteWorkerPortError
+            RemoteWorkerPortError::Transport
         })?;
-    let head = std::str::from_utf8(&response[..split]).map_err(|_| RemoteWorkerPortError)?;
-    if !head
-        .lines()
-        .next()
-        .is_some_and(|line| line == "HTTP/1.1 200 OK" || line == "HTTP/1.0 200 OK")
-    {
-        remote_transport_debug("HTTPS response status is not 200");
-        return Err(RemoteWorkerPortError);
+    let head =
+        std::str::from_utf8(&response[..split]).map_err(|_| RemoteWorkerPortError::Transport)?;
+    match http_status(head) {
+        Some(200) => {}
+        Some(400 | 401 | 403) => return Err(RemoteWorkerPortError::Rejected),
+        _ => return Err(RemoteWorkerPortError::Transport),
     }
     let content_length = head
         .lines()
@@ -374,12 +413,12 @@ fn parse_http_response(response: &[u8]) -> Result<Vec<u8>, RemoteWorkerPortError
         })
         .ok_or_else(|| {
             remote_transport_debug("HTTPS response has no Content-Length");
-            RemoteWorkerPortError
+            RemoteWorkerPortError::Transport
         })?;
     let body = &response[split + 4..];
     if body.len() != content_length {
         remote_transport_debug("HTTPS response body length differs from Content-Length");
-        return Err(RemoteWorkerPortError);
+        return Err(RemoteWorkerPortError::Transport);
     }
     Ok(body.to_vec())
 }
@@ -396,18 +435,22 @@ pub(crate) fn parse_origin(origin: &str) -> Result<Endpoint, RemoteWorkerPortErr
     let authority = origin
         .strip_prefix("https://")
         .filter(|value| !value.contains('/') && !value.contains('@'))
-        .ok_or(RemoteWorkerPortError)?;
-    let (host, port) = authority.rsplit_once(':').ok_or(RemoteWorkerPortError)?;
+        .ok_or(RemoteWorkerPortError::Transport)?;
+    let (host, port) = authority
+        .rsplit_once(':')
+        .ok_or(RemoteWorkerPortError::Transport)?;
     if host.is_empty()
         || host
             .chars()
             .any(|character| character.is_ascii_control() || character.is_whitespace())
     {
-        return Err(RemoteWorkerPortError);
+        return Err(RemoteWorkerPortError::Transport);
     }
-    let port = port.parse::<u16>().map_err(|_| RemoteWorkerPortError)?;
+    let port = port
+        .parse::<u16>()
+        .map_err(|_| RemoteWorkerPortError::Transport)?;
     if port == 0 {
-        return Err(RemoteWorkerPortError);
+        return Err(RemoteWorkerPortError::Transport);
     }
     Ok(Endpoint {
         host: host.to_owned(),
@@ -419,13 +462,13 @@ pub(crate) fn parse_origin(origin: &str) -> Result<Endpoint, RemoteWorkerPortErr
 fn read_private_credential(path: &Path) -> Result<Vec<u8>, RemoteWorkerPortError> {
     use std::os::unix::fs::PermissionsExt;
 
-    let metadata = fs::metadata(path).map_err(|_| RemoteWorkerPortError)?;
+    let metadata = fs::metadata(path).map_err(|_| RemoteWorkerPortError::Transport)?;
     if !metadata.is_file() || metadata.permissions().mode() & 0o077 != 0 {
-        return Err(RemoteWorkerPortError);
+        return Err(RemoteWorkerPortError::Transport);
     }
-    let bytes = fs::read(path).map_err(|_| RemoteWorkerPortError)?;
+    let bytes = fs::read(path).map_err(|_| RemoteWorkerPortError::Transport)?;
     if bytes.is_empty() || bytes.len() > 16 * 1024 {
-        return Err(RemoteWorkerPortError);
+        return Err(RemoteWorkerPortError::Transport);
     }
     Ok(bytes)
 }

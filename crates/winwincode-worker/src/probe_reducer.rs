@@ -422,7 +422,7 @@ fn supplement_from_provider(
                 .saturating_mul(4)
         || usage
             .as_ref()
-            .is_some_and(|usage| usage.tokens > MAX_MODEL_TOKENS)
+            .is_some_and(|usage| usage.tokens.is_none_or(|tokens| tokens > MAX_MODEL_TOKENS))
     {
         return failure_supplement(
             operation_id,

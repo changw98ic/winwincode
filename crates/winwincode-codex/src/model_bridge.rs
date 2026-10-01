@@ -12,8 +12,8 @@ use crate::{
     model_port_client::{
         ModelAuthorityRejection, ModelChunkDelivery, ModelChunkDisposition, ModelChunkSink,
         ModelLeaseAuthority, ModelLeaseAuthoritySource, ModelMessageMetadata,
-        ModelSinkDeliveryStatus, ModelTerminationReason, OpenModelExchangeCommand,
-        WorkerModelPortClient,
+        ModelPortClientErrorCode, ModelSinkDeliveryStatus, ModelTerminationReason,
+        OpenModelExchangeCommand, WorkerModelPortClient,
     },
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -973,7 +973,15 @@ impl ExecutionPortModelBridge {
             // retained frame and never create a new Provider/Core exchange.
             if exact_duplicate && chunk.is_final {
                 let disposition = client
-                    .accept_terminal_duplicate(binding.authority.clone(), chunk, metadata)
+                    .accept_terminal_duplicate(
+                        ModelLeaseAuthority {
+                            lease: chunk.lease.clone(),
+                            worker_session_id: chunk.worker_session_id.clone(),
+                            session_identity: chunk.session_identity.clone(),
+                        },
+                        chunk,
+                        metadata,
+                    )
                     .await
                     .map_err(|_| BridgeError::Protocol)?;
                 self.record_primary_model_completion(&owner, chunk, received_at)?;
@@ -1060,10 +1068,46 @@ impl ExecutionPortModelBridge {
         chunk: &ModelChunkMessage,
         received_at: &Instant,
     ) -> Result<(), BridgeError> {
+        self.retain_device_jev_receipts(owner, &chunk.model_exchange_id, received_at)?;
+        let observed_usage = primary_model_usage(chunk)?;
+        let usage = observed_usage.unwrap_or_default();
+        self.ordinal_store
+            .record_performance_completion(
+                &owner.run_key,
+                PerformanceOperationKind::PrimaryModel,
+                &owner.model_call_id,
+                received_at,
+                PerformanceOperationCompletion {
+                    usage_known: observed_usage.is_some(),
+                    cache_breakdown_known: observed_usage.is_some() && usage.cached.is_some(),
+                    duration_millis: None,
+                    input_tokens: usage.input,
+                    cached_tokens: usage.cached.unwrap_or(0),
+                    output_tokens: usage.output,
+                    actual_cost_microunits: usage.actual_cost_microunits,
+                },
+            )
+            .map_err(model_frame_store_error)?;
+        self.ordinal_store
+            .close_pending_jev_parent(
+                &owner.run_key,
+                &chunk.model_exchange_id.0,
+                &owner.model_call_id,
+                received_at,
+            )
+            .map_err(model_frame_store_error)
+    }
+
+    fn retain_device_jev_receipts(
+        &self,
+        owner: &ModelExchangeOwner,
+        exchange: &ModelExchangeId,
+        received_at: &Instant,
+    ) -> Result<(), BridgeError> {
         if let Some(directory) = self.device_provider_directory.get() {
             let open = self
                 .outbox
-                .retained_model_open(&chunk.model_exchange_id)
+                .retained_model_open(exchange)
                 .map_err(|_| BridgeError::Unavailable)?
                 .ok_or(BridgeError::Conflict)?;
             let device = winwincode_provider::DeviceProviderStore::open(directory)
@@ -1085,25 +1129,7 @@ impl ExecutionPortModelBridge {
                     .map_err(model_frame_store_error)?;
             }
         }
-        let Some(usage) = primary_model_usage(chunk)? else {
-            // A terminal transport error does not establish zero model usage.
-            return Ok(());
-        };
-        self.ordinal_store
-            .record_performance_completion(
-                &owner.run_key,
-                PerformanceOperationKind::PrimaryModel,
-                &owner.model_call_id,
-                received_at,
-                PerformanceOperationCompletion {
-                    duration_millis: None,
-                    input_tokens: usage.input,
-                    cached_tokens: usage.cached,
-                    output_tokens: usage.output,
-                    actual_cost_microunits: usage.actual_cost_microunits,
-                },
-            )
-            .map_err(model_frame_store_error)
+        Ok(())
     }
 
     fn validate_chunk_authority(
@@ -1235,10 +1261,10 @@ impl ExecutionPortModelBridge {
             .iter()
             .filter_map(|(exchange, owner)| {
                 (owner.thread_id == *thread_id || run_keys.contains(&owner.run_key))
-                    .then_some(exchange.clone())
+                    .then_some((exchange.clone(), owner.clone()))
             })
             .collect::<Vec<_>>();
-        for exchange in exchanges {
+        for (exchange, owner) in exchanges {
             let exchange = ModelExchangeId(exchange);
             self.client
                 .lock()
@@ -1252,6 +1278,19 @@ impl ExecutionPortModelBridge {
                 )
                 .await
                 .map_err(|_| BridgeError::Protocol)?;
+            self.retain_device_jev_receipts(&owner, &exchange, cancelled_at)?;
+            self.ordinal_store
+                .close_unmeasured_primary(&owner.run_key, &owner.model_call_id, cancelled_at)
+                .map_err(model_frame_store_error)?;
+            self.ordinal_store
+                .close_pending_jev_parent(
+                    &owner.run_key,
+                    &exchange.0,
+                    &owner.model_call_id,
+                    cancelled_at,
+                )
+                .map_err(model_frame_store_error)?;
+            self.mark_provider_final(&owner)?;
             self.client
                 .lock()
                 .await
@@ -1428,12 +1467,46 @@ impl ExecutionPortModelBridge {
                 },
             );
         let opened = self.client.lock().await.open(command).await;
-        if opened.is_err() {
+        if let Err(error) = opened {
+            let closed_at = self
+                .authority
+                .observed_now()
+                .map_err(model_failure)?
+                .unwrap_or_else(|| exchange.binding.opened_at.clone());
+            let close = self.ordinal_store.close_unmeasured_primary(
+                &exchange.binding.run_key,
+                &exchange.model_call_id,
+                &closed_at,
+            );
             let _ = self.sink.remove(&exchange.exchange);
             if let Ok(mut exchanges) = self.exchanges.lock() {
                 exchanges.remove(&exchange.exchange.0);
             }
-            return Err(model_failure(BridgeError::Protocol));
+            close.map_err(model_store_failure)?;
+            return Err(match error.code() {
+                ModelPortClientErrorCode::ExpiredLease => ModelPortFailure::new(
+                    "MODEL_AUTHORITY_EXPIRED",
+                    "model call authority has expired",
+                ),
+                ModelPortClientErrorCode::StaleAuthority => {
+                    model_failure(BridgeError::StaleAuthority)
+                }
+                ModelPortClientErrorCode::InvalidInput
+                | ModelPortClientErrorCode::CanonicalMapping => {
+                    model_failure(BridgeError::InvalidPayload)
+                }
+                ModelPortClientErrorCode::UnknownExchange => {
+                    model_failure(BridgeError::UnknownExchange)
+                }
+                ModelPortClientErrorCode::AlreadyTerminal
+                | ModelPortClientErrorCode::ExchangeConflict
+                | ModelPortClientErrorCode::CursorCorrupt => model_failure(BridgeError::Conflict),
+                ModelPortClientErrorCode::CursorStore
+                | ModelPortClientErrorCode::CodexSink
+                | ModelPortClientErrorCode::ExecutionPort => {
+                    model_failure(BridgeError::Unavailable)
+                }
+            });
         }
         let stream = stream::unfold(receiver, |mut receiver| async move {
             receiver.recv().await.map(|item| (item, receiver))
@@ -1967,18 +2040,24 @@ fn primary_model_usage(
         return Ok(None);
     };
     let input = non_negative_metric(usage, "inputTokens", "input_tokens")?;
-    let cached = non_negative_metric(usage, "cachedInputTokens", "cached_input_tokens")?;
+    let cached = usage
+        .get("cachedInputTokens")
+        .or_else(|| usage.get("cached_input_tokens"))
+        .filter(|value| !value.is_null())
+        .map(|_| non_negative_metric(usage, "cachedInputTokens", "cached_input_tokens"))
+        .transpose()?;
     let output = non_negative_metric(usage, "outputTokens", "output_tokens")?;
     let actual_cost_microunits = payload
         .get("actualCostMicros")
         .or_else(|| payload.get("actual_cost_micros"))
+        .filter(|value| !value.is_null())
         .map(|_| non_negative_metric(&payload, "actualCostMicros", "actual_cost_micros"))
         .transpose()?;
-    if cached > input {
+    if cached.is_some_and(|cached| cached > input) {
         return Err(BridgeError::InvalidPayload);
     }
     Ok(Some(PrimaryModelUsage {
-        input: input.saturating_sub(cached),
+        input: input.saturating_sub(cached.unwrap_or(0)),
         cached,
         output,
         actual_cost_microunits,
@@ -2464,6 +2543,64 @@ mod tests {
         bridge
     }
 
+    #[tokio::test]
+    async fn refused_model_open_closes_lifecycle_and_retains_unknown_usage_after_restart() {
+        let root = std::env::temp_dir().join(format!("wwc-refused-open-{}", uuid::Uuid::now_v7()));
+        let store = AdapterStore::open(&root).unwrap();
+        store
+            .register_performance_run("run", ExecutionMode::React, ObserverMode::Off)
+            .unwrap();
+        let lease = authority(&id("cdx", 'A'));
+        let source = SharedAuthoritySource::default();
+        let bridge = Arc::new(installed_loopback_bridge(
+            &store,
+            source.clone(),
+            "refused open",
+            "run",
+            &lease,
+            "kernel",
+        ));
+        source.update_now(&lease.lease.expires_at).unwrap();
+        let request = ModelPortRequest {
+            request_id: "refused-call".into(),
+            payload_json: json!({
+                "requestId":"refused-call", "provider":"loopback", "sessionId":"kernel",
+                "threadId":lease.session_identity.codex_thread_id.0,
+                "request":{"model":"loopback", "input":[]},
+            })
+            .to_string(),
+        };
+        assert!(bridge.model_port().stream(request).await.is_err());
+        assert!(bridge.take_messages().unwrap().is_empty());
+        assert!(bridge.exchanges.lock().unwrap().is_empty());
+        assert_eq!(
+            store
+                .delegated_performance_totals("run")
+                .unwrap()
+                .pending_model_calls,
+            0
+        );
+        let usage = store.retained_outcome_usage("run", 1).unwrap().unwrap();
+        assert_eq!(usage.tokens, None);
+        assert_eq!(usage.cost_microunits, None);
+        drop(bridge);
+        drop(store);
+        let reopened = AdapterStore::open(&root).unwrap();
+        assert_eq!(
+            reopened.retained_outcome_usage("run", 1).unwrap(),
+            Some(usage)
+        );
+        assert_eq!(
+            reopened
+                .delegated_performance_totals("run")
+                .unwrap()
+                .pending_model_calls,
+            0
+        );
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     /// Claims one model call on the durable store.
     fn claim_test_call(
         store: &AdapterStore,
@@ -2628,7 +2765,7 @@ mod tests {
             .expect("decode terminal usage")
             .expect("measured usage");
         assert_eq!(usage.input, 85);
-        assert_eq!(usage.cached, 35);
+        assert_eq!(usage.cached, Some(35));
         assert_eq!(usage.output, 20);
         assert_eq!(usage.actual_cost_microunits, Some(47));
 
@@ -2928,6 +3065,15 @@ mod tests {
                 vec![first, chunk.clone()]
             );
             assert!(bridge.take_messages().unwrap().iter().any(|m| matches!(m, ExecutionPortMessage::ModelAckMessage(ack) if ack.lease == original.lease)));
+            assert!(
+                matches!(
+                    bridge.accept_chunk(&chunk, &now).await,
+                    Ok(ModelChunkDisposition::Duplicate {
+                        confirmed_sequence: 2
+                    })
+                ),
+                "the original terminal must remain idempotent after renewal and live release"
+            );
             drop(stream);
             drop(bridge);
             let restarted = Arc::new(installed_loopback_bridge(
@@ -2939,6 +3085,19 @@ mod tests {
                 "kernel",
             ));
             restarted.authority.update_now(&now).unwrap();
+            assert!(
+                matches!(
+                    restarted.accept_chunk(&chunk, &now).await,
+                    Ok(ModelChunkDisposition::Duplicate {
+                        confirmed_sequence: 2
+                    })
+                ),
+                "restart must acknowledge the original terminal before Core reopens it"
+            );
+            assert!(restarted.take_messages().unwrap().iter().any(
+                |message| matches!(message, ExecutionPortMessage::ModelAckMessage(ack)
+                    if ack.lease == original.lease)
+            ));
             let mut replay = restarted
                 .model_port()
                 .stream(request.clone())
@@ -3767,20 +3926,20 @@ mod tests {
         assert_eq!(report.primary_model_call_count, 2);
         // These terminal frames carry no usage. Transport completion must not
         // turn either accounting row into a measured zero, even after replay.
-        assert_eq!(report.primary_model_wait_ms, 0);
+        assert_eq!(report.primary_model_wait_ms, 120_000);
         assert_eq!(
             store
                 .delegated_performance_totals("child-run")
                 .unwrap()
                 .pending_model_calls,
-            2
+            0
         );
         assert_eq!(
             store.retained_outcome_usage("child-run", 60_000).unwrap(),
-            None
+            Some(winwincode_execution_port::generated::ExecutionOutcomeUsage::unknown(60_000, 0))
         );
-        assert_eq!(report.primary_model_input_tokens, 0);
-        assert_eq!(report.primary_model_cached_tokens, 0);
+        assert_eq!(report.primary_model_input_tokens, None);
+        assert_eq!(report.primary_model_cached_tokens, None);
         assert_eq!(report.primary_model_output_tokens, 0);
         std::fs::remove_dir_all(root).expect("remove child model-call store");
     }

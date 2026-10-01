@@ -8,9 +8,9 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import stat
 import subprocess
 import sys
-import tempfile
 import uuid
 
 FROZEN_REVISION = 'fa9da301e493fb88d48c86cb8954ed46d9cd2ffe'
@@ -27,60 +27,58 @@ def write_record(path, value):
         os.fsync(stream.fileno())
 
 
-def validate_files(arguments, config):
-    if not isinstance(arguments, dict) or set(arguments) != {'files'}:
-        raise ValueError('only files may be supplied')
-    files = arguments['files']
-    if not isinstance(files, dict) or not 1 <= len(files) <= 100:
-        raise ValueError('one through 100 source files required')
-    total = 0
-    for name, content in files.items():
-        if (not isinstance(name, str) or len(name) > 1024
-                or '\\' in name or '\0' in name
-                or any(part in ('', '.', '..') or part.lower() == '.git' for part in name.split('/'))
-                or PurePosixPath(name).suffix not in config['suffixes']
-                or not isinstance(content, str)):
-            raise ValueError('invalid source file')
-        total += len(content.encode('utf8'))
-        if total > MAX_SOURCE:
-            raise ValueError('source exceeds 2 MiB')
-    if config['entry'] not in files:
-        raise ValueError('entry file required')
-    return files
+def validate_checkout_arguments(arguments):
+    if arguments != {}:
+        raise ValueError('this tool reads the trusted Session checkout and accepts no arguments')
 
 
-def source_identity(source, config):
-    """Read-only counterpart of the frozen sandbox.snapshot source manifest."""
+def capture_source(source, config, destination=None):
+    """Bind hashes and execution to the same bounded bytes from opened regular files."""
     source = Path(source).resolve(strict=True)
     if not source.is_dir():
         raise ValueError('source directory missing')
+    if destination is not None:
+        destination = Path(destination)
+        destination.mkdir(mode=0o700)
     files, total = [], 0
     excluded = {'.git', 'node_modules', 'target', 'bin', 'obj', 'build', '.venv', '__pycache__'}
-    for parent, dirs, names in os.walk(source, followlinks=False):
+    for parent, dirs, names, directory_fd in os.fwalk(source, follow_symlinks=False):
         dirs[:] = sorted(d for d in dirs if d not in excluded)
-        if any((Path(parent) / d).is_symlink() for d in dirs):
-            raise ValueError('symlink directory rejected')
+        for name in dirs:
+            if not stat.S_ISDIR(os.stat(name, dir_fd=directory_fd, follow_symlinks=False).st_mode):
+                raise ValueError('symlink directory rejected')
         for name in sorted(names):
-            path = Path(parent) / name
-            if path.is_symlink():
+            if stat.S_ISLNK(os.stat(name, dir_fd=directory_fd, follow_symlinks=False).st_mode):
                 raise ValueError('symlink file rejected')
-            if path.suffix not in config['suffixes']:
+            if Path(name).suffix not in config['suffixes']:
                 continue
-            if not path.is_file():
-                raise ValueError('non-regular source file')
-            size = path.stat().st_size
-            total += size
-            if total > MAX_SOURCE or len(files) >= 100:
-                raise ValueError('source limit exceeded')
-            with path.open('rb') as stream:
-                data = stream.read(MAX_SOURCE + 1)
-            if len(data) != size:
-                raise ValueError('source changed during verification')
-            files.append((path.relative_to(source).as_posix(), hashlib.sha256(data).hexdigest()))
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
+            with os.fdopen(fd, 'rb') as stream:
+                before = os.fstat(stream.fileno())
+                if not stat.S_ISREG(before.st_mode):
+                    raise ValueError('non-regular source file')
+                if total + before.st_size > MAX_SOURCE or len(files) >= 100:
+                    raise ValueError('source limit exceeded')
+                data = stream.read(MAX_SOURCE - total + 1)
+                after = os.fstat(stream.fileno())
+            if len(data) != before.st_size or (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+                raise ValueError('source changed during snapshot')
+            total += len(data)
+            relative = (Path(parent) / name).relative_to(source)
+            files.append((relative.as_posix(), hashlib.sha256(data).hexdigest()))
+            if destination is not None:
+                output = destination / relative
+                output.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                with output.open('xb') as stream:
+                    stream.write(data)
     if config['entry'] not in {name for name, _ in files}:
         raise ValueError('required entry missing')
     digest = hashlib.sha256(json.dumps(sorted(files), separators=(',', ':')).encode()).hexdigest()
     return {'sha256': digest, 'files': len(files), 'bytes': total}
+
+
+def source_identity(source, config):
+    return capture_source(source, config)
 
 
 class PublicSmoke:
@@ -101,8 +99,11 @@ class PublicSmoke:
         self.config = self.sandbox.strict_json((self.root / 'environments/manifest.json').read_text())[task['environment']]
         self.config = dict(self.config, image=image_id)
         self.cases = self.sandbox.strict_json((self.root / 'tasks' / task_id / 'examples.json').read_text())
+        self.source_directory = Path.cwd().resolve(strict=True)
         self.task_id = task_id
         self.evidence = Path(evidence_directory).resolve()
+        if self.evidence == self.source_directory or self.source_directory in self.evidence.parents:
+            raise ValueError('host evidence must be outside the candidate tree')
         self.evidence.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     def verify(self, source_directory):
@@ -145,17 +146,12 @@ class PublicSmoke:
                     'gradeScope': 'public_examples', 'attemptId': attempt.name}
         write_record(attempt / 'started.json', dict(identity, status='started'))
         try:
-            files = validate_files(arguments, self.config)
-            with tempfile.TemporaryDirectory(prefix='wwc-public-input-') as directory:
-                for name, content in files.items():
-                    path = Path(directory) / name
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_text(content, encoding='utf8')
-                source = self.sandbox.snapshot(directory, attempt / 'source', self.config)
+            validate_checkout_arguments(arguments)
+            source = capture_source(self.source_directory, self.config, attempt / 'source')
             write_record(attempt / 'source.json', source)
             platform = subprocess.run(['docker', 'image', 'inspect', self.config['image'],
                                        '--format', '{{.Os}}/{{.Architecture}}'],
-                                      capture_output=True, text=True, check=True, timeout=30).stdout.strip()
+                                      capture_output=True, text=True, check=True).stdout.strip()
             if platform != 'linux/arm64':
                 raise ValueError('frozen grading platform mismatch')
             payload = ''.join(json.dumps(case['input'], ensure_ascii=False) + '\n' for case in self.cases).encode()
@@ -194,11 +190,9 @@ def dispatch(service, request):
         result = {}
     elif method == 'tools/list':
         result = {'tools': [{'name': TOOL,
-                            'description': 'Run the fixed public examples for this task against supplied source files. This is feedback, not a hidden score or candidate verification. No host paths or commands are accepted.',
+                            'description': 'Run the fixed public examples against the trusted Session checkout. Save source files before calling. No arguments are accepted.',
                             'inputSchema': {'type': 'object', 'additionalProperties': False,
-                                            'required': ['files'], 'properties': {'files': {
-                                                'type': 'object', 'minProperties': 1, 'maxProperties': 100,
-                                                'additionalProperties': {'type': 'string'}}}}}]}
+                                            'properties': {}}}]}
     elif method == 'tools/call' and params.get('name') == TOOL and set(params) <= {'name', 'arguments', '_meta'}:
         report = service.call(params.get('arguments'))
         result = {'content': [{'type': 'text', 'text': json.dumps(report, ensure_ascii=False)}],
@@ -221,9 +215,16 @@ def main():
     parser.add_argument('--task-id', required=True)
     parser.add_argument('--image-id', required=True)
     parser.add_argument('--evidence-directory', required=True)
+    parser.add_argument('--run-source', choices=['.'], help='Execute and verify the current trusted checkout')
     parser.add_argument('--verify-source', help='Verify host public-test evidence against this read-only candidate')
     args = parser.parse_args()
     service = PublicSmoke(args.task_root, args.task_id, args.image_id, args.evidence_directory)
+    if args.run_source:
+        report = service.call({})
+        if report['status'] != 'evaluated':
+            raise ValueError('public execution did not complete')
+        print(json.dumps(service.verify(service.source_directory), ensure_ascii=False))
+        return
     if args.verify_source:
         print(json.dumps(service.verify(args.verify_source), ensure_ascii=False))
         return

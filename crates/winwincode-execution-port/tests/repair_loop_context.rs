@@ -288,21 +288,21 @@ fn directly_constructed_budgets_and_counters_obey_canonical_hard_bounds() {
     validate_repair_loop_counters(&sample_counters()).expect("canonical counters validate");
 
     let mut excessive_primary_calls = budget.clone();
-    excessive_primary_calls.max_primary_model_calls = 9;
+    excessive_primary_calls.max_primary_model_calls = Some(9);
     assert_eq!(
         validate_repair_loop_budget(&excessive_primary_calls),
         Err(RepairLoopBoundsError::InvalidBudget)
     );
 
     let mut zero_observer_budget = budget.clone();
-    zero_observer_budget.max_observer_calls = 0;
+    zero_observer_budget.max_observer_calls = Some(0);
     assert_eq!(
         validate_repair_loop_budget(&zero_observer_budget),
         Err(RepairLoopBoundsError::InvalidBudget)
     );
 
     let mut short_wall_time = budget;
-    short_wall_time.max_wall_time_millis = 999;
+    short_wall_time.max_wall_time_millis = Some(999);
     assert_eq!(
         validate_repair_loop_budget(&short_wall_time),
         Err(RepairLoopBoundsError::InvalidBudget)

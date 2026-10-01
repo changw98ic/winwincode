@@ -232,3 +232,11 @@ Client 是否属于某个用户。所有授权、撤销与轮换进入 Audit。
 `scan_failed`、`unavailable`。本地检查详情和绝对路径不进入回执。
 已有 Git 仓库可以直接接入；新目录初始化 Git 必须由用户显式勾选 `confirmGitInit`。
 未收到回执时，前端显示等待或离线状态，并允许用户刷新项目列表确认。
+
+### Worker launch 的持久发布与进程关闭
+
+Server 将 launch grant、Worker credential ledger 和 downlink frame 放在同一事务提交。对应 raw credential 先存入设备私有权限的加密文件并 fsync；SQLite 保留公开身份与摘要。Device ACK 清理下行帧后，永久 publication 记录继续保留。Device 必须收到匹配的 raw credential、确认 Issued grant 未超过消费截止并登记子进程 boot identity，才释放 managed Worker 启动门。
+
+`client.worker.launch_ack` 与 `client.worker.state` 可携带 `processClosure`：`workerLaunchGrantId`、原 `clientInstanceId`、当前 `reportingClientInstanceId`、`occupancyFencingToken`、`neverStarted` 和可空 `processBootDigest`。已登记进程的 terminal closure 来自精确进程启动身份；从未启动的 closure 来自不可变的本地拒绝回执及空进程登记。当前 Device 实例可在重启后重新证明同一关闭事实，每次证明单独保留。Server 校验已鉴权 Device、原授权、当前实例、占用者、lease 与 fencing 后，撤销旧 Worker 凭证、释放绑定并允许明确的 successor lineage。普通拒绝 ACK 保留拒绝原因；只有有效 process closure 才建立退出事实。
+
+Worker credential 的 30 分钟 TTL 表示有效执行活动的空闲期限。已鉴权且被接受的新心跳，在当前执行 lease、绑定、占用、Device 和 fencing 均有效时续租；grant 被消费后，其原消费截止不再限制正常运行。过期或撤销凭证保持失效，恢复由当前 Device 的进程关闭证明和新 launch 完成。

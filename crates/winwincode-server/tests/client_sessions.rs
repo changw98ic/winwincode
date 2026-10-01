@@ -776,6 +776,7 @@ fn spawn_device_responder(
                         };
                         ClientToServerMessage::WorkerLaunchAck(Box::new(
                             ClientWorkerLaunchAckPayload {
+                                process_closure: None,
                                 occupancy: OccupancyCommandContext {
                                     command: CommandContext {
                                         expected_revision: 0,

@@ -25,8 +25,8 @@ export interface FusionProviderCandidate {
 }
 
 export interface FusionBudget {
-  readonly candidateTimeoutMillis: number
-  readonly maxTotalTokens: number
+  readonly candidateTimeoutMillis: number | null
+  readonly maxTotalTokens: number | null
 }
 
 export interface FusionInput {
@@ -59,7 +59,7 @@ export interface FusionProviderRequest {
   readonly model: string
   readonly reasoningEffort?: string | null
   readonly prompt: FusionBlindPrompt
-  readonly maxTotalTokens: number
+  readonly maxTotalTokens: number | null
 }
 
 export interface FusionProviderAnswer {
@@ -128,8 +128,8 @@ export function validateFusionInput(input: FusionInput): FusionPanelErrorCode | 
     return 'Fusion expected output schema must be an object'
   }
   if (
-    input.budget.candidateTimeoutMillis <= 0
-    || input.budget.maxTotalTokens <= 0
+    !validOptionalLimit(input.budget.candidateTimeoutMillis)
+    || !validOptionalLimit(input.budget.maxTotalTokens)
   ) {
     return 'Fusion budget limits must be positive'
   }
@@ -155,6 +155,10 @@ export function validateFusionInput(input: FusionInput): FusionPanelErrorCode | 
     return 'Fusion panels require at least three distinct Providers'
   }
   return null
+}
+
+function validOptionalLimit(value: number | null): boolean {
+  return value === null || (Number.isSafeInteger(value) && (value as number) > 0)
 }
 
 /**

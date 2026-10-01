@@ -245,13 +245,22 @@ fn seed_reservation_for_user(
     seed: u64,
     reservation_user: &str,
 ) -> String {
+    seed_reservation_with_scope(storage, seed, reservation_user, false)
+}
+
+fn seed_reservation_with_scope(
+    storage: &mut SqliteStorage,
+    seed: u64,
+    reservation_user: &str,
+    chat: bool,
+) -> String {
     let scope = ExecutionQueueScope {
         organization_id: OrganizationId(id("org", seed)),
         workspace_id: WorkspaceId(id("wsp", seed)),
         project_id: ProjectId(id("prj", seed)),
         repository_id: RepositoryId(id("rep", seed)),
         product_session_id: ProductSessionId(id("psn", seed)),
-        delivery_id: Some(DeliveryId(id("dlv", seed))),
+        delivery_id: (!chat).then(|| DeliveryId(id("dlv", seed))),
     };
     let pool = WorkerPoolId(id("wpl", seed));
     let limits = ExecutionAdmissionLimits {
@@ -278,7 +287,7 @@ fn seed_reservation_for_user(
             },
             ExecutionAdmissionBoundary::Delivery {
                 organization_id: scope.organization_id.clone(),
-                delivery_id: scope.delivery_id.clone().expect("delivery"),
+                delivery_id: DeliveryId(id("dlv", seed)),
             },
             ExecutionAdmissionBoundary::ProductSession {
                 organization_id: scope.organization_id.clone(),
@@ -991,4 +1000,1044 @@ fn a_non_canonical_command_is_rejected_before_any_durable_write() {
             .expect("snapshot")
             .is_none()
     );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn credential_renewal_preserves_current_launch_authority_and_audit_across_workers() {
+    use rusqlite::params;
+    use winwincode_execution_port::generated::WorkerHeartbeatMessage;
+    use winwincode_storage::{CredentialAuditAction, CredentialIssuance, CredentialRotation};
+    let root = temporary_directory("credential-renewal");
+    let mut storage = SqliteStorage::open(&root).unwrap();
+    storage.execution_registry().unwrap();
+    for seed in [20000, 22000] {
+        let (fixture, grant, job) = seed_bound_job(&mut storage, seed);
+        storage
+            .worker_launch_grant_ledger()
+            .unwrap()
+            .settle_launch_ack(
+                &LaunchAckSettlement::try_new(
+                    &grant.worker_launch_grant_id,
+                    &fixture.lease_id,
+                    fixture.fencing_token,
+                    &grant.worker_session_id,
+                    &grant.worker_id,
+                    &grant.worker_instance_id,
+                    true,
+                    None,
+                )
+                .unwrap(),
+                &instant(T2),
+            )
+            .unwrap();
+        let record = storage
+            .worker_session_credential_ledger()
+            .unwrap()
+            .issue(
+                &CredentialIssuance::try_new(
+                    id("wcred", seed),
+                    &grant.worker_session_id,
+                    &grant.worker_id,
+                    &grant.worker_instance_id,
+                    &grant.worker_launch_grant_id,
+                    DIGEST,
+                    instant("2026-01-01T00:30:00.000Z"),
+                )
+                .unwrap(),
+                &instant(T0),
+            )
+            .unwrap();
+        let heartbeat: WorkerHeartbeatMessage = serde_json::from_value(serde_json::json!({
+            "schemaVersion":"winwincode/v1", "kind":"worker.heartbeat",
+            "messageId":id("xmsg",7), "sentAt":T2, "observedAt":T2,
+            "workerId":grant.worker_id, "workerInstanceId":grant.worker_instance_id,
+            "heartbeatSequence":7, "capacity":{"availableSlots":0,"runningJobs":1},
+            "activeLeases":[{"jobId":job,"leaseId":id("lease",seed),"attempt":1,
+                "fencingToken":"1", "expiresAt":GRANT_EXPIRES,"lastEventSequence":0}]
+        }))
+        .unwrap();
+        let db = rusqlite::Connection::open(storage.database_path()).unwrap();
+        db.execute("UPDATE client_occupancy_leases SET idle_expires_at=?1, state='draining' WHERE occupancy_lease_id=?2",
+            params![T1,fixture.lease_id]).unwrap();
+        db.execute("INSERT INTO execution_workers VALUES (?1,?2,?3,'auth','v1','{}','{}','digest','local','healthy',?3,7,1,1,0)",
+            params![grant.worker_id,grant.worker_instance_id,T0]).unwrap();
+        db.execute(
+            "INSERT INTO execution_heartbeats VALUES (?1,?2,7,'digest','{}')",
+            params![grant.worker_id, grant.worker_instance_id],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO execution_leases VALUES (?1,?2,'digest',?3,?4,1,'1',?5,?6)",
+            params![
+                job,
+                id("lease", seed),
+                grant.worker_id,
+                grant.worker_instance_id,
+                T0,
+                GRANT_EXPIRES
+            ],
+        )
+        .unwrap();
+        // Dispatch session is deliberately different from the launch credential session.
+        db.execute("INSERT INTO execution_dispatch_authorities VALUES (?1,?2,'digest',?3,?4,?5,1,'1',?6,?7,?8,?6)",
+            params![job,id("lease",seed),grant.worker_id,grant.worker_instance_id,id("wsn",seed+900),T0,GRANT_EXPIRES,id("req",seed+901)]).unwrap();
+        let lease = &heartbeat.active_leases[0];
+        let renewal_time = instant("2026-01-01T00:20:00.000Z");
+        let expiry = instant("2026-01-01T00:50:00.000Z");
+        // A same-Worker lease alone is insufficient without trusted launch reservation facts.
+        assert!(
+            storage
+                .worker_session_credential_ledger()
+                .unwrap()
+                .renew_after_accepted_heartbeat(&record, &heartbeat, lease, &expiry, &renewal_time)
+                .unwrap()
+                .is_none()
+        );
+        storage
+            .device_execution_binding_ledger()
+            .unwrap()
+            .attach_facts(
+                &DeviceExecutionFactsAttachment::try_new(
+                    id("req", seed + 902),
+                    &job,
+                    &grant.worker_launch_grant_id,
+                )
+                .unwrap(),
+                &instant(T2),
+            )
+            .unwrap();
+        let mut wrong_fence = lease.clone();
+        wrong_fence.fencing_token.0 = "2".into();
+        assert!(
+            storage
+                .worker_session_credential_ledger()
+                .unwrap()
+                .renew_after_accepted_heartbeat(
+                    &record,
+                    &heartbeat,
+                    &wrong_fence,
+                    &expiry,
+                    &renewal_time
+                )
+                .unwrap()
+                .is_none()
+        );
+        let renewed = storage
+            .worker_session_credential_ledger()
+            .unwrap()
+            .renew_after_accepted_heartbeat(&record, &heartbeat, lease, &expiry, &renewal_time)
+            .unwrap()
+            .unwrap();
+        assert_eq!(renewed.revision, 2);
+        assert!(
+            storage
+                .worker_session_credential_ledger()
+                .unwrap()
+                .renew_after_accepted_heartbeat(&record, &heartbeat, lease, &expiry, &renewal_time)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            storage
+                .worker_session_credential_ledger()
+                .unwrap()
+                .audit_trail(&record.worker_session_credential_id)
+                .unwrap()
+                .iter()
+                .filter(|entry| entry.action == CredentialAuditAction::Renewed)
+                .count(),
+            1
+        );
+        // Rotation changes the active digest, while the consumed grant retains its initial digest.
+        let rotated = storage
+            .worker_session_credential_ledger()
+            .unwrap()
+            .rotate(
+                &CredentialRotation::try_new(
+                    &grant.worker_session_id,
+                    id("wcred", seed + 903),
+                    format!("sha256:{:064}", 1),
+                    expiry.clone(),
+                    None,
+                )
+                .unwrap(),
+                &renewal_time,
+            )
+            .unwrap()
+            .issued;
+        assert!(
+            storage
+                .worker_session_credential_ledger()
+                .unwrap()
+                .renew_after_accepted_heartbeat(
+                    &renewed,
+                    &heartbeat,
+                    lease,
+                    &instant(GRANT_EXPIRES),
+                    &renewal_time
+                )
+                .unwrap()
+                .is_none()
+        );
+        let rotated_renewed = storage
+            .worker_session_credential_ledger()
+            .unwrap()
+            .renew_after_accepted_heartbeat(
+                &rotated,
+                &heartbeat,
+                lease,
+                &instant(GRANT_EXPIRES),
+                &renewal_time,
+            )
+            .unwrap()
+            .unwrap();
+        storage
+            .worker_session_credential_ledger()
+            .unwrap()
+            .revoke_for_session(
+                &grant.worker_session_id,
+                &fixture.holder,
+                None,
+                &renewal_time,
+            )
+            .unwrap();
+        assert!(
+            storage
+                .worker_session_credential_ledger()
+                .unwrap()
+                .renew_after_accepted_heartbeat(
+                    &rotated_renewed,
+                    &heartbeat,
+                    lease,
+                    &instant("2026-01-01T01:10:00.000Z"),
+                    &renewal_time
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            storage
+                .worker_session_credential_ledger()
+                .unwrap()
+                .renew_after_accepted_heartbeat(
+                    &rotated_renewed,
+                    &heartbeat,
+                    lease,
+                    &instant("2026-01-01T01:10:00.000Z"),
+                    &instant(GRANT_EXPIRES)
+                )
+                .unwrap()
+                .is_none()
+        );
+    }
+    drop(storage);
+    let mut reopened = SqliteStorage::open(&root).unwrap();
+    let audits = reopened
+        .worker_session_credential_ledger()
+        .unwrap()
+        .audit_trail(&id("wcred", 20000))
+        .unwrap();
+    assert_eq!(
+        audits
+            .iter()
+            .filter(|entry| entry.action == CredentialAuditAction::Renewed)
+            .count(),
+        1
+    );
+    drop(reopened);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn trusted_exit_replaces_a_running_attempt_in_the_same_server_and_retains_history() {
+    exercise_trusted_recovery(false, false);
+}
+
+#[test]
+fn trusted_exit_replaces_an_unclaimed_route_without_inventing_a_lease() {
+    exercise_trusted_recovery(true, false);
+}
+
+#[test]
+fn trusted_exit_recovers_active_chat_without_changing_the_original_job() {
+    exercise_trusted_recovery(false, true);
+}
+
+#[test]
+fn trusted_exit_recovers_queued_chat_without_manufacturing_a_lease() {
+    exercise_trusted_recovery(true, true);
+}
+
+#[allow(clippy::too_many_lines)]
+fn exercise_trusted_recovery(replace_queued: bool, chat: bool) {
+    use winwincode_domain::{ExecutionMessageId, ExecutionSequence, WorkerId, WorkerInstanceId};
+    use winwincode_storage::{
+        EXECUTION_PROTOCOL_VERSION, ExecutionJobSubmission, RepositorySchedulerClaimRequest,
+        RepositorySchedulerScope, WorkerAuthenticationIdentity, WorkerHeartbeatRequest,
+        WorkerPlatform, WorkerRegistrationRequest,
+    };
+    let directory = temporary_directory("trusted-replacement");
+    let mut storage = SqliteStorage::open(&directory).unwrap();
+    let seed = 8000;
+    let fixture = seed_fixture(&mut storage, seed);
+    let job_id = ExecutionJobId(seed_reservation_with_scope(
+        &mut storage,
+        seed + 300,
+        &fixture.holder,
+        chat,
+    ));
+    let issuance = LaunchGrantIssuance::try_new(
+        id("wlg", seed + 100),
+        &fixture.node,
+        &fixture.instance,
+        &fixture.holder,
+        &fixture.lease_id,
+        fixture.fencing_token,
+        &fixture.binding_id,
+        id("wsn", seed + 100),
+        id("wrk", seed + 100),
+        id("wki", seed + 100),
+        DIGEST,
+        Some(id("psn", seed + 300)),
+        (!chat).then(|| WorkRunId(id("wrn", seed + 100))),
+        instant(GRANT_EXPIRES),
+    )
+    .unwrap();
+    let mut initial = storage
+        .worker_launch_grant_ledger()
+        .unwrap()
+        .issue(&issuance, &instant(T1))
+        .unwrap();
+    let consume = |storage: &mut SqliteStorage, grant: &WorkerLaunchGrantRecord| {
+        let ack = LaunchAckSettlement::try_new(
+            &grant.worker_launch_grant_id,
+            &grant.occupancy_lease_id,
+            grant.occupancy_fencing_token,
+            &grant.worker_session_id,
+            &grant.worker_id,
+            &grant.worker_instance_id,
+            true,
+            None,
+        )
+        .unwrap();
+        storage
+            .worker_launch_grant_ledger()
+            .unwrap()
+            .settle_launch_ack(&ack, &instant(T2))
+            .unwrap();
+        storage
+            .device_execution_binding_ledger()
+            .unwrap()
+            .bind(
+                &bind_command(
+                    9000 + grant.worker_instance_id[4..].parse::<u64>().unwrap(),
+                    grant,
+                ),
+                &instant(T2),
+            )
+            .unwrap();
+    };
+    consume(&mut storage, &initial);
+    storage
+        .device_execution_binding_ledger()
+        .unwrap()
+        .attach_facts(
+            &DeviceExecutionFactsAttachment::try_new_with_role(
+                id("req", 9000),
+                &job_id.0,
+                &initial.worker_launch_grant_id,
+                (!chat).then(|| "executor".into()),
+            )
+            .unwrap(),
+            &instant(T2),
+        )
+        .unwrap();
+    let reservation = storage
+        .execution_admission()
+        .unwrap()
+        .load_reservation_by_job(&job_id)
+        .unwrap()
+        .unwrap();
+    storage.execution_queue().unwrap().submit(&ExecutionJobSubmission {
+        scope:reservation.scope.clone(),job_id:job_id.clone(),request_id:RequestId(id("req",9001)),payload_digest:winwincode_domain::Sha256Digest(format!("sha256:{}","a".repeat(64))),
+        dispatch_payload:serde_json::to_vec(&serde_json::json!({
+            "jobId":job_id,"attempt":1,"executionProfile":"executor","goal":"trusted recovery fixture",
+            "payloadDigest":format!("sha256:{}","a".repeat(64)),
+            "limits":{"deadlineAt":null,"maxRuntimeSeconds":null,"maxArtifactBytes":0},
+            "workspace":{"repositoryId":reservation.scope.repository_id,"checkoutRevision":"main","writeMode":"read-only"},
+            "scope":if chat {serde_json::json!({"kind":"product-session","productSessionId":reservation.scope.product_session_id})}
+                else {serde_json::json!({"kind":"work-run","workRunId":initial.work_run_id,"productSessionId":reservation.scope.product_session_id,
+                    "attempt":1,"workContractId":id("wct",seed),"workContractRevision":1,"workItemId":id("wit",seed),"workItemRevision":1})}
+        })).unwrap(),attempt:1,dependencies:vec![],work_run_id:initial.work_run_id.clone(),submitted_at:instant(T2),
+    }).unwrap();
+    let register = |storage: &mut SqliteStorage, grant: &WorkerLaunchGrantRecord, n: u64| {
+        storage
+            .execution_registry()
+            .unwrap()
+            .register_worker(&WorkerRegistrationRequest {
+                authentication_identity: WorkerAuthenticationIdentity::LocalEmbedded {
+                    control_plane_principal: "trusted-native-fixture".into(),
+                },
+                protocol_version: EXECUTION_PROTOCOL_VERSION.into(),
+                platform: WorkerPlatform::Aarch64AppleDarwin,
+                capabilities: vec!["codex".into()],
+                capability_digest: winwincode_domain::Sha256Digest(format!(
+                    "sha256:{}",
+                    "b".repeat(64)
+                )),
+                security_zone: "local".into(),
+                max_slots: 4,
+                message_id: ExecutionMessageId(id("xmsg", n)),
+                request_id: RequestId(id("req", n)),
+                sent_at: instant(T2),
+                started_at: instant(T1),
+                worker_id: WorkerId(grant.worker_id.clone()),
+                worker_instance_id: WorkerInstanceId(grant.worker_instance_id.clone()),
+            })
+            .unwrap();
+        storage
+            .execution_registry()
+            .unwrap()
+            .record_heartbeat(&WorkerHeartbeatRequest {
+                active_leases: vec![],
+                available_slots: 4,
+                heartbeat_sequence: ExecutionSequence(1),
+                max_slots: 4,
+                running_slots: 0,
+                message_id: ExecutionMessageId(id("xmsg", n + 1)),
+                observed_at: instant(T2),
+                sent_at: instant(T2),
+                worker_id: WorkerId(grant.worker_id.clone()),
+                worker_instance_id: WorkerInstanceId(grant.worker_instance_id.clone()),
+            })
+            .unwrap();
+    };
+    let scope = RepositorySchedulerScope {
+        organization_id: reservation.scope.organization_id.clone(),
+        workspace_id: reservation.scope.workspace_id.clone(),
+        project_id: reservation.scope.project_id.clone(),
+        repository_id: reservation.scope.repository_id.clone(),
+    };
+    let claim = |grant: &WorkerLaunchGrantRecord, n: u64, issued: &str, expires: &str| {
+        RepositorySchedulerClaimRequest {
+            scope: scope.clone(),
+            request_id: RequestId(id("req", n)),
+            scheduler_generation: "same-server-process".into(),
+            worker_id: WorkerId(grant.worker_id.clone()),
+            worker_instance_id: WorkerInstanceId(grant.worker_instance_id.clone()),
+            issued_at: instant(issued),
+            expires_at: instant(expires),
+        }
+    };
+    if replace_queued {
+        assert!(
+            storage
+                .worker_launch_grant_ledger()
+                .unwrap()
+                .observe_trusted_exit(
+                    &fixture.node,
+                    &initial.worker_session_id,
+                    &initial.worker_instance_id,
+                    &fixture.lease_id,
+                    &instant(T2)
+                )
+                .unwrap()
+        );
+        let old = storage
+            .device_execution_binding_ledger()
+            .unwrap()
+            .snapshot(&initial.worker_session_id)
+            .unwrap()
+            .unwrap();
+        storage
+            .device_execution_binding_ledger()
+            .unwrap()
+            .release(
+                &DeviceExecutionBindingRelease::try_new(
+                    &initial.worker_session_id,
+                    id("req", 9010),
+                    old.revision,
+                    instant(T2),
+                )
+                .unwrap(),
+                &instant(T2),
+            )
+            .unwrap();
+        let route = LaunchGrantIssuance::try_new(
+            id("wlg", 8101),
+            &fixture.node,
+            &fixture.instance,
+            &fixture.holder,
+            &fixture.lease_id,
+            fixture.fencing_token,
+            &fixture.binding_id,
+            id("wsn", 8101),
+            &initial.worker_id,
+            id("wki", 8101),
+            DIGEST,
+            initial.product_session_id.clone(),
+            initial.work_run_id.clone(),
+            instant(GRANT_EXPIRES),
+        )
+        .unwrap();
+        let grant = storage
+            .worker_launch_grant_ledger()
+            .unwrap()
+            .issue_replacement(&route, Some(&initial.worker_launch_grant_id), &instant(T2))
+            .unwrap();
+        consume(&mut storage, &grant);
+        winwincode_storage::stage_device_execution_recovery(
+            &mut storage,
+            &job_id,
+            &grant.worker_launch_grant_id,
+            if chat { None } else { Some("executor") },
+            &instant(T2),
+        )
+        .unwrap();
+        assert!(
+            storage
+                .execution_registry()
+                .unwrap()
+                .load_lease(&job_id)
+                .unwrap()
+                .is_none()
+        );
+        assert!(!storage.execution_has_unknown_predecessor(&job_id).unwrap());
+        initial = grant;
+    }
+    register(&mut storage, &initial, 9100);
+    let first = storage
+        .repository_scheduler()
+        .unwrap()
+        .claim_next(&claim(&initial, 9200, T2, T3))
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.lease.attempt, 1);
+    let mut predecessor = initial.clone();
+    for (n, at, expires) in [
+        (1, "2026-01-01T00:03:01.000Z", "2026-01-01T00:04:00.000Z"),
+        (2, "2026-01-01T00:04:01.000Z", "2026-01-01T00:05:00.000Z"),
+    ] {
+        let current = storage
+            .device_execution_binding_ledger()
+            .unwrap()
+            .facts(&job_id.0)
+            .unwrap()
+            .unwrap();
+        assert!(
+            storage
+                .worker_launch_grant_ledger()
+                .unwrap()
+                .observe_trusted_exit(
+                    &fixture.node,
+                    &predecessor.worker_session_id,
+                    &predecessor.worker_instance_id,
+                    &fixture.lease_id,
+                    &instant(T2)
+                )
+                .unwrap()
+        );
+        let old_binding = storage
+            .device_execution_binding_ledger()
+            .unwrap()
+            .snapshot(&predecessor.worker_session_id)
+            .unwrap()
+            .unwrap();
+        storage
+            .device_execution_binding_ledger()
+            .unwrap()
+            .release(
+                &DeviceExecutionBindingRelease::try_new(
+                    &predecessor.worker_session_id,
+                    id("req", 9300 + n),
+                    old_binding.revision,
+                    instant(T2),
+                )
+                .unwrap(),
+                &instant(T2),
+            )
+            .unwrap();
+        let successor_issuance = LaunchGrantIssuance::try_new(
+            id("wlg", 8200 + n),
+            &fixture.node,
+            &fixture.instance,
+            &fixture.holder,
+            &fixture.lease_id,
+            fixture.fencing_token,
+            &fixture.binding_id,
+            id("wsn", 8200 + n),
+            &initial.worker_id,
+            id("wki", 8200 + n),
+            DIGEST,
+            initial.product_session_id.clone(),
+            current.work_run_id.clone().map(WorkRunId),
+            instant(GRANT_EXPIRES),
+        )
+        .unwrap();
+        let successor = storage
+            .worker_launch_grant_ledger()
+            .unwrap()
+            .issue_replacement(
+                &successor_issuance,
+                Some(&predecessor.worker_launch_grant_id),
+                &instant(T2),
+            )
+            .unwrap();
+        consume(&mut storage, &successor);
+        register(&mut storage, &successor, 9400 + n * 10);
+        assert!(
+            storage
+                .repository_scheduler()
+                .unwrap()
+                .claim_next(&claim(&successor, 9500 + n, T2, expires))
+                .unwrap()
+                .is_none(),
+            "must not replace without ready intent"
+        );
+        winwincode_storage::stage_device_execution_recovery(
+            &mut storage,
+            &job_id,
+            &successor.worker_launch_grant_id,
+            if chat { None } else { Some("executor") },
+            &instant(T2),
+        )
+        .unwrap();
+        assert!(
+            storage
+                .repository_scheduler()
+                .unwrap()
+                .claim_next(&claim(&successor, 9600 + n, T2, expires))
+                .unwrap()
+                .is_none(),
+            "old lease remains fenced until expiry"
+        );
+        drop(storage);
+        storage = SqliteStorage::open(&directory).unwrap();
+        let next = storage
+            .repository_scheduler()
+            .unwrap()
+            .claim_next(&claim(&successor, 9700 + n, at, expires))
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.lease.attempt, 1 + n);
+        let facts = storage
+            .device_execution_binding_ledger()
+            .unwrap()
+            .facts(&job_id.0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            facts.work_run_id,
+            next.job.work_run_id.as_ref().map(|id| id.0.clone())
+        );
+        assert_eq!(facts.worker_session_id, successor.worker_session_id);
+        if chat {
+            assert!(facts.role.is_none());
+            assert!(facts.work_run_id.is_none());
+        } else {
+            let old_projection = ProductStateStorage::load_device_binding_facts_for_work_run(
+                &storage,
+                &job_id,
+                &WorkRunId(current.work_run_id.unwrap()),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                old_projection.worker_instance_id,
+                predecessor.worker_instance_id
+            );
+        }
+
+        assert!(storage.execution_has_unknown_predecessor(&job_id).unwrap());
+        predecessor = successor;
+    }
+    assert_eq!(
+        storage
+            .execution_admission()
+            .unwrap()
+            .load_reservation_by_job(&job_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        winwincode_storage::ExecutionReservationState::Queued,
+        "replacement keeps execution admission open"
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn launch_bundle_rolls_back_all_public_facts_and_retains_publication_after_ack() {
+    let directory = temporary_directory("launch-bundle");
+    let mut storage = SqliteStorage::open(&directory).unwrap();
+    let seed = 30000;
+    let f = seed_fixture(&mut storage, seed);
+    let issuance = LaunchGrantIssuance::try_new(
+        id("wlg", seed),
+        &f.node,
+        &f.instance,
+        &f.holder,
+        &f.lease_id,
+        f.fencing_token,
+        &f.binding_id,
+        id("wsn", seed),
+        id("wrk", seed),
+        id("wki", seed),
+        DIGEST,
+        Some(id("psn", seed)),
+        None,
+        instant(GRANT_EXPIRES),
+    )
+    .unwrap();
+    let credential = winwincode_storage::CredentialIssuance::try_new(
+        id("wcred", seed),
+        id("wsn", seed),
+        id("wrk", seed),
+        id("wki", seed),
+        id("wlg", seed),
+        DIGEST,
+        instant(GRANT_EXPIRES),
+    )
+    .unwrap();
+    let frame = serde_json::json!({"schemaVersion":"winwincode/v1","kind":"client.worker.launch","messageId":id("msg",seed),"clientNodeId":f.node,"clientInstanceId":f.instance,"sequence":1,"occurredAt":T1,
+        "payload":{"expectedRevision":1,"idempotencyKey":"launch-bundle","occupancyLeaseId":f.lease_id,"occupancyFencingToken":f.fencing_token.to_string(),"launchGrant":{
+        "workerLaunchGrantId":id("wlg",seed),"clientNodeId":f.node,"clientInstanceId":f.instance,"occupancyLeaseId":f.lease_id,"occupancyFencingToken":f.fencing_token.to_string(),
+        "repositoryBindingId":f.binding_id,"productSessionId":id("psn",seed),"workerSessionId":id("wsn",seed),"workerId":id("wrk",seed),"workerInstanceId":id("wki",seed),"credentialDigest":DIGEST,"expiresAt":GRANT_EXPIRES,"state":"issued","revision":1}}});
+    for pointer in [
+        "/payload/occupancyFencingToken",
+        "/payload/launchGrant/occupancyFencingToken",
+    ] {
+        let mut numeric = frame.clone();
+        *numeric.pointer_mut(pointer).unwrap() = serde_json::json!(f.fencing_token);
+        let numeric = winwincode_storage::ClientDownlinkAppend::try_new(
+            &f.node,
+            id("msg", seed),
+            1,
+            numeric.to_string(),
+        )
+        .unwrap();
+        assert!(
+            winwincode_storage::issue_worker_launch_bundle(
+                &mut storage,
+                &issuance,
+                None,
+                &credential,
+                &numeric,
+                &instant(T1),
+            )
+            .is_err(),
+            "fencing tokens must use the formal string encoding"
+        );
+    }
+    let mut invalid_frame = frame.clone();
+    invalid_frame["sequence"] = serde_json::json!(2);
+    let invalid = winwincode_storage::ClientDownlinkAppend::try_new(
+        &f.node,
+        id("msg", seed),
+        2,
+        invalid_frame.to_string(),
+    )
+    .unwrap();
+    assert!(
+        winwincode_storage::issue_worker_launch_bundle(
+            &mut storage,
+            &issuance,
+            None,
+            &credential,
+            &invalid,
+            &instant(T1)
+        )
+        .is_err()
+    );
+    assert!(
+        storage
+            .worker_launch_grant_ledger()
+            .unwrap()
+            .snapshot(&id("wlg", seed))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        storage
+            .worker_session_credential_ledger()
+            .unwrap()
+            .active_for_session(&id("wsn", seed))
+            .unwrap()
+            .is_none()
+    );
+    {
+        let db = rusqlite::Connection::open(storage.database_path()).unwrap();
+        for table in [
+            "worker_launch_grant_audit",
+            "worker_session_credentials_audit",
+            "client_downlink_frames",
+        ] {
+            assert_eq!(
+                db.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0,
+                "failed final append rolls back every ledger"
+            );
+        }
+        db.execute(
+            "UPDATE client_nodes SET current_instance_id=?2 WHERE client_node_id=?1",
+            rusqlite::params![f.node, id("cix", seed + 100)],
+        )
+        .unwrap();
+    }
+    let stale = winwincode_storage::ClientDownlinkAppend::try_new(
+        &f.node,
+        id("msg", seed),
+        1,
+        frame.to_string(),
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            winwincode_storage::issue_worker_launch_bundle(
+                &mut storage,
+                &issuance,
+                None,
+                &credential,
+                &stale,
+                &instant(T1)
+            ),
+            Err(winwincode_storage::WorkerLaunchBundleError::Launch(_))
+        ),
+        "Device reboot CAS is checked inside bundle transaction"
+    );
+    assert!(
+        storage
+            .worker_launch_grant_ledger()
+            .unwrap()
+            .snapshot(&id("wlg", seed))
+            .unwrap()
+            .is_none()
+    );
+    rusqlite::Connection::open(storage.database_path())
+        .unwrap()
+        .execute(
+            "UPDATE client_nodes SET current_instance_id=?2 WHERE client_node_id=?1",
+            rusqlite::params![f.node, f.instance],
+        )
+        .unwrap();
+    let valid = winwincode_storage::ClientDownlinkAppend::try_new(
+        &f.node,
+        id("msg", seed),
+        1,
+        frame.to_string(),
+    )
+    .unwrap();
+    winwincode_storage::issue_worker_launch_bundle(
+        &mut storage,
+        &issuance,
+        None,
+        &credential,
+        &valid,
+        &instant(T1),
+    )
+    .unwrap();
+    storage
+        .client_downlink_outbox()
+        .unwrap()
+        .retain_through(&f.node, 1)
+        .unwrap();
+    drop(storage);
+    let reopened = SqliteStorage::open(&directory).unwrap();
+    let connection = rusqlite::Connection::open(reopened.database_path()).unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM worker_launch_publications WHERE grant_id=?1",
+                [id("wlg", seed)],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
+    drop(connection);
+    drop(reopened);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn process_closure_is_exact_and_survives_multiple_device_reboots() {
+    use winwincode_storage::DeviceLaunchProcessClosure;
+    let directory = temporary_directory("closure-reboots");
+    let mut storage = SqliteStorage::open(&directory).unwrap();
+    let seed = 31000;
+    let mut f = seed_fixture(&mut storage, seed);
+    let grant = issue_launch_grant(&mut storage, seed, &f);
+    let ack = LaunchAckSettlement::try_new(
+        &grant.worker_launch_grant_id,
+        &grant.occupancy_lease_id,
+        grant.occupancy_fencing_token,
+        &grant.worker_session_id,
+        &grant.worker_id,
+        &grant.worker_instance_id,
+        true,
+        None,
+    )
+    .unwrap();
+    assert!(
+        storage
+            .worker_launch_grant_ledger()
+            .unwrap()
+            .settle_device_launch_ack(&id("cnd", seed + 999), &ack, &instant(T2))
+            .is_err()
+    );
+    assert_eq!(
+        storage
+            .worker_launch_grant_ledger()
+            .unwrap()
+            .snapshot(&grant.worker_launch_grant_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        winwincode_storage::WorkerLaunchGrantState::Issued
+    );
+    storage
+        .worker_launch_grant_ledger()
+        .unwrap()
+        .settle_device_launch_ack(&f.node, &ack, &instant(T2))
+        .unwrap();
+    let mut closure = DeviceLaunchProcessClosure {
+        worker_launch_grant_id: grant.worker_launch_grant_id.clone(),
+        client_instance_id: f.instance.clone(),
+        reporting_client_instance_id: id("cix", seed + 20),
+        occupancy_fencing_token: f.fencing_token,
+        never_started: true,
+        process_boot_digest: None,
+    };
+    let update = |storage: &SqliteStorage, instance: &str| {
+        let db = rusqlite::Connection::open(storage.database_path()).unwrap();
+        db.execute(
+            "UPDATE client_nodes SET current_instance_id=?2 WHERE client_node_id=?1",
+            rusqlite::params![f.node, instance],
+        )
+        .unwrap();
+    };
+    update(&storage, &closure.reporting_client_instance_id);
+    assert!(
+        !storage
+            .worker_launch_grant_ledger()
+            .unwrap()
+            .observe_device_process_closure(
+                &f.node,
+                &grant.worker_session_id,
+                &grant.worker_instance_id,
+                &f.lease_id,
+                &closure,
+                &instant(T2)
+            )
+            .unwrap(),
+        "consumed worker cannot be declared never started"
+    );
+    closure.never_started = false;
+    closure.process_boot_digest = Some(format!("sha256:{}", "a".repeat(64)));
+    let mut wrong = closure.clone();
+    wrong.occupancy_fencing_token += 1;
+    assert!(
+        !storage
+            .worker_launch_grant_ledger()
+            .unwrap()
+            .observe_device_process_closure(
+                &f.node,
+                &grant.worker_session_id,
+                &grant.worker_instance_id,
+                &f.lease_id,
+                &wrong,
+                &instant(T2)
+            )
+            .unwrap()
+    );
+    assert!(
+        storage
+            .worker_launch_grant_ledger()
+            .unwrap()
+            .observe_device_process_closure(
+                &f.node,
+                &grant.worker_session_id,
+                &grant.worker_instance_id,
+                &f.lease_id,
+                &closure,
+                &instant(T2)
+            )
+            .unwrap()
+    );
+    drop(storage);
+    storage = SqliteStorage::open(&directory).unwrap();
+    closure.reporting_client_instance_id = id("cix", seed + 21);
+    update(&storage, &closure.reporting_client_instance_id);
+    assert!(
+        storage
+            .worker_launch_grant_ledger()
+            .unwrap()
+            .observe_device_process_closure(
+                &f.node,
+                &grant.worker_session_id,
+                &grant.worker_instance_id,
+                &f.lease_id,
+                &closure,
+                &instant(T3)
+            )
+            .unwrap()
+    );
+    assert!(
+        storage
+            .worker_launch_grant_ledger()
+            .unwrap()
+            .closed_for_device_instance(
+                &grant.worker_launch_grant_id,
+                &closure.reporting_client_instance_id
+            )
+            .unwrap()
+    );
+    let mut changed = closure.clone();
+    changed.process_boot_digest = Some(format!("sha256:{}", "b".repeat(64)));
+    assert!(
+        storage
+            .worker_launch_grant_ledger()
+            .unwrap()
+            .observe_device_process_closure(
+                &f.node,
+                &grant.worker_session_id,
+                &grant.worker_instance_id,
+                &f.lease_id,
+                &changed,
+                &instant(T3)
+            )
+            .is_err()
+    );
+    f.instance = closure.reporting_client_instance_id;
+    let successor = LaunchGrantIssuance::try_new(
+        id("wlg", seed + 1),
+        &f.node,
+        &f.instance,
+        &f.holder,
+        &f.lease_id,
+        f.fencing_token,
+        &f.binding_id,
+        id("wsn", seed + 1),
+        &grant.worker_id,
+        id("wki", seed + 1),
+        DIGEST,
+        grant.product_session_id.clone(),
+        grant.work_run_id.clone(),
+        instant(GRANT_EXPIRES),
+    )
+    .unwrap();
+    storage
+        .worker_launch_grant_ledger()
+        .unwrap()
+        .issue_replacement(
+            &successor,
+            Some(&grant.worker_launch_grant_id),
+            &instant(T3),
+        )
+        .unwrap();
+    drop(storage);
+    std::fs::remove_dir_all(directory).unwrap();
 }

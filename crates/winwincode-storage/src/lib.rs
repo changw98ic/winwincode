@@ -23,6 +23,8 @@ mod client_registry;
 mod control_plane_instances;
 mod delivery;
 mod device_execution_binding;
+mod device_execution_recovery;
+pub use device_execution_recovery::stage_device_execution_recovery;
 mod device_scheduler;
 mod execution_admission;
 mod execution_queue;
@@ -2218,6 +2220,17 @@ pub trait ProductStateStorage: Send {
         Ok(None)
     }
 
+    /// Loads the immutable Device route of a particular historical `WorkRun`.
+    /// # Errors
+    /// Returns corrupt lineage or adapter failures.
+    fn load_device_binding_facts_for_work_run(
+        &self,
+        job_id: &ExecutionJobId,
+        _run: &WorkRunId,
+    ) -> Result<Option<WorkRunDeviceBindingFacts>, StorageError> {
+        self.load_work_run_device_binding_facts(job_id)
+    }
+
     /// Loads the one active scheduler row of a Delivery stage run (`FLOW-100.5`).
     ///
     /// Local production storage overrides this seam so the `StrongFlow` device
@@ -2534,6 +2547,24 @@ pub struct SqliteStorage {
     connection: Option<Connection>,
     read_connection: Mutex<Connection>,
     database_path: PathBuf,
+}
+
+impl SqliteStorage {
+    /// A replaced attempt remains financially unknown until an independent usage fact arrives.
+    /// # Errors
+    /// Returns unavailable durable accounting state.
+    pub fn execution_has_unknown_predecessor(
+        &self,
+        job: &ExecutionJobId,
+    ) -> Result<bool, StorageError> {
+        self.connection()?
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM execution_attempt_accounting_pending WHERE job_id=?1)",
+                [&job.0],
+                |r| r.get(0),
+            )
+            .map_err(|e| StorageError::adapter(e.to_string()))
+    }
 }
 
 impl SqliteStorage {
@@ -2873,6 +2904,18 @@ impl ProductStateStorage for SqliteStorage {
         job_id: &ExecutionJobId,
     ) -> Result<Option<WorkRunDeviceBindingFacts>, StorageError> {
         device_execution_binding::load_work_run_device_binding_facts(self.connection()?, &job_id.0)
+    }
+
+    fn load_device_binding_facts_for_work_run(
+        &self,
+        job_id: &ExecutionJobId,
+        run: &WorkRunId,
+    ) -> Result<Option<WorkRunDeviceBindingFacts>, StorageError> {
+        device_execution_binding::load_binding_facts_for_work_run(
+            self.connection()?,
+            &job_id.0,
+            run,
+        )
     }
 
     fn load_active_execution_job_record_for_work_run(
@@ -5021,3 +5064,110 @@ mod sqlite_open_deadline_tests {
         SQLITE_OPEN_BUSY_DEADLINE.set(None);
     }
 }
+
+/// Launch publication preserves domain refusals separately from storage failures.
+#[derive(Debug)]
+pub enum WorkerLaunchBundleError {
+    /// The atomic issuance gate rejected current launch authority.
+    Launch(WorkerLaunchGrantStoreError),
+    /// Publication or durable storage failed.
+    Storage(StorageError),
+}
+impl From<StorageError> for WorkerLaunchBundleError {
+    fn from(error: StorageError) -> Self {
+        Self::Storage(error)
+    }
+}
+impl fmt::Display for WorkerLaunchBundleError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("worker launch bundle could not be published")
+    }
+}
+impl std::error::Error for WorkerLaunchBundleError {}
+
+/// Atomically publishes one launch, its credential lifecycle row and downlink.
+/// Encrypted private material must already be fsynced before this commit.
+/// # Errors
+/// Rejects changed authority, duplicate publication or unavailable storage.
+pub fn issue_worker_launch_bundle(
+    storage: &mut SqliteStorage,
+    issuance: &LaunchGrantIssuance,
+    predecessor: Option<&str>,
+    credential: &CredentialIssuance,
+    append: &ClientDownlinkAppend,
+    now: &Instant,
+) -> Result<WorkerLaunchGrantRecord, WorkerLaunchBundleError> {
+    storage
+        .worker_launch_grant_ledger()
+        .map_err(|_| StorageError::adapter("launch ledger unavailable"))?;
+    storage
+        .worker_session_credential_ledger()
+        .map_err(|_| StorageError::adapter("credential ledger unavailable"))?;
+    storage
+        .client_downlink_outbox()
+        .map_err(|_| StorageError::adapter("downlink ledger unavailable"))?;
+    let tx = storage
+        .connection_mut()?
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| StorageError::adapter("launch transaction unavailable"))?;
+    tx.execute_batch("CREATE TABLE IF NOT EXISTS worker_launch_publications (grant_id TEXT PRIMARY KEY, client_node_id TEXT NOT NULL, message_id TEXT NOT NULL, sequence INTEGER NOT NULL, frame_digest TEXT NOT NULL, created_at TEXT NOT NULL)")
+        .map_err(|_|StorageError::adapter("launch publication unavailable"))?;
+    let grant = client_launch_grant::issue_launch_in_transaction(&tx, issuance, predecessor, now)
+        .map_err(WorkerLaunchBundleError::Launch)?;
+    if credential.worker_session_id != grant.worker_session_id
+        || credential.worker_id != grant.worker_id
+        || credential.worker_instance_id != grant.worker_instance_id
+        || credential.worker_launch_grant_id != grant.worker_launch_grant_id
+        || credential.credential_digest != grant.credential_digest
+        || append.client_node_id != grant.client_node_id
+    {
+        return Err(StorageError::invalid_input("launch publication authority differs").into());
+    }
+    let frame: serde_json::Value = serde_json::from_str(&append.frame)
+        .map_err(|_| StorageError::invalid_input("launch frame invalid"))?;
+    let wire_fencing_token = grant.occupancy_fencing_token.to_string();
+    let expected_grant = serde_json::json!({"workerLaunchGrantId":grant.worker_launch_grant_id,"clientNodeId":grant.client_node_id,
+        "clientInstanceId":grant.client_instance_id,"occupancyLeaseId":grant.occupancy_lease_id,"occupancyFencingToken":wire_fencing_token,
+        "repositoryBindingId":grant.repository_binding_id,"productSessionId":grant.product_session_id.clone().unwrap_or_default(),
+        "workRunId":grant.work_run_id.as_ref().map(|id|&id.0),"workerSessionId":grant.worker_session_id,"workerId":grant.worker_id,
+        "workerInstanceId":grant.worker_instance_id,"credentialDigest":grant.credential_digest,"expiresAt":grant.expires_at.0,"state":"issued","revision":grant.revision});
+    let mut actual_grant = frame["payload"]["launchGrant"].clone();
+    // The optional Chat anchor is omitted by the formal serializer. Null has
+    // the same typed meaning; every required identity remains exact.
+    if let Some(object) = actual_grant.as_object_mut() {
+        object.entry("workRunId").or_insert(serde_json::Value::Null);
+    }
+    if frame["kind"] != "client.worker.launch"
+        || frame["clientNodeId"] != grant.client_node_id
+        || frame["clientInstanceId"] != grant.client_instance_id
+        || frame["messageId"] != append.message_id
+        || frame["sequence"] != append.sequence
+        || actual_grant != expected_grant
+        || frame["payload"]["occupancyLeaseId"] != grant.occupancy_lease_id
+        || frame["payload"]["occupancyFencingToken"] != wire_fencing_token.as_str()
+    {
+        return Err(StorageError::invalid_input("launch frame authority differs").into());
+    }
+    worker_session_credential::issue_credential_in_transaction(&tx, credential, now)
+        .map_err(|_| StorageError::invalid_input("launch credential rejected"))?;
+    let frame = client_downlink::append_launch_in_transaction(&tx, append, now)
+        .map_err(|_| StorageError::invalid_input("launch downlink rejected"))?;
+    tx.execute(
+        "INSERT INTO worker_launch_publications VALUES (?1,?2,?3,?4,?5,?6)",
+        rusqlite::params![
+            grant.worker_launch_grant_id,
+            frame.client_node_id,
+            frame.message_id,
+            i64::try_from(frame.sequence)
+                .map_err(|_| StorageError::invalid_input("launch sequence overflow"))?,
+            format!("sha256:{:x}", Sha256::digest(frame.frame.as_bytes())),
+            now.0
+        ],
+    )
+    .map_err(|_| StorageError::adapter("launch publication failed"))?;
+    tx.commit()
+        .map_err(|_| StorageError::adapter("launch commit failed"))?;
+    Ok(grant)
+}
+
+pub use client_launch_grant::DeviceLaunchProcessClosure;

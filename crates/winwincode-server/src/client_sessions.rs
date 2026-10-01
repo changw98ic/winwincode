@@ -64,7 +64,7 @@ use winwincode_storage::ClientPresenceState;
 use winwincode_storage::DeviceExecutionBindingState;
 use winwincode_storage::ExecutionJobState;
 use winwincode_storage::SqliteStorage;
-use winwincode_storage::WorkerSlotState;
+use winwincode_storage::{WorkerSessionCredentialState, WorkerSlotState};
 
 use crate::client_exchange::{
     ClientExchangeApplication, ClientExchangeConfig, ClientExchangePort, WorkerCredentialDelivery,
@@ -214,44 +214,54 @@ pub struct ClientSessionsApplication {
 
 impl ClientSessionsApplication {
     pub(crate) fn resume_delivery_launches(&self) -> Result<(), ClientSessionsError> {
-        let jobs = self
+        let mut jobs = self
             .open_storage()?
             .repository_scheduler()
             .map_err(|_| ClientSessionsError::unavailable())?
             .pending_device_launches()
             .map_err(|_| ClientSessionsError::unavailable())?;
+        let mut recovery_storage = self.open_storage()?;
+        jobs.extend(
+            recovery_storage
+                .repository_scheduler()
+                .map_err(|_| ClientSessionsError::unavailable())?
+                .pending_device_recoveries()
+                .map_err(|_| ClientSessionsError::unavailable())?,
+        );
         for payload in jobs {
             let job: ExecutionJob =
                 serde_json::from_slice(&payload).map_err(|_| ClientSessionsError::unavailable())?;
-            let winwincode_execution_port::generated::ExecutionScope::WorkRunExecutionScope(scope) =
-                &job.scope
-            else {
-                continue;
-            };
-            let Some(target) = job
-                .work_input
-                .as_ref()
-                .and_then(|input| input.device_target.as_ref())
-            else {
-                continue;
-            };
-            // Each pass advances every queued role once; an offline Device does not delay other jobs.
-            let prepared = self.prepare(
-                &target.user_id,
-                &json!({
-                    "schemaVersion": SUPPORTED_SCHEMA_VERSION,
-                    "clientId": target.client_id,
-                    "repositoryBindingId": target.repository_binding_id,
-                    "workRunId": scope.work_run_id,
-                }),
-            );
-            if let Ok(prepared) = prepared
-                && matches!(
-                    self.poll(&prepared.grant.worker_launch_grant_id),
-                    Ok(PollOutcome::Consumed)
-                )
-            {
-                self.route_work_run(&target.user_id, &prepared)?;
+            match &job.scope {
+                winwincode_execution_port::generated::ExecutionScope::WorkRunExecutionScope(scope) => {
+                    let Some(target) = job.work_input.as_ref().and_then(|input| input.device_target.as_ref()) else { continue; };
+                    let prepared = self.prepare(&target.user_id, &json!({
+                        "schemaVersion": SUPPORTED_SCHEMA_VERSION, "clientId": target.client_id,
+                        "repositoryBindingId": target.repository_binding_id, "workRunId": scope.work_run_id,
+                    }));
+                    if let Ok(prepared) = prepared && matches!(self.poll(&prepared.grant.worker_launch_grant_id), Ok(PollOutcome::Consumed)) {
+                        self.route_work_run(&target.user_id, &prepared)?;
+                    }
+                }
+                winwincode_execution_port::generated::ExecutionScope::ProductSessionExecutionScope(scope) => {
+                    let mut storage = self.open_storage()?;
+                    let Some(facts) = storage.device_execution_binding_ledger().map_err(|_| ClientSessionsError::unavailable())?
+                        .facts(&job.job_id.0).map_err(|_| ClientSessionsError::unavailable())? else { continue; };
+                    let record = storage.load_execution_job_record(&job.job_id).map_err(|_| ClientSessionsError::unavailable())?
+                        .ok_or_else(ClientSessionsError::invalid_request)?;
+                    let node = ClientRegistryService::new(&mut storage).snapshot(&facts.client_node_id)
+                        .map_err(|_| ClientSessionsError::unavailable())?.ok_or_else(ClientSessionsError::invalid_request)?;
+                    let request = json!({"schemaVersion": SUPPORTED_SCHEMA_VERSION, "clientId": node.public_client_id,
+                        "repositoryBindingId": facts.repository_binding_id, "productSession": {
+                            "id": scope.product_session_id, "scope": {"kind":"repository",
+                            "organizationId":record.scope.organization_id,"workspaceId":record.scope.workspace_id,
+                            "projectId":record.scope.project_id,"repositoryId":record.scope.repository_id}}});
+                    let prepared = self.prepare_for_recovery(&facts.holder_user_id, &request, Some(&job.job_id));
+                    if let Ok(prepared) = prepared && matches!(self.poll(&prepared.grant.worker_launch_grant_id), Ok(PollOutcome::Consumed)) {
+                        winwincode_control_plane::dispatch_chat_job_to_device_worker(
+                            &mut storage, &job.job_id, &prepared.grant, &now_instant(),
+                        ).map_err(|_| ClientSessionsError::unavailable())?;
+                    }
+                }
             }
         }
         Ok(())
@@ -392,6 +402,16 @@ impl ClientSessionsApplication {
         user_id: &str,
         request: &Value,
     ) -> Result<PreparedLaunch, ClientSessionsError> {
+        self.prepare_for_recovery(user_id, request, None)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn prepare_for_recovery(
+        &self,
+        user_id: &str,
+        request: &Value,
+        recovery_job_id: Option<&winwincode_domain::ExecutionJobId>,
+    ) -> Result<PreparedLaunch, ClientSessionsError> {
         let Some(fields) = request.as_object() else {
             return Err(ClientSessionsError::invalid_request());
         };
@@ -523,10 +543,63 @@ impl ClientSessionsApplication {
             .map_err(|_| ClientSessionsError::invalid_request())?;
             id.0
         };
-        if let Some(grant) = WorkerLaunchGrantService::new(&mut storage)
-            .newest_grant_for_product_session(&product_session_id)
-            .map_err(|_| ClientSessionsError::unavailable())?
-        {
+        WorkerLaunchGrantService::new(&mut storage)
+            .expire(&now)
+            .map_err(|_| ClientSessionsError::unavailable())?;
+        let mut replacement_worker_id = None;
+        let mut predecessor_grant_id = None;
+        let current_device_facts = if let Some(job_id) = recovery_job_id {
+            let job = storage
+                .load_execution_job_record(job_id)
+                .map_err(|_| ClientSessionsError::unavailable())?
+                .ok_or_else(ClientSessionsError::invalid_request)?;
+            if job.work_run_id.is_some()
+                || job.cancellation.is_some()
+                || job.scope.product_session_id.0 != product_session_id
+            {
+                return Err(ClientSessionsError::invalid_request());
+            }
+            Some(
+                storage
+                    .device_execution_binding_ledger()
+                    .map_err(|_| ClientSessionsError::unavailable())?
+                    .facts(&job_id.0)
+                    .map_err(|_| ClientSessionsError::unavailable())?
+                    .ok_or_else(ClientSessionsError::invalid_request)?,
+            )
+        } else if let Some(run) = &work_run_id {
+            let job = storage
+                .load_active_execution_job_record_for_work_run(run)
+                .map_err(|_| ClientSessionsError::unavailable())?
+                .ok_or_else(ClientSessionsError::invalid_request)?;
+            storage
+                .device_execution_binding_ledger()
+                .map_err(|_| ClientSessionsError::unavailable())?
+                .facts(&job.job_id.0)
+                .map_err(|_| ClientSessionsError::unavailable())?
+        } else {
+            None
+        };
+        let previous_grant = if let Some(facts) = &current_device_facts {
+            let ledger = storage
+                .worker_launch_grant_ledger()
+                .map_err(|_| ClientSessionsError::unavailable())?;
+            ledger
+                .recovery_launch_for_grant(&facts.worker_launch_grant_id)
+                .map_err(|_| ClientSessionsError::unavailable())?
+                .or(ledger
+                    .snapshot(&facts.worker_launch_grant_id)
+                    .map_err(|_| ClientSessionsError::unavailable())?)
+        } else if let Some(run) = &work_run_id {
+            WorkerLaunchGrantService::new(&mut storage)
+                .newest_grant_for_work_run(&run.0)
+                .map_err(|_| ClientSessionsError::unavailable())?
+        } else {
+            WorkerLaunchGrantService::new(&mut storage)
+                .newest_grant_for_product_session(&product_session_id)
+                .map_err(|_| ClientSessionsError::unavailable())?
+        };
+        if let Some(grant) = previous_grant {
             if grant.client_node_id != node.client_node_id
                 || grant.repository_binding_id != repository_binding_id
                 || grant.holder_user_id != user_id
@@ -551,9 +624,30 @@ impl ClientSessionsApplication {
             let slot_state = slot.as_ref().map(|record| record.state);
             // Device-reported release is the strongest evidence the prior
             // Chat worker ended under the current occupancy.
-            let device_reported_released = work_run_id.is_none()
-                && grant.work_run_id.is_none()
-                && binding_state == Some(DeviceExecutionBindingState::Released);
+            let trusted_exit = WorkerLaunchGrantService::new(&mut storage)
+                .has_trusted_exit(&grant.worker_launch_grant_id)
+                .map_err(|_| ClientSessionsError::unavailable())?;
+            let device_reported_released =
+                binding_state == Some(DeviceExecutionBindingState::Released) || trusted_exit;
+            if trusted_exit
+                && occupancy_matches
+                && (grant.client_instance_id == node.current_instance_id.as_deref().unwrap_or("")
+                    || storage
+                        .worker_launch_grant_ledger()
+                        .map_err(|_| ClientSessionsError::unavailable())?
+                        .closed_for_device_instance(
+                            &grant.worker_launch_grant_id,
+                            node.current_instance_id.as_deref().unwrap_or(""),
+                        )
+                        .map_err(|_| ClientSessionsError::unavailable())?)
+                && (grant.work_run_id == work_run_id
+                    || current_device_facts.as_ref().is_some_and(|facts| {
+                        facts.work_run_id.as_deref() == work_run_id.as_ref().map(|id| id.0.as_str())
+                    }))
+            {
+                replacement_worker_id = Some(grant.worker_id.clone());
+                predecessor_grant_id = Some(grant.worker_launch_grant_id.clone());
+            }
             // A terminal Worker-session slot after a bind means the worker
             // process exited without a release report (abnormal exit).
             let slot_exited = slot_state.is_some_and(|state| {
@@ -570,7 +664,24 @@ impl ClientSessionsApplication {
             // slot is not known to be terminal. A still-running slot is the
             // strongest form; a missing slot still maps to the same grant
             // because the Device accepted the launch under this occupancy.
-            let reuse_same_worker = occupancy_matches
+            let credential = WorkerSessionCredentialService::new(&mut storage)
+                .status_for_session(&grant.worker_session_id)
+                .map_err(|_| ClientSessionsError::unavailable())?;
+            let credential_live = credential.as_ref().is_some_and(|record| {
+                record.state == WorkerSessionCredentialState::Active && record.expires_at.0 > now.0
+            });
+            if !credential_live
+                && binding_state == Some(DeviceExecutionBindingState::Bound)
+                && !device_reported_released
+                && !slot_exited
+            {
+                return Err(ClientSessionsError::new(
+                    ClientSessionsErrorKind::SessionNotLaunchable,
+                    "the previous Device Worker authority ended; await trusted exit or stop evidence before relaunch",
+                ));
+            }
+            let reuse_same_worker = credential_live
+                && occupancy_matches
                 && matches!(
                     grant.state,
                     LaunchGrantState::Issued | LaunchGrantState::Consumed
@@ -609,10 +720,9 @@ impl ClientSessionsApplication {
             // still-bound foreign binding). Replace the old credential under
             // the *current* occupancy and issue a fresh grant.
             let mut credentials = WorkerSessionCredentialService::new(&mut storage);
-            if credentials
-                .status_for_session(&grant.worker_session_id)
-                .map_err(|_| ClientSessionsError::unavailable())?
-                .is_some()
+            if credential
+                .as_ref()
+                .is_some_and(|record| record.state == WorkerSessionCredentialState::Active)
             {
                 credentials
                     .revoke_for_session(
@@ -629,7 +739,10 @@ impl ClientSessionsApplication {
             }
         }
         let worker_session_id = generate_prefixed_id("wsn_")?;
-        let worker_id = generate_prefixed_id("wrk_")?;
+        let worker_id = match replacement_worker_id {
+            Some(id) => id,
+            None => generate_prefixed_id("wrk_")?,
+        };
         let worker_instance_id = generate_prefixed_id("wki_")?;
         let worker_launch_grant_id = generate_prefixed_id("wlg_")?;
         let credential_material =
@@ -645,7 +758,7 @@ impl ClientSessionsApplication {
             user_id,
             lease.occupancy_lease_id.clone(),
             lease.fencing_token,
-            repository_binding_id,
+            &repository_binding_id,
             worker_session_id.clone(),
             worker_id.clone(),
             worker_instance_id.clone(),
@@ -655,33 +768,16 @@ impl ClientSessionsApplication {
             expires_at.clone(),
         )
         .map_err(|_| ClientSessionsError::unavailable())?;
-        let grant = {
-            let mut grants = WorkerLaunchGrantService::new(&mut storage);
-            match grants.issue(&issuance, &now) {
-                Ok(grant) => grant,
-                Err(error) => return Err(issue_gate_error(error.kind())),
-            }
-        };
-
-        // The durable credential row is the lifecycle handle for the
-        // material just issued: revoke, rotate, expiry, and status of the
-        // worker session resolve through it. A failure here fails the launch
-        // before any downlink frame exists, so the device never learns of a
-        // credential the server could not record; the orphaned grant expires
-        // at its deadline.
-        {
-            let mut credentials = WorkerSessionCredentialService::new(&mut storage);
-            credentials
-                .issue_for_launch(
-                    &worker_session_id,
-                    &worker_id,
-                    &worker_instance_id,
-                    &worker_launch_grant_id,
-                    credential_material.credential_digest(),
-                    &now,
-                )
-                .map_err(|_| ClientSessionsError::unavailable())?;
-        }
+        let credential_issuance = WorkerSessionCredentialService::new(&mut storage)
+            .prepare_launch_issuance(
+                &worker_session_id,
+                &worker_id,
+                &worker_instance_id,
+                &worker_launch_grant_id,
+                credential_material.credential_digest(),
+                &now,
+            )
+            .map_err(|_| ClientSessionsError::unavailable())?;
 
         self.client_exchange
             .publish_worker_credential(WorkerCredentialDelivery {
@@ -699,7 +795,7 @@ impl ClientSessionsApplication {
         let mirror_revision_view =
             client_mirror_revision_view(&self.data_directory, &node.client_node_id)
                 .map_err(|_| ClientSessionsError::unavailable())?;
-        enqueue_frame(
+        let frame = prepare_frame(
             &mut storage,
             &node,
             ServerToClientMessage::WorkerLaunch(ServerWorkerLaunchPayload {
@@ -707,28 +803,48 @@ impl ClientSessionsApplication {
                     mirror_revision_view,
                     &lease.occupancy_lease_id,
                     lease.fencing_token,
-                    &format!("idem_launch_{}", grant.worker_launch_grant_id),
+                    &format!("idem_launch_{worker_launch_grant_id}"),
                 ),
                 launch_grant: WorkerLaunchGrant {
-                    worker_launch_grant_id: grant.worker_launch_grant_id.clone(),
+                    worker_launch_grant_id: worker_launch_grant_id.clone(),
                     client_node_id: node.client_node_id.clone(),
-                    client_instance_id: grant.client_instance_id.clone(),
+                    client_instance_id: node
+                        .current_instance_id
+                        .clone()
+                        .ok_or_else(ClientSessionsError::unavailable)?,
                     occupancy_lease_id: lease.occupancy_lease_id.clone(),
                     occupancy_fencing_token: lease.fencing_token,
-                    repository_binding_id: grant.repository_binding_id.clone(),
-                    product_session_id: grant.product_session_id.clone().unwrap_or_default(),
-                    work_run_id: grant.work_run_id.as_ref().map(|id| id.0.clone()),
-                    worker_session_id: grant.worker_session_id.clone(),
-                    worker_id: grant.worker_id.clone(),
-                    worker_instance_id: grant.worker_instance_id.clone(),
-                    credential_digest: grant.credential_digest.clone(),
-                    expires_at: grant.expires_at.0.clone(),
+                    repository_binding_id: repository_binding_id.clone(),
+                    product_session_id: product_session_id.clone(),
+                    work_run_id: work_run_id.as_ref().map(|id| id.0.clone()),
+                    worker_session_id: worker_session_id.clone(),
+                    worker_id: worker_id.clone(),
+                    worker_instance_id: worker_instance_id.clone(),
+                    credential_digest: credential_material.credential_digest().to_owned(),
+                    expires_at: expires_at.0.clone(),
                     state: WireGrantState::Issued,
-                    revision: grant.revision,
+                    revision: 1,
                 },
             }),
             &now,
         )?;
+
+        let grant = winwincode_storage::issue_worker_launch_bundle(
+            &mut storage,
+            &issuance,
+            predecessor_grant_id.as_deref(),
+            &credential_issuance,
+            &frame,
+            &now,
+        )
+        .map_err(|error| match error {
+            winwincode_storage::WorkerLaunchBundleError::Launch(error) => issue_gate_error(
+                winwincode_control_plane::WorkerLaunchGrantServiceError::from(error).kind(),
+            ),
+            winwincode_storage::WorkerLaunchBundleError::Storage(_) => {
+                ClientSessionsError::unavailable()
+            }
+        })?;
 
         Ok(PreparedLaunch {
             node,
@@ -1226,6 +1342,21 @@ fn enqueue_frame(
     message: ServerToClientMessage,
     now: &Instant,
 ) -> Result<(), ClientSessionsError> {
+    let frame = prepare_frame(storage, node, message, now)?;
+    storage
+        .client_downlink_outbox()
+        .map_err(|_| ClientSessionsError::unavailable())?
+        .append(&frame, now)
+        .map_err(|_| ClientSessionsError::unavailable())?;
+    Ok(())
+}
+
+fn prepare_frame(
+    storage: &mut SqliteStorage,
+    node: &ClientNodeRecord,
+    message: ServerToClientMessage,
+    now: &Instant,
+) -> Result<ClientDownlinkAppend, ClientSessionsError> {
     let instance = node
         .current_instance_id
         .clone()
@@ -1237,7 +1368,7 @@ fn enqueue_frame(
             .map_err(|_| ClientSessionsError::unavailable())?
             .ok_or_else(ClientSessionsError::unavailable)?
     };
-    let mut downlink = storage
+    let downlink = storage
         .client_downlink_outbox()
         .map_err(|_| ClientSessionsError::unavailable())?;
     let outbox_high_water = downlink
@@ -1264,19 +1395,13 @@ fn enqueue_frame(
     let frame = std::str::from_utf8(&stored.frame)
         .map_err(|_| ClientSessionsError::unavailable())?
         .to_owned();
-    downlink
-        .append(
-            &ClientDownlinkAppend::try_new(
-                node.client_node_id.clone(),
-                envelope.message_id.clone(),
-                sequence,
-                frame,
-            )
-            .map_err(|_| ClientSessionsError::unavailable())?,
-            now,
-        )
-        .map_err(|_| ClientSessionsError::unavailable())?;
-    Ok(())
+    ClientDownlinkAppend::try_new(
+        node.client_node_id.clone(),
+        envelope.message_id.clone(),
+        sequence,
+        frame,
+    )
+    .map_err(|_| ClientSessionsError::unavailable())
 }
 
 /// Reads one required public Client ID: 9-12 ASCII digits.

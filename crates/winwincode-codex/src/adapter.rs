@@ -26,7 +26,9 @@ use crate::{
     CodexTurnCompletion, DelegatedLoopPhase, DelegatedLoopStopFact, DelegatedLoopTransition,
     DelegatedLoopTransitionOutcome, DelegatedObserverPreflight, DelegatedObserverPreflightOutcome,
     DelegatedObserverSettlement, DurableExecutionDelivery, delegated_loop_turn_id,
-    model_port_client::{ModelChunkDisposition, ModelLeaseAuthority},
+    model_port_client::{
+        ModelChunkDisposition, ModelLeaseAuthority, ModelLeaseAuthoritySource as _,
+    },
 };
 use codex_apply_patch::{Hunk, parse_patch};
 use codex_protocol::approvals::{ApplyPatchApprovalRequestEvent, ExecApprovalRequestEvent};
@@ -105,8 +107,8 @@ use crate::performance::{
     PerformanceOperationCompletion, PerformanceOperationKind, duration_millis, elapsed_millis,
 };
 use crate::stage_product::{
-    change_batch_proposal_json_schema, migrate_persisted_role_session_policy_v1,
-    role_session_policy, stage_product_job_digest,
+    StageProductErrorCode, change_batch_proposal_json_schema,
+    migrate_persisted_role_session_policy_v1, role_session_policy, stage_product_job_digest,
 };
 use crate::store::{
     AdapterStore, AdapterStoreError, StoredApprovalOperation, StoredApprovalOperationKind,
@@ -114,8 +116,8 @@ use crate::store::{
     StoredInputOperationState,
 };
 use crate::workrun_runtime_projection::{
-    StageCommandEnd, StageTurnCompletion, WorkRunRuntimeContext, WorkRunRuntimeProjector,
-    WorkRunRuntimeRetention, fusion_verification_result_json_schema,
+    StageCommandEnd, StageTurnCompletion, WorkRunRuntimeContext, WorkRunRuntimeProjectionError,
+    WorkRunRuntimeProjector, WorkRunRuntimeRetention, fusion_verification_result_json_schema,
     verification_result_json_schema, verification_role,
 };
 
@@ -125,6 +127,29 @@ const DEFAULT_EVENT_POLL_MILLIS: u64 = 25;
 const KERNEL_HOME_DIRECTORY: &str = "kernel-home";
 const MAX_REPOSITORY_RULE_PACK_BYTES: u64 = 64 * 1024;
 const ROLE_POLICY_V2_MIGRATION: &str = "role-session-policy-v1-to-v2";
+
+#[derive(Clone, Copy)]
+enum StageCompletionFailure {
+    InvalidOutput,
+    InvalidEvidence,
+    Unavailable,
+}
+
+impl StageCompletionFailure {
+    const fn reason_code(self) -> &'static str {
+        match self {
+            Self::InvalidOutput => "RESULT_SCHEMA_INVALID",
+            Self::InvalidEvidence => "RESULT_EVIDENCE_UNBOUND",
+            Self::Unavailable => "RESULT_AUTHORITY_UNAVAILABLE",
+        }
+    }
+}
+
+impl From<ProductionCodexError> for StageCompletionFailure {
+    fn from(_: ProductionCodexError) -> Self {
+        Self::Unavailable
+    }
+}
 
 /// Unvalidated caller-owned production options.
 pub struct ProductionCodexOptions {
@@ -218,6 +243,13 @@ impl ProductionCodexConfig {
     /// Rejects relative or missing paths, blank routing fields, execution
     /// modes without production routing, and malformed capability discovery.
     pub fn try_new(options: ProductionCodexOptions) -> Result<Self, ProductionCodexError> {
+        Self::try_new_with_helper(options, project_helper)
+    }
+
+    fn try_new_with_helper(
+        options: ProductionCodexOptions,
+        resolve_helper: impl FnOnce(&Path, &HelperReleaseManifest) -> Option<Arc<[u8]>>,
+    ) -> Result<Self, ProductionCodexError> {
         released_production_execution_mode_required(options.execution_mode)?;
         if !options.data_directory.is_absolute()
             || !options.helper_executable.is_absolute()
@@ -234,7 +266,7 @@ impl ProductionCodexConfig {
             ));
         }
         let helper_bytes =
-            project_helper(&options.helper_executable, &options.helper_release_manifest)
+            resolve_helper(&options.helper_executable, &options.helper_release_manifest)
                 .ok_or_else(invalid_configuration)?;
         WorkerCapabilityCatalog::discover(
             &options.registered_capabilities,
@@ -1235,7 +1267,7 @@ impl ProductionCodexAdapter {
         turn_id: &str,
         now: &Instant,
     ) -> Result<Option<RuntimeEventMessage>, ProductionCodexError> {
-        let source = crate::workrun_runtime_projection::source_key("policy", turn_id, None);
+        let source = crate::workrun_runtime_projection::VERIFICATION_POLICY_SOURCE;
         let run = self.runs.get(run_key).ok_or_else(unknown_thread)?;
         let authority = self.bridge.authority();
         let retention = self
@@ -1248,7 +1280,7 @@ impl ProductionCodexAdapter {
                 turn_id,
             )
             .map_err(|_| unavailable())?;
-        self.retain_stage_projection(run_key, &source, retention)
+        self.retain_stage_projection(run_key, source, retention)
     }
 
     fn retain_stage_command_end(
@@ -1292,7 +1324,7 @@ impl ProductionCodexAdapter {
         final_message: Option<&str>,
         failed: bool,
         now: &Instant,
-    ) -> Result<Option<RuntimeEventMessage>, ProductionCodexError> {
+    ) -> Result<Option<RuntimeEventMessage>, StageCompletionFailure> {
         let source = crate::workrun_runtime_projection::source_key("result", turn_id, None);
         let expected_fusion_claim_keys = self
             .runs
@@ -1329,8 +1361,89 @@ impl ProductionCodexAdapter {
                 },
                 expected_fusion_claim_keys.as_deref(),
             )
-            .map_err(|_| unavailable())?;
+            .map_err(|error| match error {
+                WorkRunRuntimeProjectionError::InvalidModelResult => {
+                    StageCompletionFailure::InvalidOutput
+                }
+                WorkRunRuntimeProjectionError::InvalidEvidence => {
+                    StageCompletionFailure::InvalidEvidence
+                }
+                WorkRunRuntimeProjectionError::Product(error)
+                    if matches!(
+                        error.code(),
+                        StageProductErrorCode::InvalidOutput
+                            | StageProductErrorCode::NonCanonicalOutput
+                    ) =>
+                {
+                    StageCompletionFailure::InvalidOutput
+                }
+                _ => StageCompletionFailure::Unavailable,
+            })?;
         self.retain_stage_projection(run_key, &source, retention)
+            .map_err(Into::into)
+    }
+
+    fn retain_stage_completion_rejection(
+        &mut self,
+        run_key: &str,
+        turn_id: &str,
+        failed: bool,
+        failure: StageCompletionFailure,
+        now: &Instant,
+    ) -> Result<CodexPoll, ProductionCodexError> {
+        let run = self.runs.get(run_key).ok_or_else(unknown_thread)?;
+        if failed
+            || matches!(failure, StageCompletionFailure::Unavailable)
+            || !(verification_role(&run.record.job.execution_profile)
+                || run.record.job.execution_profile == "planner")
+            || run.record.format_repair.is_some()
+            || run.record.terminal.is_some()
+            || run.record.final_candidate_freeze.is_some()
+        {
+            return self.retain_stage_failure(run_key, now);
+        }
+        let feedback = if run.record.job.execution_profile == "planner" {
+            format!(
+                "The preceding Planner result was rejected. Correct the result to match the original sealed input and required Planner JSON structure below. Return the corrected JSON only. Preserve the planning scope; do not call tools, modify files, or perform implementation work.\n{}",
+                crate::stage_product::stage_product_prompt(&run.record.job)
+                    .map_err(|_| unavailable())?
+            )
+        } else {
+            WorkRunRuntimeProjector::verification_repair_prompt(
+                &mut self.store,
+                Self::stage_context(run, now, now),
+                &run.record.job,
+            )
+            .map_err(|_| unavailable())?
+        };
+        let prompt = format!(
+            "Result validation reason: {}.\n{feedback}",
+            failure.reason_code()
+        );
+        let rejection =
+            StoredResultRejection {
+                source_turn_id: turn_id.to_owned(),
+                reason_code: failure.reason_code().to_owned(),
+                rejected_digest: run.record.last_agent_message.as_ref().map(|raw| {
+                    Sha256Digest(format!("sha256:{:x}", Sha256::digest(raw.as_bytes())))
+                }),
+            };
+        self.store
+            .commit_provider_final_model_calls(run_key)
+            .map_err(map_store_error)?;
+        let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
+        run.record.format_repair = Some(StoredFormatRepair {
+            turn_id: canonical_parts_id(
+                "trn",
+                b"winwincode.verification-format-repair.v1",
+                &[run_key.as_bytes(), turn_id.as_bytes()],
+            ),
+            submitted: false,
+            prompt: Some(prompt),
+            rejection: Some(rejection),
+        });
+        self.persist_run(run_key)?;
+        Ok(CodexPoll::Pending)
     }
 
     /// Converts a rejected semantic stage product into the normal durable
@@ -1988,13 +2101,19 @@ impl ProductionCodexAdapter {
         });
         if repair_turn {
             let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
+            if run.record.current_turn_id.as_deref() != Some(turn_id) {
+                run.record.last_agent_message = None;
+            }
             run.record.current_turn_id = Some(turn_id.to_owned());
             run.record.last_activity_at = now.clone();
             if let Some(repair) = run.record.format_repair.as_mut() {
                 repair.submitted = true;
             }
             self.persist_run(run_key)?;
-            return Ok(CodexPoll::Pending);
+            let stage = self.retain_stage_turn_started(run_key, turn_id, now)?;
+            return Ok(stage.map_or(CodexPoll::Pending, |stage| {
+                CodexPoll::RuntimeTrace(Box::new(stage))
+            }));
         }
         if self
             .runs
@@ -2084,14 +2203,23 @@ impl ProductionCodexAdapter {
                 now,
             );
         }
-        let Ok(stage) = self.retain_stage_turn_completed(
+        let stage = match self.retain_stage_turn_completed(
             run_key,
             &completed.turn_id,
             final_message.as_deref(),
             failed,
             now,
-        ) else {
-            return self.retain_stage_failure(run_key, now);
+        ) {
+            Ok(stage) => stage,
+            Err(failure) => {
+                return self.retain_stage_completion_rejection(
+                    run_key,
+                    &completed.turn_id,
+                    failed,
+                    failure,
+                    now,
+                );
+            }
         };
         self.store
             .commit_provider_final_model_calls(run_key)
@@ -2151,7 +2279,10 @@ impl ProductionCodexAdapter {
                 artifacts: diagnostic_artifacts,
                 usage: self
                     .store
-                    .retained_outcome_usage(run_key, run.record.last_runtime_millis)
+                    .retained_outcome_usage(
+                        run_key,
+                        terminal_performance_runtime(&self.store, run_key, &run.record)?,
+                    )
                     .map_err(map_store_error)?,
             }
         });
@@ -2240,6 +2371,8 @@ impl ProductionCodexAdapter {
                 run.record.format_repair = Some(StoredFormatRepair {
                     turn_id: repair_turn_id,
                     submitted: false,
+                    prompt: None,
+                    rejection: None,
                 });
                 self.persist_run(run_key)?;
                 Ok(CodexPoll::Pending)
@@ -2324,6 +2457,17 @@ impl ProductionCodexAdapter {
         ))))
     }
 
+    fn is_stage_result_run(&self, run_key: &str) -> bool {
+        self.runs.get(run_key).is_some_and(|run| {
+            verification_role(&run.record.job.execution_profile)
+                || run.record.job.execution_profile == "planner"
+        })
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "exact repair reconciliation and its durable completion gate form one crash-safe transition"
+    )]
     async fn reconcile_format_repair(
         &mut self,
         run_key: &str,
@@ -2341,17 +2485,28 @@ impl ProductionCodexAdapter {
             let Some(repair) = run.record.format_repair.clone() else {
                 return Ok(None);
             };
+            let authority = self.bridge.authority();
+            authority.update_now(now).map_err(map_bridge_error)?;
+            authority
+                .validate_current(&run.binding.authority, now)
+                .map_err(|_| invalid_job())?;
             run.format_repair_reconciliation = OneShotState::Consumed;
             (
                 run.record.kernel_session_id.clone(),
                 repair.turn_id,
                 turn_submission_options(&run.record),
+                repair
+                    .prompt
+                    .unwrap_or_else(|| FORMAT_REPAIR_PROMPT.to_owned()),
             )
         };
         let reconciliation = self
-            .reconcile_format_repair_turn(&repair.0, repair.1.clone(), repair.2)
+            .reconcile_format_repair_turn(&repair.0, repair.1.clone(), repair.2, repair.3)
             .await;
         let Ok(reconciliation) = reconciliation else {
+            if self.is_stage_result_run(run_key) {
+                return self.retain_stage_failure(run_key, now).map(Some);
+            }
             return self
                 .poll_delegated_repair_infrastructure_terminal(run_key, now)
                 .await
@@ -2360,12 +2515,16 @@ impl ProductionCodexAdapter {
         match reconciliation {
             ExactTurnReconciliation::Started { turn_id, .. } if turn_id == repair.1 => {
                 let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
+                if run.record.current_turn_id.as_deref() != Some(turn_id.as_str()) {
+                    run.record.last_agent_message = None;
+                }
                 run.record.current_turn_id = Some(turn_id);
                 run.record.last_activity_at = now.clone();
                 if let Some(stored) = run.record.format_repair.as_mut() {
                     stored.submitted = true;
                 }
                 self.persist_run(run_key)?;
+                self.retain_stage_turn_started(run_key, &repair.1, now)?;
                 Ok(Some(CodexPoll::Pending))
             }
             ExactTurnReconciliation::Completed(terminal) if terminal.turn_id == repair.1 => {
@@ -2383,6 +2542,24 @@ impl ProductionCodexAdapter {
                     run.record.last_activity_at = now.clone();
                 }
                 self.persist_run(run_key)?;
+                if self.is_stage_result_run(run_key) {
+                    self.retain_stage_turn_started(run_key, &terminal.turn_id, now)?;
+                    return self
+                        .accept_turn_complete(
+                            run_key,
+                            &codex_protocol::protocol::TurnCompleteEvent {
+                                turn_id: terminal.turn_id,
+                                last_agent_message: terminal.last_agent_message,
+                                error: None,
+                                started_at: None,
+                                completed_at: None,
+                                duration_ms: terminal.duration_ms,
+                                time_to_first_token_ms: None,
+                            },
+                            now,
+                        )
+                        .map(Some);
+                }
                 self.store
                     .commit_provider_final_model_calls(run_key)
                     .map_err(map_store_error)?;
@@ -2397,10 +2574,15 @@ impl ProductionCodexAdapter {
             ExactTurnReconciliation::Started { .. }
             | ExactTurnReconciliation::Completed(_)
             | ExactTurnReconciliation::Failed(_)
-            | ExactTurnReconciliation::NotSubmitted { .. } => self
-                .poll_delegated_repair_infrastructure_terminal(run_key, now)
-                .await
-                .map(Some),
+            | ExactTurnReconciliation::NotSubmitted { .. } => {
+                if self.is_stage_result_run(run_key) {
+                    self.retain_stage_failure(run_key, now).map(Some)
+                } else {
+                    self.poll_delegated_repair_infrastructure_terminal(run_key, now)
+                        .await
+                        .map(Some)
+                }
+            }
         }
     }
 
@@ -2409,6 +2591,7 @@ impl ProductionCodexAdapter {
         session_id: &str,
         turn_id: String,
         options: TurnSubmissionOptions,
+        prompt: String,
     ) -> Result<ExactTurnReconciliation, ()> {
         #[cfg(feature = "test-support")]
         if let Some(fault) = self.config.format_repair_faults.pop_front() {
@@ -2417,12 +2600,7 @@ impl ProductionCodexAdapter {
             };
         }
         self.kernel
-            .reconcile_turn_exact(
-                session_id,
-                turn_id,
-                FORMAT_REPAIR_PROMPT.to_owned(),
-                options,
-            )
+            .reconcile_turn_exact(session_id, turn_id, prompt, options)
             .await
             .map_err(|_| ())
     }
@@ -2743,10 +2921,6 @@ impl ProductionCodexAdapter {
         completed_at: &Instant,
         usage: Option<&ExecutionOutcomeUsage>,
     ) -> Result<(), ProductionCodexError> {
-        let Some(usage) = usage else {
-            // Keep the preflight accounting row pending when usage is unknown.
-            return Ok(());
-        };
         self.store
             .record_performance_completion(
                 run_key,
@@ -2755,8 +2929,9 @@ impl ProductionCodexAdapter {
                 completed_at,
                 PerformanceOperationCompletion {
                     duration_millis: None,
-                    input_tokens: usage.tokens,
-                    actual_cost_microunits: usage.cost_microunits,
+                    usage_known: usage.is_some_and(|usage| usage.tokens.is_some()),
+                    input_tokens: usage.map_or(0, |usage| usage.known_tokens),
+                    actual_cost_microunits: usage.and_then(|usage| usage.cost_microunits),
                     ..PerformanceOperationCompletion::default()
                 },
             )
@@ -3568,21 +3743,34 @@ fn complete_reconciled_turn(
         }
         return Ok(());
     }
-    let Ok(_stage) = adapter.retain_stage_turn_completed(
+    if adapter
+        .runs
+        .get(run_key)
+        .is_some_and(|run| is_format_repair_turn(&run.record, turn_id))
+    {
+        adapter.retain_stage_turn_started(run_key, turn_id, &activity_at)?;
+    }
+    if let Err(failure) = adapter.retain_stage_turn_completed(
         run_key,
         turn_id,
         final_message.as_deref(),
         false,
         &activity_at,
-    ) else {
-        let _ = adapter.retain_stage_failure(run_key, &activity_at)?;
+    ) {
+        let _ = adapter.retain_stage_completion_rejection(
+            run_key,
+            turn_id,
+            false,
+            failure,
+            &activity_at,
+        )?;
         adapter
             .runs
             .get_mut(run_key)
             .ok_or_else(unknown_thread)?
             .recovered = false;
         return Ok(());
-    };
+    }
     adapter
         .store
         .commit_provider_final_model_calls(run_key)
@@ -3621,7 +3809,10 @@ fn complete_reconciled_turn(
         artifacts,
         usage: adapter
             .store
-            .retained_outcome_usage(run_key, run.record.last_runtime_millis)
+            .retained_outcome_usage(
+                run_key,
+                terminal_performance_runtime(&adapter.store, run_key, &run.record)?,
+            )
             .map_err(map_store_error)?,
     });
     run.record.phase = StoredRunPhase::TerminalTracePending;
@@ -3695,7 +3886,10 @@ impl ProductionCodexAdapter {
                     completion,
                     artifacts,
                     self.store
-                        .retained_outcome_usage(&run_key, run.record.last_runtime_millis)
+                        .retained_outcome_usage(
+                            &run_key,
+                            terminal_performance_runtime(&self.store, &run_key, &run.record)?,
+                        )
                         .map_err(map_store_error)?,
                 ));
                 run.record.phase = StoredRunPhase::TerminalTracePending;
@@ -3753,7 +3947,10 @@ impl ProductionCodexAdapter {
                     completion,
                     artifacts,
                     self.store
-                        .retained_outcome_usage(run_key, record.last_runtime_millis)
+                        .retained_outcome_usage(
+                            run_key,
+                            terminal_performance_runtime(&self.store, run_key, &record)?,
+                        )
                         .map_err(map_store_error)?,
                 ));
                 record.phase = StoredRunPhase::TerminalTracePending;
@@ -3992,6 +4189,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             format_repair: None,
             delegated_transitions: Vec::new(),
             final_candidate_freeze: None,
+            delegated_budget: None,
             delegated_stop: None,
             terminal_message_id: None,
             post_action_traces: Vec::new(),
@@ -4202,7 +4400,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
                 totals.total_cost_microunits,
                 loop_elapsed,
             )?;
-            let stop_reason = if totals.cost_complete {
+            let stop_reason = if accounting_satisfies_budget(Some(&transition.budget), &totals) {
                 delegated_budget_stopped_counters(&transition.budget, &actual_counters, &counters)
                     .map(|(reason, _)| reason)
             } else {
@@ -4234,6 +4432,15 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         {
             let run = self.runs.get_mut(&run_key).ok_or_else(unknown_thread)?;
             run.record.workspace_revision = transition.context.observed_revision.clone();
+            if run
+                .record
+                .delegated_budget
+                .as_ref()
+                .is_some_and(|budget| budget != &transition.budget)
+            {
+                return Err(conflict());
+            }
+            run.record.delegated_budget = Some(transition.budget.clone());
             run.record.batch_intent = None;
             run.batch_intent_emission = OneShotState::Consumed;
             run.record
@@ -4317,6 +4524,18 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         {
             return Err(conflict());
         }
+        let run = self.runs.get_mut(&run_key).ok_or_else(unknown_thread)?;
+        if run
+            .record
+            .delegated_budget
+            .as_ref()
+            .is_some_and(|budget| budget != &preflight.budget)
+        {
+            return Err(conflict());
+        }
+        run.record.delegated_budget = Some(preflight.budget.clone());
+        self.persist_run(&run_key)?;
+        let run = self.runs.get(&run_key).ok_or_else(unknown_thread)?;
         let totals = self
             .store
             .delegated_performance_totals(&run_key)
@@ -4329,7 +4548,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             elapsed_millis(&run.binding.opened_at, &preflight.observed_at).ok_or_else(conflict)?;
         let mut actual = projected.clone();
         actual.observer_calls = totals.observer_calls;
-        let reason = if totals.cost_complete {
+        let reason = if accounting_satisfies_budget(Some(&preflight.budget), &totals) {
             delegated_budget_stop(&preflight.budget, &projected)
         } else {
             Some(RepairLoopStopReason::InfrastructureError)
@@ -4431,7 +4650,9 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         sealed.counters.total_cost_microunits = totals.total_cost_microunits;
         sealed.counters.elapsed_millis =
             elapsed_millis(&run.binding.opened_at, &sealed.stopped_at).ok_or_else(conflict)?;
-        if !totals.cost_complete || validate_repair_loop_counters(&sealed.counters).is_err() {
+        if !accounting_satisfies_budget(run.record.delegated_budget.as_ref(), &totals)
+            || validate_repair_loop_counters(&sealed.counters).is_err()
+        {
             sealed.reason = RepairLoopStopReason::InfrastructureError;
         }
         let retained = {
@@ -4908,7 +5129,14 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             .map_err(map_store_error)?;
         // The latest Observer must settle before its usage can be frozen into
         // the final cumulative counters.
-        if totals.pending_model_calls > 0 || !totals.cost_complete || totals.primary_model_calls < 1
+        if totals.pending_model_calls > 0
+            || !accounting_satisfies_budget(
+                self.runs
+                    .get(&run_key)
+                    .and_then(|run| run.record.delegated_budget.as_ref()),
+                &totals,
+            )
+            || totals.primary_model_calls < 1
         {
             return Err(conflict());
         }
@@ -5495,6 +5723,8 @@ struct StoredRun {
     #[serde(default)]
     final_candidate_freeze: Option<FinalCandidateFreezeFact>,
     #[serde(default)]
+    delegated_budget: Option<winwincode_execution_port::generated::RepairLoopBudget>,
+    #[serde(default)]
     delegated_stop: Option<DelegatedLoopStopFact>,
     /// Original terminal `JobOutcome` message id, retained across CP ACK
     /// compaction so exact terminal replay does not allocate a new id.
@@ -5578,6 +5808,18 @@ struct StoredBatchIntent {
 struct StoredFormatRepair {
     turn_id: String,
     submitted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rejection: Option<StoredResultRejection>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StoredResultRejection {
+    source_turn_id: String,
+    reason_code: String,
+    rejected_digest: Option<Sha256Digest>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -5979,6 +6221,10 @@ fn turn_submission_options(record: &StoredRun) -> TurnSubmissionOptions {
         final_output_json_schema: is_delegated_composer(record)
             .then(change_batch_proposal_json_schema)
             .or_else(|| {
+                (record.job.execution_profile == "planner")
+                    .then(crate::stage_product::planner_solution_json_schema)
+            })
+            .or_else(|| {
                 verification_role(&record.job.execution_profile).then(|| {
                     if fusion_review {
                         fusion_verification_result_json_schema()
@@ -6072,32 +6318,49 @@ fn delegated_transition_counters(
     Ok((actual, projected))
 }
 
+fn accounting_satisfies_budget(
+    budget: Option<&winwincode_execution_port::generated::RepairLoopBudget>,
+    totals: &crate::performance::DelegatedPerformanceTotals,
+) -> bool {
+    budget.is_none_or(|budget| {
+        (budget.max_total_tokens.is_none() || totals.usage_complete)
+            && (budget.max_total_cost_microunits.is_none() || totals.cost_complete)
+    })
+}
+
 fn delegated_budget_stop(
     budget: &winwincode_execution_port::generated::RepairLoopBudget,
     counters: &RepairLoopCounters,
 ) -> Option<RepairLoopStopReason> {
-    if !(1..=4).contains(&budget.max_change_batches)
-        || !(1_024..=131_072).contains(&budget.max_context_pack_bytes)
-        || !(1..=4).contains(&budget.max_observer_calls)
-        || !(1..=8).contains(&budget.max_primary_model_calls)
-        || budget.max_repair_rounds != 3
-        || !(1..=9_007_199_254_740_991).contains(&budget.max_total_cost_microunits)
-        || !(1..=10_000_000).contains(&budget.max_total_tokens)
-        || !(1_000..=3_600_000).contains(&budget.max_wall_time_millis)
-    {
+    if validate_repair_loop_budget(budget).is_err() {
         return Some(RepairLoopStopReason::InfrastructureError);
     }
     if counters.repair_rounds > budget.max_repair_rounds {
         Some(RepairLoopStopReason::RepairRoundLimitReached)
-    } else if counters.observer_calls > budget.max_observer_calls {
+    } else if budget
+        .max_observer_calls
+        .is_some_and(|limit| counters.observer_calls > limit)
+    {
         Some(RepairLoopStopReason::ObserverCallLimitReached)
-    } else if counters.primary_model_calls > budget.max_primary_model_calls {
+    } else if budget
+        .max_primary_model_calls
+        .is_some_and(|limit| counters.primary_model_calls > limit)
+    {
         Some(RepairLoopStopReason::PrimaryModelCallLimitReached)
-    } else if counters.total_tokens >= budget.max_total_tokens {
+    } else if budget
+        .max_total_tokens
+        .is_some_and(|limit| counters.total_tokens >= limit)
+    {
         Some(RepairLoopStopReason::TotalTokenLimitReached)
-    } else if counters.total_cost_microunits >= budget.max_total_cost_microunits {
+    } else if budget
+        .max_total_cost_microunits
+        .is_some_and(|limit| counters.total_cost_microunits >= limit)
+    {
         Some(RepairLoopStopReason::TotalCostLimitReached)
-    } else if counters.elapsed_millis >= budget.max_wall_time_millis {
+    } else if budget
+        .max_wall_time_millis
+        .is_some_and(|limit| counters.elapsed_millis >= limit)
+    {
         Some(RepairLoopStopReason::WallTimeLimitReached)
     } else if counters.change_batches >= budget.max_change_batches {
         Some(RepairLoopStopReason::ChangeBatchLimitReached)
@@ -6587,15 +6850,6 @@ fn install_linux_sandbox_alias(helper: &Path) -> Result<PathBuf, ProductionCodex
 }
 
 fn project_helper(path: &Path, manifest: &HelperReleaseManifest) -> Option<Arc<[u8]>> {
-    let Ok(metadata) = std::fs::symlink_metadata(path) else {
-        return None;
-    };
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return None;
-    }
-    let Ok(canonical_path) = path.canonicalize() else {
-        return None;
-    };
     let Ok(current_executable) = std::env::current_exe().and_then(|path| path.canonicalize())
     else {
         return None;
@@ -6607,6 +6861,19 @@ fn project_helper(path: &Path, manifest: &HelperReleaseManifest) -> Option<Arc<[
         } else {
             current_directory
         };
+    project_helper_in_release(path, manifest, release_directory)
+}
+
+fn project_helper_in_release(
+    path: &Path,
+    manifest: &HelperReleaseManifest,
+    release_directory: &Path,
+) -> Option<Arc<[u8]>> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return None;
+    }
+    let canonical_path = path.canonicalize().ok()?;
     if manifest.path().parent() != Some(release_directory)
         || canonical_path.parent() != Some(release_directory)
         || !canonical_path.is_file()
@@ -7254,12 +7521,12 @@ mod tests {
         RepairLoopBudget {
             max_change_batches: 4,
             max_context_pack_bytes: 131_072,
-            max_observer_calls: 4,
-            max_primary_model_calls: 8,
+            max_observer_calls: Some(4),
+            max_primary_model_calls: Some(8),
             max_repair_rounds: 3,
-            max_total_cost_microunits: 9_007_199_254_740_991,
-            max_total_tokens: 10_000_000,
-            max_wall_time_millis: 3_600_000,
+            max_total_cost_microunits: Some(9_007_199_254_740_991),
+            max_total_tokens: Some(10_000_000),
+            max_wall_time_millis: Some(3_600_000),
         }
     }
 
@@ -7511,13 +7778,20 @@ mod tests {
                 "retry",
                 &now,
                 PerformanceOperationCompletion {
+                    usage_known: true,
                     input_tokens: 40,
                     output_tokens: 8,
                     ..Default::default()
                 },
             )
             .unwrap();
-        assert_eq!(store.execution_outcome_usage("run", 1).unwrap().tokens, 48);
+        assert_eq!(
+            store
+                .execution_outcome_usage("run", 1)
+                .unwrap()
+                .known_tokens,
+            48
+        );
         let usage = store.retained_outcome_usage("run", 1).unwrap();
         assert!(usage.is_none());
         let terminal = terminal_from_pending_completion(
@@ -7554,10 +7828,13 @@ mod tests {
             .unwrap();
         assert_eq!(
             adapter.store.retained_outcome_usage("run", 0).unwrap(),
-            None
+            Some(ExecutionOutcomeUsage::unknown(0, 0))
         );
         let usage = ExecutionOutcomeUsage {
-            tokens: 17,
+            tokens: Some(17),
+            known_tokens: 17,
+            accounting_status:
+                winwincode_execution_port::generated::ExecutionOutcomeUsageAccountingStatus::Known,
             runtime_millis: 0,
             cost_microunits: None,
         };
@@ -7576,15 +7853,11 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
 
         std::fs::create_dir_all(root).expect("create diagnostic adapter root");
-        let executable = std::env::current_exe().expect("locate diagnostic test binary");
-        let release_directory = executable
-            .parent()
-            .and_then(|directory| {
-                (directory.file_name().and_then(|name| name.to_str()) == Some("deps"))
-                    .then(|| directory.parent().unwrap_or(directory))
-            })
-            .or_else(|| executable.parent())
-            .expect("locate diagnostic release directory");
+        let release_directory = root.join("test-release");
+        std::fs::create_dir_all(&release_directory).expect("create isolated test release");
+        let release_directory = release_directory
+            .canonicalize()
+            .expect("canonical test release");
         let helper = release_directory.join("winwincode-kernel-helper");
         std::fs::write(
             &helper,
@@ -7598,34 +7871,321 @@ mod tests {
         .expect("write diagnostic helper");
         std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))
             .expect("make diagnostic helper executable");
-        ProductionCodexConfig::try_new(ProductionCodexOptions {
-            data_directory: root.join("runtime"),
-            helper_executable: helper.clone(),
-            helper_release_manifest: HelperReleaseManifest::from_test_helper(&helper)
-                .expect("build diagnostic helper manifest"),
-            provider: "fixture-provider".to_owned(),
-            model: "fixture-model".to_owned(),
-            gateway_route: ModelGatewayRoute {
-                capability: "reasoning".to_owned(),
-                route: "embedded-canonical-loopback".to_owned(),
+        ProductionCodexConfig::try_new_with_helper(
+            ProductionCodexOptions {
+                data_directory: root.join("runtime"),
+                helper_executable: helper.clone(),
+                helper_release_manifest: HelperReleaseManifest::from_test_helper(&helper)
+                    .expect("build diagnostic helper manifest"),
+                provider: "fixture-provider".to_owned(),
+                model: "fixture-model".to_owned(),
+                gateway_route: ModelGatewayRoute {
+                    capability: "reasoning".to_owned(),
+                    route: "embedded-canonical-loopback".to_owned(),
+                },
+                registered_capabilities: WorkerCapabilitySet {
+                    capability_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+                    features: vec![WorkerCapabilityFeature::Sandbox],
+                    max_concurrent_jobs: 1,
+                    platform: WorkerCapabilitySetPlatform::Aarch64AppleDarwin,
+                },
+                discovered_capabilities: Vec::new(),
+                action_signing_key: ActionEnforcementSigningKey::from_bytes([31_u8; 32])
+                    .expect("diagnostic signing key"),
+                execution_envelope: ExecutionEnvelopeToken {
+                    version: 1,
+                    digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+                },
+                execution_mode: ExecutionMode::React,
+                observer_mode: ObserverMode::Off,
             },
-            registered_capabilities: WorkerCapabilitySet {
-                capability_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
-                features: vec![WorkerCapabilityFeature::Sandbox],
-                max_concurrent_jobs: 1,
-                platform: WorkerCapabilitySetPlatform::Aarch64AppleDarwin,
-            },
-            discovered_capabilities: Vec::new(),
-            action_signing_key: ActionEnforcementSigningKey::from_bytes([31_u8; 32])
-                .expect("diagnostic signing key"),
-            execution_envelope: ExecutionEnvelopeToken {
-                version: 1,
-                digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
-            },
-            execution_mode: ExecutionMode::React,
-            observer_mode: ObserverMode::Off,
-        })
+            |path, manifest| super::project_helper_in_release(path, manifest, &release_directory),
+        )
         .expect("validate diagnostic adapter config")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn planner_repair_retains_rejection_and_cumulative_usage() {
+        run_planner_repair_test(false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn planner_result_repair_requires_current_unexpired_authority_before_submission() {
+        run_planner_repair_test(true);
+    }
+
+    #[cfg(unix)]
+    fn run_planner_repair_test(expired: bool) {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(Box::pin(planner_repair_retains_rejection_body(expired)));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one scenario verifies both durable repair rounds and the restart outcome"
+    )]
+    async fn planner_repair_retains_rejection_body(expired: bool) {
+        use super::StoredTerminal;
+        use crate::performance::{PerformanceOperationCompletion, PerformanceOperationKind};
+        use sha2::{Digest as _, Sha256};
+        let root = test_root("planner-result-repair");
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let mut job = executor_job();
+        job.execution_profile = "planner".into();
+        job.workspace.write_mode = ExecutionWorkspaceWriteMode::ReadOnly;
+        job.work_input.as_mut().unwrap().candidate_ref = None;
+        let (_, original_binding) = delegated_record_and_binding();
+        let mut lease = original_binding.authority.lease;
+        lease.lease_id = LeaseId("lse_00000000000000000000000001".into());
+        lease.fencing_token = FencingToken("1".into());
+        let worker_session = original_binding.authority.worker_session_id;
+        let run_key = CodexRunKey {
+            job_id: job.job_id.clone(),
+            attempt: job.attempt,
+            fencing_token: lease.fencing_token.clone(),
+            payload_digest: job.payload_digest.clone(),
+        };
+        let revision = WorkspaceRevision(format!("git-tree:{}", "1".repeat(40)));
+        let start = CodexThreadStart {
+            snapshot_id: None,
+            run_key: &run_key,
+            worker_id: &lease.worker_id,
+            job: &job,
+            lease: &lease,
+            worker_session_id: &worker_session,
+            workspace: &workspace,
+            workspace_revision: &revision,
+        };
+        let mut adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+        let _session = Box::pin(adapter.ensure_thread(start)).await.unwrap();
+        let key = run_key.canonical_digest().unwrap().0;
+        assert!(
+            turn_submission_options(&adapter.runs[&key].record)
+                .final_output_json_schema
+                .is_some()
+        );
+        let began = Instant("2026-08-28T00:00:00Z".into());
+        let first_end = Instant("2026-08-28T00:00:10Z".into());
+        let second_end = Instant("2026-08-28T00:00:11Z".into());
+        adapter
+            .accept_turn_started(&key, "first-turn", &began)
+            .unwrap();
+        adapter
+            .store
+            .record_performance_start(
+                &key,
+                PerformanceOperationKind::PrimaryModel,
+                "first",
+                &began,
+            )
+            .unwrap();
+        adapter
+            .store
+            .record_performance_completion(
+                &key,
+                PerformanceOperationKind::PrimaryModel,
+                "first",
+                &first_end,
+                PerformanceOperationCompletion {
+                    usage_known: true,
+                    input_tokens: 2,
+                    output_tokens: 1,
+                    actual_cost_microunits: Some(1),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let completed = |turn: &str, message: &str, duration| TurnCompleteEvent {
+            turn_id: turn.into(),
+            last_agent_message: Some(message.into()),
+            error: None,
+            started_at: None,
+            completed_at: None,
+            duration_ms: Some(duration),
+            time_to_first_token_ms: None,
+        };
+        assert!(matches!(
+            adapter
+                .accept_turn_complete(&key, &completed("first-turn", "{", 10_000), &first_end)
+                .unwrap(),
+            CodexPoll::Pending
+        ));
+        let saved = load_stored_run(&adapter.store, &key).unwrap().unwrap();
+        let repair = saved.format_repair.unwrap();
+        let rejection = repair.rejection.as_ref().unwrap();
+        assert_eq!(rejection.source_turn_id, "first-turn");
+        assert_eq!(rejection.reason_code, "RESULT_SCHEMA_INVALID");
+        assert_eq!(
+            rejection.rejected_digest.as_ref().unwrap().0,
+            format!("sha256:{:x}", Sha256::digest(b"{"))
+        );
+        assert!(
+            repair
+                .prompt
+                .as_ref()
+                .unwrap()
+                .contains("planner-solution.v1")
+        );
+        if expired {
+            adapter
+                .config
+                .format_repair_faults
+                .push_back(super::ProductionFormatRepairFault::KernelRecoveryFailed);
+            assert_eq!(
+                adapter
+                    .reconcile_format_repair(&key, &lease.expires_at)
+                    .await
+                    .unwrap_err()
+                    .kind(),
+                ProductionCodexErrorKind::Authority
+            );
+            assert_eq!(
+                adapter.config.format_repair_faults.len(),
+                1,
+                "must stop before calling Core"
+            );
+            assert!(matches!(
+                adapter.runs[&key].format_repair_reconciliation,
+                super::OneShotState::Ready
+            ));
+            let retained = load_stored_run(&adapter.store, &key).unwrap().unwrap();
+            assert!(!retained.format_repair.unwrap().submitted);
+            assert!(retained.terminal.is_none());
+            drop(adapter);
+            std::fs::remove_dir_all(root).unwrap();
+            return;
+        }
+        adapter
+            .accept_turn_started(&key, &repair.turn_id, &first_end)
+            .unwrap();
+        assert!(adapter.runs[&key].record.last_agent_message.is_none());
+        adapter
+            .store
+            .record_performance_start(
+                &key,
+                PerformanceOperationKind::PrimaryModel,
+                "repair",
+                &first_end,
+            )
+            .unwrap();
+        adapter
+            .store
+            .record_performance_completion(
+                &key,
+                PerformanceOperationKind::PrimaryModel,
+                "repair",
+                &second_end,
+                PerformanceOperationCompletion {
+                    usage_known: true,
+                    input_tokens: 4,
+                    output_tokens: 3,
+                    actual_cost_microunits: Some(2),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let diagram = |kind| {
+            serde_json::json!({"id":kind,"kind":kind,"title":"Plan","nodes":[{
+            "id":"n","label":"Source","description":"Apply the scope","kind":"component","trustBoundary":null,"unresolved":false}],"edges":[]})
+        };
+        let result = serde_json::json!({"schemaVersion":1,"protocol":"winwincode.planner-solution.v1",
+            "solution":{"id":"solution:repair","summary":"Implement the assigned change","approach":["Check and update"],
+                "components":[{"id":"c","label":"Source","responsibility":"Own source","kind":"component","trustBoundary":null,"unresolved":false,"repositoryPathPrefixes":["src"]}],"connections":[]},
+            "architectureDiagram":diagram("system-architecture"),"processDiagram":diagram("process-flow"),"risks":[],"unresolvedItems":[],
+            "taskProposals":[{"id":"task:repair","title":"Apply","goal":"Apply scope","acceptanceCriterionIds":job.work_input.as_ref().unwrap().work_contract.criteria.iter().map(|c|c.id.0.clone()).collect::<Vec<_>>(),"blockedByTaskIds":[]}]});
+        let message = format!("```JSON\n{result}\n```  \nPlan complete.");
+        adapter
+            .accept_turn_complete(
+                &key,
+                &completed(&repair.turn_id, &message, 100),
+                &second_end,
+            )
+            .unwrap();
+        let record = load_stored_run(&adapter.store, &key).unwrap().unwrap();
+        let Some(StoredTerminal::Completed {
+            usage: Some(usage), ..
+        }) = &record.terminal
+        else {
+            panic!("Planner correction did not complete");
+        };
+        assert_eq!(usage.tokens, Some(10));
+        assert_eq!(usage.cost_microunits, Some(3));
+        assert_eq!(usage.runtime_millis, 11_000);
+        drop(adapter);
+        let reopened = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+        let restored = load_stored_run(&reopened.store, &key).unwrap().unwrap();
+        assert_eq!(
+            serde_json::to_value(record).unwrap(),
+            serde_json::to_value(restored).unwrap()
+        );
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn diagnostic_helpers_are_isolated_without_changing_production_installation() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let executable = std::env::current_exe().unwrap();
+        let release = executable.parent().unwrap().parent().unwrap();
+        let installed = [
+            release.join("winwincode-kernel-helper"),
+            release.join("winwincode-kernel-helper.release.json"),
+        ];
+        let snapshot = |path: &PathBuf| {
+            std::fs::read(path)
+                .ok()
+                .map(|bytes| (bytes, std::fs::metadata(path).unwrap().permissions().mode()))
+        };
+        let before = installed.each_ref().map(snapshot);
+        let roots = [
+            test_root("diagnostic-isolation-a"),
+            test_root("diagnostic-isolation-b"),
+        ];
+        std::thread::scope(|scope| {
+            for root in &roots {
+                scope.spawn(move || {
+                    let config = diagnostic_adapter_config(root);
+                    assert!(
+                        config
+                            .helper_executable
+                            .starts_with(root.canonicalize().unwrap())
+                    );
+                    assert!(
+                        project_helper(&config.helper_executable, &config.helper_release_manifest)
+                            .is_none(),
+                        "a test fixture must not qualify as a production installation"
+                    );
+                    let manifest = config.helper_release_manifest.clone();
+                    let helper = config.helper_executable.clone();
+                    std::fs::write(&helper, b"corrupted fixture").unwrap();
+                    assert!(
+                        super::project_helper_in_release(
+                            &helper,
+                            &manifest,
+                            helper.parent().unwrap()
+                        )
+                        .is_none()
+                    );
+                    std::fs::remove_dir_all(root).unwrap();
+                });
+            }
+        });
+        assert_eq!(installed.each_ref().map(snapshot), before);
     }
 
     fn frozen_fusion_candidate(workspace: &std::path::Path) -> (String, WorkspaceRevision) {
@@ -8387,14 +8947,57 @@ mod tests {
         let output = String::from_utf8(output).expect("command output remains utf8");
         assert!(output.contains("stdout-real"));
         assert!(output.contains("stderr-real"));
+        let placeholder_result = "{\"protocol\":\"winwincode.independent-verification-result.v1\",\"delivery_spec_id\":\"spec-fixture\",\"delivery_spec_revision\":2,\"candidate_ref\":\"refs/winwincode/candidates/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"findings\":[{\"finding_id\":\"UNIQUE_FINDING_ID\",\"criterion_id\":\"crt_00000000000000000000000001\",\"verdict\":\"pass\",\"explanation\":\"OBSERVED_RESULT\",\"evidence_sources\":[{\"source_id\":\"FUNCTION_CALL_ID\"}]}]}";
+        adapter
+            .accept_turn_complete(
+                &run_digest,
+                &TurnCompleteEvent {
+                    turn_id: "turn-diagnostic".to_owned(),
+                    last_agent_message: Some(placeholder_result.to_owned()),
+                    error: None,
+                    started_at: None,
+                    completed_at: None,
+                    duration_ms: Some(1),
+                    time_to_first_token_ms: None,
+                },
+                &now,
+            )
+            .expect("retain invalid output for correction");
+        let record = load_stored_run(&adapter.store, &run_digest)
+            .expect("load repair intent")
+            .expect("run");
+        assert!(
+            record.terminal.is_none(),
+            "invalid evidence must not silently pass or terminate before correction"
+        );
+        let repair = record
+            .format_repair
+            .expect("durable verification output repair");
+        assert!(
+            repair
+                .prompt
+                .as_deref()
+                .expect("evidence feedback")
+                .contains("call-real-command-output")
+        );
+        assert!(
+            !repair
+                .prompt
+                .as_deref()
+                .expect("evidence feedback")
+                .contains("FUNCTION_CALL_ID")
+        );
+        adapter
+            .accept_turn_started(&run_digest, &repair.turn_id, &now)
+            .expect("repair read-only policy");
         assert!(matches!(
             adapter
                 .accept_polled_event(
                     &run_digest,
                     CodexEvent {
-                        id: "turn-diagnostic".to_owned(),
+                        id: repair.turn_id.clone(),
                         msg: CodexEventMsg::TurnComplete(TurnCompleteEvent {
-                            turn_id: "turn-diagnostic".to_owned(),
+                            turn_id: repair.turn_id.clone(),
                             last_agent_message: Some("{\"protocol\":\"winwincode.independent-verification-result.v1\",\"delivery_spec_id\":\"spec-fixture\",\"delivery_spec_revision\":2,\"candidate_ref\":\"refs/winwincode/candidates/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"findings\":[{\"finding_id\":\"finding-diagnostic\",\"criterion_id\":\"crt_00000000000000000000000001\",\"verdict\":\"pass\",\"explanation\":\"Direct command output passed.\",\"evidence_sources\":[{\"source_id\":\"call-real-command-output\"}]}]}".to_owned()),
                             error: None,
                             started_at: None,
@@ -8448,6 +9051,41 @@ mod tests {
         let reopened_session = Box::pin(reopened.ensure_thread(start))
             .await
             .expect("recover terminal thread");
+        let identity = winwincode_execution_port::runtime_replay::RuntimeReplayIdentity {
+            lease: diagnostic_open.lease.clone(),
+            worker_session_id: diagnostic_open.worker_session_id.clone(),
+            session_identity: diagnostic_open.session_identity.clone(),
+            codex_thread_id: diagnostic_open.session_identity.codex_thread_id.clone(),
+        };
+        let snapshot = winwincode_execution_port::replay::ReplayStore::load(
+            &mut reopened.store,
+            &identity.stream_key(),
+        )
+        .expect("load corrected verification runtime")
+        .expect("retained runtime");
+        let policy_count = snapshot
+            .events
+            .iter()
+            .filter(|frame| {
+                let message: winwincode_execution_port::generated::RuntimeEventMessage =
+                    serde_json::from_slice(&frame.frame).expect("frame");
+                message.event.payload.as_ref().is_some_and(|payload| {
+                    base64::Engine::decode(
+                        &base64::engine::general_purpose::STANDARD,
+                        &payload.data_base64,
+                    )
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                    .is_some_and(|value| {
+                        value["protocol"] == "winwincode.verification-session-policy.v1"
+                    })
+                })
+            })
+            .count();
+        assert_eq!(
+            policy_count, 1,
+            "correction and restart must retain exactly one read-only policy"
+        );
         let runtime_reference = reopened
             .outbox
             .pending()
@@ -8596,6 +9234,7 @@ mod tests {
             format_repair: None,
             delegated_transitions: Vec::new(),
             final_candidate_freeze: None,
+            delegated_budget: None,
             delegated_stop: None,
             terminal_message_id: None,
             post_action_traces: Vec::new(),
@@ -8753,6 +9392,7 @@ mod tests {
             format_repair: None,
             delegated_transitions: Vec::new(),
             final_candidate_freeze: None,
+            delegated_budget: None,
             delegated_stop: None,
             terminal_message_id: None,
             post_action_traces: Vec::new(),

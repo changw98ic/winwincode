@@ -793,15 +793,18 @@ function contextEffects(records) {
   })
 }
 
-function benchmarkGates(records, quality) {
-  const complete = records.length > 0 && records.every(record => record.status === 'completed' && record.score != null)
+function benchmarkGates(records, quality, references) {
+  const complete = records.length > 0 && records.every(record => record.score != null)
+  const fusionRegrets = references.map(reference => reference.regrets?.['fusion-4']?.againstBatchBest)
+  const regret = complete && fusionRegrets.every(value => Number.isFinite(value))
+    ? (Math.max(...fusionRegrets) <= 0.01 ? 'pass' : 'fail') : 'insufficient_evidence'
   const status = (metric, threshold, direction) => {
     if (!complete || metric.observedRuns !== records.length || metric.rate === 'insufficient_evidence') return 'insufficient_evidence'
     return direction === 'min' ? (metric.rate >= threshold ? 'pass' : 'fail')
       : (metric.rate <= threshold ? 'pass' : 'fail')
   }
   return Object.freeze({
-    regret: Object.freeze({ threshold: 0.01, direction: 'max', status: complete ? 'insufficient_evidence' : 'insufficient_evidence' }),
+    regret: Object.freeze({ threshold: 0.01, direction: 'max', status: regret }),
     minority: Object.freeze({ threshold: 0.95, direction: 'min', status: status(quality.minority, 0.95, 'min') }),
     capture: Object.freeze({ threshold: 0.95, direction: 'min', status: status(quality.capture, 0.95, 'min') }),
     constraintRecall: Object.freeze({ threshold: 1, direction: 'min', status: status(quality.constraintRecall, 1, 'min') }),
@@ -908,6 +911,7 @@ export function aggregateBenchmarkReport(plan, { records, experimentId, ...bindi
     return [field, values.some(value => value == null) ? null : values.reduce((sum, value) => sum + value, 0)]
   }))
   const usage = sumUsage(records)
+  const references = strategyReferences(plan, records)
   const quality = Object.freeze({
     meanScore: scored === records.length
       ? Number((records.reduce((sum, record) => sum + record.score, 0) / records.length).toFixed(6)) : null,
@@ -943,7 +947,7 @@ export function aggregateBenchmarkReport(plan, { records, experimentId, ...bindi
       runnerTerminatedNotRun: records.filter(record => record.status === 'not_run_runner_terminated').length,
     }),
     quality,
-    strategyReferences: Object.freeze(strategyReferences(plan, records)),
+    strategyReferences: Object.freeze(references),
     tokenAndCache: usage.tokenAndCache,
     callAccounting: usage.callAccounting,
     accountingCoverage: usage.coverage,
@@ -967,6 +971,6 @@ export function aggregateBenchmarkReport(plan, { records, experimentId, ...bindi
       }),
     }),
     contextEffects: contextEffects(records),
-    gates: benchmarkGates(records, quality),
+    gates: benchmarkGates(records, quality, references),
   })
 }

@@ -464,7 +464,11 @@ pub fn stage_product_prompt(job: &ExecutionJob) -> Result<String, StageProductEr
                 "planner" => concat!(
                     "Return only canonical JSON using protocol ",
                     "winwincode.planner-solution.v1 and schemaVersion 1. ",
-                    "Every task proposal acceptanceCriterionIds value must come from workInput."
+                    "Every task proposal acceptanceCriterionIds value must come from workInput. ",
+                    "Return solution (id, summary, approach, components, connections), architectureDiagram ",
+                    "(kind system-architecture), processDiagram (kind process-flow), risks, unresolvedItems, ",
+                    "and taskProposals (id, title, goal, acceptanceCriterionIds, blockedByTaskIds). ",
+                    "Use the supplied JSON schema for all nested fields."
                 ),
                 "executor" | "remediator" => concat!(
                     "Apply the requested source change in the assigned checkout. ",
@@ -488,14 +492,10 @@ pub fn stage_product_prompt(job: &ExecutionJob) -> Result<String, StageProductEr
                     "command, cite the original exec_command call ID, not the write_stdin poll. ",
                     "Evidence references contain only source_id; the Worker derives their type ",
                     "from its saved Command/Test events. Do not supply a type or event_id. ",
-                    "Return one JSON object with exactly this shape (replace all ",
-                    "capitalized values with actual input or observed evidence): ",
-                    "{\"protocol\":\"winwincode.independent-verification-result.v1\",",
-                    "\"delivery_spec_id\":\"DELIVERY_SPEC_ID\",\"delivery_spec_revision\":1,",
-                    "\"candidate_ref\":\"CANDIDATE_REF\",\"findings\":[{",
-                    "\"finding_id\":\"UNIQUE_FINDING_ID\",\"criterion_id\":\"CRITERION_ID\",",
-                    "\"verdict\":\"pass\",\"explanation\":\"OBSERVED_RESULT\",",
-                    "\"evidence_sources\":[{\"source_id\":\"FUNCTION_CALL_ID\"}]}]}. ",
+                    "The JSON object fields are protocol, delivery_spec_id, delivery_spec_revision, ",
+                    "candidate_ref and findings. Each finding contains finding_id (choose a unique ID), ",
+                    "criterion_id, verdict, explanation (describe the actual result), and evidence_sources ",
+                    "(objects with only source_id copied from observed tool receipts). ",
                     "Copy delivery_spec_id and delivery_spec_revision from workInput.deliverySpecId ",
                     "and workInput.deliverySpecRevision, not the WorkContract identity. ",
                     "Include exactly one finding per assigned criterion, use pass or fail based ",
@@ -547,6 +547,61 @@ pub fn stage_product_prompt(job: &ExecutionJob) -> Result<String, StageProductEr
             Ok(prompt)
         }
     }
+}
+
+/// Model-facing Planner structure; sealed input identities remain host checked.
+#[must_use]
+pub fn planner_solution_json_schema() -> Value {
+    fn object(properties: Value) -> Value {
+        let required = properties
+            .as_object()
+            .expect("static schema object")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        Value::Object(serde_json::Map::from_iter([
+            ("type".into(), Value::String("object".into())),
+            ("additionalProperties".into(), Value::Bool(false)),
+            ("properties".into(), properties),
+            ("required".into(), serde_json::json!(required)),
+        ]))
+    }
+    fn array(items: Value) -> Value {
+        Value::Object(serde_json::Map::from_iter([
+            ("type".into(), Value::String("array".into())),
+            ("items".into(), items),
+        ]))
+    }
+    let text = serde_json::json!({"type":"string"});
+    let nullable_text = serde_json::json!({"type":["string","null"]});
+    let boolean = serde_json::json!({"type":"boolean"});
+    let connection = object(serde_json::json!({"id":text,"from":text,"to":text,"label":text}));
+    let component = object(
+        serde_json::json!({"id":text,"label":text,"responsibility":text,
+        "kind":{"type":"string","enum":["component","data-store","external"]},
+        "trustBoundary":nullable_text,"unresolved":boolean,"repositoryPathPrefixes":array(text.clone())}),
+    );
+    let node = object(
+        serde_json::json!({"id":text,"label":text,"description":text,
+        "kind":{"type":"string","enum":["interaction","delivery-control","execution","repository","component","data-store","decision","external","stage"]},
+        "trustBoundary":nullable_text,"unresolved":boolean}),
+    );
+    let diagram = |kind: &str| {
+        object(serde_json::json!({"id":text,"title":text,
+        "kind":{"type":"string","enum":[kind]},"nodes":array(node.clone()),"edges":array(connection.clone())}))
+    };
+    let solution = object(
+        serde_json::json!({"id":text,"summary":text,"approach":array(text.clone()),
+        "components":array(component),"connections":array(connection.clone())}),
+    );
+    let proposal = object(serde_json::json!({"id":text,"title":text,"goal":text,
+        "acceptanceCriterionIds":array(text.clone()),"blockedByTaskIds":array(text.clone())}));
+    object(
+        serde_json::json!({"schemaVersion":{"type":"integer","enum":[1]},
+        "protocol":{"type":"string","enum":[PLANNER_SOLUTION_PROTOCOL]},"solution":solution,
+        "architectureDiagram":diagram("system-architecture"),"processDiagram":diagram("process-flow"),
+        "risks":array(text.clone()),"unresolvedItems":array(text),"taskProposals":array(proposal)}),
+    )
 }
 
 fn chat_prompt(job: &ExecutionJob) -> Result<String, StageProductError> {
@@ -739,8 +794,8 @@ fn unique_texts(values: &[String], required: bool) -> bool {
 /// # Errors
 ///
 /// Rejects non-Planner jobs, malformed or oversized JSON, unknown fields,
-/// another schema/protocol, and any byte representation which does not equal
-/// the canonical serializer output.
+/// another schema/protocol or foreign work input. Safe model representations
+/// are normalized before the canonical product bytes are sealed.
 pub fn prepare_planner_solution_activity(
     job: &ExecutionJob,
     final_message: &[u8],
@@ -760,8 +815,9 @@ pub fn prepare_planner_solution_activity(
     if final_message.is_empty() || final_message.len() > MAX_PLANNER_SOLUTION_BYTES {
         return Err(invalid_output());
     }
+    let raw = std::str::from_utf8(final_message).map_err(|_| invalid_output())?;
     let product: PlannerSolutionV1 =
-        serde_json::from_slice(final_message).map_err(|_| invalid_output())?;
+        crate::structured_result::decode(raw).map_err(|()| invalid_output())?;
     if product.schema_version != PLANNER_SOLUTION_SCHEMA_VERSION
         || product.protocol != PLANNER_SOLUTION_PROTOCOL
         || !product.has_required_content()
@@ -770,12 +826,6 @@ pub fn prepare_planner_solution_activity(
         return Err(invalid_output());
     }
     let canonical = serde_json::to_vec(&product).map_err(|_| invalid_output())?;
-    if canonical != final_message {
-        return Err(StageProductError::new(
-            StageProductErrorCode::NonCanonicalOutput,
-            "Planner final response is not canonical JSON",
-        ));
-    }
     let digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(&canonical)));
     Ok(PreparedStageProduct {
         category: ExecutionEventCategory::Activity,
@@ -1918,19 +1968,39 @@ mod tests {
     }
 
     #[test]
-    fn planner_product_rejects_another_role_and_noncanonical_bytes() {
+    fn planner_representation_variants_have_the_same_canonical_product() {
+        let job = delivery_job("planner");
+        let expected = prepare_planner_solution_activity(&job, PLANNER_JSON.as_bytes()).unwrap();
+        let value: Value = serde_json::from_str(PLANNER_JSON).unwrap();
+        for message in [
+            format!("{PLANNER_JSON}\n"),
+            serde_json::to_string_pretty(&value).unwrap(),
+            format!("\u{feff}Result [1]:\n```JSON\n{PLANNER_JSON}\n```   \nDone."),
+        ] {
+            assert_eq!(
+                prepare_planner_solution_activity(&job, message.as_bytes()).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn planner_product_rejects_another_role_duplicate_fields_and_foreign_input() {
         let role_error =
             prepare_planner_solution_activity(&delivery_job("executor"), PLANNER_JSON.as_bytes())
                 .expect_err("executor cannot publish a Planner product");
         assert_eq!(role_error.code(), StageProductErrorCode::InvalidRole);
 
-        let spaced = format!(" {PLANNER_JSON}");
-        let canonical_error =
-            prepare_planner_solution_activity(&delivery_job("planner"), spaced.as_bytes())
-                .expect_err("noncanonical JSON is rejected");
+        let duplicate = PLANNER_JSON.replacen(
+            "\"schemaVersion\":1",
+            "\"schemaVersion\":1,\"schemaVersion\":1",
+            1,
+        );
         assert_eq!(
-            canonical_error.code(),
-            StageProductErrorCode::NonCanonicalOutput
+            prepare_planner_solution_activity(&delivery_job("planner"), duplicate.as_bytes())
+                .unwrap_err()
+                .code(),
+            StageProductErrorCode::InvalidOutput
         );
 
         let foreign_criterion =
@@ -2150,7 +2220,20 @@ mod tests {
             "evidence_sources",
             "source_id",
         ] {
-            assert!(prompt.contains(&format!("\"{field}\":")), "{field}");
+            assert!(prompt.contains(field), "{field}");
+        }
+        for placeholder in [
+            "UNIQUE_FINDING_ID",
+            "FUNCTION_CALL_ID",
+            "OBSERVED_RESULT",
+            "DELIVERY_SPEC_ID",
+            "CANDIDATE_REF",
+            "CRITERION_ID",
+        ] {
+            assert!(
+                !prompt.contains(placeholder),
+                "literal placeholder {placeholder}"
+            );
         }
         assert!(
             prepare_verification_result_activity(&job, VERIFICATION_RESULT_JSON.as_bytes())

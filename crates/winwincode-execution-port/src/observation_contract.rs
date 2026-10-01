@@ -317,7 +317,21 @@ pub fn parse_observation_response_strict(
             "Observer response exceeds the canonical byte limit",
         ));
     }
-    let value = parse_strict_json_value(bytes)?;
+    let raw = std::str::from_utf8(bytes).map_err(|_| {
+        error(
+            ObservationContractErrorCode::InvalidJson,
+            "Observer response is not UTF-8",
+        )
+    })?;
+    let normalized =
+        crate::model_result_normalizer::normalize_model_object(raw, MAX_OBSERVATION_RESPONSE_BYTES)
+            .map_err(|_| {
+                error(
+                    ObservationContractErrorCode::InvalidJson,
+                    "Observer response is not a unique JSON object",
+                )
+            })?;
+    let value = parse_strict_json_value(normalized.json.as_bytes())?;
     let response =
         serde_json::from_value::<ObservationResponse>(value).map_err(|_| invalid_response())?;
     validate_observation_response(&response, intent)?;
@@ -364,13 +378,10 @@ pub fn validate_observation_receipt(
 ) -> Result<(), ObservationContractError> {
     validate_observation_intent(intent)?;
     validate_observation_response(&receipt.response, intent)?;
-    let valid_usage = receipt.model_usage.as_ref().is_none_or(|usage| {
-        (0..=9_007_199_254_740_991).contains(&usage.runtime_millis)
-            && (0..=9_007_199_254_740_991).contains(&usage.tokens)
-            && usage
-                .cost_microunits
-                .is_none_or(|cost| (0..=9_007_199_254_740_991).contains(&cost))
-    });
+    let valid_usage = receipt
+        .model_usage
+        .as_ref()
+        .is_none_or(crate::usage::valid_usage);
     let source_usage = match receipt.source {
         ObservationSource::Model => receipt.model_usage.is_some(),
         ObservationSource::ObserverRuntime => {

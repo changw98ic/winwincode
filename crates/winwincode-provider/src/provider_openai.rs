@@ -269,51 +269,30 @@ fn parse_openai_sse_envelopes(
     max_event_bytes: usize,
     max_events: usize,
 ) -> Result<Vec<OpenAiEnvelope>, AnthropicCodecError> {
-    if bytes.contains(&0) {
-        return Err(AnthropicCodecError::protocol());
-    }
-    let text = std::str::from_utf8(bytes).map_err(|_| AnthropicCodecError::protocol())?;
-    let normalized = text.replace("\r\n", "\n");
-    if normalized.contains('\r') {
-        return Err(AnthropicCodecError::protocol());
-    }
+    let frames =
+        crate::provider_sse_framing::parse(bytes, max_event_bytes, max_events.saturating_add(1))
+            .map_err(|error| match error {
+                crate::provider_sse_framing::SseFramingError::Utf8 => {
+                    AnthropicCodecError::invalid_sse()
+                }
+                crate::provider_sse_framing::SseFramingError::SizeLimit => {
+                    AnthropicCodecError::size_limit()
+                }
+            })?;
     let mut envelopes = Vec::new();
-    let mut data = String::new();
     let mut done = false;
-    for line in normalized.split('\n') {
-        if line.len() > max_event_bytes {
-            return Err(AnthropicCodecError::size_limit());
-        }
-        if line.is_empty() {
-            flush_openai_envelope(
-                &mut envelopes,
-                &mut data,
-                &mut done,
-                max_event_bytes,
-                max_events,
-            )?;
-        } else if line.starts_with(':') || line.starts_with("event:") {
-        } else if let Some(value) = line.strip_prefix("data:") {
-            if !data.is_empty() {
-                data.push('\n');
-            }
-            data.push_str(value.strip_prefix(' ').unwrap_or(value));
-            if data.len() > max_event_bytes {
-                return Err(AnthropicCodecError::size_limit());
-            }
-        } else {
-            return Err(AnthropicCodecError::protocol());
-        }
+    for frame in frames {
+        let mut data = frame.data;
+        flush_openai_envelope(
+            &mut envelopes,
+            &mut data,
+            &mut done,
+            max_event_bytes,
+            max_events,
+        )?;
     }
-    flush_openai_envelope(
-        &mut envelopes,
-        &mut data,
-        &mut done,
-        max_event_bytes,
-        max_events,
-    )?;
     if !done {
-        return Err(AnthropicCodecError::protocol());
+        return Err(AnthropicCodecError::incomplete_stream());
     }
     Ok(envelopes)
 }
@@ -448,6 +427,8 @@ impl<'a> OpenAiStreamParser<'a> {
                     "stop" => ProviderFinishReason::Stop,
                     "tool_calls" | "function_call" => ProviderFinishReason::ToolCalls,
                     "length" => ProviderFinishReason::MaxTokens,
+                    "content_filter" => ProviderFinishReason::Filtered,
+                    "aborted" | "insufficient_system_resource" => ProviderFinishReason::Interrupted,
                     _ => return Err(AnthropicCodecError::protocol()),
                 });
             }
@@ -457,6 +438,7 @@ impl<'a> OpenAiStreamParser<'a> {
 
     fn apply_delta(&mut self, delta: &Map<String, Value>) -> Result<(), AnthropicCodecError> {
         if let Some(role) = delta.get("role")
+            && !role.is_null()
             && role.as_str() != Some("assistant")
         {
             return Err(AnthropicCodecError::protocol());
@@ -563,11 +545,7 @@ impl<'a> OpenAiStreamParser<'a> {
             {
                 return Err(AnthropicCodecError::protocol());
             }
-            let identity = self
-                .tool_bindings
-                .identity(name)
-                .cloned()
-                .ok_or_else(AnthropicCodecError::protocol)?;
+            let identity = self.tool_bindings.response_identity(name)?;
             if identity.kind() == crate::ProviderToolKind::Custom {
                 self.custom_arguments.insert(index, String::new());
             }
@@ -631,13 +609,31 @@ impl<'a> OpenAiStreamParser<'a> {
         }
         let reason = self
             .finish_reason
-            .ok_or_else(AnthropicCodecError::protocol)?;
-        let usage = self.usage.ok_or_else(AnthropicCodecError::protocol)?;
+            .ok_or_else(AnthropicCodecError::incomplete_stream)?;
+        let usage = self
+            .usage
+            .ok_or_else(AnthropicCodecError::incomplete_stream)?;
         self.events.push(ProviderStreamEvent::Usage(usage));
         self.events.push(ProviderStreamEvent::Finished(reason));
-        let terminal = ProviderGatewayTerminal::Completed {
-            usage,
-            actual_cost_micros: self.pricing.cost_micros(usage)?,
+        let terminal = if matches!(
+            reason,
+            ProviderFinishReason::Interrupted | ProviderFinishReason::Filtered
+        ) {
+            ProviderGatewayTerminal::Failed {
+                failure: crate::ModelAttemptFailureFact::from_stream(
+                    crate::ProviderStreamFailureKind::Unknown,
+                    crate::ModelExecutionCertainty::AcceptanceUnknown,
+                ),
+                charge: Some(crate::ProviderGatewayTerminalCharge {
+                    usage,
+                    actual_cost_micros: self.pricing.cost_micros(usage)?,
+                }),
+            }
+        } else {
+            ProviderGatewayTerminal::Completed {
+                usage,
+                actual_cost_micros: self.pricing.cost_micros(usage)?,
+            }
         };
         Ok(ParsedOpenAiStream {
             events: self.events,
@@ -656,16 +652,43 @@ fn openai_usage(value: &Value) -> Result<ProviderTokenUsage, AnthropicCodecError
             "total_tokens",
             "prompt_tokens_details",
             "completion_tokens_details",
+            "prompt_cache_hit_tokens",
+            "prompt_cache_miss_tokens",
         ],
     )?;
     let prompt = usage_number(value, "prompt_tokens")?;
     let completion = usage_number(value, "completion_tokens")?;
-    let mut cached = 0_u64;
+    let mut cached = None;
     if let Some(details) = value.get("prompt_tokens_details")
         && !details.is_null()
     {
         let details = object(details)?;
-        cached = usage_number(details, "cached_tokens")?;
+        exact_keys(details, &["cached_tokens"])?;
+        cached = details
+            .get("cached_tokens")
+            .filter(|value| !value.is_null())
+            .map(|value| value.as_u64().ok_or_else(AnthropicCodecError::protocol))
+            .transpose()?;
+    }
+    match (
+        value.get("prompt_cache_hit_tokens"),
+        value.get("prompt_cache_miss_tokens"),
+    ) {
+        (Some(hit), Some(miss)) => {
+            let hit = hit.as_u64().ok_or_else(AnthropicCodecError::protocol)?;
+            let miss = miss.as_u64().ok_or_else(AnthropicCodecError::protocol)?;
+            if hit.checked_add(miss) != Some(prompt) || cached.is_some_and(|cached| cached != hit) {
+                return Err(AnthropicCodecError::protocol());
+            }
+            cached = Some(hit);
+        }
+        (None, None) => {}
+        _ => return Err(AnthropicCodecError::protocol()),
+    }
+    if let Some(total) = value.get("total_tokens")
+        && total.as_u64() != prompt.checked_add(completion)
+    {
+        return Err(AnthropicCodecError::protocol());
     }
     let mut reasoning = 0_u64;
     if let Some(details) = value.get("completion_tokens_details")
@@ -680,7 +703,7 @@ fn openai_usage(value: &Value) -> Result<ProviderTokenUsage, AnthropicCodecError
     }
     if prompt > MAX_SAFE_INTEGER
         || completion > MAX_SAFE_INTEGER
-        || cached > prompt
+        || cached.is_some_and(|cached| cached > prompt)
         || reasoning > completion
     {
         return Err(AnthropicCodecError::protocol());
@@ -740,6 +763,76 @@ mod tests {
             }
         }))
         .expect("payload")
+    }
+
+    #[test]
+    fn tool_output_preserves_nul_as_json_text() {
+        let mut payload: Value = serde_json::from_slice(&canonical_payload()).unwrap();
+        let text = format!("command output:{}done", "\0".repeat(255));
+        payload["request"]["input"].as_array_mut().unwrap().extend([
+            json!({"type":"function_call", "name":"shell", "call_id":"call-1", "arguments":"{}"}),
+            json!({"type":"function_call_output", "call_id":"call-1", "output":text}),
+        ]);
+        let prepared = prepare_openai_chat_request(
+            &serde_json::to_vec(&payload).unwrap(),
+            "qwen3.8-flash",
+            options(),
+        )
+        .expect("NUL in tool output is valid JSON text");
+        assert!(!prepared.body.contains(&0));
+        let body: Value = serde_json::from_slice(&prepared.body).unwrap();
+        let output = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["role"] == "tool" && message["tool_call_id"] == "call-1")
+            .expect("retained tool output");
+        assert_eq!(
+            output["content"],
+            format!("Tool call source_id: call-1\n{text}")
+        );
+    }
+
+    #[test]
+    fn unadvertised_function_call_survives_stream_and_error_feedback_history() {
+        let prepared =
+            prepare_openai_chat_request(&canonical_payload(), "qwen3.8-flash", options())
+                .expect("prepared");
+        let mut parser = OpenAiStreamParser::new(&prepared.tool_bindings, options().pricing, 1);
+        parser
+            .push(&envelope(json!({"id":"r1", "choices":[{"index":0,"delta":{
+            "tool_calls":[{"index":0,"id":"call-1","type":"function","function":{
+                "name":"apply_patch","arguments":"{}"}}]},
+            "finish_reason":"tool_calls"}], "usage":{"prompt_tokens":1,"completion_tokens":1}})))
+            .expect("unknown tool is a model error, not corrupt SSE");
+        let parsed = parser.finish().expect("metered completion");
+        assert!(parsed.events.iter().any(|event| matches!(event,
+            ProviderStreamEvent::ToolCallStarted { identity, .. }
+            if identity.name() == "apply_patch" && identity.namespace() == Some("winwincode_unadvertised") && identity.kind() == crate::ProviderToolKind::Function)));
+        let mut payload: Value = serde_json::from_slice(&canonical_payload()).expect("payload");
+        payload["request"]["input"].as_array_mut().expect("input").extend([
+            json!({"type":"function_call","name":"apply_patch","namespace":"winwincode_unadvertised","call_id":"call-1","arguments":"{}"}),
+            json!({"type":"function_call_output","call_id":"call-1","output":"unsupported call: apply_patch"}),
+        ]);
+        let feedback = prepare_openai_chat_request(
+            &serde_json::to_vec(&payload).expect("payload"),
+            "qwen3.8-flash",
+            options(),
+        )
+        .expect("Core error feedback can reach model");
+        let body: Value = serde_json::from_slice(&feedback.body).expect("body");
+        assert_eq!(body["tools"].as_array().expect("tools").len(), 1);
+        assert_eq!(body["tools"][0]["function"]["name"], "shell");
+        assert_eq!(
+            body["messages"][2]["tool_calls"][0]["function"]["name"],
+            "apply_patch"
+        );
+        assert!(
+            body["messages"][3]["content"]
+                .as_str()
+                .expect("feedback")
+                .ends_with("unsupported call: apply_patch")
+        );
     }
 
     #[test]
@@ -907,6 +1000,128 @@ mod tests {
                 assert_eq!(usage.output_tokens, 5);
             }
             other => panic!("unexpected terminal {other:?}"),
+        }
+    }
+
+    #[test]
+    fn optional_cache_details_preserve_known_tokens_and_unknown_cost() {
+        for details in [
+            None,
+            Some(Value::Null),
+            Some(json!({})),
+            Some(json!({"cached_tokens":null})),
+        ] {
+            let mut value = json!({"prompt_tokens":16,"completion_tokens":10,"total_tokens":26});
+            if let Some(details) = details {
+                value["prompt_tokens_details"] = details;
+            }
+            let usage = openai_usage(&value).unwrap();
+            assert_eq!(usage.input_tokens, 16);
+            assert_eq!(usage.output_tokens, 10);
+            assert_eq!(usage.cached_input_tokens, None);
+            assert_eq!(
+                ProviderTokenPricing::default().cost_micros(usage).unwrap(),
+                None
+            );
+            let pricing = ProviderTokenPricing {
+                input_micros_per_million_tokens: 2_000_000,
+                cached_input_micros_per_million_tokens: 1_000_000,
+                ..Default::default()
+            };
+            assert_eq!(pricing.cost_micros(usage).unwrap(), None);
+            let same = ProviderTokenPricing {
+                cached_input_micros_per_million_tokens: 2_000_000,
+                ..pricing
+            };
+            assert_eq!(same.cost_micros(usage).unwrap(), Some(32));
+        }
+    }
+
+    #[test]
+    fn deepseek_stream_accepts_null_role_in_terminal_delta() {
+        let chunk = json!({"id":"deepseek-response", "choices":[{"index":0,
+            "delta":{"role":null,"content":null}, "finish_reason":"stop"}],
+            "usage":{"prompt_tokens":16,"completion_tokens":10,"total_tokens":26}});
+        let wire = format!("data: {chunk}\n\ndata: [DONE]\n\n");
+        let parsed = parse_openai_chat_sse(
+            wire.as_bytes(),
+            2048,
+            8,
+            &AnthropicToolBindings::default(),
+            options(),
+        )
+        .expect("legal null role");
+        assert!(matches!(
+            parsed.terminal,
+            ProviderGatewayTerminal::Completed { .. }
+        ));
+    }
+
+    #[test]
+    fn deepseek_stream_retains_cache_usage_without_double_counting() {
+        let chunk = json!({"id":"deepseek-response", "choices":[{"index":0,
+            "delta":{}, "finish_reason":"stop"}],
+            "usage":{"prompt_tokens":16,"completion_tokens":10,"total_tokens":26,
+                "prompt_tokens_details":{"cached_tokens":6},
+                "prompt_cache_hit_tokens":6,"prompt_cache_miss_tokens":10}});
+        let wire = format!("data: {chunk}\n\ndata: [DONE]\n\n");
+        let parsed = parse_openai_chat_sse(
+            wire.as_bytes(),
+            2048,
+            8,
+            &AnthropicToolBindings::default(),
+            options(),
+        )
+        .expect("legal cache usage");
+        let ProviderGatewayTerminal::Completed { usage, .. } = parsed.terminal else {
+            panic!("expected completion");
+        };
+        assert_eq!(usage.input_tokens, 16);
+        assert_eq!(usage.cached_input_tokens, Some(6));
+        assert_eq!(usage.output_tokens, 10);
+        for (field, value) in [
+            ("prompt_cache_miss_tokens", 11),
+            ("prompt_cache_hit_tokens", 7),
+            ("total_tokens", 25),
+        ] {
+            let mut invalid = chunk.clone();
+            invalid["usage"][field] = json!(value);
+            let wire = format!("data: {invalid}\n\ndata: [DONE]\n\n");
+            assert!(
+                parse_openai_chat_sse(
+                    wire.as_bytes(),
+                    2048,
+                    8,
+                    &AnthropicToolBindings::default(),
+                    options()
+                )
+                .is_err(),
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
+    fn sse_representation_normalizes_metadata_bom_and_all_line_endings() {
+        let chunk = json!({"id":"response-1","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}],
+            "usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}});
+        let wire = format!(
+            "id: 1\nretry: 1000\n: keepalive\nevent:message\nx-provider-info: ignored\ndata: {chunk}\n\ndata:[DONE]\n\n"
+        );
+        for ending in ["\n", "\r\n", "\r"] {
+            let body = format!("\u{feff}{}", wire.replace('\n', ending));
+            let parsed = parse_openai_chat_sse(
+                body.as_bytes(),
+                2048,
+                8,
+                &AnthropicToolBindings::default(),
+                options(),
+            )
+            .unwrap();
+            assert!(matches!(
+                parsed.terminal,
+                ProviderGatewayTerminal::Completed { .. }
+            ));
         }
     }
 

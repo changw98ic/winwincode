@@ -45,6 +45,7 @@ pub enum WorkspaceErrorCode {
     InvalidInput,
     NotFound,
     Conflict,
+    UnchangedCandidate,
     PathEscape,
     DigestMismatch,
     Corrupt,
@@ -1300,6 +1301,9 @@ pub struct WorkerWorkspace {
 }
 
 impl WorkerWorkspace {
+    pub(crate) fn source_commit_id(&self) -> &str {
+        &self.source_commit_id
+    }
     pub(crate) fn has_source_changes(&self) -> Result<bool, WorkspaceError> {
         Ok(!workspace_checkout_clean(&self.layout.checkout)?
             || rev_parse(&self.layout.checkout, "HEAD^{tree}")? != self.source_tree_id)
@@ -1452,7 +1456,8 @@ impl WorkerWorkspace {
         git_status(&self.layout.checkout, &["add", "--all"])?;
         let candidate_tree_id = git_text(&self.layout.checkout, &["write-tree"])?;
         if candidate_tree_id == self.source_tree_id {
-            return Err(WorkspaceError::conflict(
+            return Err(WorkspaceError::new(
+                WorkspaceErrorCode::UnchangedCandidate,
                 "candidate tree has no source changes",
             ));
         }
@@ -3033,7 +3038,7 @@ fn git_status(repository: &Path, arguments: &[&str]) -> Result<(), WorkspaceErro
     command_status(command, "Git operation failed")
 }
 
-fn git_text(repository: &Path, arguments: &[&str]) -> Result<String, WorkspaceError> {
+pub(crate) fn git_text(repository: &Path, arguments: &[&str]) -> Result<String, WorkspaceError> {
     let output = git_output(repository, arguments)?;
     let text = std::str::from_utf8(&output)
         .map_err(|_| WorkspaceError::new(WorkspaceErrorCode::Corrupt, "Git output is not UTF-8"))?;

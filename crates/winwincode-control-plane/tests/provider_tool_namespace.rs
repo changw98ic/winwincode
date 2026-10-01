@@ -190,7 +190,7 @@ impl ProviderGatewayAdmissionPort for Admission {
                 }
             },
             actual_tokens: 0,
-            actual_cost_micros: 0,
+            actual_cost_micros: Some(0),
             revision: 2,
             idempotent_replay: false,
         })
@@ -202,7 +202,7 @@ impl ProviderGatewayAdmissionPort for Admission {
         original_request_id: &RequestId,
         model_exchange_id: &ModelExchangeId,
         usage: ProviderTokenUsage,
-        actual_cost_micros: u64,
+        actual_cost_micros: Option<u64>,
     ) -> Result<ModelReservationTerminalReceipt, ProviderAdmissionError> {
         Ok(ModelReservationTerminalReceipt {
             request_id: original_request_id.clone(),

@@ -426,7 +426,7 @@ fn model_policy() -> LocalModelPolicyAuthority {
             tokens_per_minute: 100_000,
             concurrent_requests: 100,
             token_budget: 1_000_000,
-            cost_budget_micros: 1_000_000,
+            cost_budget_micros: Some(1_000_000),
         },
     )
     .expect("model admission policy");
@@ -1486,7 +1486,17 @@ fn failed_terminal_retry_dispatch_rebinds_product_session_and_fences_old_ingress
 
 #[test]
 fn running_scheduler_replacement_rotates_one_product_session_binding_and_replays_exactly() {
-    let seed = 61;
+    replacement_continues_react_model_exchanges(true);
+}
+
+#[test]
+fn replacement_after_session_binding_before_first_model_exchange_starts_original_chat_turn() {
+    replacement_continues_react_model_exchanges(false);
+}
+
+#[allow(clippy::too_many_lines)]
+fn replacement_continues_react_model_exchanges(original_model_bound: bool) {
+    let seed = if original_model_bound { 61 } else { 62 };
     let mut fixture = Fixture::open(seed);
     let job = create_chat_job(&mut fixture, seed);
     let scope = execution_scope(&fixture);
@@ -1512,10 +1522,12 @@ fn running_scheduler_replacement_rotates_one_product_session_binding_and_replays
             at(9),
         )
         .expect("original ProductSession binding");
-    let original_open = model_open_message(&fixture, &original_runtime, 6_107);
-    fixture
-        .accept(&model_binding_message(original_open), at(10))
-        .expect("original ProductSession ModelOpen");
+    if original_model_bound {
+        let original_open = model_open_message(&fixture, &original_runtime, 6_107);
+        fixture
+            .accept(&model_binding_message(original_open), at(10))
+            .expect("original ProductSession ModelOpen");
+    }
 
     register_worker_process(&mut fixture.storage, seed, seed + 1, 6_108, 11);
     let replacement_dispatch = scheduler_claim(&mut fixture, seed, seed + 1, 6_110, "boot-new", 25);
@@ -1561,6 +1573,33 @@ fn running_scheduler_replacement_rotates_one_product_session_binding_and_replays
         &replacement_open.model_exchange_id
     );
     assert_eq!(record.turn_intents().len(), 1);
+
+    let mut second_open = model_open_message(&fixture, &replacement_runtime, 6_118);
+    second_open.sent_at = at(29);
+    fixture
+        .accept(&model_binding_message(second_open.clone()), at(29))
+        .expect("ReAct next exchange stays on successor binding");
+    fixture
+        .accept(&model_binding_message(replacement_open.clone()), at(29))
+        .expect("replay first exchange keeps original receipt kind");
+    fixture
+        .accept(&model_binding_message(second_open.clone()), at(29))
+        .expect("replay continuation exchange");
+    let continued = ProductSessionService::new(&mut fixture.storage)
+        .get(&fixture.receipt_scope, &fixture.product_session_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(continued.bindings().len(), 1);
+    assert_eq!(
+        continued.bindings()[0].slot().authority,
+        replacement_runtime.slot
+    );
+    assert_eq!(
+        continued.bindings()[0].model_exchange_id(),
+        &second_open.model_exchange_id
+    );
+    assert!(continued.bindings()[0].includes_model_exchange(&replacement_open.model_exchange_id));
+    assert_eq!(continued.turn_intents().len(), 1);
 
     assert_product_predecessor_is_fenced(
         &mut fixture,
@@ -1944,6 +1983,115 @@ fn device_model_calls_share_one_execution_binding_and_replay_after_restart() {
     assert!(
         fixture
             .accept(&model_binding_message(foreign), at(14))
+            .is_err()
+    );
+    fixture.close();
+}
+
+#[test]
+fn bound_chat_empty_frame_rejects_foreign_thread_identity() {
+    let (mut fixture, first) = prepared_provider_fixture(94);
+    let ExecutionPortMessage::ModelChunkMessage(mut chunk) = model_binding_message(first) else {
+        panic!("chunk");
+    };
+    chunk.session_identity.codex_thread_id = CodexThreadId(id("cdx", 94949));
+    assert!(
+        fixture
+            .accept(&ExecutionPortMessage::ModelChunkMessage(chunk), at(11))
+            .is_err()
+    );
+    fixture.close();
+}
+
+#[test]
+fn bound_chat_requires_live_lease_for_new_frame_but_replays_exact_frame_after_expiry() {
+    let (mut fixture, first) = prepared_provider_fixture(95);
+    let ExecutionPortMessage::ModelChunkMessage(mut chunk) = model_binding_message(first.clone())
+    else {
+        panic!("chunk");
+    };
+    chunk.sequence = ExecutionSequence(2);
+    chunk.message_id = ExecutionMessageId(id("xmsg", 95952));
+    let body = br#"{"delta":"accepted","type":"output_text_delta"}"#;
+    chunk.payload = Some(winwincode_execution_port::generated::EncodedPayload {
+        content_type: "application/json".into(),
+        data_base64: STANDARD.encode(body),
+        payload_digest: Sha256Digest(format!("sha256:{:x}", Sha256::digest(body))),
+    });
+    let accepted = ExecutionPortMessage::ModelChunkMessage(chunk.clone());
+    fixture
+        .accept(&accepted, at(11))
+        .expect("first seen under live lease");
+    fixture = fixture.restart();
+    fixture
+        .accept(&accepted, expired())
+        .expect("exact retained frame after expiry");
+    chunk.sequence = ExecutionSequence(3);
+    chunk.message_id = ExecutionMessageId(id("xmsg", 95953));
+    assert!(
+        fixture
+            .accept(&ExecutionPortMessage::ModelChunkMessage(chunk), expired())
+            .is_err(),
+        "known exchange cannot authorize a new expired frame"
+    );
+    assert_eq!(assistant_content(&mut fixture), "accepted");
+    let ExecutionPortMessage::ModelChunkMessage(mut changed) = accepted else {
+        panic!("chunk");
+    };
+    let replacement = br#"{"delta":"changed","type":"output_text_delta"}"#;
+    changed.payload.as_mut().unwrap().data_base64 = STANDARD.encode(replacement);
+    changed.payload.as_mut().unwrap().payload_digest =
+        Sha256Digest(format!("sha256:{:x}", Sha256::digest(replacement)));
+    assert!(
+        fixture
+            .accept(&ExecutionPortMessage::ModelChunkMessage(changed), expired())
+            .is_err()
+    );
+    assert_eq!(assistant_content(&mut fixture), "accepted");
+    fixture.close();
+}
+
+#[test]
+fn renewed_chat_lease_accepts_new_frame_with_original_dispatch_stamp() {
+    let (mut fixture, first) = prepared_provider_fixture(96);
+    let lease = &first.lease;
+    fixture
+        .storage
+        .execution_registry()
+        .unwrap()
+        .renew_execution_lease(&winwincode_storage::ExecutionLeaseRenewal {
+            expires_at: at(58),
+            prior_expires_at: lease.expires_at.clone(),
+            job_id: lease.job_id.clone(),
+            lease_id: lease.lease_id.clone(),
+            worker_id: lease.worker_id.clone(),
+            worker_instance_id: lease.worker_instance_id.clone(),
+            attempt: 1,
+            fencing_token: lease.fencing_token.clone(),
+            message_id: ExecutionMessageId(id("xmsg", 96961)),
+            request_id: RequestId(id("req", 96961)),
+            sent_at: at(15),
+        })
+        .unwrap();
+    let ExecutionPortMessage::ModelChunkMessage(mut chunk) = model_binding_message(first) else {
+        panic!("chunk");
+    };
+    chunk.sequence = ExecutionSequence(2);
+    chunk.message_id = ExecutionMessageId(id("xmsg", 96962));
+    let frame = ExecutionPortMessage::ModelChunkMessage(chunk.clone());
+    assert!(chunk.lease.expires_at.0 < at(55).0);
+    fixture
+        .accept(&frame, at(55))
+        .expect("trusted renewal extends original proven period");
+    fixture = fixture.restart();
+    fixture
+        .accept(&frame, expired())
+        .expect("expired exact frame replay after renewal");
+    chunk.sequence = ExecutionSequence(3);
+    chunk.message_id = ExecutionMessageId(id("xmsg", 96963));
+    assert!(
+        fixture
+            .accept(&ExecutionPortMessage::ModelChunkMessage(chunk), at(59))
             .is_err()
     );
     fixture.close();
@@ -2362,7 +2510,8 @@ fn failure_with_known_or_unknown_usage_replays_after_metadata_change() {
         );
         assert_eq!(
             reservation.actual_tokens,
-            expected_usage.map(|usage| u64::try_from(usage.tokens).unwrap())
+            expected_usage
+                .and_then(|usage| usage.tokens.map(|tokens| u64::try_from(tokens).unwrap()))
         );
         fixture.close();
     }

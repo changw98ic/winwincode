@@ -217,7 +217,7 @@ fn parallel_namespaced_sse_round_trips_the_bound_canonical_identities() {
                 output_tokens: 4,
                 ..
             },
-            actual_cost_micros: 14,
+            actual_cost_micros: Some(14),
         }
     ));
 }
@@ -300,16 +300,18 @@ fn alias_collisions_are_deterministic_and_never_parsed_as_identity() {
 
     let unknown_wire_name =
         parallel_tool_sse().replace("repository-tools__read-file", "repository-tools__unbound");
-    let Err(error) = parse_anthropic_sse(
+    let parsed = parse_anthropic_sse(
         unknown_wire_name.as_bytes(),
         64 * 1_024,
         64,
         &prepared.tool_bindings,
         options(),
-    ) else {
-        panic!("unbound Anthropic alias was parsed as a canonical identity");
-    };
-    assert_eq!(error.kind(), AnthropicCodecErrorKind::Protocol);
+    )
+    .expect("unadvertised calls reach Core error feedback");
+    assert!(parsed.events.iter().any(|event| matches!(event,
+        ProviderStreamEvent::ToolCallStarted { identity, .. }
+        if identity.name() == "repository-tools__unbound"
+            && identity.namespace() == Some("winwincode_unadvertised"))));
 }
 
 #[test]

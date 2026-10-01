@@ -11,6 +11,7 @@ pub(crate) mod attention;
 pub mod candidate;
 pub mod evidence;
 pub mod rework;
+pub mod same_candidate;
 mod session_binding;
 mod spec;
 pub mod verdict;
@@ -366,6 +367,8 @@ pub struct DeliverySnapshot {
     pub status: DeliveryStatus,
     pub spec: DeliverySpec,
     pub session_bindings: Vec<SessionBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub same_candidate_reverification: Option<same_candidate::SameCandidateReverificationFact>,
     pub attention_items: Vec<AttentionItem>,
     pub evidence: Vec<EvidenceRef>,
     #[serde(deserialize_with = "deserialize_required_option")]
@@ -472,6 +475,7 @@ fn validate_delivery(snapshot: &mut DeliverySnapshot) -> Result<(), DeliveryVali
             format!("invalid WorkRun aggregate: {error:?}"),
         )
     })?;
+    same_candidate::validate_fact(snapshot)?;
     schema_version(snapshot.schema_version, "delivery.schemaVersion")?;
     canonical_delivery_id(&snapshot.id.0, "delivery.id")?;
     positive(snapshot.revision, "delivery.revision")?;

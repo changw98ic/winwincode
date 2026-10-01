@@ -527,8 +527,9 @@ fn materialize_extensions(
                 let mut config = mcp_connection::validate(&entry.data)?;
                 config.enabled = true;
                 config.enabled_tools = Some(projection.tool_names.clone());
-                config.startup_timeout_sec = Some(std::time::Duration::from_secs(15));
-                config.tool_timeout_sec = Some(std::time::Duration::from_mins(1));
+                if std::env::var("WWC_BENCHMARK_TOOL_REPEAT_GUARD").as_deref() == Ok("1") {
+                    config.tool_timeout_sec = Some(std::time::Duration::ZERO);
+                }
                 servers.insert(entry.id.clone(), config);
                 capabilities.push(InstalledMcpTools {
                     server: entry.id.clone(),

@@ -195,7 +195,7 @@ pub trait ProviderGatewayAdmissionPort: Send {
         original_request_id: &RequestId,
         model_exchange_id: &ModelExchangeId,
         usage: ProviderTokenUsage,
-        actual_cost_micros: u64,
+        actual_cost_micros: Option<u64>,
     ) -> Result<ModelReservationTerminalReceipt, ProviderAdmissionError>;
 }
 
@@ -359,7 +359,7 @@ impl ProviderGatewayAdmissionPort for DurableProviderGatewayAdmission<'_, '_> {
         original_request_id: &RequestId,
         model_exchange_id: &ModelExchangeId,
         usage: ProviderTokenUsage,
-        actual_cost_micros: u64,
+        actual_cost_micros: Option<u64>,
     ) -> Result<ModelReservationTerminalReceipt, ProviderAdmissionError> {
         let request = ModelReservationCompletion {
             request_id: terminal_request_id(

@@ -1130,6 +1130,7 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
         sequence: next_client_sequence(&data_directory, &node_id),
         occurred_at: "2026-09-04T12:05:00.000Z".to_owned(),
         message: ClientToServerMessage::WorkerLaunchAck(Box::new(ClientWorkerLaunchAckPayload {
+            process_closure: None,
             occupancy: OccupancyCommandContext {
                 command: CommandContext {
                     expected_revision: mirror.mirror_revision,

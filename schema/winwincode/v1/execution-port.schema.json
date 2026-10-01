@@ -126,11 +126,35 @@
         "SNAPSHOT_BINDING_MISSING",
         "SNAPSHOT_BINDING_MISMATCH",
         "MODEL_STREAM_FAILED",
+        "DEVICE_PROVIDER_REQUEST_INVALID",
+        "DEVICE_PROVIDER_REQUEST_TRANSLATION_FAILED",
+        "DEVICE_PROVIDER_REQUEST_TOO_LARGE",
+        "DEVICE_PROVIDER_RESPONSE_CONTENT_TYPE_INVALID",
+        "DEVICE_PROVIDER_SSE_FRAMING_INVALID",
+        "DEVICE_PROVIDER_SSE_EVENT_INVALID",
+        "DEVICE_PROVIDER_RESPONSE_INCOMPLETE",
+        "DEVICE_PROVIDER_STREAM_CONVERSION_FAILED",
+        "DEVICE_PROVIDER_CONNECTION_FAILED",
+        "DEVICE_PROVIDER_UPSTREAM_FAILED",
+        "DEVICE_PROVIDER_REQUEST_REJECTED",
+        "DEVICE_PROVIDER_RATE_LIMITED",
+        "DEVICE_PROVIDER_UNAVAILABLE",
+        "DEVICE_PROVIDER_INVALID_CONFIGURATION",
+        "DEVICE_PROVIDER_ADAPTER_PROTOCOL_FAILED",
+        "DEVICE_PROVIDER_TRANSPORT_FAILED",
+        "DEVICE_PROVIDER_RESPONSE_TOO_LARGE",
+        "DEVICE_PROVIDER_CREDENTIAL_LEAK_BLOCKED",
+        "DEVICE_MODEL_IDENTITY_CONFLICT",
+        "DEVICE_MODEL_PAUSED",
+        "DEVICE_MODEL_INTERRUPTED",
+        "DEVICE_JEV_UNAVAILABLE",
         "INPUT_CLOSED",
         "APPROVAL_DENIED",
         "CANCELLED",
         "EXECUTION_FAILED",
-        "INFRASTRUCTURE_ERROR"
+        "INFRASTRUCTURE_ERROR",
+        "CANDIDATE_UNCHANGED",
+        "CANDIDATE_PREPARATION_FAILED"
       ]
     },
     "ExecutionPortError": {
@@ -882,7 +906,10 @@
           "maximum": 9007199254740991
         },
         "tokens": {
-          "type": "integer",
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 0,
           "maximum": 9007199254740991
         },
@@ -893,12 +920,26 @@
           ],
           "minimum": 0,
           "maximum": 9007199254740991
+        },
+        "knownTokens": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "accountingStatus": {
+          "type": "string",
+          "enum": [
+            "known",
+            "unknown"
+          ]
         }
       },
       "required": [
         "runtimeMillis",
         "tokens",
-        "costMicrounits"
+        "costMicrounits",
+        "knownTokens",
+        "accountingStatus"
       ]
     },
     "ExecutionOutcome": {
@@ -1008,6 +1049,11 @@
         },
         "capabilities": {
           "$ref": "#/$defs/WorkerCapabilitySet"
+        },
+        "usageAccountingVersion": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 2
         }
       },
       "required": [
@@ -1019,7 +1065,8 @@
         "workerId",
         "workerInstanceId",
         "startedAt",
-        "capabilities"
+        "capabilities",
+        "usageAccountingVersion"
       ],
       "title": "worker.register",
       "description": "Registers one stable Worker identity and one process-boot identity.",
@@ -5917,27 +5964,42 @@
           "maximum": 3
         },
         "maxObserverCalls": {
-          "type": "integer",
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 1,
           "maximum": 4
         },
         "maxPrimaryModelCalls": {
-          "type": "integer",
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 1,
           "maximum": 8
         },
         "maxTotalTokens": {
-          "type": "integer",
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 1,
           "maximum": 10000000
         },
         "maxTotalCostMicrounits": {
-          "type": "integer",
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 1,
           "maximum": 9007199254740991
         },
         "maxWallTimeMillis": {
-          "type": "integer",
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 1000,
           "maximum": 3600000
         },
@@ -5962,7 +6024,7 @@
         "maxChangeBatches",
         "maxContextPackBytes"
       ],
-      "description": "Immutable upper bounds for one repair loop. maxRepairRounds is canonically fixed at three; Observer calls, primary-model calls, tokens, cost, wall time, ChangeBatches, and serialized context bytes are audited independently."
+      "description": "Immutable bounds for one repair loop. Null usage, elapsed-time and call limits are unbounded. Structural repair rounds, batches and context bytes remain bounded."
     },
     "RepairLoopCounters": {
       "type": "object",
@@ -5976,17 +6038,17 @@
         "observerCalls": {
           "type": "integer",
           "minimum": 0,
-          "maximum": 4
+          "maximum": 9007199254740991
         },
         "primaryModelCalls": {
           "type": "integer",
           "minimum": 0,
-          "maximum": 8
+          "maximum": 9007199254740991
         },
         "totalTokens": {
           "type": "integer",
           "minimum": 0,
-          "maximum": 10000000
+          "maximum": 9007199254740991
         },
         "totalCostMicrounits": {
           "type": "integer",
@@ -5996,7 +6058,7 @@
         "elapsedMillis": {
           "type": "integer",
           "minimum": 0,
-          "maximum": 3600000
+          "maximum": 9007199254740991
         },
         "changeBatches": {
           "type": "integer",
