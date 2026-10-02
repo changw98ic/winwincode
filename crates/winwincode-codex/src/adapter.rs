@@ -4655,6 +4655,25 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         settlement: DelegatedObserverSettlement,
     ) -> Result<(), Self::Error> {
         let run_key = self.run_key_for_thread(thread_id)?.to_owned();
+        // Current batch admission applies to the first settlement. An exact
+        // retained receipt remains consumable after A transitions to B or stops.
+        if let Some(previous) = self
+            .store
+            .observer_settlement(&run_key, &settlement.batch_id.0)
+            .map_err(map_store_error)?
+        {
+            if previous.batch_id != settlement.batch_id || previous.usage != settlement.usage {
+                return Err(conflict());
+            }
+            return Ok(());
+        }
+        if self
+            .store
+            .restore_legacy_observer_settlement(&run_key, &settlement)
+            .map_err(map_store_error)?
+        {
+            return Ok(());
+        }
         let run = self.runs.get(&run_key).ok_or_else(unknown_thread)?;
         if !is_delegated_composer(&run.record)
             || run.record.terminal.is_some()
@@ -4669,12 +4688,16 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         {
             return Err(conflict());
         }
-        self.record_delegated_observer_completion(
+        self.store
+            .retain_observer_settlement(&run_key, &settlement)
+            .map_err(map_store_error)?;
+        let _ = self.record_delegated_observer_completion(
             &run_key,
             &settlement.batch_id.0,
             &settlement.completed_at,
             settlement.usage.as_ref(),
-        )
+        );
+        Ok(())
     }
 
     fn retain_delegated_loop_stop(
@@ -8687,6 +8710,276 @@ mod tests {
             Some(usage)
         );
         drop(adapter);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn observer_settlement_replay_survives_consumed_batch_and_restart() {
+        assert_observer_settlement_replay(false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_observer_settlement_replay_recovers_an_exact_completed_projection() {
+        assert_observer_settlement_replay(true);
+    }
+
+    #[cfg(unix)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Keep one receipt lifecycle, its fault variants and restart assertions together"
+    )]
+    fn assert_observer_settlement_replay(legacy: bool) {
+        use super::ExecutionOutcomeUsage;
+        let root = test_root("observer-settlement-replay");
+        let mut adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+        let (mut record, mut binding) = delegated_record_and_binding();
+        record.workspace = root.join("workspace");
+        std::fs::create_dir_all(&record.workspace).unwrap();
+        binding.authority.lease.lease_id = LeaseId("lse_00000000000000000000000001".into());
+        binding.authority.lease.fencing_token = FencingToken("1".into());
+        let key = binding.run_key.clone();
+        let thread = binding.canonical_thread_id.clone();
+        let output = serde_json::json!({"acceptanceCriteriaIds":["crt_00000000000000000000000001"],
+            "disposition":"continue", "patch":"*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-old\n+new\n*** End Patch\n",
+            "schemaVersion":1,"validationProfile":"changed"});
+        let at = Instant("2026-08-28T00:00:01Z".into());
+        let event = delegated_change_batch_event(
+            &record,
+            &binding,
+            "turn-fixture",
+            Some(&output.to_string()),
+            &at,
+        )
+        .unwrap();
+        record.batch_intent = Some(super::StoredBatchIntent {
+            event: event.clone(),
+        });
+        adapter
+            .install_active_run(&key, record, binding, false, true)
+            .unwrap();
+        let settlement = super::DelegatedObserverSettlement {
+            batch_id: event.identity.batch_id,
+            completed_at: at.clone(),
+            usage: Some(ExecutionOutcomeUsage::unknown(0, 5)),
+        };
+        let mut invalid = settlement.clone();
+        invalid.usage = Some(ExecutionOutcomeUsage::unknown(0, -1));
+        assert!(
+            adapter
+                .retain_delegated_observer_settlement(&thread, invalid)
+                .is_err()
+        );
+        if !legacy {
+            adapter.store.lock().unwrap().execute_batch(
+            "CREATE TRIGGER deny_observer_statistics BEFORE INSERT ON performance_operation WHEN NEW.operation_kind='observer' BEGIN SELECT RAISE(FAIL,'optional observer statistics unavailable'); END;"
+        ).unwrap();
+        }
+        adapter
+            .retain_delegated_observer_settlement(&thread, settlement.clone())
+            .unwrap();
+        // This is the persisted seam after a delegated transition consumes A.
+        adapter.runs.get_mut(&key).unwrap().record.batch_intent = None;
+        adapter.persist_run(&key).unwrap();
+        if legacy {
+            adapter
+                .store
+                .lock()
+                .unwrap()
+                .execute("DELETE FROM observer_settlement", [])
+                .unwrap();
+            let mut changed = settlement.clone();
+            changed.usage = Some(ExecutionOutcomeUsage::unknown(0, 6));
+            assert!(
+                adapter
+                    .retain_delegated_observer_settlement(&thread, changed)
+                    .is_err()
+            );
+        }
+        let mut replay = settlement.clone();
+        replay.completed_at = Instant("2026-08-28T00:00:02Z".into());
+        adapter
+            .retain_delegated_observer_settlement(&thread, replay.clone())
+            .expect("an exact old settlement is independent of the current batch");
+        assert_eq!(
+            adapter
+                .store
+                .delegated_performance_totals(&key)
+                .unwrap()
+                .observer_calls,
+            1
+        );
+        let mut changed = replay.clone();
+        changed.usage = Some(ExecutionOutcomeUsage::unknown(0, 6));
+        assert!(
+            adapter
+                .retain_delegated_observer_settlement(&thread, changed)
+                .is_err()
+        );
+        drop(adapter);
+        let mut adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+        let record = load_stored_run(&adapter.store, &key).unwrap().unwrap();
+        let (_, mut binding) = delegated_record_and_binding();
+        binding.authority.lease.lease_id = LeaseId("lse_00000000000000000000000001".into());
+        binding.authority.lease.fencing_token = FencingToken("1".into());
+        adapter
+            .install_active_run(&key, record, binding, false, true)
+            .unwrap();
+        adapter
+            .retain_delegated_observer_settlement(&thread, replay)
+            .unwrap();
+        assert_eq!(
+            adapter
+                .store
+                .delegated_performance_totals(&key)
+                .unwrap()
+                .observer_calls,
+            1
+        );
+        drop(adapter);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_jev_accounting_closes_hard_budgets_without_blocking_unbudgeted_progress() {
+        let root = test_root("missing-jev-budget");
+        let adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+        let store = &adapter.store;
+        let exchange = winwincode_domain::ModelExchangeId("mdl_00000000000000000000000001".into());
+        let now = Instant("2030-01-01T00:00:00Z".into());
+        store
+            .claim_model_call(
+                "run",
+                "call",
+                &exchange,
+                &Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+            )
+            .unwrap();
+        store
+            .record_performance_completion(
+                "run",
+                super::PerformanceOperationKind::PrimaryModel,
+                "call",
+                &now,
+                super::PerformanceOperationCompletion {
+                    usage_known: true,
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    actual_cost_microunits: Some(15),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        store
+            .mark_model_call_provider_final_with_accounting("run", "call", false)
+            .unwrap();
+        let totals = store.delegated_performance_totals("run").unwrap();
+        assert_eq!(totals.total_tokens, 15);
+        assert_eq!(totals.pending_model_calls, 0);
+        let mut budget = delegated_budget_fixture();
+        budget.max_total_tokens = None;
+        budget.max_total_cost_microunits = None;
+        assert!(super::accounting_satisfies_budget(Some(&budget), &totals));
+        budget.max_total_tokens = Some(50);
+        assert!(!super::accounting_satisfies_budget(Some(&budget), &totals));
+        budget.max_total_tokens = None;
+        budget.max_total_cost_microunits = Some(50);
+        assert!(!super::accounting_satisfies_budget(Some(&budget), &totals));
+        // A prior-version SQLite file has no independent completeness proof.
+        store
+            .lock()
+            .unwrap()
+            .execute_batch("ALTER TABLE model_call_ledger DROP COLUMN jev_accounting_complete;")
+            .unwrap();
+        drop(adapter);
+        let reopened = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+        let totals = reopened.store.delegated_performance_totals("run").unwrap();
+        assert_eq!(totals.pending_model_calls, 0);
+        assert!(!totals.usage_complete && !totals.cost_complete);
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pending_jev_without_primary_statistics_can_persist_a_delegated_stop() {
+        let root = test_root("pending-jev-business-stop");
+        let mut adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+        let (mut record, mut binding) = delegated_record_and_binding();
+        record.workspace = root.join("workspace");
+        std::fs::create_dir_all(&record.workspace).unwrap();
+        binding.authority.lease.lease_id = LeaseId("lse_00000000000000000000000001".into());
+        binding.authority.lease.fencing_token = FencingToken("1".into());
+        let thread = binding.canonical_thread_id.clone();
+        let key = binding.run_key.clone();
+        adapter
+            .install_active_run(&key, record, binding, false, true)
+            .unwrap();
+        let exchange = winwincode_domain::ModelExchangeId("mdl_00000000000000000000000001".into());
+        let at = Instant("2026-08-28T00:00:02Z".into());
+        adapter
+            .store
+            .claim_model_call(
+                &key,
+                "call",
+                &exchange,
+                &Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+            )
+            .unwrap();
+        let receipt: winwincode_provider::DeviceJevReceipt =
+            winwincode_provider::DeviceJevReceipt {
+                operation_id: format!("jev:{}:0", exchange.0),
+                input_digest: "b".repeat(64),
+                run: None,
+            };
+        adapter
+            .store
+            .retain_jev_performance(&key, &receipt, &at)
+            .unwrap();
+        adapter
+            .store
+            .mark_model_call_provider_final_with_accounting(&key, "call", true)
+            .unwrap();
+        let fact = super::DelegatedLoopStopFact {
+            batch_id: ChangeBatchId(format!("sha256:{}", "c".repeat(64))),
+            reason: RepairLoopStopReason::HumanReviewRequired,
+            counters: delegated_counter_fixture(),
+            stopped_at: at,
+        };
+        let stop = adapter.retain_delegated_loop_stop(&thread, &fact).unwrap();
+        assert_eq!(stop.reason, RepairLoopStopReason::HumanReviewRequired);
+        assert_eq!(
+            adapter
+                .store
+                .delegated_performance_totals(&key)
+                .unwrap()
+                .pending_model_calls,
+            0
+        );
+        assert_eq!(
+            adapter
+                .store
+                .retained_outcome_usage(&key, 2000)
+                .unwrap()
+                .unwrap()
+                .tokens,
+            None
+        );
+        drop(adapter);
+        let restored = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+        let record = load_stored_run(&restored.store, &key).unwrap().unwrap();
+        assert_eq!(record.delegated_stop, Some(stop));
+        assert_eq!(
+            restored
+                .store
+                .delegated_performance_totals(&key)
+                .unwrap()
+                .pending_model_calls,
+            0
+        );
+        drop(restored);
         std::fs::remove_dir_all(root).unwrap();
     }
 

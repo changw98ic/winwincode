@@ -223,7 +223,8 @@ pub struct DelegatedObserverPreflight {
 
 /// Internal durable accounting for one terminal Observer call. A missing usage
 /// means the Provider terminal charge was not proven and must fail closed.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DelegatedObserverSettlement {
     pub batch_id: winwincode_domain::ChangeBatchId,
     pub completed_at: Instant,

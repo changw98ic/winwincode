@@ -845,9 +845,17 @@ impl ExecutionPortModelBridge {
     }
 
     /// Marks the model call provider-final in the durable ledger.
-    fn mark_provider_final(&self, owner: &ModelExchangeOwner) -> Result<(), BridgeError> {
+    fn mark_provider_final(
+        &self,
+        owner: &ModelExchangeOwner,
+        jev_complete: bool,
+    ) -> Result<(), BridgeError> {
         self.ordinal_store
-            .mark_model_call_provider_final(&owner.run_key, &owner.model_call_id)
+            .mark_model_call_provider_final_with_accounting(
+                &owner.run_key,
+                &owner.model_call_id,
+                jev_complete,
+            )
             .map_err(|error| match error {
                 crate::store::AdapterStoreError::Conflict => BridgeError::Conflict,
                 crate::store::AdapterStoreError::Unavailable
@@ -992,8 +1000,7 @@ impl ExecutionPortModelBridge {
                     )
                     .await
                     .map_err(|_| BridgeError::Protocol)?;
-                self.record_primary_model_completion(&owner, chunk, received_at);
-                self.mark_provider_final(&owner)?;
+                self.retain_provider_final_frame(&owner, chunk, received_at)?;
                 return Ok(disposition);
             }
             // An exact durable duplicate must unblock the Device model queue
@@ -1013,8 +1020,7 @@ impl ExecutionPortModelBridge {
             if contiguous_new {
                 self.retain_and_forward_frame(chunk, &owner)?;
                 if chunk.is_final {
-                    self.record_primary_model_completion(&owner, chunk, received_at);
-                    self.mark_provider_final(&owner)?;
+                    self.retain_provider_final_frame(&owner, chunk, received_at)?;
                 }
                 return Ok(ModelChunkDisposition::Delivered {
                     confirmed_sequence: u64::try_from(chunk.sequence.0)
@@ -1054,8 +1060,7 @@ impl ExecutionPortModelBridge {
         ) || matches!(disposition, ModelChunkDisposition::Duplicate { .. })
             && chunk.is_final;
         if terminal {
-            self.record_primary_model_completion(&owner, chunk, received_at);
-            self.mark_provider_final(&owner)?;
+            self.retain_provider_final_frame(&owner, chunk, received_at)?;
             self.client
                 .lock()
                 .await
@@ -1070,15 +1075,27 @@ impl ExecutionPortModelBridge {
         Ok(disposition)
     }
 
+    fn retain_provider_final_frame(
+        &self,
+        owner: &ModelExchangeOwner,
+        chunk: &ModelChunkMessage,
+        received_at: &Instant,
+    ) -> Result<(), BridgeError> {
+        let jev_complete = self.record_primary_model_completion(owner, chunk, received_at);
+        self.mark_provider_final(owner, jev_complete)
+    }
+
     fn record_primary_model_completion(
         &self,
         owner: &ModelExchangeOwner,
         chunk: &ModelChunkMessage,
         received_at: &Instant,
-    ) {
+    ) -> bool {
         // The durable frame and ProviderFinal ledger own completion. These
         // projections can be unavailable without revoking a delivered result.
-        let _ = self.retain_device_jev_receipts(owner, &chunk.model_exchange_id, received_at);
+        let jev_complete = self
+            .retain_device_jev_receipts(owner, &chunk.model_exchange_id, received_at)
+            .is_ok();
         let observed_usage = primary_model_usage(chunk).ok().flatten();
         let usage = observed_usage.unwrap_or_default();
         let _ = self.ordinal_store.record_performance_completion(
@@ -1096,12 +1113,7 @@ impl ExecutionPortModelBridge {
                 actual_cost_microunits: usage.actual_cost_microunits,
             },
         );
-        let _ = self.ordinal_store.close_pending_jev_parent(
-            &owner.run_key,
-            &chunk.model_exchange_id.0,
-            &owner.model_call_id,
-            received_at,
-        );
+        jev_complete
     }
 
     fn retain_device_jev_receipts(
@@ -1284,19 +1296,15 @@ impl ExecutionPortModelBridge {
                 )
                 .await
                 .map_err(|_| BridgeError::Protocol)?;
-            let _ = self.retain_device_jev_receipts(&owner, &exchange, cancelled_at);
+            let jev_complete = self
+                .retain_device_jev_receipts(&owner, &exchange, cancelled_at)
+                .is_ok();
             let _ = self.ordinal_store.close_unmeasured_primary(
                 &owner.run_key,
                 &owner.model_call_id,
                 cancelled_at,
             );
-            let _ = self.ordinal_store.close_pending_jev_parent(
-                &owner.run_key,
-                &exchange.0,
-                &owner.model_call_id,
-                cancelled_at,
-            );
-            self.mark_provider_final(&owner)?;
+            self.mark_provider_final(&owner, jev_complete)?;
             self.client
                 .lock()
                 .await
@@ -2613,6 +2621,184 @@ mod tests {
         drop(bridge);
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn jev_receipt_faults_keep_results_deliverable_and_accounting_unknown() {
+        assert_jev_receipt_faults(&["none", "all", "partial", "source"]).await;
+    }
+
+    #[tokio::test]
+    async fn pending_jev_closes_from_provider_final_when_primary_statistics_fail() {
+        assert_jev_receipt_faults(&["pending"]).await;
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Exercise receipt faults through the real bridge, Device store and restart"
+    )]
+    async fn assert_jev_receipt_faults(faults: &[&str]) {
+        for &fault in faults {
+            let root = std::env::temp_dir().join(format!("wwc-jev-fault-{}", uuid::Uuid::now_v7()));
+            let store = AdapterStore::open(&root).unwrap();
+            let lease = authority(&id("cdx", 'A'));
+            let bridge = Arc::new(installed_loopback_bridge(
+                &store,
+                SharedAuthoritySource::default().with_store(store.clone()),
+                "JEV accounting",
+                "run",
+                &lease,
+                "kernel",
+            ));
+            let device_root = root.join("device");
+            let device = winwincode_provider::DeviceProviderStore::open(&device_root).unwrap();
+            bridge
+                .attach_device_provider_directory(device_root.clone())
+                .unwrap();
+            let request = ModelPortRequest {
+                request_id: "original-call".into(),
+                payload_json: json!({
+                    "requestId":"original-call", "provider":"loopback", "sessionId":"kernel",
+                    "threadId":lease.session_identity.codex_thread_id.0,
+                    "request":{"model":"loopback", "input":[]},
+                })
+                .to_string(),
+            };
+            let mut stream = bridge.model_port().stream(request.clone()).await.unwrap();
+            let open = bridge
+                .take_messages()
+                .unwrap()
+                .into_iter()
+                .find_map(|message| match message {
+                    ExecutionPortMessage::ModelOpenMessage(open) => Some(open),
+                    _ => None,
+                })
+                .unwrap();
+            bridge
+                .outbox
+                .retain(&ExecutionPortMessage::ModelOpenMessage(open.clone()))
+                .unwrap();
+            let db = rusqlite::Connection::open(device_root.join("providers.sqlite3")).unwrap();
+            let saved = serde_json::to_string(&open).unwrap();
+            db.execute(
+                "INSERT INTO exchanges(exchange_id,digest,request_open) VALUES(?1,?2,?3)",
+                rusqlite::params![
+                    open.model_exchange_id.0,
+                    format!("{:x}", Sha256::digest(saved.as_bytes())),
+                    saved
+                ],
+            )
+            .unwrap();
+            for index in 0..2 {
+                let run = if fault == "pending" {
+                    None
+                } else {
+                    Some(json!({
+                    "value":null,"observation":{"providerId":"fixture","modelId":"fixture",
+                        "latency":{"secs":0,"nanos":1},"inputTokens":45,"outputTokens":5,
+                        "resolvedModelId":null,"batchSize":1,"device":"remote","confidence":1.0},"failures":[],
+                }).to_string())
+                };
+                db.execute("INSERT INTO jev_context_exchanges(operation_id,digest,result) VALUES(?1,?2,?3)",
+                    rusqlite::params![format!("jev:{}:{index}",open.model_exchange_id.0),"a".repeat(64),run]).unwrap();
+            }
+            assert_eq!(device.model_jev_receipts(&open).unwrap().len(), 2);
+            match fault {
+                "all" => store.lock().unwrap().execute_batch("CREATE TRIGGER deny_jev BEFORE INSERT ON performance_jev_receipt BEGIN SELECT RAISE(FAIL,'receipt unavailable'); END;").unwrap(),
+                "partial" => store.lock().unwrap().execute_batch("CREATE TRIGGER deny_jev BEFORE INSERT ON performance_jev_receipt WHEN substr(NEW.operation_id,-2)=':1' BEGIN SELECT RAISE(FAIL,'second receipt unavailable'); END;").unwrap(),
+                "source" => { db.execute("UPDATE jev_context_exchanges SET result='corrupt'", []).unwrap(); },
+                "pending" => store.lock().unwrap().execute_batch("CREATE TRIGGER deny_primary_completion BEFORE UPDATE ON performance_operation BEGIN SELECT RAISE(FAIL,'optional completion unavailable'); END;").unwrap(),
+                "none" => {},
+                _ => unreachable!(),
+            }
+            let mut chunk = final_chunk(&open, 'a');
+            let payload = br#"{"type":"response.completed","tokenUsage":{"inputTokens":10,"outputTokens":5},"actualCostMicros":15}"#;
+            chunk.payload = Some(EncodedPayload {
+                content_type: "application/json".into(),
+                data_base64: base64::engine::general_purpose::STANDARD.encode(payload),
+                payload_digest: winwincode_domain::Sha256Digest(format!(
+                    "sha256:{:x}",
+                    Sha256::digest(payload)
+                )),
+            });
+            bridge
+                .accept_chunk(&chunk, &lease.lease.issued_at)
+                .await
+                .unwrap();
+            assert!(
+                stream
+                    .next()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .contains("response.completed")
+            );
+            assert!(stream.next().await.is_none());
+            assert_eq!(
+                store.model_call_phase("run", "original-call").unwrap(),
+                Some(ModelCallPhase::ProviderFinal)
+            );
+            let imported: i64 = store
+                .lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM performance_jev_receipt", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(
+                imported,
+                match fault {
+                    "none" | "pending" => 2,
+                    "partial" => 1,
+                    _ => 0,
+                }
+            );
+            let totals = store.delegated_performance_totals("run").unwrap();
+            assert_eq!(
+                totals.pending_model_calls, 0,
+                "{fault}: terminal business ledger closes JEV parents"
+            );
+            assert_eq!(
+                totals.usage_complete,
+                fault == "none",
+                "{fault}: missing receipts must not open token budgets"
+            );
+            if fault == "none" {
+                assert_eq!(totals.total_tokens, 115);
+            }
+            assert!(
+                !totals.cost_complete,
+                "{fault}: missing receipts must not open cost budgets"
+            );
+            assert!(matches!(
+                bridge
+                    .accept_chunk(&chunk, &lease.lease.issued_at)
+                    .await
+                    .unwrap(),
+                ModelChunkDisposition::Duplicate { .. }
+            ));
+            let mut replay = bridge.model_port().stream(request).await.unwrap();
+            assert!(replay.next().await.unwrap().is_ok());
+            assert!(replay.next().await.is_none());
+            assert!(
+                !bridge
+                    .take_messages()
+                    .unwrap()
+                    .iter()
+                    .any(|m| matches!(m, ExecutionPortMessage::ModelOpenMessage(_)))
+            );
+            drop(db);
+            drop(device);
+            drop(bridge);
+            drop(store);
+            let reopened = AdapterStore::open(&root).unwrap();
+            let totals = reopened.delegated_performance_totals("run").unwrap();
+            assert_eq!(totals.pending_model_calls, 0);
+            assert_eq!(totals.usage_complete, fault == "none");
+            assert!(!totals.cost_complete);
+            drop(reopened);
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 
     /// Builds one Provider frame from already-resolved lease/session identity.

@@ -1375,6 +1375,14 @@ fn adapter_config_with_mode(
     root: &TestDirectory,
     execution_mode: winwincode_codex::ExecutionMode,
 ) -> winwincode_codex::ProductionCodexConfig {
+    adapter_config_with_modes(root, execution_mode, winwincode_codex::ObserverMode::Off)
+}
+
+fn adapter_config_with_modes(
+    root: &TestDirectory,
+    execution_mode: winwincode_codex::ExecutionMode,
+    observer_mode: winwincode_codex::ObserverMode,
+) -> winwincode_codex::ProductionCodexConfig {
     winwincode_codex::ProductionCodexConfig::try_new(winwincode_codex::ProductionCodexOptions {
         data_directory: root.worker(),
         helper_executable: helper_executable(),
@@ -1393,9 +1401,293 @@ fn adapter_config_with_mode(
             digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
         },
         execution_mode,
-        observer_mode: winwincode_codex::ObserverMode::Off,
+        observer_mode,
     })
     .expect("validated production Codex configuration")
+}
+
+#[test]
+fn production_observer_terminal_replay_survives_the_next_composer_turn() {
+    run_on_large_stack(async {
+        use winwincode_worker::workspace_runtime::ObservationModelConfiguration;
+        let root = TestDirectory::new("observer-terminal-replay");
+        root.source_revision();
+        let repository = root.sources().join(id("rep", 1));
+        fs::create_dir_all(repository.join(".winwincode")).unwrap();
+        fs::write(repository.join(".winwincode/validation.toml"), r#"schemaVersion = 1
+[[commands]]
+id = "check"
+phase = "validation"
+language = "typescript"
+diagnosticParserVersion = "typescript_v1"
+allowedCompanionPaths = []
+argv = ["/usr/bin/awk", "BEGIN { print \"src/lib.rs(1,1): error TS2307: Cannot find module existing-module.\"; exit 1 }"]
+workingDirectory = "."
+environment = []
+network = false
+timeoutMillis = 1000
+outputLimitBytes = 1024
+[[commands]]
+id = "rust"
+phase = "validation"
+language = "rust"
+allowedCompanionPaths = []
+argv = ["/usr/bin/true"]
+workingDirectory = "."
+environment = []
+network = false
+timeoutMillis = 1000
+outputLimitBytes = 1024
+[[commands]]
+id = "python"
+phase = "validation"
+language = "python"
+allowedCompanionPaths = []
+argv = ["/usr/bin/true"]
+workingDirectory = "."
+environment = []
+network = false
+timeoutMillis = 1000
+outputLimitBytes = 1024
+[[profiles]]
+name = "changed"
+commandIds = ["check"]
+[[profiles]]
+name = "fast"
+commandIds = ["rust"]
+[[profiles]]
+name = "affected"
+commandIds = ["python"]
+[[profiles]]
+name = "final"
+commandIds = ["check", "rust", "python"]
+"#).unwrap();
+        git(&repository, &["add", ".winwincode/validation.toml"]);
+        git(
+            &repository,
+            &["commit", "-qm", "Observer validation fixture"],
+        );
+        let mut dispatch = dispatch(&root);
+        dispatch.job.workspace.write_mode = ExecutionWorkspaceWriteMode::ReadOnly;
+        let port = RecordedPort::default();
+        let adapter = winwincode_codex::ProductionCodexAdapter::open(adapter_config_with_modes(
+            &root,
+            winwincode_codex::ExecutionMode::DelegatedPatch,
+            winwincode_codex::ObserverMode::AmbiguousOnly,
+        ))
+        .unwrap();
+        let workspaces = root.workspace_runtime().with_validation_artifact_port(
+            winwincode_worker::validation_artifact::DurableValidationArtifactStore::open(
+                root.0.join("validation-artifacts"),
+            )
+            .unwrap(),
+        );
+        let mut worker =
+            winwincode_worker::WorkerMain::new(worker_config(), port.clone(), adapter, workspaces)
+                .with_observer_mode(winwincode_codex::ObserverMode::AmbiguousOnly)
+                .with_observation_model(
+                    ObservationModelConfiguration::try_new(
+                        PROVIDER_ID,
+                        MODEL_ID,
+                        ModelGatewayRoute {
+                            capability: "observer-strict-json".into(),
+                            route: "observer-fixture".into(),
+                        },
+                    )
+                    .unwrap(),
+                );
+        register(&mut worker, &port).await;
+        worker
+            .accept_control(
+                &ExecutionPortMessage::JobDispatchMessage(dispatch.clone()),
+                at("2030-01-01T00:00:00.000Z"),
+            )
+            .await
+            .unwrap();
+        let now = at("2030-01-01T00:00:02.000Z");
+        let open = poll_until_message(
+            &mut worker,
+            &port,
+            &now,
+            |messages| {
+                messages.iter().find_map(|m| match m {
+                    ExecutionPortMessage::ModelOpenMessage(open) => Some(open.clone()),
+                    _ => None,
+                })
+            },
+            "Composer open missing",
+        )
+        .await;
+        setup_model(&root, &open, &dispatch.job);
+        let mut app = application(&root);
+        let gateway = opened(
+            app.accept_local(&typed(ExecutionPortMessage::ModelOpenMessage(open.clone())))
+                .unwrap(),
+        );
+        let proposal = serde_json::json!({"acceptanceCriteriaIds":dispatch.job.work_input.as_ref().unwrap().work_item.criterion_ids,
+            "disposition":"continue", "patch":"*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-pub fn fixture_value() -> u64 { 1 }\n+pub fn fixture_value() -> u64 { 2 }\n*** End Patch\n",
+            "schemaVersion":1,"validationProfile":"changed"}).to_string();
+        for chunk in provider_chunks(
+            &open,
+            &gateway,
+            [
+                ProviderStreamEvent::ResponseStarted {
+                    observed_model_id: None,
+                    provider_response_id: "composer-a".into(),
+                },
+                ProviderStreamEvent::TextStarted { index: 0 },
+                ProviderStreamEvent::TextDelta {
+                    index: 0,
+                    delta: proposal,
+                },
+                ProviderStreamEvent::TextEnded { index: 0 },
+                ProviderStreamEvent::Usage(ProviderTokenUsage {
+                    input_tokens: 10,
+                    cached_input_tokens: Some(0),
+                    cache_write_input_tokens: 0,
+                    output_tokens: 5,
+                    reasoning_output_tokens: 0,
+                }),
+                ProviderStreamEvent::Finished(ProviderFinishReason::Stop),
+            ],
+            980,
+        ) {
+            worker
+                .accept_control(&ExecutionPortMessage::ModelChunkMessage(chunk), now.clone())
+                .await
+                .unwrap();
+        }
+        let observer = poll_until_message(
+            &mut worker,
+            &port,
+            &now,
+            |messages| {
+                messages.iter().find_map(|m| match m {
+                    ExecutionPortMessage::ModelOpenMessage(o)
+                        if o.route.route == "observer-fixture" =>
+                    {
+                        Some(o.clone())
+                    }
+                    _ => None,
+                })
+            },
+            "Observer open missing",
+        )
+        .await;
+        let bytes = STANDARD.decode(&observer.request.data_base64).unwrap();
+        let request: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let observation: serde_json::Value = serde_json::from_str(
+            request["request"]["input"][1]["content"][0]["text"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        let response = serde_json::json!({"schemaVersion":1,"observationId":observation["intent"]["observationId"],
+            "decision":"accept","reasonCode":"criteria_satisfied","summary":"Fixture evidence accepted.",
+            "rootCauses":[],"repairClass":null,"confidenceBps":9000}).to_string();
+        let mut terminal = None;
+        for (index, payload) in [
+            serde_json::json!({"type":"output_text_delta","delta":response}),
+            serde_json::json!({"type":"completed","responseId":"observer-a","endTurn":true}),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let bytes = serde_json::to_vec(&payload).unwrap();
+            let chunk = ModelChunkMessage {
+                kind: ModelChunkMessageKind::ModelChunk,
+                schema_version: SchemaVersion::WinwincodeV1,
+                lease: observer.lease.clone(),
+                session_identity: observer.session_identity.clone(),
+                worker_session_id: observer.worker_session_id.clone(),
+                model_exchange_id: observer.model_exchange_id.clone(),
+                message_id: ExecutionMessageId(id("xmsg", 950 + u64::try_from(index).unwrap())),
+                sequence: ExecutionSequence(i64::try_from(index + 1).unwrap()),
+                sent_at: now.clone(),
+                is_final: index == 1,
+                error: None,
+                payload: Some(winwincode_execution_port::generated::EncodedPayload {
+                    content_type: "application/json".into(),
+                    data_base64: STANDARD.encode(&bytes),
+                    payload_digest: Sha256Digest(format!("sha256:{:x}", Sha256::digest(&bytes))),
+                }),
+            };
+            terminal = Some(chunk.clone());
+            worker
+                .accept_control(&ExecutionPortMessage::ModelChunkMessage(chunk), now.clone())
+                .await
+                .unwrap();
+        }
+        poll_until_message(
+            &mut worker,
+            &port,
+            &now,
+            |messages| {
+                messages.iter().find_map(|m| match m {
+                    ExecutionPortMessage::ModelOpenMessage(o)
+                        if o.model_exchange_id != open.model_exchange_id
+                            && o.model_exchange_id != observer.model_exchange_id =>
+                    {
+                        Some(o.clone())
+                    }
+                    _ => None,
+                })
+            },
+            "Next Composer turn blocked",
+        )
+        .await;
+        assert!(stored_run_json(&root)["batchIntent"].is_null());
+        let terminal = terminal.unwrap();
+        worker
+            .accept_control(
+                &ExecutionPortMessage::ModelChunkMessage(terminal.clone()),
+                now.clone(),
+            )
+            .await
+            .unwrap();
+        worker.flush_durable_outbox_at(now.clone()).await.unwrap();
+        assert!(port.messages().iter().any(|m|matches!(m,ExecutionPortMessage::ModelAckMessage(a)
+            if a.model_exchange_id==observer.model_exchange_id && a.status==LeaseWriteStatus::Duplicate && a.error.is_none())));
+        let ledger =
+            rusqlite::Connection::open(root.worker().join("worker-codex.sqlite3")).unwrap();
+        assert_eq!(
+            ledger
+                .query_row("SELECT COUNT(*) FROM observer_settlement", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        let mut changed = terminal;
+        changed.payload = None;
+        worker
+            .accept_control(
+                &ExecutionPortMessage::ModelChunkMessage(changed),
+                now.clone(),
+            )
+            .await
+            .unwrap();
+        worker.flush_durable_outbox_at(now).await.unwrap();
+        assert_eq!(
+            ledger
+                .query_row("SELECT COUNT(*) FROM observer_settlement", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert!(
+            port.messages()
+                .iter()
+                .rev()
+                .find_map(|m| match m {
+                    ExecutionPortMessage::ModelAckMessage(a)
+                        if a.model_exchange_id == observer.model_exchange_id =>
+                        Some(a.error.is_some()),
+                    _ => None,
+                })
+                .unwrap(),
+            "changed terminal bytes must remain rejected"
+        );
+    });
 }
 
 #[test]
@@ -3112,7 +3404,7 @@ async fn poll_until_message<T>(
         worker
             .poll_codex(now.clone())
             .await
-            .expect("poll embedded production Codex");
+            .unwrap_or_else(|error| panic!("{context}: {error:?}"));
         let messages = port.messages();
         if let Some(value) = select(&messages) {
             return value;
