@@ -15,6 +15,7 @@ pub mod context_safety;
 pub mod debug_experiment;
 pub mod debug_probe_context;
 mod device_model;
+mod driver_clock;
 mod execution_effects;
 pub mod handoff_snapshot;
 pub mod managed_session;
@@ -374,8 +375,7 @@ pub struct WorkerMain<Port, Codex> {
     dispatches: HashMap<String, DispatchRecord>,
     pending_candidates: HashMap<String, PendingCandidateCompletion>,
     delivery_failure: Option<WorkerErrorCode>,
-    last_now: Instant,
-    last_now_observed_at: std::time::Instant,
+    driver_clock: driver_clock::DriverClock,
     /// Delivery ids sent during the current Worker scheduling turn.  A
     /// response batch can contain acknowledgements for several earlier
     /// frames; suppressing an already-sent frame until the next poll avoids
@@ -493,7 +493,8 @@ where
         mut codex: Codex,
         workspaces: JobWorkspaceRuntime,
     ) -> Self {
-        let last_now = config.started_at.clone();
+        let driver_clock =
+            driver_clock::DriverClock::new(config.started_at.clone(), std::time::Instant::now());
         let delivery_failure = codex
             .has_rejected_terminal_delivery(&config.worker_id, &config.worker_instance_id)
             .unwrap_or(true)
@@ -519,8 +520,7 @@ where
             dispatches: HashMap::new(),
             pending_candidates: HashMap::new(),
             delivery_failure,
-            last_now,
-            last_now_observed_at: std::time::Instant::now(),
+            driver_clock,
             sent_delivery_ids: HashSet::new(),
             outbox_flush_cursor: None,
             recovery_sent_delivery_ids: HashSet::new(),
@@ -586,6 +586,20 @@ where
             models.refuse_next_start();
             true
         })
+    }
+
+    /// Installs a wall/monotonic anchor with deterministic elapsed time.
+    ///
+    /// # Panics
+    /// Panics if the requested elapsed time exceeds the monotonic clock range.
+    #[cfg(feature = "test-support")]
+    pub fn inject_driver_clock(&mut self, wall_anchor: Instant, elapsed: std::time::Duration) {
+        self.driver_clock = driver_clock::DriverClock::new(
+            wall_anchor,
+            std::time::Instant::now()
+                .checked_sub(elapsed)
+                .expect("test clock elapsed fits the monotonic clock"),
+        );
     }
 
     /// Stops one delegated finalization after the canonical freeze is durable.
@@ -4203,23 +4217,7 @@ where
     }
 
     fn observe_driver_clock(&mut self, now: Instant) {
-        let observed_at = std::time::Instant::now();
-        let parse = |value: &Instant| {
-            time::OffsetDateTime::parse(&value.0, &time::format_description::well_known::Rfc3339)
-                .ok()
-        };
-        let (Some(previous), Some(current)) = (parse(&self.last_now), parse(&now)) else {
-            return;
-        };
-        let Ok(advance) = std::time::Duration::try_from(current - previous) else {
-            return;
-        };
-        // A stale or backward wall sample must never discard elapsed time from
-        // a control/network await. Keep its original monotonic origin instead.
-        if advance >= observed_at.saturating_duration_since(self.last_now_observed_at) {
-            self.last_now = now;
-            self.last_now_observed_at = observed_at;
-        }
+        self.driver_clock.observe(now, std::time::Instant::now());
     }
 
     fn enqueue_codex_effects(&mut self) -> Result<(), WorkerError> {

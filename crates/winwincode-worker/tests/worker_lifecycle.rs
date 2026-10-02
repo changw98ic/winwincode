@@ -4566,6 +4566,101 @@ async fn deferred_local_model_start_obeys_current_lease_and_keeps_the_original_i
 }
 
 #[tokio::test]
+async fn preserved_clock_anchor_allows_new_leases_without_extending_expiry() {
+    for (elapsed_ms, sample, allowed) in [
+        (10_005, "2027-01-15T08:00:12.000Z", true),
+        (10_005, "2027-01-15T08:00:01.000Z", true),
+        (12_005, "2027-01-15T08:00:12.000Z", false),
+        (12_005, "2027-01-15T08:00:01.000Z", false),
+    ] {
+        let codex = FakeCodex::with_threads([thread('A')]);
+        let mut pump = codex.clone();
+        let root = tempfile::tempdir().unwrap();
+        let providers = root.path().join("providers");
+        let mut worker = test_worker(worker_config(1), RecordingPort::default(), codex)
+            .with_device_providers(&providers)
+            .unwrap();
+        register(&mut worker).await;
+        worker.inject_driver_clock(now(), std::time::Duration::from_millis(10_005));
+        let mut dispatch = dispatch('A', delivery_scope('A'));
+        dispatch.lease.issued_at = Instant("2027-01-15T08:00:11.000Z".into());
+        dispatch.lease.expires_at = Instant(
+            if allowed {
+                "2027-01-15T08:05:00.000Z"
+            } else {
+                "2027-01-15T08:00:13.000Z"
+            }
+            .into(),
+        );
+        let dispatch_at = Instant("2027-01-15T08:00:12.000Z".into());
+        worker
+            .accept_control(
+                &ExecutionPortMessage::JobDispatchMessage(dispatch),
+                dispatch_at,
+            )
+            .await
+            .unwrap();
+        let active = worker.active_jobs()[0].clone();
+        let ExecutionPortMessage::ModelOpenMessage(mut open) = execution_port_fixture("model.open")
+        else {
+            unreachable!()
+        };
+        open.lease = active.lease;
+        open.worker_session_id = active.worker_session_id;
+        open.session_identity = active.session_identity;
+        let retained = pump
+            .retain_execution_delivery(&ExecutionPortMessage::ModelOpenMessage(open.clone()))
+            .unwrap();
+        worker.inject_driver_clock(now(), std::time::Duration::from_millis(elapsed_ms));
+        let result = worker.flush_durable_outbox_at(Instant(sample.into())).await;
+        if allowed {
+            result.unwrap();
+        } else {
+            assert_eq!(
+                result.unwrap_err().code,
+                WorkerErrorCode::ExecutionMessageRejected
+            );
+        }
+        let store = winwincode_provider::DeviceProviderStore::open(&providers).unwrap();
+        for _ in 0..100 {
+            if store.list_stored_model_exchanges().unwrap().len() == usize::from(allowed) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            store.list_stored_model_exchanges().unwrap().len(),
+            usize::from(allowed),
+            "current authority uses elapsed time for both issuance and expiry"
+        );
+        assert!(
+            pump.state
+                .lock()
+                .unwrap()
+                .durable_deliveries
+                .iter()
+                .any(|delivery| delivery.delivery_id == retained.delivery_id
+                    && delivery.message == ExecutionPortMessage::ModelOpenMessage(open.clone()))
+        );
+        if allowed {
+            worker
+                .flush_durable_outbox_at(Instant(sample.into()))
+                .await
+                .unwrap();
+            assert_eq!(
+                store.list_stored_model_exchanges().unwrap().len(),
+                1,
+                "the immutable original request starts at most once"
+            );
+        }
+        worker
+            .shutdown(Instant("2027-01-15T08:00:14.000Z".into()))
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
 async fn stale_driver_time_cannot_reset_elapsed_first_start_authority() {
     for renewed in [false, true] {
         let codex = FakeCodex::with_threads([thread('A')]);

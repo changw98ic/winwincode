@@ -4069,7 +4069,20 @@ async fn capture_rollout_before_adapter_terminal<'root>(
 
 #[test]
 fn production_success_with_missing_final_usage_is_accepted_and_replayed() {
-    run_on_large_stack(async {
+    successful_result_survives_optional_statistics(false);
+}
+
+#[test]
+fn production_model_and_turn_statistics_failure_preserves_success_and_replay() {
+    successful_result_survives_optional_statistics(true);
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "shared production fixture checks successful delivery, accounting and exact restart replay"
+)]
+fn successful_result_survives_optional_statistics(all_statistics: bool) {
+    run_on_large_stack(async move {
         let root = TestDirectory::new("production-success-unknown-usage");
         let dispatch = dispatch(&root);
         let port = RecordedPort::default();
@@ -4084,8 +4097,13 @@ fn production_success_with_missing_final_usage_is_accepted_and_replayed() {
         register(&mut worker, &port).await;
         let statistics =
             rusqlite::Connection::open(root.worker().join("worker-codex.sqlite3")).unwrap();
-        statistics.execute_batch("CREATE TRIGGER deny_optional_tool_start BEFORE INSERT ON performance_operation WHEN NEW.operation_kind = 'tool' BEGIN SELECT RAISE(FAIL, 'injected optional statistics failure'); END;
-            CREATE TRIGGER deny_optional_tool_completion BEFORE UPDATE ON performance_operation WHEN NEW.operation_kind = 'tool' BEGIN SELECT RAISE(FAIL, 'injected optional statistics failure'); END;").unwrap();
+        let condition = if all_statistics {
+            ""
+        } else {
+            "WHEN NEW.operation_kind = 'tool'"
+        };
+        statistics.execute_batch(&format!("CREATE TRIGGER deny_optional_start BEFORE INSERT ON performance_operation {condition} BEGIN SELECT RAISE(FAIL, 'injected optional statistics failure'); END;
+            CREATE TRIGGER deny_optional_completion BEFORE UPDATE ON performance_operation {condition} BEGIN SELECT RAISE(FAIL, 'injected optional statistics failure'); END;")).unwrap();
         drop(statistics);
         worker
             .accept_control(
@@ -4114,7 +4132,7 @@ fn production_success_with_missing_final_usage_is_accepted_and_replayed() {
             usage.accounting_status,
             winwincode_execution_port::generated::ExecutionOutcomeUsageAccountingStatus::Unknown
         );
-        assert_eq!(usage.known_tokens, 15);
+        assert_eq!(usage.known_tokens, if all_statistics { 0 } else { 15 });
         assert_eq!(usage.tokens, None);
         assert_eq!(usage.cost_microunits, None);
         assert!(worker.active_jobs().is_empty());

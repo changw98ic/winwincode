@@ -8,7 +8,7 @@
 use super::{
     ActiveJobLifecycle, CodexCoreAdapter, DurableExecutionDelivery, ExecutionAckSequence,
     ExecutionEventCategory, ExecutionOutcomeStatus, ExecutionPortErrorCode,
-    ExecutionPortFailureKind, ExecutionPortMessage, Instant, WorkerError, WorkerErrorCode,
+    ExecutionPortFailureKind, ExecutionPortMessage, WorkerError, WorkerErrorCode,
     WorkerExecutionPort, WorkerMain, active_delivery_job_id, candidate_delivery_job_id,
     codex_model_error, device_model, execution_port_error, port_error, worker_error,
 };
@@ -63,10 +63,11 @@ where
             && let ExecutionPortMessage::ModelOpenMessage(open) = &message
         {
             if let Some(deadline) = self.local_model_start_deadline(open)? {
+                let (anchor, observed_at) = self.driver_clock.anchor();
                 (
                     Some(deadline),
                     self.codex
-                        .local_model_start_guard(open, &self.last_now, self.last_now_observed_at)
+                        .local_model_start_guard(open, anchor, observed_at)
                         .map_err(|_| codex_model_error())?,
                 )
             } else {
@@ -146,27 +147,9 @@ where
         {
             return Ok(None);
         }
-        let parse = |value: &Instant| {
-            time::OffsetDateTime::parse(&value.0, &time::format_description::well_known::Rfc3339)
-                .ok()
-        };
-        let (Some(now), Some(issued), Some(expires)) = (
-            parse(&self.last_now),
-            parse(&active.lease.issued_at),
-            parse(&active.lease.expires_at),
-        ) else {
-            return Ok(None);
-        };
-        if now < issued || now >= expires {
-            return Ok(None);
-        }
-        let Ok(remaining) = std::time::Duration::try_from(expires - now) else {
-            return Ok(None);
-        };
         Ok(self
-            .last_now_observed_at
-            .checked_add(remaining)
-            .filter(|deadline| *deadline > std::time::Instant::now()))
+            .driver_clock
+            .start_deadline(&active.lease.issued_at, &active.lease.expires_at))
     }
 
     pub(super) async fn dispatch_retained_effect(
@@ -272,7 +255,10 @@ where
             .get(job_id)
             .cloned()
             .ok_or_else(codex_model_error)?;
-        let now = self.last_now.clone();
+        let now = self
+            .driver_clock
+            .timestamp()
+            .ok_or_else(codex_model_error)?;
         Box::pin(
             self.codex
                 .fail_required_execution_delivery(&active.codex_thread_id, &now),

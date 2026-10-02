@@ -3701,12 +3701,12 @@ fn complete_reconciled_turn(
         run.record.last_runtime_millis = last_runtime_millis;
         run.record.last_activity_at.clone()
     };
-    adapter.record_performance_start(
+    let _ = adapter.record_performance_start(
         run_key,
         PerformanceOperationKind::Turn,
         turn_id,
         &activity_at,
-    )?;
+    );
     if adapter.runs.get(run_key).is_some_and(|run| {
         run.record
             .delegated_transitions
@@ -3715,13 +3715,13 @@ fn complete_reconciled_turn(
                 stored.turn_id == turn_id && stored.transition.phase == DelegatedLoopPhase::Repair
             })
     }) {
-        adapter.record_performance_completion(
+        let _ = adapter.record_performance_completion(
             run_key,
             PerformanceOperationKind::Repair,
             turn_id,
             &activity_at,
             None,
-        )?;
+        );
     }
     adapter.persist_run(run_key)?;
     if adapter
@@ -8491,6 +8491,95 @@ mod tests {
         assert_eq!(adapter.outbox.pending().unwrap().len(), 2);
         assert!(adapter.take_execution_messages().unwrap().is_empty());
         drop(adapter);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_model_statistics_keep_explicit_budgets_closed() {
+        let root = test_root("missing-statistics-budget");
+        let adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+        let store = &adapter.store;
+        let exchange = winwincode_domain::ModelExchangeId("mdl_00000000000000000000000001".into());
+        store
+            .claim_model_call(
+                "run",
+                "original-call",
+                &exchange,
+                &Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+            )
+            .unwrap();
+        store
+            .mark_model_call_provider_final("run", "original-call")
+            .unwrap();
+        let totals = store.delegated_performance_totals("run").unwrap();
+        assert_eq!(totals.primary_model_calls, 1);
+        assert_eq!(totals.pending_model_calls, 0);
+        let mut budget = delegated_budget_fixture();
+        budget.max_total_tokens = None;
+        budget.max_total_cost_microunits = None;
+        assert!(super::accounting_satisfies_budget(Some(&budget), &totals));
+        budget.max_total_tokens = Some(100);
+        assert!(!super::accounting_satisfies_budget(Some(&budget), &totals));
+        budget.max_total_tokens = None;
+        budget.max_total_cost_microunits = Some(100);
+        assert!(!super::accounting_satisfies_budget(Some(&budget), &totals));
+        let usage = store.retained_outcome_usage("run", 0).unwrap().unwrap();
+        assert_eq!(usage.tokens, None);
+        assert_eq!(usage.cost_microunits, None);
+        drop(adapter);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn completed_turn_recovery_survives_optional_statistics_write_failure() {
+        let root = test_root("completed-turn-statistics-fault");
+        let mut adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+        let (mut record, mut binding) = delegated_record_and_binding();
+        record.role_policy = None;
+        binding.authority.lease.lease_id = LeaseId("lse_00000000000000000000000001".into());
+        binding.authority.lease.fencing_token = FencingToken("1".into());
+        let key = binding.run_key.clone();
+        adapter
+            .install_active_run(&key, record, binding, false, true)
+            .unwrap();
+        adapter
+            .store
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER deny_recovered_turn_stats BEFORE INSERT ON performance_operation
+             BEGIN SELECT RAISE(FAIL,'optional statistics unavailable'); END;",
+            )
+            .unwrap();
+        super::complete_reconciled_turn(
+            &mut adapter,
+            &key,
+            "turn-fixture",
+            Some("done".into()),
+            15,
+            5,
+        )
+        .unwrap();
+        assert_eq!(
+            adapter.runs[&key].record.last_agent_message.as_deref(),
+            Some("done")
+        );
+        assert!(matches!(
+            adapter.runs[&key].record.terminal,
+            Some(super::StoredTerminal::Completed { .. })
+        ));
+        let retained = adapter.runs[&key].record.clone();
+        drop(adapter);
+        let restored = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+        let loaded = load_stored_run(&restored.store, &key).unwrap().unwrap();
+        assert_eq!(loaded.last_agent_message, retained.last_agent_message);
+        assert!(matches!(
+            loaded.terminal,
+            Some(super::StoredTerminal::Completed { .. })
+        ));
+        drop(restored);
         std::fs::remove_dir_all(root).unwrap();
     }
 

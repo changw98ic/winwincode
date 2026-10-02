@@ -405,8 +405,10 @@ fn initialize_performance_schema(connection: &Connection) -> Result<(), AdapterS
         FROM performance_operation p LEFT JOIN performance_usage_settlement s
           ON s.run_key=p.run_key AND s.operation_kind=p.operation_kind AND s.operation_id=p.operation_id
           AND s.revision=(SELECT MAX(q.revision) FROM performance_usage_settlement q
-            WHERE q.run_key=p.run_key AND q.operation_kind=p.operation_kind AND q.operation_id=p.operation_id);
-        UPDATE performance_jev_receipt SET completed=1,
+            WHERE q.run_key=p.run_key AND q.operation_kind=p.operation_kind AND q.operation_id=p.operation_id);").map_err(|_| AdapterStoreError::Unavailable)?;
+    // This backfill observes durable completion; it does not own completion.
+    // An optional projection write must not block opening the execution ledger.
+    let _ = connection.execute_batch("UPDATE performance_jev_receipt SET completed=1,
           usage_known=CASE WHEN json_extract(receipt_json,'$.run.observation.outputTokens') IS NOT NULL
             AND json_array_length(receipt_json,'$.run.failures')=0 THEN 1 ELSE 0 END
           WHERE json_type(receipt_json,'$.run')='object';
@@ -416,7 +418,7 @@ fn initialize_performance_schema(connection: &Connection) -> Result<(), AdapterS
             ORDER BY f.sequence DESC LIMIT 1),started_at), usage_known=0
         WHERE operation_kind='primary_model' AND completed=0 AND EXISTS (
           SELECT 1 FROM model_call_ledger m WHERE m.run_key=performance_operation.run_key
-          AND m.model_call_id=performance_operation.operation_id AND m.completed=1);").map_err(|_| AdapterStoreError::Unavailable)?;
+          AND m.model_call_id=performance_operation.operation_id AND m.completed=1);");
     Ok(())
 }
 impl AdapterStore {
@@ -1020,12 +1022,28 @@ impl AdapterStore {
                    , COALESCE(SUM(operation_kind = 'observer'), 0)
                    , COALESCE(SUM(CASE WHEN operation_kind IN ('primary_model','observer','jev') AND usage_known=0 THEN 1 ELSE 0 END),0)
                  FROM (
-                   SELECT operation_kind,input_tokens,cached_tokens,output_tokens,actual_cost_microunits,duration_millis,completed,usage_known
-                   FROM performance_operation_accounted WHERE run_key=?1
+                   SELECT operation_kind,input_tokens,cached_tokens,output_tokens,actual_cost_microunits,duration_millis,
+                     CASE WHEN operation_kind='primary_model' AND EXISTS (
+                       SELECT 1 FROM model_call_ledger m WHERE m.run_key=p.run_key
+                         AND m.model_call_id=p.operation_id AND m.provider_final=1)
+                       THEN 1 ELSE completed END AS completed,
+                     CASE WHEN completed=0 THEN 0 ELSE usage_known END AS usage_known
+                   FROM performance_operation_accounted p WHERE run_key=?1
+                   UNION ALL
+                   -- Missing telemetry never erases an admitted model identity or
+                   -- turns its unknown usage/cost into an available hard budget.
+                   SELECT 'primary_model',0,0,0,NULL,0,provider_final,0
+                   FROM model_call_ledger m WHERE run_key=?1 AND NOT EXISTS (
+                     SELECT 1 FROM performance_operation p WHERE p.run_key=m.run_key
+                       AND p.operation_kind='primary_model' AND p.operation_id=m.model_call_id)
                    UNION ALL
                    SELECT 'jev',input_tokens,0,output_tokens,NULL,0,
                      CASE WHEN completed=1 OR EXISTS(SELECT 1 FROM performance_jev_parent_terminal p WHERE p.run_key=j.run_key AND (instr(j.operation_id,'jev:'||p.exchange_id||':')=1 OR instr(j.operation_id,'judge:'||p.exchange_id||':')=1)) THEN 1 ELSE 0 END,
-                     usage_known
+                     -- Recheck the receipt when a legacy statistics backfill could
+                     -- not replace its optimistic default. Missing output stays unknown.
+                     COALESCE(usage_known
+                       AND json_type(receipt_json,'$.run.observation.outputTokens')='integer'
+                       AND json_array_length(receipt_json,'$.run.failures')=0,0)
                    FROM performance_jev_receipt j WHERE run_key=?1
                  )",
                 params![run_key],
@@ -4403,6 +4421,39 @@ mod tests {
         drop(store);
         std::fs::remove_dir_all(root).expect("cleanup");
     }
+    #[test]
+    fn failed_legacy_statistics_backfill_keeps_jev_usage_unknown_after_restart() {
+        let root = test_root("legacy-jev-stats-backfill");
+        let store = AdapterStore::open(&root).unwrap();
+        let receipt = serde_json::json!({"operationId":"jev:exchange:0", "inputDigest":"old",
+            "run":{"observation":{"inputTokens":5,"outputTokens":null},"failures":[]}})
+        .to_string();
+        store.lock().unwrap().execute(
+            "INSERT INTO performance_jev_receipt(run_key,operation_id,receipt_json,completed,input_tokens,output_tokens,usage_known)
+             VALUES('run','jev:exchange:0',?1,1,5,0,1)", [receipt]).unwrap();
+        store
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER deny_optional_jev_backfill BEFORE UPDATE ON performance_jev_receipt
+             BEGIN SELECT RAISE(FAIL,'optional backfill unavailable'); END;",
+            )
+            .unwrap();
+        drop(store);
+        let restored = AdapterStore::open(&root)
+            .expect("auxiliary backfill failure does not block execution recovery");
+        let totals = restored.delegated_performance_totals("run").unwrap();
+        assert!(
+            !totals.usage_complete,
+            "an old optimistic flag cannot make missing tokens known"
+        );
+        let usage = restored.execution_outcome_usage("run", 0).unwrap();
+        assert_eq!(usage.tokens, None);
+        assert_eq!(usage.known_tokens, 5);
+        drop(restored);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn unknown_cache_split_keeps_total_tokens_and_can_be_settled_after_restart() {
         let root = test_root("cache-split-restart");

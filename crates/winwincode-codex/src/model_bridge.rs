@@ -992,7 +992,7 @@ impl ExecutionPortModelBridge {
                     )
                     .await
                     .map_err(|_| BridgeError::Protocol)?;
-                self.record_primary_model_completion(&owner, chunk, received_at)?;
+                self.record_primary_model_completion(&owner, chunk, received_at);
                 self.mark_provider_final(&owner)?;
                 return Ok(disposition);
             }
@@ -1013,7 +1013,7 @@ impl ExecutionPortModelBridge {
             if contiguous_new {
                 self.retain_and_forward_frame(chunk, &owner)?;
                 if chunk.is_final {
-                    self.record_primary_model_completion(&owner, chunk, received_at)?;
+                    self.record_primary_model_completion(&owner, chunk, received_at);
                     self.mark_provider_final(&owner)?;
                 }
                 return Ok(ModelChunkDisposition::Delivered {
@@ -1054,7 +1054,7 @@ impl ExecutionPortModelBridge {
         ) || matches!(disposition, ModelChunkDisposition::Duplicate { .. })
             && chunk.is_final;
         if terminal {
-            self.record_primary_model_completion(&owner, chunk, received_at)?;
+            self.record_primary_model_completion(&owner, chunk, received_at);
             self.mark_provider_final(&owner)?;
             self.client
                 .lock()
@@ -1075,35 +1075,33 @@ impl ExecutionPortModelBridge {
         owner: &ModelExchangeOwner,
         chunk: &ModelChunkMessage,
         received_at: &Instant,
-    ) -> Result<(), BridgeError> {
-        self.retain_device_jev_receipts(owner, &chunk.model_exchange_id, received_at)?;
-        let observed_usage = primary_model_usage(chunk)?;
+    ) {
+        // The durable frame and ProviderFinal ledger own completion. These
+        // projections can be unavailable without revoking a delivered result.
+        let _ = self.retain_device_jev_receipts(owner, &chunk.model_exchange_id, received_at);
+        let observed_usage = primary_model_usage(chunk).ok().flatten();
         let usage = observed_usage.unwrap_or_default();
-        self.ordinal_store
-            .record_performance_completion(
-                &owner.run_key,
-                PerformanceOperationKind::PrimaryModel,
-                &owner.model_call_id,
-                received_at,
-                PerformanceOperationCompletion {
-                    usage_known: observed_usage.is_some(),
-                    cache_breakdown_known: observed_usage.is_some() && usage.cached.is_some(),
-                    duration_millis: None,
-                    input_tokens: usage.input,
-                    cached_tokens: usage.cached.unwrap_or(0),
-                    output_tokens: usage.output,
-                    actual_cost_microunits: usage.actual_cost_microunits,
-                },
-            )
-            .map_err(model_frame_store_error)?;
-        self.ordinal_store
-            .close_pending_jev_parent(
-                &owner.run_key,
-                &chunk.model_exchange_id.0,
-                &owner.model_call_id,
-                received_at,
-            )
-            .map_err(model_frame_store_error)
+        let _ = self.ordinal_store.record_performance_completion(
+            &owner.run_key,
+            PerformanceOperationKind::PrimaryModel,
+            &owner.model_call_id,
+            received_at,
+            PerformanceOperationCompletion {
+                usage_known: observed_usage.is_some(),
+                cache_breakdown_known: observed_usage.is_some() && usage.cached.is_some(),
+                duration_millis: None,
+                input_tokens: usage.input,
+                cached_tokens: usage.cached.unwrap_or(0),
+                output_tokens: usage.output,
+                actual_cost_microunits: usage.actual_cost_microunits,
+            },
+        );
+        let _ = self.ordinal_store.close_pending_jev_parent(
+            &owner.run_key,
+            &chunk.model_exchange_id.0,
+            &owner.model_call_id,
+            received_at,
+        );
     }
 
     fn retain_device_jev_receipts(
@@ -1286,18 +1284,18 @@ impl ExecutionPortModelBridge {
                 )
                 .await
                 .map_err(|_| BridgeError::Protocol)?;
-            self.retain_device_jev_receipts(&owner, &exchange, cancelled_at)?;
-            self.ordinal_store
-                .close_unmeasured_primary(&owner.run_key, &owner.model_call_id, cancelled_at)
-                .map_err(model_frame_store_error)?;
-            self.ordinal_store
-                .close_pending_jev_parent(
-                    &owner.run_key,
-                    &exchange.0,
-                    &owner.model_call_id,
-                    cancelled_at,
-                )
-                .map_err(model_frame_store_error)?;
+            let _ = self.retain_device_jev_receipts(&owner, &exchange, cancelled_at);
+            let _ = self.ordinal_store.close_unmeasured_primary(
+                &owner.run_key,
+                &owner.model_call_id,
+                cancelled_at,
+            );
+            let _ = self.ordinal_store.close_pending_jev_parent(
+                &owner.run_key,
+                &exchange.0,
+                &owner.model_call_id,
+                cancelled_at,
+            );
             self.mark_provider_final(&owner)?;
             self.client
                 .lock()
@@ -1645,14 +1643,12 @@ impl ExecutionPortModelBridge {
             .observed_now()
             .map_err(model_failure)?
             .unwrap_or_else(|| binding.opened_at.clone());
-        self.ordinal_store
-            .record_performance_start(
-                &binding.run_key,
-                PerformanceOperationKind::PrimaryModel,
-                &model_call_id,
-                &observed_at,
-            )
-            .map_err(model_store_failure)?;
+        let _ = self.ordinal_store.record_performance_start(
+            &binding.run_key,
+            PerformanceOperationKind::PrimaryModel,
+            &model_call_id,
+            &observed_at,
+        );
         let phase = self
             .ordinal_store
             .model_call_phase(&binding.run_key, &model_call_id)
@@ -2481,6 +2477,139 @@ mod tests {
                 );
             }
         }
+        drop(bridge);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "native statistics faults must cover two calls, exact replay, restart and budget completeness"
+    )]
+    async fn optional_model_statistics_do_not_block_final_delivery_or_next_call() {
+        let root =
+            std::env::temp_dir().join(format!("wwc-optional-model-stats-{}", uuid::Uuid::now_v7()));
+        let store = AdapterStore::open(&root).unwrap();
+        let lease = authority(&id("cdx", 'A'));
+        let source = SharedAuthoritySource::default().with_store(store.clone());
+        let bridge = Arc::new(installed_loopback_bridge(
+            &store,
+            source,
+            "optional model statistics",
+            "run",
+            &lease,
+            "kernel",
+        ));
+        store
+            .register_performance_run("run", ExecutionMode::React, ObserverMode::Off)
+            .unwrap();
+        store
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER deny_model_statistics_insert BEFORE INSERT ON performance_operation
+             BEGIN SELECT RAISE(FAIL,'optional statistics unavailable'); END;
+             CREATE TRIGGER deny_model_statistics_update BEFORE UPDATE ON performance_operation
+             BEGIN SELECT RAISE(FAIL,'optional statistics unavailable'); END;",
+            )
+            .unwrap();
+        for marker in ['a', 'b'] {
+            if marker == 'b' {
+                store
+                    .lock()
+                    .unwrap()
+                    .execute_batch("DROP TRIGGER deny_model_statistics_insert;")
+                    .unwrap();
+            }
+            let request_id = format!("model-{marker}");
+            let request = ModelPortRequest {
+                request_id: request_id.clone(),
+                payload_json: json!({
+                    "requestId":request_id, "provider":"loopback", "sessionId":"kernel",
+                    "threadId":lease.session_identity.codex_thread_id.0,
+                    "request":{"model":"loopback", "input":[]},
+                })
+                .to_string(),
+            };
+            let mut stream = bridge.model_port().stream(request.clone()).await.unwrap();
+            let open = bridge
+                .take_messages()
+                .unwrap()
+                .into_iter()
+                .find_map(|message| match message {
+                    ExecutionPortMessage::ModelOpenMessage(open) => Some(open),
+                    _ => None,
+                })
+                .unwrap();
+            let chunk = final_chunk(&open, marker);
+            assert!(matches!(
+                bridge
+                    .accept_chunk(&chunk, &lease.lease.issued_at)
+                    .await
+                    .unwrap(),
+                ModelChunkDisposition::Delivered {
+                    termination: Some(_),
+                    ..
+                }
+            ));
+            assert!(
+                stream
+                    .next()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .contains("response.completed")
+            );
+            assert!(stream.next().await.is_none());
+            assert_eq!(
+                store.model_call_phase("run", &request_id).unwrap(),
+                Some(ModelCallPhase::ProviderFinal)
+            );
+            assert!(matches!(
+                bridge
+                    .accept_chunk(&chunk, &lease.lease.issued_at)
+                    .await
+                    .unwrap(),
+                ModelChunkDisposition::Duplicate { .. }
+            ));
+            let mut replay = bridge.model_port().stream(request).await.unwrap();
+            assert!(
+                replay
+                    .next()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .contains("response.completed")
+            );
+            assert!(replay.next().await.is_none());
+            assert!(
+                !bridge
+                    .take_messages()
+                    .unwrap()
+                    .iter()
+                    .any(|message| matches!(message, ExecutionPortMessage::ModelOpenMessage(_)))
+            );
+        }
+        let reopened =
+            AdapterStore::open(&root).expect("optional completion backfill cannot block restart");
+        let totals = reopened.delegated_performance_totals("run").unwrap();
+        assert_eq!(
+            totals.primary_model_calls, 2,
+            "budget counts use the durable model identities when stats are missing"
+        );
+        assert_eq!(totals.pending_model_calls, 0);
+        assert!(!totals.usage_complete);
+        assert!(!totals.cost_complete);
+        assert_eq!(
+            store
+                .retained_outcome_usage("run", 0)
+                .unwrap()
+                .unwrap()
+                .tokens,
+            None
+        );
+        drop(reopened);
         drop(bridge);
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
