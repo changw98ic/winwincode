@@ -113,6 +113,27 @@ test('live checks follow a stable ID to its consolidated owner', () => {
   consolidate(data, records, 'WWC-ER-0102', 'WWC-ER-0101')
   expect(run('--mode=records', ...files(data, records)), true, /mode=records/)
 })
+test('consolidated E13 identity can live in acceptance criteria without hiding missing evidence', () => {
+  const { data, records } = fixture()
+  const entries = data.task_plan.entries.filter(entry => entry.stable_id.startsWith('WWC-ER-13'))
+  const targetEntry = entries.find(entry => entry.stable_id === 'WWC-ER-1307')
+  const target = records.find(record => record.id === targetEntry.bead_id)
+  for (const entry of entries) if (entry.bead_id !== targetEntry.bead_id) {
+    target.dependencies.push(...records.find(record => record.id === entry.bead_id).dependencies)
+    consolidate(data, records, entry.stable_id, targetEntry.stable_id)
+  }
+  target.title = 'E13 packaging, release and real acceptance'
+  target.description = 'Packaging / Release / E2E / Real Task Benchmark / Product Metrics / Operations Docs'
+  target.acceptance_criteria = entries.map(entry => `### ${entry.stable_id}\n${entry.title}`).join('\n\n')
+  expect(run('--mode=records', ...files(data, records)), true, /mode=records/)
+
+  const malformed = structuredClone(records)
+  malformed.find(record => record.id === target.id).acceptance_criteria = target.acceptance_criteria.replaceAll('WWC-ER-1301', 'WWC-ER-13010')
+  expect(run('--mode=records', ...files(data, malformed)), false, /task plan stable ID missing: WWC-ER-1301/)
+
+  const missingMapping = records.filter(record => record.id !== 'winwincode-edition.2')
+  expect(run('--mode=records', ...files(data, missingMapping)), false, /missing mapped bead: winwincode-edition\.2/)
+})
 test('rejects changed mapping ownership metadata', () => {
   const { data, records } = fixture()
   records[0].metadata.engineering_runtime_review.canonical_owner = records[1].id

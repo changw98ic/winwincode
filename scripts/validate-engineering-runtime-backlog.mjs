@@ -129,7 +129,8 @@ for (const entry of planEntries) {
   if (record?.status === "closed" && !record.close_reason) errors.push(`closed task missing close_reason: ${entry.stable_id}`);
   const metadata = record?.metadata?.engineering_runtime_plan_ids;
   const planIds = Array.isArray(metadata) ? metadata : typeof metadata === "string" ? (() => { try { return JSON.parse(metadata); } catch { return []; } })() : [];
-  if (!record || !record.title?.includes(entry.stable_id) && !record.description?.includes(entry.stable_id)) errors.push(`task plan stable ID missing: ${entry.stable_id}`);
+  const identityFields = [record?.title, record?.description, record?.acceptance_criteria];
+  if (!identityFields.some(value => typeof value === "string" && value.match(/\bWWC-ER-\d{4}\b/g)?.includes(entry.stable_id))) errors.push(`task plan stable ID missing: ${entry.stable_id}`);
   if (!planIds.includes(entry.stable_id)) errors.push(`task plan metadata missing: ${entry.stable_id}`);
   if (!record?.acceptance_criteria) errors.push(`task plan acceptance missing: ${entry.stable_id}`);
   for (const dep of entry.depends_on ?? []) {
