@@ -970,6 +970,8 @@ impl RuntimeFixture {
         authority.close().expect("close pause authority");
     }
 
+    // Keep upgrade, rejection, restart and single-side-effect assertions in one lifecycle.
+    #[allow(clippy::too_many_lines)]
     fn assert_terminal_final_ack_recovery(mut self) {
         let authority = DurableModelExchangeAuthority::open(&self.root)
             .expect("open durable exchange authority");
@@ -1026,6 +1028,60 @@ impl RuntimeFixture {
             .restarted_ack(&acknowledgement)
             .expect("replay lost final-ack response");
         assert_terminal_ack_replay(first, replay);
+        // Emulate a pre-upgrade database with only the original raw ACK tombstone.
+        let authority = DurableModelExchangeAuthority::open(&self.root).unwrap();
+        let raw_digest: String = {
+            let connection = Connection::open(authority.database_path()).unwrap();
+            let digest = connection.query_row(
+                "SELECT ack_digest FROM internal_provider_exchange_final_acks WHERE model_exchange_id=?1",
+                [&self.message.model_exchange_id.0], |row| row.get(0),
+            ).unwrap();
+            connection
+                .execute_batch("DROP TABLE internal_provider_exchange_final_ack_semantics;")
+                .unwrap();
+            digest
+        };
+        authority.close().unwrap();
+        let mut duplicate = acknowledgement.clone();
+        duplicate.status = LeaseWriteStatus::Duplicate;
+        duplicate.message_id = ExecutionMessageId(id("xmsg", 174));
+        duplicate.sent_at = Instant("2030-01-01T00:00:01Z".into());
+        let replay = self
+            .restarted_ack(&duplicate)
+            .expect("Accepted to Duplicate is the same final confirmation");
+        assert!(
+            matches!(replay, winwincode_control_plane::ModelExecutionAckReceipt::Acknowledged(ref receipt) if receipt.pool.replayed)
+        );
+        let authority = DurableModelExchangeAuthority::open(&self.root).unwrap();
+        let connection = Connection::open(authority.database_path()).unwrap();
+        assert_eq!(connection.query_row(
+            "SELECT ack_digest FROM internal_provider_exchange_final_acks WHERE model_exchange_id=?1",
+            [&self.message.model_exchange_id.0], |row| row.get::<_, String>(0),
+        ).unwrap(), raw_digest, "upgrade must preserve the original transport proof");
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM internal_provider_exchange_final_ack_semantics",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        drop(connection);
+        authority.close().unwrap();
+        let mut replay_request = duplicate.clone();
+        replay_request.replay_from_sequence = Some(winwincode_domain::ExecutionSequence(1));
+        assert!(
+            self.restarted_ack(&replay_request).is_err(),
+            "replay requests are not final success confirmations"
+        );
+        let mut failure = cancellation_ack(&self.message, 175);
+        failure.ack_sequence = duplicate.ack_sequence;
+        assert!(
+            self.restarted_ack(&failure).is_err(),
+            "a cancellation cannot reuse the successful tombstone"
+        );
         let mut changed = acknowledgement.clone();
         changed.ack_sequence.0 -= 1;
         assert_eq!(

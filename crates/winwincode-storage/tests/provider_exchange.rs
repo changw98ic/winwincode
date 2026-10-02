@@ -369,6 +369,29 @@ fn one_pool_authority_commits_with_open_failure_and_terminal_transitions() {
             )
             .expect("atomic final ack tombstone and forgotten pool authority");
         assert!(!acknowledgement.idempotent_replay);
+        let semantic = digest(b"verified-final-success-fact");
+        exchanges
+            .retain_final_ack_semantics(&acknowledgement, &semantic)
+            .unwrap();
+        exchanges
+            .retain_final_ack_semantics(&acknowledgement, &semantic)
+            .unwrap();
+        assert_eq!(
+            exchanges
+                .retain_final_ack_semantics(&acknowledgement, &digest(b"changed-fact"))
+                .unwrap_err()
+                .code(),
+            ProviderExchangeStoreErrorCode::Conflict
+        );
+        let mut changed_raw = acknowledgement;
+        changed_raw.ack_digest = digest(b"changed-raw");
+        assert_eq!(
+            exchanges
+                .retain_final_ack_semantics(&changed_raw, &semantic)
+                .unwrap_err()
+                .code(),
+            ProviderExchangeStoreErrorCode::Conflict
+        );
         let replay = exchanges
             .commit_final_ack_with_pool_authority(
                 &active.model_exchange_id,

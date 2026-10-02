@@ -57,6 +57,21 @@ pub trait ModelLeaseAuthoritySource: Send + Sync {
         now: &Instant,
     ) -> Result<(), ModelAuthorityRejection>;
 
+    /// Proves an original exchange and its still-matching current binding for
+    /// failure cleanup after expiry. This authorizes no execution or success.
+    /// Sources without durable original-request proof reject the exception.
+    ///
+    /// # Errors
+    /// Rejects unknown, replaced, cancelled, or not-yet-expired authority.
+    fn validate_expired_exchange(
+        &self,
+        _authority: &ModelLeaseAuthority,
+        _exchange: &ModelExchangeId,
+        _now: &Instant,
+    ) -> Result<(), ModelAuthorityRejection> {
+        Err(ModelAuthorityRejection::StaleLease)
+    }
+
     /// Validates current authority or a proven original request period for this exchange.
     ///
     /// # Errors
@@ -251,7 +266,7 @@ impl ModelCursorSnapshot {
         Ok(())
     }
 
-    fn fingerprint(&self, sequence: u64) -> Option<&ModelChunkFingerprint> {
+    pub(crate) fn fingerprint(&self, sequence: u64) -> Option<&ModelChunkFingerprint> {
         let index = usize::try_from(sequence.checked_sub(1)?).ok()?;
         self.frames.get(index)
     }
@@ -581,7 +596,7 @@ where
         ack: ModelMessageMetadata,
     ) -> Result<ModelChunkDisposition, ModelPortClientError> {
         let active = self.active_exchange(&chunk.model_exchange_id)?.clone();
-        self.require_current(&active.authority, &active.model_exchange_id, &ack.sent_at)?;
+        self.require_chunk_authority(&active.authority, chunk, &ack.sent_at)?;
         require_exact_chunk(&active, chunk)?;
         let mapped = frame_from_message(&ExecutionPortMessage::ModelChunkMessage(chunk.clone()))
             .map_err(|_| canonical_mapping_error())?;
@@ -649,11 +664,7 @@ where
                     "embedded Codex model stream rejected a chunk",
                 )
             })?;
-        let termination = chunk.is_final.then_some(if chunk.error.is_some() {
-            ModelTerminationReason::ProviderError
-        } else {
-            ModelTerminationReason::Completed
-        });
+        let termination = chunk_termination(chunk);
         self.store
             .record_delivery(
                 &active.stream,
@@ -694,11 +705,7 @@ where
         acknowledgement: ModelMessageMetadata,
     ) -> Result<ModelChunkDisposition, ModelPortClientError> {
         require_authority_shape(&authority)?;
-        self.require_current(
-            &authority,
-            &chunk.model_exchange_id,
-            &acknowledgement.sent_at,
-        )?;
+        self.require_chunk_authority(&authority, chunk, &acknowledgement.sent_at)?;
         if chunk.lease != authority.lease
             || chunk.worker_session_id != authority.worker_session_id
             || chunk.session_identity != authority.session_identity
@@ -988,6 +995,26 @@ where
         })
     }
 
+    fn require_chunk_authority(
+        &self,
+        authority: &ModelLeaseAuthority,
+        chunk: &ModelChunkMessage,
+        now: &Instant,
+    ) -> Result<(), ModelPortClientError> {
+        match self.require_current(authority, &chunk.model_exchange_id, now) {
+            Err(error)
+                if error.code == ModelPortClientErrorCode::ExpiredLease
+                    && canonical_instant(now)
+                    && is_expired_failure_terminal(chunk) =>
+            {
+                self.authority
+                    .validate_expired_exchange(authority, &chunk.model_exchange_id, now)
+                    .map_err(|_| stale_authority_error())
+            }
+            result => result,
+        }
+    }
+
     fn require_current(
         &self,
         authority: &ModelLeaseAuthority,
@@ -1259,6 +1286,22 @@ fn require_authority_shape(authority: &ModelLeaseAuthority) -> Result<(), ModelP
         return Err(invalid("model exchange authority is invalid"));
     }
     Ok(())
+}
+
+pub(crate) fn chunk_termination(chunk: &ModelChunkMessage) -> Option<ModelTerminationReason> {
+    chunk.is_final.then_some(if chunk.error.is_some() {
+        ModelTerminationReason::ProviderError
+    } else {
+        ModelTerminationReason::Completed
+    })
+}
+
+pub(crate) fn is_expired_failure_terminal(chunk: &ModelChunkMessage) -> bool {
+    chunk.is_final
+        && chunk.payload.is_none()
+        && chunk.error.as_ref().is_some_and(|error| {
+            error.code == ExecutionPortErrorCode::LeaseExpired && !error.retryable
+        })
 }
 
 fn require_exact_chunk(

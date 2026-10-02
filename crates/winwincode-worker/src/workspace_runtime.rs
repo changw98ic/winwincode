@@ -2381,12 +2381,6 @@ impl JobWorkspaceRuntime {
                 ) || binding.state != BatchState::ObservationPending
                     || binding.active_batch_id.as_ref() != Some(&intent.identity.batch_id)
                     || binding.checkpoint_revision.as_ref() != Some(&intent.result_revision)))
-            || (terminal_replay
-                && !pending_terminal_route
-                && !matches!(
-                    binding.state,
-                    BatchState::Accepted | BatchState::RepairRequired | BatchState::Quarantined
-                ))
         {
             return Err(authority_error());
         }
@@ -2406,6 +2400,9 @@ impl JobWorkspaceRuntime {
             },
             now,
         )?;
+        // A completed historical observation is keyed by its original authority
+        // and exact retained frame bytes, not by a later batch's workspace phase.
+        // Retention above still rejects changed bytes and new terminal frames.
         if terminal_replay && !pending_terminal_route {
             return Ok(Some(ObservationChunkApplication {
                 retention,

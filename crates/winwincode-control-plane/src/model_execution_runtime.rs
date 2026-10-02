@@ -351,6 +351,17 @@ impl DurableModelExchangeAuthority {
             .map_err(Into::into)
     }
 
+    fn retain_final_ack_semantics(
+        &self,
+        original: &ProviderExchangeFinalAck,
+        semantic_digest: &Sha256Digest,
+    ) -> Result<(), ModelExecutionRuntimeError> {
+        self.lock()?
+            .provider_exchange_store()?
+            .retain_final_ack_semantics(original, semantic_digest)
+            .map_err(Into::into)
+    }
+
     fn commit_final_ack(
         &self,
         acknowledgement: &ModelAckMessage,
@@ -1021,6 +1032,56 @@ impl<'a, 'storage> ModelExecutionRuntime<'a, 'storage> {
         }
     }
 
+    fn replay_final_ack(
+        &self,
+        acknowledgement: &ModelAckMessage,
+        stored: &ProviderExchangeFinalAck,
+    ) -> Result<ModelExecutionAckReceipt, ModelExecutionRuntimeError> {
+        let mut receipt = decode_final_ack_receipt(stored.receipt_json())?;
+        if stored.ack_sequence != acknowledgement.ack_sequence.0
+            || receipt.pool.model_exchange_id != stored.model_exchange_id
+            || i64::try_from(receipt.pool.acknowledged_sequence).ok() != Some(stored.ack_sequence)
+        {
+            return Err(ModelExecutionRuntimeError::new(
+                ModelExecutionRuntimeErrorKind::ExchangeConflict,
+            ));
+        }
+        // Legacy rows retain only a raw transport hash. Reconstruct the
+        // success fact from the validated immutable open plus the durable
+        // final receipt; never infer authority from the incoming ACK.
+        let snapshot = self
+            .exchanges
+            .snapshot(&stored.model_exchange_id)?
+            .ok_or_else(|| {
+                ModelExecutionRuntimeError::new(ModelExecutionRuntimeErrorKind::Storage)
+            })?;
+        let durable = durable_gateway_exchange(&snapshot)?;
+        let original = ModelAckMessage {
+            kind: winwincode_execution_port::generated::ModelAckMessageKind::ModelAck,
+            schema_version: winwincode_domain::SchemaVersion::WinwincodeV1,
+            model_exchange_id: stored.model_exchange_id.clone(),
+            ack_sequence: winwincode_domain::ExecutionAckSequence(stored.ack_sequence),
+            lease: durable.lease().clone(),
+            worker_session_id: durable.worker_session_id().clone(),
+            session_identity: durable.session_identity().clone(),
+            status: winwincode_execution_port::generated::LeaseWriteStatus::Accepted,
+            error: None,
+            replay_from_sequence: None,
+            message_id: snapshot.message_id,
+            sent_at: stored.acked_at.clone(),
+        };
+        let semantic = final_ack_semantic_digest(acknowledgement)?;
+        if semantic != final_ack_semantic_digest(&original)? {
+            return Err(ModelExecutionRuntimeError::new(
+                ModelExecutionRuntimeErrorKind::ExchangeConflict,
+            ));
+        }
+        self.exchanges
+            .retain_final_ack_semantics(stored, &semantic)?;
+        receipt.pool.replayed = true;
+        Ok(ModelExecutionAckReceipt::Acknowledged(receipt))
+    }
+
     fn acknowledge_terminal(
         &mut self,
         acknowledgement: &ModelAckMessage,
@@ -1030,16 +1091,7 @@ impl<'a, 'storage> ModelExecutionRuntime<'a, 'storage> {
             .exchanges
             .final_ack(&acknowledgement.model_exchange_id)?
         {
-            if stored.ack_digest != ack_digest
-                || stored.ack_sequence != acknowledgement.ack_sequence.0
-            {
-                return Err(ModelExecutionRuntimeError::new(
-                    ModelExecutionRuntimeErrorKind::ExchangeConflict,
-                ));
-            }
-            let mut receipt = decode_final_ack_receipt(stored.receipt_json())?;
-            receipt.pool.replayed = true;
-            return Ok(ModelExecutionAckReceipt::Acknowledged(receipt));
+            return self.replay_final_ack(acknowledgement, &stored);
         }
         self.restore_pool_if_needed(
             &self
@@ -1816,6 +1868,27 @@ fn model_ack_digest(
     let bytes = serde_json::to_vec(acknowledgement).map_err(|_| {
         ModelExecutionRuntimeError::new(ModelExecutionRuntimeErrorKind::InvalidInput)
     })?;
+    Ok(Sha256Digest(format!("sha256:{:x}", Sha256::digest(bytes))))
+}
+
+fn final_ack_semantic_digest(
+    acknowledgement: &ModelAckMessage,
+) -> Result<Sha256Digest, ModelExecutionRuntimeError> {
+    let mut value = serde_json::to_value(acknowledgement).map_err(|_| {
+        ModelExecutionRuntimeError::new(ModelExecutionRuntimeErrorKind::InvalidInput)
+    })?;
+    let object = value.as_object_mut().ok_or_else(|| {
+        ModelExecutionRuntimeError::new(ModelExecutionRuntimeErrorKind::InvalidInput)
+    })?;
+    object.remove("messageId");
+    object.remove("sentAt");
+    if acknowledgement.status == winwincode_execution_port::generated::LeaseWriteStatus::Duplicate {
+        object.insert("status".into(), serde_json::json!("accepted"));
+    }
+    let bytes =
+        serde_json::to_vec(&("winwincode.final-ack-semantics.v1", value)).map_err(|_| {
+            ModelExecutionRuntimeError::new(ModelExecutionRuntimeErrorKind::InvalidInput)
+        })?;
     Ok(Sha256Digest(format!("sha256:{:x}", Sha256::digest(bytes))))
 }
 

@@ -1618,7 +1618,7 @@ commandIds = ["check", "rust", "python"]
                 .await
                 .unwrap();
         }
-        poll_until_message(
+        let next_composer = poll_until_message(
             &mut worker,
             &port,
             &now,
@@ -1637,6 +1637,79 @@ commandIds = ["check", "rust", "python"]
         )
         .await;
         assert!(stored_run_json(&root)["batchIntent"].is_null());
+        // Drive B through the real workspace intake and patch/validation store;
+        // A still returns through the original Worker and ProductionAdapter.
+        let active = worker.active_jobs()[0].clone();
+        let checkout = worker
+            .workspace_runtime_for_test()
+            .open_for_job(&active, None)
+            .unwrap();
+        let accepted = worker
+            .workspace_runtime_for_test()
+            .accepted_revision(&active.job.job_id)
+            .unwrap();
+        let patch = "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-pub fn fixture_value() -> u64 { 2 }\n+pub fn fixture_value() -> u64 { 3 }\n*** End Patch\n";
+        let patch_digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(patch.as_bytes())));
+        let run_key = winwincode_worker::CodexRunKey::from_dispatch(&dispatch)
+            .canonical_digest()
+            .unwrap()
+            .0;
+        let batch = ChangeBatchProposalEvent {
+            identity: winwincode_execution_port::generated::ChangeBatchIdentity {
+                attempt: active.job.attempt,
+                batch_id: winwincode_execution_port::change_batch_identity::derive_change_batch_id(&run_key, &next_composer.request_id.0, None, &patch_digest).unwrap(),
+                call_id: None, fencing_token: active.lease.fencing_token.clone(), job_id: active.job.job_id.clone(),
+                lease_id: active.lease.lease_id.clone(), patch_digest, repository_id: active.job.workspace.repository_id.clone(),
+                run_key, session_identity: active.session_identity.clone(), turn_id: next_composer.request_id.0.clone(), workspace_revision: accepted,
+            },
+            occurred_at: now.clone(),
+            proposal: winwincode_execution_port::generated::ChangeBatchProposal {
+                acceptance_criteria_ids: active.job.work_input.as_ref().unwrap().work_item.criterion_ids.iter().map(|id| id.0.clone()).collect(),
+                disposition: winwincode_execution_port::generated::ChangeBatchProposalDisposition::ContinueValue,
+                patch: patch.into(), schema_version: 1,
+                validation_profile: winwincode_execution_port::generated::ValidationProfileName::Changed,
+            },
+        };
+        let artifact_connection = rusqlite::Connection::open(
+            root.0
+                .join("validation-artifacts/validation-artifacts.sqlite3"),
+        )
+        .unwrap();
+        artifact_connection.execute_batch("CREATE TRIGGER fail_batch_b_artifact BEFORE INSERT ON validation_artifact BEGIN SELECT RAISE(ABORT, 'fixture output failure'); END;").unwrap();
+        assert!(
+            worker
+                .workspace_runtime_for_test()
+                .execute_change_batch(&active, &batch, &now)
+                .await
+                .is_err()
+        );
+        artifact_connection
+            .execute_batch("DROP TRIGGER fail_batch_b_artifact;")
+            .unwrap();
+        let journal =
+            winwincode_worker::change_batch_store::ChangeBatchStore::open(&root.0).unwrap();
+        let workspace_id = journal
+            .workspace_id_for_batch(&batch.identity.batch_id)
+            .unwrap()
+            .unwrap();
+        let binding_b = journal.workspace_binding(&workspace_id).unwrap().unwrap();
+        assert_eq!(
+            binding_b.state,
+            winwincode_worker::change_batch_store::BatchState::ValidationPending
+        );
+        assert_eq!(
+            binding_b.active_batch_id.as_ref(),
+            Some(&batch.identity.batch_id)
+        );
+        assert!(
+            fs::read_to_string(checkout.join("src/lib.rs"))
+                .unwrap()
+                .contains("{ 3 }")
+        );
+        let revision_b = worker
+            .workspace_runtime_for_test()
+            .accepted_revision(&active.job.job_id)
+            .unwrap();
         let terminal = terminal.unwrap();
         worker
             .accept_control(
@@ -1648,6 +1721,24 @@ commandIds = ["check", "rust", "python"]
         worker.flush_durable_outbox_at(now.clone()).await.unwrap();
         assert!(port.messages().iter().any(|m|matches!(m,ExecutionPortMessage::ModelAckMessage(a)
             if a.model_exchange_id==observer.model_exchange_id && a.status==LeaseWriteStatus::Duplicate && a.error.is_none())));
+        assert_eq!(
+            worker
+                .workspace_runtime_for_test()
+                .accepted_revision(&active.job.job_id)
+                .unwrap(),
+            revision_b,
+            "historical terminal must not alter batch B"
+        );
+        assert_eq!(
+            journal.workspace_binding(&workspace_id).unwrap().unwrap(),
+            binding_b,
+            "historical receipt must not change B lifecycle"
+        );
+        assert!(
+            fs::read_to_string(checkout.join("src/lib.rs"))
+                .unwrap()
+                .contains("{ 3 }")
+        );
         let ledger =
             rusqlite::Connection::open(root.worker().join("worker-codex.sqlite3")).unwrap();
         assert_eq!(

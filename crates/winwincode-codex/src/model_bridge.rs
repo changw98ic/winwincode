@@ -11,9 +11,10 @@ use crate::{
     action_bridge::ExecutionPortActionGate,
     model_port_client::{
         ModelAuthorityRejection, ModelChunkDelivery, ModelChunkDisposition, ModelChunkSink,
-        ModelLeaseAuthority, ModelLeaseAuthoritySource, ModelMessageMetadata,
+        ModelCursorStore, ModelLeaseAuthority, ModelLeaseAuthoritySource, ModelMessageMetadata,
         ModelPortClientErrorCode, ModelSinkDeliveryStatus, ModelTerminationReason,
-        OpenModelExchangeCommand, WorkerModelPortClient,
+        OpenModelExchangeCommand, WorkerModelPortClient, chunk_termination,
+        is_expired_failure_terminal,
     },
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -338,6 +339,57 @@ impl SharedAuthoritySource {
 }
 
 impl ModelLeaseAuthoritySource for SharedAuthoritySource {
+    fn validate_expired_exchange(
+        &self,
+        authority: &ModelLeaseAuthority,
+        exchange: &ModelExchangeId,
+        now: &Instant,
+    ) -> Result<(), ModelAuthorityRejection> {
+        let store = self
+            .store
+            .as_ref()
+            .ok_or(ModelAuthorityRejection::Unavailable)?;
+        let open = ExecutionOutbox::read_model_open(store, exchange)
+            .map_err(|_| ModelAuthorityRejection::Unavailable)?
+            .ok_or(ModelAuthorityRejection::StaleLease)?;
+        if open.lease != authority.lease
+            || open.worker_session_id != authority.worker_session_id
+            || open.session_identity != authority.session_identity
+            || !ExecutionOutbox::model_start_request_allowed(store, &open)
+                .map_err(|_| ModelAuthorityRejection::Unavailable)?
+        {
+            return Err(ModelAuthorityRejection::StaleLease);
+        }
+        let thread = &authority.session_identity.codex_thread_id.0;
+        let cached = self
+            .lineage
+            .read()
+            .map_err(|_| ModelAuthorityRejection::Unavailable)?
+            .get(thread)
+            .cloned();
+        let expected = match cached {
+            Some(expected) => expected,
+            None => self
+                .load_lineage(thread)
+                .map_err(|_| ModelAuthorityRejection::Unavailable)?
+                .ok_or(ModelAuthorityRejection::StaleLease)?,
+        };
+        if !same_binding_with_extended_lease(authority, &expected) {
+            return Err(ModelAuthorityRejection::StaleLease);
+        }
+        let observed = self
+            .observed_now()
+            .map_err(|_| ModelAuthorityRejection::Unavailable)?;
+        let effective = observed
+            .as_ref()
+            .filter(|observed| observed.0 > now.0)
+            .unwrap_or(now);
+        if !canonical_instant(now) || effective.0 < expected.lease.expires_at.0 {
+            return Err(ModelAuthorityRejection::StaleLease);
+        }
+        Ok(())
+    }
+
     fn validate_exchange(
         &self,
         authority: &ModelLeaseAuthority,
@@ -943,7 +995,7 @@ impl ExecutionPortModelBridge {
                 ModelChunkDisposition::Delivered {
                     confirmed_sequence: u64::try_from(chunk.sequence.0)
                         .map_err(|_| BridgeError::InvalidPayload)?,
-                    termination: chunk.is_final.then_some(ModelTerminationReason::Completed),
+                    termination: chunk_termination(chunk),
                 }
             }
             Err(_) => return Err(BridgeError::Protocol),
@@ -951,6 +1003,10 @@ impl ExecutionPortModelBridge {
         Ok((disposition, pre_retained))
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Authority, durable frame and live or detached stream intake share one checked envelope"
+    )]
     pub(crate) async fn accept_chunk(
         &self,
         chunk: &ModelChunkMessage,
@@ -981,7 +1037,17 @@ impl ExecutionPortModelBridge {
             .ordinal_store
             .load_model_call_frames(&owner.run_key, &owner.model_call_id)
             .map_err(model_frame_store_error)?;
-        let (exact_duplicate, contiguous_new) = Self::frame_position(&persisted_frames, chunk);
+        let (mut exact_duplicate, contiguous_new) = Self::frame_position(&persisted_frames, chunk);
+        if persisted_frames.last().is_some_and(|frame| frame.is_final) && !exact_duplicate {
+            return Err(BridgeError::Conflict);
+        }
+        if !process_exchange
+            && is_expired_failure_terminal(chunk)
+            && (exact_duplicate || contiguous_new)
+        {
+            self.restore_expired_failure_cursor(chunk, &owner)?;
+            exact_duplicate = true;
+        }
         if !process_exchange {
             // A Provider may retry a terminal frame after the Worker process
             // has released its live Core stream.  The durable frame ledger is
@@ -1025,7 +1091,7 @@ impl ExecutionPortModelBridge {
                 return Ok(ModelChunkDisposition::Delivered {
                     confirmed_sequence: u64::try_from(chunk.sequence.0)
                         .map_err(|_| BridgeError::InvalidPayload)?,
-                    termination: chunk.is_final.then_some(ModelTerminationReason::Completed),
+                    termination: chunk_termination(chunk),
                 });
             }
             return Err(BridgeError::Conflict);
@@ -1073,6 +1139,55 @@ impl ExecutionPortModelBridge {
                 .remove(&chunk.model_exchange_id.0);
         }
         Ok(disposition)
+    }
+
+    fn restore_expired_failure_cursor(
+        &self,
+        chunk: &ModelChunkMessage,
+        owner: &ModelExchangeOwner,
+    ) -> Result<(), BridgeError> {
+        validate_chunk_for_retention(chunk)?;
+        self.ordinal_store
+            .retain_model_call_frame(&owner.run_key, &owner.model_call_id, chunk)
+            .map_err(model_frame_store_error)?;
+        let frames = self
+            .ordinal_store
+            .load_model_call_frames(&owner.run_key, &owner.model_call_id)
+            .map_err(model_frame_store_error)?;
+        let mut store = self.ordinal_store.clone();
+        for frame in frames {
+            let mapped =
+                frame_from_message(&ExecutionPortMessage::ModelChunkMessage(frame.clone()))
+                    .map_err(|_| BridgeError::InvalidPayload)?;
+            let snapshot = ModelCursorStore::load(&mut store, &mapped.stream)
+                .map_err(model_frame_store_error)?
+                .unwrap_or_default();
+            snapshot.validate().map_err(|_| BridgeError::Conflict)?;
+            let sequence =
+                u64::try_from(frame.sequence.0).map_err(|_| BridgeError::InvalidPayload)?;
+            let fingerprint = crate::model_port_client::ModelChunkFingerprint {
+                sequence,
+                message_id: frame.message_id.clone(),
+                digest: winwincode_domain::Sha256Digest(mapped.frame.digest),
+                is_final: frame.is_final,
+                has_error: frame.error.is_some(),
+            };
+            if sequence <= snapshot.confirmed_sequence {
+                if snapshot.fingerprint(sequence) != Some(&fingerprint) {
+                    return Err(BridgeError::Conflict);
+                }
+            } else {
+                ModelCursorStore::record_delivery(
+                    &mut store,
+                    &mapped.stream,
+                    snapshot.confirmed_sequence,
+                    &fingerprint,
+                    chunk_termination(&frame),
+                )
+                .map_err(model_frame_store_error)?;
+            }
+        }
+        Ok(())
     }
 
     fn retain_provider_final_frame(
@@ -1163,27 +1278,27 @@ impl ExecutionPortModelBridge {
         // merely because it arrived with the next sequence number.
         if !canonical_instant(received_at)
             || received_at.0 < binding.authority.lease.issued_at.0
-            || received_at.0 >= binding.authority.lease.expires_at.0
             || chunk.worker_session_id != binding.authority.worker_session_id
             || chunk.session_identity != binding.authority.session_identity
         {
             return Err(BridgeError::StaleAuthority);
         }
-        self.authority
-            .validate_exchange(
-                &ModelLeaseAuthority {
-                    lease: chunk.lease.clone(),
-                    worker_session_id: chunk.worker_session_id.clone(),
-                    session_identity: chunk.session_identity.clone(),
-                },
-                &chunk.model_exchange_id,
-                received_at,
-            )
-            .map_err(|rejection| match rejection {
-                ModelAuthorityRejection::ExpiredLease
-                | ModelAuthorityRejection::StaleLease
-                | ModelAuthorityRejection::Unavailable => BridgeError::StaleAuthority,
-            })
+        let authority = ModelLeaseAuthority {
+            lease: chunk.lease.clone(),
+            worker_session_id: chunk.worker_session_id.clone(),
+            session_identity: chunk.session_identity.clone(),
+        };
+        match self
+            .authority
+            .validate_exchange(&authority, &chunk.model_exchange_id, received_at)
+        {
+            Err(ModelAuthorityRejection::ExpiredLease) if is_expired_failure_terminal(chunk) => {
+                self.authority
+                    .validate_expired_exchange(&authority, &chunk.model_exchange_id, received_at)
+                    .map_err(|_| BridgeError::StaleAuthority)
+            }
+            result => result.map_err(|_| BridgeError::StaleAuthority),
+        }
     }
 
     fn resolve_chunk_owner(
@@ -2932,6 +3047,262 @@ mod tests {
             0
         );
         drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "One exact expired exchange through cleanup, restart, rejection and independent job progress"
+    )]
+    async fn exact_expired_failure_terminal_closes_and_replays_without_blocking_other_job() {
+        let root = std::env::temp_dir().join(format!("wwc-expired-final-{}", uuid::Uuid::now_v7()));
+        let store = AdapterStore::open(&root).unwrap();
+        let lease = authority(&id("cdx", 'A'));
+        let source = SharedAuthoritySource::default();
+        let bridge = Arc::new(installed_loopback_bridge(
+            &store,
+            source.clone(),
+            "expired final",
+            "run",
+            &lease,
+            "kernel",
+        ));
+        let request = ModelPortRequest {
+            request_id: "expired-call".into(),
+            payload_json: json!({"requestId":"expired-call", "provider":"loopback", "sessionId":"kernel", "threadId":lease.session_identity.codex_thread_id.0, "request":{"model":"loopback", "input":[]}}).to_string(),
+        };
+        let mut stream = bridge.model_port().stream(request).await.unwrap();
+        let opens = bridge.take_messages().unwrap();
+        let open = opens
+            .into_iter()
+            .find_map(|m| match m {
+                ExecutionPortMessage::ModelOpenMessage(open) => Some(open),
+                _ => None,
+            })
+            .unwrap();
+        let mut final_frame = test_chunk(&lease, &open.model_exchange_id, 1, true, b"{}", 'A');
+        final_frame.payload = None;
+        final_frame.error = Some(winwincode_execution_port::generated::ExecutionPortError {
+            code: winwincode_execution_port::generated::ExecutionPortErrorCode::LeaseExpired,
+            message: "first start authorization expired".into(),
+            retryable: false,
+        });
+        let now = lease.lease.expires_at.clone();
+        source.update_now(&now).unwrap();
+        assert!(
+            bridge.accept_chunk(&final_frame, &now).await.is_err(),
+            "missing durable original-request proof must reject cleanup"
+        );
+        bridge
+            .outbox
+            .retain(&ExecutionPortMessage::ModelOpenMessage(open.clone()))
+            .unwrap();
+        let result = bridge.accept_chunk(&final_frame, &now).await;
+        assert!(
+            matches!(
+                result,
+                Ok(ModelChunkDisposition::Delivered {
+                    termination: Some(ModelTerminationReason::ProviderError),
+                    ..
+                })
+            ),
+            "{result:?}"
+        );
+        assert!(stream.next().await.unwrap().is_err());
+        assert!(stream.next().await.is_none());
+        assert!(bridge.exchanges.lock().unwrap().is_empty());
+        assert!(matches!(
+            bridge.accept_chunk(&final_frame, &now).await.unwrap(),
+            ModelChunkDisposition::Duplicate { .. }
+        ));
+        let frames = store.load_model_call_frames("run", "expired-call").unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(
+            store.model_call_phase("run", "expired-call").unwrap(),
+            Some(ModelCallPhase::ProviderFinal)
+        );
+        assert!(
+            !store
+                .delegated_performance_totals("run")
+                .unwrap()
+                .usage_complete
+        );
+        let mut forged = final_frame.clone();
+        forged.lease.fencing_token.0 = "2".into();
+        assert!(bridge.accept_chunk(&forged, &now).await.is_err());
+        forged = final_frame.clone();
+        forged.error.as_mut().unwrap().retryable = true;
+        assert!(bridge.accept_chunk(&forged, &now).await.is_err());
+        forged = final_frame.clone();
+        forged.error = None;
+        assert!(bridge.accept_chunk(&forged, &now).await.is_err());
+        forged = final_frame.clone();
+        forged.worker_session_id.0 = id("wsn", 'B');
+        assert!(bridge.accept_chunk(&forged, &now).await.is_err());
+        forged = final_frame.clone();
+        forged.session_identity.codex_thread_id.0 = id("cdx", 'B');
+        assert!(bridge.accept_chunk(&forged, &now).await.is_err());
+        forged = final_frame.clone();
+        forged.payload =
+            test_chunk(&lease, &final_frame.model_exchange_id, 1, true, b"{}", 'A').payload;
+        assert!(bridge.accept_chunk(&forged, &now).await.is_err());
+        forged = final_frame.clone();
+        forged.sequence.0 = 2;
+        assert!(bridge.accept_chunk(&forged, &now).await.is_err());
+        forged = final_frame.clone();
+        forged.error.as_mut().unwrap().message = "changed terminal bytes".into();
+        assert!(bridge.accept_chunk(&forged, &now).await.is_err());
+        assert_eq!(
+            store
+                .load_model_call_frames("run", "expired-call")
+                .unwrap()
+                .len(),
+            1
+        );
+        let restored = loopback_bridge(
+            &store,
+            SharedAuthoritySource::default(),
+            "restored expired final",
+        );
+        assert!(matches!(
+            restored.accept_chunk(&final_frame, &now).await.unwrap(),
+            ModelChunkDisposition::Duplicate { .. }
+        ));
+        assert!(restored.sink.streams.lock().unwrap().is_empty());
+        drop(restored);
+        store
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM model_cursor", [])
+            .unwrap();
+        let restored = loopback_bridge(
+            &store,
+            SharedAuthoritySource::default(),
+            "restore cursor crash window",
+        );
+        assert!(matches!(
+            restored.accept_chunk(&final_frame, &now).await.unwrap(),
+            ModelChunkDisposition::Duplicate { .. }
+        ));
+        assert!(matches!(
+            restored.accept_chunk(&final_frame, &now).await.unwrap(),
+            ModelChunkDisposition::Duplicate { .. }
+        ));
+        drop(restored);
+        // A distinct valid job still consumes its own response after failure cleanup.
+        let mut next = authority(&id("cdx", 'B'));
+        next.lease.job_id.0 = id("job", 'B');
+        next.lease.expires_at.0 = "2030-01-01T02:00:00.000Z".into();
+        bridge
+            .install_binding(ModelRunBinding {
+                run_key: "next".into(),
+                canonical_thread_id: next.session_identity.codex_thread_id.clone(),
+                kernel_session_id: "kernel-next".into(),
+                authority: next.clone(),
+                opened_at: now.clone(),
+            })
+            .unwrap();
+        let mut second = bridge.model_port().stream(ModelPortRequest { request_id: "next-call".into(), payload_json: json!({"requestId":"next-call", "provider":"loopback", "sessionId":"kernel-next", "threadId":next.session_identity.codex_thread_id.0, "request":{"model":"loopback", "input":[]}}).to_string() }).await.unwrap();
+        let open = bridge
+            .take_messages()
+            .unwrap()
+            .into_iter()
+            .find_map(|m| match m {
+                ExecutionPortMessage::ModelOpenMessage(open) => Some(open),
+                _ => None,
+            })
+            .unwrap();
+        let success = test_chunk(
+            &next,
+            &open.model_exchange_id,
+            1,
+            true,
+            br#"{"type":"response.completed","response":{}}"#,
+            'B',
+        );
+        bridge.accept_chunk(&success, &now).await.unwrap();
+        assert!(second.next().await.unwrap().is_ok());
+        assert!(second.next().await.is_none());
+        drop(bridge);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn expired_failure_after_restart_rebuilds_cursor_before_first_ack() {
+        let root =
+            std::env::temp_dir().join(format!("wwc-detached-expiry-{}", uuid::Uuid::now_v7()));
+        let store = AdapterStore::open(&root).unwrap();
+        let lease = authority(&id("cdx", 'A'));
+        let bridge = Arc::new(installed_loopback_bridge(
+            &store,
+            SharedAuthoritySource::default(),
+            "before restart",
+            "run",
+            &lease,
+            "kernel",
+        ));
+        let stream = bridge.model_port().stream(ModelPortRequest {
+            request_id: "detached-call".into(),
+            payload_json: json!({"requestId":"detached-call", "provider":"loopback", "sessionId":"kernel", "threadId":lease.session_identity.codex_thread_id.0, "request":{"model":"loopback", "input":[]}}).to_string(),
+        }).await.unwrap();
+        let open = bridge
+            .take_messages()
+            .unwrap()
+            .into_iter()
+            .find_map(|message| match message {
+                ExecutionPortMessage::ModelOpenMessage(open) => Some(open),
+                _ => None,
+            })
+            .unwrap();
+        bridge
+            .outbox
+            .retain(&ExecutionPortMessage::ModelOpenMessage(open.clone()))
+            .unwrap();
+        let mut chunk = test_chunk(&lease, &open.model_exchange_id, 1, true, b"{}", 'A');
+        chunk.payload = None;
+        chunk.error = Some(winwincode_execution_port::generated::ExecutionPortError {
+            code: winwincode_execution_port::generated::ExecutionPortErrorCode::LeaseExpired,
+            message: "first start authority expired".into(),
+            retryable: false,
+        });
+        drop(stream);
+        drop(bridge);
+        drop(store);
+        let store = AdapterStore::open(&root).unwrap();
+        let restored = loopback_bridge(&store, SharedAuthoritySource::default(), "after restart");
+        assert!(matches!(
+            restored
+                .accept_chunk(&chunk, &lease.lease.expires_at)
+                .await
+                .unwrap(),
+            ModelChunkDisposition::Duplicate { .. }
+        ));
+        assert!(matches!(
+            restored
+                .accept_chunk(&chunk, &lease.lease.expires_at)
+                .await
+                .unwrap(),
+            ModelChunkDisposition::Duplicate { .. }
+        ));
+        let replies = restored.take_messages().unwrap();
+        assert_eq!(replies.len(), 2);
+        assert!(replies.iter().all(|reply| matches!(reply, ExecutionPortMessage::ModelAckMessage(ack) if ack.error.is_none() && ack.status == winwincode_execution_port::generated::LeaseWriteStatus::Duplicate)));
+        assert!(restored.sink.streams.lock().unwrap().is_empty());
+        assert_eq!(
+            store.model_call_phase("run", "detached-call").unwrap(),
+            Some(ModelCallPhase::ProviderFinal)
+        );
+        assert_eq!(
+            store
+                .load_model_call_frames("run", "detached-call")
+                .unwrap()
+                .len(),
+            1
+        );
+        drop(restored);
+        drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }
 

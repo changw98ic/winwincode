@@ -221,9 +221,12 @@ impl DeviceProviderStore {
                 .build()
                 .map_err(|_| DeviceProviderError)?;
             if runtime
-                .block_on(self.prepare_jev_model_request(open, &mut request))
+                .block_on(self.prepare_jev_model_request(open, &mut request, can_start))
                 .is_err()
             {
+                if !can_start() {
+                    return Err(DeviceModelFailure::LeaseExpired);
+                }
                 return Ok(vec![model_failure(open, "DEVICE_JEV_UNAVAILABLE")]);
             }
             payload = serde_json::to_vec(&request)?;

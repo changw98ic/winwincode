@@ -388,7 +388,16 @@ impl JevRuntime {
         input: JevHypothesis,
         options: JevExecutionOptions,
     ) -> JevRun<JevEvaluation> {
-        self.run(1, options, move |provider| {
+        self.evaluate_authorized(input, options, &|| true).await
+    }
+
+    pub(crate) async fn evaluate_authorized(
+        &self,
+        input: JevHypothesis,
+        options: JevExecutionOptions,
+        can_start: &(impl Fn() -> bool + ?Sized),
+    ) -> JevRun<JevEvaluation> {
+        self.run(1, options, can_start, move |provider| {
             provider.evaluate(input.clone(), options)
         })
         .await
@@ -399,8 +408,18 @@ impl JevRuntime {
         inputs: Vec<JevHypothesis>,
         options: JevExecutionOptions,
     ) -> JevRun<JevBatchEvaluation> {
+        self.batch_evaluate_authorized(inputs, options, &|| true)
+            .await
+    }
+
+    pub(crate) async fn batch_evaluate_authorized(
+        &self,
+        inputs: Vec<JevHypothesis>,
+        options: JevExecutionOptions,
+        can_start: &(impl Fn() -> bool + ?Sized),
+    ) -> JevRun<JevBatchEvaluation> {
         let batch_size = inputs.len();
-        self.run(batch_size, options, move |provider| {
+        self.run(batch_size, options, can_start, move |provider| {
             provider.batch_evaluate(inputs.clone(), options)
         })
         .await
@@ -410,6 +429,7 @@ impl JevRuntime {
         &self,
         batch_size: usize,
         options: JevExecutionOptions,
+        can_start: &(impl Fn() -> bool + ?Sized),
         operation: impl Fn(Arc<dyn JevProvider>) -> BoxFuture<'static, Result<T, JevProviderError>>,
     ) -> JevRun<T>
     where
@@ -441,6 +461,16 @@ impl JevRuntime {
                     .is_some_and(|cancel| cancel.is_cancelled())
                 {
                     break;
+                }
+                // Check the live execution authority immediately before each
+                // new side effect, including retries and provider fallback. A
+                // completed attempt remains recoverable after authority expires.
+                if !can_start() {
+                    return JevRun {
+                        value: None,
+                        observation: None,
+                        failures,
+                    };
                 }
                 let inference = Box::pin(timeout(
                     self.config.timeout,
@@ -2360,6 +2390,61 @@ retries = 0
             assert!(outcome.value.is_some());
             assert_eq!(outcome.failures.len(), 1);
             assert_eq!(remote.calls(), 2);
+        });
+    }
+
+    #[test]
+    fn live_authorization_stops_jev_retry_and_fallback() {
+        block_on(async {
+            let first = Arc::new(MockJevProvider::healthy("first").with_failures_before_success(1));
+            let fallback = Arc::new(MockJevProvider::healthy("fallback"));
+            let runner = runtime_with(
+                vec![first.clone(), fallback.clone()],
+                JevRuntimeConfig {
+                    timeout: Duration::from_secs(1),
+                    retries: 1,
+                },
+            );
+            let outcome = runner
+                .evaluate_authorized(hypothesis(), options(), &|| first.calls() == 0)
+                .await;
+            assert!(
+                outcome.value.is_none(),
+                "expired authorization must stop the next attempt"
+            );
+            assert_eq!(first.calls(), 1);
+            assert_eq!(fallback.calls(), 0);
+
+            let expired = runner
+                .batch_evaluate_authorized(vec![hypothesis(); 4], options(), &|| false)
+                .await;
+            assert!(expired.value.is_none());
+            assert_eq!(first.calls(), 1);
+            assert_eq!(fallback.calls(), 0);
+
+            let renewed = runner
+                .evaluate_authorized(hypothesis(), options(), &|| true)
+                .await;
+            assert!(renewed.value.is_some());
+            assert_eq!(first.calls(), 2);
+            assert_eq!(fallback.calls(), 0);
+
+            let unavailable = Arc::new(MockJevProvider::unavailable("unavailable"));
+            let next = Arc::new(MockJevProvider::healthy("next"));
+            let fallback_runner = runtime(vec![unavailable.clone(), next.clone()]);
+            let outcome = fallback_runner
+                .batch_evaluate_authorized(vec![hypothesis(); 4], options(), &|| {
+                    unavailable.calls() == 0
+                })
+                .await;
+            assert!(outcome.value.is_none());
+            assert_eq!(unavailable.calls(), 1);
+            assert_eq!(next.calls(), 0);
+            assert_eq!(
+                outcome.failures.len(),
+                1,
+                "retain the actual first attempt failure"
+            );
         });
     }
 

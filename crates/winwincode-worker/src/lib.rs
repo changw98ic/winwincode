@@ -608,6 +608,12 @@ where
         self.final_freeze_fault = Some(fault);
     }
 
+    /// Exposes the owned workspace intake for deterministic lifecycle fixtures.
+    #[cfg(feature = "test-support")]
+    pub fn workspace_runtime_for_test(&mut self) -> &mut JobWorkspaceRuntime {
+        &mut self.workspaces
+    }
+
     /// Returns the current process lifecycle.
     #[must_use]
     pub const fn lifecycle(&self) -> WorkerLifecycleState {
