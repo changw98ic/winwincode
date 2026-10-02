@@ -1844,6 +1844,99 @@ async fn terminal_observer_frame_replays_after_restart_before_receipt_commit() {
 }
 
 #[tokio::test]
+async fn observer_original_response_survives_legal_renewal_and_rejects_rebinding() {
+    let (fixture, mut active, open, completed) =
+        Box::pin(prepare_terminal_observer_replay_fixture()).await;
+    let mut runtime = fixture.runtime();
+    runtime
+        .open_for_job_recovering(&active, None, &Instant("2026-08-28T00:00:05.000Z".into()))
+        .unwrap();
+    active.lease.expires_at = Instant("2026-08-28T02:00:00.000Z".into());
+    runtime.renew_lease(&active).unwrap();
+    assert_eq!(
+        runtime.pending_observation_model_open(&active).unwrap(),
+        Some(open.clone())
+    );
+    let applied = runtime
+        .accept_observation_model_chunk(
+            &active,
+            &completed,
+            &Instant("2026-08-28T01:10:00.000Z".into()),
+        )
+        .unwrap()
+        .unwrap();
+    assert!(applied.receipt.is_some());
+    assert_eq!(
+        applied
+            .completed_progress
+            .iter()
+            .map(|event| &event.state)
+            .collect::<Vec<_>>(),
+        [
+            &ChangeBatchProgressState::ObservationCompleted,
+            &ChangeBatchProgressState::Accepted
+        ]
+    );
+    let mut changed = completed.clone();
+    changed.lease = active.lease.clone();
+    assert_eq!(
+        runtime
+            .accept_observation_model_chunk(
+                &active,
+                &changed,
+                &Instant("2026-08-28T01:10:00.000Z".into())
+            )
+            .unwrap_err()
+            .code(),
+        JobWorkspaceErrorCode::AuthorityMismatch,
+        "response must retain the exact original request authority"
+    );
+    let replay = runtime
+        .accept_observation_model_chunk(
+            &active,
+            &completed,
+            &Instant("2026-08-28T01:10:01.000Z".into()),
+        )
+        .unwrap()
+        .unwrap();
+    assert!(replay.completed_progress.is_empty());
+    let mut replaced = active.clone();
+    replaced.lease.fencing_token = FencingToken("2".into());
+    assert_eq!(
+        runtime
+            .accept_observation_model_chunk(
+                &replaced,
+                &completed,
+                &Instant("2026-08-28T01:10:02.000Z".into())
+            )
+            .unwrap_err()
+            .code(),
+        JobWorkspaceErrorCode::AuthorityMismatch
+    );
+    assert_eq!(
+        runtime
+            .accept_observation_model_chunk(&active, &completed, &active.lease.expires_at)
+            .unwrap_err()
+            .code(),
+        JobWorkspaceErrorCode::AuthorityMismatch,
+        "an expired current lease still rejects responses"
+    );
+    let mut cancelled = active.clone();
+    cancelled.lifecycle = ActiveJobLifecycle::Cancelling;
+    assert_eq!(
+        runtime
+            .accept_observation_model_chunk(
+                &cancelled,
+                &completed,
+                &Instant("2026-08-28T01:10:03.000Z".into())
+            )
+            .unwrap_err()
+            .code(),
+        JobWorkspaceErrorCode::AuthorityMismatch
+    );
+}
+
+#[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn diagnostic_baseline_does_not_blame_history_then_routes_one_new_missing_module() {
     let fixture = Fixture::new("diagnostic-baseline-routing");

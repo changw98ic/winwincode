@@ -266,6 +266,7 @@ struct CodexState {
     accepted_candidate: Option<ArtifactReference>,
     candidate_cancel_failures_remaining: usize,
     model_open_acknowledged: bool,
+    model_start_proofs: Vec<winwincode_execution_port::generated::ModelOpenMessage>,
     delegated_stops: HashMap<String, DelegatedLoopStopFact>,
     final_freezes: Vec<FinalCandidateFreezeFact>,
 }
@@ -479,6 +480,24 @@ fn execution_port_fixture(kind: &str) -> ExecutionPortMessage {
 
 impl CodexCoreAdapter for FakeCodex {
     type Error = ();
+
+    fn local_model_start_guard(
+        &mut self,
+        open: &winwincode_execution_port::generated::ModelOpenMessage,
+        _now: &Instant,
+        _observed_at: std::time::Instant,
+        retained_request: Option<&winwincode_execution_port::generated::ModelOpenMessage>,
+    ) -> Result<Option<winwincode_codex::LocalModelStartGuard>, Self::Error> {
+        if let Some(retained) = retained_request {
+            assert_eq!(retained, open);
+            self.state
+                .lock()
+                .unwrap()
+                .model_start_proofs
+                .push(retained.clone());
+        }
+        Ok(None)
+    }
 
     fn retained_outcome_usage(
         &mut self,
@@ -3086,8 +3105,15 @@ async fn delegated_freeze_before_persist_restarts_from_one_accepted_candidate() 
     assert_eq!(*calls.lock().expect("batch calls"), vec!["execute"]);
 }
 
-#[tokio::test]
-async fn unresolved_validation_retains_one_observer_open_before_sending_it() {
+struct ObserverWorkerFixture {
+    worker: WorkerMain<RecordingPort, FakeCodex>,
+    pump: FakeCodex,
+    messages: Rc<RefCell<Vec<ExecutionPortMessage>>>,
+    calls: Arc<Mutex<Vec<&'static str>>>,
+    port_failures: Rc<Cell<usize>>,
+}
+
+async fn observer_worker_fixture() -> ObserverWorkerFixture {
     let (workspaces_root, sources) = test_workspace_paths();
     let repository = sources.join(id("rpo", 'A'));
     std::fs::create_dir_all(repository.join(".winwincode"))
@@ -3169,6 +3195,26 @@ async fn unresolved_validation_retains_one_observer_open_before_sending_it() {
         ))),
     );
 
+    ObserverWorkerFixture {
+        worker,
+        pump,
+        messages,
+        calls,
+        port_failures,
+    }
+}
+
+#[tokio::test]
+async fn unresolved_validation_retains_one_observer_open_before_sending_it() {
+    let ObserverWorkerFixture {
+        mut worker,
+        pump,
+        messages,
+        calls,
+        port_failures,
+    } = observer_worker_fixture().await;
+    let active = worker.active_jobs()[0].clone();
+
     worker
         .poll_codex_boxed()
         .await
@@ -3234,6 +3280,241 @@ async fn unresolved_validation_retains_one_observer_open_before_sending_it() {
         1,
         "the first cancellation interrupts Codex before a transport retry"
     );
+}
+
+#[tokio::test]
+async fn observer_renewal_control_accepts_original_chunks_without_error_ack() {
+    use base64::Engine as _;
+    let ObserverWorkerFixture {
+        mut worker,
+        messages,
+        ..
+    } = observer_worker_fixture().await;
+    worker.poll_codex_boxed().await.unwrap();
+    let open = messages
+        .borrow()
+        .iter()
+        .find_map(|message| match message {
+            ExecutionPortMessage::ModelOpenMessage(open) => Some(open.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let active = worker.active_jobs()[0].clone();
+    let mut lease = active.lease.clone();
+    lease.expires_at = Instant("2027-01-15T08:10:00.000Z".into());
+    worker
+        .accept_control(
+            &ExecutionPortMessage::LeaseRenewMessage(
+                winwincode_execution_port::generated::LeaseRenewMessage {
+                    kind: winwincode_execution_port::generated::LeaseRenewMessageKind::LeaseRenew,
+                    schema_version: SchemaVersion::WinwincodeV1,
+                    message_id: ExecutionMessageId(id("xmsg", 'R')),
+                    sent_at: now(),
+                    request_id: RequestId(id("req", 'R')),
+                    lease,
+                    prior_expires_at: active.lease.expires_at.clone(),
+                },
+            ),
+            now(),
+        )
+        .await
+        .unwrap();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&open.request.data_base64)
+        .unwrap();
+    let request: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let observation: serde_json::Value = serde_json::from_str(
+        request["request"]["input"][1]["content"][0]["text"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    let response = serde_json::json!({
+        "schemaVersion": 1, "observationId": observation["intent"]["observationId"],
+        "decision": "accept", "reasonCode": "criteria_satisfied",
+        "summary": "The evidence satisfies the requested criterion.",
+        "rootCauses": [], "repairClass": null, "confidenceBps": 9000
+    })
+    .to_string();
+    let payloads = [
+        serde_json::json!({"type":"output_text_delta", "delta": response}),
+        serde_json::json!({"type":"completed", "responseId":"observer-renewal-fixture", "endTurn":true}),
+    ];
+    worker.take_delegated_poll_outcomes();
+    let mut terminal = None;
+    for (index, payload) in payloads.into_iter().enumerate() {
+        let ExecutionPortMessage::ModelChunkMessage(mut chunk) =
+            execution_port_fixture("model.chunk")
+        else {
+            unreachable!()
+        };
+        let bytes = serde_json::to_vec(&payload).unwrap();
+        chunk.error = None;
+        chunk.is_final = index == 1;
+        chunk.lease = open.lease.clone();
+        chunk.worker_session_id = open.worker_session_id.clone();
+        chunk.session_identity = open.session_identity.clone();
+        chunk.model_exchange_id = open.model_exchange_id.clone();
+        chunk.message_id = ExecutionMessageId(id("xmsg", if index == 0 { 'D' } else { 'T' }));
+        chunk.sequence = ExecutionSequence(i64::try_from(index + 1).unwrap());
+        chunk.payload = Some(EncodedPayload {
+            content_type: "application/json".into(),
+            data_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+            payload_digest: Sha256Digest(format!("sha256:{:x}", Sha256::digest(&bytes))),
+        });
+        terminal = Some(chunk.clone());
+        worker
+            .accept_control_and_drive(
+                &ExecutionPortMessage::ModelChunkMessage(chunk),
+                Instant("2027-01-15T08:06:00.000Z".into()),
+            )
+            .await
+            .unwrap();
+    }
+    let decisions = worker.take_delegated_poll_outcomes();
+    assert_eq!(
+        decisions
+            .iter()
+            .filter(|outcome| matches!(outcome,
+        DelegatedPollOutcome::ChangeBatchProgress(progress)
+            if progress.state == ChangeBatchProgressState::ObservationCompleted))
+            .count(),
+        1
+    );
+    let receipt = decisions
+        .iter()
+        .find_map(|outcome| match outcome {
+            DelegatedPollOutcome::ChangeBatchReceipt(receipt) => receipt.observation.as_ref(),
+            _ => None,
+        })
+        .unwrap();
+    let usage = receipt.model_usage.as_ref().unwrap();
+    assert_eq!(
+        receipt.source,
+        winwincode_execution_port::generated::ObservationSource::Model
+    );
+    assert_eq!(
+        usage.accounting_status,
+        winwincode_execution_port::generated::ExecutionOutcomeUsageAccountingStatus::Unknown
+    );
+    assert_eq!(usage.tokens, None);
+    assert_eq!(usage.cost_microunits, None);
+    assert!(
+        messages
+            .borrow()
+            .iter()
+            .filter_map(|message| match message {
+                ExecutionPortMessage::ModelAckMessage(ack) => Some(ack),
+                _ => None,
+            })
+            .all(|ack| ack.error.is_none()),
+        "legal renewal must never send an error/cancel ACK"
+    );
+    for timestamp in ["2027-01-15T08:06:01.000Z", "2027-01-15T08:06:02.000Z"] {
+        worker
+            .accept_control_and_drive(
+                &ExecutionPortMessage::ModelChunkMessage(terminal.clone().unwrap()),
+                Instant(timestamp.into()),
+            )
+            .await
+            .unwrap();
+        assert!(
+            worker
+                .take_delegated_poll_outcomes()
+                .iter()
+                .all(|outcome| !matches!(outcome,
+            DelegatedPollOutcome::ChangeBatchProgress(progress)
+                if progress.state == ChangeBatchProgressState::ObservationCompleted))
+        );
+    }
+}
+
+#[tokio::test]
+async fn deferred_observer_start_hands_its_durable_proof_to_the_shared_guard_after_renewal() {
+    let ObserverWorkerFixture { worker, pump, .. } = observer_worker_fixture().await;
+    let root = tempfile::tempdir().unwrap();
+    let providers = root.path().join("providers");
+    let mut worker = worker.with_device_providers(&providers).unwrap();
+    assert!(worker.inject_device_start_fault());
+    assert_eq!(
+        worker.poll_codex_boxed().await.unwrap_err().code,
+        WorkerErrorCode::ModelStartDeferred
+    );
+    let original = pump.state.lock().unwrap().model_start_proofs[0].clone();
+    assert!(
+        pump.state
+            .lock()
+            .unwrap()
+            .durable_deliveries
+            .iter()
+            .all(|delivery| !matches!(delivery.message, ExecutionPortMessage::ModelOpenMessage(_))),
+        "the Observer proof is persisted in the ChangeBatch journal"
+    );
+    let active = worker.active_jobs()[0].clone();
+    let mut lease = active.lease.clone();
+    lease.expires_at = Instant("2027-01-15T08:10:00.000Z".into());
+    worker
+        .accept_control(
+            &ExecutionPortMessage::LeaseRenewMessage(
+                winwincode_execution_port::generated::LeaseRenewMessage {
+                    kind: winwincode_execution_port::generated::LeaseRenewMessageKind::LeaseRenew,
+                    schema_version: SchemaVersion::WinwincodeV1,
+                    message_id: ExecutionMessageId(id("xmsg", 'R')),
+                    sent_at: now(),
+                    request_id: RequestId(id("req", 'R')),
+                    lease,
+                    prior_expires_at: active.lease.expires_at.clone(),
+                },
+            ),
+            now(),
+        )
+        .await
+        .unwrap();
+    let later = Instant("2027-01-15T08:06:00.000Z".into());
+    Box::pin(worker.poll_codex(later.clone())).await.unwrap();
+    let store = winwincode_provider::DeviceProviderStore::open(&providers).unwrap();
+    for _ in 0..100 {
+        if !store.list_stored_model_exchanges().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        store.list_stored_model_exchanges().unwrap(),
+        vec![original.model_exchange_id.0.clone()]
+    );
+    {
+        let state = pump.state.lock().unwrap();
+        assert!(state.model_start_proofs.len() >= 2);
+        assert!(
+            state
+                .model_start_proofs
+                .iter()
+                .all(|proof| proof == &original),
+            "renewal preserves exact original request proof at every local handoff"
+        );
+    }
+
+    // No Provider is configured: the exact started exchange ends with a durable
+    // configuration error, exercising result restoration without any API charge.
+    for _ in 0..100 {
+        if !store
+            .replay_model(&original.model_exchange_id.0, 1)
+            .unwrap()
+            .is_empty()
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        !store
+            .replay_model(&original.model_exchange_id.0, 1)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(store.list_stored_model_exchanges().unwrap().len(), 1);
+    drop(worker);
 }
 
 #[tokio::test]
@@ -4232,6 +4513,87 @@ async fn deferred_local_model_start_obeys_current_lease_and_keeps_the_original_i
             );
         }
         worker.shutdown(later).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn stale_driver_time_cannot_reset_elapsed_first_start_authority() {
+    for renewed in [false, true] {
+        let codex = FakeCodex::with_threads([thread('A')]);
+        let mut pump = codex.clone();
+        let root = tempfile::tempdir().unwrap();
+        let providers = root.path().join("providers");
+        let mut worker = test_worker(worker_config(1), RecordingPort::default(), codex)
+            .with_device_providers(&providers)
+            .unwrap();
+        register(&mut worker).await;
+        let mut dispatch = dispatch('A', delivery_scope('A'));
+        dispatch.lease.expires_at = Instant("2027-01-15T08:00:03.000Z".into());
+        worker
+            .accept_control_and_drive(&ExecutionPortMessage::JobDispatchMessage(dispatch), now())
+            .await
+            .unwrap();
+        let active = worker.active_jobs()[0].clone();
+        let ExecutionPortMessage::ModelOpenMessage(mut open) = execution_port_fixture("model.open")
+        else {
+            unreachable!()
+        };
+        open.lease = active.lease.clone();
+        open.worker_session_id = active.worker_session_id.clone();
+        open.session_identity = active.session_identity.clone();
+        pump.retain_execution_delivery(&ExecutionPortMessage::ModelOpenMessage(open))
+            .unwrap();
+        assert!(worker.inject_device_start_fault());
+        assert_eq!(
+            worker
+                .flush_durable_outbox_at(now())
+                .await
+                .unwrap_err()
+                .code,
+            WorkerErrorCode::ModelStartDeferred
+        );
+        if renewed {
+            let mut lease = active.lease.clone();
+            lease.expires_at = Instant("2027-01-15T08:10:00.000Z".into());
+            worker.accept_control(&ExecutionPortMessage::LeaseRenewMessage(
+                winwincode_execution_port::generated::LeaseRenewMessage {
+                    kind: winwincode_execution_port::generated::LeaseRenewMessageKind::LeaseRenew,
+                    schema_version: SchemaVersion::WinwincodeV1,
+                    message_id: ExecutionMessageId(id("xmsg", 'R')), sent_at: now(),
+                    request_id: RequestId(id("req", 'R')), lease,
+                    prior_expires_at: active.lease.expires_at.clone(),
+                }), now()).await.unwrap();
+        }
+        // The driver sampled its wall clock before a control/network await.
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        let result = worker.flush_durable_outbox_at(now()).await;
+        if renewed {
+            result.unwrap();
+        } else {
+            assert_eq!(
+                result.unwrap_err().code,
+                WorkerErrorCode::ExecutionMessageRejected,
+                "reusing a pre-await wall timestamp must retain elapsed monotonic time"
+            );
+        }
+        let store = winwincode_provider::DeviceProviderStore::open(&providers).unwrap();
+        for _ in 0..100 {
+            if store.list_stored_model_exchanges().unwrap().len() == usize::from(renewed) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            store.list_stored_model_exchanges().unwrap().len(),
+            usize::from(renewed)
+        );
+        // A later poll with the same stale timestamp must not reset the origin either.
+        Box::pin(worker.poll_codex(now())).await.unwrap();
+        assert_eq!(
+            store.list_stored_model_exchanges().unwrap().len(),
+            usize::from(renewed)
+        );
+        worker.shutdown(now()).await.unwrap();
     }
 }
 

@@ -3986,7 +3986,12 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         open: &winwincode_execution_port::generated::ModelOpenMessage,
         now: &Instant,
         observed_at: std::time::Instant,
+        retained_request: Option<&winwincode_execution_port::generated::ModelOpenMessage>,
     ) -> Result<Option<crate::LocalModelStartGuard>, Self::Error> {
+        if retained_request.is_some_and(|retained| retained != open) {
+            return Err(conflict());
+        }
+        let retained_request = retained_request.cloned();
         let base =
             time::OffsetDateTime::parse(&now.0, &time::format_description::well_known::Rfc3339)
                 .map_err(|_| conflict())?;
@@ -4029,9 +4034,16 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             {
                 return false;
             }
-            source
-                .validate_exchange(&authority, &exchange, &Instant(current))
-                .is_ok()
+            let current = Instant(current);
+            if let Some(retained) = &retained_request {
+                source
+                    .validate_retained_exchange(&authority, retained, &current)
+                    .is_ok()
+            } else {
+                source
+                    .validate_exchange(&authority, &exchange, &current)
+                    .is_ok()
+            }
         })))
     }
 
@@ -8290,6 +8302,7 @@ mod tests {
                 &open,
                 &Instant("2026-08-28T00:30:00.000Z".into()),
                 std::time::Instant::now(),
+                None,
             )
             .unwrap()
             .unwrap();
@@ -8350,6 +8363,83 @@ mod tests {
         );
         open.session_identity.worker_session_id.0.push('X');
         assert!(!adapter.model_start_session_allowed(&open, &parent).unwrap());
+        drop(adapter);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retained_observer_request_uses_shared_first_start_authority_after_renewal() {
+        let root = test_root("retained-observer-start-authority");
+        let mut adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+        let (_, mut binding) = delegated_record_and_binding();
+        binding.authority.lease.fencing_token = FencingToken("1".into());
+        binding.authority.lease.lease_id = LeaseId("lse_00000000000000000000000001".into());
+        binding.authority.lease.issued_at = Instant("2026-08-28T00:00:00.000Z".into());
+        binding.authority.lease.expires_at = Instant("2026-08-28T01:00:00.000Z".into());
+        adapter.bridge.install_binding(binding.clone()).unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/contracts/execution-port.valid.json"
+        ))
+        .unwrap();
+        let mut open: winwincode_execution_port::generated::ModelOpenMessage =
+            serde_json::from_value(
+                fixture["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|m| m["kind"] == "model.open")
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap();
+        open.lease = binding.authority.lease.clone();
+        open.worker_session_id = binding.authority.worker_session_id.clone();
+        open.session_identity = binding.authority.session_identity.clone();
+        open.sent_at = binding.authority.lease.issued_at.clone();
+        let original = open.clone();
+        binding.authority.lease.expires_at = Instant("2026-08-28T02:00:00.000Z".into());
+        adapter.bridge.install_binding(binding.clone()).unwrap();
+        let now = Instant("2026-08-28T01:10:00.000Z".into());
+        adapter.observe_now(&now).unwrap();
+        assert!(
+            adapter.outbox.pending().unwrap().is_empty(),
+            "Observer request proof comes from its own durable journal"
+        );
+        let unproven = adapter
+            .local_model_start_guard(&open, &now, std::time::Instant::now(), None)
+            .unwrap()
+            .unwrap();
+        assert!(
+            !unproven(),
+            "a missing request proof cannot authorize an old lease"
+        );
+        let guard = adapter
+            .local_model_start_guard(&open, &now, std::time::Instant::now(), Some(&original))
+            .unwrap()
+            .unwrap();
+        let mut changed = original.clone();
+        changed.request_id.0.push('X');
+        assert!(
+            adapter
+                .local_model_start_guard(&changed, &now, std::time::Instant::now(), Some(&original))
+                .is_err()
+        );
+        assert!(
+            guard(),
+            "a verified original Observer request must survive legal renewal"
+        );
+        assert_eq!(
+            open, original,
+            "authorization never rewrites the original request"
+        );
+        adapter
+            .observe_now(&binding.authority.lease.expires_at)
+            .unwrap();
+        assert!(
+            !guard(),
+            "current lease expiry still blocks first invocation"
+        );
         drop(adapter);
         std::fs::remove_dir_all(root).unwrap();
     }

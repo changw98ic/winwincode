@@ -290,13 +290,21 @@ impl SharedAuthoritySource {
             .map(|(_, bytes)| serde_json::from_slice(&bytes).map_err(|_| BridgeError::Unavailable))
             .collect()
     }
-}
-
-impl ModelLeaseAuthoritySource for SharedAuthoritySource {
-    fn validate_exchange(
+    /// Uses an exact request already validated against the Worker's durable
+    /// Observer journal, while retaining the shared lineage and lease checks.
+    pub(crate) fn validate_retained_exchange(
         &self,
         authority: &ModelLeaseAuthority,
-        exchange: &ModelExchangeId,
+        open: &winwincode_execution_port::generated::ModelOpenMessage,
+        now: &Instant,
+    ) -> Result<(), ModelAuthorityRejection> {
+        self.validate_original_request(authority, Some(open), now)
+    }
+
+    fn validate_original_request(
+        &self,
+        authority: &ModelLeaseAuthority,
+        open: Option<&winwincode_execution_port::generated::ModelOpenMessage>,
         now: &Instant,
     ) -> Result<(), ModelAuthorityRejection> {
         let thread = &authority.session_identity.codex_thread_id.0;
@@ -316,13 +324,6 @@ impl ModelLeaseAuthoritySource for SharedAuthoritySource {
         if !same_binding_with_extended_lease(authority, &expected) {
             return Err(ModelAuthorityRejection::StaleLease);
         }
-        let open = self
-            .store
-            .as_ref()
-            .map(|store| ExecutionOutbox::read_model_open(store, exchange))
-            .transpose()
-            .map_err(|_| ModelAuthorityRejection::Unavailable)?
-            .flatten();
         if let Some(open) = open {
             if open.lease != authority.lease
                 || open.worker_session_id != authority.worker_session_id
@@ -344,6 +345,24 @@ impl ModelLeaseAuthoritySource for SharedAuthoritySource {
             return Err(ModelAuthorityRejection::ExpiredLease);
         }
         self.validate_current(&expected, effective)
+    }
+}
+
+impl ModelLeaseAuthoritySource for SharedAuthoritySource {
+    fn validate_exchange(
+        &self,
+        authority: &ModelLeaseAuthority,
+        exchange: &ModelExchangeId,
+        now: &Instant,
+    ) -> Result<(), ModelAuthorityRejection> {
+        let open = self
+            .store
+            .as_ref()
+            .map(|store| ExecutionOutbox::read_model_open(store, exchange))
+            .transpose()
+            .map_err(|_| ModelAuthorityRejection::Unavailable)?
+            .flatten();
+        self.validate_original_request(authority, open.as_ref(), now)
     }
 
     fn validate_current(

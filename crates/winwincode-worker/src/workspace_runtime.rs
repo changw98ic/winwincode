@@ -2166,6 +2166,9 @@ impl JobWorkspaceRuntime {
             .model_open
             .ok_or_else(|| change_batch_error("Observer model open is incomplete"))?;
         validate_observation_model_open_payload(&open, &record.request)?;
+        if !same_observation_model_authority(&open, active) {
+            return Err(authority_error());
+        }
         Ok(Some(open))
     }
 
@@ -2276,6 +2279,9 @@ impl JobWorkspaceRuntime {
                 .model_open
                 .ok_or_else(|| change_batch_error("Observer model open is incomplete"))?;
             validate_observation_model_open_payload(&open, request)?;
+            if !same_observation_model_authority(&open, active) {
+                return Err(authority_error());
+            }
             return Ok(open);
         }
         let payload = observation_provider_payload(request, configuration)?;
@@ -2361,9 +2367,12 @@ impl JobWorkspaceRuntime {
         if active.lifecycle != ActiveJobLifecycle::Running
             || !same_authority(workspace.provenance(), active)
             || !same_change_batch_identity_lease_authority(&intent.identity, active)
-            || chunk.lease != active.lease
-            || chunk.session_identity != active.session_identity
-            || chunk.worker_session_id != active.worker_session_id
+            || !same_observation_model_authority(retained_open, active)
+            || now.0 < active.lease.issued_at.0
+            || now.0 >= active.lease.expires_at.0
+            || chunk.lease != retained_open.lease
+            || chunk.session_identity != retained_open.session_identity
+            || chunk.worker_session_id != retained_open.worker_session_id
             || (!terminal_replay
                 && (!same_change_batch_identity_authority(
                     &intent.identity,
@@ -3266,6 +3275,15 @@ fn same_authority(provenance: &WorkspaceProvenance, active: &ActiveJob) -> bool 
     provenance == &expected
 }
 
+fn same_observation_model_authority(open: &ModelOpenMessage, active: &ActiveJob) -> bool {
+    let mut original = open.lease.clone();
+    original.expires_at = active.lease.expires_at.clone();
+    original == active.lease
+        && open.lease.expires_at.0 <= active.lease.expires_at.0
+        && open.session_identity == active.session_identity
+        && open.worker_session_id == active.worker_session_id
+}
+
 fn same_change_batch_lease_authority(event: &ChangeBatchProposalEvent, active: &ActiveJob) -> bool {
     event.identity.job_id == active.job.job_id
         && event.identity.attempt == active.job.attempt
@@ -3713,15 +3731,12 @@ fn parse_observation_model_chunk(
                 })
                 && object.get("endTurn").and_then(serde_json::Value::as_bool) == Some(true) =>
         {
-            let model_usage = terminal_model_usage(object);
+            let model_usage = terminal_model_usage(object)
+                .unwrap_or_else(|| ExecutionOutcomeUsage::unknown(0, 0));
             ParsedObservationModelChunk {
                 response_delta: Vec::new(),
-                terminal_status: Some(if model_usage.is_some() {
-                    "completed"
-                } else {
-                    "provider_error"
-                }),
-                model_usage,
+                terminal_status: Some("completed"),
+                model_usage: Some(model_usage),
             }
         }
         "error"
@@ -3762,14 +3777,19 @@ fn terminal_model_usage(
         .and_then(serde_json::Value::as_u64)
         .and_then(|cost| i64::try_from(cost).ok())
         .filter(|cost| (0..=9_007_199_254_740_991).contains(cost));
-    total_tokens.map(|tokens| ExecutionOutcomeUsage {
-        cost_microunits: actual_cost_microunits,
-        runtime_millis: 0,
-        tokens: Some(tokens),
-        known_tokens: tokens,
-        accounting_status:
-            winwincode_execution_port::generated::ExecutionOutcomeUsageAccountingStatus::Known,
-    })
+    let mut usage = total_tokens.map_or_else(
+        || ExecutionOutcomeUsage::unknown(0, 0),
+        |tokens| ExecutionOutcomeUsage {
+            cost_microunits: None,
+            runtime_millis: 0,
+            tokens: Some(tokens),
+            known_tokens: tokens,
+            accounting_status:
+                winwincode_execution_port::generated::ExecutionOutcomeUsageAccountingStatus::Known,
+        },
+    );
+    usage.cost_microunits = actual_cost_microunits;
+    (total_tokens.is_some() || actual_cost_microunits.is_some()).then_some(usage)
 }
 
 fn observation_receipt_from_terminal(
@@ -3778,11 +3798,17 @@ fn observation_receipt_from_terminal(
 ) -> Result<ObservationReceipt, JobWorkspaceError> {
     let intent = &record.request.intent;
     let (response, source, usage) = if completed {
-        if let (Ok(response), Some(usage)) = (
-            parse_observation_response_strict(&record.response_bytes, intent),
-            record.model_usage.clone(),
-        ) {
-            (response, ObservationSource::Model, Some(usage))
+        if let Ok(response) = parse_observation_response_strict(&record.response_bytes, intent) {
+            (
+                response,
+                ObservationSource::Model,
+                Some(
+                    record
+                        .model_usage
+                        .clone()
+                        .unwrap_or_else(|| ExecutionOutcomeUsage::unknown(0, 0)),
+                ),
+            )
         } else {
             (
                 observation_infrastructure_response(intent),

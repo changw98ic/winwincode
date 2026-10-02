@@ -674,8 +674,7 @@ where
     /// # Errors
     /// Returns the same delivery errors as `flush_durable_outbox`.
     pub async fn flush_durable_outbox_at(&mut self, now: Instant) -> Result<(), WorkerError> {
-        self.last_now = now;
-        self.last_now_observed_at = std::time::Instant::now();
+        self.observe_driver_clock(now);
         self.flush_durable_outbox().await
     }
 
@@ -880,8 +879,7 @@ where
         message: &ExecutionPortMessage,
         now: Instant,
     ) -> Result<(), WorkerError> {
-        self.last_now = now.clone();
-        self.last_now_observed_at = std::time::Instant::now();
+        self.observe_driver_clock(now.clone());
         let previous = std::mem::replace(&mut self.consuming_control, true);
         let mut result = Box::pin(self.apply_control(message, now)).await;
         if result.is_ok() {
@@ -968,8 +966,7 @@ where
     ///
     /// Returns an invalid-lifecycle or outbound-port failure.
     pub async fn heartbeat(&mut self, now: Instant) -> Result<(), WorkerError> {
-        self.last_now = now.clone();
-        self.last_now_observed_at = std::time::Instant::now();
+        self.observe_driver_clock(now.clone());
         if self.lifecycle != WorkerLifecycleState::Active {
             return Err(worker_error(
                 WorkerErrorCode::InvalidLifecycle,
@@ -1025,8 +1022,7 @@ where
     /// failures become infrastructure outcomes without exposing adapter text.
     #[allow(clippy::too_many_lines)]
     pub async fn poll_codex(&mut self, now: Instant) -> Result<(), WorkerError> {
-        self.last_now = now.clone();
-        self.last_now_observed_at = std::time::Instant::now();
+        self.observe_driver_clock(now.clone());
         if self.lifecycle != WorkerLifecycleState::Active {
             return Err(worker_error(
                 WorkerErrorCode::InvalidLifecycle,
@@ -2161,20 +2157,21 @@ where
             self.sent_observation_opens
                 .remove(&chunk.model_exchange_id.0);
         }
-        let acknowledgement = ModelAckMessage {
+        let mut acknowledgement = ModelAckMessage {
             ack_sequence: ExecutionAckSequence(acknowledged),
             error,
             kind: ModelAckMessageKind::ModelAck,
             lease: chunk.lease.clone(),
-            message_id: observation_ack_message_id(chunk),
+            message_id: chunk.message_id.clone(),
             model_exchange_id: chunk.model_exchange_id.clone(),
             replay_from_sequence: replay_from,
             schema_version: SchemaVersion::WinwincodeV1,
-            sent_at: now.clone(),
+            sent_at: chunk.sent_at.clone(),
             session_identity: chunk.session_identity.clone(),
             status,
             worker_session_id: chunk.worker_session_id.clone(),
         };
+        acknowledgement.message_id = observation_ack_message_id(&acknowledgement)?;
         self.send_execution_message(ExecutionPortMessage::ModelAckMessage(acknowledgement))
             .await?;
         if let Some((receipt, state)) = routed_terminal {
@@ -4388,11 +4385,32 @@ where
         let (start_deadline, start_guard) = if self.device_models.is_some()
             && let ExecutionPortMessage::ModelOpenMessage(open) = &message
         {
-            if let Some(deadline) = self.local_model_start_deadline(open)? {
+            let observer = self
+                .workspaces
+                .is_observation_model_exchange(&open.model_exchange_id)
+                .map_err(|_| workspace_error())?;
+            let retained_request = if observer {
+                self.active
+                    .get(&open.lease.job_id.0)
+                    .map(|active| self.workspaces.pending_observation_model_open(active))
+                    .transpose()
+                    .map_err(|_| workspace_error())?
+                    .flatten()
+            } else {
+                None
+            };
+            if let Some(deadline) = self.local_model_start_deadline(open)?
+                && (!observer || retained_request.as_ref() == Some(open))
+            {
                 (
                     Some(deadline),
                     self.codex
-                        .local_model_start_guard(open, &self.last_now, self.last_now_observed_at)
+                        .local_model_start_guard(
+                            open,
+                            &self.last_now,
+                            self.last_now_observed_at,
+                            retained_request.as_ref(),
+                        )
                         .map_err(|_| codex_model_error())?,
                 )
             } else {
@@ -4447,6 +4465,26 @@ where
                     "ExecutionPort cannot continue",
                 ),
             })
+    }
+
+    fn observe_driver_clock(&mut self, now: Instant) {
+        let observed_at = std::time::Instant::now();
+        let parse = |value: &Instant| {
+            time::OffsetDateTime::parse(&value.0, &time::format_description::well_known::Rfc3339)
+                .ok()
+        };
+        let (Some(previous), Some(current)) = (parse(&self.last_now), parse(&now)) else {
+            return;
+        };
+        let Ok(advance) = std::time::Duration::try_from(current - previous) else {
+            return;
+        };
+        // A stale or backward wall sample must never discard elapsed time from
+        // a control/network await. Keep its original monotonic origin instead.
+        if advance >= observed_at.saturating_duration_since(self.last_now_observed_at) {
+            self.last_now = now;
+            self.last_now_observed_at = observed_at;
+        }
     }
 
     fn local_model_start_deadline(
@@ -4894,16 +4932,29 @@ fn namespaced_registration_message_id(namespace: &str) -> ExecutionMessageId {
     ))
 }
 
-fn observation_ack_message_id(chunk: &ModelChunkMessage) -> ExecutionMessageId {
+fn observation_ack_message_id(ack: &ModelAckMessage) -> Result<ExecutionMessageId, WorkerError> {
+    // Accepted, Duplicate and Gap may describe different receipts for the same
+    // input sequence. Derive the ID from the immutable receipt, including its
+    // source timestamp, so replay cannot reuse an ID with changed bytes.
+    let bytes = serde_json::to_vec(&(
+        &ack.ack_sequence,
+        &ack.error,
+        &ack.lease,
+        &ack.model_exchange_id,
+        &ack.replay_from_sequence,
+        &ack.sent_at,
+        &ack.session_identity,
+        &ack.status,
+        &ack.worker_session_id,
+    ))
+    .map_err(|_| codex_model_error())?;
     let mut digest = Sha256::new();
-    digest.update(b"winwincode.observation-model-ack.v1\0");
-    digest.update((chunk.model_exchange_id.0.len() as u64).to_be_bytes());
-    digest.update(chunk.model_exchange_id.0.as_bytes());
-    digest.update(chunk.sequence.0.to_be_bytes());
-    ExecutionMessageId(format!(
+    digest.update(b"winwincode.observation-model-ack.v2\0");
+    digest.update(bytes);
+    Ok(ExecutionMessageId(format!(
         "xmsg_{}",
         &format!("{:X}", digest.finalize())[..26]
-    ))
+    )))
 }
 
 fn observation_cancel_message_id(

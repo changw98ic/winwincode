@@ -290,20 +290,18 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
         tokio::select! {
             _ = tokio::signal::ctrl_c() => break,
             _ = heartbeat.tick() => {
-                let now = now_instant()?;
                 Box::pin(drain_controls(&mut worker, &handle)).await?;
-                let _ = Box::pin(worker.heartbeat(now.clone())).await;
+                let _ = Box::pin(worker.heartbeat(now_instant()?)).await;
                 // A refused upstream frame still carries valid controls.
                 Box::pin(drain_controls(&mut worker, &handle)).await?;
             }
             _ = drive.tick() => {
-                let now = now_instant()?;
                 Box::pin(drain_controls(&mut worker, &handle)).await?;
                 // Retry pending Worker→Server evidence every drive tick so a
                 // Server restart / Connection-refused window cannot strand
                 // runtime.event / artifact.chunk / JobOutcome in the outbox.
                 if worker.lifecycle() == WorkerLifecycleState::Active
-                    && let Err(error) = Box::pin(worker.flush_durable_outbox_at(now.clone())).await
+                    && let Err(error) = Box::pin(worker.flush_durable_outbox_at(now_instant()?)).await
                 {
                     if env::var_os("WWC_WORKER_POLL_DEBUG").is_some() {
                         eprintln!("winwincode-worker: durable outbox flush retry failed: {:?}", error.code);
@@ -315,7 +313,7 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
                     }
                 }
                 if worker.transport_failure().is_some() { break; }
-                let _ = Box::pin(worker.poll_codex(now)).await;
+                let _ = Box::pin(worker.poll_codex(now_instant()?)).await;
                 if exit_after_work && worker.work_drained() { break; }
             }
         }
