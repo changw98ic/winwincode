@@ -549,6 +549,7 @@ async function resolveRegisteredDeviceTask(request, launch, options = {}, persis
     }
     const manifest = exportDeviceCandidate(launch.directory, resolve(launch.directory, 'task-input.json'), evidenceDirectory)
     return { ...deviceResult(launch.directory, evidenceDirectory, manifest.candidate.candidateCommitId),
+      recovery: report.recovery,
       ...(request.engine === 'fusion-engine' ? { aggregationInputDigest: request.inputDigest, aggregationProvider } : {}) }
 }
 

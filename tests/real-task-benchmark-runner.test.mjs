@@ -2103,14 +2103,31 @@ test('candidate export verifies a self-contained Git bundle and preserves failed
       controlUrl: `https://127.0.0.1:${port}`, origin: `https://api.localhost:${port}` }))
     const plan = { cells: [cell] }
     const options = { ledgerPath: resolve(directory, 'recovery.sqlite3'), experimentBinding: { experimentId: 'original-product' } }
-    await assert.rejects(runBenchmarkPlan(plan, { ...options, executeCell: (_cell, context) => {
-      context.registerLaunch(launch)
-      throw Object.assign(new Error('interrupted export'), { code: 'BENCHMARK_EVIDENCE_FAILED' })
-    } }), { code: 'BENCHMARK_EVIDENCE_FAILED' })
+    let productStarts = 0
+    await assert.rejects(runBenchmarkPlan(plan, { ...options,
+      executeCell: (value, runner) => executeBenchmarkCell(value, {
+        runModel: async (_request, callRunner) => {
+          productStarts += 1
+          await callRunner.registerLaunch(launch)
+          throw Object.assign(new Error('interrupted export'), { code: 'BENCHMARK_EVIDENCE_FAILED' })
+        },
+      }, runner) }), { code: 'BENCHMARK_EVIDENCE_FAILED' })
+    const before = new DatabaseSync(options.ledgerPath, { readOnly: true })
+    const originalCalls = before.prepare('SELECT record FROM benchmark_call ORDER BY rowid').all()
+      .map(row => JSON.parse(row.record))
+    assert.equal(originalCalls.length, 1)
+    assert.equal(originalCalls[0].failure.code, 'BENCHMARK_EVIDENCE_FAILED')
+    assert.equal(before.prepare('SELECT record FROM benchmark_cell').get().record, null)
+    before.close()
     const recovery = { ...options, executeCell: () => assert.fail('must not rerun task'), recoverCell: recoverBenchmarkDeviceCell }
     await assert.rejects(runBenchmarkPlan(plan, recovery))
     done = true
     const restored = await runBenchmarkPlan(plan, recovery)
+    assert.equal(productStarts, 1, 'recovery cannot start another product invocation')
+    assert.equal(restored.records[0].calls[0].status, 'returned')
+    assert.deepEqual(restored.records[0].recovery.originalCalls, originalCalls)
+    assert.equal(restored.records[0].model.recovery.originalReportSha256, sha(await readFile(reportPath)))
+    assert.equal(restored.records[0].model.recovery.observation.delivery.status, 'done')
     const recoveredManifest = JSON.parse(await readFile(restored.records[0].model.submissionManifest.path))
     assert.equal(recoveredManifest.productComplete, true)
     assert.equal(recoveredManifest.externalScore, null)
