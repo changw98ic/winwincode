@@ -2742,6 +2742,7 @@ struct GatewayDriver<'root> {
     open_count: usize,
     idempotent_replays: usize,
     complete: bool,
+    omit_final_response_usage: bool,
 }
 
 impl<'root> GatewayDriver<'root> {
@@ -2757,6 +2758,7 @@ impl<'root> GatewayDriver<'root> {
             open_count: 0,
             idempotent_replays: 0,
             complete,
+            omit_final_response_usage: false,
         }
     }
 
@@ -2964,7 +2966,21 @@ impl<'root> GatewayDriver<'root> {
                 .await
                 .expect("accept durable Control Plane response");
         }
-        for chunk in chunks {
+        for mut chunk in chunks {
+            if self.omit_final_response_usage
+                && self.open_count == 2
+                && let Some(payload) = &mut chunk.payload
+            {
+                let bytes = STANDARD.decode(&payload.data_base64).unwrap();
+                let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                if value["type"] == "completed" {
+                    value.as_object_mut().unwrap().remove("tokenUsage");
+                    let bytes = serde_json::to_vec(&value).unwrap();
+                    payload.data_base64 = STANDARD.encode(&bytes);
+                    payload.payload_digest =
+                        Sha256Digest(format!("sha256:{:x}", Sha256::digest(&bytes)));
+                }
+            }
             worker
                 .accept_control(
                     &ExecutionPortMessage::ModelChunkMessage(chunk),
@@ -4023,6 +4039,142 @@ async fn capture_rollout_before_adapter_terminal<'root>(
     gateway.open_count = 0;
     gateway.idempotent_replays = 0;
     gateway
+}
+
+#[test]
+fn production_success_with_missing_final_usage_is_accepted_and_replayed() {
+    run_on_large_stack(async {
+        let root = TestDirectory::new("production-success-unknown-usage");
+        let dispatch = dispatch(&root);
+        let port = RecordedPort::default();
+        let adapter =
+            winwincode_codex::ProductionCodexAdapter::open(adapter_config(&root)).unwrap();
+        let mut worker = winwincode_worker::WorkerMain::new(
+            worker_config(),
+            port.clone(),
+            adapter,
+            root.workspace_runtime(),
+        );
+        register(&mut worker, &port).await;
+        worker
+            .accept_control(
+                &ExecutionPortMessage::JobDispatchMessage(dispatch.clone()),
+                at("2030-01-01T00:00:00.000Z"),
+            )
+            .await
+            .unwrap();
+        let mut gateway = GatewayDriver::new(&root, dispatch.job.clone(), true);
+        gateway.omit_final_response_usage = true;
+        run_until_outcome(&mut worker, &port, &mut gateway).await;
+        gateway.drive(&port, &mut worker).await;
+        let outcome = port
+            .messages()
+            .into_iter()
+            .find_map(|message| match message {
+                ExecutionPortMessage::JobOutcomeMessage(outcome) => Some(outcome),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(outcome.outcome.status, ExecutionOutcomeStatus::Succeeded);
+        assert!(outcome.outcome.error.is_none());
+        assert_eq!(outcome.outcome.artifacts.len(), 1);
+        let usage = outcome.outcome.usage.as_ref().unwrap();
+        assert_eq!(
+            usage.accounting_status,
+            winwincode_execution_port::generated::ExecutionOutcomeUsageAccountingStatus::Unknown
+        );
+        assert_eq!(usage.known_tokens, 15);
+        assert_eq!(usage.tokens, None);
+        assert_eq!(usage.cost_microunits, None);
+        assert!(worker.active_jobs().is_empty());
+        let reservation = gateway
+            .runtime_storage
+            .as_mut()
+            .unwrap()
+            .execution_admission()
+            .unwrap()
+            .load_reservation_by_job(&dispatch.job.job_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            reservation.state,
+            winwincode_storage::ExecutionReservationState::Released
+        );
+        assert_eq!(reservation.actual_tokens, None);
+        worker
+            .shutdown(at("2030-01-01T00:00:03.000Z"))
+            .await
+            .unwrap();
+        drop(worker);
+        drop(gateway);
+        let replay_port = RecordedPort::default();
+        let adapter =
+            winwincode_codex::ProductionCodexAdapter::open(adapter_config(&root)).unwrap();
+        let mut replay = winwincode_worker::WorkerMain::new(
+            worker_config(),
+            replay_port.clone(),
+            adapter,
+            root.workspace_runtime(),
+        );
+        register(&mut replay, &replay_port).await;
+        replay
+            .accept_control(
+                &ExecutionPortMessage::JobDispatchMessage(dispatch),
+                at("2030-01-01T00:00:00.000Z"),
+            )
+            .await
+            .unwrap();
+        let replayed = poll_until_message(
+            &mut replay,
+            &replay_port,
+            &at("2030-01-01T00:00:02.000Z"),
+            |messages| {
+                messages.iter().find_map(|message| match message {
+                    ExecutionPortMessage::JobOutcomeMessage(outcome) => Some(outcome.clone()),
+                    _ => None,
+                })
+            },
+            "unknown-accounting terminal was not replayed",
+        )
+        .await;
+        assert_eq!(replayed, outcome);
+        let mut control_plane = ControlPlane::start_local(
+            ControlPlaneConfig::local(root.data()),
+            Box::new(DiscardingPublisher),
+        )
+        .unwrap();
+        let mut storage = SqliteStorage::open(root.data()).unwrap();
+        let responses = DurableExecutionPortIngress::new(
+            &mut control_plane,
+            &mut storage,
+            &repository_scope(),
+            at("2030-01-01T00:00:02.000Z"),
+        )
+        .unwrap()
+        .handle(&ExecutionPortMessage::JobOutcomeMessage(replayed))
+        .unwrap();
+        assert!(responses.iter().any(|message| matches!(message,
+            ExecutionPortMessage::JobOutcomeAckMessage(ack)
+                if ack.status == winwincode_execution_port::generated::JobOutcomeAckMessageStatus::Duplicate)));
+        for response in responses {
+            replay
+                .accept_control(&response, at("2030-01-01T00:00:02.000Z"))
+                .await
+                .unwrap();
+        }
+        control_plane.shutdown().unwrap();
+        drop(storage);
+        assert!(
+            !replay_port
+                .messages()
+                .iter()
+                .any(|message| matches!(message, ExecutionPortMessage::ModelOpenMessage(_)))
+        );
+        replay
+            .shutdown(at("2030-01-01T00:00:03.000Z"))
+            .await
+            .unwrap();
+    });
 }
 
 #[test]

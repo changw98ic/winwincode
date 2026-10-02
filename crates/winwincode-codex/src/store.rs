@@ -180,6 +180,18 @@ fn initialize_schema(connection: &Connection) -> Result<(), AdapterStoreError> {
                    frame_json BLOB NOT NULL,
                    UNIQUE(family, correlation_key)
                  );
+                 CREATE TABLE IF NOT EXISTS execution_terminal_outcome (
+                   run_key TEXT PRIMARY KEY NOT NULL,
+                   frame_digest TEXT NOT NULL,
+                   frame_json BLOB NOT NULL
+                 );
+                 INSERT OR IGNORE INTO execution_terminal_outcome(run_key, frame_digest, frame_json)
+                   SELECT r.run_key, e.frame_digest, e.frame_json
+                   FROM codex_run r JOIN execution_outbox e
+                     ON e.delivery_id = json_extract(r.record_json, '$.terminalMessageId')
+                   WHERE e.family = 'outcome' AND NOT EXISTS (
+                     SELECT 1 FROM execution_terminal_outcome t WHERE t.run_key = r.run_key
+                   );
                  CREATE TABLE IF NOT EXISTS worker_transport_state (
                    state_key TEXT PRIMARY KEY NOT NULL,
                    sequence INTEGER NOT NULL CHECK(sequence >= 0)
@@ -882,10 +894,11 @@ impl AdapterStore {
         AdapterStoreError,
     > {
         let totals = self.delegated_performance_totals(run_key)?;
-        if totals.primary_model_calls + totals.observer_calls == 0 || totals.pending_model_calls > 0
-        {
+        if totals.primary_model_calls + totals.observer_calls == 0 {
             return Ok(None);
         }
+        // Pending receipts make the total unknown; they do not erase the
+        // observations already retained for this run or its completed result.
         self.execution_outcome_usage(run_key, runtime_millis)
             .map(Some)
     }
@@ -3430,7 +3443,10 @@ mod tests {
         let pending = store.delegated_performance_totals("run").unwrap();
         assert_eq!(pending.pending_model_calls, 1);
         assert!(!pending.cost_complete);
-        assert_eq!(store.retained_outcome_usage("run", 30).unwrap(), None);
+        assert_eq!(
+            store.retained_outcome_usage("run", 30).unwrap(),
+            Some(winwincode_execution_port::generated::ExecutionOutcomeUsage::unknown(30, 10))
+        );
         receipt.run = Some(JevRun {
             value: None,
             failures: vec![],
@@ -3777,7 +3793,7 @@ mod tests {
             assert_eq!(pending.pending_model_calls, 1, "{name}");
             assert_eq!(
                 store.retained_outcome_usage("run", 123).unwrap(),
-                None,
+                Some(winwincode_execution_port::generated::ExecutionOutcomeUsage::unknown(123, 0)),
                 "{name}"
             );
             assert!(!pending.cost_complete, "{name}");

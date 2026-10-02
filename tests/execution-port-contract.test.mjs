@@ -412,7 +412,7 @@ test('ExecutionPort workspace write mode distinguishes readers from writers', ()
   assert.equal(validate(dispatch), false)
 })
 
-test('ExecutionPort requires measured safe-integer usage only for succeeded outcomes', () => {
+test('ExecutionPort requires explicit safe-integer accounting for succeeded outcomes', () => {
   const validate = validator(json(schemaPath))
   const fixture = json(validFixturePath)
   const succeeded = fixture.messages.find(message => message.kind === 'job.outcome')
@@ -421,6 +421,16 @@ test('ExecutionPort requires measured safe-integer usage only for succeeded outc
   const missingUsage = structuredClone(succeeded)
   delete missingUsage.outcome.usage
   assert.equal(validate(missingUsage), false, 'succeeded outcome requires usage')
+
+  const unknownUsage = structuredClone(succeeded)
+  unknownUsage.outcome.usage = {
+    accountingStatus: 'unknown',
+    tokens: null,
+    knownTokens: 48,
+    costMicrounits: null,
+    runtimeMillis: 1000,
+  }
+  assert.equal(validate(unknownUsage), true, 'successful execution can retain unknown accounting')
 
   const unsafeUsage = structuredClone(succeeded)
   unsafeUsage.outcome.usage.tokens = 9_007_199_254_740_992

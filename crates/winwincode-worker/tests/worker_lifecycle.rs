@@ -2840,15 +2840,14 @@ async fn accepted_final_delegated_batch_freezes_without_another_primary_turn() {
     assert_eq!(outcomes.len(), 1);
     assert_eq!(
         outcomes[0].outcome.status,
-        ExecutionOutcomeStatus::InfrastructureError
+        ExecutionOutcomeStatus::Succeeded
     );
     assert_eq!(outcomes[0].outcome.artifacts, vec![artifact]);
-    // Candidate freezing succeeds; this fixture has no complete model accounting.
-    assert!(outcomes[0].outcome.usage.is_none());
     assert_eq!(
-        outcomes[0].outcome.error.as_ref().unwrap().message,
-        "execution completed with incomplete usage accounting"
+        outcomes[0].outcome.usage,
+        Some(ExecutionOutcomeUsage::unknown(0, 0))
     );
+    assert!(outcomes[0].outcome.error.is_none());
     let freezes = pump.final_freezes();
     assert_eq!(freezes.len(), 1);
     assert!(freezes[0].final_observation.is_none());
@@ -2983,7 +2982,7 @@ async fn delegated_freeze_before_persist_restarts_from_one_accepted_candidate() 
     assert_eq!(outcomes.len(), 1);
     assert_eq!(
         outcomes[0].outcome.status,
-        ExecutionOutcomeStatus::InfrastructureError
+        ExecutionOutcomeStatus::Succeeded
     );
     assert_eq!(outcomes[0].outcome.artifacts, vec![artifact]);
     assert_eq!(pump.final_freezes().len(), 1);
@@ -3570,56 +3569,69 @@ async fn delegated_outcome_survives_job_end_and_new_run_progress_starts_fresh() 
 }
 
 #[tokio::test]
-async fn unknown_usage_finishes_with_infrastructure_error_and_keeps_candidate() {
-    let port = RecordingPort::default();
-    let messages = Rc::clone(&port.messages);
-    let codex = FakeCodex::with_threads([thread('A')]);
-    let pump = codex.clone();
-    let mut worker = test_worker(worker_config(1), port, codex);
-    register(&mut worker).await;
-    worker
-        .accept_control(
-            &ExecutionPortMessage::JobDispatchMessage(writer_dispatch('A')),
-            now(),
+async fn missing_usage_preserves_success_and_keeps_candidate() {
+    for retained_usage in [
+        None,
+        Some(ExecutionOutcomeUsage::unknown(123, 48)),
+        Some(measured_completion_usage()),
+    ] {
+        let port = RecordingPort::default();
+        let messages = Rc::clone(&port.messages);
+        let codex = FakeCodex::with_threads([thread('A')]);
+        let pump = codex.clone();
+        let mut worker = test_worker(worker_config(1), port, codex);
+        register(&mut worker).await;
+        worker
+            .accept_control(
+                &ExecutionPortMessage::JobDispatchMessage(writer_dispatch('A')),
+                now(),
+            )
+            .await
+            .unwrap();
+        let active = worker.active_jobs()[0].clone();
+        if let Some(usage) = &retained_usage {
+            pump.state
+                .lock()
+                .unwrap()
+                .retained_usage
+                .insert(active.codex_thread_id.0.clone(), usage.clone());
+        }
+        std::fs::write(
+            pump.workspace(&active.codex_thread_id)
+                .join("candidate.txt"),
+            b"candidate\n",
         )
-        .await
         .unwrap();
-    let active = worker.active_jobs()[0].clone();
-    std::fs::write(
-        pump.workspace(&active.codex_thread_id)
-            .join("candidate.txt"),
-        b"candidate\n",
-    )
-    .unwrap();
-    pump.queue_poll(
-        &active.codex_thread_id,
-        Ok(CodexPoll::Completed(CodexTurnCompletion {
-            summary: secret_safe_runtime_summary("successful retry with unknown earlier usage")
-                .unwrap(),
-            artifacts: Vec::new(),
-            usage: None,
-        })),
-    );
-    worker.poll_codex_boxed().await.unwrap();
-    let artifact = observed_candidate_reference(&messages);
-    acknowledge_candidate(&mut worker, &active, &artifact, 0, 'O')
-        .await
-        .unwrap();
-    acknowledge_candidate(&mut worker, &active, &artifact, 1, 'F')
-        .await
-        .unwrap();
-    let outcomes = observed_outcomes(&messages);
-    assert_eq!(outcomes.len(), 1);
-    assert_eq!(
-        outcomes[0].outcome.status,
-        ExecutionOutcomeStatus::InfrastructureError
-    );
-    assert_eq!(outcomes[0].outcome.usage, None);
-    assert_eq!(
-        outcomes[0].outcome.error.as_ref().unwrap().message,
-        "execution completed with incomplete usage accounting"
-    );
-    assert!(outcomes[0].outcome.artifacts.contains(&artifact));
+        pump.queue_poll(
+            &active.codex_thread_id,
+            Ok(CodexPoll::Completed(CodexTurnCompletion {
+                summary: secret_safe_runtime_summary("successful retry with unknown earlier usage")
+                    .unwrap(),
+                artifacts: Vec::new(),
+                usage: None,
+            })),
+        );
+        worker.poll_codex_boxed().await.unwrap();
+        let artifact = observed_candidate_reference(&messages);
+        acknowledge_candidate(&mut worker, &active, &artifact, 0, 'O')
+            .await
+            .unwrap();
+        acknowledge_candidate(&mut worker, &active, &artifact, 1, 'F')
+            .await
+            .unwrap();
+        let outcomes = observed_outcomes(&messages);
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(
+            outcomes[0].outcome.status,
+            ExecutionOutcomeStatus::Succeeded
+        );
+        assert_eq!(
+            outcomes[0].outcome.usage,
+            Some(retained_usage.unwrap_or_else(|| ExecutionOutcomeUsage::unknown(0, 0)))
+        );
+        assert!(outcomes[0].outcome.error.is_none());
+        assert!(outcomes[0].outcome.artifacts.contains(&artifact));
+    }
 }
 
 #[tokio::test]

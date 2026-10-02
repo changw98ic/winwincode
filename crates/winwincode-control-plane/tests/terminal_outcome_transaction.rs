@@ -1355,6 +1355,13 @@ fn authenticated_worker_terminal_settles_or_releases_once_across_restart() {
             "settled",
             1,
         ),
+        (
+            78,
+            "unknown-usage",
+            ExecutionOutcomeStatus::Succeeded,
+            "released",
+            0,
+        ),
         (71, "failed", ExecutionOutcomeStatus::Failed, "released", 0),
         (
             75,
@@ -1420,6 +1427,9 @@ fn assert_authenticated_worker_terminal_case(
             cost_microunits: None,
         });
     }
+    if name == "unknown-usage" {
+        message.outcome.usage = Some(ExecutionOutcomeUsage::unknown(30_000, 47));
+    }
     if name == "unknown-cost" {
         message
             .outcome
@@ -1477,7 +1487,96 @@ fn assert_authenticated_worker_terminal_case(
             .expect("actual tokens");
         assert_eq!(Some(tokens), usage.tokens);
     }
+    if name == "unknown-usage" {
+        assert_reconciled_terminal_keeps_original_outcome(
+            &root, &scope, &job, &message, &facts, seed,
+        );
+    }
     fs::remove_dir_all(root).expect("directory release");
+}
+
+fn assert_reconciled_terminal_keeps_original_outcome(
+    root: &Path,
+    scope: &RepositoryScope,
+    job: &ExecutionJob,
+    message: &JobOutcomeMessage,
+    facts: &winwincode_delivery::application::workrun_execution::DeliveryTerminalOutcomeFacts,
+    seed: u64,
+) {
+    let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3")).unwrap();
+    let terminal: Vec<u8> = connection
+        .query_row(
+            "SELECT payload FROM outbox WHERE topic = 'delivery.work_run.terminal'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let terminal_value: serde_json::Value = serde_json::from_slice(&terminal).unwrap();
+    assert_eq!(terminal_value["outcome"]["status"], "succeeded");
+    let (terminal_request_id, unknown): (String, String) = connection.query_row(
+        "SELECT terminal_request_id, terminal_usage_json FROM execution_admission_reconciliation WHERE job_id = ?1",
+        [&job.job_id.0], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+    let unknown: ExecutionOutcomeUsage = serde_json::from_str(&unknown).unwrap();
+    assert_eq!(unknown, ExecutionOutcomeUsage::unknown(30_000, 47));
+    drop(connection);
+    let mut storage = SqliteStorage::open(root).unwrap();
+    let settled = ExecutionOutcomeUsage {
+        tokens: Some(54),
+        known_tokens: 54,
+        cost_microunits: Some(400),
+        accounting_status:
+            winwincode_execution_port::generated::ExecutionOutcomeUsageAccountingStatus::Known,
+        runtime_millis: 30_000,
+    };
+    assert!(
+        storage
+            .execution_admission()
+            .unwrap()
+            .settle_reconciliation(
+                &job.job_id,
+                &RequestId(terminal_request_id.clone()),
+                &RequestId(canonical_id("req", seed + 30_000)),
+                &settled,
+                &Instant("2027-01-15T08:02:00.000Z".into())
+            )
+            .unwrap()
+    );
+    assert!(
+        !storage
+            .execution_admission()
+            .unwrap()
+            .settle_reconciliation(
+                &job.job_id,
+                &RequestId(terminal_request_id),
+                &RequestId(canonical_id("req", seed + 30_000)),
+                &settled,
+                &Instant("2027-01-15T08:02:00.000Z".into())
+            )
+            .unwrap()
+    );
+    drop(storage);
+    let mut reconciled = ControlPlane::start_local(
+        ControlPlaneConfig::local(root),
+        Box::new(RecordingPublisher),
+    )
+    .unwrap();
+    let replay = reconciled
+        .commit_delivery_terminal_outcome(scope, message, facts, &message.sent_at)
+        .unwrap();
+    assert!(replay.receipt().idempotent_replay);
+    reconciled.shutdown().unwrap();
+    let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3")).unwrap();
+    let replayed: Vec<u8> = connection
+        .query_row(
+            "SELECT payload FROM outbox WHERE topic = 'delivery.work_run.terminal'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        replayed, terminal,
+        "reconciliation cannot rewrite the business terminal"
+    );
 }
 
 #[test]

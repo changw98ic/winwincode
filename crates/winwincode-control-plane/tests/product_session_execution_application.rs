@@ -2432,6 +2432,97 @@ fn chat_action_receipt_uses_chat_authority_and_rejects_foreign_or_expired_reques
 }
 
 #[test]
+fn successful_chat_with_unknown_usage_completes_and_replays_after_restart() {
+    let seed = 91;
+    let mut fixture = Fixture::open(seed);
+    let job = create_chat_job(&mut fixture, seed);
+    let scope = execution_scope(&fixture);
+    register_worker(&mut fixture.storage, seed);
+    reserve_execution(&mut fixture.storage, &scope, &job, seed);
+    transition_job(
+        &mut fixture.storage,
+        &scope,
+        &job.job_id,
+        seed * 100 + 20,
+        1,
+        ExecutionJobState::Queued,
+        ExecutionJobState::Leased,
+    );
+    let runtime = claim_and_open_runtime(&mut fixture, &job, seed);
+    accept_dispatch(&mut fixture, &job, &runtime, seed);
+    let binding = binding_message(&fixture, &runtime, seed);
+    fixture
+        .accept(&ExecutionPortMessage::SessionBindingMessage(binding), at(9))
+        .unwrap();
+    let model_open = model_open_message(&fixture, &runtime, seed);
+    fixture
+        .accept(&model_binding_message(model_open), at(10))
+        .unwrap();
+    let mut outcome = successful_outcome(&fixture, &runtime, seed);
+    let usage = winwincode_execution_port::generated::ExecutionOutcomeUsage::unknown(1000, 48);
+    outcome.outcome.usage = Some(usage.clone());
+    let message = ExecutionPortMessage::JobOutcomeMessage(outcome);
+    assert_eq!(
+        outcome_status(&fixture.accept(&message, at(20)).unwrap()),
+        JobOutcomeAckMessageStatus::Accepted
+    );
+    fixture = fixture.restart();
+    assert_eq!(
+        outcome_status(&fixture.accept(&message, expired()).unwrap()),
+        JobOutcomeAckMessageStatus::Duplicate
+    );
+    let record = ProductSessionService::new(&mut fixture.storage)
+        .get(&fixture.receipt_scope, &fixture.product_session_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        record
+            .messages()
+            .iter()
+            .find(|message| message.role == "assistant")
+            .unwrap()
+            .state,
+        "completed"
+    );
+    let terminal = record.turn_intents()[0].terminal_outcome.as_ref().unwrap();
+    assert_eq!(terminal.status, ExecutionOutcomeStatus::Succeeded);
+    assert_eq!(terminal.usage, Some(usage));
+    let reservation = fixture
+        .storage
+        .execution_admission()
+        .unwrap()
+        .load_reservation_by_job(&job.job_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(reservation.state, ExecutionReservationState::Released);
+    assert_eq!(reservation.actual_tokens, None);
+    assert_eq!(reservation.actual_cost_microunits, None);
+    assert_eq!(
+        fixture
+            .storage
+            .worker_session_slots()
+            .unwrap()
+            .load(&runtime.slot.worker_session_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        WorkerSlotState::Completed
+    );
+    assert_eq!(
+        fixture
+            .storage
+            .execution_queue()
+            .unwrap()
+            .load_job(&scope, &job.job_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        ExecutionJobState::Completed
+    );
+    fixture.close();
+}
+
+#[test]
 fn failure_with_known_or_unknown_usage_replays_after_metadata_change() {
     for known_usage in [false, true] {
         let seed = 90;

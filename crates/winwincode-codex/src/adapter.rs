@@ -5133,25 +5133,31 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         fact: &FinalCandidateFreezeFact,
     ) -> Result<FinalCandidateFreezeFact, Self::Error> {
         let run_key = self.run_key_for_thread(thread_id)?.to_owned();
+        let run = self.runs.get(&run_key).ok_or_else(unknown_thread)?;
+        if run.record.delegated_stop.is_some() || run.record.terminal.is_some() {
+            return Err(conflict());
+        }
+        if let Some(existing) = &run.record.final_candidate_freeze {
+            // Accounting can advance after completion. Keep the originally
+            // frozen counters, while still rejecting changed business facts.
+            let mut replay = fact.clone();
+            replay.counters = existing.counters.clone();
+            if replay != *existing {
+                return Err(conflict());
+            }
+            let retained = existing.clone();
+            // Retry the durable evidence write if the process stopped after
+            // freeze persistence and before retaining its baseline trace.
+            let _ = self.retain_performance_baseline_trace(&run_key)?;
+            return Ok(retained);
+        }
         let totals = self
             .store
             .delegated_performance_totals(&run_key)
             .map_err(map_store_error)?;
-        // The latest Observer must settle before its usage can be frozen into
-        // the final cumulative counters.
-        if totals.pending_model_calls > 0
-            || !accounting_satisfies_budget(
-                self.runs
-                    .get(&run_key)
-                    .and_then(|run| run.record.delegated_budget.as_ref()),
-                &totals,
-            )
-            || totals.primary_model_calls < 1
-        {
-            return Err(conflict());
-        }
-        let run = self.runs.get(&run_key).ok_or_else(unknown_thread)?;
-        if run.record.delegated_stop.is_some() {
+        // A validated final result starts no additional paid call. Missing
+        // usage cannot prevent its freeze; the terminal retains unknown totals.
+        if totals.primary_model_calls < 1 {
             return Err(conflict());
         }
         let opened_at = run.binding.opened_at.clone();
@@ -5284,9 +5290,9 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             return Err(conflict());
         }
         // The Control Plane may compact the acknowledged outcome row. Keep
-        // its original transport identity in the durable run so a later
-        // restart can reconstruct the same terminal frame byte-for-byte
-        // rather than allocating a new Worker message sequence.
+        // its original transport identity in the durable run, and keep the
+        // complete terminal frame in a separate snapshot. Recovery must not
+        // recompute usage, timestamps or the final event cursor after ACK.
         let canonical_message_id = run
             .record
             .terminal_message_id
@@ -5297,12 +5303,15 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         finalized.terminal_message_id = Some(canonical_message_id.clone());
         let mut canonical_outcome = outcome.clone();
         canonical_outcome.message_id = canonical_message_id;
-        let message = ExecutionPortMessage::JobOutcomeMessage(canonical_outcome);
         let delivery = self
             .store
             .transaction(|transaction| {
                 AdapterStore::save_run_in_transaction(transaction, &run_key, &finalized)?;
-                ExecutionOutbox::retain_in_transaction(transaction, &message)
+                ExecutionOutbox::retain_terminal_in_transaction(
+                    transaction,
+                    &run_key,
+                    &canonical_outcome,
+                )
             })
             .map_err(map_store_error)?;
         self.runs
@@ -7764,8 +7773,9 @@ mod tests {
     #[test]
     fn successful_retry_preserves_unknown_usage_through_terminal_restart() {
         use super::{
-            PerformanceOperationCompletion, PerformanceOperationKind, StoredPendingCompletion,
-            StoredPendingTerminalKind, StoredTerminal, terminal_from_pending_completion,
+            ExecutionOutcomeUsage, PerformanceOperationCompletion, PerformanceOperationKind,
+            StoredPendingCompletion, StoredPendingTerminalKind, StoredTerminal,
+            terminal_from_pending_completion,
         };
         let root = test_root("successful-retry-unknown-usage");
         let store = AdapterStore::open(&root).unwrap();
@@ -7803,7 +7813,7 @@ mod tests {
             48
         );
         let usage = store.retained_outcome_usage("run", 1).unwrap();
-        assert!(usage.is_none());
+        assert_eq!(usage, Some(ExecutionOutcomeUsage::unknown(1, 48)));
         let terminal = terminal_from_pending_completion(
             StoredPendingCompletion {
                 final_message: Some("valid successful result".into()),
@@ -7817,9 +7827,88 @@ mod tests {
         let CodexPoll::Completed(completion) = restored.into_poll().unwrap() else {
             panic!("completion remains successful")
         };
-        assert!(completion.usage.is_none());
+        assert_eq!(
+            completion.usage,
+            Some(ExecutionOutcomeUsage::unknown(1, 48))
+        );
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn accepted_final_candidate_freezes_with_unknown_usage_under_finite_budget() {
+        std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
+            tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
+                .block_on(Box::pin(async {
+                    use super::{ExecutionOutcomeUsage, PerformanceOperationCompletion, PerformanceOperationKind};
+                    let root = test_root("final-freeze-unknown-usage");
+                    let workspace = root.join("workspace");
+                    std::fs::create_dir_all(&workspace).unwrap();
+                    let (record, original_binding) = delegated_record_and_binding();
+                    let job = record.job;
+                    let mut lease = original_binding.authority.lease;
+                    lease.lease_id = LeaseId("lse_00000000000000000000000001".into());
+                    lease.fencing_token = FencingToken("1".into());
+                    let worker_session = original_binding.authority.worker_session_id;
+                    let run_key = CodexRunKey { job_id: job.job_id.clone(), attempt: job.attempt,
+                        fencing_token: lease.fencing_token.clone(), payload_digest: job.payload_digest.clone() };
+                    let revision = WorkspaceRevision(format!("git-tree:{}", "1".repeat(40)));
+                    let start = CodexThreadStart { snapshot_id: None, run_key: &run_key, worker_id: &lease.worker_id,
+                        job: &job, lease: &lease, worker_session_id: &worker_session, workspace: &workspace,
+                        workspace_revision: &revision };
+                    let mut config = diagnostic_adapter_config(&root);
+                    config.execution_mode = ExecutionMode::DelegatedPatch;
+                    let mut adapter = ProductionCodexAdapter::open(config).unwrap();
+                    let session = Box::pin(adapter.ensure_thread(start)).await.unwrap();
+                    let key = run_key.canonical_digest().unwrap().0;
+                    adapter.runs.get_mut(&key).unwrap().record.delegated_budget = Some(delegated_budget_fixture());
+                    let began = Instant("2026-08-28T00:00:00Z".into());
+                    let completed = Instant("2026-08-28T00:00:01Z".into());
+                    adapter.store.record_performance_start(&key, PerformanceOperationKind::PrimaryModel, "pending-request", &began).unwrap();
+                    adapter.store.record_performance_completion(&key, PerformanceOperationKind::PrimaryModel, "accepted-request", &completed,
+                        PerformanceOperationCompletion { usage_known: true, input_tokens: 40, output_tokens: 8, ..Default::default() }).unwrap();
+                    let identity = serde_json::json!({"batchId":format!("sha256:{}","0".repeat(64)), "runKey":key,
+                        "jobId":job.job_id,"attempt":1,"leaseId":lease.lease_id,"fencingToken":lease.fencing_token,
+                        "sessionIdentity":adapter.runs[&key].binding.authority.session_identity,
+                        "repositoryId":job.workspace.repository_id,"workspaceRevision":revision,"turnId":"turn-fixture",
+                        "patchDigest":format!("sha256:{}", "6".repeat(64))});
+                    let result_revision = format!("git-tree:{}", "2".repeat(40));
+                    let delta = format!("sha256:{}", "3".repeat(64));
+                    let fact: winwincode_execution_port::generated::FinalCandidateFreezeFact = serde_json::from_value(serde_json::json!({
+                        "schemaVersion":1,"identity":identity,"resultRevision":result_revision,"deltaDigest":delta,
+                        "finalReceipt":{"identity":identity,"status":"applied","baseRevision":revision,"resultRevision":result_revision,
+                            "deltaDigest":delta,"deltaExact":true,"files":[{"path":"src/lib.rs","operation":"update",
+                                "beforeSha256":format!("sha256:{}", "7".repeat(64)),"afterSha256":format!("sha256:{}", "8".repeat(64)),
+                                "bytesBefore":10,"bytesAfter":12,"modeBefore":"0644","modeAfter":"0644"}],"normalizer":null,"validation":null,"observation":null,"artifactRef":null},
+                        "finalObservation":null,"counters":{"repairRounds":0,"observerCalls":0,"primaryModelCalls":2,
+                            "totalTokens":48,"totalCostMicrounits":0,"elapsedMillis":1000,"changeBatches":1,"contextPackBytes":100},
+                        "stopReason":"accepted","contextPackDigest":format!("sha256:{}", "4".repeat(64)),
+                        "candidateArtifactRef":{"artifactId":"art_00000000000000000000000001","digest":format!("sha256:{}", "5".repeat(64))},
+                        "frozenAt":completed
+                    })).unwrap();
+                    let mut invalid = fact.clone();
+                    invalid.final_receipt.delta_exact = false;
+                    assert!(adapter.retain_final_candidate_freeze(&session.thread_id, &invalid).is_err());
+                    let frozen = adapter.retain_final_candidate_freeze(&session.thread_id, &fact)
+                        .expect("accepted candidate must not wait for accounting receipts");
+                    assert_eq!(frozen.counters.total_tokens, 48);
+                    assert_eq!(adapter.retained_outcome_usage(&session.thread_id).unwrap().unwrap().tokens, None);
+                    let saved = load_stored_run(&adapter.store, &key).unwrap().unwrap();
+                    assert_eq!(saved.final_candidate_freeze, Some(frozen.clone()));
+                    assert_eq!(adapter.store.retained_outcome_usage(&key, 1000).unwrap(), Some(ExecutionOutcomeUsage::unknown(1000, 48)));
+                    adapter.store.record_performance_completion(&key, PerformanceOperationKind::PrimaryModel,
+                        "pending-request", &completed, PerformanceOperationCompletion {
+                            usage_known: true, input_tokens: 6, ..Default::default()
+                        }).unwrap();
+                    assert_eq!(adapter.retain_final_candidate_freeze(&session.thread_id, &fact).unwrap(), frozen);
+                    invalid = fact.clone();
+                    invalid.candidate_artifact_ref.digest.0 = format!("sha256:{}", "9".repeat(64));
+                    assert!(adapter.retain_final_candidate_freeze(&session.thread_id, &invalid).is_err());
+                    drop(adapter);
+                    std::fs::remove_dir_all(root).unwrap();
+                }));
+        }).unwrap().join().unwrap();
     }
 
     #[cfg(unix)]

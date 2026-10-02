@@ -156,7 +156,8 @@ pub struct CodexThreadSession {
 pub struct CodexTurnCompletion {
     pub summary: SecretSafeTraceSummary,
     pub artifacts: Vec<ArtifactReference>,
-    /// None when any paid model request has unknown usage.
+    /// Observed accounting may carry unknown totals and a known lower bound.
+    /// `None` means the adapter has no retained accounting observation.
     pub usage: Option<ExecutionOutcomeUsage>,
 }
 

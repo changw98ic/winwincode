@@ -155,7 +155,8 @@ impl DurableWorkerExecutionLifecycle {
     ///
     /// # Errors
     ///
-    /// Rejects missing Usage, changed placement, or stale session authority.
+    /// Missing totals retain unknown accounting. Rejects inconsistent Usage,
+    /// changed placement, or stale session authority.
     #[allow(clippy::too_many_lines)]
     pub fn settle_terminal_outcome(
         &mut self,

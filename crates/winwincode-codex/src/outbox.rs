@@ -14,8 +14,9 @@ use sha2::{Digest as _, Sha256};
 use winwincode_domain::{ModelExchangeId, WorkerId, WorkerInstanceId};
 use winwincode_execution_port::{
     generated::{
-        ExecutionPortErrorCode, ExecutionPortMessage, JobOutcomeAckMessageStatus, LeaseWriteStatus,
-        ModelAckMessage, ModelOpenMessage, RuntimeEventMessage, WorkerHeartbeatAckMessageStatus,
+        ExecutionPortErrorCode, ExecutionPortMessage, JobOutcomeAckMessageStatus,
+        JobOutcomeMessage, LeaseWriteStatus, ModelAckMessage, ModelOpenMessage,
+        RuntimeEventMessage, WorkerHeartbeatAckMessageStatus,
         WorkerRegistrationResultMessageStatus,
     },
     runtime_replay::{RuntimeReplayAckReceipt, runtime_ack_stream_key, runtime_event_stream_key},
@@ -57,6 +58,57 @@ impl ExecutionOutbox {
     ) -> Result<DurableExecutionDelivery, AdapterStoreError> {
         self.store
             .transaction(|transaction| Self::retain_in_transaction(transaction, message))
+    }
+
+    /// Keeps the first complete terminal frame after its transport row is acknowledged.
+    /// The run, terminal snapshot and pending delivery commit in one transaction.
+    pub(crate) fn retain_terminal_in_transaction(
+        transaction: &Transaction<'_>,
+        run_key: &str,
+        outcome: &JobOutcomeMessage,
+    ) -> Result<DurableExecutionDelivery, AdapterStoreError> {
+        let saved = transaction.query_row(
+            "SELECT frame_digest, frame_json FROM execution_terminal_outcome WHERE run_key = ?1",
+            [run_key], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)))
+            .optional().map_err(|_| AdapterStoreError::Unavailable)?;
+        // Upgrade an existing pending terminal before its ACK can compact it.
+        let saved = if saved.is_some() {
+            saved
+        } else {
+            transaction.query_row(
+                "SELECT frame_digest, frame_json FROM execution_outbox WHERE delivery_id = ?1 AND family = ?2",
+                params![outcome.message_id.0, Family::Outcome.as_str()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)))
+                .optional().map_err(|_| AdapterStoreError::Unavailable)?
+        };
+        let canonical = if let Some((frame_digest, bytes)) = saved {
+            if digest(&bytes) != frame_digest {
+                return Err(AdapterStoreError::Corrupt);
+            }
+            let message: ExecutionPortMessage =
+                serde_json::from_slice(&bytes).map_err(|_| AdapterStoreError::Corrupt)?;
+            let ExecutionPortMessage::JobOutcomeMessage(original) = &message else {
+                return Err(AdapterStoreError::Corrupt);
+            };
+            if original.lease != outcome.lease
+                || original.worker_session_id != outcome.worker_session_id
+                || original.session_identity != outcome.session_identity
+                || original.outcome.codex_thread_id != outcome.outcome.codex_thread_id
+                || original.message_id != outcome.message_id
+            {
+                return Err(AdapterStoreError::Conflict);
+            }
+            message
+        } else {
+            ExecutionPortMessage::JobOutcomeMessage(outcome.clone())
+        };
+        let delivery = Self::retain_in_transaction(transaction, &canonical)?;
+        let bytes =
+            serde_json::to_vec(&delivery.message).map_err(|_| AdapterStoreError::Corrupt)?;
+        transaction.execute(
+            "INSERT OR IGNORE INTO execution_terminal_outcome(run_key, frame_digest, frame_json) VALUES (?1, ?2, ?3)",
+            params![run_key, digest(&bytes), bytes]).map_err(|_| AdapterStoreError::Unavailable)?;
+        Ok(delivery)
     }
 
     pub(crate) fn retain_in_transaction(
@@ -776,7 +828,7 @@ fn canonical_terminal_model_ack(message: &ModelAckMessage) -> bool {
 }
 
 fn job_authority(
-    message: &winwincode_execution_port::generated::JobOutcomeMessage,
+    message: &JobOutcomeMessage,
 ) -> (
     &winwincode_execution_port::generated::ExecutionLeaseStamp,
     &winwincode_domain::WorkerSessionId,
@@ -1471,6 +1523,134 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one scenario verifies upgrade, atomic rollback, ACK compaction and restart"
+    )]
+    fn terminal_snapshot_survives_ack_upgrade_and_atomic_rollback() {
+        for legacy in [false, true] {
+            let root = test_root("terminal-snapshot");
+            let store = AdapterStore::open(&root).unwrap();
+
+            let mut original = fixture("job.outcome");
+            let ExecutionPortMessage::JobOutcomeMessage(outcome) = &mut original else {
+                unreachable!()
+            };
+            outcome.outcome.usage = Some(
+                winwincode_execution_port::generated::ExecutionOutcomeUsage::unknown(1000, 48),
+            );
+            outcome.outcome.last_event_sequence.0 = 12;
+            let initial = if legacy {
+                serde_json::json!({"terminalMessageId": outcome.message_id})
+            } else {
+                serde_json::json!("active")
+            };
+            store.save_run("run", &initial).unwrap();
+            if legacy {
+                ExecutionOutbox::open(store.clone())
+                    .unwrap()
+                    .retain(&original)
+                    .unwrap();
+                store
+                    .lock()
+                    .unwrap()
+                    .execute_batch("DROP TABLE execution_terminal_outcome")
+                    .unwrap();
+            }
+            drop(store);
+            let store = AdapterStore::open(&root).unwrap();
+            let ExecutionPortMessage::JobOutcomeMessage(outcome) = &original else {
+                unreachable!()
+            };
+            let rolled_back: Result<(), AdapterStoreError> = store.transaction(|transaction| {
+                AdapterStore::save_run_in_transaction(transaction, "run", &"finalized")?;
+                ExecutionOutbox::retain_terminal_in_transaction(transaction, "run", outcome)?;
+                Err(AdapterStoreError::Unavailable)
+            });
+            assert_eq!(rolled_back, Err(AdapterStoreError::Unavailable));
+            assert_eq!(
+                store.load_run::<serde_json::Value>("run").unwrap(),
+                Some(initial)
+            );
+            let count: i64 = store
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM execution_terminal_outcome",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                count,
+                i64::from(legacy),
+                "upgrade snapshots before ACK consumption"
+            );
+            let retained = store
+                .transaction(|transaction| {
+                    AdapterStore::save_run_in_transaction(transaction, "run", &"finalized")?;
+                    ExecutionOutbox::retain_terminal_in_transaction(transaction, "run", outcome)
+                })
+                .unwrap();
+            assert_eq!(retained.message, original);
+            let outbox = ExecutionOutbox::open(store.clone()).unwrap();
+            outbox
+                .acknowledge_response(&fixture("job.outcome_ack"))
+                .unwrap();
+            assert!(outbox.pending().unwrap().is_empty());
+            drop(outbox);
+            drop(store);
+            let store = AdapterStore::open(&root).unwrap();
+            let mut reconstructed = outcome.clone();
+            reconstructed.outcome.last_event_sequence.0 = 0;
+            let usage = reconstructed.outcome.usage.as_mut().unwrap();
+            usage.tokens = Some(54);
+            usage.known_tokens = 54;
+            usage.accounting_status =
+                winwincode_execution_port::generated::ExecutionOutcomeUsageAccountingStatus::Known;
+            usage.cost_microunits = Some(100);
+            let replay = store
+                .transaction(|transaction| {
+                    ExecutionOutbox::retain_terminal_in_transaction(
+                        transaction,
+                        "run",
+                        &reconstructed,
+                    )
+                })
+                .unwrap();
+            assert_eq!(replay.message, original);
+            reconstructed.worker_session_id.0.push('X');
+            assert_eq!(
+                store.transaction(
+                    |transaction| ExecutionOutbox::retain_terminal_in_transaction(
+                        transaction,
+                        "run",
+                        &reconstructed
+                    )
+                ),
+                Err(AdapterStoreError::Conflict)
+            );
+            store
+                .lock()
+                .unwrap()
+                .execute_batch("UPDATE execution_terminal_outcome SET frame_digest = 'corrupt'")
+                .unwrap();
+            assert_eq!(
+                store.transaction(
+                    |transaction| ExecutionOutbox::retain_terminal_in_transaction(
+                        transaction,
+                        "run",
+                        outcome
+                    )
+                ),
+                Err(AdapterStoreError::Corrupt)
+            );
+            drop(store);
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]

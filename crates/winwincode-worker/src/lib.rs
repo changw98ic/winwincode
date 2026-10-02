@@ -3874,7 +3874,7 @@ where
                 "terminal result has no active Job",
             )
         })?;
-        let usage = if usage.is_none() && status != ExecutionOutcomeStatus::Succeeded {
+        let usage = if usage.is_none() {
             self.codex.retained_outcome_usage(&active.codex_thread_id)
                 .map_err(|_| codex_model_error())?
         } else {
@@ -3949,22 +3949,13 @@ where
                 ));
             }
         }
-        // The Server cannot accept a successful terminal without immutable Usage.
-        // Preserve the candidate and unknown total, but finish rather than replaying
-        // an outcome that can never satisfy the execution accounting contract.
-        let (status, summary, error) = if status == ExecutionOutcomeStatus::Succeeded && usage.is_none() {
-            (
-                ExecutionOutcomeStatus::InfrastructureError,
-                "execution completed with incomplete usage accounting",
-                Some(port_error(
-                    ExecutionPortErrorCode::ExecutionFailed,
-                    "execution completed with incomplete usage accounting",
-                    false,
-                )),
-            )
-        } else {
-            (status, summary, error)
-        };
+        // Completion and accounting are independent facts. Recover observed
+        // lower bounds from the durable ledger, and explicitly retain unknown
+        // totals when a successful completion has no accounting observations.
+        let usage = usage.or_else(|| {
+            (status == ExecutionOutcomeStatus::Succeeded)
+                .then(|| ExecutionOutcomeUsage::unknown(0, 0))
+        });
         self.cancel_observation_open_with_delivery(&active, &now, defer_delivery).await?;
         let close_reason = match status {
             ExecutionOutcomeStatus::Succeeded => WorkspaceCloseReason::Completed,
