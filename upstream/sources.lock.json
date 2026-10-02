@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "recordedAt": "2026-09-05",
+  "recordedAt": "2026-10-02",
   "project": {
     "license": "Apache-2.0",
     "node": "24.x",
@@ -280,7 +280,8 @@
         "codex-rs/core/src/tools/runtimes/unified_exec.rs",
         "codex-rs/core/src/tools/sandboxing.rs",
         "codex-rs/core/tests/suite/turn_input_submission.rs"
-      ]
+      ],
+      "stripComponents": 3
     },
     {
       "id": "codex-bind-tool-gate-executable-identity",
@@ -364,6 +365,17 @@
         "codex-rs/core/src/context_manager/deterministic_gc.rs",
         "codex-rs/core/src/context_manager/history.rs",
         "codex-rs/core/src/context_manager/mod.rs"
+      ]
+    },
+    {
+      "id": "codex-record-delegated-handoff-output",
+      "file": "upstream/patches/codex/0012-record-delegated-handoff-output.patch",
+      "planned": false,
+      "stripComponents": 1,
+      "patchSha256": "a877347a2c94180f545b35305f0a07d29f451c0bca443582a1e8803dc09d0ad7",
+      "targets": [
+        "codex-rs/core/src/session/turn.rs",
+        "codex-rs/core/src/session/turn_tests.rs"
       ]
     }
   ],
