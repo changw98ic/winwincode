@@ -436,6 +436,17 @@ impl RemoteWorkerPort {
 impl WorkerExecutionPort for RemoteWorkerPort {
     type Error = RemoteWorkerPortError;
 
+    fn failure_kind(error: &Self::Error) -> winwincode_codex::ExecutionPortFailureKind {
+        use winwincode_codex::ExecutionPortFailureKind;
+        match error {
+            RemoteWorkerPortError::Backpressure => ExecutionPortFailureKind::Backpressure,
+            RemoteWorkerPortError::Transport => ExecutionPortFailureKind::Unavailable,
+            RemoteWorkerPortError::Rejected
+            | RemoteWorkerPortError::Protocol
+            | RemoteWorkerPortError::TooLarge => ExecutionPortFailureKind::Terminal,
+        }
+    }
+
     fn send(
         &mut self,
         message: ExecutionPortMessage,

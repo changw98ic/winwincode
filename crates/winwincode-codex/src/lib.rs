@@ -50,8 +50,8 @@ pub use contract::{
     CodexRunKeyError, CodexThreadSession, CodexThreadStart, CodexTurnCompletion,
     DelegatedLoopPhase, DelegatedLoopStopFact, DelegatedLoopTransition,
     DelegatedLoopTransitionOutcome, DelegatedObserverPreflight, DelegatedObserverPreflightOutcome,
-    DelegatedObserverSettlement, DurableExecutionDelivery, WorkerExecutionPort,
-    delegated_loop_turn_id, secret_safe_runtime_summary,
+    DelegatedObserverSettlement, DurableExecutionDelivery, ExecutionPortFailureKind,
+    WorkerExecutionPort, delegated_loop_turn_id, secret_safe_runtime_summary,
 };
 pub use diagnostic_artifact_outbox::{
     DiagnosticArtifactAckOutcome, DiagnosticArtifactAuthority, DiagnosticArtifactUpload,

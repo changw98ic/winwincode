@@ -492,6 +492,24 @@ pub trait CodexCoreAdapter {
         &mut self,
     ) -> Result<Vec<DurableExecutionDelivery>, Self::Error>;
 
+    /// Reads one bounded page in durable order, after the previous delivery.
+    /// A deleted cursor restarts at the first remaining frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns the adapter error if the durable ledger cannot be read.
+    fn pending_execution_delivery_batch(
+        &mut self,
+        after_delivery: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<DurableExecutionDelivery>, Self::Error> {
+        let deliveries = self.pending_execution_deliveries()?;
+        let start = after_delivery
+            .and_then(|id| deliveries.iter().position(|row| row.delivery_id == id))
+            .map_or(0, |index| index + 1);
+        Ok(deliveries.into_iter().skip(start).take(limit).collect())
+    }
+
     /// Returns the highest numeric Worker message id retained in durable
     /// storage, including transport-only frames whose send attempt already
     /// succeeded. A replacement Worker uses this cursor before allocating a
@@ -721,9 +739,27 @@ pub enum ArtifactAckOutcome {
     Accepted(ArtifactReference),
 }
 
+/// Scope of an outbound failure, used to stop retries of worker-wide failures.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExecutionPortFailureKind {
+    /// The authenticated Worker queue must drain before new ingress.
+    Backpressure,
+    /// The connection or transport is temporarily unavailable.
+    Unavailable,
+    /// Only this frame is permanently rejected; other frames may proceed.
+    MessageRejected,
+    /// The port cannot continue after authentication or protocol failure.
+    Terminal,
+}
+
 /// Outbound canonical `ExecutionPort` used identically by local and remote IO.
 pub trait WorkerExecutionPort {
     type Error;
+
+    /// Existing ports default to a connection failure, which yields the batch.
+    fn failure_kind(_error: &Self::Error) -> ExecutionPortFailureKind {
+        ExecutionPortFailureKind::Unavailable
+    }
 
     fn send(
         &mut self,

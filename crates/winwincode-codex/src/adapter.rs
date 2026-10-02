@@ -4968,6 +4968,16 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         self.outbox.pending().map_err(map_store_error)
     }
 
+    fn pending_execution_delivery_batch(
+        &mut self,
+        after_delivery: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<DurableExecutionDelivery>, Self::Error> {
+        self.outbox
+            .pending_batch(after_delivery, limit)
+            .map_err(map_store_error)
+    }
+
     fn recovered_message_sequence(&mut self) -> Result<u64, Self::Error> {
         self.outbox
             .highest_numeric_message_sequence()

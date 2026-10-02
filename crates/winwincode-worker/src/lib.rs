@@ -63,8 +63,8 @@ pub use winwincode_codex::{
     CodexThreadSession, CodexThreadStart, CodexTurnCompletion, DelegatedLoopPhase,
     DelegatedLoopStopFact, DelegatedLoopTransition, DelegatedLoopTransitionOutcome,
     DelegatedObserverPreflight, DelegatedObserverPreflightOutcome, DelegatedObserverSettlement,
-    DurableExecutionDelivery, ObserverMode, RoleExecutionMode, WorkerExecutionPort,
-    secret_safe_runtime_summary,
+    DurableExecutionDelivery, ExecutionPortFailureKind, ObserverMode, RoleExecutionMode,
+    WorkerExecutionPort, secret_safe_runtime_summary,
 };
 use winwincode_domain::{
     AgentIdentityId, ChangeBatchId, CodexThreadId, ExecutionAckSequence, ExecutionEventId,
@@ -104,6 +104,9 @@ use winwincode_execution_port::{
 };
 
 const MAX_DELEGATED_POLL_OUTCOMES: usize = 1024;
+const MAX_OUTBOX_BATCH_FRAMES: usize = 64;
+const MAX_OUTBOX_BATCH_BYTES: usize = 512 * 1024;
+const MAX_OUTBOX_BATCH_DURATION: std::time::Duration = std::time::Duration::from_millis(250);
 use change_batch_store::ObservationChunkRetention;
 use workspace::WorkspaceCloseReason;
 use workspace_runtime::{JobWorkspaceRuntime, ObservationModelConfiguration};
@@ -194,6 +197,12 @@ pub enum WorkerErrorCode {
     CandidateArtifactMismatch,
     /// Outbound `ExecutionPort` failed.
     ExecutionPort,
+    /// The remote Worker queue must drain before sending more business frames.
+    ExecutionBackpressure,
+    /// A single outbound frame was rejected permanently.
+    ExecutionMessageRejected,
+    /// The port cannot continue (authentication or protocol failure).
+    ExecutionTerminal,
 }
 
 /// Typed delegated event returned by Codex before an `ExecutionPort` transport
@@ -375,6 +384,7 @@ pub struct WorkerMain<Port, Codex> {
     /// sending it twice while still allowing a later poll to retry a lost
     /// response.
     sent_delivery_ids: HashSet<String>,
+    outbox_flush_cursor: Option<String>,
     /// Interactive frames sent while a recovered Core turn is rebuilding its
     /// in-memory waiter. The durable request remains visible to the Control
     /// Plane, but the live Core event must not produce a second copy in the
@@ -505,6 +515,7 @@ where
             pending_candidates: HashMap::new(),
             defer_core_interactions: false,
             sent_delivery_ids: HashSet::new(),
+            outbox_flush_cursor: None,
             recovery_sent_delivery_ids: HashSet::new(),
             recovered_delegated_routes: HashSet::new(),
             deferred_core_interaction_jobs: HashSet::new(),
@@ -621,7 +632,7 @@ where
             })
     }
 
-    /// Flushes every pending durable Worker→Server delivery on the existing
+    /// Flushes one bounded batch of pending durable Worker→Server deliveries on the existing
     /// exchange protocol. Safe to call when the in-memory Job is already gone.
     ///
     /// # Errors
@@ -816,7 +827,7 @@ where
                 self.codex
                     .accept_execution_delivery_ack(message)
                     .map_err(|_| codex_model_error())?;
-                self.flush_durable_execution_deliveries().await
+                Ok(())
             }
             ExecutionPortMessage::JobDispatchMessage(dispatch) => {
                 // A recovered Core turn owns the re-emission of pending
@@ -872,10 +883,10 @@ where
                 self.codex
                     .accept_execution_delivery_ack(message)
                     .map_err(|_| codex_model_error())?;
-                self.flush_durable_execution_deliveries().await
+                Ok(())
             }
             ExecutionPortMessage::RuntimeReplayRequestMessage(request) => {
-                self.replay_runtime(request).await
+                self.replay_runtime(request)
             }
             _ => Err(worker_error(
                 WorkerErrorCode::UnexpectedMessage,
@@ -896,7 +907,6 @@ where
                 "heartbeat requires an active registered Worker",
             ));
         }
-        self.flush_durable_execution_deliveries().await?;
         self.heartbeat_sequence = self.heartbeat_sequence.saturating_add(1);
         let mut active_leases = self
             .workspaces
@@ -2529,19 +2539,10 @@ where
                 .finish_candidate_job(&job_id.0, accepted, upload.created_at)
                 .await;
         }
-        if retained.deliveries.is_empty() {
-            return self.flush_durable_execution_deliveries().await;
-        }
-        for delivery in retained.deliveries {
-            if self
-                .codex
-                .candidate_artifact_delivery_allowed(&delivery.message)
-                .map_err(|_| codex_model_error())?
-            {
-                self.send_retained_delivery(delivery).await?;
-            }
-        }
-        Ok(())
+        // Upload frames are retained atomically. All sending, including the
+        // first pass, uses the bounded driver batch.
+        self.outbox_flush_cursor = None;
+        self.flush_durable_execution_deliveries().await
     }
 
     /// Stops accepting work, interrupts every active turn, emits terminal
@@ -3352,31 +3353,26 @@ where
             self.validate_candidate_ack_state(acknowledgement, accepted)?;
         }
         match outcome {
-            ArtifactAckOutcome::Pending => self.flush_durable_execution_deliveries().await,
+            // The adapter has persisted the ACK and any replay/replacement
+            // intent. Network IO belongs to the driver after control confirm.
+            ArtifactAckOutcome::Pending => Ok(()),
             ArtifactAckOutcome::Replay(deliveries) => {
-                if candidate_ack
-                    && self.active.contains_key(&job_id)
-                    && self.pending_candidates.contains_key(&job_id)
-                {
-                    for delivery in deliveries {
-                        if self
-                            .codex
-                            .candidate_artifact_delivery_allowed(&delivery.message)
-                            .map_err(|_| codex_model_error())?
-                        {
-                            self.send_retained_delivery(delivery).await?;
-                        }
-                    }
-                    return Ok(());
+                for delivery in deliveries {
+                    // A replay is durable already; clear only the process-local
+                    // successful-attempt suppression, never send from intake.
+                    self.sent_delivery_ids.remove(&delivery.delivery_id);
+                    self.recovery_sent_delivery_ids
+                        .remove(&delivery.delivery_id);
                 }
-                self.flush_durable_execution_deliveries().await
+                self.outbox_flush_cursor = None;
+                Ok(())
             }
             ArtifactAckOutcome::Accepted(artifact) => {
                 if !candidate_ack
                     || !self.active.contains_key(&job_id)
                     || !self.pending_candidates.contains_key(&job_id)
                 {
-                    return self.flush_durable_execution_deliveries().await;
+                    return Ok(());
                 }
                 if acknowledgement.retained_artifact.as_ref() == Some(&artifact) {
                     // The durable adapter authenticated this completed predecessor;
@@ -3385,7 +3381,8 @@ where
                         pending.artifact = Some(artifact.clone());
                     }
                 }
-                self.finish_candidate_job(&job_id, artifact, now).await
+                self.finish_candidate_job_with_delivery(&job_id, artifact, now, true)
+                    .await
             }
         }
     }
@@ -3509,6 +3506,17 @@ where
         artifact: ArtifactReference,
         now: Instant,
     ) -> Result<(), WorkerError> {
+        self.finish_candidate_job_with_delivery(job_id, artifact, now, false)
+            .await
+    }
+
+    async fn finish_candidate_job_with_delivery(
+        &mut self,
+        job_id: &str,
+        artifact: ArtifactReference,
+        now: Instant,
+        defer_delivery: bool,
+    ) -> Result<(), WorkerError> {
         let pending = self.pending_candidates.get_mut(job_id).ok_or_else(|| {
             candidate_artifact_error("accepted candidate has no pending writer completion")
         })?;
@@ -3571,7 +3579,16 @@ where
         let mut artifacts = vec![artifact];
         artifacts.extend(pending.diagnostic_artifacts);
         let result = self
-            .finish_job(job_id, status, summary, artifacts, usage, error, now)
+            .finish_job_with_delivery(
+                job_id,
+                status,
+                summary,
+                artifacts,
+                usage,
+                error,
+                now,
+                defer_delivery,
+            )
             .await;
         if result.is_ok() || !self.active.contains_key(job_id) {
             self.pending_candidates.remove(job_id);
@@ -3722,6 +3739,16 @@ where
         active: &ActiveJob,
         now: &Instant,
     ) -> Result<(), WorkerError> {
+        self.cancel_observation_open_with_delivery(active, now, false)
+            .await
+    }
+
+    async fn cancel_observation_open_with_delivery(
+        &mut self,
+        active: &ActiveJob,
+        now: &Instant,
+        defer_delivery: bool,
+    ) -> Result<(), WorkerError> {
         let Some(open) = self
             .workspaces
             .cancel_pending_observation_model(active, now)
@@ -3749,9 +3776,12 @@ where
             status: LeaseWriteStatus::RejectedConflict,
             worker_session_id: open.worker_session_id,
         };
+        if defer_delivery {
+            self.retain_execution_message(&ExecutionPortMessage::ModelAckMessage(acknowledgement))?;
+            return Ok(());
+        }
         self.send_execution_message(ExecutionPortMessage::ModelAckMessage(acknowledgement))
             .await
-            .map_err(|_| execution_port_error())
     }
 
     async fn forward_runtime_trace(
@@ -3809,7 +3839,7 @@ where
         self.send_retained_delivery(delivery).await
     }
 
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    #[allow(clippy::too_many_arguments)]
     async fn finish_job(
         &mut self,
         job_id: &str,
@@ -3819,6 +3849,22 @@ where
         usage: Option<ExecutionOutcomeUsage>,
         error: Option<ExecutionPortError>,
         now: Instant,
+    ) -> Result<(), WorkerError> {
+        self.finish_job_with_delivery(job_id, status, summary, artifacts, usage, error, now, false)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    async fn finish_job_with_delivery(
+        &mut self,
+        job_id: &str,
+        status: ExecutionOutcomeStatus,
+        summary: &str,
+        artifacts: Vec<ArtifactReference>,
+        usage: Option<ExecutionOutcomeUsage>,
+        error: Option<ExecutionPortError>,
+        now: Instant,
+        defer_delivery: bool,
     ) -> Result<(), WorkerError> {
         // Keep the terminal future bounded at every caller, including recovery.
         Box::pin(async move {
@@ -3919,7 +3965,7 @@ where
         } else {
             (status, summary, error)
         };
-        self.cancel_observation_open(&active, &now).await?;
+        self.cancel_observation_open_with_delivery(&active, &now, defer_delivery).await?;
         let close_reason = match status {
             ExecutionOutcomeStatus::Succeeded => WorkspaceCloseReason::Completed,
             ExecutionOutcomeStatus::Cancelled => WorkspaceCloseReason::Cancelled,
@@ -3964,6 +4010,9 @@ where
         self.delegated_progress_ledgers
             .retain(|(ledger_job_id, _), _| ledger_job_id != job_id);
         let _ = self.codex.close_thread(&active.codex_thread_id).await;
+        if defer_delivery {
+            return Ok(());
+        }
         self.send_retained_delivery(delivery).await?;
         // The in-memory Job is already gone. Durable runtime.event /
         // diagnostic artifact.chunk frames retained beside this outcome must
@@ -4078,17 +4127,17 @@ where
             .map_err(|_| codex_model_error())
     }
 
-    async fn replay_runtime(
-        &mut self,
-        request: &RuntimeReplayRequestMessage,
-    ) -> Result<(), WorkerError> {
+    fn replay_runtime(&mut self, request: &RuntimeReplayRequestMessage) -> Result<(), WorkerError> {
         let deliveries = self
             .codex
             .replay_execution_deliveries(request)
             .map_err(|_| codex_model_error())?;
         for delivery in deliveries {
-            self.send_retained_delivery(delivery).await?;
+            self.sent_delivery_ids.remove(&delivery.delivery_id);
+            self.recovery_sent_delivery_ids
+                .remove(&delivery.delivery_id);
         }
+        self.outbox_flush_cursor = None;
         Ok(())
     }
 
@@ -4240,7 +4289,21 @@ where
         self.port
             .send(message)
             .await
-            .map_err(|_| execution_port_error())
+            .map_err(|error| match Port::failure_kind(&error) {
+                ExecutionPortFailureKind::Backpressure => worker_error(
+                    WorkerErrorCode::ExecutionBackpressure,
+                    "remote Worker is backpressured",
+                ),
+                ExecutionPortFailureKind::Unavailable => execution_port_error(),
+                ExecutionPortFailureKind::MessageRejected => worker_error(
+                    WorkerErrorCode::ExecutionMessageRejected,
+                    "ExecutionPort frame rejected",
+                ),
+                ExecutionPortFailureKind::Terminal => worker_error(
+                    WorkerErrorCode::ExecutionTerminal,
+                    "ExecutionPort cannot continue",
+                ),
+            })
     }
 
     async fn send_retained_delivery(
@@ -4270,16 +4333,82 @@ where
             .await
     }
 
+    fn durable_delivery_allowed(
+        &mut self,
+        delivery: &DurableExecutionDelivery,
+    ) -> Result<bool, WorkerError> {
+        if let Some(job_id) = active_delivery_job_id(&delivery.message)
+            && !self.active.contains_key(job_id)
+        {
+            match &delivery.message {
+                // Durable Control Plane frames must still flush after the
+                // Worker drops an in-memory Job. Blocking RuntimeEvent /
+                // JobOutcome / diagnostic artifact frames here strands
+                // verification evidence forever and leaves Delivery
+                // verdict=null even when Core already produced
+                // independent-verification-result. The frame lease is the
+                // authority; Server validates fencing. Candidate uploads
+                // remain gated by the pending-candidate checks below.
+                ExecutionPortMessage::RuntimeEventMessage(_)
+                | ExecutionPortMessage::ModelChunkMessage(_)
+                | ExecutionPortMessage::JobOutcomeMessage(_)
+                | ExecutionPortMessage::ArtifactChunkMessage(_)
+                | ExecutionPortMessage::ArtifactOpenMessage(_) => {}
+                ExecutionPortMessage::ApprovalRequestMessage(_)
+                | ExecutionPortMessage::InputRequestMessage(_)
+                | ExecutionPortMessage::ActionEnforcementRequestMessage(_) => {
+                    return Ok(false);
+                }
+                _ => return Ok(false),
+            }
+        }
+        if candidate_delivery_job_id(&delivery.message).is_some_and(|job_id| {
+            !self.pending_candidates.contains_key(job_id)
+                || !self
+                    .active
+                    .get(job_id)
+                    .is_some_and(|active| active.lifecycle == ActiveJobLifecycle::Running)
+        }) {
+            return Ok(false);
+        }
+        if matches!(
+            delivery.message,
+            ExecutionPortMessage::ArtifactOpenMessage(_)
+                | ExecutionPortMessage::ArtifactChunkMessage(_)
+        ) && !self
+            .codex
+            .candidate_artifact_delivery_allowed(&delivery.message)
+            .map_err(|_| codex_model_error())?
+        {
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
     async fn flush_durable_execution_deliveries_with_core_replay(
         &mut self,
         replay_core_interactions: bool,
     ) -> Result<(), WorkerError> {
+        let deadline = tokio::time::Instant::now() + MAX_OUTBOX_BATCH_DURATION;
         let deliveries = self
             .codex
-            .pending_execution_deliveries()
+            .pending_execution_delivery_batch(
+                self.outbox_flush_cursor.as_deref(),
+                MAX_OUTBOX_BATCH_FRAMES,
+            )
             .map_err(|_| codex_model_error())?;
+        if deliveries.is_empty() {
+            self.outbox_flush_cursor = None;
+            return Ok(());
+        }
+        let mut sent_bytes = 0;
         let mut last_error = None;
         for delivery in deliveries {
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            let previous_cursor = self.outbox_flush_cursor.clone();
+            self.outbox_flush_cursor = Some(delivery.delivery_id.clone());
             if self.sent_delivery_ids.contains(&delivery.delivery_id) {
                 continue;
             }
@@ -4302,47 +4431,15 @@ where
             {
                 continue;
             }
-            if let Some(job_id) = active_delivery_job_id(&delivery.message)
-                && !self.active.contains_key(job_id)
-            {
-                match &delivery.message {
-                    // Durable Control Plane frames must still flush after the
-                    // Worker drops an in-memory Job. Blocking RuntimeEvent /
-                    // JobOutcome / diagnostic artifact frames here strands
-                    // verification evidence forever and leaves Delivery
-                    // verdict=null even when Core already produced
-                    // independent-verification-result. The frame lease is the
-                    // authority; Server validates fencing. Candidate uploads
-                    // remain gated by the pending-candidate checks below.
-                    ExecutionPortMessage::RuntimeEventMessage(_)
-                    | ExecutionPortMessage::ModelChunkMessage(_)
-                    | ExecutionPortMessage::JobOutcomeMessage(_)
-                    | ExecutionPortMessage::ArtifactChunkMessage(_)
-                    | ExecutionPortMessage::ArtifactOpenMessage(_) => {}
-                    ExecutionPortMessage::ApprovalRequestMessage(_)
-                    | ExecutionPortMessage::InputRequestMessage(_)
-                    | ExecutionPortMessage::ActionEnforcementRequestMessage(_) => {
-                        continue;
-                    }
-                    _ => continue,
-                }
-            }
-            if candidate_delivery_job_id(&delivery.message).is_some_and(|job_id| {
-                !self.pending_candidates.contains_key(job_id)
-                    || !self
-                        .active
-                        .get(job_id)
-                        .is_some_and(|active| active.lifecycle == ActiveJobLifecycle::Running)
-            }) {
+            if !self.durable_delivery_allowed(&delivery)? {
                 continue;
             }
-            if candidate_delivery_job_id(&delivery.message).is_some()
-                && !self
-                    .codex
-                    .candidate_artifact_delivery_allowed(&delivery.message)
-                    .map_err(|_| codex_model_error())?
-            {
-                continue;
+            let frame_bytes = serde_json::to_vec(&delivery.message)
+                .map_err(|_| codex_model_error())?
+                .len();
+            if sent_bytes > 0 && sent_bytes + frame_bytes > MAX_OUTBOX_BATCH_BYTES {
+                self.outbox_flush_cursor = previous_cursor;
+                break;
             }
             let runtime_cursor = match &delivery.message {
                 ExecutionPortMessage::RuntimeEventMessage(event) => {
@@ -4351,16 +4448,16 @@ where
                 _ => None,
             };
             let delivery_id = delivery.delivery_id.clone();
-            // One rejected/unreachable frame must not poison the rest of the
-            // durable evidence queue. Continue sending remaining pending
-            // frames (especially runtime.event beside a diagnostic chunk)
-            // and report the last transport error after the pass.
-            if let Err(error) = self.send_retained_delivery(delivery).await {
-                if std::env::var_os("WWC_WORKER_POLL_DEBUG").is_some() {
-                    eprintln!(
-                        "flush_durable frame failed delivery={delivery_id}: {:?}",
-                        error.code
-                    );
+            sent_bytes += frame_bytes;
+            // Finish an in-flight exchange under the port's own timeout. In
+            // particular, do not cancel its receipt/accounting commit halfway.
+            let sent = self.send_retained_delivery(delivery).await;
+            if let Err(error) = sent {
+                if error.code != WorkerErrorCode::ExecutionMessageRejected {
+                    // Keep the refused frame first on retry. Worker-wide
+                    // failure yields immediately to control intake/heartbeat.
+                    self.outbox_flush_cursor = previous_cursor;
+                    return Err(error);
                 }
                 last_error = Some(error);
                 continue;

@@ -46,6 +46,7 @@ winwincode-storage.workspace = true
 winwincode-worker = { path = "../winwincode-worker", optional = true }
 
 [dev-dependencies]
+winwincode-codex = { path = "../winwincode-codex", features = ["test-support"] }
 rcgen.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "signal"] }
 tokio-rustls.workspace = true

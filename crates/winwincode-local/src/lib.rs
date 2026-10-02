@@ -533,6 +533,14 @@ where
 {
     type Error = LocalLauncherError;
 
+    fn failure_kind(error: &Self::Error) -> winwincode_worker::ExecutionPortFailureKind {
+        if error.kind() == LocalLauncherErrorKind::ExecutionPortFrame {
+            winwincode_worker::ExecutionPortFailureKind::MessageRejected
+        } else {
+            winwincode_worker::ExecutionPortFailureKind::Unavailable
+        }
+    }
+
     fn send(
         &mut self,
         message: ExecutionPortMessage,

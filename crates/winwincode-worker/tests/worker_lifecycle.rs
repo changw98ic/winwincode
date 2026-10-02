@@ -176,6 +176,10 @@ type TestFuture<'a, Output> = Pin<Box<dyn Future<Output = Output> + 'a>>;
 struct RecordingPort {
     messages: Rc<RefCell<Vec<ExecutionPortMessage>>>,
     failures_remaining: Rc<Cell<usize>>,
+    backpressured: Rc<Cell<bool>>,
+    attempts: Rc<Cell<usize>>,
+    latency: Rc<Cell<std::time::Duration>>,
+    reject_next: Rc<Cell<bool>>,
 }
 
 impl RecordingPort {
@@ -183,6 +187,7 @@ impl RecordingPort {
         Self {
             messages: Rc::new(RefCell::new(Vec::new())),
             failures_remaining: Rc::new(Cell::new(1)),
+            ..Self::default()
         }
     }
 
@@ -191,20 +196,54 @@ impl RecordingPort {
     }
 }
 
+#[derive(Debug)]
+enum RecordingPortError {
+    Unavailable,
+    Backpressure,
+    MessageRejected,
+}
+
 impl WorkerExecutionPort for RecordingPort {
-    type Error = ();
+    type Error = RecordingPortError;
+
+    fn failure_kind(error: &Self::Error) -> winwincode_codex::ExecutionPortFailureKind {
+        match error {
+            RecordingPortError::Backpressure => {
+                winwincode_codex::ExecutionPortFailureKind::Backpressure
+            }
+            RecordingPortError::Unavailable => {
+                winwincode_codex::ExecutionPortFailureKind::Unavailable
+            }
+            RecordingPortError::MessageRejected => {
+                winwincode_codex::ExecutionPortFailureKind::MessageRejected
+            }
+        }
+    }
 
     fn send(
         &mut self,
         message: ExecutionPortMessage,
     ) -> impl Future<Output = Result<(), Self::Error>> {
-        if self.failures_remaining.get() > 0 {
-            self.failures_remaining
-                .set(self.failures_remaining.get().saturating_sub(1));
-            return std::future::ready(Err(()));
-        }
-        self.messages.borrow_mut().push(message);
-        std::future::ready(Ok(()))
+        Box::pin(async move {
+            self.attempts.set(self.attempts.get() + 1);
+            if self.reject_next.replace(false) {
+                return Err(RecordingPortError::MessageRejected);
+            }
+            if self.backpressured.get() {
+                return Err(RecordingPortError::Backpressure);
+            }
+            if self.failures_remaining.get() > 0 {
+                self.failures_remaining
+                    .set(self.failures_remaining.get().saturating_sub(1));
+                return Err(RecordingPortError::Unavailable);
+            }
+            let latency = self.latency.get();
+            if !latency.is_zero() {
+                tokio::time::sleep(latency).await;
+            }
+            self.messages.borrow_mut().push(message);
+            Ok(())
+        })
     }
 }
 
@@ -1404,7 +1443,8 @@ fn acknowledge_candidate<'a>(
                 )),
                 now(),
             )
-            .await
+            .await?;
+        worker.flush_durable_outbox().await
     })
 }
 
@@ -3836,9 +3876,168 @@ async fn replacement_open_can_finish_the_writer_with_its_durable_completed_prede
         .accept_control(&ExecutionPortMessage::ArtifactAckMessage(ack), now())
         .await
         .unwrap();
+    worker.flush_durable_outbox().await.unwrap();
     let outcomes = observed_outcomes(&messages);
     assert_eq!(outcomes.len(), 1);
     assert_eq!(outcomes[0].outcome.artifacts, vec![predecessor]);
+}
+
+#[tokio::test]
+async fn worker_backpressure_stops_the_batch_without_marking_refused_frames_sent() {
+    let port = RecordingPort::default();
+    let blocked = Rc::clone(&port.backpressured);
+    let attempts = Rc::clone(&port.attempts);
+    let messages = Rc::clone(&port.messages);
+    let latency = Rc::clone(&port.latency);
+    let reject_next = Rc::clone(&port.reject_next);
+    let codex = FakeCodex::with_threads([thread('A')]);
+    let pump = codex.clone();
+    let mut worker = test_worker(worker_config(1), port, codex);
+    register(&mut worker).await;
+    worker
+        .accept_control(
+            &ExecutionPortMessage::JobDispatchMessage(dispatch('A', delivery_scope('A'))),
+            now(),
+        )
+        .await
+        .unwrap();
+    let active = worker.active_jobs()[0].clone();
+    let template: RuntimeEventMessage = serde_json::from_value(serde_json::json!({
+        "kind":"runtime.event", "schemaVersion":SchemaVersion::WinwincodeV1,
+        "messageId":id("xmsg",'Z'), "sentAt":now(), "lease":active.lease,
+        "workerSessionId":active.worker_session_id, "sessionIdentity":active.session_identity,
+        "codexThreadId":active.codex_thread_id,
+        "event":{"eventId":id("evt",'Z'), "sequence":1, "category":"command",
+            "occurredAt":now(), "summary":"durable evidence"}
+    }))
+    .unwrap();
+    for index in 1..=256 {
+        let mut frame = template.clone();
+        frame.message_id = ExecutionMessageId(format!("xmsg_{:026}", index + 1000));
+        frame.event.event_id = ExecutionEventId(format!("evt_{index:026}"));
+        frame.event.sequence = ExecutionSequence(index);
+        pump.clone()
+            .retain_execution_delivery(&ExecutionPortMessage::RuntimeEventMessage(frame))
+            .unwrap();
+    }
+    blocked.set(true);
+    let before = attempts.get();
+    let error = worker.flush_durable_outbox().await.unwrap_err();
+    assert_eq!(error.code, WorkerErrorCode::ExecutionBackpressure);
+    assert_eq!(
+        attempts.get() - before,
+        1,
+        "first worker-wide rejection yields the batch"
+    );
+    assert_eq!(pump.state.lock().unwrap().pending_delivery_ids.len(), 256);
+    blocked.set(false);
+    reject_next.set(true);
+    let before = attempts.get();
+    let error = worker.flush_durable_outbox().await.unwrap_err();
+    assert_eq!(error.code, WorkerErrorCode::ExecutionMessageRejected);
+    assert!(
+        attempts.get() - before > 1 && attempts.get() - before <= 64,
+        "one permanently rejected frame does not stop the other evidence in this bounded batch"
+    );
+    assert!(
+        pump.state
+            .lock()
+            .unwrap()
+            .pending_delivery_ids
+            .contains(&format!("xmsg_{:026}", 1001))
+    );
+    latency.set(std::time::Duration::from_millis(100));
+    let before = attempts.get();
+    worker.flush_durable_outbox().await.unwrap();
+    assert!(
+        attempts.get() - before <= 3,
+        "250 ms budget yields after the current exchange"
+    );
+    let before = attempts.get();
+    worker.heartbeat(now()).await.unwrap();
+    assert_eq!(
+        attempts.get() - before,
+        1,
+        "heartbeat never scans the business outbox"
+    );
+    latency.set(std::time::Duration::ZERO);
+    let before = attempts.get();
+    worker.flush_durable_outbox().await.unwrap();
+    assert!(attempts.get() - before <= 64, "each turn is bounded");
+    for _ in 0..8 {
+        worker.flush_durable_outbox().await.unwrap();
+    }
+    assert_eq!(
+        messages
+            .borrow()
+            .iter()
+            .filter(|message| matches!(message, ExecutionPortMessage::RuntimeEventMessage(_)))
+            .count(),
+        256
+    );
+}
+
+#[tokio::test]
+async fn artifact_ack_consumption_does_not_depend_on_followup_transport() {
+    let port = RecordingPort::default();
+    let failures = port.failures_handle();
+    let messages = Rc::clone(&port.messages);
+    let codex = FakeCodex::with_threads([thread('A')]);
+    let pump = codex.clone();
+    let mut worker = test_worker(worker_config(1), port, codex);
+    register(&mut worker).await;
+    worker
+        .accept_control(
+            &ExecutionPortMessage::JobDispatchMessage(writer_dispatch('A')),
+            now(),
+        )
+        .await
+        .unwrap();
+    let active = worker.active_jobs()[0].clone();
+    std::fs::write(
+        pump.workspace(&active.codex_thread_id)
+            .join("candidate.txt"),
+        b"candidate\n",
+    )
+    .unwrap();
+    pump.queue_poll(
+        &active.codex_thread_id,
+        Ok(CodexPoll::Completed(CodexTurnCompletion {
+            summary: secret_safe_runtime_summary("writer completed").unwrap(),
+            artifacts: vec![],
+            usage: Some(measured_completion_usage()),
+        })),
+    );
+    worker.poll_codex_boxed().await.unwrap();
+    let artifact = observed_candidate_reference(&messages);
+    acknowledge_candidate(&mut worker, &active, &artifact, 0, 'O')
+        .await
+        .unwrap();
+    failures.set(1);
+    worker
+        .accept_control(
+            &ExecutionPortMessage::ArtifactAckMessage(candidate_ack(&active, &artifact, 1, 'F')),
+            now(),
+        )
+        .await
+        .expect("durably consumed ACK can be confirmed while outcome transport is unavailable");
+    assert_eq!(
+        failures.get(),
+        1,
+        "control consumption never attempts followup IO"
+    );
+    assert_no_outcome(&messages);
+    assert!(worker.active_jobs().is_empty());
+    assert!(pump.state.lock().unwrap().durable_deliveries.iter().any(
+        |delivery| matches!(&delivery.message, ExecutionPortMessage::JobOutcomeMessage(outcome)
+            if outcome.outcome.artifacts == vec![artifact.clone()])
+    ));
+    worker
+        .flush_durable_outbox()
+        .await
+        .expect_err("outcome remains retryable");
+    worker.flush_durable_outbox().await.unwrap();
+    assert_eq!(observed_outcomes(&messages).len(), 1);
 }
 
 #[tokio::test]
@@ -4141,13 +4340,17 @@ async fn duplicate_final_candidate_ack_after_outcome_send_loss_replays_one_origi
         .expect("ack candidate open");
     let final_ack = candidate_ack(&active, &artifact, 1, 'F');
     failures.set(1);
-    let failure = first
+    first
         .accept_control(
             &ExecutionPortMessage::ArtifactAckMessage(final_ack.clone()),
             now(),
         )
         .await
-        .expect_err("outcome transport fails after durable retention");
+        .expect("final ACK is consumed before outcome transport");
+    let failure = first
+        .flush_durable_outbox()
+        .await
+        .expect_err("outcome transport remains retryable");
     assert_eq!(failure.code, WorkerErrorCode::ExecutionPort);
     assert_no_outcome(&first_messages);
 
@@ -4166,7 +4369,11 @@ async fn duplicate_final_candidate_ack_after_outcome_send_loss_replays_one_origi
             now(),
         )
         .await
-        .expect("restart-first duplicate final ACK flushes retained outcome");
+        .expect("restart-first duplicate final ACK consumes retained receipt");
+    restarted
+        .flush_durable_outbox()
+        .await
+        .expect("driver flushes retained outcome");
     restarted
         .accept_control(&ExecutionPortMessage::ArtifactAckMessage(final_ack), now())
         .await
@@ -4977,9 +5184,13 @@ async fn pending_runtime_and_diagnostic_artifact_flush_after_server_restart_wind
     // frame even though the in-memory Job is already gone.
     failures.set(0);
     worker
+        .flush_durable_outbox()
+        .await
+        .expect("drive flush after Server restart");
+    worker
         .heartbeat(now())
         .await
-        .expect("heartbeat flush after Server restart");
+        .expect("heartbeat after Server restart");
     let pending_after = pump.pending_kinds();
     assert!(
         !pending_after.iter().any(|kind| matches!(

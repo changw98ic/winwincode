@@ -1169,6 +1169,7 @@ fn input_response(request: &InputRequestMessage) -> InputResponseMessage {
 #[derive(Clone, Default)]
 struct RecordedPort {
     messages: std::sync::Arc<Mutex<Vec<ExecutionPortMessage>>>,
+    failures_remaining: std::sync::Arc<AtomicU64>,
 }
 
 impl RecordedPort {
@@ -1184,6 +1185,15 @@ impl winwincode_codex::WorkerExecutionPort for RecordedPort {
         &mut self,
         message: ExecutionPortMessage,
     ) -> impl Future<Output = Result<(), Self::Error>> {
+        if self
+            .failures_remaining
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return std::future::ready(Err(()));
+        }
         self.messages
             .lock()
             .expect("lock Worker messages")
@@ -4642,7 +4652,18 @@ fn production_worker_cancellation_closes_the_same_gateway_exchange() {
             })
             .expect("cancelled terminal outcome");
         assert_eq!(outcome.outcome.status, ExecutionOutcomeStatus::Cancelled);
-        assert!(outcome.outcome.usage.is_none());
+        let usage = outcome
+            .outcome
+            .usage
+            .as_ref()
+            .expect("cancelled model attempt preserves unknown accounting");
+        assert_eq!(
+            usage.accounting_status,
+            winwincode_execution_port::generated::ExecutionOutcomeUsageAccountingStatus::Unknown
+        );
+        assert_eq!(usage.tokens, None);
+        assert_eq!(usage.known_tokens, 0);
+        assert_eq!(usage.cost_microunits, None);
         worker
             .shutdown(at("2030-01-01T00:00:03.000Z"))
             .await
@@ -5723,6 +5744,8 @@ fn real_shell_approval_and_action_receipt_reach_one_kernel_handler() {
                 .expect("approved shell changed detached source checkout"),
             "pub fn fixture_value() -> u64 { 2 }\n"
         );
+        port.failures_remaining.store(1, Ordering::SeqCst);
+        let before_ack = port.messages().len();
         worker
             .accept_control(
                 &ExecutionPortMessage::ArtifactAckMessage(candidate_ack(&active, &artifact, 0)),
@@ -5737,6 +5760,21 @@ fn real_shell_approval_and_action_receipt_reach_one_kernel_handler() {
             )
             .await
             .expect("ack detached candidate final chunk");
+        assert_eq!(
+            port.messages().len(),
+            before_ack,
+            "durable Pending/final ACK intake sends no followup frames"
+        );
+        assert_eq!(port.failures_remaining.load(Ordering::SeqCst), 1);
+        worker
+            .flush_durable_outbox()
+            .await
+            .expect_err("retained terminal retries transport independently of ACK confirmation");
+        worker
+            .flush_durable_outbox()
+            .await
+            .expect("driver sends original retained outcome");
+
         let messages = port.messages();
         assert!(
             messages.iter().any(|message| {

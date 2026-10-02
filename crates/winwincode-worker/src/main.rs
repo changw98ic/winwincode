@@ -285,9 +285,10 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
             _ = tokio::signal::ctrl_c() => break,
             _ = heartbeat.tick() => {
                 let now = now_instant()?;
-                if Box::pin(worker.heartbeat(now.clone())).await.is_ok() {
-                    Box::pin(drain_controls(&mut worker, &handle)).await?;
-                }
+                Box::pin(drain_controls(&mut worker, &handle)).await?;
+                let _ = Box::pin(worker.heartbeat(now.clone())).await;
+                // A refused upstream frame still carries valid controls.
+                Box::pin(drain_controls(&mut worker, &handle)).await?;
             }
             _ = drive.tick() => {
                 let now = now_instant()?;
@@ -296,10 +297,16 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
                 // Server restart / Connection-refused window cannot strand
                 // runtime.event / artifact.chunk / JobOutcome in the outbox.
                 if worker.lifecycle() == WorkerLifecycleState::Active
-                    && Box::pin(worker.flush_durable_outbox()).await.is_err()
-                    && env::var_os("WWC_WORKER_POLL_DEBUG").is_some()
+                    && let Err(error) = Box::pin(worker.flush_durable_outbox()).await
                 {
-                    eprintln!("winwincode-worker: durable outbox flush retry failed");
+                    if env::var_os("WWC_WORKER_POLL_DEBUG").is_some() {
+                        eprintln!("winwincode-worker: durable outbox flush retry failed: {:?}", error.code);
+                    }
+                    if error.code == winwincode_worker::WorkerErrorCode::ExecutionBackpressure {
+                        // Polling Core performs another flush. Yield first so
+                        // the next turn can consume and confirm queued controls.
+                        continue;
+                    }
                 }
                 let _ = Box::pin(worker.poll_codex(now)).await;
                 if exit_after_work && worker.work_drained() { break; }
@@ -344,7 +351,11 @@ where
                     );
                 }
                 handle.retry(&delivery_id)?;
-                if error.code == winwincode_worker::WorkerErrorCode::ExecutionPort {
+                if matches!(
+                    error.code,
+                    winwincode_worker::WorkerErrorCode::ExecutionPort
+                        | winwincode_worker::WorkerErrorCode::ExecutionBackpressure
+                ) {
                     return Ok(());
                 }
                 // Keep the process alive while durable Worker→Server evidence

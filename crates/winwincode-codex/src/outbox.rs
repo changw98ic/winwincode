@@ -164,6 +164,35 @@ impl ExecutionOutbox {
         .collect()
     }
 
+    pub(crate) fn pending_batch(
+        &self,
+        after_delivery: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<DurableExecutionDelivery>, AdapterStoreError> {
+        let connection = self.store.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT delivery_id, frame_json FROM execution_outbox
+             WHERE (state = ?1 OR acknowledgement_required = 1)
+               AND position > COALESCE((SELECT position FROM execution_outbox WHERE delivery_id = ?2), 0)
+             ORDER BY position LIMIT ?3",
+        ).map_err(|_| AdapterStoreError::Unavailable)?;
+        let rows = statement
+            .query_map(
+                params![
+                    PENDING,
+                    after_delivery,
+                    i64::try_from(limit).map_err(|_| AdapterStoreError::Conflict)?
+                ],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+        rows.map(|row| {
+            let (id, frame) = row.map_err(|_| AdapterStoreError::Unavailable)?;
+            decode_delivery(id, &frame)
+        })
+        .collect()
+    }
+
     /// Returns the highest numeric Worker message id retained in the outbox.
     ///
     /// Transport-only frames remain durable after a successful send so their

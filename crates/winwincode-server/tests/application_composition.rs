@@ -1366,3 +1366,7 @@ fn remote_heartbeat_reaches_shared_core_after_authentication() {
     drop(application);
     fs::remove_dir_all(root).expect("cleanup");
 }
+
+#[cfg(all(unix, feature = "local-worker"))]
+#[path = "support/remote_worker_upload.rs"]
+mod remote_worker_upload;
