@@ -148,6 +148,8 @@ impl DeviceModels {
     pub(crate) fn send(
         &mut self,
         message: &ExecutionPortMessage,
+        start_deadline: Option<std::time::Instant>,
+        start_guard: Option<winwincode_codex::LocalModelStartGuard>,
     ) -> Result<DeviceModelSendOutcome, DeviceProviderError> {
         match message {
             ExecutionPortMessage::ModelOpenMessage(open) => {
@@ -167,7 +169,10 @@ impl DeviceModels {
                 self.pending.insert(id.clone(), digest);
                 // ponytail: bounded blocking HTTPS runs outside the Worker loop; adapter deadlines
                 // bound cancellation cleanup while heartbeats and tool approval remain responsive.
-                if self.start_provider(open).is_err() {
+                if self
+                    .start_provider(open, start_deadline, start_guard)
+                    .is_err()
+                {
                     self.pending.remove(&id);
                     return Ok(DeviceModelSendOutcome::NotStarted);
                 }
@@ -192,6 +197,8 @@ impl DeviceModels {
     fn start_provider(
         &mut self,
         open: &winwincode_execution_port::generated::ModelOpenMessage,
+        start_deadline: Option<std::time::Instant>,
+        start_guard: Option<winwincode_codex::LocalModelStartGuard>,
     ) -> std::io::Result<()> {
         #[cfg(any(test, feature = "test-support"))]
         if std::mem::take(&mut self.fail_next_start) {
@@ -204,7 +211,18 @@ impl DeviceModels {
             .name("device-provider".to_owned())
             .spawn(move || {
                 let chunks = DeviceProviderStore::open(&directory)
-                    .and_then(|store| store.execute_model(&open))
+                    .and_then(|store| {
+                        store.execute_model_authorized(&open, || {
+                            start_guard.as_ref().map_or_else(
+                                || {
+                                    start_deadline.is_some_and(|deadline| {
+                                        std::time::Instant::now() < deadline
+                                    })
+                                },
+                                |check| check(),
+                            )
+                        })
+                    })
                     .unwrap_or_else(|_| {
                         vec![model_failure(
                             &open,
@@ -214,6 +232,13 @@ impl DeviceModels {
                 let _ = sender.send((open.model_exchange_id.0, chunks));
             })
             .map(|_| ())
+    }
+
+    pub(crate) fn start_recorded(
+        &self,
+        open: &winwincode_execution_port::generated::ModelOpenMessage,
+    ) -> Result<bool, DeviceProviderError> {
+        DeviceProviderStore::open(&self.directory)?.model_start_recorded(open)
     }
 
     pub(crate) fn retry_chunk(&mut self, chunk: ModelChunkMessage) {
@@ -453,26 +478,48 @@ mod tests {
                 .insert(format!("occupied-{slot}"), "digest".into());
         }
         assert_eq!(
-            models.send(&open).unwrap(),
+            models
+                .send(
+                    &open,
+                    Some(std::time::Instant::now() + std::time::Duration::from_mins(1)),
+                    None,
+                )
+                .unwrap(),
             DeviceModelSendOutcome::NotStarted
         );
         models.pending.clear();
         models.fail_next_start = true;
         assert_eq!(
-            models.send(&open).unwrap(),
+            models
+                .send(
+                    &open,
+                    Some(std::time::Instant::now() + std::time::Duration::from_mins(1)),
+                    None,
+                )
+                .unwrap(),
             DeviceModelSendOutcome::NotStarted
         );
         assert!(
             models.pending.is_empty(),
             "thread refusal leaves no started call"
         );
-        models.send(&open).unwrap();
+        models
+            .send(
+                &open,
+                Some(std::time::Instant::now() + std::time::Duration::from_mins(1)),
+                None,
+            )
+            .unwrap();
         let ExecutionPortMessage::ModelOpenMessage(open) = open else {
             unreachable!()
         };
         assert!(models.pending.contains_key(&open.model_exchange_id.0));
         models
-            .send(&ExecutionPortMessage::ModelOpenMessage(open))
+            .send(
+                &ExecutionPortMessage::ModelOpenMessage(open),
+                Some(std::time::Instant::now() + std::time::Duration::from_mins(1)),
+                None,
+            )
             .unwrap();
         assert_eq!(
             models.pending.len(),

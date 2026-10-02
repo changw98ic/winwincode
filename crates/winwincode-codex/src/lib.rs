@@ -51,7 +51,7 @@ pub use contract::{
     DelegatedLoopPhase, DelegatedLoopStopFact, DelegatedLoopTransition,
     DelegatedLoopTransitionOutcome, DelegatedObserverPreflight, DelegatedObserverPreflightOutcome,
     DelegatedObserverSettlement, DurableExecutionDelivery, ExecutionPortFailureKind,
-    WorkerExecutionPort, delegated_loop_turn_id, secret_safe_runtime_summary,
+    LocalModelStartGuard, WorkerExecutionPort, delegated_loop_turn_id, secret_safe_runtime_summary,
 };
 pub use diagnostic_artifact_outbox::{
     DiagnosticArtifactAckOutcome, DiagnosticArtifactAuthority, DiagnosticArtifactUpload,

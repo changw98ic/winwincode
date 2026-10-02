@@ -32,6 +32,7 @@ use crate::{
 };
 
 enum DeviceModelFailure {
+    LeaseExpired,
     RequestInvalid,
     InvalidConfiguration,
     Unavailable,
@@ -40,6 +41,7 @@ enum DeviceModelFailure {
 impl DeviceModelFailure {
     const fn code(&self) -> &'static str {
         match self {
+            Self::LeaseExpired => "DEVICE_MODEL_START_LEASE_EXPIRED",
             Self::RequestInvalid => "DEVICE_PROVIDER_REQUEST_INVALID",
             Self::InvalidConfiguration => "DEVICE_PROVIDER_INVALID_CONFIGURATION",
             Self::Unavailable => "DEVICE_PROVIDER_UNAVAILABLE",
@@ -69,6 +71,54 @@ impl DeviceProviderStore {
         &self,
         open: &ModelOpenMessage,
     ) -> Result<Vec<ModelChunkMessage>, DeviceProviderError> {
+        self.execute_model_authorized(open, || true)
+    }
+
+    /// Restores exact previous exchanges, but gates every new Provider invocation
+    /// on the Worker's current lease deadline, including time spent preparing input.
+    ///
+    /// # Errors
+    /// Rejects conflicting exchange identities and unavailable durable storage.
+    pub fn execute_model_authorized(
+        &self,
+        open: &ModelOpenMessage,
+        can_start: impl Fn() -> bool,
+    ) -> Result<Vec<ModelChunkMessage>, DeviceProviderError> {
+        self.execute_model_with(open, &can_start, || self.invoke_model(open, &can_start))
+    }
+
+    /// Checks exact durable exchange identity without creating a first-start record.
+    ///
+    /// # Errors
+    /// Rejects a reused identity with different content or unavailable storage.
+    pub fn model_start_recorded(
+        &self,
+        open: &ModelOpenMessage,
+    ) -> Result<bool, DeviceProviderError> {
+        let stored: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT digest FROM exchanges WHERE exchange_id=?1 AND cancelled=0",
+                [&open.model_exchange_id.0],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(stored) = stored else {
+            return Ok(false);
+        };
+        let digest = format!("{:x}", Sha256::digest(serde_json::to_vec(open)?));
+        if stored != digest {
+            return Err(DeviceProviderError);
+        }
+        Ok(true)
+    }
+
+    fn execute_model_with(
+        &self,
+        open: &ModelOpenMessage,
+        can_start: &impl Fn() -> bool,
+        invoke: impl FnOnce() -> Result<Vec<ModelChunkMessage>, DeviceModelFailure>,
+    ) -> Result<Vec<ModelChunkMessage>, DeviceProviderError> {
         if self.model_cancelled(&open.model_exchange_id.0)? {
             return Ok(Vec::new());
         }
@@ -85,6 +135,12 @@ impl DeviceProviderStore {
             .map_err(|_| DeviceProviderError)?;
         let request_open = serde_json::to_string(open)?;
         let digest = format!("{:x}", Sha256::digest(request_open.as_bytes()));
+        if !self.model_start_recorded(open)? && !can_start() {
+            return Ok(vec![model_failure(
+                open,
+                DeviceModelFailure::LeaseExpired.code(),
+            )]);
+        }
         let inserted = self.connection.execute(
             "INSERT OR IGNORE INTO exchanges (exchange_id, digest, request_open) SELECT ?1, ?2, ?3 WHERE NOT EXISTS(SELECT 1 FROM accounting_closed_attempts WHERE job_id=?4 AND attempt=?5)",
             params![open.model_exchange_id.0, digest, request_open,open.lease.job_id.0,open.lease.attempt],
@@ -119,9 +175,12 @@ impl DeviceProviderStore {
             cancellation.cancel();
             return Ok(Vec::new());
         }
-        let chunks = self
-            .invoke_model(open)
-            .unwrap_or_else(|error| vec![model_failure(open, error.code())]);
+        let chunks = if can_start() {
+            invoke()
+        } else {
+            Err(DeviceModelFailure::LeaseExpired)
+        }
+        .unwrap_or_else(|error| vec![model_failure(open, error.code())]);
         // Paid receipts survive cancellation even when runtime replay is fenced.
         self.connection.execute("UPDATE exchanges SET accounting_chunks=?1 WHERE exchange_id=?2 AND accounting_chunks IS NULL",params![serde_json::to_string(&chunks)?,open.model_exchange_id.0])?;
         self.connection.execute(
@@ -135,6 +194,7 @@ impl DeviceProviderStore {
     fn invoke_model(
         &self,
         open: &ModelOpenMessage,
+        can_start: &impl Fn() -> bool,
     ) -> Result<Vec<ModelChunkMessage>, DeviceModelFailure> {
         let mut payload =
             validated_model_payload(open).map_err(|_| DeviceModelFailure::RequestInvalid)?;
@@ -186,6 +246,9 @@ impl DeviceProviderStore {
         let mut leak_gate = CredentialLeakGate::new();
         leak_gate.track_secret(&secret);
         self.retain_prepared_payload(open, &payload)?;
+        if !can_start() {
+            return Err(DeviceModelFailure::LeaseExpired);
+        }
         if let Err(error) = adapter.open(
             &ProviderAdapterInvocation {
                 model_exchange_id: &open.model_exchange_id,
@@ -468,8 +531,12 @@ fn provider_error_message(kind: crate::HttpsSseProviderErrorKind) -> &'static st
 pub fn model_failure(open: &ModelOpenMessage, message: &'static str) -> ModelChunkMessage {
     let mut chunk = model_chunk(open, 1);
     chunk.error = Some(ExecutionPortError {
-        code: serde_json::from_value(serde_json::Value::String(message.to_owned()))
-            .unwrap_or(ExecutionPortErrorCode::ModelStreamFailed),
+        code: if message == "DEVICE_MODEL_START_LEASE_EXPIRED" {
+            ExecutionPortErrorCode::LeaseExpired
+        } else {
+            serde_json::from_value(serde_json::Value::String(message.to_owned()))
+                .unwrap_or(ExecutionPortErrorCode::ModelStreamFailed)
+        },
         message: message.to_owned(),
         retryable: false,
     });
@@ -619,6 +686,198 @@ mod tests {
         }
         drop(store);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn first_invocation_is_gated_but_exact_recovery_never_calls_again() {
+        use std::cell::Cell;
+        let root = std::env::temp_dir().join(format!(
+            "wwc-first-model-authority-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = DeviceProviderStore::open(&root).unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/contracts/execution-port.valid.json"
+        ))
+        .unwrap();
+        let open: ModelOpenMessage = serde_json::from_value(
+            fixture["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|message| message["kind"] == "model.open")
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        let calls = Cell::new(0);
+        let invoke = || {
+            calls.set(calls.get() + 1);
+            let mut chunk = model_chunk(&open, 1);
+            chunk.is_final = true;
+            Ok(vec![chunk])
+        };
+        let refused = store.execute_model_with(&open, &|| false, invoke).unwrap();
+        assert_eq!(
+            refused[0].error.as_ref().unwrap().code,
+            ExecutionPortErrorCode::LeaseExpired
+        );
+        assert_eq!(calls.get(), 0);
+        assert!(!store.model_start_recorded(&open).unwrap());
+        // The same identity becomes eligible after a legitimate Worker renewal.
+        let completed = store.execute_model_with(&open, &|| true, invoke).unwrap();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(
+            store.execute_model_with(&open, &|| false, invoke).unwrap(),
+            completed
+        );
+        assert_eq!(
+            calls.get(),
+            1,
+            "expired recovery restores facts without another invocation"
+        );
+        let mut changed = open.clone();
+        changed.request_id.0.push('X');
+        assert!(store.model_start_recorded(&changed).is_err());
+        assert!(
+            store
+                .execute_model_with(&changed, &|| true, invoke)
+                .is_err()
+        );
+        assert_eq!(calls.get(), 1);
+        // Expiry after durable admission still prevents the first network invocation.
+        let mut delayed = open.clone();
+        delayed.model_exchange_id.0.push('Y');
+        let checks = Cell::new(0);
+        let delayed_result = store
+            .execute_model_with(
+                &delayed,
+                &|| {
+                    checks.set(checks.get() + 1);
+                    checks.get() == 1
+                },
+                invoke,
+            )
+            .unwrap();
+        assert_eq!(
+            delayed_result[0].error.as_ref().unwrap().code,
+            ExecutionPortErrorCode::LeaseExpired
+        );
+        assert_eq!(calls.get(), 1);
+        assert_eq!(
+            store
+                .execute_model_with(&delayed, &|| false, invoke)
+                .unwrap(),
+            delayed_result
+        );
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn expiry_during_preparation_stops_before_the_real_adapter_open() {
+        use std::{
+            cell::Cell,
+            io::ErrorKind,
+            net::TcpListener,
+            sync::{
+                Arc,
+                atomic::{AtomicBool, AtomicUsize, Ordering},
+            },
+        };
+        let root = std::env::temp_dir().join(format!(
+            "wwc-model-preparation-expiry-{}",
+            std::process::id()
+        ));
+        let store = DeviceProviderStore::open(&root).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let stopped = Arc::new(AtomicBool::new(false));
+        let counted = Arc::clone(&calls);
+        let stop = Arc::clone(&stopped);
+        let server = std::thread::spawn(move || {
+            while !stop.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok(_) => {
+                        counted.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                    Err(error) => panic!("fixture accept failed: {error}"),
+                }
+            }
+        });
+        let config = serde_json::json!({"providerId":"lease-fixture","displayName":"fixture","endpoint":format!("https://127.0.0.1:{port}/v1/responses"),"protocol":"canonical","modelIds":["fixture-model"],"enabled":true});
+        store
+            .connection
+            .execute(
+                "INSERT INTO providers VALUES (?1,?2,?3)",
+                params![
+                    "lease-fixture",
+                    config.to_string(),
+                    b"fixture-only-key".as_slice()
+                ],
+            )
+            .unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/contracts/execution-port.valid.json"
+        ))
+        .unwrap();
+        let mut open: ModelOpenMessage = serde_json::from_value(
+            fixture["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|message| message["kind"] == "model.open")
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        let payload = serde_json::to_vec(&serde_json::json!({"provider":"lease-fixture","request":{"model":"fixture-model","stream":true,"input":"fixture"}})).unwrap();
+        open.request.content_type = "application/json".into();
+        open.request.data_base64 = STANDARD.encode(&payload);
+        open.request.payload_digest.0 = format!("sha256:{:x}", Sha256::digest(&payload));
+        let checks = Cell::new(0);
+        let result = store
+            .execute_model_authorized(&open, || {
+                checks.set(checks.get() + 1);
+                checks.get() < 3
+            })
+            .unwrap();
+        stopped.store(true, Ordering::SeqCst);
+        server.join().unwrap();
+        assert_eq!(
+            checks.get(),
+            3,
+            "expiry is rechecked after durable payload preparation"
+        );
+        assert_eq!(
+            result[0].error.as_ref().unwrap().code,
+            ExecutionPortErrorCode::LeaseExpired
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "expired first start never reaches local HTTP fixture"
+        );
+        let prepared: Option<Vec<u8>> = store
+            .connection
+            .query_row(
+                "SELECT prepared_payload FROM exchanges WHERE exchange_id=?1",
+                [&open.model_exchange_id.0],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(prepared, Some(payload));
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

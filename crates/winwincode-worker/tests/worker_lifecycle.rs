@@ -4139,6 +4139,103 @@ async fn candidate_ack_keeps_original_upload_authority_after_current_lease_renew
 }
 
 #[tokio::test]
+async fn deferred_local_model_start_obeys_current_lease_and_keeps_the_original_identity() {
+    for renewed in [false, true] {
+        let codex = FakeCodex::with_threads([thread('A')]);
+        let mut pump = codex.clone();
+        let root = tempfile::tempdir().unwrap();
+        let providers = root.path().join("providers");
+        let mut worker = test_worker(worker_config(1), RecordingPort::default(), codex)
+            .with_device_providers(&providers)
+            .unwrap();
+        register(&mut worker).await;
+        worker
+            .accept_control_and_drive(
+                &ExecutionPortMessage::JobDispatchMessage(dispatch('A', delivery_scope('A'))),
+                now(),
+            )
+            .await
+            .unwrap();
+        let active = worker.active_jobs()[0].clone();
+        let ExecutionPortMessage::ModelOpenMessage(mut open) = execution_port_fixture("model.open")
+        else {
+            unreachable!()
+        };
+        open.lease = active.lease.clone();
+        open.worker_session_id = active.worker_session_id.clone();
+        open.session_identity = active.session_identity.clone();
+        let original = open.clone();
+        let retained = pump
+            .retain_execution_delivery(&ExecutionPortMessage::ModelOpenMessage(open))
+            .unwrap();
+        assert!(worker.inject_device_start_fault());
+        assert_eq!(
+            worker.flush_durable_outbox().await.unwrap_err().code,
+            WorkerErrorCode::ModelStartDeferred
+        );
+        if renewed {
+            let mut lease = active.lease.clone();
+            lease.expires_at = Instant("2027-01-15T08:10:00.000Z".into());
+            worker.accept_control(&ExecutionPortMessage::LeaseRenewMessage(
+                winwincode_execution_port::generated::LeaseRenewMessage {
+                    kind: winwincode_execution_port::generated::LeaseRenewMessageKind::LeaseRenew,
+                    schema_version: SchemaVersion::WinwincodeV1, message_id: ExecutionMessageId(id("xmsg",'R')),
+                    sent_at: now(), request_id: RequestId(id("req",'R')), lease, prior_expires_at: active.lease.expires_at.clone(),
+                }), now()).await.unwrap();
+        }
+        let later = Instant("2027-01-15T08:06:00.000Z".into());
+        worker.heartbeat(later.clone()).await.unwrap();
+        let sent = worker.flush_durable_outbox().await;
+        if renewed {
+            sent.unwrap();
+        } else {
+            assert_eq!(
+                sent.unwrap_err().code,
+                WorkerErrorCode::ExecutionMessageRejected
+            );
+        }
+        let store = winwincode_provider::DeviceProviderStore::open(&providers).unwrap();
+        for _ in 0..100 {
+            if store.list_stored_model_exchanges().unwrap().len() == usize::from(renewed) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            store.list_stored_model_exchanges().unwrap().len(),
+            usize::from(renewed),
+            "an expired unstarted call never enters the Provider execution ledger"
+        );
+        assert!(
+            pump.state
+                .lock()
+                .unwrap()
+                .durable_deliveries
+                .iter()
+                .any(|delivery| delivery.delivery_id == retained.delivery_id
+                    && delivery.message
+                        == ExecutionPortMessage::ModelOpenMessage(original.clone()))
+        );
+        if renewed {
+            for _ in 0..100 {
+                Box::pin(worker.poll_codex(later.clone())).await.unwrap();
+                if pump.state.lock().unwrap().model_open_acknowledged {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            worker.flush_durable_outbox().await.unwrap();
+            assert_eq!(
+                store.list_stored_model_exchanges().unwrap().len(),
+                1,
+                "replaying the same authorized identity cannot start twice"
+            );
+        }
+        worker.shutdown(later).await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn never_started_local_model_retries_through_the_worker_outbox_and_releases_its_request() {
     let port = RecordingPort::default();
     let messages = Rc::clone(&port.messages);

@@ -191,6 +191,12 @@ where
                 worker.lifecycle()
             );
         }
+        if let Some(error) = worker
+            .transport_failure()
+            .or_else(|| worker.required_delivery_failure())
+        {
+            return Err(error.into());
+        }
         Box::pin(drain_controls(worker, handle)).await?;
         if let Some(error) = handle.terminal_error() {
             return Err(error.into());
@@ -297,7 +303,7 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
                 // Server restart / Connection-refused window cannot strand
                 // runtime.event / artifact.chunk / JobOutcome in the outbox.
                 if worker.lifecycle() == WorkerLifecycleState::Active
-                    && let Err(error) = Box::pin(worker.flush_durable_outbox()).await
+                    && let Err(error) = Box::pin(worker.flush_durable_outbox_at(now.clone())).await
                 {
                     if env::var_os("WWC_WORKER_POLL_DEBUG").is_some() {
                         eprintln!("winwincode-worker: durable outbox flush retry failed: {:?}", error.code);
@@ -691,6 +697,137 @@ mod tests {
         ExecutionMode, ObserverMode, configured_observation_model,
         released_worker_execution_mode_required,
     };
+
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "registration integration uses the released helper and persistent adapter for both transport failure classes"
+    )]
+    async fn registration_returns_permanent_worker_failure_and_retries_only_transient_transport() {
+        use super::*;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        use winwincode_codex::{ExecutionPortFailureKind, WorkerExecutionPort};
+        use winwincode_execution_port::generated::{ExecutionPortMessage, WorkerRegisterMessage};
+        struct FailingPort {
+            permanent: bool,
+            calls: Arc<AtomicUsize>,
+        }
+        impl WorkerExecutionPort for FailingPort {
+            type Error = std::io::Error;
+            async fn send(&mut self, _: ExecutionPortMessage) -> Result<(), Self::Error> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Err(std::io::Error::from(if self.permanent {
+                    std::io::ErrorKind::InvalidInput
+                } else {
+                    std::io::ErrorKind::ConnectionRefused
+                }))
+            }
+            fn failure_kind(error: &Self::Error) -> ExecutionPortFailureKind {
+                if error.kind() == std::io::ErrorKind::InvalidInput {
+                    ExecutionPortFailureKind::MessageRejected
+                } else {
+                    ExecutionPortFailureKind::Unavailable
+                }
+            }
+        }
+        for permanent in [true, false] {
+            let root = tempfile::tempdir().unwrap();
+            let executable = env::current_exe().unwrap();
+            let helper = executable
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("winwincode-kernel-helper");
+            let fixture: serde_json::Value = serde_json::from_str(include_str!(
+                "../../../tests/fixtures/contracts/execution-port.valid.json"
+            ))
+            .unwrap();
+            let register: WorkerRegisterMessage = serde_json::from_value(
+                fixture["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|message| message["kind"] == "worker.register")
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap();
+            let config = ProductionCodexConfig::try_new(ProductionCodexOptions {
+                data_directory: root.path().join("codex"),
+                helper_executable: helper.clone(),
+                helper_release_manifest: HelperReleaseManifest::from_test_helper(&helper).unwrap(),
+                provider: "local-fixture".into(),
+                model: "local-fixture".into(),
+                gateway_route: default_model_route(),
+                registered_capabilities: register.capabilities.clone(),
+                discovered_capabilities: Vec::new(),
+                action_signing_key: ActionEnforcementSigningKey::from_bytes([31; 32]).unwrap(),
+                execution_envelope: ExecutionEnvelopeToken {
+                    version: 1,
+                    digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+                },
+                execution_mode: ExecutionMode::React,
+                observer_mode: ObserverMode::Off,
+            })
+            .unwrap();
+            let adapter = ProductionCodexAdapter::open(config).unwrap();
+            let calls = Arc::new(AtomicUsize::new(0));
+            fs::create_dir_all(root.path().join("sources")).unwrap();
+            let runtime = JobWorkspaceRuntime::open(
+                root.path().join("workspaces"),
+                root.path().join("sources"),
+            )
+            .unwrap();
+            let mut worker = WorkerMain::new(
+                WorkerConfig {
+                    worker_id: register.worker_id,
+                    worker_instance_id: register.worker_instance_id,
+                    started_at: register.started_at,
+                    capabilities: register.capabilities,
+                },
+                FailingPort {
+                    permanent,
+                    calls: Arc::clone(&calls),
+                },
+                adapter,
+                runtime,
+            );
+            let handle = RemoteWorkerTransportHandle::empty_for_test();
+            let result = tokio::time::timeout(
+                Duration::from_millis(800),
+                Box::pin(register_until_active(
+                    &mut worker,
+                    &handle,
+                    &register.sent_at,
+                )),
+            )
+            .await;
+            if permanent {
+                let error = result
+                    .expect("permanent refusal must exit the registration loop")
+                    .unwrap_err();
+                assert_eq!(
+                    error
+                        .downcast_ref::<winwincode_worker::WorkerError>()
+                        .unwrap()
+                        .code,
+                    winwincode_worker::WorkerErrorCode::ExecutionMessageRejected
+                );
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+                assert!(!worker.has_pending_durable_evidence());
+            } else {
+                assert!(result.is_err(), "a transient disconnect remains retryable");
+                assert!(calls.load(Ordering::SeqCst) >= 2);
+                assert!(worker.required_delivery_failure().is_none());
+            }
+            assert_eq!(worker.lifecycle(), WorkerLifecycleState::Registering);
+        }
+    }
 
     #[test]
     fn managed_start_gate_requires_the_registered_parent_release() {

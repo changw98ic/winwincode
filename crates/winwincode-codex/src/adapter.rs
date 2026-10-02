@@ -1963,7 +1963,7 @@ impl ProductionCodexAdapter {
         now: &Instant,
     ) -> Result<CodexPoll, ProductionCodexError> {
         if let CodexEventMsg::PatchApplyEnd(patch) = &event.msg {
-            self.record_patch_completion(run_key, patch, now)?;
+            let _ = self.record_patch_completion(run_key, patch, now);
             return self
                 .retain_patch_post_action(run_key, patch, now)
                 .map(|message| {
@@ -1972,17 +1972,22 @@ impl ProductionCodexAdapter {
                     })
                 });
         }
-        if self.record_standalone_performance_event(run_key, &event.msg, now)? {
+        // Errors here come exclusively from auxiliary tool metrics. A known
+        // metrics-only event remains consumed when its best-effort write fails.
+        if self
+            .record_standalone_performance_event(run_key, &event.msg, now)
+            .unwrap_or(true)
+        {
             return Ok(CodexPoll::Pending);
         }
         match event.msg {
             CodexEventMsg::TurnStarted(started) => {
-                self.record_performance_start(
+                let _ = self.record_performance_start(
                     run_key,
                     PerformanceOperationKind::Turn,
                     &started.turn_id,
                     now,
-                )?;
+                );
                 self.accept_turn_started(run_key, &started.turn_id, now)
             }
             CodexEventMsg::TokenCount(token_count) => {
@@ -2618,27 +2623,27 @@ impl ProductionCodexAdapter {
             return Ok(CodexPoll::Pending);
         }
         let command_duration = duration_millis(command_end.duration);
-        self.record_performance_completion(
+        let _ = self.record_performance_completion(
             run_key,
             PerformanceOperationKind::Tool,
             &command_end.call_id,
             now,
             Some(command_duration),
-        )?;
+        );
         if validation_command(&command_end.command) {
-            self.record_performance_start(
+            let _ = self.record_performance_start(
                 run_key,
                 PerformanceOperationKind::Validation,
                 &command_end.call_id,
                 now,
-            )?;
-            self.record_performance_completion(
+            );
+            let _ = self.record_performance_completion(
                 run_key,
                 PerformanceOperationKind::Validation,
                 &command_end.call_id,
                 now,
                 Some(command_duration),
-            )?;
+            );
         }
         let artifact = self.retain_command_output_artifact(run_key, command_end, now)?;
         let Ok(stage) = self.retain_stage_command_end(run_key, command_end, artifact.as_ref(), now)
@@ -3948,6 +3953,87 @@ impl ProductionCodexAdapter {
 
 impl CodexCoreAdapter for ProductionCodexAdapter {
     type Error = ProductionCodexError;
+
+    fn model_start_session_allowed(
+        &mut self,
+        open: &winwincode_execution_port::generated::ModelOpenMessage,
+        parent: &SessionIdentity,
+    ) -> Result<bool, Self::Error> {
+        if open.session_identity == *parent {
+            return Ok(true);
+        }
+        let parent_binding = self
+            .bridge
+            .binding_for_thread(&parent.codex_thread_id)
+            .map_err(map_bridge_error)?;
+        let child_binding = self
+            .bridge
+            .binding_for_thread(&open.session_identity.codex_thread_id)
+            .map_err(map_bridge_error)?;
+        Ok(parent_binding
+            .zip(child_binding)
+            .is_some_and(|(parent_binding, child)| {
+                parent_binding.authority.session_identity == *parent
+                    && child.run_key == parent_binding.run_key
+                    && child.authority.session_identity == open.session_identity
+                    && child.authority.worker_session_id == open.worker_session_id
+                    && child.authority.lease == parent_binding.authority.lease
+            }))
+    }
+
+    fn local_model_start_guard(
+        &mut self,
+        open: &winwincode_execution_port::generated::ModelOpenMessage,
+        now: &Instant,
+        observed_at: std::time::Instant,
+    ) -> Result<Option<crate::LocalModelStartGuard>, Self::Error> {
+        let base =
+            time::OffsetDateTime::parse(&now.0, &time::format_description::well_known::Rfc3339)
+                .map_err(|_| conflict())?;
+        let format = time::format_description::parse(
+            "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z",
+        )
+        .map_err(|_| conflict())?;
+        let source = self.bridge.authority();
+        let authority = ModelLeaseAuthority {
+            lease: open.lease.clone(),
+            worker_session_id: open.worker_session_id.clone(),
+            session_identity: open.session_identity.clone(),
+        };
+        let exchange = open.model_exchange_id.clone();
+        let stream = winwincode_execution_port::typed_replay::stream_key_from_message(
+            &ExecutionPortMessage::ModelOpenMessage(open.clone()),
+        )
+        .map_err(|_| conflict())?
+        .stream;
+        let store = self.store.clone();
+        Ok(Some(Arc::new(move || {
+            let Ok(elapsed) = time::Duration::try_from(observed_at.elapsed()) else {
+                return false;
+            };
+            let Some(current) = base.checked_add(elapsed) else {
+                return false;
+            };
+            let Ok(current) = current.format(&format) else {
+                return false;
+            };
+            // The shared source recognises exact retained requests under legitimate
+            // renewal, and rechecks root/child lineage at the time of first invocation.
+            let Ok(cursor) =
+                crate::model_port_client::ModelCursorStore::load(&mut store.clone(), &stream)
+            else {
+                return false;
+            };
+            if cursor
+                .is_some_and(|cursor| cursor.cancellation.is_some() || cursor.termination.is_some())
+            {
+                return false;
+            }
+            source
+                .validate_exchange(&authority, &exchange, &Instant(current))
+                .is_ok()
+        })))
+    }
 
     fn observe_now(&mut self, now: &Instant) -> Result<(), Self::Error> {
         self.bridge
@@ -8015,6 +8101,257 @@ mod tests {
                     std::fs::remove_dir_all(root).unwrap();
                 }));
         }).unwrap().join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "native tool event fixtures cover independent operation and changed-file storage faults"
+    )]
+    fn tool_events_continue_after_only_performance_writes_fail() {
+        use codex_protocol::protocol::{
+            ExecCommandBeginEvent, FileChange, PatchApplyBeginEvent, PatchApplyEndEvent,
+            PatchApplyStatus,
+        };
+        for changed_files_only in [false, true] {
+            let root = test_root("tool-performance-write-fault");
+            let mut adapter =
+                ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+            let (mut record, mut binding) = delegated_record_and_binding();
+            binding.authority.lease.fencing_token = FencingToken("1".into());
+            binding.authority.lease.lease_id = LeaseId("lse_00000000000000000000000001".into());
+            binding.authority.lease.issued_at = Instant("2026-08-28T00:00:00.000Z".into());
+            binding.authority.lease.expires_at = Instant("2026-08-28T01:00:00.000Z".into());
+            record.repository_rule_pack.rules.push(
+                winwincode_execution_port::repository_rule_pack::RepositoryRule {
+                    id: "fixture.successful-command".into(), version: 1,
+                    event: winwincode_execution_port::repository_rule_pack::RepositoryRuleEvent::CommandFinished,
+                    languages: vec![], file_patterns: vec![],
+                    outcome: Some(winwincode_execution_port::repository_rule_pack::PostActionOutcome::Succeeded),
+                    actions: vec![winwincode_execution_port::repository_rule_pack::PostActionHook::RequireVerification], priority: 0,
+                });
+            record.workspace = root.join("workspace");
+            std::fs::create_dir_all(&record.workspace).unwrap();
+            let workspace = record.workspace.clone();
+            let key = binding.run_key.clone();
+            adapter.register_performance_run(&key, &record.job).unwrap();
+            adapter
+                .install_active_run(&key, record, binding, false, false)
+                .unwrap();
+            adapter.store.lock().unwrap().execute_batch(if changed_files_only {
+            "CREATE TRIGGER refuse_optional_file BEFORE INSERT ON performance_changed_file BEGIN SELECT RAISE(ABORT,'stats file unavailable'); END;"
+        } else {
+            "CREATE TRIGGER refuse_optional_operation_insert BEFORE INSERT ON performance_operation BEGIN SELECT RAISE(ABORT,'stats write unavailable'); END;
+             CREATE TRIGGER refuse_optional_operation_update BEFORE UPDATE ON performance_operation BEGIN SELECT RAISE(ABORT,'stats write unavailable'); END;"
+        }).unwrap();
+            let now = Instant("2026-08-28T00:00:02.000Z".into());
+            let command = ExecCommandEndEvent {
+                call_id: "successful-command".into(),
+                plugin_id: None,
+                script_path: None,
+                process_id: None,
+                turn_id: "turn-fixture".into(),
+                completed_at_ms: 2,
+                command: vec!["cargo".into(), "test".into()],
+                cwd: serde_json::from_value(serde_json::json!(format!(
+                    "file://{}",
+                    workspace.display()
+                )))
+                .unwrap(),
+                parsed_cmd: vec![],
+                source: ExecCommandSource::Agent,
+                interaction_input: None,
+                stdout: "passed".into(),
+                stderr: String::new(),
+                aggregated_output: "passed".into(),
+                exit_code: 0,
+                duration: std::time::Duration::from_millis(1),
+                formatted_output: "passed".into(),
+                status: ExecCommandStatus::Completed,
+            };
+            let changes = std::collections::HashMap::from([(
+                PathBuf::from("result.rs"),
+                FileChange::Add {
+                    content: "completed patch".into(),
+                },
+            )]);
+            // The real tool effect exists independently of the optional metrics tables.
+            std::fs::write(workspace.join("result.rs"), "completed patch").unwrap();
+            let events = [
+                CodexEventMsg::ExecCommandBegin(ExecCommandBeginEvent {
+                    call_id: command.call_id.clone(),
+                    plugin_id: None,
+                    script_path: None,
+                    process_id: None,
+                    turn_id: command.turn_id.clone(),
+                    started_at_ms: 1,
+                    command: command.command.clone(),
+                    cwd: command.cwd.clone(),
+                    parsed_cmd: vec![],
+                    source: ExecCommandSource::Agent,
+                    interaction_input: None,
+                }),
+                CodexEventMsg::ExecCommandEnd(command),
+                CodexEventMsg::PatchApplyBegin(PatchApplyBeginEvent {
+                    call_id: "successful-patch".into(),
+                    turn_id: "turn-fixture".into(),
+                    auto_approved: true,
+                    changes: changes.clone(),
+                }),
+                CodexEventMsg::PatchApplyEnd(PatchApplyEndEvent {
+                    call_id: "successful-patch".into(),
+                    turn_id: "turn-fixture".into(),
+                    stdout: "applied".into(),
+                    stderr: String::new(),
+                    success: true,
+                    changes,
+                    status: PatchApplyStatus::Completed,
+                }),
+            ];
+            for msg in events {
+                adapter
+                    .accept_polled_event(
+                        &key,
+                        CodexEvent {
+                            id: "tool-event".into(),
+                            msg,
+                        },
+                        &now,
+                    )
+                    .expect("successful tool event survives optional write failure");
+            }
+            let run = &adapter.runs[&key].record;
+            assert!(run.terminal.is_none());
+            assert!(run.post_action_traces.iter().any(|trace| trace.source
+                == winwincode_execution_port::action_normalizer::ActionSource::Shell
+                && trace.retained));
+            assert!(run.post_action_traces.iter().any(|trace| trace.source
+                == winwincode_execution_port::action_normalizer::ActionSource::File
+                && trace.retained));
+            assert_eq!(
+                std::fs::read_to_string(workspace.join("result.rs")).unwrap(),
+                "completed patch"
+            );
+            assert!(adapter.store.load_run::<StoredRun>(&key).unwrap().is_some());
+            drop(adapter);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "native first-start fixture checks child lineage, renewal, expiry and durable cancellation"
+    )]
+    fn local_model_first_start_recognises_only_registered_child_authority() {
+        let root = test_root("local-model-child-authority");
+        let mut adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+        let (_, mut binding) = delegated_record_and_binding();
+        binding.authority.lease.fencing_token = FencingToken("1".into());
+        binding.authority.lease.lease_id = LeaseId("lse_00000000000000000000000001".into());
+        binding.authority.lease.issued_at = Instant("2026-08-28T00:00:00.000Z".into());
+        binding.authority.lease.expires_at = Instant("2026-08-28T01:00:00.000Z".into());
+        adapter.bridge.install_binding(binding.clone()).unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/contracts/execution-port.valid.json"
+        ))
+        .unwrap();
+        let mut open: winwincode_execution_port::generated::ModelOpenMessage =
+            serde_json::from_value(
+                fixture["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|message| message["kind"] == "model.open")
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap();
+        let parent = binding.authority.session_identity.clone();
+        open.worker_session_id = binding.authority.worker_session_id.clone();
+        open.lease = binding.authority.lease.clone();
+        open.sent_at = binding.authority.lease.issued_at.clone();
+        let mut child = binding.clone();
+        child.canonical_thread_id = CodexThreadId("cdx_00000000000000000000000002".into());
+        child.kernel_session_id = "kernel-child-authority".into();
+        child.authority.session_identity.codex_thread_id = child.canonical_thread_id.clone();
+        open.session_identity = child.authority.session_identity.clone();
+        assert!(!adapter.model_start_session_allowed(&open, &parent).unwrap());
+        adapter.bridge.install_child_binding(child).unwrap();
+        assert!(adapter.model_start_session_allowed(&open, &parent).unwrap());
+        adapter
+            .outbox
+            .retain(&ExecutionPortMessage::ModelOpenMessage(open.clone()))
+            .unwrap();
+        let guard = adapter
+            .local_model_start_guard(
+                &open,
+                &Instant("2026-08-28T00:30:00.000Z".into()),
+                std::time::Instant::now(),
+            )
+            .unwrap()
+            .unwrap();
+        assert!(guard());
+        let mut renewed = binding;
+        renewed.authority.lease.expires_at = Instant("2026-08-28T02:00:00.000Z".into());
+        adapter.bridge.install_binding(renewed).unwrap();
+        assert!(
+            adapter.model_start_session_allowed(&open, &parent).unwrap(),
+            "renewal keeps registered child lineage eligible under original open identity"
+        );
+        adapter
+            .bridge
+            .authority()
+            .update_now(&Instant("2026-08-28T01:30:00.000Z".into()))
+            .unwrap();
+        assert!(
+            guard(),
+            "first-start guard observes a legitimate renewal made after enqueue"
+        );
+        adapter
+            .bridge
+            .authority()
+            .update_now(&Instant("2026-08-28T02:00:00.000Z".into()))
+            .unwrap();
+        assert!(
+            !guard(),
+            "the same original request becomes ineligible when the current lease expires"
+        );
+        let mut extended = adapter
+            .bridge
+            .binding_for_thread(&parent.codex_thread_id)
+            .unwrap()
+            .unwrap();
+        extended.authority.lease.expires_at = Instant("2026-08-28T03:00:00.000Z".into());
+        adapter.bridge.install_binding(extended).unwrap();
+        assert!(guard());
+        let stream = winwincode_execution_port::typed_replay::stream_key_from_message(
+            &ExecutionPortMessage::ModelOpenMessage(open.clone()),
+        )
+        .unwrap()
+        .stream;
+        crate::model_port_client::ModelCursorStore::record_cancellation_intent(
+            &mut adapter.store,
+            &stream,
+            0,
+            &crate::model_port_client::ModelCancellationFingerprint {
+                message_id: ExecutionMessageId("xmsg_00000000000000000000000003".into()),
+                confirmed_sequence: 0,
+                digest: Sha256Digest(format!("sha256:{}", "3".repeat(64))),
+                phase: crate::model_port_client::ModelCancellationPhase::Intent,
+            },
+        )
+        .unwrap();
+        assert!(
+            !guard(),
+            "durable cancellation prevents a first start even while the lease is valid"
+        );
+        open.session_identity.worker_session_id.0.push('X');
+        assert!(!adapter.model_start_session_allowed(&open, &parent).unwrap());
+        drop(adapter);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]

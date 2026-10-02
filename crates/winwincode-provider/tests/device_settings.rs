@@ -155,14 +155,12 @@ fn configured_jev_request_cannot_silently_run_as_baseline() {
         drop(db);
         let result = store.execute_model(&open).unwrap();
         assert_eq!(result.len(), 1);
-        assert!(
-            result[0]
-                .error
-                .as_ref()
-                .unwrap()
-                .message
-                .starts_with("DEVICE_JEV_UNAVAILABLE:")
+        let error = result[0].error.as_ref().unwrap();
+        assert_eq!(
+            error.code,
+            winwincode_execution_port::generated::ExecutionPortErrorCode::DeviceJevUnavailable
         );
+        assert_eq!(error.message, "DEVICE_JEV_UNAVAILABLE");
         drop(store);
         let reopened = DeviceProviderStore::open(&directory).unwrap();
         assert_eq!(reopened.execute_model(&open).unwrap(), result);
@@ -301,7 +299,7 @@ fn old_database_upgrade_preserves_identity_and_provider_state() {
         let before = store.snapshot("device-1").expect("snapshot");
         drop(store);
         let db = rusqlite::Connection::open(directory.join("providers.sqlite3")).expect("db");
-        db.execute_batch("DROP TABLE jev_judge_exchanges;")
+        db.execute_batch("DROP TABLE accounting_closed_attempts; ALTER TABLE exchanges DROP COLUMN accounting_chunks; DROP TABLE jev_judge_exchanges;")
             .expect("old schema");
         db.execute_batch("ALTER TABLE jev_context_exchanges DROP COLUMN request_json;")
             .expect("old schema");
@@ -336,7 +334,7 @@ fn old_database_upgrade_preserves_identity_and_provider_state() {
         let upgraded: i64 = db
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(upgraded, 8);
+        assert_eq!(upgraded, 9);
         let old: (String, String, Option<String>, Option<Vec<u8>>) = db.query_row(
             "SELECT digest, chunks, request_open, prepared_payload FROM exchanges WHERE exchange_id='old-exchange'", [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),

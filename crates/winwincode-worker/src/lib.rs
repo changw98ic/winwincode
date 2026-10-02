@@ -384,6 +384,7 @@ pub struct WorkerMain<Port, Codex> {
     consuming_control: bool,
     delivery_failure: Option<WorkerErrorCode>,
     last_now: Instant,
+    last_now_observed_at: std::time::Instant,
     /// Delivery ids sent during the current Worker scheduling turn.  A
     /// response batch can contain acknowledgements for several earlier
     /// frames; suppressing an already-sent frame until the next poll avoids
@@ -528,6 +529,7 @@ where
             consuming_control: false,
             delivery_failure,
             last_now,
+            last_now_observed_at: std::time::Instant::now(),
             sent_delivery_ids: HashSet::new(),
             outbox_flush_cursor: None,
             recovery_sent_delivery_ids: HashSet::new(),
@@ -664,6 +666,17 @@ where
     /// Returns an outbound-port or Codex-store failure.
     pub async fn flush_durable_outbox(&mut self) -> Result<(), WorkerError> {
         Box::pin(self.flush_durable_execution_deliveries()).await
+    }
+
+    /// Flushes using the driver's current trusted clock, including elapsed time
+    /// while a first local model start waits for its Provider thread.
+    ///
+    /// # Errors
+    /// Returns the same delivery errors as `flush_durable_outbox`.
+    pub async fn flush_durable_outbox_at(&mut self, now: Instant) -> Result<(), WorkerError> {
+        self.last_now = now;
+        self.last_now_observed_at = std::time::Instant::now();
+        self.flush_durable_outbox().await
     }
 
     /// Returns an unusable transport after even the bounded optional projection is refused.
@@ -868,6 +881,7 @@ where
         now: Instant,
     ) -> Result<(), WorkerError> {
         self.last_now = now.clone();
+        self.last_now_observed_at = std::time::Instant::now();
         let previous = std::mem::replace(&mut self.consuming_control, true);
         let mut result = Box::pin(self.apply_control(message, now)).await;
         if result.is_ok() {
@@ -955,6 +969,7 @@ where
     /// Returns an invalid-lifecycle or outbound-port failure.
     pub async fn heartbeat(&mut self, now: Instant) -> Result<(), WorkerError> {
         self.last_now = now.clone();
+        self.last_now_observed_at = std::time::Instant::now();
         if self.lifecycle != WorkerLifecycleState::Active {
             return Err(worker_error(
                 WorkerErrorCode::InvalidLifecycle,
@@ -1011,6 +1026,7 @@ where
     #[allow(clippy::too_many_lines)]
     pub async fn poll_codex(&mut self, now: Instant) -> Result<(), WorkerError> {
         self.last_now = now.clone();
+        self.last_now_observed_at = std::time::Instant::now();
         if self.lifecycle != WorkerLifecycleState::Active {
             return Err(worker_error(
                 WorkerErrorCode::InvalidLifecycle,
@@ -4369,8 +4385,40 @@ where
             self.sent_delivery_ids.remove(&delivery.delivery_id);
             return Ok(());
         }
+        let (start_deadline, start_guard) = if self.device_models.is_some()
+            && let ExecutionPortMessage::ModelOpenMessage(open) = &message
+        {
+            if let Some(deadline) = self.local_model_start_deadline(open)? {
+                (
+                    Some(deadline),
+                    self.codex
+                        .local_model_start_guard(open, &self.last_now, self.last_now_observed_at)
+                        .map_err(|_| codex_model_error())?,
+                )
+            } else {
+                if !self
+                    .device_models
+                    .as_ref()
+                    .expect("local model lane exists")
+                    .start_recorded(open)
+                    .map_err(|_| codex_model_error())?
+                {
+                    return Err(worker_error(
+                        WorkerErrorCode::ExecutionMessageRejected,
+                        "unstarted local model request has no current execution authority",
+                    ));
+                }
+                // An existing exact exchange may only restore its original result.
+                (Some(std::time::Instant::now()), None)
+            }
+        } else {
+            (None, None)
+        };
         if let Some(models) = &mut self.device_models {
-            match models.send(&message).map_err(|_| codex_model_error())? {
+            match models
+                .send(&message, start_deadline, start_guard)
+                .map_err(|_| codex_model_error())?
+            {
                 device_model::DeviceModelSendOutcome::Handled => return Ok(()),
                 device_model::DeviceModelSendOutcome::Unhandled => {}
                 device_model::DeviceModelSendOutcome::NotStarted => {
@@ -4399,6 +4447,49 @@ where
                     "ExecutionPort cannot continue",
                 ),
             })
+    }
+
+    fn local_model_start_deadline(
+        &mut self,
+        open: &winwincode_execution_port::generated::ModelOpenMessage,
+    ) -> Result<Option<std::time::Instant>, WorkerError> {
+        let Some(active) = self.active.get(&open.lease.job_id.0) else {
+            return Ok(None);
+        };
+        let mut prior = open.lease.clone();
+        prior.expires_at = active.lease.expires_at.clone();
+        if active.lifecycle != ActiveJobLifecycle::Running
+            || prior != active.lease
+            || open.lease.expires_at.0 > active.lease.expires_at.0
+            || open.worker_session_id != active.worker_session_id
+            || !self
+                .codex
+                .model_start_session_allowed(open, &active.session_identity)
+                .map_err(|_| codex_model_error())?
+        {
+            return Ok(None);
+        }
+        let parse = |value: &Instant| {
+            time::OffsetDateTime::parse(&value.0, &time::format_description::well_known::Rfc3339)
+                .ok()
+        };
+        let (Some(now), Some(issued), Some(expires)) = (
+            parse(&self.last_now),
+            parse(&active.lease.issued_at),
+            parse(&active.lease.expires_at),
+        ) else {
+            return Ok(None);
+        };
+        if now < issued || now >= expires {
+            return Ok(None);
+        }
+        let Ok(remaining) = std::time::Duration::try_from(expires - now) else {
+            return Ok(None);
+        };
+        Ok(self
+            .last_now_observed_at
+            .checked_add(remaining)
+            .filter(|deadline| *deadline > std::time::Instant::now()))
     }
 
     async fn send_retained_delivery(
@@ -4598,7 +4689,8 @@ where
                 | ExecutionPortMessage::ModelChunkMessage(_)
                 | ExecutionPortMessage::JobOutcomeMessage(_)
                 | ExecutionPortMessage::ArtifactChunkMessage(_)
-                | ExecutionPortMessage::ArtifactOpenMessage(_) => {}
+                | ExecutionPortMessage::ArtifactOpenMessage(_)
+                | ExecutionPortMessage::ModelOpenMessage(_) => {}
                 ExecutionPortMessage::ApprovalRequestMessage(_)
                 | ExecutionPortMessage::InputRequestMessage(_)
                 | ExecutionPortMessage::ActionEnforcementRequestMessage(_) => {

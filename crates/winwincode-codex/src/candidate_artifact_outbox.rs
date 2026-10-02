@@ -18,8 +18,8 @@ use winwincode_domain::{
 use winwincode_execution_port::generated::{
     ArtifactAckMessage, ArtifactChunkMessage, ArtifactChunkMessageKind, ArtifactDescriptor,
     ArtifactKind, ArtifactOpenMessage, ArtifactOpenMessageKind, ArtifactReference, EncodedPayload,
-    ExecutionJobReplacementAuthority, ExecutionLeaseStamp, ExecutionPortMessage, ExecutionScope,
-    LeaseWriteStatus,
+    ExecutionJobReplacementAuthority, ExecutionLeaseStamp, ExecutionPortErrorCode,
+    ExecutionPortMessage, ExecutionScope, LeaseWriteStatus,
 };
 
 use crate::{
@@ -1203,6 +1203,28 @@ fn validate_retired_ack_shape(
     }
     if ack.retained_artifact.is_some() {
         return if record.transport_upgrade_pending && valid_retained_reference(record, ack) {
+            Ok(())
+        } else {
+            Err(AdapterStoreError::Conflict)
+        };
+    }
+    let rejection_code = match ack.status {
+        LeaseWriteStatus::RejectedExpiredLease => Some(ExecutionPortErrorCode::LeaseExpired),
+        LeaseWriteStatus::RejectedStaleFencingToken => {
+            Some(ExecutionPortErrorCode::StaleFencingToken)
+        }
+        LeaseWriteStatus::RejectedWorkerInstance => {
+            Some(ExecutionPortErrorCode::WorkerInstanceChanged)
+        }
+        _ => None,
+    };
+    if let Some(code) = rejection_code {
+        return if ack.replay_from_sequence.is_none()
+            && ack
+                .error
+                .as_ref()
+                .is_some_and(|error| error.code == code && !error.retryable)
+        {
             Ok(())
         } else {
             Err(AdapterStoreError::Conflict)
@@ -2511,6 +2533,130 @@ mod tests {
             None
         );
         std::fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn retired_upload_consumes_negative_receipts_without_advancing_its_successor() {
+        let root = test_root("retired-negative-ack");
+        let (upload, old) = persist_legacy_fixture(&root, 300 * 1024, 0, false, false);
+        let (candidate, execution) = open_ledgers(&root).unwrap();
+        let retained = candidate.retain(&upload).unwrap();
+        assert_ne!(retained.artifact.artifact_id, old.descriptor.artifact_id);
+        let late = acknowledgement(
+            &RetainedCandidateArtifact {
+                artifact: old.reference(),
+                authority: old.authority(),
+                deliveries: vec![],
+                already_accepted: false,
+            },
+            &upload,
+            0,
+            LeaseWriteStatus::Accepted,
+        );
+        for (status, code) in [
+            (
+                LeaseWriteStatus::RejectedExpiredLease,
+                ExecutionPortErrorCode::LeaseExpired,
+            ),
+            (
+                LeaseWriteStatus::RejectedStaleFencingToken,
+                ExecutionPortErrorCode::StaleFencingToken,
+            ),
+            (
+                LeaseWriteStatus::RejectedWorkerInstance,
+                ExecutionPortErrorCode::WorkerInstanceChanged,
+            ),
+        ] {
+            let mut rejected = late.clone();
+            rejected.status = status;
+            rejected.error = Some(ExecutionPortError {
+                code,
+                message: "retired upload rejected".into(),
+                retryable: false,
+            });
+            assert_eq!(
+                candidate.apply_ack(&rejected).unwrap(),
+                CandidateArtifactAckOutcome::Pending
+            );
+            assert_eq!(
+                execution.pending().unwrap().len(),
+                1,
+                "negative retired ACK cannot release successor content"
+            );
+            assert_eq!(
+                candidate.accepted_reference(&upload.authority()).unwrap(),
+                None
+            );
+        }
+        drop(candidate);
+        drop(execution);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cancelled_upload_consumes_exact_negative_receipts_and_rejects_bad_shapes() {
+        let root = test_root("cancelled-negative-ack");
+        let upload = upload(b"candidate".to_vec());
+        let (candidate, execution) = open_ledgers(&root).unwrap();
+        let retained = candidate.retain(&upload).unwrap();
+        let negative = [
+            (
+                LeaseWriteStatus::RejectedExpiredLease,
+                ExecutionPortErrorCode::LeaseExpired,
+            ),
+            (
+                LeaseWriteStatus::RejectedStaleFencingToken,
+                ExecutionPortErrorCode::StaleFencingToken,
+            ),
+            (
+                LeaseWriteStatus::RejectedWorkerInstance,
+                ExecutionPortErrorCode::WorkerInstanceChanged,
+            ),
+        ]
+        .map(|(status, code)| {
+            let mut ack = acknowledgement(&retained, &upload, 0, status);
+            ack.error = Some(ExecutionPortError {
+                code,
+                message: "old upload rejected".into(),
+                retryable: false,
+            });
+            ack
+        });
+        for ack in &negative {
+            assert_eq!(candidate.apply_ack(ack), Err(AdapterStoreError::Conflict));
+        }
+        candidate.cancel(&upload.authority()).unwrap();
+        drop(candidate);
+        drop(execution);
+        let (candidate, execution) = open_ledgers(&root).unwrap();
+        for ack in negative {
+            assert_eq!(
+                candidate.apply_ack(&ack),
+                Ok(CandidateArtifactAckOutcome::Pending)
+            );
+            for field in 0..7 {
+                let mut bad = ack.clone();
+                match field {
+                    0 => bad.error = None,
+                    1 => bad.error.as_mut().unwrap().code = ExecutionPortErrorCode::MessageConflict,
+                    2 => bad.error.as_mut().unwrap().retryable = true,
+                    3 => bad.lease.fencing_token = FencingToken("foreign".into()),
+                    4 => bad.ack_sequence.0 = 999,
+                    5 => bad.replay_from_sequence = Some(ExecutionSequence(1)),
+                    _ => bad.retained_artifact = Some(retained.artifact.clone()),
+                }
+                assert_eq!(candidate.apply_ack(&bad), Err(AdapterStoreError::Conflict));
+            }
+        }
+        assert!(execution.pending().unwrap().is_empty());
+        assert_eq!(
+            candidate.accepted_reference(&upload.authority()).unwrap(),
+            None
+        );
+        assert_eq!(candidate.retain(&upload), Err(AdapterStoreError::Conflict));
+        drop(candidate);
+        drop(execution);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

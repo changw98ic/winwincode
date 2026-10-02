@@ -121,6 +121,20 @@ pub struct RemoteWorkerTransportHandle {
 }
 
 impl RemoteWorkerTransportHandle {
+    /// Creates an empty local control inbox for native lifecycle fault injection.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn empty_for_test() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(SharedRemoteState {
+                inbox: VecDeque::new(),
+                processing: Vec::new(),
+                acknowledgements: Vec::new(),
+                terminal_error: None,
+            })),
+        }
+    }
+
     /// A permanent Server rejection ends this process instead of replaying dead authority.
     #[must_use]
     pub fn authority_rejected(&self) -> bool {

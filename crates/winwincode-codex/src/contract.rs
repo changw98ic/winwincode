@@ -31,6 +31,9 @@ use crate::diagnostic_artifact_outbox::{
     DiagnosticArtifactAuthority, DiagnosticArtifactUpload, RetainedDiagnosticArtifact,
 };
 
+/// Local first-start check shared with a Provider thread; it carries no secrets.
+pub type LocalModelStartGuard = Arc<dyn Fn() -> bool + Send + Sync>;
+
 /// Stable create-or-load identity for one Codex thread.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CodexRunKey {
@@ -312,6 +315,33 @@ pub type ActionRequestTransport =
 /// Sole embedded Codex lifecycle seam used by the Execution Worker.
 pub trait CodexCoreAdapter {
     type Error: Send + 'static;
+
+    /// Checks a first local model start against the live parent session. Production
+    /// additionally recognises child threads registered in the same Core run.
+    ///
+    /// # Errors
+    /// Returns an authority-store failure, rather than authorising an unknown child.
+    fn model_start_session_allowed(
+        &mut self,
+        open: &winwincode_execution_port::generated::ModelOpenMessage,
+        parent: &winwincode_domain::SessionIdentity,
+    ) -> Result<bool, Self::Error> {
+        Ok(open.session_identity == *parent)
+    }
+
+    /// Supplies the existing shared Core authority gate for revalidation inside
+    /// the Provider thread. Lightweight adapters use the Worker's lease deadline.
+    ///
+    /// # Errors
+    /// Rejects an invalid trusted clock or unavailable authority source.
+    fn local_model_start_guard(
+        &mut self,
+        _open: &winwincode_execution_port::generated::ModelOpenMessage,
+        _now: &Instant,
+        _observed_at: std::time::Instant,
+    ) -> Result<Option<LocalModelStartGuard>, Self::Error> {
+        Ok(None)
+    }
 
     /// Reads complete, durable model usage for a terminal result. Missing or
     /// unfinished measurements remain unknown, including on failure.
