@@ -494,6 +494,22 @@ impl ExecutionOutbox {
         if let ExecutionPortMessage::RuntimeAckMessage(_) = acknowledgement {
             return Err(AdapterStoreError::Conflict);
         }
+        if retryable_heartbeat_gap(acknowledgement) {
+            let (family, key) =
+                response_target(acknowledgement)?.ok_or(AdapterStoreError::Conflict)?;
+            // A gap consumes a control receipt, not the retained request. Only
+            // this exact request (or its applied positive proof) authorizes it.
+            let known: bool = self.store.lock()?.query_row(
+                "SELECT EXISTS(SELECT 1 FROM execution_outbox WHERE family=?1 AND correlation_key=?2)
+                 OR EXISTS(SELECT 1 FROM execution_response_receipt WHERE family=?1 AND correlation_key=?2)",
+                params![family.as_str(), key], |row| row.get(0))
+                .map_err(|_| AdapterStoreError::Unavailable)?;
+            return if known {
+                Ok(())
+            } else {
+                Err(AdapterStoreError::Conflict)
+            };
+        }
         if !accepted_response(acknowledgement) {
             return Err(AdapterStoreError::Conflict);
         }
@@ -981,6 +997,13 @@ fn save_response_proof(
     Ok(())
 }
 
+fn retryable_heartbeat_gap(message: &ExecutionPortMessage) -> bool {
+    matches!(message, ExecutionPortMessage::WorkerHeartbeatAckMessage(ack)
+        if ack.status == WorkerHeartbeatAckMessageStatus::RejectedWorkerInstance
+            && ack.error.as_ref().is_some_and(|error|
+                error.code == ExecutionPortErrorCode::SequenceGap && error.retryable))
+}
+
 fn accepted_response(message: &ExecutionPortMessage) -> bool {
     match message {
         ExecutionPortMessage::JobOutcomeAckMessage(message) => matches!(
@@ -992,10 +1015,14 @@ fn accepted_response(message: &ExecutionPortMessage) -> bool {
             WorkerRegistrationResultMessageStatus::Accepted
                 | WorkerRegistrationResultMessageStatus::Duplicate
         ),
-        ExecutionPortMessage::WorkerHeartbeatAckMessage(message) => matches!(
-            message.status,
-            WorkerHeartbeatAckMessageStatus::Accepted | WorkerHeartbeatAckMessageStatus::Duplicate
-        ),
+        ExecutionPortMessage::WorkerHeartbeatAckMessage(message) => {
+            message.error.is_none()
+                && matches!(
+                    message.status,
+                    WorkerHeartbeatAckMessageStatus::Accepted
+                        | WorkerHeartbeatAckMessageStatus::Duplicate
+                )
+        }
         ExecutionPortMessage::ModelChunkMessage(_)
         | ExecutionPortMessage::ActionEnforcementReceiptMessage(_)
         | ExecutionPortMessage::ApprovalDecisionMessage(_)
@@ -1385,6 +1412,69 @@ mod tests {
             drop(outbox);
             std::fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[test]
+    fn heartbeat_gap_is_consumed_without_acknowledging_or_losing_the_request() {
+        let root = test_root("heartbeat-gap-replay");
+        let outbox = ExecutionOutbox::open(AdapterStore::open(&root).unwrap()).unwrap();
+        let first = outbox.retain(&fixture("worker.heartbeat")).unwrap();
+        let ExecutionPortMessage::WorkerHeartbeatMessage(mut second) = fixture("worker.heartbeat")
+        else {
+            unreachable!()
+        };
+        second.heartbeat_sequence.0 = 2;
+        second.message_id = ExecutionMessageId(format!("xmsg_{}", "B".repeat(26)));
+        let second = outbox
+            .retain(&ExecutionPortMessage::WorkerHeartbeatMessage(second))
+            .unwrap();
+        let mut gap = serde_json::to_value(fixture("worker.heartbeat_ack")).unwrap();
+        gap["heartbeatSequence"] = serde_json::json!(2);
+        gap["status"] = serde_json::json!("rejected_worker_instance");
+        gap["error"] = serde_json::json!({"code":"SEQUENCE_GAP","message":"retry the original sequence","retryable":true});
+        let gap: ExecutionPortMessage = serde_json::from_value(gap).unwrap();
+        outbox.acknowledge_response(&gap).unwrap();
+        assert_eq!(
+            outbox.pending().unwrap(),
+            vec![first.clone(), second.clone()]
+        );
+        drop(outbox);
+        let outbox = ExecutionOutbox::open(AdapterStore::open(&root).unwrap()).unwrap();
+        outbox.acknowledge_response(&gap).unwrap();
+        for invalid in 0..3 {
+            let mut value = serde_json::to_value(&gap).unwrap();
+            match invalid {
+                0 => value["error"]["retryable"] = serde_json::json!(false),
+                1 => {
+                    value["workerInstanceId"] =
+                        serde_json::json!(format!("wki_{}", "C".repeat(26)));
+                }
+                _ => value["heartbeatSequence"] = serde_json::json!(3),
+            }
+            assert_eq!(
+                outbox.acknowledge_response(&serde_json::from_value(value).unwrap()),
+                Err(AdapterStoreError::Conflict)
+            );
+        }
+        outbox
+            .acknowledge_response(&fixture("worker.heartbeat_ack"))
+            .unwrap();
+        let mut accepted = serde_json::to_value(fixture("worker.heartbeat_ack")).unwrap();
+        accepted["heartbeatSequence"] = serde_json::json!(2);
+        outbox
+            .acknowledge_response(&serde_json::from_value(accepted.clone()).unwrap())
+            .unwrap();
+        accepted["status"] = serde_json::json!("duplicate");
+        outbox
+            .acknowledge_response(&serde_json::from_value(accepted).unwrap())
+            .unwrap();
+        outbox.acknowledge_response(&gap).unwrap();
+        assert!(
+            outbox.pending().unwrap().is_empty(),
+            "late Gap must not resurrect acknowledged requests"
+        );
+        drop(outbox);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -929,10 +929,30 @@ where
                 Box::pin(self.accept_input_response(response, &now)).await?;
                 Ok(())
             }
+            ExecutionPortMessage::WorkerHeartbeatAckMessage(ack) => {
+                self.codex
+                    .accept_execution_delivery_ack(message)
+                    .map_err(|_| codex_model_error())?;
+                if ack.status == winwincode_execution_port::generated::WorkerHeartbeatAckMessageStatus::RejectedWorkerInstance
+                    && ack.error.as_ref().is_some_and(|error| error.code == ExecutionPortErrorCode::SequenceGap && error.retryable)
+                {
+                    let pending = self.codex.pending_execution_deliveries()
+                        .map_err(|_| codex_model_error())?;
+                    for delivery in pending {
+                        if matches!(&delivery.message, ExecutionPortMessage::WorkerHeartbeatMessage(heartbeat)
+                            if heartbeat.worker_id == ack.worker_id && heartbeat.worker_instance_id == ack.worker_instance_id
+                                && heartbeat.heartbeat_sequence.0 <= ack.heartbeat_sequence.0)
+                        {
+                            self.enqueue_retained_effect(&delivery)?;
+                        }
+                    }
+                    self.outbox_flush_cursor = None;
+                }
+                Ok(())
+            }
             ExecutionPortMessage::ModelAckMessage(_)
             | ExecutionPortMessage::RuntimeAckMessage(_)
-            | ExecutionPortMessage::JobOutcomeAckMessage(_)
-            | ExecutionPortMessage::WorkerHeartbeatAckMessage(_) => {
+            | ExecutionPortMessage::JobOutcomeAckMessage(_) => {
                 self.codex
                     .accept_execution_delivery_ack(message)
                     .map_err(|_| codex_model_error())?;

@@ -1408,7 +1408,21 @@ fn adapter_config_with_modes(
 
 #[test]
 fn production_observer_terminal_replay_survives_the_next_composer_turn() {
-    run_on_large_stack(async {
+    observer_terminal_replay_fixture(None);
+}
+
+#[test]
+fn production_observer_custom_handoff_survives_the_next_composer_turn() {
+    observer_terminal_replay_fixture(Some(ProviderFinishReason::ToolCalls));
+}
+
+#[test]
+fn production_observer_custom_handoff_with_stop_survives_the_next_composer_turn() {
+    observer_terminal_replay_fixture(Some(ProviderFinishReason::Stop));
+}
+
+fn observer_terminal_replay_fixture(custom_finish: Option<ProviderFinishReason>) {
+    run_on_large_stack(async move {
         use winwincode_worker::workspace_runtime::ObservationModelConfiguration;
         let root = TestDirectory::new("observer-terminal-replay");
         root.source_revision();
@@ -1527,14 +1541,43 @@ commandIds = ["check", "rust", "python"]
         let proposal = serde_json::json!({"acceptanceCriteriaIds":dispatch.job.work_input.as_ref().unwrap().work_item.criterion_ids,
             "disposition":"continue", "patch":"*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-pub fn fixture_value() -> u64 { 1 }\n+pub fn fixture_value() -> u64 { 2 }\n*** End Patch\n",
             "schemaVersion":1,"validationProfile":"changed"}).to_string();
-        for chunk in provider_chunks(
-            &open,
-            &gateway,
-            [
-                ProviderStreamEvent::ResponseStarted {
-                    observed_model_id: None,
-                    provider_response_id: "composer-a".into(),
+        let mut events = vec![ProviderStreamEvent::ResponseStarted {
+            observed_model_id: None,
+            provider_response_id: "composer-a".into(),
+        }];
+        if let Some(finish) = custom_finish {
+            let call = "batch-a".to_owned();
+            events.extend([
+                ProviderStreamEvent::ToolCallStarted {
+                    index: 0,
+                    provider_call_id: call.clone(),
+                    identity: ProviderToolIdentity::try_new(
+                        ProviderToolKind::Custom,
+                        "submit_change_batch".into(),
+                        None,
+                    )
+                    .unwrap(),
                 },
+                ProviderStreamEvent::ToolCallArgumentsDelta {
+                    index: 0,
+                    provider_call_id: call.clone(),
+                    delta: proposal,
+                },
+                ProviderStreamEvent::ToolCallEnded {
+                    index: 0,
+                    provider_call_id: call,
+                },
+                ProviderStreamEvent::Usage(ProviderTokenUsage {
+                    input_tokens: 10,
+                    cached_input_tokens: Some(0),
+                    cache_write_input_tokens: 0,
+                    output_tokens: 5,
+                    reasoning_output_tokens: 0,
+                }),
+                ProviderStreamEvent::Finished(finish),
+            ]);
+        } else {
+            events.extend([
                 ProviderStreamEvent::TextStarted { index: 0 },
                 ProviderStreamEvent::TextDelta {
                     index: 0,
@@ -1549,9 +1592,9 @@ commandIds = ["check", "rust", "python"]
                     reasoning_output_tokens: 0,
                 }),
                 ProviderStreamEvent::Finished(ProviderFinishReason::Stop),
-            ],
-            980,
-        ) {
+            ]);
+        }
+        for chunk in provider_chunks(&open, &gateway, events, 980) {
             worker
                 .accept_control(&ExecutionPortMessage::ModelChunkMessage(chunk), now.clone())
                 .await
@@ -1637,6 +1680,29 @@ commandIds = ["check", "rust", "python"]
         )
         .await;
         assert!(stored_run_json(&root)["batchIntent"].is_null());
+        if custom_finish.is_some() {
+            let request: serde_json::Value = serde_json::from_slice(
+                &STANDARD.decode(&next_composer.request.data_base64).unwrap(),
+            )
+            .unwrap();
+            let outputs: Vec<_> = request["request"]["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|item| {
+                    item["type"] == "custom_tool_call_output" && item["call_id"] == "batch-a"
+                })
+                .collect();
+            assert_eq!(
+                outputs.len(),
+                1,
+                "the original custom call has exactly one handoff output in real model history"
+            );
+            assert_eq!(
+                outputs[0]["output"],
+                "ChangeBatch proposal handed to host for application and validation."
+            );
+        }
         // Drive B through the real workspace intake and patch/validation store;
         // A still returns through the original Worker and ProductionAdapter.
         let active = worker.active_jobs()[0].clone();

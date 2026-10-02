@@ -564,8 +564,9 @@ impl RemoteDeliveryQueue {
         &self,
         worker_id: &WorkerId,
         instance_id: &WorkerInstanceId,
-        message: ExecutionPortMessage,
+        mut message: ExecutionPortMessage,
     ) -> Result<(), RuntimeSupervisorError> {
+        separate_heartbeat_receipt_identity(&mut message)?;
         let delivery_id = execution_message_id(&message).map_err(|_| remote_queue_failure())?;
         let frame = TypedFrame::new(FrameDirection::ControlPlaneToWorker, message)
             .and_then(|frame| RemoteTransportAdapter::<NoopCore>::encode(&frame))
@@ -592,6 +593,49 @@ impl RemoteDeliveryQueue {
         pending.push((worker_id.clone(), instance_id.clone(), delivery_id, frame));
         Ok(())
     }
+}
+
+// A retryable gap and the eventual positive ACK must coexist until separately
+// confirmed. Accepted/Duplicate share one identity; neither can erase a gap or
+// be erased by a delayed confirmation of that gap.
+fn separate_heartbeat_receipt_identity(
+    message: &mut ExecutionPortMessage,
+) -> Result<(), RuntimeSupervisorError> {
+    use winwincode_execution_port::generated::{
+        ExecutionPortErrorCode, WorkerHeartbeatAckMessageStatus,
+    };
+    let ExecutionPortMessage::WorkerHeartbeatAckMessage(ack) = message else {
+        return Ok(());
+    };
+    let class = match ack.status {
+        WorkerHeartbeatAckMessageStatus::Accepted | WorkerHeartbeatAckMessageStatus::Duplicate
+            if ack.error.is_none() =>
+        {
+            "accepted"
+        }
+        WorkerHeartbeatAckMessageStatus::RejectedWorkerInstance
+            if ack.error.as_ref().is_some_and(|error| {
+                error.code == ExecutionPortErrorCode::SequenceGap && error.retryable
+            }) =>
+        {
+            "gap"
+        }
+        _ => return Ok(()),
+    };
+    let identity = serde_json::to_vec(&(
+        "worker-heartbeat-receipt-v1",
+        &ack.message_id,
+        &ack.worker_id,
+        &ack.worker_instance_id,
+        &ack.heartbeat_sequence,
+        class,
+    ))
+    .map_err(|_| remote_queue_failure())?;
+    ack.message_id = ExecutionMessageId(format!(
+        "xmsg_{}",
+        crate::runtime::crockford_26(&Sha256::digest(identity))
+    ));
+    Ok(())
 }
 
 struct WorkerDeliveryQueue<'queue> {
@@ -1081,6 +1125,81 @@ mod tests {
             value["error"] = serde_json::json!({"code":"INFRASTRUCTURE_ERROR","message":"z".repeat(padding),"retryable":true});
         }
         serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn heartbeat_negative_and_positive_receipts_have_separate_delivery_lifetimes() {
+        use winwincode_execution_port::generated::{ExecutionPortError, ExecutionPortErrorCode};
+        let queue = RemoteDeliveryQueue::default();
+        let worker = WorkerId("wrk_00000000000000000000000001".into());
+        let instance = WorkerInstanceId("wki_00000000000000000000000001".into());
+        let ExecutionPortMessage::WorkerHeartbeatAckMessage(mut gap) =
+            queue_message(1, &worker, &instance, 0)
+        else {
+            unreachable!()
+        };
+        gap.status = WorkerHeartbeatAckMessageStatus::RejectedWorkerInstance;
+        gap.error = Some(ExecutionPortError {
+            code: ExecutionPortErrorCode::SequenceGap,
+            message: "retry original sequence".into(),
+            retryable: true,
+        });
+        let mut accepted = gap.clone();
+        accepted.error = None;
+        accepted.status = WorkerHeartbeatAckMessageStatus::Accepted;
+        queue
+            .enqueue_for(
+                &worker,
+                &instance,
+                ExecutionPortMessage::WorkerHeartbeatAckMessage(gap.clone()),
+            )
+            .unwrap();
+        queue
+            .enqueue_for(
+                &worker,
+                &instance,
+                ExecutionPortMessage::WorkerHeartbeatAckMessage(accepted.clone()),
+            )
+            .unwrap();
+        let page = queue.snapshot(&worker, &instance).unwrap();
+        assert_eq!(
+            page.len(),
+            2,
+            "a retryable negative reply cannot hide later acceptance"
+        );
+        assert_ne!(page[0].delivery_id, page[1].delivery_id);
+        queue
+            .enqueue_for(
+                &worker,
+                &instance,
+                ExecutionPortMessage::WorkerHeartbeatAckMessage(gap),
+            )
+            .unwrap();
+        accepted.status = WorkerHeartbeatAckMessageStatus::Duplicate;
+        queue
+            .enqueue_for(
+                &worker,
+                &instance,
+                ExecutionPortMessage::WorkerHeartbeatAckMessage(accepted),
+            )
+            .unwrap();
+        assert_eq!(queue.snapshot(&worker, &instance).unwrap().len(), 2);
+        // A confirmation of the old negative receipt must leave acceptance queued.
+        queue
+            .pending
+            .lock()
+            .unwrap()
+            .retain(|(_, _, id, _)| id != &page[0].delivery_id);
+        let remaining = queue.snapshot(&worker, &instance).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].delivery_id, page[1].delivery_id);
+        for delivery in remaining {
+            let frame = RemoteTransportAdapter::<NoopCore>::decode(&delivery.frame).unwrap();
+            assert_eq!(
+                execution_message_id(frame.message()).unwrap(),
+                delivery.delivery_id
+            );
+        }
     }
 
     #[test]

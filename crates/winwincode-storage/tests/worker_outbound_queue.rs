@@ -5,6 +5,7 @@ use std::{
 };
 
 use rusqlite::Connection;
+use sha2::Digest as _;
 use winwincode_domain::{
     CodexThreadId, DeliveryId, ExecutionJobId, ExecutionMessageId, ExecutionSequence, FencingToken,
     Instant, LeaseId, OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId,
@@ -441,6 +442,368 @@ fn cursor_and_ack_are_bound_to_one_exact_worker_session_authority() {
     assert_eq!(second_page.claims[0].message_id(), second.message_id());
     Box::new(storage).close().expect("close");
     fs::remove_dir_all(root).expect("remove fixture");
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "ordered receipt, fault and restart boundaries in one native fixture"
+)]
+fn remote_confirmation_survives_cleanup_failure_and_restart_without_repeated_ack() {
+    let root = temporary_directory("remote-confirmation");
+    let mut storage = SqliteStorage::open(&root).expect("storage");
+    let authority = prepare_authority(&mut storage, 8);
+    let first = request(&authority, 800, b"private-confirmed-input");
+    let second = request(&authority, 801, b"next-input");
+    let fault = Connection::open(storage.database_path()).expect("fault");
+    {
+        let mut queue = storage.worker_outbound_queue(config()).expect("queue");
+        queue.enqueue(&first).expect("enqueue");
+        queue.enqueue(&second).expect("enqueue");
+        assert!(
+            queue
+                .retry_confirmed(
+                    &authority.slot.worker_id,
+                    &authority.slot.worker_instance_id
+                )
+                .expect("no proof")
+                .acknowledgements
+                .is_empty()
+        );
+        assert_eq!(
+            queue
+                .confirm_remote(
+                    &authority.slot.worker_id,
+                    &authority.slot.worker_instance_id,
+                    first.message_id(),
+                    &at(7)
+                )
+                .expect_err("unclaimed cannot be confirmed")
+                .code(),
+            WorkerOutboundQueueErrorCode::StateConflict
+        );
+        queue
+            .claim_page(&authority, &at(6), None, 1)
+            .expect("claim first");
+        assert_eq!(
+            queue
+                .confirm_remote(
+                    &WorkerId(id("wrk", 9)),
+                    &authority.slot.worker_instance_id,
+                    first.message_id(),
+                    &at(7)
+                )
+                .expect_err("foreign worker")
+                .code(),
+            WorkerOutboundQueueErrorCode::AuthorityMismatch
+        );
+        assert!(
+            !queue
+                .confirm_remote(
+                    &authority.slot.worker_id,
+                    &authority.slot.worker_instance_id,
+                    &ExecutionMessageId(id("xmsg", 899)),
+                    &at(7)
+                )
+                .expect("unrelated transport ACK")
+        );
+    }
+    fault.execute_batch("CREATE TRIGGER fail_confirmation BEFORE INSERT ON internal_worker_outbound_confirmations BEGIN SELECT RAISE(ABORT,'fixture'); END;").expect("fault");
+    assert_eq!(
+        storage
+            .worker_outbound_queue(config())
+            .expect("queue")
+            .confirm_remote(
+                &authority.slot.worker_id,
+                &authority.slot.worker_instance_id,
+                first.message_id(),
+                &at(7)
+            )
+            .expect_err("receipt must be persisted before transport success")
+            .code(),
+        WorkerOutboundQueueErrorCode::Storage
+    );
+    fault.execute_batch("DROP TRIGGER fail_confirmation; CREATE TRIGGER fail_cleanup BEFORE INSERT ON internal_worker_outbound_settlements BEGIN SELECT RAISE(ABORT,'fixture'); END;").expect("cleanup fault");
+    {
+        let mut queue = storage.worker_outbound_queue(config()).expect("queue");
+        assert!(
+            queue
+                .confirm_remote(
+                    &authority.slot.worker_id,
+                    &authority.slot.worker_instance_id,
+                    first.message_id(),
+                    &at(7)
+                )
+                .expect("proof")
+        );
+        assert!(
+            queue
+                .confirm_remote(
+                    &authority.slot.worker_id,
+                    &authority.slot.worker_instance_id,
+                    first.message_id(),
+                    &at(8)
+                )
+                .expect("duplicate proof")
+        );
+        let retry = queue
+            .retry_confirmed(
+                &authority.slot.worker_id,
+                &authority.slot.worker_instance_id,
+            )
+            .expect("retry progress");
+        assert_eq!(
+            retry.retry_error,
+            Some(WorkerOutboundQueueErrorCode::Storage)
+        );
+        assert!(retry.acknowledgements.is_empty());
+    }
+    let confirmed_at: String = fault
+        .query_row(
+            "SELECT confirmed_at FROM internal_worker_outbound_confirmations",
+            [],
+            |row| row.get(0),
+        )
+        .expect("clock");
+    assert_eq!(
+        confirmed_at,
+        at(7).0,
+        "duplicate keeps first reliable confirmation"
+    );
+    fault
+        .execute_batch("DROP TRIGGER fail_cleanup")
+        .expect("release");
+    Box::new(storage).close().expect("close");
+    let mut storage = SqliteStorage::open(&root).expect("restart");
+    let mut queue = storage.worker_outbound_queue(config()).expect("queue");
+    let surviving = queue
+        .claim_page(&authority, &at(8), None, 1)
+        .expect("restart skips proven receipt");
+    assert_eq!(surviving.claims[0].message_id(), second.message_id());
+    let retry = queue
+        .retry_confirmed(
+            &authority.slot.worker_id,
+            &authority.slot.worker_instance_id,
+        )
+        .expect("independent cleanup");
+    assert_eq!(retry.acknowledgements.len(), 1);
+    assert_eq!(retry.acknowledgements[0].message_id, *first.message_id());
+    assert_eq!(retry.retry_error, None);
+    let next = queue
+        .claim_page(&authority, &at(8), None, 1)
+        .expect("next input");
+    assert_eq!(next.claims[0].message_id(), second.message_id());
+    let proofs: i64 = fault
+        .query_row(
+            "SELECT COUNT(*) FROM internal_worker_outbound_confirmations",
+            [],
+            |row| row.get(0),
+        )
+        .expect("proofs");
+    assert_eq!(proofs, 0);
+    // Additive migration also opens a pre-proof database without fabricating ACKs.
+    fault
+        .execute_batch("DROP TABLE internal_worker_outbound_confirmations")
+        .expect("old schema");
+    assert!(
+        storage
+            .worker_outbound_queue(config())
+            .expect("upgrade")
+            .retry_confirmed(
+                &authority.slot.worker_id,
+                &authority.slot.worker_instance_id
+            )
+            .expect("upgrade proofs")
+            .acknowledgements
+            .is_empty()
+    );
+    drop(fault);
+    Box::new(storage).close().expect("close");
+    fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn proven_remote_cleanup_crosses_renewal_and_terminal_slot_without_execution() {
+    let root = temporary_directory("remote-terminal");
+    let mut storage = SqliteStorage::open(&root).expect("storage");
+    let authority = prepare_authority(&mut storage, 11);
+    let first = request(&authority, 1100, b"confirmed-before-renewal");
+    let second = request(&authority, 1101, b"confirmed-before-terminal");
+    {
+        let mut queue = storage.worker_outbound_queue(config()).expect("queue");
+        queue.enqueue(&first).expect("enqueue");
+        queue.enqueue(&second).expect("enqueue");
+        let page = queue
+            .claim_page(&authority, &at(6), None, 1)
+            .expect("claim first");
+        queue
+            .claim_page(&authority, &at(6), page.next_cursor.as_ref(), 1)
+            .expect("claim second");
+        queue
+            .confirm_remote(
+                &authority.slot.worker_id,
+                &authority.slot.worker_instance_id,
+                first.message_id(),
+                &at(7),
+            )
+            .expect("confirm");
+    }
+    let (renewal, _) = renewal_frame(&authority);
+    storage
+        .execution_registry()
+        .expect("registry")
+        .renew_execution_lease(&renewal)
+        .expect("renew");
+    let progress = storage
+        .worker_outbound_queue(config())
+        .expect("queue")
+        .retry_confirmed(
+            &authority.slot.worker_id,
+            &authority.slot.worker_instance_id,
+        )
+        .expect("cleanup under accepted renewal");
+    assert_eq!(progress.acknowledgements.len(), 1);
+    assert_eq!(progress.retry_error, None);
+    storage
+        .worker_outbound_queue(config())
+        .expect("queue")
+        .confirm_remote(
+            &authority.slot.worker_id,
+            &authority.slot.worker_instance_id,
+            second.message_id(),
+            &at(8),
+        )
+        .expect("confirm after renewal");
+    storage
+        .worker_session_slots()
+        .expect("slots")
+        .close(&WorkerSlotCloseRequest {
+            authority: authority.slot.clone(),
+            request_id: RequestId(id("req", 1100)),
+            expected_revision: 1,
+            outcome: WorkerSlotState::Completed,
+            closed_at: at(9),
+        })
+        .expect("terminal");
+    Box::new(storage).close().expect("close");
+    let mut storage = SqliteStorage::open(&root).expect("restart after terminal");
+    let progress = storage
+        .worker_outbound_queue(config())
+        .expect("queue")
+        .retry_confirmed(
+            &authority.slot.worker_id,
+            &authority.slot.worker_instance_id,
+        )
+        .expect("terminal cleanup");
+    assert_eq!(progress.retry_error, None);
+    assert_eq!(progress.acknowledgements.len(), 1);
+    assert_eq!(
+        progress.acknowledgements[0].settlement,
+        WorkerOutboundSettlement::Terminal
+    );
+    Box::new(storage).close().expect("close");
+    fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn remote_confirmation_retries_secure_checkpoint_and_rejects_corrupt_proof() {
+    const SECRET: &[u8] = b"private-remote-checkpoint-fixture-9812";
+    let root = temporary_directory("remote-checkpoint");
+    let mut storage = SqliteStorage::open(&root).expect("storage");
+    let authority = prepare_authority(&mut storage, 9);
+    let first = request(&authority, 900, SECRET);
+    let reader = Connection::open(storage.database_path()).expect("reader");
+    {
+        let mut queue = storage.worker_outbound_queue(config()).expect("queue");
+        queue.enqueue(&first).expect("enqueue");
+        queue
+            .claim_page(&authority, &at(6), None, 1)
+            .expect("claim");
+        queue
+            .confirm_remote(
+                &authority.slot.worker_id,
+                &authority.slot.worker_instance_id,
+                first.message_id(),
+                &at(7),
+            )
+            .expect("confirmation");
+    }
+    reader
+        .execute_batch(
+            "UPDATE internal_worker_outbound_confirmations SET authority_digest='corrupt'",
+        )
+        .expect("corrupt digest");
+    assert!(
+        storage
+            .worker_outbound_queue(config())
+            .expect("queue")
+            .retry_confirmed(
+                &authority.slot.worker_id,
+                &authority.slot.worker_instance_id
+            )
+            .is_err()
+    );
+    reader
+        .execute(
+            "UPDATE internal_worker_outbound_confirmations SET authority_digest=?1",
+            [format!(
+                "sha256:{:x}",
+                sha2::Sha256::digest(serde_json::to_vec(&authority).unwrap())
+            )],
+        )
+        .expect("restore digest");
+    reader.execute_batch("BEGIN").expect("hold snapshot");
+    let held: Vec<u8> = reader
+        .query_row(
+            "SELECT payload FROM internal_worker_outbound_messages",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read");
+    assert_eq!(held, SECRET);
+    let progress = storage
+        .worker_outbound_queue(config())
+        .expect("queue")
+        .retry_confirmed(
+            &authority.slot.worker_id,
+            &authority.slot.worker_instance_id,
+        )
+        .expect("retry progress");
+    assert_eq!(
+        progress.retry_error,
+        Some(WorkerOutboundQueueErrorCode::Storage)
+    );
+    assert!(progress.acknowledgements.is_empty());
+    reader.execute_batch("ROLLBACK").expect("release");
+    let proofs: i64 = reader
+        .query_row(
+            "SELECT COUNT(*) FROM internal_worker_outbound_confirmations",
+            [],
+            |row| row.get(0),
+        )
+        .expect("proof retained");
+    assert_eq!(
+        proofs, 1,
+        "committed deletion alone does not complete secure cleanup"
+    );
+    drop(reader);
+    let database = storage.database_path().to_path_buf();
+    Box::new(storage).close().expect("close");
+    let mut storage = SqliteStorage::open(&root).expect("restart");
+    let progress = storage
+        .worker_outbound_queue(config())
+        .expect("queue")
+        .retry_confirmed(
+            &authority.slot.worker_id,
+            &authority.slot.worker_instance_id,
+        )
+        .expect("secure cleanup retry");
+    assert_eq!(progress.acknowledgements.len(), 1);
+    assert!(progress.acknowledgements[0].replayed);
+    assert_eq!(progress.retry_error, None);
+    Box::new(storage).close().expect("close");
+    assert_files_exclude(&database, SECRET);
+    fs::remove_dir_all(root).expect("cleanup");
 }
 
 #[test]

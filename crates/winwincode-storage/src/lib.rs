@@ -202,10 +202,10 @@ pub use worker_fleet_operations::{
 };
 pub use worker_outbound_queue::{
     WorkerOutboundAcknowledgement, WorkerOutboundAuthority, WorkerOutboundClaim,
-    WorkerOutboundClaimPage, WorkerOutboundEnqueueReceipt, WorkerOutboundEnqueueRequest,
-    WorkerOutboundMessageState, WorkerOutboundPageCursor, WorkerOutboundQueue,
-    WorkerOutboundQueueConfig, WorkerOutboundQueueError, WorkerOutboundQueueErrorCode,
-    WorkerOutboundSettlement,
+    WorkerOutboundClaimPage, WorkerOutboundConfirmationProgress, WorkerOutboundEnqueueReceipt,
+    WorkerOutboundEnqueueRequest, WorkerOutboundMessageState, WorkerOutboundPageCursor,
+    WorkerOutboundQueue, WorkerOutboundQueueConfig, WorkerOutboundQueueError,
+    WorkerOutboundQueueErrorCode, WorkerOutboundSettlement,
 };
 pub use worker_placement::{
     WorkerAffinityFailure, WorkerPlacementCandidate, WorkerPlacementCandidateRejection,

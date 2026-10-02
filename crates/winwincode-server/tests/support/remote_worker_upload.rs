@@ -394,6 +394,24 @@ async fn scenario(chunks: usize) {
                         for ack in request.acknowledgements() {
                             metrics.outstanding.remove(ack);
                         }
+                        // Core observes the original domain receipt. Count its
+                        // actual transport identity once the exchange exposes
+                        // it; heartbeat Gap/positive receipt IDs are separated
+                        // by the production queue after Core returns.
+                        for delivery in decoded.deliveries() {
+                            let frame =
+                                RemoteTransportAdapter::<ArtifactIngress>::decode(&delivery.frame)
+                                    .unwrap();
+                            if let ExecutionPortMessage::WorkerHeartbeatAckMessage(ack) =
+                                frame.message()
+                            {
+                                metrics.outstanding.remove(&ExecutionMessageId(super::id(
+                                    "xmsg",
+                                    20000 + u64::try_from(ack.heartbeat_sequence.0).unwrap(),
+                                )));
+                            }
+                            metrics.outstanding.insert(delivery.delivery_id.clone());
+                        }
                         if !decoded.frame_accepted() {
                             metrics.refused.push(
                                 winwincode_execution_port::transport::execution_message_id(

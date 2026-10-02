@@ -16,8 +16,9 @@
 //! once. The vertical then pins the surrounding behaviors: the heartbeat
 //! running count following the registry, non-holder rejection, the
 //! idempotent replay of an accepted acknowledgement, the supervisor stop
-//! path, `cancel_and_release` stopping the lease workers, and a stale
-//! launch after a force fence being refused by the daemon's mirror.
+//! path, `cancel_and_release` stopping the lease workers, and an exact old
+//! launch replay after a force fence returning its retained receipt without
+//! respawning a worker or changing the daemon's mirror.
 //!
 //! Assertions land on both durable sides throughout: the server's launch
 //! grant ledger and registry projection, and the device store's worker
@@ -54,8 +55,6 @@ use winwincode_client_port::domain::ClientCapacityReport;
 use winwincode_client_port::domain::ClientOccupancyReleaseMode;
 use winwincode_client_port::domain::ClientPlatformTarget;
 use winwincode_client_port::domain::WorkerLaunchAckStatus;
-use winwincode_client_port::domain::WorkerLaunchGrant;
-use winwincode_client_port::domain::WorkerLaunchGrantState as WireGrantState;
 use winwincode_client_port::messages::CLIENT_CONTROL_PORT_SCHEMA_VERSION;
 use winwincode_client_port::messages::ClientToServerEnvelope;
 use winwincode_client_port::messages::ClientToServerMessage;
@@ -1327,7 +1326,7 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
     );
     assert_eq!(count_released_leases(&data_directory, "drain_completed"), 1);
 
-    // ---- Phase 7: a stale launch after a force fence is refused ------------
+    // ---- Phase 7: an old exact launch replay cannot respawn after a fence ---
     // Claim once more, go silent, and let the offline sweep push the lease
     // into recovery; the overdue force-release fences the device with a
     // strictly higher token.
@@ -1407,52 +1406,34 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
     assert_eq!(mirror.occupancy_lease_id, lease_three_id);
     assert_eq!(mirror.fencing_token, fence_token);
 
-    // The stale launch replays the FIRST grant's stamp: its lease/token pair
-    // died with the force fence, so the daemon refuses it and spawns
-    // nothing. The frame rides the real durable downlink outbox.
+    // Replaying an already consumed launch returns the exact durable receipt.
+    // A fresh launch still requires the current fence; changing this old
+    // payload under the same grant ID is a protocol conflict, not a new launch.
     let grant_one_replay = launch_grant(&data_directory, &grant_one_id);
+    let receipt: Value = serde_json::from_slice(
+        &daemon
+            .store_mut()
+            .worker_launch_receipt(&grant_one_id)
+            .expect("receipt read")
+            .expect("first launch receipt"),
+    )
+    .expect("receipt JSON");
+    let original: ServerWorkerLaunchPayload =
+        serde_json::from_value(receipt["launch"].clone()).expect("original launch payload");
+    let accepted_before_replay = daemon.status().worker_launches_accepted;
+    let rejected_before_replay = daemon.status().worker_launches_rejected;
     enqueue_downlink_frame(
         &data_directory,
         &node_id,
         &device_instance,
-        ServerToClientMessage::WorkerLaunch(ServerWorkerLaunchPayload {
-            occupancy: OccupancyCommandContext {
-                command: CommandContext {
-                    expected_revision: mirror.mirror_revision,
-                    idempotency_key: "stale_launch_replay".to_owned(),
-                },
-                occupancy_lease_id: grant_one_replay.occupancy_lease_id.clone(),
-                occupancy_fencing_token: grant_one_replay.occupancy_fencing_token,
-            },
-            launch_grant: WorkerLaunchGrant {
-                worker_launch_grant_id: grant_one_replay.worker_launch_grant_id.clone(),
-                client_node_id: grant_one_replay.client_node_id.clone(),
-                client_instance_id: grant_one_replay.client_instance_id.clone(),
-                occupancy_lease_id: grant_one_replay.occupancy_lease_id.clone(),
-                occupancy_fencing_token: grant_one_replay.occupancy_fencing_token,
-                repository_binding_id: grant_one_replay.repository_binding_id.clone(),
-                product_session_id: grant_one_replay
-                    .product_session_id
-                    .clone()
-                    .unwrap_or_default(),
-                work_run_id: grant_one_replay.work_run_id.as_ref().map(|id| id.0.clone()),
-                worker_session_id: grant_one_replay.worker_session_id.clone(),
-                worker_id: grant_one_replay.worker_id.clone(),
-                worker_instance_id: grant_one_replay.worker_instance_id.clone(),
-                credential_digest: grant_one_replay.credential_digest.clone(),
-                expires_at: grant_one_replay.expires_at.0.clone(),
-                state: WireGrantState::Issued,
-                revision: grant_one_replay.revision,
-            },
-        }),
+        ServerToClientMessage::WorkerLaunch(original),
     );
-    drive_until(&mut daemon, "the stale launch to be refused", |daemon| {
-        daemon.status().worker_launches_rejected == 1 && settled(daemon)
+    drive_until(&mut daemon, "the old launch receipt replay", |daemon| {
+        daemon.status().worker_launches_accepted == accepted_before_replay + 1 && settled(daemon)
     });
     assert_eq!(
-        daemon.status().worker_launches_accepted,
-        2,
-        "the stale launch spawned nothing"
+        daemon.status().worker_launches_rejected,
+        rejected_before_replay
     );
     assert_eq!(
         supervisor
@@ -1478,8 +1459,7 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
         mirror_after.fencing_token, fence_token,
         "the stale launch never touched the mirror"
     );
-    // The consumed grant the stale frame named stays consumed: the rejection
-    // changes no durable grant state.
+    // The exact replay preserves the original consumed grant state.
     assert_eq!(
         launch_grant(&data_directory, &grant_one_id).state,
         WorkerLaunchGrantState::Consumed

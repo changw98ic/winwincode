@@ -1280,9 +1280,6 @@ impl RepositoryRuntimeScheduler {
         worker_instance_id: &WorkerInstanceId,
         confirmed: &[winwincode_domain::ExecutionMessageId],
     ) -> Result<(), RuntimeSupervisorError> {
-        if confirmed.is_empty() {
-            return Ok(());
-        }
         let state_handle = Arc::clone(&self.state);
         let mut guard = state_handle.lock().map_err(|_| {
             RuntimeSupervisorError::new(
@@ -1298,26 +1295,34 @@ impl RepositoryRuntimeScheduler {
         })?;
         self.retire_terminal_pending(&mut state.storage, now)?;
         self.refresh_worker_authorities(&mut state.storage)?;
-        let mut remaining = Vec::new();
-        for (authority, message_id) in
-            std::mem::take(&mut self.pending_interaction_acknowledgements)
-        {
-            if &authority.slot.worker_id == worker_id
-                && &authority.slot.worker_instance_id == worker_instance_id
-                && confirmed.contains(&message_id)
-            {
-                if state
-                    .worker_outbound
-                    .acknowledge(&authority, &message_id, now)
-                    .is_err()
-                {
-                    remaining.push((authority, message_id));
-                }
-            } else {
-                remaining.push((authority, message_id));
-            }
+        for message_id in confirmed {
+            state
+                .worker_outbound
+                .confirm_remote(worker_id, worker_instance_id, message_id, now)
+                .map_err(|_| scheduler_failure())?;
         }
-        self.pending_interaction_acknowledgements = remaining;
+        self.retry_confirmed_interactions(state, worker_id, worker_instance_id)?;
+        Ok(())
+    }
+
+    fn retry_confirmed_interactions(
+        &mut self,
+        state: &mut ApplicationState,
+        worker_id: &WorkerId,
+        instance_id: &WorkerInstanceId,
+    ) -> Result<(), RuntimeSupervisorError> {
+        let progress = state
+            .worker_outbound
+            .retry_confirmed(worker_id, instance_id)
+            .map_err(|_| scheduler_failure())?;
+        self.pending_interaction_acknowledgements.retain(|(_, id)| {
+            !progress
+                .acknowledgements
+                .iter()
+                .any(|receipt| &receipt.message_id == id)
+        });
+        // A cleanup failure is safe to retry: the exact receipt is already
+        // durable. Unconfirmed controls are never acknowledged by this path.
         Ok(())
     }
 
@@ -1340,6 +1345,11 @@ impl RepositoryRuntimeScheduler {
                 "repository runtime scheduler application has stopped",
             )
         })?;
+        self.retry_confirmed_interactions(
+            state,
+            &self.worker_id.clone(),
+            &self.worker_instance_id.clone(),
+        )?;
         self.refresh_admission_identity(&mut state.storage);
         self.prune_worker_authorities(&mut state.storage)?;
         let admission_ready = self.ensure_queued_admission(state, now)?;
@@ -2513,6 +2523,25 @@ mod tests {
         user_id
     }
 
+    struct Publisher;
+    impl winwincode_control_plane::EventPublisher for Publisher {
+        fn publish(
+            &mut self,
+            _event: &winwincode_control_plane::OutboxEvent,
+        ) -> Result<(), winwincode_control_plane::EventPublishError> {
+            Ok(())
+        }
+    }
+    struct NoControls;
+    impl RuntimeControlOutbound for NoControls {
+        fn enqueue_control(
+            &self,
+            _message: ExecutionPortMessage,
+        ) -> Result<(), RuntimeSupervisorError> {
+            Ok(())
+        }
+    }
+
     #[test]
     #[allow(clippy::too_many_lines)]
     fn scheduler_refreshes_renewed_dispatch_and_pending_ack_authorities() {
@@ -2824,7 +2853,78 @@ mod tests {
             assert_eq!(message.lease.fencing_token, lease.fencing_token);
         }
         outbound.close().expect("close outbound");
-        Box::new(storage).close().expect("close");
+        // Exercise the real remote receipt entry and driver, with cleanup
+        // failing after the Worker has already supplied its transport ACK.
+        let scope: RepositoryScope = serde_json::from_value(serde_json::json!({
+            "kind":"repository", "organizationId":test_scope().organization_id,
+            "workspaceId":test_scope().workspace_id, "projectId":test_scope().project_id,
+            "repositoryId":test_scope().repository_id
+        }))
+        .expect("scope");
+        let application = StandaloneControlPlaneApplication::new(
+            winwincode_control_plane::ControlPlane::start_local(
+                winwincode_control_plane::ControlPlaneConfig::local(&root),
+                Box::new(Publisher),
+            )
+            .expect("control plane"),
+            storage,
+            DurableWorkerInteractionOutbound::new(
+                SqliteStorage::open(&root).expect("outbound"),
+                winwincode_storage::WorkerOutboundQueueConfig::default(),
+            )
+            .expect("outbound"),
+            scheduler.hub.clone(),
+            winwincode_control_plane::ProductSessionExecutionConfig::try_new(
+                scope,
+                "fixture-revision",
+                "codex-chat",
+                Some(3600),
+                1_073_741_824,
+            )
+            .expect("execution config"),
+        )
+        .expect("application");
+        scheduler.state = application.shared_runtime_state();
+        scheduler.pending_interaction_acknowledgements = claims
+            .iter()
+            .map(|claim| (authority.clone(), claim.message_id().clone()))
+            .collect();
+        let confirmed: Vec<_> = claims
+            .iter()
+            .map(|claim| claim.message_id().clone())
+            .collect();
+        let fault = rusqlite::Connection::open(root.join("control-plane.sqlite3"))
+            .expect("fault connection");
+        fault.execute_batch("CREATE TRIGGER fail_interaction_cleanup BEFORE INSERT ON internal_worker_outbound_settlements BEGIN SELECT RAISE(ABORT,'fixture cleanup failure'); END;").expect("inject cleanup fault");
+        scheduler
+            .acknowledge_remote(
+                &at(12),
+                &lease.worker_id,
+                &lease.worker_instance_id,
+                &confirmed,
+            )
+            .expect("durable receipt accepts cleanup retry");
+        assert_eq!(scheduler.pending_interaction_acknowledgements.len(), 2);
+        fault
+            .execute_batch("DROP TRIGGER fail_interaction_cleanup")
+            .expect("release fault");
+        // No repeated Worker ACK is supplied. Even an unrelated admission
+        // failure must not prevent the driver from cleaning proven receipts.
+        let _ = scheduler.drive_remote(&at(12), &NoControls);
+        let retained: i64 = fault
+            .query_row(
+                "SELECT COUNT(*) FROM internal_worker_outbound_messages",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count");
+        assert_eq!(
+            retained, 0,
+            "driver retries confirmed cleanup without another transport ACK"
+        );
+        assert!(scheduler.pending_interaction_acknowledgements.is_empty());
+        drop(fault);
+        drop(application);
         drop(scheduler);
         std::fs::remove_dir_all(root).expect("cleanup");
     }
