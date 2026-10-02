@@ -845,8 +845,26 @@ export function deviceConnectCodePublished(database, connectCodeId) {
 }
 
 /** Read the owned Workers' authoritative Core admission records, never model text. */
-export function assertDeviceBenchmarkRunning(deviceData, workerSessionIds) {
-  for (const workerSessionId of workerSessionIds) {
+export function assertDeviceBenchmarkRunning(deviceData, workerSessionIds, workRuns = []) {
+  const targets = Array.from(workerSessionIds, workerSessionId => ({ workerSessionId }))
+  const devicePath = join(deviceData, 'device-client.sqlite3')
+  if (workRuns.length && existsSync(devicePath)) {
+    const device = new DatabaseSync(devicePath, { readOnly: true })
+    try {
+      device.exec('PRAGMA busy_timeout = 5000')
+      for (const run of workRuns) {
+        if (!run.workerId || !run.workerInstanceId || !run.executionJobId || !run.codexThreadId
+          || !run.id || !run.productSessionId || !Number.isSafeInteger(run.attempt)) continue
+        for (const worker of device.prepare(`SELECT worker_session_id FROM worker_process_registry
+          WHERE worker_id = ? AND worker_instance_id = ?`).all(run.workerId, run.workerInstanceId)) {
+          if (worker.worker_session_id !== run.workerSessionId) {
+            targets.push({ workerSessionId: worker.worker_session_id, run })
+          }
+        }
+      }
+    } finally { device.close() }
+  }
+  for (const { workerSessionId, run } of targets) {
     assert.match(workerSessionId, /^wsn_[0-9A-HJKMNP-TV-Z]{26}$/u)
     const path = join(deviceData, 'worker-sessions', workerSessionId, 'data', 'codex-runtime', 'worker-codex.sqlite3')
     // A launch anchor can precede Worker startup and database creation.
@@ -856,10 +874,24 @@ export function assertDeviceBenchmarkRunning(deviceData, workerSessionIds) {
       database.exec('PRAGMA busy_timeout = 5000')
       // The file is visible before Core finishes its schema migration.
       if (!database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tool_repeat_run'").get()) continue
-      const stopped = database.prepare('SELECT run_key FROM tool_repeat_run WHERE stopped = 1 LIMIT 1').get()
+      let stopped
+      if (run) {
+        if (!database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'codex_run'").get()) continue
+        stopped = database.prepare(`SELECT stop.run_key FROM tool_repeat_run AS stop
+          JOIN codex_run AS core ON core.run_key = stop.run_key WHERE stop.stopped = 1
+          AND json_extract(core.record_json, '$.job.jobId') = ?
+          AND json_extract(core.record_json, '$.job.attempt') = ?
+          AND json_extract(core.record_json, '$.job.scope.workRunId') = ?
+          AND json_extract(core.record_json, '$.job.scope.productSessionId') = ?
+          AND json_extract(core.record_json, '$.canonicalThreadId') = ? LIMIT 1`)
+          .get(run.executionJobId, run.attempt, run.id, run.productSessionId, run.codexThreadId)
+      } else {
+        stopped = database.prepare('SELECT run_key FROM tool_repeat_run WHERE stopped = 1 LIMIT 1').get()
+      }
       if (stopped) {
         throw Object.assign(new Error('Core stopped before the sixth identical tool request'), {
           code: 'STUCK_TOOL_REPEAT_LIMIT', workerSessionId, runKey: stopped.run_key,
+          ...(run ? { logicalWorkerSessionId: run.workerSessionId } : {}),
         })
       }
     } finally {

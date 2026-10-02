@@ -106,17 +106,20 @@ impl DeviceProviderStore {
         connection.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;",
         )?;
-        let transaction =
-            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        migrate_device_store(&transaction)?;
-        let mut bytes: Vec<u8> = transaction.query_row(
-            "SELECT private_key FROM identity WHERE singleton=1",
-            [],
-            |row| row.get(0),
-        )?;
-        let key = SecretKey::from_slice(&bytes).map_err(|_| DeviceProviderError)?;
-        bytes.fill(0);
-        transaction.commit()?;
+        let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        let key = if version == 9 {
+            load_device_key(&connection)?
+        } else {
+            // Only an actual migration needs the writer lock. Worker polling,
+            // model startup and accounting readers share this database; opening
+            // its current schema must not contend with an accounting transaction.
+            let transaction =
+                connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            migrate_device_store(&transaction)?;
+            let key = load_device_key(&transaction)?;
+            transaction.commit()?;
+            key
+        };
         Ok(Self { connection, key })
     }
 
@@ -583,6 +586,17 @@ pub(crate) fn adapter(
     }
     .map_err(|_| DeviceProviderError)?;
     HttpsSseProviderAdapter::try_new(transport).map_err(|_| DeviceProviderError)
+}
+
+fn load_device_key(connection: &Connection) -> Result<SecretKey, DeviceProviderError> {
+    let mut bytes: Vec<u8> = connection.query_row(
+        "SELECT private_key FROM identity WHERE singleton=1",
+        [],
+        |row| row.get(0),
+    )?;
+    let key = SecretKey::from_slice(&bytes).map_err(|_| DeviceProviderError);
+    bytes.fill(0);
+    key
 }
 
 fn migrate_device_store(

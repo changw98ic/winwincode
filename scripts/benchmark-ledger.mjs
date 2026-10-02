@@ -138,9 +138,25 @@ export function openBenchmarkLedger(path, identity, cells) {
           || JSON.stringify(launches(index)) !== JSON.stringify(observed.launches)
           || JSON.stringify(calls(index)) !== JSON.stringify(observed.calls)) reject('LEDGER_RECOVERY_CONFLICT')
         if (record.calls !== undefined) {
-          if (!Array.isArray(record.calls) || record.calls.length < observed.calls.length
-            || JSON.stringify(record.calls.slice(0, observed.calls.length)) !== JSON.stringify(observed.calls)) {
+          if (!Array.isArray(record.calls) || record.calls.length < observed.calls.length) {
             reject('LEDGER_RECOVERY_CONFLICT')
+          }
+          for (const [position, prior] of observed.calls.entries()) {
+            const resolved = record.calls[position]
+            if (JSON.stringify(resolved) === JSON.stringify(prior)) continue
+            const launch = observed.launches.find(target => target.callId === prior.callId)
+            // An export error is not a Provider outcome. Resolve only that
+            // exact registered call from retained product evidence, and keep
+            // its original failure in the same atomic recovery record.
+            if (prior.status !== 'failed' || prior.failure?.code !== 'BENCHMARK_EVIDENCE_FAILED'
+              || resolved?.status !== 'returned' || resolved.callId !== prior.callId
+              || !launch || resolved.result?.directory !== launch.directory || !resolved.result.recovery
+              || record.recovery?.kind !== 'retained-product-result'
+              || JSON.stringify(record.recovery.originalCalls) !== JSON.stringify(observed.calls)) {
+              reject('LEDGER_RECOVERY_CONFLICT')
+            }
+            database.prepare('UPDATE benchmark_call SET record = ? WHERE ordinal = ? AND call_id = ?')
+              .run(JSON.stringify(resolved), index, prior.callId)
           }
           const insert = database.prepare('INSERT INTO benchmark_call VALUES (?, ?, ?)')
           for (const call of record.calls.slice(observed.calls.length)) {

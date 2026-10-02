@@ -336,10 +336,10 @@ export function stoppedDeviceResult(request, launch, expectedReport, { recoverin
     'device-data/worker-sessions/*', { cwd: launch.directory }).map(path => basename(path)))
   assert.ok(workerSessionIds.length > 0, 'Core stop has no registered product WorkRun')
   let stop = null
-  try { assertDeviceBenchmarkRunning(resolve(launch.directory, 'device-data'), workerSessionIds) }
+  try { assertDeviceBenchmarkRunning(resolve(launch.directory, 'device-data'), workerSessionIds, runs) }
   catch (error) { stop = error }
   assert.equal(stop?.code, 'STUCK_TOOL_REPEAT_LIMIT')
-  assert.ok(workerSessionIds.includes(stop.workerSessionId))
+  assert.ok(workerSessionIds.includes(stop.logicalWorkerSessionId ?? stop.workerSessionId))
   const evidenceDirectory = recovering
     ? resolve(launch.directory, 'recovery', `core-stop-${sha256(reportBytes)}`) : launch.directory
   if (recovering) mkdirSync(evidenceDirectory, { recursive: true, mode: 0o700 })
@@ -356,6 +356,7 @@ export function stoppedDeviceResult(request, launch, expectedReport, { recoverin
     provider: request.provider, callId: request.callId, directory: launch.directory,
     executionReceipts, delivery: report.delivery,
     stopProof: { workerSessionId: stop.workerSessionId, runKey: stop.runKey,
+      ...(stop.logicalWorkerSessionId ? { logicalWorkerSessionId: stop.logicalWorkerSessionId } : {}),
       productReportSha256: sha256(reportBytes) },
     ...(recovering ? { recovery: { kind: 'retained-core-stop' } } : {}),
     externalVerdict: null, externalScore: null }

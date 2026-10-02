@@ -1553,6 +1553,97 @@ test('a persisted Core stop settles a claimed product call before Delivery termi
     launch, report))
 })
 
+test('a Core stop follows the exact WorkRun into its physical Worker directory', async t => {
+  const directory = await mkdtemp(resolve(tmpdir(), 'wwc-core-stop-physical-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const workerSessionId = 'wsn_01J00000000000000000000001'
+  const physicalSessionId = 'wsn_01J00000000000000000000002'
+  const productSessionId = 'psn_01J00000000000000000000001'
+  const deliveryId = 'dlv_01J00000000000000000000001'
+  const runId = 'main-A:task-0:glm-5.3-flash'
+  const callId = `${runId}:model`
+  const run = { id: 'wrn_owned', workerSessionId, workerId: 'wrk_owned',
+    workerInstanceId: 'wki_owned', executionJobId: 'job_owned', codexThreadId: 'cdx_owned',
+    productSessionId, attempt: 1, state: 'running' }
+  const runtime = resolve(directory, 'device-data/worker-sessions', physicalSessionId, 'data/codex-runtime')
+  await mkdir(runtime, { recursive: true })
+  const device = new DatabaseSync(resolve(directory, 'device-data/device-client.sqlite3'))
+  device.exec(`CREATE TABLE worker_process_registry (worker_session_id TEXT, worker_id TEXT, worker_instance_id TEXT)`)
+  device.prepare('INSERT INTO worker_process_registry VALUES (?, ?, ?)')
+    .run(physicalSessionId, run.workerId, run.workerInstanceId)
+  device.close()
+  const database = new DatabaseSync(resolve(runtime, 'worker-codex.sqlite3'))
+  database.exec(`CREATE TABLE tool_repeat_run (run_key TEXT PRIMARY KEY, stopped INTEGER NOT NULL);
+    CREATE TABLE codex_run (run_key TEXT PRIMARY KEY, record_json BLOB);
+    INSERT INTO tool_repeat_run VALUES ('owned-core-run', 1)`)
+  const record = { canonicalThreadId: run.codexThreadId, job: { jobId: run.executionJobId,
+    attempt: run.attempt, scope: { workRunId: run.id, productSessionId } } }
+  database.prepare('INSERT INTO codex_run VALUES (?, ?)').run('owned-core-run', JSON.stringify(record))
+  t.after(() => database.close())
+  const launch = { callId, directory, productSessionId, deliveryId }
+  const report = { errorCode: 'STUCK_TOOL_REPEAT_LIMIT', complete: false, productSessionId, deliveryId,
+    delivery: { detail: { status: 'in_progress' }, workRunAggregate: { runs: [run] } } }
+  await writeFile(resolve(directory, 'device-task-result.json'), JSON.stringify(report))
+  await writeFile(resolve(directory, 'task-source-binding.json'), JSON.stringify({ runId, callId, taskId: 'task-0' }))
+  await writeFile(resolve(directory, 'execution-receipts.json'), JSON.stringify({ calls: [], jev: [] }))
+  const result = stoppedDeviceResult({ runId, callId, taskId: 'task-0', provider: 'glm-5.3-flash' }, launch, report)
+  assert.equal(result.failure.code, 'STUCK_TOOL_REPEAT_LIMIT')
+  assert.equal(result.stopProof.workerSessionId, physicalSessionId)
+  assert.equal(result.stopProof.logicalWorkerSessionId, workerSessionId)
+  assert.equal(result.stopProof.runKey, 'owned-core-run')
+  for (const [field, changed] of [['executionJobId', 'job_other'], ['codexThreadId', 'cdx_other'],
+    ['attempt', 2], ['id', 'wrn_other'], ['productSessionId', 'psn_other'],
+    ['workerId', 'wrk_other'], ['workerInstanceId', 'wki_other']]) {
+    const foreign = { ...report, delivery: { ...report.delivery,
+      workRunAggregate: { runs: [{ ...run, [field]: changed }] } } }
+    await writeFile(resolve(directory, 'device-task-result.json'), JSON.stringify(foreign))
+    assert.throws(() => stoppedDeviceResult({ runId, callId, taskId: 'task-0', provider: 'glm-5.3-flash' },
+      launch, foreign), `a different ${field} must not inherit the stop`)
+  }
+  await writeFile(resolve(directory, 'device-task-result.json'), JSON.stringify({ ...report,
+    modelRoute: { modelId: 'glm-5.3-flash' }, benchmarkConfiguration: benchmarkConfiguration('main-A') }))
+  await writeFile(resolve(directory, 'product-source-seal.json'), '{}')
+  const cell = buildBenchmarkPlan({ taskIds: Array.from({ length: 20 }, (_, index) => `task-${index}`) }).cells[0]
+  const options = { ledgerPath: resolve(directory, 'ledger.sqlite3'),
+    experimentBinding: { experimentId: 'physical-stop-recovery' } }
+  let productStarts = 0
+  await assert.rejects(runBenchmarkPlan({ cells: [cell] }, { ...options,
+    executeCell: (value, runner) => executeBenchmarkCell(value, {
+      runModel: async (_request, callRunner) => {
+        productStarts += 1
+        await callRunner.registerLaunch(launch)
+        throw Object.assign(new Error('Core stop export was unavailable'), { code: 'BENCHMARK_EVIDENCE_FAILED' })
+      },
+    }, runner) }), { code: 'BENCHMARK_EVIDENCE_FAILED' })
+  const metadata = new DatabaseSync(options.ledgerPath, { readOnly: true })
+  const identity = metadata.prepare('SELECT identity FROM benchmark_identity').get().identity
+  metadata.close()
+  const retained = openBenchmarkLedger(options.ledgerPath, identity, [cell])
+  try {
+    let observed
+    try { retained.claim(0) } catch (error) { observed = error }
+    assert.equal(observed.code, 'LEDGER_RUN_UNRESOLVED')
+    const result = await recoverBenchmarkDeviceCell(cell, observed, {})
+    const record = { ...cell, ...result, launches: observed.launches }
+    const foreign = structuredClone(record)
+    foreign.calls[0].result.directory = `${directory}/other-product`
+    assert.throws(() => retained.recover(0, observed, foreign), { code: 'LEDGER_RECOVERY_CONFLICT' })
+    const unproved = structuredClone(record)
+    delete unproved.recovery.originalCalls
+    assert.throws(() => retained.recover(0, observed, unproved), { code: 'LEDGER_RECOVERY_CONFLICT' })
+    assert.equal(retained.calls(0)[0].failure.code, 'BENCHMARK_EVIDENCE_FAILED')
+  } finally { retained.close() }
+  const ledger = await runBenchmarkPlan({ cells: [cell] }, { ...options,
+    executeCell: () => assert.fail('recovery cannot start another product call'),
+    recoverCell: (value, observed) => recoverBenchmarkDeviceCell(value, observed, {}) })
+  assert.equal(productStarts, 1)
+  assert.equal(ledger.records[0].failure.code, 'STUCK_TOOL_REPEAT_LIMIT')
+  assert.equal(ledger.records[0].calls[0].status, 'returned')
+  assert.equal(ledger.records[0].recovery.originalCalls[0].failure.code, 'BENCHMARK_EVIDENCE_FAILED')
+  assert.deepEqual(await runBenchmarkPlan({ cells: [cell] }, { ...options,
+    executeCell: () => assert.fail('settled stop cannot restart') }), ledger)
+})
+
 test('recovery retains a Core stop and receipts when the driver dies before writing its stop report', async t => {
   const directory = await mkdtemp(resolve(tmpdir(), 'wwc-core-stop-recovery-'))
   t.after(() => rm(directory, { recursive: true, force: true }))
