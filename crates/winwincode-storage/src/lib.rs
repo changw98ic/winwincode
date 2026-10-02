@@ -2208,6 +2208,19 @@ pub trait ProductStateStorage: Send {
         Ok(None)
     }
 
+    /// Proves a historical lease window from accepted Registry claim/renewal
+    /// receipts. This is identity evidence, not permission to start new work
+    /// after expiry or settlement.
+    ///
+    /// # Errors
+    /// Returns corrupt receipt or adapter failures.
+    fn load_accepted_execution_lease_for_period(
+        &mut self,
+        _period: &ExecutionLeaseRecord,
+    ) -> Result<Option<ExecutionLeaseRecord>, StorageError> {
+        Ok(None)
+    }
+
     /// Loads the scheduler-sealed Client and repository identity for one
     /// execution Job. Non-device adapters return no binding.
     ///
@@ -2898,6 +2911,14 @@ impl ProductStateStorage for SqliteStorage {
         job_id: &ExecutionJobId,
     ) -> Result<Option<ExecutionJobRecord>, StorageError> {
         repository_scheduler::load_execution_job_by_id(self.connection()?, job_id)
+    }
+
+    fn load_accepted_execution_lease_for_period(
+        &mut self,
+        period: &ExecutionLeaseRecord,
+    ) -> Result<Option<ExecutionLeaseRecord>, StorageError> {
+        self.execution_registry()?
+            .load_accepted_lease_for_period(period)
     }
 
     fn load_work_run_device_binding_facts(

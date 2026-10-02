@@ -2143,6 +2143,242 @@ fn install_workrun_dispatch_for_terminal(
     (delivery, job, lease, worker_session_id)
 }
 
+fn renew_ingress_fixture_lease(fixture: &mut Fixture, lease: &ExecutionLeaseStamp, seed: u64) {
+    let renewal = winwincode_storage::ExecutionLeaseRenewal {
+        expires_at: Instant("2027-01-15T08:10:00.000Z".into()),
+        prior_expires_at: lease.expires_at.clone(),
+        fencing_token: lease.fencing_token.clone(),
+        job_id: lease.job_id.clone(),
+        lease_id: lease.lease_id.clone(),
+        message_id: ExecutionMessageId(canonical_id("xmsg", seed + 90)),
+        request_id: RequestId(canonical_id("req", seed + 90)),
+        sent_at: Instant("2027-01-15T08:04:00.000Z".into()),
+        worker_id: lease.worker_id.clone(),
+        worker_instance_id: lease.worker_instance_id.clone(),
+        attempt: 1,
+    };
+    assert_eq!(
+        fixture
+            .storage
+            .execution_registry()
+            .unwrap()
+            .renew_execution_lease(&renewal)
+            .unwrap()
+            .status,
+        winwincode_storage::LeaseWriteStatus::Accepted,
+    );
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the real renewal/restart/replay sequence includes identity rejection controls"
+)]
+fn artifact_original_chunk_survives_accepted_renewal_and_restart() {
+    use winwincode_domain::ArtifactId;
+    use winwincode_execution_port::generated::{
+        ArtifactChunkMessage, ArtifactChunkMessageKind, ArtifactDescriptor, ArtifactKind,
+        ArtifactOpenMessage, ArtifactOpenMessageKind, EncodedPayload,
+    };
+    let seed = 99020;
+    let mut fixture = Fixture::open("renewed-artifact", seed);
+    let (_, job, lease, _) = install_workrun_dispatch_for_terminal(&mut fixture, seed);
+    let binding = workrun_binding(&job, &lease, seed, seed);
+    fixture
+        .accept(
+            &ExecutionPortMessage::SessionBindingMessage(binding.clone()),
+            binding.sent_at.clone(),
+        )
+        .unwrap();
+    let digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(b"hello")));
+    let open = ArtifactOpenMessage {
+        replaces_artifact_id: None,
+        artifact: ArtifactDescriptor {
+            artifact_id: ArtifactId(canonical_id("art", seed)),
+            digest: digest.clone(),
+            file_name: Some("command-output.txt".into()),
+            kind: ArtifactKind::CommandOutput,
+            media_type: "text/plain".into(),
+            size_bytes: 5,
+        },
+        kind: ArtifactOpenMessageKind::ArtifactOpen,
+        lease: lease.clone(),
+        message_id: ExecutionMessageId(canonical_id("xmsg", seed + 30)),
+        request_id: RequestId(canonical_id("req", seed + 30)),
+        schema_version: SchemaVersion::WinwincodeV1,
+        sent_at: Instant("2027-01-15T08:00:03.000Z".into()),
+        session_identity: binding.session_identity.clone(),
+        snapshot_id: None,
+        worker_session_id: binding.worker_session_id.clone(),
+    };
+    fixture
+        .accept(
+            &ExecutionPortMessage::ArtifactOpenMessage(open.clone()),
+            open.sent_at.clone(),
+        )
+        .unwrap();
+    let chunk = ArtifactChunkMessage {
+        artifact_id: open.artifact.artifact_id.clone(),
+        is_final: true,
+        kind: ArtifactChunkMessageKind::ArtifactChunk,
+        lease: lease.clone(),
+        message_id: ExecutionMessageId(canonical_id("xmsg", seed + 31)),
+        payload: EncodedPayload {
+            content_type: "text/plain".into(),
+            data_base64: "aGVsbG8=".into(),
+            payload_digest: digest,
+        },
+        schema_version: SchemaVersion::WinwincodeV1,
+        sent_at: Instant("2027-01-15T08:00:04.000Z".into()),
+        sequence: ExecutionSequence(1),
+        session_identity: binding.session_identity,
+        snapshot_id: None,
+        worker_session_id: binding.worker_session_id,
+    };
+    renew_ingress_fixture_lease(&mut fixture, &lease, seed);
+    let mut fixture = fixture.restart();
+    let response = fixture
+        .accept(
+            &ExecutionPortMessage::ArtifactChunkMessage(chunk.clone()),
+            Instant("2027-01-15T08:06:00.000Z".into()),
+        )
+        .expect("original pending chunk must survive an accepted renewal");
+    let [ExecutionPortMessage::ArtifactAckMessage(ack)] = response.as_slice() else {
+        panic!("artifact ACK");
+    };
+    assert_eq!(ack.status, LeaseWriteStatus::Accepted);
+    assert_eq!(ack.ack_sequence.0, 1);
+    assert_eq!(
+        ack.lease, chunk.lease,
+        "ACK preserves the original frame identity"
+    );
+    for invalid in 0..4 {
+        let mut forged = chunk.clone();
+        forged.message_id = ExecutionMessageId(canonical_id("xmsg", seed + 40 + invalid));
+        match invalid {
+            0 => forged.lease.expires_at = Instant("2027-01-15T08:04:59.000Z".into()),
+            1 => forged.lease.expires_at = Instant("2027-01-15T08:10:01.000Z".into()),
+            2 => forged.lease.fencing_token = FencingToken("2".into()),
+            _ => forged.worker_session_id = WorkerSessionId(canonical_id("wsn", seed + 99)),
+        }
+        assert!(
+            fixture
+                .accept(
+                    &ExecutionPortMessage::ArtifactChunkMessage(forged),
+                    Instant("2027-01-15T08:06:00.000Z".into())
+                )
+                .is_err()
+        );
+    }
+    let mut fixture = fixture.restart();
+    for message in [
+        ExecutionPortMessage::ArtifactOpenMessage(open),
+        ExecutionPortMessage::ArtifactChunkMessage(chunk),
+    ] {
+        let response = fixture
+            .accept(&message, Instant("2027-01-15T08:11:00.000Z".into()))
+            .unwrap();
+        let [ExecutionPortMessage::ArtifactAckMessage(ack)] = response.as_slice() else {
+            panic!("artifact replay ACK");
+        };
+        assert_eq!(ack.status, LeaseWriteStatus::Duplicate);
+    }
+    fixture.close();
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the real renewal/restart sequence checks unissued periods, expiry, and receipt-first replay"
+)]
+fn runtime_original_event_survives_accepted_renewal_and_restart() {
+    let seed = 99021;
+    let mut fixture = Fixture::open("renewed-runtime", seed);
+    let (_, job, lease, _) = install_workrun_dispatch_for_terminal(&mut fixture, seed);
+    let binding = workrun_binding(&job, &lease, seed, seed);
+    fixture
+        .accept(
+            &ExecutionPortMessage::SessionBindingMessage(binding.clone()),
+            binding.sent_at.clone(),
+        )
+        .unwrap();
+    let message = RuntimeEventMessage {
+        codex_thread_id: binding.codex_thread_id,
+        event: ExecutionEventRecord {
+            category: ExecutionEventCategory::Activity,
+            event_id: ExecutionEventId(canonical_id("xevt", seed + 30)),
+            occurred_at: Instant("2027-01-15T08:00:03.000Z".into()),
+            payload: None,
+            sequence: ExecutionSequence(1),
+            summary: "non-repeated tool completed".into(),
+        },
+        kind: RuntimeEventMessageKind::RuntimeEvent,
+        lease: lease.clone(),
+        message_id: ExecutionMessageId(canonical_id("xmsg", seed + 30)),
+        schema_version: SchemaVersion::WinwincodeV1,
+        sent_at: Instant("2027-01-15T08:00:04.000Z".into()),
+        session_identity: binding.session_identity,
+        worker_session_id: binding.worker_session_id,
+    };
+    renew_ingress_fixture_lease(&mut fixture, &lease, seed);
+    let mut fixture = fixture.restart();
+    let response = fixture
+        .accept(
+            &ExecutionPortMessage::RuntimeEventMessage(message.clone()),
+            Instant("2027-01-15T08:06:00.000Z".into()),
+        )
+        .unwrap();
+    let [ExecutionPortMessage::RuntimeAckMessage(ack)] = response.as_slice() else {
+        panic!("runtime ACK");
+    };
+    assert_eq!(
+        ack.status,
+        LeaseWriteStatus::Accepted,
+        "an accepted historical lease period cannot invalidate queued progress"
+    );
+    assert_eq!(ack.ack_sequence.0, 1);
+    let mut next = message.clone();
+    next.message_id = ExecutionMessageId(canonical_id("xmsg", seed + 31));
+    next.event.event_id = ExecutionEventId(canonical_id("xevt", seed + 31));
+    next.event.sequence = ExecutionSequence(2);
+    for expiry in ["2027-01-15T08:04:59.000Z", "2027-01-15T08:10:01.000Z"] {
+        let mut forged = next.clone();
+        forged.lease.expires_at = Instant(expiry.into());
+        let response = fixture
+            .accept(
+                &ExecutionPortMessage::RuntimeEventMessage(forged),
+                Instant("2027-01-15T08:06:00.000Z".into()),
+            )
+            .unwrap();
+        let [ExecutionPortMessage::RuntimeAckMessage(ack)] = response.as_slice() else {
+            panic!("runtime rejection ACK");
+        };
+        assert_eq!(ack.status, LeaseWriteStatus::RejectedConflict);
+    }
+    let response = fixture
+        .accept(
+            &ExecutionPortMessage::RuntimeEventMessage(next),
+            Instant("2027-01-15T08:10:00.000Z".into()),
+        )
+        .unwrap();
+    let [ExecutionPortMessage::RuntimeAckMessage(ack)] = response.as_slice() else {
+        panic!("runtime expired ACK");
+    };
+    assert_eq!(ack.status, LeaseWriteStatus::RejectedExpiredLease);
+    let mut fixture = fixture.restart();
+    let response = fixture
+        .accept(
+            &ExecutionPortMessage::RuntimeEventMessage(message),
+            Instant("2027-01-15T08:11:00.000Z".into()),
+        )
+        .unwrap();
+    let [ExecutionPortMessage::RuntimeAckMessage(ack)] = response.as_slice() else {
+        panic!("runtime replay ACK");
+    };
+    assert_eq!(ack.status, LeaseWriteStatus::Duplicate);
+    fixture.close();
+}
+
 fn prepare_workrun_slot(
     fixture: &mut Fixture,
     job: &ExecutionJob,

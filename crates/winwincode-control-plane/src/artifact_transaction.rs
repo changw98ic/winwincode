@@ -60,21 +60,23 @@ impl From<ArtifactError> for ArtifactMessageError {
 }
 
 pub(crate) fn accept_open(
-    storage: &dyn ProductStateStorage,
+    storage: &mut dyn ProductStateStorage,
     artifacts: &mut ArtifactStore,
     scope: &RepositoryScope,
     message: &ArtifactOpenMessage,
     authority: &SessionBindingAuthority,
 ) -> Result<ArtifactAckMessage, ArtifactMessageError> {
     validate_open_shape(message)?;
+    let (durable, job) = load_durable_execution_job(storage, &message.lease.job_id)?;
     let context = ArtifactMessageContext::from_authority(
         scope,
         &message.lease,
         &message.worker_session_id,
         &message.sent_at,
         authority,
+        storage,
+        &job.payload_digest,
     )?;
-    let (durable, job) = load_durable_execution_job(storage, &message.lease.job_id)?;
     let session_claim = ArtifactSessionClaim {
         worker_session_id: &message.worker_session_id,
         message_identity: &message.session_identity,
@@ -215,19 +217,22 @@ fn metering_attribution(
 }
 
 pub(crate) fn accept_chunk(
-    storage: &dyn ProductStateStorage,
+    storage: &mut dyn ProductStateStorage,
     artifacts: &mut ArtifactStore,
     scope: &RepositoryScope,
     message: &ArtifactChunkMessage,
     authority: &SessionBindingAuthority,
 ) -> Result<ArtifactAckMessage, ArtifactMessageError> {
     validate_chunk_shape(message)?;
+    let (durable, job) = load_durable_execution_job(storage, &message.lease.job_id)?;
     let context = ArtifactMessageContext::from_authority(
         scope,
         &message.lease,
         &message.worker_session_id,
         &message.sent_at,
         authority,
+        storage,
+        &job.payload_digest,
     )?;
     let bytes = STANDARD
         .decode(&message.payload.data_base64)
@@ -251,7 +256,6 @@ pub(crate) fn accept_chunk(
         bytes,
         message.is_final,
     );
-    let (durable, job) = load_durable_execution_job(storage, &message.lease.job_id)?;
     let session_claim = ArtifactSessionClaim {
         worker_session_id: &message.worker_session_id,
         message_identity: &message.session_identity,
@@ -447,9 +451,18 @@ impl ArtifactMessageContext {
         worker_session_id: &winwincode_domain::WorkerSessionId,
         sent_at: &winwincode_domain::Instant,
         authority: &SessionBindingAuthority,
+        storage: &mut dyn ProductStateStorage,
+        payload_digest: &winwincode_domain::Sha256Digest,
     ) -> Result<Self, StorageError> {
         let scope_key = repository_scope_key(scope)?;
-        let mut rejection = validate_authority(lease, worker_session_id, authority)?;
+        let accepted_window = crate::execution_lease_period::accepted_lease_window_matches(
+            storage,
+            lease,
+            payload_digest,
+            authority,
+        )?;
+        let mut rejection =
+            validate_authority(lease, worker_session_id, authority, accepted_window)?;
         let sent_at_millis = instant_millis(sent_at)?;
         let issued_at_millis = instant_millis(&lease.issued_at)?;
         let expires_at_millis = instant_millis(&lease.expires_at)?;
@@ -677,6 +690,7 @@ fn validate_authority(
     lease: &ExecutionLeaseStamp,
     worker_session_id: &winwincode_domain::WorkerSessionId,
     authority: &SessionBindingAuthority,
+    accepted_window: bool,
 ) -> Result<Option<ArtifactLeaseRejection>, StorageError> {
     let attempt = u64::try_from(lease.attempt)
         .map_err(|_| StorageError::invalid_input("Artifact lease attempt is out of range"))?;
@@ -686,8 +700,7 @@ fn validate_authority(
         || active.lease_id() != &lease.lease_id
         || active.worker_id() != &lease.worker_id
         || active.worker_session_id() != worker_session_id
-        || authority.issued_at() != &lease.issued_at
-        || authority.expires_at() != &lease.expires_at
+        || !accepted_window
     {
         return Err(StorageError::invalid_input(
             "Artifact message does not match the scheduler-owned active lease",

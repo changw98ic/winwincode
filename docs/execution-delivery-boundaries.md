@@ -72,6 +72,8 @@ Device 本地容量不足或线程创建失败表示请求确定尚未启动，�
 
 同一租约续期保留原候选上传身份，只在所有其他权威字段完全一致时接受原上传或当前续期租约的 ACK；当前 ACK 转回原上传权威进入持久化账本。跨 attempt 替换仍要求原有替换证明。
 
+Control Plane 对待发产物和运行事件使用同一租约窗口证明：窗口变更只能来自 Registry 已接受的 claim／renewal 回执，完整 Job、payload、attempt、lease、fencing 和 Worker 身份必须与当前租约一致。任意较早到期时间都不是历史授权。原帧不改写；运行事件首次接收仍检查当前 Server 时间，已接收回执的精确重放按原事实确认。
+
 候选取消意图禁止继续发送；完成清理时新增 `candidate_artifact_cancelled` 元数据证明。精确、合法的迟到 ACK 可以消费，但不推进候选、不重放内容、不生成成功结果。外来身份和越界序号仍拒绝。已接受候选不可取消；取消后的同一权威不可重新 retain，新 fencing attempt 可建立新上传。旧版本已删除且未留证明的取消记录无法事后重建。
 
 委托 `submit_change_batch` 通过 custom tool 交接提案时，Core 在结束该 turn 前保存匹配原 call ID 的 `CustomToolCallOutput`，内容仅说明交给 Host 做应用和验证。下一 Composer 请求保留原 call 与唯一交接回执；该回执不替代 workspace 验证、Observer 决策或业务 Verdict。

@@ -230,7 +230,13 @@ pub(crate) fn execute_at(
     } else {
         None
     };
-    if let Err(rejection) = validate_authority(message, authority, &context) {
+    let accepted_window = crate::execution_lease_period::accepted_lease_window_matches(
+        storage,
+        &message.lease,
+        &job.payload_digest,
+        authority,
+    )?;
+    if let Err(rejection) = validate_authority(message, authority, &context, accepted_window) {
         return Ok(rejection_ack(message, 0, rejection));
     }
 
@@ -1010,6 +1016,7 @@ fn validate_authority(
     message: &RuntimeEventMessage,
     authority: &SessionBindingAuthority,
     context: &RuntimeContext,
+    accepted_window: bool,
 ) -> Result<(), Rejection> {
     let active = authority.active_lease();
     let attempt = u64::try_from(message.lease.attempt)
@@ -1045,9 +1052,7 @@ fn validate_authority(
             "runtime event fencing token is not scheduler-owned",
         ));
     }
-    if authority.issued_at() != &message.lease.issued_at
-        || authority.expires_at() != &message.lease.expires_at
-    {
+    if !accepted_window {
         return Err(Rejection::Conflict(
             "runtime event changed the scheduler-owned lease window",
         ));
