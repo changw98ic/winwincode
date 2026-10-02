@@ -981,7 +981,7 @@ fn signal_process_group(pid: u32, signal: &str) {
         return;
     };
     let signalled = Command::new("/bin/kill")
-        .args([format!("-{signal}"), format!("-{group}")])
+        .args([format!("-{signal}"), "--".to_owned(), format!("-{group}")])
         .stderr(Stdio::null())
         .status()
         .is_ok_and(|status| status.success());
