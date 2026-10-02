@@ -3986,12 +3986,8 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         open: &winwincode_execution_port::generated::ModelOpenMessage,
         now: &Instant,
         observed_at: std::time::Instant,
-        retained_request: Option<&winwincode_execution_port::generated::ModelOpenMessage>,
     ) -> Result<Option<crate::LocalModelStartGuard>, Self::Error> {
-        if retained_request.is_some_and(|retained| retained != open) {
-            return Err(conflict());
-        }
-        let retained_request = retained_request.cloned();
+        let original = open.clone();
         let base =
             time::OffsetDateTime::parse(&now.0, &time::format_description::well_known::Rfc3339)
                 .map_err(|_| conflict())?;
@@ -4035,15 +4031,14 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
                 return false;
             }
             let current = Instant(current);
-            if let Some(retained) = &retained_request {
-                source
-                    .validate_retained_exchange(&authority, retained, &current)
-                    .is_ok()
-            } else {
-                source
-                    .validate_exchange(&authority, &exchange, &current)
-                    .is_ok()
+            // One durable proof source for Core, child roles and Observer. Exact
+            // equality also rejects altered payloads under the same exchange ID.
+            if ExecutionOutbox::model_start_request_allowed(&store, &original) != Ok(true) {
+                return false;
             }
+            source
+                .validate_exchange(&authority, &exchange, &current)
+                .is_ok()
         })))
     }
 
@@ -8302,7 +8297,6 @@ mod tests {
                 &open,
                 &Instant("2026-08-28T00:30:00.000Z".into()),
                 std::time::Instant::now(),
-                None,
             )
             .unwrap()
             .unwrap();
@@ -8369,7 +8363,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn retained_observer_request_uses_shared_first_start_authority_after_renewal() {
+    fn all_model_roles_use_outbox_first_start_authority_after_renewal() {
         let root = test_root("retained-observer-start-authority");
         let mut adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
         let (_, mut binding) = delegated_record_and_binding();
@@ -8404,27 +8398,30 @@ mod tests {
         adapter.observe_now(&now).unwrap();
         assert!(
             adapter.outbox.pending().unwrap().is_empty(),
-            "Observer request proof comes from its own durable journal"
+            "missing original intent cannot authorize dispatch"
         );
         let unproven = adapter
-            .local_model_start_guard(&open, &now, std::time::Instant::now(), None)
+            .local_model_start_guard(&open, &now, std::time::Instant::now())
             .unwrap()
             .unwrap();
         assert!(
             !unproven(),
             "a missing request proof cannot authorize an old lease"
         );
+        adapter
+            .outbox
+            .retain(&ExecutionPortMessage::ModelOpenMessage(original.clone()))
+            .unwrap();
         let guard = adapter
-            .local_model_start_guard(&open, &now, std::time::Instant::now(), Some(&original))
+            .local_model_start_guard(&open, &now, std::time::Instant::now())
             .unwrap()
             .unwrap();
         let mut changed = original.clone();
         changed.request_id.0.push('X');
-        assert!(
-            adapter
-                .local_model_start_guard(&changed, &now, std::time::Instant::now(), Some(&original))
-                .is_err()
-        );
+        assert!(!adapter
+            .local_model_start_guard(&changed, &now, std::time::Instant::now())
+            .unwrap()
+            .unwrap()());
         assert!(
             guard(),
             "a verified original Observer request must survive legal renewal"

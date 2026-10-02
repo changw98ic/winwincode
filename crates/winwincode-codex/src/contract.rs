@@ -331,8 +331,8 @@ pub trait CodexCoreAdapter {
 
     /// Supplies the existing shared Core authority gate for revalidation inside
     /// the Provider thread. Lightweight adapters use the Worker's lease deadline.
-    /// `retained_request` must be the exact open validated against the Worker's
-    /// durable Observer journal; Core requests use their own outbox proof.
+    /// Every role must enqueue its exact original request in the shared execution
+    /// outbox before dispatch. Renewal never rewrites that request proof.
     ///
     /// # Errors
     /// Rejects an invalid trusted clock or unavailable authority source.
@@ -341,7 +341,6 @@ pub trait CodexCoreAdapter {
         _open: &winwincode_execution_port::generated::ModelOpenMessage,
         _now: &Instant,
         _observed_at: std::time::Instant,
-        _retained_request: Option<&winwincode_execution_port::generated::ModelOpenMessage>,
     ) -> Result<Option<LocalModelStartGuard>, Self::Error> {
         Ok(None)
     }

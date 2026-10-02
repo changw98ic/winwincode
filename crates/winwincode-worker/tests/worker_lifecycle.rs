@@ -266,7 +266,7 @@ struct CodexState {
     accepted_candidate: Option<ArtifactReference>,
     candidate_cancel_failures_remaining: usize,
     model_open_acknowledged: bool,
-    model_start_proofs: Vec<winwincode_execution_port::generated::ModelOpenMessage>,
+    model_start_requests: Vec<winwincode_execution_port::generated::ModelOpenMessage>,
     delegated_stops: HashMap<String, DelegatedLoopStopFact>,
     final_freezes: Vec<FinalCandidateFreezeFact>,
 }
@@ -486,16 +486,17 @@ impl CodexCoreAdapter for FakeCodex {
         open: &winwincode_execution_port::generated::ModelOpenMessage,
         _now: &Instant,
         _observed_at: std::time::Instant,
-        retained_request: Option<&winwincode_execution_port::generated::ModelOpenMessage>,
     ) -> Result<Option<winwincode_codex::LocalModelStartGuard>, Self::Error> {
-        if let Some(retained) = retained_request {
-            assert_eq!(retained, open);
-            self.state
-                .lock()
-                .unwrap()
-                .model_start_proofs
-                .push(retained.clone());
-        }
+        let mut state = self.state.lock().unwrap();
+        assert!(
+            state
+                .durable_deliveries
+                .iter()
+                .any(|delivery| delivery.message
+                    == ExecutionPortMessage::ModelOpenMessage(open.clone())),
+            "every role hands off through the original durable request"
+        );
+        state.model_start_requests.push(open.clone());
         Ok(None)
     }
 
@@ -1739,6 +1740,53 @@ async fn input_response_reaches_codex_once_and_acknowledges_the_retained_request
             "input_response_ack:inp_0000000000000000000000000E",
         ]
     );
+}
+
+#[tokio::test]
+async fn remote_model_replay_requires_the_producers_durable_handoff() {
+    let port = RecordingPort::default();
+    let messages = Rc::clone(&port.messages);
+    let codex = FakeCodex::with_threads([thread('A')]);
+    let mut producer = codex.clone();
+    let original = execution_port_fixture("model.open");
+    producer.retain_execution_delivery(&original).unwrap();
+    let mut worker = test_worker(worker_config(1), port, codex);
+    register(&mut worker).await;
+    worker
+        .accept_control(
+            &ExecutionPortMessage::JobDispatchMessage(dispatch('A', delivery_scope('A'))),
+            now(),
+        )
+        .await
+        .unwrap();
+    worker.flush_durable_outbox().await.unwrap();
+    assert!(
+        !messages
+            .borrow()
+            .iter()
+            .any(|message| matches!(message, ExecutionPortMessage::ModelOpenMessage(_))),
+        "queue recovery cannot independently repeat a paid model request"
+    );
+    producer
+        .state
+        .lock()
+        .unwrap()
+        .queued_execution_messages
+        .push(original.clone());
+    worker.poll_codex_boxed().await.unwrap();
+    worker.poll_codex_boxed().await.unwrap();
+    let opens = messages
+        .borrow()
+        .iter()
+        .filter(|message| matches!(message, ExecutionPortMessage::ModelOpenMessage(_)))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        opens,
+        vec![original],
+        "one producer handoff dispatches the original identity once"
+    );
+    worker.shutdown(now()).await.unwrap();
 }
 
 #[tokio::test]
@@ -3430,7 +3478,7 @@ async fn observer_renewal_control_accepts_original_chunks_without_error_ack() {
 }
 
 #[tokio::test]
-async fn deferred_observer_start_hands_its_durable_proof_to_the_shared_guard_after_renewal() {
+async fn deferred_observer_start_uses_common_outbox_after_renewal() {
     let ObserverWorkerFixture { worker, pump, .. } = observer_worker_fixture().await;
     let root = tempfile::tempdir().unwrap();
     let providers = root.path().join("providers");
@@ -3440,15 +3488,16 @@ async fn deferred_observer_start_hands_its_durable_proof_to_the_shared_guard_aft
         worker.poll_codex_boxed().await.unwrap_err().code,
         WorkerErrorCode::ModelStartDeferred
     );
-    let original = pump.state.lock().unwrap().model_start_proofs[0].clone();
+    let original = pump.state.lock().unwrap().model_start_requests[0].clone();
     assert!(
         pump.state
             .lock()
             .unwrap()
             .durable_deliveries
             .iter()
-            .all(|delivery| !matches!(delivery.message, ExecutionPortMessage::ModelOpenMessage(_))),
-        "the Observer proof is persisted in the ChangeBatch journal"
+            .any(|delivery| delivery.message
+                == ExecutionPortMessage::ModelOpenMessage(original.clone())),
+        "Observer adopts its journaled request into the shared durable outbox"
     );
     let active = worker.active_jobs()[0].clone();
     let mut lease = active.lease.clone();
@@ -3485,10 +3534,10 @@ async fn deferred_observer_start_hands_its_durable_proof_to_the_shared_guard_aft
     );
     {
         let state = pump.state.lock().unwrap();
-        assert!(state.model_start_proofs.len() >= 2);
+        assert!(state.model_start_requests.len() >= 2);
         assert!(
             state
-                .model_start_proofs
+                .model_start_requests
                 .iter()
                 .all(|proof| proof == &original),
             "renewal preserves exact original request proof at every local handoff"
@@ -5805,7 +5854,8 @@ async fn a_lost_binding_response_resumes_the_prepared_turn_once() {
     worker
         .poll_codex(now())
         .await
-        .expect("resume after reconnect");
+        .expect_err("one refused batch yields instead of retrying in the same poll");
+    assert_eq!(failures.get(), 0);
     worker
         .poll_codex(now())
         .await

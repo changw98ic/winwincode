@@ -290,17 +290,6 @@ impl SharedAuthoritySource {
             .map(|(_, bytes)| serde_json::from_slice(&bytes).map_err(|_| BridgeError::Unavailable))
             .collect()
     }
-    /// Uses an exact request already validated against the Worker's durable
-    /// Observer journal, while retaining the shared lineage and lease checks.
-    pub(crate) fn validate_retained_exchange(
-        &self,
-        authority: &ModelLeaseAuthority,
-        open: &winwincode_execution_port::generated::ModelOpenMessage,
-        now: &Instant,
-    ) -> Result<(), ModelAuthorityRejection> {
-        self.validate_original_request(authority, Some(open), now)
-    }
-
     fn validate_original_request(
         &self,
         authority: &ModelLeaseAuthority,

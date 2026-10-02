@@ -464,6 +464,28 @@ impl ExecutionOutbox {
         Ok(retained)
     }
 
+    /// Every model role uses the exact retained request and the same durable
+    /// cancellation proof, including before its cancellation effect is dispatched.
+    pub(crate) fn model_start_request_allowed(
+        store: &crate::store::AdapterStore,
+        open: &ModelOpenMessage,
+    ) -> Result<bool, AdapterStoreError> {
+        if Self::read_model_open(store, &open.model_exchange_id)?.as_ref() != Some(open) {
+            return Ok(false);
+        }
+        let key = correlation(&(
+            &open.model_exchange_id,
+            &open.lease,
+            &open.worker_session_id,
+            &open.session_identity,
+        ))?;
+        let cancelled: bool = store.lock()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM execution_response_receipt WHERE family = ?1 AND correlation_key = ?2)",
+            params![Family::ModelOpen.as_str(), format!("{key}.cancelled")], |row| row.get(0))
+            .map_err(|_| AdapterStoreError::Unavailable)?;
+        Ok(!cancelled)
+    }
+
     /// Applies an already domain-validated response to its exact retained request.
     pub(crate) fn acknowledge_response(
         &self,
@@ -909,6 +931,19 @@ fn response_replay_digest(message: &ExecutionPortMessage) -> Result<String, Adap
     {
         object.insert("status".into(), Value::String("accepted".into()));
     }
+    if matches!(message, ExecutionPortMessage::ModelAckMessage(ack) if canonical_terminal_model_ack(ack))
+    {
+        // Existing Observer wording is the same typed cancellation fact. Preserve
+        // wire bytes, while normalising only these two accepted legacy descriptions.
+        object
+            .get_mut("error")
+            .and_then(Value::as_object_mut)
+            .ok_or(AdapterStoreError::Corrupt)?
+            .insert(
+                "message".into(),
+                Value::String("model exchange cancelled by Worker".into()),
+            );
+    }
     serde_json::to_vec(&value)
         .map(|bytes| digest(&bytes))
         .map_err(|_| AdapterStoreError::Corrupt)
@@ -987,7 +1022,11 @@ fn canonical_terminal_model_ack(message: &ModelAckMessage) -> bool {
         && message.replay_from_sequence.is_none()
         && message.error.as_ref().is_some_and(|error| {
             error.code == ExecutionPortErrorCode::Cancelled
-                && error.message == "model exchange cancelled by Worker"
+                && matches!(
+                    error.message.as_str(),
+                    "model exchange cancelled by Worker"
+                        | "Observer model exchange cancelled by Worker"
+                )
                 && !error.retryable
         })
 }
@@ -1651,6 +1690,53 @@ mod tests {
                 .is_empty()
         );
         std::fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn all_model_roles_share_durable_cancellation_before_dispatch() {
+        for wording in [
+            "model exchange cancelled by Worker",
+            "Observer model exchange cancelled by Worker",
+        ] {
+            let root = test_root("shared-model-cancellation");
+            let store = AdapterStore::open(&root).unwrap();
+            let outbox = ExecutionOutbox::open(store.clone()).unwrap();
+            let request = fixture("model.open");
+            let ExecutionPortMessage::ModelOpenMessage(open) = &request else {
+                panic!("open fixture")
+            };
+            outbox.retain(&request).unwrap();
+            assert!(ExecutionOutbox::model_start_request_allowed(&store, open).unwrap());
+            let mut cancelled = terminal_model_ack();
+            let ExecutionPortMessage::ModelAckMessage(ack) = &mut cancelled else {
+                panic!("ack fixture")
+            };
+            ack.error.as_mut().unwrap().message = wording.into();
+            outbox.retain(&cancelled).unwrap();
+            outbox.acknowledge_response(&cancelled).unwrap();
+            assert!(
+                !ExecutionOutbox::model_start_request_allowed(&store, open).unwrap(),
+                "reliable cancellation forbids first start before network dispatch"
+            );
+            assert!(
+                outbox
+                    .pending()
+                    .unwrap()
+                    .iter()
+                    .all(|delivery| delivery.message != request)
+            );
+            let restarted = ExecutionOutbox::open(AdapterStore::open(&root).unwrap()).unwrap();
+            assert!(!ExecutionOutbox::model_start_request_allowed(&restarted.store, open).unwrap());
+            if let ExecutionPortMessage::ModelAckMessage(ack) = &mut cancelled {
+                ack.error.as_mut().unwrap().message = "model exchange cancelled by Worker".into();
+            }
+            restarted.acknowledge_response(&cancelled).unwrap();
+            assert!(!ExecutionOutbox::model_start_request_allowed(&restarted.store, open).unwrap());
+            drop(restarted);
+            drop(outbox);
+            drop(store);
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]

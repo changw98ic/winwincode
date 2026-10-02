@@ -1170,6 +1170,7 @@ fn input_response(request: &InputRequestMessage) -> InputResponseMessage {
 struct RecordedPort {
     messages: std::sync::Arc<Mutex<Vec<ExecutionPortMessage>>>,
     failures_remaining: std::sync::Arc<AtomicU64>,
+    attempts: std::sync::Arc<AtomicU64>,
 }
 
 impl RecordedPort {
@@ -1185,6 +1186,7 @@ impl winwincode_codex::WorkerExecutionPort for RecordedPort {
         &mut self,
         message: ExecutionPortMessage,
     ) -> impl Future<Output = Result<(), Self::Error>> {
+        self.attempts.fetch_add(1, Ordering::SeqCst);
         if self
             .failures_remaining
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
@@ -2731,6 +2733,26 @@ async fn register(
         .expect("accept Worker registration");
 }
 
+// Shared lifecycle assertion for every real Worker + SQLite control entry.
+async fn consume_without_dispatch(
+    worker: &mut winwincode_worker::WorkerMain<
+        RecordedPort,
+        winwincode_codex::ProductionCodexAdapter,
+    >,
+    port: &RecordedPort,
+    message: &ExecutionPortMessage,
+    now: Instant,
+) -> Result<(), winwincode_worker::WorkerError> {
+    let attempts = port.attempts.load(Ordering::SeqCst);
+    let result = worker.accept_control(message, now).await;
+    assert_eq!(
+        port.attempts.load(Ordering::SeqCst),
+        attempts,
+        "control consumption must only apply state and persist effects"
+    );
+    result
+}
+
 struct GatewayDriver<'root> {
     root: &'root TestDirectory,
     job: ExecutionJob,
@@ -2961,8 +2983,7 @@ impl<'root> GatewayDriver<'root> {
             }
         }
         for response in responses {
-            worker
-                .accept_control(&response, at("2030-01-01T00:00:02.000Z"))
+            consume_without_dispatch(worker, port, &response, at("2030-01-01T00:00:02.000Z"))
                 .await
                 .expect("accept durable Control Plane response");
         }
@@ -2981,28 +3002,29 @@ impl<'root> GatewayDriver<'root> {
                         Sha256Digest(format!("sha256:{:x}", Sha256::digest(&bytes)));
                 }
             }
-            worker
-                .accept_control(
-                    &ExecutionPortMessage::ModelChunkMessage(chunk),
-                    at("2030-01-01T00:00:02.000Z"),
-                )
-                .await
-                .expect("deliver canonical Provider chunk to Worker");
+            consume_without_dispatch(
+                worker,
+                port,
+                &ExecutionPortMessage::ModelChunkMessage(chunk),
+                at("2030-01-01T00:00:02.000Z"),
+            )
+            .await
+            .expect("deliver canonical Provider chunk to Worker");
         }
         for response in action_responses {
-            worker
-                .accept_control(&response, at("2030-01-01T00:00:02.000Z"))
+            consume_without_dispatch(worker, port, &response, at("2030-01-01T00:00:02.000Z"))
                 .await
                 .expect("accept loopback approval/action response");
         }
         for acknowledgement in artifact_acks {
-            worker
-                .accept_control(
-                    &ExecutionPortMessage::ArtifactAckMessage(acknowledgement),
-                    at("2030-01-01T00:00:02.000Z"),
-                )
-                .await
-                .expect("accept loopback candidate artifact acknowledgement");
+            consume_without_dispatch(
+                worker,
+                port,
+                &ExecutionPortMessage::ArtifactAckMessage(acknowledgement),
+                at("2030-01-01T00:00:02.000Z"),
+            )
+            .await
+            .expect("accept loopback candidate artifact acknowledgement");
         }
     }
 }
@@ -4060,6 +4082,11 @@ fn production_success_with_missing_final_usage_is_accepted_and_replayed() {
             root.workspace_runtime(),
         );
         register(&mut worker, &port).await;
+        let statistics =
+            rusqlite::Connection::open(root.worker().join("worker-codex.sqlite3")).unwrap();
+        statistics.execute_batch("CREATE TRIGGER deny_optional_tool_start BEFORE INSERT ON performance_operation WHEN NEW.operation_kind = 'tool' BEGIN SELECT RAISE(FAIL, 'injected optional statistics failure'); END;
+            CREATE TRIGGER deny_optional_tool_completion BEFORE UPDATE ON performance_operation WHEN NEW.operation_kind = 'tool' BEGIN SELECT RAISE(FAIL, 'injected optional statistics failure'); END;").unwrap();
+        drop(statistics);
         worker
             .accept_control(
                 &ExecutionPortMessage::JobDispatchMessage(dispatch.clone()),
@@ -4211,13 +4238,35 @@ fn production_worker_kernel_gateway_loopback_and_restart_replay_are_exact() {
             root.workspace_runtime(),
         );
         register(&mut first, &first_port).await;
-        first
-            .accept_control(
-                &ExecutionPortMessage::JobDispatchMessage(dispatch.clone()),
-                at("2030-01-01T00:00:00.000Z"),
-            )
-            .await
-            .expect("accept exact production dispatch");
+        first_port.failures_remaining.store(1, Ordering::SeqCst);
+        consume_without_dispatch(
+            &mut first,
+            &first_port,
+            &ExecutionPortMessage::JobDispatchMessage(dispatch.clone()),
+            at("2030-01-01T00:00:00.000Z"),
+        )
+        .await
+        .expect("accept exact production dispatch");
+        assert_eq!(first_port.failures_remaining.load(Ordering::SeqCst), 1);
+        let connection =
+            rusqlite::Connection::open(root.worker().join("worker-codex.sqlite3")).unwrap();
+        let pending_frames = |connection: &rusqlite::Connection| {
+            connection.prepare("SELECT frame_json FROM execution_outbox WHERE state = 'pending' ORDER BY position").unwrap()
+                .query_map([], |row| row.get::<_, Vec<u8>>(0)).unwrap()
+                .collect::<Result<Vec<_>, _>>().unwrap()
+        };
+        let effects = pending_frames(&connection);
+        assert!(
+            effects.len() >= 2,
+            "dispatch result and binding are durable before confirmation"
+        );
+        assert!(first.flush_durable_outbox().await.is_err());
+        assert_eq!(
+            pending_frames(&connection),
+            effects,
+            "an unaccepted batch retains all original intent bytes"
+        );
+        drop(connection);
         let mut gateway = GatewayDriver::new(&root, dispatch.job.clone(), true);
         run_until_outcome(&mut first, &first_port, &mut gateway).await;
         gateway.drive(&first_port, &mut first).await;
@@ -5322,22 +5371,24 @@ fn real_request_user_input_resumes_after_response_loss_and_rejects_forged_replay
             "restart must preserve the exact opaque choice identities"
         );
 
-        replay
-            .accept_control(
-                &ExecutionPortMessage::InputResponseMessage(valid_response.clone()),
-                at("2030-01-01T00:00:02.000Z"),
-            )
-            .await
-            .expect("resolve exact input response through embedded Kernel");
+        consume_without_dispatch(
+            &mut replay,
+            &replay_port,
+            &ExecutionPortMessage::InputResponseMessage(valid_response.clone()),
+            at("2030-01-01T00:00:02.000Z"),
+        )
+        .await
+        .expect("resolve exact input response through embedded Kernel");
         // A lost ACK causes the CP to retry the exact response.  The durable
         // input operation and outbox both treat that replay as idempotent.
-        replay
-            .accept_control(
-                &ExecutionPortMessage::InputResponseMessage(valid_response.clone()),
-                at("2030-01-01T00:00:02.000Z"),
-            )
-            .await
-            .expect("exact input response replay after ACK loss");
+        consume_without_dispatch(
+            &mut replay,
+            &replay_port,
+            &ExecutionPortMessage::InputResponseMessage(valid_response.clone()),
+            at("2030-01-01T00:00:02.000Z"),
+        )
+        .await
+        .expect("exact input response replay after ACK loss");
         let resolved_input = stored_input_operation_json(&root, &request.input_request_id.0);
         assert_eq!(resolved_input["state"], "resolved");
         assert!(resolved_input["resolutionDigest"].is_string());
