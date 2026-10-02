@@ -12,6 +12,14 @@ use std::{
 use winwincode_execution_port::generated::{ExecutionPortMessage, ModelChunkMessage};
 use winwincode_provider::{DeviceProviderError, DeviceProviderStore, model_failure};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DeviceModelSendOutcome {
+    Handled,
+    Unhandled,
+    /// No Provider thread/call has started; the original durable open is retryable.
+    NotStarted,
+}
+
 pub(crate) struct DeviceModels {
     directory: PathBuf,
     pending: HashMap<String, String>,
@@ -35,6 +43,8 @@ pub(crate) struct DeviceModels {
     logged_foreign: HashSet<String>,
     /// Optional durable non-secret intake log shared with `model_bridge`.
     intake_log: Option<PathBuf>,
+    #[cfg(any(test, feature = "test-support"))]
+    fail_next_start: bool,
 }
 
 /// One durable intake log line. Bundled so the writer keeps a flat format
@@ -70,6 +80,8 @@ impl DeviceModels {
             instance_ids: HashSet::new(),
             logged_foreign: HashSet::new(),
             intake_log,
+            #[cfg(any(test, feature = "test-support"))]
+            fail_next_start: false,
         })
     }
 
@@ -83,6 +95,11 @@ impl DeviceModels {
         if !worker_instance_id.is_empty() {
             self.instance_ids.insert(worker_instance_id.to_owned());
         }
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn refuse_next_start(&mut self) {
+        self.fail_next_start = true;
     }
 
     pub(crate) fn owns_exchange(&self, exchange_id: &str) -> bool {
@@ -131,7 +148,7 @@ impl DeviceModels {
     pub(crate) fn send(
         &mut self,
         message: &ExecutionPortMessage,
-    ) -> Result<bool, DeviceProviderError> {
+    ) -> Result<DeviceModelSendOutcome, DeviceProviderError> {
         match message {
             ExecutionPortMessage::ModelOpenMessage(open) => {
                 let id = open.model_exchange_id.0.clone();
@@ -139,39 +156,22 @@ impl DeviceModels {
                 self.note_open_identity(open);
                 if let Some(previous) = self.pending.get(&id) {
                     return if previous == &digest {
-                        Ok(true)
+                        Ok(DeviceModelSendOutcome::Handled)
                     } else {
                         Err(DeviceProviderError)
                     };
                 }
                 if self.pending.len() >= 16 {
-                    return Err(DeviceProviderError);
+                    return Ok(DeviceModelSendOutcome::NotStarted);
                 }
                 self.pending.insert(id.clone(), digest);
-                let directory = self.directory.clone();
-                let sender = self.sender.clone();
-                let open = open.clone();
                 // ponytail: bounded blocking HTTPS runs outside the Worker loop; adapter deadlines
                 // bound cancellation cleanup while heartbeats and tool approval remain responsive.
-                if std::thread::Builder::new()
-                    .name("device-provider".to_owned())
-                    .spawn(move || {
-                        let chunks = DeviceProviderStore::open(&directory)
-                            .and_then(|store| store.execute_model(&open))
-                            .unwrap_or_else(|_| {
-                                vec![model_failure(
-                                    &open,
-                                    "DEVICE_MODEL_FAILED: local request could not complete",
-                                )]
-                            });
-                        let _ = sender.send((open.model_exchange_id.0, chunks));
-                    })
-                    .is_err()
-                {
+                if self.start_provider(open).is_err() {
                     self.pending.remove(&id);
-                    return Err(DeviceProviderError);
+                    return Ok(DeviceModelSendOutcome::NotStarted);
                 }
-                Ok(true)
+                Ok(DeviceModelSendOutcome::Handled)
             }
             ExecutionPortMessage::ModelAckMessage(ack) => {
                 let store = DeviceProviderStore::open(&self.directory)?;
@@ -183,10 +183,37 @@ impl DeviceModels {
                     self.chunks
                         .extend(store.replay_model(&ack.model_exchange_id.0, from.0)?);
                 }
-                Ok(true)
+                Ok(DeviceModelSendOutcome::Handled)
             }
-            _ => Ok(false),
+            _ => Ok(DeviceModelSendOutcome::Unhandled),
         }
+    }
+
+    fn start_provider(
+        &mut self,
+        open: &winwincode_execution_port::generated::ModelOpenMessage,
+    ) -> std::io::Result<()> {
+        #[cfg(any(test, feature = "test-support"))]
+        if std::mem::take(&mut self.fail_next_start) {
+            return Err(std::io::Error::other("injected thread start refusal"));
+        }
+        let directory = self.directory.clone();
+        let sender = self.sender.clone();
+        let open = open.clone();
+        std::thread::Builder::new()
+            .name("device-provider".to_owned())
+            .spawn(move || {
+                let chunks = DeviceProviderStore::open(&directory)
+                    .and_then(|store| store.execute_model(&open))
+                    .unwrap_or_else(|_| {
+                        vec![model_failure(
+                            &open,
+                            "DEVICE_MODEL_FAILED: local request could not complete",
+                        )]
+                    });
+                let _ = sender.send((open.model_exchange_id.0, chunks));
+            })
+            .map(|_| ())
     }
 
     pub(crate) fn retry_chunk(&mut self, chunk: ModelChunkMessage) {
@@ -400,6 +427,67 @@ mod tests {
                 .expect("clock")
                 .as_nanos()
         ))
+    }
+
+    #[test]
+    fn full_local_lane_defers_a_never_started_request_without_losing_its_identity() {
+        let root = temp_root("deferred-start");
+        let mut models = DeviceModels::open(&root).unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/contracts/execution-port.valid.json"
+        ))
+        .unwrap();
+        let open: ExecutionPortMessage = serde_json::from_value(
+            fixture["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|message| message["kind"] == "model.open")
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        for slot in 0..16 {
+            models
+                .pending
+                .insert(format!("occupied-{slot}"), "digest".into());
+        }
+        assert_eq!(
+            models.send(&open).unwrap(),
+            DeviceModelSendOutcome::NotStarted
+        );
+        models.pending.clear();
+        models.fail_next_start = true;
+        assert_eq!(
+            models.send(&open).unwrap(),
+            DeviceModelSendOutcome::NotStarted
+        );
+        assert!(
+            models.pending.is_empty(),
+            "thread refusal leaves no started call"
+        );
+        models.send(&open).unwrap();
+        let ExecutionPortMessage::ModelOpenMessage(open) = open else {
+            unreachable!()
+        };
+        assert!(models.pending.contains_key(&open.model_exchange_id.0));
+        models
+            .send(&ExecutionPortMessage::ModelOpenMessage(open))
+            .unwrap();
+        assert_eq!(
+            models.pending.len(),
+            1,
+            "same identity never launches two calls"
+        );
+        // No configured provider: the background task produces a local failure without HTTP.
+        let (_, chunks) = models
+            .receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].is_final);
+        drop(models);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

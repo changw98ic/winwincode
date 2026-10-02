@@ -199,6 +199,8 @@ pub enum WorkerErrorCode {
     ExecutionPort,
     /// The remote Worker queue must drain before sending more business frames.
     ExecutionBackpressure,
+    /// A local Provider call definitely did not start; poll local responses before retrying.
+    ModelStartDeferred,
     /// A single outbound frame was rejected permanently.
     ExecutionMessageRejected,
     /// The port cannot continue (authentication or protocol failure).
@@ -378,6 +380,10 @@ pub struct WorkerMain<Port, Codex> {
     /// can otherwise be observed before Core has installed its pending-input
     /// waiter, making a fast response a no-op.
     defer_core_interactions: bool,
+    /// Control consumption durably hands off sends before transport confirmation.
+    consuming_control: bool,
+    delivery_failure: Option<WorkerErrorCode>,
+    last_now: Instant,
     /// Delivery ids sent during the current Worker scheduling turn.  A
     /// response batch can contain acknowledgements for several earlier
     /// frames; suppressing an already-sent frame until the next poll avoids
@@ -493,6 +499,11 @@ where
         mut codex: Codex,
         workspaces: JobWorkspaceRuntime,
     ) -> Self {
+        let last_now = config.started_at.clone();
+        let delivery_failure = codex
+            .has_rejected_terminal_delivery(&config.worker_id, &config.worker_instance_id)
+            .unwrap_or(true)
+            .then_some(WorkerErrorCode::ExecutionMessageRejected);
         let message_sequence = recover_message_sequence(&mut codex);
         let heartbeat_sequence =
             recover_heartbeat_sequence(&mut codex, &config.worker_id, &config.worker_instance_id);
@@ -514,6 +525,9 @@ where
             dispatches: HashMap::new(),
             pending_candidates: HashMap::new(),
             defer_core_interactions: false,
+            consuming_control: false,
+            delivery_failure,
+            last_now,
             sent_delivery_ids: HashSet::new(),
             outbox_flush_cursor: None,
             recovery_sent_delivery_ids: HashSet::new(),
@@ -568,6 +582,16 @@ where
     #[cfg(feature = "test-support")]
     pub fn inject_submission_fault(&mut self, fault: WorkerSubmissionFault) {
         self.submission_fault = Some(fault);
+    }
+
+    /// Injects a definite no-start refusal in the attached local Provider lane.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn inject_device_start_fault(&mut self) -> bool {
+        self.device_models.as_mut().is_some_and(|models| {
+            models.refuse_next_start();
+            true
+        })
     }
 
     /// Stops one delegated finalization after the canonical freeze is durable.
@@ -639,7 +663,29 @@ where
     ///
     /// Returns an outbound-port or Codex-store failure.
     pub async fn flush_durable_outbox(&mut self) -> Result<(), WorkerError> {
-        self.flush_durable_execution_deliveries().await
+        Box::pin(self.flush_durable_execution_deliveries()).await
+    }
+
+    /// Returns an unusable transport after even the bounded optional projection is refused.
+    #[must_use]
+    pub fn transport_failure(&self) -> Option<WorkerError> {
+        (self.delivery_failure == Some(WorkerErrorCode::ExecutionTerminal)).then(|| {
+            worker_error(
+                WorkerErrorCode::ExecutionTerminal,
+                "bounded runtime projection cannot be delivered",
+            )
+        })
+    }
+
+    /// Returns a task transport failure that could not itself be delivered.
+    #[must_use]
+    pub fn required_delivery_failure(&self) -> Option<WorkerError> {
+        (self.delivery_failure == Some(WorkerErrorCode::ExecutionMessageRejected)).then(|| {
+            worker_error(
+                WorkerErrorCode::ExecutionMessageRejected,
+                "required execution delivery was rejected",
+            )
+        })
     }
 
     /// Builds a bounded recovery hint for one active task.
@@ -821,6 +867,22 @@ where
         message: &ExecutionPortMessage,
         now: Instant,
     ) -> Result<(), WorkerError> {
+        self.last_now = now.clone();
+        let previous = std::mem::replace(&mut self.consuming_control, true);
+        let mut result = Box::pin(self.apply_control(message, now)).await;
+        if result.is_ok() {
+            // Core follow-up intents must be durable before this control is confirmed.
+            result = Box::pin(self.flush_codex_execution_messages()).await;
+        }
+        self.consuming_control = previous;
+        result
+    }
+
+    async fn apply_control(
+        &mut self,
+        message: &ExecutionPortMessage,
+        now: Instant,
+    ) -> Result<(), WorkerError> {
         match message {
             ExecutionPortMessage::WorkerRegistrationResultMessage(result) => {
                 self.accept_registration(result)?;
@@ -830,13 +892,6 @@ where
                 Ok(())
             }
             ExecutionPortMessage::JobDispatchMessage(dispatch) => {
-                // A recovered Core turn owns the re-emission of pending
-                // Approval/Input requests.  Do not expose a durable prompt
-                // before the resumed Core has rebuilt its in-memory waiter;
-                // otherwise an immediate response can be accepted into the
-                // ledger while the Core has nowhere to deliver it.
-                self.flush_durable_execution_deliveries_with_core_replay(true)
-                    .await?;
                 Box::pin(self.accept_dispatch(dispatch, now)).await
             }
             ExecutionPortMessage::SnapshotFreezeRequestMessage(request) => {
@@ -848,33 +903,31 @@ where
             ExecutionPortMessage::LeaseRenewMessage(renewal) => {
                 self.accept_lease_renewal(renewal, &now)
             }
-            ExecutionPortMessage::JobCancelMessage(cancel) => self.accept_cancel(cancel, now).await,
+            ExecutionPortMessage::JobCancelMessage(cancel) => {
+                Box::pin(self.accept_cancel(cancel, now)).await
+            }
             ExecutionPortMessage::ArtifactAckMessage(acknowledgement) => {
                 Box::pin(self.accept_candidate_artifact_ack(acknowledgement, now)).await
             }
             ExecutionPortMessage::ModelChunkMessage(chunk) => {
-                self.accept_model_chunk_control(chunk, message, &now).await
+                Box::pin(self.accept_model_chunk_control(chunk, message, &now)).await
             }
             ExecutionPortMessage::ActionEnforcementReceiptMessage(receipt) => {
-                self.codex
-                    .accept_action_receipt(receipt, &now)
+                Box::pin(self.codex.accept_action_receipt(receipt, &now))
                     .await
                     .map_err(|_| codex_model_error())?;
                 self.codex
                     .accept_execution_delivery_ack(message)
                     .map_err(|_| codex_model_error())?;
-                self.flush_durable_execution_deliveries().await?;
-                self.flush_codex_execution_messages().await
+                Ok(())
             }
             ExecutionPortMessage::ApprovalDecisionMessage(decision) => {
-                self.accept_approval_decision(decision, &now).await?;
-                self.flush_durable_execution_deliveries().await?;
-                self.flush_codex_execution_messages().await
+                Box::pin(self.accept_approval_decision(decision, &now)).await?;
+                Ok(())
             }
             ExecutionPortMessage::InputResponseMessage(response) => {
-                self.accept_input_response(response, &now).await?;
-                self.flush_durable_execution_deliveries().await?;
-                self.flush_codex_execution_messages().await
+                Box::pin(self.accept_input_response(response, &now)).await?;
+                Ok(())
             }
             ExecutionPortMessage::ModelAckMessage(_)
             | ExecutionPortMessage::RuntimeAckMessage(_)
@@ -901,6 +954,7 @@ where
     ///
     /// Returns an invalid-lifecycle or outbound-port failure.
     pub async fn heartbeat(&mut self, now: Instant) -> Result<(), WorkerError> {
+        self.last_now = now.clone();
         if self.lifecycle != WorkerLifecycleState::Active {
             return Err(worker_error(
                 WorkerErrorCode::InvalidLifecycle,
@@ -956,11 +1010,28 @@ where
     /// failures become infrastructure outcomes without exposing adapter text.
     #[allow(clippy::too_many_lines)]
     pub async fn poll_codex(&mut self, now: Instant) -> Result<(), WorkerError> {
+        self.last_now = now.clone();
         if self.lifecycle != WorkerLifecycleState::Active {
             return Err(worker_error(
                 WorkerErrorCode::InvalidLifecycle,
                 "Codex polling requires an active Worker",
             ));
+        }
+        // A crash/store failure after archiving a refused frame must still finish
+        // its job before Core starts any further work on the restored attempt.
+        let rejected_jobs = self
+            .active
+            .values()
+            .filter_map(|active| {
+                self.codex
+                    .has_rejected_job_delivery(&active.lease)
+                    .map(|rejected| rejected.then(|| active.job.job_id.0.clone()))
+                    .map_err(|_| codex_model_error())
+                    .transpose()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for job_id in rejected_jobs {
+            Box::pin(self.finish_rejected_job(&job_id)).await?;
         }
         // Drain Core-queued ModelOpen/ModelAck before Device frame intake.
         // An automatic second model call after tool_result can enqueue its
@@ -1228,7 +1299,9 @@ where
             if self.core_interaction_jobs.remove(&job_id) {
                 self.deferred_core_interaction_jobs.remove(&job_id);
             }
-            self.handle_codex_poll(&job_id, polled, now.clone()).await?;
+            // Completion includes workspace manifest decoding. Keep its large
+            // async state off the polling stack before entering that decoder.
+            Box::pin(self.handle_codex_poll(&job_id, polled, now.clone())).await?;
         }
         Ok(())
     }
@@ -1255,12 +1328,10 @@ where
                 DelegatedPollOutcome::RepairRequired(envelope),
             ),
             CodexPoll::Completed(completion) => {
-                self.complete_codex_job(job_id, completion, Vec::new(), now)
-                    .await
+                Box::pin(self.complete_codex_job(job_id, completion, Vec::new(), now)).await
             }
             CodexPoll::CompletedWithDiagnostics(completion, diagnostics) => {
-                self.complete_codex_job(job_id, completion, diagnostics, now)
-                    .await
+                Box::pin(self.complete_codex_job(job_id, completion, diagnostics, now)).await
             }
             CodexPoll::Inconclusive(summary) => {
                 self.finish_job(
@@ -3369,7 +3440,10 @@ where
             }
             ArtifactAckOutcome::Accepted(artifact) => {
                 if !candidate_ack
-                    || !self.active.contains_key(&job_id)
+                    || !self
+                        .active
+                        .get(&job_id)
+                        .is_some_and(|active| active.lifecycle == ActiveJobLifecycle::Running)
                     || !self.pending_candidates.contains_key(&job_id)
                 {
                     return Ok(());
@@ -3405,18 +3479,19 @@ where
                 .get(job_id)
                 .and_then(|record| record.replacement_authority.clone()),
         )?;
-        let authority_matches = pending.authority == active_authority
-            || self
-                .dispatches
-                .get(job_id)
-                .and_then(|record| record.replacement_authority.as_ref())
-                .is_some_and(|replacement| {
-                    replacement_candidate_authority_matches(
-                        replacement,
-                        &pending.authority,
-                        &active_authority,
-                    )
-                });
+        let authority_matches =
+            candidate_authority_after_renewal_matches(&pending.authority, &active_authority)
+                || self
+                    .dispatches
+                    .get(job_id)
+                    .and_then(|record| record.replacement_authority.as_ref())
+                    .is_some_and(|replacement| {
+                        replacement_candidate_authority_matches(
+                            replacement,
+                            &pending.authority,
+                            &active_authority,
+                        )
+                    });
         let acknowledgement_matches_pending = acknowledgement.lease == pending.authority.lease
             && acknowledgement.worker_session_id == pending.authority.worker_session_id
             && acknowledgement.session_identity == pending.authority.session_identity;
@@ -3424,8 +3499,10 @@ where
             && acknowledgement.lease == active_authority.lease
             && acknowledgement.worker_session_id == active_authority.worker_session_id
             && acknowledgement.session_identity == active_authority.session_identity;
-        if active.lifecycle != ActiveJobLifecycle::Running
-            || !authority_matches
+        if !matches!(
+            active.lifecycle,
+            ActiveJobLifecycle::Running | ActiveJobLifecycle::Cancelling
+        ) || !authority_matches
             || (!acknowledgement_matches_pending && !acknowledgement_matches_successor)
             || pending
                 .artifact
@@ -3467,7 +3544,15 @@ where
                 .get(job_id)
                 .and_then(|record| record.replacement_authority.clone()),
         )?;
-        if pending.authority == active_authority {
+        if candidate_authority_after_renewal_matches(&pending.authority, &active_authority) {
+            if acknowledgement.lease == active_authority.lease
+                && acknowledgement.worker_session_id == pending.authority.worker_session_id
+                && acknowledgement.session_identity == pending.authority.session_identity
+            {
+                let mut durable = acknowledgement.clone();
+                durable.lease = pending.authority.lease.clone();
+                return Ok(durable);
+            }
             return Ok(acknowledgement.clone());
         }
         let Some(replacement) = self
@@ -3880,7 +3965,11 @@ where
         } else {
             usage
         };
-        if active.job.execution_profile == "codex-chat"
+        let rejected_delivery_failure = status == ExecutionOutcomeStatus::InfrastructureError
+            && (active.lifecycle == ActiveJobLifecycle::Cancelling
+                || self.codex.has_rejected_job_delivery(&active.lease).map_err(|_| codex_model_error())?);
+        if !rejected_delivery_failure
+            && active.job.execution_profile == "codex-chat"
             && self.workspaces.has_source_changes(&active).map_err(|_| workspace_error())?
         {
             if status == ExecutionOutcomeStatus::Cancelled {
@@ -4272,10 +4361,25 @@ where
         &mut self,
         message: ExecutionPortMessage,
     ) -> Result<(), WorkerError> {
-        if let Some(models) = &mut self.device_models
-            && models.send(&message).map_err(|_| codex_model_error())?
-        {
+        if self.consuming_control {
+            let delivery = self.retain_execution_message(&message)?;
+            self.codex
+                .requeue_execution_delivery(&delivery.delivery_id)
+                .map_err(|_| codex_model_error())?;
+            self.sent_delivery_ids.remove(&delivery.delivery_id);
             return Ok(());
+        }
+        if let Some(models) = &mut self.device_models {
+            match models.send(&message).map_err(|_| codex_model_error())? {
+                device_model::DeviceModelSendOutcome::Handled => return Ok(()),
+                device_model::DeviceModelSendOutcome::Unhandled => {}
+                device_model::DeviceModelSendOutcome::NotStarted => {
+                    return Err(worker_error(
+                        WorkerErrorCode::ModelStartDeferred,
+                        "local model request has not started",
+                    ));
+                }
+            }
         }
         self.port
             .send(message)
@@ -4301,12 +4405,159 @@ where
         &mut self,
         delivery: DurableExecutionDelivery,
     ) -> Result<(), WorkerError> {
-        self.send_execution_message(delivery.message).await?;
+        if self.consuming_control {
+            self.codex
+                .requeue_execution_delivery(&delivery.delivery_id)
+                .map_err(|_| codex_model_error())?;
+            self.sent_delivery_ids.remove(&delivery.delivery_id);
+            return Ok(());
+        }
+        if self
+            .codex
+            .execution_delivery_is_rejected(&delivery.delivery_id)
+            .map_err(|_| codex_model_error())?
+        {
+            return Err(worker_error(
+                WorkerErrorCode::ExecutionMessageRejected,
+                "execution delivery already rejected",
+            ));
+        }
+        if let Err(error) = self.send_execution_message(delivery.message.clone()).await {
+            if error.code != WorkerErrorCode::ExecutionMessageRejected {
+                return Err(error);
+            }
+            if let Some(projected) = self
+                .codex
+                .degrade_auxiliary_execution_delivery(&delivery.delivery_id)
+                .map_err(|_| codex_model_error())?
+            {
+                match self.send_execution_message(projected.message).await {
+                    Ok(()) => {}
+                    Err(error) if error.code != WorkerErrorCode::ExecutionMessageRejected => {
+                        return Err(error);
+                    }
+                    Err(_) => {
+                        // Refusing the legal, small placeholder makes the runtime channel
+                        // unusable. Keep it pending for recovery and preserve business facts.
+                        self.delivery_failure = Some(WorkerErrorCode::ExecutionTerminal);
+                        return Err(worker_error(
+                            WorkerErrorCode::ExecutionTerminal,
+                            "bounded runtime projection cannot be delivered",
+                        ));
+                    }
+                }
+            } else {
+                if matches!(&delivery.message, ExecutionPortMessage::RuntimeEventMessage(event)
+                    if event.event.category == ExecutionEventCategory::Usage)
+                {
+                    self.delivery_failure = Some(WorkerErrorCode::ExecutionTerminal);
+                    return Err(worker_error(
+                        WorkerErrorCode::ExecutionTerminal,
+                        "bounded runtime projection cannot be delivered",
+                    ));
+                }
+                Box::pin(self.finish_rejected_delivery(&delivery)).await?;
+                return Err(error);
+            }
+        }
         self.codex
             .record_execution_delivery_sent(&delivery.delivery_id)
             .map_err(|_| codex_model_error())?;
         self.sent_delivery_ids.insert(delivery.delivery_id);
         Ok(())
+    }
+
+    async fn finish_rejected_delivery(
+        &mut self,
+        delivery: &DurableExecutionDelivery,
+    ) -> Result<(), WorkerError> {
+        if !self
+            .codex
+            .record_execution_delivery_rejected(&delivery.delivery_id)
+            .map_err(|_| codex_model_error())?
+        {
+            return Err(worker_error(
+                WorkerErrorCode::ExecutionMessageRejected,
+                "adapter cannot archive rejected frame",
+            ));
+        }
+        let Some(job_id) = active_delivery_job_id(&delivery.message).map(str::to_owned) else {
+            self.delivery_failure = Some(WorkerErrorCode::ExecutionMessageRejected);
+            return Ok(());
+        };
+        if !self.active.contains_key(&job_id) {
+            self.delivery_failure = Some(WorkerErrorCode::ExecutionMessageRejected);
+            return Ok(());
+        }
+        if matches!(delivery.message, ExecutionPortMessage::JobOutcomeMessage(_)) {
+            self.delivery_failure = Some(WorkerErrorCode::ExecutionMessageRejected);
+            if let Some(record) = self.dispatches.get_mut(&job_id) {
+                record.terminal = true;
+            }
+            self.active.remove(&job_id);
+            return Ok(());
+        }
+        Box::pin(self.finish_rejected_job(&job_id)).await
+    }
+
+    async fn finish_rejected_job(&mut self, job_id: &str) -> Result<(), WorkerError> {
+        let active = self
+            .active
+            .get(job_id)
+            .cloned()
+            .ok_or_else(codex_model_error)?;
+        let now = self.last_now.clone();
+        Box::pin(
+            self.codex
+                .fail_required_execution_delivery(&active.codex_thread_id, &now),
+        )
+        .await
+        .map_err(|_| codex_model_error())?;
+        if let Some(pending) = self.pending_candidates.get(job_id).cloned() {
+            if pending.artifact.is_none() {
+                self.codex
+                    .begin_candidate_artifact_cancel(&pending.authority)
+                    .map_err(|_| codex_model_error())?;
+                self.codex
+                    .cancel_candidate_artifact(&pending.authority)
+                    .map_err(|_| codex_model_error())?;
+            }
+            self.pending_candidates.remove(job_id);
+        }
+        // The job has stopped. Archive its obsolete evidence and interactive intents;
+        // the explicit failed terminal is retained separately and remains retryable.
+        let pending = self
+            .codex
+            .pending_execution_deliveries()
+            .map_err(|_| codex_model_error())?;
+        for frame in pending {
+            if active_delivery_job_id(&frame.message) == Some(job_id)
+                && !matches!(frame.message, ExecutionPortMessage::JobOutcomeMessage(_))
+                && !matches!(&frame.message, ExecutionPortMessage::ModelAckMessage(ack) if ack.error.is_some())
+            {
+                self.codex
+                    .record_execution_delivery_rejected(&frame.delivery_id)
+                    .map_err(|_| codex_model_error())?;
+            }
+        }
+        if let Some(active) = self.active.get_mut(job_id) {
+            active.lifecycle = ActiveJobLifecycle::Cancelling;
+        }
+        Box::pin(self.finish_job_with_delivery(
+            job_id,
+            ExecutionOutcomeStatus::InfrastructureError,
+            "required execution delivery rejected",
+            Vec::new(),
+            None,
+            Some(port_error(
+                ExecutionPortErrorCode::ExecutionFailed,
+                "required execution delivery rejected",
+                false,
+            )),
+            now,
+            true,
+        ))
+        .await
     }
 
     async fn flush_durable_execution_deliveries(&mut self) -> Result<(), WorkerError> {
@@ -4341,6 +4592,9 @@ where
                 // authority; Server validates fencing. Candidate uploads
                 // remain gated by the pending-candidate checks below.
                 ExecutionPortMessage::RuntimeEventMessage(_)
+                | ExecutionPortMessage::JobDispatchResultMessage(_)
+                | ExecutionPortMessage::SessionBindingMessage(_)
+                | ExecutionPortMessage::ModelAckMessage(_)
                 | ExecutionPortMessage::ModelChunkMessage(_)
                 | ExecutionPortMessage::JobOutcomeMessage(_)
                 | ExecutionPortMessage::ArtifactChunkMessage(_)
@@ -4380,6 +4634,9 @@ where
         &mut self,
         replay_core_interactions: bool,
     ) -> Result<(), WorkerError> {
+        if self.consuming_control {
+            return Ok(());
+        }
         let deadline = tokio::time::Instant::now() + MAX_OUTBOX_BATCH_DURATION;
         let deliveries = self
             .codex
@@ -4393,7 +4650,6 @@ where
             return Ok(());
         }
         let mut sent_bytes = 0;
-        let mut last_error = None;
         for delivery in deliveries {
             if tokio::time::Instant::now() >= deadline {
                 break;
@@ -4403,7 +4659,12 @@ where
             if self.sent_delivery_ids.contains(&delivery.delivery_id) {
                 continue;
             }
-            if matches!(&delivery.message, ExecutionPortMessage::ModelOpenMessage(_)) {
+            if matches!(&delivery.message, ExecutionPortMessage::ModelOpenMessage(_))
+                && self.device_models.is_none()
+            {
+                // Remote paid calls remain owned by their Core recovery path. The local
+                // Device store deduplicates exact identities and never re-invokes an
+                // already started call; definite local startup refusals can retry here.
                 continue;
             }
             let recovered_interaction = (replay_core_interactions || self.defer_core_interactions)
@@ -4450,8 +4711,9 @@ where
                     self.outbox_flush_cursor = previous_cursor;
                     return Err(error);
                 }
-                last_error = Some(error);
-                continue;
+                // Permanent refusal has been durably archived and the affected job
+                // stopped (or its optional report projected). Resume other jobs next turn.
+                return Err(error);
             }
             if recovered_interaction {
                 self.recovery_sent_delivery_ids.insert(delivery_id);
@@ -4463,10 +4725,7 @@ where
                 active.last_event_sequence = ExecutionAckSequence(sequence);
             }
         }
-        match last_error {
-            Some(error) => Err(error),
-            None => Ok(()),
-        }
+        Ok(())
     }
 
     async fn flush_codex_execution_messages(&mut self) -> Result<(), WorkerError> {
@@ -4577,6 +4836,11 @@ fn active_delivery_job_id(message: &ExecutionPortMessage) -> Option<&str> {
         ExecutionPortMessage::ActionEnforcementRequestMessage(request) => Some(&request.job_id.0),
         ExecutionPortMessage::ApprovalRequestMessage(request) => Some(&request.lease.job_id.0),
         ExecutionPortMessage::InputRequestMessage(request) => Some(&request.lease.job_id.0),
+        ExecutionPortMessage::ArtifactOpenMessage(frame) => Some(&frame.lease.job_id.0),
+        ExecutionPortMessage::ArtifactChunkMessage(frame) => Some(&frame.lease.job_id.0),
+        ExecutionPortMessage::SessionBindingMessage(frame) => Some(&frame.lease.job_id.0),
+        ExecutionPortMessage::JobDispatchResultMessage(frame) => Some(&frame.job_id.0),
+        ExecutionPortMessage::ModelAckMessage(frame) => Some(&frame.lease.job_id.0),
         _ => None,
     }
 }
@@ -5127,6 +5391,18 @@ fn candidate_artifact_authority(
         worker_session_id: active.worker_session_id.clone(),
         session_identity: active.session_identity.clone(),
     })
+}
+
+fn candidate_authority_after_renewal_matches(
+    retained: &CandidateArtifactAuthority,
+    current: &CandidateArtifactAuthority,
+) -> bool {
+    if current.lease.expires_at.0 < retained.lease.expires_at.0 {
+        return false;
+    }
+    let mut original = current.clone();
+    original.lease.expires_at = retained.lease.expires_at.clone();
+    original == *retained
 }
 
 fn replacement_candidate_authority_matches(

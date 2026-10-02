@@ -1279,6 +1279,26 @@ fn register_result(
     }
 }
 
+// A transport turn consumes the control, then drives its retained output.
+trait WorkerTransportTurn {
+    async fn accept_control_and_drive(
+        &mut self,
+        message: &ExecutionPortMessage,
+        now: Instant,
+    ) -> Result<(), winwincode_worker::WorkerError>;
+}
+
+impl WorkerTransportTurn for WorkerMain<RecordingPort, ScriptedStageProductAdapter> {
+    async fn accept_control_and_drive(
+        &mut self,
+        message: &ExecutionPortMessage,
+        now: Instant,
+    ) -> Result<(), winwincode_worker::WorkerError> {
+        Box::pin(self.accept_control(message, now)).await?;
+        Box::pin(self.flush_durable_outbox()).await
+    }
+}
+
 async fn start_worker(
     storage: &mut SqliteStorage,
     config: WorkerConfig,
@@ -1319,7 +1339,7 @@ async fn start_worker(
     };
     assert_eq!(stored_recovery, expected_recovery);
     worker
-        .accept_control(
+        .accept_control_and_drive(
             &ExecutionPortMessage::WorkerRegistrationResultMessage(register_result(
                 &register, recovery,
             )),
@@ -1457,7 +1477,7 @@ async fn stage_dispatch_message(
     freeze.dispatch = dispatch.clone();
     freeze.lease = dispatch.lease.clone();
     worker
-        .accept_control(
+        .accept_control_and_drive(
             &ExecutionPortMessage::SnapshotFreezeRequestMessage(freeze.clone()),
             at(9 + seed),
         )
@@ -1765,7 +1785,7 @@ fn scheduler_stage_product_roles_cancel_restart_and_old_attempt_are_exact() {
             )
             .await;
             worker
-                .accept_control(&stage_message, at(9 + seed))
+                .accept_control_and_drive(&stage_message, at(9 + seed))
                 .await
                 .expect("accept stage dispatch");
             let messages = port.since(cursor);
@@ -1812,7 +1832,7 @@ fn scheduler_stage_product_roles_cancel_restart_and_old_attempt_are_exact() {
             if matches!(role, "reviewer" | "verifier") {
                 let unbound_cursor = port.len();
                 worker
-                    .accept_control(
+                    .accept_control_and_drive(
                         &ExecutionPortMessage::JobDispatchMessage(dispatch.clone()),
                         at(10 + seed),
                     )
@@ -1901,7 +1921,7 @@ fn scheduler_stage_product_roles_cancel_restart_and_old_attempt_are_exact() {
                     winwincode_domain::seal_snapshot(&changed.snapshot);
                 assert!(
                     worker
-                        .accept_control(
+                        .accept_control_and_drive(
                             &ExecutionPortMessage::SnapshotVerificationDispatchMessage(changed),
                             at(20 + seed)
                         )
@@ -1913,7 +1933,7 @@ fn scheduler_stage_product_roles_cancel_restart_and_old_attempt_are_exact() {
             }
             let duplicate_cursor = port.len();
             worker
-                .accept_control(&stage_message, at(20 + seed))
+                .accept_control_and_drive(&stage_message, at(20 + seed))
                 .await
                 .expect("replay dispatch");
             let duplicate_messages = port.since(duplicate_cursor);
@@ -1947,7 +1967,7 @@ fn scheduler_stage_product_roles_cancel_restart_and_old_attempt_are_exact() {
             .expect("cancel dispatch");
         let cancel_cursor = port.len();
         worker
-            .accept_control(
+            .accept_control_and_drive(
                 &ExecutionPortMessage::JobDispatchMessage(cancel_dispatch.clone()),
                 at(14),
             )
@@ -1993,7 +2013,7 @@ fn scheduler_stage_product_roles_cancel_restart_and_old_attempt_are_exact() {
             .expect("persist slot cancellation");
         let cancel_ack_cursor = port.len();
         worker
-            .accept_control(
+            .accept_control_and_drive(
                 &ExecutionPortMessage::JobCancelMessage(cancel.clone()),
                 at(17),
             )
@@ -2030,7 +2050,7 @@ fn scheduler_stage_product_roles_cancel_restart_and_old_attempt_are_exact() {
             .expect("old restart dispatch");
         let old_cursor = port.len();
         worker
-            .accept_control(
+            .accept_control_and_drive(
                 &ExecutionPortMessage::JobDispatchMessage(old_dispatch.clone()),
                 at(20),
             )
@@ -2086,7 +2106,7 @@ fn scheduler_stage_product_roles_cancel_restart_and_old_attempt_are_exact() {
         );
         let replacement_cursor = replacement_port.len();
         replacement_worker
-            .accept_control(
+            .accept_control_and_drive(
                 &ExecutionPortMessage::JobDispatchMessage(replacement_dispatch.clone()),
                 at(51),
             )
@@ -2229,7 +2249,7 @@ async fn accepted_dispatch_without_predecessor_slot_recovers_as_fresh_attempt() 
         .expect("no-slot old dispatch");
     let old_cursor = old_port.len();
     old_worker
-        .accept_control(
+        .accept_control_and_drive(
             &ExecutionPortMessage::JobDispatchMessage(old_dispatch.clone()),
             at(18),
         )
@@ -2268,7 +2288,7 @@ async fn accepted_dispatch_without_predecessor_slot_recovers_as_fresh_attempt() 
     assert_eq!(replacement.job.attempt, 2);
     let cursor = new_port.len();
     new_worker
-        .accept_control(
+        .accept_control_and_drive(
             &ExecutionPortMessage::JobDispatchMessage(replacement.clone()),
             at(51),
         )
@@ -2390,7 +2410,7 @@ async fn failed_stage_dispatch_retries_as_attempt_two_and_reaches_product() {
     );
     let cursor = port.len();
     worker
-        .accept_control(
+        .accept_control_and_drive(
             &ExecutionPortMessage::JobDispatchMessage(retry.clone()),
             at(32),
         )

@@ -1524,17 +1524,23 @@ impl ProductionCodexAdapter {
             return Ok(None);
         };
         if phase == StoredRunPhase::TerminalTracePending {
+            // Optional performance projection is separate from retained business facts.
+            // A corrupt/missing report must not turn completion into infrastructure failure.
             let baseline_retained = self
                 .store
                 .load_performance_projection(run_key)
-                .map_err(map_store_error)?
+                .ok()
+                .flatten()
                 .is_some_and(|projection| projection.retained);
-            let trace = if baseline_retained {
-                self.retain_terminal_trace(run_key, terminal.trace_summary())?
-            } else {
-                self.retain_performance_baseline_trace(run_key)?
-            };
-            return Ok(Some(CodexPoll::RuntimeTrace(trace)));
+            if !baseline_retained && let Ok(trace) = self.retain_performance_baseline_trace(run_key)
+            {
+                return Ok(Some(CodexPoll::RuntimeTrace(trace)));
+            }
+            if let Ok(trace) = self.retain_terminal_trace(run_key, terminal.trace_summary()) {
+                return Ok(Some(CodexPoll::RuntimeTrace(trace)));
+            }
+            // The terminal itself is already durable. Auxiliary trace retention can fail
+            // independently; do not delay or rewrite that authoritative outcome.
         }
         terminal.into_poll().map(Some)
     }
@@ -1838,8 +1844,8 @@ impl ProductionCodexAdapter {
         }
         self.persist_run(run_key)?;
         self.quiesce_infrastructure_run(run_key, &activity_at).await;
-        let _ = self.retain_performance_baseline_trace(run_key)?;
-        let _ = self.retain_terminal_trace(run_key, "embedded Codex infrastructure failure")?;
+        let _ = self.retain_performance_baseline_trace(run_key);
+        let _ = self.retain_terminal_trace(run_key, "embedded Codex infrastructure failure");
         Ok(())
     }
 
@@ -2277,13 +2283,7 @@ impl ProductionCodexAdapter {
                 summary: "embedded Codex turn completed".to_owned(),
                 final_message,
                 artifacts: diagnostic_artifacts,
-                usage: self
-                    .store
-                    .retained_outcome_usage(
-                        run_key,
-                        terminal_performance_runtime(&self.store, run_key, &run.record)?,
-                    )
-                    .map_err(map_store_error)?,
+                usage: terminal_outcome_usage(&self.store, run_key, &run.record),
             }
         });
         run.record.phase = StoredRunPhase::TerminalTracePending;
@@ -3807,13 +3807,7 @@ fn complete_reconciled_turn(
         summary: "embedded Codex turn completed".to_owned(),
         final_message,
         artifacts,
-        usage: adapter
-            .store
-            .retained_outcome_usage(
-                run_key,
-                terminal_performance_runtime(&adapter.store, run_key, &run.record)?,
-            )
-            .map_err(map_store_error)?,
+        usage: terminal_outcome_usage(&adapter.store, run_key, &run.record),
     });
     run.record.phase = StoredRunPhase::TerminalTracePending;
     adapter.persist_run(run_key)
@@ -3885,12 +3879,7 @@ impl ProductionCodexAdapter {
                 run.record.terminal = Some(terminal_from_pending_completion(
                     completion,
                     artifacts,
-                    self.store
-                        .retained_outcome_usage(
-                            &run_key,
-                            terminal_performance_runtime(&self.store, &run_key, &run.record)?,
-                        )
-                        .map_err(map_store_error)?,
+                    terminal_outcome_usage(&self.store, &run_key, &run.record),
                 ));
                 run.record.phase = StoredRunPhase::TerminalTracePending;
                 self.persist_run(&run_key)?;
@@ -3946,12 +3935,7 @@ impl ProductionCodexAdapter {
                 record.terminal = Some(terminal_from_pending_completion(
                     completion,
                     artifacts,
-                    self.store
-                        .retained_outcome_usage(
-                            run_key,
-                            terminal_performance_runtime(&self.store, run_key, &record)?,
-                        )
-                        .map_err(map_store_error)?,
+                    terminal_outcome_usage(&self.store, run_key, &record),
                 ));
                 record.phase = StoredRunPhase::TerminalTracePending;
             }
@@ -4669,7 +4653,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             }
         };
         self.persist_run(&run_key)?;
-        let _ = self.retain_performance_baseline_trace(&run_key)?;
+        let _ = self.retain_performance_baseline_trace(&run_key);
         Ok(retained)
     }
 
@@ -4690,12 +4674,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
     ) -> Result<Option<ExecutionOutcomeUsage>, Self::Error> {
         let run_key = self.run_key_for_thread(thread_id)?;
         let run = self.runs.get(run_key).ok_or_else(unknown_thread)?;
-        self.store
-            .retained_outcome_usage(
-                run_key,
-                terminal_performance_runtime(&self.store, run_key, &run.record)?,
-            )
-            .map_err(map_store_error)
+        Ok(terminal_outcome_usage(&self.store, run_key, &run.record))
     }
 
     async fn poll(
@@ -4839,7 +4818,12 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         self.bridge
             .authority()
             .update_now(received_at)
-            .map_err(map_bridge_error)
+            .map_err(map_bridge_error)?;
+        self.outbox
+            .record_applied_response(&ExecutionPortMessage::ActionEnforcementReceiptMessage(
+                receipt.clone(),
+            ))
+            .map_err(map_store_error)
     }
 
     async fn accept_approval_decision(
@@ -4852,7 +4836,12 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         self.bridge
             .authority()
             .update_now(received_at)
-            .map_err(map_bridge_error)
+            .map_err(map_bridge_error)?;
+        self.outbox
+            .record_applied_response(&ExecutionPortMessage::ApprovalDecisionMessage(
+                decision.clone(),
+            ))
+            .map_err(map_store_error)
     }
 
     async fn accept_input_response(
@@ -4918,7 +4907,12 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
                     &resolution_digest,
                 )
                 .map_err(map_store_error)?;
-            return Ok(());
+            return self
+                .outbox
+                .record_applied_response(&ExecutionPortMessage::InputResponseMessage(
+                    response.clone(),
+                ))
+                .map_err(map_store_error);
         }
         let mut answers = HashMap::new();
         answers.insert(
@@ -4949,7 +4943,11 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             .ok_or_else(unknown_thread)?;
         run.record.last_activity_at = received_at.clone();
         self.persist_run(&operation.run_key)?;
-        Ok(())
+        self.outbox
+            .record_applied_response(&ExecutionPortMessage::InputResponseMessage(
+                response.clone(),
+            ))
+            .map_err(map_store_error)
     }
 
     fn retain_execution_delivery(
@@ -5000,6 +4998,76 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             .map_err(map_store_error)
     }
 
+    fn requeue_execution_delivery(&mut self, delivery_id: &str) -> Result<(), Self::Error> {
+        self.outbox.requeue(delivery_id).map_err(map_store_error)
+    }
+
+    fn degrade_auxiliary_execution_delivery(
+        &mut self,
+        delivery_id: &str,
+    ) -> Result<Option<DurableExecutionDelivery>, Self::Error> {
+        self.outbox
+            .degrade_auxiliary(delivery_id)
+            .map_err(map_store_error)
+    }
+
+    fn record_execution_delivery_rejected(
+        &mut self,
+        delivery_id: &str,
+    ) -> Result<bool, Self::Error> {
+        self.outbox
+            .record_rejected(delivery_id)
+            .map(|()| true)
+            .map_err(map_store_error)
+    }
+
+    fn execution_delivery_is_rejected(&mut self, delivery_id: &str) -> Result<bool, Self::Error> {
+        self.outbox
+            .is_rejected(delivery_id)
+            .map_err(map_store_error)
+    }
+
+    fn has_rejected_terminal_delivery(
+        &mut self,
+        worker_id: &WorkerId,
+        instance_id: &WorkerInstanceId,
+    ) -> Result<bool, Self::Error> {
+        self.outbox
+            .has_rejected_terminal(worker_id, instance_id)
+            .map_err(map_store_error)
+    }
+
+    fn has_rejected_job_delivery(
+        &mut self,
+        lease: &winwincode_execution_port::generated::ExecutionLeaseStamp,
+    ) -> Result<bool, Self::Error> {
+        self.outbox.has_rejected_job(lease).map_err(map_store_error)
+    }
+
+    async fn fail_required_execution_delivery(
+        &mut self,
+        thread_id: &CodexThreadId,
+        at: &Instant,
+    ) -> Result<(), Self::Error> {
+        let run_key = self.run_key_for_thread(thread_id)?.to_owned();
+        let run = self.runs.get_mut(&run_key).ok_or_else(unknown_thread)?;
+        // Preserve existing immutable terminal authority. Worker can report the
+        // transport failure while retaining the actual completed Core/candidate facts.
+        if run.record.terminal.is_none()
+            && run.record.final_candidate_freeze.is_none()
+            && run.record.delegated_stop.is_none()
+        {
+            run.record.terminal = Some(StoredTerminal::InfrastructureFailed {
+                artifacts: Vec::new(),
+            });
+            run.record.phase = StoredRunPhase::Terminal;
+            run.record.last_activity_at = at.clone();
+            self.persist_run(&run_key)?;
+        }
+        self.quiesce_infrastructure_run(&run_key, at).await;
+        Ok(())
+    }
+
     fn accept_execution_delivery_ack(
         &mut self,
         acknowledgement: &ExecutionPortMessage,
@@ -5013,10 +5081,13 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             // when it is still present (for a crash between chunk delivery
             // and the first acknowledgement), while treating an already
             // compacted open as the expected idempotent replay.
-            return match self.outbox.acknowledge_response(acknowledgement) {
-                Ok(()) | Err(AdapterStoreError::Conflict) => Ok(()),
-                Err(error) => Err(map_store_error(error)),
-            };
+            self.outbox
+                .record_applied_response(acknowledgement)
+                .map_err(map_store_error)?;
+            return self
+                .outbox
+                .acknowledge_response(acknowledgement)
+                .map_err(map_store_error);
         }
         if let ExecutionPortMessage::RuntimeAckMessage(acknowledgement) = acknowledgement {
             let receipt = self
@@ -5148,7 +5219,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             let retained = existing.clone();
             // Retry the durable evidence write if the process stopped after
             // freeze persistence and before retaining its baseline trace.
-            let _ = self.retain_performance_baseline_trace(&run_key)?;
+            let _ = self.retain_performance_baseline_trace(&run_key);
             return Ok(retained);
         }
         let totals = self
@@ -5215,7 +5286,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             }
         };
         self.persist_run(&run_key)?;
-        let _ = self.retain_performance_baseline_trace(&run_key)?;
+        let _ = self.retain_performance_baseline_trace(&run_key);
         Ok(retained)
     }
 
@@ -5323,20 +5394,35 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
 
     fn take_execution_messages(&mut self) -> Result<Vec<ExecutionPortMessage>, Self::Error> {
         let mut messages = self.bridge.take_messages().map_err(map_bridge_error)?;
-        messages.extend(
-            self.action_gate
-                .take_messages()
-                .map_err(|_| unavailable())?,
-        );
-        messages
-            .iter()
-            .map(|message| {
-                self.outbox
-                    .retain(message)
-                    .map(|delivery| delivery.message)
-                    .map_err(map_store_error)
-            })
-            .collect()
+        let Ok(actions) = self.action_gate.take_messages() else {
+            self.bridge
+                .restore_messages(messages)
+                .map_err(map_bridge_error)?;
+            return Err(unavailable());
+        };
+        let model_count = messages.len();
+        messages.extend(actions);
+        let retained = self.store.transaction(|transaction| {
+            messages
+                .iter()
+                .map(|message| {
+                    ExecutionOutbox::retain_in_transaction(transaction, message)
+                        .map(|delivery| delivery.message)
+                })
+                .collect()
+        });
+        if retained.is_err() {
+            let actions = messages.split_off(model_count);
+            self.bridge
+                .restore_messages(messages)
+                .map_err(map_bridge_error)?;
+            for action in actions {
+                self.action_gate
+                    .enqueue_message(action)
+                    .map_err(|_| unavailable())?;
+            }
+        }
+        retained.map_err(map_store_error)
     }
 
     async fn interrupt(
@@ -5407,8 +5493,8 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             run.record.phase = StoredRunPhase::TerminalTracePending;
         }
         self.persist_run(&run_key)?;
-        let _ = self.retain_performance_baseline_trace(&run_key)?;
-        let _ = self.retain_terminal_trace(&run_key, "embedded Codex turn cancelled")?;
+        let _ = self.retain_performance_baseline_trace(&run_key);
+        let _ = self.retain_terminal_trace(&run_key, "embedded Codex turn cancelled");
         Ok(())
     }
 
@@ -5772,6 +5858,26 @@ struct StoredPendingCompletion {
     final_message: Option<String>,
     #[serde(default)]
     kind: StoredPendingTerminalKind,
+}
+
+// Reading terminal telemetry is optional. Budget admission still uses the
+// authoritative ledger and propagates its errors before starting paid work.
+fn terminal_outcome_usage(
+    store: &AdapterStore,
+    run_key: &str,
+    run: &StoredRun,
+) -> Option<ExecutionOutcomeUsage> {
+    let runtime =
+        terminal_performance_runtime(store, run_key, run).unwrap_or(run.last_runtime_millis);
+    match store.retained_outcome_usage(run_key, runtime) {
+        Ok(usage) => usage,
+        Err(_) => match &run.terminal {
+            Some(StoredTerminal::Completed {
+                usage: Some(usage), ..
+            }) => Some(usage.clone()),
+            _ => Some(ExecutionOutcomeUsage::unknown(runtime, 0)),
+        },
+    }
 }
 
 fn terminal_performance_runtime(
@@ -7909,6 +8015,129 @@ mod tests {
                     std::fs::remove_dir_all(root).unwrap();
                 }));
         }).unwrap().join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_execution_handoff_restores_the_whole_batch_before_confirmation() {
+        let root = test_root("execution-handoff-rollback");
+        let mut adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/contracts/execution-port.valid.json"
+        ))
+        .unwrap();
+        let messages = ["model.open", "model.ack"]
+            .into_iter()
+            .map(|kind| {
+                serde_json::from_value(
+                    fixture["messages"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|message| message["kind"] == kind)
+                        .unwrap()
+                        .clone(),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<ExecutionPortMessage>>();
+        adapter.bridge.restore_messages(messages.clone()).unwrap();
+        adapter
+            .store
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER refuse_second_intent BEFORE INSERT ON execution_outbox
+             WHEN json_extract(NEW.frame_json,'$.kind')='model.ack'
+             BEGIN SELECT RAISE(ABORT,'injected handoff failure'); END;",
+            )
+            .unwrap();
+        assert!(adapter.take_execution_messages().is_err());
+        assert!(
+            adapter.outbox.pending().unwrap().is_empty(),
+            "batch rolls back atomically"
+        );
+        adapter
+            .store
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER refuse_second_intent;")
+            .unwrap();
+        assert_eq!(adapter.take_execution_messages().unwrap(), messages);
+        assert_eq!(adapter.outbox.pending().unwrap().len(), 2);
+        assert!(adapter.take_execution_messages().unwrap().is_empty());
+        drop(adapter);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retained_business_terminal_survives_a_corrupt_performance_projection() {
+        use super::{
+            ActiveRun, ExecutionOutcomeUsage, OneShotState, StoredTerminal, terminal_outcome_usage,
+        };
+        let root = test_root("corrupt-optional-performance");
+        let mut adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+        let (mut record, mut binding) = delegated_record_and_binding();
+        binding.authority.lease.lease_id = LeaseId("lse_00000000000000000000000001".into());
+        binding.authority.lease.fencing_token = FencingToken("1".into());
+        let key = binding.run_key.clone();
+        record.terminal = Some(StoredTerminal::Completed {
+            summary: "accepted successful result".into(),
+            final_message: Some("done".into()),
+            artifacts: Vec::new(),
+            usage: None,
+        });
+        record.phase = StoredRunPhase::TerminalTracePending;
+        adapter.runs.insert(
+            key.clone(),
+            ActiveRun {
+                record,
+                binding,
+                replay: std::collections::VecDeque::default(),
+                kernel_live: false,
+                recovered: true,
+                batch_intent_emission: OneShotState::Ready,
+                format_repair_reconciliation: OneShotState::Ready,
+                pending_fusion: None,
+            },
+        );
+        adapter.persist_run(&key).unwrap();
+        adapter
+            .store
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO performance_projection(run_key,record_json) VALUES (?1,?2)",
+                rusqlite::params![key, b"corrupt optional report".as_slice()],
+            )
+            .unwrap();
+        let mut terminal = None;
+        for _ in 0..3 {
+            terminal = adapter
+                .poll_retained_terminal(&key)
+                .expect("optional report cannot block business result");
+            if matches!(terminal, Some(CodexPoll::Completed(_))) {
+                break;
+            }
+        }
+        assert!(matches!(terminal, Some(CodexPoll::Completed(_))));
+        adapter
+            .store
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TABLE performance_operation;")
+            .unwrap();
+        assert_eq!(
+            terminal_outcome_usage(&adapter.store, &key, &adapter.runs[&key].record),
+            Some(ExecutionOutcomeUsage::unknown(0, 0))
+        );
+        assert!(matches!(
+            adapter.poll_retained_terminal(&key).unwrap(),
+            Some(CodexPoll::Completed(_))
+        ));
+        drop(adapter);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]

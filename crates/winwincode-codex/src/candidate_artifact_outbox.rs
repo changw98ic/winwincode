@@ -141,6 +141,13 @@ impl CandidateArtifactOutbox {
                    successor_artifact_id TEXT NOT NULL UNIQUE,
                    record_json BLOB NOT NULL
                  );
+                 CREATE TABLE IF NOT EXISTS candidate_artifact_cancelled (
+                   artifact_id TEXT PRIMARY KEY NOT NULL,
+                   authority_key TEXT NOT NULL,
+                   record_json BLOB NOT NULL
+                 );
+                 CREATE INDEX IF NOT EXISTS candidate_cancelled_authority
+                   ON candidate_artifact_cancelled(authority_key);
                  CREATE TABLE IF NOT EXISTS candidate_artifact_content (
                    authority_key TEXT PRIMARY KEY NOT NULL,
                    bytes BLOB NOT NULL
@@ -169,6 +176,10 @@ impl CandidateArtifactOutbox {
             }
         };
         self.store.transaction(|transaction| {
+            let cancelled: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM candidate_artifact_cancelled WHERE authority_key=?1)",
+                [&record.authority_key], |row| row.get(0)).map_err(|_| AdapterStoreError::Unavailable)?;
+            if cancelled { return Err(AdapterStoreError::Conflict); }
             if let Some(existing) = load_by_authority(transaction, &record.authority_key)? {
                 existing.validate()?;
                 if !existing.same_upload(&record) {
@@ -229,7 +240,8 @@ impl CandidateArtifactOutbox {
             record.validate()?;
             record.validate_ack_authority(acknowledgement)?;
             if record.cancel_requested {
-                return Err(AdapterStoreError::Conflict);
+                validate_retired_ack_shape(&record, acknowledgement)?;
+                return Ok(CandidateArtifactAckOutcome::Pending);
             }
             if let Some(final_ack) = &record.final_ack {
                 return if final_ack_matches_retry(final_ack, acknowledgement) {
@@ -451,6 +463,13 @@ impl CandidateArtifactOutbox {
             }
             delete_delivery(transaction, &record.open_message.message_id.0)?;
             compact_prefix(transaction, &record, record.final_sequence())?;
+            let mut cancelled = record.clone();
+            cancelled.cancel_requested = true;
+            transaction.execute(
+                "INSERT OR IGNORE INTO candidate_artifact_cancelled(artifact_id,authority_key,record_json) VALUES (?1,?2,?3)",
+                params![record.descriptor.artifact_id.0, record.authority_key,
+                    serde_json::to_vec(&cancelled).map_err(|_| AdapterStoreError::Corrupt)?])
+                .map_err(|_| AdapterStoreError::Unavailable)?;
             transaction
                 .execute(
                     "DELETE FROM candidate_artifact_chunks WHERE authority_key=?1",
@@ -1158,7 +1177,8 @@ fn load_ack_record(
     }
     let bytes: Option<Vec<u8>> = transaction
         .query_row(
-            "SELECT record_json FROM candidate_artifact_retired WHERE artifact_id=?1",
+            "SELECT record_json FROM candidate_artifact_retired WHERE artifact_id=?1
+             UNION ALL SELECT record_json FROM candidate_artifact_cancelled WHERE artifact_id=?1 LIMIT 1",
             [&acknowledgement.artifact_id.0],
             |row| row.get(0),
         )
@@ -1167,7 +1187,45 @@ fn load_ack_record(
     let retired = decode_record(bytes)?.ok_or(AdapterStoreError::Conflict)?;
     retired.validate()?;
     retired.validate_ack_authority(acknowledgement)?;
+    validate_retired_ack_shape(&retired, acknowledgement)?;
     Ok(None)
+}
+
+// Retired/cancelled uploads consume exact, well-formed late receipts without
+// applying progress or replaying chunks. Malformed/foreign receipts still fail.
+fn validate_retired_ack_shape(
+    record: &StoredCandidateArtifact,
+    ack: &ArtifactAckMessage,
+) -> Result<(), AdapterStoreError> {
+    let sequence = u64::try_from(ack.ack_sequence.0).map_err(|_| AdapterStoreError::Conflict)?;
+    if sequence > record.final_sequence() {
+        return Err(AdapterStoreError::Conflict);
+    }
+    if ack.retained_artifact.is_some() {
+        return if record.transport_upgrade_pending && valid_retained_reference(record, ack) {
+            Ok(())
+        } else {
+            Err(AdapterStoreError::Conflict)
+        };
+    }
+    match ack.status {
+        LeaseWriteStatus::Accepted | LeaseWriteStatus::Duplicate
+            if ack.error.is_none() && ack.replay_from_sequence.is_none() =>
+        {
+            Ok(())
+        }
+        LeaseWriteStatus::Gap
+            if sequence < record.final_sequence()
+                && ack.error.is_some()
+                && ack
+                    .replay_from_sequence
+                    .as_ref()
+                    .is_some_and(|from| u64::try_from(from.0).ok() == Some(sequence + 1)) =>
+        {
+            Ok(())
+        }
+        _ => Err(AdapterStoreError::Conflict),
+    }
 }
 
 fn load_by_artifact(
@@ -2322,7 +2380,7 @@ mod tests {
                     1,
                     LeaseWriteStatus::Accepted,
                 )),
-                Err(AdapterStoreError::Conflict)
+                Ok(CandidateArtifactAckOutcome::Pending)
             );
             assert_eq!(
                 candidate.retain(&upload),
@@ -2353,11 +2411,18 @@ mod tests {
                     .delivery_allowed(&retained.deliveries[0].message)
                     .expect("deleted delivery gate")
             );
-            let replay = candidate
-                .retain(&upload)
-                .expect("new attempt after cancellation");
-            assert_eq!(replay.artifact, retained.artifact);
-            assert_eq!(replay.deliveries.len(), 2);
+            assert_eq!(candidate.retain(&upload), Err(AdapterStoreError::Conflict));
+            assert_eq!(
+                candidate.apply_ack(&acknowledgement(
+                    &retained,
+                    &upload,
+                    1,
+                    LeaseWriteStatus::Accepted,
+                )),
+                Ok(CandidateArtifactAckOutcome::Pending),
+                "an exact delayed receipt is consumed without reviving the upload"
+            );
+            assert!(execution.pending().unwrap().is_empty());
         }
         std::fs::remove_dir_all(root).expect("remove fixture");
     }
@@ -2470,20 +2535,58 @@ mod tests {
             .cancel(&upload.authority())
             .expect("repeated cancel is exact");
 
-        let retained = candidate.retain(&upload).expect("retain after cancel");
-        assert_eq!(retained.artifact, first.artifact);
-        let final_ack = acknowledgement(&retained, &upload, 1, LeaseWriteStatus::Accepted);
+        let late = acknowledgement(&first, &upload, 1, LeaseWriteStatus::Accepted);
+        assert_eq!(
+            candidate
+                .apply_ack(&late)
+                .expect("exact cancelled-stream ACK is consumed"),
+            CandidateArtifactAckOutcome::Pending
+        );
+        assert!(execution.pending().unwrap().is_empty());
+
+        assert_eq!(candidate.retain(&upload), Err(AdapterStoreError::Conflict));
+        let mut foreign = late.clone();
+        foreign.lease.fencing_token = FencingToken("999".into());
+        assert_eq!(
+            candidate.apply_ack(&foreign),
+            Err(AdapterStoreError::Conflict)
+        );
+        let mut invalid = late.clone();
+        invalid.ack_sequence.0 = 999;
+        assert_eq!(
+            candidate.apply_ack(&invalid),
+            Err(AdapterStoreError::Conflict)
+        );
+        drop(candidate);
+        drop(execution);
+        let (candidate, execution) = open_ledgers(&root).unwrap();
+        assert_eq!(
+            candidate.apply_ack(&late),
+            Ok(CandidateArtifactAckOutcome::Pending)
+        );
+        assert_eq!(
+            candidate.accepted_reference(&upload.authority()).unwrap(),
+            None
+        );
+        assert!(execution.pending().unwrap().is_empty());
+        let mut next_attempt = upload.clone();
+        next_attempt.lease.fencing_token = FencingToken("2".into());
+        let retained = candidate
+            .retain(&next_attempt)
+            .expect("fresh fenced attempt");
+        assert_ne!(retained.artifact, first.artifact);
+        let final_ack = acknowledgement(&retained, &next_attempt, 1, LeaseWriteStatus::Accepted);
         assert_eq!(
             candidate.apply_ack(&final_ack).expect("accept candidate"),
             CandidateArtifactAckOutcome::Accepted(retained.artifact.clone())
         );
         assert_eq!(
-            candidate.cancel(&upload.authority()),
+            candidate.cancel(&next_attempt.authority()),
             Err(AdapterStoreError::Conflict)
         );
         assert_eq!(
             candidate
-                .accepted_reference(&upload.authority())
+                .accepted_reference(&next_attempt.authority())
                 .expect("accepted reference survives cancel"),
             Some(retained.artifact)
         );

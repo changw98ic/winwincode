@@ -308,16 +308,26 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
                         continue;
                     }
                 }
+                if worker.transport_failure().is_some() { break; }
                 let _ = Box::pin(worker.poll_codex(now)).await;
                 if exit_after_work && worker.work_drained() { break; }
             }
         }
-        if handle.terminal_error().is_some() {
+        if handle.terminal_error().is_some()
+            || worker.transport_failure().is_some()
+            || (worker.required_delivery_failure().is_some() && worker.active_jobs().is_empty())
+        {
             break;
         }
     }
     let _ = Box::pin(worker.shutdown(now_instant()?)).await;
     if let Some(error) = handle.terminal_error() {
+        return Err(error.into());
+    }
+    if let Some(error) = worker
+        .transport_failure()
+        .or_else(|| worker.required_delivery_failure())
+    {
         return Err(error.into());
     }
     Ok(())

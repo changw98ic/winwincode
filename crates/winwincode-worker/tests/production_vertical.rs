@@ -3331,6 +3331,10 @@ async fn run_verification_work_run(root: &TestDirectory, role: &str, command: &s
         )
         .await
         .expect("freeze exact verification source");
+    worker
+        .flush_durable_outbox()
+        .await
+        .expect("drive retained freeze receipt");
     assert!(worker.active_jobs().is_empty());
     let receipt = port
         .messages()
@@ -5007,6 +5011,10 @@ fn changed_job_replay_is_rejected_before_kernel_or_provider_work() {
                 )
                 .await
                 .expect("changed replay must emit a durable conflict result");
+            worker
+                .flush_durable_outbox()
+                .await
+                .expect("drive retained dispatch result");
             let messages = port.messages();
             let result = messages
                 .iter()
@@ -5446,6 +5454,10 @@ fn real_request_user_input_resumes_after_response_loss_and_rejects_forged_replay
                 .await
                 .expect("deliver recovered request_user_input provider response");
         }
+        replay
+            .flush_durable_outbox()
+            .await
+            .expect("drive retained recovery ACKs");
         // The replacement Worker acknowledges each recovered provider frame.
         // Apply those ACKs to the same local Control Plane instance before
         // opening the continuation, so durable admission can retire the

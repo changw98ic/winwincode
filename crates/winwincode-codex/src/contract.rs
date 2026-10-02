@@ -548,6 +548,79 @@ pub trait CodexCoreAdapter {
     /// Returns the adapter error when the delivery identity is unknown or cannot be updated.
     fn record_execution_delivery_sent(&mut self, delivery_id: &str) -> Result<(), Self::Error>;
 
+    /// Requeues an explicitly emitted control response, including transport-only replays.
+    ///
+    /// # Errors
+    /// Returns a durable-store failure or a previously rejected identity.
+    fn requeue_execution_delivery(&mut self, _delivery_id: &str) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    /// Keeps a bounded auxiliary wire projection after a definite message refusal.
+    ///
+    /// # Errors
+    /// Returns a durable-store failure; required evidence cannot be degraded.
+    fn degrade_auxiliary_execution_delivery(
+        &mut self,
+        _delivery_id: &str,
+    ) -> Result<Option<DurableExecutionDelivery>, Self::Error> {
+        Ok(None)
+    }
+
+    /// Archives a permanently refused frame instead of leaving it pending forever.
+    ///
+    /// # Errors
+    /// Returns a durable-store failure. False means the adapter has no durable rejection support.
+    fn record_execution_delivery_rejected(
+        &mut self,
+        _delivery_id: &str,
+    ) -> Result<bool, Self::Error> {
+        Ok(false)
+    }
+
+    /// Returns whether a permanent refusal has already ended this delivery.
+    ///
+    /// # Errors
+    /// Returns a durable-store read failure.
+    fn execution_delivery_is_rejected(&mut self, _delivery_id: &str) -> Result<bool, Self::Error> {
+        Ok(false)
+    }
+
+    /// Restores a failure to deliver an immutable terminal after process restart.
+    ///
+    /// # Errors
+    /// Returns a durable-store read failure.
+    fn has_rejected_terminal_delivery(
+        &mut self,
+        _worker_id: &WorkerId,
+        _instance_id: &WorkerInstanceId,
+    ) -> Result<bool, Self::Error> {
+        Ok(false)
+    }
+
+    /// Detects rejected evidence for this exact job attempt and fencing authority.
+    ///
+    /// # Errors
+    /// Returns a durable-store read failure.
+    fn has_rejected_job_delivery(
+        &mut self,
+        _lease: &ExecutionLeaseStamp,
+    ) -> Result<bool, Self::Error> {
+        Ok(false)
+    }
+
+    /// Retains a task failure and stops side effects after required delivery rejection.
+    ///
+    /// # Errors
+    /// Returns a failure to persist or stop the affected task.
+    fn fail_required_execution_delivery(
+        &mut self,
+        thread_id: &CodexThreadId,
+        at: &Instant,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+        self.interrupt(thread_id, at)
+    }
+
     /// Applies a canonical response or acknowledgement after its domain validation succeeds.
     ///
     /// # Errors

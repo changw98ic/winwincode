@@ -192,6 +192,19 @@ fn initialize_schema(connection: &Connection) -> Result<(), AdapterStoreError> {
                    WHERE e.family = 'outcome' AND NOT EXISTS (
                      SELECT 1 FROM execution_terminal_outcome t WHERE t.run_key = r.run_key
                    );
+                 CREATE TABLE IF NOT EXISTS execution_delivery_disposition (
+                   delivery_id TEXT PRIMARY KEY NOT NULL,
+                   original_digest TEXT NOT NULL,
+                   original_frame BLOB NOT NULL,
+                   projected_frame BLOB,
+                   rejected INTEGER NOT NULL DEFAULT 0 CHECK(rejected IN (0,1))
+                 );
+                 CREATE TABLE IF NOT EXISTS execution_response_receipt (
+                   family TEXT NOT NULL,
+                   correlation_key TEXT NOT NULL,
+                   response_digest TEXT NOT NULL,
+                   PRIMARY KEY(family, correlation_key)
+                 );
                  CREATE TABLE IF NOT EXISTS worker_transport_state (
                    state_key TEXT PRIMARY KEY NOT NULL,
                    sequence INTEGER NOT NULL CHECK(sequence >= 0)

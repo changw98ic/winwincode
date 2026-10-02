@@ -1310,6 +1310,17 @@ impl ExecutionPortModelBridge {
         Ok(messages)
     }
 
+    pub(crate) fn restore_messages(
+        &self,
+        messages: Vec<ExecutionPortMessage>,
+    ) -> Result<(), BridgeError> {
+        let mut queue = self.queue.lock()?;
+        for message in messages.into_iter().rev() {
+            queue.push_front(message);
+        }
+        Ok(())
+    }
+
     pub(crate) fn discard_messages_for_thread(
         &self,
         thread_id: &CodexThreadId,

@@ -166,6 +166,8 @@ struct RealKernelAdapter {
     sessions: HashMap<String, String>,
     runs: HashMap<winwincode_worker::CodexRunKey, CodexThreadId>,
     interrupted: HashSet<String>,
+    deliveries: Vec<DurableExecutionDelivery>,
+    pending_deliveries: HashSet<String>,
     stats: AdapterStats,
 }
 
@@ -176,6 +178,8 @@ impl RealKernelAdapter {
             sessions: HashMap::new(),
             runs: HashMap::new(),
             interrupted: HashSet::new(),
+            deliveries: Vec::new(),
+            pending_deliveries: HashSet::new(),
             stats: AdapterStats::default(),
         }
     }
@@ -369,16 +373,35 @@ impl CodexCoreAdapter for RealKernelAdapter {
         &mut self,
         message: &ExecutionPortMessage,
     ) -> Result<DurableExecutionDelivery, Self::Error> {
-        Ok(fixture_delivery(message))
+        let delivery = fixture_delivery(message);
+        if let Some(existing) = self
+            .deliveries
+            .iter()
+            .find(|existing| existing.delivery_id == delivery.delivery_id)
+        {
+            if existing.message != delivery.message {
+                return Err("changed retained fixture frame".into());
+            }
+        } else {
+            self.deliveries.push(delivery.clone());
+        }
+        self.pending_deliveries.insert(delivery.delivery_id.clone());
+        Ok(delivery)
     }
 
     fn pending_execution_deliveries(
         &mut self,
     ) -> Result<Vec<DurableExecutionDelivery>, Self::Error> {
-        Ok(Vec::new())
+        Ok(self
+            .deliveries
+            .iter()
+            .filter(|delivery| self.pending_deliveries.contains(&delivery.delivery_id))
+            .cloned()
+            .collect())
     }
 
-    fn record_execution_delivery_sent(&mut self, _delivery_id: &str) -> Result<(), Self::Error> {
+    fn record_execution_delivery_sent(&mut self, delivery_id: &str) -> Result<(), Self::Error> {
+        self.pending_deliveries.remove(delivery_id);
         Ok(())
     }
 
@@ -732,6 +755,10 @@ async fn run_real_local_codex_fixture() {
         )
         .await
         .expect("classify exact replay");
+    worker
+        .flush_durable_outbox()
+        .await
+        .expect("drive retained duplicate dispatch result");
 
     let cancelling = dispatch('B', "Wait for deterministic cancellation.");
     worker

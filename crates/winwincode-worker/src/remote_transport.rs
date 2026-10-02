@@ -35,6 +35,8 @@ pub enum RemoteWorkerPortError {
     Protocol,
     /// One message or response exceeds its deterministic wire budget.
     TooLarge,
+    /// The received response cannot be bounded/decoded safely.
+    ResponseTooLarge,
 }
 
 impl fmt::Display for RemoteWorkerPortError {
@@ -45,6 +47,7 @@ impl fmt::Display for RemoteWorkerPortError {
             Self::Rejected => "REMOTE_WORKER_AUTHENTICATION_REJECTED",
             Self::Protocol => "REMOTE_WORKER_PROTOCOL_INVALID",
             Self::TooLarge => "REMOTE_WORKER_MESSAGE_TOO_LARGE",
+            Self::ResponseTooLarge => "REMOTE_WORKER_RESPONSE_TOO_LARGE",
         })
     }
 }
@@ -89,7 +92,7 @@ impl SharedRemoteState {
                 continue;
             }
             let frame = RemoteTransportAdapter::<NoopCore>::decode(&delivery.frame)
-                .map_err(remote_frame_error)?;
+                .map_err(|_| RemoteWorkerPortError::Protocol)?;
             state
                 .inbox
                 .push_back((delivery.delivery_id.clone(), frame.message().clone()));
@@ -381,7 +384,7 @@ impl RemoteWorkerPort {
         if let Err(
             error @ (RemoteWorkerPortError::Rejected
             | RemoteWorkerPortError::Protocol
-            | RemoteWorkerPortError::TooLarge),
+            | RemoteWorkerPortError::ResponseTooLarge),
         ) = result
             && let Ok(mut state) = self.state.lock()
         {
@@ -425,7 +428,8 @@ impl RemoteWorkerPort {
             remote_transport_debug("exchange timed out");
             RemoteWorkerPortError::Transport
         })??;
-        let response = RemoteExchangeResponse::decode(&response).map_err(remote_frame_error)?;
+        let response = RemoteExchangeResponse::decode(&response)
+            .map_err(|_| RemoteWorkerPortError::Protocol)?;
         self.state
             .lock()
             .map_err(|_| RemoteWorkerPortError::Transport)?
@@ -441,9 +445,10 @@ impl WorkerExecutionPort for RemoteWorkerPort {
         match error {
             RemoteWorkerPortError::Backpressure => ExecutionPortFailureKind::Backpressure,
             RemoteWorkerPortError::Transport => ExecutionPortFailureKind::Unavailable,
+            RemoteWorkerPortError::TooLarge => ExecutionPortFailureKind::MessageRejected,
             RemoteWorkerPortError::Rejected
             | RemoteWorkerPortError::Protocol
-            | RemoteWorkerPortError::TooLarge => ExecutionPortFailureKind::Terminal,
+            | RemoteWorkerPortError::ResponseTooLarge => ExecutionPortFailureKind::Terminal,
         }
     }
 
@@ -520,7 +525,7 @@ async fn bounded_http_response(
         .content_length()
         .is_some_and(|length| length > MAX_HTTP_RESPONSE_BYTES as u64)
     {
-        return Err(RemoteWorkerPortError::TooLarge);
+        return Err(RemoteWorkerPortError::ResponseTooLarge);
     }
     let mut body = Vec::new();
     while let Some(chunk) = response
@@ -533,7 +538,7 @@ async fn bounded_http_response(
             .checked_add(chunk.len())
             .is_none_or(|length| length > MAX_HTTP_RESPONSE_BYTES)
         {
-            return Err(RemoteWorkerPortError::TooLarge);
+            return Err(RemoteWorkerPortError::ResponseTooLarge);
         }
         body.extend_from_slice(&chunk);
     }
@@ -593,6 +598,62 @@ fn read_private_credential(path: &Path) -> Result<Vec<u8>, RemoteWorkerPortError
 #[cfg(test)]
 mod tests {
     use super::{RemoteWorkerPortError, bounded_http_response, parse_origin};
+
+    #[test]
+    fn outbound_size_rejection_is_scoped_to_one_message() {
+        use winwincode_codex::{ExecutionPortFailureKind, WorkerExecutionPort};
+        assert_eq!(
+            super::RemoteWorkerPort::failure_kind(&RemoteWorkerPortError::TooLarge),
+            ExecutionPortFailureKind::MessageRejected
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_outbound_exchange_leaves_the_connection_live_without_io() {
+        use super::*;
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/contracts/execution-port.valid.json"
+        ))
+        .unwrap();
+        let mut message: ExecutionPortMessage = serde_json::from_value(
+            fixture["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|frame| frame["kind"] == "runtime.event")
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        let ExecutionPortMessage::RuntimeEventMessage(event) = &mut message else {
+            unreachable!()
+        };
+        event.event.summary = "x".repeat(300 * 1024);
+        let state = Arc::new(Mutex::new(SharedRemoteState {
+            inbox: VecDeque::new(),
+            processing: Vec::new(),
+            acknowledgements: Vec::new(),
+            terminal_error: None,
+        }));
+        let mut port = RemoteWorkerPort {
+            endpoint: parse_origin("https://localhost:1").unwrap(),
+            credential_path: PathBuf::from("/no-credential-for-local-size-check"),
+            worker_id: event.lease.worker_id.clone(),
+            worker_instance_id: event.lease.worker_instance_id.clone(),
+            timeout: Duration::from_secs(1),
+            client: reqwest::Client::new(),
+            state: Arc::clone(&state),
+            accounting_enabled: std::sync::atomic::AtomicBool::new(false),
+            accounting_wake: Arc::new(tokio::sync::Notify::new()),
+            accounting_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            accounting_progress: tokio::sync::watch::channel(0).0,
+        };
+        assert_eq!(
+            port.exchange(message).await,
+            Err(RemoteWorkerPortError::TooLarge)
+        );
+        assert!(state.lock().unwrap().terminal_error.is_none());
+    }
 
     #[test]
     fn backpressure_delivers_controls_and_acknowledges_the_sent_prefix_without_accepting_upstream()
@@ -711,7 +772,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             bounded_http_response(response).await,
-            Err(RemoteWorkerPortError::TooLarge)
+            Err(RemoteWorkerPortError::ResponseTooLarge)
         );
         task.await.unwrap();
     }
