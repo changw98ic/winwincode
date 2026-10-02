@@ -725,6 +725,33 @@ enum ProcessRelease {
     Alive,
 }
 
+struct OwnedProcessGroup {
+    group: u32,
+    original_members: Vec<(u32, String)>,
+}
+
+impl OwnedProcessGroup {
+    fn capture(group: u32) -> Self {
+        Self {
+            group,
+            original_members: process_group_members(group)
+                .into_iter()
+                .filter_map(|pid| process_start_identity(pid).map(|identity| (pid, identity)))
+                .collect(),
+        }
+    }
+
+    fn signal(&self, signal: &str) {
+        // A surviving original member proves continuity after the leader is reaped.
+        // If that proof is gone, do not signal a possibly reused group number.
+        if self.original_members.iter().any(|(pid, identity)| {
+            process_matches(*pid, Some(identity)) && process_group_id(*pid) == Some(self.group)
+        }) {
+            signal_captured_process_group(self.group, signal);
+        }
+    }
+}
+
 fn stop_owned_process(
     pid: Option<u32>,
     identity: Option<&str>,
@@ -742,24 +769,16 @@ fn stop_owned_process(
     if !process_matches(pid, identity) && live.is_none() {
         return observe_process_release(pid, identity, group);
     }
-    if group.is_none() {
+    let Some(group_id) = group else {
         return observe_process_release(pid, identity, group);
-    }
-    signal_process_group(pid, "TERM");
-    let mut release = if let Some(live) = live.as_mut() {
-        let _ = wait_for_child_exit(&mut live.child, PROCESS_STOP_GRACE);
-        observe_process_release(pid, identity, group)
-    } else {
-        wait_for_process_release(pid, identity, group, PROCESS_STOP_GRACE)
     };
+    let target = OwnedProcessGroup::capture(group_id);
+    target.signal("TERM");
+    let mut release =
+        wait_for_process_release(pid, identity, group, live.as_mut(), PROCESS_STOP_GRACE);
     if release == ProcessRelease::Alive {
-        signal_process_group(pid, "KILL");
-        if let Some(live) = live.as_mut() {
-            let _ = wait_for_child_exit(&mut live.child, PROCESS_STOP_GRACE);
-            release = observe_process_release(pid, identity, group);
-        } else {
-            release = wait_for_process_release(pid, identity, group, PROCESS_STOP_GRACE);
-        }
+        target.signal("KILL");
+        release = wait_for_process_release(pid, identity, group, live.as_mut(), PROCESS_STOP_GRACE);
     }
     release
 }
@@ -768,10 +787,14 @@ fn wait_for_process_release(
     pid: u32,
     identity: Option<&str>,
     group: Option<u32>,
+    mut live: Option<&mut LiveRun>,
     timeout: Duration,
 ) -> ProcessRelease {
     let deadline = Instant::now() + timeout;
     loop {
+        if let Some(run) = live.as_mut() {
+            let _ = run.child.try_wait();
+        }
         let release = observe_process_release(pid, identity, group);
         if release != ProcessRelease::Alive || Instant::now() >= deadline {
             return release;
@@ -980,6 +1003,11 @@ fn signal_process_group(pid: u32, signal: &str) {
     let Some(group) = process_group_id(pid).filter(|group| *group == pid) else {
         return;
     };
+    signal_captured_process_group(group, signal);
+}
+
+#[cfg(unix)]
+fn signal_captured_process_group(group: u32, signal: &str) {
     let signalled = Command::new("/bin/kill")
         .args([format!("-{signal}"), "--".to_owned(), format!("-{group}")])
         .stderr(Stdio::null())
@@ -997,6 +1025,9 @@ fn signal_process_group(pid: u32, signal: &str) {
 
 #[cfg(not(unix))]
 fn signal_process_group(_pid: u32, _signal: &str) {}
+
+#[cfg(not(unix))]
+fn signal_captured_process_group(_group: u32, _signal: &str) {}
 
 #[cfg(unix)]
 fn process_group_exists(group: u32) -> bool {
@@ -1021,6 +1052,11 @@ fn process_group_members(group: u32) -> Vec<u32> {
             (process_group == group && !status.starts_with('Z')).then_some(process_id)
         })
         .collect()
+}
+
+#[cfg(not(unix))]
+fn process_group_members(_group: u32) -> Vec<u32> {
+    Vec::new()
 }
 
 #[cfg(not(unix))]
@@ -1151,6 +1187,24 @@ mod tests {
             .map(|directory| directory.join("node"))
             .find(|candidate| candidate.is_file())
             .expect("node in test PATH")
+    }
+
+    fn wait_for_healthy_app(
+        supervisor: &ManagedAppSupervisor,
+        mut status: ManagedAppStatus,
+    ) -> ManagedAppStatus {
+        // Start may legitimately return Starting while the listener is coming up.
+        // Query must still prove health and socket ownership before the assertion.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while matches!(
+            status.state,
+            ManagedAppState::Starting | ManagedAppState::Unhealthy
+        ) && Instant::now() < deadline
+        {
+            std::thread::sleep(PROCESS_POLL_INTERVAL);
+            status = supervisor.query(&status.run_id).expect("startup query");
+        }
+        status
     }
 
     #[cfg(test)]
@@ -1359,7 +1413,8 @@ mod tests {
                 node_path().display()
             ),
         ];
-        let started = supervisor.apply(&start, &root).expect("start");
+        let started =
+            wait_for_healthy_app(&supervisor, supervisor.apply(&start, &root).expect("start"));
         assert_eq!(started.state, ManagedAppState::Healthy);
         assert_eq!(registry.snapshot().len(), 1);
         let stopped = supervisor
@@ -1450,6 +1505,121 @@ mod tests {
         assert_eq!(status.pid, None);
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(state);
+    }
+
+    #[test]
+    fn captured_group_requires_a_matching_original_member() {
+        let mut process = Command::new("/bin/sleep");
+        process.arg("30");
+        std::os::unix::process::CommandExt::process_group(&mut process, 0);
+        let mut child = process.spawn().expect("isolated child");
+        let pid = child.id();
+        let stale = OwnedProcessGroup {
+            group: pid,
+            original_members: vec![(pid, "replaced process identity".to_owned())],
+        };
+        stale.signal("KILL");
+        let survives_stale_identity = child.try_wait().expect("child status").is_none();
+        let foreign = OwnedProcessGroup {
+            group: pid,
+            original_members: vec![(
+                std::process::id(),
+                process_start_identity(std::process::id()).expect("test runner identity"),
+            )],
+        };
+        foreign.signal("KILL");
+        let survives_foreign_group = child.try_wait().expect("child status").is_none();
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(
+            survives_stale_identity,
+            "a replaced member is not ownership proof"
+        );
+        assert!(
+            survives_foreign_group,
+            "a member of another group is not ownership proof"
+        );
+    }
+
+    #[test]
+    fn stop_reaps_term_exited_root_and_kills_remaining_child() {
+        let root = test_directory("term-exited-root");
+        let state = test_directory("term-exited-state");
+        fs::create_dir_all(&root).expect("root");
+        let registry = AuthorizedPreviewSourceRegistry::default();
+        let supervisor_config = || ManagedAppSupervisorConfig {
+            data_directory: state.clone(),
+            executable_allowlist: BTreeSet::from([node_path().display().to_string()]),
+            preview_sources: registry.clone(),
+        };
+        let supervisor = ManagedAppSupervisor::open(supervisor_config()).expect("supervisor");
+        let mut start = command("wrn_term_exited_demo", ManagedAppOperation::Start);
+        let config = start.config.as_mut().expect("config");
+        let port = config.listen_port;
+        let child_pid_file = root.join("child.pid");
+        let child_script = root.join("child.cjs");
+        fs::write(
+            &child_script,
+            "const fs = require('node:fs');\n\
+             const http = require('node:http');\n\
+             process.on('SIGTERM', () => {});\n\
+             http.createServer((req, res) => { res.writeHead(200); res.end('ok'); })\n\
+               .listen(Number(process.argv[2]), '127.0.0.1', () =>\n\
+                 fs.writeFileSync(process.argv[3], String(process.pid)));\n",
+        )
+        .expect("child fixture");
+        config.argv = vec![
+            node_path().display().to_string(),
+            "-e".to_owned(),
+            "require('node:child_process').spawn(process.execPath, process.argv.slice(1), { stdio: 'ignore' }); process.on('SIGTERM', () => process.exit(0)); setInterval(() => {}, 1000);".to_owned(),
+            child_script.display().to_string(),
+            port.to_string(),
+            child_pid_file.display().to_string(),
+        ];
+        let started =
+            wait_for_healthy_app(&supervisor, supervisor.apply(&start, &root).expect("start"));
+        assert_eq!(started.state, ManagedAppState::Healthy);
+        let pid = started.pid.expect("root pid");
+        let child_pid: u32 = fs::read_to_string(child_pid_file)
+            .expect("child pid")
+            .parse()
+            .expect("numeric pid");
+        assert_eq!(process_group_id(child_pid), Some(pid));
+        let stopped = supervisor
+            .apply(
+                &command("wrn_term_exited_demo", ManagedAppOperation::Stop),
+                &root,
+            )
+            .expect("stop");
+        let root_gone = !process_exists(pid);
+        let child_gone = !process_exists(child_pid);
+        let group_gone = !process_group_exists(pid);
+        let port_released = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_ok();
+        let repeated = supervisor
+            .apply(
+                &command("wrn_term_exited_demo", ManagedAppOperation::Stop),
+                &root,
+            )
+            .expect("repeat stop");
+        drop(supervisor);
+        let reopened = ManagedAppSupervisor::open(supervisor_config()).expect("reopen");
+        let reconciled = reopened.reconcile().expect("reconcile");
+        // The old implementation leaves this orphan alive; clean up before asserting.
+        if process_group_id(child_pid) == Some(pid) {
+            let _ = Command::new("/bin/kill")
+                .args(["-KILL", &child_pid.to_string()])
+                .status();
+        }
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(state);
+        assert!(root_gone, "TERM must exit and reap the root");
+        assert!(child_gone, "KILL must release the TERM-ignoring child");
+        assert!(group_gone, "the original process group must be empty");
+        assert!(port_released, "the child's port must be released");
+        assert_eq!(stopped.state, ManagedAppState::Stopped);
+        assert_eq!(repeated.state, ManagedAppState::Stopped);
+        assert_eq!(reconciled[0].state, ManagedAppState::Stopped);
+        assert!(registry.snapshot().is_empty());
     }
 
     #[test]
