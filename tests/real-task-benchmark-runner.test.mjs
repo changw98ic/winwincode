@@ -1178,6 +1178,9 @@ test('frozen source validation binds repository, exact revision and 20 task dire
     comparison: 'fusion-4' }, { preparedInputsDirectory, sourceRoot: repositoryRoot,
     evidenceRoot, aggregation })
   const aggregationTask = JSON.parse(await readFile(prepared.taskInputPath, 'utf8'))
+  assert.match(aggregationTask.verificationCommand, /'--verify-source' '\.'/u,
+    'independent verification must read host receipts without executing Docker or writing evidence')
+  assert.ok(!aggregationTask.verificationCommand.includes('--run-source'))
   assert.equal([...aggregationTask.goal].some(character => character.codePointAt(0) < 32), false,
     'aggregation WorkRun goal must satisfy the Worker prompt contract')
   assert.ok(aggregationTask.goal.includes('独立四模型候选的一次聚合'))

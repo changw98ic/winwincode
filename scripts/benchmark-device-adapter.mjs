@@ -140,7 +140,9 @@ export async function prepareBenchmarkDeviceTask(request, { preparedInputsDirect
     constraints: ['遵守任务的全部业务规则和 JSONL 协议', '保持 TASK.md 和 PROTOCOL.md 不变',
       `只提交 ${artifact.spec.allowed_suffixes.join('、')} 源文件，最多 ${artifact.spec.max_submission_files} 个、合计 ${artifact.spec.max_submission_bytes} 字节`],
     outOfScope: ['任务题面、验证工具、环境镜像和凭据'],
-    verificationCommand: ['/usr/bin/python3', ...args, '--run-source', '.'].map(shellWord).join(' '),
+    // Public execution belongs to the configured host MCP tool. Independent
+    // read-only roles verify its source-bound receipt without host writes.
+    verificationCommand: ['/usr/bin/python3', ...args, '--verify-source', '.'].map(shellWord).join(' '),
     acceptanceCriteria: [{ id: 'public-examples', title: '官方公开示例在冻结环境通过', required: true }],
     files: { ...artifact.files },
   }
