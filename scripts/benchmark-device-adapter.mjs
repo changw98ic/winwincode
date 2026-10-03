@@ -494,7 +494,9 @@ function loopbackUnavailable(error) {
   return false
 }
 
-async function resolveRegisteredDeviceTask(request, launch, options = {}, persisted = null) {
+// Reconcile a launched product task after its transport/driver has been
+// interrupted. The current terminal product authorities decide the outcome.
+export async function resolveRegisteredDeviceTask(request, launch, options = {}, persisted = null) {
     const originalBytes = readFileSync(resolve(launch.directory, 'device-task-result.json'))
     const original = JSON.parse(originalBytes)
     const binding = JSON.parse(readFileSync(resolve(launch.directory, 'task-source-binding.json'), 'utf8'))
