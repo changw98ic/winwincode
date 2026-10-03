@@ -250,6 +250,8 @@ test('the actual task entry completes parallel Sessions in one Server and Device
       // Seed retained, drained history from a Worker which completed the real
       // task entry. On reopen, the new anchor sorts beyond the first 200 rows.
       const registry = new DatabaseSync(join(directory, 'server-data/control-plane.sqlite3'))
+      // The live Server continues heartbeats while this fixture adds history.
+      registry.exec('PRAGMA busy_timeout = 5000')
       try {
         const template = registry.prepare('SELECT * FROM execution_workers WHERE worker_id = ?').get(first.sourceAnchor.workerId)
         const scope = registry.prepare('SELECT * FROM execution_worker_scopes WHERE worker_id = ?').get(first.sourceAnchor.workerId)
