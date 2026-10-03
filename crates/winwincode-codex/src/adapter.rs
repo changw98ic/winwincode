@@ -5591,6 +5591,9 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         let run = self.runs.get(&run_key).ok_or_else(unknown_thread)?;
         let session = run.record.kernel_session_id.clone();
         let kernel_live = run.kernel_live;
+        let sealed = run.record.delegated_stop.is_some()
+            || run.record.final_candidate_freeze.is_some()
+            || run.record.terminal_message_id.is_some();
         // Advance the action-gate generation before awaiting Core.  A receipt
         // that arrives while interrupt is in flight must not authorize a
         // side effect after the caller has cancelled this session.
@@ -5601,7 +5604,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         // Kernel session while its durable terminal trace is still pending.
         // Cancel the retained bridge and authority without interrupting a
         // session that has already been unregistered.
-        if !awaiting_panel && kernel_live {
+        if !sealed && !awaiting_panel && kernel_live {
             self.kernel
                 .interrupt(&session)
                 .await
@@ -5611,6 +5614,12 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             .cancel_thread(thread_id, interrupted_at)
             .await
             .map_err(map_bridge_error)?;
+        // A sealed delegated stop, final candidate or retained JobOutcome owns
+        // the original terminal authority. Fence later actions/models, then
+        // let Worker deliver that fact rather than add a conflicting terminal.
+        if sealed {
+            return Ok(());
+        }
         {
             let run = self.runs.get_mut(&run_key).ok_or_else(unknown_thread)?;
             run.record.last_activity_at = interrupted_at.clone();

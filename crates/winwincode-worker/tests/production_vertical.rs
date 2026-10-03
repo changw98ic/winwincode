@@ -2039,6 +2039,8 @@ async fn benchmark_repeat_guard(cancel_after_trace: bool, reopen_before_outcome:
                 .any(|message| matches!(message, ExecutionPortMessage::JobOutcomeMessage(_)))
         );
         let original_stop = run["terminalTrace"].clone();
+        let original_runtime_frames = runtime_outbox_frames(&root);
+        assert!(!original_runtime_frames.is_empty());
         let replay_store =
             rusqlite::Connection::open(root.worker().join("worker-codex.sqlite3")).unwrap();
         let original_replay: Vec<u8> = replay_store
@@ -2075,6 +2077,10 @@ async fn benchmark_repeat_guard(cancel_after_trace: bool, reopen_before_outcome:
             "cancellation retains a new fact instead of rewriting the original stopped trace"
         );
         assert_eq!(cancelled["phase"], "terminal");
+        assert!(
+            runtime_outbox_frames(&root).starts_with(&original_runtime_frames),
+            "original event positions, identities, digests and raw frame bytes remain unchanged"
+        );
         let cancelled_replay: Vec<u8> = replay_store
             .query_row(
                 "SELECT snapshot_json FROM runtime_replay LIMIT 1",
@@ -2124,6 +2130,7 @@ async fn benchmark_repeat_guard(cancel_after_trace: bool, reopen_before_outcome:
         assert_eq!(outcome.outcome.summary, "STUCK_TOOL_REPEAT_LIMIT");
     }
     let run = stored_run_json(&root);
+    let retained_runtime_frames = runtime_outbox_frames(&root);
     assert_eq!(
         run["terminal"]["kind"],
         if cancel_after_trace {
@@ -2204,6 +2211,10 @@ async fn benchmark_repeat_guard(cancel_after_trace: bool, reopen_before_outcome:
             "reopen retains the exact cancelled outcome"
         );
         assert_eq!(stored_run_json(&root)["terminalTrace"], original_trace);
+        assert!(
+            runtime_outbox_frames(&root).starts_with(&retained_runtime_frames),
+            "outcome recovery preserves all retained runtime frame bytes in original order"
+        );
         assert!(
             !replay_port
                 .messages()
@@ -4440,6 +4451,13 @@ fn simulate_terminal_persisted_before_stopped_trace(root: &TestDirectory) {
         .expect("persist terminal-before-trace replay boundary");
 }
 
+fn runtime_outbox_frames(root: &TestDirectory) -> Vec<(i64, String, String, Vec<u8>)> {
+    let db = rusqlite::Connection::open(root.worker().join("worker-codex.sqlite3")).unwrap();
+    db.prepare("SELECT position, delivery_id, frame_digest, frame_json FROM execution_outbox WHERE family='runtime' ORDER BY position")
+        .unwrap().query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
+        .unwrap().collect::<Result<Vec<_>, _>>().unwrap()
+}
+
 fn stored_run_json(root: &TestDirectory) -> serde_json::Value {
     let connection = rusqlite::Connection::open(root.worker().join("worker-codex.sqlite3"))
         .expect("open durable adapter run database");
@@ -5384,6 +5402,209 @@ fn production_event_poll_faults_retain_one_terminal_before_restart() {
             drop(replay);
         });
     }
+}
+
+#[cfg(feature = "test-support")]
+#[test]
+fn sealed_delegated_stop_survives_cancellation_after_dispatch_recovery() {
+    run_on_large_stack(async {
+        use winwincode_codex::{DelegatedLoopStopFact, ProductionSubmissionFault};
+        use winwincode_execution_port::generated::{
+            JobCancelAckMessageStatus, RepairLoopCounters, RepairLoopStopReason,
+        };
+        let root = TestDirectory::new("production-sealed-stop-cancel");
+        let dispatch = dispatch(&root);
+        let first_port = RecordedPort::default();
+        let adapter = winwincode_codex::ProductionCodexAdapter::open(
+            adapter_config_with_mode(&root, winwincode_codex::ExecutionMode::DelegatedPatch)
+                .with_test_submission_fault(ProductionSubmissionFault::AfterIntentBeforeKernel),
+        )
+        .expect("open delegated adapter at the durable submission boundary");
+        let mut first = winwincode_worker::WorkerMain::new(
+            worker_config(),
+            first_port.clone(),
+            adapter,
+            root.workspace_runtime(),
+        );
+        first.inject_submission_fault(winwincode_worker::WorkerSubmissionFault::AfterIntent);
+        register(&mut first, &first_port).await;
+        first
+            .accept_control(
+                &ExecutionPortMessage::JobDispatchMessage(dispatch.clone()),
+                at("2030-01-01T00:00:00.000Z"),
+            )
+            .await
+            .expect_err("inject exit before the first Kernel submission");
+        let thread = first.active_jobs()[0].codex_thread_id.clone();
+        let (_, mut adapter) = first.into_parts();
+        let stopped_at = at("2030-01-01T00:00:01.000Z");
+        let sealed = adapter
+            .retain_delegated_loop_stop(
+                &thread,
+                &DelegatedLoopStopFact {
+                    batch_id: winwincode_domain::ChangeBatchId(format!(
+                        "sha256:{}",
+                        "b".repeat(64)
+                    )),
+                    reason: RepairLoopStopReason::RepairRoundLimitReached,
+                    counters: RepairLoopCounters {
+                        change_batches: 1,
+                        context_pack_bytes: 0,
+                        elapsed_millis: 1000,
+                        observer_calls: 0,
+                        primary_model_calls: 0,
+                        repair_rounds: 0,
+                        total_cost_microunits: 0,
+                        total_tokens: 0,
+                    },
+                    stopped_at,
+                },
+            )
+            .expect("seal actual delegated stop before any JobOutcome");
+        let original = stored_run_json(&root);
+        assert_eq!(
+            original["delegatedStop"],
+            serde_json::to_value(&sealed).unwrap()
+        );
+        assert!(original["terminal"].is_null());
+        assert!(original["finalCandidateFreeze"].is_null());
+        assert!(original["terminalMessageId"].is_null());
+        let snapshot = DirectorySnapshot::capture(&root.worker());
+        drop(adapter);
+        snapshot.restore(&root.worker());
+
+        let port = RecordedPort::default();
+        let adapter = winwincode_codex::ProductionCodexAdapter::open(adapter_config_with_mode(
+            &root,
+            winwincode_codex::ExecutionMode::DelegatedPatch,
+        ))
+        .expect("reopen the sealed stop with no live Kernel");
+        let mut worker = winwincode_worker::WorkerMain::new(
+            worker_config(),
+            port.clone(),
+            adapter,
+            root.workspace_runtime(),
+        );
+        register(&mut worker, &port).await;
+        worker
+            .accept_control(
+                &ExecutionPortMessage::JobDispatchMessage(dispatch.clone()),
+                at("2030-01-01T00:00:01.000Z"),
+            )
+            .await
+            .expect("recover exact original dispatch before its first poll");
+        let active = worker.active_jobs()[0].clone();
+        let now = at("2030-01-01T00:00:02.000Z");
+        let cancel = JobCancelMessage {
+            kind: JobCancelMessageKind::JobCancel,
+            lease: active.lease.clone(),
+            message_id: ExecutionMessageId(id("xmsg", 92)),
+            reason: JobCancelMessageReason::UserRequested,
+            requested_at: now.clone(),
+            request_id: RequestId(id("req", 92)),
+            schema_version: SchemaVersion::WinwincodeV1,
+            sent_at: now.clone(),
+            session_identity: active.session_identity.clone(),
+            worker_session_id: active.worker_session_id.clone(),
+        };
+        let mut foreign = cancel.clone();
+        foreign.worker_session_id = winwincode_domain::WorkerSessionId(id("wsn", 999));
+        worker
+            .accept_control(
+                &ExecutionPortMessage::JobCancelMessage(foreign),
+                now.clone(),
+            )
+            .await
+            .expect("reject foreign cancellation with its exact ACK");
+        worker
+            .accept_control(
+                &ExecutionPortMessage::JobCancelMessage(cancel.clone()),
+                active.lease.expires_at.clone(),
+            )
+            .await
+            .expect("reject expired cancellation");
+        assert_eq!(
+            stored_run_json(&root)["delegatedStop"],
+            original["delegatedStop"]
+        );
+        worker
+            .accept_control(
+                &ExecutionPortMessage::JobCancelMessage(cancel.clone()),
+                now.clone(),
+            )
+            .await
+            .expect("accept current cancellation without replacing a sealed stop");
+        worker
+            .accept_control(&ExecutionPortMessage::JobCancelMessage(cancel), now.clone())
+            .await
+            .expect("duplicate cancellation remains idempotent");
+        let outcome = poll_until_candidate_outcome(&mut worker, &port, &now).await;
+        assert_eq!(outcome.outcome.status, ExecutionOutcomeStatus::Failed);
+        let retained = stored_run_json(&root);
+        assert_eq!(retained["delegatedStop"], original["delegatedStop"]);
+        assert!(retained["terminal"].is_null());
+        assert!(retained["finalCandidateFreeze"].is_null());
+        assert_eq!(retained["phase"], "outcome_retained");
+        for status in [
+            JobCancelAckMessageStatus::RejectedWorkerInstance,
+            JobCancelAckMessageStatus::RejectedExpiredLease,
+            JobCancelAckMessageStatus::Accepted,
+            JobCancelAckMessageStatus::AlreadyCancelling,
+        ] {
+            assert!(port.messages().iter().any(|message| matches!(message,
+                ExecutionPortMessage::JobCancelAckMessage(ack) if ack.status == status)));
+        }
+        assert!(worker.active_jobs().is_empty());
+        let snapshot = DirectorySnapshot::capture(&root.worker());
+        drop(worker);
+        snapshot.restore(&root.worker());
+        let replay_port = RecordedPort::default();
+        let adapter = winwincode_codex::ProductionCodexAdapter::open(adapter_config_with_mode(
+            &root,
+            winwincode_codex::ExecutionMode::DelegatedPatch,
+        ))
+        .expect("reopen the original sealed stop outcome");
+        let mut replay = winwincode_worker::WorkerMain::new(
+            worker_config(),
+            replay_port.clone(),
+            adapter,
+            root.workspace_runtime(),
+        );
+        register(&mut replay, &replay_port).await;
+        replay
+            .accept_control(
+                &ExecutionPortMessage::JobDispatchMessage(dispatch),
+                now.clone(),
+            )
+            .await
+            .expect("replay exact sealed outcome");
+        let replayed = poll_until_candidate_outcome(&mut replay, &replay_port, &now).await;
+        assert_eq!(replayed, outcome);
+        for messages in [
+            first_port.messages(),
+            port.messages(),
+            replay_port.messages(),
+        ] {
+            assert!(
+                !messages
+                    .iter()
+                    .any(|message| matches!(message, ExecutionPortMessage::ModelOpenMessage(_)))
+            );
+        }
+        let db = rusqlite::Connection::open(root.worker().join("worker-codex.sqlite3")).unwrap();
+        let calls: i64 = db
+            .query_row("SELECT COUNT(*) FROM model_call_ledger", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(calls, 0, "a sealed stop cannot restart model work");
+        let tools: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM performance_operation WHERE operation_kind='tool'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tools, 0, "a sealed stop cannot restart tool work");
+    });
 }
 
 #[test]
