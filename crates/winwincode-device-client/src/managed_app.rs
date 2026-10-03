@@ -318,36 +318,31 @@ impl ManagedAppSupervisor {
             if previous.repository_root.as_ref() != Some(&canonical_repository_root) {
                 return Err(ManagedAppError::Invalid("repository root drift".to_owned()));
             }
-            if matches!(
-                previous.state,
-                ManagedAppState::Starting | ManagedAppState::Healthy | ManagedAppState::Unhealthy
-            ) {
-                if self
-                    .live
-                    .lock()
-                    .map_err(|_| ManagedAppError::Invalid("live lock poisoned".to_owned()))?
-                    .contains_key(&run_config.run_id)
-                    && !restart
-                {
+            let has_live_child = self
+                .live
+                .lock()
+                .map_err(|_| ManagedAppError::Invalid("live lock poisoned".to_owned()))?
+                .contains_key(&run_config.run_id);
+            if has_live_child
+                || matches!(
+                    previous.state,
+                    ManagedAppState::Starting
+                        | ManagedAppState::Healthy
+                        | ManagedAppState::Unhealthy
+                )
+            {
+                if has_live_child && !restart && previous.state != ManagedAppState::Missing {
                     return Ok(status(previous));
                 }
                 if !restart
+                    && previous.state != ManagedAppState::Missing
                     && previous.pid.is_some_and(|pid| {
                         process_matches(pid, previous.process_start_identity.as_deref())
                     })
                 {
                     return Ok(status(previous));
                 }
-                let live = self
-                    .live
-                    .lock()
-                    .map_err(|_| ManagedAppError::Invalid("live lock poisoned".to_owned()))?
-                    .remove(&run_config.run_id);
-                let release = stop_owned_process(
-                    previous.pid,
-                    previous.process_start_identity.as_deref(),
-                    live,
-                );
+                let release = self.stop_run_process(previous)?;
                 if release == ProcessRelease::Alive {
                     return Err(ManagedAppError::Invalid(
                         "previous process is still running".to_owned(),
@@ -547,16 +542,7 @@ impl ManagedAppSupervisor {
             .ok_or(ManagedAppError::RunNotFound)?
             .clone();
         validate_lease(&snapshot, command)?;
-        let live = self
-            .live
-            .lock()
-            .map_err(|_| ManagedAppError::Invalid("live lock poisoned".to_owned()))?
-            .remove(&command.run_id);
-        let release = stop_owned_process(
-            snapshot.pid,
-            snapshot.process_start_identity.as_deref(),
-            live,
-        );
+        let release = self.stop_run_process(&snapshot)?;
         let run = state
             .get_mut(&command.run_id)
             .ok_or(ManagedAppError::RunNotFound)?;
@@ -583,6 +569,23 @@ impl ManagedAppSupervisor {
         let result = status(run);
         self.persist_locked(&state)?;
         Ok(result)
+    }
+
+    fn stop_run_process(&self, run: &PersistedRun) -> Result<ProcessRelease, ManagedAppError> {
+        let mut live = self
+            .live
+            .lock()
+            .map_err(|_| ManagedAppError::Invalid("live lock poisoned".to_owned()))?;
+        let release = stop_owned_process(
+            run.pid,
+            run.process_start_identity.as_deref(),
+            live.get_mut(&run.config.run_id),
+        );
+        // A timeout (or failed reap poll) must retain the Child for Stop/Query retry.
+        if release != ProcessRelease::Alive {
+            live.remove(&run.config.run_id);
+        }
+        Ok(release)
     }
 
     fn persist_locked(
@@ -755,13 +758,15 @@ impl OwnedProcessGroup {
 fn stop_owned_process(
     pid: Option<u32>,
     identity: Option<&str>,
-    mut live: Option<LiveRun>,
+    mut live: Option<&mut LiveRun>,
 ) -> ProcessRelease {
     let Some(pid) = pid.or_else(|| live.as_ref().map(|run| run.child.id())) else {
         return ProcessRelease::Gone;
     };
-    if let Some(live) = live.as_mut()
-        && live.child.try_wait().ok().flatten().is_some()
+    // A previously collected child cannot authorize a new process/group that
+    // happens to reuse its PID. Preserve the existing pre-Stop exit behavior.
+    if let Some(run) = live.as_mut()
+        && run.child.try_wait().ok().flatten().is_some()
     {
         return ProcessRelease::Gone;
     }
@@ -770,15 +775,20 @@ fn stop_owned_process(
         return observe_process_release(pid, identity, group);
     }
     let Some(group_id) = group else {
-        return observe_process_release(pid, identity, group);
+        return wait_for_process_release(pid, identity, group, live, PROCESS_STOP_GRACE);
     };
     let target = OwnedProcessGroup::capture(group_id);
     target.signal("TERM");
-    let mut release =
-        wait_for_process_release(pid, identity, group, live.as_mut(), PROCESS_STOP_GRACE);
+    let mut release = wait_for_process_release(
+        pid,
+        identity,
+        group,
+        live.as_deref_mut(),
+        PROCESS_STOP_GRACE,
+    );
     if release == ProcessRelease::Alive {
         target.signal("KILL");
-        release = wait_for_process_release(pid, identity, group, live.as_mut(), PROCESS_STOP_GRACE);
+        release = wait_for_process_release(pid, identity, group, live, PROCESS_STOP_GRACE);
     }
     release
 }
@@ -792,15 +802,39 @@ fn wait_for_process_release(
 ) -> ProcessRelease {
     let deadline = Instant::now() + timeout;
     loop {
-        if let Some(run) = live.as_mut() {
-            let _ = run.child.try_wait();
-        }
+        let reaped = live
+            .as_mut()
+            .is_none_or(|run| run.child.try_wait().is_ok_and(|status| status.is_some()));
+        #[cfg(test)]
+        PROCESS_RELEASE_TEST_HOOK.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().take() {
+                hook();
+            }
+        });
         let release = observe_process_release(pid, identity, group);
-        if release != ProcessRelease::Alive || Instant::now() >= deadline {
-            return release;
+        if release != ProcessRelease::Alive {
+            // ps excludes zombies. The child may exit after the poll above, so
+            // collect it once more before reporting success or dropping ownership.
+            if reaped
+                || live
+                    .as_mut()
+                    .is_none_or(|run| run.child.try_wait().is_ok_and(|status| status.is_some()))
+            {
+                return release;
+            }
+        }
+        if Instant::now() >= deadline {
+            return ProcessRelease::Alive;
         }
         std::thread::sleep(PROCESS_POLL_INTERVAL);
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    // Deterministically exit a real child between the reap poll and ps observation.
+    static PROCESS_RELEASE_TEST_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 fn observe_process_release(pid: u32, identity: Option<&str>, group: Option<u32>) -> ProcessRelease {
@@ -1591,7 +1625,7 @@ mod tests {
                 &root,
             )
             .expect("stop");
-        let root_gone = !process_exists(pid);
+        let root_gone = process_start_identity(pid).is_none();
         let child_gone = !process_exists(child_pid);
         let group_gone = !process_group_exists(pid);
         let port_released = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_ok();
@@ -1620,6 +1654,163 @@ mod tests {
         assert_eq!(repeated.state, ManagedAppState::Stopped);
         assert_eq!(reconciled[0].state, ManagedAppState::Stopped);
         assert!(registry.snapshot().is_empty());
+    }
+
+    fn exit_between_reap_poll_and_observation(operation: ManagedAppOperation) {
+        let root = test_directory("reap-race-root");
+        let state = test_directory("reap-race-state");
+        fs::create_dir_all(&root).expect("root");
+        let registry = AuthorizedPreviewSourceRegistry::default();
+        let supervisor = ManagedAppSupervisor::open(ManagedAppSupervisorConfig {
+            data_directory: state.clone(),
+            executable_allowlist: BTreeSet::from([node_path().display().to_string()]),
+            preview_sources: registry.clone(),
+        })
+        .expect("supervisor");
+        let gate = root.join("exit-gate");
+        let run_id = if operation == ManagedAppOperation::Restart {
+            "wrn_reap_restart_demo"
+        } else {
+            "wrn_reap_stop_demo"
+        };
+        let mut start = command(run_id, ManagedAppOperation::Start);
+        let config = start.config.as_mut().expect("config");
+        let port = config.listen_port;
+        config.argv = vec![
+            node_path().display().to_string(),
+            "-e".to_owned(),
+            "const fs = require('node:fs'); let stopping = false; process.on('SIGTERM', () => { stopping = true; }); setInterval(() => { if (stopping && fs.existsSync(process.argv[2])) process.exit(0); }, 1); require('node:http').createServer((req, res) => { res.end('ok'); }).listen(Number(process.argv[1]), '127.0.0.1');".to_owned(),
+            port.to_string(),
+            gate.display().to_string(),
+        ];
+        let started =
+            wait_for_healthy_app(&supervisor, supervisor.apply(&start, &root).expect("start"));
+        let pid = started.pid.expect("root pid");
+        assert!(!process_is_zombie(pid));
+        PROCESS_RELEASE_TEST_HOOK.with(|hook| {
+            let gate = gate.clone();
+            *hook.borrow_mut() = Some(Box::new(move || {
+                fs::write(gate, b"exit").expect("release TERM gate");
+                let deadline = Instant::now() + Duration::from_secs(1);
+                while !process_is_zombie(pid) && Instant::now() < deadline {
+                    std::thread::sleep(PROCESS_POLL_INTERVAL);
+                }
+                assert!(
+                    process_is_zombie(pid),
+                    "exit after try_wait(None), before ps"
+                );
+            }));
+        });
+        let mut finish = start.clone();
+        finish.operation = operation;
+        if operation == ManagedAppOperation::Stop {
+            finish.config = None;
+        }
+        let finished = supervisor.apply(&finish, &root).expect("stop or restart");
+        // Unlike process_exists(), lstart includes zombies: a missing entry proves reaping.
+        let root_reaped = process_start_identity(pid).is_none();
+        let repeated = supervisor
+            .apply(&command(run_id, ManagedAppOperation::Stop), &root)
+            .expect("cleanup and repeat stop");
+        drop(supervisor);
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(state);
+        assert!(
+            root_reaped,
+            "success must collect the direct child's exit status"
+        );
+        if operation == ManagedAppOperation::Restart {
+            assert_ne!(finished.pid, Some(pid));
+        } else {
+            assert_eq!(finished.state, ManagedAppState::Stopped);
+        }
+        assert_eq!(repeated.state, ManagedAppState::Stopped);
+        assert!(registry.snapshot().is_empty());
+    }
+
+    #[test]
+    fn stop_reaps_root_that_exits_between_poll_and_observation() {
+        exit_between_reap_poll_and_observation(ManagedAppOperation::Stop);
+    }
+
+    #[test]
+    fn restart_reaps_root_that_exits_between_poll_and_observation() {
+        exit_between_reap_poll_and_observation(ManagedAppOperation::Restart);
+    }
+
+    #[test]
+    fn stop_timeout_retains_child_for_a_later_reap() {
+        // A non-group child cannot be signalled by Stop; it exercises the bounded
+        // failure path without replacing the real Child or process observations.
+        let root = test_directory("reap-timeout-root");
+        let state = test_directory("reap-timeout-state");
+        fs::create_dir_all(&root).expect("root");
+        let supervisor = ManagedAppSupervisor::open(ManagedAppSupervisorConfig {
+            data_directory: state.clone(),
+            executable_allowlist: BTreeSet::new(),
+            preview_sources: AuthorizedPreviewSourceRegistry::default(),
+        })
+        .expect("supervisor");
+        let child = Command::new("/bin/sleep").arg("30").spawn().expect("child");
+        let pid = child.id();
+        assert_ne!(process_group_id(pid), Some(pid));
+        let start = command("wrn_reap_timeout_demo", ManagedAppOperation::Start);
+        let run = PersistedRun {
+            config: start.config.expect("config"),
+            lease_id: start.occupancy_lease_id,
+            fencing_token: start.occupancy_fencing_token,
+            state: ManagedAppState::Healthy,
+            pid: Some(pid),
+            process_start_identity: process_start_identity(pid),
+            exit_code: None,
+            repository_root: Some(root.canonicalize().expect("canonical root")),
+            execution_root: None,
+            port_preflight_passed: true,
+        };
+        supervisor
+            .state
+            .lock()
+            .unwrap()
+            .insert(run.config.run_id.clone(), run.clone());
+        supervisor
+            .live
+            .lock()
+            .unwrap()
+            .insert(run.config.run_id.clone(), LiveRun { child });
+        let stop = command(&run.config.run_id, ManagedAppOperation::Stop);
+        let failed_stop = supervisor.apply(&stop, &root).expect("bounded stop");
+        assert_eq!(failed_stop.state, ManagedAppState::Missing);
+        assert_eq!(failed_stop.pid, Some(pid));
+        // Restart must not overwrite ownership while the earlier process lives.
+        let restart = command(&run.config.run_id, ManagedAppOperation::Restart);
+        assert!(matches!(
+            supervisor.apply(&restart, &root),
+            Err(ManagedAppError::Invalid(reason)) if reason == "previous process is still running"
+        ));
+        supervisor
+            .live
+            .lock()
+            .unwrap()
+            .get_mut(&run.config.run_id)
+            .expect("retain Child through timeout and restart")
+            .child
+            .kill()
+            .expect("release child");
+        let stopped = supervisor.apply(&stop, &root).expect("reap on retry");
+        assert_eq!(stopped.state, ManagedAppState::Stopped);
+        assert!(
+            process_start_identity(pid).is_none(),
+            "retry must reap the direct child"
+        );
+        assert!(
+            !supervisor
+                .live
+                .lock()
+                .unwrap()
+                .contains_key(&run.config.run_id)
+        );
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(state);
     }
 
     #[test]
