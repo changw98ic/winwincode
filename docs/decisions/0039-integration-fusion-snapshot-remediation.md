@@ -247,8 +247,11 @@ detection. A tool-request identity is the hash of tool name, target resource,
 canonical arguments and requested-content digest, excluding request IDs,
 timestamps and progress metadata. When the same identity has already occurred
 more than five times in one run, intercept the sixth request before execution,
-record `STUCK_TOOL_REPEAT_LIMIT`, and terminate the local runner. It is never a
-pass and remains in the denominator. Missing permission, dependency or material
+record `STUCK_TOOL_REPEAT_LIMIT`, and terminate the current task, including any
+remaining Fusion member or aggregation calls for that task. The runner continues
+other tasks; the failed task remains in the denominator. Ledger or required
+evidence persistence failures stop the batch. Recovery retains original call
+identities and does not replay completed or stopped tasks. Missing permission, dependency or material
 creates an attention or blocker. `unresolved` and `inconclusive` are reasoned,
 recorded and recoverable states; new evidence, restored dependencies or manual
 authorization can resume them.

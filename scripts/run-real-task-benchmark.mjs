@@ -295,7 +295,7 @@ export async function executeBenchmarkCell(cell, adapter, {
     persistCall({ callId: request.callId, status: 'returned', result })
     const termination = runnerTermination(result)
     if (termination) {
-      throw Object.assign(new Error('product execution terminated the benchmark runner'), {
+      throw Object.assign(new Error('product execution terminated the current benchmark task'), {
         code: termination.reason, termination,
         productOutcome: result,
         ...(result.claims !== undefined ? { claims: result.claims } : {}),
@@ -405,6 +405,28 @@ export async function recoverBenchmarkCell(cell, observed, resolveModel) {
     originalCalls: observed.calls } }
 }
 
+// Coordinate independent durable task runners. Their returned task outcomes
+// never stop admission; a thrown ledger/evidence error stops new admission and
+// waits for already running tasks to retain their results before propagating.
+export async function runBenchmarkSchedule(cells, { concurrency = 1, executeCell }) {
+  if (!Number.isInteger(concurrency) || concurrency < 1) {
+    fail('BENCHMARK_CONCURRENCY_INVALID', 'benchmark concurrency must be a positive integer')
+  }
+  const results = Array(cells.length)
+  let cursor = 0
+  let failure = null
+  const worker = async () => {
+    while (cursor < cells.length && !failure) {
+      const index = cursor++
+      try { results[index] = await executeCell(cells[index], index) }
+      catch (error) { failure ??= { error } }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, cells.length) }, worker))
+  if (failure) throw failure.error
+  return results
+}
+
 export async function runBenchmarkPlan(plan, {
   executeCell,
   createToolGate = () => createToolRequestGuard(),
@@ -417,7 +439,6 @@ export async function runBenchmarkPlan(plan, {
     ? openBenchmarkLedger(ledgerPath, canonicalJson({ plan, experimentBinding }), plan.cells)
     : null
   const records = []
-  let stopped = null
   try {
     for (const [index, cell] of plan.cells.entries()) {
       let claim
@@ -455,42 +476,38 @@ export async function runBenchmarkPlan(plan, {
           }
         }
         record = { ...cell, status: 'planned', termination: null }
-        if (stopped) {
-          record = { ...record, status: 'not_run_runner_terminated', verdict: null, score: null, termination: stopped }
-        } else {
-          try {
-            const result = await executeCell(cell, { toolGate: createToolGate(cell), registerLaunch, recordCall })
-            if (persistenceError) throw persistenceError
-            const termination = runnerTermination(result)
-            record = {
-              ...record,
-              ...result,
-              runId: cell.runId,
-              status: termination ? 'failed' : result.status ?? 'completed',
-              // Benchmark grades belong to the user's independent grading machine.
-              verdict: null,
-              score: null,
-              termination,
-            }
-          } catch (error) {
-            if (persistenceError) throw persistenceError
-            if (error?.code === 'BENCHMARK_EVIDENCE_FAILED') throw error
-            const termination = runnerTermination(error)
-            record = {
-              ...record,
-              ...(error?.claims !== undefined ? { claims: error.claims } : {}),
-              ...(error?.productOutcome !== undefined ? { productOutcome: error.productOutcome } : {}),
-              status: 'failed',
-              verdict: null,
-              score: null,
-              termination,
-              failure: {
-                code: termination?.reason ?? runnerFailureCode(error),
-                // Raw adapter errors can contain request headers or credentials.
-                // Detailed diagnostics remain in the sanitized product evidence.
-                message: termination?.reason ?? runnerFailureCode(error),
-              },
-            }
+        try {
+          const result = await executeCell(cell, { toolGate: createToolGate(cell), registerLaunch, recordCall })
+          if (persistenceError) throw persistenceError
+          const termination = runnerTermination(result)
+          record = {
+            ...record,
+            ...result,
+            runId: cell.runId,
+            status: termination ? 'failed' : result.status ?? 'completed',
+            // Benchmark grades belong to the user's independent grading machine.
+            verdict: null,
+            score: null,
+            termination,
+          }
+        } catch (error) {
+          if (persistenceError) throw persistenceError
+          if (error?.code === 'BENCHMARK_EVIDENCE_FAILED') throw error
+          const termination = runnerTermination(error)
+          record = {
+            ...record,
+            ...(error?.claims !== undefined ? { claims: error.claims } : {}),
+            ...(error?.productOutcome !== undefined ? { productOutcome: error.productOutcome } : {}),
+            status: 'failed',
+            verdict: null,
+            score: null,
+            termination,
+            failure: {
+              code: termination?.reason ?? runnerFailureCode(error),
+              // Raw adapter errors can contain request headers or credentials.
+              // Detailed diagnostics remain in the sanitized product evidence.
+              message: termination?.reason ?? runnerFailureCode(error),
+            },
           }
         }
         // Storage/export failures must escape. They are not model failures and
@@ -499,11 +516,12 @@ export async function runBenchmarkPlan(plan, {
           record.launches = store.launches(index)
           record.calls = store.calls(index)
         }
-        if (record.status !== 'not_run_runner_terminated') record.wallMs ??= Date.now() - startedAtMs
+        record.wallMs ??= Date.now() - startedAtMs
         store?.finish(index, claim.token, record)
       }
       records.push(record)
-      stopped ??= record.termination
+      // A retained termination belongs to this task. Only hard persistence or
+      // evidence errors escape the loop and prevent admission of another task.
       await onRecord(record, index)
     }
   } finally {

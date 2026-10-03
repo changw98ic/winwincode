@@ -32,6 +32,7 @@ import {
   normalizeToolRequestIdentity,
   recoverBenchmarkCell,
   runBenchmarkPlan,
+  runBenchmarkSchedule,
   validateFrozenTaskSource,
 } from '../scripts/run-real-task-benchmark.mjs'
 
@@ -861,24 +862,26 @@ test('the model adapter tool boundary stops the cell at the sixth repeat before 
   assert.equal(executions, 5)
 })
 
-test('a stuck tool request terminates the local batch without dropping fixed-denominator rows', async () => {
+test('a stuck tool request terminates only its task and retains all 700 rows', async () => {
   const plan = buildBenchmarkPlan({ taskIds: Array.from({ length: 20 }, (_, index) => `task-${index + 1}`) })
   let cellCalls = 0
   const ledger = await runBenchmarkPlan(plan, {
     executeCell: async () => {
       cellCalls += 1
-      return { status: 'failed', termination: { reason: 'STUCK_TOOL_REPEAT_LIMIT' } }
+      return cellCalls === 1
+        ? { status: 'failed', termination: { reason: 'STUCK_TOOL_REPEAT_LIMIT' } }
+        : { status: 'completed' }
     },
   })
 
-  assert.equal(cellCalls, 1)
+  assert.equal(cellCalls, 700)
   assert.equal(ledger.records.length, 700)
   assert.equal(ledger.records[0].status, 'failed')
   assert.equal(ledger.records[0].termination.reason, 'STUCK_TOOL_REPEAT_LIMIT')
-  assert.equal(ledger.records.slice(1).every(record => record.status === 'not_run_runner_terminated'), true)
+  assert.equal(ledger.records.slice(1).every(record => record.status === 'completed' && record.termination === null), true)
 })
 
-test('a record carrying runner termination cannot be published as completed or pass', async () => {
+test('a task termination cannot be published as success or inherited by its neighbor', async () => {
   const plan = {
     cells: [
       { runId: 'run-terminated', claims: [{ id: 'claim:kept', state: 'disputed' }] },
@@ -886,7 +889,7 @@ test('a record carrying runner termination cannot be published as completed or p
     ],
   }
   const ledger = await runBenchmarkPlan(plan, {
-    executeCell: async () => ({
+    executeCell: async cell => cell.runId === 'run-pending' ? { status: 'completed' } : ({
       status: 'completed',
       verdict: 'pass',
       claims: [{ id: 'claim:kept', state: 'disputed' }],
@@ -898,9 +901,55 @@ test('a record carrying runner termination cannot be published as completed or p
   assert.equal(ledger.records[0].verdict, null)
   assert.equal(ledger.records[0].score, null)
   assert.equal(ledger.records[0].termination.reason, 'STUCK_TOOL_REPEAT_LIMIT')
-  assert.equal(ledger.records[1].status, 'not_run_runner_terminated')
+  assert.equal(ledger.records[1].status, 'completed')
+  assert.equal(ledger.records[1].termination, null)
   assert.equal(ledger.records[1].verdict, null)
   assert.equal(ledger.records[1].score, null)
+})
+
+test('parallel coordinator continues after a durable task stop and drains admitted tasks on storage failure', async t => {
+  const directory = await mkdtemp(resolve(tmpdir(), 'wwc-coordinator-stop-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const cells = Array.from({ length: 4 }, (_, index) => ({ runId: `task-${index}` }))
+  const executed = []
+  const results = await runBenchmarkSchedule(cells, {
+    concurrency: 2,
+    executeCell: (cell, index) => runBenchmarkPlan({ cells: [cell] }, {
+      ledgerPath: resolve(directory, `${index}.sqlite3`), experimentBinding: { experimentId: 'task-stop' },
+      executeCell: () => {
+        executed.push(cell.runId)
+        return index === 0 ? { termination: { reason: 'STUCK_TOOL_REPEAT_LIMIT' } } : { status: 'completed' }
+      },
+    }),
+  })
+  assert.deepEqual(executed.toSorted(), cells.map(cell => cell.runId))
+  assert.deepEqual(results.map(result => result.records[0].status), ['failed', 'completed', 'completed', 'completed'])
+  await runBenchmarkSchedule(cells, { concurrency: 2, executeCell: (cell, index) => runBenchmarkPlan({ cells: [cell] }, {
+    ledgerPath: resolve(directory, `${index}.sqlite3`), experimentBinding: { experimentId: 'task-stop' },
+    executeCell: () => assert.fail('coordinator restart must reuse retained task results'),
+  }) })
+
+  let release
+  let admitted = 0
+  let drained = false
+  const pending = new Promise(resolve => { release = resolve })
+  const storageFailure = Object.assign(new Error('evidence disk failure'), { code: 'BENCHMARK_EVIDENCE_FAILED' })
+  const failed = runBenchmarkSchedule(cells, { concurrency: 2, executeCell: async (_cell, index) => {
+    admitted += 1
+    if (index === 0) throw storageFailure
+    await pending
+    drained = true
+    return { status: 'completed' }
+  } })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(admitted, 2)
+  assert.equal(drained, false)
+  const rejected = assert.rejects(failed, error => error === storageFailure && drained)
+  release()
+  await rejected
+  assert.equal(admitted, 2)
+  await assert.rejects(runBenchmarkSchedule(cells, { concurrency: 0, executeCell: () => assert.fail() }),
+    { code: 'BENCHMARK_CONCURRENCY_INVALID' })
 })
 
 test('report aggregation accepts terminated zero scores but rejects surviving success markers', () => {
@@ -927,7 +976,7 @@ test('report aggregation accepts terminated zero scores but rejects surviving su
   )
 })
 
-test('runner termination from tool admission preserves fixed-denominator claims', async () => {
+test('tool admission stops only the offending task and preserves each task claims', async () => {
   const firstClaims = [{ id: 'claim:one', state: 'disputed' }]
   const pendingClaims = [{ id: 'claim:two', state: 'disputed' }]
   const plan = {
@@ -943,11 +992,11 @@ test('runner termination from tool admission preserves fixed-denominator claims'
     requestedContentDigest: 'a'.repeat(64),
   }
   let cellCalls = 0
+  const executions = []
 
   const ledger = await runBenchmarkPlan(plan, {
     executeCell: async (cell, { toolGate }) => {
       cellCalls += 1
-      assert.equal(cell.runId, 'run-1')
       return executeBenchmarkCell({
         ...benchmarkConfiguration('main-A'),
         runId: cell.runId,
@@ -958,22 +1007,24 @@ test('runner termination from tool admission preserves fixed-denominator claims'
         budgetLimits: null,
       }, {
         runModel: async (_request, runner) => {
-          for (let occurrence = 1; occurrence <= 6; occurrence += 1) {
-            await runner.requestTool(toolRequest, async () => ({ occurrence }))
+          for (let occurrence = 1; occurrence <= (cell.runId === 'run-1' ? 6 : 1); occurrence += 1) {
+            await runner.requestTool(toolRequest, async () => { executions.push(cell.runId); return { occurrence } })
           }
+          return { answer: 'done' }
         },
       }, { toolGate })
     },
   })
 
-  assert.equal(cellCalls, 1)
+  assert.equal(cellCalls, 2)
+  assert.deepEqual(executions, ['run-1', 'run-1', 'run-1', 'run-1', 'run-1', 'run-2'])
   assert.equal(ledger.denominator, 2)
   assert.equal(ledger.records.length, 2)
   assert.equal(ledger.records[0].status, 'failed')
   assert.equal(ledger.records[0].termination.reason, 'STUCK_TOOL_REPEAT_LIMIT')
   assert.deepEqual(ledger.records[0].claims, firstClaims)
-  assert.equal(ledger.records[1].status, 'not_run_runner_terminated')
-  assert.equal(ledger.records[1].termination.reason, 'STUCK_TOOL_REPEAT_LIMIT')
+  assert.equal(ledger.records[1].status, 'completed')
+  assert.equal(ledger.records[1].termination, null)
   assert.deepEqual(ledger.records[1].claims, pendingClaims)
 })
 
@@ -1441,7 +1492,7 @@ test('concurrent runner cannot execute an already claimed cell', async t => {
   }
 })
 
-test('Core repeat stop code survives restart and keeps every pending cell in the denominator', async t => {
+test('Core repeat stop survives restart while unclaimed tasks continue exactly once', async t => {
   const directory = await mkdtemp(resolve(tmpdir(), 'wwc-benchmark-stop-'))
   t.after(() => rm(directory, { recursive: true, force: true }))
   const plan = buildBenchmarkPlan({ taskIds: Array.from({ length: 20 }, (_, index) => `task-${index + 1}`) })
@@ -1451,14 +1502,17 @@ test('Core repeat stop code survives restart and keeps every pending cell in the
     executeCell: () => { throw Object.assign(new Error('Core stopped'), { code: 'STUCK_TOOL_REPEAT_LIMIT' }) },
     onRecord: () => { throw new Error('export interrupted') },
   }), /export interrupted/u)
+  const resumed = []
   const ledger = await runBenchmarkPlan(plan, {
-    ...options, executeCell: () => assert.fail('stopped batch must not execute'),
+    ...options, executeCell: cell => { resumed.push(cell.runId); return { status: 'completed' } },
   })
   assert.equal(ledger.denominator, 700)
   assert.equal(ledger.records[0].status, 'failed')
   assert.equal(ledger.records[0].failure.code, 'STUCK_TOOL_REPEAT_LIMIT')
-  assert.equal(ledger.records.slice(1).every(record => record.status === 'not_run_runner_terminated'), true)
+  assert.deepEqual(resumed, plan.cells.slice(1).map(cell => cell.runId))
+  assert.equal(ledger.records.slice(1).every(record => record.status === 'completed'), true)
   assert.equal(ledger.records.every(record => record.score === null && record.verdict === null), true)
+  await runBenchmarkPlan(plan, { ...options, executeCell: () => assert.fail('completed or stopped tasks must not replay') })
 })
 
 
@@ -1483,7 +1537,7 @@ test('Device Core stop check waits for a concurrent database migration', async t
   assert.equal((await exited)[0], 0)
 })
 
-test('Device Core stop ledger terminates the delivery driver and all remaining benchmark cells', async t => {
+test('Device Core stop ledger terminates its delivery driver while other benchmark tasks continue', async t => {
   const directory = await mkdtemp(resolve(tmpdir(), 'wwc-device-core-stop-'))
   t.after(() => rm(directory, { recursive: true, force: true }))
   const workerSessionId = 'wsn_01J00000000000000000000001'
@@ -1509,14 +1563,15 @@ test('Device Core stop ledger terminates the delivery driver and all remaining b
     ledgerPath: resolve(directory, 'ledger.sqlite3'), experimentBinding: { experimentId: 'device-stop' },
     executeCell: async () => {
       calls += 1
+      if (calls > 1) return { status: 'completed' }
       await driveDelivery({ query: () => assert.fail('must stop before querying or launching more work') },
         null, undefined, Date.now, { assertRunning: () => assertDeviceBenchmarkRunning(directory, sessions) })
     },
   }
   const ledger = await runBenchmarkPlan(plan, options)
-  assert.equal(calls, 1)
+  assert.equal(calls, 700)
   assert.equal(ledger.records[0].failure.code, 'STUCK_TOOL_REPEAT_LIMIT')
-  assert.equal(ledger.records.slice(1).every(record => record.status === 'not_run_runner_terminated'), true)
+  assert.equal(ledger.records.slice(1).every(record => record.status === 'completed'), true)
   assert.equal(ledger.denominator, 700)
   await runBenchmarkPlan(plan, { ...options, executeCell: () => assert.fail('restart cannot execute') })
   assert.equal(database.prepare('SELECT stopped FROM tool_repeat_run').get().stopped, 1)
@@ -1816,7 +1871,7 @@ test('member receipt write failure stops execution and leaves the cell unresolve
   }), { code: 'LEDGER_RUN_UNRESOLVED' })
 })
 
-test('returned product stop halts standalone, Fusion members and aggregation without another call', async t => {
+test('returned product stop halts its standalone or Fusion task while the next task runs', async t => {
   const root = await mkdtemp(resolve(tmpdir(), 'wwc-returned-stop-'))
   t.after(() => rm(root, { recursive: true, force: true }))
   const full = buildBenchmarkPlan({ taskIds: Array.from({ length: 20 }, (_, i) => `task-${i + 1}`) })
@@ -1832,15 +1887,17 @@ test('returned product stop halts standalone, Fusion members and aggregation wit
     }
     const ledger = await runBenchmarkPlan({ cells: [first, next] }, {
       ledgerPath: resolve(root, `${stage}.sqlite3`), experimentBinding: { experimentId: stage },
-      executeCell: (cell, context) => executeBenchmarkCell(cell, adapter, context),
+      executeCell: (cell, context) => executeBenchmarkCell(cell, cell.runId === first.runId
+        ? adapter : { runModel: () => { calls += 1; return { answer: 'next task' } } }, context),
     })
-    assert.equal(calls, stage === 'aggregation' ? 5 : 1)
+    assert.equal(calls, stage === 'aggregation' ? 6 : 2)
     assert.equal(ledger.records[0].status, 'failed')
     assert.equal(ledger.records[0].termination.reason, 'STUCK_TOOL_REPEAT_LIMIT')
     assert.deepEqual(ledger.records[0].claims, stop.claims)
     assert.deepEqual(ledger.records[0].calls.at(-1).result, stop)
-    assert.equal(ledger.records[1].status, 'not_run_runner_terminated')
-    assert.equal(ledger.records[1].calls.length, 0)
+    assert.equal(ledger.records[1].status, 'completed')
+    assert.equal(ledger.records[1].termination, null)
+    assert.equal(ledger.records[1].calls.length, 1)
     assert.equal(ledger.records[0].score, null)
     assert.equal(ledger.records[1].score, null)
   }
