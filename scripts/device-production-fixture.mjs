@@ -653,16 +653,17 @@ export function startDeterministicDeviceModelServer({
   }
 }
 
-/** Install and discover public smoke before any Worker loads Device extensions. */
-export async function installDevicePublicSmoke({ api, publicClientId, configuration, timeoutMillis = 60_000 }) {
-  const { encryptDeviceExtension } = await import('../apps/client/dist/module/device-provider-encryption.js')
-  const base = `/api/v1/clients/${encodeURIComponent(publicClientId)}/extensions`
-  const id = 'benchmark_public_smoke'
-  const receipts = []
-  for (const mutation of [
-    { operation: 'save_mcp', id, configuration: JSON.stringify(configuration), enabled: true },
-    { operation: 'test_mcp', id },
-  ]) {
+// Revision-bound settings mutations share one queue per Device. Sessions still
+// execute concurrently; only this short configuration transaction is serialized.
+const deviceExtensionMutations = new WeakMap()
+
+async function mutateDeviceExtension(api, publicClientId, mutation, expected, timeoutMillis) {
+  let clients = deviceExtensionMutations.get(api)
+  if (!clients) { clients = new Map(); deviceExtensionMutations.set(api, clients) }
+  const previous = clients.get(publicClientId) ?? Promise.resolve()
+  const result = previous.catch(() => {}).then(async () => {
+    const { encryptDeviceExtension } = await import('../apps/client/dist/module/device-provider-encryption.js')
+    const base = `/api/v1/clients/${encodeURIComponent(publicClientId)}/extensions`
     const current = await api.request(base)
     assert.equal(current.status, 200)
     assert.equal(current.json?.online, true, 'Device must be online to configure public smoke')
@@ -670,7 +671,6 @@ export async function installDevicePublicSmoke({ api, publicClientId, configurat
     const envelope = await encryptDeviceExtension(current.json.snapshot, requestId, mutation)
     const applied = await api.request(base, { method: 'POST', body: envelope })
     assert.equal(applied.status, 202, 'Device extension apply was rejected')
-    const expected = mutation.operation === 'save_mcp' ? 'saved' : 'tested'
     const completed = await waitFor(async () => {
       const response = await api.request(`${base}/receipts/${requestId}`)
       if (!response.json?.receipt) return false
@@ -678,6 +678,22 @@ export async function installDevicePublicSmoke({ api, publicClientId, configurat
       assert.equal(response.json.receipt.outcome, expected, 'Device public smoke configuration failed')
       return response.json
     }, `Device public smoke ${expected}`, timeoutMillis)
+    return completed
+  })
+  clients.set(publicClientId, result)
+  return result
+}
+
+export async function installDevicePublicSmoke({ api, publicClientId, configuration,
+  id = 'benchmark_public_smoke', timeoutMillis = 60_000 }) {
+  assert.match(id, /^benchmark_public_smoke(?:_psn_[0-9A-HJKMNP-TV-Z]{26})?$/u)
+  const receipts = []
+  for (const mutation of [
+    { operation: 'save_mcp', id, configuration: JSON.stringify(configuration), enabled: true },
+    { operation: 'test_mcp', id },
+  ]) {
+    const expected = mutation.operation === 'save_mcp' ? 'saved' : 'tested'
+    const completed = await mutateDeviceExtension(api, publicClientId, mutation, expected, timeoutMillis)
     receipts.push(completed.receipt)
     if (expected === 'tested') {
       const server = completed.snapshot?.mcpServers?.find(server => server.id === id)
@@ -687,6 +703,12 @@ export async function installDevicePublicSmoke({ api, publicClientId, configurat
     }
   }
   return { id, toolNames: ['public_smoke'], receipts }
+}
+
+export async function removeDevicePublicSmoke({ api, publicClientId, id, timeoutMillis = 60_000 }) {
+  assert.match(id, /^benchmark_public_smoke_psn_[0-9A-HJKMNP-TV-Z]{26}$/u)
+  return (await mutateDeviceExtension(api, publicClientId,
+    { operation: 'delete', kind: 'mcp', id }, 'deleted', timeoutMillis)).receipt
 }
 
 /** Resolve only approvals belonging to the currently observed Device WorkRuns. */
@@ -712,7 +734,8 @@ export async function resolveDeviceTaskApprovals({ api, runs, publicSmokeId, onD
     const approval = (await api.query('approval.get', { approvalId: item.id })).result
     if (approval.state !== 'pending' || !approval.decisionEnabled || !currentRun(approval)) continue
     const detail = approval.sanitizedDetail
-    const allow = publicSmokeId === 'benchmark_public_smoke'
+    const allow = typeof publicSmokeId === 'string'
+      && /^benchmark_public_smoke(?:_psn_[0-9A-HJKMNP-TV-Z]{26})?$/u.test(publicSmokeId)
       && approval.category === 'mcp' && approval.effectiveDecisionScope === 'once'
       && detail?.kind === 'available' && detail.operation === 'execute'
       && detail.reasonCode === 'mcp_permission' && detail.targetCount === 1
@@ -978,6 +1001,45 @@ function registeredFixtureWorkers(deviceData, snapshot) {
       return record.process_start_identity === identity ? [row] : []
     })
   } finally { database.close() }
+}
+
+// The source anchor establishes Device authority for Delivery creation but
+// receives no execution job. After dispatch, drain it through the product and
+// interrupt its witnessed process; role Workers shut down after work_drained.
+export async function stopUnusedDeviceTaskAnchor({ api, directory, deviceData, launched, productSessionId }) {
+  const server = new DatabaseSync(join(directory, 'server-data', 'control-plane.sqlite3'), { readOnly: true })
+  try {
+    server.exec('PRAGMA busy_timeout = 5000')
+    assert.equal(server.prepare('SELECT count(*) AS n FROM scheduler_execution_jobs WHERE product_session_id = ?')
+      .get(productSessionId).n, 0, 'source anchor must have no execution jobs')
+    assert.equal(server.prepare(`SELECT count(*) AS n FROM execution_leases l
+      WHERE worker_id = ? AND worker_instance_id = ?
+      AND NOT EXISTS (SELECT 1 FROM execution_lease_terminals t WHERE t.lease_id = l.lease_id)`)
+      .get(launched.workerId, launched.workerInstanceId).n, 0, 'source anchor must have no active lease')
+  } finally { server.close() }
+  const workers = (await api.query('worker.list', { states: [] })).result.items
+  const worker = workers.find(worker => worker.id === launched.workerId)
+  assert.ok(worker, 'source anchor must be registered before it can drain')
+  if (worker.state === 'enabled') {
+    const drained = await api.command('worker.drain', worker.revision, {
+      workerId: worker.id, reason: 'Source authority anchor has no job; Delivery roles own execution.',
+    })
+    assert.equal(drained.outcome, 'completed')
+  }
+  const device = new DatabaseSync(join(deviceData, 'device-client.sqlite3'), { readOnly: true })
+  try {
+    const record = device.prepare('SELECT * FROM worker_process_registry WHERE worker_session_id = ?')
+      .get(launched.workerSessionId)
+    assert.equal(record.worker_id, launched.workerId)
+    assert.equal(record.worker_instance_id, launched.workerInstanceId)
+    const row = registeredFixtureWorkers(deviceData, processSnapshot()).find(row => row.pid === record.pid)
+    assert.ok(row, 'source anchor process must match its Device registry identity')
+    process.kill(row.pid, 'SIGINT')
+    await waitFor(() => !ownedProcessAlive(row, processSnapshot()), 'unused task anchor graceful exit', 30_000)
+    await waitFor(() => device.prepare('SELECT state FROM worker_process_registry WHERE worker_session_id = ?')
+      .get(launched.workerSessionId).state !== 'running', 'Device observed unused task anchor exit', 30_000)
+    return { workerSessionId: launched.workerSessionId, workerId: launched.workerId, state: 'drained' }
+  } finally { device.close() }
 }
 
 /** Stop the owned tree, including Workers which the Device puts in separate groups. */
@@ -1267,7 +1329,7 @@ export async function establishDeviceOnlyExecutionPath({
       }
     }
 
-    const launchAnchor = async ({ workRunId = null, productSessionId = null } = {}, owner = null) => {
+    const launchAnchor = async ({ workRunId = null, productSessionId = null, repositoryBindingId: selectedBindingId = repositoryBindingId } = {}, owner = null) => {
       if (owner !== null) {
         assert.ok(productSessionId === null || productSessionId === owner,
           'launch anchor must belong to its ProductSession')
@@ -1277,7 +1339,7 @@ export async function establishDeviceOnlyExecutionPath({
       const body = {
         schemaVersion,
         clientId: status.publicClientId,
-        repositoryBindingId,
+        repositoryBindingId: selectedBindingId,
         ...(workRunId === null ? {} : { workRunId }),
       }
       if (workRunId === null && productSessionId !== null) {
@@ -1294,11 +1356,15 @@ export async function establishDeviceOnlyExecutionPath({
           },
         }
       }
-      const launched = await api.request('/api/v1/sessions', {
-        method: 'POST',
-        timeoutMillis: 30_000,
-        body,
-      })
+      const launched = await waitFor(async () => {
+        assertBenchmarkRunning(owner)
+        const response = await api.request('/api/v1/sessions', {
+          method: 'POST', timeoutMillis: 30_000, body,
+        })
+        // Capacity rejection issues no grant and starts no Provider. Retry
+        // the original launch after the Device observes a drained predecessor.
+        return response.json?.error?.code === 'CAPACITY_EXHAUSTED' ? false : response
+      }, 'available Device WorkerSession slot', timeoutMillis)
       if (launched.status !== 201) {
         throw Object.assign(new Error(`Worker launch failed: ${launched.text}`), {
           code: 'DEVICE_LAUNCH_FAILED',
@@ -1349,11 +1415,11 @@ export async function establishDeviceOnlyExecutionPath({
        */
       launchAnchor,
       /** Include this task's Controller role Sessions in its stop observation. */
-      forProductSession(productSessionId) {
+      forProductSession(productSessionId, selectedBindingId = repositoryBindingId) {
         assert.match(productSessionId, /^psn_[0-9A-HJKMNP-TV-Z]{26}$/u)
         return Object.freeze({
           assertBenchmarkRunning: workRuns => assertBenchmarkRunning(productSessionId, workRuns),
-          launchAnchor: options => launchAnchor(options, productSessionId),
+          launchAnchor: options => launchAnchor({ ...options, repositoryBindingId: selectedBindingId }, productSessionId),
         })
       },
       async stop() {

@@ -11,14 +11,15 @@
 
 import assert from 'node:assert/strict'
 import { join, resolve } from 'node:path'
-import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import { parseEnv } from 'node:util'
 import { loadDeviceAgentTask } from './device-agent-task.mjs'
 import { exportDeviceCandidate, exportDeviceExecutionReceipts, readDeviceExecutionReceipts } from './export-device-candidate.mjs'
 import { deviceFailureWithModelCauses } from './device-model-failures.mjs'
-import { installDevicePublicSmoke, resolveDeviceTaskApprovals, seedDeviceLocalProvider } from './device-production-fixture.mjs'
+import { installDevicePublicSmoke, removeDevicePublicSmoke, resolveDeviceTaskApprovals,
+  seedDeviceLocalProvider, stopUnusedDeviceTaskAnchor } from './device-production-fixture.mjs'
 import { BenchmarkError, validateBenchmarkConfiguration } from './run-real-task-benchmark.mjs'
 
 import {
@@ -28,6 +29,7 @@ import {
   deviceOnlyServerEnvironment,
   deviceProviderSecretBundle,
   driveDelivery,
+  waitForDeviceWorkerRegistered,
   assertServerEnvironmentIsDeviceOnly,
   serverTargetDirectory,
 } from './run-api-production-vertical.mjs'
@@ -224,6 +226,84 @@ export function failedDeviceDispatch(directory, workRunId, deliveryId) {
     : null
 }
 
+// One registered launch owns its evidence directory; the product databases stay
+// in the long-lived Server/Device runtime. Recovery reads the same durable facts.
+export function bindSharedDeviceTaskDirectory(directory, runtime) {
+  assert.ok(runtime?.directory && runtime?.devicePath?.deviceData, 'shared Device runtime is required')
+  const runtimeDirectory = realpathSync(runtime.directory)
+  assert.notEqual(resolve(directory), runtimeDirectory, 'task evidence cannot replace runtime metadata')
+  mkdirSync(directory, { recursive: true, mode: 0o700 })
+  for (const [name, source] of [['server-data', join(runtimeDirectory, 'server-data')],
+    ['device-data', runtime.devicePath.deviceData]]) {
+    const destination = join(directory, name)
+    if (existsSync(destination)) assert.equal(realpathSync(destination), realpathSync(source))
+    else symlinkSync(realpathSync(source), destination, 'dir')
+  }
+  for (const name of ['fixture-cert.pem', 'server-endpoint.json', 'product-source-seal.json']) {
+    const source = join(runtimeDirectory, name)
+    const destination = join(directory, name)
+    if (existsSync(destination)) assert.deepEqual(readFileSync(destination), readFileSync(source))
+    else copyFileSync(source, destination)
+  }
+  const binding = { runtimeDirectory, deviceData: realpathSync(runtime.devicePath.deviceData) }
+  const path = join(directory, 'runtime-binding.json')
+  const bytes = `${JSON.stringify(binding, null, 2)}\n`
+  if (existsSync(path)) assert.equal(readFileSync(path, 'utf8'), bytes)
+  else writeFileSync(path, bytes, { flag: 'wx', mode: 0o600 })
+}
+
+// The WorkRun projection contains leased/running roles. Controller-dispatched
+// queued roles already exist durably and still need a Device launch grant.
+export function pendingDeviceTaskWorkRuns(directory, deliveryId) {
+  const path = join(directory, 'server-data', 'control-plane.sqlite3')
+  if (!existsSync(path)) return []
+  const database = new DatabaseSync(path, { readOnly: true })
+  try {
+    database.exec('PRAGMA busy_timeout = 5000')
+    return database.prepare(`SELECT work_run_id, dispatch_payload FROM scheduler_execution_jobs
+      WHERE delivery_id = ? AND state = 'queued' ORDER BY submitted_at, job_id`).all(deliveryId).map(row => {
+      const job = JSON.parse(Buffer.from(row.dispatch_payload).toString('utf8'))
+      assert.equal(job.scope.kind, 'work-run')
+      assert.equal(job.scope.workRunId, row.work_run_id)
+      assert.match(row.work_run_id, /^wrn_[0-9A-HJKMNP-TV-Z]{26}$/u)
+      return row.work_run_id
+    })
+  } finally { database.close() }
+}
+
+// A durable Core stop belongs to one task. Cancel its own Controller work and
+// source Session through product commands; the shared Server/Device stays live.
+export async function cancelStoppedDeviceTask(api, directory, deliveryId, productSessionId) {
+  const aggregate = (await api.query('workrun.get', { deliveryId, workItemId: null, atCursor: null })).result
+  assert.equal(aggregate.readCursor.deliveryId, deliveryId)
+  const pending = new Set([...aggregate.runs.filter(run => ['queued', 'leased', 'running'].includes(run.state))
+    .map(run => run.id), ...pendingDeviceTaskWorkRuns(directory, deliveryId)])
+  const cancelled = []
+  for (const workRunId of pending) {
+    for (let attempt = 0; ; attempt++) {
+      const detail = (await api.query('delivery.get', { deliveryId })).result
+      assert.equal(detail.deliveryId, deliveryId)
+      try {
+        const result = await api.command('workrun.cancel', detail.deliveryRevision, { deliveryId, workRunId })
+        assert.equal(result.outcome, 'completed')
+        cancelled.push(workRunId)
+        break
+      } catch (error) {
+        if (error.code !== 'REVISION_CONFLICT' || attempt >= 9) throw error
+      }
+    }
+  }
+  const source = (await api.query('session.get', { productSessionId })).result
+  assert.equal(source.id, productSessionId)
+  if (source.state !== 'cancelled') {
+    const result = await api.command('session.cancel', source.revision, {
+      productSessionId, reason: 'Core stopped this task at the repeated-tool admission limit.',
+    })
+    assert.equal(result.outcome, 'completed')
+  }
+  return { deliveryId, productSessionId, workRunIds: cancelled, sourceState: 'cancelled' }
+}
+
 export async function runDeviceTaskVertical({
   directory: requestedDirectory,
   providerName: requestedProvider,
@@ -240,6 +320,10 @@ export async function runDeviceTaskVertical({
   agentSettings,
   mcpConfiguration,
   providerEnvironment = process.env,
+  runtime = null,
+  timeoutMillis = 600_000,
+  productSessionId: requestedSessionId,
+  deliveryId: requestedDeliveryId,
 } = {}) {
   const switches = { configurationId, track, fusion, jev, jevContext, jevJudge }
   const configuration = registerLaunch !== undefined || Object.values(switches).some(value => value !== undefined)
@@ -256,8 +340,14 @@ export async function runDeviceTaskVertical({
     requestedDirectory ?? process.env.WWC_DEVICE_TASK_RESULT_DIRECTORY
       ?? join('test-results', 'device-task', new Date().toISOString().replaceAll(':', '-')),
   )
-  const deliveryId = 'dlv_01J00000000000000000000001'
-  const productSessionId = 'psn_01J00000000000000000000001'
+  const deliveryId = requestedDeliveryId ?? 'dlv_01J00000000000000000000001'
+  const productSessionId = requestedSessionId ?? 'psn_01J00000000000000000000001'
+  assert.match(productSessionId, /^psn_[0-9A-HJKMNP-TV-Z]{26}$/u)
+  assert.match(deliveryId, /^dlv_[0-9A-HJKMNP-TV-Z]{26}$/u)
+  if (runtime !== null) {
+    assert.ok(requestedSessionId && requestedDeliveryId, 'shared tasks require their own durable identities')
+    bindSharedDeviceTaskDirectory(directory, runtime)
+  }
   const report = { complete: false, directory, steps: [], execution: 'device-worker-only' }
   report.benchmarkConfiguration = configuration
   const save = () => writeFileSync(join(directory, 'device-task-result.json'), `${JSON.stringify(report, null, 2)}\n`)
@@ -339,8 +429,195 @@ export async function runDeviceTaskVertical({
   report.deliveryId = deliveryId
   save()
 
+  const run = async ({ api, repository, baseline, modelRoute, devicePath: runtimeDevicePath }) => {
+    assert.ok(runtimeDevicePath, 'Device-only vertical must expose devicePath')
+    assert.equal(modelRoute.providerId, deviceProvider.providerId, 'task must use its requested Device Provider')
+    assert.equal(modelRoute.modelId, deviceProvider.modelId, 'task must use its requested model')
+    const devicePath = { ...runtimeDevicePath, ...runtimeDevicePath.forProductSession(productSessionId, runtime?.repositoryBindingId) }
+    report.publicClientId = devicePath.publicClientId
+    report.repositoryBindingId = runtime?.repositoryBindingId ?? devicePath.repositoryBindingId
+    report.steps.push(...devicePath.steps)
+    report.modelRoute = modelRoute
+    report.modelSource = useDeviceDeterministic ? 'deterministic-fixture' : 'external-provider'
+    report.formalBenchmark = false
+    if (mcpConfiguration || process.env.WWC_DEVICE_TASK_MCP_CONFIG) {
+      assert.ok(input, 'public smoke MCP requires an explicit task input')
+      report.publicSmoke = await installDevicePublicSmoke({
+        api,
+        publicClientId: devicePath.publicClientId,
+        ...(runtime === null ? {} : { id: `benchmark_public_smoke_${productSessionId}` }),
+        configuration: mcpConfiguration ?? JSON.parse(readFileSync(process.env.WWC_DEVICE_TASK_MCP_CONFIG, 'utf8')),
+      })
+      save()
+    }
+    assert.equal(devicePath.modelServer === null, !useDeviceDeterministic)
+    report.providerSecretBundle = deviceProviderSecretBundle({
+      providerId: deviceProvider.providerId,
+      modelId: deviceProvider.modelId,
+      apiKey: null,
+    })
+    save()
+
+    report.fusionProviders = []
+    for (const provider of runtime === null ? additionalProviders : []) {
+      report.fusionProviders.push(await seedDeviceLocalProvider({
+        api, publicClientId: devicePath.publicClientId, ...provider,
+      }))
+      save()
+    }
+    const session = await api.command('session.create', 0, {
+      productSessionId,
+      projectId: 'prj_01J00000000000000000000000',
+      repositoryId: 'rep_01J00000000000000000000000',
+      title: task.title,
+      modelRoute,
+    })
+    assert.equal(session.outcome, 'completed')
+    const sourceAnchor = await devicePath.launchAnchor({ productSessionId })
+    const created = await api.command('delivery.create', 0, {
+      deliveryId,
+      spec: {
+        title: task.title,
+        goal: task.goal,
+        scope: task.scope,
+        constraints: task.constraints,
+        outOfScope: task.outOfScope,
+        baseRevision: baseline,
+        repositoryId: 'rep_01J00000000000000000000000',
+        publicationTarget: null,
+        sourceProductSessionId: productSessionId,
+        verificationCommand: task.verificationCommand,
+        acceptanceCriteria: task.acceptanceCriteria,
+      },
+    })
+    assert.equal(created.outcome, 'completed')
+    const aggregate = async () => (await api.query('workrun.get', {
+      deliveryId,
+      workItemId: null,
+      atCursor: null,
+    })).result
+    const itemPayload = workItemCreatePayload(await aggregate(), created.currentRevision)
+    itemPayload.items[0].title = task.title
+    itemPayload.items[0].goal = task.goal
+    const items = await api.command('workitems.create', created.currentRevision, itemPayload)
+    assert.equal(items.outcome, 'completed')
+    const started = await api.command('workrun.start', items.currentRevision, {
+      deliveryId,
+      dispatchProfile: 'executor',
+    })
+    assert.equal(started.outcome, 'completed')
+    const workRunId = started.result.activeWorkRunId
+    assert.ok(workRunId, 'workrun.start must return the active WorkRun')
+    report.workRunId = workRunId
+    report.steps.push('web.workrun.started')
+    save()
+
+    if (runtime !== null) {
+      await waitForDeviceWorkerRegistered(api, sourceAnchor, 60_000)
+      report.sourceAnchor = await stopUnusedDeviceTaskAnchor({
+        api, directory, deviceData: devicePath.deviceData, launched: sourceAnchor, productSessionId,
+      })
+      save()
+    }
+
+    const launched = await devicePath.launchAnchor({ workRunId })
+    report.workerSessionId = launched.workerSessionId
+    report.steps.push('client.worker.launched')
+    save()
+
+    const anchored = new Map([[workRunId, launched.workerSessionId]])
+    const checkDispatchFailure = id => {
+      if (!input) return
+      const failure = failedDeviceDispatch(directory, id, deliveryId)
+      if (!failure) return
+      report.dispatchFailure = failure
+      report.failure = deviceFailureWithModelCauses(
+        { code: 'DEVICE_DISPATCH_FAILED', status: 'failed' },
+        readDeviceExecutionReceipts(directory, { deliveryId, productSessionId }), [failure.jobId])
+      save()
+      throw new BenchmarkError(report.failure.code,
+        'Device scheduler persisted a failed WorkRun dispatch')
+    }
+    const delivery = await driveDelivery(api, input ? null : timeoutMillis, modelRoute, Date.now, {
+      deliveryId,
+      resolveAttention: input === null ? true : 'verified-candidate',
+      expectDeviceWorkRun: true,
+      strictLaunchAnchor: true,
+      pendingDeviceWorkRunIds: () => [...new Set([...anchored.keys(),
+        ...pendingDeviceTaskWorkRuns(directory, deliveryId)])],
+      assertRunning: devicePath.assertBenchmarkRunning,
+      onProjection: ({ detail, workRunAggregate }) => {
+        if (report.delivery?.detail?.readCursor?.token === detail.readCursor?.token) return
+        report.delivery = { detail, workRunAggregate }
+        report.candidateRef = detail.currentCandidate?.candidateRef ?? null
+        save()
+      },
+      onActiveWorkRuns: async runs => {
+        devicePath.assertBenchmarkRunning(runs)
+        report.workRuns = runs
+        save()
+        for (const run of runs) checkDispatchFailure(run.id)
+        for (const run of runs) {
+          if (anchored.has(run.id)) continue
+          const launched = await devicePath.launchAnchor({ workRunId: run.id })
+          anchored.set(run.id, launched.workerSessionId)
+        }
+        if (input) {
+          for (const run of runs) {
+            const expired = expiredDeviceWorkRunLease(directory, run.id,
+              anchored.get(run.id), Date.now(), run.executionJobId)
+            if (!expired) continue
+            report.workerLeaseExpired = expired
+            if (expired.workerState === 'crashed') report.workerCrash = expired
+            save()
+            throw new BenchmarkError(expired.workerState === 'crashed'
+              ? 'DEVICE_WORKER_CRASHED' : 'DEVICE_EXECUTION_LEASE_EXPIRED',
+            'Device WorkRun cannot finish after its execution lease expired')
+          }
+        }
+        if (input) {
+          await resolveDeviceTaskApprovals({
+            api, runs, publicSmokeId: report.publicSmoke?.id,
+            onDecision: decision => {
+              report.approvalDecisions ??= []
+              report.approvalDecisions.push(decision)
+              save()
+            },
+          })
+        }
+      },
+      onPendingDeviceWorkRuns: async ids => {
+        for (const id of ids) {
+          checkDispatchFailure(id)
+          if (!anchored.has(id)) {
+            const launched = await devicePath.launchAnchor({ workRunId: id })
+            anchored.set(id, launched.workerSessionId)
+          }
+        }
+      },
+    })
+    const detail = delivery.detail
+    assert.ok(detail.currentCandidate, 'completed Agent task must freeze a candidate')
+    report.delivery = delivery
+    report.runtime = (await api.query('runtime.projection.get', {
+      kind: 'product-session', productSessionId,
+    })).result
+    report.candidateRef = detail.currentCandidate.candidateRef
+    report.complete = true
+    report.steps.push('agent.task.completed')
+    if (runtime !== null && report.publicSmoke) {
+      try {
+        report.publicSmokeRemoval = await removeDevicePublicSmoke({
+          api, publicClientId: devicePath.publicClientId, id: report.publicSmoke.id,
+        })
+      } catch { report.publicSmokeRemoval = { outcome: 'unknown' } }
+    }
+    save()
+    return { ...report, providerRoute: modelRoute }
+  }
+
   try {
-    const vertical = await runApiProductionVertical({
+    const vertical = runtime === null ? await runApiProductionVertical({
       directory,
       restart: false,
       repeat: false,
@@ -351,177 +628,37 @@ export async function runDeviceTaskVertical({
       deviceAgentEnvironment,
       wwcBinary,
       serverEnvironment,
-      timeoutMillis: 600_000,
+      timeoutMillis,
       scenario: {
         files: task.files,
-        async run({ api, repository, baseline, modelRoute, devicePath: runtimeDevicePath }) {
-          assert.ok(runtimeDevicePath, 'Device-only vertical must expose devicePath')
-          const devicePath = { ...runtimeDevicePath, ...runtimeDevicePath.forProductSession(productSessionId) }
-          report.publicClientId = devicePath.publicClientId
-          report.repositoryBindingId = devicePath.repositoryBindingId
-          report.steps.push(...devicePath.steps)
-          report.modelRoute = modelRoute
-          report.modelSource = useDeviceDeterministic ? 'deterministic-fixture' : 'external-provider'
-          report.formalBenchmark = false
-          if (mcpConfiguration || process.env.WWC_DEVICE_TASK_MCP_CONFIG) {
-            assert.ok(input, 'public smoke MCP requires an explicit task input')
-            report.publicSmoke = await installDevicePublicSmoke({
-              api,
-              publicClientId: devicePath.publicClientId,
-              configuration: mcpConfiguration ?? JSON.parse(readFileSync(process.env.WWC_DEVICE_TASK_MCP_CONFIG, 'utf8')),
-            })
-            save()
-          }
-          assert.equal(devicePath.modelServer === null, !useDeviceDeterministic)
-          report.providerSecretBundle = deviceProviderSecretBundle({
-            providerId: deviceProvider.providerId,
-            modelId: deviceProvider.modelId,
-            apiKey: null,
-          })
-          save()
-
-          report.fusionProviders = []
-          for (const provider of additionalProviders) {
-            report.fusionProviders.push(await seedDeviceLocalProvider({
-              api, publicClientId: devicePath.publicClientId, ...provider,
-            }))
-            save()
-          }
-          const session = await api.command('session.create', 0, {
-            productSessionId,
-            projectId: 'prj_01J00000000000000000000000',
-            repositoryId: 'rep_01J00000000000000000000000',
-            title: task.title,
-            modelRoute,
-          })
-          assert.equal(session.outcome, 'completed')
-          await devicePath.launchAnchor({ productSessionId })
-          const created = await api.command('delivery.create', 0, {
-            deliveryId,
-            spec: {
-              title: task.title,
-              goal: task.goal,
-              scope: task.scope,
-              constraints: task.constraints,
-              outOfScope: task.outOfScope,
-              baseRevision: baseline,
-              repositoryId: 'rep_01J00000000000000000000000',
-              publicationTarget: null,
-              sourceProductSessionId: productSessionId,
-              verificationCommand: task.verificationCommand,
-              acceptanceCriteria: task.acceptanceCriteria,
-            },
-          })
-          assert.equal(created.outcome, 'completed')
-          const aggregate = async () => (await api.query('workrun.get', {
-            deliveryId,
-            workItemId: null,
-            atCursor: null,
-          })).result
-          const itemPayload = workItemCreatePayload(await aggregate(), created.currentRevision)
-          itemPayload.items[0].title = task.title
-          itemPayload.items[0].goal = task.goal
-          const items = await api.command('workitems.create', created.currentRevision, itemPayload)
-          assert.equal(items.outcome, 'completed')
-          const started = await api.command('workrun.start', items.currentRevision, {
-            deliveryId,
-            dispatchProfile: 'executor',
-          })
-          assert.equal(started.outcome, 'completed')
-          const workRunId = started.result.activeWorkRunId
-          assert.ok(workRunId, 'workrun.start must return the active WorkRun')
-          report.workRunId = workRunId
-          report.steps.push('web.workrun.started')
-          save()
-
-          const launched = await devicePath.launchAnchor({ workRunId })
-          report.workerSessionId = launched.workerSessionId
-          report.steps.push('client.worker.launched')
-          save()
-
-          const anchored = new Map([[workRunId, launched.workerSessionId]])
-          const checkDispatchFailure = id => {
-            if (!input) return
-            const failure = failedDeviceDispatch(directory, id, deliveryId)
-            if (!failure) return
-            report.dispatchFailure = failure
-            report.failure = deviceFailureWithModelCauses(
-              { code: 'DEVICE_DISPATCH_FAILED', status: 'failed' },
-              readDeviceExecutionReceipts(directory), [failure.jobId])
-            save()
-            throw new BenchmarkError(report.failure.code,
-              'Device scheduler persisted a failed WorkRun dispatch')
-          }
-          const delivery = await driveDelivery(api, input ? null : 600_000, modelRoute, Date.now, {
-            deliveryId,
-            resolveAttention: input === null ? true : 'verified-candidate',
-            expectDeviceWorkRun: true,
-            strictLaunchAnchor: true,
-            pendingDeviceWorkRunIds: () => [...anchored.keys()],
-            assertRunning: devicePath.assertBenchmarkRunning,
-            onProjection: ({ detail, workRunAggregate }) => {
-              if (report.delivery?.detail?.readCursor?.token === detail.readCursor?.token) return
-              report.delivery = { detail, workRunAggregate }
-              report.candidateRef = detail.currentCandidate?.candidateRef ?? null
-              save()
-            },
-            onActiveWorkRuns: async runs => {
-              devicePath.assertBenchmarkRunning(runs)
-              report.workRuns = runs
-              save()
-              for (const run of runs) checkDispatchFailure(run.id)
-              for (const run of runs) {
-                if (anchored.has(run.id)) continue
-                const launched = await devicePath.launchAnchor({ workRunId: run.id })
-                anchored.set(run.id, launched.workerSessionId)
-              }
-              if (input) {
-                for (const run of runs) {
-                  const expired = expiredDeviceWorkRunLease(directory, run.id,
-                    anchored.get(run.id), Date.now(), run.executionJobId)
-                  if (!expired) continue
-                  report.workerLeaseExpired = expired
-                  if (expired.workerState === 'crashed') report.workerCrash = expired
-                  save()
-                  throw new BenchmarkError(expired.workerState === 'crashed'
-                    ? 'DEVICE_WORKER_CRASHED' : 'DEVICE_EXECUTION_LEASE_EXPIRED',
-                  'Device WorkRun cannot finish after its execution lease expired')
-                }
-              }
-              if (input) {
-                await resolveDeviceTaskApprovals({
-                  api, runs, publicSmokeId: report.publicSmoke?.id,
-                  onDecision: decision => {
-                    report.approvalDecisions ??= []
-                    report.approvalDecisions.push(decision)
-                    save()
-                  },
-                })
-              }
-            },
-            onPendingDeviceWorkRuns: async ids => {
-              for (const id of ids) checkDispatchFailure(id)
-            },
-          })
-          const detail = delivery.detail
-          assert.ok(detail.currentCandidate, 'completed Agent task must freeze a candidate')
-          report.delivery = delivery
-          report.runtime = (await api.query('runtime.projection.get', {
-            kind: 'product-session', productSessionId,
-          })).result
-          report.candidateRef = detail.currentCandidate.candidateRef
-          report.complete = true
-          report.steps.push('agent.task.completed')
-          save()
-          return { ...report, providerRoute: modelRoute }
-        },
+        run,
       },
-    })
+    }) : { flow: { scenario: await run(runtime) }, devicePath: {
+      publicClientId: runtime.devicePath.publicClientId,
+      repositoryBindingId: runtime.devicePath.repositoryBindingId,
+      modelRoute: runtime.modelRoute,
+    } }
     report.providerRoute = vertical.flow.scenario.providerRoute
     report.devicePath = vertical.devicePath
     save()
     return report
   } catch (error) {
+    if (runtime !== null && error?.code === 'STUCK_TOOL_REPEAT_LIMIT') {
+      try {
+        report.taskCancellation = await cancelStoppedDeviceTask(runtime.api, directory, deliveryId, productSessionId)
+      } catch {
+        error = Object.assign(new Error('Stopped task cancellation is not confirmed'), {
+          code: 'DEVICE_TASK_CANCEL_UNRESOLVED',
+        })
+      }
+      if (report.taskCancellation && report.publicSmoke) {
+        try {
+          report.publicSmokeRemoval = await removeDevicePublicSmoke({
+            api: runtime.api, publicClientId: report.publicClientId, id: report.publicSmoke.id,
+          })
+        } catch { report.publicSmokeRemoval = { outcome: 'unknown' } }
+      }
+    }
     report.error = String(error instanceof Error ? error.message : error)
     report.errorCode = error?.code ?? null
     for (const secret of [...deviceSecrets, ...Object.values(customHeaders ?? {})]) {
@@ -533,7 +670,7 @@ export async function runDeviceTaskVertical({
     if (input) {
       try {
         if (report.candidateRef) exportDeviceCandidate(directory, inputPath)
-        else exportDeviceExecutionReceipts(directory)
+        else exportDeviceExecutionReceipts(directory, directory, { deliveryId, productSessionId })
       } catch {
         throw Object.assign(new Error('Candidate evidence export failed'), {
           code: 'BENCHMARK_EVIDENCE_FAILED', report,

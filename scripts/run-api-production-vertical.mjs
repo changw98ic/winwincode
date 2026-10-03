@@ -1978,8 +1978,11 @@ export async function runApiProductionVertical({
   deviceProvider = deterministicDeviceProvider(),
   deviceAgentEnvironment = process.env,
   scenario = null,
+  retainRepository = false,
   timeoutMillis = DEFAULT_TIMEOUT_MILLIS,
 } = {}) {
+  assert.ok(!retainRepository || (directory !== null && scenario !== null),
+    'retaining a runtime repository requires an explicit directory and scenario')
   assertServerEnvironmentIsDeviceOnly(serverEnvironment)
   assertDeviceSecretsNeverOnServer(serverEnvironment, deviceProviderSecrets)
   const modelRoute = configuredModelRoute(deviceRoute ?? {})
@@ -2705,7 +2708,7 @@ export async function runApiProductionVertical({
         failure = new Error(`${String(failure)}\nServer output:\n${diagnostic}`)
       }
     }
-    removeControlledRepository({ repository: controlledRepository.repository })
+    if (!retainRepository) removeControlledRepository({ repository: controlledRepository.repository })
     if (ownedDirectory) rmSync(fixtureDirectory, { recursive: true, force: true })
   }
   if (failure !== null) throw failure

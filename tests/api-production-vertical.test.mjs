@@ -1,12 +1,16 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
 import { driveDelivery, runApiProductionVertical, waitForDeviceWorkerRegistered,
   workItemCreatePayload } from '../scripts/run-api-production-vertical.mjs'
+import { readDeviceExecutionReceipts } from '../scripts/export-device-candidate.mjs'
+import { runDeviceTaskVertical } from '../scripts/run-device-task-vertical.mjs'
+import { deviceTaskIdentities, withDeviceTaskRuntime } from '../scripts/device-task-runtime.mjs'
+import { benchmarkConfiguration } from '../scripts/run-real-task-benchmark.mjs'
 import { deterministicDeviceProvider, waitFor } from '../scripts/device-production-fixture.mjs'
 
 /**
@@ -168,4 +172,69 @@ test('one stopped ProductSession does not block another Session on the same Serv
   assert.equal(report.flow.scenario.localChatProviderCalls, 7)
   assert.ok(report.flow.scenario.localProviderCalls > 7)
   assert.equal(report.flow.scenario.delivery, 'done')
+})
+
+
+test('the actual task entry completes parallel Sessions in one Server and Device runtime', async t => {
+  const directory = process.env.WWC_PARALLEL_FIXTURE_DIRECTORY ?? mkdtempSync(join(tmpdir(), 'wwc-parallel-tasks-'))
+  mkdirSync(directory, { recursive: true })
+  if (process.env.WWC_PARALLEL_FIXTURE_DIRECTORY === undefined) t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const oldDeterministic = process.env.WWC_DEVICE_TASK_DETERMINISTIC
+  process.env.WWC_DEVICE_TASK_DETERMINISTIC = '1'
+  t.after(() => {
+    if (oldDeterministic === undefined) delete process.env.WWC_DEVICE_TASK_DETERMINISTIC
+    else process.env.WWC_DEVICE_TASK_DETERMINISTIC = oldDeterministic
+  })
+  const task = { title: 'Independent task', goal: 'Write status: complete to TASK.md.',
+    scope: ['TASK.md'], constraints: ['Only change TASK.md'], outOfScope: [],
+    verificationCommand: 'npm run verify',
+    acceptanceCriteria: [{ id: 'done', required: true, title: 'TASK.md is complete' }],
+    files: { 'TASK.md': 'status: pending\n', 'package.json': JSON.stringify({
+      private: true, scripts: { verify: "node -e \"if(require('fs').readFileSync('TASK.md','utf8')!=='status: complete\\n')process.exit(1)\"" },
+    }) + '\n' } }
+  const inputPath = join(directory, 'native-task.json')
+  writeFileSync(inputPath, JSON.stringify(task))
+  const profile = benchmarkConfiguration('main-A')
+  const result = await withDeviceTaskRuntime({ directory, profiles: [profile],
+    providers: [deterministicDeviceProvider()], build: process.env.WWC_API_SKIP_BUILD !== '1',
+    timeoutMillis: 1_200_000,
+  }, async runtime => {
+      const contexts = new Map()
+      for (const id of ['first', 'second']) contexts.set(id, await runtime.forTask({
+        ...profile, provider: 'device-deterministic-model',
+      }, { taskInputPath: inputPath, directory: join(directory, `${id}-repository`) }))
+      const launch = id => runDeviceTaskVertical({ directory: join(directory, id),
+        ...deviceTaskIdentities('native-parallel-entry', id), runtime: contexts.get(id),
+        timeoutMillis: 1_200_000,
+      })
+      const results = await Promise.allSettled([launch('first'), launch('second')])
+      for (const result of results) if (result.status === 'rejected') throw result.reason
+      const [first, second] = results.map(result => result.value)
+      assert.equal(first.complete, true)
+      assert.equal(second.complete, true)
+      assert.equal(first.delivery.detail.verdict.status, 'pass')
+      assert.equal(second.delivery.detail.verdict.status, 'pass')
+      assert.notEqual(first.productSessionId, second.productSessionId)
+      assert.notEqual(first.deliveryId, second.deliveryId)
+      assert.equal(first.publicClientId, second.publicClientId)
+      const receipts = value => readDeviceExecutionReceipts(value.directory, {
+        deliveryId: value.deliveryId, productSessionId: value.productSessionId,
+      })
+      const a = receipts(first), b = receipts(second)
+      assert.ok(a.calls.length > 0 && b.calls.length > 0)
+      assert.equal(a.calls.some(call => b.calls.some(other => call.exchangeId === other.exchangeId)), false)
+      assert.equal(a.performance.some(row => b.performance.some(other => row.runKey === other.runKey)), false)
+      for (const task of [first, second]) {
+        assert.equal(task.sourceAnchor.state, 'drained')
+        const core = new DatabaseSync(join(contexts.get('first').devicePath.deviceData,
+          'worker-sessions', task.sourceAnchor.workerSessionId, 'data/codex-runtime/worker-codex.sqlite3'),
+        { readOnly: true })
+        try { assert.equal(core.prepare('SELECT count(*) AS n FROM model_call_ledger').get().n, 0) }
+        finally { core.close() }
+        assert.equal(task.delivery.workRunAggregate.runs.length, 3)
+        assert.equal(task.delivery.workRunAggregate.runs.every(run => run.state === 'settled'), true)
+      }
+      return { completed: 2, calls: [a.calls.length, b.calls.length] }
+  })
+  assert.equal(result.flow.scenario.completed, 2)
 })

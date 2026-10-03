@@ -18,6 +18,7 @@ const root = resolve(import.meta.dirname, '..')
 const canonicalTestFiles = Object.freeze([
   'tests/api-production-vertical-runner.test.mjs',
   'tests/device-fixture-shutdown.test.mjs',
+  'tests/device-task-runtime.test.mjs',
   'tests/architecture-documentation.test.mjs',
   'tests/candidate-run-preview-ui.test.mjs',
   'tests/okqq-sidebar-board-wiring.test.mjs',

@@ -14,7 +14,7 @@ import { assertDeviceBenchmarkRunning } from '../scripts/device-production-fixtu
 import { driveDelivery } from '../scripts/run-api-production-vertical.mjs'
 import { openBenchmarkLedger } from '../scripts/benchmark-ledger.mjs'
 import { benchmarkAggregationInput, executeDeviceBenchmark, prepareBenchmarkDeviceTask, recoverBenchmarkDeviceCell,
-  runBenchmarkDeviceAggregation, stoppedDeviceResult, terminalBenchmarkDeviceFailure,
+  runBenchmarkDeviceAggregation, stoppedDeviceResult, assertRetainedDeviceTaskRunning, terminalBenchmarkDeviceFailure,
   terminalDeviceFailure, failedDispatchDeviceResult } from '../scripts/benchmark-device-adapter.mjs'
 import { runDeviceTaskVertical, fusionDeviceProviders, inspectUnresolvedDeviceTasks, benchmarkDeviceEnvironment,
   expiredCrashedDeviceWorkRun, expiredDeviceWorkRunLease, failedDeviceDispatch,
@@ -2438,4 +2438,75 @@ test('execution receipt export validates payloads, omits private text and preser
   database.prepare('UPDATE exchanges SET request_open=? WHERE exchange_id=?').run(JSON.stringify(opened), 'known')
   assert.throws(() => exportDeviceExecutionReceipts(directory), /receipt digest mismatch/u)
   assert.equal(await readFile(resolve(directory, 'execution-receipts.json'), 'utf8'), saved)
+})
+
+test('shared Device receipts select durable Delivery jobs including role Sessions', async t => {
+  const directory = await mkdtemp(resolve(tmpdir(), 'shared-device-receipts-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  await mkdir(resolve(directory, 'device-data', 'providers'), { recursive: true })
+  await mkdir(resolve(directory, 'server-data'))
+  const server = new DatabaseSync(resolve(directory, 'server-data', 'control-plane.sqlite3'))
+  const providers = new DatabaseSync(resolve(directory, 'device-data', 'providers', 'providers.sqlite3'))
+  t.after(() => { server.close(); providers.close() })
+  server.exec('CREATE TABLE scheduler_execution_jobs(job_id TEXT,delivery_id TEXT,product_session_id TEXT)')
+  providers.exec('CREATE TABLE exchanges(exchange_id TEXT,request_open TEXT,chunks TEXT)')
+  const deliveryId = 'dlv_01J00000000000000000000001'
+  const productSessionId = 'psn_01J00000000000000000000001'
+  for (const [job, delivery, session] of [
+    ['root', deliveryId, productSessionId],
+    ['role', deliveryId, 'psn_01J00000000000000000000002'],
+    ['other', 'dlv_01J00000000000000000000002', 'psn_01J00000000000000000000003'],
+  ]) server.prepare('INSERT INTO scheduler_execution_jobs VALUES (?,?,?)').run(job, delivery, session)
+  const encode = object => {
+    const bytes = Buffer.from(JSON.stringify(object))
+    return { dataBase64: bytes.toString('base64'), payloadDigest: `sha256:${createHash('sha256').update(bytes).digest('hex')}` }
+  }
+  for (const job of ['root', 'role', 'other']) {
+    const opened = { modelExchangeId: job, lease: { jobId: job }, workerSessionId: 'shared-worker',
+      request: encode({ provider: 'glm', request: { model: 'glm-5.3-flash' } }) }
+    if (job === 'other') opened.request.payloadDigest = 'sha256:invalid'
+    providers.prepare('INSERT INTO exchanges VALUES (?,?,?)').run(job, JSON.stringify(opened), JSON.stringify([
+      { modelExchangeId: job, isFinal: true, payload: encode({ type: 'completed', tokenUsage: {
+        input_tokens: 2, output_tokens: 3, total_tokens: 5,
+      } }) },
+    ]))
+  }
+  const { evidence } = exportDeviceExecutionReceipts(directory, directory, { deliveryId, productSessionId })
+  assert.deepEqual(evidence.calls.map(call => call.jobId), ['role', 'root'])
+  assert.equal(evidence.totalTokens, 10)
+  assert.equal(evidence.calls.some(call => call.jobId === 'other'), false)
+  await assert.rejects(async () => exportDeviceExecutionReceipts(directory, directory, {
+    deliveryId: 'dlv_01J00000000000000000000002', productSessionId: 'psn_01J00000000000000000000003',
+  }), /receipt digest mismatch/u)
+})
+
+
+test('shared recovery ignores a neighboring stop and retains its own unprojected Controller stop', async t => {
+  const directory = await mkdtemp(resolve(tmpdir(), 'wwc-shared-recovery-stop-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const source = 'psn_01J00000000000000000000001'
+  const role = 'psn_01J00000000000000000000002'
+  const neighbor = 'psn_01J00000000000000000000003'
+  const worker = 'wsn_01J00000000000000000000001'
+  const launch = { directory, productSessionId: source, deliveryId: 'delivery-a' }
+  await mkdir(resolve(directory, 'server-data'), { recursive: true })
+  await mkdir(resolve(directory, 'device-data/worker-sessions', worker, 'data/codex-runtime'), { recursive: true })
+  await writeFile(resolve(directory, 'runtime-binding.json'), '{}')
+  const server = new DatabaseSync(resolve(directory, 'server-data/control-plane.sqlite3'))
+  t.after(() => server.close())
+  server.exec('CREATE TABLE scheduler_execution_jobs (delivery_id TEXT, work_run_id TEXT, dispatch_payload BLOB)')
+  server.prepare('INSERT INTO scheduler_execution_jobs VALUES (?,?,?)').run('delivery-a', 'run-a',
+    JSON.stringify({ scope: { kind: 'work-run', workRunId: 'run-a', productSessionId: role } }))
+  server.prepare('INSERT INTO scheduler_execution_jobs VALUES (?,?,?)').run('delivery-b', 'run-b', 'invalid foreign proof')
+  const core = new DatabaseSync(resolve(directory, 'device-data/worker-sessions', worker,
+    'data/codex-runtime/worker-codex.sqlite3'))
+  t.after(() => core.close())
+  core.exec('CREATE TABLE tool_repeat_run (run_key TEXT, stopped INTEGER); CREATE TABLE codex_run (run_key TEXT, record_json BLOB)')
+  for (const [key, session, stopped] of [['own', role, 0], ['foreign', neighbor, 1]]) {
+    core.prepare('INSERT INTO tool_repeat_run VALUES (?,?)').run(key, stopped)
+    core.prepare('INSERT INTO codex_run VALUES (?,?)').run(key, JSON.stringify({ job: { scope: { productSessionId: session } } }))
+  }
+  assert.deepEqual(assertRetainedDeviceTaskRunning(launch), [worker])
+  core.prepare('UPDATE tool_repeat_run SET stopped = 1 WHERE run_key = ?').run('own')
+  assert.throws(() => assertRetainedDeviceTaskRunning(launch), error => error.code === 'STUCK_TOOL_REPEAT_LIMIT' && error.runKey === 'own')
 })

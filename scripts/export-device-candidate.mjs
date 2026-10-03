@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { globSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, globSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { retainedModelFailure } from './device-model-failures.mjs'
@@ -25,21 +25,43 @@ function decodeReceipt(payload) {
   return JSON.parse(bytes)
 }
 
+// Shared runtimes retain all task jobs. Select this Delivery's durable jobs,
+// including Controller role Sessions, before decoding or aggregating receipts.
+function taskReceiptJobs(directory, scope) {
+  if (scope === undefined && existsSync(join(directory, 'runtime-binding.json'))) {
+    const report = JSON.parse(readFileSync(join(directory, 'device-task-result.json')))
+    scope = { deliveryId: report.deliveryId, productSessionId: report.productSessionId }
+  }
+  if (scope === undefined) return null
+  assert.match(scope.deliveryId, /^dlv_[0-9A-HJKMNP-TV-Z]{26}$/u)
+  assert.match(scope.productSessionId, /^psn_[0-9A-HJKMNP-TV-Z]{26}$/u)
+  const server = new DatabaseSync(join(directory, 'server-data', 'control-plane.sqlite3'), { readOnly: true })
+  try {
+    server.exec('PRAGMA busy_timeout=5000')
+    return new Set(server.prepare(`SELECT job_id FROM scheduler_execution_jobs
+      WHERE delivery_id = ? OR product_session_id = ?`).all(scope.deliveryId, scope.productSessionId)
+      .map(row => row.job_id))
+  } finally { server.close() }
+}
+
 // Export identity/accounting facts only; prompts, tool output and credentials stay private.
-export function readDeviceExecutionReceipts(directory) {
+export function readDeviceExecutionReceipts(directory, scope) {
+  const selectedJobs = taskReceiptJobs(directory, scope)
+  const deviceDirectory = existsSync(join(directory, 'device-data')) ? realpathSync(join(directory, 'device-data')) : null
   const calls = []
   const jev = []
   const performance = []
   const identities = new Set()
-  for (const path of globSync('device-data/**/providers.sqlite3', { cwd: directory }).sort()) {
+  for (const path of (deviceDirectory === null ? [] : globSync('**/providers.sqlite3', { cwd: deviceDirectory }).map(path => join('device-data', path))).sort()) {
     const database = new DatabaseSync(join(directory, path), { readOnly: true })
     try {
       database.exec('PRAGMA busy_timeout=5000')
       const exchanges = new Map()
       for (const row of database.prepare('SELECT exchange_id, request_open, chunks FROM exchanges WHERE request_open IS NOT NULL ORDER BY exchange_id').all()) {
+        const opened = JSON.parse(row.request_open)
+        if (selectedJobs !== null && !selectedJobs.has(opened.lease.jobId)) continue
         assert.ok(!identities.has(row.exchange_id), 'duplicate model exchange across Device stores')
         identities.add(row.exchange_id)
-        const opened = JSON.parse(row.request_open)
         assert.equal(opened.modelExchangeId, row.exchange_id)
         const request = decodeReceipt(opened.request)
         const actualModels = []
@@ -88,6 +110,7 @@ export function readDeviceExecutionReceipts(directory) {
         for (const row of database.prepare(`SELECT operation_id, request_json, result FROM ${table} ORDER BY operation_id`).all()) {
           const exchangeId = row.operation_id.split(':')[1]
           const call = exchanges.get(exchangeId)
+          if (selectedJobs !== null && !call) continue
           assert.ok(call, 'JEV receipt must belong to a retained model exchange')
           const run = row.result === null ? null : JSON.parse(row.result)
           const observation = run?.observation
@@ -104,7 +127,7 @@ export function readDeviceExecutionReceipts(directory) {
       database.close()
     }
   }
-  for (const path of globSync('device-data/**/worker-codex.sqlite3', { cwd: directory }).sort()) {
+  for (const path of (deviceDirectory === null ? [] : globSync('**/worker-codex.sqlite3', { cwd: deviceDirectory }).map(path => join('device-data', path))).sort()) {
     const database = new DatabaseSync(join(directory, path), { readOnly: true })
     try {
       database.exec('PRAGMA busy_timeout=5000')
@@ -115,6 +138,11 @@ export function readDeviceExecutionReceipts(directory) {
       const operations = database.prepare(`SELECT run_key, operation_kind, completed, duration_millis,
         actual_cost_microunits FROM ${operationsTable} ORDER BY run_key, operation_kind, operation_id`).all()
       for (const projection of projections) {
+        if (selectedJobs !== null) {
+          if (!database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='codex_run'").get()) continue
+          const core = database.prepare('SELECT record_json FROM codex_run WHERE run_key = ?').get(projection.run_key)
+          if (!core || !selectedJobs.has(JSON.parse(Buffer.from(core.record_json).toString('utf8')).job.jobId)) continue
+        }
         const stored = JSON.parse(Buffer.from(projection.record_json).toString('utf8'))
         const report = stored.report
         for (const key of ['primaryModelWaitMs', 'totalRuntimeMs']) {
@@ -153,8 +181,8 @@ export function readDeviceExecutionReceipts(directory) {
   return evidence
 }
 
-export function exportDeviceExecutionReceipts(directory, evidenceDirectory = directory) {
-  const evidence = readDeviceExecutionReceipts(directory)
+export function exportDeviceExecutionReceipts(directory, evidenceDirectory = directory, scope) {
+  const evidence = readDeviceExecutionReceipts(directory, scope)
   const bytes = `${JSON.stringify(evidence, null, 2)}\n`
   retain(join(evidenceDirectory, 'execution-receipts.json'), bytes)
   return { evidence, sha256: digest(bytes) }
