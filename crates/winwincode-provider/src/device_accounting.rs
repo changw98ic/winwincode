@@ -24,7 +24,10 @@ impl DeviceProviderStore {
         lease: &ExecutionLeaseStamp,
         key: &ActionEnforcementSigningKey,
     ) -> Result<Option<AttemptAccountingStatement>, DeviceProviderError> {
-        self.connection.execute_batch("BEGIN IMMEDIATE")?;
+        // Receipt scans and validation must not reserve the Device's writer
+        // while another task is starting a call or retaining a paid response.
+        // A changed WAL snapshot refuses the final upgrade and retries accounting.
+        self.connection.execute_batch("BEGIN DEFERRED")?;
         let result = (|| {
             let mut query = self.connection.prepare("SELECT digest,request_open,COALESCE(accounting_chunks,chunks) FROM exchanges WHERE request_open IS NOT NULL AND json_extract(request_open,'$.lease.jobId')=?1 AND json_extract(request_open,'$.lease.attempt')=?2 ORDER BY exchange_id")?;
             let rows = query
@@ -39,10 +42,6 @@ impl DeviceProviderStore {
             if rows.is_empty() || rows.iter().any(|(_, _, chunks)| chunks.is_none()) {
                 return Ok(None);
             }
-            self.connection.execute(
-                "INSERT OR IGNORE INTO accounting_closed_attempts VALUES(?1,?2,?3)",
-                params![lease.job_id.0, lease.attempt, lease.lease_id.0],
-            )?;
             let mut statement = AttemptAccountingStatement {
                 lease: lease.clone(),
                 manifest: Vec::new(),
@@ -145,6 +144,12 @@ impl DeviceProviderStore {
             statement.manifest.sort();
             statement.receipts.sort_by(|a, b| a.slot.cmp(&b.slot));
             statement.sign(key).map_err(|_| DeviceProviderError)?;
+            // Freeze only the fully checked snapshot. Keep its write transaction
+            // limited to this insert and commit; failed upgrades export nothing.
+            self.connection.execute(
+                "INSERT OR IGNORE INTO accounting_closed_attempts VALUES(?1,?2,?3)",
+                params![lease.job_id.0, lease.attempt, lease.lease_id.0],
+            )?;
             Ok(Some(statement))
         })();
         if result.is_ok() {

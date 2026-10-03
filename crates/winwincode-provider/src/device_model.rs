@@ -647,6 +647,174 @@ mod tests {
     use super::*;
 
     #[test]
+    fn slow_accounting_scan_does_not_block_a_live_model_invocation() {
+        assert_accounting_scan_allows_live_model(false);
+    }
+
+    #[test]
+    fn slow_accounting_scan_does_not_discard_a_live_provider_response() {
+        assert_accounting_scan_allows_live_model(true);
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "exercise the accounting scan, live invocation, and exact replay on two real SQLite connections"
+    )]
+    fn assert_accounting_scan_allows_live_model(after_invocation: bool) {
+        use rusqlite::{functions::FunctionFlags, types::Value};
+        use std::{
+            cell::{Cell, RefCell},
+            sync::{
+                Mutex,
+                atomic::{AtomicBool, Ordering},
+                mpsc,
+            },
+            time::Duration,
+        };
+        use winwincode_execution_port::action_enforcement::ActionEnforcementSigningKey;
+
+        let root = std::env::temp_dir().join(format!(
+            "wwc-accounting-model-concurrency-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = DeviceProviderStore::open(&root).unwrap();
+        let accounting = DeviceProviderStore::open(&root).unwrap();
+        store
+            .connection
+            .busy_timeout(Duration::from_millis(50))
+            .unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/contracts/execution-port.valid.json"
+        ))
+        .unwrap();
+        let mut old: ModelOpenMessage = serde_json::from_value(
+            fixture["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|message| message["kind"] == "model.open")
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        let payload = serde_json::to_vec(
+            &serde_json::json!({"provider":"fixture-provider","request":{"model":"fixture-model"}}),
+        )
+        .unwrap();
+        old.request.content_type = "application/json".into();
+        old.request.data_base64 = STANDARD.encode(&payload);
+        old.request.payload_digest.0 = format!("sha256:{:x}", Sha256::digest(&payload));
+        store
+            .execute_model_with(&old, &|| true, || {
+                Ok(vec![model_failure(&old, "fixture final")])
+            })
+            .unwrap();
+
+        // Pause the actual accounting SELECT while its SQLite transaction is open.
+        // Only this fixture connection replaces JSON extraction; returned values are exact.
+        let (scanning, scanned) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let released = Mutex::new(released);
+        let paused = AtomicBool::new(false);
+        accounting
+            .connection
+            .create_scalar_function(
+                "json_extract",
+                2,
+                FunctionFlags::SQLITE_UTF8,
+                move |context| {
+                    if !paused.swap(true, Ordering::SeqCst) {
+                        scanning.send(()).unwrap();
+                        released
+                            .lock()
+                            .unwrap()
+                            .recv_timeout(Duration::from_secs(10))
+                            .unwrap();
+                    }
+                    let json: serde_json::Value =
+                        serde_json::from_str(&context.get::<String>(0)?).unwrap();
+                    Ok(match context.get::<String>(1)?.as_str() {
+                        "$.lease.jobId" => {
+                            Value::Text(json["lease"]["jobId"].as_str().unwrap().to_owned())
+                        }
+                        "$.lease.attempt" => {
+                            Value::Integer(json["lease"]["attempt"].as_i64().unwrap())
+                        }
+                        path => panic!("unexpected accounting JSON path: {path}"),
+                    })
+                },
+            )
+            .unwrap();
+        let accounting = RefCell::new(Some(accounting));
+        let task = RefCell::new(None);
+        let start_scan = || {
+            let accounting = accounting.borrow_mut().take().unwrap();
+            let lease = old.lease.clone();
+            *task.borrow_mut() = Some(std::thread::spawn(move || {
+                accounting.accounting_statement(
+                    &lease,
+                    &ActionEnforcementSigningKey::from_bytes([7; 32]).unwrap(),
+                )
+            }));
+            scanned.recv_timeout(Duration::from_secs(10)).unwrap();
+        };
+        if !after_invocation {
+            start_scan();
+        }
+        let mut live = old.clone();
+        live.model_exchange_id.0 = "mdl_00000000000000000000000999".into();
+        live.lease.job_id.0 = "job_00000000000000000000000999".into();
+        live.lease.lease_id.0 = "lse_00000000000000000000000999".into();
+        let calls = Cell::new(0);
+        let invoke = || {
+            calls.set(calls.get() + 1);
+            if after_invocation {
+                start_scan();
+            }
+            let mut chunk = model_chunk(&live, 1);
+            chunk.is_final = true;
+            Ok(vec![chunk])
+        };
+        let result = store.execute_model_with(&live, &|| true, invoke);
+        release.send(()).unwrap();
+        let scan_result = task.borrow_mut().take().unwrap().join().unwrap();
+        assert!(
+            result.is_ok(),
+            "auxiliary accounting changed a live model outcome (after_invocation={after_invocation}): {result:?}"
+        );
+        assert_eq!(calls.get(), 1);
+        assert_eq!(
+            store.execute_model_with(&live, &|| false, invoke).unwrap(),
+            result.unwrap()
+        );
+        assert_eq!(calls.get(), 1, "recovery cannot invoke the Provider again");
+        assert!(
+            scan_result.is_err(),
+            "a stale accounting snapshot must retry rather than close a changed database"
+        );
+        let key = ActionEnforcementSigningKey::from_bytes([7; 32]).unwrap();
+        let statement = store
+            .accounting_statement(&old.lease, &key)
+            .unwrap()
+            .unwrap();
+        statement.verify(&key).unwrap();
+        let mut forbidden = old.clone();
+        forbidden.model_exchange_id.0 = "mdl_00000000000000000000000998".into();
+        assert!(
+            store
+                .execute_model_with(&forbidden, &|| true, invoke)
+                .is_err()
+        );
+        assert_eq!(calls.get(), 1, "the closed attempt remains fenced");
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn invalid_local_model_requests_retain_a_request_failure_before_provider_resolution() {
         let directory =
             std::env::temp_dir().join(format!("wwc-invalid-model-request-{}", std::process::id()));

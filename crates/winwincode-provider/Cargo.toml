@@ -36,6 +36,7 @@ winwincode-execution-port.workspace = true
 [dev-dependencies]
 rcgen.workspace = true
 rustls.workspace = true
+rusqlite = { workspace = true, features = ["functions"] }
 
 [lints]
 workspace = true
