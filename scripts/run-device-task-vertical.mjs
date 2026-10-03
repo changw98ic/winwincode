@@ -215,10 +215,24 @@ export function failedDeviceDispatch(directory, workRunId, deliveryId) {
   const server = new DatabaseSync(path, { readOnly: true })
   let job
   try {
-    job = server.prepare(`SELECT job_id, state, attempt, revision, updated_at
+    job = server.prepare(`SELECT job_id, state, attempt, revision, updated_at, payload_digest
       FROM scheduler_execution_jobs WHERE work_run_id = ? AND delivery_id = ?
       ORDER BY updated_at DESC, attempt DESC, revision DESC, job_id DESC LIMIT 1`)
       .get(workRunId, deliveryId)
+    if (job?.state === 'failed') {
+      // Scheduler cancellation retains a failed job row. Only its exact
+      // current lease terminal can distinguish that from a dispatch failure;
+      // the product projection still owns cancellation and evidence closure.
+      const cancelled = server.prepare(`SELECT 1 FROM execution_leases l
+        JOIN execution_lease_terminals t ON t.lease_id = l.lease_id
+          AND t.job_id = l.job_id AND t.attempt = l.attempt
+          AND t.fencing_token = l.fencing_token AND t.worker_id = l.worker_id
+          AND t.worker_instance_id = l.worker_instance_id
+        WHERE l.job_id = ? AND l.attempt = ? AND l.payload_digest = ?
+          AND t.outcome = 'cancelled' LIMIT 1`)
+        .get(job.job_id, job.attempt, job.payload_digest)
+      if (cancelled) return null
+    }
   } finally { server.close() }
   return job?.state === 'failed'
     ? { workRunId, deliveryId, jobId: job.job_id, state: job.state,

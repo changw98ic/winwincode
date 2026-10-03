@@ -76,6 +76,52 @@ test('expired crashed Device Worker is diagnosed from both durable authorities',
   } finally { device.close(); server.close() }
 })
 
+const dispatchLeaseSchema = `
+  CREATE TABLE execution_leases (job_id TEXT, lease_id TEXT, payload_digest TEXT, worker_id TEXT,
+    worker_instance_id TEXT, attempt INTEGER, fencing_token TEXT);
+  CREATE TABLE execution_lease_terminals (lease_id TEXT, job_id TEXT, worker_id TEXT,
+    worker_instance_id TEXT, attempt INTEGER, fencing_token TEXT, outcome TEXT);
+`
+
+test('current exact cancelled lease remains a product cancellation during recovery', async t => {
+  const directory = await mkdtemp(resolve(tmpdir(), 'benchmark-cancelled-dispatch-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  await mkdir(resolve(directory, 'server-data'))
+  const db = new DatabaseSync(resolve(directory, 'server-data/control-plane.sqlite3'))
+  t.after(() => db.close())
+  db.exec(`CREATE TABLE scheduler_execution_jobs (job_id TEXT, delivery_id TEXT,
+    work_run_id TEXT, state TEXT, attempt INTEGER, revision INTEGER, updated_at TEXT, payload_digest TEXT);
+    INSERT INTO scheduler_execution_jobs VALUES ('job','delivery','run','failed',2,5,'now','payload');
+    ${dispatchLeaseSchema}
+    INSERT INTO execution_leases VALUES ('job','lease','payload','worker','instance',2,'2');
+    INSERT INTO execution_lease_terminals VALUES ('lease','job','worker','instance',2,'2','cancelled');`)
+  assert.equal(failedDeviceDispatch(directory, 'run', 'delivery'), null,
+    'scheduler failed state must not replace its exact cancelled lease outcome')
+  assert.deepEqual(terminalDeviceFailure({ delivery: { status: 'cancelled', attention: [] },
+    workRunAggregate: { runs: [{ state: 'cancelled' }], items: [{ state: 'cancelled' }] } }),
+  { code: 'DEVICE_PRODUCT_CANCELLED', status: 'cancelled' })
+  for (const mutation of [
+    "UPDATE execution_lease_terminals SET outcome='failed'",
+    "UPDATE execution_lease_terminals SET lease_id='foreign'",
+    "UPDATE execution_lease_terminals SET job_id='foreign'",
+    "UPDATE execution_lease_terminals SET worker_id='foreign'",
+    "UPDATE execution_lease_terminals SET worker_instance_id='foreign'",
+    'UPDATE execution_lease_terminals SET attempt=1',
+    "UPDATE execution_lease_terminals SET fencing_token='1'",
+    'UPDATE execution_leases SET attempt=1',
+    "UPDATE execution_leases SET payload_digest='foreign'",
+    'DELETE FROM execution_lease_terminals',
+  ]) {
+    db.exec(mutation)
+    assert.equal(failedDeviceDispatch(directory, 'run', 'delivery')?.jobId, 'job', mutation)
+    // The production helper opens its own read-only connection, so each
+    // mutation and restoration must be committed before observing it.
+    db.exec(`DELETE FROM execution_leases; DELETE FROM execution_lease_terminals;
+      INSERT INTO execution_leases VALUES ('job','lease','payload','worker','instance',2,'2');
+      INSERT INTO execution_lease_terminals VALUES ('lease','job','worker','instance',2,'2','cancelled');`)
+  }
+})
+
 test('failed dispatch is detected from the bound terminal scheduler job and retained as a failed cell', async t => {
   const directory = await mkdtemp(resolve(tmpdir(), 'benchmark-dispatch-failed-'))
   t.after(() => rm(directory, { recursive: true, force: true }))
@@ -92,6 +138,8 @@ test('failed dispatch is detected from the bound terminal scheduler job and reta
       work_run_id TEXT, state TEXT, attempt INTEGER, revision INTEGER, updated_at TEXT);
       INSERT INTO scheduler_execution_jobs VALUES ('${jobId}', '${deliveryId}', '${workRunId}',
         'queued', 1, 1, '2026-01-01T00:00:00Z')`)
+    database.exec(`ALTER TABLE scheduler_execution_jobs ADD COLUMN payload_digest TEXT DEFAULT 'payload';
+      ${dispatchLeaseSchema}`)
     assert.equal(failedDeviceDispatch(directory, workRunId, deliveryId), null)
     database.exec(`UPDATE scheduler_execution_jobs SET state='failed', revision=2,
       updated_at='2026-01-01T00:01:00Z'`)
@@ -100,7 +148,7 @@ test('failed dispatch is detected from the bound terminal scheduler job and reta
     const failure = failedDeviceDispatch(directory, workRunId, deliveryId)
     assert.equal(failure?.jobId, jobId)
     assert.equal(failure?.state, 'failed')
-    database.exec(`INSERT INTO scheduler_execution_jobs VALUES ('job_retry', '${deliveryId}',
+    database.exec(`INSERT INTO scheduler_execution_jobs (job_id, delivery_id, work_run_id, state, attempt, revision, updated_at) VALUES ('job_retry', '${deliveryId}',
       '${workRunId}', 'queued', 2, 1, '2026-01-01T00:02:00Z')`)
     assert.equal(failedDeviceDispatch(directory, workRunId, deliveryId), null,
       'a newer retry must not be called terminal')
@@ -167,6 +215,8 @@ test('dispatch failure reports preserve a model cause only from the failed job',
     work_run_id TEXT, state TEXT, attempt INTEGER, revision INTEGER, updated_at TEXT);
     INSERT INTO scheduler_execution_jobs VALUES ('failed-job', 'delivery', 'work-run', 'failed', 1, 1,
       '2026-01-01T00:00:00Z');`)
+  server.exec(`ALTER TABLE scheduler_execution_jobs ADD COLUMN payload_digest TEXT DEFAULT 'payload';
+    ${dispatchLeaseSchema}`)
   providers.exec('CREATE TABLE exchanges(exchange_id TEXT,request_open TEXT,chunks TEXT)')
   for (const [exchangeId, jobId, code] of [
     ['failed-exchange', 'failed-job', 'DEVICE_PROVIDER_SSE_EVENT_INVALID'],
