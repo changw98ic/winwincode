@@ -440,3 +440,101 @@ fn renewal_failure_is_observable_and_graceful_release_remains_fenced() {
         .expect("exact owner can still release after clock recovery");
     assert!(!root.exists());
 }
+
+#[test]
+fn concurrent_crash_quarantine_finishers_count_exactly_one_removal() {
+    for release in [false, true] {
+        for iteration in 0..10 {
+            let directory =
+                TestDirectory::new(&format!("quarantine-contention-{release}-{iteration}"));
+            let runtime = Arc::new(FakeRuntime::new(1_000));
+            let owner = manager(
+                &directory.0,
+                TemporaryRootTarget::Aarch64AppleDarwin,
+                &runtime,
+            );
+            let lease = owner.acquire().expect("acquire interrupted lease");
+            let original = lease.path().to_path_buf();
+            let lease_bytes =
+                fs::read(original.join(TEMPORARY_ROOT_LEASE_FILE)).expect("read lease");
+            // A real, populated root keeps recursive deletion overlapping after
+            // multiple independent recovery scans validate the same crash claim.
+            for item in 0..128 {
+                fs::write(
+                    original.join(format!("payload-{item}")),
+                    b"retained root payload",
+                )
+                .expect("write payload");
+            }
+            let token = "3".repeat(32);
+            let (prefix, claim_name, claim) = if release {
+                (
+                    ".release",
+                    ".winwincode-control-plane-release.json",
+                    serde_json::to_vec(&ReleaseClaimFixture {
+                        schema: "winwincode.control-plane-temporary-root-release.v1",
+                        lease_sha256: format!("sha256:{:x}", Sha256::digest(&lease_bytes)),
+                        releaser_id: &token,
+                        released_at_millis: 1_000,
+                    })
+                    .expect("encode release claim"),
+                )
+            } else {
+                (
+                    ".reclaim",
+                    ".winwincode-control-plane-reclaim.json",
+                    serde_json::to_vec(&ReclaimClaimFixture {
+                        schema: "winwincode.control-plane-temporary-root-reclaim.v1",
+                        lease_sha256: format!("sha256:{:x}", Sha256::digest(&lease_bytes)),
+                        reclaimer_id: &token,
+                        claimed_at_millis: 1_150,
+                    })
+                    .expect("encode reclaim claim"),
+                )
+            };
+            write_private_record(&original.join(claim_name), &claim);
+            let quarantine = directory
+                .0
+                .join(format!("{prefix}-{}-{token}", lease.instance_id()));
+            fs::rename(&original, &quarantine).expect("simulate crash after verified claim");
+            runtime.set_now(1_150);
+            let barrier = Arc::new(Barrier::new(9));
+            let cleaners: Vec<_> = (0..8)
+                .map(|_| {
+                    let independent = manager(
+                        &directory.0,
+                        TemporaryRootTarget::Aarch64AppleDarwin,
+                        &runtime,
+                    );
+                    spawn_cleaner(independent, Arc::clone(&barrier))
+                })
+                .collect();
+            barrier.wait();
+            let removed: u64 = cleaners
+                .into_iter()
+                .map(|cleaner| {
+                    let report = cleaner.join().expect("recovery scan");
+                    report.reclaimed + report.released
+                })
+                .sum();
+            assert_eq!(removed, 1, "release={release}, iteration={iteration}");
+            assert!(!quarantine.exists());
+            assert_eq!(
+                lease
+                    .release()
+                    .expect_err("old owner remains fenced")
+                    .kind(),
+                TemporaryRootLeaseErrorKind::OwnershipLost
+            );
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReclaimClaimFixture<'a> {
+    schema: &'a str,
+    lease_sha256: String,
+    reclaimer_id: &'a str,
+    claimed_at_millis: u64,
+}

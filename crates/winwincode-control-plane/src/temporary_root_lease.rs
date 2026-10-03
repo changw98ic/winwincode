@@ -398,6 +398,7 @@ impl TemporaryRootLeaseManager {
     ///
     /// Returns a parent scan, clock, entropy, or atomic takeover failure.
     pub fn reclaim_expired(&self) -> Result<TemporaryRootReclaimReport, TemporaryRootLeaseError> {
+        let _lifecycle_lock = self.lock_lifecycle()?;
         let mut report = TemporaryRootReclaimReport::default();
         for entry in fs::read_dir(&self.parent).map_err(|_| TemporaryRootLeaseError::io())? {
             let entry = entry.map_err(|_| TemporaryRootLeaseError::io())?;
@@ -420,6 +421,18 @@ impl TemporaryRootLeaseManager {
             }
         }
         Ok(report)
+    }
+
+    fn lock_lifecycle(&self) -> Result<fs::File, TemporaryRootLeaseError> {
+        // A crash claim proves what may be removed, not which live finisher
+        // owns the deletion. Recursive removal may return success to multiple
+        // callers. Lock the stable parent inode through an independently opened
+        // descriptor; locking a file inside the removed root would lose that
+        // exclusion when its inode disappears. Process exit releases this lock
+        // so another manager can still resume a crash quarantine.
+        let parent = fs::File::open(&self.parent).map_err(|_| TemporaryRootLeaseError::io())?;
+        parent.lock().map_err(|_| TemporaryRootLeaseError::io())?;
+        Ok(parent)
     }
 
     fn renew_handle(&self, handle: &mut LeaseHandle) -> Result<(), TemporaryRootLeaseError> {
@@ -469,6 +482,7 @@ impl TemporaryRootLeaseManager {
     }
 
     fn release_handle(&self, handle: &LeaseHandle) -> Result<(), TemporaryRootLeaseError> {
+        let _lifecycle_lock = self.lock_lifecycle()?;
         ensure_direct_child(&self.parent, &handle.path)?;
         let lease_bytes = encode_lease(&handle.record)?;
         if read_bounded(&handle.path.join(TEMPORARY_ROOT_LEASE_FILE))

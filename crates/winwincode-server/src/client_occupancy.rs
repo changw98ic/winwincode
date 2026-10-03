@@ -60,7 +60,10 @@
 use std::fmt;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use crate::application::StandaloneApplicationClock;
+use crate::application::SystemStandaloneApplicationClock;
 use crate::client_exchange::is_canonical_client_node_id;
 use rusqlite::OptionalExtension;
 use rusqlite::params;
@@ -235,10 +238,21 @@ pub struct OfflineSweepOutcome {
 /// database directory. Like the connect flow, every operation opens and
 /// closes its own storage connection so concurrent flows never share state in
 /// memory and the bounded wait holds no database lock.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ClientOccupancyApplication {
     data_directory: PathBuf,
     config: ClientOccupancyConfig,
+    clock: Arc<dyn StandaloneApplicationClock>,
+}
+
+impl fmt::Debug for ClientOccupancyApplication {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ClientOccupancyApplication")
+            .field("data_directory", &self.data_directory)
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
 }
 
 /// What one validated claim prepared before the bounded wait.
@@ -271,6 +285,24 @@ impl ClientOccupancyApplication {
         data_directory: impl Into<PathBuf>,
         config: &ClientOccupancyConfig,
     ) -> Result<Self, ClientOccupancyError> {
+        Self::open_with_clock(
+            data_directory,
+            config,
+            Arc::new(SystemStandaloneApplicationClock),
+        )
+    }
+
+    /// Composes occupancy with the trusted application clock. The ACK wait
+    /// still uses Tokio's monotonic timer independently of this wall clock.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the configuration violates its bounds.
+    pub fn open_with_clock(
+        data_directory: impl Into<PathBuf>,
+        config: &ClientOccupancyConfig,
+        clock: Arc<dyn StandaloneApplicationClock>,
+    ) -> Result<Self, ClientOccupancyError> {
         if config.offer_wait.is_zero()
             || config.poll_interval.is_zero()
             || config.recovery_window.is_zero()
@@ -287,6 +319,7 @@ impl ClientOccupancyApplication {
         Ok(Self {
             data_directory: data_directory.into(),
             config: config.clone(),
+            clock,
         })
     }
 
@@ -367,7 +400,7 @@ impl ClientOccupancyApplication {
 
         let mut storage = self.open_storage()?;
         let node = ClientOccupancyApplication::lookup_node(&mut storage, &public_client_id)?;
-        let now = now_instant();
+        let now = self.clock.now_instant();
         let (released_lease, state_text) = {
             let mut occupancy = ClientOccupancyService::new(&mut storage);
             let Some(lease) = occupancy
@@ -478,7 +511,7 @@ impl ClientOccupancyApplication {
         let public_client_id = required_client_id(fields.get("clientId"))?;
         let mut storage = self.open_storage()?;
         let node = ClientOccupancyApplication::lookup_node(&mut storage, &public_client_id)?;
-        let now = now_instant();
+        let now = self.clock.now_instant();
         let (released, new_token) = {
             let mut occupancy = ClientOccupancyService::new(&mut storage);
             let Some(lease) = occupancy
@@ -647,7 +680,7 @@ impl ClientOccupancyApplication {
     ///
     /// Propagates the [`Self::run_offline_sweep`] failures.
     pub fn run_server_sweep(&self) -> Result<OfflineSweepOutcome, ClientOccupancyError> {
-        let now = now_instant();
+        let now = self.clock.now_instant();
         let cutoff = offset_instant(&now, -duration_millis(self.config.heartbeat_stale_after))
             .ok_or_else(ClientOccupancyError::unavailable)?;
         self.run_offline_sweep(&cutoff, &now)
@@ -677,7 +710,7 @@ impl ClientOccupancyApplication {
         if lease.state != OccupancyLeaseState::RecoveryPending {
             return Ok(false);
         }
-        let now = now_instant();
+        let now = self.clock.now_instant();
         Ok(lease
             .recovery_deadline_at
             .as_ref()
@@ -708,9 +741,11 @@ impl ClientOccupancyApplication {
         // fixed window shape as the connect flow.
         {
             let mut connect = ConnectCodeService::new(&mut storage);
-            let anchor =
-                connect_attempt_window_anchor(&now_instant(), self.config.rate_window_seconds)
-                    .map_err(|_| ClientOccupancyError::unavailable())?;
+            let anchor = connect_attempt_window_anchor(
+                &self.clock.now_instant(),
+                self.config.rate_window_seconds,
+            )
+            .map_err(|_| ClientOccupancyError::unavailable())?;
             for (dimension, subject) in [
                 (AttemptDimension::User, user_id),
                 (AttemptDimension::Client, node.client_node_id.as_str()),
@@ -774,7 +809,7 @@ impl ClientOccupancyApplication {
             }
         }
 
-        let now = now_instant();
+        let now = self.clock.now_instant();
         let claim = OccupancyClaim::try_new(
             generate_prefixed_id("ocl_").map_err(|_| ClientOccupancyError::unavailable())?,
             node.client_node_id.clone(),
@@ -881,7 +916,7 @@ impl ClientOccupancyApplication {
                         occupancy_lease_id,
                         lease.fencing_token,
                         OccupancyReleaseReason::AckTimeout,
-                        &now_instant(),
+                        &self.clock.now_instant(),
                     )
                     .map_err(|_| ClientOccupancyError::unavailable())?;
             }
@@ -927,8 +962,11 @@ impl ClientOccupancyApplication {
         user_id: &str,
         client_node_id: &str,
     ) -> Result<(), ClientOccupancyError> {
-        let anchor = connect_attempt_window_anchor(&now_instant(), self.config.rate_window_seconds)
-            .map_err(|_| ClientOccupancyError::unavailable())?;
+        let anchor = connect_attempt_window_anchor(
+            &self.clock.now_instant(),
+            self.config.rate_window_seconds,
+        )
+        .map_err(|_| ClientOccupancyError::unavailable())?;
         let mut storage = self.open_storage()?;
         let mut connect = ConnectCodeService::new(&mut storage);
         for (dimension, subject) in [
@@ -1273,12 +1311,6 @@ const fn presence_text(record: &ClientNodeRecord) -> &'static str {
         | ClientPresenceState::PendingEnrollment
         | ClientPresenceState::Revoked => "offline",
     }
-}
-
-/// The canonical application instant the boundary shares across one flow.
-fn now_instant() -> Instant {
-    use crate::application::StandaloneApplicationClock as _;
-    crate::application::SystemStandaloneApplicationClock.now_instant()
 }
 
 /// Signed millisecond amount of one duration, clamped to the `i64` range.
