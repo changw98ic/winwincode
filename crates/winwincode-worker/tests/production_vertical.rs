@@ -217,6 +217,7 @@ fn detached_checkout(root: &TestDirectory) -> PathBuf {
 struct DirectorySnapshot {
     directories: Vec<(PathBuf, fs::Permissions)>,
     files: Vec<(PathBuf, Vec<u8>, fs::Permissions)>,
+    hard_links: Vec<(PathBuf, PathBuf)>,
 }
 
 impl DirectorySnapshot {
@@ -226,6 +227,8 @@ impl DirectorySnapshot {
             current: &Path,
             directories: &mut Vec<(PathBuf, fs::Permissions)>,
             files: &mut Vec<(PathBuf, Vec<u8>, fs::Permissions)>,
+            hard_links: &mut Vec<(PathBuf, PathBuf)>,
+            originals: &mut std::collections::BTreeMap<(u64, u64), PathBuf>,
         ) {
             let mut entries = fs::read_dir(current)
                 .expect("read crash snapshot directory")
@@ -247,16 +250,29 @@ impl DirectorySnapshot {
                             .expect("read durable crash snapshot directory permissions")
                             .permissions(),
                     ));
-                    visit(root, &path, directories, files);
+                    visit(root, &path, directories, files, hard_links, originals);
                 } else if file_type.is_file() {
-                    let permissions = entry
+                    let metadata = entry
                         .metadata()
-                        .expect("read durable crash snapshot permissions")
-                        .permissions();
+                        .expect("read durable crash snapshot metadata");
+                    #[cfg(unix)]
+                    let identity = {
+                        use std::os::unix::fs::MetadataExt as _;
+                        Some((metadata.dev(), metadata.ino()))
+                    };
+                    #[cfg(not(unix))]
+                    let identity: Option<(u64, u64)> = None;
+                    if let Some(identity) = identity {
+                        if let Some(original) = originals.get(&identity) {
+                            hard_links.push((relative, original.clone()));
+                            continue;
+                        }
+                        originals.insert(identity, relative.clone());
+                    }
                     files.push((
                         relative,
                         fs::read(&path).expect("read durable crash snapshot file"),
-                        permissions,
+                        metadata.permissions(),
                     ));
                 } else {
                     panic!("durable crash snapshot contains a non-file entry");
@@ -266,8 +282,20 @@ impl DirectorySnapshot {
 
         let mut directories = Vec::new();
         let mut files = Vec::new();
-        visit(root, root, &mut directories, &mut files);
-        Self { directories, files }
+        let mut hard_links = Vec::new();
+        visit(
+            root,
+            root,
+            &mut directories,
+            &mut files,
+            &mut hard_links,
+            &mut std::collections::BTreeMap::new(),
+        );
+        Self {
+            directories,
+            files,
+            hard_links,
+        }
     }
 
     fn restore(&self, root: &Path) {
@@ -292,7 +320,46 @@ impl DirectorySnapshot {
             fs::set_permissions(path, permissions.clone())
                 .expect("restore durable crash snapshot permissions");
         }
+        // A crash preserves inode relationships, including the sealed Linux
+        // helper's sandbox alias. Equal bytes alone are not that identity.
+        for (path, original) in &self.hard_links {
+            fs::hard_link(root.join(original), root.join(path))
+                .expect("restore durable crash snapshot hard link");
+        }
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn crash_snapshot_preserves_hard_links_without_merging_equal_files() {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let root = TestDirectory::new("crash-hard-links");
+    let directory = root.worker().join("helper-installation");
+    fs::create_dir_all(&directory).expect("helper installation");
+    let helper = directory.join("winwincode-kernel-helper");
+    let alias = directory.join("codex-linux-sandbox");
+    let independent = directory.join("independent-copy");
+    fs::write(&helper, b"sealed helper bytes").expect("helper bytes");
+    fs::hard_link(&helper, &alias).expect("sandbox alias hard link");
+    fs::write(&independent, b"sealed helper bytes").expect("independent file");
+    let snapshot = DirectorySnapshot::capture(&root.worker());
+    snapshot.restore(&root.worker());
+    let identity = |path: &Path| {
+        let metadata = fs::metadata(path).expect("restored metadata");
+        (metadata.dev(), metadata.ino())
+    };
+    assert_eq!(fs::read(&helper).unwrap(), b"sealed helper bytes");
+    assert_eq!(
+        identity(&helper),
+        identity(&alias),
+        "restore the original hard link"
+    );
+    assert_ne!(
+        identity(&helper),
+        identity(&independent),
+        "equal bytes are not a hard link"
+    );
 }
 
 fn id(prefix: &str, seed: u64) -> String {
