@@ -3826,20 +3826,22 @@ impl ProductionCodexAdapter {
         run_key: &str,
         _emit_trace: bool,
     ) -> Result<(), ProductionCodexError> {
-        let Some(run_key) = self
-            .runs
-            .iter()
-            .find(|(candidate_key, run)| {
-                candidate_key.as_str() == run_key
-                    && run.binding.authority.lease == authority.lease
-                    && run.binding.authority.worker_session_id == authority.worker_session_id
-                    && run.binding.authority.session_identity == authority.session_identity
-            })
-            .map(|(key, _)| key.clone())
-        else {
+        let Some(run) = self.runs.get(run_key) else {
             return self
                 .attach_accepted_diagnostic_artifact_after_restart(reference, authority, run_key);
         };
+        let current = DiagnosticArtifactAuthority {
+            snapshot_id: run.record.snapshot_id.clone(),
+            job: run.record.job.clone(),
+            scope: run.record.job.scope.clone(),
+            lease: run.binding.authority.lease.clone(),
+            worker_session_id: run.binding.authority.worker_session_id.clone(),
+            session_identity: run.binding.authority.session_identity.clone(),
+        };
+        if !authority.matches_current(&current) {
+            return Err(conflict());
+        }
+        let run_key = run_key.to_owned();
         let pending_completion = {
             let run = self.runs.get_mut(&run_key).ok_or_else(unknown_thread)?;
             if let Some(StoredTerminal::Completed { artifacts, .. }) = run.record.terminal.as_mut()
@@ -3869,7 +3871,7 @@ impl ProductionCodexAdapter {
         if let Some(completion) = pending_completion {
             if self
                 .diagnostic_artifacts
-                .has_pending(authority)
+                .has_pending(&current)
                 .map_err(map_store_error)?
             {
                 let run = self.runs.get_mut(&run_key).ok_or_else(unknown_thread)?;
@@ -3878,7 +3880,7 @@ impl ProductionCodexAdapter {
             } else {
                 let artifacts = self
                     .diagnostic_artifacts
-                    .accepted_references(authority)
+                    .accepted_references(&current)
                     .map_err(map_store_error)?;
                 let run = self.runs.get_mut(&run_key).ok_or_else(unknown_thread)?;
                 run.record.terminal = Some(terminal_from_pending_completion(
@@ -3902,7 +3904,22 @@ impl ProductionCodexAdapter {
         let Some(mut record) = load_stored_run(&self.store, run_key)? else {
             return Ok(());
         };
-        if record.job != authority.job || record.job.scope != authority.scope {
+        let (retained_key, bytes) = self
+            .store
+            .load_model_thread_lineage(&record.canonical_thread_id.0)
+            .map_err(map_store_error)?
+            .ok_or_else(conflict)?;
+        let installed: ModelLeaseAuthority =
+            serde_json::from_slice(&bytes).map_err(|_| conflict())?;
+        let current = DiagnosticArtifactAuthority {
+            snapshot_id: record.snapshot_id.clone(),
+            job: record.job.clone(),
+            scope: record.job.scope.clone(),
+            lease: installed.lease,
+            worker_session_id: installed.worker_session_id,
+            session_identity: installed.session_identity,
+        };
+        if retained_key != run_key || !authority.matches_current(&current) {
             return Err(conflict());
         }
         if let Some(StoredTerminal::Completed { artifacts, .. }) = record.terminal.as_mut()
@@ -3928,14 +3945,14 @@ impl ProductionCodexAdapter {
         if let Some(completion) = record.pending_completion.take() {
             if self
                 .diagnostic_artifacts
-                .has_pending(authority)
+                .has_pending(&current)
                 .map_err(map_store_error)?
             {
                 record.pending_completion = Some(completion);
             } else {
                 let artifacts = self
                     .diagnostic_artifacts
-                    .accepted_references(authority)
+                    .accepted_references(&current)
                     .map_err(map_store_error)?;
                 record.terminal = Some(terminal_from_pending_completion(
                     completion,
@@ -9914,16 +9931,33 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn production_command_output_ack_survives_restart_before_terminal_projection() {
+        run_command_output_ack_fixture(0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn production_command_output_ack_closes_live_completion_after_renewal() {
+        run_command_output_ack_fixture(1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn production_command_output_ack_closes_renewed_completion_after_restart() {
+        run_command_output_ack_fixture(2);
+    }
+
+    #[cfg(unix)]
+    fn run_command_output_ack_fixture(scenario: u8) {
         std::thread::Builder::new()
-            .name("diagnostic-vertical".to_owned())
+            .name("diagnostic-ack".to_owned())
             .stack_size(16 * 1024 * 1024)
-            .spawn(|| {
+            .spawn(move || {
                 tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
                     .expect("build diagnostic runtime")
                     .block_on(Box::pin(
-                        production_command_output_ack_survives_restart_before_terminal_projection_body(),
+                        production_command_output_ack_survives_restart_before_terminal_projection_body(scenario),
                     ));
             })
             .expect("spawn diagnostic test thread")
@@ -9932,7 +9966,9 @@ mod tests {
     }
 
     #[allow(clippy::too_many_lines)]
-    async fn production_command_output_ack_survives_restart_before_terminal_projection_body() {
+    async fn production_command_output_ack_survives_restart_before_terminal_projection_body(
+        scenario: u8,
+    ) {
         let root = test_root("diagnostic-vertical");
         let workspace = root.join("workspace");
         std::fs::create_dir_all(&workspace).expect("create diagnostic workspace");
@@ -9948,9 +9984,9 @@ mod tests {
         job.workspace.write_mode = ExecutionWorkspaceWriteMode::ReadOnly;
         let lease = ExecutionLeaseStamp {
             attempt: 1,
-            expires_at: Instant("2030-01-01T00:05:00Z".to_owned()),
+            expires_at: Instant("2030-01-01T00:05:00.000Z".to_owned()),
             fencing_token: FencingToken("1".to_owned()),
-            issued_at: Instant("2030-01-01T00:00:00Z".to_owned()),
+            issued_at: Instant("2030-01-01T00:00:00.000Z".to_owned()),
             job_id: job.job_id.clone(),
             lease_id: LeaseId("lse_00000000000000000000000001".to_owned()),
             worker_id: WorkerId("wrk_00000000000000000000000001".to_owned()),
@@ -9964,7 +10000,7 @@ mod tests {
             payload_digest: job.payload_digest.clone(),
         };
         let workspace_revision = WorkspaceRevision(format!("git-tree:{}", "1".repeat(40)));
-        let now = Instant("2030-01-01T00:00:01Z".to_owned());
+        let now = Instant("2030-01-01T00:00:01.000Z".to_owned());
         let snapshot_id =
             winwincode_domain::SnapshotId("snap_00000000000000000000000001".to_owned());
         let start = CodexThreadStart {
@@ -10159,10 +10195,42 @@ mod tests {
                 .expect("poll wait two"),
             CodexPoll::Pending
         ));
-        drop(adapter);
-
-        let mut reopened = ProductionCodexAdapter::open(diagnostic_adapter_config(&root))
-            .expect("reopen diagnostic adapter");
+        let mut reopened = if scenario > 0 {
+            use winwincode_execution_port::generated::{LeaseRenewMessage, LeaseRenewMessageKind};
+            let mut extended = lease.clone();
+            extended.expires_at = Instant("2030-01-01T00:10:00.000Z".to_owned());
+            assert!(
+                adapter
+                    .renew_lease(
+                        &session.thread_id,
+                        &LeaseRenewMessage {
+                            kind: LeaseRenewMessageKind::LeaseRenew,
+                            lease: extended,
+                            prior_expires_at: lease.expires_at.clone(),
+                            message_id: ExecutionMessageId(
+                                "xmsg_00000000000000000000009998".to_owned()
+                            ),
+                            request_id: winwincode_domain::RequestId(
+                                "req_00000000000000000000009998".to_owned()
+                            ),
+                            schema_version: SchemaVersion::WinwincodeV1,
+                            sent_at: now.clone(),
+                        },
+                        &now
+                    )
+                    .expect("renew live completion awaiting command evidence")
+            );
+            adapter
+        } else {
+            drop(adapter);
+            ProductionCodexAdapter::open(diagnostic_adapter_config(&root))
+                .expect("reopen diagnostic adapter")
+        };
+        if scenario == 2 {
+            drop(reopened);
+            reopened = ProductionCodexAdapter::open(diagnostic_adapter_config(&root))
+                .expect("reopen after lease renewal");
+        }
         let accepted = reopened
             .accept_artifact_ack(&ArtifactAckMessage {
                 retained_artifact: None,
@@ -10183,9 +10251,20 @@ mod tests {
         assert!(
             matches!(accepted, crate::ArtifactAckOutcome::Accepted(reference) if reference == artifact)
         );
-        let reopened_session = Box::pin(reopened.ensure_thread(start))
+        let mut current_lease = lease.clone();
+        if scenario > 0 {
+            current_lease.expires_at = Instant("2030-01-01T00:10:00.000Z".to_owned());
+        }
+        let reopened_session = if scenario == 1 {
+            session
+        } else {
+            Box::pin(reopened.ensure_thread(CodexThreadStart {
+                lease: &current_lease,
+                ..start
+            }))
             .await
-            .expect("recover terminal thread");
+            .expect("recover terminal thread")
+        };
         let identity = winwincode_execution_port::runtime_replay::RuntimeReplayIdentity {
             lease: diagnostic_open.lease.clone(),
             worker_session_id: diagnostic_open.worker_session_id.clone(),
