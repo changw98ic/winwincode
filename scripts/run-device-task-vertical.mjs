@@ -318,6 +318,7 @@ export async function runDeviceTaskVertical({
   jevContext,
   jevJudge,
   agentSettings,
+  automaticTaskActions = false,
   mcpConfiguration,
   providerEnvironment = process.env,
   runtime = null,
@@ -325,6 +326,7 @@ export async function runDeviceTaskVertical({
   productSessionId: requestedSessionId,
   deliveryId: requestedDeliveryId,
 } = {}) {
+  assert.equal(typeof automaticTaskActions, 'boolean', 'task action authorization must be explicit')
   const switches = { configurationId, track, fusion, jev, jevContext, jevJudge }
   const configuration = registerLaunch !== undefined || Object.values(switches).some(value => value !== undefined)
     ? validateBenchmarkConfiguration(switches) : null
@@ -348,7 +350,7 @@ export async function runDeviceTaskVertical({
     assert.ok(requestedSessionId && requestedDeliveryId, 'shared tasks require their own durable identities')
     bindSharedDeviceTaskDirectory(directory, runtime)
   }
-  const report = { complete: false, directory, steps: [], execution: 'device-worker-only' }
+  const report = { complete: false, directory, steps: [], execution: 'device-worker-only', automaticTaskActions }
   report.benchmarkConfiguration = configuration
   const save = () => writeFileSync(join(directory, 'device-task-result.json'), `${JSON.stringify(report, null, 2)}\n`)
 
@@ -578,6 +580,7 @@ export async function runDeviceTaskVertical({
         if (input) {
           await resolveDeviceTaskApprovals({
             api, runs, publicSmokeId: report.publicSmoke?.id,
+            automaticTaskActions,
             onDecision: decision => {
               report.approvalDecisions ??= []
               report.approvalDecisions.push(decision)

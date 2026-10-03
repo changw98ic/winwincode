@@ -270,6 +270,7 @@ export async function runBenchmarkDeviceModel(request, runner, options) {
     report = await runDeviceTaskVertical({ ...request, ...prepared, ...identities, runtime,
       providerName: seats[request.provider], requestedModel: request.provider,
       agentSettings: options.agentSettings,
+      automaticTaskActions: options.automaticTaskActions ?? false,
       registerLaunch: async target => {
         await runner.registerLaunch(target)
         registeredLaunch = target

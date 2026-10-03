@@ -391,3 +391,58 @@ test('Device task approves only installed public smoke once with an exact curren
   api.query = async () => ({ page: { hasMore: true }, result: { items: [original] } })
   await assert.rejects(resolveDeviceTaskApprovals({ api, runs: [run], onDecision: () => {} }), /must be complete/u)
 })
+
+test('authorized task Sessions automatically approve actions while preserving current authority checks', async () => {
+  const run = { id: 'run', state: 'running', productSessionId: 'product', codexThreadId: 'core',
+    workerSessionId: 'worker', executionJobId: 'job' }
+  const original = {
+    id: 'approval', revision: 3, state: 'pending', decisionEnabled: true,
+    category: 'shell', effectiveDecisionScope: 'once',
+    binding: { executionJobId: 'job', productSessionId: 'product', workerSessionId: 'worker',
+      sessionIdentity: { workRunId: 'run', codexThreadId: 'core', productSessionId: 'product', workerSessionId: 'worker' } },
+    sanitizedDetail: { kind: 'available', operation: 'execute', reasonCode: 'sandbox_escalation',
+      workingDirectory: 'workspace', riskLevel: 'high', targetCount: 1,
+      targetSummaries: ['program:zsh;argument_count:2'] },
+  }
+  const cases = [
+    ['approve', () => {}],
+    ['approve', a => { a.sanitizedDetail.reasonCode = 'network_access' }],
+    ['approve', a => { a.category = 'network'; a.sanitizedDetail.reasonCode = 'network_access' }],
+    ['approve', a => { a.category = 'filesystem_write'; Object.assign(a.sanitizedDetail,
+      { operation: 'modify', reasonCode: 'filesystem_write', workingDirectory: null }) }],
+    ['reject', a => { a.category = 'mcp'; a.sanitizedDetail.reasonCode = 'mcp_permission' }],
+    ['reject', a => { a.sanitizedDetail.kind = 'unavailable' }],
+    ['reject', a => { a.sanitizedDetail.reasonCode = 'unknown' }],
+    ['reject', a => { a.sanitizedDetail.workingDirectory = 'unknown' }],
+    ['reject', a => { a.sanitizedDetail.targetCount = 0 }],
+    ['reject', a => { a.sanitizedDetail.targetSummaries = [] }],
+    ['reject', a => { a.effectiveDecisionScope = 'session' }],
+    [null, a => { a.state = 'expired' }],
+    [null, a => { a.decisionEnabled = false }],
+    ...['executionJobId', 'productSessionId', 'workerSessionId'].map(key =>
+      [null, a => { a.binding[key] = 'foreign' }]),
+    ...['workRunId', 'codexThreadId', 'productSessionId', 'workerSessionId'].map(key =>
+      [null, a => { a.binding.sessionIdentity[key] = 'foreign' }]),
+  ]
+  for (const [expected, mutate] of cases) {
+    const approval = structuredClone(original)
+    mutate(approval)
+    const decisions = []
+    const api = {
+      query: async name => ({ page: { hasMore: false }, result: name === 'approval.list' ? { items: [original] } : approval }),
+      command: async (name, revision, payload) => {
+        assert.equal(name, 'approval.decide'); assert.equal(revision, approval.revision)
+        assert.deepEqual(payload.binding, approval.binding)
+        decisions.push(payload.decision)
+        return { outcome: 'completed' }
+      },
+    }
+    await resolveDeviceTaskApprovals({ api, runs: [run], automaticTaskActions: true, onDecision: () => {} })
+    assert.deepEqual(decisions, expected === null ? [] : [expected])
+  }
+  const api = { query: async name => ({ page: { hasMore: false },
+    result: name === 'approval.list' ? { items: [original] } : original }),
+  command: async () => assert.fail('terminal WorkRun cannot approve') }
+  await resolveDeviceTaskApprovals({ api, runs: [{ ...run, state: 'cancelled' }],
+    automaticTaskActions: true, onDecision: () => {} })
+})

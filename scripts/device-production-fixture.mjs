@@ -712,7 +712,9 @@ export async function removeDevicePublicSmoke({ api, publicClientId, id, timeout
 }
 
 /** Resolve only approvals belonging to the currently observed Device WorkRuns. */
-export async function resolveDeviceTaskApprovals({ api, runs, publicSmokeId, onDecision }) {
+export async function resolveDeviceTaskApprovals({ api, runs, publicSmokeId,
+  automaticTaskActions = false, onDecision }) {
+  assert.equal(typeof automaticTaskActions, 'boolean')
   const currentRun = approval => runs.find(run => {
     const binding = approval.binding
     const identity = binding?.sessionIdentity
@@ -734,20 +736,35 @@ export async function resolveDeviceTaskApprovals({ api, runs, publicSmokeId, onD
     const approval = (await api.query('approval.get', { approvalId: item.id })).result
     if (approval.state !== 'pending' || !approval.decisionEnabled || !currentRun(approval)) continue
     const detail = approval.sanitizedDetail
-    const allow = typeof publicSmokeId === 'string'
+    const publicSmoke = typeof publicSmokeId === 'string'
       && /^benchmark_public_smoke(?:_psn_[0-9A-HJKMNP-TV-Z]{26})?$/u.test(publicSmokeId)
       && approval.category === 'mcp' && approval.effectiveDecisionScope === 'once'
       && detail?.kind === 'available' && detail.operation === 'execute'
       && detail.reasonCode === 'mcp_permission' && detail.targetCount === 1
       && detail.targetSummaries?.length === 1
       && detail.targetSummaries[0] === `server:${publicSmokeId}`
+    // This opt-in represents the operator's authorization for this task's
+    // role Sessions. The server still validates the exact binding, revision,
+    // expiry and one-use decision, and Worker action enforcement still runs.
+    const taskAction = automaticTaskActions && approval.effectiveDecisionScope === 'once'
+      && detail?.kind === 'available' && detail.targetCount > 0
+      && Array.isArray(detail.targetSummaries) && detail.targetSummaries.length > 0
+      && ((approval.category === 'shell' && detail.operation === 'execute'
+        && ['sandbox_escalation', 'network_access'].includes(detail.reasonCode)
+        && detail.workingDirectory === 'workspace')
+      || (approval.category === 'network' && detail.operation === 'execute'
+        && detail.reasonCode === 'network_access' && detail.workingDirectory === 'workspace')
+      || (approval.category === 'filesystem_write' && detail.operation === 'modify'
+        && detail.reasonCode === 'filesystem_write'))
+    const allow = publicSmoke || taskAction
     const decision = allow ? 'approve' : 'reject'
     let result
     try {
       result = await api.command('approval.decide', approval.revision, {
         approvalId: approval.id, binding: approval.binding, decision,
-        reason: allow
-          ? 'Run the configured public_smoke in the frozen offline sandbox.'
+        reason: taskAction
+          ? 'The operator authorized automatic task actions for this exact active Session and WorkRun.'
+          : allow ? 'Run the configured public_smoke in the frozen offline sandbox.'
           : 'Continue within the configured workspace and public_smoke tool; escalation is not authorized.',
       })
     } catch (error) {
