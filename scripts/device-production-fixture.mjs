@@ -910,12 +910,106 @@ export async function waitFor(check, label, timeoutMillis = 30_000, pollMillis =
   }
 }
 
-export function stopProcessGroup(child) {
-  if (child === null || child.exitCode !== null || child.signalCode !== null) return
+function processSnapshot() {
+  const result = spawnSync('ps', ['-axo', 'pid=,ppid=,pgid=,stat=,lstart='], {
+    encoding: 'utf8', timeout: 1000, maxBuffer: 8 * 1024 * 1024,
+    env: { ...process.env, LC_ALL: 'C' },
+  })
+  if (result.error) throw result.error
+  if (result.status !== 0) throw new Error('cannot inspect fixture process ownership')
+  const rows = new Map()
+  for (const line of result.stdout.split('\n')) {
+    const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.+?)\s*$/u.exec(line)
+    if (!match) continue
+    const row = {
+      pid: Number(match[1]), parent: Number(match[2]), group: Number(match[3]),
+      state: match[4], start: match[5].replace(/\s+/gu, ' '),
+    }
+    if (process.platform === 'linux') {
+      try {
+        const stat = readFileSync(`/proc/${row.pid}/stat`, 'utf8')
+        row.start = `linux-${stat.slice(stat.lastIndexOf(')') + 1).trim().split(/\s+/u)[19]}`
+      } catch (error) {
+        if (error.code === 'ENOENT' || error.code === 'ESRCH') continue
+        throw error
+      }
+    }
+    rows.set(row.pid, row)
+  }
+  return rows
+}
+
+function ownedProcessAlive(witness, current) {
+  const row = current.get(witness.pid)
+  return row !== undefined && row.start === witness.start && row.group === witness.group
+    && !row.state.startsWith('Z')
+}
+
+function registeredFixtureWorkers(deviceData, snapshot) {
+  if (!deviceData) return []
+  const path = join(deviceData, 'device-client.sqlite3')
+  if (!existsSync(path)) return []
+  const database = new DatabaseSync(path, { readOnly: true })
   try {
-    process.kill(-child.pid, 'SIGTERM')
-  } catch {
-    child.kill('SIGTERM')
+    database.exec('PRAGMA busy_timeout = 1000')
+    if (!database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'worker_process_registry'").get()) return []
+    return database.prepare(`SELECT pid, process_start_identity FROM worker_process_registry
+      WHERE state = 'running'`).all().flatMap(record => {
+      const row = snapshot.get(record.pid)
+      if (!row || row.state.startsWith('Z')) return []
+      const identity = process.platform === 'linux' ? row.start : `darwin-ps-${row.start}`
+      return record.process_start_identity === identity ? [row] : []
+    })
+  } finally { database.close() }
+}
+
+/** Stop the owned tree, including Workers which the Device puts in separate groups. */
+export async function stopProcessGroup(child, { graceMillis = 1000, deviceData } = {}) {
+  const parentExited = () => child === null || child.exitCode !== null || child.signalCode !== null
+  if (parentExited() && !deviceData) return
+  const snapshot = processSnapshot()
+  const root = parentExited() ? undefined : snapshot.get(child.pid)
+  // Capture boot identities before TERM reparents descendants to init/launchd.
+  const owned = new Map(registeredFixtureWorkers(deviceData, snapshot).map(row => [row.pid, row]))
+  if (root?.parent === process.pid) owned.set(root.pid, root)
+  if (owned.size === 0) return
+  for (;;) {
+    const before = owned.size
+    for (const row of snapshot.values()) {
+      if (owned.has(row.parent)) owned.set(row.pid, row)
+    }
+    if (before === owned.size) break
+  }
+  const targets = new Map()
+  for (const row of [...owned.values()].reverse()) {
+    // A shared parent group is not ours: signal only its witnessed descendants.
+    const target = owned.has(row.group) ? -row.group : row.pid
+    const witnesses = targets.get(target) ?? []
+    witnesses.push(row)
+    targets.set(target, witnesses)
+  }
+  const signalOwned = signal => {
+    for (const [target, witnesses] of targets) {
+      if (!witnesses.some(row => ownedProcessAlive(row, processSnapshot()))) continue
+      try { process.kill(target, signal) } catch (error) {
+        if (error.code !== 'ESRCH') throw error
+      }
+    }
+  }
+  const stopped = () => {
+    const current = processSnapshot()
+    return [...owned.values()].every(row => !ownedProcessAlive(row, current))
+      && parentExited()
+  }
+  signalOwned('SIGTERM')
+  const deadline = Date.now() + graceMillis
+  while (!stopped() && Date.now() < deadline) {
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 25))
+  }
+  // A reaped Device is not proof its detached Workers or their tools have exited.
+  if (!stopped()) {
+    signalOwned('SIGKILL')
+    await waitFor(stopped, 'fixture process tree shutdown', 1000, 25)
   }
 }
 
@@ -1212,7 +1306,7 @@ export async function establishDeviceOnlyExecutionPath({
         report.workerInstanceId = launched.json.workerInstanceId
         return launched.json
       },
-      stop() {
+      async stop() {
         if (modelServer !== null) {
           try {
             modelServer.close()
@@ -1220,11 +1314,13 @@ export async function establishDeviceOnlyExecutionPath({
             // Model fixture shutdown is best-effort.
           }
         }
-        stopProcessGroup(device)
+        await stopProcessGroup(device, { deviceData })
       },
     }
   } catch (error) {
-    stopProcessGroup(device)
+    try { await stopProcessGroup(device, { deviceData }) } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], 'Device setup and cleanup failed')
+    }
     throw error
   }
 }

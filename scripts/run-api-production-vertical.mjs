@@ -2656,7 +2656,7 @@ export async function runApiProductionVertical({
     failure = error
   } finally {
     if (devicePath !== null) {
-      devicePath.stop?.()
+      try { await devicePath.stop?.() } catch (error) { failure ??= error }
       serverOutput += ''
     }
     if (workerStarted !== null) {
