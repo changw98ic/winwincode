@@ -427,7 +427,11 @@ export async function runBenchmarkSchedule(cells, { concurrency = 1, executeCell
   return results
 }
 
-export function verifyBenchmarkLedgerIdentity(plan, { ledgerPath, experimentBinding }) {
+// Validate formal configuration before initializing or checking the immutable
+// identity. This may create an unclaimed ledger, but never starts product work.
+export function verifyBenchmarkLedgerIdentity(plan, options) {
+  validateFormalBenchmarkOptions(options)
+  const { ledgerPath, experimentBinding } = options
   const store = openBenchmarkLedger(ledgerPath, canonicalJson({ plan, experimentBinding }), plan.cells)
   store.close()
 }
@@ -540,7 +544,7 @@ export async function runBenchmarkPlan(plan, {
   })
 }
 
-export async function executeFormalBenchmark(plan, { providerEvidence, ...options }) {
+export function validateFormalBenchmarkOptions({ providerEvidence, ...options }) {
   if (!Array.isArray(providerEvidence)) fail('MODEL_IDENTITY_MISSING', 'providerEvidence is required before execution')
   const byProvider = new Map(providerEvidence.map(evidence => [evidence.requestedModelId, evidence]))
   if (byProvider.size !== PROVIDERS.length || PROVIDERS.some(provider => !byProvider.has(provider))) {
@@ -567,6 +571,10 @@ export async function executeFormalBenchmark(plan, { providerEvidence, ...option
   if (!options.ledgerPath || !options.experimentBinding?.experimentId) {
     fail('LEDGER_REQUIRED', 'formal execution requires a durable ledger and experiment identity')
   }
+}
+
+export async function executeFormalBenchmark(plan, { providerEvidence, ...options }) {
+  validateFormalBenchmarkOptions({ providerEvidence, ...options })
   return runBenchmarkPlan(plan, options)
 }
 

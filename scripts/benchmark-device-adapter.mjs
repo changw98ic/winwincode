@@ -6,7 +6,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { pathToFileURL } from 'node:url'
 import { benchmarkAggregationDigest, buildBenchmarkPlan, executeBenchmarkCell, executeFormalBenchmark,
   recoverBenchmarkCell, validateBenchmarkConfiguration, validateFrozenTaskSource,
-  verifyBenchmarkLedgerIdentity } from './run-real-task-benchmark.mjs'
+  validateFormalBenchmarkOptions, verifyBenchmarkLedgerIdentity } from './run-real-task-benchmark.mjs'
 import { assertBenchmarkExecutionReceipts } from './benchmark-execution-receipts.mjs'
 import { benchmarkDeviceEnvironment, expiredCrashedDeviceWorkRun, failedDeviceDispatch,
   loadDeviceProviderEnvironment, deviceTaskProvider,
@@ -78,6 +78,10 @@ export async function executeDeviceBenchmark(options) {
     benchmarkDeviceEnvironment(plan.cells.find(cell => cell.configurationId === configurationId),
       options.agentSettings, providerEnvironment)
   }
+  const ledgerPath = resolve(options.evidenceRoot, 'benchmark.sqlite3')
+  // Invalid first-run configuration must not freeze an unused experiment.
+  validateFormalBenchmarkOptions({ providerEvidence: options.providerEvidence, ledgerPath,
+    experimentBinding: { experimentId: options.experimentId } })
   const source = await validateFrozenTaskSource({ repositoryRoot: options.sourceRoot,
     repositoryUrl: catalog.source.repositoryUrl, revision: catalog.source.revision })
   assert.equal(source.sourceDigest, catalog.source.sourceDigest)
@@ -99,7 +103,7 @@ export async function executeDeviceBenchmark(options) {
   const experimentBinding = deviceBenchmarkExperimentBinding(options, source, catalog)
   // Reject changed experiment policy before opening Device/Worker services.
   // The execution driver rechecks the same identity before claiming work.
-  verifyBenchmarkLedgerIdentity(plan, { ledgerPath: resolve(evidenceRoot, 'benchmark.sqlite3'), experimentBinding })
+  verifyBenchmarkLedgerIdentity(plan, { providerEvidence: options.providerEvidence, ledgerPath, experimentBinding })
   const shared = await withDeviceTaskRuntime({ directory: resolve(evidenceRoot, 'runtime'),
     profiles: [...new Map(plan.cells.map(cell => [cell.configurationId, cell])).values()],
     providers: Object.keys(seats).map(name => deviceTaskProvider(seats[name], providerEnvironment)),
@@ -111,7 +115,7 @@ export async function executeDeviceBenchmark(options) {
       aggregate: (request, runner) => runBenchmarkDeviceAggregation(request, runner, sharedOptions),
     }
     return executeFormalBenchmark(plan, {
-      providerEvidence: options.providerEvidence, ledgerPath: resolve(evidenceRoot, 'benchmark.sqlite3'),
+      providerEvidence: options.providerEvidence, ledgerPath,
       experimentBinding,
       executeCell: (cell, runner) => executeBenchmarkCell(cell, adapter, runner),
       recoverCell: (cell, observed) => recoverBenchmarkDeviceCell(cell, observed, sharedOptions),

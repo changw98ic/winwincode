@@ -603,13 +603,18 @@ test('Device approval policy is frozen before effects and same-mode recovery pre
   const directory = await mkdtemp(resolve(tmpdir(), 'benchmark-approval-binding-'))
   t.after(() => rm(directory, { recursive: true, force: true }))
   const plan = { cells: [{ runId: 'original' }, { runId: 'next' }] }
-  const bindingOptions = { experimentId: 'approval-policy', agentSettings: {}, providerEvidence: {},
+  const providerEvidence = ['glm-5.3-flash', 'mimo-v2.6-pro', 'deepseek-flash', 'qwen3.8-flash'].map(model => ({
+    requestedModelId: model, observedModelId: model, endpoint: 'https://provider.invalid/messages',
+    credentialPresent: true, supportsReasoningEffort: 'max',
+  }))
+  const bindingOptions = { experimentId: 'approval-policy', agentSettings: {}, providerEvidence,
     frozenSourceIdentity: {}, productSourceSealSha256: 'fixture-seal' }
   const binding = automaticTaskActions => deviceBenchmarkExperimentBinding(
     { ...bindingOptions, automaticTaskActions }, { revision: 'fixture-revision' }, { tasks: [] })
   assert.deepEqual(binding(undefined), binding(false), 'omitted mode means explicit false')
   for (const originalMode of [false, true]) {
-    const options = { ledgerPath: resolve(directory, `${originalMode}.sqlite3`), experimentBinding: binding(originalMode) }
+    const options = { ledgerPath: resolve(directory, `${originalMode}.sqlite3`),
+      providerEvidence, experimentBinding: binding(originalMode) }
     const target = { callId: 'original:model', directory: resolve(directory, `product-${originalMode}`),
       productSessionId: 'psn_01J00000000000000000000001', deliveryId: 'dlv_01J00000000000000000000001' }
     const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
@@ -659,6 +664,61 @@ test('Device approval policy is frozen before effects and same-mode recovery pre
     assert.deepEqual(await runBenchmarkPlan(plan, { ...options,
       executeCell: () => assert.fail('completed calls cannot restart') }), result)
   }
+})
+
+test('rejected formal preflight leaves no frozen identity and corrected configuration can use the same directory', async t => {
+  const directory = await mkdtemp(resolve(tmpdir(), 'benchmark-invalid-first-config-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const plan = { cells: [{ runId: 'first' }] }
+  const providers = ['glm-5.3-flash', 'mimo-v2.6-pro', 'deepseek-flash', 'qwen3.8-flash'].map(model => ({
+    requestedModelId: model, observedModelId: model, endpoint: 'https://provider.invalid/messages',
+    credentialPresent: true, supportsReasoningEffort: 'max',
+  }))
+  const cases = [
+    { providerEvidence: providers.map((row, i) => i === 1 ? { ...row, observedModelId: 'wrong-model' } : row),
+      experimentId: 'same-experiment', code: 'MODEL_IDENTITY_MISMATCH' },
+    { providerEvidence: null, experimentId: 'same-experiment', code: 'MODEL_IDENTITY_MISSING' },
+    { providerEvidence: providers, experimentId: undefined, code: 'LEDGER_REQUIRED' },
+  ]
+  await writeFile(resolve(directory, 'prepared-inputs.json'), JSON.stringify({
+    tasks: Array.from({ length: 20 }, (_, i) => ({ taskId: `task-${i}` })),
+  }))
+  const providerEnvironment = Object.fromEntries(['ZHIPU', 'XIAOMI', 'DEEPSEEK', 'OPENCODE'].flatMap((prefix, index) => [
+    [`${prefix}_API_KEY`, 'fixture-only'], [`${prefix}_BASE_URL`, 'https://provider.invalid'],
+    [`${prefix}_MODEL`, providers[index].requestedModelId],
+  ]))
+  for (const [index, invalid] of cases.entries()) {
+    const evidenceRoot = resolve(directory, `device-${index}`)
+    await assert.rejects(executeDeviceBenchmark({ ...invalid, automaticTaskActions: true, evidenceRoot,
+      preparedInputsDirectory: directory, sourceRoot: resolve(directory, 'missing-source'), providerEnvironment,
+      agentSettings: { jevSettingsFile: resolve(directory, 'unused-settings'),
+        jevContext: { provider: 'fixture-context', policy: {} }, jevJudge: 'fixture-judge' },
+    }), { code: invalid.code })
+    await assert.rejects(access(evidenceRoot), { code: 'ENOENT' })
+    const options = evidence => ({ providerEvidence: evidence.providerEvidence,
+      ledgerPath: resolve(directory, `${index}.sqlite3`),
+      experimentBinding: deviceBenchmarkExperimentBinding({ ...evidence, automaticTaskActions: true,
+        agentSettings: {}, frozenSourceIdentity: {}, productSourceSealSha256: 'fixture-seal' }, {}, {}),
+    })
+    const refused = options(invalid)
+    assert.throws(() => verifyBenchmarkLedgerIdentity(plan, refused), { code: invalid.code })
+    await assert.rejects(executeFormalBenchmark(plan, { ...refused,
+      executeCell: () => assert.fail('invalid evidence cannot claim or execute a cell') }), { code: invalid.code })
+    await assert.rejects(access(refused.ledgerPath), { code: 'ENOENT' })
+    const corrected = options({ providerEvidence: providers, experimentId: 'same-experiment' })
+    verifyBenchmarkLedgerIdentity(plan, corrected)
+    let executed = 0
+    const result = await executeFormalBenchmark(plan, { ...corrected,
+      executeCell: cell => { executed += 1; assert.equal(cell.runId, 'first'); return { status: 'completed' } },
+    })
+    assert.equal(executed, 1)
+    assert.equal(result.records[0].status, 'completed')
+  }
+  await assert.rejects(executeDeviceBenchmark({ preparedInputsDirectory: directory,
+    evidenceRoot: resolve(directory, 'missing-evidence'), providerEnvironment,
+    agentSettings: { jevSettingsFile: resolve(directory, 'unused-settings'),
+      jevContext: { provider: 'fixture-context', policy: {} }, jevJudge: 'fixture-judge' },
+  }), { code: 'MODEL_IDENTITY_MISSING' })
 })
 
 test('frozen task catalog produces exactly 700 unique benchmark cells', () => {
