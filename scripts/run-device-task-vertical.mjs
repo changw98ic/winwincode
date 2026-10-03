@@ -522,8 +522,9 @@ export async function runDeviceTaskVertical({
       save()
     }
 
-    const launched = await devicePath.launchAnchor({ workRunId })
+    const launched = await devicePath.launchAnchor({ workRunId, deliveryId })
     report.workerSessionId = launched.workerSessionId
+    if (launched.recoveredCompleted === true) report.recoveredCompletedAnchors = [launched]
     report.steps.push('client.worker.launched')
     save()
 
@@ -561,7 +562,12 @@ export async function runDeviceTaskVertical({
         for (const run of runs) checkDispatchFailure(run.id)
         for (const run of runs) {
           if (anchored.has(run.id)) continue
-          const launched = await devicePath.launchAnchor({ workRunId: run.id })
+          const launched = await devicePath.launchAnchor({ workRunId: run.id, deliveryId })
+          if (launched.recoveredCompleted === true) {
+            report.recoveredCompletedAnchors ??= []
+            report.recoveredCompletedAnchors.push(launched)
+            save()
+          }
           anchored.set(run.id, launched.workerSessionId)
         }
         if (input) {
@@ -593,7 +599,12 @@ export async function runDeviceTaskVertical({
         for (const id of ids) {
           checkDispatchFailure(id)
           if (!anchored.has(id)) {
-            const launched = await devicePath.launchAnchor({ workRunId: id })
+            const launched = await devicePath.launchAnchor({ workRunId: id, deliveryId })
+            if (launched.recoveredCompleted === true) {
+              report.recoveredCompletedAnchors ??= []
+              report.recoveredCompletedAnchors.push(launched)
+              save()
+            }
             anchored.set(id, launched.workerSessionId)
           }
         }

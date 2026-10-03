@@ -36,6 +36,59 @@ export function runtimeChildEnvironment(environment = process.env) {
     .map(key => [key, environment[key]]))
 }
 
+/** Interpret the task driver's launch response without changing public launch authority. */
+export function deviceTaskLaunchResult({ response, directory, deliveryId, workRunId,
+  publicClientId, holderUserId, repositoryBindingId }) {
+  if (response.status === 201) return response.json
+  // The scheduler can finish a role while the task driver drains its unused
+  // source anchor. An expired grant is never launch authority here: recover
+  // only the original, accepted and completed execution as an observation.
+  if (response.status === 400 && response.json?.error?.code === 'INVALID_REQUEST'
+    && [directory, deliveryId, workRunId, publicClientId, holderUserId, repositoryBindingId]
+      .every(value => typeof value === 'string' && value.length > 0)) {
+    const db = new DatabaseSync(join(directory, 'server-data/control-plane.sqlite3'), { readOnly: true })
+    try {
+      const rows = db.prepare(`SELECT j.job_id, j.payload_digest, j.dispatch_payload,
+        f.product_session_id, f.worker_session_id, f.worker_id, f.worker_instance_id
+        FROM scheduler_execution_jobs j
+        JOIN device_execution_current_facts f ON f.job_id = j.job_id
+          AND f.work_run_id = j.work_run_id AND f.product_session_id = j.product_session_id
+        JOIN client_nodes c ON c.client_node_id = f.client_node_id
+        JOIN worker_launch_grants g ON g.worker_launch_grant_id = f.worker_launch_grant_id
+          AND g.client_node_id = f.client_node_id AND g.client_instance_id = f.client_instance_id
+          AND g.holder_user_id = f.holder_user_id AND g.repository_binding_id = f.repository_binding_id
+          AND g.occupancy_lease_id = f.occupancy_lease_id
+          AND g.occupancy_fencing_token = f.occupancy_fencing_token
+          AND g.worker_session_id = f.worker_session_id AND g.worker_id = f.worker_id
+          AND g.worker_instance_id = f.worker_instance_id
+          AND g.product_session_id = j.product_session_id AND g.work_run_id = j.work_run_id
+          AND g.state = 'consumed' AND g.consumed_at IS NOT NULL
+        JOIN execution_leases l ON l.job_id = j.job_id AND l.payload_digest = j.payload_digest
+          AND l.worker_id = f.worker_id AND l.worker_instance_id = f.worker_instance_id
+          AND l.attempt = j.attempt
+        JOIN execution_lease_terminals t ON t.lease_id = l.lease_id AND t.job_id = l.job_id
+          AND t.worker_id = l.worker_id AND t.worker_instance_id = l.worker_instance_id
+          AND t.attempt = l.attempt AND t.fencing_token = l.fencing_token AND t.outcome = 'completed'
+        WHERE j.delivery_id = ? AND j.work_run_id = ? AND j.state = 'completed'
+          AND c.public_client_id = ? AND f.holder_user_id = ? AND f.repository_binding_id = ?`)
+        .all(deliveryId, workRunId, publicClientId, holderUserId, repositoryBindingId)
+      if (rows.length === 1) {
+        const row = rows[0], payload = JSON.parse(Buffer.from(row.dispatch_payload).toString('utf8'))
+        if (payload.jobId === row.job_id && payload.payloadDigest === row.payload_digest
+          && payload.scope?.kind === 'work-run' && payload.scope.workRunId === workRunId
+          && payload.scope.productSessionId === row.product_session_id) {
+          return { workRunId, productSessionId: row.product_session_id,
+            workerSessionId: row.worker_session_id, workerId: row.worker_id,
+            workerInstanceId: row.worker_instance_id, recoveredCompleted: true }
+        }
+      }
+    } finally { db.close() }
+  }
+  throw Object.assign(new Error(`Worker launch failed: ${response.text}`), {
+    code: 'DEVICE_LAUNCH_FAILED',
+  })
+}
+
 /** Server environment keys that encode the removed Server-local model path. */
 export const FORBIDDEN_SERVER_MODEL_ENVIRONMENT_KEYS = Object.freeze([
   'WWC_SERVER_MODEL_PROVIDER_ID',
@@ -1392,7 +1445,7 @@ export async function establishDeviceOnlyExecutionPath({
       }
     }
 
-    const launchAnchor = async ({ workRunId = null, productSessionId = null, repositoryBindingId: selectedBindingId = repositoryBindingId } = {}, owner = null) => {
+    const launchAnchor = async ({ workRunId = null, productSessionId = null, deliveryId = null, repositoryBindingId: selectedBindingId = repositoryBindingId } = {}, owner = null) => {
       if (owner !== null) {
         assert.ok(productSessionId === null || productSessionId === owner,
           'launch anchor must belong to its ProductSession')
@@ -1428,31 +1481,30 @@ export async function establishDeviceOnlyExecutionPath({
         // the original launch after the Device observes a drained predecessor.
         return response.json?.error?.code === 'CAPACITY_EXHAUSTED' ? false : response
       }, 'available Device WorkerSession slot', timeoutMillis)
-      if (launched.status !== 201) {
-        throw Object.assign(new Error(`Worker launch failed: ${launched.text}`), {
-          code: 'DEVICE_LAUNCH_FAILED',
-        })
-      }
+      const anchor = deviceTaskLaunchResult({ response: launched, directory,
+        workRunId, deliveryId, publicClientId: status.publicClientId,
+        holderUserId: api.actor.id, repositoryBindingId: selectedBindingId })
       if (owner !== null) {
-        if (workRunId === null) assert.equal(launched.json.productSessionId, owner,
+        if (workRunId === null) assert.equal(anchor.productSessionId, owner,
           'Server launch authority must match the task ProductSession')
-        else assert.equal(launched.json.workRunId, workRunId,
+        else assert.equal(anchor.workRunId, workRunId,
           'Server launch authority must match the Controller WorkRun')
       }
-      steps.push(workRunId !== null || productSessionId === null
-        ? 'launch-anchor' : `launch-anchor:${productSessionId}`)
-      launchedWorkerSessions.add(launched.json.workerSessionId)
-      const taskSessionId = owner ?? launched.json.productSessionId
+      steps.push(anchor.recoveredCompleted === true ? 'recover-completed-anchor'
+        : workRunId !== null || productSessionId === null
+          ? 'launch-anchor' : `launch-anchor:${productSessionId}`)
+      launchedWorkerSessions.add(anchor.workerSessionId)
+      const taskSessionId = owner ?? anchor.productSessionId
       const members = productSessionWorkers.get(taskSessionId) ?? new Set()
-      members.add(launched.json.workerSessionId)
+      members.add(anchor.workerSessionId)
       productSessionWorkers.set(taskSessionId, members)
       const scopes = productSessionScopes.get(taskSessionId) ?? new Set([taskSessionId])
-      scopes.add(launched.json.productSessionId)
+      scopes.add(anchor.productSessionId)
       productSessionScopes.set(taskSessionId, scopes)
-      report.workerSessionId = launched.json.workerSessionId
-      report.workerId = launched.json.workerId
-      report.workerInstanceId = launched.json.workerInstanceId
-      return launched.json
+      report.workerSessionId = anchor.workerSessionId
+      report.workerId = anchor.workerId
+      report.workerInstanceId = anchor.workerInstanceId
+      return anchor
     }
 
     return {
