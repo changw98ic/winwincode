@@ -3320,7 +3320,13 @@ impl ProductionCodexAdapter {
     ) -> Result<ApprovalRequestMessage, ProductionCodexError> {
         let request_digest =
             private_payload_digest(b"winwincode.patch-approval-request.v1", request)?;
-        let detail = patch_approval_detail(request, &request_digest);
+        let workspace = &self
+            .runs
+            .get(run_key)
+            .ok_or_else(unknown_thread)?
+            .record
+            .workspace;
+        let detail = patch_approval_detail(request, &request_digest, workspace);
         self.retain_approval_request(
             run_key,
             StoredApprovalOperationKind::Patch,
@@ -5806,23 +5812,39 @@ fn exec_approval_detail(
 fn patch_approval_detail(
     request: &ApplyPatchApprovalRequestEvent,
     request_digest: &str,
+    workspace: &Path,
 ) -> Option<ApprovalActionSanitizedDetail> {
-    let mut targets = request
-        .changes
-        .iter()
-        .filter_map(|(path, change)| {
-            let path = safe_relative_approval_path(path)?;
-            let operation = match change {
-                FileChange::Add { .. } => "create",
-                FileChange::Delete { .. } => "delete",
-                FileChange::Update { .. } => "modify",
-            };
-            Some(format!("{operation}:{path}"))
-        })
-        .collect::<Vec<_>>();
+    // Core resolves patch targets to absolute paths, including patches submitted
+    // through exec_command. Only expose labels relative to this validated
+    // checkout. Labels describe the request; Worker write enforcement remains
+    // responsible for permission and filesystem checks.
+    let label = |path: &Path| {
+        let relative = if path.is_absolute() {
+            path.strip_prefix(workspace).ok()?
+        } else {
+            path
+        };
+        safe_relative_approval_path(relative)
+    };
+    let mut targets = Vec::new();
+    for (path, change) in &request.changes {
+        let path = label(path)?;
+        let operation = match change {
+            FileChange::Add { .. } => "create",
+            FileChange::Delete { .. } => "delete",
+            FileChange::Update { move_path, .. } => {
+                if let Some(destination) = move_path {
+                    targets.push(format!("move-to:{}", label(destination)?));
+                }
+                "modify"
+            }
+        };
+        targets.push(format!("{operation}:{path}"));
+    }
     targets.sort_unstable();
     targets.dedup();
-    if targets.is_empty() {
+    let target_count = i64::try_from(targets.len()).ok()?;
+    if target_count == 0 || target_count > 10_000 {
         return None;
     }
     targets.truncate(20);
@@ -5832,7 +5854,7 @@ fn patch_approval_detail(
         reason_code: ApprovalActionReasonCode::FilesystemWrite,
         request_sha256: Sha256Digest(request_digest.to_owned()),
         risk_level: ApprovalActionRiskLevel::Medium,
-        target_count: i64::try_from(request.changes.len()).ok()?.min(10_000),
+        target_count,
         target_summaries: targets,
         working_directory: None,
     })
@@ -7650,7 +7672,7 @@ mod tests {
     };
     use super::{
         ApprovalActionCategory, ApprovalActionReasonCode, StoredApprovalOperationKind,
-        mcp_approval_detail,
+        mcp_approval_detail, patch_approval_detail,
     };
     use crate::helper_release::HelperReleaseManifest;
     use crate::{CodexCoreAdapter, CodexPoll, CodexRunKey, CodexThreadStart};
@@ -9620,6 +9642,63 @@ mod tests {
         }
     }
 
+    #[test]
+    fn patch_approval_labels_cover_every_target_without_exporting_checkout_paths() {
+        let root = test_root("patch-targets");
+        let workspace = root.join("checkout");
+        let make_request = |changes| {
+            serde_json::from_value(serde_json::json!({
+                "call_id": "patch", "turn_id": "turn", "started_at_ms": 1,
+                "changes": changes, "reason": null, "grant_root": null
+            }))
+            .expect("patch request")
+        };
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let mut request = make_request(serde_json::json!({
+            workspace.join("src/main.rs").to_str().unwrap(): {
+                "type": "update", "unified_diff": "", "move_path": workspace.join("src/new.rs")
+            },
+            "Cargo.toml": {"type": "add", "content": ""}
+        }));
+        let detail = patch_approval_detail(&request, &digest, &workspace).expect("checkout labels");
+        assert_eq!(
+            detail.target_summaries,
+            [
+                "create:Cargo.toml",
+                "modify:src/main.rs",
+                "move-to:src/new.rs"
+            ]
+        );
+        assert_eq!(detail.target_count, 3);
+        assert_eq!(detail.request_sha256.0, digest);
+        for path in [
+            root.join("outside.rs"),
+            PathBuf::from("../outside.rs"),
+            workspace.join("../outside.rs"),
+            workspace.join("private\nname.rs"),
+        ] {
+            request.changes.insert(
+                path,
+                codex_protocol::protocol::FileChange::Add {
+                    content: String::new(),
+                },
+            );
+            assert!(
+                patch_approval_detail(&request, &digest, &workspace).is_none(),
+                "one invalid target disables the entire summary"
+            );
+            request.changes.retain(|path, _| {
+                path == &workspace.join("src/main.rs") || path == std::path::Path::new("Cargo.toml")
+            });
+        }
+        request = make_request(serde_json::json!({
+            "main.rs": {"type": "update", "unified_diff": "", "move_path": root.join("outside.rs")}
+        }));
+        assert!(patch_approval_detail(&request, &digest, &workspace).is_none());
+        request.changes.clear();
+        assert!(patch_approval_detail(&request, &digest, &workspace).is_none());
+    }
+
     #[cfg(unix)]
     #[test]
     fn production_lease_renewal_preserves_core_session() {
@@ -9799,7 +9878,7 @@ mod tests {
                     .enable_all()
                     .build()
                     .expect("test runtime")
-                    .block_on(Box::pin(mcp_permission_request_is_retained_body()));
+                    .block_on(Box::pin(permission_request_is_retained_body(false)));
             })
             .expect("test thread")
             .join()
@@ -9807,8 +9886,12 @@ mod tests {
     }
 
     #[allow(clippy::too_many_lines)]
-    async fn mcp_permission_request_is_retained_body() {
-        let root = test_root("mcp-elicitation");
+    async fn permission_request_is_retained_body(patch: bool) {
+        let root = test_root(if patch {
+            "patch-approval"
+        } else {
+            "mcp-elicitation"
+        });
         let workspace = root.join("workspace");
         std::fs::create_dir_all(&workspace).expect("create diagnostic workspace");
         let mut job = executor_job();
@@ -9861,21 +9944,38 @@ mod tests {
         adapter
             .retain_stage_turn_started(&run_digest, "turn-diagnostic", &now)
             .expect("retain reviewer policy before command evidence");
-        let event: CodexEvent = serde_json::from_value(serde_json::json!({
-            "id": "turn-diagnostic",
-            "msg": {
-                "type": "elicitation_request",
-                "turn_id": "turn-diagnostic",
-                "server_name": "benchmark_public_smoke",
-                "id": "mcp_tool_approval_call-public-smoke",
-                "request": {
-                    "mode": "form",
-                    "_meta": {"codex_approval_kind": "mcp_tool_call"},
-                    "message": "Allow public smoke?",
-                    "requested_schema": {"type": "object", "properties": {}}
+        let kernel_workspace = &adapter.runs[&run_digest].record.workspace;
+        let event: CodexEvent = serde_json::from_value(if patch {
+            serde_json::json!({
+                "id": "turn-diagnostic",
+                "msg": {
+                    "type": "apply_patch_approval_request",
+                    "call_id": "patch-cargo",
+                    "turn_id": "turn-diagnostic",
+                    "started_at_ms": 1,
+                    "changes": {kernel_workspace.join("Cargo.toml").to_str().unwrap(): {
+                        "type": "add", "content": "[package]\nname = 'fixture'\n"
+                    }},
+                    "reason": null, "grant_root": null
                 }
-            }
-        }))
+            })
+        } else {
+            serde_json::json!({
+                "id": "turn-diagnostic",
+                "msg": {
+                    "type": "elicitation_request",
+                    "turn_id": "turn-diagnostic",
+                    "server_name": "benchmark_public_smoke",
+                    "id": "mcp_tool_approval_call-public-smoke",
+                    "request": {
+                        "mode": "form",
+                        "_meta": {"codex_approval_kind": "mcp_tool_call"},
+                        "message": "Allow public smoke?",
+                        "requested_schema": {"type": "object", "properties": {}}
+                    }
+                }
+            })
+        })
         .expect("Core MCP permission event");
         adapter
             .accept_polled_event(&run_digest, event, &now)
@@ -9887,17 +9987,23 @@ mod tests {
         assert_eq!(approvals.len(), 1);
         assert_eq!(
             approvals[0].operation_kind,
-            StoredApprovalOperationKind::Mcp
+            if patch {
+                StoredApprovalOperationKind::Patch
+            } else {
+                StoredApprovalOperationKind::Mcp
+            }
         );
-        let callback: serde_json::Value =
-            serde_json::from_str(&approvals[0].operation_id).expect("typed callback");
-        assert_eq!(
-            callback,
-            serde_json::json!([
-                "benchmark_public_smoke",
-                "mcp_tool_approval_call-public-smoke"
-            ])
-        );
+        if !patch {
+            let callback: serde_json::Value =
+                serde_json::from_str(&approvals[0].operation_id).expect("typed callback");
+            assert_eq!(
+                callback,
+                serde_json::json!([
+                    "benchmark_public_smoke",
+                    "mcp_tool_approval_call-public-smoke"
+                ])
+            );
+        }
         let messages = adapter.outbox.pending().expect("durable approval outbox");
         let approval = messages
             .iter()
@@ -9906,16 +10012,37 @@ mod tests {
                 _ => None,
             })
             .expect("MCP permission must reach the product approval path");
-        assert_eq!(approval.action.category, ApprovalActionCategory::Mcp);
+        assert_eq!(
+            approval.action.category,
+            if patch {
+                ApprovalActionCategory::FilesystemWrite
+            } else {
+                ApprovalActionCategory::Mcp
+            }
+        );
         assert_eq!(
             approval
                 .action
                 .sanitized_detail
                 .as_ref()
-                .expect("MCP facts")
+                .expect("permission facts")
                 .reason_code,
-            ApprovalActionReasonCode::McpPermission
+            if patch {
+                ApprovalActionReasonCode::FilesystemWrite
+            } else {
+                ApprovalActionReasonCode::McpPermission
+            }
         );
+        if patch {
+            let detail = approval
+                .action
+                .sanitized_detail
+                .as_ref()
+                .expect("patch facts");
+            assert_eq!(detail.target_summaries, ["create:Cargo.toml"]);
+            assert_eq!(detail.target_count, 1);
+            assert_eq!(detail.working_directory, None);
+        }
         drop(adapter);
         let reopened =
             ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).expect("reopen adapter");
@@ -9926,6 +10053,23 @@ mod tests {
                 .expect("recovered MCP operations"),
             approvals
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn absolute_checkout_patch_permission_retains_decidable_facts() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("test runtime")
+                    .block_on(Box::pin(permission_request_is_retained_body(true)));
+            })
+            .expect("test thread")
+            .join()
+            .expect("absolute patch approval regression");
     }
 
     #[cfg(unix)]
