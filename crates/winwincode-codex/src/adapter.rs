@@ -3889,12 +3889,12 @@ impl ProductionCodexAdapter {
                     .accepted_references(&current)
                     .map_err(map_store_error)?;
                 let run = self.runs.get_mut(&run_key).ok_or_else(unknown_thread)?;
-                run.record.terminal = Some(terminal_from_pending_completion(
+                let terminal = terminal_from_pending_completion(
                     completion,
                     artifacts,
                     terminal_outcome_usage(&self.store, &run_key, &run.record),
-                ));
-                run.record.phase = StoredRunPhase::TerminalTracePending;
+                );
+                set_retained_terminal(&mut run.record, terminal);
                 self.persist_run(&run_key)?;
             }
         }
@@ -3960,12 +3960,12 @@ impl ProductionCodexAdapter {
                     .diagnostic_artifacts
                     .accepted_references(&current)
                     .map_err(map_store_error)?;
-                record.terminal = Some(terminal_from_pending_completion(
+                let terminal = terminal_from_pending_completion(
                     completion,
                     artifacts,
                     terminal_outcome_usage(&self.store, run_key, &record),
-                ));
-                record.phase = StoredRunPhase::TerminalTracePending;
+                );
+                set_retained_terminal(&mut record, terminal);
             }
         }
         self.store
@@ -4835,10 +4835,21 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             .map_err(map_store_error)?;
         if stopped
             && self.runs.get(&run_key).is_some_and(|run| {
-                run.record.terminal.is_some()
-                    || run.record.pending_completion.is_some()
-                    || run.record.final_candidate_freeze.is_some()
-                    || run.record.delegated_stop.is_some()
+                // An accepted cancellation owns the terminal decision, including
+                // its wait for exact diagnostic ACKs. A prior repeat-stop marker
+                // must not restore the failure on the next poll or after reopen.
+                !matches!(run.record.terminal, Some(StoredTerminal::Cancelled { .. }))
+                    && !run
+                        .record
+                        .pending_completion
+                        .as_ref()
+                        .is_some_and(|pending| {
+                            matches!(pending.kind, StoredPendingTerminalKind::Cancelled)
+                        })
+                    && (run.record.terminal.is_some()
+                        || run.record.pending_completion.is_some()
+                        || run.record.final_candidate_freeze.is_some()
+                        || run.record.delegated_stop.is_some())
             })
         {
             return self.poll_infrastructure_terminal(&run_key, now).await;
@@ -5577,14 +5588,20 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             .pending_fusion
             .take()
             .is_some();
-        let session = self.session_for_thread(thread_id)?;
+        let run = self.runs.get(&run_key).ok_or_else(unknown_thread)?;
+        let session = run.record.kernel_session_id.clone();
+        let kernel_live = run.kernel_live;
         // Advance the action-gate generation before awaiting Core.  A receipt
         // that arrives while interrupt is in flight must not authorize a
         // side effect after the caller has cancelled this session.
         self.action_gate
             .cancel_session(&session)
             .map_err(|_| unavailable())?;
-        if !awaiting_panel {
+        // A repeat/infrastructure stop can already have closed this exact
+        // Kernel session while its durable terminal trace is still pending.
+        // Cancel the retained bridge and authority without interrupting a
+        // session that has already been unregistered.
+        if !awaiting_panel && kernel_live {
             self.kernel
                 .interrupt(&session)
                 .await
@@ -5628,8 +5645,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             .map_err(map_store_error)?;
         {
             let run = self.runs.get_mut(&run_key).ok_or_else(unknown_thread)?;
-            run.record.terminal = Some(StoredTerminal::Cancelled { artifacts });
-            run.record.phase = StoredRunPhase::TerminalTracePending;
+            set_retained_terminal(&mut run.record, StoredTerminal::Cancelled { artifacts });
         }
         self.persist_run(&run_key)?;
         let _ = self.retain_performance_baseline_trace(&run_key);
@@ -6054,6 +6070,21 @@ fn terminal_performance_runtime(
                 .as_ref()
                 .map_or(0, |stop| stop.counters.elapsed_millis),
         ))
+}
+
+// A cancellation can supersede a retained stop before its JobOutcome exists.
+// The prior trace remains immutable in runtime replay; the new terminal fact
+// receives its own event identity instead of reusing that trace's bytes.
+fn set_retained_terminal(record: &mut StoredRun, terminal: StoredTerminal) {
+    if record
+        .terminal
+        .as_ref()
+        .is_some_and(|previous| previous.trace_summary() != terminal.trace_summary())
+    {
+        record.terminal_trace = None;
+    }
+    record.terminal = Some(terminal);
+    record.phase = StoredRunPhase::TerminalTracePending;
 }
 
 fn terminal_from_pending_completion(
