@@ -167,8 +167,10 @@ fn resolve_action_authority(
                 .map_err(|_| authority_rejected())?
         }
     };
-    if request.lease != lease_stamp(&authority.lease)
-        || request.worker_session_id != authority.worker_session_id
+    if !winwincode_execution_port::execution_identity::execution_lease_authorizes(
+        &lease_stamp(&authority.lease),
+        &request.lease,
+    ) || request.worker_session_id != authority.worker_session_id
         || request.session_identity != authority.session_identity
         || request.sent_at.0 < authority.lease.issued_at.0
         || request.sent_at.0 >= authority.lease.expires_at.0

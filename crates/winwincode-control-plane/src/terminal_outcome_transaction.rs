@@ -522,7 +522,7 @@ fn validate_message_authority(
         || active.worker_instance_id() != &message.lease.worker_instance_id
         || active.worker_session_id() != &message.worker_session_id
         || facts.authority().issued_at() != &message.lease.issued_at
-        || facts.authority().expires_at() != &message.lease.expires_at
+        || facts.authority().expires_at().0 < message.lease.expires_at.0
         || facts.status() != expected_status
         || metadata.codex_thread_id() != message.outcome.codex_thread_id.as_ref()
         || metadata.finished_at_millis() != message_finished_at

@@ -439,6 +439,10 @@ fn execution_port_fixture(kind: &str) -> ExecutionPortMessage {
 impl CodexCoreAdapter for FakeCodex {
     type Error = ();
 
+    fn renew_lease(&mut self, _lease: &ExecutionLeaseStamp) -> Result<bool, Self::Error> {
+        Ok(true)
+    }
+
     fn ensure_thread(
         &mut self,
         start: CodexThreadStart<'_>,
@@ -4299,7 +4303,10 @@ async fn pending_runtime_and_diagnostic_artifact_flush_after_server_restart_wind
     pump.inject_pending_delivery(diagnostic_chunk);
 
     let first = worker.poll_codex_boxed().await;
-    assert!(first.is_err(), "runtime send must fail while Server is down");
+    assert!(
+        first.is_err(),
+        "runtime send must fail while Server is down"
+    );
     let second = worker.poll_codex_boxed().await;
     assert!(
         second.is_err(),
@@ -4451,5 +4458,85 @@ async fn forward_runtime_trace_retains_and_sends_when_in_memory_job_is_gone() {
                 if event.event.summary.contains("late verification")
         )),
         "late runtime frame must flush after Server returns"
+    );
+}
+
+#[tokio::test]
+async fn lease_renewal_keeps_the_attempt_and_changes_subsequent_heartbeats() {
+    use winwincode_execution_port::generated::{LeaseRenewMessage, LeaseRenewMessageKind};
+    let port = RecordingPort::default();
+    let messages = Rc::clone(&port.messages);
+    let mut worker = test_worker(
+        worker_config(1),
+        port,
+        FakeCodex::with_threads([thread('A')]),
+    );
+    register(&mut worker).await;
+    let dispatch = dispatch('A', product_scope('A'));
+    worker
+        .accept_control(
+            &ExecutionPortMessage::JobDispatchMessage(dispatch.clone()),
+            now(),
+        )
+        .await
+        .expect("dispatch");
+    let mut renewed = dispatch.lease.clone();
+    renewed.expires_at = Instant("2027-01-15T08:10:00.000Z".into());
+    let renewal = LeaseRenewMessage {
+        kind: LeaseRenewMessageKind::LeaseRenew,
+        lease: renewed.clone(),
+        prior_expires_at: dispatch.lease.expires_at.clone(),
+        message_id: ExecutionMessageId(id("xmsg", 'R')),
+        request_id: RequestId(id("req", 'R')),
+        schema_version: SchemaVersion::WinwincodeV1,
+        sent_at: Instant("2027-01-15T08:04:00.000Z".into()),
+    };
+    let after = Instant("2027-01-15T08:06:00.000Z".into());
+    worker
+        .accept_control(
+            &ExecutionPortMessage::LeaseRenewMessage(renewal.clone()),
+            after.clone(),
+        )
+        .await
+        .expect("delayed but still valid renewal");
+    worker
+        .accept_control(
+            &ExecutionPortMessage::LeaseRenewMessage(renewal.clone()),
+            after.clone(),
+        )
+        .await
+        .expect("idempotent redelivery");
+    assert_eq!(worker.active_jobs()[0].lease, renewed);
+    let mut foreign = renewal;
+    foreign.lease.fencing_token = FencingToken("8".into());
+    assert!(
+        worker
+            .accept_control(
+                &ExecutionPortMessage::LeaseRenewMessage(foreign),
+                after.clone()
+            )
+            .await
+            .is_err()
+    );
+    worker
+        .heartbeat(after)
+        .await
+        .expect("heartbeat after old expiry");
+    let messages = messages.borrow();
+    let heartbeat = messages
+        .iter()
+        .rev()
+        .find_map(|message| {
+            if let ExecutionPortMessage::WorkerHeartbeatMessage(heartbeat) = message {
+                Some(heartbeat)
+            } else {
+                None
+            }
+        })
+        .expect("heartbeat");
+    assert_eq!(heartbeat.active_leases[0].expires_at, renewed.expires_at);
+    assert_eq!(
+        heartbeat.active_leases[0].fencing_token,
+        dispatch.lease.fencing_token
     );
 }

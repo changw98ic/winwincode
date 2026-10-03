@@ -66,6 +66,11 @@ CREATE TABLE IF NOT EXISTS occupancy_fencing_tokens (
     last_issued_token INTEGER NOT NULL
         CHECK (last_issued_token >= 0 AND last_issued_token <= 9007199254740991)
 );
+CREATE TABLE IF NOT EXISTS client_occupancy_recovery (
+    occupancy_lease_id TEXT PRIMARY KEY NOT NULL,
+    was_draining INTEGER NOT NULL,
+    started_at TEXT NOT NULL
+);
 ";
 
 /// Lifecycle state of one `ClientOccupancyLease` (contract 4).
@@ -722,9 +727,11 @@ impl<'storage> OccupancyLedger<'storage> {
         &mut self,
         occupancy_lease_id: &str,
         recovery_deadline_at: &Instant,
+        now: &Instant,
     ) -> Result<OccupancyLeaseRecord, OccupancyStoreError> {
         validate_occupancy_lease_id(occupancy_lease_id)?;
         validate_instant(recovery_deadline_at, "recovery deadline")?;
+        validate_instant(now, "recovery start")?;
         let transaction = self.transaction()?;
         let record = require_occupancy_lease(&transaction, occupancy_lease_id)?;
         if record.state == OccupancyLeaseState::RecoveryPending {
@@ -755,6 +762,9 @@ impl<'storage> OccupancyLedger<'storage> {
                 ));
             }
         }
+        transaction.execute("INSERT INTO client_occupancy_recovery (occupancy_lease_id, was_draining, started_at) VALUES (?1, ?2, ?3)
+            ON CONFLICT(occupancy_lease_id) DO UPDATE SET was_draining = excluded.was_draining, started_at = excluded.started_at",
+            params![occupancy_lease_id, record.state == OccupancyLeaseState::Draining, now.0]).map_err(|sql| sql_error(&sql))?;
         let updated = transaction
             .execute(
                 "UPDATE client_occupancy_leases
@@ -838,6 +848,29 @@ impl<'storage> OccupancyLedger<'storage> {
         let updated = require_occupancy_lease(&transaction, occupancy_lease_id)?;
         transaction.commit().map_err(|sql| sql_error(&sql))?;
         Ok(updated)
+    }
+
+    /// Returns the release intent and minimum observation time for recovery.
+    /// Legacy pending rows start a fresh observation window and resume only
+    /// draining, because the previous release intent was not retained.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an unavailable store or corrupt recovery context.
+    pub fn recovery_context(
+        &mut self,
+        lease_id: &str,
+        now: &Instant,
+    ) -> Result<Option<(bool, Instant)>, OccupancyStoreError> {
+        validate_occupancy_lease_id(lease_id)?;
+        validate_instant(now, "recovery observation time")?;
+        let tx = self.transaction()?;
+        tx.execute("INSERT OR IGNORE INTO client_occupancy_recovery (occupancy_lease_id, was_draining, started_at)
+            SELECT occupancy_lease_id, 1, ?2 FROM client_occupancy_leases WHERE occupancy_lease_id = ?1 AND state = 'recovery_pending'", params![lease_id, now.0]).map_err(|sql| sql_error(&sql))?;
+        let context = tx.query_row("SELECT was_draining, started_at FROM client_occupancy_recovery WHERE occupancy_lease_id = ?1", [lease_id],
+            |row| Ok((row.get(0)?, Instant(row.get(1)?)))).optional().map_err(|sql| sql_error(&sql))?;
+        tx.commit().map_err(|sql| sql_error(&sql))?;
+        Ok(context)
     }
 
     /// Releases a `recovery_pending` lease whose recovery window has passed

@@ -12,6 +12,34 @@ use winwincode_domain::{
 
 use crate::generated::JobDispatchMessage;
 
+/// Compares the immutable authority of an execution lease. Renewal may only
+/// extend its deadline; it never changes the attempt, fence or process identity.
+#[must_use]
+pub fn same_execution_lease(
+    left: &crate::generated::ExecutionLeaseStamp,
+    right: &crate::generated::ExecutionLeaseStamp,
+) -> bool {
+    left.job_id == right.job_id
+        && left.lease_id == right.lease_id
+        && left.attempt == right.attempt
+        && left.fencing_token == right.fencing_token
+        && left.worker_id == right.worker_id
+        && left.worker_instance_id == right.worker_instance_id
+        && left.issued_at == right.issued_at
+}
+
+/// Accepts an equal or earlier lease deadline under the current authority.
+/// Receivers must still check trusted time against the current deadline.
+#[must_use]
+pub fn execution_lease_authorizes(
+    current: &crate::generated::ExecutionLeaseStamp,
+    presented: &crate::generated::ExecutionLeaseStamp,
+) -> bool {
+    same_execution_lease(current, presented)
+        && presented.expires_at.0 > presented.issued_at.0
+        && presented.expires_at.0 <= current.expires_at.0
+}
+
 /// Secret-free failure to encode one canonical execution identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ExecutionIdentityError;

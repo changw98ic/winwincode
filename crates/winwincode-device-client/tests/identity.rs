@@ -314,3 +314,72 @@ fn identity_seed_launch_stamp_and_issued_identity_are_validated() {
     store.close().expect("store should close");
     fs::remove_dir_all(root).expect("database directory should be released");
 }
+
+#[test]
+fn rotation_restores_pending_material_and_switches_only_after_matching_confirmation() {
+    use winwincode_device_client::identity::{
+        activate_credential_rotation, load_device_identity, pending_credential_rotation,
+        prepare_credential_rotation,
+    };
+    let root = temporary_directory("rotation-restart");
+    let mut store = DeviceStore::open(&root).expect("store");
+    let identity =
+        ensure_device_identity(&mut store, &seed(), "2026-09-04T00:00:00.000Z").expect("identity");
+    let original = identity.credential().digest().to_owned();
+    let payload = winwincode_client_port::messages::ServerCredentialRotatePayload {
+        command: winwincode_client_port::messages::CommandContext {
+            expected_revision: 0,
+            idempotency_key: "rotate-key-1".into(),
+        },
+        reason: winwincode_client_port::domain::ClientCredentialRotateReason::Scheduled,
+    };
+    prepare_credential_rotation(&mut store, "rotate-1", &payload).expect("prepare");
+    let proposal = pending_credential_rotation(&store)
+        .expect("pending")
+        .expect("proposal");
+    assert_ne!(proposal.credential_digest, original);
+    drop(store);
+    let mut store = DeviceStore::open(&root).expect("restart");
+    prepare_credential_rotation(&mut store, "rotate-1", &payload).expect("replayed downlink");
+    assert_eq!(
+        pending_credential_rotation(&store).expect("pending"),
+        Some(proposal.clone())
+    );
+    assert_eq!(
+        load_device_identity(&store)
+            .expect("identity")
+            .expect("row")
+            .credential()
+            .digest(),
+        original
+    );
+    let mut wrong = proposal.clone();
+    wrong.credential_digest = original;
+    assert!(activate_credential_rotation(&mut store, &wrong, "2026-09-04T00:01:00.000Z").is_err());
+    activate_credential_rotation(&mut store, &proposal, "2026-09-04T00:01:00.000Z")
+        .expect("activate");
+    let after = load_device_identity(&store)
+        .expect("identity")
+        .expect("row");
+    assert_eq!(after.credential().digest(), proposal.credential_digest);
+    prepare_credential_rotation(&mut store, "rotate-1", &payload).expect("late replay");
+    prepare_credential_rotation(&mut store, "rotate-replayed-in-new-frame", &payload)
+        .expect("same key must not rotate again");
+    let mut changed = payload.clone();
+    changed.command.expected_revision = 99;
+    assert!(prepare_credential_rotation(&mut store, "rotate-conflict", &changed).is_err());
+    activate_credential_rotation(&mut store, &proposal, "2026-09-04T00:02:00.000Z")
+        .expect("confirmation replay");
+    assert_eq!(
+        load_device_identity(&store)
+            .expect("identity")
+            .expect("row")
+            .credential(),
+        after.credential()
+    );
+    assert!(
+        pending_credential_rotation(&store)
+            .expect("no pending")
+            .is_none()
+    );
+}

@@ -929,9 +929,12 @@ fn product_interaction_authority(
         || session_identity.product_session_id != job_scope.product_session_id
         || worker_session_id != dispatch.worker_session_id()
         || session_identity.worker_session_id != *worker_session_id
-        || lease != &lease_stamp(dispatch.lease())
+        || !winwincode_execution_port::execution_identity::execution_lease_authorizes(
+            &lease_stamp(dispatch.lease()),
+            lease,
+        )
         || context.server_time().0 < lease.issued_at.0
-        || context.server_time().0 >= lease.expires_at.0
+        || context.server_time().0 >= dispatch.lease().expires_at.0
     {
         return Err(storage_ingress(
             "Worker interaction identity differs from its accepted dispatch",

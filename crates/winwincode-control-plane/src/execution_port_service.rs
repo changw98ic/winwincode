@@ -363,6 +363,42 @@ impl<'storage> ExecutionPortService<'storage> {
         ))
     }
 
+    /// Applies a capability report after joining the current Worker identity.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an unknown instance, invalid capability report, or storage failure.
+    pub fn update_capabilities(
+        &mut self,
+        message: &winwincode_execution_port::generated::WorkerCapabilitiesMessage,
+    ) -> Result<(), ExecutionPortServiceError> {
+        let worker = self
+            .registry()?
+            .load_worker(&message.worker_id)?
+            .ok_or(ExecutionPortServiceError::Protocol("workerId"))?;
+        if message.observed_at.0 > self.server_time.0 || message.observed_at.0 > message.sent_at.0 {
+            return Err(ExecutionPortServiceError::Protocol("observedAt"));
+        }
+        let register = WorkerRegisterMessage {
+            capabilities: message.capabilities.clone(),
+            kind: winwincode_execution_port::generated::WorkerRegisterMessageKind::WorkerRegister,
+            message_id: message.message_id.clone(),
+            request_id: message.request_id.clone(),
+            schema_version: message.schema_version.clone(),
+            sent_at: message.sent_at.clone(),
+            started_at: message.observed_at.clone(),
+            worker_id: message.worker_id.clone(),
+            worker_instance_id: message.worker_instance_id.clone(),
+        };
+        let request = worker_registration_request(
+            &register,
+            worker.authentication_identity,
+            worker.security_zone,
+        )?;
+        self.registry()?.update_worker_capabilities(&request)?;
+        Ok(())
+    }
+
     /// Converts and durably records one Worker heartbeat.
     ///
     /// # Errors
@@ -405,6 +441,116 @@ impl<'storage> ExecutionPortService<'storage> {
             &self.server_time,
             self.heartbeat_interval_ms,
         ))
+    }
+
+    /// Renews only currently accepted attempts before expiry, and replays the
+    /// same persisted command until the heartbeat reports its new deadline.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an invalid server timestamp, corrupt lease, or storage failure.
+    pub fn renew_active_leases(
+        &mut self,
+        message: &WorkerHeartbeatMessage,
+    ) -> Result<Vec<ExecutionPortMessage>, ExecutionPortServiceError> {
+        use sha2::{Digest as _, Sha256};
+        use winwincode_execution_port::generated::{LeaseRenewMessage, LeaseRenewMessageKind};
+        use winwincode_storage::ExecutionLeaseRenewal;
+        let now = self
+            .server_time
+            .0
+            .parse::<jiff::Timestamp>()
+            .map_err(|_| ExecutionPortServiceError::Protocol("serverTime"))?;
+        let mut messages = Vec::new();
+        for summary in &message.active_leases {
+            let Some(authority) = self.registry()?.load_dispatch_authority(&summary.job_id)? else {
+                continue;
+            };
+            let lease = authority.lease();
+            if lease.worker_id != message.worker_id
+                || lease.worker_instance_id != message.worker_instance_id
+                || lease.lease_id != summary.lease_id
+                || lease.fencing_token != summary.fencing_token
+                || i64::try_from(lease.attempt).ok() != Some(summary.attempt)
+                || self.server_time.0 >= lease.expires_at.0
+            {
+                continue;
+            }
+            let prior = self.registry()?.latest_lease_renewal(&lease.lease_id)?;
+            let renewal = if summary.expires_at.0 < lease.expires_at.0 {
+                let Some(prior) = prior else {
+                    continue;
+                };
+                prior
+            } else {
+                if summary.expires_at != lease.expires_at {
+                    continue;
+                }
+                let expires = lease
+                    .expires_at
+                    .0
+                    .parse::<jiff::Timestamp>()
+                    .map_err(|_| ExecutionPortServiceError::Protocol("expiresAt"))?;
+                let start = prior
+                    .as_ref()
+                    .map_or(&lease.issued_at, |renewal| &renewal.sent_at)
+                    .0
+                    .parse::<jiff::Timestamp>()
+                    .map_err(|_| ExecutionPortServiceError::Protocol("issuedAt"))?;
+                let duration = expires.as_millisecond() - start.as_millisecond();
+                if duration <= 0 || expires.as_millisecond() - now.as_millisecond() > duration / 3 {
+                    continue;
+                }
+                let expires = jiff::Timestamp::from_millisecond(
+                    now.as_millisecond()
+                        .checked_add(duration)
+                        .ok_or(ExecutionPortServiceError::Protocol("expiresAt"))?,
+                )
+                .map_err(|_| ExecutionPortServiceError::Protocol("expiresAt"))?;
+                let digest = format!(
+                    "{:x}",
+                    Sha256::digest(
+                        format!("{}:{}", lease.lease_id.0, lease.expires_at.0).as_bytes()
+                    )
+                );
+                let request = ExecutionLeaseRenewal {
+                    expires_at: Instant(format!("{expires:.3}")),
+                    fencing_token: lease.fencing_token.clone(),
+                    job_id: lease.job_id.clone(),
+                    lease_id: lease.lease_id.clone(),
+                    message_id: ExecutionMessageId(format!(
+                        "xmsg_{}",
+                        &digest[..26].to_ascii_uppercase()
+                    )),
+                    request_id: RequestId(format!("req_{}", &digest[..26].to_ascii_uppercase())),
+                    prior_expires_at: lease.expires_at.clone(),
+                    sent_at: self.server_time.clone(),
+                    worker_id: lease.worker_id.clone(),
+                    worker_instance_id: lease.worker_instance_id.clone(),
+                    attempt: lease.attempt,
+                };
+                let receipt = self.registry()?.renew_execution_lease(&request)?;
+                if !matches!(
+                    receipt.status,
+                    LeaseWriteStatus::Accepted | LeaseWriteStatus::Duplicate
+                ) {
+                    continue;
+                }
+                request
+            };
+            let mut stamp = lease_stamp(lease);
+            stamp.expires_at = renewal.expires_at;
+            messages.push(ExecutionPortMessage::LeaseRenewMessage(LeaseRenewMessage {
+                kind: LeaseRenewMessageKind::LeaseRenew,
+                lease: stamp,
+                message_id: renewal.message_id,
+                request_id: renewal.request_id,
+                prior_expires_at: renewal.prior_expires_at,
+                sent_at: renewal.sent_at,
+                schema_version: SchemaVersion::WinwincodeV1,
+            }));
+        }
+        Ok(messages)
     }
 
     /// Claims a durable Job for a registered Worker and builds the exact

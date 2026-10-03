@@ -23,7 +23,10 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 use winwincode_domain::{CodexThreadId, ExecutionMessageId, Instant, ModelExchangeId, RequestId};
 use winwincode_execution_port::{
-    generated::{EncodedPayload, ExecutionPortMessage, ModelChunkMessage, ModelGatewayRoute},
+    generated::{
+        EncodedPayload, ExecutionLeaseStamp, ExecutionPortMessage, ModelChunkMessage,
+        ModelGatewayRoute,
+    },
     replay::{ReplayAuthority, ReplayStreamKey},
     runtime_replay::RuntimeReplayIdentity,
     typed_replay::frame_from_message,
@@ -89,6 +92,31 @@ impl SharedAuthoritySource {
             .read()
             .map(|now| now.clone())
             .map_err(|_| BridgeError::Unavailable)
+    }
+
+    pub(crate) fn renew_lease(&self, lease: &ExecutionLeaseStamp) -> Result<(), BridgeError> {
+        let mut roots = self.write_authorities()?;
+        let mut lineage = self.write_lineage()?;
+        let current = roots
+            .get(&lease.job_id.0)
+            .ok_or(BridgeError::StaleAuthority)?;
+        if !winwincode_execution_port::execution_identity::execution_lease_authorizes(
+            lease,
+            &current.lease,
+        ) {
+            return Err(BridgeError::StaleAuthority);
+        }
+        if let Some(store) = &self.store {
+            store
+                .renew_model_lease(lease)
+                .map_err(|_| BridgeError::Unavailable)?;
+        }
+        for authority in roots.values_mut().chain(lineage.values_mut()) {
+            if authority.lease.job_id == lease.job_id {
+                authority.lease = lease.clone();
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn install(
@@ -279,6 +307,31 @@ impl SharedAuthoritySource {
 }
 
 impl ModelLeaseAuthoritySource for SharedAuthoritySource {
+    fn lease_deadline(
+        &self,
+        authority: &ModelLeaseAuthority,
+    ) -> Result<Instant, ModelAuthorityRejection> {
+        let lineage = self
+            .lineage
+            .read()
+            .map_err(|_| ModelAuthorityRejection::Unavailable)?;
+        let expected = lineage
+            .get(&authority.session_identity.codex_thread_id.0)
+            .cloned()
+            .or(self
+                .load_lineage(&authority.session_identity.codex_thread_id.0)
+                .map_err(|_| ModelAuthorityRejection::Unavailable)?);
+        let expected = expected.ok_or(ModelAuthorityRejection::Unavailable)?;
+        if !winwincode_execution_port::execution_identity::execution_lease_authorizes(
+            &expected.lease,
+            &authority.lease,
+        ) || expected.worker_session_id != authority.worker_session_id
+            || expected.session_identity != authority.session_identity
+        {
+            return Err(ModelAuthorityRejection::StaleLease);
+        }
+        Ok(expected.lease.expires_at)
+    }
     fn validate_current(
         &self,
         authority: &ModelLeaseAuthority,
@@ -298,10 +351,11 @@ impl ModelLeaseAuthoritySource for SharedAuthoritySource {
         let Some(expected) = expected.as_ref() else {
             return Err(ModelAuthorityRejection::Unavailable);
         };
-        if expected != authority
-            || expected.lease.job_id != authority.lease.job_id
-            || expected.session_identity.codex_thread_id
-                != authority.session_identity.codex_thread_id
+        if !winwincode_execution_port::execution_identity::execution_lease_authorizes(
+            &expected.lease,
+            &authority.lease,
+        ) || expected.worker_session_id != authority.worker_session_id
+            || expected.session_identity != authority.session_identity
         {
             return Err(ModelAuthorityRejection::StaleLease);
         }
@@ -312,7 +366,7 @@ impl ModelLeaseAuthoritySource for SharedAuthoritySource {
             .clone()
             .unwrap_or_else(|| now.clone());
         if trusted_now.0 < authority.lease.issued_at.0
-            || trusted_now.0 >= authority.lease.expires_at.0
+            || trusted_now.0 >= expected.lease.expires_at.0
         {
             return Err(ModelAuthorityRejection::ExpiredLease);
         }
@@ -352,7 +406,11 @@ impl ReplayAuthority for SharedAuthoritySource {
             worker_session_id: context.worker_session_id.clone(),
             session_identity: context.session_identity.clone(),
         };
-        if expected != presented
+        if !winwincode_execution_port::execution_identity::execution_lease_authorizes(
+            &expected.lease,
+            &presented.lease,
+        ) || expected.worker_session_id != presented.worker_session_id
+            || expected.session_identity != presented.session_identity
             || context.codex_thread_id != context.session_identity.codex_thread_id
             || expected.session_identity.codex_thread_id != context.codex_thread_id
         {
@@ -646,6 +704,22 @@ impl ExecutionPortModelBridge {
         self.insert_binding(binding, true)
     }
 
+    pub(crate) fn renew_lease(&self, lease: &ExecutionLeaseStamp) -> Result<(), BridgeError> {
+        self.authority.renew_lease(lease)?;
+        // Existing streams retain their immutable wire envelopes. New calls
+        // use the extended authority; both consult the renewed durable clock.
+        let mut bindings = self
+            .bindings
+            .write()
+            .map_err(|_| BridgeError::Unavailable)?;
+        for binding in bindings.values_mut() {
+            if binding.authority.lease.job_id == lease.job_id {
+                binding.authority.lease = lease.clone();
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn install_child_binding(
         &self,
         binding: ModelRunBinding,
@@ -799,10 +873,7 @@ impl ExecutionPortModelBridge {
                         .decode(&payload.data_base64)
                         .map_err(|_| BridgeError::InvalidPayload)?;
                     let text = String::from_utf8(bytes).map_err(|_| BridgeError::InvalidPayload)?;
-                    let _ = self.sink.deliver_item(
-                        &chunk.model_exchange_id,
-                        Ok(text),
-                    );
+                    let _ = self.sink.deliver_item(&chunk.model_exchange_id, Ok(text));
                 }
                 if chunk.is_final {
                     self.record_primary_model_completion(&owner, chunk, received_at)?;
@@ -817,9 +888,7 @@ impl ExecutionPortModelBridge {
                 return Ok(ModelChunkDisposition::Delivered {
                     confirmed_sequence: u64::try_from(chunk.sequence.0)
                         .map_err(|_| BridgeError::InvalidPayload)?,
-                    termination: chunk
-                        .is_final
-                        .then_some(ModelTerminationReason::Completed),
+                    termination: chunk.is_final.then_some(ModelTerminationReason::Completed),
                 });
             }
             return Err(BridgeError::Conflict);
@@ -848,9 +917,7 @@ impl ExecutionPortModelBridge {
                 ModelChunkDisposition::Delivered {
                     confirmed_sequence: u64::try_from(chunk.sequence.0)
                         .map_err(|_| BridgeError::InvalidPayload)?,
-                    termination: chunk
-                        .is_final
-                        .then_some(ModelTerminationReason::Completed),
+                    termination: chunk.is_final.then_some(ModelTerminationReason::Completed),
                 }
             }
             Err(_) => return Err(BridgeError::Protocol),
@@ -934,7 +1001,6 @@ impl ExecutionPortModelBridge {
         // merely because it arrived with the next sequence number.
         if !canonical_instant(received_at)
             || received_at.0 < binding.authority.lease.issued_at.0
-            || received_at.0 >= binding.authority.lease.expires_at.0
             || chunk.lease != binding.authority.lease
             || chunk.worker_session_id != binding.authority.worker_session_id
             || chunk.session_identity != binding.authority.session_identity
@@ -1651,8 +1717,7 @@ fn model_store_failure(error: crate::store::AdapterStoreError) -> ModelPortFailu
 /// Worker stderr redacts credentials; this path records only public envelope
 /// identities and BridgeError codes so verification-exchange resolve/authority
 /// failures remain inspectable after a run.
-static MODEL_INTAKE_LOG_PATH: std::sync::OnceLock<std::path::PathBuf> =
-    std::sync::OnceLock::new();
+static MODEL_INTAKE_LOG_PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
 /// Publishes the Worker-owned durable intake log path for model-bridge
 /// diagnostics. Idempotent; the first path wins.
@@ -2355,8 +2420,10 @@ mod tests {
         let second_call_id = "post-tool-call-2";
         let first_exchange = ModelExchangeId(id("mdl", '1'));
         let second_exchange = ModelExchangeId(id("mdl", '2'));
-        let first_request = json!({"model": "loopback", "input": [{"role": "user", "content": "tool"}]});
-        let second_request = json!({"model": "loopback", "input": [{"role": "user", "content": "after-tool"}]});
+        let first_request =
+            json!({"model": "loopback", "input": [{"role": "user", "content": "tool"}]});
+        let second_request =
+            json!({"model": "loopback", "input": [{"role": "user", "content": "after-tool"}]});
         store
             .claim_model_call(
                 run_key,
@@ -2417,10 +2484,7 @@ mod tests {
                 .await
                 .expect("retain first-call frame");
             assert!(
-                matches!(
-                    disposition,
-                    ModelChunkDisposition::Delivered { .. }
-                ),
+                matches!(disposition, ModelChunkDisposition::Delivered { .. }),
                 "first call frame {sequence} must deliver"
             );
         }
@@ -2465,7 +2529,12 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 2, 3, 4, 5, 6]
         );
-        assert!(second_frames.last().expect("final second-call frame").is_final);
+        assert!(
+            second_frames
+                .last()
+                .expect("final second-call frame")
+                .is_final
+        );
         assert_eq!(
             store
                 .model_call_phase(run_key, second_call_id)
@@ -2889,5 +2958,44 @@ mod tests {
                 .is_ok()
         );
         std::fs::remove_dir_all(root).expect("remove lineage store");
+    }
+
+    #[test]
+    fn renewal_preserves_child_lineage_and_old_streams_across_restart() {
+        let root =
+            std::env::temp_dir().join(format!("winwincode-renew-lineage-{}", uuid::Uuid::now_v7()));
+        let store = AdapterStore::open(&root).expect("store");
+        let source = SharedAuthoritySource::default().with_store(store.clone());
+        let original = authority(&id("cdx", 'R'));
+        source.install("run", original.clone()).expect("root");
+        let mut child = original.clone();
+        child.session_identity.codex_thread_id = CodexThreadId(id("cdx", 'C'));
+        source.install_child("run", child.clone()).expect("child");
+        let mut renewed = original.lease.clone();
+        renewed.expires_at = Instant("2030-01-01T02:00:00.000Z".into());
+        source.renew_lease(&renewed).expect("renew");
+        drop(source);
+        let source = SharedAuthoritySource::default().with_store(store);
+        let after_original_expiry = Instant("2030-01-01T01:30:00.000Z".into());
+        source
+            .validate_current(&child, &after_original_expiry)
+            .expect("old stream remains authorized by renewal");
+        assert_eq!(
+            source.lease_deadline(&child).expect("durable deadline"),
+            renewed.expires_at
+        );
+        let mut foreign = child.clone();
+        foreign.lease.fencing_token = FencingToken("2".into());
+        assert!(
+            source
+                .validate_current(&foreign, &after_original_expiry)
+                .is_err()
+        );
+        assert!(
+            source
+                .validate_current(&child, &renewed.expires_at)
+                .is_err()
+        );
+        std::fs::remove_dir_all(root).expect("cleanup");
     }
 }

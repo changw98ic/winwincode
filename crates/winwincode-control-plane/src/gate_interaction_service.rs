@@ -757,7 +757,7 @@ impl<'storage> GateInteractionService<'storage> {
             || lease.worker_instance_id != authority.runtime.worker_instance_id
             || lease.attempt != authority.runtime.attempt
             || lease.fencing_token != authority.runtime.fencing_token
-            || lease.expires_at != authority.lease_expires_at
+            || lease.expires_at.0 < authority.lease_expires_at.0
         {
             return Err(authority_mismatch(
                 "current Worker slot, lease, fence, or admission does not match",

@@ -522,6 +522,25 @@ impl SqliteStorage {
 }
 
 impl<'storage> DeviceExecutionBindingLedger<'storage> {
+    /// Lists the active reservations that a recovery report must account for.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an invalid node identity, corrupt binding, or storage failure.
+    pub fn active_for_node(
+        &self,
+        client_node_id: &str,
+    ) -> Result<Vec<DeviceExecutionBindingRecord>, DeviceExecutionBindingStoreError> {
+        validate_client_node_id(client_node_id)?;
+        let mut statement = self.connection()?.prepare(
+            &format!("{BINDING_SELECT} WHERE client_node_id = ?1 AND state = 'bound' ORDER BY worker_session_id")
+        ).map_err(|error| sql_error(&error))?;
+        let rows = statement
+            .query_map([client_node_id], binding_row)
+            .map_err(|error| sql_error(&error))?;
+        rows.map(|row| complete_binding(row.map_err(|error| sql_error(&error))?))
+            .collect()
+    }
     fn new(storage: &'storage mut SqliteStorage) -> Result<Self, DeviceExecutionBindingStoreError> {
         // The binding ledger consumes authoritative identity facts: client
         // nodes, worker launch grants, and execution admission reservations.

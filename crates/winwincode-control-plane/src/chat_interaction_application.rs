@@ -1388,7 +1388,7 @@ fn require_current_source(
         || i64::try_from(lease.attempt).ok() != Some(expected.lease.attempt)
         || lease.fencing_token != expected.lease.fencing_token
         || lease.issued_at != expected.lease.issued_at
-        || lease.expires_at != expected.lease.expires_at
+        || lease.expires_at.0 < expected.lease.expires_at.0
     {
         return Err(authority_mismatch(
             "Worker slot, lease, fence, or reservation is no longer current",

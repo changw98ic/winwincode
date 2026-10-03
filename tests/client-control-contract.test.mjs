@@ -308,9 +308,9 @@ test('schemaVersion is the string constant winwincode/v1', () => {
   assert.equal(typeof CLIENT_CONTROL_SCHEMA_VERSION, 'string')
 })
 
-test('kind registries match the schema verbatim: 19 + 14 = 33', () => {
+test('kind registries share command_ack in both directions: 19 + 15 - 1 = 33', () => {
   assert.equal(CLIENT_TO_SERVER_MESSAGE_KINDS.length, 19)
-  assert.equal(SERVER_TO_CLIENT_MESSAGE_KINDS.length, 14)
+  assert.equal(SERVER_TO_CLIENT_MESSAGE_KINDS.length, 15)
   assert.equal(CLIENT_CONTROL_MESSAGE_KINDS.length, 33)
   assert.equal(Object.isFrozen(CLIENT_TO_SERVER_MESSAGE_KINDS), true)
   assert.equal(Object.isFrozen(SERVER_TO_CLIENT_MESSAGE_KINDS), true)
@@ -319,7 +319,7 @@ test('kind registries match the schema verbatim: 19 + 14 = 33', () => {
   const overlap = CLIENT_TO_SERVER_MESSAGE_KINDS.filter(kind => (
     SERVER_TO_CLIENT_MESSAGE_KINDS.includes(kind)
   ))
-  assert.deepEqual(overlap, [])
+  assert.deepEqual(overlap, ['client.command_ack'])
 })
 
 test('exactly 22 command kinds and 11 fenced kinds per the schema', () => {
@@ -646,4 +646,16 @@ test('domain helpers round-trip the schema scalars', () => {
     })),
     'INVALID_VALUE',
   )
+})
+
+test('server command rejection is parsed in both directions', () => {
+  const receipt = {
+    ...envelopeFields('client.command_ack'),
+    commandMessageId: crockfordId('cmsg', 900),
+    commandKind: 'client.repository.upsert',
+    status: 'rejected_revision_conflict',
+    currentRevision: 4,
+    error: { code: 'REVISION_CONFLICT', message: 'Refresh repository revision', retryable: false },
+  }
+  assert.deepEqual(parseServerToClientMessage(receipt), parseClientToServerMessage(receipt))
 })

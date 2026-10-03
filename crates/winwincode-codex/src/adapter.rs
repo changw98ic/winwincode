@@ -2766,8 +2766,10 @@ impl ProductionCodexAdapter {
             .get(&operation.run_key)
             .ok_or_else(unknown_thread)?;
         let authority = &run.binding.authority;
-        if decision.lease != authority.lease
-            || decision.worker_session_id != authority.worker_session_id
+        if !winwincode_execution_port::execution_identity::execution_lease_authorizes(
+            &authority.lease,
+            &decision.lease,
+        ) || decision.worker_session_id != authority.worker_session_id
             || decision.session_identity != authority.session_identity
             || decision.sent_at != decision.decided_at
             || !canonical_instant(&decision.decided_at)
@@ -3173,7 +3175,10 @@ impl ProductionCodexAdapter {
             .iter()
             .find(|(candidate_key, run)| {
                 candidate_key.as_str() == run_key
-                    && run.binding.authority.lease == authority.lease
+                    && winwincode_execution_port::execution_identity::execution_lease_authorizes(
+                        &run.binding.authority.lease,
+                        &authority.lease,
+                    )
                     && run.binding.authority.worker_session_id == authority.worker_session_id
                     && run.binding.authority.session_identity == authority.session_identity
             })
@@ -3303,6 +3308,22 @@ impl ProductionCodexAdapter {
 
 impl CodexCoreAdapter for ProductionCodexAdapter {
     type Error = ProductionCodexError;
+
+    fn renew_lease(
+        &mut self,
+        lease: &winwincode_execution_port::generated::ExecutionLeaseStamp,
+    ) -> Result<bool, Self::Error> {
+        self.bridge.renew_lease(lease).map_err(|_| conflict())?;
+        self.action_gate
+            .renew_lease(lease)
+            .map_err(|_| conflict())?;
+        for run in self.runs.values_mut() {
+            if run.binding.authority.lease.job_id == lease.job_id {
+                run.binding.authority.lease = lease.clone();
+            }
+        }
+        Ok(true)
+    }
 
     fn observe_now(&mut self, now: &Instant) -> Result<(), Self::Error> {
         self.bridge
@@ -4181,8 +4202,10 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             .get(&operation.run_key)
             .ok_or_else(unknown_thread)?;
         let authority = &run.binding.authority;
-        if response.lease != authority.lease
-            || response.worker_session_id != authority.worker_session_id
+        if !winwincode_execution_port::execution_identity::execution_lease_authorizes(
+            &authority.lease,
+            &response.lease,
+        ) || response.worker_session_id != authority.worker_session_id
             || response.session_identity != authority.session_identity
             || response.sent_at != response.responded_at
             || !canonical_instant(&response.responded_at)
@@ -4570,7 +4593,10 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             + usize::from(run.record.final_candidate_freeze.is_some())
             + usize::from(run.record.delegated_stop.is_some());
         if terminal_authorities != 1
-            || outcome.lease != run.binding.authority.lease
+            || !winwincode_execution_port::execution_identity::execution_lease_authorizes(
+                &run.binding.authority.lease,
+                &outcome.lease,
+            )
             || outcome.worker_session_id != run.binding.authority.worker_session_id
             || outcome.session_identity != run.binding.authority.session_identity
             || outcome.outcome.codex_thread_id.as_ref() != Some(thread_id)

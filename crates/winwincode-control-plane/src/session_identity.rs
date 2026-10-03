@@ -249,7 +249,7 @@ fn validate_message_lease_window(
         ));
     }
     if authority.issued_at() != &message.lease.issued_at
-        || authority.expires_at() != &message.lease.expires_at
+        || authority.expires_at().0 < message.lease.expires_at.0
     {
         return Err(SessionIdentityAdapterError::InvalidLeaseWindow(
             "message changed scheduler-owned lease window",

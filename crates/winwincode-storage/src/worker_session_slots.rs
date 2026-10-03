@@ -1437,7 +1437,7 @@ pub(crate) fn require_running_slot_authority(
     require_lease_authority(connection, authority, observed_at)?;
     let lease = load_current_lease(connection, &authority.job_id)?
         .ok_or_else(|| WorkerSlotError::invalid("execution lease does not exist"))?;
-    if lease.issued_at != *lease_issued_at || lease.expires_at != *lease_expires_at {
+    if lease.issued_at != *lease_issued_at || lease.expires_at.0 < lease_expires_at.0 {
         return Err(WorkerSlotError::new(
             WorkerSlotErrorCode::LeaseMismatch,
             "Worker slot lease time does not match durable authority",

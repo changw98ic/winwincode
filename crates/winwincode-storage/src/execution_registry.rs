@@ -63,6 +63,20 @@ CREATE TABLE IF NOT EXISTS execution_worker_registration_receipts (
     response_json TEXT NOT NULL,
     PRIMARY KEY (worker_id, request_id)
 );
+CREATE TABLE IF NOT EXISTS execution_worker_capability_updates (
+    worker_id TEXT NOT NULL,
+    worker_instance_id TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    request_digest TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    PRIMARY KEY (worker_id, request_id)
+);
+CREATE TABLE IF NOT EXISTS execution_lease_renewals (
+    lease_id TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    request_json TEXT NOT NULL,
+    PRIMARY KEY (lease_id, expires_at)
+);
 CREATE TABLE IF NOT EXISTS execution_worker_authenticated_placements (
     worker_id TEXT NOT NULL,
     worker_instance_id TEXT NOT NULL,
@@ -1222,6 +1236,62 @@ impl<'storage> ExecutionRegistry<'storage> {
         Ok(response)
     }
 
+    /// Updates only the capability snapshot of the current registered process.
+    /// Authentication, placement, scope and heartbeat sequence remain canonical.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a stale instance, conflicting report, invalid capacity, or storage failure.
+    pub fn update_worker_capabilities(
+        &mut self,
+        request: &WorkerRegistrationRequest,
+    ) -> Result<(), StorageError> {
+        validate_registration(request)?;
+        let digest = digest(request)?;
+        let tx = self
+            .storage
+            .connection_mut()?
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql_error)?;
+        let worker = load_worker_in_transaction(&tx, &request.worker_id)?
+            .ok_or_else(|| StorageError::invalid_input("Worker is not registered"))?;
+        if worker.worker_instance_id != request.worker_instance_id
+            || worker.authentication_identity != request.authentication_identity
+            || worker.platform != request.platform
+        {
+            return Err(StorageError::invalid_input(
+                "capabilities differ from current Worker authority",
+            ));
+        }
+        let prior: Option<String> = tx.query_row("SELECT request_digest FROM execution_worker_capability_updates WHERE worker_id = ?1 AND request_id = ?2", params![request.worker_id.0, request.request_id.0], |row| row.get(0)).optional().map_err(sql_error)?;
+        if let Some(prior) = prior {
+            if prior != digest {
+                return Err(StorageError::invalid_input(
+                    "capability request identity conflict",
+                ));
+            }
+            return Ok(());
+        }
+        if request.max_slots < worker.running_slots {
+            return Err(StorageError::invalid_input(
+                "capability capacity is below running jobs",
+            ));
+        }
+        let latest: Option<String> = tx.query_row("SELECT MAX(observed_at) FROM execution_worker_capability_updates WHERE worker_id = ?1 AND worker_instance_id = ?2", params![request.worker_id.0, request.worker_instance_id.0], |row| row.get(0)).map_err(sql_error)?;
+        if request.started_at.0 < worker.started_at.0
+            || latest.is_some_and(|latest| request.started_at.0 <= latest)
+        {
+            return Err(StorageError::invalid_input(
+                "capability observation is stale",
+            ));
+        }
+        tx.execute("UPDATE execution_workers SET capabilities = ?1, capability_digest = ?2, max_slots = ?3, available_slots = ?3 - running_slots WHERE worker_id = ?4 AND worker_instance_id = ?5",
+            params![encode_json(&request.capabilities)?, request.capability_digest.0, i64::try_from(request.max_slots).map_err(|_| StorageError::invalid_input("capability slots out of range"))?, request.worker_id.0, request.worker_instance_id.0]).map_err(sql_error)?;
+        tx.execute("INSERT INTO execution_worker_capability_updates (worker_id, worker_instance_id, request_id, request_digest, observed_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![request.worker_id.0, request.worker_instance_id.0, request.request_id.0, digest, request.started_at.0]).map_err(sql_error)?;
+        tx.commit().map_err(sql_error)
+    }
+
     /// Renews one exact current lease without changing its attempt or fence.
     ///
     /// # Errors
@@ -1328,6 +1398,10 @@ impl<'storage> ExecutionRegistry<'storage> {
             ..current
         };
         let response = lease_receipt(LeaseWriteStatus::Accepted, Some(lease.clone()), false);
+        transaction.execute("UPDATE execution_dispatch_authorities SET expires_at = ?1 WHERE job_id = ?2 AND lease_id = ?3 AND fencing_token = ?4",
+            params![request.expires_at.0, request.job_id.0, request.lease_id.0, request.fencing_token.0]).map_err(sql_error)?;
+        transaction.execute("INSERT INTO execution_lease_renewals (lease_id, expires_at, request_json) VALUES (?1, ?2, ?3)",
+            params![request.lease_id.0, request.expires_at.0, encode_json(request)?]).map_err(sql_error)?;
         transaction
             .execute(
                 "UPDATE execution_leases SET expires_at = ?1
@@ -1352,6 +1426,26 @@ impl<'storage> ExecutionRegistry<'storage> {
         )?;
         transaction.commit().map_err(sql_error)?;
         Ok(response)
+    }
+
+    /// Loads the renewal command for reliable re-delivery after response loss.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an unavailable store or corrupt renewal record.
+    pub fn latest_lease_renewal(
+        &self,
+        lease_id: &LeaseId,
+    ) -> Result<Option<ExecutionLeaseRenewal>, StorageError> {
+        let json: Option<String> = self.storage.connection()?.query_row(
+            "SELECT request_json FROM execution_lease_renewals WHERE lease_id = ?1 ORDER BY expires_at DESC LIMIT 1",
+            [&lease_id.0], |row| row.get(0),
+        ).optional().map_err(sql_error)?;
+        json.map(|json| {
+            serde_json::from_str(&json)
+                .map_err(|_| StorageError::adapter("invalid persisted lease renewal"))
+        })
+        .transpose()
     }
 
     /// Marks an exact fenced lease attempt terminal while retaining its
@@ -2231,7 +2325,7 @@ pub(crate) fn record_dispatch_result_in_transaction(
         || request.attempt != current.attempt
         || request.fencing_token != current.fencing_token
         || request.issued_at != current.issued_at
-        || request.expires_at != current.expires_at
+        || request.expires_at.0 > current.expires_at.0
     {
         return Ok(dispatch_result_rejection(
             DispatchResultStatus::Conflict,

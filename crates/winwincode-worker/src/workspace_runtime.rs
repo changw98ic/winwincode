@@ -2205,7 +2205,10 @@ impl JobWorkspaceRuntime {
         if active.lifecycle != ActiveJobLifecycle::Running
             || !same_authority(workspace.provenance(), active)
             || !same_change_batch_identity_lease_authority(&intent.identity, active)
-            || chunk.lease != active.lease
+            || !winwincode_execution_port::execution_identity::execution_lease_authorizes(
+                &active.lease,
+                &chunk.lease,
+            )
             || chunk.session_identity != active.session_identity
             || chunk.worker_session_id != active.worker_session_id
             || (!terminal_replay

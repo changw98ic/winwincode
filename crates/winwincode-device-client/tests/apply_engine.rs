@@ -1444,6 +1444,7 @@ fn daemon_applies_the_complete_reworked_candidate_from_its_downlink() {
                 }),
             };
             Ok(serde_json::to_vec(&ExchangeResponse {
+                credential_rotation: None,
                 schema_version: "winwincode/v1".into(),
                 ack_sequence: request.frames.last().unwrap()["sequence"].as_u64().unwrap(),
                 replay_from_sequence: None,

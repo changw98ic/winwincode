@@ -238,6 +238,29 @@ fn initialize_performance_schema(connection: &Connection) -> Result<(), AdapterS
     Ok(())
 }
 impl AdapterStore {
+    pub(crate) fn renew_model_lease(
+        &self,
+        lease: &winwincode_execution_port::generated::ExecutionLeaseStamp,
+    ) -> Result<(), AdapterStoreError> {
+        self.transaction(|tx| {
+            let rows = {
+                let mut statement = tx.prepare("SELECT thread_id, authority_json FROM model_thread_lineage WHERE json_extract(authority_json, '$.lease.jobId') = ?1").map_err(|_| AdapterStoreError::Unavailable)?;
+                statement.query_map([&lease.job_id.0], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)))
+                    .map_err(|_| AdapterStoreError::Unavailable)?.collect::<Result<Vec<_>, _>>().map_err(|_| AdapterStoreError::Unavailable)?
+            };
+            if rows.is_empty() { return Err(AdapterStoreError::Conflict); }
+            for (thread_id, bytes) in rows {
+                let mut authority: ModelLeaseAuthority = serde_json::from_slice(&bytes).map_err(|_| AdapterStoreError::Corrupt)?;
+                if !winwincode_execution_port::execution_identity::execution_lease_authorizes(lease, &authority.lease) {
+                    return Err(AdapterStoreError::Conflict);
+                }
+                authority.lease = lease.clone();
+                tx.execute("UPDATE model_thread_lineage SET authority_json = ?1 WHERE thread_id = ?2",
+                    params![serde_json::to_vec(&authority).map_err(|_| AdapterStoreError::Corrupt)?, thread_id]).map_err(|_| AdapterStoreError::Unavailable)?;
+            }
+            Ok(())
+        })
+    }
     pub(crate) fn open(root: &Path) -> Result<Self, AdapterStoreError> {
         std::fs::create_dir_all(root).map_err(|_| AdapterStoreError::Unavailable)?;
         restrict_directory(root)?;

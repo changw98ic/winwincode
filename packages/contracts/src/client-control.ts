@@ -1738,8 +1738,9 @@ export interface ClientToServerMessageByKind {
   'client.command_ack': ClientCommandAckMessage
 }
 
-/** Kind → message mapping for the Server → Client direction (11 kinds). */
+/** Kind → message mapping for the Server → Client direction. */
 export interface ServerToClientMessageByKind {
+  'client.command_ack': ClientCommandAckMessage
   'client.repository.register': ClientRepositoryRegisterMessage
   'client.provider.apply': ClientProviderApplyMessage
   'client.extension.apply': ClientExtensionApplyMessage
@@ -1800,6 +1801,7 @@ export const SERVER_TO_CLIENT_MESSAGE_KINDS = Object.freeze([
   'client.candidate.apply',
   'client.client_lock',
   'client.credential_rotate',
+  'client.command_ack',
   'client.provider.apply',
   'client.extension.apply',
   'client.repository.register',
@@ -1807,8 +1809,7 @@ export const SERVER_TO_CLIENT_MESSAGE_KINDS = Object.freeze([
 
 /** Every ClientControlPort message kind, in schema ClientControlMessageKind order. */
 export const CLIENT_CONTROL_MESSAGE_KINDS = Object.freeze([
-  ...CLIENT_TO_SERVER_MESSAGE_KINDS,
-  ...SERVER_TO_CLIENT_MESSAGE_KINDS,
+  ...new Set([...CLIENT_TO_SERVER_MESSAGE_KINDS, ...SERVER_TO_CLIENT_MESSAGE_KINDS]),
 ] as const)
 
 /**
@@ -2853,6 +2854,8 @@ function parseServerToClientByKind(
   path: string,
 ): ServerToClientMessage {
   switch (kind) {
+    case 'client.command_ack':
+      return parseClientCommandAckMessage(input, path)
     case 'client.enrollment_accepted':
       return parseClientEnrollmentAcceptedMessage(input, path)
     case 'client.access.challenge':
@@ -2894,7 +2897,7 @@ export function parseClientToServerMessage(
   return parseClientToServerByKind(kind, input, path)
 }
 
-/** Parse and validate one Server → Client message (11 kinds). */
+/** Parse and validate one Server → Client message. */
 export function parseServerToClientMessage(
   value: unknown,
   path = 'serverToClientMessage',

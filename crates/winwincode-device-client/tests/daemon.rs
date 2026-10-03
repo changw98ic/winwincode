@@ -339,6 +339,7 @@ impl ServerSim {
             }
         }
         let response = ExchangeResponse {
+            credential_rotation: None,
             schema_version: CLIENT_CONTROL_PORT_SCHEMA_VERSION.to_owned(),
             ack_sequence: ack,
             replay_from_sequence: gap_response.then_some(1),
@@ -1022,4 +1023,89 @@ fn graceful_shutdown_keeps_taken_frames_durable() {
 
     daemon.into_store().close().expect("store close");
     cleanup(&root);
+}
+
+struct LockCommandTransport {
+    server: Arc<ServerSim>,
+}
+impl ExchangeTransport for LockCommandTransport {
+    fn exchange(
+        &self,
+        credential: Option<&str>,
+        bytes: &[u8],
+    ) -> Result<Vec<u8>, ExchangeTransportError> {
+        let request: ExchangeRequest = serde_json::from_slice(bytes).expect("request");
+        let mut response: ExchangeResponse =
+            serde_json::from_slice(&self.server.exchange(credential, bytes)?).expect("response");
+        if response.enrollment.is_none() && request.ack_sequence < 2 {
+            response.frames.push(
+                serde_json::to_value(ServerToClientEnvelope {
+                    schema_version: CLIENT_CONTROL_PORT_SCHEMA_VERSION.into(),
+                    message_id: "msg_lock_crash".into(),
+                    client_node_id: ASSIGNED_NODE.into(),
+                    client_instance_id: request.frames.last().expect("frame")["clientInstanceId"]
+                        .as_str()
+                        .expect("instance")
+                        .into(),
+                    sequence: 2,
+                    occurred_at: "2026-09-04T00:00:00.000Z".into(),
+                    message: ServerToClientMessage::ClientLock(
+                        winwincode_client_port::messages::ServerClientLockPayload {
+                            command: winwincode_client_port::messages::CommandContext {
+                                expected_revision: 0,
+                                idempotency_key: "lock-crash".into(),
+                            },
+                            lock_state: ClientLockState::Locked,
+                        },
+                    ),
+                })
+                .expect("downlink"),
+            );
+        }
+        Ok(serde_json::to_vec(&response).expect("response"))
+    }
+}
+
+#[test]
+fn a_failed_downlink_effect_is_not_acknowledged_and_is_replayed_after_restart() {
+    let root = temporary_directory("downlink-effect-before-ack");
+    let (store, identity) = open_identity(&root);
+    let database = store.database_path().to_owned();
+    let config = daemon_config("effect-before-ack");
+    let transport = Arc::new(LockCommandTransport {
+        server: Arc::new(ServerSim::new()),
+    });
+    let mut daemon =
+        DeviceDaemon::start(config.clone(), store, transport.clone(), &identity).expect("daemon");
+    let now = Instant::now();
+    daemon.tick(now).expect("enrollment");
+    let connection = rusqlite::Connection::open(&database).expect("fault connection");
+    connection.execute_batch("CREATE TRIGGER fail_policy BEFORE INSERT ON client_connection_policy BEGIN SELECT RAISE(FAIL, 'injected policy write failure'); END;").expect("inject failure");
+    assert!(daemon.tick(now + Duration::from_millis(20)).is_err());
+    let cursor: i64 = connection
+        .query_row(
+            "SELECT last_sequence FROM client_inbox_cursor WHERE server_profile_id = ?1",
+            [&config.server_profile_id],
+            |row| row.get(0),
+        )
+        .expect("cursor");
+    assert_eq!(
+        cursor, 1,
+        "an unexecuted command must remain below the ACK cursor"
+    );
+    drop(daemon);
+    connection
+        .execute_batch("DROP TRIGGER fail_policy;")
+        .expect("restore storage");
+    drop(connection);
+    let (store, identity) = open_identity(&root);
+    let mut daemon = DeviceDaemon::start(config, store, transport, &identity).expect("restart");
+    daemon
+        .tick(Instant::now() + Duration::from_secs(1))
+        .expect("replay pending command");
+    assert_eq!(
+        daemon.connection_policy().expect("policy").lock_state,
+        ClientLockState::Locked
+    );
+    assert_eq!(daemon.status().downlink_accepted_through, 2);
 }

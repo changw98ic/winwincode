@@ -70,7 +70,6 @@ use winwincode_client_port::domain::RepositoryDirtyState as WireRepositoryDirtyS
 use winwincode_client_port::domain::WorkerLaunchAckStatus;
 use winwincode_client_port::exchange::AckCursor;
 use winwincode_client_port::exchange::CommandIdentity;
-use winwincode_client_port::exchange::CommandOutcome;
 use winwincode_client_port::exchange::DEFAULT_MAX_FRAME_BYTES;
 use winwincode_client_port::exchange::DedupRegister;
 use winwincode_client_port::exchange::DedupVerdict;
@@ -203,6 +202,12 @@ pub enum ClientExchangeErrorKind {
     InvalidRequest,
     /// Durable state or storage failed; the exchange was not applied.
     Unavailable,
+    /// A command was rejected; persist a negative receipt before acknowledging it.
+    CommandRejected {
+        status: winwincode_client_port::domain::CommandAckStatus,
+        code: winwincode_client_port::domain::ClientControlErrorCode,
+        current_revision: Option<u64>,
+    },
 }
 
 /// Secret-free exchange failure.
@@ -247,6 +252,7 @@ impl fmt::Display for ClientExchangeError {
             ClientExchangeErrorKind::Authentication => "device credential authentication failed",
             ClientExchangeErrorKind::InvalidRequest => "client exchange request is invalid",
             ClientExchangeErrorKind::Unavailable => "client exchange storage is unavailable",
+            ClientExchangeErrorKind::CommandRejected { .. } => "client command was rejected",
         };
         formatter.write_str(reason)
     }
@@ -313,6 +319,7 @@ pub struct ClientExchangeApplication {
     data_directory: PathBuf,
     config: ClientExchangeConfig,
     worker_credentials: Arc<Mutex<Vec<WorkerCredentialDelivery>>>,
+    exchange_lock: Arc<Mutex<()>>,
 }
 
 impl ClientExchangeApplication {
@@ -334,6 +341,7 @@ impl ClientExchangeApplication {
             data_directory: data_directory.into(),
             config,
             worker_credentials: Arc::new(Mutex::new(Vec::new())),
+            exchange_lock: Arc::new(Mutex::new(())),
         })
     }
 
@@ -344,6 +352,10 @@ impl ClientExchangeApplication {
         request_body: &[u8],
         now: &Instant,
     ) -> Result<ExchangeResponseBody, ClientExchangeError> {
+        let _exchange_guard = self
+            .exchange_lock
+            .lock()
+            .map_err(|_| ClientExchangeError::unavailable())?;
         let request = parse_request(request_body)?;
         let codec = FrameCodec::new(self.config.max_frame_bytes);
         let envelopes = decode_frames(&codec, &request, self.config.max_frames_per_exchange)?;
@@ -375,7 +387,7 @@ impl ClientExchangeApplication {
                     .and_then(decode_credential_secret)
                     .as_ref(),
                 &envelopes,
-                request.ack_sequence,
+                &request,
                 now,
             ),
         };
@@ -529,7 +541,7 @@ impl ClientExchangeApplication {
                 .map_err(|_| ClientExchangeError::invalid_request())?;
             let command = command_identity(&envelope.message, &identity.payload_digest);
             match settler.ingest(instance, &identity, command.as_ref()) {
-                BatchOutcome::Accepted { .. } => {}
+                BatchOutcome::Accepted => {}
                 BatchOutcome::Gap {
                     replay_from_sequence,
                 } => {
@@ -601,6 +613,7 @@ impl ClientExchangeApplication {
         }
 
         Ok(ExchangeResponseBody {
+            credential_rotation: None,
             schema_version: CLIENT_CONTROL_PORT_SCHEMA_VERSION.to_owned(),
             ack_sequence,
             replay_from_sequence: replay_hint,
@@ -629,9 +642,11 @@ impl ClientExchangeApplication {
         node_id: &str,
         secret: Option<&[u8; 32]>,
         envelopes: &[ClientToServerEnvelope],
-        client_ack: u64,
+        request: &ExchangeRequestBody,
         now: &Instant,
     ) -> Result<ExchangeResponseBody, ClientExchangeError> {
+        let client_ack = request.ack_sequence;
+        let rotation = request.credential_rotation.as_ref();
         let Some(secret) = secret else {
             return Err(ClientExchangeError::authentication());
         };
@@ -650,10 +665,17 @@ impl ClientExchangeApplication {
         let Some(stored_digest) = record.device_credential_digest.as_deref() else {
             return Err(ClientExchangeError::authentication());
         };
-        if !credential_digest_matches(secret, stored_digest) {
+        if record.presence_state == ClientPresenceState::Revoked {
             return Err(ClientExchangeError::authentication());
         }
-        if record.presence_state == ClientPresenceState::Revoked {
+        if !credential_digest_matches(secret, stored_digest)
+            && !storage
+                .client_node_registry()
+                .and_then(|mut registry| {
+                    registry.activate_credential_rotation(node_id, &credential_digest(secret))
+                })
+                .map_err(|_| ClientExchangeError::unavailable())?
+        {
             return Err(ClientExchangeError::authentication());
         }
         let cursors = {
@@ -666,6 +688,9 @@ impl ClientExchangeApplication {
         let outbox_high_water = outbox_high_water_or_unavailable(storage, node_id)?;
         if client_ack > cursors.server_to_client_ack_sequence.max(outbox_high_water) {
             return Err(ClientExchangeError::invalid_request());
+        }
+        if let Some(rotation) = rotation {
+            stage_credential_rotation(storage, node_id, rotation)?;
         }
         let effective_instance = record
             .current_instance_id
@@ -688,25 +713,69 @@ impl ClientExchangeApplication {
                 // superseded) before the frame is judged, so the guard
                 // accepts the new instance and later old-instance frames are
                 // refused as reacquire-required.
-                supersede_instance(storage, &record, envelope, now);
+                supersede_instance(storage, &record, envelope, now)?;
                 settler.take_over_instance(&envelope.client_instance_id);
             }
             let identity = FrameCodec::envelope_identity(envelope)
                 .map_err(|_| ClientExchangeError::invalid_request())?;
             let command = command_identity(&envelope.message, &identity.payload_digest);
             match settler.ingest(&envelope.client_instance_id, &identity, command.as_ref()) {
-                BatchOutcome::Accepted {
-                    command: CommandOutcome::Fresh,
-                } => {
-                    apply_effect_with_status(
-                        storage,
-                        &self.data_directory,
-                        node_id,
-                        envelope,
-                        now,
-                    )?;
+                BatchOutcome::Accepted | BatchOutcome::Duplicate => {
+                    let mut reply = None;
+                    let key = command
+                        .as_ref()
+                        .map(|identity| identity.idempotency_key.as_str());
+                    let completed = storage
+                        .client_node_registry()
+                        .and_then(|mut registry| {
+                            registry.reserve_exchange_frame(
+                                node_id,
+                                envelope.sequence,
+                                &envelope.message_id,
+                                &identity.payload_digest,
+                                key,
+                            )
+                        })
+                        .map_err(|error| match error.kind() {
+                            winwincode_storage::ClientRegistryErrorKind::IdentityConflict => {
+                                ClientExchangeError::invalid_request()
+                            }
+                            _ => ClientExchangeError::unavailable(),
+                        })?;
+                    if !completed && envelope.sequence > cursors.client_to_server_ack_sequence {
+                        let result = apply_effect_with_status(
+                            storage,
+                            &self.data_directory,
+                            node_id,
+                            envelope,
+                            now,
+                        );
+                        match result {
+                            Err(error)
+                                if matches!(
+                                    error.kind,
+                                    ClientExchangeErrorKind::CommandRejected { .. }
+                                ) && key.is_some() =>
+                            {
+                                reply = Some(command_rejection_reply(
+                                    storage, node_id, envelope, error, now,
+                                )?);
+                            }
+                            result => result?,
+                        }
+                    }
+                    storage
+                        .client_node_registry()
+                        .and_then(|mut registry| {
+                            registry.complete_exchange_frame_with_reply(
+                                node_id,
+                                envelope.sequence,
+                                key,
+                                reply.as_ref().map(|reply| (reply, now)),
+                            )
+                        })
+                        .map_err(|_| ClientExchangeError::unavailable())?;
                 }
-                BatchOutcome::Accepted { .. } | BatchOutcome::Duplicate => {}
                 BatchOutcome::Gap {
                     replay_from_sequence,
                 } => {
@@ -754,6 +823,7 @@ impl ClientExchangeApplication {
             frames,
             enrollment: None,
             worker_credentials,
+            credential_rotation: rotation.cloned(),
         })
     }
 
@@ -832,9 +902,8 @@ fn cursors_or_unavailable(
 /// outcome stops the batch with an unchanged acknowledgement, and only a
 /// gap carries the replay hint upward into the response.
 enum BatchOutcome {
-    /// The frame was accepted; `command` says whether an attached command is
-    /// fresh or an idempotent replay.
-    Accepted { command: CommandOutcome },
+    /// The frame was accepted; durable receipts decide whether to apply it.
+    Accepted,
     /// The frame replayed an already accepted position; confirm it without
     /// executing again.
     Duplicate,
@@ -901,14 +970,11 @@ impl BatchSettler {
                 DedupVerdict::Duplicate | DedupVerdict::New => BatchOutcome::Duplicate,
             },
             SequenceVerdict::Accept => {
-                let command_outcome = match command {
-                    None => CommandOutcome::Fresh,
-                    Some(command) => match self.dedup.check_command(command) {
-                        DedupVerdict::Conflict => return BatchOutcome::Refused,
-                        DedupVerdict::Duplicate => CommandOutcome::IdempotentReplay,
-                        DedupVerdict::New => CommandOutcome::Fresh,
-                    },
-                };
+                if command.is_some_and(|command| {
+                    self.dedup.check_command(command) == DedupVerdict::Conflict
+                }) {
+                    return BatchOutcome::Refused;
+                }
                 if self.dedup.check_frame(identity) == DedupVerdict::Conflict {
                     return BatchOutcome::Refused;
                 }
@@ -917,9 +983,7 @@ impl BatchSettler {
                     self.dedup.record_command(command);
                 }
                 let _ = self.ack.advance(identity.sequence);
-                BatchOutcome::Accepted {
-                    command: command_outcome,
-                }
+                BatchOutcome::Accepted
             }
         }
     }
@@ -955,10 +1019,19 @@ impl ClientExchangePort for ClientExchangeApplication {
             .map_err(|_| ClientExchangeError::unavailable())?
             .ok_or_else(ClientExchangeError::authentication)?;
         let accepted = record.presence_state != ClientPresenceState::Revoked
-            && record
+            && (record
                 .device_credential_digest
                 .as_deref()
-                .is_some_and(|digest| credential_digest_matches(&secret, digest));
+                .is_some_and(|digest| credential_digest_matches(&secret, digest))
+                || storage
+                    .client_node_registry()
+                    .and_then(|mut registry| {
+                        registry.activate_credential_rotation(
+                            client_node_id,
+                            &credential_digest(&secret),
+                        )
+                    })
+                    .map_err(|_| ClientExchangeError::unavailable())?);
         Box::new(storage)
             .close()
             .map_err(|_| ClientExchangeError::unavailable())?;
@@ -1000,6 +1073,8 @@ impl ClientExchangePort for ClientExchangeApplication {
 /// contiguous acknowledgement of the Server → Client stream.
 #[derive(Debug, Deserialize)]
 struct ExchangeRequestBody {
+    #[serde(rename = "credentialRotation", default)]
+    credential_rotation: Option<winwincode_client_port::messages::DeviceCredentialRotation>,
     #[serde(rename = "schemaVersion")]
     schema_version: String,
     #[serde(default)]
@@ -1011,6 +1086,8 @@ struct ExchangeRequestBody {
 /// Encoded exchange response body.
 #[derive(Debug, Serialize)]
 struct ExchangeResponseBody {
+    #[serde(rename = "credentialRotation", skip_serializing_if = "Option::is_none")]
+    credential_rotation: Option<winwincode_client_port::messages::DeviceCredentialRotation>,
     #[serde(rename = "schemaVersion")]
     schema_version: String,
     #[serde(rename = "ackSequence")]
@@ -1165,13 +1242,19 @@ fn command_identity(
     Some(CommandIdentity::new(key.clone(), payload_digest))
 }
 
-/// Applies the kind-specific effect of one freshly accepted frame. Effects
-/// are report facts: a refused projection (illegal transition, lost revision
-/// race, unknown challenge) changes no frame settlement. The occupancy
-/// mirror-revision facts (ack mirror revision, rejection current revision,
-/// release/force-fence effective revision) feed the Server's durable view
-/// the occupancy downlink stamps are computed against.
-#[allow(clippy::too_many_lines)]
+// Presence reports may race the state machine, but storage failures must
+// never be converted into a successful transport acknowledgement.
+fn require_durable_presence(
+    error: &winwincode_control_plane::ClientRegistryServiceError,
+) -> Result<(), ClientExchangeError> {
+    use winwincode_control_plane::ClientRegistryServiceErrorKind;
+    match error.kind() {
+        ClientRegistryServiceErrorKind::PresenceTransition
+        | ClientRegistryServiceErrorKind::RevisionConflict => Ok(()),
+        _ => Err(ClientExchangeError::unavailable()),
+    }
+}
+
 #[cfg(test)]
 fn apply_effect(
     storage: &mut SqliteStorage,
@@ -1195,6 +1278,9 @@ fn apply_effect_with_status(
         ClientToServerMessage::WorkerState(payload) => {
             settle_worker_exit(storage, node_id, payload, now)
         }
+        ClientToServerMessage::WorkerReconcile(payload) => {
+            settle_worker_reconciliation(storage, node_id, payload, &envelope.occurred_at, now)
+        }
         ClientToServerMessage::RepositoryRegistered { receipt } => {
             crate::device_providers::observe_repository_registration(storage, node_id, receipt)
                 .map_err(|_| ClientExchangeError::unavailable())
@@ -1212,17 +1298,16 @@ fn apply_effect_with_status(
                 .snapshot(node_id)
                 .map_err(|_| ClientExchangeError::unavailable())?;
             if let Some(record) = record {
-                supersede_instance(storage, &record, envelope, now);
+                supersede_instance(storage, &record, envelope, now)?;
             }
             let mut registry = ClientRegistryService::new(storage);
             if let Some(target) = presence_target(payload.presence_state)
                 && let Some(record) = registry
                     .snapshot(node_id)
                     .map_err(|_| ClientExchangeError::unavailable())?
+                && let Err(error) = registry.update_presence(node_id, target, record.revision)
             {
-                // Illegal transitions and revision races are ignored
-                // report facts; the next hello or heartbeat re-reports.
-                let _ = registry.update_presence(node_id, target, record.revision);
+                require_durable_presence(&error)?;
             }
             Ok(())
         }
@@ -1233,22 +1318,28 @@ fn apply_effect_with_status(
                 .map_err(|_| ClientExchangeError::unavailable())?
             {
                 // `pending_enrollment` and `revoked` nodes refuse heartbeats.
-                let _ = registry.heartbeat(
+                if let Err(error) = registry.heartbeat(
                     node_id,
                     payload.capacity.running_worker_sessions,
                     now,
                     record.revision,
-                );
+                ) {
+                    require_durable_presence(&error)?;
+                }
             }
             // Drain automation (plan 12.4): a `draining` lease releases once
             // the device reports no running worker session. A refused
             // judgement is an ignored report fact.
             if payload.capacity.running_worker_sessions == 0 {
                 let mut occupancy = ClientOccupancyService::new(storage);
-                if let Ok(Some(lease)) = occupancy.active_lease_for_node(node_id)
+                if let Some(lease) = occupancy
+                    .active_lease_for_node(node_id)
+                    .map_err(|_| ClientExchangeError::unavailable())?
                     && lease.state == OccupancyLeaseState::Draining
                 {
-                    let _ = occupancy.drain_complete(&lease.occupancy_lease_id);
+                    occupancy
+                        .drain_complete(&lease.occupancy_lease_id)
+                        .map_err(|_| ClientExchangeError::unavailable())?;
                 }
             }
             Ok(())
@@ -1263,7 +1354,7 @@ fn apply_effect_with_status(
                 Instant(payload.expires_at.clone()),
                 payload.remaining_attempts,
             ) else {
-                return Ok(());
+                return Err(rejected_command(None));
             };
             let mut connect = ConnectCodeService::new(storage);
             match connect
@@ -1273,18 +1364,29 @@ fn apply_effect_with_status(
                 None if payload.generation == 1 => {
                     connect
                         .publish(&publication, now)
-                        .map_err(|_| ClientExchangeError::unavailable())?;
+                        .map_err(|error| domain_command_error(matches!(error.kind(),
+                            winwincode_control_plane::ClientConnectServiceErrorKind::Storage
+                            | winwincode_control_plane::ClientConnectServiceErrorKind::CorruptState)))?;
                 }
-                Some(current) if current.connect_code_id == payload.connect_code_id => {}
+                Some(current) if current.connect_code_id == payload.connect_code_id => {
+                    if current.code_digest != payload.code_digest
+                        || current.generation != payload.generation
+                        || current.expires_at.0 != payload.expires_at
+                    {
+                        return Err(rejected_command(None));
+                    }
+                }
                 Some(current) if payload.generation == current.generation + 1 => {
                     let revocation =
                         ConnectCodeRevocation::try_new(current.connect_code_id, current.revision)
                             .map_err(|_| ClientExchangeError::unavailable())?;
                     connect
                         .refresh_code(&revocation, &publication, now)
-                        .map_err(|_| ClientExchangeError::unavailable())?;
+                        .map_err(|error| domain_command_error(matches!(error.kind(),
+                            winwincode_control_plane::ClientConnectServiceErrorKind::Storage
+                            | winwincode_control_plane::ClientConnectServiceErrorKind::CorruptState)))?;
                 }
-                None | Some(_) => return Ok(()),
+                None | Some(_) => return Err(rejected_command(None)),
             }
             Ok(())
         }
@@ -1298,18 +1400,26 @@ fn apply_effect_with_status(
                 ClientChallengeAckStatus::StaleGeneration => ConnectChallengeVerdict::Rejected,
             };
             let mut connect = ConnectCodeService::new(storage);
-            let _ = connect.settle_challenge(
-                &payload.challenge_id,
-                node_id,
-                &payload.connect_code_id,
-                verdict,
-                now,
-            );
+            connect
+                .settle_challenge(
+                    &payload.challenge_id,
+                    node_id,
+                    &payload.connect_code_id,
+                    verdict,
+                    now,
+                )
+                .map_err(|error| {
+                    domain_command_error(matches!(
+                        error.kind(),
+                        winwincode_control_plane::ClientConnectServiceErrorKind::Storage
+                            | winwincode_control_plane::ClientConnectServiceErrorKind::CorruptState
+                    ))
+                })?;
             Ok(())
         }
         ClientToServerMessage::RepositoryUpsert(payload) => {
             let repository = &payload.repository;
-            let Ok(projection) = RepositoryBindingProjection::try_new(
+            let projection = RepositoryBindingProjection::try_new(
                 repository.repository_binding_id.clone(),
                 node_id,
                 repository.display_name.clone(),
@@ -1318,18 +1428,23 @@ fn apply_effect_with_status(
                 repository_dirty_state(repository.dirty_state),
                 repository_availability(repository.availability),
                 repository.repository_fingerprint.clone(),
-            ) else {
-                return Ok(());
-            };
+            )
+            .map_err(|_| rejected_command(None))?;
             let binding_id = repository.repository_binding_id.clone();
             let binding_exists = {
                 let mut bindings = RepositoryBindingService::new(storage);
-                let _ = bindings.upsert(
-                    &projection,
-                    Some(&Instant(repository.last_scanned_at.clone())),
-                    payload.command.expected_revision,
-                    now,
-                );
+                let current_revision = bindings
+                    .snapshot(&binding_id)
+                    .map_err(|_| ClientExchangeError::unavailable())?
+                    .map(|record| record.revision);
+                bindings
+                    .upsert(
+                        &projection,
+                        Some(&Instant(repository.last_scanned_at.clone())),
+                        payload.command.expected_revision,
+                        now,
+                    )
+                    .map_err(|error| repository_command_error(&error, current_revision))?;
                 bindings
                     .snapshot(&binding_id)
                     .map_err(|_| ClientExchangeError::unavailable())?
@@ -1368,10 +1483,19 @@ fn apply_effect_with_status(
         }
         ClientToServerMessage::RepositoryRemoved(payload) => {
             let mut bindings = RepositoryBindingService::new(storage);
-            if let Ok(Some(binding)) = bindings.snapshot(&payload.repository_binding_id)
-                && binding.client_node_id == node_id
+            if let Some(binding) = bindings
+                .snapshot(&payload.repository_binding_id)
+                .map_err(|_| ClientExchangeError::unavailable())?
             {
-                let _ = bindings.remove(&payload.repository_binding_id);
+                if binding.client_node_id != node_id {
+                    return Err(rejected_command(None));
+                }
+                if binding.revision != payload.command.expected_revision {
+                    return Err(revision_conflict(Some(binding.revision)));
+                }
+                bindings
+                    .remove(&payload.repository_binding_id)
+                    .map_err(|error| repository_command_error(&error, Some(binding.revision)))?;
             }
             Ok(())
         }
@@ -1383,38 +1507,45 @@ fn apply_effect_with_status(
                 return Ok(());
             };
             let mut bindings = RepositoryBindingService::new(storage);
-            let Ok(Some(binding)) = bindings.snapshot(&payload.repository_binding_id) else {
+            let Some(binding) = bindings
+                .snapshot(&payload.repository_binding_id)
+                .map_err(|_| ClientExchangeError::unavailable())?
+            else {
                 return Ok(());
             };
             if binding.client_node_id != node_id {
                 return Ok(());
             }
-            let _ = bindings.update_availability(
-                &payload.repository_binding_id,
-                &outcome,
-                &Instant(payload.last_scanned_at.clone()),
-                binding.revision,
-            );
+            bindings
+                .update_availability(
+                    &payload.repository_binding_id,
+                    &outcome,
+                    &Instant(payload.last_scanned_at.clone()),
+                    binding.revision,
+                )
+                .map_err(|_| ClientExchangeError::unavailable())?;
             Ok(())
         }
         ClientToServerMessage::OccupancyAck(payload) => {
             // The device persisted the occupancy mirror: the exact lease and
             // token promote `reserving -> occupied` (plan 12.2, contract
-            // 9.3). A stale or rolled-back offer refuses the promotion as an
-            // ignored report fact and changes no frame settlement.
-            let _ = crate::client_occupancy::observe_client_mirror_revision(
+            // 9.3). A stale or rolled-back offer returns a durable rejection.
+            require_occupancy_sender(storage, node_id, &payload.occupancy.occupancy_lease_id)?;
+            crate::client_occupancy::observe_client_mirror_revision(
                 data_directory,
                 node_id,
                 payload.occupancy.command.expected_revision,
                 now,
-            );
+            )
+            .map_err(|_| ClientExchangeError::unavailable())?;
             let mut occupancy = ClientOccupancyService::new(storage);
-            let _ = occupancy.record_acknowledgement(
+            occupancy.record_acknowledgement(
                 &payload.occupancy.occupancy_lease_id,
                 payload.occupancy.occupancy_fencing_token,
                 None,
                 now,
-            );
+            ).map_err(|error| domain_command_error(matches!(error.kind(),
+                winwincode_control_plane::ClientOccupancyServiceErrorKind::Storage | winwincode_control_plane::ClientOccupancyServiceErrorKind::CorruptState)))?;
             Ok(())
         }
         ClientToServerMessage::OccupancyRejected(payload) => {
@@ -1422,23 +1553,26 @@ fn apply_effect_with_status(
             // to `released` with the `client_rejected` reason (contract 4).
             // The rejection also carries the device's current mirror
             // revision, which re-syncs the Server view for the next offer.
-            let _ = crate::client_occupancy::observe_client_mirror_revision(
+            require_occupancy_sender(storage, node_id, &payload.occupancy.occupancy_lease_id)?;
+            crate::client_occupancy::observe_client_mirror_revision(
                 data_directory,
                 node_id,
                 payload.occupancy.command.expected_revision,
                 now,
-            );
+            )
+            .map_err(|_| ClientExchangeError::unavailable())?;
             let mut occupancy = ClientOccupancyService::new(storage);
-            let _ = occupancy.reject_offer(
+            occupancy.reject_offer(
                 &payload.occupancy.occupancy_lease_id,
                 payload.occupancy.occupancy_fencing_token,
                 OccupancyReleaseReason::ClientRejected,
                 now,
-            );
+            ).map_err(|error| domain_command_error(matches!(error.kind(),
+                winwincode_control_plane::ClientOccupancyServiceErrorKind::Storage | winwincode_control_plane::ClientOccupancyServiceErrorKind::CorruptState)))?;
             Ok(())
         }
         ClientToServerMessage::WorkerLaunchAck(payload) => {
-            settle_worker_launch_ack(storage, data_directory, node_id, payload, now);
+            settle_worker_launch_ack(storage, data_directory, node_id, payload, now)?;
             Ok(())
         }
         ClientToServerMessage::CandidateRetained(payload) => {
@@ -1447,31 +1581,32 @@ fn apply_effect_with_status(
             // the receipt ledger (plan 15.2, contract 6). The retention is a
             // report fact without a fencing precondition (contract 6: the
             // candidate production belongs to the running task itself).
-            let _ = crate::client_occupancy::observe_client_mirror_revision(
+            crate::client_occupancy::observe_client_mirror_revision(
                 data_directory,
                 node_id,
                 payload.occupancy.command.expected_revision,
                 now,
-            );
-            settle_candidate_retained(storage, node_id, payload, now);
+            )
+            .map_err(|_| ClientExchangeError::unavailable())?;
+            settle_candidate_retained(storage, node_id, payload, now)?;
             Ok(())
         }
         ClientToServerMessage::CandidateApplyResult(payload) => {
             // The device answered a `client.candidate.apply` command with
             // its local apply receipt (plan 15.5, contract 8): settle it
             // into the ledger behind the occupancy fencing judgement.
-            let _ = crate::client_occupancy::observe_client_mirror_revision(
+            crate::client_occupancy::observe_client_mirror_revision(
                 data_directory,
                 node_id,
                 payload.occupancy.command.expected_revision,
                 now,
-            );
-            settle_candidate_apply_result(storage, node_id, payload, now);
+            )
+            .map_err(|_| ClientExchangeError::unavailable())?;
+            settle_candidate_apply_result(storage, node_id, payload, now)?;
             Ok(())
         }
         ClientToServerMessage::CommandAck(payload) => {
-            observe_command_ack_revision(data_directory, node_id, payload, now);
-            Ok(())
+            observe_command_ack_revision(data_directory, node_id, payload, now)
         }
         ClientToServerMessage::ManagedAppStatus(payload) => {
             let status_json = serde_json::to_vec(&payload.status)
@@ -1486,9 +1621,8 @@ fn apply_effect_with_status(
                 .map_err(|_| ClientExchangeError::unavailable())?;
             Ok(())
         }
-        // The remaining kinds settle at the cursor in this lane; their
-        // Control Plane effects belong to later worker lanes.
-        _ => Ok(()),
+        // Enrollment is accepted only by the unauthenticated enrollment lane.
+        ClientToServerMessage::Enroll(_) => Err(ClientExchangeError::invalid_request()),
     }
 }
 
@@ -1502,6 +1636,269 @@ fn repository_availability(value: WireRepositoryAvailability) -> RepositoryAvail
         WireRepositoryAvailability::PermissionDenied => RepositoryAvailability::PermissionDenied,
         WireRepositoryAvailability::ScanFailed => RepositoryAvailability::ScanFailed,
     }
+}
+
+fn stage_credential_rotation(
+    storage: &mut SqliteStorage,
+    node_id: &str,
+    proposal: &winwincode_client_port::messages::DeviceCredentialRotation,
+) -> Result<(), ClientExchangeError> {
+    let prior = storage
+        .client_node_registry()
+        .and_then(|registry| {
+            registry.credential_rotation_digest(node_id, &proposal.command_message_id)
+        })
+        .map_err(|_| ClientExchangeError::unavailable())?;
+    if prior.is_none() {
+        let frame = storage
+            .client_downlink_outbox()
+            .and_then(|outbox| outbox.frame_by_message_id(node_id, &proposal.command_message_id))
+            .map_err(|_| ClientExchangeError::unavailable())?
+            .ok_or_else(ClientExchangeError::invalid_request)?;
+        let envelope: ServerToClientEnvelope =
+            serde_json::from_str(&frame).map_err(|_| ClientExchangeError::unavailable())?;
+        if !matches!(envelope.message, ServerToClientMessage::CredentialRotate(_))
+            || envelope.client_node_id != node_id
+        {
+            return Err(ClientExchangeError::invalid_request());
+        }
+    }
+    storage
+        .client_node_registry()
+        .and_then(|mut registry| {
+            registry.stage_credential_rotation(
+                node_id,
+                &proposal.command_message_id,
+                &proposal.credential_digest,
+            )
+        })
+        .map_err(|error| match error.kind() {
+            winwincode_storage::ClientRegistryErrorKind::IdentityConflict
+            | winwincode_storage::ClientRegistryErrorKind::InvalidInput => {
+                ClientExchangeError::invalid_request()
+            }
+            _ => ClientExchangeError::unavailable(),
+        })
+}
+
+fn rejected_command(current_revision: Option<u64>) -> ClientExchangeError {
+    ClientExchangeError::new(ClientExchangeErrorKind::CommandRejected {
+        status: winwincode_client_port::domain::CommandAckStatus::RejectedWrongState,
+        code: winwincode_client_port::domain::ClientControlErrorCode::WrongState,
+        current_revision,
+    })
+}
+
+fn domain_command_error(storage_failure: bool) -> ClientExchangeError {
+    if storage_failure {
+        ClientExchangeError::unavailable()
+    } else {
+        rejected_command(None)
+    }
+}
+
+fn require_occupancy_sender(
+    storage: &mut SqliteStorage,
+    node: &str,
+    lease: &str,
+) -> Result<(), ClientExchangeError> {
+    let lease = ClientOccupancyService::new(storage)
+        .snapshot(lease)
+        .map_err(|_| ClientExchangeError::unavailable())?
+        .ok_or_else(|| rejected_command(None))?;
+    if lease.client_node_id != node {
+        return Err(rejected_command(None));
+    }
+    Ok(())
+}
+
+fn revision_conflict(current_revision: Option<u64>) -> ClientExchangeError {
+    ClientExchangeError::new(ClientExchangeErrorKind::CommandRejected {
+        status: winwincode_client_port::domain::CommandAckStatus::RejectedRevisionConflict,
+        code: winwincode_client_port::domain::ClientControlErrorCode::RevisionConflict,
+        current_revision,
+    })
+}
+
+fn repository_command_error(
+    error: &winwincode_control_plane::RepositoryBindingServiceError,
+    current_revision: Option<u64>,
+) -> ClientExchangeError {
+    use winwincode_control_plane::RepositoryBindingServiceErrorKind;
+    match error.kind() {
+        RepositoryBindingServiceErrorKind::Storage
+        | RepositoryBindingServiceErrorKind::CorruptState => ClientExchangeError::unavailable(),
+        RepositoryBindingServiceErrorKind::RevisionConflict => revision_conflict(current_revision),
+        _ => rejected_command(current_revision),
+    }
+}
+
+fn command_rejection_reply(
+    storage: &mut SqliteStorage,
+    node_id: &str,
+    envelope: &ClientToServerEnvelope,
+    error: ClientExchangeError,
+    now: &Instant,
+) -> Result<ClientDownlinkAppend, ClientExchangeError> {
+    let ClientExchangeErrorKind::CommandRejected {
+        status,
+        code,
+        current_revision,
+    } = error.kind
+    else {
+        return Err(error);
+    };
+    let value =
+        serde_json::to_value(&envelope.message).map_err(|_| ClientExchangeError::unavailable())?;
+    let command_kind = serde_json::from_value(value["kind"].clone())
+        .map_err(|_| ClientExchangeError::unavailable())?;
+    let cursor = cursors_or_unavailable(&mut ClientRegistryService::new(storage), node_id)?;
+    let downlink = storage
+        .client_downlink_outbox()
+        .map_err(|_| ClientExchangeError::unavailable())?;
+    let sequence = downlink
+        .high_water(node_id)
+        .map_err(|_| ClientExchangeError::unavailable())?
+        .max(cursor.server_to_client_ack_sequence)
+        + 1;
+    let receipt = ServerToClientEnvelope {
+        schema_version: CLIENT_CONTROL_PORT_SCHEMA_VERSION.to_owned(),
+        message_id: generate_prefixed_id("cmsg_")?,
+        client_node_id: node_id.to_owned(),
+        client_instance_id: envelope.client_instance_id.clone(),
+        sequence,
+        occurred_at: now.0.clone(),
+        message: ServerToClientMessage::CommandAck(
+            winwincode_client_port::messages::ClientCommandAckPayload {
+                command_kind,
+                command_message_id: envelope.message_id.clone(),
+                status,
+                current_revision,
+                error: Some(winwincode_client_port::domain::ClientControlError {
+                    code,
+                    message:
+                        "Server rejected the command; refresh the current state before retrying"
+                            .into(),
+                    retryable: false,
+                }),
+            },
+        ),
+    };
+    let frame = serde_json::to_string(&receipt).map_err(|_| ClientExchangeError::unavailable())?;
+    let append = ClientDownlinkAppend::try_new(node_id, receipt.message_id, sequence, frame)
+        .map_err(|_| ClientExchangeError::unavailable())?;
+    Ok(append)
+}
+
+fn settle_worker_reconciliation(
+    storage: &mut SqliteStorage,
+    node_id: &str,
+    payload: &winwincode_client_port::messages::ClientWorkerReconcilePayload,
+    reported_at: &str,
+    now: &Instant,
+) -> Result<(), ClientExchangeError> {
+    use winwincode_client_port::domain::{ClientWorkerRunState, WorkerReconcileState};
+    use winwincode_storage::OccupancyReconcileTarget;
+    let Some(lease) = ClientOccupancyService::new(storage)
+        .active_lease_for_node(node_id)
+        .map_err(|_| ClientExchangeError::unavailable())?
+    else {
+        return Ok(());
+    };
+    if lease.state != OccupancyLeaseState::RecoveryPending
+        || payload.occupancy_lease_id.as_deref() != Some(lease.occupancy_lease_id.as_str())
+    {
+        return Ok(());
+    }
+    let Some((was_draining, recovery_started_at)) = storage
+        .client_occupancy_ledger()
+        .and_then(|mut ledger| ledger.recovery_context(&lease.occupancy_lease_id, now))
+        .map_err(|_| ClientExchangeError::unavailable())?
+    else {
+        return Ok(());
+    };
+    if reported_at < recovery_started_at.0.as_str() || reported_at > now.0.as_str() {
+        return Ok(());
+    }
+    let bindings = storage
+        .device_execution_binding_ledger()
+        .and_then(|ledger| ledger.active_for_node(node_id))
+        .map_err(|_| ClientExchangeError::unavailable())?;
+    // Missing entries, duplicate sessions, unknown processes or foreign
+    // instances cannot prove recovery. Keep the original lease fenced.
+    let mut seen = std::collections::HashSet::new();
+    for report in &payload.workers {
+        if !seen.insert(&report.worker_session_id)
+            || report.reconcile_state == WorkerReconcileState::Unknown
+            || report.observed_at < recovery_started_at.0
+            || report.observed_at > now.0
+        {
+            return Ok(());
+        }
+        let Some(binding) = winwincode_control_plane::DeviceExecutionBindingService::new(storage)
+            .snapshot(&report.worker_session_id)
+            .map_err(|_| ClientExchangeError::unavailable())?
+        else {
+            return Ok(());
+        };
+        let Some(grant) = WorkerLaunchGrantService::new(storage)
+            .snapshot(&binding.worker_launch_grant_id)
+            .map_err(|_| ClientExchangeError::unavailable())?
+        else {
+            return Ok(());
+        };
+        if binding.client_node_id != node_id
+            || binding.occupancy_lease_id != lease.occupancy_lease_id
+            || binding.occupancy_fencing_token != lease.fencing_token
+            || grant.worker_instance_id != report.worker_instance_id
+        {
+            return Ok(());
+        }
+    }
+    if bindings.iter().any(|binding| {
+        binding.occupancy_lease_id != lease.occupancy_lease_id
+            || !seen.contains(&binding.worker_session_id)
+    }) {
+        return Ok(());
+    }
+    for report in &payload.workers {
+        if matches!(
+            report.reconcile_state,
+            WorkerReconcileState::Missing | WorkerReconcileState::Terminal
+        ) {
+            settle_worker_exit(
+                storage,
+                node_id,
+                &winwincode_client_port::messages::ClientWorkerStatePayload {
+                    occupancy_lease_id: payload.occupancy_lease_id.clone(),
+                    worker_session_id: report.worker_session_id.clone(),
+                    worker_instance_id: report.worker_instance_id.clone(),
+                    state: if report.reconcile_state == WorkerReconcileState::Missing {
+                        ClientWorkerRunState::Missing
+                    } else {
+                        ClientWorkerRunState::Stopped
+                    },
+                    exit_code: None,
+                    observed_at: report.observed_at.clone(),
+                },
+                now,
+            )?;
+        }
+    }
+    let target = if !was_draining
+        && payload
+            .workers
+            .iter()
+            .any(|report| report.reconcile_state == WorkerReconcileState::StillRunning)
+    {
+        OccupancyReconcileTarget::ResumeOccupied
+    } else {
+        OccupancyReconcileTarget::ResumeDraining
+    };
+    ClientOccupancyService::new(storage)
+        .reconcile_resume(&lease.occupancy_lease_id, target, None, now)
+        .map_err(|_| ClientExchangeError::unavailable())?;
+    Ok(())
 }
 
 fn settle_worker_exit(
@@ -1567,40 +1964,50 @@ fn observe_command_ack_revision(
     node_id: &str,
     payload: &winwincode_client_port::messages::ClientCommandAckPayload,
     now: &Instant,
-) {
+) -> Result<(), ClientExchangeError> {
     if matches!(
         payload.command_kind,
         ClientControlMessageKind::OccupancyRelease | ClientControlMessageKind::OccupancyForceFence
     ) && let Some(revision) = payload.current_revision
     {
-        let _ = crate::client_occupancy::observe_client_mirror_revision(
+        crate::client_occupancy::observe_client_mirror_revision(
             data_directory,
             node_id,
             revision,
             now,
-        );
+        )
+        .map_err(|_| ClientExchangeError::unavailable())?;
     }
+    Ok(())
 }
 
 /// Settles one `client.worker.launch_ack` (plan 14.3 step 10). The
 /// acknowledged mirror revision keeps the Server stamp view current, and the
 /// verdict settles the grant exactly once: an accepted acknowledgement
 /// consumes it, a rejection keeps it `issued` with the reason in the launch
-/// audit trail. A refused settlement (unknown grant, field mismatch, stale
-/// token) is an ignored report fact and changes no frame settlement.
+/// audit trail. Refused settlements return a durable rejection; storage
+/// failures leave the frame unacknowledged for retry.
 fn settle_worker_launch_ack(
     storage: &mut SqliteStorage,
     data_directory: &Path,
     node_id: &str,
     payload: &winwincode_client_port::messages::ClientWorkerLaunchAckPayload,
     now: &Instant,
-) {
-    let _ = crate::client_occupancy::observe_client_mirror_revision(
+) -> Result<(), ClientExchangeError> {
+    let grant = WorkerLaunchGrantService::new(storage)
+        .snapshot(&payload.worker_launch_grant_id)
+        .map_err(|_| ClientExchangeError::unavailable())?
+        .ok_or_else(|| rejected_command(None))?;
+    if grant.client_node_id != node_id {
+        return Err(rejected_command(None));
+    }
+    crate::client_occupancy::observe_client_mirror_revision(
         data_directory,
         node_id,
         payload.occupancy.command.expected_revision,
         now,
-    );
+    )
+    .map_err(|_| ClientExchangeError::unavailable())?;
     let accepted = matches!(
         payload.status,
         WorkerLaunchAckStatus::Accepted | WorkerLaunchAckStatus::Duplicate
@@ -1615,10 +2022,19 @@ fn settle_worker_launch_ack(
         accepted,
         (!accepted).then(|| launch_rejection_reason(payload.status, payload.error.as_ref())),
     ) else {
-        return;
+        return Err(rejected_command(None));
     };
     let mut grants = WorkerLaunchGrantService::new(storage);
-    let _ = grants.settle_launch_ack(&settlement, now);
+    grants
+        .settle_launch_ack(&settlement, now)
+        .map_err(|error| {
+            domain_command_error(matches!(
+                error.kind(),
+                winwincode_control_plane::WorkerLaunchGrantServiceErrorKind::Storage
+                    | winwincode_control_plane::WorkerLaunchGrantServiceErrorKind::CorruptState
+            ))
+        })?;
+    Ok(())
 }
 
 /// Maps one rejected `client.worker.launch_ack` onto the stable audit
@@ -1647,14 +2063,13 @@ fn launch_rejection_reason(
 /// and already owns the idempotency and conflict semantics: a replayed
 /// receipt and a duplicate retention of the same candidate ref return the
 /// original row, and any fact disagreement (or an unknown binding owner)
-/// fails closed — a refused retention is an ignored report fact and changes
-/// no frame settlement.
+/// fails closed with a durable command rejection.
 fn settle_candidate_retained(
     storage: &mut SqliteStorage,
     node_id: &str,
     payload: &ClientCandidateRetainedPayload,
     now: &Instant,
-) {
+) -> Result<(), ClientExchangeError> {
     let receipt = &payload.receipt;
     let Ok(command) = LocalCandidateRetained::try_new(
         receipt.local_candidate_receipt_id.clone(),
@@ -1664,10 +2079,17 @@ fn settle_candidate_retained(
         receipt.candidate_commit.clone(),
         receipt.local_ref_name.clone(),
     ) else {
-        return;
+        return Err(rejected_command(None));
     };
     let mut candidates = LocalCandidateService::new(storage);
-    let _ = candidates.record_retained(&command, now);
+    candidates.record_retained(&command, now).map_err(|error| {
+        domain_command_error(matches!(
+            error.kind(),
+            winwincode_control_plane::LocalCandidateServiceErrorKind::Storage
+                | winwincode_control_plane::LocalCandidateServiceErrorKind::CorruptState
+        ))
+    })?;
+    Ok(())
 }
 
 /// Settles one `client.candidate.apply_result` report into the receipt
@@ -1677,37 +2099,36 @@ fn settle_candidate_retained(
 /// Fencing (contract 9.2): the result settles only while it names the
 /// node's one active occupancy lease with its current token — an apply
 /// ticket superseded by a higher token (a force fence or a fresh claim) is
-/// refused as an ignored report fact and never reaches the ledger. A refused
-/// settlement (an unknown or drifted candidate identity, a terminal
-/// candidate, a receipt id replayed with different fields) changes no frame
-/// settlement either; the frame settles at the cursor and the ledger's
-/// append-only authority stays intact.
+/// refused with a durable rejection and never reaches the ledger. Storage
+/// failures remain unacknowledged so the sender can retry.
 fn settle_candidate_apply_result(
     storage: &mut SqliteStorage,
     node_id: &str,
     payload: &ClientCandidateApplyResultPayload,
     now: &Instant,
-) {
+) -> Result<(), ClientExchangeError> {
     let fenced = {
         let mut occupancy = ClientOccupancyService::new(storage);
         occupancy
             .active_lease_for_node(node_id)
-            .ok()
-            .flatten()
+            .map_err(|_| ClientExchangeError::unavailable())?
             .is_some_and(|lease| {
                 lease.occupancy_lease_id == payload.occupancy.occupancy_lease_id
                     && lease.fencing_token == payload.occupancy.occupancy_fencing_token
             })
     };
     if !fenced {
-        return;
+        return Err(rejected_command(None));
     }
     let receipt = &payload.receipt;
     let mut candidates = LocalCandidateService::new(storage);
     // The wire apply receipt names the candidate by its local ref; the
     // ledger keys the settlement on the retained receipt identity.
-    let Ok(Some(candidate)) = candidates.candidate_for_ref(node_id, &receipt.candidate_ref) else {
-        return;
+    let Some(candidate) = candidates
+        .candidate_for_ref(node_id, &receipt.candidate_ref)
+        .map_err(|_| ClientExchangeError::unavailable())?
+    else {
+        return Err(rejected_command(None));
     };
     let Ok(settlement) = LocalApplySettlement::try_new(
         receipt.local_apply_receipt_id.clone(),
@@ -1722,9 +2143,18 @@ fn settle_candidate_apply_result(
         receipt.resulting_commit.clone(),
         receipt.conflict_artifact_ref.clone(),
     ) else {
-        return;
+        return Err(rejected_command(None));
     };
-    let _ = candidates.record_apply_result(&settlement, now);
+    candidates
+        .record_apply_result(&settlement, now)
+        .map_err(|error| {
+            domain_command_error(matches!(
+                error.kind(),
+                winwincode_control_plane::LocalCandidateServiceErrorKind::Storage
+                    | winwincode_control_plane::LocalCandidateServiceErrorKind::CorruptState
+            ))
+        })?;
+    Ok(())
 }
 
 /// Maps the wire apply strategy onto the ledger's frozen strategy vocabulary.
@@ -1761,22 +2191,22 @@ fn supersede_instance(
     record: &ClientNodeRecord,
     envelope: &ClientToServerEnvelope,
     now: &Instant,
-) {
+) -> Result<(), ClientExchangeError> {
     let ClientToServerMessage::Hello(payload) = &envelope.message else {
-        return;
+        return Ok(());
     };
     let mut registry = ClientRegistryService::new(storage);
-    let Ok(current) = registry.snapshot(&record.client_node_id) else {
-        return;
-    };
+    let current = registry
+        .snapshot(&record.client_node_id)
+        .map_err(|_| ClientExchangeError::unavailable())?;
     let Some(current) = current else {
-        return;
+        return Ok(());
     };
     if current.client_version == payload.client_version
         && current.current_instance_id.as_deref() == Some(envelope.client_instance_id.as_str())
         && current.max_concurrent_worker_sessions == payload.capacity.max_concurrent_worker_sessions
     {
-        return;
+        return Ok(());
     }
     let Ok(registration) = ClientNodeRegistration::try_new(
         current.client_node_id.clone(),
@@ -1789,9 +2219,12 @@ fn supersede_instance(
         Some(envelope.client_instance_id.clone()),
         payload.capacity.max_concurrent_worker_sessions,
     ) else {
-        return;
+        return Ok(());
     };
-    let _ = registry.register(&registration, current.revision, now);
+    registry
+        .register(&registration, current.revision, now)
+        .map_err(|_| ClientExchangeError::unavailable())?;
+    Ok(())
 }
 
 /// Maps a device-reported presence fact onto a registry transition target.
@@ -2507,7 +2940,7 @@ mod tests {
             ),
         );
         apply_effect(&mut storage, &root, foreign_node, &removed, &second)
-            .expect("foreign remove effect");
+            .expect_err("foreign remove must return a rejection");
         assert!(
             RepositoryBindingService::new(&mut storage)
                 .snapshot(binding_id)

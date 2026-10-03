@@ -45,6 +45,17 @@ pub struct ModelLeaseAuthority {
 /// Caller-owned current-lease check. Implementations read the same authority
 /// that governs the Worker Job and never derive authority from a model frame.
 pub trait ModelLeaseAuthoritySource: Send + Sync {
+    /// Deadline from trusted current authority; durable sources include renewals.
+    ///
+    /// # Errors
+    ///
+    /// Rejects authority that is no longer bound to the current execution.
+    fn lease_deadline(
+        &self,
+        authority: &ModelLeaseAuthority,
+    ) -> Result<Instant, ModelAuthorityRejection> {
+        Ok(authority.lease.expires_at.clone())
+    }
     /// Verifies that the exact lease, attempt, fence, Worker process, and
     /// session remain current at `now`.
     ///
@@ -961,7 +972,11 @@ where
         authority: &ModelLeaseAuthority,
         now: &Instant,
     ) -> Result<(), ModelPortClientError> {
-        if !canonical_instant(now) || now.0 >= authority.lease.expires_at.0 {
+        let deadline = self
+            .authority
+            .lease_deadline(authority)
+            .map_err(|_| stale_authority_error())?;
+        if !canonical_instant(now) || now.0 >= deadline.0 {
             return Err(client_error(
                 ModelPortClientErrorCode::ExpiredLease,
                 "model exchange lease has expired",

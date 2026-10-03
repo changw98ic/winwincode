@@ -736,7 +736,7 @@ impl ProviderGatewayIdentityPort for DurableProviderGatewayIdentitySource {
             || lease.attempt != message_attempt
             || lease.fencing_token != message.lease.fencing_token
             || lease.issued_at != message.lease.issued_at
-            || lease.expires_at != message.lease.expires_at
+            || lease.expires_at.0 < message.lease.expires_at.0
             || message.sent_at.0 < lease.issued_at.0
             || message.sent_at.0 >= lease.expires_at.0
             || worker.worker_instance_id != message.lease.worker_instance_id

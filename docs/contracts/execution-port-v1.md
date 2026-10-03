@@ -88,6 +88,18 @@ expiresAt
 `fencingToken` 使用十进制字符串，避免跨 Rust、JavaScript 和数据库时丢失 64 位整数
 精度。重新派发到另一个 Worker 实例或新的尝试时，Control Plane 必须使用更大的 token。
 
+`worker.capabilities` 是完整能力快照，Control Plane 校验当前 Worker 实例后持久更新能力
+与容量，保留注册身份和权限范围。重复 requestId 必须匹配原摘要，旧观察值及低于正在运行
+任务数的容量被拒绝；Worker 使用 durable outbox 重试，成功由传输确认。
+
+Control Plane 在已接受任务的心跳中检查租约：剩余时间不超过租期的三分之一时，持久续期并
+下发 `lease.renew`；重复心跳或响应丢失会重放同一续期记录。Worker 校验
+`priorExpiresAt`、实例、attempt 和 fencingToken，持久更新 Codex 执行权限后使用新期限。
+续期仅延长 expiresAt，不改变 Job、Lease、attempt、fencingToken 或 issuedAt。
+续期前保留的事件、模型流、工具动作与产物消息保留原始摘要和身份，并在当前同一租约的
+有效期限内继续处理；签发的工具授权自身期限不因此延长。已失效的当前租约及旧 fencingToken
+仍然拒绝写入。任务结束后迟到的续期不会重建任务。
+
 Worker 接受 Job 并建立 CodexThread 后，先发送一条 `session.binding`。它把
 `ProductSessionId + WorkerSessionId + CodexThreadId` 绑定到当前
 `Job + attempt + Lease + fencingToken`，并携带会话打开时冻结的 secret-free

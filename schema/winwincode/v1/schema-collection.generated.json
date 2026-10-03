@@ -3744,7 +3744,7 @@
     },
     "ClientCommandAckMessage": {
       "additionalProperties": false,
-      "description": "Universal idempotent acknowledgement for control-plane-to-client commands that have no dedicated ack message.",
+      "description": "Durable command result in either direction. Server reports rejected client commands; Device acknowledges server commands without a dedicated result. Transport acknowledgement alone does not imply business success.",
       "properties": {
         "clientInstanceId": {
           "$ref": "#/$defs/ClientInstanceId"
@@ -3798,7 +3798,7 @@
       "title": "client.command_ack",
       "type": "object",
       "x-authority": "control-ack",
-      "x-direction": "client-to-control-plane",
+      "x-direction": "bidirectional",
       "x-message-class": "ack"
     },
     "ClientConnectCode": {
@@ -4135,7 +4135,7 @@
     },
     "ClientCredentialRotateMessage": {
       "additionalProperties": false,
-      "description": "Requests device credential rotation; the rotation handshake and credential material stay outside this contract.",
+      "description": "Requests device credential rotation. Device durably generates a replacement and proposes only its digest in the authenticated exchange credentialRotation sidecar; Server confirms staging and activates it when the replacement credential proves possession.",
       "properties": {
         "clientInstanceId": {
           "$ref": "#/$defs/ClientInstanceId"
@@ -12553,6 +12553,23 @@
         "publicKey",
         "nonce",
         "ciphertext"
+      ],
+      "type": "object"
+    },
+    "DeviceCredentialRotation": {
+      "additionalProperties": false,
+      "description": "Optional credentialRotation sidecar on authenticated exchange requests and responses. Contains no secret; the response echoes a durably staged request. The first request authenticated with the replacement credential activates it and invalidates the previous credential.",
+      "properties": {
+        "commandMessageId": {
+          "$ref": "#/$defs/ClientControlMessageId"
+        },
+        "credentialDigest": {
+          "$ref": "#/$defs/Sha256Digest"
+        }
+      },
+      "required": [
+        "commandMessageId",
+        "credentialDigest"
       ],
       "type": "object"
     },
@@ -27667,7 +27684,7 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:fe0da56b06a48137e5c570d7d11ea53bcc476d9f694112b3709aa93d585a1695",
+  "x-source-digest": "sha256:c48205d6591b66035d806cea689cb4c323d454d2994d10789de7ffc49179b076",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {

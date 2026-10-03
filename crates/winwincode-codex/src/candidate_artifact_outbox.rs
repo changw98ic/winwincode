@@ -145,9 +145,20 @@ impl CandidateArtifactOutbox {
             }
         };
         self.store.transaction(|transaction| {
-            if let Some(existing) = load_by_authority(transaction, &record.authority_key)? {
+            if let Some(existing) = load_by_authority(transaction, &record.authority_key)?
+                .or(load_renewed_candidate(transaction, &upload.authority())?)
+            {
                 existing.validate()?;
-                if !existing.same_upload(&record) {
+                // Lease renewal changes the derived identity of a newly
+                // constructed record, but must preserve an existing upload's
+                // IDs and bytes. Normalize only these derived comparison keys.
+                let mut comparable = record.clone();
+                comparable.authority_key.clone_from(&existing.authority_key);
+                comparable
+                    .descriptor
+                    .artifact_id
+                    .clone_from(&existing.descriptor.artifact_id);
+                if !existing.same_upload(&comparable) {
                     return Err(AdapterStoreError::Conflict);
                 }
                 if existing.cancel_requested {
@@ -273,7 +284,9 @@ impl CandidateArtifactOutbox {
             &authority.session_identity,
         )?;
         let connection = self.store.lock()?;
-        let Some(record) = load_by_authority_connection(&connection, &authority_key)? else {
+        let Some(record) = load_by_authority_connection(&connection, &authority_key)?
+            .or(load_renewed_candidate(&connection, authority)?)
+        else {
             return Ok(None);
         };
         record.validate()?;
@@ -589,8 +602,10 @@ impl StoredCandidateArtifact {
             return Err(AdapterStoreError::Corrupt);
         }
         if let Some(replacement) = &self.replacement_authority {
-            if replacement.successor_lease != self.open_message.lease
-                || replacement.predecessor_lease.job_id != self.open_message.lease.job_id
+            if !winwincode_execution_port::execution_identity::execution_lease_authorizes(
+                &self.open_message.lease,
+                &replacement.successor_lease,
+            ) || replacement.predecessor_lease.job_id != self.open_message.lease.job_id
                 || replacement.predecessor_lease.attempt.saturating_add(1)
                     != self.open_message.lease.attempt
                 || replacement.predecessor_lease.worker_id != self.open_message.lease.worker_id
@@ -840,8 +855,10 @@ fn validate_replacement_upload(
     upload: &CandidateArtifactUpload,
     replacement: &ExecutionJobReplacementAuthority,
 ) -> Result<(), AdapterStoreError> {
-    if replacement.successor_lease != upload.lease
-        || replacement.predecessor_lease.job_id != upload.lease.job_id
+    if !winwincode_execution_port::execution_identity::execution_lease_authorizes(
+        &upload.lease,
+        &replacement.successor_lease,
+    ) || replacement.predecessor_lease.job_id != upload.lease.job_id
         || replacement.predecessor_lease.attempt.saturating_add(1) != upload.lease.attempt
         || replacement.predecessor_lease.worker_id != upload.lease.worker_id
         || replacement.predecessor_lease.worker_instance_id == upload.lease.worker_instance_id
@@ -963,14 +980,19 @@ fn load_cancel_record(
     if let Some(record) = load_by_authority(transaction, &exact_key)? {
         return Ok(Some((record, true)));
     }
+    if let Some(record) = load_renewed_candidate(transaction, authority)? {
+        return Ok(Some((record, true)));
+    }
     let Some(proof) = authority.replacement_authority.as_ref() else {
         return Ok(None);
     };
     let Some(predecessor_session) = proof.predecessor_session_identity.as_ref() else {
         return Ok(None);
     };
-    if proof.successor_lease != authority.lease
-        || proof.logical_job_digest != authority.logical_job_digest
+    if !winwincode_execution_port::execution_identity::execution_lease_authorizes(
+        &authority.lease,
+        &proof.successor_lease,
+    ) || proof.logical_job_digest != authority.logical_job_digest
         || proof.predecessor_lease.attempt.saturating_add(1) != authority.lease.attempt
         || proof.predecessor_lease.worker_id != authority.lease.worker_id
         || proof.predecessor_lease.worker_instance_id == authority.lease.worker_instance_id
@@ -996,6 +1018,34 @@ fn load_cancel_record(
         return Err(AdapterStoreError::Conflict);
     }
     Ok(Some((record, false)))
+}
+
+fn load_renewed_candidate(
+    connection: &rusqlite::Connection,
+    authority: &CandidateArtifactAuthority,
+) -> Result<Option<StoredCandidateArtifact>, AdapterStoreError> {
+    let mut statement = connection.prepare("SELECT record_json FROM candidate_artifact_upload WHERE json_extract(record_json, '$.open_message.lease.jobId') = ?1").map_err(|_| AdapterStoreError::Unavailable)?;
+    let rows = statement
+        .query_map([&authority.lease.job_id.0], |row| row.get::<_, Vec<u8>>(0))
+        .map_err(|_| AdapterStoreError::Unavailable)?;
+    let mut found = None;
+    for row in rows {
+        let record: StoredCandidateArtifact =
+            serde_json::from_slice(&row.map_err(|_| AdapterStoreError::Unavailable)?)
+                .map_err(|_| AdapterStoreError::Corrupt)?;
+        if winwincode_execution_port::execution_identity::execution_lease_authorizes(
+            &authority.lease,
+            &record.open_message.lease,
+        ) && record.open_message.worker_session_id == authority.worker_session_id
+            && record.open_message.session_identity == authority.session_identity
+        {
+            if found.is_some() {
+                return Err(AdapterStoreError::Conflict);
+            }
+            found = Some(record);
+        }
+    }
+    Ok(found)
 }
 
 fn load_by_artifact(
@@ -1682,6 +1732,48 @@ mod tests {
                 .expect("accepted reference survives cancel"),
             Some(retained.artifact)
         );
+        std::fs::remove_dir_all(root).expect("remove fixture");
+    }
+    #[test]
+    fn renewal_keeps_one_upload_and_recovers_its_original_reference() {
+        let root = test_root("lease-renewal");
+        let upload = upload(br#"{"candidate":"renewed"}"#.to_vec());
+        let (candidate, execution) = open_ledgers(&root).expect("open ledgers");
+        let retained = candidate.retain(&upload).expect("retain before renewal");
+        let mut renewed = upload.clone();
+        renewed.lease.expires_at = Instant("2028-01-15T08:10:00.000Z".into());
+        let retry = candidate
+            .retain(&renewed)
+            .expect("same upload under renewed authority");
+        assert_eq!(retry.artifact, retained.artifact);
+        assert!(retry.deliveries.is_empty());
+        assert_eq!(
+            execution.pending().expect("original frames"),
+            retained.deliveries
+        );
+        let final_ack = acknowledgement(&retained, &upload, 1, LeaseWriteStatus::Accepted);
+        candidate
+            .apply_ack(&final_ack)
+            .expect("original acknowledgement");
+        drop(candidate);
+        drop(execution);
+        let (candidate, execution) = open_ledgers(&root).expect("restart");
+        assert_eq!(
+            candidate
+                .accepted_reference(&renewed.authority())
+                .expect("renewed reference"),
+            Some(retained.artifact)
+        );
+        let mut foreign = renewed.authority();
+        foreign.lease.fencing_token = FencingToken("999".into());
+        assert!(
+            candidate
+                .accepted_reference(&foreign)
+                .expect("foreign attempt")
+                .is_none()
+        );
+        drop(candidate);
+        drop(execution);
         std::fs::remove_dir_all(root).expect("remove fixture");
     }
 }

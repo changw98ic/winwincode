@@ -430,13 +430,7 @@ where
         self
     }
 
-    fn log_model_intake(
-        &self,
-        stage: &str,
-        code: &str,
-        chunk: &ModelChunkMessage,
-        detail: &str,
-    ) {
+    fn log_model_intake(&self, stage: &str, code: &str, chunk: &ModelChunkMessage, detail: &str) {
         let exchange = chunk.model_exchange_id.0.as_str();
         let sequence = chunk.sequence.0;
         let worker_session_id = chunk.worker_session_id.0.as_str();
@@ -764,6 +758,9 @@ where
                 self.accept_dispatch(dispatch, now).await
             }
             ExecutionPortMessage::JobCancelMessage(cancel) => self.accept_cancel(cancel, now).await,
+            ExecutionPortMessage::LeaseRenewMessage(renewal) => {
+                self.accept_lease_renewal(renewal, &now)
+            }
             ExecutionPortMessage::ArtifactAckMessage(acknowledgement) => {
                 self.accept_candidate_artifact_ack(acknowledgement, now)
                     .await
@@ -810,8 +807,7 @@ where
                 {
                     eprintln!(
                         "poll_codex durable flush best-effort failed exchange={} seq={}",
-                        chunk.model_exchange_id.0,
-                        chunk.sequence.0
+                        chunk.model_exchange_id.0, chunk.sequence.0
                     );
                 }
                 if self.flush_codex_execution_messages().await.is_err()
@@ -819,8 +815,7 @@ where
                 {
                     eprintln!(
                         "poll_codex core flush best-effort failed exchange={} seq={}",
-                        chunk.model_exchange_id.0,
-                        chunk.sequence.0
+                        chunk.model_exchange_id.0, chunk.sequence.0
                     );
                 }
                 Ok(())
@@ -863,6 +858,104 @@ where
                 "message is not handled by the Worker lifecycle core",
             )),
         }
+    }
+
+    fn accept_lease_renewal(
+        &mut self,
+        renewal: &winwincode_execution_port::generated::LeaseRenewMessage,
+        now: &Instant,
+    ) -> Result<(), WorkerError> {
+        use winwincode_execution_port::execution_identity::same_execution_lease;
+        if renewal.lease.worker_id != self.config.worker_id
+            || renewal.lease.worker_instance_id != self.config.worker_instance_id
+            || renewal.sent_at.0 > now.0
+        {
+            return Err(worker_error(
+                WorkerErrorCode::InvalidDispatchAuthority,
+                "renewal is not for the current Worker instance and time",
+            ));
+        }
+        // A job may finish while its renewal is in transit. Consuming the
+        // stale control frame must not recreate the execution or block later
+        // deliveries on the same connection.
+        let Some(active) = self.active.get(&renewal.lease.job_id.0) else {
+            return Ok(());
+        };
+        if !same_execution_lease(&active.lease, &renewal.lease)
+            || renewal.sent_at.0 < active.lease.issued_at.0
+            || renewal.sent_at.0 >= renewal.prior_expires_at.0
+            || renewal.lease.expires_at.0 <= renewal.prior_expires_at.0
+        {
+            return Err(worker_error(
+                WorkerErrorCode::InvalidDispatchAuthority,
+                "renewal changed execution authority",
+            ));
+        }
+        // Delayed duplicate renewals may arrive after a subsequent extension.
+        if renewal.lease.expires_at.0 <= active.lease.expires_at.0 {
+            return Ok(());
+        }
+        if renewal.prior_expires_at != active.lease.expires_at
+            || now.0 >= renewal.lease.expires_at.0
+        {
+            return Err(worker_error(
+                WorkerErrorCode::InvalidDispatchAuthority,
+                "renewal is expired or skips the current deadline",
+            ));
+        }
+        if !self
+            .codex
+            .renew_lease(&renewal.lease)
+            .map_err(|_| codex_model_error())?
+        {
+            return Err(worker_error(
+                WorkerErrorCode::InvalidDispatchAuthority,
+                "Codex adapter cannot persist lease renewal",
+            ));
+        }
+        self.active
+            .get_mut(&renewal.lease.job_id.0)
+            .expect("validated active execution")
+            .lease = renewal.lease.clone();
+        Ok(())
+    }
+
+    /// Publishes a complete capability snapshot through the durable transport.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid lifecycle or capacity, or a durable transport failure.
+    pub async fn update_capabilities(
+        &mut self,
+        capabilities: WorkerCapabilitySet,
+        now: Instant,
+    ) -> Result<(), WorkerError> {
+        if self.lifecycle != WorkerLifecycleState::Active
+            || capabilities.max_concurrent_jobs
+                < i64::try_from(self.active.len()).unwrap_or(i64::MAX)
+            || !(1..=1024).contains(&capabilities.max_concurrent_jobs)
+            || capabilities.platform != self.config.capabilities.platform
+        {
+            return Err(worker_error(
+                WorkerErrorCode::InvalidLifecycle,
+                "capability update requires current Worker capacity",
+            ));
+        }
+        let message = winwincode_execution_port::generated::WorkerCapabilitiesMessage {
+            capabilities: capabilities.clone(),
+            kind: winwincode_execution_port::generated::WorkerCapabilitiesMessageKind::WorkerCapabilities,
+            message_id: self.next_message_id(),
+            request_id: self.next_request_id(),
+            schema_version: SchemaVersion::WinwincodeV1,
+            observed_at: now.clone(),
+            sent_at: now,
+            worker_id: self.config.worker_id.clone(),
+            worker_instance_id: self.config.worker_instance_id.clone(),
+        };
+        let delivery = self
+            .retain_execution_message(&ExecutionPortMessage::WorkerCapabilitiesMessage(message))?;
+        self.config.capabilities = capabilities;
+        self.send_retained_delivery(delivery).await
     }
 
     /// Sends one explicit heartbeat with current capacity and lease progress.
@@ -998,7 +1091,10 @@ where
                     models.retry_chunk(chunk);
                 }
                 if std::env::var_os("WWC_WORKER_POLL_DEBUG").is_some() {
-                    eprintln!("poll_codex chunk failed exchange={exchange} seq={sequence}: {:?}", error.code);
+                    eprintln!(
+                        "poll_codex chunk failed exchange={exchange} seq={sequence}: {:?}",
+                        error.code
+                    );
                 }
                 return Err(error);
             }
@@ -1020,7 +1116,10 @@ where
             {
                 eprintln!("poll_codex durable flush failed; Core polls continue");
             }
-        } else if self.flush_recovered_durable_execution_deliveries().await.is_err()
+        } else if self
+            .flush_recovered_durable_execution_deliveries()
+            .await
+            .is_err()
             && std::env::var_os("WWC_WORKER_POLL_DEBUG").is_some()
         {
             eprintln!("poll_codex recovered durable flush failed; Core polls continue");
@@ -3212,7 +3311,10 @@ where
             && acknowledgement.worker_session_id == pending.authority.worker_session_id
             && acknowledgement.session_identity == pending.authority.session_identity;
         let acknowledgement_matches_successor = authority_matches
-            && acknowledgement.lease == active_authority.lease
+            && winwincode_execution_port::execution_identity::execution_lease_authorizes(
+                &active_authority.lease,
+                &acknowledgement.lease,
+            )
             && acknowledgement.worker_session_id == active_authority.worker_session_id
             && acknowledgement.session_identity == active_authority.session_identity;
         if active.lifecycle != ActiveJobLifecycle::Running
@@ -3274,8 +3376,10 @@ where
         ) {
             return Ok(acknowledgement.clone());
         }
-        if acknowledgement.lease != active_authority.lease
-            || acknowledgement.worker_session_id != active_authority.worker_session_id
+        if !winwincode_execution_port::execution_identity::execution_lease_authorizes(
+            &active_authority.lease,
+            &acknowledgement.lease,
+        ) || acknowledgement.worker_session_id != active_authority.worker_session_id
             || acknowledgement.session_identity != active_authority.session_identity
         {
             return Ok(acknowledgement.clone());
@@ -3520,8 +3624,10 @@ where
         // from which WorkerMain can reconstruct that cursor, so the first
         // canonical trace resumes at the adapter-provided sequence.
         let resumes_fully_acknowledged_cursor = last_sequence == 0 && sequence > 0;
-        if message.lease != active.lease
-            || message.worker_session_id != active.worker_session_id
+        if !winwincode_execution_port::execution_identity::execution_lease_authorizes(
+            &active.lease,
+            &message.lease,
+        ) || message.worker_session_id != active.worker_session_id
             || message.session_identity != active.session_identity
             || message.codex_thread_id != active.codex_thread_id
             || (sequence > last_sequence.saturating_add(1) && !resumes_fully_acknowledged_cursor)

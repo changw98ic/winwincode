@@ -260,6 +260,12 @@ pub trait ExchangeTransport: Send + Sync {
 /// routing identity rides inside each frame envelope.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExchangeRequest {
+    #[serde(
+        rename = "credentialRotation",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub credential_rotation: Option<winwincode_client_port::messages::DeviceCredentialRotation>,
     /// Wire contract schema version (`winwincode/v1`).
     #[serde(rename = "schemaVersion")]
     pub schema_version: String,
@@ -333,6 +339,12 @@ impl fmt::Debug for WorkerCredentialIssuance {
 /// fresh enrollment — the issued Device Credential material.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExchangeResponse {
+    #[serde(
+        rename = "credentialRotation",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub credential_rotation: Option<winwincode_client_port::messages::DeviceCredentialRotation>,
     /// Wire contract schema version (`winwincode/v1`).
     #[serde(rename = "schemaVersion")]
     pub schema_version: String,
@@ -1247,6 +1259,7 @@ impl DeviceDaemon {
             }))?;
             self.publish_provider_state(None)?;
             self.publish_extension_state(None)?;
+            self.publish_worker_reconciliation()?;
             self.publish_worker_exits()?;
             self.hello_announced = true;
             self.next_heartbeat_at = now + self.heartbeat_interval;
@@ -1266,9 +1279,54 @@ impl DeviceDaemon {
                     .map(|mirror| mirror.occupancy_lease_id.clone()),
             }))?;
             self.status.heartbeats_enqueued += 1;
+            self.publish_worker_reconciliation()?;
             self.publish_worker_exits()?;
             self.next_heartbeat_at = now + self.heartbeat_interval;
         }
+        Ok(())
+    }
+
+    fn publish_worker_reconciliation(&mut self) -> Result<(), DaemonError> {
+        use crate::supervisor::WorkerReconcileVerdict;
+        use winwincode_client_port::domain::WorkerReconcileState;
+        use winwincode_client_port::messages::{
+            ClientWorkerReconcilePayload, ClientWorkerReconciliation,
+        };
+        let (Some(supervisor), Some(mirror)) = (&self.worker_supervisor, &self.occupancy_mirror)
+        else {
+            return Ok(());
+        };
+        let lease_id = mirror.occupancy_lease_id.clone();
+        let sessions = self.store.worker_processes_for_lease(&lease_id)?;
+        let reports = supervisor
+            .reconcile()
+            .map_err(|_| DaemonError::Protocol("worker reconciliation failed".into()))?;
+        let observed_at = now_rfc3339();
+        let workers = reports
+            .into_iter()
+            .filter(|report| {
+                sessions
+                    .iter()
+                    .any(|worker| worker.worker_session_id == report.worker_session_id)
+            })
+            .map(|report| ClientWorkerReconciliation {
+                worker_session_id: report.worker_session_id,
+                worker_instance_id: report.worker_instance_id,
+                reconcile_state: match report.verdict {
+                    WorkerReconcileVerdict::StillRunning => WorkerReconcileState::StillRunning,
+                    WorkerReconcileVerdict::Terminal => WorkerReconcileState::Terminal,
+                    WorkerReconcileVerdict::Missing => WorkerReconcileState::Missing,
+                    WorkerReconcileVerdict::Unknown => WorkerReconcileState::Unknown,
+                },
+                observed_at: observed_at.clone(),
+            })
+            .collect();
+        self.enqueue(ClientToServerMessage::WorkerReconcile(
+            ClientWorkerReconcilePayload {
+                occupancy_lease_id: Some(lease_id),
+                workers,
+            },
+        ))?;
         Ok(())
     }
 
@@ -1320,6 +1378,7 @@ impl DeviceDaemon {
             values.push(value);
         }
         Ok(ExchangeRequest {
+            credential_rotation: crate::identity::pending_credential_rotation(&self.store)?,
             schema_version: CLIENT_CONTROL_PORT_SCHEMA_VERSION.to_owned(),
             frames: values,
             ack_sequence: self.downlink.ack_sequence(),
@@ -1332,6 +1391,7 @@ impl DeviceDaemon {
         batch: &OutboxBatch,
         now: Instant,
     ) -> Result<TickOutcome, DaemonError> {
+        self.confirm_credential_rotation(response)?;
         let ack = match self
             .session
             .acknowledge(&mut self.store, response.ack_sequence)
@@ -1385,6 +1445,7 @@ impl DeviceDaemon {
         batch: &OutboxBatch,
         now: Instant,
     ) -> Result<TickOutcome, DaemonError> {
+        self.confirm_credential_rotation(response)?;
         if replay_from == 0 || replay_from > batch.highest_sequence + 1 {
             let reason = format!(
                 "gap replayFromSequence {replay_from} is outside the retained stream \
@@ -1572,68 +1633,96 @@ impl DeviceDaemon {
             }
             match self.downlink.observe(envelope.sequence) {
                 SequenceVerdict::Accept => {
-                    let defer_cursor =
-                        matches!(&envelope.message, ServerToClientMessage::WorkerStop(_));
-                    if !defer_cursor {
-                        self.advance_downlink_cursor(&envelope)?;
-                    }
-                    match envelope.message {
+                    // The sender may discard every acknowledged frame. Keep the
+                    // cursor behind the durable effect/intent and its reply so a
+                    // crash at any earlier point replays the command.
+                    match &envelope.message {
+                        ServerToClientMessage::CommandAck(payload) => {
+                            self.store.record_command_result(payload).map_err(|error| {
+                                DownlinkFailure::Fatal(DaemonError::Store(error))
+                            })?;
+                            if let Some(error) = &payload.error {
+                                self.status.last_error = Some(format!(
+                                    "command {}: {:?}",
+                                    payload.command_message_id, error.code
+                                ));
+                            }
+                        }
                         ServerToClientMessage::ProviderApply(_)
                         | ServerToClientMessage::CandidateApply(_)
                         | ServerToClientMessage::RepositoryRegister(_)
                         | ServerToClientMessage::ExtensionApply(_) => {}
                         ServerToClientMessage::EnrollmentAccepted(payload) => {
-                            acceptance = Some(payload);
+                            let issuance = enrollment.ok_or_else(|| {
+                                DownlinkFailure::Retriable(
+                                    "enrollment acceptance arrived without issuance".to_owned(),
+                                )
+                            })?;
+                            if payload.public_client_id != issuance.public_client_id {
+                                return Err(DownlinkFailure::Fatal(DaemonError::Protocol(
+                                    "enrollment acceptance identity mismatch".to_owned(),
+                                )));
+                            }
+                            self.accept_enrollment(issuance)
+                                .map_err(DownlinkFailure::Fatal)?;
+                            acceptance = Some(payload.clone());
                         }
                         ServerToClientMessage::AccessChallenge(payload) => {
-                            self.answer_access_challenge(&payload)
+                            self.answer_access_challenge(payload)
                                 .map_err(DownlinkFailure::Fatal)?;
                         }
                         ServerToClientMessage::ClientLock(payload) => {
-                            self.apply_client_lock(&payload, &envelope.message_id)
+                            self.apply_client_lock(payload, &envelope.message_id)
                                 .map_err(DownlinkFailure::Fatal)?;
                         }
                         ServerToClientMessage::OccupancyOffer(payload) => {
-                            self.apply_occupancy_offer(&payload)
+                            self.apply_occupancy_offer(payload)
                                 .map_err(DownlinkFailure::Fatal)?;
                         }
                         ServerToClientMessage::OccupancyRelease(payload) => {
-                            self.apply_occupancy_release(&payload, &envelope.message_id)
+                            self.apply_occupancy_release(payload, &envelope.message_id)
                                 .map_err(DownlinkFailure::Fatal)?;
                         }
                         ServerToClientMessage::OccupancyForceFence(payload) => {
-                            self.apply_occupancy_force_fence(&payload, &envelope.message_id)
+                            self.apply_occupancy_force_fence(payload, &envelope.message_id)
                                 .map_err(DownlinkFailure::Fatal)?;
                         }
                         ServerToClientMessage::WorkerLaunch(payload) => {
-                            self.apply_worker_launch(&payload)
+                            self.apply_worker_launch(payload)
                                 .map_err(DownlinkFailure::Fatal)?;
                         }
-                        ServerToClientMessage::WorkerStop(ref payload) => {
+                        ServerToClientMessage::WorkerStop(payload) => {
                             self.apply_worker_stop(payload, &envelope.message_id)
                                 .map_err(worker_stop_failure_to_downlink)?;
                             // The stop intent, process-group action, terminal
                             // registry state, and receipt are durable before
                             // this cursor is advanced. A crash before this
                             // point therefore replays the same command.
-                            self.advance_downlink_cursor(&envelope)?;
                         }
                         ServerToClientMessage::RepositoryRescan(payload) => {
-                            self.apply_repository_rescan(&payload, &envelope.message_id)
+                            self.apply_repository_rescan(payload, &envelope.message_id)
                                 .map_err(DownlinkFailure::Fatal)?;
                         }
-                        ServerToClientMessage::CredentialRotate(_) => {
-                            // Credential commands are owned by later device-client
-                            // lanes; the cursor has already advanced, so a skipped
-                            // frame never blocks the stream.
-                            self.status.unhandled_downlink_commands += 1;
+                        ServerToClientMessage::CredentialRotate(payload) => {
+                            crate::identity::prepare_credential_rotation(
+                                &mut self.store,
+                                &envelope.message_id,
+                                payload,
+                            )
+                            .map_err(|error| DownlinkFailure::Fatal(DaemonError::Store(error)))?;
                         }
                         ServerToClientMessage::ManagedAppCommand(payload) => {
-                            self.apply_managed_app_command(&payload, &envelope.message_id)
+                            self.apply_managed_app_command(payload, &envelope.message_id)
                                 .map_err(DownlinkFailure::Fatal)?;
                         }
                     }
+                    self.advance_downlink_cursor(&envelope)?;
                     accepted += 1;
+                    if matches!(envelope.message, ServerToClientMessage::CredentialRotate(_)) {
+                        // Complete one durable handover before receiving another.
+                        self.next_heartbeat_at = Instant::now();
+                        break;
+                    }
                 }
                 SequenceVerdict::Duplicate => {}
                 SequenceVerdict::Gap {
@@ -1665,8 +1754,6 @@ impl DeviceDaemon {
                     payload.public_client_id, issuance.public_client_id
                 ))));
             }
-            self.accept_enrollment(issuance)
-                .map_err(DownlinkFailure::Fatal)?;
         } else if enrollment.is_some() {
             return Err(DownlinkFailure::Retriable(
                 "enrollment issuance arrived without an acceptance frame".to_owned(),
@@ -1676,15 +1763,29 @@ impl DeviceDaemon {
         Ok(accepted)
     }
 
+    fn confirm_credential_rotation(
+        &mut self,
+        response: &ExchangeResponse,
+    ) -> Result<(), DaemonError> {
+        if let Some(confirmation) = &response.credential_rotation {
+            crate::identity::activate_credential_rotation(
+                &mut self.store,
+                confirmation,
+                &now_rfc3339(),
+            )?;
+            let identity =
+                crate::identity::load_device_identity(&self.store)?.ok_or_else(|| {
+                    DaemonError::Protocol("device identity disappeared during rotation".into())
+                })?;
+            self.credential = Some(identity.credential().material_hex());
+        }
+        Ok(())
+    }
+
     fn advance_downlink_cursor(
         &mut self,
         envelope: &ServerToClientEnvelope,
     ) -> Result<(), DownlinkFailure> {
-        self.downlink.advance(envelope.sequence).map_err(|error| {
-            DownlinkFailure::Fatal(DaemonError::Protocol(format!(
-                "downlink cursor rejected an accepted sequence: {error:?}"
-            )))
-        })?;
         self.store
             .advance_inbox_cursor(&ClientInboxCursorUpdate {
                 server_profile_id: self.config.server_profile_id.clone(),
@@ -1693,6 +1794,11 @@ impl DeviceDaemon {
                 updated_at: now_rfc3339(),
             })
             .map_err(|error| DownlinkFailure::Fatal(DaemonError::Store(error)))?;
+        self.downlink.advance(envelope.sequence).map_err(|error| {
+            DownlinkFailure::Fatal(DaemonError::Protocol(format!(
+                "downlink cursor rejected an accepted sequence: {error:?}"
+            )))
+        })?;
         Ok(())
     }
 

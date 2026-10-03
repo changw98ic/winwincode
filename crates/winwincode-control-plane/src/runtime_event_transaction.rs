@@ -1036,7 +1036,7 @@ fn validate_authority(
         ));
     }
     if authority.issued_at() != &message.lease.issued_at
-        || authority.expires_at() != &message.lease.expires_at
+        || authority.expires_at().0 < message.lease.expires_at.0
     {
         return Err(Rejection::Conflict(
             "runtime event changed the scheduler-owned lease window",
@@ -1046,7 +1046,7 @@ fn validate_authority(
         .map_err(|_| Rejection::Conflict("runtime event sentAt is not canonical"))?;
     let issued_at = instant_millis(&message.lease.issued_at)
         .map_err(|_| Rejection::Conflict("runtime event issuedAt is not canonical"))?;
-    let expires_at = instant_millis(&message.lease.expires_at)
+    let expires_at = instant_millis(authority.expires_at())
         .map_err(|_| Rejection::Conflict("runtime event expiresAt is not canonical"))?;
     let occurred_at = instant_millis(&message.event.occurred_at)
         .map_err(|_| Rejection::Conflict("runtime event occurredAt is not canonical"))?;

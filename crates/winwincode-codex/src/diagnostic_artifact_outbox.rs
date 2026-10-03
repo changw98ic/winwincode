@@ -499,7 +499,9 @@ impl DiagnosticArtifactOutbox {
             let record: StoredDiagnosticArtifact =
                 serde_json::from_slice(&bytes).map_err(|_| AdapterStoreError::Corrupt)?;
             record.validate()?;
-            if record.authority() == *authority && record.final_ack.is_some() {
+            if current_diagnostic_authority(authority, record.authority())
+                && record.final_ack.is_some()
+            {
                 result.push(record.reference());
             }
         }
@@ -522,7 +524,9 @@ impl DiagnosticArtifactOutbox {
                 serde_json::from_slice(&row.map_err(|_| AdapterStoreError::Unavailable)?)
                     .map_err(|_| AdapterStoreError::Corrupt)?;
             record.validate()?;
-            if record.authority() == *authority && record.final_ack.is_none() {
+            if current_diagnostic_authority(authority, record.authority())
+                && record.final_ack.is_none()
+            {
                 return Ok(true);
             }
         }
@@ -924,6 +928,20 @@ fn requeue(
     }
     Ok(replay)
 }
+fn current_diagnostic_authority(
+    current: &DiagnosticArtifactAuthority,
+    mut retained: DiagnosticArtifactAuthority,
+) -> bool {
+    if !winwincode_execution_port::execution_identity::execution_lease_authorizes(
+        &current.lease,
+        &retained.lease,
+    ) {
+        return false;
+    }
+    retained.lease = current.lease.clone();
+    *current == retained
+}
+
 fn final_ack_matches(left: &ArtifactAckMessage, right: &ArtifactAckMessage) -> bool {
     left.artifact_id == right.artifact_id
         && left.ack_sequence == right.ack_sequence

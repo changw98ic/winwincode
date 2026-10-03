@@ -146,6 +146,29 @@ impl ExecutionPortActionGate {
         }
     }
 
+    pub(crate) fn renew_lease(
+        &self,
+        lease: &winwincode_execution_port::generated::ExecutionLeaseStamp,
+    ) -> Result<(), ActionBridgeError> {
+        let mut bindings = self
+            .state
+            .bindings
+            .write()
+            .map_err(|_| ActionBridgeError::Unavailable)?;
+        for binding in bindings.values_mut() {
+            if binding.authority.lease.job_id == lease.job_id {
+                if !winwincode_execution_port::execution_identity::execution_lease_authorizes(
+                    lease,
+                    &binding.authority.lease,
+                ) {
+                    return Err(ActionBridgeError::Conflict);
+                }
+                binding.authority.lease = lease.clone();
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn install_binding(
         &self,
         binding: ModelRunBinding,
@@ -403,8 +426,10 @@ impl ExecutionPortActionGate {
             .get(session_id)
             .cloned();
         let stale = current_binding.as_ref().is_none_or(|binding| {
-            binding.authority.lease != action.authority.lease
-                || binding.authority.worker_session_id != action.authority.worker_session_id
+            !winwincode_execution_port::execution_identity::execution_lease_authorizes(
+                &binding.authority.lease,
+                &action.authority.lease,
+            ) || binding.authority.worker_session_id != action.authority.worker_session_id
                 || binding.authority.session_identity != action.authority.session_identity
                 || !canonical_instant(received_at)
                 || !canonical_instant(&binding.authority.lease.issued_at)

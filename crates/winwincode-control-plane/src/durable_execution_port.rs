@@ -322,7 +322,18 @@ impl<'application> DurableExecutionPortIngress<'application> {
                     _ => unreachable!("Worker registration/heartbeat match is exhaustive"),
                 }
                 .map_err(DurableExecutionPortError::Service)?;
-                Ok(vec![response])
+                let mut responses = vec![response];
+                if let ExecutionPortMessage::WorkerHeartbeatMessage(heartbeat) = message
+                    && matches!(&responses[0], ExecutionPortMessage::WorkerHeartbeatAckMessage(ack)
+                        if matches!(ack.status, winwincode_execution_port::generated::WorkerHeartbeatAckMessageStatus::Accepted | winwincode_execution_port::generated::WorkerHeartbeatAckMessageStatus::Duplicate))
+                {
+                    responses.extend(
+                        ExecutionPortService::new(self.storage, self.server_time.clone())
+                            .renew_active_leases(heartbeat)
+                            .map_err(DurableExecutionPortError::Service)?,
+                    );
+                }
+                Ok(responses)
             }
             ExecutionPortMessage::JobDispatchResultMessage(result) => {
                 let accepted = ExecutionPortService::new(self.storage, self.server_time.clone())
@@ -455,8 +466,11 @@ impl<'application> DurableExecutionPortIngress<'application> {
             ExecutionPortMessage::ActionEnforcementRequestMessage(request) => {
                 self.delegate_job_scoped(&request.lease.job_id, message)
             }
-            ExecutionPortMessage::WorkerCapabilitiesMessage(_) => {
-                self.delegate_supplement(DurableExecutionPortSupplement::WorkerMessage(message))
+            ExecutionPortMessage::WorkerCapabilitiesMessage(capabilities) => {
+                ExecutionPortService::new(self.storage, self.server_time.clone())
+                    .update_capabilities(capabilities)
+                    .map_err(DurableExecutionPortError::Service)?;
+                Ok(Vec::new())
             }
             _ => Err(DurableExecutionPortError::UnsupportedMessage),
         }
@@ -621,8 +635,9 @@ impl<'application> DurableExecutionPortIngress<'application> {
         job: &ExecutionJob,
         terminal_revision: Option<u64>,
     ) -> Result<(), DurableExecutionPortError> {
-        let initiating_actor = public_actor_from_receipt_key(durable.receipt_identity().actor_key())
-            .map_err(DurableExecutionPortError::Storage)?;
+        let initiating_actor =
+            public_actor_from_receipt_key(durable.receipt_identity().actor_key())
+                .map_err(DurableExecutionPortError::Storage)?;
         let delivery_id = DeliveryId(
             durable
                 .stream_id()
@@ -885,7 +900,7 @@ fn require_exact_dispatch_message(
         && attempt == Some(accepted.attempt)
         && lease.fencing_token == accepted.fencing_token
         && lease.issued_at == accepted.issued_at
-        && lease.expires_at == accepted.expires_at
+        && lease.expires_at.0 <= accepted.expires_at.0
         && worker_session_id == authority.worker_session_id()
         && identity_worker_session_id == worker_session_id;
     if exact {
@@ -939,7 +954,7 @@ fn outcome_authority_rejection(
         && attempt == Some(lease.attempt)
         && message.lease.fencing_token == lease.fencing_token
         && message.lease.issued_at == lease.issued_at
-        && message.lease.expires_at == lease.expires_at
+        && message.lease.expires_at.0 <= lease.expires_at.0
         && message.worker_session_id == *authority.worker_session_id();
     (!exact).then(|| {
         outcome_rejection(

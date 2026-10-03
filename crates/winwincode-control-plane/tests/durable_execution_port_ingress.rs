@@ -2629,3 +2629,86 @@ fn replacement_seal_skips_append_and_binds_successor_worker_session() {
     );
     fixture.close();
 }
+
+#[test]
+fn renewal_authorizes_runtime_after_the_original_deadline_without_changing_retained_frames() {
+    let seed = 902;
+    let mut fixture = Fixture::open("renewed-product-runtime", seed);
+    let dispatch = install_product_dispatch(&mut fixture, seed);
+    let lease = &dispatch.lease;
+    let renewal = winwincode_storage::ExecutionLeaseRenewal {
+        expires_at: Instant("2027-01-15T08:10:00.000Z".into()),
+        prior_expires_at: lease.expires_at.clone(),
+        sent_at: Instant("2027-01-15T08:04:00.000Z".into()),
+        job_id: lease.job_id.clone(),
+        lease_id: lease.lease_id.clone(),
+        worker_id: lease.worker_id.clone(),
+        worker_instance_id: lease.worker_instance_id.clone(),
+        attempt: 1,
+        fencing_token: lease.fencing_token.clone(),
+        request_id: RequestId(canonical_id("req", seed + 40)),
+        message_id: ExecutionMessageId(canonical_id("xmsg", seed + 40)),
+    };
+    let receipt = fixture
+        .storage
+        .execution_registry()
+        .expect("registry")
+        .renew_execution_lease(&renewal)
+        .expect("renew");
+    assert_eq!(
+        receipt.status,
+        winwincode_storage::LeaseWriteStatus::Accepted
+    );
+    let identity = exact_session_identity(&dispatch);
+    let mut runtime = RuntimeEventMessage {
+        codex_thread_id: identity.codex_thread_id.clone(),
+        worker_session_id: identity.worker_session_id.clone(),
+        session_identity: identity,
+        lease: lease.clone(),
+        kind: RuntimeEventMessageKind::RuntimeEvent,
+        message_id: ExecutionMessageId(canonical_id("xmsg", seed + 41)),
+        schema_version: SchemaVersion::WinwincodeV1,
+        sent_at: Instant("2027-01-15T08:06:00.000Z".into()),
+        event: ExecutionEventRecord {
+            category: ExecutionEventCategory::Lifecycle,
+            event_id: ExecutionEventId(canonical_id("xevt", seed + 41)),
+            occurred_at: Instant("2027-01-15T08:06:00.000Z".into()),
+            payload: None,
+            sequence: ExecutionSequence(1),
+            summary: "Stream opened before renewal is still running".into(),
+        },
+    };
+    for (sequence, expiry) in [(1, lease.expires_at.clone()), (2, renewal.expires_at)] {
+        runtime.lease.expires_at = expiry;
+        runtime.event.sequence = ExecutionSequence(sequence);
+        runtime.message_id = ExecutionMessageId(canonical_id(
+            "xmsg",
+            seed + 40 + u64::try_from(sequence).expect("positive sequence"),
+        ));
+        runtime.event.event_id = ExecutionEventId(canonical_id(
+            "xevt",
+            seed + 40 + u64::try_from(sequence).expect("positive sequence"),
+        ));
+        let result = fixture
+            .accept(
+                &ExecutionPortMessage::RuntimeEventMessage(runtime.clone()),
+                runtime.sent_at.clone(),
+            )
+            .expect("runtime after original expiry");
+        let [ExecutionPortMessage::RuntimeAckMessage(ack)] = result.as_slice() else {
+            panic!("runtime ack")
+        };
+        assert_eq!(ack.status, LeaseWriteStatus::Accepted, "{:?}", ack.error);
+    }
+    let replay = fixture
+        .accept(
+            &ExecutionPortMessage::RuntimeEventMessage(runtime.clone()),
+            Instant("2027-01-15T08:11:00.000Z".into()),
+        )
+        .expect("immutable replay after expiry");
+    let [ExecutionPortMessage::RuntimeAckMessage(ack)] = replay.as_slice() else {
+        panic!("runtime replay ack")
+    };
+    assert_eq!(ack.status, LeaseWriteStatus::Duplicate);
+    fixture.close();
+}

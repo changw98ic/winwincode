@@ -585,7 +585,7 @@ where
         .map_err(|_| RemoteWorkerTransportError::new("remote Worker authentication failed"))?;
         let principal = connection.principal().clone();
 
-        let responses = match frame.message() {
+        let mut responses = match frame.message() {
             ExecutionPortMessage::WorkerRegisterMessage(_)
             | ExecutionPortMessage::WorkerHeartbeatMessage(_) => Ok(vec![
                 pool.accept(&mut connection, frame.message(), now)
@@ -618,6 +618,18 @@ where
                     })
             }
         }?;
+        if let ExecutionPortMessage::WorkerHeartbeatMessage(heartbeat) = frame.message()
+            && matches!(responses.first(), Some(ExecutionPortMessage::WorkerHeartbeatAckMessage(ack))
+                if matches!(ack.status, winwincode_execution_port::generated::WorkerHeartbeatAckMessageStatus::Accepted | winwincode_execution_port::generated::WorkerHeartbeatAckMessageStatus::Duplicate))
+        {
+            responses.extend(
+                winwincode_control_plane::ExecutionPortService::new(storage, now.clone())
+                    .renew_active_leases(heartbeat)
+                    .map_err(|_| {
+                        RemoteWorkerTransportError::new("remote Worker lease renewal failed")
+                    })?,
+            );
+        }
         Ok((responses, principal))
     }
 }

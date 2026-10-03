@@ -2831,3 +2831,110 @@ mod runtime_router_fixture {
         }
     }
 }
+
+#[test]
+fn capabilities_update_preserves_scope_and_replays_after_restart() {
+    use winwincode_execution_port::generated::WorkerCapabilitiesMessage;
+    let root = temporary_directory("capabilities-update");
+    let mut storage = SqliteStorage::open(&root).expect("storage");
+    let register: WorkerRegisterMessage = fixture_message("worker.register");
+    let mut update: WorkerCapabilitiesMessage = fixture_message("worker.capabilities");
+    update.capabilities.max_concurrent_jobs = 7;
+    let mut service = ExecutionPortService::new(&mut storage, update.sent_at.clone());
+    service.register_worker(&register).expect("register");
+    service.update_capabilities(&update).expect("update");
+    drop(service);
+    let worker = storage
+        .execution_registry()
+        .expect("registry")
+        .load_worker(&register.worker_id)
+        .expect("worker")
+        .expect("registered");
+    assert_eq!(worker.max_slots, 7);
+    let scope = worker.management_scope;
+    drop(storage);
+    let mut storage = SqliteStorage::open(&root).expect("restart");
+    let mut service = ExecutionPortService::new(&mut storage, update.sent_at.clone());
+    service.update_capabilities(&update).expect("exact replay");
+    update.capabilities.max_concurrent_jobs = 8;
+    assert!(
+        service.update_capabilities(&update).is_err(),
+        "changed request must fail"
+    );
+    update.request_id.0 = "req_AAAAAAAAAAAAAAAAAAAAAAAAAA".into();
+    update.worker_instance_id.0 = "wki_AAAAAAAAAAAAAAAAAAAAAAAAAA".into();
+    assert!(
+        service.update_capabilities(&update).is_err(),
+        "foreign instance must fail"
+    );
+    drop(service);
+    let worker = storage
+        .execution_registry()
+        .expect("registry")
+        .load_worker(&register.worker_id)
+        .expect("worker")
+        .expect("registered");
+    assert_eq!(worker.max_slots, 7);
+    assert_eq!(worker.management_scope, scope);
+}
+
+#[test]
+fn heartbeat_renews_current_dispatch_and_redelivers_after_server_restart() {
+    use winwincode_domain::Instant;
+    let root = temporary_directory("heartbeat-renewal");
+    let mut storage = SqliteStorage::open(&root).expect("storage");
+    let (mut service, dispatch) = setup_service(&mut storage, "2026-08-24T12:00:01.000Z");
+    let result: JobDispatchResultMessage = fixture_message("job.dispatch_result");
+    assert_eq!(
+        dispatch_result_response(&mut service, result, "accept dispatch").status,
+        JobDispatchResultMessageStatus::Accepted
+    );
+    drop(service);
+    let mut heartbeat: WorkerHeartbeatMessage = fixture_message("worker.heartbeat");
+    heartbeat.observed_at = Instant("2026-08-24T12:08:00.000Z".into());
+    heartbeat.sent_at = heartbeat.observed_at.clone();
+    let mut service = ExecutionPortService::new(&mut storage, heartbeat.sent_at.clone());
+    let messages = service.renew_active_leases(&heartbeat).expect("renew");
+    assert_eq!(messages.len(), 1);
+    let ExecutionPortMessage::LeaseRenewMessage(renewal) = &messages[0] else {
+        panic!("lease renewal");
+    };
+    assert_eq!(renewal.prior_expires_at, dispatch.lease.expires_at);
+    assert_eq!(renewal.lease.expires_at.0, "2026-08-24T12:18:00.000Z");
+    drop(service);
+    assert_eq!(
+        storage
+            .execution_registry()
+            .expect("registry")
+            .load_dispatch_authority(&dispatch.job.job_id)
+            .expect("authority remains usable")
+            .expect("accepted")
+            .lease()
+            .expires_at,
+        renewal.lease.expires_at
+    );
+    drop(storage);
+    let mut storage = SqliteStorage::open(&root).expect("restart");
+    let mut service =
+        ExecutionPortService::new(&mut storage, Instant("2026-08-24T12:08:02.000Z".into()));
+    assert_eq!(
+        service
+            .renew_active_leases(&heartbeat)
+            .expect("lost response replay"),
+        messages
+    );
+    heartbeat.active_leases[0].expires_at = renewal.lease.expires_at.clone();
+    assert!(
+        service
+            .renew_active_leases(&heartbeat)
+            .expect("acknowledged renewal")
+            .is_empty()
+    );
+    heartbeat.worker_instance_id.0 = "wki_AAAAAAAAAAAAAAAAAAAAAAAAAA".into();
+    assert!(
+        service
+            .renew_active_leases(&heartbeat)
+            .expect("foreign instance")
+            .is_empty()
+    );
+}

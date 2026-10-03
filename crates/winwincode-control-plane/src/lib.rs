@@ -1734,7 +1734,10 @@ impl ControlPlane {
             || acknowledgement.worker_session_id != chunk.worker_session_id
             || acknowledgement.session_identity != chunk.session_identity
             || acknowledgement.ack_sequence.0 != chunk.sequence.0
-            || acknowledgement.lease != authority_lease(authority)
+            || !winwincode_execution_port::execution_identity::execution_lease_authorizes(
+                &authority_lease(authority),
+                &acknowledgement.lease,
+            )
         {
             return Err(CandidateResolutionError::Storage(
                 StorageError::invalid_input(

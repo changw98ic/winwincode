@@ -328,6 +328,16 @@ pub trait CodexCoreAdapter {
         Ok(())
     }
 
+    /// Persists a Control Plane-authorized lease extension before Worker ACK.
+    /// Adapters without a durable authority source reject renewal explicitly.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when the new deadline cannot be persisted.
+    fn renew_lease(&mut self, _lease: &ExecutionLeaseStamp) -> Result<bool, Self::Error> {
+        Ok(false)
+    }
+
     /// Installs the local-only action request transport.  The default keeps
     /// remote/test adapters on the ordinary typed response path.
     fn install_action_request_transport(&mut self, _transport: ActionRequestTransport) {}

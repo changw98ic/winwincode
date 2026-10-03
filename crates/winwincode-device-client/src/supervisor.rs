@@ -1773,6 +1773,7 @@ fn signal_process(target: ProcessSignalTarget, signal: &str) -> bool {
     let ProcessSignalTarget::Group(group) = target;
     Command::new("/bin/kill")
         .arg(format!("-{signal}"))
+        .arg("--")
         .arg(format!("-{group}"))
         .stderr(Stdio::null())
         .status()
