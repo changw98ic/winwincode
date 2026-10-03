@@ -538,3 +538,245 @@ struct ReclaimClaimFixture<'a> {
     reclaimer_id: &'a str,
     claimed_at_millis: u64,
 }
+
+#[test]
+fn lifecycle_lock_is_private_stable_and_independent_of_readable_parent() {
+    use std::os::unix::fs::MetadataExt;
+    let directory = TestDirectory::new("private-lifecycle-lock");
+    fs::set_permissions(&directory.0, fs::Permissions::from_mode(0o755)).expect("readable parent");
+    let runtime = Arc::new(FakeRuntime::new(1_000));
+    let owner = manager(
+        &directory.0,
+        TemporaryRootTarget::Aarch64AppleDarwin,
+        &runtime,
+    );
+    let parent_lock = fs::File::open(&directory.0).expect("open readable parent");
+    parent_lock
+        .lock()
+        .expect("simulate unrelated directory lock");
+    let independent = owner.clone();
+    let (send, receive) = std::sync::mpsc::channel();
+    let acquisition = thread::spawn(move || send.send(independent.acquire()).expect("send result"));
+    let result = receive.recv_timeout(Duration::from_secs(2));
+    parent_lock
+        .unlock()
+        .expect("release unrelated directory lock");
+    acquisition.join().expect("acquisition process");
+    let lease = result
+        .expect("directory reader must not block lifecycle")
+        .expect("acquire lease");
+    let lock_path = directory.child(".winwincode-control-plane-lifecycle.lock");
+    let before = fs::metadata(&lock_path).expect("private lock");
+    assert_eq!(before.mode() & 0o7777, 0o600);
+    assert_eq!(before.uid(), rustix::process::geteuid().as_raw());
+    assert_eq!(before.nlink(), 1);
+    lease.release().expect("release original lease");
+    owner
+        .acquire()
+        .expect("acquire next lease")
+        .release()
+        .expect("release next lease");
+    let after = fs::metadata(lock_path).expect("stable lock survives root deletion");
+    assert_eq!((before.dev(), before.ino()), (after.dev(), after.ino()));
+}
+
+#[test]
+fn lifecycle_lock_rejects_writable_parents_and_linked_or_readable_files() {
+    let directory = TestDirectory::new("unsafe-lifecycle-lock");
+    let runtime = Arc::new(FakeRuntime::new(1_000));
+    fs::set_permissions(&directory.0, fs::Permissions::from_mode(0o777)).expect("unsafe parent");
+    assert_eq!(
+        TemporaryRootLeaseManager::open(
+            &directory.0,
+            config(TemporaryRootTarget::Aarch64AppleDarwin),
+            runtime.clone()
+        )
+        .expect_err("foreign UID must not replace lifecycle inode")
+        .kind(),
+        TemporaryRootLeaseErrorKind::OwnershipLost
+    );
+    fs::set_permissions(&directory.0, fs::Permissions::from_mode(0o755)).expect("safe parent");
+    let alias = directory.child("parent-alias");
+    symlink(&directory.0, &alias).expect("parent symlink");
+    assert!(
+        TemporaryRootLeaseManager::open(
+            &alias,
+            config(TemporaryRootTarget::Aarch64AppleDarwin),
+            runtime.clone()
+        )
+        .is_err()
+    );
+    let owner = manager(
+        &directory.0,
+        TemporaryRootTarget::Aarch64AppleDarwin,
+        &runtime,
+    );
+    let target = directory.child("retained-evidence");
+    fs::write(&target, b"preserve this evidence").expect("evidence");
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).expect("private evidence");
+    let lock = directory.child(".winwincode-control-plane-lifecycle.lock");
+    symlink(&target, &lock).expect("lock symlink");
+    assert!(owner.reclaim_expired().is_err());
+    fs::remove_file(&lock).expect("remove test symlink");
+    fs::hard_link(&target, &lock).expect("lock hard link");
+    assert!(owner.reclaim_expired().is_err());
+    fs::remove_file(&lock).expect("remove test hard link");
+    fs::write(&lock, b"readable lock").expect("readable lock");
+    fs::set_permissions(&lock, fs::Permissions::from_mode(0o644)).expect("readable permission");
+    assert!(owner.reclaim_expired().is_err());
+    assert_eq!(
+        fs::metadata(&lock)
+            .expect("preserved mode")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o644
+    );
+    assert_eq!(
+        fs::read(target).expect("preserved evidence"),
+        b"preserve this evidence"
+    );
+}
+
+// Independent OS processes exercise the same manager and persistent proof.
+// The ignored probe is executed only by its parent test with a private path.
+#[test]
+#[ignore = "subprocess probe for independent lifecycle tests"]
+fn temporary_root_process_probe() {
+    use std::io::BufRead;
+    let parent = std::env::var_os("WWC_TEST_LIFECYCLE_PARENT").expect("private parent");
+    if std::env::var_os("WWC_TEST_LIFECYCLE_HOLD").is_some() {
+        let file =
+            fs::File::open(PathBuf::from(parent).join(".winwincode-control-plane-lifecycle.lock"))
+                .expect("private lock");
+        file.lock().expect("hold lifecycle lock");
+        println!("LOCK_HELD");
+        std::io::stdout().flush().expect("flush handshake");
+        let mut line = String::new();
+        std::io::stdin()
+            .lock()
+            .read_line(&mut line)
+            .expect("wait for exit");
+    } else {
+        let runtime = Arc::new(FakeRuntime::new(1_150));
+        let owner = manager(
+            Path::new(&parent),
+            TemporaryRootTarget::Aarch64AppleDarwin,
+            &runtime,
+        );
+        let gate = std::env::var_os("WWC_TEST_LIFECYCLE_GATE").expect("private gate");
+        println!("READY");
+        std::io::stdout().flush().expect("flush handshake");
+        while !Path::new(&gate).exists() {
+            thread::sleep(Duration::from_millis(5));
+        }
+        let report = owner.reclaim_expired().expect("recover actual manager");
+        println!("REMOVED={}", report.reclaimed + report.released);
+    }
+}
+
+#[test]
+fn independent_processes_reclaim_once_and_recover_after_lock_holder_dies() {
+    use std::{
+        io::{BufRead, BufReader},
+        process::{Command, Stdio},
+    };
+    let directory = TestDirectory::new("process-lifecycle-lock");
+    let runtime = Arc::new(FakeRuntime::new(1_000));
+    let owner = manager(
+        &directory.0,
+        TemporaryRootTarget::Aarch64AppleDarwin,
+        &runtime,
+    );
+    let lease = owner.acquire().expect("original lease");
+    let lease_bytes = fs::read(lease.path().join(TEMPORARY_ROOT_LEASE_FILE)).expect("lease proof");
+    let token = "5".repeat(32);
+    let claim = serde_json::to_vec(&ReclaimClaimFixture {
+        schema: "winwincode.control-plane-temporary-root-reclaim.v1",
+        lease_sha256: format!("sha256:{:x}", Sha256::digest(&lease_bytes)),
+        reclaimer_id: &token,
+        claimed_at_millis: 1_150,
+    })
+    .expect("claim proof");
+    write_private_record(
+        &lease.path().join(".winwincode-control-plane-reclaim.json"),
+        &claim,
+    );
+    let quarantine = directory.child(&format!(".reclaim-{}-{token}", lease.instance_id()));
+    fs::rename(lease.path(), &quarantine).expect("persist crash quarantine");
+    let gate = directory.child("start-cleaners");
+    let mut children = Vec::new();
+    for _ in 0..8 {
+        let mut child = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "temporary_root_process_probe",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("WWC_TEST_LIFECYCLE_PARENT", &directory.0)
+            .env("WWC_TEST_LIFECYCLE_GATE", &gate)
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("independent cleaner");
+        let mut output = BufReader::new(child.stdout.take().expect("cleaner pipe"));
+        wait_for_process_output(&mut output, "READY");
+        children.push((child, output));
+    }
+    fs::write(&gate, b"start").expect("release cleaners together");
+    let mut removed = 0;
+    for (mut child, output) in children {
+        for line in output.lines() {
+            if let Some(count) = line.expect("cleaner result").strip_prefix("REMOVED=") {
+                removed += count.parse::<u64>().expect("removal count");
+            }
+        }
+        assert!(child.wait().expect("cleaner exit").success());
+    }
+    assert_eq!(removed, 1);
+    assert!(!quarantine.exists());
+    assert_eq!(
+        lease
+            .release()
+            .expect_err("old owner remains fenced")
+            .kind(),
+        TemporaryRootLeaseErrorKind::OwnershipLost
+    );
+    let mut holder = Command::new(std::env::current_exe().expect("test executable"))
+        .args([
+            "--exact",
+            "temporary_root_process_probe",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("WWC_TEST_LIFECYCLE_PARENT", &directory.0)
+        .env("WWC_TEST_LIFECYCLE_HOLD", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("lock holder");
+    let mut output = BufReader::new(holder.stdout.take().expect("holder pipe"));
+    wait_for_process_output(&mut output, "LOCK_HELD");
+    holder.kill().expect("terminate this fixture lock holder");
+    holder.wait().expect("release descriptors on exit");
+    let (send, receive) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        send.send(owner.reclaim_expired())
+            .expect("send recovery result");
+    });
+    receive
+        .recv_timeout(Duration::from_secs(2))
+        .expect("holder death releases lock")
+        .expect("recover manager");
+}
+
+fn wait_for_process_output(output: &mut impl std::io::BufRead, expected: &str) {
+    let mut line = String::new();
+    loop {
+        assert!(output.read_line(&mut line).expect("process readiness") > 0);
+        if line.trim() == expected {
+            break;
+        }
+        line.clear();
+    }
+}

@@ -6,7 +6,7 @@ use std::{
     fmt, fs,
     fs::OpenOptions,
     io::Write,
-    os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
+    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::{Arc, Condvar, Mutex},
     thread::{self, JoinHandle},
@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const TEMPORARY_ROOT_LEASE_FILE: &str = ".winwincode-control-plane-lease.json";
+const LIFECYCLE_LOCK_FILE: &str = ".winwincode-control-plane-lifecycle.lock";
 const RECLAIM_CLAIM_FILE: &str = ".winwincode-control-plane-reclaim.json";
 const RELEASE_CLAIM_FILE: &str = ".winwincode-control-plane-release.json";
 const LEASE_SCHEMA: &str = "winwincode.control-plane-temporary-root-lease.v1";
@@ -279,18 +280,54 @@ impl fmt::Debug for TemporaryRootLeaseManager {
     }
 }
 
+// Other UIDs must neither replace the parent nor unlink/recreate its lock inode.
+fn open_lifecycle_parent(parent: &Path) -> Result<fs::File, TemporaryRootLeaseError> {
+    let directory = fs::File::from(
+        rustix::fs::open(
+            parent,
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(|_| TemporaryRootLeaseError::io())?,
+    );
+    let metadata = directory
+        .metadata()
+        .map_err(|_| TemporaryRootLeaseError::io())?;
+    if !metadata.is_dir()
+        || metadata.uid() != rustix::process::geteuid().as_raw()
+        || metadata.mode() & 0o022 != 0
+    {
+        return Err(TemporaryRootLeaseError::ownership_lost());
+    }
+    Ok(directory)
+}
+
 impl TemporaryRootLeaseManager {
     /// Opens the manager under one exact canonical parent.
     ///
     /// # Errors
     ///
-    /// Rejects a non-directory parent or filesystem failure.
+    /// Rejects symlinked, foreign-owned or writable-by-others parents and filesystem failures.
     pub fn open(
         parent: impl AsRef<Path>,
         config: TemporaryRootLeaseConfig,
         runtime: Arc<dyn TemporaryRootLeaseRuntime>,
     ) -> Result<Self, TemporaryRootLeaseError> {
-        fs::create_dir_all(parent.as_ref()).map_err(|_| TemporaryRootLeaseError::io())?;
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(parent.as_ref())
+            .map_err(|_| TemporaryRootLeaseError::io())?;
+        if fs::symlink_metadata(parent.as_ref())
+            .map_err(|_| TemporaryRootLeaseError::io())?
+            .file_type()
+            .is_symlink()
+        {
+            return Err(TemporaryRootLeaseError::ownership_lost());
+        }
         let parent =
             fs::canonicalize(parent.as_ref()).map_err(|_| TemporaryRootLeaseError::io())?;
         if !fs::metadata(&parent)
@@ -302,6 +339,7 @@ impl TemporaryRootLeaseManager {
                 "temporary root lease parent is not a directory",
             ));
         }
+        open_lifecycle_parent(&parent)?;
         Ok(Self {
             parent,
             config,
@@ -424,15 +462,33 @@ impl TemporaryRootLeaseManager {
     }
 
     fn lock_lifecycle(&self) -> Result<fs::File, TemporaryRootLeaseError> {
-        // A crash claim proves what may be removed, not which live finisher
-        // owns the deletion. Recursive removal may return success to multiple
-        // callers. Lock the stable parent inode through an independently opened
-        // descriptor; locking a file inside the removed root would lose that
-        // exclusion when its inode disappears. Process exit releases this lock
-        // so another manager can still resume a crash quarantine.
-        let parent = fs::File::open(&self.parent).map_err(|_| TemporaryRootLeaseError::io())?;
-        parent.lock().map_err(|_| TemporaryRootLeaseError::io())?;
-        Ok(parent)
+        // Keep the exclusion inode outside all removable roots. A readable
+        // parent directory cannot carry the lock: another UID can flock it
+        // without write access. Open this owner-only file relative to a verified
+        // parent descriptor, reject aliases, and let process exit release it.
+        let parent = open_lifecycle_parent(&self.parent)?;
+        let lock = fs::File::from(
+            rustix::fs::openat(
+                &parent,
+                LIFECYCLE_LOCK_FILE,
+                rustix::fs::OFlags::RDWR
+                    | rustix::fs::OFlags::CREATE
+                    | rustix::fs::OFlags::NOFOLLOW
+                    | rustix::fs::OFlags::CLOEXEC,
+                rustix::fs::Mode::from_raw_mode(0o600),
+            )
+            .map_err(|_| TemporaryRootLeaseError::io())?,
+        );
+        let metadata = lock.metadata().map_err(|_| TemporaryRootLeaseError::io())?;
+        if !metadata.is_file()
+            || metadata.uid() != rustix::process::geteuid().as_raw()
+            || metadata.mode() & 0o7777 != 0o600
+            || metadata.nlink() != 1
+        {
+            return Err(TemporaryRootLeaseError::ownership_lost());
+        }
+        lock.lock().map_err(|_| TemporaryRootLeaseError::io())?;
+        Ok(lock)
     }
 
     fn renew_handle(&self, handle: &mut LeaseHandle) -> Result<(), TemporaryRootLeaseError> {

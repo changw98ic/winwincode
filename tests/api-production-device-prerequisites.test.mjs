@@ -30,6 +30,7 @@ import {
   resolveVerificationObservation,
   observeToolProcess,
   deviceConnectCodePublished,
+  deviceHelloAcknowledged,
   workInputFromRequest,
 } from '../scripts/device-production-fixture.mjs'
 
@@ -38,6 +39,22 @@ const runnerPath = resolve(root, 'scripts/run-api-production-vertical.mjs')
 const deviceTaskPath = resolve(root, 'scripts/run-device-task-vertical.mjs')
 const glmPath = resolve(root, 'scripts/run-glm-ui-rework.mjs')
 const fixturePath = resolve(root, 'scripts/device-production-fixture.mjs')
+
+test('reopening waits for the new daemon instance hello acknowledgement', () => {
+  const database = new DatabaseSync(':memory:')
+  try {
+    database.exec(`CREATE TABLE device_identity (current_instance_id TEXT);
+      CREATE TABLE client_outbox (kind TEXT, published INTEGER, client_instance_id TEXT);
+      INSERT INTO device_identity VALUES ('old');
+      INSERT INTO client_outbox VALUES ('client.hello', 1, 'old')`)
+    assert.equal(deviceHelloAcknowledged(database, 'old'), false)
+    assert.equal(deviceHelloAcknowledged(database, null), true)
+    database.exec("UPDATE device_identity SET current_instance_id = 'new'; INSERT INTO client_outbox VALUES ('client.hello', 0, 'new')")
+    assert.equal(deviceHelloAcknowledged(database, 'old'), false)
+    database.exec("UPDATE client_outbox SET published = 1 WHERE client_instance_id = 'new'")
+    assert.equal(deviceHelloAcknowledged(database, 'old'), true)
+  } finally { database.close() }
+})
 
 test('Device-only prerequisite list covers the production acceptance path', () => {
   assert.deepEqual([...DEVICE_ONLY_PREREQUISITES], [

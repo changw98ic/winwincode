@@ -3,10 +3,10 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdirSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, realpathSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { checkedWwc, configuredDeviceModelRoute, establishDeviceOnlyExecutionPath,
-  seedDeviceLocalProvider, waitFor } from './device-production-fixture.mjs'
+  registerOrReuseDeviceRepository, seedDeviceLocalProvider, waitFor } from './device-production-fixture.mjs'
 import { loadDeviceAgentTask } from './device-agent-task.mjs'
 import { runApiProductionVertical } from './run-api-production-vertical.mjs'
 import { benchmarkDeviceEnvironment } from './run-device-task-vertical.mjs'
@@ -76,12 +76,24 @@ export async function registerDeviceTaskRepository(runtime, taskInputPath, direc
 }
 
 async function registerTaskRepository(runtime, prepared, directory) {
-  const repository = join(directory, 'source')
-  execFileSync('git', ['-C', runtime.repository, 'worktree', 'add', '--quiet', '--detach',
-    repository, prepared.baseline], { stdio: ['ignore', 'pipe', 'pipe'] })
-  const registered = checkedWwc(runtime.devicePath.wwc, ['repo', 'add', repository,
-    '--data-dir', runtime.devicePath.deviceData, '--json'], runtime.devicePath.deviceEnvironment)
-  const repositoryBindingId = registered.repository.repositoryBindingId
+  const git = (repository, args) => execFileSync('git', ['-C', repository, ...args], { encoding: 'utf8' }).trim()
+  const common = realpathSync(git(runtime.repository, ['rev-parse', '--path-format=absolute', '--git-common-dir']))
+  const bindings = checkedWwc(runtime.devicePath.wwc, ['repo', 'list',
+    '--data-dir', runtime.devicePath.deviceData, '--json'], runtime.devicePath.deviceEnvironment).repositories
+  const retained = bindings.find(binding => binding.headCommit === prepared.baseline
+    && binding.gitCommonDirectory === common)
+  const repository = retained?.canonicalPath ?? join(directory, 'source')
+  if (!existsSync(repository)) {
+    assert.equal(retained, undefined, 'retained task worktree is missing')
+    execFileSync('git', ['-C', runtime.repository, 'worktree', 'add', '--quiet', '--detach',
+      repository, prepared.baseline], { stdio: ['ignore', 'pipe', 'pipe'] })
+  }
+  assert.equal(realpathSync(git(repository, ['rev-parse', '--path-format=absolute', '--git-common-dir'])), common,
+    'retained task worktree belongs to another repository')
+  assert.equal(git(repository, ['rev-parse', 'HEAD']), prepared.baseline, 'retained task baseline changed')
+  assert.equal(git(repository, ['status', '--porcelain']), '', 'retained task worktree is dirty')
+  const registered = registerOrReuseDeviceRepository({ ...runtime.devicePath, repository })
+  const repositoryBindingId = registered.repositoryBindingId
   await waitFor(async () => {
     const response = await runtime.api.request(`/api/v1/repositories?clientId=${runtime.devicePath.publicClientId}`)
     return response.status === 200 && response.json.repositories.some(item => item.repositoryBindingId === repositoryBindingId)

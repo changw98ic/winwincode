@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -195,18 +195,31 @@ test('the actual task entry completes parallel Sessions in one Server and Device
   const inputPath = join(directory, 'native-task.json')
   writeFileSync(inputPath, JSON.stringify(task))
   const profile = benchmarkConfiguration('main-A')
-  const result = await withDeviceTaskRuntime({ directory, profiles: [profile],
+  const options = { directory, profiles: [profile],
     providers: [deterministicDeviceProvider()], build: process.env.WWC_API_SKIP_BUILD !== '1',
     timeoutMillis: 1_200_000,
-  }, async runtime => {
+  }
+  let retained
+  const result = await withDeviceTaskRuntime(options, async runtime => {
       const contexts = new Map()
       for (const id of ['first', 'second']) contexts.set(id, await runtime.forTask({
         ...profile, provider: 'device-deterministic-model',
       }, { taskInputPath: inputPath, directory: join(directory, `${id}-repository`) }))
-      const launch = id => runDeviceTaskVertical({ directory: join(directory, id),
-        ...deviceTaskIdentities('native-parallel-entry', id), runtime: contexts.get(id),
-        timeoutMillis: 1_200_000,
-      })
+      const context = contexts.get('first'), api = context.api
+      const launch = async id => {
+        const prior = join(directory, id, 'device-task-result.json')
+        if (existsSync(prior)) {
+          const retained = JSON.parse(readFileSync(prior, 'utf8'))
+          assert.equal(retained.complete, true, 'an interrupted fixture task must not be replayed')
+          const projection = (await api.query('delivery.get', { deliveryId: retained.deliveryId })).result
+          assert.equal(projection.status, 'done')
+          assert.equal(projection.verdict.status, 'pass')
+          return retained
+        }
+        return runDeviceTaskVertical({ directory: join(directory, id),
+          ...deviceTaskIdentities('native-parallel-entry', id), runtime: contexts.get(id),
+          timeoutMillis: 1_200_000 })
+      }
       const results = await Promise.allSettled([launch('first'), launch('second')])
       for (const result of results) if (result.status === 'rejected') throw result.reason
       const [first, second] = results.map(result => result.value)
@@ -234,7 +247,61 @@ test('the actual task entry completes parallel Sessions in one Server and Device
         assert.equal(task.delivery.workRunAggregate.runs.length, 3)
         assert.equal(task.delivery.workRunAggregate.runs.every(run => run.state === 'settled'), true)
       }
+      // Seed retained, drained history from a Worker which completed the real
+      // task entry. On reopen, the new anchor sorts beyond the first 200 rows.
+      const registry = new DatabaseSync(join(directory, 'server-data/control-plane.sqlite3'))
+      try {
+        const template = registry.prepare('SELECT * FROM execution_workers WHERE worker_id = ?').get(first.sourceAnchor.workerId)
+        const scope = registry.prepare('SELECT * FROM execution_worker_scopes WHERE worker_id = ?').get(first.sourceAnchor.workerId)
+        const columns = Object.keys(template)
+        const insert = registry.prepare(`INSERT INTO execution_workers (${columns.join(',')}) VALUES (${columns.map(() => '?').join(',')})`)
+        for (let i = 1; i <= 201; i++) {
+          const workerId = `wrk_${String(i).padStart(26, '0')}`
+          const instance = `wki_${String(i).padStart(26, '0')}`
+          if (registry.prepare('SELECT 1 FROM execution_workers WHERE worker_id = ?').get(workerId)) continue
+          insert.run(...columns.map(key => key === 'worker_id' ? workerId : key === 'worker_instance_id' ? instance : template[key]))
+          registry.prepare('INSERT INTO execution_worker_instances VALUES (?,?,?)').run(workerId, instance, template.started_at)
+          registry.prepare('INSERT INTO execution_worker_scopes VALUES (?,?,?)').run(workerId, scope.scope_key, scope.scope_json)
+          assert.equal((await api.command('worker.drain', 0, { workerId, reason: 'Historical drained fixture' })).outcome, 'completed')
+        }
+      } finally { registry.close() }
+      const firstPage = await api.query('worker.list', { states: [] })
+      assert.equal(firstPage.result.items.length, 200)
+      assert.equal(firstPage.page.hasMore, true)
+      assert.equal(firstPage.result.items.every(worker => worker.state === 'draining'), true)
+      retained = { first, second, receipts: [a, b],
+        baseline: context.baseline, binding: context.repositoryBindingId,
+        client: context.devicePath.publicClientId,
+        endpoint: readFileSync(join(directory, 'server-endpoint.json'), 'utf8'),
+        certificate: readFileSync(join(directory, 'fixture-cert.pem'), 'utf8') }
       return { completed: 2, calls: [a.calls.length, b.calls.length] }
   })
   assert.equal(result.flow.scenario.completed, 2)
+  const reopened = await withDeviceTaskRuntime({ ...options, build: false }, async runtime => {
+    const context = await runtime.forTask({ ...profile, provider: 'device-deterministic-model' },
+      { taskInputPath: inputPath, directory: join(directory, 'first-repository') })
+    assert.equal(context.baseline, retained.baseline)
+    assert.equal(context.repositoryBindingId, retained.binding)
+    assert.equal(context.devicePath.publicClientId, retained.client)
+    assert.equal(readFileSync(join(directory, 'server-endpoint.json'), 'utf8'), retained.endpoint)
+    assert.equal(readFileSync(join(directory, 'fixture-cert.pem'), 'utf8'), retained.certificate)
+    for (const [index, prior] of [retained.first, retained.second].entries()) {
+      const projection = (await context.api.query('delivery.get', { deliveryId: prior.deliveryId })).result
+      assert.equal(projection.status, 'done')
+      assert.equal(projection.verdict.status, 'pass')
+      assert.deepEqual(readDeviceExecutionReceipts(prior.directory, {
+        deliveryId: prior.deliveryId, productSessionId: prior.productSessionId,
+      }).calls, retained.receipts[index].calls)
+    }
+    assert.equal(context.devicePath.modelServer.requests.length, 0, 'reopening completed calls must not invoke a model')
+    const next = await runDeviceTaskVertical({ directory: join(directory, 'third'),
+      ...deviceTaskIdentities('native-parallel-entry', 'third'), runtime: context,
+      timeoutMillis: 1_200_000 })
+    assert.equal(next.complete, true)
+    assert.equal(next.delivery.detail.verdict.status, 'pass')
+    const foreign = await context.api.query('worker.list', { states: [] })
+    assert.equal(foreign.result.items.every(worker => worker.state === 'draining' && worker.revision === 1), true)
+    return { retainedCompleted: 2, continued: 1 }
+  })
+  assert.deepEqual(reopened.flow.scenario, { retainedCompleted: 2, continued: 1 })
 })

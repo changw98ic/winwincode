@@ -35,6 +35,7 @@ import {
   readFileSync,
   readSync,
   renameSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from 'node:fs'
@@ -55,6 +56,7 @@ import {
   deviceOnlyServerEnvironment,
   deviceProviderSecretBundle,
   establishDeviceOnlyExecutionPath,
+  getDeviceWorker,
   seedDeviceLocalProvider,
   startDeterministicDeviceModelServer,
   encryptDeviceProviderEnvelope,
@@ -723,7 +725,7 @@ function commandRequest(requestId, command, expectedRevision, payload, actor = A
   }
 }
 
-function queryRequest(requestId, query, parameters, actor = ACTOR) {
+function queryRequest(requestId, query, parameters, actor = ACTOR, pagination = page()) {
   return {
     schemaVersion: SCHEMA_VERSION,
     requestId,
@@ -731,7 +733,7 @@ function queryRequest(requestId, query, parameters, actor = ACTOR) {
     scope: SCOPE,
     query,
     parameters,
-    page: page(),
+    page: pagination,
   }
 }
 
@@ -820,9 +822,10 @@ class ApiClient {
   }
 
   requestId() {
-    const value = id('req', this.nextRequest)
     this.nextRequest += 1
-    return value
+    // Reopening a retained Server must not reuse a prior command receipt's
+    // counter with a different payload. Explicit retry IDs still pass through.
+    return `req_${randomBytes(13).toString('hex').toUpperCase()}`
   }
 
   async bootstrap(proof, { login = false, localOpen = false } = {}) {
@@ -893,8 +896,8 @@ class ApiClient {
     return response.json
   }
 
-  async query(query, parameters) {
-    const request = queryRequest(this.requestId(), query, parameters, this.actor ?? ACTOR)
+  async query(query, parameters, pagination = page()) {
+    const request = queryRequest(this.requestId(), query, parameters, this.actor ?? ACTOR, pagination)
     const response = await requestJson(`${this.baseUrl}/api/v1/queries`, {
       method: 'POST',
       origin: this.origin,
@@ -997,8 +1000,7 @@ export async function waitForDeviceWorkerRegistered(
   const workerId = launched?.workerId
   assert.equal(typeof workerId, 'string', 'Device launch anchor must return workerId')
   return waitFor(async () => {
-    const response = await client.query('worker.list', { states: [] })
-    const worker = response.result?.items?.find(item => item.id === workerId)
+    const worker = await getDeviceWorker(client, workerId)
     return worker?.state === 'enabled' && typeof worker.lastHeartbeatAt === 'string'
       ? worker
       : false
@@ -1022,6 +1024,15 @@ function createCertificate(directory) {
   const configuration = join(directory, 'openssl.cnf')
   const key = join(directory, 'fixture-key.pem')
   const cert = join(directory, 'fixture-cert.pem')
+  if (existsSync(cert) || existsSync(key)) {
+    const certificate = new X509Certificate(readFileSync(cert))
+    for (const path of [cert, key]) assert.equal(lstatSync(path).isFile(), true,
+      'retained TLS identity must use regular files')
+    assert.equal(certificate.checkPrivateKey(createPrivateKey(readFileSync(key))), true,
+      'retained TLS certificate and private key must match')
+    assert.ok(Date.parse(certificate.validTo) > Date.now(), 'retained TLS certificate expired')
+    return { cert, key }
+  }
   writeFileSync(configuration, `[req]
 distinguished_name = dn
 x509_extensions = extensions
@@ -1053,30 +1064,59 @@ export function prepareControlledRepository({ fixtureDirectory, files = {}, veri
   const sourceRoot = resolve(fixtureDirectory, 'source-repositories')
   const repository = join(sourceRoot, IDS.repository)
   mkdirSync(sourceRoot, { recursive: true })
+  const expected = verificationCommand === null ? {
+    'package.json': `${JSON.stringify({ name: 'winwincode-api-fixture', private: true,
+      scripts: { verify: "test -s .winwincode-api-candidate && printf '%s\\n' 'fixture verified'" } }, null, 2)}\n`,
+    'package-lock.json': '{}\n',
+    '.winwincode-api-candidate': 'deterministic StrongFlow candidate baseline\n',
+    ...files,
+  } : files
+  for (const [name, content] of Object.entries(expected)) {
+    assert.ok(resolve(repository, name).startsWith(`${repository}/`) && !name.split('/').includes('.git'),
+      'scenario files must stay inside the source repository')
+    assert.equal(typeof content, 'string', 'scenario file content must be text')
+  }
+  const checkpoint = join(fixtureDirectory, 'controlled-repository.json')
+  const inputDigest = createHash('sha256').update(JSON.stringify(
+    [verificationCommand, Object.entries(expected).sort(([a], [b]) => a.localeCompare(b))],
+  )).digest('hex')
+  if (existsSync(join(repository, '.git'))) {
+    assert.equal(lstatSync(repository).isSymbolicLink(), false, 'retained repository must not be a symlink')
+    assert.equal(lstatSync(join(repository, '.git')).isDirectory(), true,
+      'retained repository must have its original Git directory')
+    const git = args => {
+      const result = spawnSync('git', ['-C', repository, ...args], { encoding: 'utf8' })
+      assert.equal(result.status, 0, `retained repository lookup failed: ${result.stderr}`)
+      return result.stdout.trim()
+    }
+    assert.equal(realpathSync(git(['rev-parse', '--show-toplevel'])), realpathSync(repository))
+    const revision = git(['rev-parse', 'HEAD'])
+    if (existsSync(checkpoint)) {
+      const saved = JSON.parse(readFileSync(checkpoint, 'utf8'))
+      assert.equal(saved.inputDigest, inputDigest, 'retained repository input changed')
+      assert.equal(saved.revision, revision, 'retained repository baseline changed')
+    }
+    assert.equal(git(['status', '--porcelain']), '', 'retained repository is dirty; preserve its evidence')
+    const paths = git(['ls-tree', '-r', '--name-only', revision]).split('\n').filter(Boolean).sort()
+    assert.deepEqual(paths, Object.keys(expected).sort(), 'retained repository baseline paths changed')
+    for (const [path, content] of Object.entries(expected)) {
+      const result = spawnSync('git', ['-C', repository, 'show', `${revision}:${path}`], { encoding: 'utf8' })
+      assert.equal(result.status, 0)
+      assert.equal(result.stdout, content, 'retained repository baseline content changed')
+    }
+    // A pre-checkpoint runtime is adopted only after validating its original
+    // committed tree. No reset, commit, worktree replacement or model restart.
+    if (!existsSync(checkpoint)) writeJsonAtomically(checkpoint, { inputDigest, revision })
+    return { sourceRoot, repository, revision }
+  }
+  assert.equal(existsSync(checkpoint), false, 'retained repository is missing; preserve its checkpoint')
   const init = spawnSync(
     'git',
     ['init', '--quiet', '--initial-branch=main', repository],
     { cwd: sourceRoot, encoding: 'utf8', stdio: 'pipe' },
   )
   assert.equal(init.status, 0, `controlled API fixture repository creation failed: ${init.stderr}`)
-  if (verificationCommand === null) writeFileSync(
-    join(repository, 'package.json'),
-    `${JSON.stringify({
-      name: 'winwincode-api-fixture',
-      private: true,
-      scripts: {
-        verify: "test -s .winwincode-api-candidate && printf '%s\\n' 'fixture verified'",
-      },
-    }, null, 2)}\n`,
-  )
-  // Prefer npm over pnpm/corepack so the Worker sandbox can execute the
-  // scanned verification command without a package-manager bootstrap.
-  if (verificationCommand === null) writeFileSync(join(repository, 'package-lock.json'), '{}\n')
-  if (verificationCommand === null) writeFileSync(
-    join(repository, '.winwincode-api-candidate'),
-    'deterministic StrongFlow candidate baseline\n',
-  )
-  for (const [name, contents] of Object.entries(files)) {
+  for (const [name, contents] of Object.entries(expected)) {
     const destination = resolve(repository, name)
     assert.ok(destination.startsWith(`${repository}/`) && !name.split('/').includes('.git'),
       'scenario files must stay inside the source repository')
@@ -1120,6 +1160,7 @@ export function prepareControlledRepository({ fixtureDirectory, files = {}, veri
     0,
     `controlled API fixture revision lookup failed: ${revision.stderr}`,
   )
+  writeJsonAtomically(checkpoint, { inputDigest, revision: revision.stdout.trim() })
   return { sourceRoot, repository, revision: revision.stdout.trim() }
 }
 
@@ -2132,7 +2173,20 @@ export async function runApiProductionVertical({
     errorCodeTruthfulness: null,
   }
 
-  const stableServerPort = remoteWorkerBinary === null ? null : await freePort()
+  const endpointPath = join(fixtureDirectory, 'server-endpoint.json')
+  const retainedEndpoint = retainRepository && existsSync(endpointPath)
+    ? JSON.parse(readFileSync(endpointPath, 'utf8')) : null
+  if (retainedEndpoint !== null) {
+    const endpoint = new URL(retainedEndpoint.controlUrl)
+    assert.equal(endpoint.protocol, 'https:')
+    assert.equal(endpoint.hostname, '127.0.0.1')
+    assert.equal(endpoint.username + endpoint.password + endpoint.search + endpoint.hash, '')
+    assert.equal(endpoint.pathname, '/')
+    assert.equal(retainedEndpoint.origin, `https://api.localhost:${endpoint.port}`)
+    assert.ok(Number(endpoint.port) > 0)
+  }
+  const stableServerPort = retainedEndpoint !== null ? Number(new URL(retainedEndpoint.controlUrl).port)
+    : remoteWorkerBinary === null ? null : await freePort()
 
   try {
     started = await startServer({
@@ -2152,11 +2206,11 @@ export async function runApiProductionVertical({
     })
     report.health.initial = started.health.status
     api = new ApiClient(started.controlUrl, started.origin)
-    await api.bootstrap(proof)
+    await api.bootstrap(proof, { login: retainedEndpoint !== null })
 
     // Live public-error truthfulness: without Device prerequisites the Server
     // must reject chat with a dedicated Device terminal code, not WRONG_STATE.
-    if (devicePrerequisites) {
+    if (devicePrerequisites && retainedEndpoint === null) {
       const probeSessionId = 'psn_01J00000000000000000000099'
       const probe = {
         probeSessionId,

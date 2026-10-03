@@ -18,8 +18,8 @@ import {
   randomBytes,
   X509Certificate,
 } from 'node:crypto'
-import { spawn, spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, openSync, readFileSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawn, spawnSync } from 'node:child_process'
+import { chmodSync, existsSync, openSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { createServer as createHttpsServer } from 'node:https'
 import { createServer as createNetServer } from 'node:net'
 import { join } from 'node:path'
@@ -879,6 +879,13 @@ export function deviceConnectCodePublished(database, connectCodeId) {
   `).get(connectCodeId) !== undefined
 }
 
+export function deviceHelloAcknowledged(database, previousInstanceId) {
+  return database.prepare(`SELECT 1 FROM client_outbox
+    WHERE kind = 'client.hello' AND published = 1 AND client_instance_id =
+      (SELECT current_instance_id FROM device_identity LIMIT 1)
+      AND (? IS NULL OR client_instance_id <> ?)`).get(previousInstanceId, previousInstanceId) !== undefined
+}
+
 /** Read the owned Workers' authoritative Core admission records, never model text. */
 export function assertDeviceBenchmarkRunning(deviceData, workerSessionIds, workRuns = [], productSessionId = null) {
   if (productSessionId !== null) assert.match(productSessionId, /^psn_[0-9A-HJKMNP-TV-Z]{26}$/u)
@@ -1017,8 +1024,7 @@ export async function stopUnusedDeviceTaskAnchor({ api, directory, deviceData, l
       AND NOT EXISTS (SELECT 1 FROM execution_lease_terminals t WHERE t.lease_id = l.lease_id)`)
       .get(launched.workerId, launched.workerInstanceId).n, 0, 'source anchor must have no active lease')
   } finally { server.close() }
-  const workers = (await api.query('worker.list', { states: [] })).result.items
-  const worker = workers.find(worker => worker.id === launched.workerId)
+  const worker = await getDeviceWorker(api, launched.workerId)
   assert.ok(worker, 'source anchor must be registered before it can drain')
   if (worker.state === 'enabled') {
     const drained = await api.command('worker.drain', worker.revision, {
@@ -1040,6 +1046,31 @@ export async function stopUnusedDeviceTaskAnchor({ api, directory, deviceData, l
       .get(launched.workerSessionId).state !== 'running', 'Device observed unused task anchor exit', 30_000)
     return { workerSessionId: launched.workerSessionId, workerId: launched.workerId, state: 'drained' }
   } finally { device.close() }
+}
+
+// An exact read has its own protocol page shape. Historical drained Workers
+// remain durable; registration and drain must not depend on their list position.
+export async function getDeviceWorker(api, workerId) {
+  try {
+    const response = await api.query('worker.get', { workerId }, { cursor: null, limit: 1 })
+    assert.equal(response.result.id, workerId, 'Worker lookup must return the requested identity')
+    return response.result
+  } catch (error) {
+    if (error.code === 'RESOURCE_NOT_FOUND') return null
+    throw error
+  }
+}
+
+export function registerOrReuseDeviceRepository({ wwc, repository, deviceData, deviceEnvironment }) {
+  const bindings = checkedWwc(wwc, ['repo', 'list', '--data-dir', deviceData, '--json'], deviceEnvironment)
+  const existing = bindings.repositories.find(binding => binding.canonicalPath === realpathSync(repository))
+  if (existing) {
+    const head = execFileSync('git', ['-C', repository, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
+    assert.equal(existing.headCommit, head, 'retained Device repository HEAD differs from its binding')
+    assert.equal(existing.dirtyState, 'clean', 'retained Device repository binding is dirty')
+    return existing
+  }
+  return checkedWwc(wwc, ['repo', 'add', repository, '--data-dir', deviceData, '--json'], deviceEnvironment).repository
 }
 
 /** Stop the owned tree, including Workers which the Device puts in separate groups. */
@@ -1175,6 +1206,18 @@ export async function establishDeviceOnlyExecutionPath({
     deviceEnvironment.WWC_WORKER_MODEL_PROVIDER_ID = modelRouteSource.providerId
     deviceEnvironment.WWC_WORKER_MODEL_ID = modelRouteSource.modelId
   }
+  const priorStatus = existsSync(join(deviceData, 'device-client.sqlite3'))
+    ? checkedWwc(wwc, ['device', 'status', '--data-dir', deviceData, '--json'], deviceEnvironment)
+    : null
+  const directoryView = priorStatus?.device?.enrolled ? await api.request('/api/v1/clients') : null
+  if (directoryView) assert.equal(directoryView.status, 200, 'retained connection authorization must be readable')
+  const retainedGrant = directoryView?.json.clients.some(client => client.clientId === priorStatus.device.publicClientId)
+  let previousInstanceId = null
+  if (priorStatus) {
+    const previous = new DatabaseSync(join(deviceData, 'device-client.sqlite3'), { readOnly: true })
+    try { previousInstanceId = previous.prepare('SELECT current_instance_id FROM device_identity LIMIT 1').get().current_instance_id }
+    finally { previous.close() }
+  }
   const deviceLog = openSync(join(directory, logName), 'a', 0o600)
   const device = spawn(wwc, [
     'device', 'serve',
@@ -1204,46 +1247,49 @@ export async function establishDeviceOnlyExecutionPath({
     report.publicClientId = status.publicClientId
     steps.push('device.enroll-pair')
 
-    const refreshed = checkedWwc(wwc, [
-      'device', 'refresh-code', '--data-dir', deviceData, '--json',
-    ], deviceEnvironment)
     const deviceDatabase = new DatabaseSync(join(deviceData, 'device-client.sqlite3'), { readOnly: true })
     try {
-      await waitFor(
-        () => {
-          if (device.exitCode !== null) {
-            throw new Error(`Device Client exited before connect code publication (${device.exitCode})`)
-          }
+      // The daemon owns instance takeover. A reconnect command must not be
+      // queued for an instance which has not announced itself to the Server.
+      await waitFor(() => {
+        if (device.exitCode !== null) throw new Error(`Device Client exited before hello acknowledgement (${device.exitCode})`)
+        return deviceHelloAcknowledged(deviceDatabase, previousInstanceId)
+      }, 'Device hello acknowledgement', Math.min(timeoutMillis, 60_000))
+      if (!retainedGrant) {
+        const refreshed = checkedWwc(wwc, [
+          'device', 'refresh-code', '--data-dir', deviceData, '--json',
+        ], deviceEnvironment)
+        await waitFor(() => {
+          if (device.exitCode !== null) throw new Error(`Device Client exited before connect code publication (${device.exitCode})`)
           return deviceConnectCodePublished(deviceDatabase, refreshed.code.connectCodeId)
-        },
-        'Device connect code publication acknowledgement',
-        timeoutMillis,
-      )
-    } finally {
-      deviceDatabase.close()
-    }
-    const connected = await api.request('/api/v1/clients/connections', {
-      method: 'POST',
-      body: {
-        schemaVersion,
-        clientId: status.publicClientId,
-        connectionCode: refreshed.connectCode,
-      },
-    })
-    assert.equal(connected.status, 201, `Client connect failed: ${connected.text}`)
+        }, 'Device connect code publication acknowledgement', Math.min(timeoutMillis, 60_000))
+        const connected = await api.request('/api/v1/clients/connections', {
+          method: 'POST', body: { schemaVersion, clientId: status.publicClientId, connectionCode: refreshed.connectCode },
+        })
+        assert.equal(connected.status, 201, `Client connect failed: ${connected.text}`)
+      }
+    } finally { deviceDatabase.close() }
     steps.push('client-connect')
 
-    const occupied = await api.request('/api/v1/clients/occupancy', {
-      method: 'POST',
-      body: { schemaVersion, clientId: status.publicClientId },
-    })
-    assert.equal(occupied.status, 201, `Client occupancy failed: ${occupied.text}`)
+    const occupancy = await waitFor(async () => {
+      const value = await api.request(`/api/v1/clients/${status.publicClientId}/occupancy`)
+      assert.equal(value.status, 200, `Client occupancy lookup failed: ${value.text}`)
+      return value.json.occupancy === 'recovery_pending' ? false : value
+    }, 'Device occupancy recovery', Math.min(timeoutMillis, 60_000))
+    assert.equal(occupancy.status, 200, `Client occupancy lookup failed: ${occupancy.text}`)
+    if (occupancy.json.occupancy === 'available') {
+      const occupied = await api.request('/api/v1/clients/occupancy', {
+        method: 'POST', body: { schemaVersion, clientId: status.publicClientId },
+      })
+      assert.equal(occupied.status, 201, `Client occupancy failed: ${occupied.text}`)
+    } else {
+      assert.equal(occupancy.json.occupancy, 'occupied', 'retained Device occupancy is not usable')
+      assert.equal(occupancy.json.holderUserId, api.actor.id, 'retained Device occupancy belongs to another user')
+    }
     steps.push('client-occupancy')
 
-    const registered = checkedWwc(wwc, [
-      'repo', 'add', repository, '--data-dir', deviceData, '--json',
-    ], deviceEnvironment)
-    const repositoryBindingId = registered.repository.repositoryBindingId
+    const registered = registerOrReuseDeviceRepository({ wwc, repository, deviceData, deviceEnvironment })
+    const repositoryBindingId = registered.repositoryBindingId
     await waitFor(async () => {
       const response = await api.request(`/api/v1/repositories?clientId=${status.publicClientId}`)
       return response.status === 200
