@@ -2487,6 +2487,72 @@ mod runtime_router_fixture {
     }
 
     #[test]
+    fn retained_action_request_survives_renewal_and_original_deadline() {
+        let seed = 208;
+        let fixture = runtime_fixture(seed, "action-enforcement-renewal");
+        let root = fixture.root.clone();
+        let request = action_request(&fixture, seed);
+        fixture.control_plane.shutdown().expect("shutdown fixture");
+        let issuer = ActionEnforcementIssuer::new(
+            ActionEnforcementSigningKey::from_bytes([11_u8; 32]).expect("signing key"),
+        );
+        let mut storage = SqliteStorage::open(&root).expect("reopen storage");
+        install_runtime_lease(&mut storage, &fixture.runtime, &fixture.job, seed);
+        let lease = &request.lease;
+        let renewed_expiry = Instant("2027-01-15T08:10:00.000Z".into());
+        let renewal = storage
+            .execution_registry()
+            .expect("registry")
+            .renew_execution_lease(&winwincode_storage::ExecutionLeaseRenewal {
+                expires_at: renewed_expiry.clone(),
+                prior_expires_at: lease.expires_at.clone(),
+                job_id: lease.job_id.clone(),
+                lease_id: lease.lease_id.clone(),
+                worker_id: lease.worker_id.clone(),
+                worker_instance_id: lease.worker_instance_id.clone(),
+                attempt: 1,
+                fencing_token: lease.fencing_token.clone(),
+                message_id: ExecutionMessageId(canonical_id("xmsg", seed + 800)),
+                request_id: RequestId(canonical_id("req", seed + 800)),
+                sent_at: Instant("2027-01-15T08:04:00.000Z".into()),
+            })
+            .expect("renew active lease");
+        assert_eq!(
+            renewal.status,
+            winwincode_storage::LeaseWriteStatus::Accepted
+        );
+        let mut service = winwincode_control_plane::ExecutionPortService::new(
+            &mut storage,
+            Instant("2027-01-15T08:06:00.000Z".into()),
+        );
+        let receipt = service
+            .enforce_action(&issuer, &request)
+            .expect("original action identity remains authorized by current renewed lease");
+        assert_eq!(receipt.lease, request.lease);
+        assert!(receipt.evaluated_at.0 > request.lease.expires_at.0);
+        assert_eq!(
+            service
+                .enforce_action(&issuer, &request)
+                .expect("exact replay"),
+            receipt
+        );
+        let mut changed = request.clone();
+        changed.lease.fencing_token = FencingToken("2".into());
+        assert!(service.enforce_action(&issuer, &changed).is_err());
+        changed = request.clone();
+        changed.sent_at = request.lease.expires_at.clone();
+        assert!(service.enforce_action(&issuer, &changed).is_err());
+        drop(service);
+        assert!(
+            winwincode_control_plane::ExecutionPortService::new(&mut storage, renewed_expiry)
+                .enforce_action(&issuer, &request)
+                .is_err()
+        );
+        Box::new(storage).close().expect("close storage");
+        fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
     fn action_receipt_binds_durable_scope_and_actor_and_replays_after_restart() {
         let seed = 207;
         let fixture = runtime_fixture(seed, "action-enforcement");

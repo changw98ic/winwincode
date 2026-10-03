@@ -141,6 +141,27 @@ fn number(value: &[u8], start: usize, end: usize) -> Option<u8> {
         })
 }
 
+/// Compares a retained stamp with independently authenticated current authority.
+/// Only the expiry may advance; this comparison does not authenticate a renewal.
+#[must_use]
+pub fn retained_lease_matches_current(
+    retained: &ExecutionLeaseStamp,
+    current: &ExecutionLeaseStamp,
+) -> bool {
+    let mut expected = retained.clone();
+    expected.expires_at = current.expires_at.clone();
+    [
+        &retained.issued_at,
+        &retained.expires_at,
+        &current.expires_at,
+    ]
+    .into_iter()
+    .all(canonical_instant)
+        && retained.issued_at.0 < retained.expires_at.0
+        && retained.expires_at.0 <= current.expires_at.0
+        && expected == *current
+}
+
 /// Validates a live same-attempt lease extension or its unchanged replay.
 #[must_use]
 pub fn valid_lease_renewal(

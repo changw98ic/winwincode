@@ -125,6 +125,70 @@ fn receipt(action: &WorkerActionRequest) -> ActionEnforcementReceiptMessage {
 }
 
 #[test]
+fn current_lease_verifies_late_evaluation_without_changing_original_receipt() {
+    let action = action();
+    let mut signed = receipt(&action);
+    signed.evaluated_at = Instant("2027-01-15T08:06:00.000Z".into());
+    signed.sent_at = signed.evaluated_at.clone();
+    issuer()
+        .sign(&mut signed)
+        .expect("sign actual evaluation time");
+    let mut current = action.authority.lease.clone();
+    current.expires_at = Instant("2027-01-15T08:10:00.000Z".into());
+    assert!(
+        issuer()
+            .verifier()
+            .verify_outcome(&action, &signed)
+            .is_err()
+    );
+    let verifier = issuer().verifier();
+    verifier
+        .verify_outcome_with_current_lease(&action, &signed, &current)
+        .expect("independently verified renewal allows original request");
+    for field in 0..9 {
+        let mut changed = current.clone();
+        match field {
+            0 => changed.job_id = ExecutionJobId(id("job", 'B')),
+            1 => changed.lease_id = LeaseId(id("lse", 'B')),
+            2 => changed.worker_id = WorkerId(id("wrk", 'B')),
+            3 => changed.worker_instance_id = WorkerInstanceId(id("wki", 'B')),
+            4 => changed.attempt += 1,
+            5 => changed.fencing_token = FencingToken("8".into()),
+            6 => changed.issued_at = Instant("2027-01-15T08:00:01.000Z".into()),
+            7 => changed.expires_at = Instant("2027-01-15T08:04:00.000Z".into()),
+            _ => changed.expires_at = signed.evaluated_at.clone(),
+        }
+        assert!(
+            verifier
+                .verify_outcome_with_current_lease(&action, &signed, &changed)
+                .is_err()
+        );
+    }
+    let mut forged = signed.clone();
+    forged.resource.push_str("changed");
+    assert!(
+        verifier
+            .verify_outcome_with_current_lease(&action, &forged, &current)
+            .is_err()
+    );
+    let suffix = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!(
+        "winwincode-renewed-action-{}-{suffix}",
+        std::process::id()
+    ));
+    let mut store = FileActionReceiptUseStore::open(&root).expect("receipt store");
+    assert_eq!(
+        store.claim(&signed).expect("first claim"),
+        ActionReceiptClaim::Fresh
+    );
+    assert_eq!(
+        store.claim(&signed).expect("replay claim"),
+        ActionReceiptClaim::AlreadyConsumed
+    );
+    fs::remove_dir_all(root).expect("remove store");
+}
+
+#[test]
 fn request_and_receipt_bind_exact_action_invocation_and_authority() {
     let action = action();
     let request = prepare_action_enforcement_request(

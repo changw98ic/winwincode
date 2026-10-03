@@ -2331,6 +2331,7 @@ fn core_chat_approval_is_recorded_for_the_owner_and_survives_replay() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn chat_action_receipt_uses_chat_authority_and_rejects_foreign_or_expired_requests() {
     use winwincode_execution_port::action_enforcement::{
         ActionEnforcementIssuer, ActionEnforcementSigningKey,
@@ -2351,19 +2352,45 @@ fn chat_action_receipt_uses_chat_authority_and_rejects_foreign_or_expired_reques
     request.worker_session_id = runtime.slot.worker_session_id.clone();
     request.session_identity = session_identity(&fixture, &runtime);
     request.sent_at = at(11);
+    assert!(runtime.lease.expires_at.0 < at(55).0);
+    let lease = &request.lease;
+    assert_eq!(
+        fixture
+            .storage
+            .execution_registry()
+            .expect("registry")
+            .renew_execution_lease(&winwincode_storage::ExecutionLeaseRenewal {
+                expires_at: at(58),
+                prior_expires_at: lease.expires_at.clone(),
+                job_id: lease.job_id.clone(),
+                lease_id: lease.lease_id.clone(),
+                worker_id: lease.worker_id.clone(),
+                worker_instance_id: lease.worker_instance_id.clone(),
+                attempt: 1,
+                fencing_token: lease.fencing_token.clone(),
+                message_id: ExecutionMessageId(id("xmsg", 81997)),
+                request_id: RequestId(id("req", 81997)),
+                sent_at: at(10),
+            })
+            .expect("renew before delayed action arrives")
+            .status,
+        winwincode_storage::LeaseWriteStatus::Accepted
+    );
     let issuer = ActionEnforcementIssuer::new(
         ActionEnforcementSigningKey::from_bytes([11; 32]).expect("key"),
     );
     let first = winwincode_control_plane::issue_action_enforcement_receipt(
         &mut fixture.storage,
         &issuer,
-        &at(12),
+        &at(55),
         &request,
     )
     .expect("Chat tool must receive its own signed action receipt");
     issuer.verify_signature(&first).expect("valid signature");
     assert_eq!(first.actor.id, UserId(id("usr", 1)));
     assert_eq!(first.scope, fixture.repository_scope);
+    assert_eq!(first.lease, request.lease);
+    assert!(first.evaluated_at.0 > request.lease.expires_at.0);
     for mutate in 0..3 {
         let mut changed = request.clone();
         match mutate {
@@ -2378,7 +2405,7 @@ fn chat_action_receipt_uses_chat_authority_and_rejects_foreign_or_expired_reques
             winwincode_control_plane::issue_action_enforcement_receipt(
                 &mut fixture.storage,
                 &issuer,
-                &at(13),
+                &at(56),
                 &changed
             )
             .is_err()
@@ -2397,7 +2424,7 @@ fn chat_action_receipt_uses_chat_authority_and_rejects_foreign_or_expired_reques
     let replay = winwincode_control_plane::issue_action_enforcement_receipt(
         &mut fixture.storage,
         &issuer,
-        &at(13),
+        &at(56),
         &request,
     )
     .expect("replay after restart");
@@ -2422,7 +2449,7 @@ fn chat_action_receipt_uses_chat_authority_and_rejects_foreign_or_expired_reques
         winwincode_control_plane::issue_action_enforcement_receipt(
             &mut fixture.storage,
             &issuer,
-            &at(14),
+            &at(57),
             &request
         )
         .is_err(),

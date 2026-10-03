@@ -28,7 +28,7 @@ Core 的状态与必要 outbox 批次在相应 SQLite 事务中交接。Observer
 | 远程模型调用 | Core / Observer 的持久化生产者明确交接原请求，Gateway 按原身份去重恢复 | 通用队列扫描不擅自重发无人交接的付费请求 |
 | 新的业务尝试 | 任务层明确创建新的 attempt / fencing | 旧尝试的结果保持不变 |
 
-Observer journal 保留业务观察状态；模型原始请求的授权证明统一来自公共 outbox，派发器不读取角色专属证明。首次合法响应或取消回执会结束原 `ModelOpen` 的 pending 生命周期，但保留原始请求供续租及迟到结果校验。有效期延长不修改原帧、exchange 或调用 ID。
+Observer journal 保留业务观察状态；模型原始请求的授权证明统一来自公共 outbox，派发器不读取角色专属证明。首次合法响应或取消回执会结束原 `ModelOpen` 的 pending 生命周期，但保留原始请求供续租及迟到结果校验。有效期延长不修改原帧、exchange 或调用 ID。 工具 action 请求与签名回执同样保留原租约 stamp 和请求摘要。Server 按持久化的当前租约验证同一 job、Worker/instance、attempt、fencing 和 Session，并确认请求在原租约有效时发出；回执按实际签发时间生成。Core 独立核对当前绑定及接收时间，再用当前续租期限验证回执，原 stamp 过期不否定合法续租，身份变化、缩短期限、取消和当前过期仍拒绝。
 
 Worker 的 `DriverClock` 成对保留墙钟和单调锚点。新采样落后于单调估计时保留原锚点；首次调用同时用“锚点 + elapsed”校验租约签发下界与到期上界，单调 deadline 仍从原采样对计算。拒绝任务的时间戳也使用当前估计时间。保留旧锚点不拒绝后来签发的合法新任务，时钟回拨不延长授权。
 
