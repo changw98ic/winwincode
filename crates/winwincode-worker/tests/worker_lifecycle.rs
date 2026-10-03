@@ -1960,6 +1960,22 @@ async fn snapshot_freeze_replays_after_restart_without_starting_codex() {
     let (workspace_root, source_root) = test_workspace_paths();
     let repository = source_root.join(id("rep", 'A'));
     std::fs::rename(source_root.join(id("rpo", 'A')), &repository).unwrap();
+    let common_repository = workspace_root
+        .parent()
+        .unwrap()
+        .join("snapshot-common-source");
+    std::fs::rename(&repository, &common_repository).unwrap();
+    run_git(
+        &common_repository,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            repository.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    assert!(repository.join(".git").is_file());
     let git = |args: &[&str]| {
         let output = Command::new("git")
             .arg("-C")
@@ -2037,6 +2053,7 @@ async fn snapshot_freeze_replays_after_restart_without_starting_codex() {
         .unwrap()
         .candidate_ref = Some(request.candidate.candidate_ref.clone());
     let mut responses = Vec::new();
+    let mut predecessor = None;
     for replay in 0..2 {
         let port = RecordingPort::default();
         let messages = Rc::clone(&port.messages);
@@ -2216,9 +2233,116 @@ async fn snapshot_freeze_replays_after_restart_without_starting_codex() {
                     .count(),
                 1
             );
+            predecessor = Some(worker.active_jobs()[0].clone());
         }
     }
     assert_eq!(responses[0], responses[1]);
+
+    let predecessor = predecessor.unwrap();
+    let template = replacement_dispatch(&predecessor);
+    let mut successor = request.clone();
+    successor.dispatch.lease = template.lease;
+    successor.dispatch.job.attempt = 2;
+    if let ExecutionScope::WorkRunExecutionScope(scope) = &mut successor.dispatch.job.scope {
+        scope.attempt = 2;
+        scope.work_run_id = WorkRunId(id("wrn", 'B'));
+    }
+    let mut proof = template.replacement_authority.unwrap();
+    proof.logical_job_digest = logical_job_digest(&successor.dispatch.job);
+    proof.scope = successor.dispatch.job.scope.clone();
+    successor.dispatch.replacement_authority = Some(proof);
+    successor.dispatch.message_id = ExecutionMessageId(id("msg", 'B'));
+    successor.dispatch.request_id = RequestId(id("req", 'B'));
+    successor.message_id = ExecutionMessageId(id("msg", 'C'));
+    successor.request_id = RequestId(id("req", 'C'));
+    successor.lease = successor.dispatch.lease.clone();
+    let successor_now = Instant("2027-01-15T08:01:02.000Z".into());
+    successor.sent_at = successor_now.clone();
+    successor.dispatch.sent_at = successor_now.clone();
+    let mut config = worker_config(1);
+    config.worker_instance_id = successor.lease.worker_instance_id.clone();
+    let port = RecordingPort::default();
+    let messages = Rc::clone(&port.messages);
+    let codex = FakeCodex::default();
+    let calls = codex.clone();
+    let mut worker = WorkerMain::new(
+        config,
+        port,
+        codex,
+        JobWorkspaceRuntime::open(&workspace_root, &source_root).unwrap(),
+    );
+    worker.start(now()).await.unwrap();
+    let result = WorkerRegistrationResultMessage {
+        error: None,
+        heartbeat_interval_ms: 2_000,
+        kind: WorkerRegistrationResultMessageKind::WorkerRegistrationResult,
+        lease_recovery: WorkerRegistrationResultMessageLeaseRecovery::NoActiveLeases,
+        message_id: ExecutionMessageId(id("msg", 'R')),
+        request_id: RequestId("req_00000000000000000000000001".to_owned()),
+        schema_version: SchemaVersion::WinwincodeV1,
+        sent_at: now(),
+        server_time: now(),
+        status: WorkerRegistrationResultMessageStatus::Accepted,
+        worker_id: WorkerId(id("wrk", 'A')),
+        worker_instance_id: WorkerInstanceId(id("wki", 'B')),
+    };
+    worker
+        .accept_control_and_drive(
+            &ExecutionPortMessage::WorkerRegistrationResultMessage(result),
+            now(),
+        )
+        .await
+        .unwrap();
+    worker
+        .accept_control_and_drive(
+            &ExecutionPortMessage::SnapshotFreezeRequestMessage(successor.clone()),
+            successor_now,
+        )
+        .await
+        .expect("sealed replacement freezes the retained candidate without a model call");
+    let response = messages
+        .borrow()
+        .iter()
+        .find_map(|message| match message {
+            ExecutionPortMessage::SnapshotFreezeReceiptMessage(receipt) => Some(receipt.clone()),
+            _ => None,
+        })
+        .unwrap();
+    validate_freeze_receipt(&successor, &response).unwrap();
+    assert_eq!(
+        response.receipt.candidate_commit_id,
+        responses[0].receipt.candidate_commit_id
+    );
+    assert!(
+        !calls
+            .calls()
+            .iter()
+            .any(|call| call.starts_with("ensure:") || call.starts_with("submit:"))
+    );
+    let manifest_path = std::fs::read_dir(&workspace_root)
+        .unwrap()
+        .map(|entry| entry.unwrap().path().join(".winwincode-workspace.json"))
+        .find(|path| path.exists())
+        .unwrap();
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(manifest_path).unwrap()).unwrap();
+    assert_eq!(
+        manifest["snapshotFreezeHistory"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(
+        manifest["snapshotFreezeHistory"][0]["request"],
+        serde_json::to_value(&request).unwrap()
+    );
+    assert_eq!(
+        manifest["snapshotFreezeHistory"][0]["response"],
+        serde_json::to_value(&responses[0]).unwrap()
+    );
+    assert!(manifest["snapshotFreezeHistory"][0]["snapshot"].is_object());
+    assert_eq!(
+        manifest["snapshotFreeze"]["response"],
+        serde_json::to_value(&response).unwrap()
+    );
 }
 
 #[tokio::test]

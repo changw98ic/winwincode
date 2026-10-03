@@ -612,6 +612,111 @@ fn frozen_candidate_restarts_with_the_same_commit_and_artifact_bytes() {
 }
 
 #[test]
+fn linked_source_worktree_recovers_and_replaces_the_original_checkout() {
+    let fixture = Fixture::new("linked-source-recovery");
+    let repository = fixture.repository();
+    let common = fixture.root.join("common-repository");
+    std::fs::rename(&repository, &common).expect("move shared repository");
+    git(
+        &common,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            repository.to_str().expect("source path"),
+            "HEAD",
+        ],
+    );
+    assert!(repository.join(".git").is_file());
+    let predecessor = active_job();
+    let mut first = fixture.runtime();
+    let checkout = first
+        .open_for_job(&predecessor, None)
+        .expect("open from linked source");
+    std::fs::write(checkout.join("fixture.txt"), b"retained candidate\n")
+        .expect("retain predecessor files");
+    drop(first);
+
+    let mut recovered = fixture.runtime();
+    assert_eq!(
+        recovered
+            .open_for_job_recovering(
+                &predecessor,
+                None,
+                &Instant("2026-08-28T00:00:05.000Z".into()),
+            )
+            .expect("recover exact linked-source checkout"),
+        checkout
+    );
+    drop(recovered);
+    let successor = replacement_successor(&predecessor);
+    let receipt = replacement_authority(&predecessor, &successor);
+    let mut replaced = fixture.runtime();
+    assert_eq!(
+        replaced
+            .open_for_job_recovering(
+                &successor,
+                Some(&receipt),
+                &Instant("2026-08-28T00:10:00.000Z".into()),
+            )
+            .expect("replace exact linked-source checkout"),
+        checkout
+    );
+    assert_eq!(
+        std::fs::read(checkout.join("fixture.txt")).expect("retained candidate"),
+        b"retained candidate\n"
+    );
+    replaced
+        .close_job(&successor.job.job_id, WorkspaceCloseReason::Completed)
+        .expect("close linked-source workspace");
+}
+
+#[test]
+fn recovered_checkout_rejects_a_foreign_common_repository_with_identical_commit() {
+    let fixture = Fixture::new("foreign-common-recovery");
+    let predecessor = active_job();
+    let mut runtime = fixture.runtime();
+    let checkout = runtime
+        .open_for_job(&predecessor, None)
+        .expect("open original checkout");
+    let revision = git_output(&checkout, &["rev-parse", "HEAD"]);
+    drop(runtime);
+    let foreign = fixture.root.join("foreign-repository");
+    git(
+        &fixture.root,
+        &[
+            "clone",
+            "--no-hardlinks",
+            fixture.repository().to_str().expect("source path"),
+            foreign.to_str().expect("foreign path"),
+        ],
+    );
+    git(
+        &fixture.repository(),
+        &[
+            "worktree",
+            "remove",
+            checkout.to_str().expect("checkout path"),
+        ],
+    );
+    git(
+        &foreign,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            checkout.to_str().expect("checkout path"),
+            &revision,
+        ],
+    );
+    let mut recovered = fixture.runtime();
+    assert!(recovered.open_for_job(&predecessor, None).is_err());
+    let successor = replacement_successor(&predecessor);
+    let receipt = replacement_authority(&predecessor, &successor);
+    assert!(recovered.open_for_job(&successor, Some(&receipt)).is_err());
+}
+
+#[test]
 fn sealed_replacement_rotates_authority_and_preserves_the_predecessor_checkout() {
     let fixture = Fixture::new("replacement");
     let predecessor = active_job();
