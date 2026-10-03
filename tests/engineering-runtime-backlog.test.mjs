@@ -46,7 +46,7 @@ function fixture() {
     const record = records.find(item => item.id === row.old_id)
     row.source_record_sha256 = digest(Object.fromEntries(keys.map(key => [key, record?.[key] ?? null])))
   }
-  return { data, records }
+  return { data, records: records.filter(record => !data.live_scope_retirements.some(entry => entry.old_id === record.id)) }
 }
 function consolidate(data, records, stableId, targetStableId) {
   const sourceEntry = data.task_plan.entries.find(entry => entry.stable_id === stableId)
@@ -131,8 +131,8 @@ test('consolidated E13 identity can live in acceptance criteria without hiding m
   malformed.find(record => record.id === target.id).acceptance_criteria = target.acceptance_criteria.replaceAll('WWC-ER-1301', 'WWC-ER-13010')
   expect(run('--mode=records', ...files(data, malformed)), false, /task plan stable ID missing: WWC-ER-1301/)
 
-  const missingMapping = records.filter(record => record.id !== 'winwincode-edition.2')
-  expect(run('--mode=records', ...files(data, missingMapping)), false, /missing mapped bead: winwincode-edition\.2/)
+  const missingMapping = records.filter(record => record.id !== 'winwincode-edition.2.4')
+  expect(run('--mode=records', ...files(data, missingMapping)), false, /missing mapped bead: winwincode-edition\.2\.4/)
 })
 test('rejects changed mapping ownership metadata', () => {
   const { data, records } = fixture()
@@ -194,4 +194,57 @@ test('rejects a merged record that remains active', () => {
 })
 test('rejects typos, missing values, duplicate options and offline input in live mode', () => {
   for (const args of [['--mdoe=live'], ['--mode=wat'], ['--mode'], ['--mode=snapshot', '--mode=live'], ['--mode=records'], ['--mode=live', '--records=fixture.json'], ['--snapshot'], ['--records=x']]) expect(run(...args), false)
+})
+
+test('retires exactly the five historical split mappings without changing the snapshot', () => {
+  const { data, records } = fixture()
+  assert.equal(data.mapping.length, 111)
+  assert.equal(data.live_scope_retirements.length, 5)
+  for (const entry of data.live_scope_retirements) {
+    assert.equal(records.some(record => record.id === entry.old_id), false)
+    assert.equal(data.mapping.find(row => row.old_id === entry.old_id).classification, 'KEEP')
+  }
+  expect(run('--mode=records', ...files(data, records)), true, /retired historical mappings=5/)
+})
+test('still rejects a missing Community mapping outside the retired split scope', () => {
+  const { data, records } = fixture()
+  const id = 'winwincode-edition.2.4'
+  expect(run('--mode=records', ...files(data, records.filter(record => record.id !== id))), false, /missing mapped bead: winwincode-edition\.2\.4/)
+})
+for (const [name, mutate] of [
+  ['omitted', data => { delete data.live_scope_retirements }],
+  ['expanded', data => { data.live_scope_retirements.push({ ...data.live_scope_retirements[0], old_id: 'winwincode-edition.2.4' }) }],
+  ['substituted', data => { data.live_scope_retirements[0].old_id = 'winwincode-edition.2.4' }],
+  ['duplicated', data => { data.live_scope_retirements[1] = data.live_scope_retirements[0] }],
+  ['unexplained', data => { delete data.live_scope_retirements[0].decision }],
+  ['runtime-aligned', data => { data.mapping.find(row => row.old_id === data.live_scope_retirements[0].old_id).aligned_er_ids = ['WWC-ER-0101'] }],
+  ['runtime-owner', data => { data.task_plan.entries[0].bead_id = data.live_scope_retirements[0].old_id }],
+]) {
+  test(`rejects ${name} scope retirement`, () => {
+    const { data } = fixture(); mutate(data)
+    expect(run('--mode=snapshot', ...files(data).slice(0, 2)), false, /retirement|runtime scope/)
+  })
+}
+function retiredRecord(data) {
+  const row = data.mapping.find(row => row.old_id === data.live_scope_retirements[0].old_id)
+  return { id: row.old_id, status: 'closed', close_reason: 'synthetic historical fixture only', metadata: { engineering_runtime_review: { ...row, audit_bead: data.audit_bead } } }
+}
+test('rejects retired split work reappearing as active or claiming runtime ownership', () => {
+  for (const mutation of [record => { record.status = 'in_progress' }, record => { record.metadata.engineering_runtime_plan_ids = ['WWC-ER-0101'] }]) {
+    const { data, records } = fixture()
+    const record = retiredRecord(data); mutation(record); records.push(record)
+    expect(run('--mode=records', ...files(data, records)), false, /retired mapped bead/)
+  }
+})
+test('rejects active blockers on retired split work even when the target is absent', () => {
+  const { data, records } = fixture()
+  records.push({ id: 'new-community-work', status: 'open', dependencies: [{ type: 'blocks', depends_on_id: data.live_scope_retirements[0].old_id }] })
+  expect(run('--mode=records', ...files(data, records)), false, /active blocker points to retired/)
+})
+test('still validates metadata on retained closed split history', () => {
+  const { data, records } = fixture()
+  const record = retiredRecord(data); records.push(record)
+  expect(run('--mode=records', ...files(data, records)), true)
+  record.metadata.engineering_runtime_review.canonical_owner = 'different-owner'
+  expect(run('--mode=records', ...files(data, records)), false, /source metadata changed/)
 })
