@@ -1577,6 +1577,29 @@ test('Device Core stop ledger terminates its delivery driver while other benchma
   assert.equal(database.prepare('SELECT stopped FROM tool_repeat_run').get().stopped, 1)
 })
 
+test('a reused physical Worker stop is scoped to its ProductSession', async t => {
+  const directory = await mkdtemp(resolve(tmpdir(), 'wwc-session-stop-scope-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const workerSessionId = 'wsn_01J00000000000000000000001'
+  const firstId = 'psn_01J00000000000000000000003'
+  const secondId = 'psn_01J00000000000000000000004'
+  const runtime = resolve(directory, 'worker-sessions', workerSessionId, 'data', 'codex-runtime')
+  await mkdir(runtime, { recursive: true })
+  const database = new DatabaseSync(resolve(runtime, 'worker-codex.sqlite3'))
+  t.after(() => database.close())
+  database.exec(`CREATE TABLE tool_repeat_run (run_key TEXT PRIMARY KEY, stopped INTEGER);
+    CREATE TABLE codex_run (run_key TEXT PRIMARY KEY, record_json TEXT)`)
+  for (const [runKey, productSessionId, stopped] of [['first', firstId, 1], ['second', secondId, 0]]) {
+    database.prepare('INSERT INTO tool_repeat_run VALUES (?, ?)').run(runKey, stopped)
+    database.prepare('INSERT INTO codex_run VALUES (?, ?)').run(runKey,
+      JSON.stringify({ job: { scope: { productSessionId } } }))
+  }
+  assertDeviceBenchmarkRunning(directory, [workerSessionId], [], secondId)
+  assert.throws(() => assertDeviceBenchmarkRunning(directory, [workerSessionId], [], firstId),
+    error => error.code === 'STUCK_TOOL_REPEAT_LIMIT' && error.runKey === 'first')
+  assert.equal(database.prepare('SELECT stopped FROM tool_repeat_run WHERE run_key = ?').get('first').stopped, 1)
+})
+
 test('a persisted Core stop settles a claimed product call before Delivery terminal projection', async t => {
   const directory = await mkdtemp(resolve(tmpdir(), 'wwc-core-stop-product-'))
   t.after(() => rm(directory, { recursive: true, force: true }))

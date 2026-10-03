@@ -1557,12 +1557,14 @@ export function workItemCreatePayload(workRunAggregate, expectedRevision) {
   const items = workRunAggregate.items
   assert.ok(Array.isArray(items), 'workrun.get must return canonical WorkItems')
   if (items.length > 0) return null
+  const deliveryId = workRunAggregate.readCursor?.deliveryId ?? IDS.delivery
+  assert.match(deliveryId, /^dlv_[0-9A-HJKMNP-TV-Z]{26}$/u)
   return {
-    deliveryId: IDS.delivery,
+    deliveryId,
     expectedRevision,
     contractRevision: contract.revision,
     items: [{
-      id: IDS.workItem,
+      id: `wit_${deliveryId.slice(4)}`,
       title: 'Execute the accepted API delivery',
       goal: 'Reach the terminal API delivery state from the accepted contract.',
       criterionIds: contract.criteria.map(criterion => criterion.id),
@@ -1677,6 +1679,8 @@ export async function driveDelivery(
   now = Date.now,
   hooks = {},
 ) {
+  const deliveryId = hooks.deliveryId ?? IDS.delivery
+  assert.match(deliveryId, /^dlv_[0-9A-HJKMNP-TV-Z]{26}$/u)
   const transitionTrace = { observations: [], totalTransitionCount: 0 }
   const actions = []
   const transientErrors = []
@@ -1687,12 +1691,12 @@ export async function driveDelivery(
   const stuckPollLimit = 80
   for (;;) {
     await hooks.assertRunning?.()
-    detail = (await client.query('delivery.get', { deliveryId: IDS.delivery })).result
+    detail = (await client.query('delivery.get', { deliveryId })).result
     // Scheduling and completion use the current WorkRun aggregate.
     let workRunAggregate
     try {
       workRunAggregate = (await client.query('workrun.get', {
-        deliveryId: IDS.delivery,
+        deliveryId,
         workItemId: null,
         atCursor: detail.readCursor,
       })).result
@@ -1783,7 +1787,7 @@ export async function driveDelivery(
       idlePolls = 0
       command = 'delivery.resolve_attention'
       payload = {
-        deliveryId: IDS.delivery,
+        deliveryId,
         attentionItemId: attention.id,
         decision: 'resolve',
         resolution: hooks.resolveAttention === 'verified-candidate'
@@ -1845,7 +1849,7 @@ export async function driveDelivery(
       let failureDetail = detail
       try {
         failureDetail = (await client.query('delivery.get', {
-          deliveryId: IDS.delivery,
+          deliveryId,
         })).result ?? detail
       } catch {
         // Preserve the command error when the diagnostic query is unavailable.
@@ -1866,7 +1870,7 @@ export async function driveDelivery(
 
   const terminal = detail
   const terminalWorkRunAggregate = (await client.query('workrun.get', {
-    deliveryId: IDS.delivery,
+    deliveryId,
     workItemId: null,
     atCursor: terminal.readCursor ?? null,
   })).result

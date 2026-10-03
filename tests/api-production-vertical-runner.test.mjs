@@ -135,6 +135,22 @@ test('WorkRun contract drives canonical WorkItem creation payload', async () => 
   })
 })
 
+test('Delivery helpers keep each task on its own canonical Delivery identity', async () => {
+  const deliveryId = 'dlv_01J00000000000000000000003'
+  const client = deliveryDriverClient(1)
+  const query = client.query.bind(client)
+  client.query = (name, payload) => {
+    assert.equal(payload.deliveryId, deliveryId)
+    return query(name, payload)
+  }
+  const aggregate = { contract: { revision: 1, criteria: [{ id: 'criterion' }] }, items: [],
+    readCursor: { deliveryId } }
+  assert.equal(workItemCreatePayload(aggregate, 1).deliveryId, deliveryId)
+  assert.equal(workItemCreatePayload(aggregate, 1).items[0].id, 'wit_01J00000000000000000000003')
+  const result = await driveDelivery(client, 10_000, undefined, Date.now, { deliveryId })
+  assert.equal(result.detail.status, 'done')
+})
+
 test('Delivery transition evidence keeps the newest bounded window without limiting progress', () => {
   const trace = { observations: [], totalTransitionCount: 0 }
   const transitionCount = DELIVERY_TRANSITION_DIAGNOSTIC_CAPACITY + 5

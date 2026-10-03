@@ -99,6 +99,7 @@ export function configuredDeviceModelRoute({
 export function deterministicDeviceProvider({
   providerId = 'winwincode-device-deterministic',
   modelId = 'device-deterministic-model',
+  repeatToolMarker = null,
 } = {}) {
   return Object.freeze({
     providerId,
@@ -106,6 +107,7 @@ export function deterministicDeviceProvider({
     displayName: 'WinWinCode Device deterministic Provider',
     endpointHint: 'https://127.0.0.1:<device-mock-model-port>/v1/messages',
     protocol: 'anthropic_messages',
+    ...(repeatToolMarker === null ? {} : { repeatToolMarker }),
   })
 }
 
@@ -458,7 +460,9 @@ export function startDeterministicDeviceModelServer({
   certificatePath,
   privateKeyPath,
   chatContent = 'WinWinCode Device deterministic Provider completed the Chat workflow.',
+  repeatToolMarker = null,
 }) {
+  assert.ok(repeatToolMarker === null || (typeof repeatToolMarker === 'string' && repeatToolMarker.length > 0))
   const errors = []
   const requests = []
   const server = createHttpsServer({
@@ -476,12 +480,14 @@ export function startDeterministicDeviceModelServer({
         const bodyText = Buffer.concat(chunks).toString('utf8')
         assert.ok(size <= 512 * 1024, 'Device Provider request exceeds fixture bound')
         const providerRequest = JSON.parse(bodyText)
+        const repeatTool = repeatToolMarker !== null && bodyText.includes(repeatToolMarker)
         requests.push({
           path: request.url ?? '',
           verification: bodyText.includes(DETERMINISTIC_VERIFICATION_BEHAVIOR_MARKER),
           executor: bodyText.includes(DETERMINISTIC_EXECUTOR_BEHAVIOR_MARKER),
           planner: bodyText.includes(DETERMINISTIC_PLANNER_PROTOCOL),
           hasToolOutput: /function_call_output|custom_tool_call_output|tool_result/u.test(bodyText),
+          repeatTool,
         })
         let shellTool = providerRequest.tools?.find(tool => (
           /(?:^|__)shell_command$|(?:^|__)exec_command$/u.test(tool.name)
@@ -549,6 +555,12 @@ export function startDeterministicDeviceModelServer({
           text = 'Verification command did not yield a sealed exit code; no independent result emitted.'
         } else if (isPlanner) {
           text = deterministicPlannerProduct(workInput.criterionIds)
+        } else if (repeatTool) {
+          useTool = true
+          stopReason = 'tool_use'
+          toolCallId = `loopback-repeat-${requests.length}`
+          toolCommand = 'git rev-parse --verify HEAD'
+          text = ''
         }
 
         const events = [
@@ -845,7 +857,8 @@ export function deviceConnectCodePublished(database, connectCodeId) {
 }
 
 /** Read the owned Workers' authoritative Core admission records, never model text. */
-export function assertDeviceBenchmarkRunning(deviceData, workerSessionIds, workRuns = []) {
+export function assertDeviceBenchmarkRunning(deviceData, workerSessionIds, workRuns = [], productSessionId = null) {
+  if (productSessionId !== null) assert.match(productSessionId, /^psn_[0-9A-HJKMNP-TV-Z]{26}$/u)
   const targets = Array.from(workerSessionIds, workerSessionId => ({ workerSessionId }))
   const devicePath = join(deviceData, 'device-client.sqlite3')
   if (workRuns.length && existsSync(devicePath)) {
@@ -875,9 +888,9 @@ export function assertDeviceBenchmarkRunning(deviceData, workerSessionIds, workR
       // The file is visible before Core finishes its schema migration.
       if (!database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tool_repeat_run'").get()) continue
       let stopped
-      if (run) {
+      if (run || productSessionId !== null) {
         if (!database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'codex_run'").get()) continue
-        stopped = database.prepare(`SELECT stop.run_key FROM tool_repeat_run AS stop
+        stopped = run ? database.prepare(`SELECT stop.run_key FROM tool_repeat_run AS stop
           JOIN codex_run AS core ON core.run_key = stop.run_key WHERE stop.stopped = 1
           AND json_extract(core.record_json, '$.job.jobId') = ?
           AND json_extract(core.record_json, '$.job.attempt') = ?
@@ -885,6 +898,10 @@ export function assertDeviceBenchmarkRunning(deviceData, workerSessionIds, workR
           AND json_extract(core.record_json, '$.job.scope.productSessionId') = ?
           AND json_extract(core.record_json, '$.canonicalThreadId') = ? LIMIT 1`)
           .get(run.executionJobId, run.attempt, run.id, run.productSessionId, run.codexThreadId)
+          : database.prepare(`SELECT stop.run_key FROM tool_repeat_run AS stop
+            JOIN codex_run AS core ON core.run_key = stop.run_key WHERE stop.stopped = 1
+            AND json_extract(core.record_json, '$.job.scope.productSessionId') = ? LIMIT 1`)
+            .get(productSessionId)
       } else {
         stopped = database.prepare('SELECT run_key FROM tool_repeat_run WHERE stopped = 1 LIMIT 1').get()
       }
@@ -1184,6 +1201,7 @@ export async function establishDeviceOnlyExecutionPath({
         modelServer = await startDeterministicDeviceModelServer({
           certificatePath,
           privateKeyPath,
+          repeatToolMarker: deviceProvider.repeatToolMarker,
         }).listen()
       }
       providerApiKey = deviceSecret ?? `device-local-${randomBytes(24).toString('hex')}`
@@ -1238,10 +1256,74 @@ export async function establishDeviceOnlyExecutionPath({
       })
     report.modelRoute = modelRoute
     const launchedWorkerSessions = new Set()
-    const assertBenchmarkRunning = () => {
+    const productSessionWorkers = new Map()
+    const productSessionScopes = new Map()
+    const assertBenchmarkRunning = (productSessionId = null, workRuns = []) => {
       if (deviceEnvironment.WWC_BENCHMARK_TOOL_REPEAT_GUARD === '1') {
-        assertDeviceBenchmarkRunning(deviceData, launchedWorkerSessions)
+        if (productSessionId === null) assertDeviceBenchmarkRunning(deviceData, launchedWorkerSessions)
+        else for (const scope of productSessionScopes.get(productSessionId) ?? [productSessionId]) {
+          assertDeviceBenchmarkRunning(deviceData, productSessionWorkers.get(productSessionId) ?? [], workRuns, scope)
+        }
       }
+    }
+
+    const launchAnchor = async ({ workRunId = null, productSessionId = null } = {}, owner = null) => {
+      if (owner !== null) {
+        assert.ok(productSessionId === null || productSessionId === owner,
+          'launch anchor must belong to its ProductSession')
+        productSessionId = owner
+      }
+      assertBenchmarkRunning(owner)
+      const body = {
+        schemaVersion,
+        clientId: status.publicClientId,
+        repositoryBindingId,
+        ...(workRunId === null ? {} : { workRunId }),
+      }
+      if (workRunId === null && productSessionId !== null) {
+        assert.ok(repositoryScope !== null,
+          'productSession launch requires repositoryScope on establishDeviceOnlyExecutionPath')
+        body.productSession = {
+          id: productSessionId,
+          scope: {
+            kind: 'repository',
+            organizationId: repositoryScope.organizationId,
+            workspaceId: repositoryScope.workspaceId,
+            projectId: repositoryScope.projectId,
+            repositoryId: repositoryScope.repositoryId,
+          },
+        }
+      }
+      const launched = await api.request('/api/v1/sessions', {
+        method: 'POST',
+        timeoutMillis: 30_000,
+        body,
+      })
+      if (launched.status !== 201) {
+        throw Object.assign(new Error(`Worker launch failed: ${launched.text}`), {
+          code: 'DEVICE_LAUNCH_FAILED',
+        })
+      }
+      if (owner !== null) {
+        if (workRunId === null) assert.equal(launched.json.productSessionId, owner,
+          'Server launch authority must match the task ProductSession')
+        else assert.equal(launched.json.workRunId, workRunId,
+          'Server launch authority must match the Controller WorkRun')
+      }
+      steps.push(workRunId !== null || productSessionId === null
+        ? 'launch-anchor' : `launch-anchor:${productSessionId}`)
+      launchedWorkerSessions.add(launched.json.workerSessionId)
+      const taskSessionId = owner ?? launched.json.productSessionId
+      const members = productSessionWorkers.get(taskSessionId) ?? new Set()
+      members.add(launched.json.workerSessionId)
+      productSessionWorkers.set(taskSessionId, members)
+      const scopes = productSessionScopes.get(taskSessionId) ?? new Set([taskSessionId])
+      scopes.add(launched.json.productSessionId)
+      productSessionScopes.set(taskSessionId, scopes)
+      report.workerSessionId = launched.json.workerSessionId
+      report.workerId = launched.json.workerId
+      report.workerInstanceId = launched.json.workerInstanceId
+      return launched.json
     }
 
     return {
@@ -1265,46 +1347,14 @@ export async function establishDeviceOnlyExecutionPath({
        * WorkerLaunchGrant bound to that ProductSession; StrongFlow passes
        * `workRunId` for the Controller-dispatched execution job.
        */
-      async launchAnchor({ workRunId = null, productSessionId = null } = {}) {
-        assertBenchmarkRunning()
-        const body = {
-          schemaVersion,
-          clientId: status.publicClientId,
-          repositoryBindingId,
-          ...(workRunId === null ? {} : { workRunId }),
-        }
-        if (productSessionId !== null) {
-          assert.ok(repositoryScope !== null,
-            'productSession launch requires repositoryScope on establishDeviceOnlyExecutionPath')
-          body.productSession = {
-            id: productSessionId,
-            scope: {
-              kind: 'repository',
-              organizationId: repositoryScope.organizationId,
-              workspaceId: repositoryScope.workspaceId,
-              projectId: repositoryScope.projectId,
-              repositoryId: repositoryScope.repositoryId,
-            },
-          }
-        }
-        const launched = await api.request('/api/v1/sessions', {
-          method: 'POST',
-          timeoutMillis: 30_000,
-          body,
+      launchAnchor,
+      /** Include this task's Controller role Sessions in its stop observation. */
+      forProductSession(productSessionId) {
+        assert.match(productSessionId, /^psn_[0-9A-HJKMNP-TV-Z]{26}$/u)
+        return Object.freeze({
+          assertBenchmarkRunning: workRuns => assertBenchmarkRunning(productSessionId, workRuns),
+          launchAnchor: options => launchAnchor(options, productSessionId),
         })
-        if (launched.status !== 201) {
-          throw Object.assign(new Error(`Worker launch failed: ${launched.text}`), {
-            code: 'DEVICE_LAUNCH_FAILED',
-          })
-        }
-        steps.push(productSessionId === null
-          ? 'launch-anchor'
-          : `launch-anchor:${productSessionId}`)
-        launchedWorkerSessions.add(launched.json.workerSessionId)
-        report.workerSessionId = launched.json.workerSessionId
-        report.workerId = launched.json.workerId
-        report.workerInstanceId = launched.json.workerInstanceId
-        return launched.json
       },
       async stop() {
         if (modelServer !== null) {

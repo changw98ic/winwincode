@@ -354,8 +354,9 @@ export async function runDeviceTaskVertical({
       timeoutMillis: 600_000,
       scenario: {
         files: task.files,
-        async run({ api, repository, baseline, modelRoute, devicePath }) {
-          assert.ok(devicePath, 'Device-only vertical must expose devicePath')
+        async run({ api, repository, baseline, modelRoute, devicePath: runtimeDevicePath }) {
+          assert.ok(runtimeDevicePath, 'Device-only vertical must expose devicePath')
+          const devicePath = { ...runtimeDevicePath, ...runtimeDevicePath.forProductSession(productSessionId) }
           report.publicClientId = devicePath.publicClientId
           report.repositoryBindingId = devicePath.repositoryBindingId
           report.steps.push(...devicePath.steps)
@@ -452,6 +453,7 @@ export async function runDeviceTaskVertical({
               'Device scheduler persisted a failed WorkRun dispatch')
           }
           const delivery = await driveDelivery(api, input ? null : 600_000, modelRoute, Date.now, {
+            deliveryId,
             resolveAttention: input === null ? true : 'verified-candidate',
             expectDeviceWorkRun: true,
             strictLaunchAnchor: true,
@@ -464,6 +466,7 @@ export async function runDeviceTaskVertical({
               save()
             },
             onActiveWorkRuns: async runs => {
+              devicePath.assertBenchmarkRunning(runs)
               report.workRuns = runs
               save()
               for (const run of runs) checkDispatchFailure(run.id)
