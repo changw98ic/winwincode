@@ -534,7 +534,12 @@ export async function resolveRegisteredDeviceTask(request, launch, options = {},
     if (original.errorCode === 'DEVICE_WORKER_CRASHED') {
       return crashedDeviceResult(request, launch, options)
     }
-    if (original.errorCode === 'DEVICE_DISPATCH_FAILED' || original.dispatchFailure) {
+    // Old reports may have classified a cancelled scheduler row as a dispatch
+    // failure. Preserve those bytes, but let current durable dispatch facts
+    // decide whether that failure still applies before using product recovery.
+    if ((original.errorCode === 'DEVICE_DISPATCH_FAILED' || original.dispatchFailure)
+      && [original.workRunId, ...(original.workRuns ?? []).map(run => run.id)]
+        .some(id => id && failedDeviceDispatch(launch.directory, id, launch.deliveryId))) {
       return failedDispatchDeviceResult(request, launch, options)
     }
     if (!original.complete && (original.errorCode === undefined || original.errorCode === null)

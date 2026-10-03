@@ -15,7 +15,7 @@ import { driveDelivery } from '../scripts/run-api-production-vertical.mjs'
 import { openBenchmarkLedger } from '../scripts/benchmark-ledger.mjs'
 import { benchmarkAggregationInput, deviceBenchmarkExperimentBinding, executeDeviceBenchmark, prepareBenchmarkDeviceTask, recoverBenchmarkDeviceCell,
   runBenchmarkDeviceAggregation, stoppedDeviceResult, assertRetainedDeviceTaskRunning, terminalBenchmarkDeviceFailure,
-  terminalDeviceFailure, failedDispatchDeviceResult } from '../scripts/benchmark-device-adapter.mjs'
+  terminalDeviceFailure, failedDispatchDeviceResult, resolveRegisteredDeviceTask } from '../scripts/benchmark-device-adapter.mjs'
 import { runDeviceTaskVertical, fusionDeviceProviders, inspectUnresolvedDeviceTasks, benchmarkDeviceEnvironment,
   expiredCrashedDeviceWorkRun, expiredDeviceWorkRunLease, failedDeviceDispatch,
   loadDeviceProviderEnvironment } from '../scripts/run-device-task-vertical.mjs'
@@ -2337,6 +2337,7 @@ test('candidate export verifies a self-contained Git bundle and preserves failed
     '-subj', '/CN=control.localhost', '-addext', 'subjectAltName=DNS:control.localhost',
     '-keyout', resolve(directory, 'fixture-key.pem'), '-out', resolve(directory, 'fixture-cert.pem')], { stdio: 'ignore' })
   let done = false
+  let cancelled = false
   const cursor = { deliveryId: launch.deliveryId, token: 'terminal-cursor' }
   const server = createServer({ key: await readFile(resolve(directory, 'fixture-key.pem')),
     cert: await readFile(resolve(directory, 'fixture-cert.pem')) }, async (request, response) => {
@@ -2352,10 +2353,12 @@ test('candidate export verifies a self-contained Git bundle and preserves failed
     const values = {
       'session.get': { id: launch.productSessionId },
       'delivery.get': { ...report.delivery.detail, deliveryId: launch.deliveryId, readCursor: cursor,
-        status: done ? 'done' : 'in_progress', verdict: { status: 'pass', criteria: [{ verdict: 'pass' }] },
+        status: cancelled ? 'cancelled' : done ? 'done' : 'in_progress',
+        verdict: cancelled ? null : { status: 'pass', criteria: [{ verdict: 'pass' }] },
         attention: [], evidence: [{ id: 'canonical-test-evidence' }] },
-      'workrun.get': { readCursor: cursor, items: [{ state: 'done' }],
-        runs: [{ id: 'original-run', state: 'completed', workItemId: 'original-item', executionJobId: 'original-job' }] },
+      'workrun.get': { readCursor: cursor, items: [{ state: cancelled ? 'cancelled' : 'done' }],
+        runs: [{ id: 'original-run', state: cancelled ? 'cancelled' : 'completed',
+          workItemId: 'original-item', executionJobId: 'original-job' }] },
     }
     response.end(JSON.stringify({ schemaVersion: 'winwincode/v1', requestId: body.requestId,
       query: body.query, result: values[body.query] }))
@@ -2398,6 +2401,43 @@ test('candidate export verifies a self-contained Git bundle and preserves failed
     assert.equal(JSON.parse(await readFile(reportPath)).complete, false, 'original observation remains unchanged')
     assert.equal(JSON.parse(await readFile(resolve(directory, 'submission-evidence', commit, 'manifest.json'))).productComplete, false)
     assert.deepEqual(await runBenchmarkPlan(plan, recovery), restored)
+    await t.test('old dispatch failure report reconciles current cancellation without changing retained bytes', async () => {
+      await mkdir(resolve(directory, 'server-data'), { recursive: true })
+      const scheduler = new DatabaseSync(resolve(directory, 'server-data/control-plane.sqlite3'))
+      try {
+        scheduler.exec(`CREATE TABLE scheduler_execution_jobs (job_id TEXT, delivery_id TEXT,
+          work_run_id TEXT, state TEXT, attempt INTEGER, revision INTEGER, updated_at TEXT, payload_digest TEXT);
+          ${dispatchLeaseSchema}
+          INSERT INTO execution_leases VALUES ('original-job','lease','payload','worker','instance',1,'1');
+          INSERT INTO execution_lease_terminals VALUES ('lease','original-job','worker','instance',1,'1','cancelled');`)
+        scheduler.prepare('INSERT INTO scheduler_execution_jobs VALUES (?,?,?,?,?,?,?,?)')
+          .run('original-job', launch.deliveryId, 'original-run', 'failed', 1, 5, 'now', 'payload')
+        const oldReport = { ...report, errorCode: 'DEVICE_DISPATCH_FAILED', workRunId: 'original-run',
+          dispatchFailure: { workRunId: 'original-run', deliveryId: launch.deliveryId,
+            jobId: 'original-job', state: 'failed', attempt: 1, revision: 5, updatedAt: 'now' } }
+        const oldBytes = JSON.stringify(oldReport)
+        await writeFile(reportPath, oldBytes)
+        const originalProviderBytes = await readFile(resolve(providerDirectory, 'providers.sqlite3'))
+        cancelled = true
+        const request = { ...cell, callId: launch.callId, provider: cell.comparison }
+        const result = await resolveRegisteredDeviceTask(request, launch)
+        assert.equal(result.failure.code, 'DEVICE_PRODUCT_CANCELLED')
+        assert.equal(result.productComplete, false)
+        assert.equal(result.externalScore, null)
+        assert.equal(result.recovery.originalReportSha256, sha(oldBytes))
+        assert.equal(await readFile(reportPath, 'utf8'), oldBytes)
+        assert.deepEqual(await readFile(resolve(providerDirectory, 'providers.sqlite3')), originalProviderBytes)
+        assert.equal(productStarts, 1)
+        cancelled = false
+        done = false
+        await assert.rejects(resolveRegisteredDeviceTask(request, launch))
+        assert.equal(await readFile(reportPath, 'utf8'), oldBytes)
+        scheduler.exec("UPDATE execution_lease_terminals SET outcome='failed'")
+        const failed = await resolveRegisteredDeviceTask(request, launch)
+        assert.equal(failed.failure.code, 'DEVICE_DISPATCH_FAILED')
+        assert.deepEqual(failed.dispatchFailure, oldReport.dispatchFailure)
+      } finally { scheduler.close() }
+    })
   } finally {
     server.closeAllConnections()
     await new Promise(resolvePromise => server.close(resolvePromise))
