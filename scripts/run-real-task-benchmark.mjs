@@ -427,6 +427,11 @@ export async function runBenchmarkSchedule(cells, { concurrency = 1, executeCell
   return results
 }
 
+export function verifyBenchmarkLedgerIdentity(plan, { ledgerPath, experimentBinding }) {
+  const store = openBenchmarkLedger(ledgerPath, canonicalJson({ plan, experimentBinding }), plan.cells)
+  store.close()
+}
+
 export async function runBenchmarkPlan(plan, {
   executeCell,
   createToolGate = () => createToolRequestGuard(),

@@ -5,7 +5,8 @@ import { basename, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { pathToFileURL } from 'node:url'
 import { benchmarkAggregationDigest, buildBenchmarkPlan, executeBenchmarkCell, executeFormalBenchmark,
-  recoverBenchmarkCell, validateBenchmarkConfiguration, validateFrozenTaskSource } from './run-real-task-benchmark.mjs'
+  recoverBenchmarkCell, validateBenchmarkConfiguration, validateFrozenTaskSource,
+  verifyBenchmarkLedgerIdentity } from './run-real-task-benchmark.mjs'
 import { assertBenchmarkExecutionReceipts } from './benchmark-execution-receipts.mjs'
 import { benchmarkDeviceEnvironment, expiredCrashedDeviceWorkRun, failedDeviceDispatch,
   loadDeviceProviderEnvironment, deviceTaskProvider,
@@ -53,7 +54,21 @@ function benchmarkSourceIdentity(agentSettings) {
     privateSettingsDigest: agentSettings?.jevSettingsFile ? sha256(readFileSync(agentSettings.jevSettingsFile)) : null }
 }
 
+export function deviceBenchmarkExperimentBinding(options, source, catalog) {
+  const automaticTaskActions = options.automaticTaskActions === undefined ? false : options.automaticTaskActions
+  assert.equal(typeof automaticTaskActions, 'boolean', 'task action authorization must be explicit')
+  return { experimentId: options.experimentId, source, aggregationProvider,
+    automaticTaskActions,
+    preparedCatalogSha256: sha256(JSON.stringify(catalog)),
+    agentSettingsSha256: sha256(JSON.stringify(options.agentSettings)),
+    providerEvidenceSha256: sha256(JSON.stringify(options.providerEvidence)),
+    ...options.frozenSourceIdentity, productSourceSealSha256: options.productSourceSealSha256 }
+}
+
 export async function executeDeviceBenchmark(options) {
+  const automaticTaskActions = options.automaticTaskActions === undefined ? false : options.automaticTaskActions
+  assert.equal(typeof automaticTaskActions, 'boolean', 'task action authorization must be explicit')
+  options = { ...options, automaticTaskActions }
   const catalog = JSON.parse(readFileSync(resolve(options.preparedInputsDirectory, 'prepared-inputs.json'), 'utf8'))
   const plan = buildBenchmarkPlan({ taskIds: catalog.tasks.map(task => task.taskId) })
   const providerEnvironment = options.providerEnvironment ?? process.env
@@ -81,6 +96,10 @@ export async function executeDeviceBenchmark(options) {
     productSourceSealSha256: sha256(`${JSON.stringify(sourceSeal.seal, null, 2)}\n`) }
   const evidenceRoot = resolve(options.evidenceRoot)
   mkdirSync(evidenceRoot, { recursive: true, mode: 0o700 })
+  const experimentBinding = deviceBenchmarkExperimentBinding(options, source, catalog)
+  // Reject changed experiment policy before opening Device/Worker services.
+  // The execution driver rechecks the same identity before claiming work.
+  verifyBenchmarkLedgerIdentity(plan, { ledgerPath: resolve(evidenceRoot, 'benchmark.sqlite3'), experimentBinding })
   const shared = await withDeviceTaskRuntime({ directory: resolve(evidenceRoot, 'runtime'),
     profiles: [...new Map(plan.cells.map(cell => [cell.configurationId, cell])).values()],
     providers: Object.keys(seats).map(name => deviceTaskProvider(seats[name], providerEnvironment)),
@@ -93,11 +112,7 @@ export async function executeDeviceBenchmark(options) {
     }
     return executeFormalBenchmark(plan, {
       providerEvidence: options.providerEvidence, ledgerPath: resolve(evidenceRoot, 'benchmark.sqlite3'),
-      experimentBinding: { experimentId: options.experimentId, source, aggregationProvider,
-        preparedCatalogSha256: sha256(JSON.stringify(catalog)),
-        agentSettingsSha256: sha256(JSON.stringify(options.agentSettings)),
-        providerEvidenceSha256: sha256(JSON.stringify(options.providerEvidence)),
-        ...options.frozenSourceIdentity, productSourceSealSha256: options.productSourceSealSha256 },
+      experimentBinding,
       executeCell: (cell, runner) => executeBenchmarkCell(cell, adapter, runner),
       recoverCell: (cell, observed) => recoverBenchmarkDeviceCell(cell, observed, sharedOptions),
       onRecord: record => {

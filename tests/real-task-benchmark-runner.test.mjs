@@ -13,7 +13,7 @@ import test from 'node:test'
 import { assertDeviceBenchmarkRunning } from '../scripts/device-production-fixture.mjs'
 import { driveDelivery } from '../scripts/run-api-production-vertical.mjs'
 import { openBenchmarkLedger } from '../scripts/benchmark-ledger.mjs'
-import { benchmarkAggregationInput, executeDeviceBenchmark, prepareBenchmarkDeviceTask, recoverBenchmarkDeviceCell,
+import { benchmarkAggregationInput, deviceBenchmarkExperimentBinding, executeDeviceBenchmark, prepareBenchmarkDeviceTask, recoverBenchmarkDeviceCell,
   runBenchmarkDeviceAggregation, stoppedDeviceResult, assertRetainedDeviceTaskRunning, terminalBenchmarkDeviceFailure,
   terminalDeviceFailure, failedDispatchDeviceResult } from '../scripts/benchmark-device-adapter.mjs'
 import { runDeviceTaskVertical, fusionDeviceProviders, inspectUnresolvedDeviceTasks, benchmarkDeviceEnvironment,
@@ -32,6 +32,7 @@ import {
   normalizeToolRequestIdentity,
   recoverBenchmarkCell,
   runBenchmarkPlan,
+  verifyBenchmarkLedgerIdentity,
   runBenchmarkSchedule,
   validateFrozenTaskSource,
 } from '../scripts/run-real-task-benchmark.mjs'
@@ -585,6 +586,79 @@ test('formal Device entry refuses an unavailable arm before creating the ledger 
       jevJudge: 'judge', jevSettingsFile: resolve(directory, 'private-settings.json') } }),
   { code: 'BENCHMARK_CONFIGURATION_UNAVAILABLE' })
   await assert.rejects(access(evidenceRoot), { code: 'ENOENT' })
+})
+
+test('formal Device entry validates automatic approval mode before reading inputs or opening a runtime', async t => {
+  const directory = await mkdtemp(resolve(tmpdir(), 'benchmark-approval-preflight-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  for (const automaticTaskActions of [null, 'true', 1, {}]) {
+    await assert.rejects(executeDeviceBenchmark({ automaticTaskActions,
+      preparedInputsDirectory: resolve(directory, 'missing-inputs'), evidenceRoot: resolve(directory, 'runtime') }),
+    /task action authorization must be explicit/u)
+  }
+  await assert.rejects(access(resolve(directory, 'runtime')), { code: 'ENOENT' })
+})
+
+test('Device approval policy is frozen before effects and same-mode recovery preserves original claims', async t => {
+  const directory = await mkdtemp(resolve(tmpdir(), 'benchmark-approval-binding-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const plan = { cells: [{ runId: 'original' }, { runId: 'next' }] }
+  const bindingOptions = { experimentId: 'approval-policy', agentSettings: {}, providerEvidence: {},
+    frozenSourceIdentity: {}, productSourceSealSha256: 'fixture-seal' }
+  const binding = automaticTaskActions => deviceBenchmarkExperimentBinding(
+    { ...bindingOptions, automaticTaskActions }, { revision: 'fixture-revision' }, { tasks: [] })
+  assert.deepEqual(binding(undefined), binding(false), 'omitted mode means explicit false')
+  for (const originalMode of [false, true]) {
+    const options = { ledgerPath: resolve(directory, `${originalMode}.sqlite3`), experimentBinding: binding(originalMode) }
+    const target = { callId: 'original:model', directory: resolve(directory, `product-${originalMode}`),
+      productSessionId: 'psn_01J00000000000000000000001', deliveryId: 'dlv_01J00000000000000000000001' }
+    const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
+      const { runBenchmarkPlan } = await import(process.argv[1]);
+      await runBenchmarkPlan(JSON.parse(process.argv[2]), { ...JSON.parse(process.argv[3]),
+        executeCell: (_cell, context) => {
+          context.registerLaunch(JSON.parse(process.argv[4]));
+          process.exit(86);
+        },
+      });
+    `, new URL('../scripts/run-real-task-benchmark.mjs', import.meta.url).href,
+    JSON.stringify(plan), JSON.stringify(options), JSON.stringify(target)], { encoding: 'utf8' })
+    assert.equal(child.status, 86, child.stderr)
+    const snapshot = () => {
+      const database = new DatabaseSync(options.ledgerPath, { readOnly: true })
+      try {
+        return { cells: database.prepare('SELECT * FROM benchmark_cell ORDER BY ordinal').all(),
+          launches: database.prepare('SELECT * FROM benchmark_launch').all(),
+          calls: database.prepare('SELECT * FROM benchmark_call').all() }
+      } finally { database.close() }
+    }
+    const before = snapshot()
+    const changed = { ...options, experimentBinding: binding(!originalMode) }
+    assert.throws(() => verifyBenchmarkLedgerIdentity(plan, changed), { code: 'LEDGER_IDENTITY_MISMATCH' })
+    let effects = 0
+    await assert.rejects(runBenchmarkPlan(plan, { ...changed,
+      executeCell: () => { effects += 1 }, recoverCell: () => { effects += 1 } }),
+    { code: 'LEDGER_IDENTITY_MISMATCH' })
+    assert.equal(effects, 0, 'policy changes cannot recover, approve or execute any cell')
+    assert.deepEqual(snapshot(), before, 'original claim, launch and unopened next cell remain unchanged')
+    verifyBenchmarkLedgerIdentity(plan, options)
+    await assert.rejects(runBenchmarkPlan(plan, { ...options, executeCell: () => assert.fail('unknown call cannot restart') }),
+    error => {
+      assert.equal(error.code, 'LEDGER_RUN_UNRESOLVED')
+      assert.deepEqual(error.launches, [target])
+      return true
+    })
+    const result = await runBenchmarkPlan(plan, { ...options,
+      recoverCell: (_cell, observed) => {
+        assert.deepEqual(observed.launches, [target])
+        return { status: 'completed', recovery: { kind: 'fixture-original-result' } }
+      },
+      executeCell: cell => { assert.equal(cell.runId, 'next'); effects += 1; return { status: 'completed' } },
+    })
+    assert.equal(effects, 1)
+    assert.deepEqual(result.records[0].launches, [target])
+    assert.deepEqual(await runBenchmarkPlan(plan, { ...options,
+      executeCell: () => assert.fail('completed calls cannot restart') }), result)
+  }
 })
 
 test('frozen task catalog produces exactly 700 unique benchmark cells', () => {
