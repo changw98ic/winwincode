@@ -215,14 +215,14 @@ export function failedDeviceDispatch(directory, workRunId, deliveryId) {
   const server = new DatabaseSync(path, { readOnly: true })
   let job
   try {
-    job = server.prepare(`SELECT job_id, state, attempt, revision, updated_at, payload_digest
+    job = server.prepare(`SELECT *
       FROM scheduler_execution_jobs WHERE work_run_id = ? AND delivery_id = ?
       ORDER BY updated_at DESC, attempt DESC, revision DESC, job_id DESC LIMIT 1`)
       .get(workRunId, deliveryId)
     if (job?.state === 'failed') {
-      // Scheduler cancellation retains a failed job row. Only its exact
-      // current lease terminal can distinguish that from a dispatch failure;
-      // the product projection still owns cancellation and evidence closure.
+      // Scheduler cancellation retains a failed job row. A claimed job
+      // requires its exact current cancelled lease terminal; the public
+      // product projection still owns cancellation and evidence closure.
       const cancelled = server.prepare(`SELECT 1 FROM execution_leases l
         JOIN execution_lease_terminals t ON t.lease_id = l.lease_id
           AND t.job_id = l.job_id AND t.attempt = l.attempt
@@ -232,12 +232,41 @@ export function failedDeviceDispatch(directory, workRunId, deliveryId) {
           AND t.outcome = 'cancelled' LIMIT 1`)
         .get(job.job_id, job.attempt, job.payload_digest)
       if (cancelled) return null
+      if (queuedCancellationMatches(server, job)) return null
     }
   } finally { server.close() }
   return job?.state === 'failed'
     ? { workRunId, deliveryId, jobId: job.job_id, state: job.state,
       attempt: job.attempt, revision: job.revision, updatedAt: job.updated_at }
     : null
+}
+
+function queuedCancellationMatches(server, job) {
+  if (!job.cancellation_request_id || !server.prepare(`SELECT 1 FROM sqlite_master
+    WHERE type = 'table' AND name = 'repository_scheduler_cancel_receipts'`).get()) return false
+  const scopeFields = ['organization_id', 'workspace_id', 'project_id', 'repository_id']
+  const stored = server.prepare(`SELECT response_json FROM repository_scheduler_cancel_receipts
+    WHERE scope_key = ? AND request_id = ?`)
+    .get(scopeFields.map(key => job[key]).join('\u001f'), job.cancellation_request_id)
+  if (!stored) return false
+  // An unclaimed cancellation has no lease terminal. Its native scheduler
+  // receipt must describe this exact current queue job, with no dispatch
+  // authority, before the public product projection can own its closure.
+  const receipt = JSON.parse(stored.response_json)
+  const retained = receipt.job
+  return receipt.request_id === job.cancellation_request_id
+    && receipt.lease === null && receipt.worker_session_id === null
+    && receipt.codex_thread_id === null && receipt.message_id === null
+    && retained?.cancellation?.request_id === job.cancellation_request_id
+    && retained.cancellation.requested_at === job.cancellation_requested_at
+    && [...scopeFields, 'product_session_id', 'delivery_id']
+      .every(key => retained.scope?.[key] === job[key])
+    && ['job_id', 'submission_request_id', 'payload_digest', 'state', 'attempt', 'revision',
+      'work_run_id', 'submitted_at', 'updated_at'].every(key => retained[key] === job[key])
+    && Array.isArray(retained.dispatch_payload)
+    && retained.dispatch_payload.every(byte => Number.isInteger(byte) && byte >= 0 && byte <= 255)
+    && Buffer.from(retained.dispatch_payload).equals(Buffer.from(job.dispatch_payload))
+    && !server.prepare('SELECT 1 FROM execution_leases WHERE job_id = ? LIMIT 1').get(job.job_id)
 }
 
 // One registered launch owns its evidence directory; the product databases stay

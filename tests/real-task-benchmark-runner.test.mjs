@@ -122,6 +122,75 @@ test('current exact cancelled lease remains a product cancellation during recove
   }
 })
 
+test('queued cancellation recovery requires the exact current scheduler receipt and no lease', async t => {
+  const directory = await mkdtemp(resolve(tmpdir(), 'benchmark-queued-cancel-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  await mkdir(resolve(directory, 'server-data'))
+  const db = new DatabaseSync(resolve(directory, 'server-data/control-plane.sqlite3'))
+  t.after(() => db.close())
+  db.exec(`CREATE TABLE scheduler_execution_jobs (job_id TEXT, organization_id TEXT,
+    workspace_id TEXT, project_id TEXT, repository_id TEXT, product_session_id TEXT,
+    delivery_id TEXT, work_run_id TEXT, submission_request_id TEXT, payload_digest TEXT,
+    dispatch_payload BLOB, state TEXT, attempt INTEGER, revision INTEGER, submitted_at TEXT,
+    updated_at TEXT, cancellation_request_id TEXT, cancellation_requested_at TEXT);
+    CREATE TABLE repository_scheduler_cancel_receipts (scope_key TEXT, request_id TEXT,
+      request_digest TEXT, response_json TEXT);
+    ${dispatchLeaseSchema}`)
+  db.prepare('INSERT INTO scheduler_execution_jobs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+    .run('job', 'org', 'workspace', 'project', 'repository', 'session', 'delivery', 'run',
+      'submit', 'payload', Buffer.from('{}'), 'failed', 1, 3, 'before', 'now', 'cancel', 'now')
+  const receipt = { request_id: 'cancel', lease: null, worker_session_id: null,
+    codex_thread_id: null, message_id: null, replayed: false,
+    job: { scope: { organization_id: 'org', workspace_id: 'workspace', project_id: 'project',
+      repository_id: 'repository', product_session_id: 'session', delivery_id: 'delivery' },
+    job_id: 'job', submission_request_id: 'submit', payload_digest: 'payload',
+    dispatch_payload: [...Buffer.from('{}')], state: 'failed', attempt: 1, revision: 3,
+    dependencies: [], work_run_id: 'run', submitted_at: 'before', updated_at: 'now',
+    cancellation: { request_id: 'cancel', requested_at: 'now' } } }
+  const store = value => {
+    db.exec('DELETE FROM repository_scheduler_cancel_receipts')
+    db.prepare('INSERT INTO repository_scheduler_cancel_receipts VALUES (?,?,?,?)')
+      .run(['org', 'workspace', 'project', 'repository'].join('\u001f'), 'cancel', 'digest', JSON.stringify(value))
+  }
+  store(receipt)
+  assert.equal(failedDeviceDispatch(directory, 'run', 'delivery'), null,
+    'the retained queued cancellation receipt must reach public product recovery')
+  for (const mutate of [
+    value => { value.request_id = 'foreign' },
+    value => { value.job.job_id = 'foreign' },
+    value => { value.job.scope.product_session_id = 'foreign' },
+    value => { value.job.scope.repository_id = 'foreign' },
+    value => { value.job.scope.delivery_id = 'foreign' },
+    value => { value.job.work_run_id = 'foreign' },
+    value => { value.job.payload_digest = 'foreign' },
+    value => { value.job.dispatch_payload = [0] },
+    value => { value.job.dispatch_payload = [123 + 256, 125] },
+    value => { value.job.dispatch_payload = [123, '125'] },
+    value => { value.job.attempt = 2 },
+    value => { value.job.revision = 2 },
+    value => { value.job.cancellation.request_id = 'foreign' },
+    value => { value.job.cancellation.requested_at = 'before' },
+    value => { value.lease = { lease_id: 'foreign' } },
+    value => { value.worker_session_id = 'foreign' },
+    value => { value.message_id = 'foreign' },
+  ]) {
+    const value = structuredClone(receipt)
+    mutate(value)
+    store(value)
+    assert.equal(failedDeviceDispatch(directory, 'run', 'delivery')?.jobId, 'job')
+  }
+  store(receipt)
+  db.exec("INSERT INTO execution_leases VALUES ('job','lease','payload','worker','instance',1,'1')")
+  assert.equal(failedDeviceDispatch(directory, 'run', 'delivery')?.jobId, 'job',
+    'a no-lease receipt cannot replace an actual current lease')
+  db.exec('DELETE FROM execution_leases; DELETE FROM repository_scheduler_cancel_receipts')
+  assert.equal(failedDeviceDispatch(directory, 'run', 'delivery')?.jobId, 'job')
+  store(receipt)
+  db.exec("UPDATE repository_scheduler_cancel_receipts SET response_json = '{'")
+  assert.throws(() => failedDeviceDispatch(directory, 'run', 'delivery'), SyntaxError,
+    'corrupt required cancellation evidence must not produce an invented terminal result')
+})
+
 test('failed dispatch is detected from the bound terminal scheduler job and retained as a failed cell', async t => {
   const directory = await mkdtemp(resolve(tmpdir(), 'benchmark-dispatch-failed-'))
   t.after(() => rm(directory, { recursive: true, force: true }))
