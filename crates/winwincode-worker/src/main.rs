@@ -4,6 +4,8 @@
 
 //! Standalone Execution Worker process entrypoint.
 
+mod shutdown_signal;
+
 use std::env;
 use std::fs;
 use std::future::Future;
@@ -213,6 +215,7 @@ where
     reason = "the composition owns registration, control delivery, and bounded shutdown"
 )]
 async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error::Error>> {
+    let mut interrupt = shutdown_signal::WorkerInterrupt::new()?;
     let WorkerBootstrap {
         exit_after_work,
         worker_id,
@@ -279,16 +282,27 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
         worker = worker.with_observation_model(observation_model);
     }
 
-    if let Err(error) = register_until_active(&mut worker, &handle, &started_at).await {
-        let _ = Box::pin(worker.shutdown(now_instant()?)).await;
-        return Err(error);
+    let registration = tokio::select! {
+        result = Box::pin(register_until_active(&mut worker, &handle, &started_at)) => Some(result),
+        () = interrupt.wait() => None,
+    };
+    match registration {
+        Some(Ok(())) => {}
+        Some(Err(error)) => {
+            let _ = Box::pin(worker.shutdown(now_instant()?)).await;
+            return Err(error);
+        }
+        None => {
+            let _ = Box::pin(worker.shutdown(now_instant()?)).await;
+            return Ok(());
+        }
     }
 
     let mut heartbeat = tokio::time::interval(Duration::from_secs(1));
     let mut drive = tokio::time::interval(Duration::from_millis(25));
     loop {
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => break,
+            () = interrupt.wait() => break,
             _ = heartbeat.tick() => {
                 Box::pin(drain_controls(&mut worker, &handle)).await?;
                 let _ = Box::pin(worker.heartbeat(now_instant()?)).await;
