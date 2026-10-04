@@ -6,18 +6,17 @@
 //! `kind`/`payload` pair. The field sets follow the authoritative schema
 //! (`schema/winwincode/v1/client-control.schema.json`):
 //!
-//! - 19 command kinds embed the command fields (`expectedRevision`,
+//! - Command kinds embed the command fields (`expectedRevision`,
 //!   `idempotencyKey`) flattened to the payload top level.
 //! - 11 of those commands additionally embed the occupancy fencing stamp
 //!   (`occupancyLeaseId`, `occupancyFencingToken`).
-//! - The 8 remaining kinds (`client.hello`, `client.heartbeat`,
+//! - Report and acknowledgement kinds (`client.hello`, `client.heartbeat`,
 //!   `client.worker.state`, `client.worker.reconcile`,
-//!   `client.repository.status`, `client.command_ack`,
-//!   `client.enrollment_accepted`) carry neither
+//!   `client.repository.status`, `client.command_ack`) carry neither
 //!   the command fields nor a fencing token.
 //!
 //! The `kind` strings match the plan enumeration exactly, for example
-//! `client.enroll` and `client.enrollment_accepted`. The envelope
+//! `client.enroll` and `client.hello`. The envelope
 //! `schemaVersion` is the domain contract string `"winwincode/v1"`, and
 //! fencing tokens travel as decimal strings (see [`crate::wire`]).
 
@@ -501,22 +500,6 @@ pub enum ClientToServerMessage {
     ManagedAppStatus(ClientManagedAppStatusPayload),
 }
 
-/// Payload of `client.enrollment_accepted` (plan section 9.4, 11.4).
-///
-/// A pure response: it carries no command context.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ServerEnrollmentAcceptedPayload {
-    /// Stable public device identifier, not a secret.
-    #[serde(rename = "publicClientId")]
-    pub public_client_id: String,
-    /// Requested heartbeat interval in milliseconds.
-    #[serde(rename = "heartbeatIntervalMs")]
-    pub heartbeat_interval_ms: u32,
-    /// Server timestamp the device should clock-drift against (RFC 3339).
-    #[serde(rename = "serverTime")]
-    pub server_time: String,
-}
-
 /// Payload of `client.occupancy.offer` (plan section 9.4, 12.2).
 ///
 /// The new lease's identity and fencing fields are flattened into the fenced
@@ -665,9 +648,6 @@ pub enum ServerToClientMessage {
     /// End-to-end encrypted Provider mutation, bound to the selected Device.
     #[serde(rename = "client.provider.apply")]
     ProviderApply(Box<ServerConfigurationApplyPayload>),
-    /// Device enrollment was accepted.
-    #[serde(rename = "client.enrollment_accepted")]
-    EnrollmentAccepted(ServerEnrollmentAcceptedPayload),
     /// Server offers a created occupancy lease.
     #[serde(rename = "client.occupancy.offer")]
     OccupancyOffer(ServerOccupancyOfferPayload),
@@ -754,14 +734,13 @@ mod tests {
     ];
 
     /// Kinds that carry neither command fields nor a fencing token.
-    const CONTEXT_FREE_KINDS: [&str; 7] = [
+    const CONTEXT_FREE_KINDS: [&str; 6] = [
         "client.hello",
         "client.heartbeat",
         "client.worker.state",
         "client.worker.reconcile",
         "client.repository.status",
         "client.command_ack",
-        "client.enrollment_accepted",
     ];
 
     /// The context-free reports that mirror the occupancy lease id (nullable,
@@ -1226,14 +1205,6 @@ mod tests {
         let occupancy = occupancy_context();
         vec![
             (
-                "client.enrollment_accepted",
-                ServerToClientMessage::EnrollmentAccepted(ServerEnrollmentAcceptedPayload {
-                    public_client_id: "100200300401".to_owned(),
-                    heartbeat_interval_ms: 15_000,
-                    server_time: "2026-01-01T00:00:00.000Z".to_owned(),
-                }),
-            ),
-            (
                 "client.occupancy.offer",
                 ServerToClientMessage::OccupancyOffer(ServerOccupancyOfferPayload {
                     occupancy: occupancy.clone(),
@@ -1337,7 +1308,7 @@ mod tests {
     #[test]
     fn command_and_fencing_contexts_follow_the_schema_classification() {
         assert_eq!(FENCED_KINDS.len(), 11, "exactly 11 fenced kinds");
-        assert_eq!(CONTEXT_FREE_KINDS.len(), 7, "exactly 7 context-free kinds");
+        assert_eq!(CONTEXT_FREE_KINDS.len(), 6, "exactly 6 context-free kinds");
 
         let messages: Vec<(&str, serde_json::Value)> = all_client_to_server_messages()
             .into_iter()
@@ -1354,7 +1325,7 @@ mod tests {
                     }),
             )
             .collect();
-        assert_eq!(messages.len(), 24, "every fixture kind is represented");
+        assert_eq!(messages.len(), 23, "every fixture kind is represented");
 
         // 17 commands in these fixtures, 11 of them fenced.
         let plain_commands = messages.len() - FENCED_KINDS.len() - CONTEXT_FREE_KINDS.len();
@@ -1371,7 +1342,7 @@ mod tests {
             let context_free = CONTEXT_FREE_KINDS.contains(kind);
 
             // Command fields: present for the 17 commands, absent for the
-            // other 7 kinds.
+            // other 6 kinds.
             assert_eq!(
                 payload.get("expectedRevision").is_some(),
                 !context_free,

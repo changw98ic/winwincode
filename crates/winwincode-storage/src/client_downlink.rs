@@ -2,8 +2,7 @@
 
 //! Durable Server → Client downlink outbox for the `ClientControlPort`.
 //!
-//! Every Server-to-Client frame (`client.enrollment_accepted`,
-//! occupancy, and worker frames) is
+//! Every Server-to-Client command (occupancy and worker frames) is
 //! persisted here before delivery and is delivered by the client exchange
 //! under the per-client `server_to_client_ack_sequence` cursor owned by the
 //! `ClientNode` registry (plan 9.2). A frame is retained until the Device

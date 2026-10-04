@@ -201,11 +201,6 @@ const KIND_EXTRA_FIELDS = Object.freeze({
     commandKind: 'client.enroll',
     status: 'accepted',
   }),
-  'client.enrollment_accepted': () => ({
-    publicClientId: '927351842',
-    serverTime: T0,
-    heartbeatIntervalMs: 30_000,
-  }),
   'client.occupancy.offer': () => ({
     holderUserId: crockfordId('usr'),
     claimRequestId: crockfordId('ocq'),
@@ -254,7 +249,6 @@ const NON_COMMAND_KINDS = Object.freeze([
   'client.worker.reconcile',
   'client.repository.status',
   'client.command_ack',
-  'client.enrollment_accepted',
 ])
 
 function validMessage(kind, overrides = {}) {
@@ -294,10 +288,10 @@ test('schemaVersion is the string constant winwincode/v1', () => {
   assert.equal(typeof CLIENT_CONTROL_SCHEMA_VERSION, 'string')
 })
 
-test('kind registries share command_ack in both directions: 18 + 13 - 1 = 30', () => {
+test('kind registries share command_ack in both directions: 18 + 12 - 1 = 29', () => {
   assert.equal(CLIENT_TO_SERVER_MESSAGE_KINDS.length, 18)
-  assert.equal(SERVER_TO_CLIENT_MESSAGE_KINDS.length, 13)
-  assert.equal(CLIENT_CONTROL_MESSAGE_KINDS.length, 30)
+  assert.equal(SERVER_TO_CLIENT_MESSAGE_KINDS.length, 12)
+  assert.equal(CLIENT_CONTROL_MESSAGE_KINDS.length, 29)
   assert.equal(Object.isFrozen(CLIENT_TO_SERVER_MESSAGE_KINDS), true)
   assert.equal(Object.isFrozen(SERVER_TO_CLIENT_MESSAGE_KINDS), true)
   assert.equal(Object.isFrozen(CLIENT_CONTROL_COMMAND_MESSAGE_KINDS), true)

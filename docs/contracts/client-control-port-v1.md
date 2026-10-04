@@ -125,13 +125,13 @@ occupancyFencingToken
 ## Client → Server 消息
 
 强制字段标记（与 `client-control.schema.json` 的 `x-message-class` 一致）：
-`C` 命令，必带 `expectedRevision` + `idempotencyKey`（共 22 条）；`C + L` 命令再加
+`C` 命令，必带 `expectedRevision` + `idempotencyKey`（共 20 条）；`C + L` 命令再加
 占用盖章 `occupancyLeaseId` + `occupancyFencingToken`（共 11 条）；`—` 非命令事实
 （report/ack/response/request），不带命令字段。
 
 | kind | 方向 | payload 概要 | 发送/处理时机 | 强制字段 |
 | --- | --- | --- | --- | --- |
-| `client.enroll` | Client → Server | 设备名、凭据请求材料、clientInstanceId、协议版本 | Device 首次启动且本地无已接受身份时发送；Server 以 `client.enrollment_accepted` 回应 | `C` |
+| `client.enroll` | Client → Server | 设备名、凭据请求材料、clientInstanceId、协议版本 | Device 首次启动且本地无已接受身份时发送；Server 在注册响应的 `enrollment` 中直接返回设备 ID 和凭据，不发送下行通知、不占用下行序号 | `C` |
 | `client.hello` | Client → Server | clientInstanceId、软件版本、inbox cursor、outbox 起点、待对账标记 | 进程启动以及每次断线恢复后的第一个交换中发送；Server 校验后继续两个流并把旧实例标记为被取代 | — |
 | `client.heartbeat` | Client → Server | presence、容量（`maxConcurrentWorkerSessions`、`runningWorkerSessions`、`reservedWorkerSessions`、draining）、lastObservedAt | 空闲期按固定间隔发送；Server 不得从 heartbeat 隐式派发命令 | `—` |
 | `client.connect_code.published` | Client → Server | connectCodeId、codeDigest、issuedByInstanceId、expiresAt、remainingAttempts、generation | 用户在设备上生成或刷新动态连接码后发送；Server 只保存摘要 | `C` |
@@ -154,7 +154,6 @@ occupancyFencingToken
 
 | kind | 方向 | payload 概要 | 发送/处理时机 | 强制字段 |
 | --- | --- | --- | --- | --- |
-| `client.enrollment_accepted` | Server → Client | clientNodeId、Device Credential 材料与指纹、server profile、下行流起点 | 回应 `client.enroll`；此后 Client 以该身份交换 | — |
 | `client.occupancy.offer` | Server → Client | occupancyLeaseId、新 occupancyFencingToken、holderUserId、claimRequestId、idleExpiresAt | 原子检查通过并创建 reserving Lease 后发送；Client 持久化占用镜像后回 `client.occupancy.ack`。offer 本身携带的新 Lease 与 token 即被 ACK 回显的盖章值 | `C + L` |
 | `client.occupancy.release` | Server → Client | occupancyLeaseId、occupancyFencingToken、mode（release、drain、cancel_and_release）、reason | 占用者释放、drain 完成或取消全部任务并释放时发送；Client 停止接受新 WorkerSession，cancel 模式下停止现有 worker | `C + L` |
 | `client.occupancy.force_fence` | Server → Client | occupancyLeaseId、更高 occupancyFencingToken、reason、要求的本地清理动作 | 管理员或原占用者安全清理路径发送；Client 以新 token 覆盖镜像并立即拒绝一切旧 token 命令 | `C + L` |

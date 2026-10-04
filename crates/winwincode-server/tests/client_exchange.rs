@@ -374,21 +374,23 @@ async fn enroll_creates_a_pending_node_and_the_authenticated_hello_continues() {
         &format!("sha256:{:x}", Sha256::digest(secret_bytes)),
         "the digest persists exactly the sha256 of the issued material"
     );
-    assert_eq!(
-        enrollment.get("downlinkFromSequence"),
-        Some(&serde_json::json!(1))
-    );
     assert!(enrollment.get("heartbeatIntervalMs").is_some());
+    assert!(enrollment.get("downlinkFromSequence").is_none());
+    assert_eq!(body["frames"], serde_json::json!([]));
     assert_eq!(
-        body.get("frames")
-            .and_then(serde_json::Value::as_array)
-            .map(Vec::len),
-        Some(1)
+        cursors(&data_directory, node_id).server_to_client_ack_sequence,
+        0
     );
-    assert_eq!(
-        body["frames"][0].get("kind"),
-        Some(&serde_json::json!("client.enrollment_accepted"))
+    let mut storage = SqliteStorage::open(&data_directory).unwrap();
+    assert!(
+        storage
+            .client_downlink_outbox()
+            .unwrap()
+            .deliverable(node_id, 0, 16)
+            .unwrap()
+            .is_empty()
     );
+    drop(storage);
 
     let record = node_snapshot(&data_directory, node_id).expect("enrolled node");
     assert_eq!(
@@ -401,7 +403,7 @@ async fn enroll_creates_a_pending_node_and_the_authenticated_hello_continues() {
     // The authenticated hello takes presence online on the same stream.
     let (status, body) = post_exchange(
         address,
-        &exchange_request(&[hello_frame(node_id, INSTANCE, 2)], 1),
+        &exchange_request(&[hello_frame(node_id, INSTANCE, 2)], 0),
         Some(credential),
     )
     .await;
@@ -440,17 +442,17 @@ async fn missing_malformed_wrong_and_unknown_credentials_are_one_uniform_rejecti
     let attempts = vec![
         // A non-enroll exchange without any credential.
         (
-            exchange_request(&[heartbeat_frame(&node_id, INSTANCE, 2, 0)], 1),
+            exchange_request(&[heartbeat_frame(&node_id, INSTANCE, 2, 0)], 0),
             None,
         ),
         // A malformed credential.
         (
-            exchange_request(&[heartbeat_frame(&node_id, INSTANCE, 2, 0)], 1),
+            exchange_request(&[heartbeat_frame(&node_id, INSTANCE, 2, 0)], 0),
             Some("not-hex"),
         ),
         // A well-formed but wrong credential.
         (
-            exchange_request(&[heartbeat_frame(&node_id, INSTANCE, 2, 0)], 1),
+            exchange_request(&[heartbeat_frame(&node_id, INSTANCE, 2, 0)], 0),
             Some(wrong_hex.as_str()),
         ),
         // A plausible credential against a node that does not exist.
@@ -482,7 +484,7 @@ async fn missing_malformed_wrong_and_unknown_credentials_are_one_uniform_rejecti
     // The real credential still authenticates: the failures changed nothing.
     let (status, body) = post_exchange(
         address,
-        &exchange_request(&[hello_frame(&node_id, INSTANCE, 2)], 1),
+        &exchange_request(&[hello_frame(&node_id, INSTANCE, 2)], 0),
         Some(&credential),
     )
     .await;
@@ -505,7 +507,7 @@ async fn a_gap_answers_replay_from_sequence_and_keeps_the_cursor() {
 
     let (status, _) = post_exchange(
         address,
-        &exchange_request(&[hello_frame(&node_id, INSTANCE, 2)], 1),
+        &exchange_request(&[hello_frame(&node_id, INSTANCE, 2)], 0),
         Some(&credential),
     )
     .await;
@@ -518,7 +520,7 @@ async fn a_gap_answers_replay_from_sequence_and_keeps_the_cursor() {
     // Sequence 4 arrives while the cursor sits at 2: gap with a replay hint.
     let (status, body) = post_exchange(
         address,
-        &exchange_request(&[heartbeat_frame(&node_id, INSTANCE, 4, 1)], 1),
+        &exchange_request(&[heartbeat_frame(&node_id, INSTANCE, 4, 1)], 0),
         Some(&credential),
     )
     .await;
@@ -544,7 +546,7 @@ async fn a_gap_answers_replay_from_sequence_and_keeps_the_cursor() {
                 heartbeat_frame(&node_id, INSTANCE, 3, 1),
                 heartbeat_frame(&node_id, INSTANCE, 4, 1),
             ],
-            1,
+            0,
         ),
         Some(&credential),
     )
@@ -573,7 +575,7 @@ async fn duplicate_frames_confirm_without_reexecution() {
 
     let (status, _) = post_exchange(
         address,
-        &exchange_request(&[hello_frame(&node_id, INSTANCE, 2)], 1),
+        &exchange_request(&[hello_frame(&node_id, INSTANCE, 2)], 0),
         Some(&credential),
     )
     .await;
@@ -585,7 +587,7 @@ async fn duplicate_frames_confirm_without_reexecution() {
     // the presence projection does not execute a second time.
     let (status, body) = post_exchange(
         address,
-        &exchange_request(&[hello_frame(&node_id, INSTANCE, 2)], 1),
+        &exchange_request(&[hello_frame(&node_id, INSTANCE, 2)], 0),
         Some(&credential),
     )
     .await;
@@ -614,7 +616,7 @@ async fn heartbeat_updates_the_capacity_and_heartbeat_projection() {
 
     let (status, _) = post_exchange(
         address,
-        &exchange_request(&[hello_frame(&node_id, INSTANCE, 2)], 1),
+        &exchange_request(&[hello_frame(&node_id, INSTANCE, 2)], 0),
         Some(&credential),
     )
     .await;
@@ -622,7 +624,7 @@ async fn heartbeat_updates_the_capacity_and_heartbeat_projection() {
 
     let (status, body) = post_exchange(
         address,
-        &exchange_request(&[heartbeat_frame(&node_id, INSTANCE, 3, 2)], 1),
+        &exchange_request(&[heartbeat_frame(&node_id, INSTANCE, 3, 2)], 0),
         Some(&credential),
     )
     .await;
@@ -654,7 +656,7 @@ async fn a_pending_enrollment_heartbeat_is_refused() {
     // the `pending_enrollment` node: no heartbeat instant, no presence move.
     let (status, body) = post_exchange(
         address,
-        &exchange_request(&[heartbeat_frame(&node_id, INSTANCE, 2, 3)], 1),
+        &exchange_request(&[heartbeat_frame(&node_id, INSTANCE, 2, 3)], 0),
         Some(&credential),
     )
     .await;
@@ -722,7 +724,7 @@ async fn a_second_enroll_after_enrollment_is_refused() {
     // inside an authenticated batch is refused at the conflict outcome.
     let (status, _) = post_exchange(
         address,
-        &exchange_request(&[hello_frame(&node_id, INSTANCE, 2)], 1),
+        &exchange_request(&[hello_frame(&node_id, INSTANCE, 2)], 0),
         Some(&credential),
     )
     .await;
@@ -746,7 +748,7 @@ async fn a_second_enroll_after_enrollment_is_refused() {
                     client_version: "0.1.0-alpha.1".to_owned(),
                 })),
             )],
-            1,
+            0,
         ),
         Some(&credential),
     )
@@ -780,7 +782,7 @@ async fn a_restarted_instance_supersedes_the_old_one_via_hello() {
 
     let (status, _) = post_exchange(
         address,
-        &exchange_request(&[hello_frame(&node_id, INSTANCE, 2)], 1),
+        &exchange_request(&[hello_frame(&node_id, INSTANCE, 2)], 0),
         Some(&credential),
     )
     .await;
@@ -790,7 +792,7 @@ async fn a_restarted_instance_supersedes_the_old_one_via_hello() {
     // superseded and the stream continues under the new instance.
     let (status, body) = post_exchange(
         address,
-        &exchange_request(&[hello_frame(&node_id, RESTARTED_INSTANCE, 3)], 1),
+        &exchange_request(&[hello_frame(&node_id, RESTARTED_INSTANCE, 3)], 0),
         Some(&credential),
     )
     .await;
@@ -810,7 +812,7 @@ async fn a_restarted_instance_supersedes_the_old_one_via_hello() {
     // cursor does not move.
     let (status, body) = post_exchange(
         address,
-        &exchange_request(&[heartbeat_frame(&node_id, INSTANCE, 4, 0)], 1),
+        &exchange_request(&[heartbeat_frame(&node_id, INSTANCE, 4, 0)], 0),
         Some(&credential),
     )
     .await;
@@ -924,7 +926,7 @@ fn direct_enrollment(root: &Path) -> (ClientExchangeApplication, String, String)
     direct_exchange(
         &app,
         Some(&credential),
-        &exchange_request(&[hello_frame(&node, INSTANCE, 2)], 1),
+        &exchange_request(&[hello_frame(&node, INSTANCE, 2)], 0),
     )
     .expect("hello");
     (app, node, credential)
@@ -965,7 +967,7 @@ fn command_rejections_are_durable_and_cross_exchange_conflicts_never_advance_ack
         ClientToServerMessage::RepositoryUpsert(command.clone()),
     );
     assert_eq!(
-        direct_exchange(&app, Some(&credential), &exchange_request(&[first], 1)).expect("create")["ackSequence"],
+        direct_exchange(&app, Some(&credential), &exchange_request(&[first], 0)).expect("create")["ackSequence"],
         3
     );
     drop(app);
@@ -979,7 +981,7 @@ fn command_rejections_are_durable_and_cross_exchange_conflicts_never_advance_ack
         ClientToServerMessage::RepositoryUpsert(command.clone()),
     );
     assert!(
-        direct_exchange(&app, Some(&credential), &exchange_request(&[changed], 1))
+        direct_exchange(&app, Some(&credential), &exchange_request(&[changed], 0))
             .expect_err("same key with changed payload")
             .is_invalid_request()
     );
@@ -994,7 +996,7 @@ fn command_rejections_are_durable_and_cross_exchange_conflicts_never_advance_ack
     let response = direct_exchange(
         &app,
         Some(&credential),
-        &exchange_request(std::slice::from_ref(&stale), 1),
+        &exchange_request(std::slice::from_ref(&stale), 0),
     )
     .expect("rejection is a settled business result");
     assert_eq!(response["ackSequence"], 4);
@@ -1003,7 +1005,7 @@ fn command_rejections_are_durable_and_cross_exchange_conflicts_never_advance_ack
     assert_eq!(result["payload"]["status"], "rejected_revision_conflict");
     assert_eq!(result["payload"]["currentRevision"], 1);
     let replay =
-        direct_exchange(&app, Some(&credential), &exchange_request(&[stale], 1)).expect("replay");
+        direct_exchange(&app, Some(&credential), &exchange_request(&[stale], 0)).expect("replay");
     assert_eq!(
         replay["frames"], response["frames"],
         "rejection remains in the durable downlink"
@@ -1085,7 +1087,7 @@ fn recovery_requires_a_fresh_complete_report_for_the_same_occupancy() {
     direct_exchange(
         &app,
         Some(&credential),
-        &exchange_request(&[hello_frame(&node, INSTANCE, 3)], 1),
+        &exchange_request(&[hello_frame(&node, INSTANCE, 3)], 0),
     )
     .expect("reconnect");
     let report = |sequence, workers, occurred_at: &str, occupancy: &str| {
@@ -1099,7 +1101,7 @@ fn recovery_requires_a_fresh_complete_report_for_the_same_occupancy() {
             }),
         );
         value["occurredAt"] = occurred_at.into();
-        direct_exchange(&app, Some(&credential), &exchange_request(&[value], 1)).expect("report");
+        direct_exchange(&app, Some(&credential), &exchange_request(&[value], 0)).expect("report");
     };
     let state = || {
         SqliteStorage::open(&root)

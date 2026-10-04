@@ -553,9 +553,6 @@ pub enum ClientControlMessageKind {
     /// `client.command_ack`
     #[serde(rename = "client.command_ack")]
     CommandAck,
-    /// `client.enrollment_accepted`
-    #[serde(rename = "client.enrollment_accepted")]
-    EnrollmentAccepted,
     /// `client.occupancy.offer`
     #[serde(rename = "client.occupancy.offer")]
     OccupancyOffer,

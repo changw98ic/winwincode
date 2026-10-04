@@ -394,8 +394,8 @@ async fn enroll_device(address: std::net::SocketAddr) -> (String, String, String
         .to_owned();
     assert_eq!(
         body["frames"].as_array().expect("downlink batch").len(),
-        1,
-        "the enrollment acceptance frame is delivered in the same response"
+        0,
+        "enrollment returns credentials without a downlink notification"
     );
     (node, public_client_id, credential, 2)
 }
@@ -417,7 +417,7 @@ async fn walk_hello(
     });
     let (status, body) = post_exchange(
         address,
-        &exchange_request(&[frame(node, instance, sequence, hello)], sequence - 1),
+        &exchange_request(&[frame(node, instance, sequence, hello)], 0),
         Some(credential),
     )
     .await;

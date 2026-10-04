@@ -98,10 +98,9 @@ use winwincode_client_port::messages::{
     ClientHeartbeatPayload, ClientHelloPayload, ClientManagedAppStatusPayload,
     ClientOccupancyAckPayload, ClientOccupancyRejectedPayload, ClientToServerEnvelope,
     ClientToServerMessage, ClientWorkerLaunchAckPayload, CommandContext, OccupancyCommandContext,
-    ServerClientLockPayload, ServerEnrollmentAcceptedPayload, ServerOccupancyForceFencePayload,
-    ServerOccupancyOfferPayload, ServerOccupancyReleasePayload, ServerRepositoryRescanPayload,
-    ServerToClientEnvelope, ServerToClientMessage, ServerWorkerLaunchPayload,
-    ServerWorkerStopPayload,
+    ServerClientLockPayload, ServerOccupancyForceFencePayload, ServerOccupancyOfferPayload,
+    ServerOccupancyReleasePayload, ServerRepositoryRescanPayload, ServerToClientEnvelope,
+    ServerToClientMessage, ServerWorkerLaunchPayload, ServerWorkerStopPayload,
 };
 
 use crate::connect_code::{self, PublishedConnectCode};
@@ -293,10 +292,6 @@ pub struct EnrollmentIssuance {
     /// Server timestamp the device should clock-drift against (RFC 3339).
     #[serde(rename = "serverTime")]
     pub server_time: String,
-    /// First sequence of the server-to-client stream this device continues
-    /// at.
-    #[serde(rename = "downlinkFromSequence")]
-    pub downlink_from_sequence: u64,
 }
 
 /// One Worker Session Credential delivered beside its matching durable
@@ -371,7 +366,7 @@ pub struct DaemonConfig {
     pub architecture: ClientArchitecture,
     /// Device client software version.
     pub client_version: String,
-    /// Idle cadence for `client.heartbeat`; the enrollment acceptance may
+    /// Idle cadence for `client.heartbeat`; the enrollment response may
     /// override it with the server-requested interval.
     pub heartbeat_interval: Duration,
     /// Cadence for the enrollment wait while no deliverable enroll frame
@@ -455,7 +450,7 @@ impl From<DeviceStoreError> for DaemonError {
 /// Observed counters and scheduling state of one daemon session.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DaemonStatus {
-    /// Whether `client.enrollment_accepted` was persisted.
+    /// Whether the issued enrollment identity was persisted.
     pub enrolled: bool,
     /// Exchanges attempted (a failed transport call counts).
     pub exchanges_started: u64,
@@ -742,7 +737,7 @@ impl DeviceDaemon {
         &self.instance_id
     }
 
-    /// Whether `client.enrollment_accepted` has been persisted.
+    /// Whether the issued enrollment identity has been persisted.
     #[must_use]
     pub const fn is_enrolled(&self) -> bool {
         self.enrolled
@@ -1419,21 +1414,21 @@ impl DeviceDaemon {
         self.status.exchanges_succeeded += 1;
         self.reset_backoff();
 
-        let downlink_frames = match self.ingest_downlink(
-            &response.frames,
-            response.enrollment.as_ref(),
-            &response.worker_credentials,
-        ) {
-            Ok(count) => count,
-            Err(DownlinkFailure::Retriable(reason)) => {
-                // The client acknowledgement was already persisted; the
-                // offending downlink batch is simply refused and the server
-                // replays it after our next ackSequence report.
-                self.register_failure(now, reason);
-                return Ok(self.retry_outcome());
-            }
-            Err(DownlinkFailure::Fatal(error)) => return Err(error),
-        };
+        if let Some(issuance) = &response.enrollment {
+            self.accept_enrollment(issuance)?;
+        }
+        let downlink_frames =
+            match self.ingest_downlink(&response.frames, &response.worker_credentials) {
+                Ok(count) => count,
+                Err(DownlinkFailure::Retriable(reason)) => {
+                    // The client acknowledgement was already persisted; the
+                    // offending downlink batch is simply refused and the server
+                    // replays it after our next ackSequence report.
+                    self.register_failure(now, reason);
+                    return Ok(self.retry_outcome());
+                }
+                Err(DownlinkFailure::Fatal(error)) => return Err(error),
+            };
         Ok(TickOutcome::Exchanged {
             frames_sent: batch.frames.len(),
             acked_through: ack,
@@ -1469,7 +1464,7 @@ impl DeviceDaemon {
         self.status.exchanges_succeeded += 1;
         self.reset_backoff();
         let downlink_frames =
-            match self.ingest_downlink(&response.frames, None, &response.worker_credentials) {
+            match self.ingest_downlink(&response.frames, &response.worker_credentials) {
                 Ok(count) => count,
                 Err(DownlinkFailure::Retriable(reason)) => {
                     self.register_failure(now, reason);
@@ -1485,8 +1480,8 @@ impl DeviceDaemon {
     }
 
     /// Ingests the server-to-client batch: validates contiguous sequences,
-    /// persists the acknowledgement cursor, and handles the enrollment
-    /// response, client-lock commands (persist the policy, acknowledge), and the
+    /// persists the acknowledgement cursor, and handles
+    /// client-lock commands (persist the policy, acknowledge) and the
     /// occupancy commands (mirror advance with persist-before-send acks,
     /// release intents, force-fence overwrites). Commands owned by later
     /// lanes are counted without acting.
@@ -1494,12 +1489,10 @@ impl DeviceDaemon {
     fn ingest_downlink(
         &mut self,
         frames: &[serde_json::Value],
-        enrollment: Option<&EnrollmentIssuance>,
         worker_credentials: &[WorkerCredentialIssuance],
     ) -> Result<usize, DownlinkFailure> {
         self.ingest_worker_credentials(worker_credentials)?;
         let mut accepted = 0_usize;
-        let mut acceptance: Option<ServerEnrollmentAcceptedPayload> = None;
         for value in frames {
             let envelope: ServerToClientEnvelope =
                 decode_downlink_frame(&self.codec, value).map_err(DownlinkFailure::Retriable)?;
@@ -1653,21 +1646,6 @@ impl DeviceDaemon {
                         | ServerToClientMessage::CandidateApply(_)
                         | ServerToClientMessage::RepositoryRegister(_)
                         | ServerToClientMessage::ExtensionApply(_) => {}
-                        ServerToClientMessage::EnrollmentAccepted(payload) => {
-                            let issuance = enrollment.ok_or_else(|| {
-                                DownlinkFailure::Retriable(
-                                    "enrollment acceptance arrived without issuance".to_owned(),
-                                )
-                            })?;
-                            if payload.public_client_id != issuance.public_client_id {
-                                return Err(DownlinkFailure::Fatal(DaemonError::Protocol(
-                                    "enrollment acceptance identity mismatch".to_owned(),
-                                )));
-                            }
-                            self.accept_enrollment(issuance)
-                                .map_err(DownlinkFailure::Fatal)?;
-                            acceptance = Some(payload.clone());
-                        }
                         ServerToClientMessage::ClientLock(payload) => {
                             self.apply_client_lock(payload, &envelope.message_id)
                                 .map_err(DownlinkFailure::Fatal)?;
@@ -1724,24 +1702,6 @@ impl DeviceDaemon {
                     ));
                 }
             }
-        }
-        if let Some(payload) = acceptance {
-            let Some(issuance) = enrollment else {
-                return Err(DownlinkFailure::Retriable(
-                    "enrollment acceptance arrived without the enrollment issuance".to_owned(),
-                ));
-            };
-            if payload.public_client_id != issuance.public_client_id {
-                return Err(DownlinkFailure::Fatal(DaemonError::Protocol(format!(
-                    "enrollment acceptance names publicClientId {} but the issuance \
-                     carries {}",
-                    payload.public_client_id, issuance.public_client_id
-                ))));
-            }
-        } else if enrollment.is_some() {
-            return Err(DownlinkFailure::Retriable(
-                "enrollment issuance arrived without an acceptance frame".to_owned(),
-            ));
         }
         self.status.downlink_accepted_through = self.downlink.ack_sequence();
         Ok(accepted)

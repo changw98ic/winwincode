@@ -3904,9 +3904,6 @@
           "$ref": "#/$defs/ClientCommandAckMessage"
         },
         {
-          "$ref": "#/$defs/ClientEnrollmentAcceptedMessage"
-        },
-        {
           "$ref": "#/$defs/ClientOccupancyOfferMessage"
         },
         {
@@ -3980,7 +3977,6 @@
         "client.candidate.retained",
         "client.candidate.apply_result",
         "client.command_ack",
-        "client.enrollment_accepted",
         "client.occupancy.offer",
         "client.occupancy.release",
         "client.occupancy.force_fence",
@@ -4006,61 +4002,6 @@
       "maxLength": 200,
       "minLength": 1,
       "type": "string"
-    },
-    "ClientEnrollmentAcceptedMessage": {
-      "additionalProperties": false,
-      "description": "Completes enrollment and returns the stable public Client ID; the public Client ID is not a credential. Device credential material never crosses this contract.",
-      "properties": {
-        "clientInstanceId": {
-          "$ref": "#/$defs/ClientInstanceId"
-        },
-        "clientNodeId": {
-          "$ref": "#/$defs/ClientNodeId"
-        },
-        "heartbeatIntervalMs": {
-          "maximum": 300000,
-          "minimum": 1000,
-          "type": "integer"
-        },
-        "kind": {
-          "const": "client.enrollment_accepted"
-        },
-        "messageId": {
-          "$ref": "#/$defs/ClientControlMessageId"
-        },
-        "occurredAt": {
-          "$ref": "#/$defs/Instant"
-        },
-        "publicClientId": {
-          "$ref": "#/$defs/PublicClientId"
-        },
-        "schemaVersion": {
-          "$ref": "#/$defs/SchemaVersion"
-        },
-        "sequence": {
-          "$ref": "#/$defs/ClientExchangeSequence"
-        },
-        "serverTime": {
-          "$ref": "#/$defs/Instant"
-        }
-      },
-      "required": [
-        "kind",
-        "schemaVersion",
-        "messageId",
-        "clientNodeId",
-        "clientInstanceId",
-        "sequence",
-        "occurredAt",
-        "publicClientId",
-        "serverTime",
-        "heartbeatIntervalMs"
-      ],
-      "title": "client.enrollment_accepted",
-      "type": "object",
-      "x-authority": "device-enrollment",
-      "x-direction": "control-plane-to-client",
-      "x-message-class": "response"
     },
     "ClientEnrollMessage": {
       "additionalProperties": false,
@@ -28132,7 +28073,7 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:991499978a9eb7ef8da3ebe3886177896354a412cafd7d2a1fbd4b9067954530",
+  "x-source-digest": "sha256:e15068ffc6f78f354ec9a8d233ac7e087a55e0e30a994e08e1d2c20594bbda56",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {

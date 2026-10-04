@@ -52,7 +52,7 @@ revoked
 | 当前状态 | 目标状态 | 触发事件 | 触发者 / 权威所有者 | ACK / fencing 要求 |
 | --- | --- | --- | --- | --- |
 | —（初始） | `pending_enrollment` | Device Client 首次注册，提交 `client.enroll` | Device Client 发起；Control Plane 创建登记记录 | 无 |
-| `pending_enrollment` | `online` | 登记被接受（`client.enrollment_accepted`）且首次 hello / 心跳成功 | Control Plane 判定；Device Client 上报 | 无 |
+| `pending_enrollment` | `online` | 注册响应中的设备 ID 和凭据已保存，且首次 hello / 心跳成功 | Control Plane 判定；Device Client 上报 | 无 |
 | `pending_enrollment` | `revoked` | 登记被拒绝、过期或设备凭据被吊销 | Control Plane | 无 |
 | `online` | `offline` | 心跳 / 交换在超时窗口内未到达 | Control Plane 持久投影（时间判定） | 无 |
 | `online` | `degraded` | Device Client 重启后报告本地 Worker / 占用镜像未完成对账 | Device Client 上报，Control Plane 投影 | 无 |

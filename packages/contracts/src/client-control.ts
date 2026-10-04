@@ -16,11 +16,8 @@ import { DeviceExtensionOutcome, DeviceExtensionMcpTransport, DeviceExtensionMcp
  * - no field carries a local filesystem path; repository bindings resolve only
  *   inside the Device Client and the Server never sees or stores a path;
  * - `ClientConnectCode` carries only `codeDigest`, never connect-code plaintext;
- * - exactly the 22 command-class messages carry `expectedRevision` plus
- *   `idempotencyKey` on the message envelope; the 8 non-command messages
- *   (heartbeat, hello, worker.state, worker.reconcile, and repository.status
- *   reports, the command ack, enrollment_accepted)
- *   reject both fields;
+ * - command-class messages carry `expectedRevision` plus `idempotencyKey`;
+ *   report and acknowledgement messages reject both fields;
  * - exactly 11 command-class messages are stamped with the occupancy lease
  *   pair `occupancyLeaseId` + `occupancyFencingToken`; `schemaVersion` is the
  *   string constant "winwincode/v1"; `occupancyFencingToken` is a decimal
@@ -1606,14 +1603,6 @@ export interface ClientCommandAckMessage extends ClientControlMessageEnvelopeFie
   readonly error?: ClientControlError
 }
 
-export interface ClientEnrollmentAcceptedMessage extends ClientControlMessageEnvelopeFields {
-  readonly kind: 'client.enrollment_accepted'
-  readonly publicClientId: PublicClientId
-  readonly serverTime: Instant
-  readonly heartbeatIntervalMs: number
-}
-
-
 export interface ClientOccupancyOfferMessage extends ClientControlMessageEnvelopeFields, ClientControlFencedCommandFields {
   readonly kind: 'client.occupancy.offer'
   readonly holderUserId: UserId
@@ -1720,7 +1709,6 @@ export interface ServerToClientMessageByKind {
   'client.repository.register': ClientRepositoryRegisterMessage
   'client.provider.apply': ClientProviderApplyMessage
   'client.extension.apply': ClientExtensionApplyMessage
-  'client.enrollment_accepted': ClientEnrollmentAcceptedMessage
   'client.occupancy.offer': ClientOccupancyOfferMessage
   'client.occupancy.release': ClientOccupancyReleaseMessage
   'client.occupancy.force_fence': ClientOccupancyForceFenceMessage
@@ -1763,7 +1751,6 @@ export const CLIENT_TO_SERVER_MESSAGE_KINDS = Object.freeze([
 
 /** §9.4 Server → Client message kinds, verbatim. */
 export const SERVER_TO_CLIENT_MESSAGE_KINDS = Object.freeze([
-  'client.enrollment_accepted',
   'client.occupancy.offer',
   'client.occupancy.release',
   'client.occupancy.force_fence',
@@ -2415,37 +2402,6 @@ function parseClientCommandAckMessage(
   })
 }
 
-function parseClientEnrollmentAcceptedMessage(
-  input: Readonly<Record<string, unknown>>,
-  path: string,
-): ClientEnrollmentAcceptedMessage {
-  exactKeys(input, [
-    'kind',
-    'schemaVersion',
-    'messageId',
-    'clientNodeId',
-    'clientInstanceId',
-    'sequence',
-    'occurredAt',
-    'publicClientId',
-    'serverTime',
-    'heartbeatIntervalMs',
-  ], path)
-  return Object.freeze({
-    ...parseEnvelopeBase(input, path),
-    kind: 'client.enrollment_accepted',
-    publicClientId: PUBLIC_CLIENT_ID(input.publicClientId, `${path}.publicClientId`),
-    serverTime: instant(input.serverTime, `${path}.serverTime`),
-    heartbeatIntervalMs: boundedInteger(
-      input.heartbeatIntervalMs,
-      `${path}.heartbeatIntervalMs`,
-      1_000,
-      300_000,
-    ),
-  })
-}
-
-
 function parseClientOccupancyOfferMessage(
   input: Readonly<Record<string, unknown>>,
   path: string,
@@ -2765,8 +2721,6 @@ function parseServerToClientByKind(
   switch (kind) {
     case 'client.command_ack':
       return parseClientCommandAckMessage(input, path)
-    case 'client.enrollment_accepted':
-      return parseClientEnrollmentAcceptedMessage(input, path)
     case 'client.occupancy.offer':
       return parseClientOccupancyOfferMessage(input, path)
     case 'client.occupancy.release':

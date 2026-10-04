@@ -2217,61 +2217,6 @@
       "x-authority": "control-ack",
       "x-message-class": "ack"
     },
-    "ClientEnrollmentAcceptedMessage": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "kind": {
-          "const": "client.enrollment_accepted"
-        },
-        "schemaVersion": {
-          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
-        },
-        "messageId": {
-          "$ref": "#/$defs/ClientControlMessageId"
-        },
-        "clientNodeId": {
-          "$ref": "#/$defs/ClientNodeId"
-        },
-        "clientInstanceId": {
-          "$ref": "#/$defs/ClientInstanceId"
-        },
-        "sequence": {
-          "$ref": "#/$defs/ClientExchangeSequence"
-        },
-        "occurredAt": {
-          "$ref": "./domain.schema.json#/$defs/Instant"
-        },
-        "publicClientId": {
-          "$ref": "#/$defs/PublicClientId"
-        },
-        "serverTime": {
-          "$ref": "./domain.schema.json#/$defs/Instant"
-        },
-        "heartbeatIntervalMs": {
-          "type": "integer",
-          "minimum": 1000,
-          "maximum": 300000
-        }
-      },
-      "required": [
-        "kind",
-        "schemaVersion",
-        "messageId",
-        "clientNodeId",
-        "clientInstanceId",
-        "sequence",
-        "occurredAt",
-        "publicClientId",
-        "serverTime",
-        "heartbeatIntervalMs"
-      ],
-      "title": "client.enrollment_accepted",
-      "description": "Completes enrollment and returns the stable public Client ID; the public Client ID is not a credential. Device credential material never crosses this contract.",
-      "x-direction": "control-plane-to-client",
-      "x-authority": "device-enrollment",
-      "x-message-class": "response"
-    },
     "ClientOccupancyOfferMessage": {
       "type": "object",
       "additionalProperties": false,
@@ -3136,7 +3081,6 @@
         "client.candidate.retained",
         "client.candidate.apply_result",
         "client.command_ack",
-        "client.enrollment_accepted",
         "client.occupancy.offer",
         "client.occupancy.release",
         "client.occupancy.force_fence",
@@ -3205,9 +3149,6 @@
         },
         {
           "$ref": "#/$defs/ClientCommandAckMessage"
-        },
-        {
-          "$ref": "#/$defs/ClientEnrollmentAcceptedMessage"
         },
         {
           "$ref": "#/$defs/ClientOccupancyOfferMessage"

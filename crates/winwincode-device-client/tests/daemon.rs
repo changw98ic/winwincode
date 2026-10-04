@@ -22,7 +22,7 @@ use winwincode_client_port::domain::{
 };
 use winwincode_client_port::messages::{
     CLIENT_CONTROL_PORT_SCHEMA_VERSION, ClientHeartbeatPayload, ClientToServerMessage,
-    ServerEnrollmentAcceptedPayload, ServerToClientEnvelope, ServerToClientMessage,
+    ServerToClientEnvelope, ServerToClientMessage,
 };
 use winwincode_device_client::{
     DaemonConfig, DaemonError, DaemonStatus, DeviceDaemon, DeviceIdentitySeed, DeviceStore,
@@ -135,7 +135,6 @@ fn issued_enrollment_with_heartbeat(heartbeat_interval_ms: u32) -> EnrollmentIss
         device_credential_digest: issued_credential_digest(),
         heartbeat_interval_ms,
         server_time: "2026-09-04T00:00:00.000Z".to_owned(),
-        downlink_from_sequence: 1,
     }
 }
 
@@ -153,7 +152,6 @@ struct SimFrame {
 struct ServerState {
     received: Vec<SimFrame>,
     sequences: HashMap<String, BTreeSet<u64>>,
-    downlink_next: HashMap<String, u64>,
     enroll_node: Option<String>,
     assigned: bool,
 }
@@ -161,7 +159,7 @@ struct ServerState {
 /// In-memory fake of the canonical exchange endpoint: it records every
 /// frame keyed by the frame envelope's `clientNodeId`, acknowledges the
 /// contiguous sequence prefix, and answers the first `client.enroll`
-/// exchange with the assigned identity, the acceptance downlink frame, and
+/// exchange with the assigned identity and
 /// the one-time credential issuance. Like the real endpoint, the assigned
 /// stream is credited with the settled enroll sequence (the enrollment
 /// settlement starts the assigned node's client-to-server stream at 1).
@@ -176,11 +174,11 @@ struct ServerSim {
     /// After the enrollment settled once, every later enroll exchange is
     /// refused like the endpoint's uniform authentication rejection.
     enrollment_settled: AtomicBool,
-    /// The heartbeat cadence the acceptance demands (the daemon adopts it
+    /// The heartbeat cadence the enrollment response requests (the daemon adopts it
     /// over its configured cadence). Tests that stage exact crash shapes
     /// around the enroll/hello window raise it so the idle daemon stays
     /// silent while the window is staged.
-    acceptance_heartbeat_ms: AtomicU32,
+    enrollment_heartbeat_ms: AtomicU32,
 }
 
 impl ServerSim {
@@ -190,7 +188,7 @@ impl ServerSim {
             gap_first_exchange: AtomicBool::new(false),
             corrupt_issuance: AtomicBool::new(false),
             enrollment_settled: AtomicBool::new(false),
-            acceptance_heartbeat_ms: AtomicU32::new(10),
+            enrollment_heartbeat_ms: AtomicU32::new(10),
         }
     }
 
@@ -209,23 +207,6 @@ impl ServerSim {
             .collect()
     }
 
-    fn acceptance_frame(node: &str, sequence: u64, heartbeat_interval_ms: u32) -> Value {
-        let envelope = ServerToClientEnvelope {
-            schema_version: CLIENT_CONTROL_PORT_SCHEMA_VERSION.to_owned(),
-            message_id: format!("srv-accept-{sequence}"),
-            client_node_id: node.to_owned(),
-            client_instance_id: "srv-instance".to_owned(),
-            sequence,
-            occurred_at: "2026-09-04T00:00:00.000Z".to_owned(),
-            message: ServerToClientMessage::EnrollmentAccepted(ServerEnrollmentAcceptedPayload {
-                public_client_id: ASSIGNED_PUBLIC_CLIENT_ID.to_owned(),
-                heartbeat_interval_ms,
-                server_time: "2026-09-04T00:00:00.000Z".to_owned(),
-            }),
-        };
-        serde_json::to_value(&envelope).expect("acceptance value")
-    }
-
     fn contiguous_ack(state: &ServerState, node: &str) -> u64 {
         let mut expected = 1_u64;
         while state
@@ -241,7 +222,6 @@ impl ServerSim {
     /// Settles one canonical exchange request like the endpoint.
     #[allow(clippy::too_many_lines)]
     fn settle(&self, request: &ExchangeRequest) -> Result<Vec<u8>, ExchangeTransportError> {
-        let mut downlink = Vec::new();
         let mut issuance = None;
         let mut gap_response = false;
         let ack;
@@ -298,7 +278,7 @@ impl ServerSim {
             } else {
                 // First enroll settles: assign the identity, credit the
                 // assigned stream with the settled enroll sequence, and
-                // deliver the acceptance with the one-time issuance.
+                // return the one-time issuance without a downlink frame.
                 if let Some(enroll_node) = state.enroll_node.clone()
                     && !state.assigned
                 {
@@ -308,25 +288,15 @@ impl ServerSim {
                         ));
                     }
                     state.assigned = true;
-                    let next = state
-                        .downlink_next
-                        .entry(ASSIGNED_NODE.to_owned())
-                        .or_insert(1);
-                    let sequence = *next;
-                    *next += 1;
-                    let heartbeat_ms = self.acceptance_heartbeat_ms.load(Ordering::SeqCst);
-                    downlink.push(Self::acceptance_frame(
-                        ASSIGNED_NODE,
-                        sequence,
-                        heartbeat_ms,
-                    ));
                     issuance = Some(if self.corrupt_issuance.load(Ordering::SeqCst) {
                         EnrollmentIssuance {
                             client_node_id: enroll_node.clone(),
                             ..issued_enrollment()
                         }
                     } else {
-                        issued_enrollment_with_heartbeat(heartbeat_ms)
+                        issued_enrollment_with_heartbeat(
+                            self.enrollment_heartbeat_ms.load(Ordering::SeqCst),
+                        )
                     });
                     // The enroll settlement starts the assigned stream at 1.
                     state
@@ -342,7 +312,7 @@ impl ServerSim {
             schema_version: CLIENT_CONTROL_PORT_SCHEMA_VERSION.to_owned(),
             ack_sequence: ack,
             replay_from_sequence: gap_response.then_some(1),
-            frames: downlink,
+            frames: Vec::new(),
             enrollment: issuance,
             worker_credentials: Vec::new(),
         };
@@ -579,6 +549,16 @@ fn enroll_hello_heartbeat_and_ack_advance_end_to_end() {
 
     assert_fully_exchanged(&mut daemon);
 
+    assert_eq!(status.downlink_accepted_through, 0);
+    assert!(
+        daemon
+            .store_mut()
+            .inbox_cursor(&config.server_profile_id)
+            .unwrap()
+            .is_none(),
+        "enrollment creates no downlink message or acknowledgement"
+    );
+
     // The enrollment adoption persisted the server profile.
     let profile = daemon
         .store_mut()
@@ -587,15 +567,6 @@ fn enroll_hello_heartbeat_and_ack_advance_end_to_end() {
         .expect("enrollment must persist the server profile");
     assert_eq!(profile.base_url, config.base_url);
     assert_eq!(profile.display_name, config.server_display_name);
-
-    // The durable inbox cursor tracks the accepted downlink frame.
-    let cursor = daemon
-        .store_mut()
-        .inbox_cursor(&config.server_profile_id)
-        .expect("cursor read")
-        .expect("the acceptance frame advanced the inbox cursor");
-    assert_eq!(cursor.last_sequence, 1);
-    assert_eq!(status.downlink_accepted_through, 1);
 
     daemon.into_store().close().expect("store close");
     cleanup(&root);
@@ -934,7 +905,7 @@ fn graceful_shutdown_keeps_taken_frames_durable() {
     // cadence rises above the window so the idle daemon never injects a
     // heartbeat frame between the test's three enqueues and the armed
     // exchange.
-    sim.acceptance_heartbeat_ms
+    sim.enrollment_heartbeat_ms
         .store(3_600_000, Ordering::SeqCst);
     // One frame per exchange: the armed transport blocks exactly the first
     // in-flight frame of the shutdown window.
@@ -1036,7 +1007,7 @@ impl ExchangeTransport for LockCommandTransport {
         let request: ExchangeRequest = serde_json::from_slice(bytes).expect("request");
         let mut response: ExchangeResponse =
             serde_json::from_slice(&self.server.exchange(credential, bytes)?).expect("response");
-        if response.enrollment.is_none() && request.ack_sequence < 2 {
+        if response.enrollment.is_none() && request.ack_sequence < 1 {
             response.frames.push(
                 serde_json::to_value(ServerToClientEnvelope {
                     schema_version: CLIENT_CONTROL_PORT_SCHEMA_VERSION.into(),
@@ -1046,7 +1017,7 @@ impl ExchangeTransport for LockCommandTransport {
                         .as_str()
                         .expect("instance")
                         .into(),
-                    sequence: 2,
+                    sequence: 1,
                     occurred_at: "2026-09-04T00:00:00.000Z".into(),
                     message: ServerToClientMessage::ClientLock(
                         winwincode_client_port::messages::ServerClientLockPayload {
@@ -1081,16 +1052,13 @@ fn a_failed_downlink_effect_is_not_acknowledged_and_is_replayed_after_restart() 
     let connection = rusqlite::Connection::open(&database).expect("fault connection");
     connection.execute_batch("CREATE TRIGGER fail_policy BEFORE INSERT ON client_connection_policy BEGIN SELECT RAISE(FAIL, 'injected policy write failure'); END;").expect("inject failure");
     assert!(daemon.tick(now + Duration::from_millis(20)).is_err());
-    let cursor: i64 = connection
-        .query_row(
-            "SELECT last_sequence FROM client_inbox_cursor WHERE server_profile_id = ?1",
-            [&config.server_profile_id],
-            |row| row.get(0),
-        )
-        .expect("cursor");
-    assert_eq!(
-        cursor, 1,
-        "an unexecuted command must remain below the ACK cursor"
+    assert!(
+        daemon
+            .store_mut()
+            .inbox_cursor(&config.server_profile_id)
+            .unwrap()
+            .is_none(),
+        "an unexecuted first command must not advance the ACK cursor"
     );
     drop(daemon);
     connection
@@ -1106,5 +1074,5 @@ fn a_failed_downlink_effect_is_not_acknowledged_and_is_replayed_after_restart() 
         daemon.connection_policy().expect("policy").lock_state,
         ClientLockState::Locked
     );
-    assert_eq!(daemon.status().downlink_accepted_through, 2);
+    assert_eq!(daemon.status().downlink_accepted_through, 1);
 }

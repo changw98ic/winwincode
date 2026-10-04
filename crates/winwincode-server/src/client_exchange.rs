@@ -33,8 +33,7 @@
 //! credential as `Authorization: Bearer <lowercase hex>`; the digest
 //! comparison is constant time and every failure is one uniform 401 that
 //! never discloses whether the node exists. The credential material crosses
-//! only this transport response — the `client.enrollment_accepted` frame
-//! itself stays free of it, matching the frozen schema.
+//! only this transport response. Enrollment emits no downlink frame.
 //!
 //! Cursor durability: the Client → Server acknowledgement cursor and the
 //! Server → Client acknowledgement cursor persist in
@@ -79,7 +78,6 @@ use winwincode_client_port::messages::ClientCandidateRetainedPayload;
 use winwincode_client_port::messages::ClientEnrollPayload;
 use winwincode_client_port::messages::ClientToServerEnvelope;
 use winwincode_client_port::messages::ClientToServerMessage;
-use winwincode_client_port::messages::ServerEnrollmentAcceptedPayload;
 use winwincode_client_port::messages::ServerToClientEnvelope;
 use winwincode_client_port::messages::ServerToClientMessage;
 use winwincode_control_plane::AccessGrantService;
@@ -428,7 +426,7 @@ impl ClientExchangeApplication {
                 if payload.command.expected_revision != 0 || client_ack != 0 {
                     return Err(ClientExchangeError::invalid_request());
                 }
-                self.create_enrollment(storage, None, 0, payload, envelopes, now)
+                self.create_enrollment(storage, None, payload, envelopes, now)
             }
             // A pending node without any credential yet may refresh its
             // enrollment facts. Once a credential was issued, subsequent
@@ -446,15 +444,7 @@ impl ClientExchangeApplication {
                 if client_ack > cursors.server_to_client_ack_sequence.max(high_water) {
                     return Err(ClientExchangeError::invalid_request());
                 }
-                let downlink_high_water = cursors.server_to_client_ack_sequence;
-                self.create_enrollment(
-                    storage,
-                    Some(&record),
-                    downlink_high_water,
-                    payload,
-                    envelopes,
-                    now,
-                )
+                self.create_enrollment(storage, Some(&record), payload, envelopes, now)
             }
             // An enrolled or revoked node never re-enrolls; the uniform
             // failure does not disclose which of the two it is.
@@ -463,20 +453,13 @@ impl ClientExchangeApplication {
     }
 
     /// Creates or refreshes the `pending_enrollment` node, issues one Device
-    /// Credential, settles the enroll frames on the fresh per-node stream,
-    /// and appends the `client.enrollment_accepted` downlink frame to the
-    /// durable outbox. The frame is delivered inside this response together
-    /// with the credential material and the server profile, and stays durable
-    /// until the device acknowledges its sequence.
-    ///
-    /// `downlink_high_water` is the acknowledged downlink sequence the fresh
-    /// acceptance frame is ordered after.
+    /// Credential, and settles the enroll frames on the fresh per-node stream.
+    /// The response carries the issued identity directly, without a downlink message.
     #[allow(clippy::too_many_lines)]
     fn create_enrollment(
         &self,
         storage: &mut SqliteStorage,
         existing: Option<&ClientNodeRecord>,
-        downlink_high_water: u64,
         payload: &ClientEnrollPayload,
         envelopes: &[ClientToServerEnvelope],
         now: &Instant,
@@ -545,70 +528,17 @@ impl ClientExchangeApplication {
         }
         let ack_sequence = settler.ack_sequence();
 
-        let codec = FrameCodec::new(self.config.max_frame_bytes);
-        // The next free stream position: one past the acknowledged
-        // high-water or the highest retained frame, whichever is higher.
-        let mut downlink = storage
-            .client_downlink_outbox()
+        // Enrollment only acknowledges the uplink request. It does not consume
+        // or acknowledge a position in the Server-to-Device command stream.
+        ClientRegistryService::new(storage)
+            .advance_exchange_cursors(&node_id, ack_sequence, 0)
             .map_err(|_| ClientExchangeError::unavailable())?;
-        let outbox_high_water = downlink
-            .high_water(&receipt.record.client_node_id)
-            .map_err(|_| ClientExchangeError::unavailable())?;
-        let acceptance_sequence = downlink_high_water
-            .max(outbox_high_water)
-            .checked_add(1)
-            .ok_or(ClientExchangeError::invalid_request())?;
-        let acceptance = ServerToClientEnvelope {
-            schema_version: CLIENT_CONTROL_PORT_SCHEMA_VERSION.to_owned(),
-            message_id: generate_prefixed_id("msg_")?,
-            client_node_id: node_id.clone(),
-            client_instance_id: instance.clone(),
-            sequence: acceptance_sequence,
-            occurred_at: now.0.clone(),
-            message: ServerToClientMessage::EnrollmentAccepted(ServerEnrollmentAcceptedPayload {
-                public_client_id: receipt.record.public_client_id.clone(),
-                heartbeat_interval_ms: self.config.heartbeat_interval_ms,
-                server_time: now.0.clone(),
-            }),
-        };
-        let stored = codec
-            .encode_envelope(&acceptance)
-            .map_err(|_| ClientExchangeError::unavailable())?;
-        let frame_text = std::str::from_utf8(&stored.frame)
-            .map_err(|_| ClientExchangeError::unavailable())?
-            .to_owned();
-        let appended = downlink
-            .append(
-                &ClientDownlinkAppend::try_new(
-                    node_id.clone(),
-                    acceptance.message_id.clone(),
-                    acceptance_sequence,
-                    frame_text,
-                )
-                .map_err(|_| ClientExchangeError::unavailable())?,
-                now,
-            )
-            .map_err(|_| ClientExchangeError::unavailable())?;
-        debug_assert_eq!(appended.sequence, acceptance_sequence);
-        let frame_value: Value = serde_json::from_str(&appended.frame)
-            .map_err(|_| ClientExchangeError::unavailable())?;
-
-        // The acceptance frame was persisted in the durable outbox and is
-        // delivered inside this response; the cursor records it as the
-        // delivered downlink high-water, and the durable row is retained
-        // until the device acknowledges its sequence.
-        {
-            let mut registry = ClientRegistryService::new(storage);
-            registry
-                .advance_exchange_cursors(&node_id, ack_sequence, acceptance_sequence)
-                .map_err(|_| ClientExchangeError::unavailable())?;
-        }
 
         Ok(ExchangeResponseBody {
             schema_version: CLIENT_CONTROL_PORT_SCHEMA_VERSION.to_owned(),
             ack_sequence,
             replay_from_sequence: replay_hint,
-            frames: vec![frame_value],
+            frames: Vec::new(),
             enrollment: Some(EnrollmentIssuance {
                 client_node_id: node_id,
                 public_client_id: receipt.record.public_client_id,
@@ -616,7 +546,6 @@ impl ClientExchangeApplication {
                 device_credential_digest: digest,
                 heartbeat_interval_ms: self.config.heartbeat_interval_ms,
                 server_time: now.0.clone(),
-                downlink_from_sequence: acceptance_sequence,
             }),
             worker_credentials: Vec::new(),
         })
@@ -1119,8 +1048,6 @@ struct EnrollmentIssuance {
     heartbeat_interval_ms: u32,
     #[serde(rename = "serverTime")]
     server_time: String,
-    #[serde(rename = "downlinkFromSequence")]
-    downlink_from_sequence: u64,
 }
 
 fn parse_request(request_body: &[u8]) -> Result<ExchangeRequestBody, ClientExchangeError> {
