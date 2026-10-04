@@ -28,6 +28,10 @@ pub enum ClientConnectServiceErrorKind {
     InvalidInput,
     /// The client node identity does not exist.
     UnknownClientNode,
+    /// The device has disabled new connections.
+    ClientConnectionsForbidden,
+    /// The device is locally locked.
+    ClientLocked,
     /// No connect code matches the requested identity or presented digest.
     UnknownConnectCode,
     /// No access grant matches the requested identity.
@@ -88,6 +92,12 @@ impl From<ClientConnectStoreError> for ClientConnectServiceError {
                 }
                 ClientConnectStoreErrorKind::UnknownClientNode => {
                     ClientConnectServiceErrorKind::UnknownClientNode
+                }
+                ClientConnectStoreErrorKind::ClientConnectionsForbidden => {
+                    ClientConnectServiceErrorKind::ClientConnectionsForbidden
+                }
+                ClientConnectStoreErrorKind::ClientLocked => {
+                    ClientConnectServiceErrorKind::ClientLocked
                 }
                 ClientConnectStoreErrorKind::UnknownConnectCode => {
                     ClientConnectServiceErrorKind::UnknownConnectCode
@@ -289,16 +299,16 @@ impl<'storage> ConnectCodeService<'storage> {
     /// on the `active` code row, and the losing transaction rolls back
     /// entirely, so no second grant can appear. The first user ever granted
     /// on the Client receives `use+manage+share`; every later user receives
-    /// `use` (plan 11.5). The expiry and remaining-attempt budgets are
-    /// validated inside the same transaction.
+    /// `use` (plan 11.5). The current device connection policy, expiry, and
+    /// remaining-attempt budgets are validated inside the same transaction.
     ///
     /// # Errors
     ///
     /// Rejects an unknown or digest-mismatched code (indistinguishable by
     /// design), a code that is not `active`, an expired code, an exhausted
     /// attempt budget, a stored generation mismatch, an unknown client
-    /// node, an already-active grant for the user and client, or storage
-    /// failure.
+    /// node, a device policy forbidding new connections, an already-active
+    /// grant for the user and client, or storage failure.
     pub fn consume_and_grant(
         &mut self,
         consume: &ConnectCodeConsume,

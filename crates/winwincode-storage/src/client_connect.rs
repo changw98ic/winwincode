@@ -866,6 +866,10 @@ pub enum ClientConnectStoreErrorKind {
     InvalidInput,
     /// The client node identity does not exist.
     UnknownClientNode,
+    /// The device has disabled new connections.
+    ClientConnectionsForbidden,
+    /// The device is locally locked.
+    ClientLocked,
     /// No connect code matches the requested identity or presented digest.
     UnknownConnectCode,
     /// No access grant matches the requested identity.
@@ -1248,8 +1252,8 @@ impl<'storage> ClientConnectLedger<'storage> {
     /// design so failures never reveal that a Client belongs to a user), a
     /// code that is not `active`, an expired code, an exhausted attempt
     /// budget, a generation mismatch with the stored code, an unknown
-    /// client node, an already-active grant for the user and client, or
-    /// storage failure.
+    /// client node, a device policy forbidding new connections, an
+    /// already-active grant for the user and client, or storage failure.
     pub fn consume_and_create_grant(
         &mut self,
         consume: &ConnectCodeConsume,
@@ -1270,6 +1274,7 @@ impl<'storage> ClientConnectLedger<'storage> {
                 "access grant client node must match the consumed code",
             ));
         }
+        ensure_connections_allowed(&transaction, &code.client_node_id)?;
         let first_user = !grant_exists_for_client(&transaction, code.client_node_id.as_str())?;
         let permissions = if first_user {
             GrantPermissions::USE_MANAGE_SHARE
@@ -2226,6 +2231,45 @@ fn grant_exists_for_client(
         )
         .map_err(|sql| sql_error(&sql))?;
     Ok(exists == 1)
+}
+
+/// Read the policy inside the consume transaction so a policy change after
+/// the HTTP preflight cannot be bypassed by a stale node snapshot.
+fn ensure_connections_allowed(
+    connection: &rusqlite::Connection,
+    client_node_id: &str,
+) -> Result<(), ClientConnectStoreError> {
+    let policy = connection
+        .query_row(
+            "SELECT accepting_connections, lock_state FROM client_nodes WHERE client_node_id = ?1",
+            [client_node_id],
+            |row| Ok((row.get::<_, bool>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|sql| sql_error(&sql))?;
+    let Some((accepting_connections, lock_state)) = policy else {
+        return Err(error(
+            ClientConnectStoreErrorKind::UnknownClientNode,
+            "client node does not exist",
+        ));
+    };
+    if !accepting_connections {
+        return Err(error(
+            ClientConnectStoreErrorKind::ClientConnectionsForbidden,
+            "the client no longer accepts new connections",
+        ));
+    }
+    match lock_state.as_str() {
+        "unlocked" => Ok(()),
+        "locked" => Err(error(
+            ClientConnectStoreErrorKind::ClientLocked,
+            "the client is locked",
+        )),
+        _ => Err(error(
+            ClientConnectStoreErrorKind::CorruptState,
+            "stored client lock state is invalid",
+        )),
+    }
 }
 
 fn require_client_node(

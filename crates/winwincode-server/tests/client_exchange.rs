@@ -933,6 +933,61 @@ fn direct_enrollment(root: &Path) -> (ClientExchangeApplication, String, String)
 }
 
 #[test]
+fn connection_policy_write_failures_remain_retryable_and_duplicates_do_not_restore_old_policy() {
+    let directory = test_directory("policy-durability");
+    let (app, node, credential) = direct_enrollment(&directory);
+    let storage = SqliteStorage::open(&directory).unwrap();
+    let connection = rusqlite::Connection::open(storage.database_path()).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER fail_policy_write BEFORE UPDATE OF accepting_connections, lock_state
+         ON client_nodes BEGIN SELECT RAISE(ABORT, 'injected policy write failure'); END;",
+        )
+        .unwrap();
+
+    let mut locked = heartbeat_frame(&node, INSTANCE, 3, 0);
+    locked["payload"]["acceptingConnections"] = serde_json::json!(false);
+    locked["payload"]["lockState"] = serde_json::json!("locked");
+    let request = exchange_request(&[locked], 0);
+    direct_exchange(&app, Some(&credential), &request).expect_err("policy was not persisted");
+    assert_eq!(cursors(&directory, &node).client_to_server_ack_sequence, 2);
+    let before = node_snapshot(&directory, &node).unwrap();
+    assert!(before.accepting_connections);
+    assert_eq!(
+        before.lock_state,
+        winwincode_storage::ClientLockState::Unlocked
+    );
+
+    connection
+        .execute_batch("DROP TRIGGER fail_policy_write;")
+        .unwrap();
+    let retried = direct_exchange(&app, Some(&credential), &request).unwrap();
+    assert_eq!(retried["ackSequence"], 3);
+    let locked = node_snapshot(&directory, &node).unwrap();
+    assert!(!locked.accepting_connections);
+    assert_eq!(
+        locked.lock_state,
+        winwincode_storage::ClientLockState::Locked
+    );
+
+    direct_exchange(
+        &app,
+        Some(&credential),
+        &exchange_request(&[heartbeat_frame(&node, INSTANCE, 4, 0)], 0),
+    )
+    .unwrap();
+    let unlocked = node_snapshot(&directory, &node).unwrap();
+    assert!(unlocked.accepting_connections);
+    assert_eq!(
+        unlocked.lock_state,
+        winwincode_storage::ClientLockState::Unlocked
+    );
+    let duplicate = direct_exchange(&app, Some(&credential), &request).unwrap();
+    assert_eq!(duplicate["ackSequence"], 4);
+    assert_eq!(node_snapshot(&directory, &node).unwrap(), unlocked);
+}
+
+#[test]
 fn command_rejections_are_durable_and_cross_exchange_conflicts_never_advance_ack() {
     use winwincode_client_port::{
         domain::{

@@ -448,6 +448,13 @@ impl ClientConnectionsApplication {
                 directory_json(&mut storage, user_id)
             }
             Err(error) => match error.kind() {
+                ClientConnectServiceErrorKind::ClientConnectionsForbidden => {
+                    Err(ClientConnectionsError::new(
+                        ClientConnectionsErrorKind::ClientConnectionsForbidden,
+                        "the client no longer accepts new connections",
+                    ))
+                }
+                ClientConnectServiceErrorKind::ClientLocked => Err(client_locked()),
                 // A concurrent retry of the same request won the consume: its
                 // grant is ours to return (idempotent, one active grant per
                 // user and client by the partial unique index).

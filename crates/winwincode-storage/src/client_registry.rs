@@ -711,6 +711,57 @@ impl<'storage> ClientNodeRegistry<'storage> {
         Ok(updated_record)
     }
 
+    /// Persists the connection policy reported by a Device Client under
+    /// `expectedRevision` CAS, independently of its presence state.
+    /// Repeated reports of the same policy leave the revision unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an unknown client node, a stale `expectedRevision`, or storage
+    /// failure.
+    pub fn update_connection_policy(
+        &mut self,
+        client_node_id: &str,
+        accepting_connections: bool,
+        lock_state: ClientLockState,
+        expected_revision: u64,
+    ) -> Result<ClientNodeRecord, ClientRegistryError> {
+        validate_client_node_id(client_node_id)?;
+        validate_revision(expected_revision)?;
+        let transaction = self.transaction()?;
+        let record =
+            load_client_node(&transaction, client_node_id)?.ok_or_else(unknown_client_node)?;
+        ensure_revision(&record, expected_revision)?;
+        if record.accepting_connections == accepting_connections && record.lock_state == lock_state
+        {
+            transaction.commit().map_err(|sql| sql_error(&sql))?;
+            return Ok(record);
+        }
+        let updated = transaction
+            .execute(
+                "UPDATE client_nodes
+                 SET accepting_connections = ?2, lock_state = ?3, revision = revision + 1
+                 WHERE client_node_id = ?1 AND revision = ?4",
+                params![
+                    client_node_id,
+                    accepting_connections,
+                    lock_state.as_str(),
+                    sql_integer(record.revision)?,
+                ],
+            )
+            .map_err(|sql| sql_error(&sql))?;
+        if updated != 1 {
+            return Err(error(
+                ClientRegistryErrorKind::RevisionConflict,
+                "client node revision changed during connection policy update",
+            ));
+        }
+        let updated_record =
+            load_client_node(&transaction, client_node_id)?.ok_or_else(unknown_client_node)?;
+        transaction.commit().map_err(|sql| sql_error(&sql))?;
+        Ok(updated_record)
+    }
+
     /// Records one accepted Device Client heartbeat (plan 9.3
     /// `client.heartbeat`).
     ///

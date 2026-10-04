@@ -8,8 +8,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use winwincode_domain::Instant;
 use winwincode_storage::{
     AccessGrantIssuance, AccessGrantState, AttemptDimension, ClientConnectStoreErrorKind,
-    ConnectCodeConsume, ConnectCodePublication, ConnectCodeRevocation, ConnectCodeState,
-    GrantPermissions, GrantSource, GrantTrustMode, SqliteStorage, connect_attempt_window_anchor,
+    ClientLockState, ConnectCodeConsume, ConnectCodePublication, ConnectCodeRevocation,
+    ConnectCodeState, GrantPermissions, GrantSource, GrantTrustMode, SqliteStorage,
+    connect_attempt_window_anchor,
 };
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -436,6 +437,66 @@ fn consume_and_grant_is_atomic_and_first_user_receives_full_permissions() {
             .state,
         ConnectCodeState::Consumed
     );
+}
+
+#[test]
+fn consume_checks_current_device_policy_without_spending_the_code_on_rejection() {
+    let directory = temporary_directory("consume-policy");
+    let mut storage = open(directory.clone());
+    let client = seed_client_node(&mut storage, 1);
+    let published = storage
+        .client_connect_ledger()
+        .unwrap()
+        .publish(&publication(30, &client, T1, 3), &instant(T0))
+        .unwrap();
+    let consume = consume(30, &published.code_digest, published.generation);
+    let alice = user_id(2);
+    let issuance = issuance(40, &client, &alice, &alice, GrantTrustMode::Trusted, None);
+
+    // Another connection changes the policy after the caller has read the code.
+    let mut device_reports = open(directory);
+    for (accepting, lock, kind) in [
+        (
+            false,
+            ClientLockState::Unlocked,
+            ClientConnectStoreErrorKind::ClientConnectionsForbidden,
+        ),
+        (
+            true,
+            ClientLockState::Locked,
+            ClientConnectStoreErrorKind::ClientLocked,
+        ),
+    ] {
+        let mut registry = device_reports.client_node_registry().unwrap();
+        let revision = registry.snapshot(&client).unwrap().unwrap().revision;
+        registry
+            .update_connection_policy(&client, accepting, lock, revision)
+            .unwrap();
+
+        let mut ledger = storage.client_connect_ledger().unwrap();
+        expect_kind(
+            ledger.consume_and_create_grant(&consume, &issuance, &instant(T0)),
+            kind,
+        );
+        assert_eq!(
+            ledger.code_snapshot(&code_id(30)).unwrap().unwrap(),
+            published
+        );
+        assert!(ledger.grant_snapshot(&grant_id(40)).unwrap().is_none());
+    }
+
+    let mut registry = device_reports.client_node_registry().unwrap();
+    let revision = registry.snapshot(&client).unwrap().unwrap().revision;
+    registry
+        .update_connection_policy(&client, true, ClientLockState::Unlocked, revision)
+        .unwrap();
+    let receipt = storage
+        .client_connect_ledger()
+        .unwrap()
+        .consume_and_create_grant(&consume, &issuance, &instant(T0))
+        .unwrap();
+    assert_eq!(receipt.code.state, ConnectCodeState::Consumed);
+    assert_eq!(receipt.grant.state, AccessGrantState::Active);
 }
 
 #[test]

@@ -39,6 +39,10 @@ use winwincode_client_port::messages::CommandContext;
 use winwincode_control_plane::AccessGrantService;
 use winwincode_control_plane::ClientRegistryService;
 use winwincode_control_plane::ConnectCodeService;
+use winwincode_device_client::{
+    DaemonConfig, DeviceDaemon, DeviceIdentitySeed, DeviceStore, HttpExchangeTransport,
+    TickOutcome, ensure_device_identity,
+};
 use winwincode_domain::Instant;
 use winwincode_server::{
     ApiError, AuthSessionBootstrap, AuthSessionConfig, AuthenticatedPrincipal,
@@ -518,6 +522,67 @@ fn expire_all_connect_codes(data_directory: &Path) {
     assert!(!expired.is_empty(), "the published code must be expired");
 }
 
+fn start_policy_device(address: std::net::SocketAddr, directory: &Path) -> DeviceDaemon {
+    let mut store = DeviceStore::open(directory).unwrap();
+    let identity = ensure_device_identity(
+        &mut store,
+        &DeviceIdentitySeed {
+            display_name: "Policy test device".into(),
+            platform: "darwin".into(),
+            architecture: "arm64".into(),
+            client_version: "0.1.0-alpha.1".into(),
+        },
+        "2026-09-04T12:00:00.000Z",
+    )
+    .unwrap();
+    let endpoint = format!("http://{address}/internal/v1/client/exchange");
+    let config = DaemonConfig {
+        server_profile_id: "policy-server".into(),
+        base_url: endpoint.clone(),
+        server_display_name: "Policy test server".into(),
+        device_display_name: "Policy test device".into(),
+        platform: ClientPlatformTarget::Aarch64AppleDarwin,
+        architecture: ClientArchitecture::Aarch64,
+        client_version: "0.1.0-alpha.1".into(),
+        heartbeat_interval: Duration::from_secs(10),
+        enroll_poll_interval: Duration::from_millis(5),
+        max_frames_per_exchange: 8,
+        initial_backoff: Duration::from_millis(5),
+        max_backoff: Duration::from_millis(200),
+        capacity: capacity(),
+    };
+    DeviceDaemon::start(
+        config,
+        store,
+        Arc::new(HttpExchangeTransport::new(endpoint)),
+        &identity,
+    )
+    .unwrap()
+}
+
+fn exchange_device_reports(daemon: &mut DeviceDaemon, tick_at: &mut std::time::Instant) {
+    *tick_at += Duration::from_mins(2);
+    let outcome = daemon.tick(*tick_at).unwrap();
+    assert!(
+        matches!(outcome, TickOutcome::Exchanged { .. }),
+        "{outcome:?}"
+    );
+    assert!(daemon.outbox_snapshot().unwrap().frames.is_empty());
+}
+
+fn reported_policy(
+    data_directory: &Path,
+    node: &str,
+) -> (bool, winwincode_storage::ClientLockState) {
+    let mut storage = SqliteStorage::open(data_directory).unwrap();
+    let record = ClientRegistryService::new(&mut storage)
+        .snapshot(node)
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.presence_state, ClientPresenceState::Online);
+    (record.accepting_connections, record.lock_state)
+}
+
 fn connect_body(client_id: &str, code: &str) -> String {
     json!({
         "schemaVersion": SCHEMA_VERSION,
@@ -575,6 +640,126 @@ async fn connect_and_directory_require_a_signed_in_session() {
     running.shutdown().await.expect("shutdown");
     let _ = std::fs::remove_dir_all(&data_directory);
     let _ = std::fs::remove_dir_all(&auth_directory);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::too_many_lines)]
+async fn device_reported_policy_controls_access_across_heartbeats_and_restart() {
+    use winwincode_storage::ClientLockState as StoredLock;
+
+    let data_directory = test_directory("reported-policy-server");
+    let auth_directory = test_directory("reported-policy-auth");
+    let device_directory = test_directory("reported-policy-device");
+    let running = start_server(&data_directory, &auth_directory).await;
+    let address = running.local_address();
+    let (cookie, user_id) = initialize_and_login_owner(address).await;
+    let mut daemon = start_policy_device(address, &device_directory);
+    let mut tick_at = std::time::Instant::now();
+
+    // A lock set before enrollment must reach the Server in the first hello.
+    daemon.lock_client().unwrap();
+    exchange_device_reports(&mut daemon, &mut tick_at);
+    exchange_device_reports(&mut daemon, &mut tick_at);
+    let node = daemon.client_node_id().to_owned();
+    assert_eq!(
+        reported_policy(&data_directory, &node),
+        (false, StoredLock::Locked)
+    );
+    let public_id = {
+        let mut storage = SqliteStorage::open(&data_directory).unwrap();
+        ClientRegistryService::new(&mut storage)
+            .snapshot(&node)
+            .unwrap()
+            .unwrap()
+            .public_client_id
+    };
+    let code = daemon.publish_connect_code().unwrap();
+    exchange_device_reports(&mut daemon, &mut tick_at);
+    let request = cookie_post(
+        "/api/v1/clients/connections",
+        &connect_body(&public_id, code.plaintext.expose()),
+        &cookie,
+    );
+    let response = http_request(address, &request).await;
+    assert_eq!(status_of(&response), "409", "{response}");
+    assert_eq!(wire_code(&response), "CLIENT_CONNECTIONS_FORBIDDEN");
+
+    // Ordinary heartbeat reports persist a changed policy and repeated reports.
+    daemon.unlock_client().unwrap();
+    daemon.set_accepting_connections(false).unwrap();
+    for _ in 0..2 {
+        exchange_device_reports(&mut daemon, &mut tick_at);
+        assert_eq!(
+            reported_policy(&data_directory, &node),
+            (false, StoredLock::Unlocked)
+        );
+        let response = http_request(address, &request).await;
+        assert_eq!(status_of(&response), "409", "{response}");
+        assert_eq!(wire_code(&response), "CLIENT_CONNECTIONS_FORBIDDEN");
+    }
+
+    // The lock is independent of accepting_connections.
+    daemon.lock_client().unwrap();
+    daemon.set_accepting_connections(true).unwrap();
+    exchange_device_reports(&mut daemon, &mut tick_at);
+    assert_eq!(
+        reported_policy(&data_directory, &node),
+        (true, StoredLock::Locked)
+    );
+    let response = http_request(address, &request).await;
+    assert_eq!(status_of(&response), "409", "{response}");
+    assert_eq!(wire_code(&response), "CLIENT_LOCKED");
+    daemon.into_store().close().unwrap();
+    running.shutdown().await.unwrap();
+
+    // Both stores reopen with the reported policy; a fresh hello preserves it.
+    let running = start_server(&data_directory, &auth_directory).await;
+    let address = running.local_address();
+    assert_eq!(
+        reported_policy(&data_directory, &node),
+        (true, StoredLock::Locked)
+    );
+    let mut daemon = start_policy_device(address, &device_directory);
+    exchange_device_reports(&mut daemon, &mut tick_at);
+    assert_eq!(
+        reported_policy(&data_directory, &node),
+        (true, StoredLock::Locked)
+    );
+    let response = http_request(address, &request).await;
+    assert_eq!(status_of(&response), "409", "{response}");
+    assert_eq!(wire_code(&response), "CLIENT_LOCKED");
+
+    let mut storage = SqliteStorage::open(&data_directory).unwrap();
+    assert!(
+        AccessGrantService::new(&mut storage)
+            .active_grant(&node, &user_id)
+            .unwrap()
+            .is_none()
+    );
+    drop(storage);
+
+    // Rejections did not consume the code; an unlocked heartbeat permits it.
+    daemon.unlock_client().unwrap();
+    exchange_device_reports(&mut daemon, &mut tick_at);
+    assert_eq!(
+        reported_policy(&data_directory, &node),
+        (true, StoredLock::Unlocked)
+    );
+    let response = http_request(address, &request).await;
+    assert_eq!(status_of(&response), "201", "{response}");
+    let mut storage = SqliteStorage::open(&data_directory).unwrap();
+    assert!(
+        AccessGrantService::new(&mut storage)
+            .active_grant(&node, &user_id)
+            .unwrap()
+            .is_some()
+    );
+    drop(storage);
+    daemon.into_store().close().unwrap();
+    running.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(data_directory);
+    let _ = std::fs::remove_dir_all(auth_directory);
+    let _ = std::fs::remove_dir_all(device_directory);
 }
 
 #[tokio::test]

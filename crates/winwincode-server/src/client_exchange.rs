@@ -1157,6 +1157,30 @@ fn require_durable_presence(
     }
 }
 
+fn apply_connection_policy(
+    storage: &mut SqliteStorage,
+    node_id: &str,
+    accepting_connections: bool,
+    lock_state: winwincode_client_port::domain::ClientLockState,
+) -> Result<ClientNodeRecord, ClientExchangeError> {
+    use winwincode_client_port::domain::ClientLockState as WireLockState;
+    use winwincode_storage::ClientLockState;
+
+    let mut registry = ClientRegistryService::new(storage);
+    let record = registry
+        .snapshot(node_id)
+        .map_err(|_| ClientExchangeError::unavailable())?
+        .ok_or_else(ClientExchangeError::unavailable)?;
+    let lock_state = match lock_state {
+        WireLockState::Unlocked => ClientLockState::Unlocked,
+        WireLockState::Locked => ClientLockState::Locked,
+    };
+    // A failed policy write must leave the report unacknowledged for retry.
+    registry
+        .update_connection_policy(node_id, accepting_connections, lock_state, record.revision)
+        .map_err(|_| ClientExchangeError::unavailable())
+}
+
 #[cfg(test)]
 fn apply_effect(
     storage: &mut SqliteStorage,
@@ -1202,11 +1226,14 @@ fn apply_effect_with_status(
             if let Some(record) = record {
                 supersede_instance(storage, &record, envelope, now)?;
             }
+            let record = apply_connection_policy(
+                storage,
+                node_id,
+                payload.accepting_connections,
+                payload.lock_state,
+            )?;
             let mut registry = ClientRegistryService::new(storage);
             if let Some(target) = presence_target(payload.presence_state)
-                && let Some(record) = registry
-                    .snapshot(node_id)
-                    .map_err(|_| ClientExchangeError::unavailable())?
                 && let Err(error) = registry.update_presence(node_id, target, record.revision)
             {
                 require_durable_presence(&error)?;
@@ -1214,20 +1241,21 @@ fn apply_effect_with_status(
             Ok(())
         }
         ClientToServerMessage::Heartbeat(payload) => {
+            let record = apply_connection_policy(
+                storage,
+                node_id,
+                payload.accepting_connections,
+                payload.lock_state,
+            )?;
             let mut registry = ClientRegistryService::new(storage);
-            if let Some(record) = registry
-                .snapshot(node_id)
-                .map_err(|_| ClientExchangeError::unavailable())?
-            {
-                // `pending_enrollment` and `revoked` nodes refuse heartbeats.
-                if let Err(error) = registry.heartbeat(
-                    node_id,
-                    payload.capacity.running_worker_sessions,
-                    now,
-                    record.revision,
-                ) {
-                    require_durable_presence(&error)?;
-                }
+            // `pending_enrollment` and `revoked` nodes refuse heartbeats.
+            if let Err(error) = registry.heartbeat(
+                node_id,
+                payload.capacity.running_worker_sessions,
+                now,
+                record.revision,
+            ) {
+                require_durable_presence(&error)?;
             }
             // Drain automation (plan 12.4): a `draining` lease releases once
             // the device reports no running worker session. A refused
