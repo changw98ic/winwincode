@@ -177,8 +177,8 @@ impl DurableExecutionPortContext<'_> {
         self.server_time
     }
 
-    /// Validates the sealed lease at the trusted ingress time for a first-seen
-    /// owner message.
+    /// Validates the causal clock of a dispatch observation. Receiving facts
+    /// does not grant execution authority and remains valid after lease expiry.
     ///
     /// The owner must call this only after its own receipt identity and body
     /// digest lookup proved that the message is new. Exact receipt replay must
@@ -189,21 +189,18 @@ impl DurableExecutionPortContext<'_> {
     ///
     /// # Errors
     ///
-    /// Returns an authority error when Server time predates lease issuance or
-    /// is at/after lease expiry.
-    pub fn validate_first_seen_dispatch(
+    /// Returns an authority error when Server time predates lease issuance.
+    pub fn validate_dispatch_observation(
         &self,
         authority: &ExecutionDispatchAuthority,
     ) -> Result<(), DurableExecutionPortError> {
         let issued_at = instant_millis(&authority.lease().issued_at)
             .map_err(DurableExecutionPortError::Storage)?;
-        let expires_at = instant_millis(&authority.lease().expires_at)
-            .map_err(DurableExecutionPortError::Storage)?;
         let server_time =
             instant_millis(self.server_time).map_err(DurableExecutionPortError::Storage)?;
-        if server_time < issued_at || server_time >= expires_at {
+        if server_time < issued_at {
             return Err(DurableExecutionPortError::Storage(
-                StorageError::invalid_input("Server time is outside the accepted dispatch lease"),
+                StorageError::invalid_input("Server time precedes the accepted dispatch"),
             ));
         }
         Ok(())
@@ -383,7 +380,6 @@ impl<'application> DurableExecutionPortIngress<'application> {
                     &binding.session_identity.worker_session_id,
                     &authority,
                     self.storage,
-                    &self.server_time,
                 )?;
                 let (_, job) = load_durable_execution_job(self.storage, &binding.lease.job_id)
                     .map_err(DurableExecutionPortError::Storage)?;
@@ -602,7 +598,6 @@ impl<'application> DurableExecutionPortIngress<'application> {
                 identity_worker_session_id,
                 &dispatch,
                 self.storage,
-                &self.server_time,
             )?;
         }
         self.delegate_supplement(DurableExecutionPortSupplement::JobScopedWorkerMessage {
@@ -973,7 +968,6 @@ pub(crate) fn require_exact_dispatch_message(
     identity_worker_session_id: &winwincode_domain::WorkerSessionId,
     authority: &ExecutionDispatchAuthority,
     storage: &mut SqliteStorage,
-    now: &Instant,
 ) -> Result<(), DurableExecutionPortError> {
     let accepted = authority.lease();
     let exact = exact_dispatch_message_identity(
@@ -990,7 +984,7 @@ pub(crate) fn require_exact_dispatch_message(
         period.expires_at.clone_from(&lease.expires_at);
         let current = storage
             .execution_registry()
-            .and_then(|registry| registry.load_live_lease_for_period(&period, now))
+            .and_then(|registry| registry.load_accepted_lease_for_period(&period))
             .map_err(DurableExecutionPortError::Storage)?;
         if current.is_some() {
             return Ok(());

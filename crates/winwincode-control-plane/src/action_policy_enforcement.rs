@@ -29,7 +29,7 @@ use winwincode_storage::{
     receipt_scope_key, repository_scope_from_receipt_key,
 };
 
-use crate::execution_port_service::{lease_stamp, load_runtime_replay_authority};
+use crate::execution_port_service::{lease_stamp, load_running_runtime_authority};
 
 const ACTION_RECEIPT_STREAM_PREFIX: &str = "action-enforcement-receipt:";
 const ACTION_RECEIPT_TOPIC: &str = "action.enforcement-receipt.issued";
@@ -163,7 +163,7 @@ fn resolve_action_authority(
             .map_err(|_| authority_rejected())?
         }
         winwincode_execution_port::generated::ExecutionScope::WorkRunExecutionScope(_) => {
-            load_runtime_replay_authority(storage, &job, evaluated_at)
+            load_running_runtime_authority(storage, &job, evaluated_at)
                 .map_err(|_| authority_rejected())?
         }
     };

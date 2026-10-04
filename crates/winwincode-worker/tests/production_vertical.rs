@@ -5522,7 +5522,7 @@ fn sealed_delegated_stop_survives_cancellation_after_dispatch_recovery() {
                 active.lease.expires_at.clone(),
             )
             .await
-            .expect("reject expired cancellation");
+            .expect("accept exact cancellation after expiry");
         assert_eq!(
             stored_run_json(&root)["delegatedStop"],
             original["delegatedStop"]
@@ -5547,7 +5547,6 @@ fn sealed_delegated_stop_survives_cancellation_after_dispatch_recovery() {
         assert_eq!(retained["phase"], "outcome_retained");
         for status in [
             JobCancelAckMessageStatus::RejectedWorkerInstance,
-            JobCancelAckMessageStatus::RejectedExpiredLease,
             JobCancelAckMessageStatus::Accepted,
             JobCancelAckMessageStatus::AlreadyCancelling,
         ] {

@@ -305,7 +305,7 @@ fn completed_and_cancelled_terminals_replay_exactly_and_restore_fleet_capacity()
 }
 
 #[test]
-fn terminal_authority_rejects_old_instance_stale_fence_and_terminal_heartbeat() {
+fn terminal_authority_rejects_foreign_facts_but_accepts_a_matching_heartbeat() {
     let root = TestDirectory::new("authority");
     let fixture = setup(&root, 300);
     let exact = terminal(
@@ -354,15 +354,21 @@ fn terminal_authority_rejects_old_instance_stale_fence_and_terminal_heartbeat() 
             .record_heartbeat(&terminal_heartbeat)
             .expect("terminal lease heartbeat")
             .status,
-        LeaseWriteStatus::RejectedConflict
+        LeaseWriteStatus::Accepted
     );
     assert_eq!(
         registry
             .load_worker(&fixture.worker_id)
-            .expect("load unchanged Worker")
+            .expect("load observed Worker")
             .expect("Worker exists")
             .heartbeat_sequence,
-        1
+        2
+    );
+    assert!(
+        registry
+            .load_live_lease(&fixture.lease.job_id, &instant(6))
+            .expect("terminal lease remains inactive")
+            .is_none()
     );
 
     let replacement = registration(300, 2, 334);

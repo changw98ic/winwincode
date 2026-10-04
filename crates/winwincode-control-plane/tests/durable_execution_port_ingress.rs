@@ -1427,7 +1427,7 @@ fn product_terminal_model_cancel_and_action_share_one_sealed_delegate_core() {
 
 #[test]
 #[allow(clippy::too_many_lines)]
-fn delegated_old_period_requires_accepted_history_and_a_live_current_lease() {
+fn delegated_old_period_requires_accepted_history_without_a_delivery_deadline() {
     let mut fixture = Fixture::open("renewed-delegate", 89);
     let dispatch = install_product_dispatch(&mut fixture, 89);
     let lease = &dispatch.lease;
@@ -1510,11 +1510,11 @@ fn delegated_old_period_requires_accepted_history_and_a_live_current_lease() {
     }
     let mut message = execution_message("model.open");
     align_delegated_message(&mut message, &dispatch, 22);
-    assert!(
-        fixture
-            .accept_with_delegate(&message, renewal.expires_at.clone(), &mut delegate)
-            .is_err()
-    );
+    delegate.expected_server_time = Some(renewal.expires_at.clone());
+    fixture
+        .accept_with_delegate(&message, renewal.expires_at.clone(), &mut delegate)
+        .expect("the owner decides execution versus retained-message semantics");
+    delegate.expected_server_time = Some(now.clone());
     let terminal = ExecutionLeaseTerminalRequest {
         job_id: lease.job_id.clone(),
         lease_id: lease.lease_id.clone(),
@@ -1532,19 +1532,18 @@ fn delegated_old_period_requires_accepted_history_and_a_live_current_lease() {
         .expect("registry")
         .finish_execution_lease(&terminal)
         .expect("terminal");
-    assert!(
-        fixture
-            .accept_with_delegate(
-                &message,
-                Instant("2027-01-15T08:08:00.000Z".into()),
-                &mut delegate
-            )
-            .is_err()
-    );
+    delegate.expected_server_time = Some(Instant("2027-01-15T08:08:00.000Z".into()));
+    fixture
+        .accept_with_delegate(
+            &message,
+            delegate.expected_server_time.clone().unwrap(),
+            &mut delegate,
+        )
+        .expect("terminal identity still reaches the message owner");
     assert_eq!(
         delegate.seen.len(),
-        6,
-        "invalid frames never reach the owner"
+        8,
+        "only identity conflicts are rejected by transport"
     );
     fixture.close();
 }
@@ -1656,7 +1655,7 @@ fn production_execution_port_contract_has_no_worker_time_authority_fallback() {
         ingress
             .contains(".commit_delivery_session_binding(binding, &authority, &self.server_time)")
     );
-    assert!(ingress.contains("validate_first_seen_dispatch"));
+    assert!(ingress.contains("validate_dispatch_observation"));
     assert!(ingress.contains("Exact receipt replay must"));
     assert!(ingress.contains("must not be copied into the owner request identity, digest"));
     assert!(ingress.contains("The trusted clock never enters the owner digest"));
@@ -1866,25 +1865,28 @@ fn accepted_dispatch_seals_product_session_runtime_and_replays_exactly() {
     };
     assert_eq!(changed.status, LeaseWriteStatus::RejectedConflict);
 
-    let mut forged = runtime.clone();
-    forged.message_id = ExecutionMessageId(canonical_id("xmsg", seed + 30));
-    forged.event.event_id = ExecutionEventId(canonical_id("xevt", seed + 30));
-    forged.event.sequence = ExecutionSequence(2);
-    let forged = fixture
+    let mut late = runtime.clone();
+    late.message_id = ExecutionMessageId(canonical_id("xmsg", seed + 30));
+    late.event.event_id = ExecutionEventId(canonical_id("xevt", seed + 30));
+    late.event.sequence = ExecutionSequence(2);
+    late.event.summary = "Worker finished cleanup".to_owned();
+    late.event.occurred_at = expired_time.clone();
+    late.sent_at = expired_time.clone();
+    let late = fixture
         .accept(
-            &ExecutionPortMessage::RuntimeEventMessage(forged),
+            &ExecutionPortMessage::RuntimeEventMessage(late),
             expired_time,
         )
-        .expect("fresh expired runtime rejection");
-    let [ExecutionPortMessage::RuntimeAckMessage(forged)] = forged.as_slice() else {
-        panic!("fresh expired runtime ack");
+        .expect("first delivery after expiry");
+    let [ExecutionPortMessage::RuntimeAckMessage(late)] = late.as_slice() else {
+        panic!("late runtime ack");
     };
-    assert_eq!(forged.status, LeaseWriteStatus::RejectedExpiredLease);
+    assert_eq!(late.status, LeaseWriteStatus::Accepted);
 
     let mut premature = runtime.clone();
     premature.message_id = ExecutionMessageId(canonical_id("xmsg", seed + 31));
     premature.event.event_id = ExecutionEventId(canonical_id("xevt", seed + 31));
-    premature.event.sequence = ExecutionSequence(2);
+    premature.event.sequence = ExecutionSequence(3);
     let premature = fixture
         .accept(
             &ExecutionPortMessage::RuntimeEventMessage(premature),
@@ -1899,7 +1901,7 @@ fn accepted_dispatch_seals_product_session_runtime_and_replays_exactly() {
     let mut stale = runtime;
     stale.message_id = ExecutionMessageId(canonical_id("xmsg", seed + 4));
     stale.event.event_id = ExecutionEventId(canonical_id("xevt", seed + 4));
-    stale.event.sequence = ExecutionSequence(2);
+    stale.event.sequence = ExecutionSequence(3);
     stale.lease.fencing_token = FencingToken("6".to_owned());
     let rejected = fixture
         .accept(
@@ -2074,6 +2076,18 @@ fn install_workrun_dispatch_for_terminal(
     fixture: &mut Fixture,
     seed: u64,
 ) -> (Delivery, ExecutionJob, ExecutionLeaseStamp, WorkerSessionId) {
+    install_workrun_dispatch_for_terminal_at(
+        fixture,
+        seed,
+        Instant("2027-01-15T08:00:01.100Z".into()),
+    )
+}
+
+fn install_workrun_dispatch_for_terminal_at(
+    fixture: &mut Fixture,
+    seed: u64,
+    received_at: Instant,
+) -> (Delivery, ExecutionJob, ExecutionLeaseStamp, WorkerSessionId) {
     let delivery = initial_workrun_delivery(seed);
     let job = workrun_job(seed, &delivery, &fixture.scope);
     seed_workrun_delivery(fixture, &delivery, &job);
@@ -2137,7 +2151,7 @@ fn install_workrun_dispatch_for_terminal(
                 status: JobDispatchResultMessageStatus::Accepted,
                 worker_session_id: Some(worker_session_id.clone()),
             }),
-            Instant("2027-01-15T08:00:01.100Z".into()),
+            received_at,
         )
         .expect("accepted dispatch");
     (delivery, job, lease, worker_session_id)
@@ -2372,7 +2386,7 @@ fn runtime_original_event_survives_accepted_renewal_and_restart() {
     let [ExecutionPortMessage::RuntimeAckMessage(ack)] = response.as_slice() else {
         panic!("runtime expired ACK");
     };
-    assert_eq!(ack.status, LeaseWriteStatus::RejectedExpiredLease);
+    assert_eq!(ack.status, LeaseWriteStatus::Accepted);
     let mut fixture = fixture.restart();
     let response = fixture
         .accept(
@@ -2581,18 +2595,6 @@ fn committed_delivery_outcome_replay_finishes_registry_once_after_restart_gap() 
         if renewal_stage == 1 {
             renew(&mut fixture);
         }
-
-        assert_eq!(
-            outcome_ack_status(
-                fixture
-                    .accept(
-                        &ExecutionPortMessage::JobOutcomeMessage(outcome.clone()),
-                        Instant("2027-01-15T08:06:00.000Z".into()),
-                    )
-                    .expect("first-seen outcome at expiry rejected")
-            ),
-            winwincode_execution_port::generated::JobOutcomeAckMessageStatus::RejectedConflict
-        );
 
         let connection = rusqlite::Connection::open(fixture.root.join("control-plane.sqlite3"))
             .expect("Registry failure injector");
@@ -3376,6 +3378,159 @@ fn renewed_terminal_outcome_uses_current_authority_without_rewriting_its_lease_s
     assert_eq!(
         outcome_ack_status(replay),
         winwincode_execution_port::generated::JobOutcomeAckMessageStatus::Duplicate
+    );
+    fixture.close();
+}
+
+#[derive(Default)]
+struct RetainedAckOwner {
+    seen: usize,
+}
+impl DurableExecutionPortDelegate for RetainedAckOwner {
+    fn accept(
+        &mut self,
+        _: DurableExecutionPortContext<'_>,
+        supplement: DurableExecutionPortSupplement<'_>,
+    ) -> Result<Vec<ExecutionPortMessage>, DurableExecutionPortError> {
+        assert!(matches!(
+            supplement,
+            DurableExecutionPortSupplement::JobScopedWorkerMessage {
+                message: ExecutionPortMessage::ModelAckMessage(_),
+                ..
+            }
+        ));
+        self.seen += 1;
+        Ok(vec![])
+    }
+}
+
+#[test]
+fn exact_model_ack_replays_after_renewal_and_expiry() {
+    let seed = 91210;
+    let mut fixture = Fixture::open("retained-ack", seed);
+    let dispatch = install_product_dispatch(&mut fixture, seed);
+    renew_ingress_fixture_lease(&mut fixture, &dispatch.lease, seed);
+    let ExecutionPortMessage::ModelAckMessage(mut ack) = execution_message("model.ack") else {
+        panic!("model ack fixture")
+    };
+    ack.lease = dispatch.lease.clone();
+    ack.worker_session_id = dispatch.worker_session_id.clone();
+    ack.session_identity = exact_session_identity(&dispatch);
+    ack.sent_at = Instant("2027-01-15T08:06:00.000Z".into());
+    let original = ExecutionPortMessage::ModelAckMessage(ack.clone());
+    let mut owner = RetainedAckOwner::default();
+    fixture
+        .accept_with_delegate(
+            &original,
+            Instant("2027-01-15T08:06:00.000Z".into()),
+            &mut owner,
+        )
+        .expect("same retained ack reaches its owner before current expiry");
+    let blocked = fixture.accept_with_delegate(
+        &original,
+        Instant("2027-01-15T08:11:00.000Z".into()),
+        &mut owner,
+    );
+    blocked.expect("exact ACK reaches its owner after expiry");
+    assert_eq!(owner.seen, 2);
+    ack.lease.expires_at = Instant("2027-01-15T08:10:00.000Z".into());
+    fixture
+        .accept_with_delegate(
+            &ExecutionPortMessage::ModelAckMessage(ack),
+            Instant("2027-01-15T08:11:00.000Z".into()),
+            &mut owner,
+        )
+        .expect("only changing the stamp makes the outer check pass");
+    assert_eq!(owner.seen, 3);
+    fixture.close();
+}
+
+#[test]
+fn session_binding_keeps_its_original_period_after_renewal() {
+    for (seed, received_at, bound_after_renewal) in [
+        (91212, "2027-01-15T08:06:00.000Z", false),
+        (91218, "2027-01-15T08:11:00.000Z", false),
+        (91220, "2027-01-15T08:06:02.000Z", true),
+    ] {
+        let mut fixture = Fixture::open("retained-binding", seed);
+        let (_, job, lease, _) = install_workrun_dispatch_for_terminal(&mut fixture, seed);
+        let mut binding = workrun_binding(&job, &lease, seed, seed);
+        renew_ingress_fixture_lease(&mut fixture, &lease, seed);
+        if bound_after_renewal {
+            binding.bound_at = Instant("2027-01-15T08:06:00.000Z".into());
+            binding.sent_at = Instant("2027-01-15T08:06:01.000Z".into());
+        }
+        fixture
+            .accept(
+                &ExecutionPortMessage::SessionBindingMessage(binding),
+                Instant(received_at.into()),
+            )
+            .expect("accepted binding identity survives renewal and delivery delay");
+        fixture.close();
+    }
+}
+
+#[test]
+fn completed_outcome_first_delivery_survives_expiry() {
+    for (seed, received_at) in [
+        (91214, "2027-01-15T08:01:02.000Z"),
+        (91216, "2027-01-15T08:06:00.000Z"),
+        (91222, "2027-01-15T08:06:00.000Z"),
+    ] {
+        let mut fixture = Fixture::open("late-outcome", seed);
+        let (_, job, lease, session) = install_workrun_dispatch_for_terminal(&mut fixture, seed);
+        let binding = workrun_binding(&job, &lease, seed, seed);
+        fixture
+            .accept(
+                &ExecutionPortMessage::SessionBindingMessage(binding),
+                Instant("2027-01-15T08:00:02.100Z".into()),
+            )
+            .expect("bind session");
+        prepare_workrun_slot(&mut fixture, &job, &lease, &session, seed);
+        let mut outcome = terminal_workrun_outcome(&job, lease, &session, seed);
+        if seed == 91222 {
+            outcome.outcome.finished_at = outcome.lease.expires_at.clone();
+            outcome.sent_at = Instant("2027-01-15T08:05:01.000Z".into());
+        }
+        let response = fixture
+            .accept(
+                &ExecutionPortMessage::JobOutcomeMessage(outcome),
+                Instant(received_at.into()),
+            )
+            .expect("typed outcome response");
+        let status = outcome_ack_status(response.clone());
+        assert_eq!(
+            status,
+            winwincode_execution_port::generated::JobOutcomeAckMessageStatus::Accepted
+        );
+        fixture.close();
+    }
+}
+
+#[test]
+fn late_dispatch_receipt_then_binding_records_the_original_workrun() {
+    let seed = 91224;
+    let mut fixture = Fixture::open("late-dispatch", seed);
+    let (_, job, lease, _) = install_workrun_dispatch_for_terminal_at(
+        &mut fixture,
+        seed,
+        Instant("2027-01-15T08:06:00.000Z".into()),
+    );
+    let binding = workrun_binding(&job, &lease, seed, seed);
+    fixture
+        .accept(
+            &ExecutionPortMessage::SessionBindingMessage(binding),
+            Instant("2027-01-15T08:06:01.000Z".into()),
+        )
+        .expect("late dispatch and binding are execution facts");
+    assert!(
+        fixture
+            .storage
+            .execution_registry()
+            .unwrap()
+            .load_live_lease(&job.job_id, &Instant("2027-01-15T08:06:01.000Z".into()))
+            .unwrap()
+            .is_none()
     );
     fixture.close();
 }

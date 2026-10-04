@@ -1379,9 +1379,9 @@ impl<'storage> ExecutionRegistry<'storage> {
     ) -> Result<ExecutionDispatchWorkRunProof, StorageError> {
         validate_instant(checked_at, "checkedAt")?;
         let lease = authority.lease();
-        if checked_at.0 < authority.accepted_at().0 || checked_at.0 >= lease.expires_at.0 {
+        if checked_at.0 < authority.accepted_at().0 {
             return Err(StorageError::invalid_input(
-                "dispatch proof requested outside its accepted lease window",
+                "dispatch proof requested before its acceptance",
             ));
         }
         let transaction = self
@@ -1855,8 +1855,9 @@ impl<'storage> ExecutionRegistry<'storage> {
     }
 
     /// Proves an accepted lease period against the current lease, including after
-    /// terminal settlement or expiry. This proves identity only: callers must
-    /// resolve exact receipts before authorizing any first-seen operation.
+    /// terminal settlement or expiry. This proves identity only; starting new
+    /// execution separately requires current live authority. Message owners
+    /// retain their own receipt, content and product-state checks.
     ///
     /// # Errors
     /// Rejects malformed records and propagates corrupt receipt or `SQLite` errors.
@@ -2225,12 +2226,6 @@ pub(crate) fn record_dispatch_result_in_transaction(
             DispatchResultErrorCode::StaleFencingToken,
         ));
     }
-    if request.checked_at.0 >= current.expires_at.0 || request.sent_at.0 >= current.expires_at.0 {
-        return Ok(dispatch_result_rejection(
-            DispatchResultStatus::RejectedExpiredLease,
-            DispatchResultErrorCode::LeaseExpired,
-        ));
-    }
     if request.sent_at.0 < current.issued_at.0 {
         return Ok(dispatch_result_rejection(
             DispatchResultStatus::Conflict,
@@ -2249,7 +2244,16 @@ pub(crate) fn record_dispatch_result_in_transaction(
         || request.attempt != current.attempt
         || request.fencing_token != current.fencing_token
         || request.issued_at != current.issued_at
-        || request.expires_at != current.expires_at
+    {
+        return Ok(dispatch_result_rejection(
+            DispatchResultStatus::Conflict,
+            DispatchResultErrorCode::JobDispatchConflict,
+        ));
+    }
+
+    let mut period = current.clone();
+    period.expires_at.clone_from(&request.expires_at);
+    if period != current && !accepted_lease_history(connection, &current.job_id)?.contains(&period)
     {
         return Ok(dispatch_result_rejection(
             DispatchResultStatus::Conflict,
@@ -3352,9 +3356,6 @@ fn heartbeat_lease_status(
     request: &WorkerHeartbeatRequest,
 ) -> Result<Option<LeaseWriteStatus>, StorageError> {
     for summary in &request.active_leases {
-        if execution_lease_is_terminal(connection, &summary.lease_id)? {
-            return Ok(Some(LeaseWriteStatus::RejectedConflict));
-        }
         let Some(current) = load_lease_in_transaction(connection, &summary.job_id)? else {
             return Ok(Some(LeaseWriteStatus::RejectedConflict));
         };
@@ -3371,9 +3372,6 @@ fn heartbeat_lease_status(
             || summary.fencing_token != current.fencing_token
         {
             return Ok(Some(LeaseWriteStatus::RejectedConflict));
-        }
-        if request.observed_at.0 >= current.expires_at.0 {
-            return Ok(Some(LeaseWriteStatus::RejectedExpiredLease));
         }
     }
     Ok(None)
@@ -3697,11 +3695,9 @@ pub(crate) fn load_dispatch_authority_in_transaction(
         "dispatchRequestId",
     )?;
     validate_instant(&authority.accepted_at, "acceptedAt")?;
-    if authority.accepted_at.0 < authority.lease.issued_at.0
-        || authority.accepted_at.0 >= authority.lease.expires_at.0
-    {
+    if authority.accepted_at.0 < authority.lease.issued_at.0 {
         return Err(StorageError::adapter(
-            "stored dispatch acceptance falls outside its lease window",
+            "stored dispatch acceptance precedes lease issuance",
         ));
     }
     let current = load_lease_in_transaction(connection, job_id)?

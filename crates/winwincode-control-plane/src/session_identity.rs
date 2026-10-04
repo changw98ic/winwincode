@@ -76,10 +76,22 @@ pub fn validate_session_binding<'a>(
     scope: &WorkRunExecutionScope,
     delivery_id: &winwincode_domain::DeliveryId,
 ) -> Result<SessionBindingAcceptance<'a>, SessionIdentityAdapterError> {
+    let accepted_window = authority.issued_at() == &message.lease.issued_at
+        && authority.expires_at() == &message.lease.expires_at;
+    validate_session_binding_for_period(message, authority, scope, delivery_id, accepted_window)
+}
+
+pub(crate) fn validate_session_binding_for_period<'a>(
+    message: &'a SessionBindingMessage,
+    authority: &'a SessionBindingAuthority,
+    scope: &WorkRunExecutionScope,
+    delivery_id: &winwincode_domain::DeliveryId,
+    accepted_window: bool,
+) -> Result<SessionBindingAcceptance<'a>, SessionIdentityAdapterError> {
     validate_message_discriminator(message)?;
     validate_message_identifiers(message)?;
     validate_message_authority_fields(message)?;
-    validate_message_lease_window(message, authority)?;
+    validate_message_lease_window(message, authority, accepted_window)?;
     validate_scheduler_authority(message, authority)?;
     validate_delivery_scope(message, authority, scope)?;
 
@@ -234,23 +246,21 @@ fn validate_message_authority_fields(
 fn validate_message_lease_window(
     message: &SessionBindingMessage,
     authority: &SessionBindingAuthority,
+    accepted_window: bool,
 ) -> Result<(), SessionIdentityAdapterError> {
     validate_instant(&message.lease.issued_at, "issuedAt")?;
     validate_instant(&message.bound_at, "boundAt")?;
     validate_instant(&message.sent_at, "sentAt")?;
     validate_instant(&message.lease.expires_at, "expiresAt")?;
     if message.lease.issued_at.0 > message.bound_at.0
-        || message.bound_at.0 >= message.lease.expires_at.0
+        || message.bound_at.0 >= authority.expires_at().0
         || message.sent_at.0 < message.bound_at.0
-        || message.sent_at.0 > message.lease.expires_at.0
     {
         return Err(SessionIdentityAdapterError::InvalidLeaseWindow(
             "message timestamp is outside lease",
         ));
     }
-    if authority.issued_at() != &message.lease.issued_at
-        || authority.expires_at() != &message.lease.expires_at
-    {
+    if !accepted_window {
         return Err(SessionIdentityAdapterError::InvalidLeaseWindow(
             "message changed scheduler-owned lease window",
         ));

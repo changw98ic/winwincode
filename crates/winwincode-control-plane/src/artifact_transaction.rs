@@ -439,7 +439,6 @@ struct ArtifactSessionClaim<'a> {
 
 #[derive(Clone, Copy)]
 enum ArtifactLeaseRejection {
-    Expired,
     StaleFencingToken,
     WorkerInstance,
 }
@@ -461,18 +460,13 @@ impl ArtifactMessageContext {
             payload_digest,
             authority,
         )?;
-        let mut rejection =
-            validate_authority(lease, worker_session_id, authority, accepted_window)?;
+        let rejection = validate_authority(lease, worker_session_id, authority, accepted_window)?;
         let sent_at_millis = instant_millis(sent_at)?;
         let issued_at_millis = instant_millis(&lease.issued_at)?;
-        let expires_at_millis = instant_millis(authority.expires_at())?;
         if sent_at_millis < issued_at_millis {
             return Err(StorageError::invalid_input(
                 "Artifact message time precedes its active lease",
             ));
-        }
-        if sent_at_millis >= expires_at_millis {
-            rejection = Some(ArtifactLeaseRejection::Expired);
         }
         let attempt = u64::try_from(lease.attempt)
             .map_err(|_| StorageError::invalid_input("Artifact lease attempt is out of range"))?;
@@ -918,11 +912,6 @@ fn ack_lease_rejection(
     session_identity: &SessionIdentity,
 ) -> Result<ArtifactAckMessage, ArtifactMessageError> {
     let (status, code, message) = match rejection {
-        ArtifactLeaseRejection::Expired => (
-            LeaseWriteStatus::RejectedExpiredLease,
-            ExecutionPortErrorCode::LeaseExpired,
-            "Artifact message lease has expired",
-        ),
         ArtifactLeaseRejection::StaleFencingToken => (
             LeaseWriteStatus::RejectedStaleFencingToken,
             ExecutionPortErrorCode::StaleFencingToken,

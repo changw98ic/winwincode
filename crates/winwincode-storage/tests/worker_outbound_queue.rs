@@ -291,13 +291,10 @@ fn assert_disconnect_retains_and_reconnects(
                 .expect("disconnect replay stays durable")
                 .replayed
         );
-        assert_eq!(
-            queue
-                .claim_page(authority, &at(6), None, 1)
-                .expect_err("unhealthy Worker cannot claim")
-                .code(),
-            WorkerOutboundQueueErrorCode::AuthorityMismatch
-        );
+        let page = queue
+            .claim_page(authority, &at(6), None, 1)
+            .expect("retained delivery is independent of cached Worker health");
+        assert_eq!(page.claims[0].message_id(), enqueue_request.message_id());
     }
     let connection = Connection::open(storage.database_path()).expect("fixture connection");
     connection
@@ -352,7 +349,7 @@ fn enqueue_claim_restart_replay_capacity_and_authority_are_closed() {
         .claim_page(&authority, &at(6), None, 1)
         .expect("first page");
     assert_eq!(first_page.claims[0].frame_bytes(), b"first-private-frame");
-    assert!(!first_page.claims[0].replayed());
+    assert!(first_page.claims[0].replayed());
     let second_page = storage
         .worker_outbound_queue(config())
         .expect("queue")
@@ -370,7 +367,7 @@ fn enqueue_claim_restart_replay_capacity_and_authority_are_closed() {
         .expect("restart replay");
     assert_eq!(replayed.claims[0].frame_bytes(), b"first-private-frame");
     assert!(replayed.claims[0].replayed());
-    assert_eq!(replayed.claims[0].delivery_attempt(), 2);
+    assert_eq!(replayed.claims[0].delivery_attempt(), 3);
 
     let mut stale = authority.clone();
     stale.slot.fencing_token = FencingToken("2".into());
@@ -1183,7 +1180,14 @@ fn renewal_keeps_historical_frames_claimable_and_acknowledgeable() {
     assert_eq!(next.claims[0].message_id(), frame.message_id());
     assert_eq!(next.claims[0].authority(), frame.authority());
     assert!(next.next_cursor.is_none());
-    assert!(queue.claim_page(&authority, &at(21), None, 1).is_err());
+    assert_eq!(
+        queue
+            .claim_page(&authority, &at(21), None, 1)
+            .unwrap()
+            .claims[0]
+            .frame_bytes(),
+        b"original-approval"
+    );
     let mut invented = frame.authority().clone();
     invented.lease_expires_at = at(25);
     assert!(
@@ -1257,4 +1261,74 @@ fn terminal_cleanup_clears_frames_from_every_accepted_lease_period() {
     );
     Box::new(storage).close().expect("close");
     fs::remove_dir_all(root).expect("remove fixture");
+}
+
+#[test]
+fn retained_delivery_confirmation_and_cleanup_survive_expiry_and_restart() {
+    let root = temporary_directory("late-outbound-ack");
+    let mut storage = SqliteStorage::open(&root).expect("storage");
+    let authority = prepare_authority(&mut storage, 1);
+    let first = request(&authority, 1800, b"retained-before-expiry");
+    let second = WorkerOutboundEnqueueRequest::new(
+        authority.clone(),
+        ExecutionMessageId(id("xmsg", 1801)),
+        at(55),
+        b"late-delivery".to_vec(),
+    )
+    .unwrap();
+    {
+        let mut queue = storage
+            .worker_outbound_queue(WorkerOutboundQueueConfig {
+                max_claim_page_size: 2,
+                ..config()
+            })
+            .unwrap();
+        queue.enqueue(&first).unwrap();
+        queue
+            .enqueue(&second)
+            .expect("transport retention has no execution deadline");
+        let page = queue.claim_page(&authority, &at(56), None, 2).unwrap();
+        assert_eq!(page.claims.len(), 2);
+        assert_eq!(page.claims[0].frame_bytes(), b"retained-before-expiry");
+        assert!(
+            queue
+                .confirm_remote(
+                    &authority.slot.worker_id,
+                    &authority.slot.worker_instance_id,
+                    first.message_id(),
+                    &at(57)
+                )
+                .unwrap()
+        );
+    }
+    Box::new(storage).close().unwrap();
+    let mut storage = SqliteStorage::open(&root).unwrap();
+    {
+        let mut queue = storage
+            .worker_outbound_queue(WorkerOutboundQueueConfig {
+                max_claim_page_size: 2,
+                ..config()
+            })
+            .unwrap();
+        let progress = queue
+            .retry_confirmed(
+                &authority.slot.worker_id,
+                &authority.slot.worker_instance_id,
+            )
+            .unwrap();
+        assert_eq!(progress.acknowledgements.len(), 1);
+        assert!(progress.retry_error.is_none());
+        queue
+            .acknowledge(&authority, second.message_id(), &at(59))
+            .unwrap();
+        assert!(
+            queue
+                .claim_page(&authority, &at(59), None, 2)
+                .unwrap()
+                .claims
+                .is_empty()
+        );
+    }
+    Box::new(storage).close().unwrap();
+    fs::remove_dir_all(root).unwrap();
 }

@@ -48,7 +48,7 @@ use winwincode_storage::{
 use crate::delivery_transaction::{
     StagedDeliveryJournal, delivery_journal_key, delivery_stream_id, load_durable_execution_job,
 };
-use crate::session_identity::{SessionBindingAcceptance, validate_session_binding};
+use crate::session_identity::SessionBindingAcceptance;
 use crate::{
     DeliveryChangeKind, OutboxError, delivery_changed_event_for_scope, execution_audit_event,
     repository_scope_from_receipt_key, validate_delivery_changed_receipt,
@@ -243,14 +243,21 @@ pub(crate) fn execute_at(
 
     // Validate scheduler authority before applying a replacement owner phase.
     // Partial/new binding paths are the only paths that may mutate Delivery.
-    let acceptance = validate_session_binding(
+    let accepted_window = crate::execution_lease_period::accepted_lease_window_matches(
+        storage,
+        &message.lease,
+        &job.payload_digest,
+        authority,
+    )?;
+    let acceptance = crate::session_identity::validate_session_binding_for_period(
         message,
         authority,
         delivery_scope(&job)?,
         &context.delivery_id,
+        accepted_window,
     )
     .map_err(|error| StorageError::invalid_input(error.to_string()))?;
-    // Validate the ingress lease window before any replacement mutation.
+    // Validate the causal ingress clock before any product-state mutation.
     if worker_replay.is_none() && codex_replay.is_none() {
         validate_trusted_lease_time(message, server_time)?;
     }
@@ -1143,10 +1150,9 @@ fn validate_message_shape(message: &SessionBindingMessage) -> Result<u64, Storag
     let expires_at = instant_millis(&message.lease.expires_at)?;
     let bound_at = instant_millis(&message.bound_at)?;
     let sent_at = instant_millis(&message.sent_at)?;
-    if issued_at > bound_at || bound_at >= expires_at || sent_at < bound_at || sent_at > expires_at
-    {
+    if issued_at >= expires_at || issued_at > bound_at || sent_at < bound_at {
         return Err(StorageError::invalid_input(
-            "SessionBinding message time is outside its active lease",
+            "SessionBinding message timestamps are inconsistent",
         ));
     }
     Ok(bound_at)
@@ -1157,11 +1163,10 @@ fn validate_trusted_lease_time(
     server_time: &Instant,
 ) -> Result<(), StorageError> {
     let issued_at = instant_millis(&message.lease.issued_at)?;
-    let expires_at = instant_millis(&message.lease.expires_at)?;
     let server_time = instant_millis(server_time)?;
-    if server_time < issued_at || server_time >= expires_at {
+    if server_time < issued_at {
         return Err(StorageError::invalid_input(
-            "SessionBinding Server time is outside its active lease",
+            "SessionBinding Server time precedes lease issuance",
         ));
     }
     Ok(())

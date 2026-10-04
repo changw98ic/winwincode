@@ -3731,9 +3731,6 @@ where
             {
                 (JobCancelAckMessageStatus::RejectedStaleFencingToken, None)
             }
-            Some(active) if now.0 >= active.lease.expires_at.0 => {
-                (JobCancelAckMessageStatus::RejectedExpiredLease, None)
-            }
             Some(active) if active.lifecycle == ActiveJobLifecycle::Cancelling => (
                 JobCancelAckMessageStatus::AlreadyCancelling,
                 self.pending_candidates

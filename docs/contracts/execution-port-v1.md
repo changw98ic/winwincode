@@ -101,9 +101,13 @@ Control Plane 在已接受任务的心跳中检查租约：剩余时间不超过
 拒绝已续租执行的事件、产物或结果，也不为续期重写原消息。
 模型 ACK 只确认原模型交换的消费进度，不授予执行权限；即使当前租约已过期，也按原交换、
 会话身份及序号接收，不能拿租期阻止已产生内容的确认和清理。
-续期前保留的事件、模型流、工具动作与产物消息保留原始摘要和身份，并在当前同一租约的
-有效期限内继续处理，原期限必须对应已接受的持久租约记录；签发的工具授权自身期限不因此延长。已失效的当前租约及旧 fencingToken
-仍然拒绝写入。任务结束后迟到的续期不会重建任务。
+租约到期只停止新的执行授权。已经产生的会话绑定、派发回执、事件、模型输出、产物和结果，
+以及它们的 ACK、历史补传、取消和下行队列清理，不受发送或接收时刻的租期限制。
+这些路径仍校验原 Job、attempt、会话、消息摘要、连续 sequence 和已接受的租约记录，
+不为续期改写原消息。首次产品状态写入还要符合当前任务身份和状态；重复消息读取原回执。
+新模型调用、工具执行及恢复执行的审批仍须满足当前授权，工具许可和输入/审批自身的期限
+不随租约续期延长。任务结束后迟到的续期不会重建任务。
+Worker 心跳可以报告已到期或已结束的原任务；这不续租，也不恢复执行权限。
 
 Worker 接受 Job 并建立 CodexThread 后，先发送一条 `session.binding`。它把
 `ProductSessionId + WorkerSessionId + CodexThreadId` 绑定到当前
@@ -122,8 +126,9 @@ Job/Lease 改成另一条 Session 或 CodexThread 是冲突。`runtime.event.cod
 | 相同 request、job、attempt、fence 和 payload digest 重复派发 | `duplicate` | 返回原 `workerSessionId`，不启动第二次执行 |
 | 相同 eventId、sequence 和 payload digest 重放 | `duplicate` | 确认原事件，不重复持久化或投影 |
 | 收到的 sequence 大于“最高连续 sequence + 1” | `gap` | 保持原 `ackSequence`，从 `replayFromSequence` 请求重放 |
-| Worker 断线后带有效 Lease 重连 | `replay_required` | 按原 eventId 和 sequence 重放 ack 之后的事件 |
-| Worker 写入时 Lease 已过期 | `rejected_expired_lease` | 不保存事件、产物或结果 |
+| Worker 断线后补传已有事件 | `replay_required` | 按原 eventId 和 sequence 重放 ack 之后的事件，租约到期不影响补传 |
+| 租约到期后请求启动新的执行 | `rejected_expired_lease` | 不启动新的模型调用或工具动作 |
+| 租约到期后交付已有消息或请求停止 | 按消息身份和操作语义处理 | 保存事实、返回原回执或停止对应执行 |
 | Worker 重启并产生新的 workerInstanceId | `reacquire_required` | 原实例写入被拒绝，取得新 Lease 后才继续 |
 | Worker 使用小于当前值的 fencingToken | `rejected_stale_fencing_token` | 不保存事件、产物或结果 |
 | 同一消息身份对应不同 payload | `rejected_conflict` | 不覆盖已接受的数据 |

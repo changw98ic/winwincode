@@ -14,7 +14,6 @@ use crate::{
         ModelCursorStore, ModelLeaseAuthority, ModelLeaseAuthoritySource, ModelMessageMetadata,
         ModelPortClientErrorCode, ModelSinkDeliveryStatus, ModelTerminationReason,
         OpenModelExchangeCommand, WorkerModelPortClient, chunk_termination,
-        is_expired_failure_terminal,
     },
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -291,12 +290,11 @@ impl SharedAuthoritySource {
             .map(|(_, bytes)| serde_json::from_slice(&bytes).map_err(|_| BridgeError::Unavailable))
             .collect()
     }
-    fn validate_original_request(
+    fn original_request_authority(
         &self,
         authority: &ModelLeaseAuthority,
         open: Option<&winwincode_execution_port::generated::ModelOpenMessage>,
-        now: &Instant,
-    ) -> Result<(), ModelAuthorityRejection> {
+    ) -> Result<ModelLeaseAuthority, ModelAuthorityRejection> {
         let thread = &authority.session_identity.codex_thread_id.0;
         let cached = self
             .lineage
@@ -324,6 +322,16 @@ impl SharedAuthoritySource {
         } else if expected != *authority {
             return Err(ModelAuthorityRejection::StaleLease);
         }
+        Ok(expected)
+    }
+
+    fn validate_original_request(
+        &self,
+        authority: &ModelLeaseAuthority,
+        open: Option<&winwincode_execution_port::generated::ModelOpenMessage>,
+        now: &Instant,
+    ) -> Result<(), ModelAuthorityRejection> {
+        let expected = self.original_request_authority(authority, open)?;
         let observed = self
             .observed_now()
             .map_err(|_| ModelAuthorityRejection::Unavailable)?;
@@ -339,55 +347,27 @@ impl SharedAuthoritySource {
 }
 
 impl ModelLeaseAuthoritySource for SharedAuthoritySource {
-    fn validate_expired_exchange(
+    fn validate_retained_exchange(
         &self,
         authority: &ModelLeaseAuthority,
         exchange: &ModelExchangeId,
         now: &Instant,
     ) -> Result<(), ModelAuthorityRejection> {
-        let store = self
+        if !canonical_instant(now) {
+            return Err(ModelAuthorityRejection::StaleLease);
+        }
+        let open = self
             .store
             .as_ref()
-            .ok_or(ModelAuthorityRejection::Unavailable)?;
-        let open = ExecutionOutbox::read_model_open(store, exchange)
+            .map(|store| ExecutionOutbox::read_model_open(store, exchange))
+            .transpose()
             .map_err(|_| ModelAuthorityRejection::Unavailable)?
-            .ok_or(ModelAuthorityRejection::StaleLease)?;
-        if open.lease != authority.lease
-            || open.worker_session_id != authority.worker_session_id
-            || open.session_identity != authority.session_identity
-            || !ExecutionOutbox::model_start_request_allowed(store, &open)
-                .map_err(|_| ModelAuthorityRejection::Unavailable)?
-        {
-            return Err(ModelAuthorityRejection::StaleLease);
+            .flatten();
+        if let Some(open) = open {
+            self.original_request_authority(authority, Some(&open))?;
+            return Ok(());
         }
-        let thread = &authority.session_identity.codex_thread_id.0;
-        let cached = self
-            .lineage
-            .read()
-            .map_err(|_| ModelAuthorityRejection::Unavailable)?
-            .get(thread)
-            .cloned();
-        let expected = match cached {
-            Some(expected) => expected,
-            None => self
-                .load_lineage(thread)
-                .map_err(|_| ModelAuthorityRejection::Unavailable)?
-                .ok_or(ModelAuthorityRejection::StaleLease)?,
-        };
-        if !same_binding_with_extended_lease(authority, &expected) {
-            return Err(ModelAuthorityRejection::StaleLease);
-        }
-        let observed = self
-            .observed_now()
-            .map_err(|_| ModelAuthorityRejection::Unavailable)?;
-        let effective = observed
-            .as_ref()
-            .filter(|observed| observed.0 > now.0)
-            .unwrap_or(now);
-        if !canonical_instant(now) || effective.0 < expected.lease.expires_at.0 {
-            return Err(ModelAuthorityRejection::StaleLease);
-        }
-        Ok(())
+        self.validate_original_request(authority, None, now)
     }
 
     fn validate_exchange(
@@ -1041,11 +1021,12 @@ impl ExecutionPortModelBridge {
         if persisted_frames.last().is_some_and(|frame| frame.is_final) && !exact_duplicate {
             return Err(BridgeError::Conflict);
         }
-        if !process_exchange
-            && is_expired_failure_terminal(chunk)
-            && (exact_duplicate || contiguous_new)
-        {
-            self.restore_expired_failure_cursor(chunk, &owner)?;
+        let detached_delivery = !process_exchange && contiguous_new && !exact_duplicate;
+        if !process_exchange && chunk.is_final && (exact_duplicate || contiguous_new) {
+            if detached_delivery {
+                self.retain_and_forward_frame(chunk, &owner)?;
+            }
+            self.restore_retained_cursor(chunk, &owner)?;
             exact_duplicate = true;
         }
         if !process_exchange {
@@ -1067,7 +1048,15 @@ impl ExecutionPortModelBridge {
                     .await
                     .map_err(|_| BridgeError::Protocol)?;
                 self.retain_provider_final_frame(&owner, chunk, received_at)?;
-                return Ok(disposition);
+                return Ok(if detached_delivery {
+                    ModelChunkDisposition::Delivered {
+                        confirmed_sequence: u64::try_from(chunk.sequence.0)
+                            .map_err(|_| BridgeError::InvalidPayload)?,
+                        termination: chunk_termination(chunk),
+                    }
+                } else {
+                    disposition
+                });
             }
             // An exact durable duplicate must unblock the Device model queue
             // even when Core is not attached; otherwise one stale accept error
@@ -1141,7 +1130,7 @@ impl ExecutionPortModelBridge {
         Ok(disposition)
     }
 
-    fn restore_expired_failure_cursor(
+    fn restore_retained_cursor(
         &self,
         chunk: &ModelChunkMessage,
         owner: &ModelExchangeOwner,
@@ -1288,17 +1277,9 @@ impl ExecutionPortModelBridge {
             worker_session_id: chunk.worker_session_id.clone(),
             session_identity: chunk.session_identity.clone(),
         };
-        match self
-            .authority
-            .validate_exchange(&authority, &chunk.model_exchange_id, received_at)
-        {
-            Err(ModelAuthorityRejection::ExpiredLease) if is_expired_failure_terminal(chunk) => {
-                self.authority
-                    .validate_expired_exchange(&authority, &chunk.model_exchange_id, received_at)
-                    .map_err(|_| BridgeError::StaleAuthority)
-            }
-            result => result.map_err(|_| BridgeError::StaleAuthority),
-        }
+        self.authority
+            .validate_retained_exchange(&authority, &chunk.model_exchange_id, received_at)
+            .map_err(|_| BridgeError::StaleAuthority)
     }
 
     fn resolve_chunk_owner(
@@ -2221,16 +2202,6 @@ fn replay_model_call_frames(
     exchange: &ModelExchangeId,
     authority: &SharedAuthoritySource,
 ) -> Result<ModelPortStream, ModelPortFailure> {
-    match authority.validate_current(&binding.authority, &binding.opened_at) {
-        Ok(()) => {}
-        Err(
-            ModelAuthorityRejection::ExpiredLease
-            | ModelAuthorityRejection::StaleLease
-            | ModelAuthorityRejection::Unavailable,
-        ) => {
-            return Err(model_failure(BridgeError::StaleAuthority));
-        }
-    }
     if frames.is_empty() {
         return Err(model_failure(BridgeError::Unavailable));
     }
@@ -2248,7 +2219,7 @@ fn replay_model_call_frames(
             return Err(model_failure(BridgeError::Conflict));
         }
         authority
-            .validate_exchange(
+            .validate_retained_exchange(
                 &ModelLeaseAuthority {
                     lease: chunk.lease.clone(),
                     worker_session_id: chunk.worker_session_id.clone(),
@@ -3277,7 +3248,10 @@ mod tests {
                 .accept_chunk(&chunk, &lease.lease.expires_at)
                 .await
                 .unwrap(),
-            ModelChunkDisposition::Duplicate { .. }
+            ModelChunkDisposition::Delivered {
+                termination: Some(ModelTerminationReason::ProviderError),
+                ..
+            }
         ));
         assert!(matches!(
             restored
@@ -3817,12 +3791,14 @@ mod tests {
                 Some(Ok(r#"{"type":"response.completed","call":"R"}"#.into()))
             );
             assert!(restarted.take_messages().unwrap().is_empty());
-            assert!(
+            assert!(matches!(
                 restarted
                     .accept_chunk(&chunk, &renewed.lease.expires_at)
-                    .await
-                    .is_err()
-            );
+                    .await,
+                Ok(ModelChunkDisposition::Duplicate {
+                    confirmed_sequence: 2
+                })
+            ));
             drop(replay);
             drop(restarted);
             drop(store);

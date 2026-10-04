@@ -224,15 +224,9 @@ fn validate_trusted_lease_time(
 ) -> Result<(), StorageError> {
     let now = instant_millis(server_time)?;
     let issued_at = instant_millis(facts.authority().issued_at())?;
-    let expires_at = instant_millis(facts.authority().expires_at())?;
     if now < issued_at {
         return Err(StorageError::invalid_input(
             "terminal ingress precedes the scheduler-owned lease",
-        ));
-    }
-    if now >= expires_at {
-        return Err(StorageError::invalid_input(
-            "terminal ingress observed an expired scheduler-owned lease",
         ));
     }
     Ok(())
@@ -578,8 +572,6 @@ fn validate_message_authority(
         || facts.authority().issued_at() != &message.lease.issued_at
         || accepted_period != &message.lease.expires_at
         || accepted_period.0 > facts.authority().expires_at().0
-        || message.outcome.finished_at.0 >= facts.authority().expires_at().0
-        || message.sent_at.0 > facts.authority().expires_at().0
         || facts.status() != expected_status
         || metadata.codex_thread_id() != message.outcome.codex_thread_id.as_ref()
         || metadata.finished_at_millis() != message_finished_at

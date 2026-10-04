@@ -20,7 +20,7 @@ use crate::execution_registry::{
     accepted_lease_history, load_lease_in_transaction, renew_execution_lease_in_transaction,
 };
 use crate::worker_session_slots::{
-    load_slot_in_transaction, require_running_slot_authority, require_terminal_slot_authority,
+    load_slot_in_transaction, require_retained_slot_authority, require_terminal_slot_authority,
 };
 use crate::{
     ExecutionLeaseReceipt, ExecutionLeaseRenewal, LeaseWriteStatus, SqliteStorage,
@@ -536,12 +536,12 @@ impl<'storage> WorkerOutboundQueue<'storage> {
         Ok(receipt)
     }
 
-    /// Claims a stable authority-bound page for one healthy reconnected Worker.
+    /// Claims a stable authority-bound page for one reconnected Worker.
     /// Claimed-but-unacknowledged rows are returned again with the same bytes.
     ///
     /// # Errors
     ///
-    /// Rejects stale/unhealthy authority, an invalid cursor/page size, corrupt
+    /// Rejects mismatched authority, an invalid cursor/page size, corrupt
     /// retained bytes, and storage failures.
     pub fn claim_page(
         &mut self,
@@ -562,14 +562,7 @@ impl<'storage> WorkerOutboundQueue<'storage> {
             .map_err(|_| WorkerOutboundQueueError::storage())?
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| WorkerOutboundQueueError::storage())?;
-        require_running_slot_authority(
-            &transaction,
-            &authority.slot,
-            &authority.lease_issued_at,
-            &authority.lease_expires_at,
-            observed_at,
-            true,
-        )?;
+        require_retained_slot_authority(&transaction, &authority.slot)?;
         let history = authority_history(&transaction, authority)?;
         let digests = history_digests(&history)?;
         let (after_sequence, snapshot_sequence) =
@@ -705,14 +698,7 @@ impl<'storage> WorkerOutboundQueue<'storage> {
         {
             return Err(WorkerOutboundQueueError::authority());
         }
-        require_running_slot_authority(
-            &transaction,
-            &authority.slot,
-            &authority.lease_issued_at,
-            &authority.lease_expires_at,
-            confirmed_at,
-            true,
-        )?;
+        require_retained_slot_authority(&transaction, &authority.slot)?;
         transaction.execute(
             "INSERT INTO internal_worker_outbound_confirmations
              (message_id,worker_id,worker_instance_id,authority_digest,authority_json,payload_digest,confirmed_at)
@@ -865,14 +851,7 @@ impl<'storage> WorkerOutboundQueue<'storage> {
             secure_checkpoint(self.storage)?;
             return Ok(acknowledgement);
         }
-        require_running_slot_authority(
-            &transaction,
-            &authority.slot,
-            &authority.lease_issued_at,
-            &authority.lease_expires_at,
-            acknowledged_at,
-            true,
-        )?;
+        require_retained_slot_authority(&transaction, &authority.slot)?;
         let Some((stored_authority, payload_digest, state)) = transaction
             .query_row(
                 "SELECT authority_digest, payload_digest, state
@@ -1022,7 +1001,6 @@ fn validate_confirmation(
     if !stored.is_some_and(|(authority, payload)| {
         history.contains_key(&authority) && payload == proof.payload_digest
     }) || proof.confirmed_at.0 < proof.authority.lease_issued_at.0
-        || proof.confirmed_at.0 >= proof.authority.lease_expires_at.0
     {
         return Err(WorkerOutboundQueueError::conflict());
     }
@@ -1063,7 +1041,6 @@ fn validate_enqueue(
         || request.frame_bytes.len() > config.max_frame_bytes
         || digest_bytes(&request.frame_bytes) != request.payload_digest
         || request.sent_at.0 < request.authority.lease_issued_at.0
-        || request.sent_at.0 >= request.authority.lease_expires_at.0
     {
         return Err(WorkerOutboundQueueError::invalid());
     }
@@ -1468,14 +1445,7 @@ fn enqueue_in_transaction(
     {
         return Err(WorkerOutboundQueueError::authority());
     }
-    require_running_slot_authority(
-        connection,
-        &current_authority.slot,
-        &current_authority.lease_issued_at,
-        &current_authority.lease_expires_at,
-        &request.sent_at,
-        false,
-    )?;
+    require_retained_slot_authority(connection, &current_authority.slot)?;
     let digests = history_digests(&history)?;
     let (authority_pending, retained_bytes) = connection
         .query_row(

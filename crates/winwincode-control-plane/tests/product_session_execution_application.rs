@@ -1298,22 +1298,13 @@ fn accepted_terminal_fixture(seed: u64, renewed: bool) -> AcceptedTerminalFixtur
                 .status,
             winwincode_storage::LeaseWriteStatus::Accepted
         );
-        assert!(
-            fixture
-                .accept(
-                    &ExecutionPortMessage::JobOutcomeMessage(outcome.clone()),
-                    expired()
-                )
-                .is_err(),
-            "first-seen expired outcome cannot use old sentAt"
-        );
     }
     let output = fixture
         .accept(
             &ExecutionPortMessage::JobOutcomeMessage(outcome.clone()),
-            at(20),
+            if renewed { expired() } else { at(20) },
         )
-        .expect("first terminal outcome");
+        .expect("first terminal outcome, including delayed delivery after expiry");
     assert_eq!(
         outcome_status(&output),
         JobOutcomeAckMessageStatus::Accepted
@@ -2004,7 +1995,7 @@ fn bound_chat_empty_frame_rejects_foreign_thread_identity() {
 }
 
 #[test]
-fn bound_chat_requires_live_lease_for_new_frame_but_replays_exact_frame_after_expiry() {
+fn bound_chat_accepts_delayed_frames_and_replays_exact_frames_after_expiry() {
     let (mut fixture, first) = prepared_provider_fixture(95);
     let ExecutionPortMessage::ModelChunkMessage(mut chunk) = model_binding_message(first.clone())
     else {
@@ -2028,13 +2019,10 @@ fn bound_chat_requires_live_lease_for_new_frame_but_replays_exact_frame_after_ex
         .expect("exact retained frame after expiry");
     chunk.sequence = ExecutionSequence(3);
     chunk.message_id = ExecutionMessageId(id("xmsg", 95953));
-    assert!(
-        fixture
-            .accept(&ExecutionPortMessage::ModelChunkMessage(chunk), expired())
-            .is_err(),
-        "known exchange cannot authorize a new expired frame"
-    );
-    assert_eq!(assistant_content(&mut fixture), "accepted");
+    fixture
+        .accept(&ExecutionPortMessage::ModelChunkMessage(chunk), expired())
+        .expect("an existing exchange can deliver another retained output frame after expiry");
+    assert_eq!(assistant_content(&mut fixture), "acceptedaccepted");
     let ExecutionPortMessage::ModelChunkMessage(mut changed) = accepted else {
         panic!("chunk");
     };
@@ -2047,7 +2035,7 @@ fn bound_chat_requires_live_lease_for_new_frame_but_replays_exact_frame_after_ex
             .accept(&ExecutionPortMessage::ModelChunkMessage(changed), expired())
             .is_err()
     );
-    assert_eq!(assistant_content(&mut fixture), "accepted");
+    assert_eq!(assistant_content(&mut fixture), "acceptedaccepted");
     fixture.close();
 }
 
@@ -2089,11 +2077,9 @@ fn renewed_chat_lease_accepts_new_frame_with_original_dispatch_stamp() {
         .expect("expired exact frame replay after renewal");
     chunk.sequence = ExecutionSequence(3);
     chunk.message_id = ExecutionMessageId(id("xmsg", 96963));
-    assert!(
-        fixture
-            .accept(&ExecutionPortMessage::ModelChunkMessage(chunk), at(59))
-            .is_err()
-    );
+    fixture
+        .accept(&ExecutionPortMessage::ModelChunkMessage(chunk), at(59))
+        .expect("retained output remains admissible after the renewed deadline");
     fixture.close();
 }
 

@@ -1774,11 +1774,11 @@ fn trusted_server_time_is_checked_only_after_session_binding_receipt_resolution(
     forged.message_id = ExecutionMessageId(canonical_id("xmsg", 20_201));
     let expired_error = control_plane
         .commit_delivery_session_binding(&forged, &authority, &expired_server_time)
-        .expect_err("first-seen message cannot backdate sentAt after expiry");
+        .expect_err("a different binding message still conflicts with the existing phases");
     assert!(
-        expired_error
+        !expired_error
             .to_string()
-            .contains("Server time is outside its active lease")
+            .contains("Server time precedes lease issuance")
     );
 
     forged.message_id = ExecutionMessageId(canonical_id("xmsg", 20_202));
@@ -1792,7 +1792,7 @@ fn trusted_server_time_is_checked_only_after_session_binding_receipt_resolution(
     assert!(
         premature_error
             .to_string()
-            .contains("Server time is outside its active lease")
+            .contains("Server time precedes lease issuance")
     );
 
     let state = control_plane
@@ -2476,20 +2476,14 @@ fn generated_artifact_messages_use_the_exact_durable_job_and_binding_authority()
     let expired = control_plane
         .accept_artifact_open(&scope, &expired_open, &authority)
         .expect("expired Artifact write acknowledgement");
-    assert_eq!(expired.status, LeaseWriteStatus::RejectedExpiredLease);
+    assert_eq!(expired.status, LeaseWriteStatus::Accepted);
     assert_eq!(expired.ack_sequence.0, 0);
-    assert_eq!(
-        expired.error.expect("expired lease error").code,
-        ExecutionPortErrorCode::LeaseExpired
-    );
-    let mut after_expiry = expired_open;
-    after_expiry.message_id = ExecutionMessageId(canonical_id("xmsg", seed + 21));
-    after_expiry.request_id = RequestId(canonical_id("req", seed + 21));
-    after_expiry.sent_at = Instant("2027-01-15T08:00:04.000Z".into());
+    assert!(expired.error.is_none());
+    let after_expiry = expired_open;
     let accepted_after_expiry = control_plane
         .accept_artifact_open(&scope, &after_expiry, &authority)
-        .expect("expired Artifact message must not reserve metadata");
-    assert_eq!(accepted_after_expiry.status, LeaseWriteStatus::Accepted);
+        .expect("late Artifact open replays its receipt");
+    assert_eq!(accepted_after_expiry.status, LeaseWriteStatus::Duplicate);
 
     let mut crossed_open_identities = open.clone();
     crossed_open_identities.request_id = RequestId(canonical_id("req", seed + 21));

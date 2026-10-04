@@ -2018,27 +2018,24 @@ async fn observer_original_response_survives_legal_renewal_and_rejects_rebinding
             .code(),
         JobWorkspaceErrorCode::AuthorityMismatch
     );
-    assert_eq!(
-        runtime
-            .accept_observation_model_chunk(&active, &completed, &active.lease.expires_at)
-            .unwrap_err()
-            .code(),
-        JobWorkspaceErrorCode::AuthorityMismatch,
-        "an expired current lease still rejects responses"
-    );
+    let late = runtime
+        .accept_observation_model_chunk(&active, &completed, &active.lease.expires_at)
+        .expect("exact retained observation after expiry")
+        .expect("observation receipt");
+    assert!(late.completed_progress.is_empty());
+    assert!(late.receipt.is_some());
     let mut cancelled = active.clone();
     cancelled.lifecycle = ActiveJobLifecycle::Cancelling;
-    assert_eq!(
-        runtime
-            .accept_observation_model_chunk(
-                &cancelled,
-                &completed,
-                &Instant("2026-08-28T01:10:03.000Z".into())
-            )
-            .unwrap_err()
-            .code(),
-        JobWorkspaceErrorCode::AuthorityMismatch
-    );
+    let replay = runtime
+        .accept_observation_model_chunk(
+            &cancelled,
+            &completed,
+            &Instant("2026-08-28T01:10:03.000Z".into()),
+        )
+        .expect("completed observation replays during cancellation")
+        .expect("receipt");
+    assert!(replay.completed_progress.is_empty());
+    assert!(replay.receipt.is_some());
 }
 
 #[tokio::test]

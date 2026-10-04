@@ -6520,3 +6520,36 @@ async fn unsuccessful_outcomes_retain_known_usage_without_changing_status() {
         assert_eq!(outcomes[0].outcome.usage, Some(usage));
     }
 }
+
+#[tokio::test]
+async fn same_running_job_accepts_stop_after_lease_expiry() {
+    let port = RecordingPort::default();
+    let codex = FakeCodex::with_threads([thread('A')]);
+    let observed = codex.clone();
+    let mut worker = test_worker(worker_config(1), port, codex);
+    register(&mut worker).await;
+    worker
+        .accept_control(
+            &ExecutionPortMessage::JobDispatchMessage(dispatch('A', product_scope('A'))),
+            now(),
+        )
+        .await
+        .expect("start exact job");
+    let active = worker.active_jobs()[0].clone();
+    worker
+        .accept_control(
+            &ExecutionPortMessage::JobCancelMessage(cancel_for(&active, 'C')),
+            active.lease.expires_at.clone(),
+        )
+        .await
+        .expect("consume cancel");
+    let state = observed.state.lock().unwrap();
+    assert!(state.durable_deliveries.iter().any(|delivery| matches!(&delivery.message, ExecutionPortMessage::JobCancelAckMessage(ack) if ack.status == JobCancelAckMessageStatus::Accepted)));
+    assert!(
+        state
+            .calls
+            .iter()
+            .any(|call| call.starts_with("interrupt:")),
+        "the exact stop reaches Core"
+    );
+}

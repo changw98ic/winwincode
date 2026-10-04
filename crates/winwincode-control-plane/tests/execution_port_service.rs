@@ -657,7 +657,7 @@ fn stale_fencing_token_is_rejected_without_replacing_the_durable_lease() {
 }
 
 #[test]
-fn expired_lease_is_rejected_without_a_registry_write() {
+fn delayed_dispatch_result_is_recorded_after_lease_expiry() {
     let root = temporary_directory("dispatch-expired");
     let mut storage = SqliteStorage::open(&root).expect("storage open");
     let (mut service, dispatch) = setup_service(&mut storage, "2026-08-24T12:10:00.000Z");
@@ -670,14 +670,8 @@ fn expired_lease_is_rejected_without_a_registry_write() {
     let ExecutionPortMessage::JobDispatchResultMessage(response) = response else {
         panic!("dispatch result response variant");
     };
-    assert_eq!(
-        response.status,
-        JobDispatchResultMessageStatus::RejectedExpiredLease
-    );
-    assert_eq!(
-        response.error.as_ref().map(|error| &error.code),
-        Some(&winwincode_execution_port::generated::ExecutionPortErrorCode::LeaseExpired)
-    );
+    assert_eq!(response.status, JobDispatchResultMessageStatus::Accepted);
+    assert_eq!(response.error.as_ref().map(|error| &error.code), None);
 
     drop(service);
     let registry = storage.execution_registry().expect("registry reopen");
@@ -687,10 +681,10 @@ fn expired_lease_is_rejected_without_a_registry_write() {
         .expect("durable lease");
     assert_eq!(lease.expires_at.0, "2026-08-24T12:10:00.000Z");
     assert!(
-        !registry
+        registry
             .has_request("dispatch_result", &dispatch.job.job_id, &result_request_id)
             .expect("dispatch result receipt read"),
-        "expired dispatch result must not create a durable receipt"
+        "delayed dispatch result has a durable receipt"
     );
     drop(registry);
     Box::new(storage).close().expect("storage close");
@@ -698,7 +692,7 @@ fn expired_lease_is_rejected_without_a_registry_write() {
 }
 
 #[test]
-fn a_result_timestamp_at_lease_expiry_is_rejected_even_before_control_plane_clock_expiry() {
+fn dispatch_result_sent_at_is_not_an_execution_deadline() {
     let root = temporary_directory("dispatch-expired-message");
     let mut storage = SqliteStorage::open(&root).expect("storage open");
     let (mut service, dispatch) = setup_service(&mut storage, "2026-08-24T12:00:01.000Z");
@@ -712,14 +706,8 @@ fn a_result_timestamp_at_lease_expiry_is_rejected_even_before_control_plane_cloc
     let ExecutionPortMessage::JobDispatchResultMessage(response) = response else {
         panic!("dispatch result response variant");
     };
-    assert_eq!(
-        response.status,
-        JobDispatchResultMessageStatus::RejectedExpiredLease
-    );
-    assert_eq!(
-        response.error.as_ref().map(|error| &error.code),
-        Some(&winwincode_execution_port::generated::ExecutionPortErrorCode::LeaseExpired)
-    );
+    assert_eq!(response.status, JobDispatchResultMessageStatus::Accepted);
+    assert_eq!(response.error.as_ref().map(|error| &error.code), None);
 
     drop(service);
     let registry = storage.execution_registry().expect("registry reopen");
@@ -733,10 +721,10 @@ fn a_result_timestamp_at_lease_expiry_is_rejected_even_before_control_plane_cloc
         "2026-08-24T12:10:00.000Z"
     );
     assert!(
-        !registry
+        registry
             .has_request("dispatch_result", &dispatch.job.job_id, &result_request_id)
             .expect("dispatch result receipt read"),
-        "expired dispatch result must not create a durable receipt"
+        "delayed dispatch result has a durable receipt"
     );
     drop(registry);
     Box::new(storage).close().expect("storage close");
@@ -2688,7 +2676,7 @@ mod runtime_router_fixture {
     }
 
     #[test]
-    fn runtime_replay_request_rejects_expired_or_foreign_lease_without_a_frame() {
+    fn runtime_replay_request_allows_expiry_and_rejects_foreign_identity() {
         let stale_seed = 204;
         let stale_fixture = runtime_fixture(stale_seed, "replay-request-stale");
         let stale_root = stale_fixture.root.clone();
@@ -2708,12 +2696,12 @@ mod runtime_router_fixture {
             &mut stale_storage,
             Instant("2027-01-15T08:05:00.001Z".into()),
         );
-        let stale_error = stale_service
+        let replay = stale_service
             .build_runtime_replay_request(replay_command(stale_seed, stale_job_id))
-            .expect_err("expired lease must not produce a replay frame");
+            .expect("historical replay survives lease expiry");
         assert!(matches!(
-            stale_error,
-            ExecutionPortServiceError::AuthorityRejected("current execution lease is expired")
+            replay.message(),
+            ExecutionPortMessage::RuntimeReplayRequestMessage(_)
         ));
         drop(stale_service);
         Box::new(stale_storage)

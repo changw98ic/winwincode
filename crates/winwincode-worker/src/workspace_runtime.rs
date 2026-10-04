@@ -2364,12 +2364,11 @@ impl JobWorkspaceRuntime {
                 active,
                 &binding.accepted_revision,
             );
-        if active.lifecycle != ActiveJobLifecycle::Running
+        if (active.lifecycle != ActiveJobLifecycle::Running && !terminal_replay)
             || !same_authority(workspace.provenance(), active)
             || !same_change_batch_identity_lease_authority(&intent.identity, active)
             || !same_observation_model_authority(retained_open, active)
             || now.0 < active.lease.issued_at.0
-            || now.0 >= active.lease.expires_at.0
             || chunk.lease != retained_open.lease
             || chunk.session_identity != retained_open.session_identity
             || chunk.worker_session_id != retained_open.worker_session_id
