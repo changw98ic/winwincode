@@ -2296,8 +2296,8 @@
         "status"
       ],
       "title": "client.command_ack",
-      "description": "Universal idempotent acknowledgement for control-plane-to-client commands that have no dedicated ack message.",
-      "x-direction": "client-to-control-plane",
+      "description": "Durable command result in either direction. Server reports rejected client commands; Device acknowledges server commands without a dedicated result. Transport acknowledgement alone does not imply business success.",
+      "x-direction": "bidirectional",
       "x-authority": "control-ack",
       "x-message-class": "ack"
     },
@@ -3000,7 +3000,7 @@
         "idempotencyKey"
       ],
       "title": "client.credential_rotate",
-      "description": "Requests device credential rotation; the rotation handshake and credential material stay outside this contract.",
+      "description": "Requests device credential rotation. Device durably generates a replacement and proposes only its digest in the authenticated exchange credentialRotation sidecar; Server confirms staging and activates it when the replacement credential proves possession.",
       "x-direction": "control-plane-to-client",
       "x-authority": "control-command",
       "x-message-class": "command"
@@ -3862,6 +3862,23 @@
         "processBootDigest"
       ],
       "description": "Authenticated Device proof of an exact launch process closure; current reporter instance is distinct from the original launch instance."
+    },
+    "DeviceCredentialRotation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "commandMessageId": {
+          "$ref": "#/$defs/ClientControlMessageId"
+        },
+        "credentialDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        }
+      },
+      "required": [
+        "commandMessageId",
+        "credentialDigest"
+      ],
+      "description": "Optional credentialRotation sidecar on authenticated exchange requests and responses. Contains no secret; the response echoes a durably staged request. The first request authenticated with the replacement credential activates it and invalidates the previous credential."
     }
   }
 }

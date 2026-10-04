@@ -1088,12 +1088,13 @@ impl<'a> ProviderGateway<'a> {
         )
     }
 
-    /// Validates a normal Worker stream acknowledgement against the exact
-    /// durable lease and session authority without applying Provider control.
+    /// Validates a normal Worker stream acknowledgement against the original
+    /// durable exchange and session identity without applying Provider control.
     ///
     /// # Errors
     ///
-    /// Rejects expired, foreign, malformed, replay-request, or error acknowledgements.
+    /// Rejects foreign, malformed, replay-request, or error acknowledgements.
+    /// A receipt does not grant execution authority and remains valid after lease expiry.
     pub fn validate_worker_acknowledgement(
         &self,
         acknowledgement: &ModelAckMessage,
@@ -1669,7 +1670,6 @@ fn validate_worker_ack_authority(
     if acknowledgement.schema_version != SchemaVersion::WinwincodeV1
         || acknowledgement.ack_sequence.0 < 0
         || acknowledgement.lease != record.lease
-        || acknowledgement.sent_at.0 >= record.lease.expires_at.0
         || acknowledgement.worker_session_id != record.worker_session_id
         || acknowledgement.session_identity != record.session_identity
     {

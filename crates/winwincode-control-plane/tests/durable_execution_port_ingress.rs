@@ -2170,17 +2170,25 @@ fn renew_ingress_fixture_lease(fixture: &mut Fixture, lease: &ExecutionLeaseStam
 }
 
 #[test]
+fn artifact_original_chunk_survives_accepted_renewal_and_restart() {
+    assert_artifact_chunk_after_renewal("2027-01-15T08:00:04.000Z", 99020);
+}
+
+#[test]
+fn artifact_stream_continues_after_original_expiry_with_its_retained_identity() {
+    assert_artifact_chunk_after_renewal("2027-01-15T08:06:00.000Z", 99022);
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "the real renewal/restart/replay sequence includes identity rejection controls"
 )]
-fn artifact_original_chunk_survives_accepted_renewal_and_restart() {
+fn assert_artifact_chunk_after_renewal(sent_at: &str, seed: u64) {
     use winwincode_domain::ArtifactId;
     use winwincode_execution_port::generated::{
         ArtifactChunkMessage, ArtifactChunkMessageKind, ArtifactDescriptor, ArtifactKind,
         ArtifactOpenMessage, ArtifactOpenMessageKind, EncodedPayload,
     };
-    let seed = 99020;
     let mut fixture = Fixture::open("renewed-artifact", seed);
     let (_, job, lease, _) = install_workrun_dispatch_for_terminal(&mut fixture, seed);
     let binding = workrun_binding(&job, &lease, seed, seed);
@@ -2229,7 +2237,7 @@ fn artifact_original_chunk_survives_accepted_renewal_and_restart() {
             payload_digest: digest,
         },
         schema_version: SchemaVersion::WinwincodeV1,
-        sent_at: Instant("2027-01-15T08:00:04.000Z".into()),
+        sent_at: Instant(sent_at.into()),
         sequence: ExecutionSequence(1),
         session_identity: binding.session_identity,
         snapshot_id: None,
@@ -3244,6 +3252,130 @@ fn replacement_seal_skips_append_and_binds_successor_worker_session() {
             .expect("runs")
             .len(),
         2
+    );
+    fixture.close();
+}
+
+#[test]
+fn renewal_authorizes_runtime_after_the_original_deadline_without_changing_retained_frames() {
+    let seed = 902;
+    let mut fixture = Fixture::open("renewed-product-runtime", seed);
+    let dispatch = install_product_dispatch(&mut fixture, seed);
+    let lease = &dispatch.lease;
+    let renewal = winwincode_storage::ExecutionLeaseRenewal {
+        expires_at: Instant("2027-01-15T08:10:00.000Z".into()),
+        prior_expires_at: lease.expires_at.clone(),
+        sent_at: Instant("2027-01-15T08:04:00.000Z".into()),
+        job_id: lease.job_id.clone(),
+        lease_id: lease.lease_id.clone(),
+        worker_id: lease.worker_id.clone(),
+        worker_instance_id: lease.worker_instance_id.clone(),
+        attempt: 1,
+        fencing_token: lease.fencing_token.clone(),
+        request_id: RequestId(canonical_id("req", seed + 40)),
+        message_id: ExecutionMessageId(canonical_id("xmsg", seed + 40)),
+    };
+    let receipt = fixture
+        .storage
+        .execution_registry()
+        .expect("registry")
+        .renew_execution_lease(&renewal)
+        .expect("renew");
+    assert_eq!(
+        receipt.status,
+        winwincode_storage::LeaseWriteStatus::Accepted
+    );
+    let identity = exact_session_identity(&dispatch);
+    let mut runtime = RuntimeEventMessage {
+        codex_thread_id: identity.codex_thread_id.clone(),
+        worker_session_id: identity.worker_session_id.clone(),
+        session_identity: identity,
+        lease: lease.clone(),
+        kind: RuntimeEventMessageKind::RuntimeEvent,
+        message_id: ExecutionMessageId(canonical_id("xmsg", seed + 41)),
+        schema_version: SchemaVersion::WinwincodeV1,
+        sent_at: Instant("2027-01-15T08:06:00.000Z".into()),
+        event: ExecutionEventRecord {
+            category: ExecutionEventCategory::Lifecycle,
+            event_id: ExecutionEventId(canonical_id("xevt", seed + 41)),
+            occurred_at: Instant("2027-01-15T08:06:00.000Z".into()),
+            payload: None,
+            sequence: ExecutionSequence(1),
+            summary: "Stream opened before renewal is still running".into(),
+        },
+    };
+    for (sequence, expiry) in [(1, lease.expires_at.clone()), (2, renewal.expires_at)] {
+        runtime.lease.expires_at = expiry;
+        runtime.event.sequence = ExecutionSequence(sequence);
+        runtime.message_id = ExecutionMessageId(canonical_id(
+            "xmsg",
+            seed + 40 + u64::try_from(sequence).expect("positive sequence"),
+        ));
+        runtime.event.event_id = ExecutionEventId(canonical_id(
+            "xevt",
+            seed + 40 + u64::try_from(sequence).expect("positive sequence"),
+        ));
+        let result = fixture
+            .accept(
+                &ExecutionPortMessage::RuntimeEventMessage(runtime.clone()),
+                runtime.sent_at.clone(),
+            )
+            .expect("runtime after original expiry");
+        let [ExecutionPortMessage::RuntimeAckMessage(ack)] = result.as_slice() else {
+            panic!("runtime ack")
+        };
+        assert_eq!(ack.status, LeaseWriteStatus::Accepted, "{:?}", ack.error);
+    }
+    let replay = fixture
+        .accept(
+            &ExecutionPortMessage::RuntimeEventMessage(runtime.clone()),
+            Instant("2027-01-15T08:11:00.000Z".into()),
+        )
+        .expect("immutable replay after expiry");
+    let [ExecutionPortMessage::RuntimeAckMessage(ack)] = replay.as_slice() else {
+        panic!("runtime replay ack")
+    };
+    assert_eq!(ack.status, LeaseWriteStatus::Duplicate);
+    fixture.close();
+}
+
+#[test]
+fn renewed_terminal_outcome_uses_current_authority_without_rewriting_its_lease_stamp() {
+    let seed = 99024;
+    let mut fixture = Fixture::open("renewed-terminal-time", seed);
+    let (_, job, lease, session) = install_workrun_dispatch_for_terminal(&mut fixture, seed);
+    let binding = workrun_binding(&job, &lease, seed, seed);
+    fixture
+        .accept(
+            &ExecutionPortMessage::SessionBindingMessage(binding),
+            Instant("2027-01-15T08:00:02.100Z".into()),
+        )
+        .expect("binding");
+    prepare_workrun_slot(&mut fixture, &job, &lease, &session, seed);
+    renew_ingress_fixture_lease(&mut fixture, &lease, seed);
+    let mut outcome = terminal_workrun_outcome(&job, lease, &session, seed);
+    outcome.outcome.finished_at = Instant("2027-01-15T08:06:00.000Z".into());
+    outcome.sent_at = Instant("2027-01-15T08:06:00.100Z".into());
+    let response = fixture
+        .accept(
+            &ExecutionPortMessage::JobOutcomeMessage(outcome.clone()),
+            outcome.sent_at.clone(),
+        )
+        .expect("outcome under the current renewed lease");
+    assert_eq!(
+        outcome_ack_status(response),
+        winwincode_execution_port::generated::JobOutcomeAckMessageStatus::Accepted
+    );
+    let mut fixture = fixture.restart();
+    let replay = fixture
+        .accept(
+            &ExecutionPortMessage::JobOutcomeMessage(outcome),
+            Instant("2027-01-15T08:11:00.000Z".into()),
+        )
+        .expect("exact terminal replay after expiry");
+    assert_eq!(
+        outcome_ack_status(replay),
+        winwincode_execution_port::generated::JobOutcomeAckMessageStatus::Duplicate
     );
     fixture.close();
 }

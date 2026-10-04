@@ -383,7 +383,7 @@ fn normal_ack(message: &ModelOpenMessage, seed: u64, sequence: i64) -> ModelAckM
     acknowledgement
 }
 
-fn assert_current_and_expired_ack_authority(
+fn assert_ack_identity_survives_lease_expiry(
     gateway: &ProviderGateway<'_>,
     message: &ModelOpenMessage,
 ) {
@@ -392,10 +392,14 @@ fn assert_current_and_expired_ack_authority(
         .expect("current Worker ack authority");
     let mut expired = normal_ack(message, 143, 1);
     expired.sent_at = expired.lease.expires_at.clone();
+    gateway
+        .validate_worker_acknowledgement(&expired)
+        .expect("acknowledging the original stream grants no new execution authority");
+    expired.lease.fencing_token = FencingToken("999".to_owned());
     assert_eq!(
         gateway
             .validate_worker_acknowledgement(&expired)
-            .expect_err("expired Worker ack is denied")
+            .expect_err("a different execution cannot acknowledge this stream")
             .kind(),
         ProviderGatewayErrorKind::IdentityDenied
     );
@@ -2088,7 +2092,7 @@ fn restored_gateway_forces_the_durable_pool_read_decision_to_the_adapter() {
     restarted
         .restore_durable_exchange(&durable)
         .expect("restore durable exchange");
-    assert_current_and_expired_ack_authority(&restarted, &message);
+    assert_ack_identity_survives_lease_expiry(&restarted, &message);
     assert!(
         !restarted
             .set_provider_read_paused(&message.model_exchange_id, false)

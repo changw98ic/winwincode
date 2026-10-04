@@ -56,7 +56,6 @@ use winwincode_client_port::domain::ClientOccupancyReleaseMode;
 use winwincode_client_port::domain::ClientPlatformTarget;
 use winwincode_client_port::domain::WorkerLaunchAckStatus;
 use winwincode_client_port::messages::CLIENT_CONTROL_PORT_SCHEMA_VERSION;
-use winwincode_client_port::messages::ClientToServerEnvelope;
 use winwincode_client_port::messages::ClientToServerMessage;
 use winwincode_client_port::messages::ClientWorkerLaunchAckPayload;
 use winwincode_client_port::messages::CommandContext;
@@ -72,7 +71,6 @@ use winwincode_device_client::{
     DaemonConfig, DeviceDaemon, DeviceIdentitySeed, DeviceStore, HttpExchangeTransport,
     SessionSupervisor, SupervisorConfig, TickOutcome, WORKER_STATE_EXITED, WORKER_STATE_RUNNING,
     WorkerLaunchDirectories, WorkerLaunchMaterialSource, ensure_device_identity,
-    load_device_identity,
 };
 use winwincode_domain::Instant;
 use winwincode_domain::OrganizationId;
@@ -252,35 +250,6 @@ async fn http_request(address: std::net::SocketAddr, request: &str) -> String {
         .await
         .expect("read response");
     String::from_utf8(response).expect("HTTP response")
-}
-
-async fn post_exchange(
-    address: std::net::SocketAddr,
-    body: &str,
-    credential: Option<&str>,
-) -> (String, Option<Value>) {
-    let mut stream = TcpStream::connect(address).await.expect("connect server");
-    let authorization = credential
-        .map(|value| format!("Authorization: Bearer {value}\r\n"))
-        .unwrap_or_default();
-    let request = format!(
-        "POST {EXCHANGE_ENDPOINT_PATH} HTTP/1.1\r\nHost: control.example\r\n{authorization}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    stream
-        .write_all(request.as_bytes())
-        .await
-        .expect("write request");
-    let mut response = Vec::new();
-    stream
-        .read_to_end(&mut response)
-        .await
-        .expect("read response");
-    let response = String::from_utf8(response).expect("HTTP response");
-    let status = response.lines().next().expect("status line").to_owned();
-    let body = response.split_once("\r\n\r\n").map(|(_, body)| body);
-    let parsed = body.and_then(|body| serde_json::from_str(body).ok());
-    (status, parsed)
 }
 
 fn bearer_post(path: &str, body: &str, proof: &str) -> String {
@@ -463,16 +432,6 @@ fn start_daemon(endpoint: &str, device_root: &Path, stamp: &str) -> DeviceDaemon
         &identity,
     )
     .expect("daemon start")
-}
-
-/// The device credential material of the daemon (for the one hand-built
-/// uplink frame the idempotency phase posts directly).
-fn device_credential(device_root: &Path) -> String {
-    let store = DeviceStore::open(device_root).expect("device store connection");
-    let identity = load_device_identity(&store)
-        .expect("identity read")
-        .expect("enrolled identity");
-    identity.credential().material_hex().clone()
 }
 
 /// Drives the daemon loop until `predicate` holds, sleeping only the
@@ -668,35 +627,6 @@ fn audit_actions(data_directory: &Path, grant_id: &str) -> Vec<String> {
         .into_iter()
         .map(|entry| entry.action.as_str().to_owned())
         .collect()
-}
-
-fn next_client_sequence(data_directory: &Path, node: &str) -> u64 {
-    let mut storage = SqliteStorage::open(data_directory).expect("storage");
-    let mut registry = ClientRegistryService::new(&mut storage);
-    registry
-        .exchange_cursors(node)
-        .expect("cursors")
-        .expect("cursors exist")
-        .client_to_server_ack_sequence
-        + 1
-}
-
-fn downlink_ack_cursor(data_directory: &Path, node: &str) -> u64 {
-    let mut storage = SqliteStorage::open(data_directory).expect("storage");
-    let cursors = {
-        let mut registry = ClientRegistryService::new(&mut storage);
-        registry
-            .exchange_cursors(node)
-            .expect("cursors")
-            .expect("cursors exist")
-            .server_to_client_ack_sequence
-    };
-    let high_water = storage
-        .client_downlink_outbox()
-        .expect("outbox")
-        .high_water(node)
-        .expect("high water");
-    cursors.max(high_water)
 }
 
 /// Publishes one connect code digest the way the Device Client would.
@@ -926,7 +856,6 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
     daemon.set_worker_launch_material_source(material.clone());
     daemon.set_worker_capacity_source(Arc::new(supervisor.clone()));
     daemon.set_lease_worker_controller(Arc::new(supervisor.clone()));
-    let daemon_credential = device_credential(&device_root);
 
     consume_code_as(
         &data_directory,
@@ -1118,17 +1047,10 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
 
     // ---- Phase 4: a replayed accepted ack is an idempotent no-op -----------
     let revision_before = grant_one.revision;
-    let duplicate_ack = ClientToServerEnvelope {
-        schema_version: SCHEMA_VERSION.to_owned(),
-        message_id: format!(
-            "msg_duplicate_ack_{}",
-            next_client_sequence(&data_directory, &node_id)
-        ),
-        client_node_id: node_id.clone(),
-        client_instance_id: device_instance.clone(),
-        sequence: next_client_sequence(&data_directory, &node_id),
-        occurred_at: "2026-09-04T12:05:00.000Z".to_owned(),
-        message: ClientToServerMessage::WorkerLaunchAck(Box::new(ClientWorkerLaunchAckPayload {
+    // A replay is another Device outbox frame; allocating its sequence through
+    // the daemon keeps the single persistent stream authoritative.
+    let duplicate_ack =
+        ClientToServerMessage::WorkerLaunchAck(Box::new(ClientWorkerLaunchAckPayload {
             process_closure: None,
             occupancy: OccupancyCommandContext {
                 command: CommandContext {
@@ -1144,20 +1066,15 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
             worker_instance_id: worker_instance_one.clone(),
             status: WorkerLaunchAckStatus::Accepted,
             error: None,
-        })),
-    };
-    let (status, _) = post_exchange(
-        address,
-        &json!({
-            "schemaVersion": SCHEMA_VERSION,
-            "frames": [serde_json::to_value(&duplicate_ack).expect("ack frame")],
-            "ackSequence": downlink_ack_cursor(&data_directory, &node_id),
-        })
-        .to_string(),
-        Some(&daemon_credential),
-    )
-    .await;
-    assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+        }));
+    daemon
+        .enqueue(duplicate_ack)
+        .expect("enqueue replayed launch acknowledgement");
+    drive_until(
+        &mut daemon,
+        "the duplicate acknowledgement to settle",
+        settled,
+    );
     let grant_after = launch_grant(&data_directory, &grant_one_id);
     assert_eq!(grant_after.state, WorkerLaunchGrantState::Consumed);
     assert_eq!(

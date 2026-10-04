@@ -660,7 +660,7 @@ impl ClientOccupancyApplication {
                 continue;
             }
             if occupancy
-                .mark_recovery_pending(&lease.occupancy_lease_id, &deadline)
+                .mark_recovery_pending(&lease.occupancy_lease_id, &deadline, now)
                 .is_ok()
             {
                 leases_pending_recovery.push(lease.occupancy_lease_id);

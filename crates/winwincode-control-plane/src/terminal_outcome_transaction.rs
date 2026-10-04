@@ -535,12 +535,7 @@ fn validate_message_shape(message: &JobOutcomeMessage) -> Result<(), StorageErro
     let expires_at = instant_millis(&message.lease.expires_at)?;
     let finished_at = instant_millis(&message.outcome.finished_at)?;
     let sent_at = instant_millis(&message.sent_at)?;
-    if issued_at >= expires_at
-        || finished_at < issued_at
-        || finished_at >= expires_at
-        || sent_at < finished_at
-        || sent_at > expires_at
-    {
+    if issued_at >= expires_at || finished_at < issued_at || sent_at < finished_at {
         return Err(StorageError::invalid_input(
             "job.outcome time is outside its active lease",
         ));
@@ -583,6 +578,8 @@ fn validate_message_authority(
         || facts.authority().issued_at() != &message.lease.issued_at
         || accepted_period != &message.lease.expires_at
         || accepted_period.0 > facts.authority().expires_at().0
+        || message.outcome.finished_at.0 >= facts.authority().expires_at().0
+        || message.sent_at.0 > facts.authority().expires_at().0
         || facts.status() != expected_status
         || metadata.codex_thread_id() != message.outcome.codex_thread_id.as_ref()
         || metadata.finished_at_millis() != message_finished_at

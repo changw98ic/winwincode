@@ -299,11 +299,12 @@ impl<'storage> ClientOccupancyService<'storage> {
         &mut self,
         occupancy_lease_id: &str,
         recovery_deadline_at: &Instant,
+        now: &Instant,
     ) -> Result<OccupancyLeaseRecord, ClientOccupancyServiceError> {
         Ok(self
             .storage
             .client_occupancy_ledger()?
-            .mark_recovery_pending(occupancy_lease_id, recovery_deadline_at)?)
+            .mark_recovery_pending(occupancy_lease_id, recovery_deadline_at, now)?)
     }
 
     /// Applies an accepted `client.worker.reconcile` outcome (plan 12.5,

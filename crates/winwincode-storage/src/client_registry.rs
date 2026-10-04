@@ -58,6 +58,30 @@ CREATE TABLE IF NOT EXISTS client_exchange_cursors (
         CHECK (server_to_client_ack_sequence >= 0),
     FOREIGN KEY (client_node_id) REFERENCES client_nodes(client_node_id) ON DELETE RESTRICT
 );
+CREATE TABLE IF NOT EXISTS client_exchange_frames (
+    client_node_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    message_id TEXT NOT NULL,
+    payload_digest TEXT NOT NULL,
+    completed INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (client_node_id, sequence),
+    UNIQUE (client_node_id, message_id)
+);
+CREATE TABLE IF NOT EXISTS client_exchange_commands (
+    client_node_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    payload_digest TEXT NOT NULL,
+    completed INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (client_node_id, idempotency_key)
+);
+CREATE TABLE IF NOT EXISTS client_credential_rotations (
+    client_node_id TEXT NOT NULL,
+    command_message_id TEXT NOT NULL,
+    base_digest TEXT NOT NULL,
+    credential_digest TEXT NOT NULL,
+    activated INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (client_node_id, command_message_id)
+);
 ";
 
 /// Machine-level presence of one `ClientNode` (plan 4.1, contract 1).
@@ -411,6 +435,216 @@ impl SqliteStorage {
 }
 
 impl<'storage> ClientNodeRegistry<'storage> {
+    /// Returns the exact digest proposal retained for a rotation command.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an unavailable store or corrupt proposal.
+    pub fn credential_rotation_digest(
+        &self,
+        node: &str,
+        command_id: &str,
+    ) -> Result<Option<String>, ClientRegistryError> {
+        self.connection()?.query_row("SELECT credential_digest FROM client_credential_rotations WHERE client_node_id = ?1 AND command_message_id = ?2",
+            params![node, command_id], |row| row.get(0)).optional().map_err(|sql| sql_error(&sql))
+    }
+
+    /// Stages only a digest; the old credential remains valid until proof of
+    /// possession of the replacement arrives. Replays cannot change the digest.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an invalid identity, conflicting proposal, or storage failure.
+    pub fn stage_credential_rotation(
+        &mut self,
+        node: &str,
+        command_id: &str,
+        digest: &str,
+    ) -> Result<(), ClientRegistryError> {
+        validate_client_node_id(node)?;
+        validate_sha256_digest(digest)?;
+        let tx = self.transaction()?;
+        let prior: Option<String> = tx.query_row("SELECT credential_digest FROM client_credential_rotations WHERE client_node_id = ?1 AND command_message_id = ?2", params![node, command_id], |row| row.get(0)).optional().map_err(|sql| sql_error(&sql))?;
+        if let Some(prior) = prior {
+            if prior != digest {
+                return Err(error(
+                    ClientRegistryErrorKind::IdentityConflict,
+                    "credential rotation digest conflict",
+                ));
+            }
+        } else {
+            let pending: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM client_credential_rotations WHERE client_node_id = ?1 AND activated = 0)", [node], |row| row.get(0)).map_err(|sql| sql_error(&sql))?;
+            if pending {
+                return Err(error(
+                    ClientRegistryErrorKind::IdentityConflict,
+                    "credential rotation already pending",
+                ));
+            }
+            let inserted = tx.execute("INSERT INTO client_credential_rotations (client_node_id, command_message_id, base_digest, credential_digest) SELECT client_node_id, ?2, device_credential_digest, ?3 FROM client_nodes WHERE client_node_id = ?1", params![node, command_id, digest]).map_err(|sql| sql_error(&sql))?;
+            if inserted != 1 {
+                return Err(unknown_client_node());
+            }
+        }
+        tx.commit().map_err(|sql| sql_error(&sql))
+    }
+
+    /// Activates a staged digest only after an authenticated exchange proves
+    /// possession. This atomically invalidates the previous credential.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an invalid identity, corrupt proposal, or storage failure.
+    pub fn activate_credential_rotation(
+        &mut self,
+        node: &str,
+        digest: &str,
+    ) -> Result<bool, ClientRegistryError> {
+        validate_client_node_id(node)?;
+        validate_sha256_digest(digest)?;
+        let tx = self.transaction()?;
+        let changed = tx.execute("UPDATE client_nodes SET device_credential_digest = ?2, revision = revision + 1
+            WHERE client_node_id = ?1 AND presence_state != 'revoked' AND EXISTS (
+                SELECT 1 FROM client_credential_rotations r WHERE r.client_node_id = ?1
+                AND r.activated = 0 AND r.credential_digest = ?2 AND r.base_digest = client_nodes.device_credential_digest)", params![node, digest]).map_err(|sql| sql_error(&sql))?;
+        if changed == 1 {
+            tx.execute("UPDATE client_credential_rotations SET activated = 1 WHERE client_node_id = ?1 AND credential_digest = ?2", params![node, digest]).map_err(|sql| sql_error(&sql))?;
+        }
+        tx.commit().map_err(|sql| sql_error(&sql))?;
+        Ok(changed == 1)
+    }
+    /// Binds a received frame and command to immutable bytes before applying
+    /// effects. A pending reservation is retried after a crash; a completed
+    /// command is replayed without applying its effects again.
+    ///
+    /// # Errors
+    /// Rejects reused identities with different bytes or unavailable storage.
+    pub fn reserve_exchange_frame(
+        &mut self,
+        node: &str,
+        sequence: u64,
+        message_id: &str,
+        digest: &str,
+        command_key: Option<&str>,
+    ) -> Result<bool, ClientRegistryError> {
+        validate_client_node_id(node)?;
+        validate_sequence(sequence, "received sequence")?;
+        let tx = self.transaction()?;
+        tx.execute(
+            "INSERT OR IGNORE INTO client_exchange_frames
+             (client_node_id, sequence, message_id, payload_digest) VALUES (?1, ?2, ?3, ?4)",
+            params![node, sql_integer(sequence)?, message_id, digest],
+        )
+        .map_err(|sql| sql_error(&sql))?;
+        let stored: Option<(String, String, bool)> = tx
+            .query_row(
+                "SELECT message_id, payload_digest, completed FROM client_exchange_frames
+             WHERE client_node_id = ?1 AND sequence = ?2",
+                params![node, sql_integer(sequence)?],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(|sql| sql_error(&sql))?;
+        let Some((stored_id, stored_digest, mut completed)) = stored else {
+            return Err(error(
+                ClientRegistryErrorKind::IdentityConflict,
+                "exchange message identity conflict",
+            ));
+        };
+        if stored_id != message_id || stored_digest != digest {
+            return Err(error(
+                ClientRegistryErrorKind::IdentityConflict,
+                "exchange frame payload conflict",
+            ));
+        }
+        if let Some(key) = command_key {
+            tx.execute(
+                "INSERT OR IGNORE INTO client_exchange_commands
+                 (client_node_id, idempotency_key, payload_digest) VALUES (?1, ?2, ?3)",
+                params![node, key, digest],
+            )
+            .map_err(|sql| sql_error(&sql))?;
+            let (prior, settled): (String, bool) = tx
+                .query_row(
+                    "SELECT payload_digest, completed FROM client_exchange_commands
+                 WHERE client_node_id = ?1 AND idempotency_key = ?2",
+                    params![node, key],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(|sql| sql_error(&sql))?;
+            if prior != digest {
+                return Err(error(
+                    ClientRegistryErrorKind::IdentityConflict,
+                    "exchange idempotency conflict",
+                ));
+            }
+            completed |= settled;
+        }
+        tx.commit().map_err(|sql| sql_error(&sql))?;
+        Ok(completed)
+    }
+
+    /// Atomically records completion and its cumulative acknowledgement.
+    ///
+    /// # Errors
+    /// Rejects an unavailable store or an unreserved frame.
+    pub fn complete_exchange_frame(
+        &mut self,
+        node: &str,
+        sequence: u64,
+        command_key: Option<&str>,
+    ) -> Result<(), ClientRegistryError> {
+        self.complete_exchange_frame_with_reply(node, sequence, command_key, None)
+    }
+
+    /// Commits a rejected command's durable reply with completion and ACK, so
+    /// a crash can never acknowledge a rejection whose result was lost.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an unreserved frame, conflicting downlink sequence, or storage failure.
+    pub fn complete_exchange_frame_with_reply(
+        &mut self,
+        node: &str,
+        sequence: u64,
+        command_key: Option<&str>,
+        reply: Option<(&crate::ClientDownlinkAppend, &Instant)>,
+    ) -> Result<(), ClientRegistryError> {
+        let tx = self.transaction()?;
+        if let Some((reply, now)) = reply {
+            let next: i64 = tx.query_row("SELECT MAX(COALESCE((SELECT MAX(sequence) FROM client_downlink_frames WHERE client_node_id = ?1), 0), server_to_client_ack_sequence) + 1 FROM client_exchange_cursors WHERE client_node_id = ?1", [node], |row| row.get(0)).map_err(|sql| sql_error(&sql))?;
+            if reply.client_node_id() != node || sql_integer(reply.sequence())? != next {
+                return Err(error(
+                    ClientRegistryErrorKind::IdentityConflict,
+                    "downlink reply sequence changed",
+                ));
+            }
+            tx.execute("INSERT INTO client_downlink_frames (client_node_id, sequence, message_id, frame, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![node, next, reply.message_id(), reply.frame(), now.0]).map_err(|sql| sql_error(&sql))?;
+        }
+        let changed = tx.execute(
+            "UPDATE client_exchange_frames SET completed = 1 WHERE client_node_id = ?1 AND sequence = ?2",
+            params![node, sql_integer(sequence)?],
+        ).map_err(|sql| sql_error(&sql))?;
+        if changed != 1 {
+            return Err(error(
+                ClientRegistryErrorKind::IdentityConflict,
+                "exchange frame is not reserved",
+            ));
+        }
+        if let Some(key) = command_key {
+            tx.execute(
+                "UPDATE client_exchange_commands SET completed = 1 WHERE client_node_id = ?1 AND idempotency_key = ?2",
+                params![node, key],
+            ).map_err(|sql| sql_error(&sql))?;
+        }
+        tx.execute(
+            "UPDATE client_exchange_cursors SET client_to_server_ack_sequence = MAX(client_to_server_ack_sequence, ?2)
+             WHERE client_node_id = ?1",
+            params![node, sql_integer(sequence)?],
+        ).map_err(|sql| sql_error(&sql))?;
+        tx.commit().map_err(|sql| sql_error(&sql))
+    }
+
     fn new(storage: &'storage mut SqliteStorage) -> Result<Self, ClientRegistryError> {
         let connection = storage
             .connection()
@@ -1122,6 +1356,38 @@ fn validate_schema(connection: &rusqlite::Connection) -> Result<(), ClientRegist
             "client_node_id",
             "client_to_server_ack_sequence",
             "server_to_client_ack_sequence",
+        ],
+    )?;
+    validate_columns(
+        connection,
+        "client_exchange_frames",
+        &[
+            "client_node_id",
+            "sequence",
+            "message_id",
+            "payload_digest",
+            "completed",
+        ],
+    )?;
+    validate_columns(
+        connection,
+        "client_exchange_commands",
+        &[
+            "client_node_id",
+            "idempotency_key",
+            "payload_digest",
+            "completed",
+        ],
+    )?;
+    validate_columns(
+        connection,
+        "client_credential_rotations",
+        &[
+            "client_node_id",
+            "command_message_id",
+            "base_digest",
+            "credential_digest",
+            "activated",
         ],
     )
 }

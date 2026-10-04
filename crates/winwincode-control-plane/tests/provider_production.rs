@@ -1091,6 +1091,73 @@ fn durable_identity_rejects_stale_fence_and_foreign_session() {
 }
 
 #[test]
+fn durable_identity_uses_renewed_authority_for_original_model_stream_identity() {
+    let root = TestDirectory::new("renewed-identity");
+    let mut message = setup(&root);
+    let mut storage = SqliteStorage::open(root.data()).expect("open storage");
+    let renewal = winwincode_storage::ExecutionLeaseRenewal {
+        expires_at: at("2030-01-01T00:10:00.000Z"),
+        prior_expires_at: message.lease.expires_at.clone(),
+        fencing_token: message.lease.fencing_token.clone(),
+        job_id: message.lease.job_id.clone(),
+        lease_id: message.lease.lease_id.clone(),
+        message_id: ExecutionMessageId(id("xmsg", 900)),
+        request_id: RequestId(id("req", 900)),
+        sent_at: at("2030-01-01T00:04:00.000Z"),
+        worker_id: message.lease.worker_id.clone(),
+        worker_instance_id: message.lease.worker_instance_id.clone(),
+        attempt: u64::try_from(message.lease.attempt).expect("positive attempt"),
+    };
+    assert_eq!(
+        storage
+            .execution_registry()
+            .expect("registry")
+            .renew_execution_lease(&renewal)
+            .expect("renew lease")
+            .status,
+        StorageLeaseWriteStatus::Accepted
+    );
+    drop(storage);
+    message.sent_at = at("2030-01-01T00:06:00.000Z");
+    let identity = DurableProviderGatewayIdentitySource::open(root.data())
+        .expect("reopen durable identity source");
+    identity
+        .authorize(&message)
+        .expect("original model identity authorized beyond its original lease deadline");
+    let mut application = application(&root);
+    let opened = opened(
+        application
+            .accept_local(&open_frame(&message))
+            .expect("renewed model request passes admission and retry planning"),
+    );
+    let batch = application
+        .complete_loopback(&opened, &at("2030-01-01T00:06:01.000Z"))
+        .expect("model stream completes beyond the original deadline");
+    let mut ack = final_ack(
+        &message,
+        &batch.chunks.last().expect("final chunk").sequence,
+    );
+    ack.sent_at = at("2030-01-01T00:11:00.000Z");
+    let frame = TypedFrame::new(
+        FrameDirection::ControlPlaneToWorker,
+        ExecutionPortMessage::ModelAckMessage(ack),
+    )
+    .expect("typed model acknowledgement");
+    application
+        .accept_local(&frame)
+        .expect("original stream receipt remains valid after the current lease expires");
+    let mut invalid = message.clone();
+    invalid.lease.expires_at = at("2030-01-01T00:07:00.000Z");
+    assert!(identity.authorize(&invalid).is_err());
+    invalid = message.clone();
+    invalid.lease.fencing_token = FencingToken("0".to_owned());
+    assert!(identity.authorize(&invalid).is_err());
+    invalid = message;
+    invalid.sent_at = renewal.expires_at;
+    assert!(identity.authorize(&invalid).is_err());
+}
+
+#[test]
 fn external_https_sse_completion_and_credential_leak_share_durable_terminal_path() {
     const EXTERNAL_PROVIDER: &str = "winwincode-https-fixture";
     const EXTERNAL_MODEL: &str = "https-fixture-model";

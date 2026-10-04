@@ -2488,10 +2488,19 @@ mod runtime_router_fixture {
 
     #[test]
     fn retained_action_request_survives_renewal_and_original_deadline() {
-        let seed = 208;
+        assert_action_request_after_renewal(208, "2027-01-15T08:00:01.100Z");
+    }
+
+    #[test]
+    fn action_request_after_original_expiry_uses_current_renewed_authority() {
+        assert_action_request_after_renewal(91204, "2027-01-15T08:06:00.000Z");
+    }
+
+    fn assert_action_request_after_renewal(seed: u64, sent_at: &str) {
         let fixture = runtime_fixture(seed, "action-enforcement-renewal");
         let root = fixture.root.clone();
-        let request = action_request(&fixture, seed);
+        let mut request = action_request(&fixture, seed);
+        request.sent_at = Instant(sent_at.to_owned());
         fixture.control_plane.shutdown().expect("shutdown fixture");
         let issuer = ActionEnforcementIssuer::new(
             ActionEnforcementSigningKey::from_bytes([11_u8; 32]).expect("signing key"),
@@ -2897,4 +2906,50 @@ mod runtime_router_fixture {
             Ok(())
         }
     }
+}
+
+#[test]
+fn capabilities_update_preserves_scope_and_replays_after_restart() {
+    use winwincode_execution_port::generated::WorkerCapabilitiesMessage;
+    let root = temporary_directory("capabilities-update");
+    let mut storage = SqliteStorage::open(&root).expect("storage");
+    let register: WorkerRegisterMessage = fixture_message("worker.register");
+    let mut update: WorkerCapabilitiesMessage = fixture_message("worker.capabilities");
+    update.capabilities.max_concurrent_jobs = 7;
+    let mut service = ExecutionPortService::new(&mut storage, update.sent_at.clone());
+    service.register_worker(&register).expect("register");
+    service.update_capabilities(&update).expect("update");
+    drop(service);
+    let worker = storage
+        .execution_registry()
+        .expect("registry")
+        .load_worker(&register.worker_id)
+        .expect("worker")
+        .expect("registered");
+    assert_eq!(worker.max_slots, 7);
+    let scope = worker.management_scope;
+    drop(storage);
+    let mut storage = SqliteStorage::open(&root).expect("restart");
+    let mut service = ExecutionPortService::new(&mut storage, update.sent_at.clone());
+    service.update_capabilities(&update).expect("exact replay");
+    update.capabilities.max_concurrent_jobs = 8;
+    assert!(
+        service.update_capabilities(&update).is_err(),
+        "changed request must fail"
+    );
+    update.request_id.0 = "req_AAAAAAAAAAAAAAAAAAAAAAAAAA".into();
+    update.worker_instance_id.0 = "wki_AAAAAAAAAAAAAAAAAAAAAAAAAA".into();
+    assert!(
+        service.update_capabilities(&update).is_err(),
+        "foreign instance must fail"
+    );
+    drop(service);
+    let worker = storage
+        .execution_registry()
+        .expect("registry")
+        .load_worker(&register.worker_id)
+        .expect("worker")
+        .expect("registered");
+    assert_eq!(worker.max_slots, 7);
+    assert_eq!(worker.management_scope, scope);
 }

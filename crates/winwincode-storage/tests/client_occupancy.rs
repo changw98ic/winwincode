@@ -568,7 +568,7 @@ fn fencing_tokens_strictly_increase_and_recovery_never_mints() {
         let mut ledger = storage.client_occupancy_ledger().expect("ledger");
         let deadline = instant(T4);
         let record = ledger
-            .mark_recovery_pending(record.occupancy_lease_id.as_str(), &deadline)
+            .mark_recovery_pending(record.occupancy_lease_id.as_str(), &deadline, &instant(T2))
             .expect("recovery");
         assert_eq!(record.fencing_token, 1);
         let resumed = ledger
@@ -642,14 +642,18 @@ fn recovery_pending_blocks_preemption_until_reconciliation() {
         let mut ledger = storage.client_occupancy_ledger().expect("ledger");
         let deadline = instant(T4);
         let pending = ledger
-            .mark_recovery_pending(record.occupancy_lease_id.as_str(), &deadline)
+            .mark_recovery_pending(record.occupancy_lease_id.as_str(), &deadline, &instant(T2))
             .expect("mark recovery");
         assert_eq!(pending.state, OccupancyLeaseState::RecoveryPending);
         assert_eq!(pending.recovery_deadline_at, Some(instant(T4)));
         assert_eq!(pending.fencing_token, record.fencing_token);
         // Replay marking is an idempotent no-op.
         let replay = ledger
-            .mark_recovery_pending(record.occupancy_lease_id.as_str(), &instant(T3))
+            .mark_recovery_pending(
+                record.occupancy_lease_id.as_str(),
+                &instant(T3),
+                &instant(T2),
+            )
             .expect("mark replay");
         assert_eq!(replay.revision, pending.revision);
         assert_eq!(replay.recovery_deadline_at, Some(instant(T4)));
@@ -704,7 +708,11 @@ fn recovery_pending_blocks_preemption_until_reconciliation() {
     {
         let mut ledger = storage.client_occupancy_ledger().expect("ledger");
         let pending = ledger
-            .mark_recovery_pending(resumed.occupancy_lease_id.as_str(), &instant(T4))
+            .mark_recovery_pending(
+                resumed.occupancy_lease_id.as_str(),
+                &instant(T4),
+                &instant(T2),
+            )
             .expect("mark recovery");
         expect_kind(
             ledger.reconcile_resume(
@@ -750,7 +758,11 @@ fn recovery_pending_blocks_preemption_until_reconciliation() {
     // A reserving lease never enters recovery: the state is judged before the
     // presence projection.
     expect_kind(
-        ledger.mark_recovery_pending(fresh.occupancy_lease_id.as_str(), &instant(T4)),
+        ledger.mark_recovery_pending(
+            fresh.occupancy_lease_id.as_str(),
+            &instant(T4),
+            &instant(T2),
+        ),
         OccupancyStoreErrorKind::IllegalStateTransition,
     );
 
@@ -765,7 +777,11 @@ fn recovery_pending_blocks_preemption_until_reconciliation() {
         )
         .expect("ack");
     expect_kind(
-        ledger.mark_recovery_pending(occupied.occupancy_lease_id.as_str(), &instant(T4)),
+        ledger.mark_recovery_pending(
+            occupied.occupancy_lease_id.as_str(),
+            &instant(T4),
+            &instant(T2),
+        ),
         OccupancyStoreErrorKind::PresenceNotOnline,
     );
 }
@@ -784,7 +800,11 @@ fn force_release_requires_an_expired_recovery_window() {
     let released = {
         let mut ledger = storage.client_occupancy_ledger().expect("ledger");
         let pending = ledger
-            .mark_recovery_pending(record.occupancy_lease_id.as_str(), &instant(T3))
+            .mark_recovery_pending(
+                record.occupancy_lease_id.as_str(),
+                &instant(T3),
+                &instant(T2),
+            )
             .expect("mark recovery");
 
         // Before the deadline the safe cleanup is refused.
@@ -1055,4 +1075,53 @@ fn malformed_commands_are_rejected_before_storage() {
     );
     assert!(ledger.snapshot("ocl_short").is_err());
     assert!(ledger.active_lease_for_node("node").is_err());
+}
+
+#[test]
+fn legacy_pending_recovery_starts_one_durable_draining_observation_window() {
+    let root = temporary_directory("legacy-recovery");
+    let mut storage = open(root.clone());
+    let holder = user_id(2);
+    let client = seed_client_with_holder(&mut storage, 1, 2, &holder);
+    let lease = acknowledged(
+        &mut storage.client_occupancy_ledger().expect("ledger"),
+        90,
+        &client,
+        &holder,
+    );
+    set_presence(&mut storage, &client, ClientPresenceState::Offline);
+    storage
+        .client_occupancy_ledger()
+        .expect("ledger")
+        .mark_recovery_pending(&lease.occupancy_lease_id, &instant(T4), &instant(T2))
+        .expect("recovery");
+    let original = storage
+        .client_occupancy_ledger()
+        .expect("ledger")
+        .recovery_context(&lease.occupancy_lease_id, &instant(T3))
+        .expect("context");
+    assert_eq!(original, Some((false, instant(T2))));
+    let inspection = rusqlite::Connection::open(storage.database_path()).expect("legacy layout");
+    inspection
+        .execute("DELETE FROM client_occupancy_recovery", [])
+        .expect("pre-upgrade pending row");
+    drop(inspection);
+    let migrated = storage
+        .client_occupancy_ledger()
+        .expect("ledger")
+        .recovery_context(&lease.occupancy_lease_id, &instant(T3))
+        .expect("legacy context");
+    assert_eq!(migrated, Some((true, instant(T3))));
+    drop(storage);
+    let mut storage = open(root.clone());
+    assert_eq!(
+        storage
+            .client_occupancy_ledger()
+            .expect("ledger")
+            .recovery_context(&lease.occupancy_lease_id, &instant(T4))
+            .expect("replayed context"),
+        migrated
+    );
+    drop(storage);
+    std::fs::remove_dir_all(root).expect("release fixture");
 }

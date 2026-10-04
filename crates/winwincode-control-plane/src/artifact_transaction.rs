@@ -465,7 +465,7 @@ impl ArtifactMessageContext {
             validate_authority(lease, worker_session_id, authority, accepted_window)?;
         let sent_at_millis = instant_millis(sent_at)?;
         let issued_at_millis = instant_millis(&lease.issued_at)?;
-        let expires_at_millis = instant_millis(&lease.expires_at)?;
+        let expires_at_millis = instant_millis(authority.expires_at())?;
         if sent_at_millis < issued_at_millis {
             return Err(StorageError::invalid_input(
                 "Artifact message time precedes its active lease",

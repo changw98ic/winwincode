@@ -1061,7 +1061,7 @@ fn validate_authority(
         .map_err(|_| Rejection::Conflict("runtime event sentAt is not canonical"))?;
     let issued_at = instant_millis(&message.lease.issued_at)
         .map_err(|_| Rejection::Conflict("runtime event issuedAt is not canonical"))?;
-    let expires_at = instant_millis(&message.lease.expires_at)
+    let expires_at = instant_millis(authority.expires_at())
         .map_err(|_| Rejection::Conflict("runtime event expiresAt is not canonical"))?;
     let occurred_at = instant_millis(&message.event.occurred_at)
         .map_err(|_| Rejection::Conflict("runtime event occurredAt is not canonical"))?;

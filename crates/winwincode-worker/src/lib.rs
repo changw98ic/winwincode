@@ -968,6 +968,45 @@ where
         }
     }
 
+    /// Publishes a complete capability snapshot through the durable transport.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid lifecycle or capacity, or a durable transport failure.
+    pub async fn update_capabilities(
+        &mut self,
+        capabilities: WorkerCapabilitySet,
+        now: Instant,
+    ) -> Result<(), WorkerError> {
+        self.observe_driver_clock(now.clone());
+        if self.lifecycle != WorkerLifecycleState::Active
+            || capabilities.max_concurrent_jobs
+                < i64::try_from(self.active.len()).unwrap_or(i64::MAX)
+            || !(1..=1024).contains(&capabilities.max_concurrent_jobs)
+            || capabilities.platform != self.config.capabilities.platform
+        {
+            return Err(worker_error(
+                WorkerErrorCode::InvalidLifecycle,
+                "capability update requires current Worker capacity",
+            ));
+        }
+        let message = winwincode_execution_port::generated::WorkerCapabilitiesMessage {
+            capabilities: capabilities.clone(),
+            kind: winwincode_execution_port::generated::WorkerCapabilitiesMessageKind::WorkerCapabilities,
+            message_id: self.next_message_id(),
+            request_id: self.next_request_id(),
+            schema_version: SchemaVersion::WinwincodeV1,
+            observed_at: now.clone(),
+            sent_at: now,
+            worker_id: self.config.worker_id.clone(),
+            worker_instance_id: self.config.worker_instance_id.clone(),
+        };
+        let delivery = self
+            .retain_execution_message(&ExecutionPortMessage::WorkerCapabilitiesMessage(message))?;
+        self.config.capabilities = capabilities;
+        self.dispatch_retained_effect(delivery).await
+    }
+
     /// Sends one explicit heartbeat with current capacity and lease progress.
     ///
     /// # Errors

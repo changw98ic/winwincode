@@ -669,9 +669,14 @@ async fn send_retained(
     mirror_revision: u64,
     binding_id: &str,
     commit: &str,
-) {
+) -> ClientToServerMessage {
     let retained = ClientToServerMessage::CandidateRetained(ClientCandidateRetainedPayload {
-        occupancy: occupancy_stamp(lease_id, token, mirror_revision),
+        occupancy: occupancy_stamp(
+            lease_id,
+            token,
+            mirror_revision,
+            &format!("candidate-retained-{commit}"),
+        ),
         worker_session_id: "wsn_000000000000000000000001".to_owned(),
         receipt: winwincode_client_port::domain::LocalCandidateReceipt {
             local_candidate_receipt_id: fresh_receipt_id("lcr_"),
@@ -688,13 +693,14 @@ async fn send_retained(
     let (status, _) = post_exchange(
         address,
         &exchange_request(
-            &[frame(node, DEVICE_INSTANCE, sequence, retained)],
+            &[frame(node, DEVICE_INSTANCE, sequence, retained.clone())],
             downlink_ack_cursor(data_directory, node),
         ),
         Some(credential),
     )
     .await;
     assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+    retained
 }
 
 /// Sends one raw `client.candidate.apply_result` frame with an explicit
@@ -715,7 +721,12 @@ async fn send_apply_result(
 ) {
     let apply_result =
         ClientToServerMessage::CandidateApplyResult(ClientCandidateApplyResultPayload {
-            occupancy: occupancy_stamp(lease_id, token, 1),
+            occupancy: occupancy_stamp(
+                lease_id,
+                token,
+                1,
+                &format!("candidate-apply-result-{receipt_id}"),
+            ),
             receipt: winwincode_client_port::domain::LocalApplyReceipt {
                 local_apply_receipt_id: receipt_id.to_owned(),
                 candidate_ref: format!("refs/winwincode/candidates/{commit}"),
@@ -743,11 +754,16 @@ async fn send_apply_result(
     assert!(status.starts_with("HTTP/1.1 200"), "{status}");
 }
 
-fn occupancy_stamp(lease_id: &str, token: u64, mirror_revision: u64) -> OccupancyCommandContext {
+fn occupancy_stamp(
+    lease_id: &str,
+    token: u64,
+    mirror_revision: u64,
+    idempotency_key: &str,
+) -> OccupancyCommandContext {
     OccupancyCommandContext {
         command: CommandContext {
             expected_revision: mirror_revision,
-            idempotency_key: format!("idem_device_{token}"),
+            idempotency_key: idempotency_key.to_owned(),
         },
         occupancy_lease_id: lease_id.to_owned(),
         occupancy_fencing_token: token,
@@ -837,7 +853,12 @@ fn spawn_candidate_responder(
                 let receipt_id = fresh_receipt_id("lar_");
                 let apply_result = ClientToServerMessage::CandidateApplyResult(
                     ClientCandidateApplyResultPayload {
-                        occupancy: occupancy_stamp(&lease_id, token, mirror),
+                        occupancy: occupancy_stamp(
+                            &lease_id,
+                            token,
+                            mirror,
+                            &format!("candidate-apply-result-{receipt_id}"),
+                        ),
                         receipt: winwincode_client_port::domain::LocalApplyReceipt {
                             local_apply_receipt_id: receipt_id,
                             candidate_ref,
@@ -1025,7 +1046,7 @@ async fn retained_frames_project_into_the_dual_authorized_list() {
     // the unshared binding.
     let commit = "0f9e8d7c6b5a4938271605f4e3d2c1b0a9988776";
     let hidden_commit = "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d";
-    send_retained(
+    let retained = send_retained(
         address,
         &data_directory,
         &node,
@@ -1081,18 +1102,21 @@ async fn retained_frames_project_into_the_dual_authorized_list() {
     );
 
     // The idempotent replay settles as the same retention: still one card.
-    send_retained(
+    let (status, _) = post_exchange(
         address,
-        &data_directory,
-        &node,
-        &credential,
-        "ocl_test",
-        1,
-        1,
-        &visible_binding,
-        commit,
+        &exchange_request(
+            &[frame(
+                &node,
+                DEVICE_INSTANCE,
+                next_client_sequence(&data_directory, &node),
+                retained,
+            )],
+            downlink_ack_cursor(&data_directory, &node),
+        ),
+        Some(&credential),
     )
     .await;
+    assert!(status.starts_with("HTTP/1.1 200"), "{status}");
     let response = http_request(
         address,
         &cookie_get(

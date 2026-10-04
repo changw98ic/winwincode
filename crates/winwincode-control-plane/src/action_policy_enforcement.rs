@@ -174,7 +174,7 @@ fn resolve_action_authority(
         || request.session_identity != authority.session_identity
         || !winwincode_execution_port::execution_identity::canonical_instant(&request.sent_at)
         || request.sent_at.0 < authority.lease.issued_at.0
-        || request.sent_at.0 >= request.lease.expires_at.0
+        || request.sent_at.0 >= authority.lease.expires_at.0
         || evaluated_at.0 < authority.lease.issued_at.0
         || evaluated_at.0 >= authority.lease.expires_at.0
     {

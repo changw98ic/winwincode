@@ -57,8 +57,9 @@ use winwincode_client_port::messages::{
 /// version-1 through version-5 database ever shipped, so older databases fail
 /// closed as unsupported. Version 7 (WORKER-100.3) adds the durable worker
 /// stop-intent/receipt table, including the stop reason in its command
-/// identity.
-pub const CLIENT_STORE_SCHEMA_VERSION: i64 = 7;
+/// identity. Version 8 adds durable Server command results and credential
+/// rotation proposals for exchange recovery.
+pub const CLIENT_STORE_SCHEMA_VERSION: i64 = 8;
 
 const DATABASE_FILE_NAME: &str = "device-client.sqlite3";
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -458,6 +459,53 @@ pub struct DeviceStore {
 }
 
 impl DeviceStore {
+    /// Persists the business result independently of the transport acknowledgement.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an unavailable store or a result that cannot be encoded.
+    pub fn record_command_result(
+        &mut self,
+        result: &winwincode_client_port::messages::ClientCommandAckPayload,
+    ) -> Result<(), DeviceStoreError> {
+        let payload = serde_json::to_vec(result)
+            .map_err(|_| DeviceStoreError::invalid("invalid command receipt"))?;
+        self.connection()?
+            .execute(
+                "INSERT INTO server_command_results (command_message_id, payload) VALUES (?1, ?2)
+             ON CONFLICT(command_message_id) DO UPDATE SET payload = excluded.payload",
+                params![result.command_message_id, payload],
+            )
+            .map_err(sql_error)?;
+        Ok(())
+    }
+
+    /// Returns a retained Server result, including rejected commands after restart.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an unavailable store or corrupt result.
+    pub fn command_result(
+        &self,
+        message_id: &str,
+    ) -> Result<Option<winwincode_client_port::messages::ClientCommandAckPayload>, DeviceStoreError>
+    {
+        let payload: Option<Vec<u8>> = self
+            .connection()?
+            .query_row(
+                "SELECT payload FROM server_command_results WHERE command_message_id = ?1",
+                [message_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(sql_error)?;
+        payload
+            .map(|bytes| {
+                serde_json::from_slice(&bytes)
+                    .map_err(|_| DeviceStoreError::adapter("invalid stored command receipt"))
+            })
+            .transpose()
+    }
     /// Opens the local database and applies all schema migrations before return.
     ///
     /// # Errors
@@ -3148,7 +3196,7 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), DeviceStoreError>
     let version = transaction
         .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
         .map_err(sql_error)?;
-    if !matches!(version, 0 | 6 | CLIENT_STORE_SCHEMA_VERSION) {
+    if !matches!(version, 0 | 6 | 7 | CLIENT_STORE_SCHEMA_VERSION) {
         return Err(DeviceStoreError::adapter(format!(
             "unsupported schema version {version}"
         )));
@@ -3180,6 +3228,21 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), DeviceStoreError>
             )
             .map_err(sql_error)?;
     }
+    transaction
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS server_command_results (
+            command_message_id TEXT PRIMARY KEY NOT NULL, payload BLOB NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS device_credential_rotations (
+            command_message_id TEXT PRIMARY KEY NOT NULL,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            command_digest TEXT NOT NULL,
+            credential_secret BLOB NOT NULL CHECK (length(credential_secret) = 32),
+            credential_digest TEXT NOT NULL,
+            activated INTEGER NOT NULL DEFAULT 0
+        );",
+        )
+        .map_err(sql_error)?;
     validate_store_schema(&transaction)?;
     transaction
         .pragma_update(None, "user_version", CLIENT_STORE_SCHEMA_VERSION)
@@ -3202,6 +3265,23 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), DeviceStoreError>
 /// serves traffic. The pragma queries are static per table so the adapter
 /// keeps the no-dynamic-SQL-identifier rule of `winwincode-storage`.
 const STORE_SCHEMA_COLUMNS: &[(&str, &str, &[&str])] = &[
+    (
+        "server_command_results",
+        "PRAGMA table_info(server_command_results)",
+        &["command_message_id", "payload"],
+    ),
+    (
+        "device_credential_rotations",
+        "PRAGMA table_info(device_credential_rotations)",
+        &[
+            "command_message_id",
+            "idempotency_key",
+            "command_digest",
+            "credential_secret",
+            "credential_digest",
+            "activated",
+        ],
+    ),
     (
         "device_identity",
         "PRAGMA table_info(device_identity)",

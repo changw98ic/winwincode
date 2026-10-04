@@ -281,6 +281,21 @@ impl<'storage> ClientDownlinkOutbox<'storage> {
         highest_sequence(connection, client_node_id)
     }
 
+    /// Loads a retained command for an authenticated digest-only handshake.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an unavailable store or corrupt retained frame.
+    pub fn frame_by_message_id(
+        &self,
+        node: &str,
+        message_id: &str,
+    ) -> Result<Option<String>, ClientDownlinkError> {
+        self.storage.connection().map_err(|storage| storage_error(&storage))?
+            .query_row("SELECT frame FROM client_downlink_frames WHERE client_node_id = ?1 AND message_id = ?2", params![node, message_id], |row| row.get(0))
+            .optional().map_err(|sql| sql_error(&sql))
+    }
+
     /// Deletes every retained frame at or below `ack_sequence` and returns
     /// the deleted count.
     ///

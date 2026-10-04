@@ -409,6 +409,101 @@ pub fn adopt_enrollment(
     transaction.commit().map_err(sql_error)
 }
 
+/// Prepares a random replacement once. Replayed commands never rotate twice.
+///
+/// # Errors
+///
+/// Rejects a concurrent rotation, random-source failure, or storage failure.
+pub fn prepare_credential_rotation(
+    store: &mut DeviceStore,
+    command_id: &str,
+    payload: &winwincode_client_port::messages::ServerCredentialRotatePayload,
+) -> Result<(), DeviceStoreError> {
+    let command_digest =
+        credential_digest(&serde_json::to_vec(payload).map_err(|_| {
+            DeviceStoreError::conflict("credential rotation command is not encodable")
+        })?);
+    let tx = store
+        .connection_mut()?
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(sql_error)?;
+    let prior: Option<String> = tx.query_row("SELECT command_digest FROM device_credential_rotations WHERE command_message_id = ?1 OR idempotency_key = ?2", params![command_id, payload.command.idempotency_key], |row| row.get(0)).optional().map_err(sql_error)?;
+    if let Some(prior) = prior {
+        if prior != command_digest {
+            return Err(DeviceStoreError::conflict(
+                "credential rotation command identity changed",
+            ));
+        }
+    } else {
+        let pending: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM device_credential_rotations WHERE activated = 0)",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(sql_error)?;
+        if pending {
+            return Err(DeviceStoreError::conflict(
+                "another credential rotation is pending",
+            ));
+        }
+        let mut secret = [0_u8; CREDENTIAL_SECRET_BYTES];
+        fill_random(&mut secret)?;
+        tx.execute("INSERT INTO device_credential_rotations (command_message_id, idempotency_key, command_digest, credential_secret, credential_digest) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![command_id, payload.command.idempotency_key, command_digest, secret.as_slice(), credential_digest(&secret)]).map_err(sql_error)?;
+    }
+    tx.commit().map_err(sql_error)
+}
+
+/// Restores the pending digest proposal after network loss or process restart.
+///
+/// # Errors
+///
+/// Rejects an unavailable store or corrupt proposal.
+pub fn pending_credential_rotation(
+    store: &DeviceStore,
+) -> Result<Option<winwincode_client_port::messages::DeviceCredentialRotation>, DeviceStoreError> {
+    store.connection()?.query_row(
+        "SELECT command_message_id, credential_digest FROM device_credential_rotations WHERE activated = 0",
+        [], |row| Ok(winwincode_client_port::messages::DeviceCredentialRotation { command_message_id: row.get(0)?, credential_digest: row.get(1)? }),
+    ).optional().map_err(sql_error)
+}
+
+/// Switches locally only after Server durably accepted the exact new digest.
+///
+/// # Errors
+///
+/// Rejects an unknown or changed proposal, or a storage failure.
+pub fn activate_credential_rotation(
+    store: &mut DeviceStore,
+    confirmation: &winwincode_client_port::messages::DeviceCredentialRotation,
+    now: &str,
+) -> Result<(), DeviceStoreError> {
+    let tx = store
+        .connection_mut()?
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(sql_error)?;
+    let stored: Option<(Vec<u8>, String, bool)> = tx.query_row(
+        "SELECT credential_secret, credential_digest, activated FROM device_credential_rotations WHERE command_message_id = ?1",
+        [&confirmation.command_message_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).optional().map_err(sql_error)?;
+    let Some((secret, digest, activated)) = stored else {
+        return Err(DeviceStoreError::conflict(
+            "unknown credential rotation confirmation",
+        ));
+    };
+    if digest != confirmation.credential_digest {
+        return Err(DeviceStoreError::conflict(
+            "credential rotation digest changed",
+        ));
+    }
+    if !activated {
+        tx.execute("UPDATE device_credential SET credential_secret = ?1, credential_digest = ?2, credential_generation = credential_generation + 1, rotated_at = ?3", params![secret, digest, now]).map_err(sql_error)?;
+        tx.execute("UPDATE device_credential_rotations SET activated = 1, credential_secret = zeroblob(32) WHERE command_message_id = ?1", [&confirmation.command_message_id]).map_err(sql_error)?;
+    }
+    tx.commit().map_err(sql_error)
+}
+
 /// Loads the single identity row, or creates it inside the same transaction
 /// on first boot.
 fn load_or_create_identity(
