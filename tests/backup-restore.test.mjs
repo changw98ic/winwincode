@@ -119,7 +119,7 @@ test('schema version constants stay locked to the canonical storage sources', ()
   assert.ok(declaredDevice, 'device gate uses the canonical constant')
   const deviceVersion = deviceStore.match(/CLIENT_STORE_SCHEMA_VERSION: i64 = (\d+);/)
   assert.ok(deviceVersion, 'device store schema version declared')
-  assert.equal(deviceVersion[1], '7', 'device store uses schema v7 (durable worker stop receipts)')
+  assert.equal(deviceVersion[1], '9', 'device store uses schema v9 (command receipts without device rotation)')
 })
 
 test('restore fails closed on unsupported schema versions before touching targets', () => {

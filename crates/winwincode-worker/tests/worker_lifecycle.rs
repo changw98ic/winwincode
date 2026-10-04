@@ -1683,61 +1683,6 @@ async fn registration_send_loss_retries_the_durable_original_before_new_work() {
 }
 
 #[tokio::test]
-async fn capability_send_loss_replays_the_retained_snapshot_through_the_shared_driver() {
-    let port = RecordingPort::default();
-    let observed = port.clone();
-    let codex = FakeCodex::default();
-    let mut retained = codex.clone();
-    let mut worker = test_worker(worker_config(1), port, codex);
-    register(&mut worker).await;
-
-    let capabilities = worker_config(2).capabilities;
-    observed.failures_remaining.set(1);
-    assert_eq!(
-        worker
-            .update_capabilities(capabilities.clone(), now())
-            .await
-            .unwrap_err()
-            .code,
-        WorkerErrorCode::ExecutionPort
-    );
-    let pending = retained.pending_execution_deliveries().unwrap();
-    let original = pending
-        .iter()
-        .find(|delivery| {
-            matches!(&delivery.message, ExecutionPortMessage::WorkerCapabilitiesMessage(message)
-            if message.capabilities == capabilities)
-        })
-        .expect("capability snapshot retained before send")
-        .message
-        .clone();
-    worker
-        .poll_codex_boxed()
-        .await
-        .expect("shared driver retries pending capabilities");
-    assert!(observed.messages.borrow().contains(&original));
-    assert!(
-        !retained
-            .pending_execution_deliveries()
-            .unwrap()
-            .iter()
-            .any(|delivery| delivery.message == original)
-    );
-
-    let mut invalid = capabilities;
-    invalid.max_concurrent_jobs = 0;
-    assert!(worker.update_capabilities(invalid, now()).await.is_err());
-    worker
-        .heartbeat(now())
-        .await
-        .expect("heartbeat uses updated capacity");
-    assert!(observed.messages.borrow().iter().any(|message| {
-        matches!(message, ExecutionPortMessage::WorkerHeartbeatMessage(heartbeat)
-            if heartbeat.capacity.available_slots == 2)
-    }));
-}
-
-#[tokio::test]
 async fn streaming_model_chunks_acknowledge_the_open_only_on_sequence_one() {
     let port = RecordingPort::default();
     let codex = FakeCodex::default();

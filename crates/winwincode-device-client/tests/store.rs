@@ -58,7 +58,7 @@ fn envelope(message_id: &str, client_instance_id: &str, sequence: u64) -> Client
 
 #[test]
 fn open_migrates_the_full_local_schema_and_round_trips_it() {
-    assert_eq!(winwincode_device_client::CLIENT_STORE_SCHEMA_VERSION, 8);
+    assert_eq!(winwincode_device_client::CLIENT_STORE_SCHEMA_VERSION, 9);
     let (root, mut store) = open_store("schema-round-trip");
     let database_path = store.database_path().to_path_buf();
     let canonical_root = fs::canonicalize(&root).expect("root should canonicalize");
@@ -84,7 +84,9 @@ fn open_migrates_the_full_local_schema_and_round_trips_it() {
 
     // Reopen a version-7 database with real preexisting local state.
     let legacy = Connection::open(&database_path).expect("legacy database");
-    legacy.execute_batch("DROP TABLE server_command_results; DROP TABLE device_credential_rotations; PRAGMA user_version = 7;").expect("version-7 layout");
+    legacy
+        .execute_batch("DROP TABLE server_command_results; PRAGMA user_version = 7;")
+        .expect("version-7 layout");
     legacy.close().expect("close legacy inspection");
 
     let store = DeviceStore::open(&root).expect("restarted store should open");
@@ -99,7 +101,7 @@ fn open_migrates_the_full_local_schema_and_round_trips_it() {
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("schema version should be readable");
-    assert_eq!(version, 8);
+    assert_eq!(version, 9);
     assert_canonical_local_tables(&connection);
     connection.close().expect("inspection close");
     fs::remove_dir_all(root).expect("database directory should be released");
@@ -125,18 +127,6 @@ const CANONICAL_LOCAL_TABLES: &[(&str, &str, &[&str])] = &[
         "server_command_results",
         "PRAGMA table_info(server_command_results)",
         &["command_message_id", "payload"],
-    ),
-    (
-        "device_credential_rotations",
-        "PRAGMA table_info(device_credential_rotations)",
-        &[
-            "command_message_id",
-            "idempotency_key",
-            "command_digest",
-            "credential_secret",
-            "credential_digest",
-            "activated",
-        ],
     ),
     (
         "device_identity",

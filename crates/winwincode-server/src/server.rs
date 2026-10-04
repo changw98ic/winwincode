@@ -1053,8 +1053,8 @@ async fn load_managed_app_template(
     }
 }
 
-/// One add-Client attempt (plan 11.4): bounded wait for the Device Client
-/// challenge acknowledgement, then the atomic consume-and-grant.
+/// Authorizes an add-Client request entirely on Server by atomically consuming
+/// the stored connect code and creating the access grant.
 #[allow(clippy::too_many_lines)]
 async fn create_client_connection(
     State(state): State<ServerState>,
@@ -1096,7 +1096,7 @@ async fn create_client_connection(
         );
     };
     let client_ip = client.ip().to_string();
-    match application.connect(&user_id.0, &client_ip, &body).await {
+    match application.connect(&user_id.0, &client_ip, &body) {
         Ok(body) => json_response(StatusCode::CREATED, body, origin.as_ref()),
         Err(error) => connect_flow_error(&error, origin.as_ref()),
     }

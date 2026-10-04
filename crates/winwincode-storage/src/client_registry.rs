@@ -74,14 +74,7 @@ CREATE TABLE IF NOT EXISTS client_exchange_commands (
     completed INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (client_node_id, idempotency_key)
 );
-CREATE TABLE IF NOT EXISTS client_credential_rotations (
-    client_node_id TEXT NOT NULL,
-    command_message_id TEXT NOT NULL,
-    base_digest TEXT NOT NULL,
-    credential_digest TEXT NOT NULL,
-    activated INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (client_node_id, command_message_id)
-);
+DROP TABLE IF EXISTS client_credential_rotations;
 ";
 
 /// Machine-level presence of one `ClientNode` (plan 4.1, contract 1).
@@ -435,83 +428,6 @@ impl SqliteStorage {
 }
 
 impl<'storage> ClientNodeRegistry<'storage> {
-    /// Returns the exact digest proposal retained for a rotation command.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unavailable store or corrupt proposal.
-    pub fn credential_rotation_digest(
-        &self,
-        node: &str,
-        command_id: &str,
-    ) -> Result<Option<String>, ClientRegistryError> {
-        self.connection()?.query_row("SELECT credential_digest FROM client_credential_rotations WHERE client_node_id = ?1 AND command_message_id = ?2",
-            params![node, command_id], |row| row.get(0)).optional().map_err(|sql| sql_error(&sql))
-    }
-
-    /// Stages only a digest; the old credential remains valid until proof of
-    /// possession of the replacement arrives. Replays cannot change the digest.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid identity, conflicting proposal, or storage failure.
-    pub fn stage_credential_rotation(
-        &mut self,
-        node: &str,
-        command_id: &str,
-        digest: &str,
-    ) -> Result<(), ClientRegistryError> {
-        validate_client_node_id(node)?;
-        validate_sha256_digest(digest)?;
-        let tx = self.transaction()?;
-        let prior: Option<String> = tx.query_row("SELECT credential_digest FROM client_credential_rotations WHERE client_node_id = ?1 AND command_message_id = ?2", params![node, command_id], |row| row.get(0)).optional().map_err(|sql| sql_error(&sql))?;
-        if let Some(prior) = prior {
-            if prior != digest {
-                return Err(error(
-                    ClientRegistryErrorKind::IdentityConflict,
-                    "credential rotation digest conflict",
-                ));
-            }
-        } else {
-            let pending: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM client_credential_rotations WHERE client_node_id = ?1 AND activated = 0)", [node], |row| row.get(0)).map_err(|sql| sql_error(&sql))?;
-            if pending {
-                return Err(error(
-                    ClientRegistryErrorKind::IdentityConflict,
-                    "credential rotation already pending",
-                ));
-            }
-            let inserted = tx.execute("INSERT INTO client_credential_rotations (client_node_id, command_message_id, base_digest, credential_digest) SELECT client_node_id, ?2, device_credential_digest, ?3 FROM client_nodes WHERE client_node_id = ?1", params![node, command_id, digest]).map_err(|sql| sql_error(&sql))?;
-            if inserted != 1 {
-                return Err(unknown_client_node());
-            }
-        }
-        tx.commit().map_err(|sql| sql_error(&sql))
-    }
-
-    /// Activates a staged digest only after an authenticated exchange proves
-    /// possession. This atomically invalidates the previous credential.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid identity, corrupt proposal, or storage failure.
-    pub fn activate_credential_rotation(
-        &mut self,
-        node: &str,
-        digest: &str,
-    ) -> Result<bool, ClientRegistryError> {
-        validate_client_node_id(node)?;
-        validate_sha256_digest(digest)?;
-        let tx = self.transaction()?;
-        let changed = tx.execute("UPDATE client_nodes SET device_credential_digest = ?2, revision = revision + 1
-            WHERE client_node_id = ?1 AND presence_state != 'revoked' AND EXISTS (
-                SELECT 1 FROM client_credential_rotations r WHERE r.client_node_id = ?1
-                AND r.activated = 0 AND r.credential_digest = ?2 AND r.base_digest = client_nodes.device_credential_digest)", params![node, digest]).map_err(|sql| sql_error(&sql))?;
-        if changed == 1 {
-            tx.execute("UPDATE client_credential_rotations SET activated = 1 WHERE client_node_id = ?1 AND credential_digest = ?2", params![node, digest]).map_err(|sql| sql_error(&sql))?;
-        }
-        tx.commit().map_err(|sql| sql_error(&sql))?;
-        Ok(changed == 1)
-    }
     /// Binds a received frame and command to immutable bytes before applying
     /// effects. A pending reservation is retried after a crash; a completed
     /// command is replayed without applying its effects again.
@@ -1379,17 +1295,7 @@ fn validate_schema(connection: &rusqlite::Connection) -> Result<(), ClientRegist
             "completed",
         ],
     )?;
-    validate_columns(
-        connection,
-        "client_credential_rotations",
-        &[
-            "client_node_id",
-            "command_message_id",
-            "base_digest",
-            "credential_digest",
-            "activated",
-        ],
-    )
+    Ok(())
 }
 
 fn validate_columns(

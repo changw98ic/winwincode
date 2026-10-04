@@ -63,7 +63,7 @@ Attempt 或 Fencing 校验。
 
 | 方向 | 消息 |
 | --- | --- |
-| Worker → Control Plane | `worker.register`、`worker.capabilities`、`worker.heartbeat` |
+| Worker → Control Plane | `worker.register`、`worker.heartbeat` |
 | Control Plane → Worker | `worker.registration_result`、`worker.heartbeat_ack` |
 | Control Plane → Worker | `job.dispatch`、`lease.renew`、`runtime.replay_request`、`job.cancel` |
 | Worker → Control Plane | `job.dispatch_result`、`session.binding`、`runtime.event`、`job.cancel_ack`、`job.outcome` |
@@ -72,7 +72,7 @@ Attempt 或 Fencing 校验。
 | Worker → Control Plane | `input.request`、`approval.request` |
 | Control Plane → Worker | `input.response`、`approval.decision`、`job.outcome_ack` |
 
-除注册、能力和心跳外，每条 Worker 写消息都必须携带完整 `ExecutionLeaseStamp`：
+除注册和心跳外，每条 Worker 写消息都必须携带完整 `ExecutionLeaseStamp`：
 
 ```text
 leaseId
@@ -88,9 +88,7 @@ expiresAt
 `fencingToken` 使用十进制字符串，避免跨 Rust、JavaScript 和数据库时丢失 64 位整数
 精度。重新派发到另一个 Worker 实例或新的尝试时，Control Plane 必须使用更大的 token。
 
-`worker.capabilities` 是完整能力快照，Control Plane 校验当前 Worker 实例后持久更新能力
-与容量，保留注册身份和权限范围。重复 requestId 必须匹配原摘要，旧观察值及低于正在运行
-任务数的容量被拒绝；Worker 使用 durable outbox 重试，成功由传输确认。
+Worker 在启动注册时提交平台、功能和容量信息，不提供独立的动态能力更新通道。
 
 Control Plane 在已接受任务的心跳中检查租约：剩余时间不超过配置租期的一半时，原子提交
 续期和下行 outbox 中的 `lease.renew`；响应丢失会重放同一续期记录。Worker 校验

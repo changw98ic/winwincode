@@ -60,10 +60,9 @@ pub use artifact::{
     LocalArtifactObjectStore, MAX_ARTIFACT_RANGE_BYTES,
 };
 pub use client_connect::{
-    AccessChallengeCreation, AccessChallengeRecord, AccessGrantIssuance, AccessGrantRecord,
-    AccessGrantState, AttemptDimension, ClientConnectLedger, ClientConnectStoreError,
-    ClientConnectStoreErrorKind, ConnectAttemptState, ConnectAuditAction, ConnectAuditEntry,
-    ConnectChallengeState, ConnectChallengeVerdict, ConnectCodeConsume, ConnectCodePublication,
+    AccessGrantIssuance, AccessGrantRecord, AccessGrantState, AttemptDimension,
+    ClientConnectLedger, ClientConnectStoreError, ClientConnectStoreErrorKind, ConnectAttemptState,
+    ConnectAuditAction, ConnectAuditEntry, ConnectCodeConsume, ConnectCodePublication,
     ConnectCodeRecord, ConnectCodeRevocation, ConnectCodeState, ConnectGrantReceipt,
     GrantPermissions, GrantSource, GrantTrustMode, connect_attempt_window_anchor,
 };

@@ -58,8 +58,9 @@ use winwincode_client_port::messages::{
 /// closed as unsupported. Version 7 (WORKER-100.3) adds the durable worker
 /// stop-intent/receipt table, including the stop reason in its command
 /// identity. Version 8 adds durable Server command results and credential
-/// rotation proposals for exchange recovery.
-pub const CLIENT_STORE_SCHEMA_VERSION: i64 = 8;
+/// rotation proposals for exchange recovery. Version 9 removes the unused
+/// rotation proposals while retaining the device identity and command results.
+pub const CLIENT_STORE_SCHEMA_VERSION: i64 = 9;
 
 const DATABASE_FILE_NAME: &str = "device-client.sqlite3";
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -247,8 +248,7 @@ pub struct ClientInboxCursorUpdate {
 /// (CLIENT-200.2, plan 11.3).
 ///
 /// LOCAL ONLY: the plaintext code never persists — this record carries the
-/// `sha256:` digest plus the metadata needed to answer
-/// `client.access.challenge` with the code-generation verdict.
+/// `sha256:` digest and generation used to publish code state to Server.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConnectCodeStateRecord {
     pub connect_code_id: String,
@@ -269,9 +269,8 @@ pub struct ConnectCodeStateRecord {
 
 /// Durable local connection policy (CLIENT-200.2, plan 11.1/12.1).
 ///
-/// Mirrored into every `client.hello` / `client.heartbeat` report and
-/// enforced against `client.access.challenge`: while the node is locked or
-/// new connections are disabled, every challenge is rejected.
+/// Mirrored into every `client.hello` / `client.heartbeat` report. Server
+/// uses the published policy when authorizing new access.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConnectionPolicyRecord {
     pub accepting_connections: bool,
@@ -1081,8 +1080,7 @@ impl DeviceStore {
     /// Loads the durable state of the currently published connect code.
     ///
     /// The plaintext code is never stored; only this digest-bearing record
-    /// survives a restart so challenges stay answerable across process
-    /// launches.
+    /// survives a restart so publications retain their original identity.
     ///
     /// # Errors
     ///
@@ -1169,29 +1167,6 @@ impl DeviceStore {
             )
             .map_err(sql_error)?;
         transaction.commit().map_err(sql_error)
-    }
-
-    /// Marks the stored connect code `revoked` (the local disable). A no-op
-    /// returning `false` when no active code exists.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter-neutral error when the write fails or the store is
-    /// closed.
-    pub fn revoke_connect_code_state(
-        &mut self,
-        revoked_at: &str,
-    ) -> Result<bool, DeviceStoreError> {
-        require_non_empty(revoked_at, "revoked at", MAX_ID_BYTES)?;
-        let changed = self
-            .connection_mut()?
-            .execute(
-                "UPDATE connect_code_state SET state = 'revoked', updated_at = ?1 \
-                 WHERE singleton = 1 AND state = 'active'",
-                params![revoked_at],
-            )
-            .map_err(sql_error)?;
-        Ok(changed > 0)
     }
 
     /// Loads the durable local connection policy.
@@ -3163,8 +3138,7 @@ CREATE TABLE client_inbox_cursor (
 );
 -- CLIENT-200.2 (plan 11.3): local state of the currently published dynamic
 -- connect code. The plaintext code never persists; only its sha256 digest
--- plus the metadata needed to answer client.access.challenge survive a
--- restart. A refresh replaces the single row at generation + 1.
+-- and publication metadata survive a restart. A refresh replaces the single row at generation + 1.
 CREATE TABLE connect_code_state (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     connect_code_id TEXT NOT NULL,
@@ -3177,8 +3151,7 @@ CREATE TABLE connect_code_state (
     updated_at TEXT NOT NULL
 );
 -- CLIENT-200.2 (plan 11.1/12.1): durable local connection policy, mirrored
--- into client.hello / client.heartbeat and enforced against
--- client.access.challenge.
+-- into client.hello / client.heartbeat for Server-owned access policy.
 CREATE TABLE client_connection_policy (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     accepting_connections INTEGER NOT NULL CHECK (accepting_connections IN (0, 1)),
@@ -3196,7 +3169,7 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), DeviceStoreError>
     let version = transaction
         .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
         .map_err(sql_error)?;
-    if !matches!(version, 0 | 6 | 7 | CLIENT_STORE_SCHEMA_VERSION) {
+    if !matches!(version, 0 | 6 | 7 | 8 | CLIENT_STORE_SCHEMA_VERSION) {
         return Err(DeviceStoreError::adapter(format!(
             "unsupported schema version {version}"
         )));
@@ -3233,14 +3206,7 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), DeviceStoreError>
             "CREATE TABLE IF NOT EXISTS server_command_results (
             command_message_id TEXT PRIMARY KEY NOT NULL, payload BLOB NOT NULL
         );
-        CREATE TABLE IF NOT EXISTS device_credential_rotations (
-            command_message_id TEXT PRIMARY KEY NOT NULL,
-            idempotency_key TEXT NOT NULL UNIQUE,
-            command_digest TEXT NOT NULL,
-            credential_secret BLOB NOT NULL CHECK (length(credential_secret) = 32),
-            credential_digest TEXT NOT NULL,
-            activated INTEGER NOT NULL DEFAULT 0
-        );",
+        DROP TABLE IF EXISTS device_credential_rotations;",
         )
         .map_err(sql_error)?;
     validate_store_schema(&transaction)?;
@@ -3269,18 +3235,6 @@ const STORE_SCHEMA_COLUMNS: &[(&str, &str, &[&str])] = &[
         "server_command_results",
         "PRAGMA table_info(server_command_results)",
         &["command_message_id", "payload"],
-    ),
-    (
-        "device_credential_rotations",
-        "PRAGMA table_info(device_credential_rotations)",
-        &[
-            "command_message_id",
-            "idempotency_key",
-            "command_digest",
-            "credential_secret",
-            "credential_digest",
-            "activated",
-        ],
     ),
     (
         "device_identity",

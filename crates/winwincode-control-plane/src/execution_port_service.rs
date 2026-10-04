@@ -363,43 +363,6 @@ impl<'storage> ExecutionPortService<'storage> {
         ))
     }
 
-    /// Applies a capability report after joining the current Worker identity.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown instance, invalid capability report, or storage failure.
-    pub fn update_capabilities(
-        &mut self,
-        message: &winwincode_execution_port::generated::WorkerCapabilitiesMessage,
-    ) -> Result<(), ExecutionPortServiceError> {
-        let worker = self
-            .registry()?
-            .load_worker(&message.worker_id)?
-            .ok_or(ExecutionPortServiceError::Protocol("workerId"))?;
-        if message.observed_at.0 > self.server_time.0 || message.observed_at.0 > message.sent_at.0 {
-            return Err(ExecutionPortServiceError::Protocol("observedAt"));
-        }
-        let register = WorkerRegisterMessage {
-            usage_accounting_version: 2,
-            capabilities: message.capabilities.clone(),
-            kind: winwincode_execution_port::generated::WorkerRegisterMessageKind::WorkerRegister,
-            message_id: message.message_id.clone(),
-            request_id: message.request_id.clone(),
-            schema_version: message.schema_version.clone(),
-            sent_at: message.sent_at.clone(),
-            started_at: message.observed_at.clone(),
-            worker_id: message.worker_id.clone(),
-            worker_instance_id: message.worker_instance_id.clone(),
-        };
-        let request = worker_registration_request(
-            &register,
-            worker.authentication_identity,
-            worker.security_zone,
-        )?;
-        self.registry()?.update_worker_capabilities(&request)?;
-        Ok(())
-    }
-
     /// Converts and durably records one Worker heartbeat.
     ///
     /// # Errors

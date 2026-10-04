@@ -22,9 +22,8 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 # RFC 3339 stamps for exchange envelopes and durable cursors; the same
-# formatting dependency the server side already uses. The `parsing` feature
-# is required locally to compare stored code expiry stamps against the wall
-# clock when answering access challenges.
+# formatting dependency the server side already uses. Parsing is used for
+# persisted worker-log and candidate-retention timestamps.
 time = { workspace = true, features = ["parsing"] }
 # Direct path dependency on purpose: `winwincode-client-port` is not part of
 # `[workspace.dependencies]`, matching how `winwincode-server` and

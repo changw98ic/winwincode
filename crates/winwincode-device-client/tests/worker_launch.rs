@@ -242,7 +242,6 @@ impl ExchangeTransport for ServerSim {
             (ack, frames, worker_credentials)
         };
         let response = ExchangeResponse {
-            credential_rotation: None,
             schema_version: CLIENT_CONTROL_PORT_SCHEMA_VERSION.to_owned(),
             ack_sequence: ack,
             replay_from_sequence: None,

@@ -350,7 +350,6 @@ impl FrameDirection {
 
         match kind {
             "worker.register"
-            | "worker.capabilities"
             | "worker.heartbeat"
             | "job.dispatch_result"
             | "session.binding"

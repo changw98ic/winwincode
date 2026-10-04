@@ -1,20 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! User-facing Client connection flow over the real `ClientControlPort`
-//! (plan 11.3-11.5, §16.3, contract `client-control-state-machines.md` 2-3).
+//! Server-owned browser authorization for access to registered Clients.
 //!
-//! `POST /api/v1/clients/connections` validates the signed-in user, the three
-//! rate-limit dimensions, the target Client's presence, lock, and
-//! accepting-connections facts, and the presented dynamic connect code
-//! digest; then it creates one durable access challenge, enqueues the
-//! `client.access.challenge` downlink frame into the durable outbox, and
-//! waits a bounded, configurable interval for the Device Client's
-//! `client.access.challenge_ack` to be settled by the client exchange. A
-//! confirmed challenge is consumed atomically together with the derived
-//! `ClientAccessGrant` (`ConnectCodeService::consume_and_grant`), so a
-//! retried request can never produce a second grant — the partial unique
-//! index on `(client_node_id, user_id)` over active grants backs the same
-//! guarantee at the storage layer.
+//! `POST /api/v1/clients/connections` validates the signed-in user, rate
+//! limits, stored access policy and connect-code digest. It atomically consumes
+//! the code and creates the grant without contacting Device or requiring it
+//! to be online. Retried requests return the existing grant.
 //!
 //! `GET /api/v1/clients` projects the signed-in user's directory of granted
 //! Clients as `DeviceSummary` cards; occupancy is uniformly `available` until
@@ -37,12 +28,6 @@ use serde_json::Value;
 use serde_json::json;
 use sha2::Digest;
 use sha2::Sha256;
-use winwincode_client_port::exchange::DEFAULT_MAX_FRAME_BYTES;
-use winwincode_client_port::exchange::FrameCodec;
-use winwincode_client_port::messages::CLIENT_CONTROL_PORT_SCHEMA_VERSION;
-use winwincode_client_port::messages::ServerAccessChallengePayload;
-use winwincode_client_port::messages::ServerToClientEnvelope;
-use winwincode_client_port::messages::ServerToClientMessage;
 use winwincode_control_plane::AccessGrantService;
 use winwincode_control_plane::ClientConnectServiceErrorKind;
 use winwincode_control_plane::ClientRegistryService;
@@ -50,16 +35,13 @@ use winwincode_control_plane::ConnectCodeService;
 use winwincode_control_plane::RepositoryAccessGrantService;
 use winwincode_control_plane::RepositoryBindingService;
 use winwincode_domain::Instant;
-use winwincode_storage::AccessChallengeCreation;
 use winwincode_storage::AccessGrantIssuance;
 use winwincode_storage::AttemptDimension;
-use winwincode_storage::ClientDownlinkAppend;
 use winwincode_storage::ClientLockState;
 use winwincode_storage::ClientNodeRecord;
 use winwincode_storage::ClientPresenceState;
 use winwincode_storage::ConnectAuditAction;
 use winwincode_storage::ConnectAuditEntry;
-use winwincode_storage::ConnectChallengeState;
 use winwincode_storage::ConnectCodeConsume;
 use winwincode_storage::ConnectCodeRecord;
 use winwincode_storage::ConnectCodeState;
@@ -72,14 +54,9 @@ use winwincode_storage::connect_attempt_window_anchor;
 /// Schema version of the public browser-facing connect surface.
 const SUPPORTED_SCHEMA_VERSION: &str = "winwincode/v1";
 
-/// Bounded-wait and throttling policy of the connect flow.
+/// Server-side throttling policy of the connect flow.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientConnectionsConfig {
-    /// How long one connect request waits for the Device Client challenge
-    /// acknowledgement before failing (plan 11.4 step 7).
-    pub challenge_wait: std::time::Duration,
-    /// How often the durable challenge state is polled while waiting.
-    pub poll_interval: std::time::Duration,
     /// Length of the fixed connect-attempt window in seconds (plan 11.3).
     pub rate_window_seconds: u64,
     /// Failed connect attempts per window and dimension that block further
@@ -90,8 +67,6 @@ pub struct ClientConnectionsConfig {
 impl Default for ClientConnectionsConfig {
     fn default() -> Self {
         Self {
-            challenge_wait: std::time::Duration::from_secs(30),
-            poll_interval: std::time::Duration::from_millis(200),
             rate_window_seconds: 300,
             rate_max_attempts: 5,
         }
@@ -106,10 +81,9 @@ pub enum ClientConnectionsErrorKind {
     InvalidRequest,
     /// The public Client ID does not name a connectable Client.
     ClientNotFound,
-    /// The Client is not reachable (offline, degraded, or did not answer the
-    /// challenge within the bounded wait).
+    /// The requested operation needs a reachable Client.
     ClientOffline,
-    /// The presented code digest matches no code, or the device rejected it.
+    /// The presented code digest matches no code.
     ConnectCodeInvalid,
     /// The code is expired, exhausted, revoked, or already consumed.
     ConnectCodeExpired,
@@ -168,39 +142,12 @@ impl fmt::Display for ClientConnectionsError {
 
 impl std::error::Error for ClientConnectionsError {}
 
-/// The signed-in user's connect surface over the Server's one product-state
-/// database directory. Like the client exchange, every operation opens and
-/// closes its own storage connection so concurrent flows never share state in
-/// memory and the bounded wait holds no database lock.
+/// The signed-in user's authorization surface over the Server's product-state
+/// database. Device transport is independent of browser authorization.
 #[derive(Debug, Clone)]
 pub struct ClientConnectionsApplication {
     data_directory: PathBuf,
     config: ClientConnectionsConfig,
-}
-
-/// What one validated connect attempt prepared before the bounded wait.
-#[allow(clippy::large_enum_variant)]
-enum Prepared {
-    /// The user already holds an active grant on the Client: an idempotent
-    /// retry that returns the same device list without a second grant.
-    Completed(Value),
-    /// The challenge was created (or reused) and the flow must wait for its
-    /// acknowledgement.
-    AwaitChallenge {
-        node: ClientNodeRecord,
-        code: ConnectCodeRecord,
-        challenge_id: String,
-    },
-}
-
-/// The outcome of one poll of a pending challenge.
-enum PollOutcome {
-    /// The challenge is still pending; keep waiting.
-    Pending,
-    /// The flow reached its terminal response body (the fresh device list).
-    Completed(Value),
-    /// The flow failed with the mapped domain error.
-    Failed(ClientConnectionsError),
 }
 
 impl ClientConnectionsApplication {
@@ -213,11 +160,7 @@ impl ClientConnectionsApplication {
         data_directory: impl Into<PathBuf>,
         config: &ClientConnectionsConfig,
     ) -> Result<Self, ClientConnectionsError> {
-        if config.challenge_wait.is_zero()
-            || config.poll_interval.is_zero()
-            || config.rate_window_seconds == 0
-            || config.rate_max_attempts == 0
-        {
+        if config.rate_window_seconds == 0 || config.rate_max_attempts == 0 {
             return Err(ClientConnectionsError::new(
                 ClientConnectionsErrorKind::InvalidRequest,
                 "client connect configuration bounds must be positive",
@@ -229,48 +172,17 @@ impl ClientConnectionsApplication {
         })
     }
 
-    /// Runs the full connect flow (plan 11.4, steps 3-10) and resolves to the
-    /// fresh device list body of the `201` response.
+    /// Authorizes a browser request from Server-owned state, without a Device round trip.
     ///
     /// # Errors
-    ///
-    /// Returns the stable §16.3 failure categories; `ClientOffline` also
-    /// covers a device that never answered the challenge within the bounded
-    /// wait.
-    pub async fn connect(
+    /// Rejects invalid, expired or already-consumed codes and unavailable storage.
+    pub fn connect(
         &self,
         user_id: &str,
         client_ip: &str,
         request: &Value,
     ) -> Result<Value, ClientConnectionsError> {
-        match self.prepare(user_id, client_ip, request)? {
-            Prepared::Completed(body) => Ok(body),
-            Prepared::AwaitChallenge {
-                node,
-                code,
-                challenge_id,
-            } => {
-                let deadline = tokio::time::Instant::now() + self.config.challenge_wait;
-                loop {
-                    match self.poll(user_id, client_ip, &node, &code, &challenge_id)? {
-                        PollOutcome::Pending => {}
-                        PollOutcome::Completed(body) => return Ok(body),
-                        PollOutcome::Failed(error) => return Err(error),
-                    }
-                    if tokio::time::Instant::now() >= deadline {
-                        // The device was online but never answered the
-                        // challenge: within the fixed §16.3 taxonomy this is
-                        // the offline category.
-                        self.record_failures(user_id, client_ip, &node.client_node_id)?;
-                        return Err(ClientConnectionsError::new(
-                            ClientConnectionsErrorKind::ClientOffline,
-                            "the device did not confirm the connect challenge in time",
-                        ));
-                    }
-                    tokio::time::sleep(self.config.poll_interval).await;
-                }
-            }
-        }
+        self.prepare(user_id, client_ip, request)
     }
 
     /// Projects the signed-in user's granted Clients as a device list body.
@@ -350,16 +262,14 @@ impl ClientConnectionsApplication {
         }))
     }
 
-    /// Validates the request and durable preconditions, creates or reuses the
-    /// durable access challenge, and enqueues the challenge downlink frame
-    /// (plan 11.4, steps 4-6).
+    /// Validates the request and consumes the Server-owned code atomically.
     #[allow(clippy::too_many_lines)]
     fn prepare(
         &self,
         user_id: &str,
         client_ip: &str,
         request: &Value,
-    ) -> Result<Prepared, ClientConnectionsError> {
+    ) -> Result<Value, ClientConnectionsError> {
         let Some(fields) = request.as_object() else {
             return Err(ClientConnectionsError::invalid_request());
         };
@@ -388,17 +298,6 @@ impl ClientConnectionsApplication {
                 ..
             }) => {
                 return Err(client_not_found());
-            }
-            Some(node)
-                if matches!(
-                    node.presence_state,
-                    ClientPresenceState::Offline | ClientPresenceState::Degraded
-                ) =>
-            {
-                return Err(ClientConnectionsError::new(
-                    ClientConnectionsErrorKind::ClientOffline,
-                    "the client is not online",
-                ));
             }
             // A locally locked device is not connectable either.
             Some(node) if node.presence_state == ClientPresenceState::Locked => {
@@ -454,7 +353,7 @@ impl ClientConnectionsApplication {
                 .is_some()
             {
                 ensure_repository_grants(&mut storage, &node.client_node_id, user_id)?;
-                return directory_json(&mut storage, user_id).map(Prepared::Completed);
+                return directory_json(&mut storage, user_id);
             }
         }
 
@@ -500,87 +399,11 @@ impl ClientConnectionsApplication {
             ));
         }
 
-        // Create or reuse the durable challenge (plan 11.4, step 5) so a
-        // retried request waits on the same challenge instead of queueing a
-        // second frame.
-        let (reused, challenge_id) = {
-            let existing = connect
-                .pending_challenge_for_subject(&node.client_node_id, user_id, &code.connect_code_id)
-                .map_err(|_| ClientConnectionsError::unavailable())?;
-            if let Some(pending) = existing {
-                (true, pending.challenge_id)
-            } else {
-                let creation = AccessChallengeCreation::try_new(
-                    generate_prefixed_id("cch_")?,
-                    node.client_node_id.clone(),
-                    code.connect_code_id.clone(),
-                    user_id,
-                )
-                .map_err(|_| ClientConnectionsError::unavailable())?;
-                let created = connect
-                    .create_challenge(&creation, &now)
-                    .map_err(|_| ClientConnectionsError::unavailable())?;
-                (false, created.challenge_id)
-            }
-        };
-        if !reused {
-            enqueue_challenge_frame(
-                &mut storage,
-                &node,
-                &challenge_id,
-                &code.connect_code_id,
-                &code_digest,
-                &code.expires_at,
-                user_id,
-                &now,
-            )?;
-        }
-
-        Ok(Prepared::AwaitChallenge {
-            node,
-            code,
-            challenge_id,
-        })
+        drop(storage);
+        self.consume(user_id, client_ip, &node, &code)
     }
 
-    /// Reads the durable challenge state once and drives the flow to its next
-    /// transition (plan 11.4, steps 7-9).
-    fn poll(
-        &self,
-        user_id: &str,
-        client_ip: &str,
-        node: &ClientNodeRecord,
-        code: &ConnectCodeRecord,
-        challenge_id: &str,
-    ) -> Result<PollOutcome, ClientConnectionsError> {
-        let mut storage = self.open_storage()?;
-        let challenge = {
-            let mut connect = ConnectCodeService::new(&mut storage);
-            connect
-                .challenge_snapshot(challenge_id)
-                .map_err(|_| ClientConnectionsError::unavailable())?
-        };
-        let Some(challenge) = challenge else {
-            return Ok(PollOutcome::Failed(connect_code_invalid()));
-        };
-        match challenge.state {
-            ConnectChallengeState::Pending => Ok(PollOutcome::Pending),
-            ConnectChallengeState::Rejected => {
-                self.record_failures(user_id, client_ip, &node.client_node_id)?;
-                Ok(PollOutcome::Failed(connect_code_invalid()))
-            }
-            // The device confirmed this code generation; consume the code and
-            // create the grant in one atomic transaction (plan 11.4 step 8,
-            // contract 2 `active -> consumed`).
-            ConnectChallengeState::Confirmed => {
-                drop(storage);
-                self.consume(user_id, client_ip, node, code)
-                    .map(PollOutcome::Completed)
-            }
-        }
-    }
-
-    /// Consumes the confirmed code atomically and builds the `201` body.
+    /// Consumes the validated code atomically and builds the `201` body.
     fn consume(
         &self,
         user_id: &str,
@@ -782,78 +605,6 @@ fn connect_code_digest(code: &str) -> String {
     format!("sha256:{:x}", Sha256::digest(code.as_bytes()))
 }
 
-/// Enqueues the `client.access.challenge` downlink frame into the durable
-/// outbox at the next free stream position.
-#[allow(clippy::too_many_arguments)]
-fn enqueue_challenge_frame(
-    storage: &mut SqliteStorage,
-    node: &ClientNodeRecord,
-    challenge_id: &str,
-    connect_code_id: &str,
-    code_digest: &str,
-    expires_at: &Instant,
-    requester_user_id: &str,
-    now: &Instant,
-) -> Result<(), ClientConnectionsError> {
-    let instance = node
-        .current_instance_id
-        .clone()
-        .ok_or_else(ClientConnectionsError::unavailable)?;
-    let cursors = {
-        let mut registry = ClientRegistryService::new(storage);
-        registry
-            .exchange_cursors(&node.client_node_id)
-            .map_err(|_| ClientConnectionsError::unavailable())?
-            .ok_or_else(ClientConnectionsError::unavailable)?
-    };
-    let mut downlink = storage
-        .client_downlink_outbox()
-        .map_err(|_| ClientConnectionsError::unavailable())?;
-    let outbox_high_water = downlink
-        .high_water(&node.client_node_id)
-        .map_err(|_| ClientConnectionsError::unavailable())?;
-    let sequence = cursors
-        .server_to_client_ack_sequence
-        .max(outbox_high_water)
-        .checked_add(1)
-        .ok_or_else(ClientConnectionsError::unavailable)?;
-    let envelope = ServerToClientEnvelope {
-        schema_version: CLIENT_CONTROL_PORT_SCHEMA_VERSION.to_owned(),
-        message_id: generate_prefixed_id("msg_")?,
-        client_node_id: node.client_node_id.clone(),
-        client_instance_id: instance,
-        sequence,
-        occurred_at: now.0.clone(),
-        message: ServerToClientMessage::AccessChallenge(Box::new(ServerAccessChallengePayload {
-            challenge_id: challenge_id.to_owned(),
-            connect_code_id: connect_code_id.to_owned(),
-            code_digest: code_digest.to_owned(),
-            expires_at: expires_at.0.clone(),
-            requester_user_id: requester_user_id.to_owned(),
-        })),
-    };
-    let codec = FrameCodec::new(DEFAULT_MAX_FRAME_BYTES);
-    let stored = codec
-        .encode_envelope(&envelope)
-        .map_err(|_| ClientConnectionsError::unavailable())?;
-    let frame = std::str::from_utf8(&stored.frame)
-        .map_err(|_| ClientConnectionsError::unavailable())?
-        .to_owned();
-    downlink
-        .append(
-            &ClientDownlinkAppend::try_new(
-                node.client_node_id.clone(),
-                envelope.message_id.clone(),
-                sequence,
-                frame,
-            )
-            .map_err(|_| ClientConnectionsError::unavailable())?,
-            now,
-        )
-        .map_err(|_| ClientConnectionsError::unavailable())?;
-    Ok(())
-}
-
 /// Builds the device list body for one user: every active grant joined with
 /// its registry projection, occupancy uniformly `available` until the
 /// occupancy epic lands (§12.1, §16.4).
@@ -978,7 +729,7 @@ mod tests {
     fn config_rejects_zero_bounds() {
         let mut config = ClientConnectionsConfig::default();
         assert!(ClientConnectionsApplication::open("unused", &config).is_ok());
-        config.challenge_wait = std::time::Duration::ZERO;
+        config.rate_window_seconds = 0;
         assert!(ClientConnectionsApplication::open("unused", &config).is_err());
     }
 

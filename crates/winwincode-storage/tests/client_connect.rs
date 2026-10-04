@@ -119,8 +119,9 @@ fn issuance(
     .expect("issuance")
 }
 
-fn consume(code: u64, presented_digest: &str, ack_generation: u64) -> ConnectCodeConsume {
-    ConnectCodeConsume::try_new(code_id(code), presented_digest, ack_generation).expect("consume")
+fn consume(code: u64, presented_digest: &str, expected_generation: u64) -> ConnectCodeConsume {
+    ConnectCodeConsume::try_new(code_id(code), presented_digest, expected_generation)
+        .expect("consume")
 }
 
 fn expect_kind<T>(
@@ -358,7 +359,7 @@ fn consume_and_grant_is_atomic_and_first_user_receives_full_permissions() {
         ),
         ClientConnectStoreErrorKind::UnknownConnectCode,
     );
-    // The challenge ACK must name the published generation.
+    // The Server consumes exactly the stored publication generation.
     expect_kind(
         ledger.consume_and_create_grant(
             &consume(30, &digest(30), 29),

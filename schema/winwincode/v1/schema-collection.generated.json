@@ -3268,133 +3268,6 @@
       ],
       "type": "object"
     },
-    "ClientAccessChallengeAckMessage": {
-      "additionalProperties": false,
-      "description": "Confirms that the challenged connect code generation is still valid on the Device Client; the Control Plane may create the ClientAccessGrant only after this ACK.",
-      "properties": {
-        "challengeId": {
-          "$ref": "#/$defs/ClientAccessChallengeId"
-        },
-        "clientInstanceId": {
-          "$ref": "#/$defs/ClientInstanceId"
-        },
-        "clientNodeId": {
-          "$ref": "#/$defs/ClientNodeId"
-        },
-        "connectCodeId": {
-          "$ref": "#/$defs/ClientConnectCodeId"
-        },
-        "expectedRevision": {
-          "$ref": "#/$defs/Revision"
-        },
-        "idempotencyKey": {
-          "$ref": "#/$defs/IdempotencyKey"
-        },
-        "kind": {
-          "const": "client.access.challenge_ack"
-        },
-        "messageId": {
-          "$ref": "#/$defs/ClientControlMessageId"
-        },
-        "occurredAt": {
-          "$ref": "#/$defs/Instant"
-        },
-        "schemaVersion": {
-          "$ref": "#/$defs/SchemaVersion"
-        },
-        "sequence": {
-          "$ref": "#/$defs/ClientExchangeSequence"
-        },
-        "status": {
-          "$ref": "#/$defs/ClientChallengeAckStatus"
-        }
-      },
-      "required": [
-        "kind",
-        "schemaVersion",
-        "messageId",
-        "clientNodeId",
-        "clientInstanceId",
-        "sequence",
-        "occurredAt",
-        "challengeId",
-        "connectCodeId",
-        "status",
-        "expectedRevision",
-        "idempotencyKey"
-      ],
-      "title": "client.access.challenge_ack",
-      "type": "object",
-      "x-authority": "access-write",
-      "x-direction": "client-to-control-plane",
-      "x-message-class": "command"
-    },
-    "ClientAccessChallengeId": {
-      "description": "Identity of one pending access challenge sent to the Device Client before a grant is created.",
-      "pattern": "^cac_[0-9A-HJKMNP-TV-Z]{26}$",
-      "type": "string"
-    },
-    "ClientAccessChallengeMessage": {
-      "additionalProperties": false,
-      "description": "Asks the Device Client to verify that the challenged connect code generation is still valid before a ClientAccessGrant is created; the plaintext code never crosses this contract.",
-      "properties": {
-        "challengeId": {
-          "$ref": "#/$defs/ClientAccessChallengeId"
-        },
-        "clientInstanceId": {
-          "$ref": "#/$defs/ClientInstanceId"
-        },
-        "clientNodeId": {
-          "$ref": "#/$defs/ClientNodeId"
-        },
-        "codeDigest": {
-          "$ref": "#/$defs/Sha256Digest"
-        },
-        "connectCodeId": {
-          "$ref": "#/$defs/ClientConnectCodeId"
-        },
-        "expiresAt": {
-          "$ref": "#/$defs/Instant"
-        },
-        "kind": {
-          "const": "client.access.challenge"
-        },
-        "messageId": {
-          "$ref": "#/$defs/ClientControlMessageId"
-        },
-        "occurredAt": {
-          "$ref": "#/$defs/Instant"
-        },
-        "requesterUserId": {
-          "$ref": "#/$defs/UserId"
-        },
-        "schemaVersion": {
-          "$ref": "#/$defs/SchemaVersion"
-        },
-        "sequence": {
-          "$ref": "#/$defs/ClientExchangeSequence"
-        }
-      },
-      "required": [
-        "kind",
-        "schemaVersion",
-        "messageId",
-        "clientNodeId",
-        "clientInstanceId",
-        "sequence",
-        "occurredAt",
-        "challengeId",
-        "connectCodeId",
-        "codeDigest",
-        "requesterUserId",
-        "expiresAt"
-      ],
-      "title": "client.access.challenge",
-      "type": "object",
-      "x-authority": "access-write",
-      "x-direction": "control-plane-to-client",
-      "x-message-class": "request"
-    },
     "ClientAccessGrant": {
       "additionalProperties": false,
       "description": "Many-to-many user-to-client permission relation. A grant never implies occupancy. Ownership: Control Plane.",
@@ -3749,15 +3622,6 @@
       "title": "ClientCapacityReport",
       "type": "object"
     },
-    "ClientChallengeAckStatus": {
-      "description": "Device Client verdict for one access challenge.",
-      "enum": [
-        "confirmed",
-        "stale_generation"
-      ],
-      "title": "ClientChallengeAckStatus",
-      "type": "string"
-    },
     "ClientCommandAckMessage": {
       "additionalProperties": false,
       "description": "Durable command result in either direction. Server reports rejected client commands; Device acknowledges server commands without a dedicated result. Transport acknowledgement alone does not imply business success.",
@@ -4007,9 +3871,6 @@
           "$ref": "#/$defs/ClientConnectCodePublishedMessage"
         },
         {
-          "$ref": "#/$defs/ClientAccessChallengeAckMessage"
-        },
-        {
           "$ref": "#/$defs/ClientOccupancyAckMessage"
         },
         {
@@ -4046,9 +3907,6 @@
           "$ref": "#/$defs/ClientEnrollmentAcceptedMessage"
         },
         {
-          "$ref": "#/$defs/ClientAccessChallengeMessage"
-        },
-        {
           "$ref": "#/$defs/ClientOccupancyOfferMessage"
         },
         {
@@ -4071,9 +3929,6 @@
         },
         {
           "$ref": "#/$defs/ClientLockMessage"
-        },
-        {
-          "$ref": "#/$defs/ClientCredentialRotateMessage"
         },
         {
           "$ref": "#/$defs/ClientProviderReportMessage"
@@ -4114,7 +3969,6 @@
         "client.hello",
         "client.heartbeat",
         "client.connect_code.published",
-        "client.access.challenge_ack",
         "client.occupancy.ack",
         "client.occupancy.rejected",
         "client.repository.upsert",
@@ -4127,7 +3981,6 @@
         "client.candidate.apply_result",
         "client.command_ack",
         "client.enrollment_accepted",
-        "client.access.challenge",
         "client.occupancy.offer",
         "client.occupancy.release",
         "client.occupancy.force_fence",
@@ -4136,7 +3989,6 @@
         "client.worker.stop",
         "client.candidate.apply",
         "client.client_lock",
-        "client.credential_rotate",
         "client.provider.report",
         "client.provider.apply",
         "client.extension.apply",
@@ -4147,68 +3999,6 @@
         "client.managed_app.status"
       ],
       "title": "ClientControlMessageKind",
-      "type": "string"
-    },
-    "ClientCredentialRotateMessage": {
-      "additionalProperties": false,
-      "description": "Requests device credential rotation. Device durably generates a replacement and proposes only its digest in the authenticated exchange credentialRotation sidecar; Server confirms staging and activates it when the replacement credential proves possession.",
-      "properties": {
-        "clientInstanceId": {
-          "$ref": "#/$defs/ClientInstanceId"
-        },
-        "clientNodeId": {
-          "$ref": "#/$defs/ClientNodeId"
-        },
-        "expectedRevision": {
-          "$ref": "#/$defs/Revision"
-        },
-        "idempotencyKey": {
-          "$ref": "#/$defs/IdempotencyKey"
-        },
-        "kind": {
-          "const": "client.credential_rotate"
-        },
-        "messageId": {
-          "$ref": "#/$defs/ClientControlMessageId"
-        },
-        "occurredAt": {
-          "$ref": "#/$defs/Instant"
-        },
-        "reason": {
-          "$ref": "#/$defs/ClientCredentialRotateReason"
-        },
-        "schemaVersion": {
-          "$ref": "#/$defs/SchemaVersion"
-        },
-        "sequence": {
-          "$ref": "#/$defs/ClientExchangeSequence"
-        }
-      },
-      "required": [
-        "kind",
-        "schemaVersion",
-        "messageId",
-        "clientNodeId",
-        "clientInstanceId",
-        "sequence",
-        "occurredAt",
-        "reason",
-        "expectedRevision",
-        "idempotencyKey"
-      ],
-      "title": "client.credential_rotate",
-      "type": "object",
-      "x-authority": "control-command",
-      "x-direction": "control-plane-to-client",
-      "x-message-class": "command"
-    },
-    "ClientCredentialRotateReason": {
-      "description": "Why device credential rotation is requested; credential material itself never crosses this contract.",
-      "enum": [
-        "scheduled",
-        "suspected_compromise"
-      ],
-      "title": "ClientCredentialRotateReason",
       "type": "string"
     },
     "ClientDisplayName": {
@@ -12651,23 +12441,6 @@
       ],
       "type": "object"
     },
-    "DeviceCredentialRotation": {
-      "additionalProperties": false,
-      "description": "Optional credentialRotation sidecar on authenticated exchange requests and responses. Contains no secret; the response echoes a durably staged request. The first request authenticated with the replacement credential activates it and invalidates the previous credential.",
-      "properties": {
-        "commandMessageId": {
-          "$ref": "#/$defs/ClientControlMessageId"
-        },
-        "credentialDigest": {
-          "$ref": "#/$defs/Sha256Digest"
-        }
-      },
-      "required": [
-        "commandMessageId",
-        "credentialDigest"
-      ],
-      "type": "object"
-    },
     "DeviceExtensionMcp": {
       "additionalProperties": false,
       "properties": {
@@ -14823,9 +14596,6 @@
         },
         {
           "$ref": "#/$defs/WorkerRegistrationResultMessage"
-        },
-        {
-          "$ref": "#/$defs/WorkerCapabilitiesMessage"
         },
         {
           "$ref": "#/$defs/WorkerHeartbeatMessage"
@@ -26707,54 +26477,6 @@
       "pattern": "^wct_[0-9A-HJKMNP-TV-Z]{26}$",
       "type": "string"
     },
-    "WorkerCapabilitiesMessage": {
-      "additionalProperties": false,
-      "description": "Replaces the registered capability snapshot for the current Worker instance.",
-      "properties": {
-        "capabilities": {
-          "$ref": "#/$defs/WorkerCapabilitySet"
-        },
-        "kind": {
-          "const": "worker.capabilities"
-        },
-        "messageId": {
-          "$ref": "#/$defs/ExecutionMessageId"
-        },
-        "observedAt": {
-          "$ref": "#/$defs/Instant"
-        },
-        "requestId": {
-          "$ref": "#/$defs/RequestId"
-        },
-        "schemaVersion": {
-          "$ref": "#/$defs/SchemaVersion"
-        },
-        "sentAt": {
-          "$ref": "#/$defs/Instant"
-        },
-        "workerId": {
-          "$ref": "#/$defs/WorkerId"
-        },
-        "workerInstanceId": {
-          "$ref": "#/$defs/WorkerInstanceId"
-        }
-      },
-      "required": [
-        "kind",
-        "schemaVersion",
-        "messageId",
-        "sentAt",
-        "requestId",
-        "workerId",
-        "workerInstanceId",
-        "observedAt",
-        "capabilities"
-      ],
-      "title": "worker.capabilities",
-      "type": "object",
-      "x-authority": "worker-registry",
-      "x-direction": "worker-to-control-plane"
-    },
     "WorkerCapabilityFeature": {
       "enum": [
         "artifact_stream",
@@ -28410,7 +28132,7 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:5fe30747ba453f348c2f308f2e8e2f92f81a07609187a06136303ccc50414b92",
+  "x-source-digest": "sha256:991499978a9eb7ef8da3ebe3886177896354a412cafd7d2a1fbd4b9067954530",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {

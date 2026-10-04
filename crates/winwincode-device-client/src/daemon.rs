@@ -98,10 +98,10 @@ use winwincode_client_port::messages::{
     ClientHeartbeatPayload, ClientHelloPayload, ClientManagedAppStatusPayload,
     ClientOccupancyAckPayload, ClientOccupancyRejectedPayload, ClientToServerEnvelope,
     ClientToServerMessage, ClientWorkerLaunchAckPayload, CommandContext, OccupancyCommandContext,
-    ServerAccessChallengePayload, ServerClientLockPayload, ServerEnrollmentAcceptedPayload,
-    ServerOccupancyForceFencePayload, ServerOccupancyOfferPayload, ServerOccupancyReleasePayload,
-    ServerRepositoryRescanPayload, ServerToClientEnvelope, ServerToClientMessage,
-    ServerWorkerLaunchPayload, ServerWorkerStopPayload,
+    ServerClientLockPayload, ServerEnrollmentAcceptedPayload, ServerOccupancyForceFencePayload,
+    ServerOccupancyOfferPayload, ServerOccupancyReleasePayload, ServerRepositoryRescanPayload,
+    ServerToClientEnvelope, ServerToClientMessage, ServerWorkerLaunchPayload,
+    ServerWorkerStopPayload,
 };
 
 use crate::connect_code::{self, PublishedConnectCode};
@@ -259,12 +259,6 @@ pub trait ExchangeTransport: Send + Sync {
 /// routing identity rides inside each frame envelope.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExchangeRequest {
-    #[serde(
-        rename = "credentialRotation",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub credential_rotation: Option<winwincode_client_port::messages::DeviceCredentialRotation>,
     /// Wire contract schema version (`winwincode/v1`).
     #[serde(rename = "schemaVersion")]
     pub schema_version: String,
@@ -338,12 +332,6 @@ impl fmt::Debug for WorkerCredentialIssuance {
 /// fresh enrollment — the issued Device Credential material.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExchangeResponse {
-    #[serde(
-        rename = "credentialRotation",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub credential_rotation: Option<winwincode_client_port::messages::DeviceCredentialRotation>,
     /// Wire contract schema version (`winwincode/v1`).
     #[serde(rename = "schemaVersion")]
     pub schema_version: String,
@@ -479,11 +467,6 @@ pub struct DaemonStatus {
     pub heartbeats_enqueued: u64,
     /// `client.connect_code.published` frames enqueued by this session.
     pub connect_codes_published: u64,
-    /// `client.access.challenge` frames answered with a
-    /// `client.access.challenge_ack`.
-    pub access_challenges_answered: u64,
-    /// Access challenges whose local verdict was `confirmed`.
-    pub access_challenges_confirmed: u64,
     /// `client.client_lock` commands applied and acknowledged.
     pub client_lock_commands_applied: u64,
     /// `client.repository.rescan` commands that completed a fresh local scan.
@@ -863,7 +846,7 @@ impl DeviceDaemon {
     }
 
     /// Generates a new dynamic connect code (or refreshes the current one:
-    /// the previous generation stops validating challenges immediately and
+    /// the next publication replaces the prior Server-owned generation and
     /// the new publication carries `generation + 1`), persists its digest
     /// state, and enqueues the durable `client.connect_code.published`
     /// frame. The plaintext rides the returned value only — never the store,
@@ -911,21 +894,9 @@ impl DeviceDaemon {
         Ok(published)
     }
 
-    /// Revokes the current connect code (the local disable): every later
-    /// challenge naming it is refused. Returns the revoked record, or `None`
-    /// when no active code exists.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DaemonError::Store`] for durable failures.
-    pub fn revoke_connect_code(&mut self) -> Result<Option<ConnectCodeStateRecord>, DaemonError> {
-        connect_code::revoke_connect_code(&mut self.store, OffsetDateTime::now_utc())
-            .map_err(DaemonError::Store)
-    }
-
     /// Locks the client locally: `acceptingConnections = false` and
     /// `lockState = locked`, durably, mirrored into every later hello and
-    /// heartbeat. While locked, every access challenge is refused.
+    /// heartbeat. The Server uses the published policy when authorizing access.
     ///
     /// # Errors
     ///
@@ -1412,7 +1383,6 @@ impl DeviceDaemon {
             values.push(value);
         }
         Ok(ExchangeRequest {
-            credential_rotation: crate::identity::pending_credential_rotation(&self.store)?,
             schema_version: CLIENT_CONTROL_PORT_SCHEMA_VERSION.to_owned(),
             frames: values,
             ack_sequence: self.downlink.ack_sequence(),
@@ -1425,7 +1395,6 @@ impl DeviceDaemon {
         batch: &OutboxBatch,
         now: Instant,
     ) -> Result<TickOutcome, DaemonError> {
-        self.confirm_credential_rotation(response)?;
         let ack = match self
             .session
             .acknowledge(&mut self.store, response.ack_sequence)
@@ -1479,7 +1448,6 @@ impl DeviceDaemon {
         batch: &OutboxBatch,
         now: Instant,
     ) -> Result<TickOutcome, DaemonError> {
-        self.confirm_credential_rotation(response)?;
         if replay_from == 0 || replay_from > batch.highest_sequence + 1 {
             let reason = format!(
                 "gap replayFromSequence {replay_from} is outside the retained stream \
@@ -1518,8 +1486,7 @@ impl DeviceDaemon {
 
     /// Ingests the server-to-client batch: validates contiguous sequences,
     /// persists the acknowledgement cursor, and handles the enrollment
-    /// response, access challenges (answer with a `challenge_ack` verdict),
-    /// client-lock commands (persist the policy, acknowledge), and the
+    /// response, client-lock commands (persist the policy, acknowledge), and the
     /// occupancy commands (mirror advance with persist-before-send acks,
     /// release intents, force-fence overwrites). Commands owned by later
     /// lanes are counted without acting.
@@ -1701,10 +1668,6 @@ impl DeviceDaemon {
                                 .map_err(DownlinkFailure::Fatal)?;
                             acceptance = Some(payload.clone());
                         }
-                        ServerToClientMessage::AccessChallenge(payload) => {
-                            self.answer_access_challenge(payload)
-                                .map_err(DownlinkFailure::Fatal)?;
-                        }
                         ServerToClientMessage::ClientLock(payload) => {
                             self.apply_client_lock(payload, &envelope.message_id)
                                 .map_err(DownlinkFailure::Fatal)?;
@@ -1737,14 +1700,6 @@ impl DeviceDaemon {
                             self.apply_repository_rescan(payload, &envelope.message_id)
                                 .map_err(DownlinkFailure::Fatal)?;
                         }
-                        ServerToClientMessage::CredentialRotate(payload) => {
-                            crate::identity::prepare_credential_rotation(
-                                &mut self.store,
-                                &envelope.message_id,
-                                payload,
-                            )
-                            .map_err(|error| DownlinkFailure::Fatal(DaemonError::Store(error)))?;
-                        }
                         ServerToClientMessage::ManagedAppCommand(payload) => {
                             self.apply_managed_app_command(payload, &envelope.message_id)
                                 .map_err(DownlinkFailure::Fatal)?;
@@ -1752,11 +1707,6 @@ impl DeviceDaemon {
                     }
                     self.advance_downlink_cursor(&envelope)?;
                     accepted += 1;
-                    if matches!(envelope.message, ServerToClientMessage::CredentialRotate(_)) {
-                        // Complete one durable handover before receiving another.
-                        self.next_heartbeat_at = Instant::now();
-                        break;
-                    }
                 }
                 SequenceVerdict::Duplicate => {}
                 SequenceVerdict::Gap {
@@ -1795,25 +1745,6 @@ impl DeviceDaemon {
         }
         self.status.downlink_accepted_through = self.downlink.ack_sequence();
         Ok(accepted)
-    }
-
-    fn confirm_credential_rotation(
-        &mut self,
-        response: &ExchangeResponse,
-    ) -> Result<(), DaemonError> {
-        if let Some(confirmation) = &response.credential_rotation {
-            crate::identity::activate_credential_rotation(
-                &mut self.store,
-                confirmation,
-                &now_rfc3339(),
-            )?;
-            let identity =
-                crate::identity::load_device_identity(&self.store)?.ok_or_else(|| {
-                    DaemonError::Protocol("device identity disappeared during rotation".into())
-                })?;
-            self.credential = Some(identity.credential().material_hex());
-        }
-        Ok(())
     }
 
     fn advance_downlink_cursor(
@@ -1993,34 +1924,6 @@ impl DeviceDaemon {
         self.hello_announced = false;
         self.next_heartbeat_at = Instant::now() + self.heartbeat_interval;
         self.status.enrolled = true;
-        Ok(())
-    }
-
-    /// Answers one `client.access.challenge`: validates the challenged code
-    /// generation against the durable local state and enqueues the
-    /// `client.access.challenge_ack` verdict (persist-before-send, so a
-    /// crash cannot drop the answer).
-    ///
-    /// The ack is answered for every challenge — `stale_generation` is the
-    /// frozen v1 schema's only negative verdict, so local rejections
-    /// (unknown/older generation, revoked, expired, locked, new connections
-    /// disabled) all map onto it while the precise local reason stays in the
-    /// status counters and logs never carry code material.
-    fn answer_access_challenge(
-        &mut self,
-        payload: &ServerAccessChallengePayload,
-    ) -> Result<(), DaemonError> {
-        let verdict = connect_code::evaluate_access_challenge(
-            &self.store,
-            payload,
-            OffsetDateTime::now_utc(),
-        )
-        .map_err(DaemonError::Store)?;
-        self.enqueue(connect_code::challenge_ack_message(payload, verdict))?;
-        self.status.access_challenges_answered += 1;
-        if verdict.is_confirmed() {
-            self.status.access_challenges_confirmed += 1;
-        }
         Ok(())
     }
 

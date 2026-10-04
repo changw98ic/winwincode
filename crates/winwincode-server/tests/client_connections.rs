@@ -3,8 +3,7 @@
 //! The user-facing Client connection flow over real HTTP: the three
 //! `/api/v1/clients` routes wired to `ClientConnectionsApplication` and the
 //! real client exchange, covering the §16.3 error taxonomy, the bounded
-//! challenge wait driven by a fake device that answers
-//! `client.access.challenge_ack` over the exchange protocol, the atomic
+//! authorization without a Device response, the atomic
 //! consume-and-grant with idempotent retries, the device directory shape,
 //! and immediate revocation.
 
@@ -29,11 +28,9 @@ use tokio::sync::mpsc;
 use winwincode_api::generated::{OrganizationScope, OrganizationScopeKind, Scope};
 use winwincode_client_port::domain::ClientArchitecture;
 use winwincode_client_port::domain::ClientCapacityReport;
-use winwincode_client_port::domain::ClientChallengeAckStatus;
 use winwincode_client_port::domain::ClientLockState;
 use winwincode_client_port::domain::ClientPlatformTarget;
 use winwincode_client_port::domain::PresenceState;
-use winwincode_client_port::messages::ClientAccessChallengeAckPayload;
 use winwincode_client_port::messages::ClientEnrollPayload;
 use winwincode_client_port::messages::ClientHelloPayload;
 use winwincode_client_port::messages::ClientToServerEnvelope;
@@ -521,71 +518,6 @@ fn expire_all_connect_codes(data_directory: &Path) {
     assert!(!expired.is_empty(), "the published code must be expired");
 }
 
-/// The fake device: polls the durable downlink outbox like the real daemon
-/// polls its inbox, and answers every `client.access.challenge` with a
-/// confirmed `client.access.challenge_ack` frame over the exchange protocol.
-fn spawn_challenge_responder(
-    data_directory: PathBuf,
-    address: std::net::SocketAddr,
-    node: String,
-    credential: String,
-    mut inbox_ack: u64,
-    mut next_sequence: u64,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-            let pending = {
-                let Ok(mut storage) = SqliteStorage::open(&data_directory) else {
-                    continue;
-                };
-                let Ok(outbox) = storage.client_downlink_outbox() else {
-                    continue;
-                };
-                match outbox.deliverable(&node, inbox_ack, 8) {
-                    Ok(frames) => frames,
-                    Err(_) => continue,
-                }
-            };
-            for stored in pending {
-                let frame_value: Value = serde_json::from_str(&stored.frame).expect("frame json");
-                inbox_ack = stored.sequence;
-                if frame_value["kind"] != json!("client.access.challenge") {
-                    continue;
-                }
-                let payload = &frame_value["payload"];
-                let ack_frame = ClientToServerMessage::AccessChallengeAck(Box::new(
-                    ClientAccessChallengeAckPayload {
-                        command: CommandContext {
-                            expected_revision: 0,
-                            idempotency_key: format!(
-                                "idem_ack_{}",
-                                payload["challengeId"].as_str().expect("challenge id")
-                            ),
-                        },
-                        challenge_id: payload["challengeId"]
-                            .as_str()
-                            .expect("challenge id")
-                            .to_owned(),
-                        connect_code_id: payload["connectCodeId"]
-                            .as_str()
-                            .expect("connect code id")
-                            .to_owned(),
-                        status: ClientChallengeAckStatus::Confirmed,
-                    },
-                ));
-                let request = exchange_request(
-                    &[frame(&node, INSTANCE, next_sequence, ack_frame)],
-                    stored.sequence,
-                );
-                next_sequence += 1;
-                let (status, body) = post_exchange(address, &request, Some(&credential)).await;
-                assert!(status.starts_with("HTTP/1.1 200"), "{status} {body:?}");
-            }
-        }
-    })
-}
-
 fn connect_body(client_id: &str, code: &str) -> String {
     json!({
         "schemaVersion": SCHEMA_VERSION,
@@ -754,23 +686,9 @@ async fn connect_reports_every_domain_failure_of_the_taxonomy() {
     assert_eq!(status_of(&response), "409", "{response}");
     assert_eq!(wire_code(&response), "CONNECT_CODE_EXPIRED");
 
-    // An offline device: presence precedes any code verification.
-    set_presence(&data_directory, &node, ClientPresenceState::Offline);
     let usable_code = publish_connect_code(&data_directory, &node, "44445555");
-    let response = http_request(
-        address,
-        &cookie_post(
-            "/api/v1/clients/connections",
-            &connect_body(&public_client_id, &usable_code),
-            &cookie,
-        ),
-    )
-    .await;
-    assert_eq!(status_of(&response), "409", "{response}");
-    assert_eq!(wire_code(&response), "CLIENT_OFFLINE");
 
     // A Client that no longer accepts connections.
-    set_presence(&data_directory, &node, ClientPresenceState::Online);
     set_node_column(&data_directory, &node, "accepting_connections = 0");
     let response = http_request(
         address,
@@ -848,23 +766,15 @@ async fn connect_reports_every_domain_failure_of_the_taxonomy() {
 
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
-async fn connect_completes_when_the_device_confirms_and_stays_idempotent() {
+async fn server_connect_completes_without_device_traffic_and_stays_idempotent() {
     let data_directory = test_directory("client-connect-happy");
     let auth_directory = test_directory("client-connect-happy-sessions");
     let running = start_server(&data_directory, &auth_directory).await;
     let address = running.local_address();
     let (cookie, user_id) = initialize_and_login_owner(address).await;
 
-    let (node, public_client_id, credential, next_sequence) = enroll_online_device(address).await;
+    let (node, public_client_id, _credential, _next_sequence) = enroll_online_device(address).await;
     let code = publish_connect_code(&data_directory, &node, "68421975");
-    let responder = spawn_challenge_responder(
-        data_directory.clone(),
-        address,
-        node.clone(),
-        credential,
-        1,
-        next_sequence,
-    );
 
     let response = http_request(
         address,
@@ -885,8 +795,7 @@ async fn connect_completes_when_the_device_confirms_and_stays_idempotent() {
     assert_eq!(clients[0]["occupancy"], json!("available"));
 
     // Durable facts: exactly one active grant with the first-user permission
-    // set, the code consumed, the challenge settled, and the acked challenge
-    // frame retained no longer.
+    // set, the code consumed, and no authorization traffic sent to Device.
     {
         let mut storage = SqliteStorage::open(&data_directory).expect("storage");
         let mut grants = AccessGrantService::new(&mut storage);
@@ -906,15 +815,11 @@ async fn connect_completes_when_the_device_confirms_and_stays_idempotent() {
             code_record.state,
             winwincode_storage::ConnectCodeState::Consumed
         );
-        let pending = connect
-            .pending_challenge_for_subject(&node, &user_id, &code_record.connect_code_id)
-            .expect("challenge lookup");
-        assert!(pending.is_none(), "the challenge settled");
         let outbox = storage.client_downlink_outbox().expect("outbox");
         assert_eq!(
             outbox.deliverable(&node, 0, 100).expect("retained").len(),
             0,
-            "the acked challenge frame is retained no longer"
+            "authorization did not enqueue a Device command"
         );
     }
     {
@@ -962,60 +867,6 @@ async fn connect_completes_when_the_device_confirms_and_stays_idempotent() {
             "the partial unique index keeps exactly one grant"
         );
     }
-
-    responder.abort();
-    running.shutdown().await.expect("shutdown");
-    let _ = std::fs::remove_dir_all(&data_directory);
-    let _ = std::fs::remove_dir_all(&auth_directory);
-}
-
-#[tokio::test]
-async fn connect_times_out_with_client_offline_and_feeds_the_rate_limit() {
-    let data_directory = test_directory("client-connect-timeout");
-    let auth_directory = test_directory("client-connect-timeout-sessions");
-    let running = start_server(&data_directory, &auth_directory).await;
-    let address = running.local_address();
-
-    let (node, public_client_id, _credential, _next) = enroll_online_device(address).await;
-    let code = publish_connect_code(&data_directory, &node, "55556666");
-    // No responder: the durable challenge stays pending until the deadline.
-    let application = ClientConnectionsApplication::open(
-        &data_directory,
-        &ClientConnectionsConfig {
-            challenge_wait: Duration::from_millis(300),
-            poll_interval: Duration::from_millis(25),
-            ..ClientConnectionsConfig::default()
-        },
-    )
-    .expect("valid application");
-    let request = json!({
-        "schemaVersion": SCHEMA_VERSION,
-        "clientId": public_client_id,
-        "connectionCode": code,
-    });
-    let user = "usr_11111111111111111111111111";
-    let first = application
-        .connect(user, "127.0.0.1", &request)
-        .await
-        .expect_err("the bounded wait must fail");
-    assert_eq!(first.kind(), ClientConnectionsErrorKind::ClientOffline);
-
-    // Every retry reuses the same pending challenge and fails offline again,
-    // burning one failure per attempt in all three dimensions.
-    for _ in 0..4 {
-        let retry = application
-            .connect(user, "127.0.0.1", &request)
-            .await
-            .expect_err("the retry must fail");
-        assert_eq!(retry.kind(), ClientConnectionsErrorKind::ClientOffline);
-    }
-    // Five failures reached the fixed-window threshold: the next attempt is
-    // throttled before any challenge work happens.
-    let throttled = application
-        .connect(user, "127.0.0.1", &request)
-        .await
-        .expect_err("the throttled attempt must fail");
-    assert_eq!(throttled.kind(), ClientConnectionsErrorKind::RateLimited);
 
     running.shutdown().await.expect("shutdown");
     let _ = std::fs::remove_dir_all(&data_directory);
@@ -1209,4 +1060,54 @@ async fn downlink_outbox_retains_by_acknowledgement_cursor_and_purges() {
     let appended = append_frame(&mut storage, 1);
     assert_eq!(appended.sequence, 1);
     let _ = std::fs::remove_dir_all(&data_directory);
+}
+
+#[tokio::test]
+async fn offline_device_authorization_is_immediate_and_server_rechecks_code_state() {
+    let data_directory = test_directory("server-connect-offline");
+    let auth_directory = test_directory("server-connect-offline-sessions");
+    let running = start_server(&data_directory, &auth_directory).await;
+    let (cookie, user) = initialize_and_login_owner(running.local_address()).await;
+    let (node, public_client_id, _credential, _) =
+        enroll_online_device(running.local_address()).await;
+    let code = publish_connect_code(&data_directory, &node, "55556666");
+    set_presence(&data_directory, &node, ClientPresenceState::Offline);
+    let application =
+        ClientConnectionsApplication::open(&data_directory, &ClientConnectionsConfig::default())
+            .unwrap();
+    let request = json!({"schemaVersion": SCHEMA_VERSION, "clientId": public_client_id, "connectionCode": code});
+    let response = http_request(
+        running.local_address(),
+        &cookie_post("/api/v1/clients/connections", &request.to_string(), &cookie),
+    )
+    .await;
+    assert_eq!(status_of(&response), "201", "{response}");
+    assert_eq!(
+        response_body(&response)["clients"][0]["presence"],
+        "offline"
+    );
+    let mut storage = SqliteStorage::open(&data_directory).unwrap();
+    assert!(
+        storage
+            .client_downlink_outbox()
+            .unwrap()
+            .deliverable(&node, 0, 100)
+            .unwrap()
+            .is_empty(),
+        "no Device round trip"
+    );
+    drop(storage);
+    let other_user = "usr_22222222222222222222222222";
+    let denied = application
+        .connect(other_user, "127.0.0.2", &request)
+        .expect_err("consumed code grants nobody else");
+    assert_eq!(
+        denied.kind(),
+        ClientConnectionsErrorKind::ConnectCodeExpired
+    );
+    let replay = application.connect(&user, "127.0.0.1", &request).unwrap();
+    assert_eq!(replay["clients"].as_array().unwrap().len(), 1);
+    running.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(data_directory);
+    let _ = std::fs::remove_dir_all(auth_directory);
 }

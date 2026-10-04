@@ -19,8 +19,7 @@
 //! `client.hello`, `client.heartbeat`), the occupancy ledger
 //! (`client.occupancy.ack` promotes `reserving -> occupied`,
 //! `client.occupancy.rejected` rolls the offer back, and a zero-running
-//! heartbeat completes a `draining` lease), the connect ledger
-//! (`client.access.challenge_ack`), and the candidate receipt ledger
+//! heartbeat completes a `draining` lease), and the candidate receipt ledger
 //! (`client.candidate.retained` records the frozen candidate idempotently;
 //! `client.candidate.apply_result` settles the device's apply receipt under
 //! the occupancy fencing judgement — a ticket stamped with a superseded
@@ -43,10 +42,8 @@
 //! frames. Downlink frames persist in the durable `client_downlink_frames`
 //! outbox until the device acknowledges their sequence: the exchange
 //! delivers every retained frame above the acknowledgement cursor (bounded
-//! by the batch size), and acknowledged frames are retained no longer. The
-//! `client.access.challenge_ack` frame settles its durable access challenge
-//! through the `ConnectCodeService`, completing the connect flow's bounded
-//! wait (plan 11.4).
+//! by the batch size), and acknowledged frames are retained no longer.
+//! Browser access authorization is decided by the Server.
 
 use std::fmt;
 use std::path::Path;
@@ -61,7 +58,6 @@ use sha2::Sha256;
 use winwincode_client_port::domain::ApplyResult;
 use winwincode_client_port::domain::ApplyStrategy;
 use winwincode_client_port::domain::ClientArchitecture;
-use winwincode_client_port::domain::ClientChallengeAckStatus;
 use winwincode_client_port::domain::ClientControlMessageKind;
 use winwincode_client_port::domain::ClientPlatformTarget;
 use winwincode_client_port::domain::PresenceState;
@@ -104,7 +100,6 @@ use winwincode_storage::ClientExchangeCursors;
 use winwincode_storage::ClientNodeRecord;
 use winwincode_storage::ClientNodeRegistration;
 use winwincode_storage::ClientPresenceState;
-use winwincode_storage::ConnectChallengeVerdict;
 use winwincode_storage::ConnectCodePublication;
 use winwincode_storage::ConnectCodeRevocation;
 use winwincode_storage::LaunchAckSettlement;
@@ -436,10 +431,9 @@ impl ClientExchangeApplication {
                 self.create_enrollment(storage, None, 0, payload, envelopes, now)
             }
             // A pending node without any credential yet may refresh its
-            // enrollment facts. Once a credential was issued — pending or
-            // not — enroll is refused forever; rotation is
-            // `client.credential_rotate`'s authenticated job, and an
-            // unauthenticated re-issue would let anyone hijack the identity.
+            // enrollment facts. Once a credential was issued, subsequent
+            // exchanges use it; unauthenticated enrollment cannot replace
+            // that identity.
             Some(record)
                 if record.presence_state == ClientPresenceState::PendingEnrollment
                     && record.device_credential_digest.is_none() =>
@@ -611,7 +605,6 @@ impl ClientExchangeApplication {
         }
 
         Ok(ExchangeResponseBody {
-            credential_rotation: None,
             schema_version: CLIENT_CONTROL_PORT_SCHEMA_VERSION.to_owned(),
             ack_sequence,
             replay_from_sequence: replay_hint,
@@ -631,7 +624,7 @@ impl ClientExchangeApplication {
 
     /// Settles one authenticated exchange: constant-time credential match,
     /// per-frame cursor judgement, `client.hello` instance takeover and
-    /// presence, `client.heartbeat` projection, `client.access.challenge_ack`
+    /// presence, `client.heartbeat` projection, repository
     /// settlement, and the durable downlink batch.
     #[allow(clippy::too_many_lines)]
     fn authenticated_exchange(
@@ -644,7 +637,6 @@ impl ClientExchangeApplication {
         now: &Instant,
     ) -> Result<ExchangeResponseBody, ClientExchangeError> {
         let client_ack = request.ack_sequence;
-        let rotation = request.credential_rotation.as_ref();
         let Some(secret) = secret else {
             return Err(ClientExchangeError::authentication());
         };
@@ -666,14 +658,7 @@ impl ClientExchangeApplication {
         if record.presence_state == ClientPresenceState::Revoked {
             return Err(ClientExchangeError::authentication());
         }
-        if !credential_digest_matches(secret, stored_digest)
-            && !storage
-                .client_node_registry()
-                .and_then(|mut registry| {
-                    registry.activate_credential_rotation(node_id, &credential_digest(secret))
-                })
-                .map_err(|_| ClientExchangeError::unavailable())?
-        {
+        if !credential_digest_matches(secret, stored_digest) {
             return Err(ClientExchangeError::authentication());
         }
         let cursors = {
@@ -686,9 +671,6 @@ impl ClientExchangeApplication {
         let outbox_high_water = outbox_high_water_or_unavailable(storage, node_id)?;
         if client_ack > cursors.server_to_client_ack_sequence.max(outbox_high_water) {
             return Err(ClientExchangeError::invalid_request());
-        }
-        if let Some(rotation) = rotation {
-            stage_credential_rotation(storage, node_id, rotation)?;
         }
         let effective_instance = record
             .current_instance_id
@@ -821,7 +803,6 @@ impl ClientExchangeApplication {
             frames,
             enrollment: None,
             worker_credentials,
-            credential_rotation: rotation.cloned(),
         })
     }
 
@@ -1027,19 +1008,10 @@ impl ClientExchangePort for ClientExchangeApplication {
             .map_err(|_| ClientExchangeError::unavailable())?
             .ok_or_else(ClientExchangeError::authentication)?;
         let accepted = record.presence_state != ClientPresenceState::Revoked
-            && (record
+            && record
                 .device_credential_digest
                 .as_deref()
-                .is_some_and(|digest| credential_digest_matches(&secret, digest))
-                || storage
-                    .client_node_registry()
-                    .and_then(|mut registry| {
-                        registry.activate_credential_rotation(
-                            client_node_id,
-                            &credential_digest(&secret),
-                        )
-                    })
-                    .map_err(|_| ClientExchangeError::unavailable())?);
+                .is_some_and(|digest| credential_digest_matches(&secret, digest));
         Box::new(storage)
             .close()
             .map_err(|_| ClientExchangeError::unavailable())?;
@@ -1080,8 +1052,6 @@ impl ClientExchangePort for ClientExchangeApplication {
 /// contiguous acknowledgement of the Server → Client stream.
 #[derive(Debug, Deserialize)]
 struct ExchangeRequestBody {
-    #[serde(rename = "credentialRotation", default)]
-    credential_rotation: Option<winwincode_client_port::messages::DeviceCredentialRotation>,
     #[serde(rename = "schemaVersion")]
     schema_version: String,
     #[serde(default)]
@@ -1093,8 +1063,6 @@ struct ExchangeRequestBody {
 /// Encoded exchange response body.
 #[derive(Debug, Serialize)]
 struct ExchangeResponseBody {
-    #[serde(rename = "credentialRotation", skip_serializing_if = "Option::is_none")]
-    credential_rotation: Option<winwincode_client_port::messages::DeviceCredentialRotation>,
     #[serde(rename = "schemaVersion")]
     schema_version: String,
     #[serde(rename = "ackSequence")]
@@ -1219,7 +1187,7 @@ fn command_identity(
     let key = match message {
         ClientToServerMessage::Enroll(payload) => &payload.command.idempotency_key,
         ClientToServerMessage::ConnectCodePublished(payload) => &payload.command.idempotency_key,
-        ClientToServerMessage::AccessChallengeAck(payload) => &payload.command.idempotency_key,
+
         ClientToServerMessage::RepositoryUpsert(payload) => &payload.command.idempotency_key,
         ClientToServerMessage::RepositoryRemoved(payload) => &payload.command.idempotency_key,
         ClientToServerMessage::OccupancyAck(payload) => &payload.occupancy.command.idempotency_key,
@@ -1395,33 +1363,6 @@ fn apply_effect_with_status(
                 }
                 None | Some(_) => return Err(rejected_command(None)),
             }
-            Ok(())
-        }
-        ClientToServerMessage::AccessChallengeAck(payload) => {
-            // The device verdict settles the durable challenge the connect
-            // flow is waiting on. A verdict the device no longer holds a
-            // matching generation for is carried by the `stale_generation`
-            // status and settles as a rejection.
-            let verdict = match payload.status {
-                ClientChallengeAckStatus::Confirmed => ConnectChallengeVerdict::Confirmed,
-                ClientChallengeAckStatus::StaleGeneration => ConnectChallengeVerdict::Rejected,
-            };
-            let mut connect = ConnectCodeService::new(storage);
-            connect
-                .settle_challenge(
-                    &payload.challenge_id,
-                    node_id,
-                    &payload.connect_code_id,
-                    verdict,
-                    now,
-                )
-                .map_err(|error| {
-                    domain_command_error(matches!(
-                        error.kind(),
-                        winwincode_control_plane::ClientConnectServiceErrorKind::Storage
-                            | winwincode_control_plane::ClientConnectServiceErrorKind::CorruptState
-                    ))
-                })?;
             Ok(())
         }
         ClientToServerMessage::RepositoryUpsert(payload) => {
@@ -1643,49 +1584,6 @@ fn repository_availability(value: WireRepositoryAvailability) -> RepositoryAvail
         WireRepositoryAvailability::PermissionDenied => RepositoryAvailability::PermissionDenied,
         WireRepositoryAvailability::ScanFailed => RepositoryAvailability::ScanFailed,
     }
-}
-
-fn stage_credential_rotation(
-    storage: &mut SqliteStorage,
-    node_id: &str,
-    proposal: &winwincode_client_port::messages::DeviceCredentialRotation,
-) -> Result<(), ClientExchangeError> {
-    let prior = storage
-        .client_node_registry()
-        .and_then(|registry| {
-            registry.credential_rotation_digest(node_id, &proposal.command_message_id)
-        })
-        .map_err(|_| ClientExchangeError::unavailable())?;
-    if prior.is_none() {
-        let frame = storage
-            .client_downlink_outbox()
-            .and_then(|outbox| outbox.frame_by_message_id(node_id, &proposal.command_message_id))
-            .map_err(|_| ClientExchangeError::unavailable())?
-            .ok_or_else(ClientExchangeError::invalid_request)?;
-        let envelope: ServerToClientEnvelope =
-            serde_json::from_str(&frame).map_err(|_| ClientExchangeError::unavailable())?;
-        if !matches!(envelope.message, ServerToClientMessage::CredentialRotate(_))
-            || envelope.client_node_id != node_id
-        {
-            return Err(ClientExchangeError::invalid_request());
-        }
-    }
-    storage
-        .client_node_registry()
-        .and_then(|mut registry| {
-            registry.stage_credential_rotation(
-                node_id,
-                &proposal.command_message_id,
-                &proposal.credential_digest,
-            )
-        })
-        .map_err(|error| match error.kind() {
-            winwincode_storage::ClientRegistryErrorKind::IdentityConflict
-            | winwincode_storage::ClientRegistryErrorKind::InvalidInput => {
-                ClientExchangeError::invalid_request()
-            }
-            _ => ClientExchangeError::unavailable(),
-        })
 }
 
 fn rejected_command(current_revision: Option<u64>) -> ClientExchangeError {
@@ -2588,14 +2486,6 @@ mod tests {
                     remaining_attempts: 5,
                 },
             ),
-            ClientToServerMessage::AccessChallengeAck(Box::new(
-                winwincode_client_port::messages::ClientAccessChallengeAckPayload {
-                    command: command.clone(),
-                    challenge_id: "chal_1".to_owned(),
-                    connect_code_id: "code_1".to_owned(),
-                    status: ClientChallengeAckStatus::Confirmed,
-                },
-            )),
             ClientToServerMessage::RepositoryUpsert(
                 winwincode_client_port::messages::ClientRepositoryUpsertPayload {
                     command: command.clone(),
@@ -2674,7 +2564,7 @@ mod tests {
                 },
             }),
         ];
-        assert_eq!(commands.len(), 10, "the client command kinds");
+        assert_eq!(commands.len(), 9, "the client command kinds");
         for message in &commands {
             let identity = command_identity(message, "sha256:dd");
             assert_eq!(

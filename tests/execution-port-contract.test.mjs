@@ -31,7 +31,6 @@ const expectedKinds = [
   'action.enforcement_receipt',
   'worker.register',
   'worker.registration_result',
-  'worker.capabilities',
   'worker.heartbeat',
   'worker.heartbeat_ack',
   'job.dispatch',

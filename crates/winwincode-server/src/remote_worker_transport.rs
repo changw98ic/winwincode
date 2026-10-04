@@ -892,9 +892,6 @@ where
             ExecutionPortMessage::WorkerHeartbeatMessage(message) => {
                 Some((&message.worker_id, &message.worker_instance_id))
             }
-            ExecutionPortMessage::WorkerCapabilitiesMessage(m) => {
-                Some((&m.worker_id, &m.worker_instance_id))
-            }
             ExecutionPortMessage::JobDispatchResultMessage(m) => {
                 Some((&m.lease.worker_id, &m.lease.worker_instance_id))
             }

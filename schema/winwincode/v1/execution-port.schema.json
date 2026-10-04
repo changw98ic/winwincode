@@ -1143,54 +1143,6 @@
       "x-direction": "control-plane-to-worker",
       "x-authority": "control-command"
     },
-    "WorkerCapabilitiesMessage": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "kind": {
-          "const": "worker.capabilities"
-        },
-        "schemaVersion": {
-          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
-        },
-        "messageId": {
-          "$ref": "#/$defs/ExecutionMessageId"
-        },
-        "sentAt": {
-          "$ref": "./domain.schema.json#/$defs/Instant"
-        },
-        "requestId": {
-          "$ref": "./domain.schema.json#/$defs/RequestId"
-        },
-        "workerId": {
-          "$ref": "./domain.schema.json#/$defs/WorkerId"
-        },
-        "workerInstanceId": {
-          "$ref": "./domain.schema.json#/$defs/WorkerInstanceId"
-        },
-        "observedAt": {
-          "$ref": "./domain.schema.json#/$defs/Instant"
-        },
-        "capabilities": {
-          "$ref": "#/$defs/WorkerCapabilitySet"
-        }
-      },
-      "required": [
-        "kind",
-        "schemaVersion",
-        "messageId",
-        "sentAt",
-        "requestId",
-        "workerId",
-        "workerInstanceId",
-        "observedAt",
-        "capabilities"
-      ],
-      "title": "worker.capabilities",
-      "description": "Replaces the registered capability snapshot for the current Worker instance.",
-      "x-direction": "worker-to-control-plane",
-      "x-authority": "worker-registry"
-    },
     "WorkerHeartbeatMessage": {
       "type": "object",
       "additionalProperties": false,
@@ -2631,9 +2583,6 @@
         },
         {
           "$ref": "#/$defs/WorkerRegistrationResultMessage"
-        },
-        {
-          "$ref": "#/$defs/WorkerCapabilitiesMessage"
         },
         {
           "$ref": "#/$defs/WorkerHeartbeatMessage"

@@ -79,7 +79,7 @@ flowchart TB
 
 - HTTP Command 和 Query 携带 `requestId` 与 `expectedRevision`，Server 返回生成合同定义的结果或错误。
 - WebSocket 只发送 Projection、运行事件、审批请求、Attention、任务和在线状态，不作为业务写入通道。
-- Control Plane 与 Worker 通过版本化 [`ExecutionPort 合同`](contracts/execution-port-v1.md)交换注册、能力、心跳、Job、Lease、Fencing、运行事件、模型流、输入、审批、取消、结果和产物引用。
+- Control Plane 与 Worker 通过版本化 [`ExecutionPort 合同`](contracts/execution-port-v1.md)交换注册、心跳、Job、Lease、Fencing、运行事件、模型流、输入、审批、取消、结果和产物引用。
 - Server 的 [`GeneratedContractDispatcher`](../crates/winwincode-server/src/dispatcher.rs) 是公开请求的唯一入口；运行时先验证租户范围、主体、请求相关性和当前版本。
 - 同进程部署仍使用同一 typed frame；分进程部署只替换传输，不替换状态语义。
 

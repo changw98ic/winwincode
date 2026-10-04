@@ -474,12 +474,6 @@ impl<'application> DurableExecutionPortIngress<'application> {
             ExecutionPortMessage::ActionEnforcementRequestMessage(request) => {
                 self.delegate_job_scoped(&request.lease.job_id, message)
             }
-            ExecutionPortMessage::WorkerCapabilitiesMessage(capabilities) => {
-                ExecutionPortService::new(self.storage, self.server_time.clone())
-                    .update_capabilities(capabilities)
-                    .map_err(DurableExecutionPortError::Service)?;
-                Ok(Vec::new())
-            }
             _ => Err(DurableExecutionPortError::UnsupportedMessage),
         }
     }

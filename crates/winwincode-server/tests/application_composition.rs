@@ -1401,10 +1401,6 @@ mod heartbeat_gap {
         type Output = Vec<ExecutionPortMessage>;
         type Error = winwincode_control_plane::ExecutionPortServiceError;
         fn accept(&mut self, message: &ExecutionPortMessage) -> Result<Self::Output, Self::Error> {
-            // A fixture capability supplement sends no response; heartbeat policy is real.
-            if matches!(message, ExecutionPortMessage::WorkerCapabilitiesMessage(_)) {
-                return Ok(vec![]);
-            }
             winwincode_control_plane::ExecutionPortService::new(&mut self.0, self.1.clone())
                 .handle(message.clone())
                 .map(|ack| vec![ack])
@@ -1581,32 +1577,20 @@ mod heartbeat_gap {
             state.lock().unwrap().successful_heartbeat_sequences,
             vec![2, 1, 2]
         );
-        let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../tests/fixtures/contracts/execution-port.valid.json"
-        ))
-        .unwrap();
-        let mut caps = fixture["messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|m| m["kind"] == "worker.capabilities")
-            .unwrap()
-            .clone();
-        caps["workerId"] = serde_json::json!(wire.worker.0);
-        caps["workerInstanceId"] = serde_json::json!(wire.instance.0);
-        let mut wire = wire;
-        winwincode_worker::WorkerExecutionPort::send(
-            &mut wire,
-            serde_json::from_value(caps).unwrap(),
-        )
-        .await
-        .unwrap();
+        // The next real heartbeat carries the confirmations for the recovered
+        // frames. Its own new acknowledgement is the only remaining downlink.
+        worker.heartbeat(now.clone()).await.unwrap();
         assert_eq!(
-            state.lock().unwrap().server_pending,
-            0,
-            "authenticated confirmation drains the real Server queue"
+            state.lock().unwrap().successful_heartbeat_sequences,
+            vec![2, 1, 2, 3]
         );
         assert!(state.lock().unwrap().acknowledgements.is_empty());
+        let controls = state.lock().unwrap().controls.clone();
+        assert_eq!(controls.len(), 1);
+        let last = RemoteTransportAdapter::<HeartbeatCore>::decode(&controls[0].frame).unwrap();
+        assert!(
+            matches!(last.message(), ExecutionPortMessage::WorkerHeartbeatAckMessage(ack) if ack.heartbeat_sequence.0 == 3)
+        );
         assert_eq!(
             worker.lifecycle(),
             winwincode_worker::WorkerLifecycleState::Active

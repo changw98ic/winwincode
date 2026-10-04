@@ -13,7 +13,7 @@ HTTP、WebSocket 和 ExecutionPort 合同。`tests/control-plane-api-coverage.te
 | HTTP Command | 25 | Community 中会改变产品状态的用户操作 |
 | HTTP Query | 28 | 列表、详情、Chat 历史和可重建运行投影 |
 | WebSocket Event | 12 | 已保存的产品、消息、运行、审批、协作和 Worker 投影 |
-| ExecutionPort Message | 28 | Worker 注册、Job/Lease、运行、产物、模型、输入、审批、取消和结果 |
+| ExecutionPort Message | 27 | Worker 注册、Job/Lease、运行、产物、模型、输入、审批、取消和结果 |
 
 ## 审计中纠正的四个缺口
 
