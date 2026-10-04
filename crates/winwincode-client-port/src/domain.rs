@@ -279,28 +279,6 @@ pub enum ClientArchitecture {
     X8664,
 }
 
-/// Device Client verdict for one access challenge (schema
-/// `ClientChallengeAckStatus`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ClientChallengeAckStatus {
-    /// The device confirmed the challenge.
-    Confirmed,
-    /// The device answered from an older credential generation.
-    StaleGeneration,
-}
-
-/// Why device credential rotation is requested (schema
-/// `ClientCredentialRotateReason`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ClientCredentialRotateReason {
-    /// Rotation is part of the regular schedule.
-    Scheduled,
-    /// Rotation is a response to a suspected compromise.
-    SuspectedCompromise,
-}
-
 /// Client-side reason for rejecting an offered occupancy lease (schema
 /// `OccupancyRejectReason`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -542,9 +520,6 @@ pub enum ClientControlMessageKind {
     /// `client.connect_code.published`
     #[serde(rename = "client.connect_code.published")]
     ConnectCodePublished,
-    /// `client.access.challenge_ack`
-    #[serde(rename = "client.access.challenge_ack")]
-    AccessChallengeAck,
     /// `client.occupancy.ack`
     #[serde(rename = "client.occupancy.ack")]
     OccupancyAck,
@@ -578,12 +553,6 @@ pub enum ClientControlMessageKind {
     /// `client.command_ack`
     #[serde(rename = "client.command_ack")]
     CommandAck,
-    /// `client.enrollment_accepted`
-    #[serde(rename = "client.enrollment_accepted")]
-    EnrollmentAccepted,
-    /// `client.access.challenge`
-    #[serde(rename = "client.access.challenge")]
-    AccessChallenge,
     /// `client.occupancy.offer`
     #[serde(rename = "client.occupancy.offer")]
     OccupancyOffer,
@@ -608,9 +577,6 @@ pub enum ClientControlMessageKind {
     /// `client.client_lock`
     #[serde(rename = "client.client_lock")]
     ClientLock,
-    /// `client.credential_rotate`
-    #[serde(rename = "client.credential_rotate")]
-    CredentialRotate,
     /// Managed application lifecycle command.
     #[serde(rename = "client.managed_app.command")]
     ManagedAppCommand,

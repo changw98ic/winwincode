@@ -30,6 +30,7 @@ import {
   resolveVerificationObservation,
   observeToolProcess,
   deviceConnectCodePublished,
+  deviceHelloAcknowledged,
   workInputFromRequest,
 } from '../scripts/device-production-fixture.mjs'
 
@@ -38,6 +39,22 @@ const runnerPath = resolve(root, 'scripts/run-api-production-vertical.mjs')
 const deviceTaskPath = resolve(root, 'scripts/run-device-task-vertical.mjs')
 const glmPath = resolve(root, 'scripts/run-glm-ui-rework.mjs')
 const fixturePath = resolve(root, 'scripts/device-production-fixture.mjs')
+
+test('reopening waits for the new daemon instance hello acknowledgement', () => {
+  const database = new DatabaseSync(':memory:')
+  try {
+    database.exec(`CREATE TABLE device_identity (current_instance_id TEXT);
+      CREATE TABLE client_outbox (kind TEXT, published INTEGER, client_instance_id TEXT);
+      INSERT INTO device_identity VALUES ('old');
+      INSERT INTO client_outbox VALUES ('client.hello', 1, 'old')`)
+    assert.equal(deviceHelloAcknowledged(database, 'old'), false)
+    assert.equal(deviceHelloAcknowledged(database, null), true)
+    database.exec("UPDATE device_identity SET current_instance_id = 'new'; INSERT INTO client_outbox VALUES ('client.hello', 0, 'new')")
+    assert.equal(deviceHelloAcknowledged(database, 'old'), false)
+    database.exec("UPDATE client_outbox SET published = 1 WHERE client_instance_id = 'new'")
+    assert.equal(deviceHelloAcknowledged(database, 'old'), true)
+  } finally { database.close() }
+})
 
 test('Device-only prerequisite list covers the production acceptance path', () => {
   assert.deepEqual([...DEVICE_ONLY_PREREQUISITES], [
@@ -373,4 +390,59 @@ test('Device task approves only installed public smoke once with an exact curren
   await assert.rejects(resolveDeviceTaskApprovals({ api, runs: [run], onDecision: () => {} }), /transport lost/u)
   api.query = async () => ({ page: { hasMore: true }, result: { items: [original] } })
   await assert.rejects(resolveDeviceTaskApprovals({ api, runs: [run], onDecision: () => {} }), /must be complete/u)
+})
+
+test('authorized task Sessions automatically approve actions while preserving current authority checks', async () => {
+  const run = { id: 'run', state: 'running', productSessionId: 'product', codexThreadId: 'core',
+    workerSessionId: 'worker', executionJobId: 'job' }
+  const original = {
+    id: 'approval', revision: 3, state: 'pending', decisionEnabled: true,
+    category: 'shell', effectiveDecisionScope: 'once',
+    binding: { executionJobId: 'job', productSessionId: 'product', workerSessionId: 'worker',
+      sessionIdentity: { workRunId: 'run', codexThreadId: 'core', productSessionId: 'product', workerSessionId: 'worker' } },
+    sanitizedDetail: { kind: 'available', operation: 'execute', reasonCode: 'sandbox_escalation',
+      workingDirectory: 'workspace', riskLevel: 'high', targetCount: 1,
+      targetSummaries: ['program:zsh;argument_count:2'] },
+  }
+  const cases = [
+    ['approve', () => {}],
+    ['approve', a => { a.sanitizedDetail.reasonCode = 'network_access' }],
+    ['approve', a => { a.category = 'network'; a.sanitizedDetail.reasonCode = 'network_access' }],
+    ['approve', a => { a.category = 'filesystem_write'; Object.assign(a.sanitizedDetail,
+      { operation: 'modify', reasonCode: 'filesystem_write', workingDirectory: null }) }],
+    ['reject', a => { a.category = 'mcp'; a.sanitizedDetail.reasonCode = 'mcp_permission' }],
+    ['reject', a => { a.sanitizedDetail.kind = 'unavailable' }],
+    ['reject', a => { a.sanitizedDetail.reasonCode = 'unknown' }],
+    ['reject', a => { a.sanitizedDetail.workingDirectory = 'unknown' }],
+    ['reject', a => { a.sanitizedDetail.targetCount = 0 }],
+    ['reject', a => { a.sanitizedDetail.targetSummaries = [] }],
+    ['reject', a => { a.effectiveDecisionScope = 'session' }],
+    [null, a => { a.state = 'expired' }],
+    [null, a => { a.decisionEnabled = false }],
+    ...['executionJobId', 'productSessionId', 'workerSessionId'].map(key =>
+      [null, a => { a.binding[key] = 'foreign' }]),
+    ...['workRunId', 'codexThreadId', 'productSessionId', 'workerSessionId'].map(key =>
+      [null, a => { a.binding.sessionIdentity[key] = 'foreign' }]),
+  ]
+  for (const [expected, mutate] of cases) {
+    const approval = structuredClone(original)
+    mutate(approval)
+    const decisions = []
+    const api = {
+      query: async name => ({ page: { hasMore: false }, result: name === 'approval.list' ? { items: [original] } : approval }),
+      command: async (name, revision, payload) => {
+        assert.equal(name, 'approval.decide'); assert.equal(revision, approval.revision)
+        assert.deepEqual(payload.binding, approval.binding)
+        decisions.push(payload.decision)
+        return { outcome: 'completed' }
+      },
+    }
+    await resolveDeviceTaskApprovals({ api, runs: [run], automaticTaskActions: true, onDecision: () => {} })
+    assert.deepEqual(decisions, expected === null ? [] : [expected])
+  }
+  const api = { query: async name => ({ page: { hasMore: false },
+    result: name === 'approval.list' ? { items: [original] } : original }),
+  command: async () => assert.fail('terminal WorkRun cannot approve') }
+  await resolveDeviceTaskApprovals({ api, runs: [{ ...run, state: 'cancelled' }],
+    automaticTaskActions: true, onDecision: () => {} })
 })

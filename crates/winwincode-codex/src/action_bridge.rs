@@ -413,11 +413,10 @@ impl ExecutionPortActionGate {
             // This request is retained in the pending map and its signature
             // remains bound to the original stamp. Only the current deadline
             // may have advanced while the exact request was in flight.
-            let mut expected = action.authority.lease.clone();
-            expected.expires_at = binding.authority.lease.expires_at.clone();
-            binding.authority.lease != expected
-                || binding.authority.lease.expires_at.0 < action.authority.lease.expires_at.0
-                || binding.authority.worker_session_id != action.authority.worker_session_id
+            !winwincode_execution_port::execution_identity::retained_lease_matches_current(
+                &action.authority.lease,
+                &binding.authority.lease,
+            ) || binding.authority.worker_session_id != action.authority.worker_session_id
                 || binding.authority.session_identity != action.authority.session_identity
                 || !canonical_instant(received_at)
                 || !canonical_instant(&binding.authority.lease.issued_at)
@@ -433,7 +432,13 @@ impl ExecutionPortActionGate {
             );
             return Err(ActionBridgeError::StaleAuthority);
         }
-        if self.state.verifier.verify_outcome(action, receipt).is_err() {
+        let current_binding = current_binding.ok_or(ActionBridgeError::StaleAuthority)?;
+        if self
+            .state
+            .verifier
+            .verify_outcome_with_current_lease(action, receipt, &current_binding.authority.lease)
+            .is_err()
+        {
             reject_pending(
                 &self.state,
                 &receipt.request_id.0,
@@ -1916,7 +1921,6 @@ mod tests {
         };
         assert!(messages.is_empty());
         assert_pending_shell_request(&gate, &request);
-        let receipt = signed_permit(request, &now);
         if renew {
             let mut renewed = binding();
             renewed.authority.lease.expires_at = Instant("2030-01-01T02:00:00.000Z".to_owned());
@@ -1924,6 +1928,7 @@ mod tests {
                 .expect("renew pending action");
             now = Instant("2030-01-01T01:30:00.000Z".to_owned());
         }
+        let receipt = signed_permit(request, &now);
         gate.accept_receipt(&receipt, &now)
             .expect("accept signed permit");
         let authorization = task

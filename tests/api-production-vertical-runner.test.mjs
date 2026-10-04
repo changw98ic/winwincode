@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
 import {
   chmodSync,
   mkdtempSync,
@@ -22,11 +23,29 @@ import {
   writeApiProductionSourceSeal,
   writeHelperReleaseManifest,
   runApiProductionVertical,
+  waitForDeviceWorkerRegistered,
 } from '../scripts/run-api-production-vertical.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 const runnerPath = resolve(root, 'scripts/run-api-production-vertical.mjs')
 const browserGatePath = resolve(root, 'tests/browser-chat-production.test.mjs')
+
+test('registration reads the exact Worker beyond a full historical first page', async () => {
+  const historical = Array.from({ length: 201 }, (_, index) => ({ id: `old-${index}`, state: 'drained' }))
+  const target = { id: 'target', state: 'enabled', lastHeartbeatAt: '2026-10-03T00:00:00Z' }
+  const queries = []
+  const api = { async query(name, parameters, pagination) {
+    queries.push(name)
+    if (name === 'worker.list') return { result: { items: historical.slice(0, 200) },
+      page: { hasMore: true, nextCursor: 'later' } }
+    assert.equal(name, 'worker.get')
+    assert.deepEqual(parameters, { workerId: target.id })
+    assert.deepEqual(pagination, { cursor: null, limit: 1 })
+    return { result: target }
+  } }
+  assert.deepEqual(await waitForDeviceWorkerRegistered(api, { workerId: target.id }, 1), target)
+  assert.deepEqual(queries, ['worker.get'])
+})
 
 test('external Provider without a credential fails before build or deterministic fallback', async () => {
   await assert.rejects(runApiProductionVertical({
@@ -133,6 +152,22 @@ test('WorkRun contract drives canonical WorkItem creation payload', async () => 
     deliveryId: payload.deliveryId,
     dispatchProfile: 'executor',
   })
+})
+
+test('Delivery helpers keep each task on its own canonical Delivery identity', async () => {
+  const deliveryId = 'dlv_01J00000000000000000000003'
+  const client = deliveryDriverClient(1)
+  const query = client.query.bind(client)
+  client.query = (name, payload) => {
+    assert.equal(payload.deliveryId, deliveryId)
+    return query(name, payload)
+  }
+  const aggregate = { contract: { revision: 1, criteria: [{ id: 'criterion' }] }, items: [],
+    readCursor: { deliveryId } }
+  assert.equal(workItemCreatePayload(aggregate, 1).deliveryId, deliveryId)
+  assert.equal(workItemCreatePayload(aggregate, 1).items[0].id, 'wit_01J00000000000000000000003')
+  const result = await driveDelivery(client, 10_000, undefined, Date.now, { deliveryId })
+  assert.equal(result.detail.status, 'done')
 })
 
 test('Delivery transition evidence keeps the newest bounded window without limiting progress', () => {
@@ -382,6 +417,24 @@ test('production scenario files enter the committed repository and reject path e
   } finally {
     rmSync(directory, { recursive: true, force: true })
   }
+})
+
+test('the retained controlled repository reopens without writing or replacing its baseline', t => {
+  const directory = mkdtempSync(resolve(tmpdir(), 'wwc-reopen-repository-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const options = { fixtureDirectory: directory, files: { 'TASK.md': 'frozen task\n' } }
+  const first = prepareControlledRepository(options)
+  const git = (...args) => execFileSync('git', ['-C', first.repository, ...args], { encoding: 'utf8' }).trim()
+  const objects = git('count-objects', '-v')
+  assert.deepEqual(prepareControlledRepository(options), first)
+  assert.equal(git('count-objects', '-v'), objects)
+  assert.throws(() => prepareControlledRepository({ ...options, files: { 'TASK.md': 'changed\n' } }),
+    /retained.*(input|baseline)/u)
+  assert.equal(readFileSync(resolve(first.repository, 'TASK.md'), 'utf8'), 'frozen task\n')
+  writeFileSync(resolve(first.repository, 'TASK.md'), 'retained dirty evidence\n')
+  assert.throws(() => prepareControlledRepository(options), /retained.*dirty/u)
+  assert.equal(readFileSync(resolve(first.repository, 'TASK.md'), 'utf8'), 'retained dirty evidence\n')
+  assert.equal(git('rev-parse', 'HEAD'), first.revision)
 })
 
 

@@ -60,6 +60,7 @@ mod device_execution_binding;
 mod device_scheduler;
 pub mod device_session_gate;
 mod durable_execution_port;
+mod execution_lease_period;
 pub mod execution_port_service;
 pub mod fusion_adjudication_host;
 pub use winwincode_fusion::analysis as fusion_analysis;
@@ -1604,7 +1605,7 @@ impl ControlPlane {
     ) -> Result<execution_port::ArtifactAckMessage, ArtifactMessageError> {
         self.validate_supplied_snapshot(&message.lease.job_id, message.snapshot_id.as_ref())
             .map_err(ArtifactMessageError::Storage)?;
-        let storage = self.storage.as_deref().ok_or_else(|| {
+        let storage = self.storage.as_deref_mut().ok_or_else(|| {
             ArtifactMessageError::Storage(StorageError::adapter("Control Plane storage is closed"))
         })?;
         let artifacts = self.artifact_store.as_mut().ok_or_else(|| {
@@ -1631,7 +1632,7 @@ impl ControlPlane {
         self.validate_supplied_snapshot(&message.lease.job_id, message.snapshot_id.as_ref())
             .map_err(ArtifactMessageError::Storage)?;
         let ack = {
-            let storage = self.storage.as_deref().ok_or_else(|| {
+            let storage = self.storage.as_deref_mut().ok_or_else(|| {
                 ArtifactMessageError::Storage(StorageError::adapter(
                     "Control Plane storage is closed",
                 ))

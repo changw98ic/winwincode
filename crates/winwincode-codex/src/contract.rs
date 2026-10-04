@@ -223,7 +223,8 @@ pub struct DelegatedObserverPreflight {
 
 /// Internal durable accounting for one terminal Observer call. A missing usage
 /// means the Provider terminal charge was not proven and must fail closed.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DelegatedObserverSettlement {
     pub batch_id: winwincode_domain::ChangeBatchId,
     pub completed_at: Instant,
@@ -331,6 +332,8 @@ pub trait CodexCoreAdapter {
 
     /// Supplies the existing shared Core authority gate for revalidation inside
     /// the Provider thread. Lightweight adapters use the Worker's lease deadline.
+    /// Every role must enqueue its exact original request in the shared execution
+    /// outbox before dispatch. Renewal never rewrites that request proof.
     ///
     /// # Errors
     /// Rejects an invalid trusted clock or unavailable authority source.

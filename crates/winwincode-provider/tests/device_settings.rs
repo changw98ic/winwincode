@@ -10,6 +10,64 @@ use winwincode_api::generated::{DeviceConfigurationEnvelope, DeviceProviderOutco
 use winwincode_provider::DeviceProviderStore;
 
 #[test]
+fn opening_current_device_store_does_not_require_the_writer_lock() {
+    let directory =
+        std::env::temp_dir().join(format!("wwc-device-provider-reader-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&directory);
+    drop(DeviceProviderStore::open(&directory).expect("initialize schema"));
+    let writer = rusqlite::Connection::open(directory.join("providers.sqlite3"))
+        .expect("concurrent accounting writer");
+    writer
+        .execute_batch("BEGIN IMMEDIATE")
+        .expect("hold writer");
+    let reader = DeviceProviderStore::open(&directory);
+    writer.execute_batch("ROLLBACK").expect("release writer");
+    assert!(
+        reader.is_ok(),
+        "opening an existing store is a read operation"
+    );
+    let reader = reader.expect("current schema reader");
+    assert_eq!(
+        reader.snapshot("reader-device").expect("snapshot").revision,
+        0
+    );
+    drop(reader);
+    drop(writer);
+    fs::remove_dir_all(directory).expect("remove reader fixture");
+}
+
+#[test]
+fn failed_device_key_validation_does_not_commit_a_schema_upgrade() {
+    let directory = std::env::temp_dir().join(format!(
+        "wwc-device-provider-bad-key-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&directory);
+    drop(DeviceProviderStore::open(&directory).expect("initialize schema"));
+    let database = rusqlite::Connection::open(directory.join("providers.sqlite3"))
+        .expect("legacy store fixture");
+    database
+        .execute_batch(
+            "ALTER TABLE exchanges DROP COLUMN accounting_chunks;
+             DROP TABLE accounting_closed_attempts;
+             UPDATE identity SET private_key=zeroblob(32);
+             PRAGMA user_version=8;",
+        )
+        .expect("old schema with an invalid private key");
+    assert!(DeviceProviderStore::open(&directory).is_err());
+    let version: i64 = database
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("retained schema version");
+    assert_eq!(version, 8, "a failed open must roll back the migration");
+    database
+        .pragma_update(None, "user_version", 10)
+        .expect("future schema");
+    assert!(DeviceProviderStore::open(&directory).is_err());
+    drop(database);
+    fs::remove_dir_all(directory).expect("remove invalid key fixture");
+}
+
+#[test]
 fn browser_crypto_device_storage_replay_and_tamper() {
     let directory =
         std::env::temp_dir().join(format!("wwc-device-provider-{}", std::process::id()));

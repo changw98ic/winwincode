@@ -186,7 +186,7 @@ fn seed_recovery_pending(world: &mut RecoveryWorld) -> OccupancyLeaseRecord {
     );
     let mut service = ClientOccupancyService::new(&mut world.storage);
     service
-        .mark_recovery_pending(lease_id(21).as_str(), &instant(T4))
+        .mark_recovery_pending(lease_id(21).as_str(), &instant(T4), &instant(T2))
         .expect("mark recovery")
 }
 

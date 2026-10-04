@@ -228,8 +228,15 @@ JEV 成本目标待真实数据后取 Pareto Front（Quality × Cost × Latency�
 单任务和全批次都不设时间和资源上限。工具请求身份由工具名、目标文件或资源、
 规范化参数和请求内容摘要组成，排除请求 ID、时间戳及进度元数据。同一身份在
 一个 run 中累计出现 6 次，即重复请求相同内容超过 5 次；第 6 次请求必须在
-实际执行前被拦截，立即记录 `STUCK_TOOL_REPEAT_LIMIT` 并结束本机 runner。
-该结果不是通过，也不从任务分母删除。
+实际执行前被拦截，立即记录 `STUCK_TOOL_REPEAT_LIMIT` 并停止当前任务。
+Runner 继续领取其他任务；当前任务的失败保留在分母中。Fusion 任务停止后不再
+启动该任务的其他成员或聚合调用。账本或必要证据无法可靠保存时停止整批，
+恢复时复用已领取任务的原调用身份，已完成或已停止任务不重复执行。
+
+共用 Server 与 Device 的任务通过入口 ProductSession 绑定执行范围。Controller
+为 WorkRun 创建的角色 ProductSession 按实际 launch grant 归入该任务；停止检查
+同时核对这些角色身份和物理 Worker 中的 Core run。已停止任务的事实继续保留，
+其他任务仍可启动并完成自己的执行、候选与验收流程。
 
 正式评测 Runner 固定为本机 `macOS 26.5.1 aarch64-apple-darwin`，不需要另行
 选择或确认 Runner。

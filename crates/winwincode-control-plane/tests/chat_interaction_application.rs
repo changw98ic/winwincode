@@ -1779,3 +1779,43 @@ fn pending_approval_survives_renewal_without_extending_its_own_deadline() {
         Box::new(storage).close().expect("close storage");
     }
 }
+
+#[test]
+fn pending_input_uses_current_renewed_lease_after_original_expiry() {
+    let (directory, mut storage, _scope, runtime, revision) = setup_input("late-input-renewal");
+    let mut request = input_request(&runtime);
+    request.expires_at = at(59);
+    ChatInteractionService::new(&mut storage)
+        .record_input(&RecordInputInteractionCommand {
+            authority: input_authority(revision),
+            request: request.clone(),
+        })
+        .unwrap();
+    let mut outbound = DurableWorkerInteractionOutbound::new(
+        SqliteStorage::open(&directory.0).unwrap(),
+        WorkerOutboundQueueConfig::default(),
+    )
+    .unwrap();
+    let mut lease = request.lease.clone();
+    lease.expires_at = at(58);
+    let renewal: LeaseRenewMessage = serde_json::from_value(json!({
+        "kind": "lease.renew", "lease": lease,
+        "messageId": id("xmsg", 1940), "priorExpiresAt": at(50),
+        "requestId": id("req", 1940), "schemaVersion": "winwincode/v1", "sentAt": at(20)
+    }))
+    .unwrap();
+    let current = outbound.renew_lease(&runtime, &renewal).unwrap();
+    let mut clock = FixtureClock(VecDeque::from([at(55)]));
+    ChatInteractionApiService::new(&mut storage, &mut clock, &mut outbound)
+        .respond_input(input_response_command("late but authorized input"))
+        .expect("old message period cannot shorten the current lease");
+    let claims = outbound.claim_pending(&current, &at(56)).unwrap();
+    assert!(
+        claims
+            .iter()
+            .any(|claim| matches!(claim.typed_frame().message(),
+        ExecutionPortMessage::InputResponseMessage(response) if response.lease == request.lease))
+    );
+    outbound.close().unwrap();
+    Box::new(storage).close().unwrap();
+}

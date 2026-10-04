@@ -15,6 +15,9 @@
     "upstream/patches/codex/0006-tool-gate-and-exact-turn-replay.patch",
     "upstream/patches/codex/0007-bind-tool-gate-executable-identity.patch",
     "upstream/patches/codex/0008-atomic-apply-patch.patch",
-    "upstream/patches/codex/0009-canonicalize-intercepted-apply-patch.patch"
+    "upstream/patches/codex/0009-canonicalize-intercepted-apply-patch.patch",
+    "upstream/patches/codex/0010-submit-change-batch-handoff.patch",
+    "upstream/patches/codex/0011-deterministic-tool-context-gc.patch",
+    "upstream/patches/codex/0012-record-delegated-handoff-output.patch"
   ]
 }

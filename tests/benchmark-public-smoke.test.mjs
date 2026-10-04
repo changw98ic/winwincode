@@ -127,13 +127,13 @@ with tempfile.TemporaryDirectory() as directory:
   assert.equal(result.status, 0, result.stderr)
 })
 
-test('read-only source identity matches the frozen snapshot and rejects unsafe trees', () => {
+test('read-only source identity binds a portable snapshot and rejects unsafe trees', () => {
   const script = fileURLToPath(new URL('../scripts/benchmark-public-smoke.py', import.meta.url))
-  const frozen = fileURLToPath(new URL('../fusion-benchmark-tasks/agent-benchmark-tasks/tools/sandbox.py', import.meta.url))
   const result = spawnSync('python3', ['-I', '-c', `
 import pathlib, runpy, sys, tempfile
-identity = runpy.run_path(sys.argv[1])['source_identity']
-snapshot = runpy.run_path(sys.argv[2])['snapshot']
+module = runpy.run_path(sys.argv[1])
+identity = module['source_identity']
+snapshot = lambda source, destination, config: module['capture_source'](source, config, destination)
 config = {'entry': 'main.py', 'suffixes': ['.py']}
 with tempfile.TemporaryDirectory() as directory:
     root = pathlib.Path(directory)
@@ -145,7 +145,11 @@ with tempfile.TemporaryDirectory() as directory:
     (source / 'TASK.md').write_text('ignored non-source')
     (source / '__pycache__').mkdir()
     (source / '__pycache__/ignored.py').write_text('ignored')
-    assert identity(source, config) == snapshot(source, root / 'copy', config)
+    expected = {'sha256': 'a5cf80cf281d10c7f4e4e36fef1e1bfb5bd37e392bc46d57835bd788fbd4665b', 'files': 2, 'bytes': 24}
+    assert identity(source, config) == expected
+    assert snapshot(source, root / 'copy', config) == expected
+    assert (root / 'copy/main.py').read_bytes() == b'print(1)'
+    assert (root / 'copy/nested/模块.py').read_text() == 'value = "中文"'
     for name, kind in [('link.py', 'symlink'), ('link-dir', 'directory'),
                        ('large.py', 'large'), ('pipe.py', 'pipe')]:
         path = source / name
@@ -165,6 +169,6 @@ with tempfile.TemporaryDirectory() as directory:
     try: identity(source, config)
     except ValueError: pass
     else: raise AssertionError('missing entry accepted')
-`, script, frozen], { encoding: 'utf8' })
+`, script], { encoding: 'utf8' })
   assert.equal(result.status, 0, result.stderr)
 })

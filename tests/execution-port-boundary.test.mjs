@@ -37,7 +37,7 @@ const deviceControlConceptKeywords = [
   { keyword: 'connect_code', concept: 'connect code publication (client.connect_code.published)' },
   { keyword: 'clientNodeId', concept: 'ClientControlPort envelope identity field' },
   { keyword: 'clientInstanceId', concept: 'ClientControlPort envelope identity field' },
-  { keyword: 'enroll', concept: 'client.enroll / client.enrollment_accepted' },
+  { keyword: 'enroll', concept: 'client.enroll / enrollment issuance' },
 ]
 
 function collectSchemaKindValues(node, out, source) {

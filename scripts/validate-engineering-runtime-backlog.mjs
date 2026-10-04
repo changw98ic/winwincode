@@ -57,6 +57,16 @@ function visitPlan(id) {
   planVisiting.delete(id); planVisited.add(id); return cycle;
 }
 for (const entry of planEntries) if (visitPlan(entry.stable_id)) { errors.push("task plan dependency cycle"); break; }
+// This reviewed scope change retires only the completed repository-split work.
+// The original mapping, classification and source hashes remain historical facts.
+const retiredIds = new Set(["winwincode-edition.2", "winwincode-edition.2.2", "winwincode-edition.2.5", "winwincode-edition.2.6", "winwincode-edition.3"]);
+const retirements = snapshot.live_scope_retirements ?? [];
+if (!Array.isArray(retirements) || retirements.length !== retiredIds.size || new Set(retirements.map(entry => entry?.old_id)).size !== retiredIds.size) errors.push("live scope retirement set drift");
+for (const entry of Array.isArray(retirements) ? retirements : []) {
+  const row = rows.find(item => item.old_id === entry?.old_id);
+  if (!retiredIds.has(entry?.old_id) || entry.disposition !== "retired_repository_split" || entry.decision !== "docs/engineering-runtime/repository-split-audit-scope.md") errors.push(`invalid live scope retirement: ${entry?.old_id}`);
+  if (!row || row.classification !== "KEEP" || row.aligned_er_ids?.length !== 0 || planEntries.some(item => item.bead_id === entry?.old_id)) errors.push(`retirement overlaps current runtime scope: ${entry?.old_id}`);
+}
 const prerequisites = snapshot.new_bead_prerequisites ?? {};
 const expectedPrerequisites = { "WWC-ER-0002": "WWC-ER-0001", "WWC-ER-0003": "WWC-ER-0002", "WWC-ER-0004": "WWC-ER-0002" };
 if (!isDeepStrictEqual(prerequisites, expectedPrerequisites)) errors.push("new bead prerequisites incomplete or incorrect");
@@ -93,6 +103,14 @@ const byId = new Map(records.map((record) => [record.id, record]));
 if (byId.size !== records.length) errors.push("duplicate records ID");
 for (const row of rows) {
   const record = byId.get(row.old_id);
+  if (retiredIds.has(row.old_id)) {
+    if (record && record.status !== "closed") errors.push(`retired mapped bead is active: ${row.old_id}`);
+    const claims = record?.metadata?.engineering_runtime_plan_ids;
+    const planIds = typeof claims === "string" ? (() => { try { return JSON.parse(claims); } catch { return null; } })() : claims;
+    if (claims !== undefined && (!Array.isArray(planIds) || planIds.length)) errors.push(`retired mapped bead claims runtime work: ${row.old_id}`);
+    if (records.some(item => item.status !== "closed" && item.dependencies?.some(dep => dep.type === "blocks" && dep.depends_on_id === row.old_id))) errors.push(`active blocker points to retired mapped bead: ${row.old_id}`);
+    if (!record) continue;
+  }
   if (!record) { errors.push(`missing mapped bead: ${row.old_id}`); continue; }
   let annotation = record.metadata?.engineering_runtime_review;
   if (typeof annotation === "string") try { annotation = JSON.parse(annotation); } catch { annotation = null; }
@@ -129,7 +147,8 @@ for (const entry of planEntries) {
   if (record?.status === "closed" && !record.close_reason) errors.push(`closed task missing close_reason: ${entry.stable_id}`);
   const metadata = record?.metadata?.engineering_runtime_plan_ids;
   const planIds = Array.isArray(metadata) ? metadata : typeof metadata === "string" ? (() => { try { return JSON.parse(metadata); } catch { return []; } })() : [];
-  if (!record || !record.title?.includes(entry.stable_id) && !record.description?.includes(entry.stable_id)) errors.push(`task plan stable ID missing: ${entry.stable_id}`);
+  const identityFields = [record?.title, record?.description, record?.acceptance_criteria];
+  if (!identityFields.some(value => typeof value === "string" && value.match(/\bWWC-ER-\d{4}\b/g)?.includes(entry.stable_id))) errors.push(`task plan stable ID missing: ${entry.stable_id}`);
   if (!planIds.includes(entry.stable_id)) errors.push(`task plan metadata missing: ${entry.stable_id}`);
   if (!record?.acceptance_criteria) errors.push(`task plan acceptance missing: ${entry.stable_id}`);
   for (const dep of entry.depends_on ?? []) {
@@ -157,4 +176,4 @@ function visit(id) {
 }
 for (const record of records) if (visit(record.id)) { errors.push("beads dependency cycle"); break; }
 if (errors.length) { console.error(errors.join("\n")); process.exit(1); }
-console.log(`engineering runtime backlog: ${rows.length} mappings; mode=${options.mode}; identity/owner/dependencies/metadata checked; live Beads status=${options.mode === "live" ? "CHECKED" : "NOT_RUN"}`);
+console.log(`engineering runtime backlog: ${rows.length} mappings; mode=${options.mode}; identity/owner/dependencies/metadata checked; retired historical mappings=${retiredIds.size}; live Beads status=${options.mode === "live" ? "CHECKED" : "NOT_RUN"}`);

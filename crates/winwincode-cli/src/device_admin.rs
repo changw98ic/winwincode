@@ -262,7 +262,7 @@ pub fn refresh_device_connect_code(
 
 /// Locks or unlocks the Client locally (plan 11.1 `锁定 Client`): locking
 /// sets `acceptingConnections = false` plus `lockState = locked`, durably.
-/// While locked, every access challenge is refused.
+/// The Server uses the published policy when authorizing new access.
 ///
 /// Requires an existing device identity: a lock landing on a typo'd data
 /// directory must fail loudly instead of silently locking a nonexistent

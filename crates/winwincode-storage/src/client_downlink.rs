@@ -2,8 +2,7 @@
 
 //! Durable Server → Client downlink outbox for the `ClientControlPort`.
 //!
-//! Every Server-to-Client frame (`client.enrollment_accepted`,
-//! `client.access.challenge`, and later occupancy and worker frames) is
+//! Every Server-to-Client command (occupancy and worker frames) is
 //! persisted here before delivery and is delivered by the client exchange
 //! under the per-client `server_to_client_ack_sequence` cursor owned by the
 //! `ClientNode` registry (plan 9.2). A frame is retained until the Device
@@ -279,6 +278,21 @@ impl<'storage> ClientDownlinkOutbox<'storage> {
             .connection()
             .map_err(|storage| storage_error(&storage))?;
         highest_sequence(connection, client_node_id)
+    }
+
+    /// Loads a retained command for an authenticated digest-only handshake.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an unavailable store or corrupt retained frame.
+    pub fn frame_by_message_id(
+        &self,
+        node: &str,
+        message_id: &str,
+    ) -> Result<Option<String>, ClientDownlinkError> {
+        self.storage.connection().map_err(|storage| storage_error(&storage))?
+            .query_row("SELECT frame FROM client_downlink_frames WHERE client_node_id = ?1 AND message_id = ?2", params![node, message_id], |row| row.get(0))
+            .optional().map_err(|sql| sql_error(&sql))
     }
 
     /// Deletes every retained frame at or below `ack_sequence` and returns

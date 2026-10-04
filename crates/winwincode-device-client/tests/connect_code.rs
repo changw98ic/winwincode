@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! CLIENT-200.2 coverage: the dynamic connect code lifecycle (plan 11.1,
-//! 11.3) and the daemon downlink extensions — `client.access.challenge`
+//! 11.3) and the daemon policy updates —
 //! answering, `client.client_lock` application, and repository rescan commands.
 
 use std::collections::{BTreeSet, VecDeque};
@@ -21,12 +21,11 @@ use winwincode_client_port::domain::{
     ClientRepositoryRescanReason, ConnectCodeState,
 };
 use winwincode_client_port::messages::{
-    CLIENT_CONTROL_PORT_SCHEMA_VERSION, ClientToServerMessage, CommandContext,
-    ServerAccessChallengePayload, ServerClientLockPayload, ServerRepositoryRescanPayload,
-    ServerToClientEnvelope, ServerToClientMessage,
+    CLIENT_CONTROL_PORT_SCHEMA_VERSION, CommandContext, ServerClientLockPayload,
+    ServerRepositoryRescanPayload, ServerToClientEnvelope, ServerToClientMessage,
 };
 use winwincode_device_client::connect_code::{
-    self, ChallengeVerdict, connect_code_digest, generate_connect_code, is_weak_connect_code,
+    self, connect_code_digest, generate_connect_code, is_weak_connect_code,
 };
 use winwincode_device_client::{
     ConnectCodeStateRecord, DaemonConfig, DeviceDaemon, DeviceIdentitySeed, DeviceStore,
@@ -35,7 +34,6 @@ use winwincode_device_client::{
 };
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
-static NEXT_CHALLENGE: AtomicU64 = AtomicU64::new(1);
 
 fn temporary_directory(name: &str) -> PathBuf {
     let suffix = NEXT_TEMP_DIRECTORY.fetch_add(1, Ordering::Relaxed);
@@ -250,19 +248,6 @@ fn drive_until(daemon: &mut DeviceDaemon, condition: impl Fn(&DeviceDaemon) -> b
     panic!("the awaited daemon condition never held");
 }
 
-fn challenge_payload(code: &ConnectCodeStateRecord) -> ServerAccessChallengePayload {
-    ServerAccessChallengePayload {
-        challenge_id: format!(
-            "cac_CCCCCCCCCCCCCCCCCCCCCCCCCC{}",
-            NEXT_CHALLENGE.fetch_add(1, Ordering::Relaxed)
-        ),
-        connect_code_id: code.connect_code_id.clone(),
-        code_digest: code.code_digest.clone(),
-        expires_at: "2026-09-04T00:05:00.000Z".to_owned(),
-        requester_user_id: "usr_01j2".to_owned(),
-    }
-}
-
 fn downlink_envelope(sequence: u64, message: ServerToClientMessage) -> Value {
     let envelope = ServerToClientEnvelope {
         schema_version: CLIENT_CONTROL_PORT_SCHEMA_VERSION.to_owned(),
@@ -426,127 +411,15 @@ fn refresh_supersedes_the_previous_generation_monotonically() {
         winwincode_device_client::DeviceStoreErrorKind::Conflict
     );
 
-    // The old generation no longer validates challenges; the new one does.
-    let old_challenge = ServerAccessChallengePayload {
-        challenge_id: "cac_OLDOLDOLDOLDOLDOLDOLDOLD00".to_owned(),
-        connect_code_id: first.record.connect_code_id.clone(),
-        code_digest: first.record.code_digest.clone(),
-        expires_at: "2026-09-04T00:05:00.000Z".to_owned(),
-        requester_user_id: "usr_01j2".to_owned(),
-    };
-    assert_eq!(
-        connect_code::evaluate_access_challenge(&store, &old_challenge, now_utc())
-            .expect("old challenge evaluation"),
-        ChallengeVerdict::UnknownCode,
-        "the refreshed-over generation is unknown"
-    );
     let current = store.connect_code_state().expect("current").expect("row");
-    assert_eq!(
-        connect_code::evaluate_access_challenge(&store, &challenge_payload(&current), now_utc())
-            .expect("current challenge evaluation"),
-        ChallengeVerdict::Confirmed
-    );
-
-    store.close().expect("store close");
-    cleanup(&root);
-}
-
-#[test]
-fn expiry_revocation_and_policy_reject_challenges_in_order() {
-    let root = temporary_directory("challenge-branches");
-    let (mut store, identity) = open_enrolled(&root);
-    let expired = connect_code::publish_connect_code(
-        &mut store,
-        identity.current_instance_id(),
-        now_utc() - time::Duration::seconds(1),
-        Duration::ZERO,
-    )
-    .expect("expired publication");
-    let code = store.connect_code_state().expect("state").expect("row");
-    assert_eq!(expired.record.connect_code_id, code.connect_code_id);
-    assert_eq!(
-        connect_code::evaluate_access_challenge(&store, &challenge_payload(&code), now_utc())
-            .expect("expired evaluation"),
-        ChallengeVerdict::CodeExpired,
-        "an expired code refuses challenges even while unlocked"
-    );
-
-    // Revocation beats the clock only before expiry; revoked codes refuse.
-    connect_code::revoke_connect_code(&mut store, now_utc())
-        .expect("revocation")
-        .expect("an active code was revoked");
-    assert_eq!(
-        connect_code::evaluate_access_challenge(&store, &challenge_payload(&code), now_utc())
-            .expect("revoked evaluation"),
-        ChallengeVerdict::CodeRevoked
-    );
-    assert!(
-        connect_code::revoke_connect_code(&mut store, now_utc())
-            .expect("second revocation")
-            .is_none(),
-        "revoking again is a no-op"
-    );
-
-    // Fresh code, locked node: locked wins over the disabled flag.
-    connect_code::publish_connect_code(
-        &mut store,
-        identity.current_instance_id(),
-        now_utc(),
-        connect_code::CONNECT_CODE_TTL,
-    )
-    .expect("post-lock publication");
-    connect_code::set_connection_policy(&mut store, false, ClientLockState::Locked, now_utc())
-        .expect("lock policy");
-    let code = store.connect_code_state().expect("state").expect("row");
-    assert_eq!(
-        connect_code::evaluate_access_challenge(&store, &challenge_payload(&code), now_utc())
-            .expect("locked evaluation"),
-        ChallengeVerdict::Locked
-    );
-
-    // Unlocked but new connections disabled: still refused.
-    connect_code::set_connection_policy(&mut store, false, ClientLockState::Unlocked, now_utc())
-        .expect("disable policy");
-    assert_eq!(
-        connect_code::evaluate_access_challenge(&store, &challenge_payload(&code), now_utc())
-            .expect("disabled evaluation"),
-        ChallengeVerdict::NewConnectionsDisabled
-    );
-
-    // Fully open again: confirmed.
-    connect_code::set_connection_policy(&mut store, true, ClientLockState::Unlocked, now_utc())
-        .expect("open policy");
-    assert_eq!(
-        connect_code::evaluate_access_challenge(&store, &challenge_payload(&code), now_utc())
-            .expect("open evaluation"),
-        ChallengeVerdict::Confirmed
-    );
-
-    // Every rejection maps onto the single negative wire verdict; only the
-    // confirmation maps onto `confirmed`.
-    for verdict in [
-        ChallengeVerdict::UnknownCode,
-        ChallengeVerdict::CodeRevoked,
-        ChallengeVerdict::CodeExpired,
-        ChallengeVerdict::Locked,
-        ChallengeVerdict::NewConnectionsDisabled,
-    ] {
-        assert_eq!(
-            verdict.wire_status(),
-            winwincode_client_port::domain::ClientChallengeAckStatus::StaleGeneration
-        );
-    }
-    assert_eq!(
-        ChallengeVerdict::Confirmed.wire_status(),
-        winwincode_client_port::domain::ClientChallengeAckStatus::Confirmed
-    );
+    assert_eq!(current, second.record);
 
     store.close().expect("store close");
     cleanup(&root);
 }
 
 // ---------------------------------------------------------------------------
-// Daemon end-to-end: published frames, challenge ACKs, client lock, unknown
+// Daemon end-to-end: published frames, client lock, unknown
 // downlink kinds.
 // ---------------------------------------------------------------------------
 
@@ -597,83 +470,11 @@ fn published_frames_reach_the_outbox_without_the_plaintext() {
 }
 
 #[test]
-fn challenges_are_answered_confirmed_replayed_and_expired() {
-    let root = temporary_directory("daemon-challenge");
-    let sim = Arc::new(ServerSim::new());
-    let mut daemon = started_daemon("challenge", &root, &sim);
-    let published = daemon.publish_connect_code().expect("publication");
-
-    // The same challenge queued twice: a server replay of an unanswered
-    // challenge. Both deliveries must produce the identical idempotent ACK.
-    let challenge = challenge_payload(&published.record);
-    let first = downlink_envelope(
-        1,
-        ServerToClientMessage::AccessChallenge(Box::new(challenge.clone())),
-    );
-    let second = downlink_envelope(
-        2,
-        ServerToClientMessage::AccessChallenge(Box::new(challenge.clone())),
-    );
-    sim.queue_downlink(vec![first]);
-    sim.queue_downlink(vec![second]);
-    drive_until(&mut daemon, |_| {
-        sim.frames_with_kind("client.access.challenge_ack").len() >= 2
-    });
-
-    let acks = sim.frames_with_kind("client.access.challenge_ack");
-    assert_eq!(acks.len(), 2, "both deliveries were answered: {acks:?}");
-    for ack in &acks {
-        assert_eq!(ack.frame["payload"]["challengeId"], challenge.challenge_id);
-        assert_eq!(
-            ack.frame["payload"]["connectCodeId"],
-            published.record.connect_code_id
-        );
-        assert_eq!(ack.frame["payload"]["status"], "confirmed");
-    }
-    assert_eq!(
-        acks[0].frame["payload"]["idempotencyKey"], acks[1].frame["payload"]["idempotencyKey"],
-        "replays carry the deterministic per-challenge idempotency key"
-    );
-    assert_eq!(
-        acks[0].frame["payload"], acks[1].frame["payload"],
-        "the replayed verdict is byte-identical"
-    );
-    assert_eq!(daemon.status().access_challenges_confirmed, 2);
-
-    // An expired publication answers stale_generation.
-    let expired = daemon
-        .publish_connect_code_with_ttl(Duration::ZERO)
-        .expect("expired publication");
-    let expired_challenge = challenge_payload(&expired.record);
-    sim.queue_downlink(vec![downlink_envelope(
-        3,
-        ServerToClientMessage::AccessChallenge(Box::new(expired_challenge.clone())),
-    )]);
-    drive_until(&mut daemon, |_| {
-        sim.frames_with_kind("client.access.challenge_ack").len() >= 3
-    });
-    let acks = sim.frames_with_kind("client.access.challenge_ack");
-    let last = acks.last().expect("expired ack");
-    assert_eq!(
-        last.frame["payload"]["status"], "stale_generation",
-        "the expired generation answers with the single negative verdict"
-    );
-    assert_eq!(
-        last.frame["payload"]["connectCodeId"],
-        expired.record.connect_code_id
-    );
-    assert_eq!(daemon.status().access_challenges_confirmed, 2);
-
-    daemon.into_store().close().expect("store close");
-    cleanup(&root);
-}
-
-#[test]
-fn locked_nodes_refuse_challenges_and_report_the_policy() {
+fn locked_nodes_persist_and_report_the_policy() {
     let root = temporary_directory("daemon-lock");
     let sim = Arc::new(ServerSim::new());
     let mut daemon = started_daemon("lock", &root, &sim);
-    let published = daemon.publish_connect_code().expect("publication");
+    daemon.publish_connect_code().expect("publication");
 
     // Local lock: acceptingConnections=false + lockState=locked, durable.
     let policy = daemon.lock_client().expect("local lock");
@@ -682,27 +483,6 @@ fn locked_nodes_refuse_challenges_and_report_the_policy() {
     let reopened = daemon.connection_policy().expect("durable policy");
     assert!(!reopened.accepting_connections);
     assert_eq!(reopened.lock_state, ClientLockState::Locked);
-
-    let challenge = challenge_payload(&published.record);
-    sim.queue_downlink(vec![downlink_envelope(
-        1,
-        ServerToClientMessage::AccessChallenge(Box::new(challenge.clone())),
-    )]);
-    drive_until(&mut daemon, |_| {
-        !sim.frames_with_kind("client.access.challenge_ack")
-            .is_empty()
-    });
-    let acks = sim.frames_with_kind("client.access.challenge_ack");
-    assert_eq!(
-        acks.last().expect("locked ack").frame["payload"]["status"],
-        "stale_generation",
-        "the lock window refuses every challenge"
-    );
-    assert_eq!(
-        daemon.status().access_challenges_confirmed,
-        0,
-        "no challenge was confirmed while locked"
-    );
 
     // The durable policy rides every subsequent heartbeat report.
     drive_until(&mut daemon, |daemon| {
@@ -789,10 +569,8 @@ fn missing_repository_rescan_is_rejected_without_blocking_the_cursor() {
     let mut daemon = started_daemon("unhandled", &root, &sim);
     daemon.publish_connect_code().expect("publication");
 
-    // An unknown binding is a handled rescan rejection between two
-    // challenge frames; it must not terminate or block the daemon.
-    let published = daemon.connect_code_state().expect("state").expect("row");
-    let challenge = challenge_payload(&published);
+    // An unknown binding is a handled rescan rejection before a lock
+    // command; it must not terminate or block the daemon.
     sim.queue_downlink(vec![
         downlink_envelope(
             1,
@@ -807,12 +585,17 @@ fn missing_repository_rescan_is_rejected_without_blocking_the_cursor() {
         ),
         downlink_envelope(
             2,
-            ServerToClientMessage::AccessChallenge(Box::new(challenge.clone())),
+            ServerToClientMessage::ClientLock(ServerClientLockPayload {
+                command: CommandContext {
+                    expected_revision: 0,
+                    idempotency_key: "follow-up-lock".into(),
+                },
+                lock_state: ClientLockState::Locked,
+            }),
         ),
     ]);
     drive_until(&mut daemon, |_| {
-        !sim.frames_with_kind("client.access.challenge_ack")
-            .is_empty()
+        sim.frames_with_kind("client.command_ack").len() == 2
     });
 
     assert_eq!(
@@ -822,19 +605,16 @@ fn missing_repository_rescan_is_rejected_without_blocking_the_cursor() {
     );
     assert_eq!(daemon.status().repository_rescans_applied, 0);
     assert_eq!(daemon.status().unhandled_downlink_commands, 0);
-    // The cursor advanced across the skipped frame: the follow-up challenge
-    // at sequence 2 was still accepted and answered.
+    // The cursor advanced across the refused rescan; the following lock
+    // command at sequence 2 was still applied and acknowledged.
     let cursor = daemon
         .store_mut()
         .inbox_cursor(daemon_config("unhandled").server_profile_id.as_str())
         .expect("cursor read")
         .expect("cursor row");
     assert_eq!(cursor.last_sequence, 2);
-    let acks = sim.frames_with_kind("client.access.challenge_ack");
-    assert_eq!(acks.len(), 1);
-    assert_eq!(acks[0].frame["payload"]["status"], "confirmed");
     let command_acks = sim.frames_with_kind("client.command_ack");
-    assert_eq!(command_acks.len(), 1);
+    assert_eq!(command_acks.len(), 2);
     assert_eq!(
         command_acks[0].frame["payload"]["commandKind"],
         "client.repository.rescan"
@@ -867,60 +647,4 @@ fn publication_before_enrollment_is_refused() {
     );
     daemon.into_store().close().expect("store close");
     cleanup(&root);
-}
-
-// The daemon-side challenge answer path constructs its ack through
-// `connect_code::challenge_ack_message`; pin its message shape here.
-#[test]
-fn challenge_ack_message_shape_is_stable() {
-    let challenge = ServerAccessChallengePayload {
-        challenge_id: "cac_AAAAAAAAAAAAAAAAAAAAAAAAAA1".to_owned(),
-        connect_code_id: "cct_AAAAAAAAAAAAAAAAAAAAAAAAAA1".to_owned(),
-        code_digest: "sha256:aa11".to_owned(),
-        expires_at: "2026-09-04T00:05:00.000Z".to_owned(),
-        requester_user_id: "usr_01j2".to_owned(),
-    };
-    let confirmed = connect_code::challenge_ack_message(&challenge, ChallengeVerdict::Confirmed);
-    let value = serde_json::to_value(&confirmed).expect("message value");
-    assert_eq!(value["kind"], "client.access.challenge_ack");
-    assert_eq!(value["payload"]["challengeId"], challenge.challenge_id);
-    assert_eq!(value["payload"]["connectCodeId"], challenge.connect_code_id);
-    assert_eq!(value["payload"]["status"], "confirmed");
-    assert_eq!(
-        value["payload"]["idempotencyKey"], "challenge-ack-cac_AAAAAAAAAAAAAAAAAAAAAAAAAA1",
-        "the idempotency key is deterministic per challenge"
-    );
-
-    let rejected = connect_code::challenge_ack_message(&challenge, ChallengeVerdict::Locked);
-    let value = serde_json::to_value(&rejected).expect("message value");
-    assert_eq!(value["payload"]["status"], "stale_generation");
-
-    // The published message shape carries bounded verification metadata but
-    // no plaintext code field.
-    let record = ConnectCodeStateRecord {
-        connect_code_id: "cct_AAAAAAAAAAAAAAAAAAAAAAAAAA2".to_owned(),
-        code_digest: "sha256:bb22".to_owned(),
-        generation: 3,
-        issued_by_instance_id: "cix_AAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned(),
-        expires_at: "2026-09-04T00:02:00.000Z".to_owned(),
-        state: ConnectCodeState::Active,
-        created_at: STAMP.to_owned(),
-        updated_at: STAMP.to_owned(),
-    };
-    let published = connect_code::published_message(&record);
-    let value = serde_json::to_value(&published).expect("message value");
-    assert_eq!(value["kind"], "client.connect_code.published");
-    assert_eq!(value["payload"]["codeDigest"], "sha256:bb22");
-    assert_eq!(value["payload"]["generation"], 3);
-    assert_eq!(value["payload"]["expiresAt"], record.expires_at);
-    assert_eq!(value["payload"]["remainingAttempts"], 5);
-    assert_eq!(
-        value["payload"].as_object().expect("payload object").len(),
-        7,
-        "exactly the command context plus the five payload fields"
-    );
-    assert!(matches!(
-        published,
-        ClientToServerMessage::ConnectCodePublished(_)
-    ));
 }

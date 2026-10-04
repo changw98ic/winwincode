@@ -2206,6 +2206,21 @@ async fn drain_in_flight(
             }
         }
     }
+    if let Some(handoff) = &handoff {
+        // The delegated tool completes by yielding to the host. Preserve that
+        // fact in history before the next turn can normalize the original call;
+        // patch application and validation are still owned by the host.
+        let response_item = ResponseInputItem::CustomToolCallOutput {
+            call_id: handoff.call_id.clone(),
+            name: Some("submit_change_batch".to_string()),
+            output: codex_protocol::models::FunctionCallOutputPayload::from_text(
+                "ChangeBatch proposal handed to host for application and validation.".to_string(),
+            ),
+        }
+        .into();
+        sess.record_conversation_items(&turn_context, std::slice::from_ref(&response_item))
+            .await;
+    }
     Ok(handoff)
 }
 

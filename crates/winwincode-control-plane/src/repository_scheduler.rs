@@ -268,8 +268,18 @@ impl<'storage> RepositoryExecutionScheduler<'storage> {
                     StorageError::invalid_input("Delivery state identity is inconsistent").into(),
                 );
             }
-            if record.state == ExecutionJobState::Queued {
-                validate_queued_workrun_job(&record, &delivery, request)?;
+            let unaccepted_lease = record.state == ExecutionJobState::Leased
+                && self
+                    .storage
+                    .execution_registry()?
+                    .load_dispatch_authority(&record.job_id)?
+                    .is_none();
+            if record.state == ExecutionJobState::Queued || unaccepted_lease {
+                // Claiming reserves a lease before accepted dispatch appends
+                // the Delivery WorkRun. Validate the immutable pre-acceptance
+                // input in both states; storage rechecks the exact run/queue
+                // revision and current lease atomically before cancellation.
+                validate_pre_acceptance_workrun_job(&record, &delivery, request)?;
             } else {
                 let run = delivery
                     .snapshot()
@@ -387,7 +397,7 @@ impl<'storage> RepositoryExecutionScheduler<'storage> {
     }
 }
 
-fn validate_queued_workrun_job(
+fn validate_pre_acceptance_workrun_job(
     record: &ExecutionJobRecord,
     delivery: &Delivery,
     request: &WorkRunCancellationRequest,
@@ -429,26 +439,23 @@ fn validate_queued_workrun_job(
         .ok_or(RepositoryExecutionSchedulerError::InvalidExecutionJob(
             "workItem",
         ))?;
-    if item.state != WorkItemState::Ready || scope.work_item_revision != item.revision {
+    if !matches!(
+        item.state,
+        WorkItemState::Ready | WorkItemState::InProgress | WorkItemState::CandidateReady
+    ) || scope.work_item_revision != item.revision
+    {
         return Err(RepositoryExecutionSchedulerError::InvalidExecutionJob(
             "workItem revision",
         ));
     }
-    // Depending on the producer path, the immutable dispatch may carry either
-    // the source Ready item or its InProgress execution copy while the
-    // Delivery aggregate remains Ready until accepted dispatch appends the
-    // canonical WorkRun. Compare every other item field and normalize only
-    // this intentional pre-acceptance state transition.
+    // The source Ready item can carry its InProgress execution copy before
+    // acceptance. Other active phases, including candidate-ready validation,
+    // must match every item field exactly; a role does not invent a new
+    // cancellation identity or require an accepted Delivery WorkRun.
     let mut input_item = input.work_item.clone();
-    if !matches!(
-        input_item.state,
-        WorkItemState::Ready | WorkItemState::InProgress
-    ) {
-        return Err(RepositoryExecutionSchedulerError::InvalidExecutionJob(
-            "workItem state",
-        ));
+    if item.state == WorkItemState::Ready && input_item.state == WorkItemState::InProgress {
+        input_item.state = WorkItemState::Ready;
     }
-    input_item.state = item.state.clone();
     if input_item != *item {
         return Err(RepositoryExecutionSchedulerError::InvalidExecutionJob(
             "workItem",
@@ -603,8 +610,14 @@ fn cancel_message(
         receipt.worker_session_id.as_ref(),
         receipt.message_id.as_ref(),
     ) else {
-        if receipt.lease.is_none()
+        // Storage atomically cancels an unaccepted lease and terminalizes
+        // its queue row. That receipt can retain the exact Registry lease
+        // without a WorkerSession/message: no Worker accepted a side effect
+        // and no job.cancel command needs to be sent.
+        if receipt.job.state == ExecutionJobState::Failed
+            && receipt.job.cancellation.is_some()
             && receipt.worker_session_id.is_none()
+            && receipt.codex_thread_id.is_none()
             && receipt.message_id.is_none()
         {
             return Ok(None);

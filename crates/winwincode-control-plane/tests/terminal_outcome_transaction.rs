@@ -2541,9 +2541,6 @@ fn stale_or_foreign_lease_binding_metadata_and_artifacts_fail_closed() {
         .artifacts
         .push(changed.outcome.artifacts[0].clone());
     cases.push(("duplicate-artifact", changed));
-    let mut changed = message.clone();
-    changed.sent_at = Instant("2027-01-15T08:06:00.000Z".into());
-    cases.push(("sent-after-expiry", changed));
 
     for (name, changed) in cases {
         assert!(

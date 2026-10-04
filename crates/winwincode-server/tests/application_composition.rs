@@ -1370,3 +1370,258 @@ fn remote_heartbeat_reaches_shared_core_after_authentication() {
 #[cfg(all(unix, feature = "local-worker"))]
 #[path = "support/remote_worker_upload.rs"]
 mod remote_worker_upload;
+
+#[cfg(feature = "local-worker")]
+#[allow(clippy::too_many_lines, clippy::large_futures)]
+mod heartbeat_gap {
+    // SPDX-License-Identifier: Apache-2.0
+
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
+    use winwincode_domain::{Instant, WorkerId, WorkerInstanceId};
+    use winwincode_execution_port::{
+        generated::ExecutionPortMessage,
+        transport::{
+            ExecutionPortCore, FrameDirection, RemoteExchangeDelivery, RemoteExchangeRequest,
+            RemoteExchangeResponse, RemoteTransportAdapter, TypedFrame,
+        },
+    };
+    use winwincode_server::{
+        FileRemoteWorkerAuthenticator, ProductionRemoteWorkerExchange, RemoteWorkerExchangePort,
+        RepositoryRuntimeScheduler,
+    };
+    use winwincode_storage::SqliteStorage;
+
+    struct HeartbeatCore(SqliteStorage, Instant);
+    impl ExecutionPortCore for HeartbeatCore {
+        type Output = Vec<ExecutionPortMessage>;
+        type Error = winwincode_control_plane::ExecutionPortServiceError;
+        fn accept(&mut self, message: &ExecutionPortMessage) -> Result<Self::Output, Self::Error> {
+            winwincode_control_plane::ExecutionPortService::new(&mut self.0, self.1.clone())
+                .handle(message.clone())
+                .map(|ack| vec![ack])
+        }
+    }
+
+    #[derive(Default)]
+    struct WireState {
+        drop_next_heartbeat: bool,
+        acknowledgements: Vec<winwincode_domain::ExecutionMessageId>,
+        controls: Vec<RemoteExchangeDelivery>,
+        successful_heartbeat_sequences: Vec<i64>,
+        server_pending: usize,
+    }
+    #[derive(Clone)]
+    struct LossyWire {
+        exchange: Arc<dyn RemoteWorkerExchangePort>,
+        state: Arc<Mutex<WireState>>,
+        worker: WorkerId,
+        instance: WorkerInstanceId,
+        now: Instant,
+    }
+    impl winwincode_worker::WorkerExecutionPort for LossyWire {
+        type Error = ();
+        async fn send(&mut self, message: ExecutionPortMessage) -> Result<(), Self::Error> {
+            let mut state = self.state.lock().unwrap();
+            if matches!(message, ExecutionPortMessage::WorkerHeartbeatMessage(_))
+                && state.drop_next_heartbeat
+            {
+                state.drop_next_heartbeat = false;
+                return Err(());
+            }
+            let frame =
+                TypedFrame::new(FrameDirection::WorkerToControlPlane, message.clone()).unwrap();
+            let bytes = RemoteTransportAdapter::<HeartbeatCore>::encode(&frame).unwrap();
+            let request = RemoteExchangeRequest::new(
+                self.worker.clone(),
+                self.instance.clone(),
+                state.acknowledgements.clone(),
+                bytes,
+            )
+            .unwrap()
+            .with_acceptance_receipt();
+            let bytes = self
+                .exchange
+                .exchange(
+                    b"heartbeat-gap-fixture".to_vec(),
+                    &request.encode().unwrap(),
+                    self.now.clone(),
+                )
+                .map_err(|_| ())?;
+            state.acknowledgements.clear();
+            let response = RemoteExchangeResponse::decode(&bytes).unwrap();
+            assert!(response.frame_accepted());
+            state.server_pending = response.deliveries().len();
+            if let ExecutionPortMessage::WorkerHeartbeatMessage(h) = message {
+                state
+                    .successful_heartbeat_sequences
+                    .push(h.heartbeat_sequence.0);
+            }
+            state.controls = response.deliveries().to_vec();
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_heartbeat_then_gap_drains_real_worker_and_server_queues() {
+        use std::os::unix::fs::PermissionsExt;
+        use winwincode_codex::{
+            ProductionCodexAdapter, ProductionCodexConfig, ProductionCodexOptions,
+        };
+        use winwincode_execution_port::generated::{ModelGatewayRoute, WorkerCapabilitySet};
+        let root = super::temporary_root("worker-heartbeat-gap");
+        fs::create_dir_all(&root).unwrap();
+        let now = Instant("2027-01-15T08:00:05.000Z".into());
+        let worker_id = WorkerId("wrk_00000000000000000000000001".into());
+        let instance = WorkerInstanceId("wki_00000000000000000000000001".into());
+        let token = root.join("worker.token");
+        fs::write(&token, b"heartbeat-gap-fixture").unwrap();
+        fs::set_permissions(&token, fs::Permissions::from_mode(0o600)).unwrap();
+        let auth = FileRemoteWorkerAuthenticator::open(
+            &token,
+            worker_id.clone(),
+            winwincode_storage::WorkerPoolId("wpl_00000000000000000000000001".into()),
+            winwincode_storage::WorkerRegistryScope::local_default(),
+            "fixture".into(),
+            "fixture-worker".into(),
+            "local".into(),
+            Instant("2027-01-15T09:00:00.000Z".into()),
+            &now,
+        )
+        .unwrap();
+        let application = super::open_application(&root, "heartbeat-fixture").unwrap();
+        let scope = serde_json::from_value(super::repository_scope_json(1)).unwrap();
+        let scheduler = RepositoryRuntimeScheduler::from_application(
+            &application,
+            scope,
+            worker_id.clone(),
+            instance.clone(),
+            "heartbeat-gap",
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        let exchange: Arc<dyn RemoteWorkerExchangePort> =
+            Arc::new(ProductionRemoteWorkerExchange::new(
+                &root,
+                Arc::new(auth),
+                scheduler,
+                HeartbeatCore(SqliteStorage::open(&root).unwrap(), now.clone()),
+            ));
+        let state = Arc::new(Mutex::new(WireState::default()));
+        let wire = LossyWire {
+            exchange,
+            state: state.clone(),
+            worker: worker_id.clone(),
+            instance: instance.clone(),
+            now: now.clone(),
+        };
+        let capabilities: WorkerCapabilitySet = serde_json::from_value(serde_json::json!({"platform":"aarch64-apple-darwin", "features":["sandbox"], "capabilityDigest":format!("sha256:{}", "a".repeat(64)), "maxConcurrentJobs":1})).unwrap();
+        let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
+            || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"),
+            PathBuf::from,
+        );
+        let helper = target.join("debug/winwincode-kernel-helper");
+        let adapter = ProductionCodexAdapter::open(ProductionCodexConfig::try_new(ProductionCodexOptions {
+        data_directory: root.join("worker"), helper_release_manifest: winwincode_codex::HelperReleaseManifest::from_test_helper(&helper).unwrap(), helper_executable: helper,
+        provider: "fixture-provider".into(), model: "fixture-model".into(), gateway_route: ModelGatewayRoute { capability: "reasoning".into(), route: "fixture".into() },
+        registered_capabilities: capabilities.clone(), discovered_capabilities: vec![],
+        action_signing_key: winwincode_execution_port::action_enforcement::ActionEnforcementSigningKey::from_bytes([31;32]).unwrap(),
+        execution_envelope: winwincode_execution_port::action_gateway::ExecutionEnvelopeToken { version:1, digest: winwincode_domain::Sha256Digest(format!("sha256:{}", "a".repeat(64))) },
+        execution_mode: winwincode_codex::ExecutionMode::React, observer_mode: winwincode_codex::ObserverMode::Off,
+    }).unwrap()).unwrap();
+        let config = winwincode_worker::WorkerConfig {
+            worker_id,
+            worker_instance_id: instance,
+            started_at: now.clone(),
+            capabilities,
+        };
+        fs::create_dir_all(root.join("sources")).unwrap();
+        let workspaces = winwincode_worker::workspace_runtime::JobWorkspaceRuntime::open(
+            root.join("workspaces"),
+            root.join("sources"),
+        )
+        .unwrap();
+        let mut worker =
+            winwincode_worker::WorkerMain::new(config, wire.clone(), adapter, workspaces);
+        worker.start(now.clone()).await.unwrap();
+        consume(&mut worker, &state, &now).await;
+        state.lock().unwrap().drop_next_heartbeat = true;
+        assert!(
+            worker.heartbeat(now.clone()).await.is_err(),
+            "N is lost before Server accepts it"
+        );
+        worker.heartbeat(now.clone()).await.unwrap();
+        consume(&mut worker, &state, &now).await;
+        for _ in 0..6 {
+            worker.flush_durable_outbox_at(now.clone()).await.unwrap();
+            consume(&mut worker, &state, &now).await;
+        }
+        let connection =
+            rusqlite::Connection::open(root.join("worker/worker-codex.sqlite3")).unwrap();
+        let pending: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM execution_outbox WHERE acknowledgement_required=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            pending, 0,
+            "Gap must release the sent cache and allow exact N+1 replay"
+        );
+        assert_eq!(
+            state.lock().unwrap().successful_heartbeat_sequences,
+            vec![2, 1, 2]
+        );
+        // The next real heartbeat carries the confirmations for the recovered
+        // frames. Its own new acknowledgement is the only remaining downlink.
+        worker.heartbeat(now.clone()).await.unwrap();
+        assert_eq!(
+            state.lock().unwrap().successful_heartbeat_sequences,
+            vec![2, 1, 2, 3]
+        );
+        assert!(state.lock().unwrap().acknowledgements.is_empty());
+        let controls = state.lock().unwrap().controls.clone();
+        assert_eq!(controls.len(), 1);
+        let last = RemoteTransportAdapter::<HeartbeatCore>::decode(&controls[0].frame).unwrap();
+        assert!(
+            matches!(last.message(), ExecutionPortMessage::WorkerHeartbeatAckMessage(ack) if ack.heartbeat_sequence.0 == 3)
+        );
+        assert_eq!(
+            worker.lifecycle(),
+            winwincode_worker::WorkerLifecycleState::Active
+        );
+        drop(worker);
+        drop(wire);
+        drop(connection);
+        drop(application);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    async fn consume(
+        worker: &mut winwincode_worker::WorkerMain<
+            LossyWire,
+            winwincode_codex::ProductionCodexAdapter,
+        >,
+        state: &Arc<Mutex<WireState>>,
+        now: &Instant,
+    ) {
+        let controls = std::mem::take(&mut state.lock().unwrap().controls);
+        for delivery in controls {
+            let frame = RemoteTransportAdapter::<HeartbeatCore>::decode(&delivery.frame).unwrap();
+            worker
+                .accept_control(frame.message(), now.clone())
+                .await
+                .unwrap();
+            state
+                .lock()
+                .unwrap()
+                .acknowledgements
+                .push(delivery.delivery_id);
+        }
+    }
+}

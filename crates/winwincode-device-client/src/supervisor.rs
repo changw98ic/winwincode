@@ -1810,6 +1810,7 @@ fn signal_process(target: ProcessSignalTarget, signal: &str) -> bool {
     let ProcessSignalTarget::Group(group) = target;
     Command::new("/bin/kill")
         .arg(format!("-{signal}"))
+        .arg("--")
         .arg(format!("-{group}"))
         .stderr(Stdio::null())
         .status()
@@ -1954,6 +1955,40 @@ mod tests {
             .is_ok_and(|status| status.success())
     }
 
+    #[test]
+    fn process_group_signal_stops_only_the_owned_group() {
+        let spawn = || {
+            Command::new("/bin/sleep")
+                .arg("30")
+                .process_group(0)
+                .spawn()
+                .expect("isolated process group")
+        };
+        let mut owned = spawn();
+        let mut foreign = spawn();
+        let target = validated_process_group_target(owned.id());
+        let signalled = target.is_some_and(|target| signal_process(target, "TERM"));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let exited = loop {
+            if owned.try_wait().expect("owned status").is_some() {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            thread::sleep(STOP_POLL_INTERVAL);
+        };
+        let foreign_alive = foreign.try_wait().expect("foreign status").is_none();
+        // Both children are direct handles; clean up before any assertion.
+        let _ = owned.kill();
+        let _ = owned.wait();
+        let _ = foreign.kill();
+        let _ = foreign.wait();
+        assert!(signalled, "the owned group signal must report success");
+        assert!(exited, "the owned process must exit");
+        assert!(foreign_alive, "another process group must stay alive");
+    }
+
     fn temp_root(name: &str) -> PathBuf {
         let suffix = NEXT_TEMP_ROOT.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
@@ -1966,7 +2001,20 @@ mod tests {
     }
 
     fn write_executable_script(path: &Path, body: &str) {
-        fs::write(path, format!("#!/bin/sh\n{body}\n")).expect("script writes");
+        // Real managed Workers wait for the registry commit before executing.
+        // In particular, a crash fixture must not exit before the start gate.
+        fs::write(
+            path,
+            format!(
+                "#!/bin/sh\n\
+                 if [ \"${{WWC_MANAGED_START_GATE:-}}\" = 1 ]; then\n\
+                 gate=$(dd bs=1 count=1 2>/dev/null)\n\
+                 [ \"$gate\" = \"$(printf '\\001')\" ] || exit 1\n\
+                 fi\n\
+                 {body}\n"
+            ),
+        )
+        .expect("script writes");
         let mut permissions = fs::metadata(path).expect("script metadata").permissions();
         permissions.set_mode(0o755);
         fs::set_permissions(path, permissions).expect("script chmod");

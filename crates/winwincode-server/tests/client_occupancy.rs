@@ -895,13 +895,19 @@ async fn unanswered_offer_times_out_rolls_back_and_feeds_the_rate_limit() {
         &user_id,
     );
     // No responder: the durable offer stays unanswered until the deadline.
-    let application = ClientOccupancyApplication::open(
+    let clock = Arc::new(OccupancyTestClock(AtomicU64::new(
+        winwincode_server::StandaloneApplicationClock::now_millis(
+            &winwincode_server::SystemStandaloneApplicationClock,
+        ),
+    )));
+    let application = ClientOccupancyApplication::open_with_clock(
         &data_directory,
         &ClientOccupancyConfig {
             offer_wait: Duration::from_millis(300),
             poll_interval: Duration::from_millis(25),
             ..ClientOccupancyConfig::default()
         },
+        clock.clone(),
     )
     .expect("valid application");
     let request = json!({
@@ -939,6 +945,21 @@ async fn unanswered_offer_times_out_rolls_back_and_feeds_the_rate_limit() {
         ClientOccupancyErrorKind::RateLimited,
         "{throttled}"
     );
+
+    // The original wall-clock test could cross the 300-second boundary
+    // between its five failures and its sixth claim. Keep the threshold
+    // assertion in one window, then explicitly verify the permitted reset.
+    clock.0.fetch_add(300_000, Ordering::SeqCst);
+    let next_window = application
+        .claim(&user_id, &request)
+        .await
+        .expect_err("a fresh window admits an offer, which still has no responder");
+    assert_eq!(
+        next_window.kind(),
+        ClientOccupancyErrorKind::OccupancyAckTimeout
+    );
+    assert_eq!(count_released_leases(&data_directory, "ack_timeout"), 6);
+    assert!(active_lease(&data_directory, &node).is_none());
 
     running.shutdown().await.expect("shutdown");
     let _ = std::fs::remove_dir_all(&data_directory);
@@ -1423,4 +1444,30 @@ async fn force_release_enforces_the_recovery_deadline() {
     running.shutdown().await.expect("shutdown");
     let _ = std::fs::remove_dir_all(&data_directory);
     let _ = std::fs::remove_dir_all(&auth_directory);
+}
+
+struct OccupancyTestClock(AtomicU64);
+
+impl winwincode_server::StandaloneApplicationClock for OccupancyTestClock {
+    fn now_millis(&self) -> u64 {
+        self.0.load(Ordering::SeqCst)
+    }
+
+    fn now_instant(&self) -> Instant {
+        let millis = self.now_millis();
+        let date = time::OffsetDateTime::from_unix_timestamp(
+            i64::try_from(millis / 1_000).expect("epoch"),
+        )
+        .expect("test timestamp");
+        Instant(format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+            date.year(),
+            u8::from(date.month()),
+            date.day(),
+            date.hour(),
+            date.minute(),
+            date.second(),
+            millis % 1_000
+        ))
+    }
 }

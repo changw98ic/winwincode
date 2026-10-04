@@ -63,7 +63,7 @@ Attempt 或 Fencing 校验。
 
 | 方向 | 消息 |
 | --- | --- |
-| Worker → Control Plane | `worker.register`、`worker.capabilities`、`worker.heartbeat` |
+| Worker → Control Plane | `worker.register`、`worker.heartbeat` |
 | Control Plane → Worker | `worker.registration_result`、`worker.heartbeat_ack` |
 | Control Plane → Worker | `job.dispatch`、`lease.renew`、`runtime.replay_request`、`job.cancel` |
 | Worker → Control Plane | `job.dispatch_result`、`session.binding`、`runtime.event`、`job.cancel_ack`、`job.outcome` |
@@ -72,7 +72,7 @@ Attempt 或 Fencing 校验。
 | Worker → Control Plane | `input.request`、`approval.request` |
 | Control Plane → Worker | `input.response`、`approval.decision`、`job.outcome_ack` |
 
-除注册、能力和心跳外，每条 Worker 写消息都必须携带完整 `ExecutionLeaseStamp`：
+除注册和心跳外，每条 Worker 写消息都必须携带完整 `ExecutionLeaseStamp`：
 
 ```text
 leaseId
@@ -87,6 +87,25 @@ expiresAt
 
 `fencingToken` 使用十进制字符串，避免跨 Rust、JavaScript 和数据库时丢失 64 位整数
 精度。重新派发到另一个 Worker 实例或新的尝试时，Control Plane 必须使用更大的 token。
+
+Worker 在启动注册时提交平台、功能和容量信息，不提供独立的动态能力更新通道。
+
+Control Plane 在已接受任务的心跳中检查租约：剩余时间不超过配置租期的一半时，原子提交
+续期和下行 outbox 中的 `lease.renew`；响应丢失会重放同一续期记录。Worker 校验
+`priorExpiresAt`、实例、attempt 和 fencingToken，持久更新 Codex 执行权限后使用新期限。
+续期仅延长 expiresAt，不改变 Job、Lease、attempt、fencingToken 或 issuedAt。
+租期不定义消息分段：同一执行实例的消息流跨续期连续，顺序和去重仍由 sequence、消息 ID
+及持久回执决定。权限校验使用当前持久租约的有效期限，不能单凭消息内保留的旧 expiresAt
+拒绝已续租执行的事件、产物或结果，也不为续期重写原消息。
+模型 ACK 只确认原模型交换的消费进度，不授予执行权限；即使当前租约已过期，也按原交换、
+会话身份及序号接收，不能拿租期阻止已产生内容的确认和清理。
+租约到期只停止新的执行授权。已经产生的会话绑定、派发回执、事件、模型输出、产物和结果，
+以及它们的 ACK、历史补传、取消和下行队列清理，不受发送或接收时刻的租期限制。
+这些路径仍校验原 Job、attempt、会话、消息摘要、连续 sequence 和已接受的租约记录，
+不为续期改写原消息。首次产品状态写入还要符合当前任务身份和状态；重复消息读取原回执。
+新模型调用、工具执行及恢复执行的审批仍须满足当前授权，工具许可和输入/审批自身的期限
+不随租约续期延长。任务结束后迟到的续期不会重建任务。
+Worker 心跳可以报告已到期或已结束的原任务；这不续租，也不恢复执行权限。
 
 Worker 接受 Job 并建立 CodexThread 后，先发送一条 `session.binding`。它把
 `ProductSessionId + WorkerSessionId + CodexThreadId` 绑定到当前
@@ -105,8 +124,9 @@ Job/Lease 改成另一条 Session 或 CodexThread 是冲突。`runtime.event.cod
 | 相同 request、job、attempt、fence 和 payload digest 重复派发 | `duplicate` | 返回原 `workerSessionId`，不启动第二次执行 |
 | 相同 eventId、sequence 和 payload digest 重放 | `duplicate` | 确认原事件，不重复持久化或投影 |
 | 收到的 sequence 大于“最高连续 sequence + 1” | `gap` | 保持原 `ackSequence`，从 `replayFromSequence` 请求重放 |
-| Worker 断线后带有效 Lease 重连 | `replay_required` | 按原 eventId 和 sequence 重放 ack 之后的事件 |
-| Worker 写入时 Lease 已过期 | `rejected_expired_lease` | 不保存事件、产物或结果 |
+| Worker 断线后补传已有事件 | `replay_required` | 按原 eventId 和 sequence 重放 ack 之后的事件，租约到期不影响补传 |
+| 租约到期后请求启动新的执行 | `rejected_expired_lease` | 不启动新的模型调用或工具动作 |
+| 租约到期后交付已有消息或请求停止 | 按消息身份和操作语义处理 | 保存事实、返回原回执或停止对应执行 |
 | Worker 重启并产生新的 workerInstanceId | `reacquire_required` | 原实例写入被拒绝，取得新 Lease 后才继续 |
 | Worker 使用小于当前值的 fencingToken | `rejected_stale_fencing_token` | 不保存事件、产物或结果 |
 | 同一消息身份对应不同 payload | `rejected_conflict` | 不覆盖已接受的数据 |
@@ -165,8 +185,10 @@ Heartbeat 只更新存活、容量和当前 Lease 进度，不隐式派发 Job�
 
 - Artifact 使用 `artifact.open` 建立不可变摘要和长度，再用有 sequence 的
   `artifact.chunk` 传输。合同不暴露本地路径、对象存储键或上传 URL。
-- Model 使用 `model.open` 提交 Provider 中立的编码请求，由 Control Plane 根据
-  `ModelGatewayRoute` 解析模型与长期 Credential。Worker 只收到有 sequence 的编码响应块。
+- Model 使用 `model.open` 提交 Provider 中立的编码请求。服务端装配由 Control Plane
+  根据 `ModelGatewayRoute` 解析组织模型与 Credential 引用；Device 装配由 Worker
+  注入设备 Provider 通道执行同一请求。两种路径均返回有 sequence 的 `model.chunk`，
+  并按原始调用身份接受 `model.ack`；原始凭据不进入 ExecutionPort 消息。
 - Input 和 Approval 都带 WorkerSession、Lease 和独立请求身份。产品会话、审批队列、
   决策人和审计记录仍由 Control Plane 管理。
 - 浏览器通过 HTTP `input.respond` 提交有 Actor 和 revision 的业务命令。Control Plane 核对

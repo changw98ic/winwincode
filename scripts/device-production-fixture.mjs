@@ -18,8 +18,8 @@ import {
   randomBytes,
   X509Certificate,
 } from 'node:crypto'
-import { spawn, spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, openSync, readFileSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawn, spawnSync } from 'node:child_process'
+import { chmodSync, existsSync, openSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { createServer as createHttpsServer } from 'node:https'
 import { createServer as createNetServer } from 'node:net'
 import { join } from 'node:path'
@@ -34,6 +34,59 @@ export function runtimeChildEnvironment(environment = process.env) {
   return Object.fromEntries(keys
     .filter(key => environment[key] !== undefined)
     .map(key => [key, environment[key]]))
+}
+
+/** Interpret the task driver's launch response without changing public launch authority. */
+export function deviceTaskLaunchResult({ response, directory, deliveryId, workRunId,
+  publicClientId, holderUserId, repositoryBindingId }) {
+  if (response.status === 201) return response.json
+  // The scheduler can finish a role while the task driver drains its unused
+  // source anchor. An expired grant is never launch authority here: recover
+  // only the original, accepted and completed execution as an observation.
+  if (response.status === 400 && response.json?.error?.code === 'INVALID_REQUEST'
+    && [directory, deliveryId, workRunId, publicClientId, holderUserId, repositoryBindingId]
+      .every(value => typeof value === 'string' && value.length > 0)) {
+    const db = new DatabaseSync(join(directory, 'server-data/control-plane.sqlite3'), { readOnly: true })
+    try {
+      const rows = db.prepare(`SELECT j.job_id, j.payload_digest, j.dispatch_payload,
+        f.product_session_id, f.worker_session_id, f.worker_id, f.worker_instance_id
+        FROM scheduler_execution_jobs j
+        JOIN device_execution_current_facts f ON f.job_id = j.job_id
+          AND f.work_run_id = j.work_run_id AND f.product_session_id = j.product_session_id
+        JOIN client_nodes c ON c.client_node_id = f.client_node_id
+        JOIN worker_launch_grants g ON g.worker_launch_grant_id = f.worker_launch_grant_id
+          AND g.client_node_id = f.client_node_id AND g.client_instance_id = f.client_instance_id
+          AND g.holder_user_id = f.holder_user_id AND g.repository_binding_id = f.repository_binding_id
+          AND g.occupancy_lease_id = f.occupancy_lease_id
+          AND g.occupancy_fencing_token = f.occupancy_fencing_token
+          AND g.worker_session_id = f.worker_session_id AND g.worker_id = f.worker_id
+          AND g.worker_instance_id = f.worker_instance_id
+          AND g.product_session_id = j.product_session_id AND g.work_run_id = j.work_run_id
+          AND g.state = 'consumed' AND g.consumed_at IS NOT NULL
+        JOIN execution_leases l ON l.job_id = j.job_id AND l.payload_digest = j.payload_digest
+          AND l.worker_id = f.worker_id AND l.worker_instance_id = f.worker_instance_id
+          AND l.attempt = j.attempt
+        JOIN execution_lease_terminals t ON t.lease_id = l.lease_id AND t.job_id = l.job_id
+          AND t.worker_id = l.worker_id AND t.worker_instance_id = l.worker_instance_id
+          AND t.attempt = l.attempt AND t.fencing_token = l.fencing_token AND t.outcome = 'completed'
+        WHERE j.delivery_id = ? AND j.work_run_id = ? AND j.state = 'completed'
+          AND c.public_client_id = ? AND f.holder_user_id = ? AND f.repository_binding_id = ?`)
+        .all(deliveryId, workRunId, publicClientId, holderUserId, repositoryBindingId)
+      if (rows.length === 1) {
+        const row = rows[0], payload = JSON.parse(Buffer.from(row.dispatch_payload).toString('utf8'))
+        if (payload.jobId === row.job_id && payload.payloadDigest === row.payload_digest
+          && payload.scope?.kind === 'work-run' && payload.scope.workRunId === workRunId
+          && payload.scope.productSessionId === row.product_session_id) {
+          return { workRunId, productSessionId: row.product_session_id,
+            workerSessionId: row.worker_session_id, workerId: row.worker_id,
+            workerInstanceId: row.worker_instance_id, recoveredCompleted: true }
+        }
+      }
+    } finally { db.close() }
+  }
+  throw Object.assign(new Error(`Worker launch failed: ${response.text}`), {
+    code: 'DEVICE_LAUNCH_FAILED',
+  })
 }
 
 /** Server environment keys that encode the removed Server-local model path. */
@@ -99,6 +152,7 @@ export function configuredDeviceModelRoute({
 export function deterministicDeviceProvider({
   providerId = 'winwincode-device-deterministic',
   modelId = 'device-deterministic-model',
+  repeatToolMarker = null,
 } = {}) {
   return Object.freeze({
     providerId,
@@ -106,6 +160,7 @@ export function deterministicDeviceProvider({
     displayName: 'WinWinCode Device deterministic Provider',
     endpointHint: 'https://127.0.0.1:<device-mock-model-port>/v1/messages',
     protocol: 'anthropic_messages',
+    ...(repeatToolMarker === null ? {} : { repeatToolMarker }),
   })
 }
 
@@ -458,7 +513,9 @@ export function startDeterministicDeviceModelServer({
   certificatePath,
   privateKeyPath,
   chatContent = 'WinWinCode Device deterministic Provider completed the Chat workflow.',
+  repeatToolMarker = null,
 }) {
+  assert.ok(repeatToolMarker === null || (typeof repeatToolMarker === 'string' && repeatToolMarker.length > 0))
   const errors = []
   const requests = []
   const server = createHttpsServer({
@@ -476,12 +533,14 @@ export function startDeterministicDeviceModelServer({
         const bodyText = Buffer.concat(chunks).toString('utf8')
         assert.ok(size <= 512 * 1024, 'Device Provider request exceeds fixture bound')
         const providerRequest = JSON.parse(bodyText)
+        const repeatTool = repeatToolMarker !== null && bodyText.includes(repeatToolMarker)
         requests.push({
           path: request.url ?? '',
           verification: bodyText.includes(DETERMINISTIC_VERIFICATION_BEHAVIOR_MARKER),
           executor: bodyText.includes(DETERMINISTIC_EXECUTOR_BEHAVIOR_MARKER),
           planner: bodyText.includes(DETERMINISTIC_PLANNER_PROTOCOL),
           hasToolOutput: /function_call_output|custom_tool_call_output|tool_result/u.test(bodyText),
+          repeatTool,
         })
         let shellTool = providerRequest.tools?.find(tool => (
           /(?:^|__)shell_command$|(?:^|__)exec_command$/u.test(tool.name)
@@ -549,6 +608,12 @@ export function startDeterministicDeviceModelServer({
           text = 'Verification command did not yield a sealed exit code; no independent result emitted.'
         } else if (isPlanner) {
           text = deterministicPlannerProduct(workInput.criterionIds)
+        } else if (repeatTool) {
+          useTool = true
+          stopReason = 'tool_use'
+          toolCallId = `loopback-repeat-${requests.length}`
+          toolCommand = 'git rev-parse --verify HEAD'
+          text = ''
         }
 
         const events = [
@@ -641,16 +706,17 @@ export function startDeterministicDeviceModelServer({
   }
 }
 
-/** Install and discover public smoke before any Worker loads Device extensions. */
-export async function installDevicePublicSmoke({ api, publicClientId, configuration, timeoutMillis = 60_000 }) {
-  const { encryptDeviceExtension } = await import('../apps/client/dist/module/device-provider-encryption.js')
-  const base = `/api/v1/clients/${encodeURIComponent(publicClientId)}/extensions`
-  const id = 'benchmark_public_smoke'
-  const receipts = []
-  for (const mutation of [
-    { operation: 'save_mcp', id, configuration: JSON.stringify(configuration), enabled: true },
-    { operation: 'test_mcp', id },
-  ]) {
+// Revision-bound settings mutations share one queue per Device. Sessions still
+// execute concurrently; only this short configuration transaction is serialized.
+const deviceExtensionMutations = new WeakMap()
+
+async function mutateDeviceExtension(api, publicClientId, mutation, expected, timeoutMillis) {
+  let clients = deviceExtensionMutations.get(api)
+  if (!clients) { clients = new Map(); deviceExtensionMutations.set(api, clients) }
+  const previous = clients.get(publicClientId) ?? Promise.resolve()
+  const result = previous.catch(() => {}).then(async () => {
+    const { encryptDeviceExtension } = await import('../apps/client/dist/module/device-provider-encryption.js')
+    const base = `/api/v1/clients/${encodeURIComponent(publicClientId)}/extensions`
     const current = await api.request(base)
     assert.equal(current.status, 200)
     assert.equal(current.json?.online, true, 'Device must be online to configure public smoke')
@@ -658,7 +724,6 @@ export async function installDevicePublicSmoke({ api, publicClientId, configurat
     const envelope = await encryptDeviceExtension(current.json.snapshot, requestId, mutation)
     const applied = await api.request(base, { method: 'POST', body: envelope })
     assert.equal(applied.status, 202, 'Device extension apply was rejected')
-    const expected = mutation.operation === 'save_mcp' ? 'saved' : 'tested'
     const completed = await waitFor(async () => {
       const response = await api.request(`${base}/receipts/${requestId}`)
       if (!response.json?.receipt) return false
@@ -666,6 +731,22 @@ export async function installDevicePublicSmoke({ api, publicClientId, configurat
       assert.equal(response.json.receipt.outcome, expected, 'Device public smoke configuration failed')
       return response.json
     }, `Device public smoke ${expected}`, timeoutMillis)
+    return completed
+  })
+  clients.set(publicClientId, result)
+  return result
+}
+
+export async function installDevicePublicSmoke({ api, publicClientId, configuration,
+  id = 'benchmark_public_smoke', timeoutMillis = 60_000 }) {
+  assert.match(id, /^benchmark_public_smoke(?:_psn_[0-9A-HJKMNP-TV-Z]{26})?$/u)
+  const receipts = []
+  for (const mutation of [
+    { operation: 'save_mcp', id, configuration: JSON.stringify(configuration), enabled: true },
+    { operation: 'test_mcp', id },
+  ]) {
+    const expected = mutation.operation === 'save_mcp' ? 'saved' : 'tested'
+    const completed = await mutateDeviceExtension(api, publicClientId, mutation, expected, timeoutMillis)
     receipts.push(completed.receipt)
     if (expected === 'tested') {
       const server = completed.snapshot?.mcpServers?.find(server => server.id === id)
@@ -677,8 +758,16 @@ export async function installDevicePublicSmoke({ api, publicClientId, configurat
   return { id, toolNames: ['public_smoke'], receipts }
 }
 
+export async function removeDevicePublicSmoke({ api, publicClientId, id, timeoutMillis = 60_000 }) {
+  assert.match(id, /^benchmark_public_smoke_psn_[0-9A-HJKMNP-TV-Z]{26}$/u)
+  return (await mutateDeviceExtension(api, publicClientId,
+    { operation: 'delete', kind: 'mcp', id }, 'deleted', timeoutMillis)).receipt
+}
+
 /** Resolve only approvals belonging to the currently observed Device WorkRuns. */
-export async function resolveDeviceTaskApprovals({ api, runs, publicSmokeId, onDecision }) {
+export async function resolveDeviceTaskApprovals({ api, runs, publicSmokeId,
+  automaticTaskActions = false, onDecision }) {
+  assert.equal(typeof automaticTaskActions, 'boolean')
   const currentRun = approval => runs.find(run => {
     const binding = approval.binding
     const identity = binding?.sessionIdentity
@@ -700,19 +789,35 @@ export async function resolveDeviceTaskApprovals({ api, runs, publicSmokeId, onD
     const approval = (await api.query('approval.get', { approvalId: item.id })).result
     if (approval.state !== 'pending' || !approval.decisionEnabled || !currentRun(approval)) continue
     const detail = approval.sanitizedDetail
-    const allow = publicSmokeId === 'benchmark_public_smoke'
+    const publicSmoke = typeof publicSmokeId === 'string'
+      && /^benchmark_public_smoke(?:_psn_[0-9A-HJKMNP-TV-Z]{26})?$/u.test(publicSmokeId)
       && approval.category === 'mcp' && approval.effectiveDecisionScope === 'once'
       && detail?.kind === 'available' && detail.operation === 'execute'
       && detail.reasonCode === 'mcp_permission' && detail.targetCount === 1
       && detail.targetSummaries?.length === 1
       && detail.targetSummaries[0] === `server:${publicSmokeId}`
+    // This opt-in represents the operator's authorization for this task's
+    // role Sessions. The server still validates the exact binding, revision,
+    // expiry and one-use decision, and Worker action enforcement still runs.
+    const taskAction = automaticTaskActions && approval.effectiveDecisionScope === 'once'
+      && detail?.kind === 'available' && detail.targetCount > 0
+      && Array.isArray(detail.targetSummaries) && detail.targetSummaries.length > 0
+      && ((approval.category === 'shell' && detail.operation === 'execute'
+        && ['sandbox_escalation', 'network_access'].includes(detail.reasonCode)
+        && detail.workingDirectory === 'workspace')
+      || (approval.category === 'network' && detail.operation === 'execute'
+        && detail.reasonCode === 'network_access' && detail.workingDirectory === 'workspace')
+      || (approval.category === 'filesystem_write' && detail.operation === 'modify'
+        && detail.reasonCode === 'filesystem_write'))
+    const allow = publicSmoke || taskAction
     const decision = allow ? 'approve' : 'reject'
     let result
     try {
       result = await api.command('approval.decide', approval.revision, {
         approvalId: approval.id, binding: approval.binding, decision,
-        reason: allow
-          ? 'Run the configured public_smoke in the frozen offline sandbox.'
+        reason: taskAction
+          ? 'The operator authorized automatic task actions for this exact active Session and WorkRun.'
+          : allow ? 'Run the configured public_smoke in the frozen offline sandbox.'
           : 'Continue within the configured workspace and public_smoke tool; escalation is not authorized.',
       })
     } catch (error) {
@@ -844,9 +949,35 @@ export function deviceConnectCodePublished(database, connectCodeId) {
   `).get(connectCodeId) !== undefined
 }
 
+export function deviceHelloAcknowledged(database, previousInstanceId) {
+  return database.prepare(`SELECT 1 FROM client_outbox
+    WHERE kind = 'client.hello' AND published = 1 AND client_instance_id =
+      (SELECT current_instance_id FROM device_identity LIMIT 1)
+      AND (? IS NULL OR client_instance_id <> ?)`).get(previousInstanceId, previousInstanceId) !== undefined
+}
+
 /** Read the owned Workers' authoritative Core admission records, never model text. */
-export function assertDeviceBenchmarkRunning(deviceData, workerSessionIds) {
-  for (const workerSessionId of workerSessionIds) {
+export function assertDeviceBenchmarkRunning(deviceData, workerSessionIds, workRuns = [], productSessionId = null) {
+  if (productSessionId !== null) assert.match(productSessionId, /^psn_[0-9A-HJKMNP-TV-Z]{26}$/u)
+  const targets = Array.from(workerSessionIds, workerSessionId => ({ workerSessionId }))
+  const devicePath = join(deviceData, 'device-client.sqlite3')
+  if (workRuns.length && existsSync(devicePath)) {
+    const device = new DatabaseSync(devicePath, { readOnly: true })
+    try {
+      device.exec('PRAGMA busy_timeout = 5000')
+      for (const run of workRuns) {
+        if (!run.workerId || !run.workerInstanceId || !run.executionJobId || !run.codexThreadId
+          || !run.id || !run.productSessionId || !Number.isSafeInteger(run.attempt)) continue
+        for (const worker of device.prepare(`SELECT worker_session_id FROM worker_process_registry
+          WHERE worker_id = ? AND worker_instance_id = ?`).all(run.workerId, run.workerInstanceId)) {
+          if (worker.worker_session_id !== run.workerSessionId) {
+            targets.push({ workerSessionId: worker.worker_session_id, run })
+          }
+        }
+      }
+    } finally { device.close() }
+  }
+  for (const { workerSessionId, run } of targets) {
     assert.match(workerSessionId, /^wsn_[0-9A-HJKMNP-TV-Z]{26}$/u)
     const path = join(deviceData, 'worker-sessions', workerSessionId, 'data', 'codex-runtime', 'worker-codex.sqlite3')
     // A launch anchor can precede Worker startup and database creation.
@@ -856,10 +987,28 @@ export function assertDeviceBenchmarkRunning(deviceData, workerSessionIds) {
       database.exec('PRAGMA busy_timeout = 5000')
       // The file is visible before Core finishes its schema migration.
       if (!database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tool_repeat_run'").get()) continue
-      const stopped = database.prepare('SELECT run_key FROM tool_repeat_run WHERE stopped = 1 LIMIT 1').get()
+      let stopped
+      if (run || productSessionId !== null) {
+        if (!database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'codex_run'").get()) continue
+        stopped = run ? database.prepare(`SELECT stop.run_key FROM tool_repeat_run AS stop
+          JOIN codex_run AS core ON core.run_key = stop.run_key WHERE stop.stopped = 1
+          AND json_extract(core.record_json, '$.job.jobId') = ?
+          AND json_extract(core.record_json, '$.job.attempt') = ?
+          AND json_extract(core.record_json, '$.job.scope.workRunId') = ?
+          AND json_extract(core.record_json, '$.job.scope.productSessionId') = ?
+          AND json_extract(core.record_json, '$.canonicalThreadId') = ? LIMIT 1`)
+          .get(run.executionJobId, run.attempt, run.id, run.productSessionId, run.codexThreadId)
+          : database.prepare(`SELECT stop.run_key FROM tool_repeat_run AS stop
+            JOIN codex_run AS core ON core.run_key = stop.run_key WHERE stop.stopped = 1
+            AND json_extract(core.record_json, '$.job.scope.productSessionId') = ? LIMIT 1`)
+            .get(productSessionId)
+      } else {
+        stopped = database.prepare('SELECT run_key FROM tool_repeat_run WHERE stopped = 1 LIMIT 1').get()
+      }
       if (stopped) {
         throw Object.assign(new Error('Core stopped before the sixth identical tool request'), {
           code: 'STUCK_TOOL_REPEAT_LIMIT', workerSessionId, runKey: stopped.run_key,
+          ...(run ? { logicalWorkerSessionId: run.workerSessionId } : {}),
         })
       }
     } finally {
@@ -878,12 +1027,169 @@ export async function waitFor(check, label, timeoutMillis = 30_000, pollMillis =
   }
 }
 
-export function stopProcessGroup(child) {
-  if (child === null || child.exitCode !== null || child.signalCode !== null) return
+function processSnapshot() {
+  const result = spawnSync('ps', ['-axo', 'pid=,ppid=,pgid=,stat=,lstart='], {
+    encoding: 'utf8', timeout: 1000, maxBuffer: 8 * 1024 * 1024,
+    env: { ...process.env, LC_ALL: 'C' },
+  })
+  if (result.error) throw result.error
+  if (result.status !== 0) throw new Error('cannot inspect fixture process ownership')
+  const rows = new Map()
+  for (const line of result.stdout.split('\n')) {
+    const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.+?)\s*$/u.exec(line)
+    if (!match) continue
+    const row = {
+      pid: Number(match[1]), parent: Number(match[2]), group: Number(match[3]),
+      state: match[4], start: match[5].replace(/\s+/gu, ' '),
+    }
+    if (process.platform === 'linux') {
+      try {
+        const stat = readFileSync(`/proc/${row.pid}/stat`, 'utf8')
+        row.start = `linux-${stat.slice(stat.lastIndexOf(')') + 1).trim().split(/\s+/u)[19]}`
+      } catch (error) {
+        if (error.code === 'ENOENT' || error.code === 'ESRCH') continue
+        throw error
+      }
+    }
+    rows.set(row.pid, row)
+  }
+  return rows
+}
+
+function ownedProcessAlive(witness, current) {
+  const row = current.get(witness.pid)
+  return row !== undefined && row.start === witness.start && row.group === witness.group
+    && !row.state.startsWith('Z')
+}
+
+function registeredFixtureWorkers(deviceData, snapshot) {
+  if (!deviceData) return []
+  const path = join(deviceData, 'device-client.sqlite3')
+  if (!existsSync(path)) return []
+  const database = new DatabaseSync(path, { readOnly: true })
   try {
-    process.kill(-child.pid, 'SIGTERM')
-  } catch {
-    child.kill('SIGTERM')
+    database.exec('PRAGMA busy_timeout = 1000')
+    if (!database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'worker_process_registry'").get()) return []
+    return database.prepare(`SELECT pid, process_start_identity FROM worker_process_registry
+      WHERE state = 'running'`).all().flatMap(record => {
+      const row = snapshot.get(record.pid)
+      if (!row || row.state.startsWith('Z')) return []
+      const identity = process.platform === 'linux' ? row.start : `darwin-ps-${row.start}`
+      return record.process_start_identity === identity ? [row] : []
+    })
+  } finally { database.close() }
+}
+
+// The source anchor establishes Device authority for Delivery creation but
+// receives no execution job. After dispatch, drain it through the product and
+// interrupt its witnessed process; role Workers shut down after work_drained.
+export async function stopUnusedDeviceTaskAnchor({ api, directory, deviceData, launched, productSessionId }) {
+  const server = new DatabaseSync(join(directory, 'server-data', 'control-plane.sqlite3'), { readOnly: true })
+  try {
+    server.exec('PRAGMA busy_timeout = 5000')
+    assert.equal(server.prepare('SELECT count(*) AS n FROM scheduler_execution_jobs WHERE product_session_id = ?')
+      .get(productSessionId).n, 0, 'source anchor must have no execution jobs')
+    assert.equal(server.prepare(`SELECT count(*) AS n FROM execution_leases l
+      WHERE worker_id = ? AND worker_instance_id = ?
+      AND NOT EXISTS (SELECT 1 FROM execution_lease_terminals t WHERE t.lease_id = l.lease_id)`)
+      .get(launched.workerId, launched.workerInstanceId).n, 0, 'source anchor must have no active lease')
+  } finally { server.close() }
+  const worker = await getDeviceWorker(api, launched.workerId)
+  assert.ok(worker, 'source anchor must be registered before it can drain')
+  if (worker.state === 'enabled') {
+    const drained = await api.command('worker.drain', worker.revision, {
+      workerId: worker.id, reason: 'Source authority anchor has no job; Delivery roles own execution.',
+    })
+    assert.equal(drained.outcome, 'completed')
+  }
+  const device = new DatabaseSync(join(deviceData, 'device-client.sqlite3'), { readOnly: true })
+  try {
+    const record = device.prepare('SELECT * FROM worker_process_registry WHERE worker_session_id = ?')
+      .get(launched.workerSessionId)
+    assert.equal(record.worker_id, launched.workerId)
+    assert.equal(record.worker_instance_id, launched.workerInstanceId)
+    const row = registeredFixtureWorkers(deviceData, processSnapshot()).find(row => row.pid === record.pid)
+    assert.ok(row, 'source anchor process must match its Device registry identity')
+    process.kill(row.pid, 'SIGINT')
+    await waitFor(() => !ownedProcessAlive(row, processSnapshot()), 'unused task anchor graceful exit', 30_000)
+    await waitFor(() => device.prepare('SELECT state FROM worker_process_registry WHERE worker_session_id = ?')
+      .get(launched.workerSessionId).state !== 'running', 'Device observed unused task anchor exit', 30_000)
+    return { workerSessionId: launched.workerSessionId, workerId: launched.workerId, state: 'drained' }
+  } finally { device.close() }
+}
+
+// An exact read has its own protocol page shape. Historical drained Workers
+// remain durable; registration and drain must not depend on their list position.
+export async function getDeviceWorker(api, workerId) {
+  try {
+    const response = await api.query('worker.get', { workerId }, { cursor: null, limit: 1 })
+    assert.equal(response.result.id, workerId, 'Worker lookup must return the requested identity')
+    return response.result
+  } catch (error) {
+    if (error.code === 'RESOURCE_NOT_FOUND') return null
+    throw error
+  }
+}
+
+export function registerOrReuseDeviceRepository({ wwc, repository, deviceData, deviceEnvironment }) {
+  const bindings = checkedWwc(wwc, ['repo', 'list', '--data-dir', deviceData, '--json'], deviceEnvironment)
+  const existing = bindings.repositories.find(binding => binding.canonicalPath === realpathSync(repository))
+  if (existing) {
+    const head = execFileSync('git', ['-C', repository, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
+    assert.equal(existing.headCommit, head, 'retained Device repository HEAD differs from its binding')
+    assert.equal(existing.dirtyState, 'clean', 'retained Device repository binding is dirty')
+    return existing
+  }
+  return checkedWwc(wwc, ['repo', 'add', repository, '--data-dir', deviceData, '--json'], deviceEnvironment).repository
+}
+
+/** Stop the owned tree, including Workers which the Device puts in separate groups. */
+export async function stopProcessGroup(child, { graceMillis = 1000, deviceData } = {}) {
+  const parentExited = () => child === null || child.exitCode !== null || child.signalCode !== null
+  if (parentExited() && !deviceData) return
+  const snapshot = processSnapshot()
+  const root = parentExited() ? undefined : snapshot.get(child.pid)
+  // Capture boot identities before TERM reparents descendants to init/launchd.
+  const owned = new Map(registeredFixtureWorkers(deviceData, snapshot).map(row => [row.pid, row]))
+  if (root?.parent === process.pid) owned.set(root.pid, root)
+  if (owned.size === 0) return
+  for (;;) {
+    const before = owned.size
+    for (const row of snapshot.values()) {
+      if (owned.has(row.parent)) owned.set(row.pid, row)
+    }
+    if (before === owned.size) break
+  }
+  const targets = new Map()
+  for (const row of [...owned.values()].reverse()) {
+    // A shared parent group is not ours: signal only its witnessed descendants.
+    const target = owned.has(row.group) ? -row.group : row.pid
+    const witnesses = targets.get(target) ?? []
+    witnesses.push(row)
+    targets.set(target, witnesses)
+  }
+  const signalOwned = signal => {
+    for (const [target, witnesses] of targets) {
+      if (!witnesses.some(row => ownedProcessAlive(row, processSnapshot()))) continue
+      try { process.kill(target, signal) } catch (error) {
+        if (error.code !== 'ESRCH') throw error
+      }
+    }
+  }
+  const stopped = () => {
+    const current = processSnapshot()
+    return [...owned.values()].every(row => !ownedProcessAlive(row, current))
+      && parentExited()
+  }
+  signalOwned('SIGTERM')
+  const deadline = Date.now() + graceMillis
+  while (!stopped() && Date.now() < deadline) {
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 25))
+  }
+  // A reaped Device is not proof its detached Workers or their tools have exited.
+  if (!stopped()) {
+    signalOwned('SIGKILL')
+    await waitFor(stopped, 'fixture process tree shutdown', 1000, 25)
   }
 }
 
@@ -970,6 +1276,18 @@ export async function establishDeviceOnlyExecutionPath({
     deviceEnvironment.WWC_WORKER_MODEL_PROVIDER_ID = modelRouteSource.providerId
     deviceEnvironment.WWC_WORKER_MODEL_ID = modelRouteSource.modelId
   }
+  const priorStatus = existsSync(join(deviceData, 'device-client.sqlite3'))
+    ? checkedWwc(wwc, ['device', 'status', '--data-dir', deviceData, '--json'], deviceEnvironment)
+    : null
+  const directoryView = priorStatus?.device?.enrolled ? await api.request('/api/v1/clients') : null
+  if (directoryView) assert.equal(directoryView.status, 200, 'retained connection authorization must be readable')
+  const retainedGrant = directoryView?.json.clients.some(client => client.clientId === priorStatus.device.publicClientId)
+  let previousInstanceId = null
+  if (priorStatus) {
+    const previous = new DatabaseSync(join(deviceData, 'device-client.sqlite3'), { readOnly: true })
+    try { previousInstanceId = previous.prepare('SELECT current_instance_id FROM device_identity LIMIT 1').get().current_instance_id }
+    finally { previous.close() }
+  }
   const deviceLog = openSync(join(directory, logName), 'a', 0o600)
   const device = spawn(wwc, [
     'device', 'serve',
@@ -999,46 +1317,49 @@ export async function establishDeviceOnlyExecutionPath({
     report.publicClientId = status.publicClientId
     steps.push('device.enroll-pair')
 
-    const refreshed = checkedWwc(wwc, [
-      'device', 'refresh-code', '--data-dir', deviceData, '--json',
-    ], deviceEnvironment)
     const deviceDatabase = new DatabaseSync(join(deviceData, 'device-client.sqlite3'), { readOnly: true })
     try {
-      await waitFor(
-        () => {
-          if (device.exitCode !== null) {
-            throw new Error(`Device Client exited before connect code publication (${device.exitCode})`)
-          }
+      // The daemon owns instance takeover. A reconnect command must not be
+      // queued for an instance which has not announced itself to the Server.
+      await waitFor(() => {
+        if (device.exitCode !== null) throw new Error(`Device Client exited before hello acknowledgement (${device.exitCode})`)
+        return deviceHelloAcknowledged(deviceDatabase, previousInstanceId)
+      }, 'Device hello acknowledgement', Math.min(timeoutMillis, 60_000))
+      if (!retainedGrant) {
+        const refreshed = checkedWwc(wwc, [
+          'device', 'refresh-code', '--data-dir', deviceData, '--json',
+        ], deviceEnvironment)
+        await waitFor(() => {
+          if (device.exitCode !== null) throw new Error(`Device Client exited before connect code publication (${device.exitCode})`)
           return deviceConnectCodePublished(deviceDatabase, refreshed.code.connectCodeId)
-        },
-        'Device connect code publication acknowledgement',
-        timeoutMillis,
-      )
-    } finally {
-      deviceDatabase.close()
-    }
-    const connected = await api.request('/api/v1/clients/connections', {
-      method: 'POST',
-      body: {
-        schemaVersion,
-        clientId: status.publicClientId,
-        connectionCode: refreshed.connectCode,
-      },
-    })
-    assert.equal(connected.status, 201, `Client connect failed: ${connected.text}`)
+        }, 'Device connect code publication acknowledgement', Math.min(timeoutMillis, 60_000))
+        const connected = await api.request('/api/v1/clients/connections', {
+          method: 'POST', body: { schemaVersion, clientId: status.publicClientId, connectionCode: refreshed.connectCode },
+        })
+        assert.equal(connected.status, 201, `Client connect failed: ${connected.text}`)
+      }
+    } finally { deviceDatabase.close() }
     steps.push('client-connect')
 
-    const occupied = await api.request('/api/v1/clients/occupancy', {
-      method: 'POST',
-      body: { schemaVersion, clientId: status.publicClientId },
-    })
-    assert.equal(occupied.status, 201, `Client occupancy failed: ${occupied.text}`)
+    const occupancy = await waitFor(async () => {
+      const value = await api.request(`/api/v1/clients/${status.publicClientId}/occupancy`)
+      assert.equal(value.status, 200, `Client occupancy lookup failed: ${value.text}`)
+      return value.json.occupancy === 'recovery_pending' ? false : value
+    }, 'Device occupancy recovery', Math.min(timeoutMillis, 60_000))
+    assert.equal(occupancy.status, 200, `Client occupancy lookup failed: ${occupancy.text}`)
+    if (occupancy.json.occupancy === 'available') {
+      const occupied = await api.request('/api/v1/clients/occupancy', {
+        method: 'POST', body: { schemaVersion, clientId: status.publicClientId },
+      })
+      assert.equal(occupied.status, 201, `Client occupancy failed: ${occupied.text}`)
+    } else {
+      assert.equal(occupancy.json.occupancy, 'occupied', 'retained Device occupancy is not usable')
+      assert.equal(occupancy.json.holderUserId, api.actor.id, 'retained Device occupancy belongs to another user')
+    }
     steps.push('client-occupancy')
 
-    const registered = checkedWwc(wwc, [
-      'repo', 'add', repository, '--data-dir', deviceData, '--json',
-    ], deviceEnvironment)
-    const repositoryBindingId = registered.repository.repositoryBindingId
+    const registered = registerOrReuseDeviceRepository({ wwc, repository, deviceData, deviceEnvironment })
+    const repositoryBindingId = registered.repositoryBindingId
     await waitFor(async () => {
       const response = await api.request(`/api/v1/repositories?clientId=${status.publicClientId}`)
       return response.status === 200
@@ -1058,6 +1379,7 @@ export async function establishDeviceOnlyExecutionPath({
         modelServer = await startDeterministicDeviceModelServer({
           certificatePath,
           privateKeyPath,
+          repeatToolMarker: deviceProvider.repeatToolMarker,
         }).listen()
       }
       providerApiKey = deviceSecret ?? `device-local-${randomBytes(24).toString('hex')}`
@@ -1112,10 +1434,77 @@ export async function establishDeviceOnlyExecutionPath({
       })
     report.modelRoute = modelRoute
     const launchedWorkerSessions = new Set()
-    const assertBenchmarkRunning = () => {
+    const productSessionWorkers = new Map()
+    const productSessionScopes = new Map()
+    const assertBenchmarkRunning = (productSessionId = null, workRuns = []) => {
       if (deviceEnvironment.WWC_BENCHMARK_TOOL_REPEAT_GUARD === '1') {
-        assertDeviceBenchmarkRunning(deviceData, launchedWorkerSessions)
+        if (productSessionId === null) assertDeviceBenchmarkRunning(deviceData, launchedWorkerSessions)
+        else for (const scope of productSessionScopes.get(productSessionId) ?? [productSessionId]) {
+          assertDeviceBenchmarkRunning(deviceData, productSessionWorkers.get(productSessionId) ?? [], workRuns, scope)
+        }
       }
+    }
+
+    const launchAnchor = async ({ workRunId = null, productSessionId = null, deliveryId = null, repositoryBindingId: selectedBindingId = repositoryBindingId } = {}, owner = null) => {
+      if (owner !== null) {
+        assert.ok(productSessionId === null || productSessionId === owner,
+          'launch anchor must belong to its ProductSession')
+        productSessionId = owner
+      }
+      assertBenchmarkRunning(owner)
+      const body = {
+        schemaVersion,
+        clientId: status.publicClientId,
+        repositoryBindingId: selectedBindingId,
+        ...(workRunId === null ? {} : { workRunId }),
+      }
+      if (workRunId === null && productSessionId !== null) {
+        assert.ok(repositoryScope !== null,
+          'productSession launch requires repositoryScope on establishDeviceOnlyExecutionPath')
+        body.productSession = {
+          id: productSessionId,
+          scope: {
+            kind: 'repository',
+            organizationId: repositoryScope.organizationId,
+            workspaceId: repositoryScope.workspaceId,
+            projectId: repositoryScope.projectId,
+            repositoryId: repositoryScope.repositoryId,
+          },
+        }
+      }
+      const launched = await waitFor(async () => {
+        assertBenchmarkRunning(owner)
+        const response = await api.request('/api/v1/sessions', {
+          method: 'POST', timeoutMillis: 30_000, body,
+        })
+        // Capacity rejection issues no grant and starts no Provider. Retry
+        // the original launch after the Device observes a drained predecessor.
+        return response.json?.error?.code === 'CAPACITY_EXHAUSTED' ? false : response
+      }, 'available Device WorkerSession slot', timeoutMillis)
+      const anchor = deviceTaskLaunchResult({ response: launched, directory,
+        workRunId, deliveryId, publicClientId: status.publicClientId,
+        holderUserId: api.actor.id, repositoryBindingId: selectedBindingId })
+      if (owner !== null) {
+        if (workRunId === null) assert.equal(anchor.productSessionId, owner,
+          'Server launch authority must match the task ProductSession')
+        else assert.equal(anchor.workRunId, workRunId,
+          'Server launch authority must match the Controller WorkRun')
+      }
+      steps.push(anchor.recoveredCompleted === true ? 'recover-completed-anchor'
+        : workRunId !== null || productSessionId === null
+          ? 'launch-anchor' : `launch-anchor:${productSessionId}`)
+      launchedWorkerSessions.add(anchor.workerSessionId)
+      const taskSessionId = owner ?? anchor.productSessionId
+      const members = productSessionWorkers.get(taskSessionId) ?? new Set()
+      members.add(anchor.workerSessionId)
+      productSessionWorkers.set(taskSessionId, members)
+      const scopes = productSessionScopes.get(taskSessionId) ?? new Set([taskSessionId])
+      scopes.add(anchor.productSessionId)
+      productSessionScopes.set(taskSessionId, scopes)
+      report.workerSessionId = anchor.workerSessionId
+      report.workerId = anchor.workerId
+      report.workerInstanceId = anchor.workerInstanceId
+      return anchor
     }
 
     return {
@@ -1139,48 +1528,16 @@ export async function establishDeviceOnlyExecutionPath({
        * WorkerLaunchGrant bound to that ProductSession; StrongFlow passes
        * `workRunId` for the Controller-dispatched execution job.
        */
-      async launchAnchor({ workRunId = null, productSessionId = null } = {}) {
-        assertBenchmarkRunning()
-        const body = {
-          schemaVersion,
-          clientId: status.publicClientId,
-          repositoryBindingId,
-          ...(workRunId === null ? {} : { workRunId }),
-        }
-        if (productSessionId !== null) {
-          assert.ok(repositoryScope !== null,
-            'productSession launch requires repositoryScope on establishDeviceOnlyExecutionPath')
-          body.productSession = {
-            id: productSessionId,
-            scope: {
-              kind: 'repository',
-              organizationId: repositoryScope.organizationId,
-              workspaceId: repositoryScope.workspaceId,
-              projectId: repositoryScope.projectId,
-              repositoryId: repositoryScope.repositoryId,
-            },
-          }
-        }
-        const launched = await api.request('/api/v1/sessions', {
-          method: 'POST',
-          timeoutMillis: 30_000,
-          body,
+      launchAnchor,
+      /** Include this task's Controller role Sessions in its stop observation. */
+      forProductSession(productSessionId, selectedBindingId = repositoryBindingId) {
+        assert.match(productSessionId, /^psn_[0-9A-HJKMNP-TV-Z]{26}$/u)
+        return Object.freeze({
+          assertBenchmarkRunning: workRuns => assertBenchmarkRunning(productSessionId, workRuns),
+          launchAnchor: options => launchAnchor({ ...options, repositoryBindingId: selectedBindingId }, productSessionId),
         })
-        if (launched.status !== 201) {
-          throw Object.assign(new Error(`Worker launch failed: ${launched.text}`), {
-            code: 'DEVICE_LAUNCH_FAILED',
-          })
-        }
-        steps.push(productSessionId === null
-          ? 'launch-anchor'
-          : `launch-anchor:${productSessionId}`)
-        launchedWorkerSessions.add(launched.json.workerSessionId)
-        report.workerSessionId = launched.json.workerSessionId
-        report.workerId = launched.json.workerId
-        report.workerInstanceId = launched.json.workerInstanceId
-        return launched.json
       },
-      stop() {
+      async stop() {
         if (modelServer !== null) {
           try {
             modelServer.close()
@@ -1188,11 +1545,13 @@ export async function establishDeviceOnlyExecutionPath({
             // Model fixture shutdown is best-effort.
           }
         }
-        stopProcessGroup(device)
+        await stopProcessGroup(device, { deviceData })
       },
     }
   } catch (error) {
-    stopProcessGroup(device)
+    try { await stopProcessGroup(device, { deviceData }) } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], 'Device setup and cleanup failed')
+    }
     throw error
   }
 }

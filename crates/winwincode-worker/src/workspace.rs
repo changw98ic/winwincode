@@ -630,6 +630,8 @@ struct RecoveryManifest {
     max_artifact_bytes: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     snapshot_freeze: Option<RetainedSnapshotFreeze>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    snapshot_freeze_history: Vec<RetainedSnapshotFreeze>,
 }
 
 #[derive(Clone, Deserialize, PartialEq, Serialize)]
@@ -1078,6 +1080,7 @@ impl WorkspaceManager {
                 },
             )));
         }
+        archive_predecessor_snapshot_freeze(&mut manifest)?;
         manifest.current_provenance = request.provenance.clone();
         manifest.replacement = Some(replacement.clone());
         replace_recovery_manifest(&path, &manifest)?;
@@ -1227,6 +1230,32 @@ fn cleanup_creating_predecessor(plan: &WorkspacePlan) -> Result<(), WorkspaceErr
 
 fn duplicate_workspace_error() -> WorkspaceError {
     WorkspaceError::conflict("more than one checkout exists for the same sealed Job authority")
+}
+
+fn archive_predecessor_snapshot_freeze(
+    manifest: &mut RecoveryManifest,
+) -> Result<(), WorkspaceError> {
+    if let Some(retained) = manifest.snapshot_freeze.take() {
+        validate_freeze_receipt(&retained.request, &retained.response)
+            .map_err(WorkspaceError::invalid)?;
+        if !provenance_extends_lease(&manifest.current_provenance, &retained.request.lease)
+            || manifest.current_provenance.execution_job_digest
+                != Sha256Digest(format!(
+                    "sha256:{:x}",
+                    Sha256::digest(serde_json::to_vec(&retained.request.dispatch.job).map_err(
+                        |error| WorkspaceError::io("retained freeze Job cannot be encoded", error)
+                    )?)
+                ))
+        {
+            return Err(WorkspaceError::conflict(
+                "retained freeze differs from the sealed predecessor",
+            ));
+        }
+        // Keep the predecessor's request, receipt and Snapshot immutable.
+        // A new attempt needs its own freeze receipt before dispatch.
+        manifest.snapshot_freeze_history.push(retained);
+    }
+    Ok(())
 }
 
 fn validate_recovery_request(
@@ -2017,6 +2046,7 @@ fn recovery_manifest(
         replacement: plan.replacement.clone(),
         max_artifact_bytes: plan.max_artifact_bytes,
         snapshot_freeze: None,
+        snapshot_freeze_history: Vec::new(),
     })
 }
 
@@ -2618,7 +2648,11 @@ fn validate_recovered_plan(plan: &WorkspacePlan) -> Result<(), WorkspaceError> {
     )?);
     let reported_common = fs::canonicalize(reported_common)
         .map_err(|error| WorkspaceError::io("Git common directory cannot be recovered", error))?;
-    let expected_common = fs::canonicalize(plan.source_repository.join(".git"))
+    let expected_common = PathBuf::from(git_text(
+        &plan.source_repository,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?);
+    let expected_common = fs::canonicalize(expected_common)
         .map_err(|error| WorkspaceError::io("source Git directory cannot be recovered", error))?;
     let source_tree = rev_parse(
         &plan.source_repository,

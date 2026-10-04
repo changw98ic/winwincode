@@ -730,13 +730,21 @@ impl ProviderGatewayIdentityPort for DurableProviderGatewayIdentitySource {
         };
         let message_attempt = u64::try_from(message.lease.attempt)
             .map_err(|_| ProviderGatewayIdentityError::denied())?;
+        let mut presented_period = lease.clone();
+        presented_period.expires_at = message.lease.expires_at.clone();
+        let accepted_period = presented_period.expires_at == lease.expires_at
+            || storage
+                .load_accepted_execution_lease_for_period(&presented_period)
+                .map_err(|_| ProviderGatewayIdentityError::unavailable())?
+                .as_ref()
+                == Some(&lease);
         if lease.lease_id != message.lease.lease_id
             || lease.worker_id != message.lease.worker_id
             || lease.worker_instance_id != message.lease.worker_instance_id
             || lease.attempt != message_attempt
             || lease.fencing_token != message.lease.fencing_token
             || lease.issued_at != message.lease.issued_at
-            || lease.expires_at != message.lease.expires_at
+            || !accepted_period
             || message.sent_at.0 < lease.issued_at.0
             || message.sent_at.0 >= lease.expires_at.0
             || worker.worker_instance_id != message.lease.worker_instance_id

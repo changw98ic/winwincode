@@ -279,7 +279,7 @@ impl ModelRetryPreOpenPlannerPort for DurableModelRetryPreOpenPlanner<'_> {
         message: &ModelOpenMessage,
         admission: &ProviderAdmissionOpenReceipt,
     ) -> Result<ModelRetrySettlementContext, ModelRetryPlannerError> {
-        validate_admission(message, admission)?;
+        validate_admission(&mut self.storage, message, admission)?;
         let release_authority = ModelRetryAdmissionReleaseAuthority::from_admission(admission)?;
         let context_stream =
             crate::model_retry_usage::retry_context_stream(&message.model_exchange_id)
@@ -620,6 +620,7 @@ fn validate_job_target(
 }
 
 fn validate_admission(
+    storage: &mut dyn ProductStateStorage,
     message: &ModelOpenMessage,
     admission: &ProviderAdmissionOpenReceipt,
 ) -> Result<(), ModelRetryPlannerError> {
@@ -632,8 +633,11 @@ fn validate_admission(
         || admission.reservation.model_exchange_id != message.model_exchange_id
         || admission.reservation.route_authority_fingerprint
             != admission.route_authority.fingerprint()
-        || message.sent_at.0 < message.lease.issued_at.0
-        || message.sent_at.0 >= message.lease.expires_at.0
+        || !crate::execution_lease_period::retained_message_within_lease(
+            storage,
+            &message.lease,
+            &message.sent_at,
+        )?
     {
         return Err(ModelRetryPlannerError::identity());
     }

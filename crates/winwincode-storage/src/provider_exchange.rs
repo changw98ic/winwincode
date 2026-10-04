@@ -135,6 +135,11 @@ CREATE TABLE IF NOT EXISTS internal_provider_exchange_final_acks (
     acked_at TEXT NOT NULL,
     FOREIGN KEY(model_exchange_id) REFERENCES internal_provider_exchanges(model_exchange_id)
 );
+CREATE TABLE IF NOT EXISTS internal_provider_exchange_final_ack_semantics (
+    model_exchange_id TEXT PRIMARY KEY NOT NULL,
+    semantic_digest TEXT NOT NULL,
+    FOREIGN KEY(model_exchange_id) REFERENCES internal_provider_exchange_final_acks(model_exchange_id)
+);
 ";
 
 const MAX_METADATA_BYTES: usize = 256 * 1024;
@@ -1095,6 +1100,43 @@ impl<'storage> ProviderExchangeStore<'storage> {
             .commit()
             .map_err(|_| ProviderExchangeStoreError::storage())?;
         Ok(acknowledgement)
+    }
+
+    /// Retains an independently verified semantic confirmation for an existing
+    /// final acknowledgement. The original transport digest stays immutable.
+    ///
+    /// # Errors
+    /// Rejects a changed raw tombstone, changed semantic proof, or unavailable storage.
+    pub fn retain_final_ack_semantics(
+        &mut self,
+        original: &ProviderExchangeFinalAck,
+        semantic_digest: &Sha256Digest,
+    ) -> Result<(), ProviderExchangeStoreError> {
+        validate_digest(semantic_digest)?;
+        let transaction = self
+            .storage
+            .connection_mut()
+            .map_err(|_| ProviderExchangeStoreError::storage())?
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| ProviderExchangeStoreError::storage())?;
+        let saved = load_final_ack(&transaction, &original.model_exchange_id)?
+            .ok_or_else(ProviderExchangeStoreError::not_found)?;
+        if saved.ack_digest != original.ack_digest
+            || saved.ack_sequence != original.ack_sequence
+            || saved.receipt_json != original.receipt_json
+        {
+            return Err(ProviderExchangeStoreError::conflict());
+        }
+        transaction.execute("INSERT OR IGNORE INTO internal_provider_exchange_final_ack_semantics(model_exchange_id,semantic_digest) VALUES(?1,?2)",
+            params![original.model_exchange_id.0, semantic_digest.0]).map_err(|_| ProviderExchangeStoreError::storage())?;
+        let retained: String = transaction.query_row("SELECT semantic_digest FROM internal_provider_exchange_final_ack_semantics WHERE model_exchange_id=?1",
+            [&original.model_exchange_id.0], |row| row.get(0)).map_err(|_| ProviderExchangeStoreError::storage())?;
+        if retained != semantic_digest.0 {
+            return Err(ProviderExchangeStoreError::conflict());
+        }
+        transaction
+            .commit()
+            .map_err(|_| ProviderExchangeStoreError::storage())
     }
 
     /// Loads a final acknowledgement tombstone for exact response replay.

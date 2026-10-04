@@ -57,6 +57,17 @@ impl JevRuntime {
         policy: &JevPolicy,
         options: JevExecutionOptions,
     ) -> Result<JevRun<JevContextEvaluation>, JevDecisionError> {
+        self.evaluate_context_authorized(input, policy, options, &|| true)
+            .await
+    }
+
+    pub(crate) async fn evaluate_context_authorized(
+        &self,
+        input: JevContextRequest,
+        policy: &JevPolicy,
+        options: JevExecutionOptions,
+        can_start: &(impl Fn() -> bool + ?Sized),
+    ) -> Result<JevRun<JevContextEvaluation>, JevDecisionError> {
         validate_policy(policy)?;
         if input.task.trim().is_empty() || input.candidate.trim().is_empty() {
             return Err(JevDecisionError::InvalidMetadata);
@@ -73,7 +84,9 @@ impl JevRuntime {
             premise: premise.clone(),
             hypothesis: hypothesis.to_owned(),
         });
-        let run = self.batch_evaluate(hypotheses.into(), options).await;
+        let run = self
+            .batch_evaluate_authorized(hypotheses.into(), options, can_start)
+            .await;
         let mut failures = run.failures;
         let mut value = None;
         if let (Some(batch), Some(observation)) = (&run.value, &run.observation) {

@@ -1298,22 +1298,13 @@ fn accepted_terminal_fixture(seed: u64, renewed: bool) -> AcceptedTerminalFixtur
                 .status,
             winwincode_storage::LeaseWriteStatus::Accepted
         );
-        assert!(
-            fixture
-                .accept(
-                    &ExecutionPortMessage::JobOutcomeMessage(outcome.clone()),
-                    expired()
-                )
-                .is_err(),
-            "first-seen expired outcome cannot use old sentAt"
-        );
     }
     let output = fixture
         .accept(
             &ExecutionPortMessage::JobOutcomeMessage(outcome.clone()),
-            at(20),
+            if renewed { expired() } else { at(20) },
         )
-        .expect("first terminal outcome");
+        .expect("first terminal outcome, including delayed delivery after expiry");
     assert_eq!(
         outcome_status(&output),
         JobOutcomeAckMessageStatus::Accepted
@@ -2004,7 +1995,7 @@ fn bound_chat_empty_frame_rejects_foreign_thread_identity() {
 }
 
 #[test]
-fn bound_chat_requires_live_lease_for_new_frame_but_replays_exact_frame_after_expiry() {
+fn bound_chat_accepts_delayed_frames_and_replays_exact_frames_after_expiry() {
     let (mut fixture, first) = prepared_provider_fixture(95);
     let ExecutionPortMessage::ModelChunkMessage(mut chunk) = model_binding_message(first.clone())
     else {
@@ -2028,13 +2019,10 @@ fn bound_chat_requires_live_lease_for_new_frame_but_replays_exact_frame_after_ex
         .expect("exact retained frame after expiry");
     chunk.sequence = ExecutionSequence(3);
     chunk.message_id = ExecutionMessageId(id("xmsg", 95953));
-    assert!(
-        fixture
-            .accept(&ExecutionPortMessage::ModelChunkMessage(chunk), expired())
-            .is_err(),
-        "known exchange cannot authorize a new expired frame"
-    );
-    assert_eq!(assistant_content(&mut fixture), "accepted");
+    fixture
+        .accept(&ExecutionPortMessage::ModelChunkMessage(chunk), expired())
+        .expect("an existing exchange can deliver another retained output frame after expiry");
+    assert_eq!(assistant_content(&mut fixture), "acceptedaccepted");
     let ExecutionPortMessage::ModelChunkMessage(mut changed) = accepted else {
         panic!("chunk");
     };
@@ -2047,7 +2035,7 @@ fn bound_chat_requires_live_lease_for_new_frame_but_replays_exact_frame_after_ex
             .accept(&ExecutionPortMessage::ModelChunkMessage(changed), expired())
             .is_err()
     );
-    assert_eq!(assistant_content(&mut fixture), "accepted");
+    assert_eq!(assistant_content(&mut fixture), "acceptedaccepted");
     fixture.close();
 }
 
@@ -2089,11 +2077,9 @@ fn renewed_chat_lease_accepts_new_frame_with_original_dispatch_stamp() {
         .expect("expired exact frame replay after renewal");
     chunk.sequence = ExecutionSequence(3);
     chunk.message_id = ExecutionMessageId(id("xmsg", 96963));
-    assert!(
-        fixture
-            .accept(&ExecutionPortMessage::ModelChunkMessage(chunk), at(59))
-            .is_err()
-    );
+    fixture
+        .accept(&ExecutionPortMessage::ModelChunkMessage(chunk), at(59))
+        .expect("retained output remains admissible after the renewed deadline");
     fixture.close();
 }
 
@@ -2331,6 +2317,7 @@ fn core_chat_approval_is_recorded_for_the_owner_and_survives_replay() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn chat_action_receipt_uses_chat_authority_and_rejects_foreign_or_expired_requests() {
     use winwincode_execution_port::action_enforcement::{
         ActionEnforcementIssuer, ActionEnforcementSigningKey,
@@ -2351,19 +2338,45 @@ fn chat_action_receipt_uses_chat_authority_and_rejects_foreign_or_expired_reques
     request.worker_session_id = runtime.slot.worker_session_id.clone();
     request.session_identity = session_identity(&fixture, &runtime);
     request.sent_at = at(11);
+    assert!(runtime.lease.expires_at.0 < at(55).0);
+    let lease = &request.lease;
+    assert_eq!(
+        fixture
+            .storage
+            .execution_registry()
+            .expect("registry")
+            .renew_execution_lease(&winwincode_storage::ExecutionLeaseRenewal {
+                expires_at: at(58),
+                prior_expires_at: lease.expires_at.clone(),
+                job_id: lease.job_id.clone(),
+                lease_id: lease.lease_id.clone(),
+                worker_id: lease.worker_id.clone(),
+                worker_instance_id: lease.worker_instance_id.clone(),
+                attempt: 1,
+                fencing_token: lease.fencing_token.clone(),
+                message_id: ExecutionMessageId(id("xmsg", 81997)),
+                request_id: RequestId(id("req", 81997)),
+                sent_at: at(10),
+            })
+            .expect("renew before delayed action arrives")
+            .status,
+        winwincode_storage::LeaseWriteStatus::Accepted
+    );
     let issuer = ActionEnforcementIssuer::new(
         ActionEnforcementSigningKey::from_bytes([11; 32]).expect("key"),
     );
     let first = winwincode_control_plane::issue_action_enforcement_receipt(
         &mut fixture.storage,
         &issuer,
-        &at(12),
+        &at(55),
         &request,
     )
     .expect("Chat tool must receive its own signed action receipt");
     issuer.verify_signature(&first).expect("valid signature");
     assert_eq!(first.actor.id, UserId(id("usr", 1)));
     assert_eq!(first.scope, fixture.repository_scope);
+    assert_eq!(first.lease, request.lease);
+    assert!(first.evaluated_at.0 > request.lease.expires_at.0);
     for mutate in 0..3 {
         let mut changed = request.clone();
         match mutate {
@@ -2378,7 +2391,7 @@ fn chat_action_receipt_uses_chat_authority_and_rejects_foreign_or_expired_reques
             winwincode_control_plane::issue_action_enforcement_receipt(
                 &mut fixture.storage,
                 &issuer,
-                &at(13),
+                &at(56),
                 &changed
             )
             .is_err()
@@ -2397,7 +2410,7 @@ fn chat_action_receipt_uses_chat_authority_and_rejects_foreign_or_expired_reques
     let replay = winwincode_control_plane::issue_action_enforcement_receipt(
         &mut fixture.storage,
         &issuer,
-        &at(13),
+        &at(56),
         &request,
     )
     .expect("replay after restart");
@@ -2422,7 +2435,7 @@ fn chat_action_receipt_uses_chat_authority_and_rejects_foreign_or_expired_reques
         winwincode_control_plane::issue_action_enforcement_receipt(
             &mut fixture.storage,
             &issuer,
-            &at(14),
+            &at(57),
             &request
         )
         .is_err(),

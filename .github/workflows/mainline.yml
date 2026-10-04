@@ -155,6 +155,11 @@ jobs:
         shell: bash
         run: corepack pnpm verify:api-production-vertical
 
+      - name: Verify shared Device product Sessions
+        if: ${{ matrix.lane == 'runtime' }}
+        shell: bash
+        run: corepack pnpm verify:api-production-sessions
+
   verify:
     name: Canonical workspace verification
     if: ${{ always() }}

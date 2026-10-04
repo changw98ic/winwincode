@@ -55,6 +55,23 @@ pub struct DiagnosticArtifactAuthority {
     pub session_identity: SessionIdentity,
 }
 
+impl DiagnosticArtifactAuthority {
+    /// Compares retained evidence with the independently installed current run.
+    /// The original upload and ACK identity remain exact; only expiry may advance.
+    pub(crate) fn matches_current(&self, current: &Self) -> bool {
+        self.snapshot_id == current.snapshot_id
+            && self.job == current.job
+            && self.scope == current.scope
+            && self.worker_session_id == current.worker_session_id
+            && self.session_identity == current.session_identity
+            && (self.lease == current.lease
+                || winwincode_execution_port::execution_identity::retained_lease_matches_current(
+                    &self.lease,
+                    &current.lease,
+                ))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct RetainedDiagnosticArtifact {
     pub run_key: String,
@@ -501,7 +518,7 @@ impl DiagnosticArtifactOutbox {
             let record: StoredDiagnosticArtifact =
                 serde_json::from_slice(&bytes).map_err(|_| AdapterStoreError::Corrupt)?;
             record.validate()?;
-            if record.authority() == *authority && record.final_ack.is_some() {
+            if record.authority().matches_current(authority) && record.final_ack.is_some() {
                 result.push(record.reference());
             }
         }
@@ -524,7 +541,7 @@ impl DiagnosticArtifactOutbox {
                 serde_json::from_slice(&row.map_err(|_| AdapterStoreError::Unavailable)?)
                     .map_err(|_| AdapterStoreError::Corrupt)?;
             record.validate()?;
-            if record.authority() == *authority && record.final_ack.is_none() {
+            if record.authority().matches_current(authority) && record.final_ack.is_none() {
                 return Ok(true);
             }
         }
@@ -1079,6 +1096,116 @@ mod tests {
         assert!(!source.contains("turn-secret"));
         assert!(!source.contains("call-secret"));
         assert!(source.starts_with("command_"));
+    }
+
+    #[test]
+    fn command_evidence_wait_and_reference_survive_current_lease_renewal() {
+        let root = test_root("renewal-wait");
+        let mut upload = fixture_upload(b"real command output".to_vec());
+        upload.lease.issued_at = Instant("2030-01-01T00:00:00.000Z".into());
+        upload.lease.expires_at = Instant("2030-01-01T00:05:00.000Z".into());
+        upload.created_at = Instant("2030-01-01T00:01:00.000Z".into());
+        let store = AdapterStore::open(&root).expect("store");
+        let outbox = DiagnosticArtifactOutbox::open(store.clone()).expect("outbox");
+        let retained = outbox.retain(&upload).expect("retain command evidence");
+        let original = retained.deliveries.clone();
+        let mut current = retained.authority.clone();
+        current.lease.expires_at = Instant("2030-01-01T00:10:00.000Z".into());
+        assert!(
+            outbox.has_pending(&current).expect("renewed evidence wait"),
+            "renewal cannot bypass the required final Artifact ACK"
+        );
+        assert!(outbox.accepted_references(&current).unwrap().is_empty());
+        outbox
+            .apply_ack(&ack(&upload, &retained))
+            .expect("original final ACK");
+        assert!(!outbox.has_pending(&current).unwrap());
+        assert_eq!(
+            outbox.accepted_references(&current).unwrap(),
+            vec![retained.artifact.clone()]
+        );
+        let persisted = store
+            .transaction(|tx| load_by_artifact(tx, &retained.artifact.artifact_id))
+            .unwrap()
+            .unwrap();
+        let mut original_chunks = Vec::new();
+        for delivery in original {
+            match delivery.message {
+                ExecutionPortMessage::ArtifactOpenMessage(open) => assert_eq!(persisted.open, open),
+                ExecutionPortMessage::ArtifactChunkMessage(chunk) => original_chunks.push(chunk),
+                _ => unreachable!(),
+            }
+        }
+        assert_eq!(persisted.chunks, original_chunks);
+        drop(outbox);
+        drop(store);
+        let reopened = DiagnosticArtifactOutbox::open(AdapterStore::open(&root).unwrap()).unwrap();
+        assert_eq!(
+            reopened.accepted_references(&current).unwrap(),
+            vec![retained.artifact]
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn renewed_command_evidence_keeps_all_pending_uploads_and_rejects_foreign_authority() {
+        let root = test_root("renewal-all-outputs");
+        let mut first = fixture_upload(b"first command output".to_vec());
+        first.lease.issued_at = Instant("2030-01-01T00:00:00.000Z".into());
+        first.lease.expires_at = Instant("2030-01-01T00:05:00.000Z".into());
+        first.created_at = Instant("2030-01-01T00:01:00.000Z".into());
+        let outbox = DiagnosticArtifactOutbox::open(AdapterStore::open(&root).unwrap()).unwrap();
+        let retained = outbox.retain(&first).unwrap();
+        let mut current = retained.authority.clone();
+        current.lease.expires_at = Instant("2030-01-01T00:10:00.000Z".into());
+        for mutation in 0..11 {
+            let mut foreign = current.clone();
+            match mutation {
+                0 => foreign.lease.fencing_token.0.push('2'),
+                1 => foreign.lease.worker_id.0.push('2'),
+                2 => foreign.lease.worker_instance_id.0.push('2'),
+                3 => foreign.lease.attempt += 1,
+                4 => foreign.lease.lease_id.0.push('2'),
+                5 => foreign.lease.expires_at = Instant("2030-01-01T00:04:00.000Z".into()),
+                6 => foreign.worker_session_id.0.push('2'),
+                7 => foreign.session_identity.product_session_id.0.push('2'),
+                8 => foreign.job.payload_digest.0.push('2'),
+                9 => {
+                    let mut scope = serde_json::to_value(&foreign.scope).unwrap();
+                    scope["workRunId"] = serde_json::json!("wrn_foreign");
+                    foreign.scope = serde_json::from_value(scope).unwrap();
+                }
+                _ => {
+                    foreign.snapshot_id =
+                        Some(winwincode_domain::SnapshotId("snap_foreign".into()));
+                }
+            }
+            assert!(
+                !outbox.has_pending(&foreign).unwrap(),
+                "foreign authority {mutation}"
+            );
+            assert!(outbox.accepted_references(&foreign).unwrap().is_empty());
+        }
+        let mut second = first.clone();
+        second.source_id.push_str("_second");
+        second.file_name = format!("{}.log", second.source_id);
+        second.lease = current.lease.clone();
+        let later = outbox.retain(&second).unwrap();
+        outbox.apply_ack(&ack(&first, &retained)).unwrap();
+        assert!(
+            outbox.has_pending(&current).unwrap(),
+            "the second output still needs its final ACK"
+        );
+        assert_eq!(
+            outbox.accepted_references(&current).unwrap(),
+            vec![retained.artifact.clone()]
+        );
+        outbox.apply_ack(&ack(&second, &later)).unwrap();
+        assert!(!outbox.has_pending(&current).unwrap());
+        let mut expected = vec![retained.artifact, later.artifact];
+        expected.sort_by(|a, b| a.artifact_id.0.cmp(&b.artifact_id.0));
+        assert_eq!(outbox.accepted_references(&current).unwrap(), expected);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

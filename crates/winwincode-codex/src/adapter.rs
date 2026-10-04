@@ -3320,7 +3320,13 @@ impl ProductionCodexAdapter {
     ) -> Result<ApprovalRequestMessage, ProductionCodexError> {
         let request_digest =
             private_payload_digest(b"winwincode.patch-approval-request.v1", request)?;
-        let detail = patch_approval_detail(request, &request_digest);
+        let workspace = &self
+            .runs
+            .get(run_key)
+            .ok_or_else(unknown_thread)?
+            .record
+            .workspace;
+        let detail = patch_approval_detail(request, &request_digest, workspace);
         self.retain_approval_request(
             run_key,
             StoredApprovalOperationKind::Patch,
@@ -3701,12 +3707,12 @@ fn complete_reconciled_turn(
         run.record.last_runtime_millis = last_runtime_millis;
         run.record.last_activity_at.clone()
     };
-    adapter.record_performance_start(
+    let _ = adapter.record_performance_start(
         run_key,
         PerformanceOperationKind::Turn,
         turn_id,
         &activity_at,
-    )?;
+    );
     if adapter.runs.get(run_key).is_some_and(|run| {
         run.record
             .delegated_transitions
@@ -3715,13 +3721,13 @@ fn complete_reconciled_turn(
                 stored.turn_id == turn_id && stored.transition.phase == DelegatedLoopPhase::Repair
             })
     }) {
-        adapter.record_performance_completion(
+        let _ = adapter.record_performance_completion(
             run_key,
             PerformanceOperationKind::Repair,
             turn_id,
             &activity_at,
             None,
-        )?;
+        );
     }
     adapter.persist_run(run_key)?;
     if adapter
@@ -3826,20 +3832,22 @@ impl ProductionCodexAdapter {
         run_key: &str,
         _emit_trace: bool,
     ) -> Result<(), ProductionCodexError> {
-        let Some(run_key) = self
-            .runs
-            .iter()
-            .find(|(candidate_key, run)| {
-                candidate_key.as_str() == run_key
-                    && run.binding.authority.lease == authority.lease
-                    && run.binding.authority.worker_session_id == authority.worker_session_id
-                    && run.binding.authority.session_identity == authority.session_identity
-            })
-            .map(|(key, _)| key.clone())
-        else {
+        let Some(run) = self.runs.get(run_key) else {
             return self
                 .attach_accepted_diagnostic_artifact_after_restart(reference, authority, run_key);
         };
+        let current = DiagnosticArtifactAuthority {
+            snapshot_id: run.record.snapshot_id.clone(),
+            job: run.record.job.clone(),
+            scope: run.record.job.scope.clone(),
+            lease: run.binding.authority.lease.clone(),
+            worker_session_id: run.binding.authority.worker_session_id.clone(),
+            session_identity: run.binding.authority.session_identity.clone(),
+        };
+        if !authority.matches_current(&current) {
+            return Err(conflict());
+        }
+        let run_key = run_key.to_owned();
         let pending_completion = {
             let run = self.runs.get_mut(&run_key).ok_or_else(unknown_thread)?;
             if let Some(StoredTerminal::Completed { artifacts, .. }) = run.record.terminal.as_mut()
@@ -3869,7 +3877,7 @@ impl ProductionCodexAdapter {
         if let Some(completion) = pending_completion {
             if self
                 .diagnostic_artifacts
-                .has_pending(authority)
+                .has_pending(&current)
                 .map_err(map_store_error)?
             {
                 let run = self.runs.get_mut(&run_key).ok_or_else(unknown_thread)?;
@@ -3878,15 +3886,15 @@ impl ProductionCodexAdapter {
             } else {
                 let artifacts = self
                     .diagnostic_artifacts
-                    .accepted_references(authority)
+                    .accepted_references(&current)
                     .map_err(map_store_error)?;
                 let run = self.runs.get_mut(&run_key).ok_or_else(unknown_thread)?;
-                run.record.terminal = Some(terminal_from_pending_completion(
+                let terminal = terminal_from_pending_completion(
                     completion,
                     artifacts,
                     terminal_outcome_usage(&self.store, &run_key, &run.record),
-                ));
-                run.record.phase = StoredRunPhase::TerminalTracePending;
+                );
+                set_retained_terminal(&mut run.record, terminal);
                 self.persist_run(&run_key)?;
             }
         }
@@ -3902,7 +3910,22 @@ impl ProductionCodexAdapter {
         let Some(mut record) = load_stored_run(&self.store, run_key)? else {
             return Ok(());
         };
-        if record.job != authority.job || record.job.scope != authority.scope {
+        let (retained_key, bytes) = self
+            .store
+            .load_model_thread_lineage(&record.canonical_thread_id.0)
+            .map_err(map_store_error)?
+            .ok_or_else(conflict)?;
+        let installed: ModelLeaseAuthority =
+            serde_json::from_slice(&bytes).map_err(|_| conflict())?;
+        let current = DiagnosticArtifactAuthority {
+            snapshot_id: record.snapshot_id.clone(),
+            job: record.job.clone(),
+            scope: record.job.scope.clone(),
+            lease: installed.lease,
+            worker_session_id: installed.worker_session_id,
+            session_identity: installed.session_identity,
+        };
+        if retained_key != run_key || !authority.matches_current(&current) {
             return Err(conflict());
         }
         if let Some(StoredTerminal::Completed { artifacts, .. }) = record.terminal.as_mut()
@@ -3928,21 +3951,21 @@ impl ProductionCodexAdapter {
         if let Some(completion) = record.pending_completion.take() {
             if self
                 .diagnostic_artifacts
-                .has_pending(authority)
+                .has_pending(&current)
                 .map_err(map_store_error)?
             {
                 record.pending_completion = Some(completion);
             } else {
                 let artifacts = self
                     .diagnostic_artifacts
-                    .accepted_references(authority)
+                    .accepted_references(&current)
                     .map_err(map_store_error)?;
-                record.terminal = Some(terminal_from_pending_completion(
+                let terminal = terminal_from_pending_completion(
                     completion,
                     artifacts,
                     terminal_outcome_usage(&self.store, run_key, &record),
-                ));
-                record.phase = StoredRunPhase::TerminalTracePending;
+                );
+                set_retained_terminal(&mut record, terminal);
             }
         }
         self.store
@@ -3987,6 +4010,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         now: &Instant,
         observed_at: std::time::Instant,
     ) -> Result<Option<crate::LocalModelStartGuard>, Self::Error> {
+        let original = open.clone();
         let base =
             time::OffsetDateTime::parse(&now.0, &time::format_description::well_known::Rfc3339)
                 .map_err(|_| conflict())?;
@@ -4029,8 +4053,14 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             {
                 return false;
             }
+            let current = Instant(current);
+            // One durable proof source for Core, child roles and Observer. Exact
+            // equality also rejects altered payloads under the same exchange ID.
+            if ExecutionOutbox::model_start_request_allowed(&store, &original) != Ok(true) {
+                return false;
+            }
             source
-                .validate_exchange(&authority, &exchange, &Instant(current))
+                .validate_exchange(&authority, &exchange, &current)
                 .is_ok()
         })))
     }
@@ -4648,6 +4678,25 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         settlement: DelegatedObserverSettlement,
     ) -> Result<(), Self::Error> {
         let run_key = self.run_key_for_thread(thread_id)?.to_owned();
+        // Current batch admission applies to the first settlement. An exact
+        // retained receipt remains consumable after A transitions to B or stops.
+        if let Some(previous) = self
+            .store
+            .observer_settlement(&run_key, &settlement.batch_id.0)
+            .map_err(map_store_error)?
+        {
+            if previous.batch_id != settlement.batch_id || previous.usage != settlement.usage {
+                return Err(conflict());
+            }
+            return Ok(());
+        }
+        if self
+            .store
+            .restore_legacy_observer_settlement(&run_key, &settlement)
+            .map_err(map_store_error)?
+        {
+            return Ok(());
+        }
         let run = self.runs.get(&run_key).ok_or_else(unknown_thread)?;
         if !is_delegated_composer(&run.record)
             || run.record.terminal.is_some()
@@ -4662,12 +4711,16 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         {
             return Err(conflict());
         }
-        self.record_delegated_observer_completion(
+        self.store
+            .retain_observer_settlement(&run_key, &settlement)
+            .map_err(map_store_error)?;
+        let _ = self.record_delegated_observer_completion(
             &run_key,
             &settlement.batch_id.0,
             &settlement.completed_at,
             settlement.usage.as_ref(),
-        )
+        );
+        Ok(())
     }
 
     fn retain_delegated_loop_stop(
@@ -4782,10 +4835,21 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             .map_err(map_store_error)?;
         if stopped
             && self.runs.get(&run_key).is_some_and(|run| {
-                run.record.terminal.is_some()
-                    || run.record.pending_completion.is_some()
-                    || run.record.final_candidate_freeze.is_some()
-                    || run.record.delegated_stop.is_some()
+                // An accepted cancellation owns the terminal decision, including
+                // its wait for exact diagnostic ACKs. A prior repeat-stop marker
+                // must not restore the failure on the next poll or after reopen.
+                !matches!(run.record.terminal, Some(StoredTerminal::Cancelled { .. }))
+                    && !run
+                        .record
+                        .pending_completion
+                        .as_ref()
+                        .is_some_and(|pending| {
+                            matches!(pending.kind, StoredPendingTerminalKind::Cancelled)
+                        })
+                    && (run.record.terminal.is_some()
+                        || run.record.pending_completion.is_some()
+                        || run.record.final_candidate_freeze.is_some()
+                        || run.record.delegated_stop.is_some())
             })
         {
             return self.poll_infrastructure_terminal(&run_key, now).await;
@@ -5524,14 +5588,23 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             .pending_fusion
             .take()
             .is_some();
-        let session = self.session_for_thread(thread_id)?;
+        let run = self.runs.get(&run_key).ok_or_else(unknown_thread)?;
+        let session = run.record.kernel_session_id.clone();
+        let kernel_live = run.kernel_live;
+        let sealed = run.record.delegated_stop.is_some()
+            || run.record.final_candidate_freeze.is_some()
+            || run.record.terminal_message_id.is_some();
         // Advance the action-gate generation before awaiting Core.  A receipt
         // that arrives while interrupt is in flight must not authorize a
         // side effect after the caller has cancelled this session.
         self.action_gate
             .cancel_session(&session)
             .map_err(|_| unavailable())?;
-        if !awaiting_panel {
+        // A repeat/infrastructure stop can already have closed this exact
+        // Kernel session while its durable terminal trace is still pending.
+        // Cancel the retained bridge and authority without interrupting a
+        // session that has already been unregistered.
+        if !sealed && !awaiting_panel && kernel_live {
             self.kernel
                 .interrupt(&session)
                 .await
@@ -5541,6 +5614,12 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             .cancel_thread(thread_id, interrupted_at)
             .await
             .map_err(map_bridge_error)?;
+        // A sealed delegated stop, final candidate or retained JobOutcome owns
+        // the original terminal authority. Fence later actions/models, then
+        // let Worker deliver that fact rather than add a conflicting terminal.
+        if sealed {
+            return Ok(());
+        }
         {
             let run = self.runs.get_mut(&run_key).ok_or_else(unknown_thread)?;
             run.record.last_activity_at = interrupted_at.clone();
@@ -5575,8 +5654,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             .map_err(map_store_error)?;
         {
             let run = self.runs.get_mut(&run_key).ok_or_else(unknown_thread)?;
-            run.record.terminal = Some(StoredTerminal::Cancelled { artifacts });
-            run.record.phase = StoredRunPhase::TerminalTracePending;
+            set_retained_terminal(&mut run.record, StoredTerminal::Cancelled { artifacts });
         }
         self.persist_run(&run_key)?;
         let _ = self.retain_performance_baseline_trace(&run_key);
@@ -5759,23 +5837,39 @@ fn exec_approval_detail(
 fn patch_approval_detail(
     request: &ApplyPatchApprovalRequestEvent,
     request_digest: &str,
+    workspace: &Path,
 ) -> Option<ApprovalActionSanitizedDetail> {
-    let mut targets = request
-        .changes
-        .iter()
-        .filter_map(|(path, change)| {
-            let path = safe_relative_approval_path(path)?;
-            let operation = match change {
-                FileChange::Add { .. } => "create",
-                FileChange::Delete { .. } => "delete",
-                FileChange::Update { .. } => "modify",
-            };
-            Some(format!("{operation}:{path}"))
-        })
-        .collect::<Vec<_>>();
+    // Core resolves patch targets to absolute paths, including patches submitted
+    // through exec_command. Only expose labels relative to this validated
+    // checkout. Labels describe the request; Worker write enforcement remains
+    // responsible for permission and filesystem checks.
+    let label = |path: &Path| {
+        let relative = if path.is_absolute() {
+            path.strip_prefix(workspace).ok()?
+        } else {
+            path
+        };
+        safe_relative_approval_path(relative)
+    };
+    let mut targets = Vec::new();
+    for (path, change) in &request.changes {
+        let path = label(path)?;
+        let operation = match change {
+            FileChange::Add { .. } => "create",
+            FileChange::Delete { .. } => "delete",
+            FileChange::Update { move_path, .. } => {
+                if let Some(destination) = move_path {
+                    targets.push(format!("move-to:{}", label(destination)?));
+                }
+                "modify"
+            }
+        };
+        targets.push(format!("{operation}:{path}"));
+    }
     targets.sort_unstable();
     targets.dedup();
-    if targets.is_empty() {
+    let target_count = i64::try_from(targets.len()).ok()?;
+    if target_count == 0 || target_count > 10_000 {
         return None;
     }
     targets.truncate(20);
@@ -5785,7 +5879,7 @@ fn patch_approval_detail(
         reason_code: ApprovalActionReasonCode::FilesystemWrite,
         request_sha256: Sha256Digest(request_digest.to_owned()),
         risk_level: ApprovalActionRiskLevel::Medium,
-        target_count: i64::try_from(request.changes.len()).ok()?.min(10_000),
+        target_count,
         target_summaries: targets,
         working_directory: None,
     })
@@ -5985,6 +6079,21 @@ fn terminal_performance_runtime(
                 .as_ref()
                 .map_or(0, |stop| stop.counters.elapsed_millis),
         ))
+}
+
+// A cancellation can supersede a retained stop before its JobOutcome exists.
+// The prior trace remains immutable in runtime replay; the new terminal fact
+// receives its own event identity instead of reusing that trace's bytes.
+fn set_retained_terminal(record: &mut StoredRun, terminal: StoredTerminal) {
+    if record
+        .terminal
+        .as_ref()
+        .is_some_and(|previous| previous.trace_summary() != terminal.trace_summary())
+    {
+        record.terminal_trace = None;
+    }
+    record.terminal = Some(terminal);
+    record.phase = StoredRunPhase::TerminalTracePending;
 }
 
 fn terminal_from_pending_completion(
@@ -7603,7 +7712,7 @@ mod tests {
     };
     use super::{
         ApprovalActionCategory, ApprovalActionReasonCode, StoredApprovalOperationKind,
-        mcp_approval_detail,
+        mcp_approval_detail, patch_approval_detail,
     };
     use crate::helper_release::HelperReleaseManifest;
     use crate::{CodexCoreAdapter, CodexPoll, CodexRunKey, CodexThreadStart};
@@ -8356,6 +8465,86 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn all_model_roles_use_outbox_first_start_authority_after_renewal() {
+        let root = test_root("retained-observer-start-authority");
+        let mut adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+        let (_, mut binding) = delegated_record_and_binding();
+        binding.authority.lease.fencing_token = FencingToken("1".into());
+        binding.authority.lease.lease_id = LeaseId("lse_00000000000000000000000001".into());
+        binding.authority.lease.issued_at = Instant("2026-08-28T00:00:00.000Z".into());
+        binding.authority.lease.expires_at = Instant("2026-08-28T01:00:00.000Z".into());
+        adapter.bridge.install_binding(binding.clone()).unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/contracts/execution-port.valid.json"
+        ))
+        .unwrap();
+        let mut open: winwincode_execution_port::generated::ModelOpenMessage =
+            serde_json::from_value(
+                fixture["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|m| m["kind"] == "model.open")
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap();
+        open.lease = binding.authority.lease.clone();
+        open.worker_session_id = binding.authority.worker_session_id.clone();
+        open.session_identity = binding.authority.session_identity.clone();
+        open.sent_at = binding.authority.lease.issued_at.clone();
+        let original = open.clone();
+        binding.authority.lease.expires_at = Instant("2026-08-28T02:00:00.000Z".into());
+        adapter.bridge.install_binding(binding.clone()).unwrap();
+        let now = Instant("2026-08-28T01:10:00.000Z".into());
+        adapter.observe_now(&now).unwrap();
+        assert!(
+            adapter.outbox.pending().unwrap().is_empty(),
+            "missing original intent cannot authorize dispatch"
+        );
+        let unproven = adapter
+            .local_model_start_guard(&open, &now, std::time::Instant::now())
+            .unwrap()
+            .unwrap();
+        assert!(
+            !unproven(),
+            "a missing request proof cannot authorize an old lease"
+        );
+        adapter
+            .outbox
+            .retain(&ExecutionPortMessage::ModelOpenMessage(original.clone()))
+            .unwrap();
+        let guard = adapter
+            .local_model_start_guard(&open, &now, std::time::Instant::now())
+            .unwrap()
+            .unwrap();
+        let mut changed = original.clone();
+        changed.request_id.0.push('X');
+        assert!(!adapter
+            .local_model_start_guard(&changed, &now, std::time::Instant::now())
+            .unwrap()
+            .unwrap()());
+        assert!(
+            guard(),
+            "a verified original Observer request must survive legal renewal"
+        );
+        assert_eq!(
+            open, original,
+            "authorization never rewrites the original request"
+        );
+        adapter
+            .observe_now(&binding.authority.lease.expires_at)
+            .unwrap();
+        assert!(
+            !guard(),
+            "current lease expiry still blocks first invocation"
+        );
+        drop(adapter);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn failed_execution_handoff_restores_the_whole_batch_before_confirmation() {
         let root = test_root("execution-handoff-rollback");
         let mut adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
@@ -8404,6 +8593,95 @@ mod tests {
         assert_eq!(adapter.outbox.pending().unwrap().len(), 2);
         assert!(adapter.take_execution_messages().unwrap().is_empty());
         drop(adapter);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_model_statistics_keep_explicit_budgets_closed() {
+        let root = test_root("missing-statistics-budget");
+        let adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+        let store = &adapter.store;
+        let exchange = winwincode_domain::ModelExchangeId("mdl_00000000000000000000000001".into());
+        store
+            .claim_model_call(
+                "run",
+                "original-call",
+                &exchange,
+                &Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+            )
+            .unwrap();
+        store
+            .mark_model_call_provider_final("run", "original-call")
+            .unwrap();
+        let totals = store.delegated_performance_totals("run").unwrap();
+        assert_eq!(totals.primary_model_calls, 1);
+        assert_eq!(totals.pending_model_calls, 0);
+        let mut budget = delegated_budget_fixture();
+        budget.max_total_tokens = None;
+        budget.max_total_cost_microunits = None;
+        assert!(super::accounting_satisfies_budget(Some(&budget), &totals));
+        budget.max_total_tokens = Some(100);
+        assert!(!super::accounting_satisfies_budget(Some(&budget), &totals));
+        budget.max_total_tokens = None;
+        budget.max_total_cost_microunits = Some(100);
+        assert!(!super::accounting_satisfies_budget(Some(&budget), &totals));
+        let usage = store.retained_outcome_usage("run", 0).unwrap().unwrap();
+        assert_eq!(usage.tokens, None);
+        assert_eq!(usage.cost_microunits, None);
+        drop(adapter);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn completed_turn_recovery_survives_optional_statistics_write_failure() {
+        let root = test_root("completed-turn-statistics-fault");
+        let mut adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+        let (mut record, mut binding) = delegated_record_and_binding();
+        record.role_policy = None;
+        binding.authority.lease.lease_id = LeaseId("lse_00000000000000000000000001".into());
+        binding.authority.lease.fencing_token = FencingToken("1".into());
+        let key = binding.run_key.clone();
+        adapter
+            .install_active_run(&key, record, binding, false, true)
+            .unwrap();
+        adapter
+            .store
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER deny_recovered_turn_stats BEFORE INSERT ON performance_operation
+             BEGIN SELECT RAISE(FAIL,'optional statistics unavailable'); END;",
+            )
+            .unwrap();
+        super::complete_reconciled_turn(
+            &mut adapter,
+            &key,
+            "turn-fixture",
+            Some("done".into()),
+            15,
+            5,
+        )
+        .unwrap();
+        assert_eq!(
+            adapter.runs[&key].record.last_agent_message.as_deref(),
+            Some("done")
+        );
+        assert!(matches!(
+            adapter.runs[&key].record.terminal,
+            Some(super::StoredTerminal::Completed { .. })
+        ));
+        let retained = adapter.runs[&key].record.clone();
+        drop(adapter);
+        let restored = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+        let loaded = load_stored_run(&restored.store, &key).unwrap().unwrap();
+        assert_eq!(loaded.last_agent_message, retained.last_agent_message);
+        assert!(matches!(
+            loaded.terminal,
+            Some(super::StoredTerminal::Completed { .. })
+        ));
+        drop(restored);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -8511,6 +8789,276 @@ mod tests {
             Some(usage)
         );
         drop(adapter);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn observer_settlement_replay_survives_consumed_batch_and_restart() {
+        assert_observer_settlement_replay(false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_observer_settlement_replay_recovers_an_exact_completed_projection() {
+        assert_observer_settlement_replay(true);
+    }
+
+    #[cfg(unix)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Keep one receipt lifecycle, its fault variants and restart assertions together"
+    )]
+    fn assert_observer_settlement_replay(legacy: bool) {
+        use super::ExecutionOutcomeUsage;
+        let root = test_root("observer-settlement-replay");
+        let mut adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+        let (mut record, mut binding) = delegated_record_and_binding();
+        record.workspace = root.join("workspace");
+        std::fs::create_dir_all(&record.workspace).unwrap();
+        binding.authority.lease.lease_id = LeaseId("lse_00000000000000000000000001".into());
+        binding.authority.lease.fencing_token = FencingToken("1".into());
+        let key = binding.run_key.clone();
+        let thread = binding.canonical_thread_id.clone();
+        let output = serde_json::json!({"acceptanceCriteriaIds":["crt_00000000000000000000000001"],
+            "disposition":"continue", "patch":"*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-old\n+new\n*** End Patch\n",
+            "schemaVersion":1,"validationProfile":"changed"});
+        let at = Instant("2026-08-28T00:00:01Z".into());
+        let event = delegated_change_batch_event(
+            &record,
+            &binding,
+            "turn-fixture",
+            Some(&output.to_string()),
+            &at,
+        )
+        .unwrap();
+        record.batch_intent = Some(super::StoredBatchIntent {
+            event: event.clone(),
+        });
+        adapter
+            .install_active_run(&key, record, binding, false, true)
+            .unwrap();
+        let settlement = super::DelegatedObserverSettlement {
+            batch_id: event.identity.batch_id,
+            completed_at: at.clone(),
+            usage: Some(ExecutionOutcomeUsage::unknown(0, 5)),
+        };
+        let mut invalid = settlement.clone();
+        invalid.usage = Some(ExecutionOutcomeUsage::unknown(0, -1));
+        assert!(
+            adapter
+                .retain_delegated_observer_settlement(&thread, invalid)
+                .is_err()
+        );
+        if !legacy {
+            adapter.store.lock().unwrap().execute_batch(
+            "CREATE TRIGGER deny_observer_statistics BEFORE INSERT ON performance_operation WHEN NEW.operation_kind='observer' BEGIN SELECT RAISE(FAIL,'optional observer statistics unavailable'); END;"
+        ).unwrap();
+        }
+        adapter
+            .retain_delegated_observer_settlement(&thread, settlement.clone())
+            .unwrap();
+        // This is the persisted seam after a delegated transition consumes A.
+        adapter.runs.get_mut(&key).unwrap().record.batch_intent = None;
+        adapter.persist_run(&key).unwrap();
+        if legacy {
+            adapter
+                .store
+                .lock()
+                .unwrap()
+                .execute("DELETE FROM observer_settlement", [])
+                .unwrap();
+            let mut changed = settlement.clone();
+            changed.usage = Some(ExecutionOutcomeUsage::unknown(0, 6));
+            assert!(
+                adapter
+                    .retain_delegated_observer_settlement(&thread, changed)
+                    .is_err()
+            );
+        }
+        let mut replay = settlement.clone();
+        replay.completed_at = Instant("2026-08-28T00:00:02Z".into());
+        adapter
+            .retain_delegated_observer_settlement(&thread, replay.clone())
+            .expect("an exact old settlement is independent of the current batch");
+        assert_eq!(
+            adapter
+                .store
+                .delegated_performance_totals(&key)
+                .unwrap()
+                .observer_calls,
+            1
+        );
+        let mut changed = replay.clone();
+        changed.usage = Some(ExecutionOutcomeUsage::unknown(0, 6));
+        assert!(
+            adapter
+                .retain_delegated_observer_settlement(&thread, changed)
+                .is_err()
+        );
+        drop(adapter);
+        let mut adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+        let record = load_stored_run(&adapter.store, &key).unwrap().unwrap();
+        let (_, mut binding) = delegated_record_and_binding();
+        binding.authority.lease.lease_id = LeaseId("lse_00000000000000000000000001".into());
+        binding.authority.lease.fencing_token = FencingToken("1".into());
+        adapter
+            .install_active_run(&key, record, binding, false, true)
+            .unwrap();
+        adapter
+            .retain_delegated_observer_settlement(&thread, replay)
+            .unwrap();
+        assert_eq!(
+            adapter
+                .store
+                .delegated_performance_totals(&key)
+                .unwrap()
+                .observer_calls,
+            1
+        );
+        drop(adapter);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_jev_accounting_closes_hard_budgets_without_blocking_unbudgeted_progress() {
+        let root = test_root("missing-jev-budget");
+        let adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+        let store = &adapter.store;
+        let exchange = winwincode_domain::ModelExchangeId("mdl_00000000000000000000000001".into());
+        let now = Instant("2030-01-01T00:00:00Z".into());
+        store
+            .claim_model_call(
+                "run",
+                "call",
+                &exchange,
+                &Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+            )
+            .unwrap();
+        store
+            .record_performance_completion(
+                "run",
+                super::PerformanceOperationKind::PrimaryModel,
+                "call",
+                &now,
+                super::PerformanceOperationCompletion {
+                    usage_known: true,
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    actual_cost_microunits: Some(15),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        store
+            .mark_model_call_provider_final_with_accounting("run", "call", false)
+            .unwrap();
+        let totals = store.delegated_performance_totals("run").unwrap();
+        assert_eq!(totals.total_tokens, 15);
+        assert_eq!(totals.pending_model_calls, 0);
+        let mut budget = delegated_budget_fixture();
+        budget.max_total_tokens = None;
+        budget.max_total_cost_microunits = None;
+        assert!(super::accounting_satisfies_budget(Some(&budget), &totals));
+        budget.max_total_tokens = Some(50);
+        assert!(!super::accounting_satisfies_budget(Some(&budget), &totals));
+        budget.max_total_tokens = None;
+        budget.max_total_cost_microunits = Some(50);
+        assert!(!super::accounting_satisfies_budget(Some(&budget), &totals));
+        // A prior-version SQLite file has no independent completeness proof.
+        store
+            .lock()
+            .unwrap()
+            .execute_batch("ALTER TABLE model_call_ledger DROP COLUMN jev_accounting_complete;")
+            .unwrap();
+        drop(adapter);
+        let reopened = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+        let totals = reopened.store.delegated_performance_totals("run").unwrap();
+        assert_eq!(totals.pending_model_calls, 0);
+        assert!(!totals.usage_complete && !totals.cost_complete);
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pending_jev_without_primary_statistics_can_persist_a_delegated_stop() {
+        let root = test_root("pending-jev-business-stop");
+        let mut adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+        let (mut record, mut binding) = delegated_record_and_binding();
+        record.workspace = root.join("workspace");
+        std::fs::create_dir_all(&record.workspace).unwrap();
+        binding.authority.lease.lease_id = LeaseId("lse_00000000000000000000000001".into());
+        binding.authority.lease.fencing_token = FencingToken("1".into());
+        let thread = binding.canonical_thread_id.clone();
+        let key = binding.run_key.clone();
+        adapter
+            .install_active_run(&key, record, binding, false, true)
+            .unwrap();
+        let exchange = winwincode_domain::ModelExchangeId("mdl_00000000000000000000000001".into());
+        let at = Instant("2026-08-28T00:00:02Z".into());
+        adapter
+            .store
+            .claim_model_call(
+                &key,
+                "call",
+                &exchange,
+                &Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+            )
+            .unwrap();
+        let receipt: winwincode_provider::DeviceJevReceipt =
+            winwincode_provider::DeviceJevReceipt {
+                operation_id: format!("jev:{}:0", exchange.0),
+                input_digest: "b".repeat(64),
+                run: None,
+            };
+        adapter
+            .store
+            .retain_jev_performance(&key, &receipt, &at)
+            .unwrap();
+        adapter
+            .store
+            .mark_model_call_provider_final_with_accounting(&key, "call", true)
+            .unwrap();
+        let fact = super::DelegatedLoopStopFact {
+            batch_id: ChangeBatchId(format!("sha256:{}", "c".repeat(64))),
+            reason: RepairLoopStopReason::HumanReviewRequired,
+            counters: delegated_counter_fixture(),
+            stopped_at: at,
+        };
+        let stop = adapter.retain_delegated_loop_stop(&thread, &fact).unwrap();
+        assert_eq!(stop.reason, RepairLoopStopReason::HumanReviewRequired);
+        assert_eq!(
+            adapter
+                .store
+                .delegated_performance_totals(&key)
+                .unwrap()
+                .pending_model_calls,
+            0
+        );
+        assert_eq!(
+            adapter
+                .store
+                .retained_outcome_usage(&key, 2000)
+                .unwrap()
+                .unwrap()
+                .tokens,
+            None
+        );
+        drop(adapter);
+        let restored = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+        let record = load_stored_run(&restored.store, &key).unwrap().unwrap();
+        assert_eq!(record.delegated_stop, Some(stop));
+        assert_eq!(
+            restored
+                .store
+                .delegated_performance_totals(&key)
+                .unwrap()
+                .pending_model_calls,
+            0
+        );
+        drop(restored);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -9134,6 +9682,63 @@ mod tests {
         }
     }
 
+    #[test]
+    fn patch_approval_labels_cover_every_target_without_exporting_checkout_paths() {
+        let root = test_root("patch-targets");
+        let workspace = root.join("checkout");
+        let make_request = |changes| {
+            serde_json::from_value(serde_json::json!({
+                "call_id": "patch", "turn_id": "turn", "started_at_ms": 1,
+                "changes": changes, "reason": null, "grant_root": null
+            }))
+            .expect("patch request")
+        };
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let mut request = make_request(serde_json::json!({
+            workspace.join("src/main.rs").to_str().unwrap(): {
+                "type": "update", "unified_diff": "", "move_path": workspace.join("src/new.rs")
+            },
+            "Cargo.toml": {"type": "add", "content": ""}
+        }));
+        let detail = patch_approval_detail(&request, &digest, &workspace).expect("checkout labels");
+        assert_eq!(
+            detail.target_summaries,
+            [
+                "create:Cargo.toml",
+                "modify:src/main.rs",
+                "move-to:src/new.rs"
+            ]
+        );
+        assert_eq!(detail.target_count, 3);
+        assert_eq!(detail.request_sha256.0, digest);
+        for path in [
+            root.join("outside.rs"),
+            PathBuf::from("../outside.rs"),
+            workspace.join("../outside.rs"),
+            workspace.join("private\nname.rs"),
+        ] {
+            request.changes.insert(
+                path,
+                codex_protocol::protocol::FileChange::Add {
+                    content: String::new(),
+                },
+            );
+            assert!(
+                patch_approval_detail(&request, &digest, &workspace).is_none(),
+                "one invalid target disables the entire summary"
+            );
+            request.changes.retain(|path, _| {
+                path == &workspace.join("src/main.rs") || path == std::path::Path::new("Cargo.toml")
+            });
+        }
+        request = make_request(serde_json::json!({
+            "main.rs": {"type": "update", "unified_diff": "", "move_path": root.join("outside.rs")}
+        }));
+        assert!(patch_approval_detail(&request, &digest, &workspace).is_none());
+        request.changes.clear();
+        assert!(patch_approval_detail(&request, &digest, &workspace).is_none());
+    }
+
     #[cfg(unix)]
     #[test]
     fn production_lease_renewal_preserves_core_session() {
@@ -9313,7 +9918,7 @@ mod tests {
                     .enable_all()
                     .build()
                     .expect("test runtime")
-                    .block_on(Box::pin(mcp_permission_request_is_retained_body()));
+                    .block_on(Box::pin(permission_request_is_retained_body(false)));
             })
             .expect("test thread")
             .join()
@@ -9321,8 +9926,12 @@ mod tests {
     }
 
     #[allow(clippy::too_many_lines)]
-    async fn mcp_permission_request_is_retained_body() {
-        let root = test_root("mcp-elicitation");
+    async fn permission_request_is_retained_body(patch: bool) {
+        let root = test_root(if patch {
+            "patch-approval"
+        } else {
+            "mcp-elicitation"
+        });
         let workspace = root.join("workspace");
         std::fs::create_dir_all(&workspace).expect("create diagnostic workspace");
         let mut job = executor_job();
@@ -9375,21 +9984,38 @@ mod tests {
         adapter
             .retain_stage_turn_started(&run_digest, "turn-diagnostic", &now)
             .expect("retain reviewer policy before command evidence");
-        let event: CodexEvent = serde_json::from_value(serde_json::json!({
-            "id": "turn-diagnostic",
-            "msg": {
-                "type": "elicitation_request",
-                "turn_id": "turn-diagnostic",
-                "server_name": "benchmark_public_smoke",
-                "id": "mcp_tool_approval_call-public-smoke",
-                "request": {
-                    "mode": "form",
-                    "_meta": {"codex_approval_kind": "mcp_tool_call"},
-                    "message": "Allow public smoke?",
-                    "requested_schema": {"type": "object", "properties": {}}
+        let kernel_workspace = &adapter.runs[&run_digest].record.workspace;
+        let event: CodexEvent = serde_json::from_value(if patch {
+            serde_json::json!({
+                "id": "turn-diagnostic",
+                "msg": {
+                    "type": "apply_patch_approval_request",
+                    "call_id": "patch-cargo",
+                    "turn_id": "turn-diagnostic",
+                    "started_at_ms": 1,
+                    "changes": {kernel_workspace.join("Cargo.toml").to_str().unwrap(): {
+                        "type": "add", "content": "[package]\nname = 'fixture'\n"
+                    }},
+                    "reason": null, "grant_root": null
                 }
-            }
-        }))
+            })
+        } else {
+            serde_json::json!({
+                "id": "turn-diagnostic",
+                "msg": {
+                    "type": "elicitation_request",
+                    "turn_id": "turn-diagnostic",
+                    "server_name": "benchmark_public_smoke",
+                    "id": "mcp_tool_approval_call-public-smoke",
+                    "request": {
+                        "mode": "form",
+                        "_meta": {"codex_approval_kind": "mcp_tool_call"},
+                        "message": "Allow public smoke?",
+                        "requested_schema": {"type": "object", "properties": {}}
+                    }
+                }
+            })
+        })
         .expect("Core MCP permission event");
         adapter
             .accept_polled_event(&run_digest, event, &now)
@@ -9401,17 +10027,23 @@ mod tests {
         assert_eq!(approvals.len(), 1);
         assert_eq!(
             approvals[0].operation_kind,
-            StoredApprovalOperationKind::Mcp
+            if patch {
+                StoredApprovalOperationKind::Patch
+            } else {
+                StoredApprovalOperationKind::Mcp
+            }
         );
-        let callback: serde_json::Value =
-            serde_json::from_str(&approvals[0].operation_id).expect("typed callback");
-        assert_eq!(
-            callback,
-            serde_json::json!([
-                "benchmark_public_smoke",
-                "mcp_tool_approval_call-public-smoke"
-            ])
-        );
+        if !patch {
+            let callback: serde_json::Value =
+                serde_json::from_str(&approvals[0].operation_id).expect("typed callback");
+            assert_eq!(
+                callback,
+                serde_json::json!([
+                    "benchmark_public_smoke",
+                    "mcp_tool_approval_call-public-smoke"
+                ])
+            );
+        }
         let messages = adapter.outbox.pending().expect("durable approval outbox");
         let approval = messages
             .iter()
@@ -9420,16 +10052,37 @@ mod tests {
                 _ => None,
             })
             .expect("MCP permission must reach the product approval path");
-        assert_eq!(approval.action.category, ApprovalActionCategory::Mcp);
+        assert_eq!(
+            approval.action.category,
+            if patch {
+                ApprovalActionCategory::FilesystemWrite
+            } else {
+                ApprovalActionCategory::Mcp
+            }
+        );
         assert_eq!(
             approval
                 .action
                 .sanitized_detail
                 .as_ref()
-                .expect("MCP facts")
+                .expect("permission facts")
                 .reason_code,
-            ApprovalActionReasonCode::McpPermission
+            if patch {
+                ApprovalActionReasonCode::FilesystemWrite
+            } else {
+                ApprovalActionReasonCode::McpPermission
+            }
         );
+        if patch {
+            let detail = approval
+                .action
+                .sanitized_detail
+                .as_ref()
+                .expect("patch facts");
+            assert_eq!(detail.target_summaries, ["create:Cargo.toml"]);
+            assert_eq!(detail.target_count, 1);
+            assert_eq!(detail.working_directory, None);
+        }
         drop(adapter);
         let reopened =
             ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).expect("reopen adapter");
@@ -9444,17 +10097,51 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn production_command_output_ack_survives_restart_before_terminal_projection() {
+    fn absolute_checkout_patch_permission_retains_decidable_facts() {
         std::thread::Builder::new()
-            .name("diagnostic-vertical".to_owned())
             .stack_size(16 * 1024 * 1024)
             .spawn(|| {
                 tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
+                    .expect("test runtime")
+                    .block_on(Box::pin(permission_request_is_retained_body(true)));
+            })
+            .expect("test thread")
+            .join()
+            .expect("absolute patch approval regression");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn production_command_output_ack_survives_restart_before_terminal_projection() {
+        run_command_output_ack_fixture(0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn production_command_output_ack_closes_live_completion_after_renewal() {
+        run_command_output_ack_fixture(1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn production_command_output_ack_closes_renewed_completion_after_restart() {
+        run_command_output_ack_fixture(2);
+    }
+
+    #[cfg(unix)]
+    fn run_command_output_ack_fixture(scenario: u8) {
+        std::thread::Builder::new()
+            .name("diagnostic-ack".to_owned())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
                     .expect("build diagnostic runtime")
                     .block_on(Box::pin(
-                        production_command_output_ack_survives_restart_before_terminal_projection_body(),
+                        production_command_output_ack_survives_restart_before_terminal_projection_body(scenario),
                     ));
             })
             .expect("spawn diagnostic test thread")
@@ -9463,7 +10150,9 @@ mod tests {
     }
 
     #[allow(clippy::too_many_lines)]
-    async fn production_command_output_ack_survives_restart_before_terminal_projection_body() {
+    async fn production_command_output_ack_survives_restart_before_terminal_projection_body(
+        scenario: u8,
+    ) {
         let root = test_root("diagnostic-vertical");
         let workspace = root.join("workspace");
         std::fs::create_dir_all(&workspace).expect("create diagnostic workspace");
@@ -9479,9 +10168,9 @@ mod tests {
         job.workspace.write_mode = ExecutionWorkspaceWriteMode::ReadOnly;
         let lease = ExecutionLeaseStamp {
             attempt: 1,
-            expires_at: Instant("2030-01-01T00:05:00Z".to_owned()),
+            expires_at: Instant("2030-01-01T00:05:00.000Z".to_owned()),
             fencing_token: FencingToken("1".to_owned()),
-            issued_at: Instant("2030-01-01T00:00:00Z".to_owned()),
+            issued_at: Instant("2030-01-01T00:00:00.000Z".to_owned()),
             job_id: job.job_id.clone(),
             lease_id: LeaseId("lse_00000000000000000000000001".to_owned()),
             worker_id: WorkerId("wrk_00000000000000000000000001".to_owned()),
@@ -9495,7 +10184,7 @@ mod tests {
             payload_digest: job.payload_digest.clone(),
         };
         let workspace_revision = WorkspaceRevision(format!("git-tree:{}", "1".repeat(40)));
-        let now = Instant("2030-01-01T00:00:01Z".to_owned());
+        let now = Instant("2030-01-01T00:00:01.000Z".to_owned());
         let snapshot_id =
             winwincode_domain::SnapshotId("snap_00000000000000000000000001".to_owned());
         let start = CodexThreadStart {
@@ -9690,10 +10379,42 @@ mod tests {
                 .expect("poll wait two"),
             CodexPoll::Pending
         ));
-        drop(adapter);
-
-        let mut reopened = ProductionCodexAdapter::open(diagnostic_adapter_config(&root))
-            .expect("reopen diagnostic adapter");
+        let mut reopened = if scenario > 0 {
+            use winwincode_execution_port::generated::{LeaseRenewMessage, LeaseRenewMessageKind};
+            let mut extended = lease.clone();
+            extended.expires_at = Instant("2030-01-01T00:10:00.000Z".to_owned());
+            assert!(
+                adapter
+                    .renew_lease(
+                        &session.thread_id,
+                        &LeaseRenewMessage {
+                            kind: LeaseRenewMessageKind::LeaseRenew,
+                            lease: extended,
+                            prior_expires_at: lease.expires_at.clone(),
+                            message_id: ExecutionMessageId(
+                                "xmsg_00000000000000000000009998".to_owned()
+                            ),
+                            request_id: winwincode_domain::RequestId(
+                                "req_00000000000000000000009998".to_owned()
+                            ),
+                            schema_version: SchemaVersion::WinwincodeV1,
+                            sent_at: now.clone(),
+                        },
+                        &now
+                    )
+                    .expect("renew live completion awaiting command evidence")
+            );
+            adapter
+        } else {
+            drop(adapter);
+            ProductionCodexAdapter::open(diagnostic_adapter_config(&root))
+                .expect("reopen diagnostic adapter")
+        };
+        if scenario == 2 {
+            drop(reopened);
+            reopened = ProductionCodexAdapter::open(diagnostic_adapter_config(&root))
+                .expect("reopen after lease renewal");
+        }
         let accepted = reopened
             .accept_artifact_ack(&ArtifactAckMessage {
                 retained_artifact: None,
@@ -9714,9 +10435,20 @@ mod tests {
         assert!(
             matches!(accepted, crate::ArtifactAckOutcome::Accepted(reference) if reference == artifact)
         );
-        let reopened_session = Box::pin(reopened.ensure_thread(start))
+        let mut current_lease = lease.clone();
+        if scenario > 0 {
+            current_lease.expires_at = Instant("2030-01-01T00:10:00.000Z".to_owned());
+        }
+        let reopened_session = if scenario == 1 {
+            session
+        } else {
+            Box::pin(reopened.ensure_thread(CodexThreadStart {
+                lease: &current_lease,
+                ..start
+            }))
             .await
-            .expect("recover terminal thread");
+            .expect("recover terminal thread")
+        };
         let identity = winwincode_execution_port::runtime_replay::RuntimeReplayIdentity {
             lease: diagnostic_open.lease.clone(),
             worker_session_id: diagnostic_open.worker_session_id.clone(),

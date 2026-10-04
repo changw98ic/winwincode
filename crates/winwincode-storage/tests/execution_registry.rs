@@ -419,7 +419,7 @@ fn heartbeat_requires_contiguous_sequence_is_idempotent_and_never_dispatches() {
 }
 
 #[test]
-fn heartbeat_rejects_foreign_stale_and_expired_active_leases_without_writing() {
+fn heartbeat_checks_reported_lease_identity_without_extending_expired_authority() {
     let root = temporary_directory("heartbeat-lease-authority");
     let mut storage = SqliteStorage::open(&root).expect("storage open");
     let mut registry = storage.execution_registry().expect("registry open");
@@ -487,24 +487,61 @@ fn heartbeat_rejects_foreign_stale_and_expired_active_leases_without_writing() {
     expired.sent_at = instant(5);
     expired.active_leases = vec![ActiveLeaseSummary {
         job_id: lease.job_id.clone(),
-        lease_id: lease.lease_id,
+        lease_id: lease.lease_id.clone(),
         attempt: lease.attempt,
-        fencing_token: lease.fencing_token,
+        fencing_token: lease.fencing_token.clone(),
     }];
     assert_eq!(
         registry
             .record_heartbeat(&expired)
             .expect("expired lease heartbeat")
             .status,
-        LeaseWriteStatus::RejectedExpiredLease
+        LeaseWriteStatus::Accepted
     );
     assert_eq!(
         registry
             .load_worker(&WorkerId(id("wrk", 30)))
-            .expect("worker read after rejected heartbeats")
+            .expect("worker records the valid delayed heartbeat")
             .expect("worker")
             .heartbeat_sequence,
-        0
+        1
+    );
+
+    assert_eq!(
+        registry
+            .load_lease(&lease.job_id)
+            .unwrap()
+            .unwrap()
+            .expires_at,
+        lease.expires_at
+    );
+    registry
+        .finish_execution_lease(&ExecutionLeaseTerminalRequest {
+            job_id: lease.job_id.clone(),
+            lease_id: lease.lease_id.clone(),
+            worker_id: lease.worker_id.clone(),
+            worker_instance_id: lease.worker_instance_id.clone(),
+            attempt: lease.attempt,
+            fencing_token: lease.fencing_token.clone(),
+            outcome: ExecutionLeaseTerminalOutcome::Failed,
+            terminal_at: instant(5),
+            request_id: RequestId(id("req", 69)),
+        })
+        .unwrap();
+    expired.message_id = ExecutionMessageId(id("xmsg", 68));
+    expired.heartbeat_sequence = ExecutionSequence(2);
+    expired.observed_at = instant(6);
+    expired.sent_at = instant(6);
+    assert_eq!(
+        registry.record_heartbeat(&expired).unwrap().status,
+        LeaseWriteStatus::Accepted
+    );
+    assert!(
+        registry
+            .load_live_lease(&lease.job_id, &instant(6))
+            .unwrap()
+            .is_none(),
+        "late cleanup progress cannot revive terminal execution"
     );
 
     Box::new(storage).close().expect("storage close");
@@ -702,7 +739,7 @@ fn terminal_lease_replays_exactly_and_stops_counting_as_active_after_restart() {
                 .record_heartbeat(&heartbeat)
                 .expect("terminal lease heartbeat")
                 .status,
-            LeaseWriteStatus::RejectedConflict
+            LeaseWriteStatus::Accepted
         );
         drop(registry);
         Box::new(storage).close().expect("storage close");

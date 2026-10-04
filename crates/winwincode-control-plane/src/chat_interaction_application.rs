@@ -685,12 +685,6 @@ impl<'storage> ChatInteractionService<'storage> {
         authority: &PersistedInteractionAuthority,
         now: &Instant,
     ) -> Result<(), ChatInteractionServiceError> {
-        if now.0 < authority.lease.issued_at.0 || now.0 >= authority.lease.expires_at.0 {
-            return Err(error(
-                ChatInteractionServiceErrorCode::Expired,
-                "Worker lease is outside its accepted time window",
-            ));
-        }
         let current = self
             .storage
             .load_worker_interaction_source(
@@ -700,6 +694,12 @@ impl<'storage> ChatInteractionService<'storage> {
             )
             .map_err(storage_error)?
             .ok_or_else(|| authority_mismatch("current Worker authority does not exist"))?;
+        if now.0 < current.2.issued_at.0 || now.0 >= current.2.expires_at.0 {
+            return Err(error(
+                ChatInteractionServiceErrorCode::Expired,
+                "Worker lease is outside its accepted time window",
+            ));
+        }
         if current.2.expires_at != authority.lease.expires_at {
             let mut period = current.2.clone();
             period.expires_at.clone_from(&authority.lease.expires_at);

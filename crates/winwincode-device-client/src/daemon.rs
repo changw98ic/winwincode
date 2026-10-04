@@ -98,10 +98,9 @@ use winwincode_client_port::messages::{
     ClientHeartbeatPayload, ClientHelloPayload, ClientManagedAppStatusPayload,
     ClientOccupancyAckPayload, ClientOccupancyRejectedPayload, ClientToServerEnvelope,
     ClientToServerMessage, ClientWorkerLaunchAckPayload, CommandContext, OccupancyCommandContext,
-    ServerAccessChallengePayload, ServerClientLockPayload, ServerEnrollmentAcceptedPayload,
-    ServerOccupancyForceFencePayload, ServerOccupancyOfferPayload, ServerOccupancyReleasePayload,
-    ServerRepositoryRescanPayload, ServerToClientEnvelope, ServerToClientMessage,
-    ServerWorkerLaunchPayload, ServerWorkerStopPayload,
+    ServerClientLockPayload, ServerOccupancyForceFencePayload, ServerOccupancyOfferPayload,
+    ServerOccupancyReleasePayload, ServerRepositoryRescanPayload, ServerToClientEnvelope,
+    ServerToClientMessage, ServerWorkerLaunchPayload, ServerWorkerStopPayload,
 };
 
 use crate::connect_code::{self, PublishedConnectCode};
@@ -293,10 +292,6 @@ pub struct EnrollmentIssuance {
     /// Server timestamp the device should clock-drift against (RFC 3339).
     #[serde(rename = "serverTime")]
     pub server_time: String,
-    /// First sequence of the server-to-client stream this device continues
-    /// at.
-    #[serde(rename = "downlinkFromSequence")]
-    pub downlink_from_sequence: u64,
 }
 
 /// One Worker Session Credential delivered beside its matching durable
@@ -371,7 +366,7 @@ pub struct DaemonConfig {
     pub architecture: ClientArchitecture,
     /// Device client software version.
     pub client_version: String,
-    /// Idle cadence for `client.heartbeat`; the enrollment acceptance may
+    /// Idle cadence for `client.heartbeat`; the enrollment response may
     /// override it with the server-requested interval.
     pub heartbeat_interval: Duration,
     /// Cadence for the enrollment wait while no deliverable enroll frame
@@ -455,7 +450,7 @@ impl From<DeviceStoreError> for DaemonError {
 /// Observed counters and scheduling state of one daemon session.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DaemonStatus {
-    /// Whether `client.enrollment_accepted` was persisted.
+    /// Whether the issued enrollment identity was persisted.
     pub enrolled: bool,
     /// Exchanges attempted (a failed transport call counts).
     pub exchanges_started: u64,
@@ -467,11 +462,6 @@ pub struct DaemonStatus {
     pub heartbeats_enqueued: u64,
     /// `client.connect_code.published` frames enqueued by this session.
     pub connect_codes_published: u64,
-    /// `client.access.challenge` frames answered with a
-    /// `client.access.challenge_ack`.
-    pub access_challenges_answered: u64,
-    /// Access challenges whose local verdict was `confirmed`.
-    pub access_challenges_confirmed: u64,
     /// `client.client_lock` commands applied and acknowledged.
     pub client_lock_commands_applied: u64,
     /// `client.repository.rescan` commands that completed a fresh local scan.
@@ -747,7 +737,7 @@ impl DeviceDaemon {
         &self.instance_id
     }
 
-    /// Whether `client.enrollment_accepted` has been persisted.
+    /// Whether the issued enrollment identity has been persisted.
     #[must_use]
     pub const fn is_enrolled(&self) -> bool {
         self.enrolled
@@ -851,7 +841,7 @@ impl DeviceDaemon {
     }
 
     /// Generates a new dynamic connect code (or refreshes the current one:
-    /// the previous generation stops validating challenges immediately and
+    /// the next publication replaces the prior Server-owned generation and
     /// the new publication carries `generation + 1`), persists its digest
     /// state, and enqueues the durable `client.connect_code.published`
     /// frame. The plaintext rides the returned value only — never the store,
@@ -899,21 +889,9 @@ impl DeviceDaemon {
         Ok(published)
     }
 
-    /// Revokes the current connect code (the local disable): every later
-    /// challenge naming it is refused. Returns the revoked record, or `None`
-    /// when no active code exists.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DaemonError::Store`] for durable failures.
-    pub fn revoke_connect_code(&mut self) -> Result<Option<ConnectCodeStateRecord>, DaemonError> {
-        connect_code::revoke_connect_code(&mut self.store, OffsetDateTime::now_utc())
-            .map_err(DaemonError::Store)
-    }
-
     /// Locks the client locally: `acceptingConnections = false` and
     /// `lockState = locked`, durably, mirrored into every later hello and
-    /// heartbeat. While locked, every access challenge is refused.
+    /// heartbeat. The Server uses the published policy when authorizing access.
     ///
     /// # Errors
     ///
@@ -1247,6 +1225,7 @@ impl DeviceDaemon {
             self.publish_provider_state(None)?;
             self.publish_extension_state(None)?;
             self.publish_worker_exits()?;
+            self.publish_worker_reconciliation()?;
             self.hello_announced = true;
             self.next_heartbeat_at = now + self.heartbeat_interval;
             return Ok(());
@@ -1266,8 +1245,53 @@ impl DeviceDaemon {
             }))?;
             self.status.heartbeats_enqueued += 1;
             self.publish_worker_exits()?;
+            self.publish_worker_reconciliation()?;
             self.next_heartbeat_at = now + self.heartbeat_interval;
         }
+        Ok(())
+    }
+
+    fn publish_worker_reconciliation(&mut self) -> Result<(), DaemonError> {
+        use crate::supervisor::WorkerReconcileVerdict;
+        use winwincode_client_port::domain::WorkerReconcileState;
+        use winwincode_client_port::messages::{
+            ClientWorkerReconcilePayload, ClientWorkerReconciliation,
+        };
+        let (Some(supervisor), Some(mirror)) = (&self.worker_supervisor, &self.occupancy_mirror)
+        else {
+            return Ok(());
+        };
+        let lease_id = mirror.occupancy_lease_id.clone();
+        let sessions = self.store.worker_processes_for_lease(&lease_id)?;
+        let reports = supervisor
+            .reconcile()
+            .map_err(|_| DaemonError::Protocol("worker reconciliation failed".into()))?;
+        let observed_at = now_rfc3339();
+        let workers = reports
+            .into_iter()
+            .filter(|report| {
+                sessions
+                    .iter()
+                    .any(|worker| worker.worker_session_id == report.worker_session_id)
+            })
+            .map(|report| ClientWorkerReconciliation {
+                worker_session_id: report.worker_session_id,
+                worker_instance_id: report.worker_instance_id,
+                reconcile_state: match report.verdict {
+                    WorkerReconcileVerdict::StillRunning => WorkerReconcileState::StillRunning,
+                    WorkerReconcileVerdict::Terminal => WorkerReconcileState::Terminal,
+                    WorkerReconcileVerdict::Missing => WorkerReconcileState::Missing,
+                    WorkerReconcileVerdict::Unknown => WorkerReconcileState::Unknown,
+                },
+                observed_at: observed_at.clone(),
+            })
+            .collect();
+        self.enqueue(ClientToServerMessage::WorkerReconcile(
+            ClientWorkerReconcilePayload {
+                occupancy_lease_id: Some(lease_id),
+                workers,
+            },
+        ))?;
         Ok(())
     }
 
@@ -1390,21 +1414,21 @@ impl DeviceDaemon {
         self.status.exchanges_succeeded += 1;
         self.reset_backoff();
 
-        let downlink_frames = match self.ingest_downlink(
-            &response.frames,
-            response.enrollment.as_ref(),
-            &response.worker_credentials,
-        ) {
-            Ok(count) => count,
-            Err(DownlinkFailure::Retriable(reason)) => {
-                // The client acknowledgement was already persisted; the
-                // offending downlink batch is simply refused and the server
-                // replays it after our next ackSequence report.
-                self.register_failure(now, reason);
-                return Ok(self.retry_outcome());
-            }
-            Err(DownlinkFailure::Fatal(error)) => return Err(error),
-        };
+        if let Some(issuance) = &response.enrollment {
+            self.accept_enrollment(issuance)?;
+        }
+        let downlink_frames =
+            match self.ingest_downlink(&response.frames, &response.worker_credentials) {
+                Ok(count) => count,
+                Err(DownlinkFailure::Retriable(reason)) => {
+                    // The client acknowledgement was already persisted; the
+                    // offending downlink batch is simply refused and the server
+                    // replays it after our next ackSequence report.
+                    self.register_failure(now, reason);
+                    return Ok(self.retry_outcome());
+                }
+                Err(DownlinkFailure::Fatal(error)) => return Err(error),
+            };
         Ok(TickOutcome::Exchanged {
             frames_sent: batch.frames.len(),
             acked_through: ack,
@@ -1440,7 +1464,7 @@ impl DeviceDaemon {
         self.status.exchanges_succeeded += 1;
         self.reset_backoff();
         let downlink_frames =
-            match self.ingest_downlink(&response.frames, None, &response.worker_credentials) {
+            match self.ingest_downlink(&response.frames, &response.worker_credentials) {
                 Ok(count) => count,
                 Err(DownlinkFailure::Retriable(reason)) => {
                     self.register_failure(now, reason);
@@ -1456,9 +1480,8 @@ impl DeviceDaemon {
     }
 
     /// Ingests the server-to-client batch: validates contiguous sequences,
-    /// persists the acknowledgement cursor, and handles the enrollment
-    /// response, access challenges (answer with a `challenge_ack` verdict),
-    /// client-lock commands (persist the policy, acknowledge), and the
+    /// persists the acknowledgement cursor, and handles
+    /// client-lock commands (persist the policy, acknowledge) and the
     /// occupancy commands (mirror advance with persist-before-send acks,
     /// release intents, force-fence overwrites). Commands owned by later
     /// lanes are counted without acting.
@@ -1466,12 +1489,10 @@ impl DeviceDaemon {
     fn ingest_downlink(
         &mut self,
         frames: &[serde_json::Value],
-        enrollment: Option<&EnrollmentIssuance>,
         worker_credentials: &[WorkerCredentialIssuance],
     ) -> Result<usize, DownlinkFailure> {
         self.ingest_worker_credentials(worker_credentials)?;
         let mut accepted = 0_usize;
-        let mut acceptance: Option<ServerEnrollmentAcceptedPayload> = None;
         for value in frames {
             let envelope: ServerToClientEnvelope =
                 decode_downlink_frame(&self.codec, value).map_err(DownlinkFailure::Retriable)?;
@@ -1606,71 +1627,63 @@ impl DeviceDaemon {
             }
             match self.downlink.observe(envelope.sequence) {
                 SequenceVerdict::Accept => {
-                    let defer_cursor = matches!(
-                        &envelope.message,
-                        ServerToClientMessage::WorkerStop(_)
-                            | ServerToClientMessage::WorkerLaunch(_)
-                    );
-                    if !defer_cursor {
-                        self.advance_downlink_cursor(&envelope)?;
-                    }
-                    match envelope.message {
+                    // The sender may discard every acknowledged frame. Keep the
+                    // cursor behind the durable effect/intent and its reply so a
+                    // crash at any earlier point replays the command.
+                    match &envelope.message {
+                        ServerToClientMessage::CommandAck(payload) => {
+                            self.store.record_command_result(payload).map_err(|error| {
+                                DownlinkFailure::Fatal(DaemonError::Store(error))
+                            })?;
+                            if let Some(error) = &payload.error {
+                                self.status.last_error = Some(format!(
+                                    "command {}: {:?}",
+                                    payload.command_message_id, error.code
+                                ));
+                            }
+                        }
                         ServerToClientMessage::ProviderApply(_)
                         | ServerToClientMessage::CandidateApply(_)
                         | ServerToClientMessage::RepositoryRegister(_)
                         | ServerToClientMessage::ExtensionApply(_) => {}
-                        ServerToClientMessage::EnrollmentAccepted(payload) => {
-                            acceptance = Some(payload);
-                        }
-                        ServerToClientMessage::AccessChallenge(payload) => {
-                            self.answer_access_challenge(&payload)
-                                .map_err(DownlinkFailure::Fatal)?;
-                        }
                         ServerToClientMessage::ClientLock(payload) => {
-                            self.apply_client_lock(&payload, &envelope.message_id)
+                            self.apply_client_lock(payload, &envelope.message_id)
                                 .map_err(DownlinkFailure::Fatal)?;
                         }
                         ServerToClientMessage::OccupancyOffer(payload) => {
-                            self.apply_occupancy_offer(&payload)
+                            self.apply_occupancy_offer(payload)
                                 .map_err(DownlinkFailure::Fatal)?;
                         }
                         ServerToClientMessage::OccupancyRelease(payload) => {
-                            self.apply_occupancy_release(&payload, &envelope.message_id)
+                            self.apply_occupancy_release(payload, &envelope.message_id)
                                 .map_err(DownlinkFailure::Fatal)?;
                         }
                         ServerToClientMessage::OccupancyForceFence(payload) => {
-                            self.apply_occupancy_force_fence(&payload, &envelope.message_id)
+                            self.apply_occupancy_force_fence(payload, &envelope.message_id)
                                 .map_err(DownlinkFailure::Fatal)?;
                         }
-                        ServerToClientMessage::WorkerLaunch(ref payload) => {
+                        ServerToClientMessage::WorkerLaunch(payload) => {
                             self.apply_worker_launch(payload)
                                 .map_err(|error| DownlinkFailure::Retriable(error.to_string()))?;
-                            self.advance_downlink_cursor(&envelope)?;
                         }
-                        ServerToClientMessage::WorkerStop(ref payload) => {
+                        ServerToClientMessage::WorkerStop(payload) => {
                             self.apply_worker_stop(payload, &envelope.message_id)
                                 .map_err(worker_stop_failure_to_downlink)?;
                             // The stop intent, process-group action, terminal
                             // registry state, and receipt are durable before
                             // this cursor is advanced. A crash before this
                             // point therefore replays the same command.
-                            self.advance_downlink_cursor(&envelope)?;
                         }
                         ServerToClientMessage::RepositoryRescan(payload) => {
-                            self.apply_repository_rescan(&payload, &envelope.message_id)
+                            self.apply_repository_rescan(payload, &envelope.message_id)
                                 .map_err(DownlinkFailure::Fatal)?;
                         }
-                        ServerToClientMessage::CredentialRotate(_) => {
-                            // Credential commands are owned by later device-client
-                            // lanes; the cursor has already advanced, so a skipped
-                            // frame never blocks the stream.
-                            self.status.unhandled_downlink_commands += 1;
-                        }
                         ServerToClientMessage::ManagedAppCommand(payload) => {
-                            self.apply_managed_app_command(&payload, &envelope.message_id)
+                            self.apply_managed_app_command(payload, &envelope.message_id)
                                 .map_err(DownlinkFailure::Fatal)?;
                         }
                     }
+                    self.advance_downlink_cursor(&envelope)?;
                     accepted += 1;
                 }
                 SequenceVerdict::Duplicate => {}
@@ -1690,26 +1703,6 @@ impl DeviceDaemon {
                 }
             }
         }
-        if let Some(payload) = acceptance {
-            let Some(issuance) = enrollment else {
-                return Err(DownlinkFailure::Retriable(
-                    "enrollment acceptance arrived without the enrollment issuance".to_owned(),
-                ));
-            };
-            if payload.public_client_id != issuance.public_client_id {
-                return Err(DownlinkFailure::Fatal(DaemonError::Protocol(format!(
-                    "enrollment acceptance names publicClientId {} but the issuance \
-                     carries {}",
-                    payload.public_client_id, issuance.public_client_id
-                ))));
-            }
-            self.accept_enrollment(issuance)
-                .map_err(DownlinkFailure::Fatal)?;
-        } else if enrollment.is_some() {
-            return Err(DownlinkFailure::Retriable(
-                "enrollment issuance arrived without an acceptance frame".to_owned(),
-            ));
-        }
         self.status.downlink_accepted_through = self.downlink.ack_sequence();
         Ok(accepted)
     }
@@ -1718,11 +1711,6 @@ impl DeviceDaemon {
         &mut self,
         envelope: &ServerToClientEnvelope,
     ) -> Result<(), DownlinkFailure> {
-        self.downlink.advance(envelope.sequence).map_err(|error| {
-            DownlinkFailure::Fatal(DaemonError::Protocol(format!(
-                "downlink cursor rejected an accepted sequence: {error:?}"
-            )))
-        })?;
         self.store
             .advance_inbox_cursor(&ClientInboxCursorUpdate {
                 server_profile_id: self.config.server_profile_id.clone(),
@@ -1731,6 +1719,11 @@ impl DeviceDaemon {
                 updated_at: now_rfc3339(),
             })
             .map_err(|error| DownlinkFailure::Fatal(DaemonError::Store(error)))?;
+        self.downlink.advance(envelope.sequence).map_err(|error| {
+            DownlinkFailure::Fatal(DaemonError::Protocol(format!(
+                "downlink cursor rejected an accepted sequence: {error:?}"
+            )))
+        })?;
         Ok(())
     }
 
@@ -1891,34 +1884,6 @@ impl DeviceDaemon {
         self.hello_announced = false;
         self.next_heartbeat_at = Instant::now() + self.heartbeat_interval;
         self.status.enrolled = true;
-        Ok(())
-    }
-
-    /// Answers one `client.access.challenge`: validates the challenged code
-    /// generation against the durable local state and enqueues the
-    /// `client.access.challenge_ack` verdict (persist-before-send, so a
-    /// crash cannot drop the answer).
-    ///
-    /// The ack is answered for every challenge — `stale_generation` is the
-    /// frozen v1 schema's only negative verdict, so local rejections
-    /// (unknown/older generation, revoked, expired, locked, new connections
-    /// disabled) all map onto it while the precise local reason stays in the
-    /// status counters and logs never carry code material.
-    fn answer_access_challenge(
-        &mut self,
-        payload: &ServerAccessChallengePayload,
-    ) -> Result<(), DaemonError> {
-        let verdict = connect_code::evaluate_access_challenge(
-            &self.store,
-            payload,
-            OffsetDateTime::now_utc(),
-        )
-        .map_err(DaemonError::Store)?;
-        self.enqueue(connect_code::challenge_ack_message(payload, verdict))?;
-        self.status.access_challenges_answered += 1;
-        if verdict.is_confirmed() {
-            self.status.access_challenges_confirmed += 1;
-        }
         Ok(())
     }
 

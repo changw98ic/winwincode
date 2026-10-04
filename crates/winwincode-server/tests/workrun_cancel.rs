@@ -20,7 +20,9 @@ use winwincode_server::{
     TypedControlPlaneApiPort,
 };
 use winwincode_storage::{
-    ExecutionJobState, RepositorySchedulerScope, SqliteStorage, WorkerOutboundQueueConfig,
+    EXECUTION_PROTOCOL_VERSION, ExecutionJobState, RepositorySchedulerClaimRequest,
+    RepositorySchedulerScope, SqliteStorage, WorkerAuthenticationIdentity, WorkerHeartbeatRequest,
+    WorkerOutboundQueueConfig, WorkerPlatform, WorkerRegistrationRequest,
 };
 
 static NEXT_ROOT: AtomicU64 = AtomicU64::new(1);
@@ -157,6 +159,29 @@ fn command(
     reason = "the server cancellation test keeps public command, queue state, and replay together"
 )]
 fn server_workrun_cancel_uses_public_envelope_and_real_queued_workrun() {
+    cancel_before_dispatch_acceptance(false, false);
+}
+
+#[test]
+fn server_workrun_cancel_releases_unaccepted_lease_without_a_delivery_run() {
+    cancel_before_dispatch_acceptance(true, false);
+}
+
+#[test]
+fn server_workrun_cancel_releases_unaccepted_reviewer_lease() {
+    cancel_before_dispatch_acceptance(true, true);
+}
+
+#[test]
+fn server_workrun_cancel_stops_queued_reviewer_before_acceptance() {
+    cancel_before_dispatch_acceptance(false, true);
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "exercise a public cancellation across production Delivery, queue, Registry, and restart"
+)]
+fn cancel_before_dispatch_acceptance(claim: bool, reviewer: bool) {
     let suffix = NEXT_ROOT.fetch_add(1, Ordering::Relaxed);
     let root = std::env::temp_dir().join(format!(
         "winwincode-server-workrun-cancel-{}-{suffix}",
@@ -290,12 +315,35 @@ fn server_workrun_cancel_uses_public_envelope_and_real_queued_workrun() {
         .iter()
         .find(|job| job.state == ExecutionJobState::Queued)
         .expect("generated queued WorkRun job");
-    let work_run_id = queued.work_run_id.clone().expect("queued WorkRun id");
+    let mut work_run_id = queued.work_run_id.clone().expect("queued WorkRun id");
     let state = control_plane
         .load_state(&format!("delivery:{}", delivery_id.0))
         .expect("advanced Delivery state")
         .expect("advanced Delivery state exists");
-    let expected_delivery_revision = state.revision;
+    let mut expected_delivery_revision = state.revision;
+    let delivery = winwincode_delivery::domain::Delivery::decode_json(&state.payload)
+        .expect("Delivery before dispatch acceptance");
+    assert!(delivery.snapshot().work_run_aggregate.runs.is_empty());
+    if reviewer {
+        let queued = queued.clone();
+        work_run_id = seed_reviewer(&mut storage, &queued, delivery, &scheduler_scope);
+        expected_delivery_revision += 1;
+    }
+    if claim {
+        claim_without_acceptance(&mut storage, &scheduler_scope);
+        assert_eq!(
+            storage
+                .repository_scheduler()
+                .expect("scheduler")
+                .list_jobs(&scheduler_scope, &[])
+                .expect("leased jobs")
+                .iter()
+                .find(|job| job.work_run_id.as_ref() == Some(&work_run_id))
+                .expect("exact leased job")
+                .state,
+            ExecutionJobState::Leased,
+        );
+    }
     drop(storage);
     control_plane.shutdown().expect("close Delivery host");
 
@@ -326,6 +374,27 @@ fn server_workrun_cancel_uses_public_envelope_and_real_queued_workrun() {
         &work_run_id,
         &id("usr", 1),
         expected_delivery_revision,
+    );
+    let mut wrong_revision = request.clone();
+    if let CommandRequest::WorkRunCancelCommand(command) = &mut wrong_revision {
+        command.expected_revision.0 += 1;
+    }
+    assert!(
+        application
+            .command(&user, CommandFamily::Delivery, wrong_revision)
+            .is_err()
+    );
+    let wrong_delivery = command(
+        &scope,
+        &DeliveryId(id("dlv", 99)),
+        &work_run_id,
+        &id("usr", 1),
+        expected_delivery_revision,
+    );
+    assert!(
+        application
+            .command(&user, CommandFamily::Delivery, wrong_delivery)
+            .is_err()
     );
     let completed = application
         .command(&user, CommandFamily::Delivery, request.clone())
@@ -358,6 +427,38 @@ fn server_workrun_cancel_uses_public_envelope_and_real_queued_workrun() {
             .is_err(),
         "same requestId with changed public actor must conflict"
     );
+    let mut facts = SqliteStorage::open(&data).expect("cancelled queue facts");
+    let cancelled = facts
+        .repository_scheduler()
+        .expect("scheduler")
+        .list_jobs(&scheduler_scope, &[])
+        .expect("terminal jobs")
+        .into_iter()
+        .find(|job| job.work_run_id.as_ref() == Some(&work_run_id))
+        .expect("cancelled job");
+    assert_eq!(cancelled.state, ExecutionJobState::Failed);
+    assert!(cancelled.cancellation.is_some());
+    assert!(
+        facts
+            .execution_registry()
+            .expect("registry")
+            .load_dispatch_authority(&cancelled.job_id)
+            .expect("dispatch authority")
+            .is_none(),
+        "unaccepted cancellation must not invent a WorkerSession or dispatch"
+    );
+    if claim {
+        assert!(
+            facts
+                .execution_registry()
+                .expect("registry")
+                .load_live_lease(&cancelled.job_id, &FixedClock.now_instant())
+                .expect("remaining lease")
+                .is_none(),
+            "cancellation must release the exact Registry lease"
+        );
+    }
+    drop(facts);
     application.shutdown().expect("shutdown application");
     let restarted = StandaloneControlPlaneApplication::new_with_clock(
         ControlPlane::start_local(ControlPlaneConfig::local(&data), Box::new(NoopPublisher))
@@ -386,4 +487,155 @@ fn server_workrun_cancel_uses_public_envelope_and_real_queued_workrun() {
         .shutdown()
         .expect("shutdown restarted application");
     fs::remove_dir_all(root).expect("cleanup");
+}
+
+fn claim_without_acceptance(storage: &mut SqliteStorage, scope: &RepositorySchedulerScope) {
+    use winwincode_domain::{
+        ExecutionMessageId, ExecutionSequence, Instant, RequestId, Sha256Digest, WorkerId,
+        WorkerInstanceId,
+    };
+    let now = Instant("2027-01-15T08:00:00.000Z".into());
+    let worker_id = WorkerId(id("wrk", 50));
+    let worker_instance_id = WorkerInstanceId(id("wki", 51));
+    let mut registry = storage.execution_registry().expect("Registry");
+    registry
+        .register_worker(&WorkerRegistrationRequest {
+            authentication_identity: WorkerAuthenticationIdentity::LocalEmbedded {
+                control_plane_principal: "fixture-control-plane".into(),
+            },
+            protocol_version: EXECUTION_PROTOCOL_VERSION.into(),
+            platform: WorkerPlatform::Aarch64AppleDarwin,
+            capabilities: vec!["codex".into()],
+            capability_digest: Sha256Digest(format!("sha256:{}", "b".repeat(64))),
+            security_zone: "local".into(),
+            max_slots: 1,
+            message_id: ExecutionMessageId(id("xmsg", 52)),
+            request_id: RequestId(id("req", 52)),
+            sent_at: now.clone(),
+            started_at: now.clone(),
+            worker_id: worker_id.clone(),
+            worker_instance_id: worker_instance_id.clone(),
+        })
+        .expect("register");
+    registry
+        .record_heartbeat(&WorkerHeartbeatRequest {
+            active_leases: Vec::new(),
+            available_slots: 1,
+            heartbeat_sequence: ExecutionSequence(1),
+            max_slots: 1,
+            running_slots: 0,
+            message_id: ExecutionMessageId(id("xmsg", 53)),
+            observed_at: now.clone(),
+            sent_at: now.clone(),
+            worker_id: worker_id.clone(),
+            worker_instance_id: worker_instance_id.clone(),
+        })
+        .expect("heartbeat");
+    let dispatch = winwincode_control_plane::RepositoryExecutionScheduler::new(storage)
+        .claim_next(&RepositorySchedulerClaimRequest {
+            scope: scope.clone(),
+            request_id: RequestId(id("req", 54)),
+            scheduler_generation: "cancellation-before-acceptance".into(),
+            worker_id,
+            worker_instance_id,
+            issued_at: now,
+            expires_at: Instant("2027-01-15T08:05:00.000Z".into()),
+        })
+        .expect("claim")
+        .expect("dispatch");
+    assert!(
+        storage
+            .execution_registry()
+            .expect("Registry")
+            .load_dispatch_authority(&dispatch.job.job_id)
+            .expect("accepted authority")
+            .is_none()
+    );
+}
+
+// Seed the candidate-ready input phase without invoking an external Provider.
+// The original Executor queue intent is closed through the scheduler; a fresh
+// immutable Reviewer job is submitted through the production storage port.
+fn seed_reviewer(
+    storage: &mut SqliteStorage,
+    executor: &winwincode_storage::ExecutionJobRecord,
+    delivery: winwincode_delivery::domain::Delivery,
+    scope: &RepositorySchedulerScope,
+) -> winwincode_domain::WorkRunId {
+    use winwincode_domain::{
+        ExecutionJobId, Instant, RequestId, Sha256Digest, WorkItemState, WorkRunId,
+    };
+    use winwincode_execution_port::generated::{
+        ExecutionJob, ExecutionScope, ExecutionWorkspaceWriteMode,
+    };
+    use winwincode_storage::{
+        ExecutionJobSubmission, NewOutboxEvent, ProductStateStorage, ReceiptActorKey,
+        ReceiptIdentity, ReceiptScopeKey, RepositorySchedulerCancellationRequest, StateCommit,
+    };
+    let now = Instant("2027-01-15T08:00:00.000Z".into());
+    winwincode_control_plane::RepositoryExecutionScheduler::new(storage)
+        .request_cancellation(&RepositorySchedulerCancellationRequest {
+            scope: scope.clone(),
+            job_id: executor.job_id.clone(),
+            request_id: RequestId(id("req", 61)),
+            expected_revision: executor.revision,
+            requested_at: now.clone(),
+        })
+        .expect("close unaccepted Executor intent");
+    let mut snapshot = delivery.into_snapshot();
+    let previous_revision = snapshot.revision;
+    snapshot.revision += 1;
+    snapshot.work_run_aggregate.items[0].state = WorkItemState::CandidateReady;
+    let delivery = winwincode_delivery::domain::Delivery::try_from_snapshot(snapshot)
+        .expect("candidate-ready Delivery fixture");
+    storage
+        .commit(&StateCommit::new(
+            ReceiptIdentity::new(
+                ReceiptActorKey::from_encoded(b"fixture-actor".to_vec()).expect("fixture actor"),
+                ReceiptScopeKey::from_encoded(b"fixture-scope".to_vec()).expect("fixture scope"),
+                RequestId(id("req", 62)),
+            )
+            .expect("fixture receipt"),
+            Sha256Digest(format!("sha256:{}", "c".repeat(64))),
+            format!("delivery:{}", delivery.id().0),
+            previous_revision,
+            delivery.encode_json().expect("candidate-ready Delivery"),
+            vec![NewOutboxEvent::internal(
+                "fixture-candidate-ready",
+                "fixture.phase",
+                b"candidate-ready".to_vec(),
+            )],
+        ))
+        .expect("candidate-ready fixture commit");
+    let mut job: ExecutionJob =
+        serde_json::from_slice(&executor.dispatch_payload).expect("Executor input");
+    job.job_id = ExecutionJobId(id("job", 63));
+    job.execution_profile = "reviewer".into();
+    job.workspace.write_mode = ExecutionWorkspaceWriteMode::ReadOnly;
+    job.workspace.checkout_revision = "a".repeat(40);
+    let work_run_id = WorkRunId(id("wrn", 63));
+    let ExecutionScope::WorkRunExecutionScope(execution_scope) = &mut job.scope else {
+        panic!("WorkRun scope")
+    };
+    execution_scope.work_run_id = work_run_id.clone();
+    let input = job.work_input.as_mut().expect("workInput");
+    input.work_item = delivery.snapshot().work_run_aggregate.items[0].clone();
+    input.work_plan = Some(delivery.snapshot().work_run_aggregate.items.clone());
+    input.candidate_ref = Some(format!("refs/winwincode/candidates/{}", "a".repeat(40)));
+    storage
+        .execution_queue()
+        .expect("queue")
+        .submit(&ExecutionJobSubmission {
+            scope: executor.scope.clone(),
+            job_id: job.job_id.clone(),
+            request_id: RequestId(id("req", 63)),
+            payload_digest: job.payload_digest.clone(),
+            dispatch_payload: serde_json::to_vec(&job).expect("Reviewer payload"),
+            attempt: 1,
+            dependencies: Vec::new(),
+            work_run_id: Some(work_run_id.clone()),
+            submitted_at: now,
+        })
+        .expect("immutable Reviewer job");
+    work_run_id
 }

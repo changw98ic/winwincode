@@ -1428,13 +1428,18 @@ async fn accounting_https_route_is_separate_and_preserves_query_and_receipt_byte
             _: Instant,
         ) -> Result<Vec<u8>, RemoteWorkerTransportError> {
             assert_eq!(credential, b"execution-token");
-            winwincode_execution_port::transport::RemoteExchangeRequest::decode(body).unwrap();
+            let request =
+                winwincode_execution_port::transport::RemoteExchangeRequest::decode(body).unwrap();
+            assert!(request.supports_acceptance_receipt());
             self.execution_calls.fetch_add(1, Ordering::Relaxed);
             Ok(
-                winwincode_execution_port::transport::RemoteExchangeResponse::new(Vec::new())
-                    .unwrap()
-                    .encode()
-                    .unwrap(),
+                winwincode_execution_port::transport::RemoteExchangeResponse::with_acceptance(
+                    Vec::new(),
+                    true,
+                )
+                .unwrap()
+                .encode()
+                .unwrap(),
             )
         }
     }

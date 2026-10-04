@@ -611,8 +611,7 @@ async fn the_real_device_daemon_runs_the_full_occupancy_loop_over_http() {
         record.max_concurrent_worker_sessions, 4,
         "the enrollment instance hello lands its reported capacity"
     );
-    // Device side: the profile persisted and the acceptance frame advanced
-    // the downlink cursor.
+    // Device side: the profile persisted without a downlink message.
     assert!(
         daemon
             .store_mut()
@@ -621,14 +620,12 @@ async fn the_real_device_daemon_runs_the_full_occupancy_loop_over_http() {
             .is_some(),
         "the adoption must persist the server profile"
     );
-    assert_eq!(
+    assert!(
         daemon
             .store_mut()
             .inbox_cursor(&config.server_profile_id)
             .expect("cursor read")
-            .expect("the acceptance frame advanced the inbox cursor")
-            .last_sequence,
-        1
+            .is_none()
     );
     assert!(
         daemon.occupancy_mirror().is_none(),

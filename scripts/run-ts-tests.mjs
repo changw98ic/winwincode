@@ -17,6 +17,8 @@ const root = resolve(import.meta.dirname, '..')
 // momentarily missing asset (see tests/fixtures/real-browser-harness.mjs).
 const canonicalTestFiles = Object.freeze([
   'tests/api-production-vertical-runner.test.mjs',
+  'tests/device-fixture-shutdown.test.mjs',
+  'tests/device-task-runtime.test.mjs',
   'tests/architecture-documentation.test.mjs',
   'tests/candidate-run-preview-ui.test.mjs',
   'tests/okqq-sidebar-board-wiring.test.mjs',
@@ -43,6 +45,7 @@ const canonicalTestFiles = Object.freeze([
   'tests/browser-control-packages.test.mjs',
   'tests/browser-ui-package.test.mjs',
   'tests/client-server-separation.test.mjs',
+  'tests/codex-handoff-patch-replay.test.mjs',
   'tests/community-core-finalize.test.mjs',
   'tests/community-persistence-ports.test.mjs',
   'tests/engineering-runtime-backlog.test.mjs',

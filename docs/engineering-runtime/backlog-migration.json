@@ -3107,5 +3107,32 @@
         ]
       }
     ]
-  }
+  },
+  "live_scope_retirements": [
+    {
+      "old_id": "winwincode-edition.2",
+      "disposition": "retired_repository_split",
+      "decision": "docs/engineering-runtime/repository-split-audit-scope.md"
+    },
+    {
+      "old_id": "winwincode-edition.2.2",
+      "disposition": "retired_repository_split",
+      "decision": "docs/engineering-runtime/repository-split-audit-scope.md"
+    },
+    {
+      "old_id": "winwincode-edition.2.5",
+      "disposition": "retired_repository_split",
+      "decision": "docs/engineering-runtime/repository-split-audit-scope.md"
+    },
+    {
+      "old_id": "winwincode-edition.2.6",
+      "disposition": "retired_repository_split",
+      "decision": "docs/engineering-runtime/repository-split-audit-scope.md"
+    },
+    {
+      "old_id": "winwincode-edition.3",
+      "disposition": "retired_repository_split",
+      "decision": "docs/engineering-runtime/repository-split-audit-scope.md"
+    }
+  ]
 }

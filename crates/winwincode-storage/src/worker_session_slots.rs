@@ -479,7 +479,7 @@ impl<'storage> WorkerSessionSlots<'storage> {
             return Ok(receipt);
         }
         let current = require_active_slot(&transaction, &request.authority)?;
-        require_lease_authority(&transaction, &request.authority, &request.observed_at)?;
+        require_retained_lease_identity(&transaction, &request.authority)?;
         if current.event_cursor != request.expected_cursor
             || request.next_cursor != request.expected_cursor + 1
         {
@@ -550,7 +550,7 @@ impl<'storage> WorkerSessionSlots<'storage> {
             return Ok(receipt);
         }
         let current = require_active_slot(&transaction, &request.authority)?;
-        require_lease_authority(&transaction, &request.authority, &request.requested_at)?;
+        require_retained_lease_identity(&transaction, &request.authority)?;
         if current.revision != request.expected_revision {
             return Err(revision_conflict(
                 request.expected_revision,
@@ -623,7 +623,7 @@ impl<'storage> WorkerSessionSlots<'storage> {
             return Ok(receipt);
         }
         let current = require_active_slot(&transaction, &request.authority)?;
-        require_lease_authority(&transaction, &request.authority, &request.closed_at)?;
+        require_retained_lease_identity(&transaction, &request.authority)?;
         if current.revision != request.expected_revision {
             return Err(revision_conflict(
                 request.expected_revision,
@@ -947,7 +947,6 @@ struct CurrentLease {
     worker_instance_id: WorkerInstanceId,
     attempt: u64,
     fencing_token: FencingToken,
-    issued_at: Instant,
     expires_at: Instant,
 }
 
@@ -1034,6 +1033,27 @@ fn require_lease_authority(
     Ok(())
 }
 
+fn require_retained_lease_identity(
+    connection: &Connection,
+    authority: &WorkerSlotAuthority,
+) -> Result<(), WorkerSlotError> {
+    let lease = crate::execution_registry::load_lease_in_transaction(connection, &authority.job_id)
+        .map_err(storage_error)?
+        .ok_or_else(|| WorkerSlotError::invalid("execution lease does not exist"))?;
+    if lease.lease_id != authority.lease_id
+        || lease.worker_id != authority.worker_id
+        || lease.worker_instance_id != authority.worker_instance_id
+        || lease.attempt != authority.attempt
+        || lease.fencing_token != authority.fencing_token
+    {
+        return Err(WorkerSlotError::new(
+            WorkerSlotErrorCode::LeaseMismatch,
+            "Worker slot observation differs from its execution identity",
+        ));
+    }
+    Ok(())
+}
+
 fn load_current_lease(
     connection: &Connection,
     job_id: &ExecutionJobId,
@@ -1041,7 +1061,7 @@ fn load_current_lease(
     connection
         .query_row(
             "SELECT leases.lease_id, leases.worker_id, leases.worker_instance_id,
-                    leases.attempt, leases.fencing_token, leases.issued_at, leases.expires_at
+                    leases.attempt, leases.fencing_token, leases.expires_at
              FROM execution_leases AS leases
              WHERE leases.job_id = ?1
                AND NOT EXISTS (
@@ -1058,8 +1078,7 @@ fn load_current_lease(
                     attempt: u64::try_from(attempt)
                         .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(3, attempt))?,
                     fencing_token: FencingToken(row.get(4)?),
-                    issued_at: Instant(row.get(5)?),
-                    expires_at: Instant(row.get(6)?),
+                    expires_at: Instant(row.get(5)?),
                 })
             },
         )
@@ -1420,34 +1439,24 @@ fn require_active_slot(
     Ok(slot)
 }
 
-pub(crate) fn require_running_slot_authority(
+/// Checks ownership for delivery and acknowledgement of retained messages.
+/// Slot liveness and lease expiry govern execution, not transport cleanup.
+pub(crate) fn require_retained_slot_authority(
     connection: &Connection,
     authority: &WorkerSlotAuthority,
-    lease_issued_at: &Instant,
-    lease_expires_at: &Instant,
-    observed_at: &Instant,
-    require_healthy: bool,
 ) -> Result<WorkerSlotRecord, WorkerSlotError> {
     require_current_worker(
         connection,
         &authority.worker_id,
         &authority.worker_instance_id,
-        require_healthy,
+        false,
     )?;
-    require_lease_authority(connection, authority, observed_at)?;
-    let lease = load_current_lease(connection, &authority.job_id)?
-        .ok_or_else(|| WorkerSlotError::invalid("execution lease does not exist"))?;
-    if lease.issued_at != *lease_issued_at || lease.expires_at != *lease_expires_at {
+    let slot = load_slot_in_transaction(connection, &authority.worker_session_id)?
+        .ok_or_else(|| WorkerSlotError::invalid("Worker slot does not exist"))?;
+    if slot.authority != *authority {
         return Err(WorkerSlotError::new(
             WorkerSlotErrorCode::LeaseMismatch,
-            "Worker slot lease time does not match durable authority",
-        ));
-    }
-    let slot = require_active_slot(connection, authority)?;
-    if slot.state != WorkerSlotState::Running {
-        return Err(WorkerSlotError::new(
-            WorkerSlotErrorCode::StateConflict,
-            "Worker slot is not running",
+            "Worker message does not match its retained slot identity",
         ));
     }
     Ok(slot)

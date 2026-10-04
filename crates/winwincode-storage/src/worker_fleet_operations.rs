@@ -351,9 +351,9 @@ impl<'storage> WorkerFleetOperations<'storage> {
     /// Fences every current lease of one exact disconnected Worker process.
     ///
     /// The canonical lease expiry is shortened in the same transaction as the
-    /// immutable fence receipt. This makes late renewal/results fail against
-    /// the Registry and allows the existing placement adapter to claim the
-    /// next attempt with the returned higher fencing token.
+    /// immutable fence receipt. This stops new execution and renewal and allows
+    /// the placement adapter to claim the next attempt with the returned higher
+    /// fencing token. Retaining a late fact never restores the prior authority.
     ///
     /// # Errors
     ///

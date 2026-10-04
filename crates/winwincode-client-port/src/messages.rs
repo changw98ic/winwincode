@@ -6,18 +6,17 @@
 //! `kind`/`payload` pair. The field sets follow the authoritative schema
 //! (`schema/winwincode/v1/client-control.schema.json`):
 //!
-//! - 19 command kinds embed the command fields (`expectedRevision`,
+//! - Command kinds embed the command fields (`expectedRevision`,
 //!   `idempotencyKey`) flattened to the payload top level.
 //! - 11 of those commands additionally embed the occupancy fencing stamp
 //!   (`occupancyLeaseId`, `occupancyFencingToken`).
-//! - The 8 remaining kinds (`client.hello`, `client.heartbeat`,
+//! - Report and acknowledgement kinds (`client.hello`, `client.heartbeat`,
 //!   `client.worker.state`, `client.worker.reconcile`,
-//!   `client.repository.status`, `client.command_ack`,
-//!   `client.enrollment_accepted`, `client.access.challenge`) carry neither
+//!   `client.repository.status`, `client.command_ack`) carry neither
 //!   the command fields nor a fencing token.
 //!
 //! The `kind` strings match the plan enumeration exactly, for example
-//! `client.enroll` and `client.enrollment_accepted`. The envelope
+//! `client.enroll` and `client.hello`. The envelope
 //! `schemaVersion` is the domain contract string `"winwincode/v1"`, and
 //! fencing tokens travel as decimal strings (see [`crate::wire`]).
 
@@ -29,10 +28,8 @@ use serde::Serialize;
 use crate::domain::ApplyStrategy;
 use crate::domain::ClientArchitecture;
 use crate::domain::ClientCapacityReport;
-use crate::domain::ClientChallengeAckStatus;
 use crate::domain::ClientControlError;
 use crate::domain::ClientControlMessageKind;
-use crate::domain::ClientCredentialRotateReason;
 use crate::domain::ClientLockState;
 use crate::domain::ClientOccupancyForceFenceReason;
 use crate::domain::ClientOccupancyReleaseMode;
@@ -202,22 +199,6 @@ pub struct ClientConnectCodePublishedPayload {
     /// Failed verification attempts still permitted for this generation.
     #[serde(rename = "remainingAttempts")]
     pub remaining_attempts: u32,
-}
-
-/// Payload of `client.access.challenge_ack` (plan section 9.3, 11.4).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ClientAccessChallengeAckPayload {
-    /// Common command fields.
-    #[serde(flatten)]
-    pub command: CommandContext,
-    /// Challenge being acknowledged.
-    #[serde(rename = "challengeId")]
-    pub challenge_id: String,
-    /// Connect code the challenge verified.
-    #[serde(rename = "connectCodeId")]
-    pub connect_code_id: String,
-    /// Device verdict for the challenge.
-    pub status: ClientChallengeAckStatus,
 }
 
 /// Payload of `client.occupancy.ack` (plan section 9.3, 12.2).
@@ -422,18 +403,19 @@ pub struct ClientCandidateApplyResultPayload {
 /// A universal acknowledgement: it carries no command context of its own.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ClientCommandAckPayload {
-    /// Kind of the server command being acknowledged.
+    /// Kind of the command being acknowledged in either direction.
     #[serde(rename = "commandKind")]
     pub command_kind: ClientControlMessageKind,
-    /// Message id of the server command being acknowledged.
+    /// Message id of the command being acknowledged.
     #[serde(rename = "commandMessageId")]
     pub command_message_id: String,
     /// Universal acknowledgement status.
     pub status: CommandAckStatus,
-    /// Server-side revision after the command, when accepted.
-    #[serde(rename = "currentRevision")]
+    /// Receiver's current aggregate revision, when available.
+    #[serde(rename = "currentRevision", skip_serializing_if = "Option::is_none")]
     pub current_revision: Option<u64>,
     /// Machine-readable error fact, if the command was rejected.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<ClientControlError>,
 }
 
@@ -480,9 +462,6 @@ pub enum ClientToServerMessage {
     /// A dynamic connect code was published on the device.
     #[serde(rename = "client.connect_code.published")]
     ConnectCodePublished(ClientConnectCodePublishedPayload),
-    /// Device response to an access challenge.
-    #[serde(rename = "client.access.challenge_ack")]
-    AccessChallengeAck(Box<ClientAccessChallengeAckPayload>),
     /// Device acknowledged an occupancy offer under its fencing token.
     #[serde(rename = "client.occupancy.ack")]
     OccupancyAck(ClientOccupancyAckPayload),
@@ -519,44 +498,6 @@ pub enum ClientToServerMessage {
     /// Device reports a managed application lifecycle state.
     #[serde(rename = "client.managed_app.status")]
     ManagedAppStatus(ClientManagedAppStatusPayload),
-}
-
-/// Payload of `client.enrollment_accepted` (plan section 9.4, 11.4).
-///
-/// A pure response: it carries no command context.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ServerEnrollmentAcceptedPayload {
-    /// Stable public device identifier, not a secret.
-    #[serde(rename = "publicClientId")]
-    pub public_client_id: String,
-    /// Requested heartbeat interval in milliseconds.
-    #[serde(rename = "heartbeatIntervalMs")]
-    pub heartbeat_interval_ms: u32,
-    /// Server timestamp the device should clock-drift against (RFC 3339).
-    #[serde(rename = "serverTime")]
-    pub server_time: String,
-}
-
-/// Payload of `client.access.challenge` (plan section 9.4, 11.4).
-///
-/// A pure request: it carries no command context.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ServerAccessChallengePayload {
-    /// Challenge identifier.
-    #[serde(rename = "challengeId")]
-    pub challenge_id: String,
-    /// Connect code being verified.
-    #[serde(rename = "connectCodeId")]
-    pub connect_code_id: String,
-    /// Digest of the connect code.
-    #[serde(rename = "codeDigest")]
-    pub code_digest: String,
-    /// Expiry timestamp (RFC 3339).
-    #[serde(rename = "expiresAt")]
-    pub expires_at: String,
-    /// User the challenge was issued to.
-    #[serde(rename = "requesterUserId")]
-    pub requester_user_id: String,
 }
 
 /// Payload of `client.occupancy.offer` (plan section 9.4, 12.2).
@@ -681,16 +622,6 @@ pub struct ServerClientLockPayload {
     pub lock_state: ClientLockState,
 }
 
-/// Payload of `client.credential_rotate` (plan section 9.4).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ServerCredentialRotatePayload {
-    /// Common command fields.
-    #[serde(flatten)]
-    pub command: CommandContext,
-    /// Why the rotation is requested.
-    pub reason: ClientCredentialRotateReason,
-}
-
 /// Encrypted Provider command using the shared revision/idempotency fields.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServerConfigurationApplyPayload {
@@ -705,6 +636,9 @@ pub struct ServerConfigurationApplyPayload {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "payload")]
 pub enum ServerToClientMessage {
+    /// Durable result of a Device-to-Server command.
+    #[serde(rename = "client.command_ack")]
+    CommandAck(ClientCommandAckPayload),
     /// Encrypted path to register on this device.
     #[serde(rename = "client.repository.register")]
     RepositoryRegister(Box<ServerConfigurationApplyPayload>),
@@ -714,12 +648,6 @@ pub enum ServerToClientMessage {
     /// End-to-end encrypted Provider mutation, bound to the selected Device.
     #[serde(rename = "client.provider.apply")]
     ProviderApply(Box<ServerConfigurationApplyPayload>),
-    /// Device enrollment was accepted.
-    #[serde(rename = "client.enrollment_accepted")]
-    EnrollmentAccepted(ServerEnrollmentAcceptedPayload),
-    /// Server challenges a connecting user.
-    #[serde(rename = "client.access.challenge")]
-    AccessChallenge(Box<ServerAccessChallengePayload>),
     /// Server offers a created occupancy lease.
     #[serde(rename = "client.occupancy.offer")]
     OccupancyOffer(ServerOccupancyOfferPayload),
@@ -744,9 +672,6 @@ pub enum ServerToClientMessage {
     /// Server changes the machine-level client lock.
     #[serde(rename = "client.client_lock")]
     ClientLock(ServerClientLockPayload),
-    /// Server requests a device credential rotation.
-    #[serde(rename = "client.credential_rotate")]
-    CredentialRotate(ServerCredentialRotatePayload),
     /// Server controls one Device-owned managed application process group.
     #[serde(rename = "client.managed_app.command")]
     ManagedAppCommand(ServerManagedAppCommandPayload),
@@ -809,15 +734,13 @@ mod tests {
     ];
 
     /// Kinds that carry neither command fields nor a fencing token.
-    const CONTEXT_FREE_KINDS: [&str; 8] = [
+    const CONTEXT_FREE_KINDS: [&str; 6] = [
         "client.hello",
         "client.heartbeat",
         "client.worker.state",
         "client.worker.reconcile",
         "client.repository.status",
         "client.command_ack",
-        "client.enrollment_accepted",
-        "client.access.challenge",
     ];
 
     /// The context-free reports that mirror the occupancy lease id (nullable,
@@ -1174,17 +1097,6 @@ mod tests {
                 }),
             ),
             (
-                "client.access.challenge_ack",
-                ClientToServerMessage::AccessChallengeAck(Box::new(
-                    ClientAccessChallengeAckPayload {
-                        command: command.clone(),
-                        challenge_id: "chal_01j2".to_owned(),
-                        connect_code_id: "code_01j2".to_owned(),
-                        status: ClientChallengeAckStatus::Confirmed,
-                    },
-                )),
-            ),
-            (
                 "client.occupancy.ack",
                 ClientToServerMessage::OccupancyAck(ClientOccupancyAckPayload {
                     occupancy: occupancy.clone(),
@@ -1293,24 +1205,6 @@ mod tests {
         let occupancy = occupancy_context();
         vec![
             (
-                "client.enrollment_accepted",
-                ServerToClientMessage::EnrollmentAccepted(ServerEnrollmentAcceptedPayload {
-                    public_client_id: "100200300401".to_owned(),
-                    heartbeat_interval_ms: 15_000,
-                    server_time: "2026-01-01T00:00:00.000Z".to_owned(),
-                }),
-            ),
-            (
-                "client.access.challenge",
-                ServerToClientMessage::AccessChallenge(Box::new(ServerAccessChallengePayload {
-                    challenge_id: "chal_01j2".to_owned(),
-                    connect_code_id: "code_01j2".to_owned(),
-                    code_digest: "sha256:bb22".to_owned(),
-                    expires_at: "2026-01-01T01:00:00.000Z".to_owned(),
-                    requester_user_id: "usr_01j2".to_owned(),
-                })),
-            ),
-            (
                 "client.occupancy.offer",
                 ServerToClientMessage::OccupancyOffer(ServerOccupancyOfferPayload {
                     occupancy: occupancy.clone(),
@@ -1378,13 +1272,6 @@ mod tests {
                     lock_state: ClientLockState::Locked,
                 }),
             ),
-            (
-                "client.credential_rotate",
-                ServerToClientMessage::CredentialRotate(ServerCredentialRotatePayload {
-                    command,
-                    reason: ClientCredentialRotateReason::SuspectedCompromise,
-                }),
-            ),
         ]
     }
 
@@ -1421,7 +1308,7 @@ mod tests {
     #[test]
     fn command_and_fencing_contexts_follow_the_schema_classification() {
         assert_eq!(FENCED_KINDS.len(), 11, "exactly 11 fenced kinds");
-        assert_eq!(CONTEXT_FREE_KINDS.len(), 8, "exactly 8 context-free kinds");
+        assert_eq!(CONTEXT_FREE_KINDS.len(), 6, "exactly 6 context-free kinds");
 
         let messages: Vec<(&str, serde_json::Value)> = all_client_to_server_messages()
             .into_iter()
@@ -1438,15 +1325,15 @@ mod tests {
                     }),
             )
             .collect();
-        assert_eq!(messages.len(), 27, "every protocol kind is represented");
+        assert_eq!(messages.len(), 23, "every fixture kind is represented");
 
-        // 19 commands per the schema's x-message-class, 11 of them fenced.
-        let plain_commands = 27 - FENCED_KINDS.len() - CONTEXT_FREE_KINDS.len();
-        assert_eq!(plain_commands, 8, "exactly 8 plain command kinds");
+        // 17 commands in these fixtures, 11 of them fenced.
+        let plain_commands = messages.len() - FENCED_KINDS.len() - CONTEXT_FREE_KINDS.len();
+        assert_eq!(plain_commands, 6, "exactly 6 plain command kinds");
         assert_eq!(
             FENCED_KINDS.len() + plain_commands,
-            19,
-            "11 fenced + 8 plain = the 19 command kinds"
+            17,
+            "11 fenced + 6 plain = the 17 command kinds"
         );
 
         for (kind, value) in &messages {
@@ -1454,8 +1341,8 @@ mod tests {
             let fenced = FENCED_KINDS.contains(kind);
             let context_free = CONTEXT_FREE_KINDS.contains(kind);
 
-            // Command fields: present for the 19 commands, absent for the
-            // other 8 kinds.
+            // Command fields: present for the 17 commands, absent for the
+            // other 6 kinds.
             assert_eq!(
                 payload.get("expectedRevision").is_some(),
                 !context_free,
