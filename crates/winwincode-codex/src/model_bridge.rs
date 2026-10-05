@@ -2482,7 +2482,7 @@ mod tests {
     };
     use winwincode_execution_port::runtime_trace_outbox::{ExecutionMode, ObserverMode};
     use winwincode_execution_port::typed_replay::frame_from_message;
-    use winwincode_kernel::ModelPortRequest;
+    use winwincode_kernel::{ModelPortFailure, ModelPortRequest};
 
     #[tokio::test]
     async fn tool_repeat_guard_intercepts_live_and_replayed_output_before_core() {
@@ -2574,6 +2574,297 @@ mod tests {
         drop(bridge);
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    struct PublicSmokeStreamFixture {
+        root: std::path::PathBuf,
+        workspace: std::path::PathBuf,
+        store: AdapterStore,
+        authority: ModelLeaseAuthority,
+        bridge: Arc<ExecutionPortModelBridge>,
+    }
+
+    impl PublicSmokeStreamFixture {
+        fn new() -> Self {
+            let root = std::env::temp_dir()
+                .join(format!("wwc-public-smoke-stream-{}", uuid::Uuid::now_v7()));
+            let workspace = root.join("checkout");
+            std::fs::create_dir_all(&workspace).unwrap();
+            std::fs::write(workspace.join("main.py"), "print(0)\n").unwrap();
+            let store = AdapterStore::open(&root).unwrap();
+            store
+                .save_run(
+                    "smoke-run",
+                    &json!({
+                        "workspace": workspace,
+                        "agentConfig": sealed_profile("loopback", "loopback", "provider_default"),
+                        "job": {"workInput": {"workContract": {
+                            "scope": ["main.py", "*.py"]
+                        }}},
+                    }),
+                )
+                .unwrap();
+            Self::install(root, workspace, store, authority(&id("cdx", 'A')))
+        }
+
+        fn install(
+            root: std::path::PathBuf,
+            workspace: std::path::PathBuf,
+            store: AdapterStore,
+            authority: ModelLeaseAuthority,
+        ) -> Self {
+            let bridge = Arc::new(
+                installed_loopback_bridge(
+                    &store,
+                    SharedAuthoritySource::default(),
+                    "public smoke repeat",
+                    "smoke-run",
+                    &authority,
+                    "kernel",
+                )
+                .with_tool_repeat_guard(true),
+            );
+            Self {
+                root,
+                workspace,
+                store,
+                authority,
+                bridge,
+            }
+        }
+
+        fn reopen(self) -> Self {
+            let Self {
+                root,
+                workspace,
+                store,
+                authority,
+                bridge,
+            } = self;
+            drop(bridge);
+            drop(store);
+            let store = AdapterStore::open(&root).unwrap();
+            Self::install(root, workspace, store, authority)
+        }
+
+        fn remove(self) {
+            let Self {
+                root,
+                store,
+                bridge,
+                ..
+            } = self;
+            drop(bridge);
+            drop(store);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    fn public_smoke_model_request(
+        fixture: &PublicSmokeStreamFixture,
+        occurrence: usize,
+    ) -> ModelPortRequest {
+        let request_id = format!("smoke-model-{occurrence}");
+        ModelPortRequest {
+            request_id: request_id.clone(),
+            payload_json: json!({
+                "requestId": request_id, "provider": "loopback", "sessionId": "kernel",
+                "threadId": fixture.authority.session_identity.codex_thread_id.0,
+                "request": {"model": "loopback", "input": []},
+            })
+            .to_string(),
+        }
+    }
+
+    fn public_smoke_tool_output(fixture: &PublicSmokeStreamFixture, namespaced: bool) -> String {
+        let mut item = json!({
+            "type": "function_call", "call_id": "public-smoke-call", "arguments": "{}",
+            "name": "mcp__benchmark_public_smoke__public_smoke",
+        });
+        if namespaced {
+            item["namespace"] = json!(format!(
+                "mcp__benchmark_public_smoke_{}",
+                fixture.authority.session_identity.product_session_id.0
+            ));
+            item["name"] = json!("public_smoke");
+        }
+        json!({"type": "output_item_done", "item": item}).to_string()
+    }
+
+    async fn deliver_public_smoke_tool_output(
+        fixture: &PublicSmokeStreamFixture,
+        occurrence: usize,
+        namespaced: bool,
+    ) -> Result<String, ModelPortFailure> {
+        let mut stream = fixture
+            .bridge
+            .model_port()
+            .stream(public_smoke_model_request(fixture, occurrence))
+            .await
+            .unwrap();
+        let opens = fixture
+            .bridge
+            .take_messages()
+            .unwrap()
+            .into_iter()
+            .filter_map(|message| match message {
+                ExecutionPortMessage::ModelOpenMessage(open) => Some(open),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(opens.len(), 1, "each new model request opens once");
+        let output = public_smoke_tool_output(fixture, namespaced);
+        fixture
+            .bridge
+            .accept_chunk(
+                &test_chunk(
+                    &fixture.authority,
+                    &opens[0].model_exchange_id,
+                    1,
+                    true,
+                    output.as_bytes(),
+                    'S',
+                ),
+                &fixture.authority.lease.issued_at,
+            )
+            .await
+            .unwrap();
+        stream.next().await.unwrap()
+    }
+
+    async fn replay_public_smoke_tool_output(fixture: &PublicSmokeStreamFixture) {
+        assert_eq!(
+            fixture
+                .store
+                .model_call_phase("smoke-run", "smoke-model-0")
+                .unwrap(),
+            Some(ModelCallPhase::ProviderFinal)
+        );
+        let mut replay = fixture
+            .bridge
+            .model_port()
+            .stream(public_smoke_model_request(fixture, 0))
+            .await
+            .unwrap();
+        assert_eq!(
+            replay.next().await.unwrap().unwrap(),
+            public_smoke_tool_output(fixture, true),
+            "replay retains the exact original empty arguments"
+        );
+        assert!(
+            !fixture
+                .bridge
+                .take_messages()
+                .unwrap()
+                .iter()
+                .any(|message| matches!(message, ExecutionPortMessage::ModelOpenMessage(_))),
+            "ProviderFinal replay must not reopen the provider"
+        );
+    }
+
+    #[tokio::test]
+    async fn public_smoke_stream_keeps_empty_arguments_and_admits_six_distinct_sources() {
+        for namespaced in [true, false] {
+            let fixture = PublicSmokeStreamFixture::new();
+            for occurrence in 0..6 {
+                std::fs::write(
+                    fixture.workspace.join("main.py"),
+                    format!("print({occurrence})\n"),
+                )
+                .unwrap();
+                assert_eq!(
+                    deliver_public_smoke_tool_output(&fixture, occurrence, namespaced)
+                        .await
+                        .unwrap(),
+                    public_smoke_tool_output(&fixture, namespaced),
+                    "source-aware admission must not rewrite model output or arguments"
+                );
+            }
+            assert!(!fixture.store.tool_repeat_stopped("smoke-run").unwrap());
+            fixture.remove();
+        }
+    }
+
+    #[tokio::test]
+    async fn public_smoke_stream_blocks_sixth_request_for_unchanged_source() {
+        for namespaced in [true, false] {
+            let fixture = PublicSmokeStreamFixture::new();
+            for occurrence in 0..5 {
+                assert_eq!(
+                    deliver_public_smoke_tool_output(&fixture, occurrence, namespaced)
+                        .await
+                        .unwrap(),
+                    public_smoke_tool_output(&fixture, namespaced)
+                );
+            }
+            let failure = deliver_public_smoke_tool_output(&fixture, 5, namespaced)
+                .await
+                .unwrap_err();
+            assert_eq!(failure.code, crate::tool_repeat::STOP_REASON);
+            assert!(fixture.store.tool_repeat_stopped("smoke-run").unwrap());
+            assert!(
+                fixture
+                    .bridge
+                    .model_port()
+                    .stream(public_smoke_model_request(&fixture, 6))
+                    .await
+                    .is_err(),
+                "a retained stop blocks another model request"
+            );
+            assert!(
+                !fixture
+                    .bridge
+                    .take_messages()
+                    .unwrap()
+                    .iter()
+                    .any(|message| matches!(message, ExecutionPortMessage::ModelOpenMessage(_)))
+            );
+            fixture.remove();
+        }
+    }
+
+    #[tokio::test]
+    async fn public_smoke_stream_replay_after_source_change_and_restart_counts_once() {
+        let fixture = PublicSmokeStreamFixture::new();
+        assert_eq!(
+            deliver_public_smoke_tool_output(&fixture, 0, true)
+                .await
+                .unwrap(),
+            public_smoke_tool_output(&fixture, true)
+        );
+        std::fs::write(fixture.workspace.join("main.py"), "print(999)\n").unwrap();
+        replay_public_smoke_tool_output(&fixture).await;
+        let fixture = fixture.reopen();
+        replay_public_smoke_tool_output(&fixture).await;
+        let admissions: i64 = fixture
+            .store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM tool_repeat_admission WHERE run_key = 'smoke-run'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(admissions, 1, "both replays use the retained admission");
+        std::fs::write(fixture.workspace.join("main.py"), "print(0)\n").unwrap();
+        for occurrence in 1..5 {
+            assert_eq!(
+                deliver_public_smoke_tool_output(&fixture, occurrence, true)
+                    .await
+                    .unwrap(),
+                public_smoke_tool_output(&fixture, true)
+            );
+        }
+        assert_eq!(
+            deliver_public_smoke_tool_output(&fixture, 5, true)
+                .await
+                .unwrap_err()
+                .code,
+            crate::tool_repeat::STOP_REASON,
+            "replay must neither consume counts nor change the original comparison identity"
+        );
+        fixture.remove();
     }
 
     #[tokio::test]

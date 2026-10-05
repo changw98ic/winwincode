@@ -3,13 +3,29 @@
 //! Benchmark-only admission at the last model-stream boundary before Core
 //! dispatches a complete tool request. The ledger contains digests, not inputs.
 
-use rusqlite::{OptionalExtension as _, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
 use crate::store::{AdapterStore, AdapterStoreError};
 
 pub(crate) const STOP_REASON: &str = "STUCK_TOOL_REPEAT_LIMIT";
+
+#[cfg(test)]
+#[path = "tool_repeat_source_admission_tests.rs"]
+mod source_admission_tests;
+
+#[derive(Debug, PartialEq, Eq)]
+struct ToolIdentity {
+    call_id: String,
+    request_digest: String,
+    public_smoke: bool,
+}
+
+enum Admission {
+    Known(bool),
+    New(ToolIdentity),
+}
 
 impl AdapterStore {
     pub(crate) fn enable_tool_repeat_guard(&self, run: &str) -> Result<(), AdapterStoreError> {
@@ -42,53 +58,42 @@ impl AdapterStore {
         model_call: &str,
         output: &str,
     ) -> Result<bool, AdapterStoreError> {
+        let identity = match admission(&*self.lock()?, run, model_call, output)? {
+            Admission::Known(admitted) => return Ok(admitted),
+            Admission::New(identity) => identity,
+        };
+        // Source IO runs without the execution ledger's write lock. A second
+        // transactional check below handles concurrent admission and stops.
+        let comparison_digest = self.tool_comparison_digest(run, &identity)?;
         let mut connection = self.lock()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| AdapterStoreError::Unavailable)?;
-        let stopped: Option<bool> = transaction
-            .query_row(
-                "SELECT stopped FROM tool_repeat_run WHERE run_key = ?1",
-                [run],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|_| AdapterStoreError::Unavailable)?;
-        match stopped {
-            None => return Ok(true),
-            Some(true) => return Ok(false),
-            Some(false) => {}
-        }
-        let Some((call_id, digest)) = tool_identity(output)? else {
-            return Ok(true);
-        };
-        let existing: Option<String> = transaction
-            .query_row(
-                "SELECT request_digest FROM tool_repeat_admission
-                 WHERE run_key = ?1 AND model_call_id = ?2 AND call_id = ?3",
-                params![run, model_call, call_id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|_| AdapterStoreError::Unavailable)?;
-        if let Some(existing) = existing {
-            return if existing == digest {
-                Ok(true)
-            } else {
-                Err(AdapterStoreError::Conflict)
-            };
+        if let Admission::Known(admitted) = admission(&transaction, run, model_call, output)? {
+            return Ok(admitted);
         }
         transaction
             .execute(
-                "INSERT INTO tool_repeat_admission(run_key, model_call_id, call_id, request_digest)
-             VALUES (?1, ?2, ?3, ?4)",
-                params![run, model_call, call_id, digest],
+                "INSERT INTO tool_repeat_admission
+                 (run_key, model_call_id, call_id, request_digest, comparison_digest)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    run,
+                    model_call,
+                    identity.call_id,
+                    identity.request_digest,
+                    comparison_digest
+                ],
             )
             .map_err(|_| AdapterStoreError::Unavailable)?;
-        let count: i64 = transaction.query_row(
-            "SELECT COUNT(*) FROM tool_repeat_admission WHERE run_key = ?1 AND request_digest = ?2",
-            params![run, digest], |row| row.get(0),
-        ).map_err(|_| AdapterStoreError::Unavailable)?;
+        let count: i64 = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM tool_repeat_admission
+             WHERE run_key = ?1 AND COALESCE(comparison_digest, request_digest) = ?2",
+                params![run, comparison_digest],
+                |row| row.get(0),
+            )
+            .map_err(|_| AdapterStoreError::Unavailable)?;
         if count >= 6 {
             transaction
                 .execute(
@@ -102,9 +107,91 @@ impl AdapterStore {
             .map_err(|_| AdapterStoreError::Unavailable)?;
         Ok(count < 6)
     }
+
+    fn tool_comparison_digest(
+        &self,
+        run: &str,
+        identity: &ToolIdentity,
+    ) -> Result<String, AdapterStoreError> {
+        if !identity.public_smoke {
+            return Ok(identity.request_digest.clone());
+        }
+        let record = self
+            .load_run::<Value>(run)?
+            .ok_or(AdapterStoreError::Corrupt)?;
+        let workspace = record["workspace"]
+            .as_str()
+            .ok_or(AdapterStoreError::Corrupt)?;
+        let scope = record
+            .pointer("/job/workInput/workContract/scope")
+            .and_then(Value::as_array)
+            .ok_or(AdapterStoreError::Corrupt)?;
+        let mut suffixes = Vec::new();
+        for pattern in scope {
+            let pattern = pattern.as_str().ok_or(AdapterStoreError::Corrupt)?;
+            if let Some(suffix) = pattern.strip_prefix('*')
+                && suffix.starts_with('.')
+                && suffix.len() > 1
+                && !suffix.contains(['/', '\\', '*', '?'])
+            {
+                suffixes.push(suffix.to_owned());
+            }
+        }
+        if suffixes.is_empty() {
+            return Err(AdapterStoreError::Corrupt);
+        }
+        let source =
+            crate::tool_repeat_source::source_digest(std::path::Path::new(workspace), &suffixes)?;
+        let mut digest = Sha256::new();
+        digest.update(b"winwincode.public-smoke-source-repeat.v1\0");
+        digest.update(identity.request_digest.as_bytes());
+        digest.update(source.as_bytes());
+        Ok(format!("{:x}", digest.finalize()))
+    }
 }
 
-fn tool_identity(output: &str) -> Result<Option<(String, String)>, AdapterStoreError> {
+fn admission(
+    connection: &Connection,
+    run: &str,
+    model_call: &str,
+    output: &str,
+) -> Result<Admission, AdapterStoreError> {
+    let stopped: Option<bool> = connection
+        .query_row(
+            "SELECT stopped FROM tool_repeat_run WHERE run_key = ?1",
+            [run],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| AdapterStoreError::Unavailable)?;
+    match stopped {
+        None => return Ok(Admission::Known(true)),
+        Some(true) => return Ok(Admission::Known(false)),
+        Some(false) => {}
+    }
+    let Some(identity) = tool_identity(output)? else {
+        return Ok(Admission::Known(true));
+    };
+    let existing: Option<String> = connection
+        .query_row(
+            "SELECT request_digest FROM tool_repeat_admission
+             WHERE run_key = ?1 AND model_call_id = ?2 AND call_id = ?3",
+            params![run, model_call, identity.call_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| AdapterStoreError::Unavailable)?;
+    if let Some(existing) = existing {
+        return if existing == identity.request_digest {
+            Ok(Admission::Known(true))
+        } else {
+            Err(AdapterStoreError::Conflict)
+        };
+    }
+    Ok(Admission::New(identity))
+}
+
+fn tool_identity(output: &str) -> Result<Option<ToolIdentity>, AdapterStoreError> {
     let frame: Value = serde_json::from_str(output).map_err(|_| AdapterStoreError::Corrupt)?;
     if frame["type"] != "output_item_done" {
         return Ok(None);
@@ -151,6 +238,9 @@ fn tool_identity(output: &str) -> Result<Option<(String, String)>, AdapterStoreE
         .as_str()
         .filter(|name| !name.is_empty())
         .unwrap_or("functions");
+    let public_smoke = kind == "function_call"
+        && args == serde_json::json!({})
+        && is_public_smoke(name, namespace);
     // Complete arguments include target paths, workdir and requested content.
     // Custom input is preserved byte-for-byte, so distinct patches stay distinct.
     let identity = canonical_args(serde_json::json!({
@@ -158,10 +248,36 @@ fn tool_identity(output: &str) -> Result<Option<(String, String)>, AdapterStoreE
         "execution": item.get("execution"),
     }));
     let bytes = serde_json::to_vec(&identity).map_err(|_| AdapterStoreError::Corrupt)?;
-    Ok(Some((
-        call_id.to_owned(),
-        format!("{:x}", Sha256::digest(bytes)),
-    )))
+    Ok(Some(ToolIdentity {
+        call_id: call_id.to_owned(),
+        request_digest: format!("{:x}", Sha256::digest(bytes)),
+        public_smoke,
+    }))
+}
+
+fn is_public_smoke(name: &str, namespace: &str) -> bool {
+    let server = if name == "public_smoke" {
+        namespace.strip_prefix("mcp__").unwrap_or(namespace)
+    } else if namespace == "functions" {
+        let Some(server) = name
+            .strip_prefix("mcp__")
+            .and_then(|name| name.strip_suffix("__public_smoke"))
+        else {
+            return false;
+        };
+        server
+    } else {
+        return false;
+    };
+    server == "benchmark_public_smoke"
+        || server
+            .strip_prefix("benchmark_public_smoke_psn_")
+            .is_some_and(|session| {
+                session.len() == 26
+                    && session
+                        .bytes()
+                        .all(|byte| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(&byte))
+            })
 }
 
 fn canonical_args(value: Value) -> Value {

@@ -207,6 +207,12 @@ Provider ID 共享；满额请求保留在 durable outbox 等待重试，不写�
 Running，再由 Provider 配额约束模型请求。生产 Fusion 在同一个 Job 内同时发起四家
 Provider 的成员调用，四家各占一个槽位；同一家 Provider 的其他任务共用该家的三个槽位。
 
+Benchmark 的重复工具保护按同一请求身份在 run 内累计计数，第六次在执行前停止。
+`public_smoke` 的参数固定为 `{}`，其比较身份还包含可信工作区中、冻结任务契约允许的
+源码路径和内容摘要；修改源码属于不同请求，日志、缓存和构建产物不参与计数。
+原始请求摘要单独用于重放校验，已准入调用的重放不重新读取当前源码、不重复计数。
+旧记录没有源码证据时不回填当前源码，已保留的停止事实继续有效。
+
 Server Model admission 另有 `workerConcurrencyLimit`、Provider `concurrentRequests`、
 RPM/TPM 和路由队列。这些控制服务端 Provider Gateway 装配；当前 managed Worker
 在 Device 本地处理 `ModelOpen`，不经过该服务端模型准入，不能把这些值当作当前
