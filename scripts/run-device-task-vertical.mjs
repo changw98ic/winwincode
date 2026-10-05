@@ -719,11 +719,14 @@ export async function runDeviceTaskVertical({
     }
     report.error = String(error instanceof Error ? error.message : error)
     report.errorCode = error?.code ?? null
+    report.errorStatus = Number.isInteger(error?.status) && error.status >= 100 && error.status <= 599
+      ? error.status : null
     for (const secret of [...deviceSecrets, ...Object.values(customHeaders ?? {})]) {
       if (secret) report.error = report.error.replaceAll(secret, '<redacted>')
     }
     save()
-    throw Object.assign(new Error(report.error), { code: report.errorCode, report })
+    throw Object.assign(new Error(report.error), { code: report.errorCode,
+      ...(report.errorStatus === null ? {} : { status: report.errorStatus }), report })
   } finally {
     if (input) {
       try {

@@ -112,7 +112,7 @@ impl DeviceProviderStore {
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;",
         )?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        let key = if version == 9 {
+        let key = if version == 10 {
             load_device_key(&connection)?
         } else {
             // Only an actual migration needs the writer lock. Worker polling,
@@ -630,7 +630,7 @@ fn migrate_device_store(
             "INSERT INTO identity VALUES (1, ?1, 0)",
             [key.to_bytes().as_slice()],
         )?;
-    } else if ![1, 2, 3, 4, 5, 6, 7, 8, 9].contains(&version) {
+    } else if ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10].contains(&version) {
         return Err(DeviceProviderError);
     }
     if version < 2 {
@@ -683,6 +683,16 @@ fn migrate_device_store(
         transaction.execute_batch("ALTER TABLE exchanges ADD COLUMN accounting_chunks TEXT;
             CREATE TABLE accounting_closed_attempts (job_id TEXT NOT NULL,attempt INTEGER NOT NULL,lease_id TEXT NOT NULL,PRIMARY KEY(job_id,attempt));
             PRAGMA user_version=9;")?;
+    }
+    if version < 10 {
+        transaction.execute_batch(
+            "CREATE TABLE IF NOT EXISTS model_invocation_attempts (
+            exchange_id TEXT NOT NULL, attempt_number INTEGER NOT NULL CHECK(attempt_number>0),
+            adapter_request_id TEXT NOT NULL UNIQUE, state TEXT NOT NULL,
+            failure_chunks TEXT, accounting_chunks TEXT, response_bytes BLOB,
+            PRIMARY KEY(exchange_id,attempt_number));
+            PRAGMA user_version=10;",
+        )?;
     }
     Ok(())
 }

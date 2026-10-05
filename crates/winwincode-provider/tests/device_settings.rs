@@ -60,7 +60,7 @@ fn failed_device_key_validation_does_not_commit_a_schema_upgrade() {
         .expect("retained schema version");
     assert_eq!(version, 8, "a failed open must roll back the migration");
     database
-        .pragma_update(None, "user_version", 10)
+        .pragma_update(None, "user_version", 11)
         .expect("future schema");
     assert!(DeviceProviderStore::open(&directory).is_err());
     drop(database);
@@ -246,6 +246,10 @@ fn configured_jev_request_cannot_silently_run_as_baseline() {
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one durable exchange verifies exact replay, cancellation and public error/content projection together"
+)]
 fn model_failure_replay_cancellation_and_public_projection_stay_local() {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     use sha2::{Digest, Sha256};
@@ -301,6 +305,8 @@ fn model_failure_replay_cancellation_and_public_projection_stay_local() {
             .contains("device-only-secret")
     );
     let mut chunk = chunks[0].clone();
+    chunk.error = None;
+    chunk.is_final = false;
     for (kind, retained) in [
         ("reasoning_delta", false),
         ("function_call", false),
@@ -326,6 +332,51 @@ fn model_failure_replay_cancellation_and_public_projection_stay_local() {
             );
         }
     }
+    let metadata=serde_json::to_vec(&serde_json::json!({"providerErrorKind":"rate_limited","status":429,"providerRetryAfterMillis":2000,"providerRequestId":"device-only-request","diagnostic":{"stage":"response","eventType":"message_delta","fieldPath":"$.private"}})).expect("private error metadata");
+    failure.payload = Some(EncodedPayload {
+        content_type: "application/json".into(),
+        data_base64: STANDARD.encode(&metadata),
+        payload_digest: Sha256Digest(format!("sha256:{:x}", Sha256::digest(&metadata))),
+    });
+    let public = public_model_chunk(&failure).expect("error metadata stays private");
+    let public_text = String::from_utf8(
+        STANDARD
+            .decode(
+                public
+                    .payload
+                    .expect("generic failure remains visible")
+                    .data_base64,
+            )
+            .expect("public bytes"),
+    )
+    .expect("public text");
+    for private in [
+        "device-only-request",
+        "providerRetryAfterMillis",
+        "message_delta",
+        "$.private",
+        "device-only-secret",
+    ] {
+        assert!(!public_text.contains(private));
+    }
+    assert!(public.error.is_none());
+    let mut tampered = failure.clone();
+    tampered
+        .payload
+        .as_mut()
+        .expect("metadata")
+        .payload_digest
+        .0 = "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".into();
+    assert!(
+        public_model_chunk(&tampered).is_err(),
+        "error metadata must retain the same digest validation as content frames"
+    );
+    tampered = failure.clone();
+    tampered.payload.as_mut().expect("metadata").data_base64 = "not valid base64".into();
+    assert!(
+        public_model_chunk(&tampered).is_err(),
+        "malformed error payloads cannot be silently projected"
+    );
     store
         .cancel_model(&open.model_exchange_id.0)
         .expect("cancel");
@@ -392,7 +443,7 @@ fn old_database_upgrade_preserves_identity_and_provider_state() {
         let upgraded: i64 = db
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(upgraded, 9);
+        assert_eq!(upgraded, 10);
         let old: (String, String, Option<String>, Option<Vec<u8>>) = db.query_row(
             "SELECT digest, chunks, request_open, prepared_payload FROM exchanges WHERE exchange_id='old-exchange'", [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),

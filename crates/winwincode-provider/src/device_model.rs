@@ -2,6 +2,10 @@
 
 //! Model exchanges execute on the Device, with local replay records before network effects.
 
+#[cfg(test)]
+#[path = "device_model_recovery_tests.rs"]
+mod recovery_tests;
+
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use std::sync::{Mutex, OnceLock};
 type ActiveDeviceExchange = std::sync::Arc<crate::provider_transport::ExchangeCancellation>;
@@ -31,6 +35,7 @@ use crate::{
     ProviderAdapterPort, ProviderGatewayOpenReceipt, ProviderStreamControlAction,
 };
 
+#[derive(Debug)]
 enum DeviceModelFailure {
     LeaseExpired,
     RequestInvalid,
@@ -60,6 +65,163 @@ impl From<serde_json::Error> for DeviceModelFailure {
         Self::RequestInvalid
     }
 }
+impl From<rusqlite::Error> for DeviceModelFailure {
+    fn from(_: rusqlite::Error) -> Self {
+        Self::Unavailable
+    }
+}
+
+struct AdmissionRelease<'a, F: Fn()>(&'a F);
+impl<F: Fn()> Drop for AdmissionRelease<'_, F> {
+    fn drop(&mut self) {
+        (self.0)();
+    }
+}
+
+enum ModelAttemptOutcome {
+    Completed(Vec<ModelChunkMessage>),
+    TerminalFailure(Vec<ModelChunkMessage>, Option<Box<ModelChunkMessage>>),
+    Failed {
+        chunk: Box<ModelChunkMessage>,
+        retryable: bool,
+        retry_after: Option<u64>,
+        response: Option<Vec<u8>>,
+        accounting: Option<Box<ModelChunkMessage>>,
+        not_sent: bool,
+    },
+}
+
+fn completion_outcome(
+    open: &ModelOpenMessage,
+    completion: &crate::HttpsSseProviderCompletion,
+) -> Result<ModelAttemptOutcome, DeviceModelFailure> {
+    let chunks = completion
+        .frames
+        .iter()
+        .map(|frame| {
+            let mut chunk = model_chunk(
+                open,
+                i64::try_from(frame.sequence()).map_err(|_| DeviceProviderError)?,
+            );
+            chunk.payload = Some(frame.encoded_payload());
+            chunk.is_final = frame.is_terminal();
+            Ok(chunk)
+        })
+        .collect::<Result<Vec<_>, DeviceProviderError>>()?;
+    if let crate::ProviderGatewayTerminal::Failed { failure, charge } = completion.terminal {
+        let mut accounting = chunks.last().cloned();
+        if let Some(charge) = charge
+            && let Some(chunk) = accounting.as_mut()
+        {
+            let mut value: serde_json::Value = serde_json::from_str(
+                completion
+                    .frames
+                    .last()
+                    .ok_or(DeviceProviderError)?
+                    .payload_json(),
+            )?;
+            if let Some(cost) = charge.actual_cost_micros {
+                value
+                    .as_object_mut()
+                    .ok_or(DeviceProviderError)?
+                    .insert("actualCostMicros".to_owned(), cost.into());
+            }
+            chunk.payload = Some(encoded_json(&value)?);
+        }
+        let (code, retryable) = match failure.kind {
+            crate::ModelAttemptFailureKind::RateLimit => ("DEVICE_PROVIDER_RATE_LIMITED", true),
+            crate::ModelAttemptFailureKind::Server => ("DEVICE_PROVIDER_UPSTREAM_FAILED", true),
+            crate::ModelAttemptFailureKind::Timeout | crate::ModelAttemptFailureKind::Transport => {
+                ("DEVICE_PROVIDER_TRANSPORT_FAILED", true)
+            }
+            _ => {
+                return Ok(ModelAttemptOutcome::TerminalFailure(
+                    chunks,
+                    accounting.map(Box::new),
+                ));
+            }
+        };
+        let value: serde_json::Value = serde_json::from_str(
+            completion
+                .frames
+                .last()
+                .ok_or(DeviceProviderError)?
+                .payload_json(),
+        )?;
+        let error = value.get("error").ok_or(DeviceProviderError)?;
+        let metadata = crate::ProviderFailureMetadata {
+            status: error
+                .get("status")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|status| u16::try_from(status).ok()),
+            provider_retry_after_millis: error
+                .get("providerRetryAfterMillis")
+                .and_then(serde_json::Value::as_u64),
+            provider_request_id: error
+                .get("providerRequestId")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+            diagnostic: None,
+        };
+        return Ok(ModelAttemptOutcome::Failed {
+            chunk: Box::new(model_failure_metadata(open, code, retryable, &metadata)?),
+            retryable,
+            retry_after: metadata.provider_retry_after_millis,
+            response: None,
+            accounting: accounting.map(Box::new),
+            not_sent: false,
+        });
+    }
+    Ok(ModelAttemptOutcome::Completed(chunks))
+}
+
+fn observed_accounting_chunk(
+    open: &ModelOpenMessage,
+    response_id: &str,
+    usage: crate::ProviderTokenUsage,
+) -> Result<ModelChunkMessage, DeviceProviderError> {
+    let mut chunk = model_chunk(open, 1);
+    chunk.is_final = true;
+    chunk.payload = Some(encoded_json(
+        &serde_json::json!({"type":"failed","responseId":response_id,"tokenUsage":{"inputTokens":usage.input_tokens,"outputTokens":usage.output_tokens,"cachedInputTokens":usage.cached_input_tokens,"cacheWriteInputTokens":usage.cache_write_input_tokens,"reasoningOutputTokens":usage.reasoning_output_tokens}}),
+    )?);
+    Ok(chunk)
+}
+
+fn encoded_json(
+    value: &serde_json::Value,
+) -> Result<winwincode_execution_port::generated::EncodedPayload, DeviceProviderError> {
+    let bytes = serde_json::to_vec(value)?;
+    Ok(winwincode_execution_port::generated::EncodedPayload {
+        content_type: "application/json".to_owned(),
+        data_base64: STANDARD.encode(&bytes),
+        payload_digest: winwincode_domain::Sha256Digest(format!(
+            "sha256:{:x}",
+            Sha256::digest(&bytes)
+        )),
+    })
+}
+
+fn model_failure_metadata(
+    open: &ModelOpenMessage,
+    code: &'static str,
+    retryable: bool,
+    metadata: &crate::ProviderFailureMetadata,
+) -> Result<ModelChunkMessage, DeviceProviderError> {
+    let mut chunk = model_failure(open, code);
+    chunk.error.as_mut().ok_or(DeviceProviderError)?.retryable = retryable;
+    let mut value = serde_json::to_value(metadata)?;
+    value.as_object_mut().ok_or(DeviceProviderError)?.insert(
+        "providerErrorKind".to_owned(),
+        serde_json::Value::String(
+            code.strip_prefix("DEVICE_PROVIDER_")
+                .unwrap_or(code)
+                .to_ascii_lowercase(),
+        ),
+    );
+    chunk.payload = Some(encoded_json(&value)?);
+    Ok(chunk)
+}
 
 impl DeviceProviderStore {
     /// Executes a model request using this Device's configuration and secret.
@@ -84,7 +246,27 @@ impl DeviceProviderStore {
         open: &ModelOpenMessage,
         can_start: impl Fn() -> bool,
     ) -> Result<Vec<ModelChunkMessage>, DeviceProviderError> {
-        self.execute_model_with(open, &can_start, || self.invoke_model(open, &can_start))
+        self.execute_model_with(open, &can_start, || {
+            self.invoke_model(open, &can_start, false, &|| Ok(()), &|| {})
+        })
+    }
+
+    /// Recovers transient failures within this logical model step. Each actual
+    /// invocation has a separate durable receipt; terminal exchange replay never
+    /// opens a new network request. Admission is released before every wait.
+    ///
+    /// # Errors
+    /// Rejects changed exchange identities or unavailable durable storage.
+    pub fn execute_model_recovering_authorized(
+        &self,
+        open: &ModelOpenMessage,
+        can_start: impl Fn() -> bool,
+        before_attempt: impl Fn() -> Result<(), DeviceProviderError>,
+        after_attempt: impl Fn(),
+    ) -> Result<Vec<ModelChunkMessage>, DeviceProviderError> {
+        self.execute_model_with(open, &can_start, || {
+            self.invoke_model(open, &can_start, true, &before_attempt, &after_attempt)
+        })
     }
 
     /// Retains a bounded terminal failure when Provider admission storage is unavailable.
@@ -134,6 +316,7 @@ impl DeviceProviderStore {
         invoke: impl FnOnce() -> Result<Vec<ModelChunkMessage>, DeviceModelFailure>,
     ) -> Result<Vec<ModelChunkMessage>, DeviceProviderError> {
         if self.model_cancelled(&open.model_exchange_id.0)? {
+            self.settle_abandoned_model_accounting(&open.model_exchange_id.0)?;
             return Ok(Vec::new());
         }
         let key = (
@@ -143,6 +326,9 @@ impl DeviceProviderStore {
                 .to_owned(),
             open.model_exchange_id.0.clone(),
         );
+        let _owner = self
+            .try_model_exchange_owner(&open.model_exchange_id.0)?
+            .ok_or(DeviceProviderError)?;
         let mut active = ACTIVE_EXCHANGES
             .get_or_init(Mutex::default)
             .lock()
@@ -168,6 +354,9 @@ impl DeviceProviderStore {
             return Err(DeviceProviderError);
         }
         if let Some(chunks) = previous {
+            if !active.contains_key(&key) {
+                self.settle_interrupted_invocations(open)?;
+            }
             return Ok(serde_json::from_str(&chunks)?);
         }
         if inserted == 0 {
@@ -177,6 +366,7 @@ impl DeviceProviderStore {
                 return Err(DeviceProviderError);
             }
             let chunks = vec![model_failure(open, "DEVICE_MODEL_INTERRUPTED")];
+            self.settle_interrupted_invocations(open)?;
             self.connection.execute("UPDATE exchanges SET chunks=?1 WHERE exchange_id=?2 AND chunks IS NULL AND cancelled=0",params![serde_json::to_string(&chunks)?,open.model_exchange_id.0])?;
             return Ok(chunks);
         }
@@ -209,6 +399,9 @@ impl DeviceProviderStore {
         &self,
         open: &ModelOpenMessage,
         can_start: &impl Fn() -> bool,
+        recover: bool,
+        before_attempt: &impl Fn() -> Result<(), DeviceProviderError>,
+        after_attempt: &impl Fn(),
     ) -> Result<Vec<ModelChunkMessage>, DeviceModelFailure> {
         let mut payload =
             validated_model_payload(open).map_err(|_| DeviceModelFailure::RequestInvalid)?;
@@ -245,87 +438,206 @@ impl DeviceProviderStore {
             }
             payload = serde_json::to_vec(&request)?;
         }
-        let adapter = crate::device_store::adapter(&config, self.custom_headers(&provider_id)?)
-            .map_err(|_| DeviceModelFailure::InvalidConfiguration)?;
-        let adapter_request_id = format!("device-{}", open.model_exchange_id.0);
-        let adapter = match self.active_cancellation(&open.model_exchange_id.0)? {
-            Some(cancellation) => adapter.with_cancellation(cancellation),
-            None => return Err(DeviceModelFailure::Unavailable),
-        };
-        if self.model_cancelled(&open.model_exchange_id.0)? {
-            let _ = adapter.control(
-                &open.model_exchange_id,
-                &adapter_request_id,
-                ProviderStreamControlAction::Cancel,
-            );
-            return Ok(Vec::new());
-        }
-        let mut leak_gate = CredentialLeakGate::new();
-        leak_gate.track_secret(&secret);
+        let headers = self.custom_headers(&provider_id)?;
         self.retain_prepared_payload(open, &payload)?;
-        if !can_start() {
-            return Err(DeviceModelFailure::LeaseExpired);
-        }
-        if let Err(error) = adapter.open(
-            &ProviderAdapterInvocation {
+        let mut attempt_number = 0_i64;
+        loop {
+            if self.model_cancelled(&open.model_exchange_id.0)? {
+                return Ok(Vec::new());
+            }
+            if !can_start() {
+                return Err(DeviceModelFailure::LeaseExpired);
+            }
+            before_attempt()?;
+            let release = AdmissionRelease(after_attempt);
+            if self.model_cancelled(&open.model_exchange_id.0)? {
+                return Ok(Vec::new());
+            }
+            if !can_start() {
+                return Err(DeviceModelFailure::LeaseExpired);
+            }
+            attempt_number = attempt_number
+                .checked_add(1)
+                .ok_or(DeviceModelFailure::Unavailable)?;
+            let adapter_request_id = format!(
+                "device-{}:attempt:{attempt_number}",
+                open.model_exchange_id.0
+            );
+            let adapter = crate::device_store::adapter(&config, headers.clone())
+                .map_err(|_| DeviceModelFailure::InvalidConfiguration)?;
+            let Some(cancellation) = self.active_cancellation(&open.model_exchange_id.0)? else {
+                return Err(DeviceModelFailure::Unavailable);
+            };
+            let adapter = adapter.with_cancellation(cancellation);
+            let inserted = self.connection.execute(
+                "INSERT INTO model_invocation_attempts(exchange_id,attempt_number,adapter_request_id,state) SELECT ?1,?2,?3,'prepared' WHERE EXISTS(SELECT 1 FROM exchanges WHERE exchange_id=?1 AND cancelled=0 AND chunks IS NULL) AND NOT EXISTS(SELECT 1 FROM accounting_closed_attempts WHERE job_id=?4 AND attempt=?5)",
+                params![open.model_exchange_id.0, attempt_number, adapter_request_id, open.lease.job_id.0, open.lease.attempt],
+            )?;
+            if inserted != 1 {
+                return Err(DeviceModelFailure::Unavailable);
+            }
+            if self.model_cancelled(&open.model_exchange_id.0)? || !can_start() {
+                self.connection.execute("UPDATE model_invocation_attempts SET state='not_sent' WHERE exchange_id=?1 AND attempt_number=?2 AND state='prepared'",params![open.model_exchange_id.0,attempt_number])?;
+                if self.model_cancelled(&open.model_exchange_id.0)? {
+                    return Ok(Vec::new());
+                }
+                return Err(DeviceModelFailure::LeaseExpired);
+            }
+            let mut leak_gate = CredentialLeakGate::new();
+            leak_gate.track_secret(&secret);
+            let invocation = ProviderAdapterInvocation {
                 model_exchange_id: &open.model_exchange_id,
                 request_id: &open.request_id,
                 adapter_request_id: &adapter_request_id,
                 model_id: &model_id,
                 content_type: &open.request.content_type,
                 payload: &payload,
-            },
-            &secret,
-        ) {
-            return Ok(vec![model_failure(
-                open,
-                adapter_error_message(error.kind()),
-            )]);
-        }
-        drop(secret);
-        let receipt = ProviderGatewayOpenReceipt {
-            model_exchange_id: open.model_exchange_id.clone(),
-            request_id: open.request_id.clone(),
-            route: ModelRoute {
-                provider_id: provider_id.clone(),
-                model_id,
-                credential_reference_id: CredentialReferenceId(format!(
-                    "crd_0{}",
-                    &format!("{:X}", Sha256::digest(provider_id.as_bytes()))[..25]
-                )),
-            },
-            adapter_request_id,
-            idempotent_replay: false,
-            stream_leak_gate: leak_gate,
-        };
-        let completion = adapter.drain_canonical(&receipt);
-        let _ = adapter.control(
-            &open.model_exchange_id,
-            &receipt.adapter_request_id,
-            ProviderStreamControlAction::Release,
-        );
-        let completion = match completion {
-            Ok(completion) => completion,
-            Err(error) => {
-                return Ok(vec![model_failure(
-                    open,
-                    provider_error_message(error.kind()),
-                )]);
+            };
+            self.connection.execute("UPDATE model_invocation_attempts SET state='invoking' WHERE exchange_id=?1 AND attempt_number=?2 AND state='prepared'",params![open.model_exchange_id.0,attempt_number])?;
+            let outcome = if let Err(error) = adapter.open(&invocation, &secret) {
+                ModelAttemptOutcome::Failed {
+                    chunk: Box::new(model_failure_metadata(
+                        open,
+                        adapter_error_message(error.kind()),
+                        error.retryable(),
+                        error.metadata(),
+                    )?),
+                    retryable: error.retryable(),
+                    retry_after: error.metadata().provider_retry_after_millis,
+                    response: None,
+                    accounting: None,
+                    not_sent: matches!(
+                        error.kind(),
+                        crate::ProviderAdapterErrorKind::RequestInvalid
+                            | crate::ProviderAdapterErrorKind::RequestTranslation
+                            | crate::ProviderAdapterErrorKind::RequestSizeLimit
+                            | crate::ProviderAdapterErrorKind::IdentityConflict
+                    ),
+                }
+            } else {
+                let receipt = ProviderGatewayOpenReceipt {
+                    model_exchange_id: open.model_exchange_id.clone(),
+                    request_id: open.request_id.clone(),
+                    route: ModelRoute {
+                        provider_id: provider_id.clone(),
+                        model_id: model_id.clone(),
+                        credential_reference_id: CredentialReferenceId(format!(
+                            "crd_0{}",
+                            &format!("{:X}", Sha256::digest(provider_id.as_bytes()))[..25]
+                        )),
+                    },
+                    adapter_request_id: adapter_request_id.clone(),
+                    idempotent_replay: false,
+                    stream_leak_gate: leak_gate,
+                };
+                match adapter.drain_canonical(&receipt) {
+                    Ok(completion) => completion_outcome(open, &completion)?,
+                    Err(error) => ModelAttemptOutcome::Failed {
+                        chunk: Box::new(model_failure_metadata(
+                            open,
+                            provider_error_message(error.kind()),
+                            error.retryable(),
+                            error.metadata(),
+                        )?),
+                        retryable: error.retryable(),
+                        retry_after: error.metadata().provider_retry_after_millis,
+                        response: error.response().map(<[u8]>::to_vec),
+                        accounting: error
+                            .observed_receipt()
+                            .map(|(response_id, usage)| {
+                                observed_accounting_chunk(open, response_id, *usage)
+                            })
+                            .transpose()?
+                            .map(Box::new),
+                        not_sent: false,
+                    },
+                }
+            };
+            let _ = adapter.control(
+                &open.model_exchange_id,
+                &adapter_request_id,
+                ProviderStreamControlAction::Release,
+            );
+            let (chunks, retryable, retry_after) = match outcome {
+                ModelAttemptOutcome::Completed(chunks) => {
+                    self.connection.execute("UPDATE model_invocation_attempts SET state='completed',accounting_chunks=?1 WHERE exchange_id=?2 AND attempt_number=?3 AND state='invoking'", params![serde_json::to_string(&chunks)?, open.model_exchange_id.0, attempt_number])?;
+                    (chunks, false, None)
+                }
+                ModelAttemptOutcome::TerminalFailure(chunks, accounting) => {
+                    self.connection.execute("UPDATE model_invocation_attempts SET state='failed',failure_chunks=?1,accounting_chunks=?2 WHERE exchange_id=?3 AND attempt_number=?4 AND state='invoking'",params![serde_json::to_string(&chunks)?,accounting.map(|chunk|serde_json::to_string(&vec![chunk])).transpose()?,open.model_exchange_id.0,attempt_number])?;
+                    (chunks, false, None)
+                }
+                ModelAttemptOutcome::Failed {
+                    chunk,
+                    retryable,
+                    retry_after,
+                    response,
+                    accounting,
+                    not_sent,
+                } => {
+                    let chunks = vec![*chunk];
+                    self.connection.execute("UPDATE model_invocation_attempts SET state=?6,failure_chunks=?1,accounting_chunks=?2,response_bytes=?3 WHERE exchange_id=?4 AND attempt_number=?5 AND state='invoking'", params![serde_json::to_string(&chunks)?, accounting.map(|chunk| serde_json::to_string(&vec![chunk])).transpose()?, response, open.model_exchange_id.0, attempt_number,if not_sent {"not_sent"} else {"failed"}])?;
+                    (chunks, retryable, retry_after)
+                }
+            };
+            drop(release);
+            if !recover || !retryable {
+                return Ok(chunks);
             }
-        };
-        completion
-            .frames
-            .iter()
-            .map(|frame| {
-                let mut chunk = model_chunk(
-                    open,
-                    i64::try_from(frame.sequence()).map_err(|_| DeviceProviderError)?,
+            let default_wait = 250_u64
+                .saturating_mul(
+                    1_u64 << u32::try_from(attempt_number.saturating_sub(1).min(7)).unwrap_or(7),
+                )
+                .min(30_000);
+            let duration =
+                std::time::Duration::from_millis(retry_after.unwrap_or(0).max(default_wait));
+            let started = std::time::Instant::now();
+            while started.elapsed() < duration {
+                if self.model_cancelled(&open.model_exchange_id.0)? {
+                    return Ok(Vec::new());
+                }
+                if !can_start() {
+                    return Err(DeviceModelFailure::LeaseExpired);
+                }
+                std::thread::sleep(
+                    duration
+                        .saturating_sub(started.elapsed())
+                        .min(std::time::Duration::from_millis(50)),
                 );
-                chunk.payload = Some(frame.encoded_payload());
-                chunk.is_final = frame.is_terminal();
-                Ok(chunk)
-            })
-            .collect()
+            }
+        }
+    }
+
+    pub(crate) fn settle_interrupted_invocations(
+        &self,
+        open: &ModelOpenMessage,
+    ) -> Result<(), DeviceProviderError> {
+        let chunks = serde_json::to_string(&vec![model_failure(open, "DEVICE_MODEL_INTERRUPTED")])?;
+        self.connection.execute("UPDATE model_invocation_attempts SET state=CASE WHEN state='prepared' THEN 'not_sent' ELSE 'interrupted_unknown' END,failure_chunks=CASE WHEN state='invoking' THEN COALESCE(failure_chunks,?1) ELSE failure_chunks END WHERE exchange_id=?2 AND state IN ('prepared','invoking')",params![chunks,open.model_exchange_id.0])?;
+        Ok(())
+    }
+
+    pub(crate) fn settle_abandoned_model_accounting(
+        &self,
+        exchange_id: &str,
+    ) -> Result<(), DeviceProviderError> {
+        let Some(_owner) = self.try_model_exchange_owner(exchange_id)? else {
+            return Ok(());
+        };
+        let request: Option<Option<String>> = self
+            .connection
+            .query_row(
+                "SELECT request_open FROM exchanges WHERE exchange_id=?1 AND request_open IS NOT NULL",
+                [exchange_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(Some(request)) = request {
+            let open: ModelOpenMessage = serde_json::from_str(&request)?;
+            self.settle_interrupted_invocations(&open)?;
+            self.connection.execute("UPDATE exchanges SET accounting_chunks=COALESCE(accounting_chunks,chunks,?1) WHERE exchange_id=?2",params![serde_json::to_string(&vec![model_failure(&open,"DEVICE_MODEL_INTERRUPTED")])?,exchange_id])?;
+        }
+        Ok(())
     }
 
     // Retain the exact adapter input before any network side effect. Prepared does
@@ -367,6 +679,8 @@ impl DeviceProviderStore {
             .cloned();
         if let Some(cancellation) = active {
             cancellation.cancel();
+        } else {
+            self.settle_abandoned_model_accounting(exchange_id)?;
         }
         Ok(())
     }
@@ -589,6 +903,21 @@ fn model_chunk(open: &ModelOpenMessage, sequence: i64) -> ModelChunkMessage {
 pub fn public_model_chunk(
     chunk: &ModelChunkMessage,
 ) -> Result<ModelChunkMessage, DeviceProviderError> {
+    let value = chunk
+        .payload
+        .as_ref()
+        .map(|payload| {
+            let bytes = STANDARD
+                .decode(&payload.data_base64)
+                .map_err(|_| DeviceProviderError)?;
+            if payload.content_type != "application/json"
+                || payload.payload_digest.0 != format!("sha256:{:x}", Sha256::digest(&bytes))
+            {
+                return Err(DeviceProviderError);
+            }
+            serde_json::from_slice::<serde_json::Value>(&bytes).map_err(Into::into)
+        })
+        .transpose()?;
     let mut public = chunk.clone();
     public.payload = None;
     public.error = None;
@@ -599,9 +928,7 @@ pub fn public_model_chunk(
             Sha256::digest(format!("public:{}", chunk.message_id.0))
         )[..25]
     ));
-    if chunk.payload.is_none()
-        && let Some(error) = &chunk.error
-    {
+    if let Some(error) = &chunk.error {
         let text = match error.message.as_str() {
             "DEVICE_PROVIDER_RATE_LIMITED" => {
                 "模型服务触发速率或额度限制，请检查服务商用量后重试。"
@@ -625,33 +952,24 @@ pub fn public_model_chunk(
             )),
         });
     }
-    if let Some(payload) = &chunk.payload {
-        let bytes = STANDARD
-            .decode(&payload.data_base64)
-            .map_err(|_| DeviceProviderError)?;
-        if payload.content_type != "application/json"
-            || payload.payload_digest.0 != format!("sha256:{:x}", Sha256::digest(&bytes))
-        {
-            return Err(DeviceProviderError);
-        }
-        let value: serde_json::Value = serde_json::from_slice(&bytes)?;
-        if value.get("type").and_then(serde_json::Value::as_str) == Some("output_text_delta") {
-            let delta = value
-                .get("delta")
-                .and_then(serde_json::Value::as_str)
-                .ok_or(DeviceProviderError)?;
-            let bytes = serde_json::to_vec(
-                &serde_json::json!({"type":"output_text_delta", "delta":delta}),
-            )?;
-            public.payload = Some(winwincode_execution_port::generated::EncodedPayload {
-                content_type: "application/json".to_owned(),
-                data_base64: STANDARD.encode(&bytes),
-                payload_digest: winwincode_domain::Sha256Digest(format!(
-                    "sha256:{:x}",
-                    Sha256::digest(&bytes)
-                )),
-            });
-        }
+    if chunk.error.is_none()
+        && let Some(value) = value
+        && value.get("type").and_then(serde_json::Value::as_str) == Some("output_text_delta")
+    {
+        let delta = value
+            .get("delta")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(DeviceProviderError)?;
+        let bytes =
+            serde_json::to_vec(&serde_json::json!({"type":"output_text_delta", "delta":delta}))?;
+        public.payload = Some(winwincode_execution_port::generated::EncodedPayload {
+            content_type: "application/json".to_owned(),
+            data_base64: STANDARD.encode(&bytes),
+            payload_digest: winwincode_domain::Sha256Digest(format!(
+                "sha256:{:x}",
+                Sha256::digest(&bytes)
+            )),
+        });
     }
     Ok(public)
 }
@@ -675,11 +993,15 @@ mod tests {
         reason = "exercise the accounting scan, live invocation, and exact replay on two real SQLite connections"
     )]
     fn assert_accounting_scan_allows_live_model(after_invocation: bool) {
-        use rusqlite::{functions::FunctionFlags, types::Value};
+        use rusqlite::{
+            functions::FunctionFlags,
+            hooks::{AuthAction, AuthContext, Authorization, TransactionOperation},
+            types::Value,
+        };
         use std::{
             cell::{Cell, RefCell},
             sync::{
-                Mutex,
+                Arc, Mutex,
                 atomic::{AtomicBool, Ordering},
                 mpsc,
             },
@@ -734,6 +1056,25 @@ mod tests {
         let (release, released) = mpsc::channel();
         let released = Mutex::new(released);
         let paused = AtomicBool::new(false);
+        // Recovery probes run before the financial snapshot. Observe BEGIN on
+        // this connection so the fixture pauses the subsequent transactional
+        // receipt scan, preserving the original stale-WAL-snapshot regression.
+        let transaction_started = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&transaction_started);
+        accounting
+            .connection
+            .authorizer(Some(move |context: AuthContext<'_>| {
+                if matches!(
+                    context.action,
+                    AuthAction::Transaction {
+                        operation: TransactionOperation::Begin
+                    }
+                ) {
+                    observed.store(true, Ordering::SeqCst);
+                }
+                Authorization::Allow
+            }))
+            .unwrap();
         accounting
             .connection
             .create_scalar_function(
@@ -741,7 +1082,9 @@ mod tests {
                 2,
                 FunctionFlags::SQLITE_UTF8,
                 move |context| {
-                    if !paused.swap(true, Ordering::SeqCst) {
+                    if transaction_started.load(Ordering::SeqCst)
+                        && !paused.swap(true, Ordering::SeqCst)
+                    {
                         scanning.send(()).unwrap();
                         released
                             .lock()

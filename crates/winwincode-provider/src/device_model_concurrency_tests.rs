@@ -180,6 +180,40 @@ fn replay_cancellation_and_invalid_payload_do_not_wait_for_another_provider_slot
 }
 
 #[test]
+fn an_actual_retry_requires_a_provider_slot_while_receipt_replay_does_not() {
+    let directory = TestDirectory::new("retry-admission");
+    let store = DeviceProviderStore::open(&directory.0).unwrap();
+    let retained = model_open("provider-a", 10);
+    let previous = store.execute_model(&retained).unwrap();
+    let mut held = (0..3)
+        .map(|index| permit(&store, &model_open("provider-a", index)))
+        .collect::<Vec<_>>();
+    let _replay = permit(&store, &retained);
+    assert_eq!(store.execute_model(&retained).unwrap(), previous);
+    assert!(matches!(
+        store.try_model_attempt_permit(&retained).unwrap(),
+        DeviceModelAdmission::Deferred
+    ));
+    drop(held.pop());
+    let retry = match store.try_model_attempt_permit(&retained).unwrap() {
+        DeviceModelAdmission::Ready(acquired) => acquired,
+        DeviceModelAdmission::Deferred => panic!("the released invocation slot is available"),
+    };
+    assert!(matches!(
+        store
+            .try_model_attempt_permit(&model_open("provider-a", 11))
+            .unwrap(),
+        DeviceModelAdmission::Deferred
+    ));
+    let _independent = permit(&store, &model_open("provider-b", 12));
+    drop(retry);
+    assert!(matches!(
+        store.try_model_attempt_permit(&retained).unwrap(),
+        DeviceModelAdmission::Ready(_)
+    ));
+}
+
+#[test]
 fn unsafe_provider_slot_paths_are_hard_errors_and_never_report_a_full_queue() {
     let directory = TestDirectory::new("permissions");
     let store = DeviceProviderStore::open(&directory.0).unwrap();

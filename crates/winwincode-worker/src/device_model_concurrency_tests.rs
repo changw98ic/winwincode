@@ -3,6 +3,9 @@
 //! The network fixture withholds every answer until every expected request arrives.
 //! Run the Device lane in a child process to isolate its TLS-root environment.
 
+#[path = "device_model_recovery_tests.rs"]
+mod recovery_tests;
+
 use super::{DeviceModelSendOutcome, DeviceModels};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rcgen::{CertifiedKey, generate_simple_self_signed};

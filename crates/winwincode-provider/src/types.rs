@@ -122,15 +122,50 @@ pub enum ProviderAdapterErrorKind {
 }
 
 /// Provider adapter error which cannot copy upstream response text.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct ProviderAdapterError {
     kind: ProviderAdapterErrorKind,
     message: &'static str,
+    metadata: Option<Box<ProviderFailureMetadata>>,
 }
+
+/// Validated transport facts; response bodies and arbitrary header values are absent.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderFailureMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_retry_after_millis: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<ProviderFailureDiagnostic>,
+}
+
+/// Static parser locations, never copied from a response field or value.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderFailureDiagnostic {
+    pub stage: String,
+    pub event_type: String,
+    pub field_path: String,
+}
+
+static EMPTY_PROVIDER_FAILURE_METADATA: ProviderFailureMetadata = ProviderFailureMetadata {
+    status: None,
+    provider_retry_after_millis: None,
+    provider_request_id: None,
+    diagnostic: None,
+};
 
 impl ProviderAdapterError {
     const fn new(kind: ProviderAdapterErrorKind, message: &'static str) -> Self {
-        Self { kind, message }
+        Self {
+            kind,
+            message,
+            metadata: None,
+        }
     }
 
     #[must_use]
@@ -191,39 +226,73 @@ impl ProviderAdapterError {
 
     #[must_use]
     pub const fn rejected() -> Self {
-        Self {
-            kind: ProviderAdapterErrorKind::Rejected,
-            message: "Provider rejected the request",
-        }
+        Self::new(
+            ProviderAdapterErrorKind::Rejected,
+            "Provider rejected the request",
+        )
     }
 
     #[must_use]
     pub const fn rate_limited() -> Self {
-        Self {
-            kind: ProviderAdapterErrorKind::RateLimited,
-            message: "Provider rate limit rejected the request",
-        }
+        Self::new(
+            ProviderAdapterErrorKind::RateLimited,
+            "Provider rate limit rejected the request",
+        )
     }
 
     #[must_use]
     pub const fn unavailable() -> Self {
-        Self {
-            kind: ProviderAdapterErrorKind::Unavailable,
-            message: "Provider adapter is unavailable",
-        }
+        Self::new(
+            ProviderAdapterErrorKind::Unavailable,
+            "Provider adapter is unavailable",
+        )
     }
 
     #[must_use]
     pub const fn protocol() -> Self {
-        Self {
-            kind: ProviderAdapterErrorKind::Protocol,
-            message: "Provider adapter response is invalid",
-        }
+        Self::new(
+            ProviderAdapterErrorKind::Protocol,
+            "Provider adapter response is invalid",
+        )
     }
 
     #[must_use]
     pub const fn kind(&self) -> ProviderAdapterErrorKind {
         self.kind
+    }
+
+    #[must_use]
+    pub fn with_metadata(mut self, metadata: ProviderFailureMetadata) -> Self {
+        self.metadata = (metadata != EMPTY_PROVIDER_FAILURE_METADATA).then(|| Box::new(metadata));
+        self
+    }
+
+    #[must_use]
+    pub fn metadata(&self) -> &ProviderFailureMetadata {
+        self.metadata
+            .as_deref()
+            .unwrap_or(&EMPTY_PROVIDER_FAILURE_METADATA)
+    }
+
+    #[must_use]
+    pub const fn retryable(&self) -> bool {
+        matches!(
+            self.kind,
+            ProviderAdapterErrorKind::Connection
+                | ProviderAdapterErrorKind::Upstream
+                | ProviderAdapterErrorKind::RateLimited
+        )
+    }
+}
+
+impl fmt::Debug for ProviderAdapterError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderAdapterError")
+            .field("kind", &self.kind)
+            .field("message", &self.message)
+            .field("metadata", self.metadata())
+            .finish()
     }
 }
 

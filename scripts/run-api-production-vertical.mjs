@@ -1665,11 +1665,11 @@ function deliveryFailureSummary(detail, modelRoute = configuredModelRoute()) {
 function transientDeliveryErrorSummary(errors) {
   const counts = new Map()
   for (const error of errors) {
-    const key = `${error.command}:${error.code}`
+    const key = `${error.query ?? error.command}:${error.code}`
     const previous = counts.get(key)
     if (previous === undefined) {
       counts.set(key, {
-        command: error.command,
+        ...(error.query === undefined ? { command: error.command } : { query: error.query }),
         code: error.code,
         status: error.status,
         count: 1,
@@ -1727,22 +1727,42 @@ export async function driveDelivery(
   const transientErrors = []
   const deadline = timeoutMillis === null ? Infinity : now() + timeoutMillis
   let detail = null
+  let workRunAggregate = null
   let terminalCommand = null
   let idlePolls = 0
   const stuckPollLimit = 80
   for (;;) {
     await hooks.assertRunning?.()
-    detail = (await client.query('delivery.get', { deliveryId })).result
-    // Scheduling and completion use the current WorkRun aggregate.
-    let workRunAggregate
+    // A failed cursor-bound query invalidates the entire observation. Re-read
+    // this Delivery before querying its WorkRuns rather than acting on stale
+    // attention, status or revision facts.
+    detail = null
+    workRunAggregate = null
+    let query = 'delivery.get'
     try {
+      detail = (await client.query(query, { deliveryId })).result
+      query = 'workrun.get'
       workRunAggregate = (await client.query('workrun.get', {
         deliveryId,
         workItemId: null,
         atCursor: detail.readCursor,
       })).result
     } catch (error) {
-      if (error?.code === 'REVISION_CONFLICT' || error?.code === 'READ_CURSOR_EXPIRED') continue
+      if (query === 'workrun.get'
+          && (error?.code === 'REVISION_CONFLICT' || error?.code === 'READ_CURSOR_EXPIRED')) continue
+      if (error?.code === 'TRUSTED_FACTS_UNAVAILABLE' && error.status === 503) {
+        detail = null
+        workRunAggregate = null
+        if (transientErrors.length < 128) {
+          transientErrors.push({ query, code: error.code, status: error.status, message: error.message })
+        }
+        if (now() >= deadline) {
+          error.unresolvedDeviceExecution = true
+          throw error
+        }
+        await new Promise(resolvePromise => setTimeout(resolvePromise, POLL_INTERVAL_MILLIS))
+        continue
+      }
       throw error
     }
     await hooks.onProjection?.({ detail, workRunAggregate })
@@ -1910,11 +1930,9 @@ export async function driveDelivery(
   }
 
   const terminal = detail
-  const terminalWorkRunAggregate = (await client.query('workrun.get', {
-    deliveryId,
-    workItemId: null,
-    atCursor: terminal.readCursor ?? null,
-  })).result
+  // The successful pair already contains the authoritative terminal aggregate.
+  // Do not introduce another unpaired query after accepting completion.
+  const terminalWorkRunAggregate = workRunAggregate
   assertCompletedDelivery(terminal, terminalWorkRunAggregate)
   return {
     actions,

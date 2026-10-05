@@ -49,6 +49,11 @@ impl ExchangeIo {
         if self.cancelled.load(Ordering::Acquire) {
             return Err(interrupted());
         }
+        // ureq's not_zero() maps an elapsed deadline to one additional second.
+        // An expired configured deadline must fail before granting idle time.
+        if next.after.is_zero() {
+            return Err(ureq::Error::Timeout(next.reason));
+        }
         let duration = if self.body.load(Ordering::Acquire) {
             self.idle
         } else {
@@ -62,6 +67,7 @@ impl ExchangeIo {
             .map_or(duration, |value| duration.min(*value)))
     }
 }
+
 fn interrupted() -> ureq::Error {
     std::io::Error::new(
         std::io::ErrorKind::ConnectionAborted,
@@ -195,5 +201,45 @@ impl ExchangeCancellation {
         if !self.is_cancelled() {
             notified.await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ureq::unversioned::transport::time::Duration as TransportDuration;
+
+    #[test]
+    fn an_expired_configured_deadline_cannot_restart_with_an_idle_wait() {
+        let io = ExchangeIo::new(Duration::from_secs(1), Duration::from_secs(2));
+        io.body_started();
+        for reason in [ureq::Timeout::Global, ureq::Timeout::RecvBody] {
+            assert!(matches!(
+                io.timeout(NextTimeout { after: Duration::ZERO.into(), reason }),
+                Err(ureq::Error::Timeout(actual)) if actual == reason,
+            ));
+        }
+    }
+
+    #[test]
+    fn a_disabled_total_deadline_preserves_idle_wait_and_future_deadlines() {
+        let io = ExchangeIo::new(Duration::from_secs(1), Duration::from_secs(2));
+        io.body_started();
+        assert_eq!(
+            io.timeout(NextTimeout {
+                after: TransportDuration::NotHappening,
+                reason: ureq::Timeout::Global,
+            })
+            .unwrap(),
+            Duration::from_secs(2),
+        );
+        assert_eq!(
+            io.timeout(NextTimeout {
+                after: Duration::from_millis(50).into(),
+                reason: ureq::Timeout::Global,
+            })
+            .unwrap(),
+            Duration::from_millis(50),
+        );
     }
 }

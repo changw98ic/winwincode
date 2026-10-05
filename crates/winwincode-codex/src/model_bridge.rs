@@ -23,7 +23,10 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 use winwincode_domain::{CodexThreadId, ExecutionMessageId, Instant, ModelExchangeId, RequestId};
 use winwincode_execution_port::{
-    generated::{EncodedPayload, ExecutionPortMessage, ModelChunkMessage, ModelGatewayRoute},
+    generated::{
+        EncodedPayload, ExecutionPortError, ExecutionPortMessage, ModelChunkMessage,
+        ModelGatewayRoute,
+    },
     replay::{ReplayAuthority, ReplayStreamKey},
     runtime_replay::RuntimeReplayIdentity,
     typed_replay::frame_from_message,
@@ -565,10 +568,7 @@ impl ModelChunkSink for KernelStreamSink {
         delivery: ModelChunkDelivery<'_>,
     ) -> Result<ModelSinkDeliveryStatus, Self::Error> {
         let item = if let Some(error) = delivery.error {
-            Err(ModelPortFailure::new(
-                format!("{:?}", error.code),
-                "Provider Gateway returned a terminal model error",
-            ))
+            Err(decode_provider_failure(error, delivery.payload)?)
         } else if let Some(payload) = delivery.payload {
             if payload.content_type != "application/json" {
                 return Err(BridgeError::InvalidPayload);
@@ -923,7 +923,12 @@ impl ExecutionPortModelBridge {
         self.ordinal_store
             .retain_model_call_frame(&owner.run_key, &owner.model_call_id, chunk)
             .map_err(model_frame_store_error)?;
-        if let Some(payload) = &chunk.payload {
+        if let Some(error) = &chunk.error {
+            let _ = self.sink.deliver_item(
+                &chunk.model_exchange_id,
+                Err(decode_provider_failure(error, chunk.payload.as_ref())?),
+            );
+        } else if let Some(payload) = &chunk.payload {
             let bytes = STANDARD
                 .decode(&payload.data_base64)
                 .map_err(|_| BridgeError::InvalidPayload)?;
@@ -2230,10 +2235,9 @@ fn replay_model_call_frames(
             )
             .map_err(|_| model_failure(BridgeError::StaleAuthority))?;
         if let Some(error) = &chunk.error {
-            items.push(Err(ModelPortFailure::new(
-                format!("{:?}", error.code),
-                "Provider Gateway returned a terminal model error",
-            )));
+            items
+                .push(Err(decode_provider_failure(error, chunk.payload.as_ref())
+                    .map_err(model_failure)?));
         } else if let Some(payload) = &chunk.payload {
             items.push(Ok(decode_response_payload(payload)?));
         } else if !chunk.is_final {
@@ -2244,6 +2248,110 @@ fn replay_model_call_frames(
         return Err(model_failure(BridgeError::Conflict));
     }
     Ok(Box::pin(stream::iter(items)) as ModelPortStream)
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DeviceModelFailureMetadata {
+    provider_error_kind: Option<String>,
+    status: Option<u16>,
+    provider_retry_after_millis: Option<u64>,
+    provider_request_id: Option<String>,
+    diagnostic: Option<DeviceModelFailureDiagnostic>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DeviceModelFailureDiagnostic {
+    stage: Option<String>,
+    event_type: Option<String>,
+    field_path: Option<String>,
+}
+
+fn decode_provider_failure(
+    error: &ExecutionPortError,
+    payload: Option<&EncodedPayload>,
+) -> Result<ModelPortFailure, BridgeError> {
+    let metadata: DeviceModelFailureMetadata = payload
+        .map(|payload| {
+            let json = decode_response_payload(payload).map_err(|_| BridgeError::InvalidPayload)?;
+            serde_json::from_str(&json).map_err(|_| BridgeError::InvalidPayload)
+        })
+        .transpose()?
+        .unwrap_or_default();
+    if metadata
+        .status
+        .is_some_and(|status| !(100..=599).contains(&status))
+        || metadata.provider_request_id.as_ref().is_some_and(|value| {
+            value.is_empty()
+                || value.len() > 256
+                || !value.bytes().all(|byte| byte.is_ascii_graphic())
+        })
+        || metadata.provider_error_kind.as_ref().is_some_and(|value| {
+            value.is_empty()
+                || value.len() > 64
+                || !value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        })
+        || metadata.diagnostic.as_ref().is_some_and(|diagnostic| {
+            [
+                &diagnostic.stage,
+                &diagnostic.event_type,
+                &diagnostic.field_path,
+            ]
+            .into_iter()
+            .flatten()
+            .any(|value| {
+                value.is_empty() || value.len() > 256 || value.chars().any(char::is_control)
+            })
+        })
+    {
+        return Err(BridgeError::InvalidPayload);
+    }
+    let wire_code = serde_json::to_value(&error.code).map_err(|_| BridgeError::InvalidPayload)?;
+    let wire_code = wire_code.as_str().ok_or(BridgeError::InvalidPayload)?;
+    let code = match wire_code {
+        "DEVICE_PROVIDER_RATE_LIMITED" => "RATE_LIMIT",
+        "DEVICE_PROVIDER_UPSTREAM_FAILED" => "SERVER",
+        "DEVICE_PROVIDER_CONNECTION_FAILED" | "DEVICE_PROVIDER_TRANSPORT_FAILED" => "TRANSPORT",
+        "DEVICE_PROVIDER_RESPONSE_INCOMPLETE" => "INCOMPLETE_STREAM",
+        "DEVICE_PROVIDER_REQUEST_REJECTED" => match metadata.status {
+            Some(401 | 403) => "AUTH",
+            Some(429) => "RATE_LIMIT",
+            Some(500..=599) => "SERVER",
+            _ => "INVALID_REQUEST",
+        },
+        "DEVICE_PROVIDER_REQUEST_INVALID"
+        | "DEVICE_PROVIDER_REQUEST_TRANSLATION_FAILED"
+        | "DEVICE_PROVIDER_REQUEST_TOO_LARGE"
+        | "DEVICE_PROVIDER_INVALID_CONFIGURATION" => "INVALID_REQUEST",
+        "DEVICE_PROVIDER_RESPONSE_CONTENT_TYPE_INVALID"
+        | "DEVICE_PROVIDER_SSE_FRAMING_INVALID"
+        | "DEVICE_PROVIDER_SSE_EVENT_INVALID"
+        | "DEVICE_PROVIDER_STREAM_CONVERSION_FAILED"
+        | "DEVICE_PROVIDER_ADAPTER_PROTOCOL_FAILED" => "PROTOCOL",
+        _ => wire_code,
+    };
+    let terminal_authority = matches!(
+        wire_code,
+        "LEASE_EXPIRED"
+            | "STALE_FENCING_TOKEN"
+            | "WORKER_INSTANCE_CHANGED"
+            | "DEVICE_MODEL_PAUSED"
+            | "DEVICE_MODEL_INTERRUPTED"
+            | "CANCELLED"
+            | "DEVICE_MODEL_IDENTITY_CONFLICT"
+            | "DEVICE_PROVIDER_CREDENTIAL_LEAK_BLOCKED"
+    ) || matches!(code, "AUTH" | "INVALID_REQUEST");
+    Ok(ModelPortFailure {
+        code: code.to_owned(),
+        message: "Provider Gateway returned a terminal model error".to_owned(),
+        status: metadata.status,
+        retryable: Some(error.retryable && !terminal_authority),
+        provider_retry_after_millis: metadata.provider_retry_after_millis,
+        provider_request_id: metadata.provider_request_id,
+    })
 }
 
 fn decode_response_payload(payload: &EncodedPayload) -> Result<String, ModelPortFailure> {
@@ -2347,6 +2455,9 @@ fn validate_chunk_for_retention(chunk: &ModelChunkMessage) -> Result<(), BridgeE
         String::from_utf8(bytes).map_err(|_| BridgeError::InvalidPayload)?;
     } else if !chunk.is_final && chunk.error.is_none() {
         return Err(BridgeError::InvalidPayload);
+    }
+    if let Some(error) = &chunk.error {
+        decode_provider_failure(error, chunk.payload.as_ref())?;
     }
     // The private ledger is replayed through the same typed protocol mapper
     // as Core.  Validate that mapping before writing a new frame so malformed
@@ -2483,6 +2594,217 @@ mod tests {
     use winwincode_execution_port::runtime_trace_outbox::{ExecutionMode, ObserverMode};
     use winwincode_execution_port::typed_replay::frame_from_message;
     use winwincode_kernel::{ModelPortFailure, ModelPortRequest};
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Four real error envelopes through live delivery, durable replay and no extra Provider opens"
+    )]
+    async fn provider_failure_facts_match_live_and_retained_replay() {
+        use winwincode_execution_port::generated::{ExecutionPortError, ExecutionPortErrorCode};
+
+        let root =
+            std::env::temp_dir().join(format!("wwc-provider-failure-{}", uuid::Uuid::now_v7()));
+        let store = AdapterStore::open(&root).unwrap();
+        let lease = authority(&id("cdx", 'A'));
+        let bridge = Arc::new(installed_loopback_bridge(
+            &store,
+            SharedAuthoritySource::default(),
+            "provider failure",
+            "run",
+            &lease,
+            "kernel",
+        ));
+        for (index, (wire_code, status, canonical_code, retryable)) in [
+            (
+                ExecutionPortErrorCode::DeviceProviderRateLimited,
+                429,
+                "RATE_LIMIT",
+                true,
+            ),
+            (
+                ExecutionPortErrorCode::DeviceProviderUpstreamFailed,
+                503,
+                "SERVER",
+                true,
+            ),
+            (
+                ExecutionPortErrorCode::DeviceProviderRequestRejected,
+                401,
+                "AUTH",
+                false,
+            ),
+            (
+                ExecutionPortErrorCode::DeviceProviderRequestRejected,
+                400,
+                "INVALID_REQUEST",
+                false,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let call = format!("failure-{index}");
+            let request = ModelPortRequest {
+                request_id: call.clone(),
+                payload_json: json!({
+                    "requestId":call, "provider":"loopback", "sessionId":"kernel",
+                    "threadId":lease.session_identity.codex_thread_id.0,
+                    "request":{"model":"loopback", "input":[]},
+                })
+                .to_string(),
+            };
+            let mut live = bridge.model_port().stream(request.clone()).await.unwrap();
+            let open = bridge
+                .take_messages()
+                .unwrap()
+                .into_iter()
+                .find_map(|message| {
+                    if let ExecutionPortMessage::ModelOpenMessage(open) = message {
+                        Some(open)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap();
+            let facts = json!({
+                "providerErrorKind":serde_json::to_value(&wire_code).unwrap(), "status":status,
+                "providerRetryAfterMillis":750, "providerRequestId":"upstream-42",
+                "diagnostic":{"stage":"open","eventType":"error","fieldPath":"status"},
+            })
+            .to_string();
+            let mut chunk = test_chunk(
+                &lease,
+                &open.model_exchange_id,
+                1,
+                true,
+                facts.as_bytes(),
+                'F',
+            );
+            chunk.error = Some(ExecutionPortError {
+                code: wire_code,
+                message: "private upstream response must not escape".to_owned(),
+                retryable,
+            });
+            if index == 1 {
+                // A restored owner can still have an attached Core sink. Its
+                // forwarding path must deliver the error, never the metadata
+                // JSON as a synthetic model response.
+                bridge
+                    .exchanges
+                    .lock()
+                    .unwrap()
+                    .remove(&open.model_exchange_id.0);
+            }
+            bridge
+                .accept_chunk(&chunk, &lease.lease.issued_at)
+                .await
+                .unwrap();
+            let failure = live.next().await.unwrap().unwrap_err();
+            assert_eq!(failure.code, canonical_code);
+            assert_eq!(failure.status, Some(status));
+            assert_eq!(failure.retryable, Some(retryable));
+            assert_eq!(failure.provider_retry_after_millis, Some(750));
+            assert_eq!(failure.provider_request_id.as_deref(), Some("upstream-42"));
+            assert!(!failure.message.contains("private upstream response"));
+            let mut replay = bridge.model_port().stream(request).await.unwrap();
+            assert_eq!(replay.next().await.unwrap().unwrap_err(), failure);
+            assert!(
+                !bridge
+                    .take_messages()
+                    .unwrap()
+                    .iter()
+                    .any(|message| matches!(message, ExecutionPortMessage::ModelOpenMessage(_)))
+            );
+        }
+        drop(bridge);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_provider_failure_metadata_is_rejected_before_retention() {
+        use winwincode_execution_port::generated::{ExecutionPortError, ExecutionPortErrorCode};
+
+        let lease = authority(&id("cdx", 'A'));
+        for facts in [
+            json!({"status":"429"}),
+            json!({"status":999}),
+            json!({"providerRetryAfterMillis":-1}),
+            json!({"providerRequestId":"request\nsecret"}),
+            json!({"diagnostic":{"stage":12}}),
+            json!({"tokenUsage":{"input_tokens":42}}),
+        ] {
+            let mut chunk = test_chunk(
+                &lease,
+                &ModelExchangeId(id("mdl", 'A')),
+                1,
+                true,
+                facts.to_string().as_bytes(),
+                'M',
+            );
+            chunk.error = Some(ExecutionPortError {
+                code: ExecutionPortErrorCode::DeviceProviderRateLimited,
+                message: "limited".to_owned(),
+                retryable: true,
+            });
+            assert!(matches!(
+                super::validate_chunk_for_retention(&chunk),
+                Err(super::BridgeError::InvalidPayload)
+            ));
+            assert!(
+                super::decode_provider_failure(
+                    chunk.error.as_ref().unwrap(),
+                    chunk.payload.as_ref()
+                )
+                .is_err()
+            );
+        }
+        let mut chunk = test_chunk(
+            &lease,
+            &ModelExchangeId(id("mdl", 'A')),
+            1,
+            true,
+            b"{\"status\":429}",
+            'M',
+        );
+        chunk.error = Some(ExecutionPortError {
+            code: ExecutionPortErrorCode::DeviceProviderRateLimited,
+            message: "limited".to_owned(),
+            retryable: true,
+        });
+        chunk.payload.as_mut().unwrap().payload_digest.0 = format!("sha256:{}", "0".repeat(64));
+        assert!(
+            super::decode_provider_failure(chunk.error.as_ref().unwrap(), chunk.payload.as_ref())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn retained_authority_failures_keep_wire_codes_and_remain_terminal() {
+        use winwincode_execution_port::generated::{ExecutionPortError, ExecutionPortErrorCode};
+
+        for (code, expected) in [
+            (ExecutionPortErrorCode::LeaseExpired, "LEASE_EXPIRED"),
+            (ExecutionPortErrorCode::Cancelled, "CANCELLED"),
+            (
+                ExecutionPortErrorCode::DeviceModelPaused,
+                "DEVICE_MODEL_PAUSED",
+            ),
+        ] {
+            let failure = super::decode_provider_failure(
+                &ExecutionPortError {
+                    code,
+                    message: "terminal".to_owned(),
+                    retryable: true,
+                },
+                None,
+            )
+            .unwrap();
+            assert_eq!(failure.code, expected);
+            assert_eq!(failure.retryable, Some(false));
+        }
+    }
 
     #[tokio::test]
     async fn tool_repeat_guard_intercepts_live_and_replayed_output_before_core() {

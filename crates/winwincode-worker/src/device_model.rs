@@ -237,10 +237,10 @@ impl DeviceModels {
         std::thread::Builder::new()
             .name("device-provider".to_owned())
             .spawn(move || {
-                let _permit = permit;
+                let permit = std::cell::RefCell::new(Some(permit));
                 let chunks = DeviceProviderStore::open(&directory)
                     .and_then(|store| {
-                        store.execute_model_authorized(&open, || {
+                        let can_start = || {
                             start_guard.as_ref().map_or_else(
                                 || {
                                     start_deadline.is_some_and(|deadline| {
@@ -249,7 +249,37 @@ impl DeviceModels {
                                 },
                                 |check| check(),
                             )
-                        })
+                        };
+                        let before_attempt = || {
+                            if permit.borrow().is_some() {
+                                return Ok(());
+                            }
+                            loop {
+                                if !can_start()
+                                    || store.model_cancelled(&open.model_exchange_id.0)?
+                                {
+                                    return Err(DeviceProviderError);
+                                }
+                                match store.try_model_attempt_permit(&open)? {
+                                    DeviceModelAdmission::Ready(acquired) => {
+                                        *permit.borrow_mut() = Some(acquired);
+                                        return Ok(());
+                                    }
+                                    DeviceModelAdmission::Deferred => {
+                                        std::thread::sleep(std::time::Duration::from_millis(25));
+                                    }
+                                }
+                            }
+                        };
+                        let after_attempt = || {
+                            permit.borrow_mut().take();
+                        };
+                        store.execute_model_recovering_authorized(
+                            &open,
+                            can_start,
+                            before_attempt,
+                            after_attempt,
+                        )
                     })
                     .unwrap_or_else(|_| {
                         vec![model_failure(

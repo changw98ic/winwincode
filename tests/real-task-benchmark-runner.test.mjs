@@ -2,7 +2,8 @@ import assert from 'node:assert/strict'
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { once } from 'node:events'
 import { createHash } from 'node:crypto'
-import { exportDeviceCandidate, exportDeviceExecutionReceipts } from '../scripts/export-device-candidate.mjs'
+import { exportDeviceCandidate, exportDeviceExecutionReceipts, readDeviceExecutionReceipts } from '../scripts/export-device-candidate.mjs'
+import { assertBenchmarkExecutionReceipts } from '../scripts/benchmark-execution-receipts.mjs'
 import { deviceFailureWithModelCauses } from '../scripts/device-model-failures.mjs'
 import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:https'
@@ -1841,6 +1842,118 @@ test('parallel ledger stops new claims on a hard evidence error and drains its a
   assert.equal(new Set(executed).size, 700)
 })
 
+test('typed query interruption drains admitted cells and recovers the original registered execution without relaunching', async t => {
+  const directory = await mkdtemp(resolve(tmpdir(), 'wwc-benchmark-query-recovery-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const full = buildBenchmarkPlan({ taskIds: Array.from({ length: 20 }, (_, index) => `task-${index + 1}`) })
+  const plan = { cells: full.cells.slice(0, 4) }
+  const options = { ledgerPath: resolve(directory, 'ledger.sqlite3'),
+    experimentBinding: { experimentId: 'query-recovery' } }
+  const launch = { callId: `${plan.cells[0].runId}:model`, directory: resolve(directory, 'original-product'),
+    productSessionId: 'psn_01J00000000000000000000001', deliveryId: 'dlv_01J00000000000000000000001' }
+  await mkdir(launch.directory)
+  const evidencePath = resolve(launch.directory, 'device-task-result.json')
+  const originalEvidence = `${JSON.stringify({ complete: false, ...launch,
+    errorCode: 'TRUSTED_FACTS_UNAVAILABLE', delivery: { detail: { status: 'running' } } })}\n`
+  await writeFile(evidencePath, originalEvidence)
+  const interruption = Object.assign(new Error('query returned HTTP 503'), {
+    code: 'TRUSTED_FACTS_UNAVAILABLE', status: 503, unresolvedDeviceExecution: true,
+  })
+  const executed = []
+  const retained = []
+  const releases = []
+  let modelCalls = 0
+  let settled = false
+  const running = runBenchmarkPlan(plan, { ...options, concurrency: 3,
+    executeCell: (cell, context) => {
+      const index = executed.length
+      executed.push(cell.runId)
+      if (index === 0) return executeBenchmarkCell(cell, {
+        runModel: async (request, runner) => {
+          modelCalls += 1
+          assert.equal(request.callId, launch.callId)
+          await runner.registerLaunch(launch)
+          throw interruption
+        },
+      }, context)
+      return new Promise(resolvePromise => { releases.push(() => resolvePromise({ status: 'completed' })) })
+    },
+    onRecord: record => { retained.push(record.runId) },
+  })
+  const rejected = assert.rejects(running, error => error === interruption && retained.length === 2)
+    .then(() => { settled = true })
+  try {
+    await new Promise(resolvePromise => setImmediate(resolvePromise))
+    assert.equal(executed.length, 3)
+    assert.equal(settled, false)
+    assert.equal(modelCalls, 1)
+  } finally {
+    for (const release of releases) release()
+    await rejected
+  }
+  let originalCallBytes
+  const before = new DatabaseSync(options.ledgerPath, { readOnly: true })
+  try {
+    const rows = before.prepare('SELECT ordinal, token, record FROM benchmark_cell ORDER BY ordinal').all()
+    assert.notEqual(rows[0].token, null)
+    assert.equal(rows[0].record, null, 'a query interruption cannot manufacture a failed task result')
+    assert.equal(rows.slice(1, 3).every(row => JSON.parse(row.record).status === 'completed'), true)
+    assert.equal(rows[3].token, null)
+    assert.equal(rows[3].record, null)
+    originalCallBytes = before.prepare('SELECT record FROM benchmark_call WHERE ordinal = 0').get().record
+    assert.deepEqual(JSON.parse(originalCallBytes), { callId: launch.callId, status: 'failed',
+      failure: { code: 'TRUSTED_FACTS_UNAVAILABLE' }, unresolvedDeviceExecution: true })
+    assert.deepEqual(JSON.parse(before.prepare('SELECT target FROM benchmark_launch WHERE ordinal = 0').get().target), launch)
+  } finally { before.close() }
+  const authoritativeTerminal = { status: 'failed', directory: launch.directory,
+    failure: { code: 'DEVICE_PRODUCT_FAILED', status: 'failed' },
+    recovery: { kind: 'retained-product', originalReportSha256: createHash('sha256').update(originalEvidence).digest('hex') } }
+  let reconciliations = 0
+  const recovered = await runBenchmarkPlan(plan, { ...options, concurrency: 2,
+    recoverCell: (cell, observed) => recoverBenchmarkCell(cell, observed, (request, registeredLaunch) => {
+      reconciliations += 1
+      assert.equal(request.callId, launch.callId)
+      assert.deepEqual(registeredLaunch, launch)
+      return authoritativeTerminal
+    }),
+    executeCell: cell => {
+      assert.equal(cell.runId, plan.cells[3].runId, 'only the previously unclaimed task can start')
+      executed.push(cell.runId)
+      return { status: 'completed' }
+    },
+  })
+  assert.equal(modelCalls, 1, 'recovery must not call the model again')
+  assert.equal(reconciliations, 1)
+  assert.deepEqual(executed, plan.cells.map(cell => cell.runId))
+  const record = recovered.records[0]
+  assert.equal(record.status, 'failed')
+  assert.equal(record.failure.code, 'DEVICE_PRODUCT_FAILED')
+  assert.deepEqual(record.calls, [{ callId: launch.callId, status: 'returned', result: authoritativeTerminal }])
+  assert.equal(JSON.stringify(record.recovery.originalCalls[0]), originalCallBytes)
+  assert.equal(await readFile(evidencePath, 'utf8'), originalEvidence)
+  const after = new DatabaseSync(options.ledgerPath, { readOnly: true })
+  try {
+    assert.deepEqual(JSON.parse(after.prepare('SELECT record FROM benchmark_call WHERE ordinal = 0').get().record), record.calls[0])
+    assert.deepEqual(JSON.parse(after.prepare('SELECT target FROM benchmark_launch WHERE ordinal = 0').get().target), launch)
+  } finally { after.close() }
+})
+
+test('a typed query error without unresolved execution metadata remains scoped to its own task', async () => {
+  const full = buildBenchmarkPlan({ taskIds: Array.from({ length: 20 }, (_, index) => `task-${index + 1}`) })
+  const plan = { cells: full.cells.slice(0, 2) }
+  const result = await runBenchmarkPlan(plan, {
+    executeCell: cell => {
+      if (cell.runId === plan.cells[0].runId) throw Object.assign(new Error('query failed'), {
+        code: 'TRUSTED_FACTS_UNAVAILABLE', status: 503,
+      })
+      return { status: 'completed' }
+    },
+  })
+  assert.equal(result.records[0].status, 'failed')
+  assert.equal(result.records[0].failure.code, 'TRUSTED_FACTS_UNAVAILABLE')
+  assert.equal(result.records[1].status, 'completed')
+})
+
 test('configuration selection keeps all 700 cells and preserves completed and unresolved unselected rows', async t => {
   const directory = await mkdtemp(resolve(tmpdir(), 'wwc-benchmark-selected-profiles-'))
   t.after(() => rm(directory, { recursive: true, force: true }))
@@ -2700,6 +2813,54 @@ test('unresolved Device inspection queries the original TLS endpoint without cha
 })
 
 
+test('Device vertical preserves HTTP status in sanitized errors and its durable report', async t => {
+  const directory = await mkdtemp(resolve(tmpdir(), 'wwc-device-http-status-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const runtimeDirectory = resolve(directory, 'runtime')
+  const deviceData = resolve(runtimeDirectory, 'device-data')
+  await mkdir(deviceData, { recursive: true })
+  await mkdir(resolve(runtimeDirectory, 'server-data'))
+  for (const file of ['fixture-cert.pem', 'server-endpoint.json', 'product-source-seal.json']) {
+    await writeFile(resolve(runtimeDirectory, file), 'retained runtime metadata\n')
+  }
+  const secret = 'synthetic-private-provider-key'
+  const modelRoute = { providerId: 'zhipu-glm', modelId: 'glm-5.3-flash' }
+  const providerEnvironment = { ZHIPU_API_KEY: secret, ZHIPU_BASE_URL: 'https://provider.invalid',
+    ZHIPU_MODEL: modelRoute.modelId }
+  for (const [index, status] of [503, undefined, secret, 999].entries()) {
+    const taskDirectory = resolve(directory, `task-${index}`)
+    let commands = 0
+    const runtime = { directory: runtimeDirectory, modelRoute,
+      devicePath: { deviceData, publicClientId: 'fixture-device', steps: [], modelServer: null,
+        forProductSession: () => ({}) },
+      api: { command: async name => {
+        commands += 1
+        assert.equal(name, 'session.create')
+        throw Object.assign(new Error(`query failed with private credential ${secret}`), {
+          code: 'TRUSTED_FACTS_UNAVAILABLE', status,
+        })
+      } },
+    }
+    await assert.rejects(runDeviceTaskVertical({ directory: taskDirectory, providerName: 'glm',
+      providerEnvironment, runtime,
+      productSessionId: 'psn_01J00000000000000000000001',
+      deliveryId: 'dlv_01J00000000000000000000001',
+    }), asyncError => {
+      assert.equal(asyncError.code, 'TRUSTED_FACTS_UNAVAILABLE')
+      assert.equal(asyncError.status, status === 503 ? 503 : undefined)
+      assert.equal(asyncError.report.errorStatus, status === 503 ? 503 : null)
+      assert.equal(asyncError.message.includes(secret), false)
+      assert.equal(JSON.stringify(asyncError.report).includes(secret), false)
+      return true
+    })
+    const report = JSON.parse(await readFile(resolve(taskDirectory, 'device-task-result.json'), 'utf8'))
+    assert.equal(report.errorStatus, status === 503 ? 503 : null)
+    assert.equal(report.errorCode, 'TRUSTED_FACTS_UNAVAILABLE')
+    assert.equal(report.complete, false)
+    assert.equal(commands, 1)
+  }
+})
+
 test('Device driver preserves candidate projections before failure and propagates evidence write failures', async () => {
   const detail = { status: 'candidate_ready', deliveryRevision: 7, readCursor: { token: 'cursor-7' },
     currentCandidate: { candidateRef: 'candidate/original' }, attention: [{ id: 'needs-input', status: 'open' }] }
@@ -3192,4 +3353,216 @@ test('shared recovery ignores a neighboring stop and retains its own unprojected
   assert.deepEqual(assertRetainedDeviceTaskRunning(launch), [worker])
   core.prepare('UPDATE tool_repeat_run SET stopped = 1 WHERE run_key = ?').run('own')
   assert.throws(() => assertRetainedDeviceTaskRunning(launch), error => error.code === 'STUCK_TOOL_REPEAT_LIMIT' && error.runKey === 'own')
+})
+
+async function actualProviderReceiptFixture(t, exchangeId = 'actual-provider-call') {
+  const directory = await mkdtemp(resolve(tmpdir(), 'actual-provider-receipts-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const providerDirectory = resolve(directory, 'device-data/providers')
+  await mkdir(providerDirectory, { recursive: true })
+  const database = new DatabaseSync(resolve(providerDirectory, 'providers.sqlite3'))
+  t.after(() => database.close())
+  database.exec(`CREATE TABLE exchanges(exchange_id TEXT, request_open TEXT, chunks TEXT);
+    CREATE TABLE model_invocation_attempts(exchange_id TEXT, attempt_number INTEGER,
+      adapter_request_id TEXT, state TEXT, failure_chunks TEXT, accounting_chunks TEXT, response_bytes BLOB);`)
+  const encode = value => {
+    const bytes = Buffer.from(JSON.stringify(value))
+    return { dataBase64: bytes.toString('base64'), payloadDigest: `sha256:${createHash('sha256').update(bytes).digest('hex')}` }
+  }
+  const opened = { modelExchangeId: exchangeId, lease: { jobId: 'job-own', leaseId: 'lease-own',
+    attempt: 1, fencingToken: 4 }, workerSessionId: 'worker-own', sessionIdentity: { productSessionId: 'session-own' },
+  request: encode({ provider: 'deepseek', request: { model: 'deepseek-flash', reasoning: { effort: 'max' },
+    input: 'private-prompt' } }) }
+  const chunk = (sequence, frame, error) => ({ modelExchangeId: exchangeId, lease: opened.lease,
+    workerSessionId: opened.workerSessionId, sessionIdentity: opened.sessionIdentity,
+    sequence, isFinal: sequence === 2 || error !== undefined,
+    ...(frame === undefined ? {} : { payload: encode(frame) }), ...(error === undefined ? {} : { error }) })
+  const usage = { input_tokens: 4, output_tokens: 3, total_tokens: 7, cached_input_tokens: 0,
+    cache_write_input_tokens: 0, reasoning_output_tokens: 0 }
+  const completed = [chunk(1, { type: 'server_model', model: 'deepseek-flash' }),
+    chunk(2, { type: 'completed', tokenUsage: usage, responseId: 'provider-success' })]
+  database.prepare('INSERT INTO exchanges VALUES (?,?,?)')
+    .run(exchangeId, JSON.stringify(opened), JSON.stringify(completed))
+  const insertAttempt = (number, state, failures = null, accounting = null, response = null) =>
+    database.prepare('INSERT INTO model_invocation_attempts VALUES (?,?,?,?,?,?,?)')
+      .run(exchangeId, number, `device-${exchangeId}:attempt:${number}`, state,
+        failures === null ? null : JSON.stringify(failures), accounting === null ? null : JSON.stringify(accounting), response)
+  const failure = (code, retryable = true) => [chunk(1, { status: 429, providerRetryAfterMillis: 20,
+    providerRequestId: 'provider-request-429', privateBody: 'private-provider-body',
+    diagnostic: { stage: 'response_fields', eventType: 'content_block_delta', fieldPath: '$.delta.text' } },
+  { code, retryable, message: 'private-upstream-error' })]
+  const paidFailure = [chunk(2, { type: 'failed', responseId: 'private-observed-provider-id', tokenUsage: {
+    inputTokens: 2, outputTokens: 1, cachedInputTokens: 0, cacheWriteInputTokens: 0, reasoningOutputTokens: 0 } })]
+  return { directory, database, exchangeId, opened, chunk, encode, completed, insertAttempt, failure, paidFailure }
+}
+
+function actualReceiptReport(evidence) {
+  const plan = buildBenchmarkPlan({ taskIds: Array.from({ length: 20 }, (_, index) => `task-${index + 1}`) })
+  const records = plan.cells.map((cell, index) => ({ ...cell, status: index === 0 ? 'completed' : 'failed',
+    verdict: null, score: null, calls: index === 0 ? [{ callId: `${cell.runId}:model`, status: 'returned',
+      result: { executionReceipts: evidence } }] : [] }))
+  return aggregateBenchmarkReport(plan, { records, experimentId: 'actual-provider-attempts' })
+}
+
+test('actual Provider retries retain private receipt hashes and unknown rejected charge without double counting Core calls', async t => {
+  const fixture = await actualProviderReceiptFixture(t)
+  fixture.insertAttempt(1, 'failed', fixture.failure('DEVICE_PROVIDER_RATE_LIMITED'))
+  const response = Buffer.from('private-provider-response-and-tool-arguments')
+  fixture.insertAttempt(2, 'failed', fixture.failure('DEVICE_PROVIDER_SSE_EVENT_INVALID'), fixture.paidFailure, response)
+  fixture.insertAttempt(3, 'completed', null, fixture.completed)
+  const { evidence } = exportDeviceExecutionReceipts(fixture.directory)
+  assert.equal(evidence.calls.length, 1, 'three Provider invocations remain one logical Core call')
+  const attempts = evidence.calls[0].providerAttempts
+  assert.deepEqual(attempts.map(attempt => attempt.state), ['failed', 'failed', 'completed'])
+  assert.deepEqual(attempts[0].failure, { code: 'DEVICE_PROVIDER_RATE_LIMITED', retryable: true,
+    status: 429, providerRetryAfterMillis: 20, providerRequestId: 'provider-request-429',
+    diagnostic: { stage: 'response_fields', eventType: 'content_block_delta', fieldPath: '$.delta.text' } })
+  assert.equal(attempts[0].usage, null, 'HTTP rejection is not a measured zero-token receipt')
+  assert.equal(attempts[1].usage.totalTokens, 3)
+  assert.equal(attempts[2].usage.totalTokens, 7)
+  assert.equal(attempts[1].responseSha256, createHash('sha256').update(response).digest('hex'))
+  assert.equal(evidence.completeUsage, false)
+  assert.equal(evidence.totalTokens, null)
+  const saved = await readFile(resolve(fixture.directory, 'execution-receipts.json'), 'utf8')
+  assert.doesNotMatch(saved, /private-|dataBase64|response_bytes|error\.message|tokenUsage/u)
+  assertBenchmarkExecutionReceipts(evidence)
+  const report = actualReceiptReport(evidence)
+  assert.equal(report.callAccounting.modelCalls, 1)
+  assert.equal(report.callAccounting.providerInvocations, 3)
+  assert.equal(report.callAccounting.failedProviderInvocations, 2)
+  assert.equal(report.tokenAndCache.retryCalls, 2)
+  assert.equal(report.tokenAndCache.failedCalls, 0, 'the logical Core call recovered successfully')
+  assert.equal(report.tokenAndCache.inputTokens, null)
+  assert.deepEqual(report.tokenAndCache.measured, { inputTokens: 6, outputTokens: 4, cachedTokens: 0 })
+  assert.equal(report.tokenAndCache.unknownUsageExchanges, 1)
+  assert.equal(report.cost.costUsd, null)
+  const misleadingCost = structuredClone(evidence)
+  misleadingCost.performance = [{ modelCalls: 1, totalRuntimeMs: 20, modelWaitMs: 10,
+    toolMs: 1, actualCostMicros: 5 }]
+  assert.equal(actualReceiptReport(misleadingCost).cost.costUsd, null,
+    'a logical final-call cost cannot price its prior paid attempts')
+})
+
+test('paid truncated Provider response plus recovered success accounts both actual invocations exactly once', async t => {
+  const fixture = await actualProviderReceiptFixture(t)
+  fixture.insertAttempt(1, 'failed', fixture.failure('DEVICE_PROVIDER_STREAM_INCOMPLETE'), fixture.paidFailure,
+    Buffer.from('private-truncated-response'))
+  fixture.insertAttempt(2, 'completed', null, fixture.completed)
+  const evidence = readDeviceExecutionReceipts(fixture.directory)
+  assert.equal(evidence.completeUsage, true)
+  assert.equal(evidence.totalTokens, 10, '3 failed-attempt tokens plus 7 successful-attempt tokens')
+  assert.equal(evidence.calls[0].usage.totalTokens, 7, 'logical final receipt remains unchanged')
+  const report = actualReceiptReport(evidence)
+  assert.equal(report.callAccounting.modelCalls, 1)
+  assert.equal(report.callAccounting.providerInvocations, 2)
+  assert.equal(report.tokenAndCache.inputTokens, 6)
+  assert.equal(report.tokenAndCache.outputTokens, 4)
+  assert.equal(report.tokenAndCache.retryCalls, 1)
+})
+
+test('proven unsent Provider attempts contribute no invocation while interrupted attempts retain unknown charge', async t => {
+  const fixture = await actualProviderReceiptFixture(t)
+  fixture.insertAttempt(1, 'not_sent')
+  fixture.database.prepare('UPDATE exchanges SET chunks=?').run(JSON.stringify(fixture.failure('DEVICE_MODEL_LEASE_EXPIRED', false)))
+  const unsent = readDeviceExecutionReceipts(fixture.directory)
+  assert.equal(unsent.calls[0].providerAttempts[0].usage, null)
+  assert.equal(unsent.completeUsage, true)
+  assert.equal(unsent.totalTokens, 0, 'authority proves no Provider request was sent')
+  const unsentReport = actualReceiptReport(unsent)
+  assert.equal(unsentReport.callAccounting.modelCalls, 1)
+  assert.equal(unsentReport.callAccounting.providerInvocations, 0)
+  assert.equal(unsentReport.tokenAndCache.cacheHits, 0)
+  assert.equal(unsentReport.tokenAndCache.cacheMisses, 0)
+  fixture.database.prepare("UPDATE model_invocation_attempts SET state='interrupted_unknown'").run()
+  const interrupted = readDeviceExecutionReceipts(fixture.directory)
+  assert.equal(interrupted.completeUsage, false)
+  assert.equal(interrupted.totalTokens, null)
+  const interruptedReport = actualReceiptReport(interrupted)
+  assert.equal(interruptedReport.callAccounting.providerInvocations, 1)
+  assert.equal(interruptedReport.tokenAndCache.inputTokens, null)
+  interrupted.performance = [{ modelCalls: 1, totalRuntimeMs: 20, modelWaitMs: 10,
+    toolMs: 1, actualCostMicros: 5 }]
+  assert.equal(actualReceiptReport(interrupted).cost.costUsd, null,
+    'a logical performance cost cannot establish an interrupted Provider attempt charge')
+  fixture.database.prepare("UPDATE model_invocation_attempts SET state='prepared'").run()
+  const pending = readDeviceExecutionReceipts(fixture.directory)
+  assert.equal(pending.completeUsage, false)
+  assert.equal(actualReceiptReport(pending).callAccounting.providerInvocations, 0)
+})
+
+test('actual Provider receipt export rejects changed attempt identity, bindings and accounting digests', async t => {
+  const fixture = await actualProviderReceiptFixture(t)
+  fixture.insertAttempt(1, 'completed', null, fixture.completed)
+  const original = fixture.database.prepare('SELECT * FROM model_invocation_attempts').get()
+  const reset = () => fixture.database.prepare(`UPDATE model_invocation_attempts SET attempt_number=?,
+    adapter_request_id=?, state=?, accounting_chunks=?, response_bytes=?`)
+    .run(original.attempt_number, original.adapter_request_id, original.state, original.accounting_chunks, original.response_bytes)
+  for (const [sql, value, expected] of [
+    ['UPDATE model_invocation_attempts SET adapter_request_id=?', 'wrong-attempt', /request identity mismatch/u],
+    ['UPDATE model_invocation_attempts SET attempt_number=?', 2, /attempt numbers are incomplete/u],
+    ['UPDATE model_invocation_attempts SET state=?', 'unknown-state', /invalid Provider attempt state/u],
+  ]) {
+    reset()
+    fixture.database.prepare(sql).run(value)
+    assert.throws(() => readDeviceExecutionReceipts(fixture.directory), expected)
+  }
+  for (const mutate of [
+    chunks => { chunks[1].lease.jobId = 'job-other' },
+    chunks => { chunks[1].sessionIdentity.productSessionId = 'session-other' },
+    chunks => { chunks[1].payload.payloadDigest = `sha256:${'0'.repeat(64)}` },
+  ]) {
+    reset()
+    const chunks = JSON.parse(original.accounting_chunks)
+    mutate(chunks)
+    fixture.database.prepare('UPDATE model_invocation_attempts SET accounting_chunks=?').run(JSON.stringify(chunks))
+    assert.throws(() => readDeviceExecutionReceipts(fixture.directory), /mismatch/u)
+  }
+  reset()
+  const evidence = readDeviceExecutionReceipts(fixture.directory)
+  for (const mutate of [
+    attempt => { attempt.response_bytes = 'private-body' },
+    attempt => { attempt.responseSha256 = 'not-a-digest' },
+    attempt => { attempt.actualModels = ['different-model'] },
+    attempt => { attempt.usage.totalTokens = 999 },
+    attempt => { attempt.failure = { code: 'DEVICE_PROVIDER_RATE_LIMITED', retryable: true, message: 'private-error' } },
+  ]) {
+    const invalid = structuredClone(evidence)
+    mutate(invalid.calls[0].providerAttempts[0])
+    assert.throws(() => assertBenchmarkExecutionReceipts(invalid))
+  }
+})
+
+test('canonical rejected Provider attempt exports safe HTTP facts and its authority-owned failure category', async t => {
+  const fixture = await actualProviderReceiptFixture(t)
+  const rejected = [fixture.chunk(1, { type: 'server_model', model: 'deepseek-flash' }),
+    fixture.chunk(2, { type: 'error', error: { code: 'AUTH', retryable: false,
+    message: 'private-credential-diagnostic', status: 403, providerRetryAfterMillis: 100,
+    providerRequestId: 'upstream-rejection-42',
+    diagnostic: { stage: 'response_fields', eventType: 'error', fieldPath: '$.error.type' } },
+  privateBody: 'private-http-body' })]
+  fixture.insertAttempt(1, 'failed', rejected)
+  fixture.database.prepare('UPDATE exchanges SET chunks=?').run(JSON.stringify(rejected))
+  const evidence = readDeviceExecutionReceipts(fixture.directory)
+  const expected = { code: 'AUTH', retryable: false, status: 403, providerRetryAfterMillis: 100,
+    providerRequestId: 'upstream-rejection-42',
+    diagnostic: { stage: 'response_fields', eventType: 'error', fieldPath: '$.error.type' } }
+  assert.deepEqual(evidence.calls[0].failure, expected)
+  assert.deepEqual(evidence.calls[0].providerAttempts[0].failure, expected)
+  assert.deepEqual(evidence.calls[0].providerAttempts[0].actualModels, ['deepseek-flash'],
+    'validated canonical failure frames retain their genuine observed model')
+  const failure = deviceFailureWithModelCauses({ code: 'DEVICE_PRODUCT_FAILED' }, evidence, ['job-own'])
+  assert.equal(failure.observedProviderFailures[0].status, 403)
+  assert.equal(failure.observedProviderFailures[0].providerRequestId, 'upstream-rejection-42')
+  assertBenchmarkExecutionReceipts(evidence)
+  assert.doesNotMatch(JSON.stringify(evidence), /private-|dataBase64|message/u)
+  assert.equal(evidence.completeUsage, false)
+  const filtered = [fixture.chunk(2, { type: 'error', error: { code: 'CONTENT_FILTER', retryable: false,
+    message: 'private-filter-message' } })]
+  fixture.database.prepare('UPDATE model_invocation_attempts SET failure_chunks=?').run(JSON.stringify(filtered))
+  fixture.database.prepare('UPDATE exchanges SET chunks=?').run(JSON.stringify(filtered))
+  const filteredEvidence = readDeviceExecutionReceipts(fixture.directory)
+  assert.equal(filteredEvidence.calls[0].failure.code, 'CONTENT_FILTER')
+  assert.equal(filteredEvidence.calls[0].providerAttempts[0].failure.code, 'CONTENT_FILTER')
+  assertBenchmarkExecutionReceipts(filteredEvidence)
+  assert.doesNotMatch(JSON.stringify(filteredEvidence), /private-filter-message/u)
 })

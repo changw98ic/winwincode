@@ -59,6 +59,7 @@ function runnerFailureCode(error) {
 
 function requiresBenchmarkRecovery(error) {
   return error?.benchmarkPersistenceFailure === true
+    || error?.unresolvedDeviceExecution === true
     || ['BENCHMARK_EVIDENCE_FAILED', 'LEDGER_RUN_UNRESOLVED'].includes(error?.code)
 }
 
@@ -292,7 +293,8 @@ export async function executeBenchmarkCell(cell, adapter, {
       if (persistenceFailure) throw persistenceFailure
     } catch (error) {
       const code = runnerFailureCode(error)
-      persistCall({ callId: request.callId, status: 'failed', failure: { code } })
+      persistCall({ callId: request.callId, status: 'failed', failure: { code },
+        ...(error?.unresolvedDeviceExecution === true ? { unresolvedDeviceExecution: true } : {}) })
       throw error
     }
     persistCall({ callId: request.callId, status: 'returned', result })
@@ -387,7 +389,8 @@ export async function recoverBenchmarkCell(cell, observed, resolveModel) {
   const replay = async request => {
     const retained = observed.calls.find(call => call.callId === request.callId)
     if (retained?.status === 'returned') return retained.result
-    if (retained?.status === 'failed' && retained.failure.code !== 'BENCHMARK_EVIDENCE_FAILED') {
+    if (retained?.status === 'failed' && retained.failure.code !== 'BENCHMARK_EVIDENCE_FAILED'
+        && retained.unresolvedDeviceExecution !== true) {
       throw Object.assign(new Error(retained.failure.code), { code: retained.failure.code, retainedFailure: true })
     }
     const launch = observed.launches.find(target => target.callId === request.callId)
@@ -682,18 +685,41 @@ function retainedUsage(record) {
     }
     assertBenchmarkExecutionReceipts(receipt)
     for (const exchange of receipt.calls) {
-      const cached = exchange.usage?.cachedTokens ?? null
-      rows.push({ callKind: 'model', requestedModelId: exchange.requestedModel,
-        observedModelId: exchange.actualModels.at(-1) ?? null,
-        reasoningEffort: exchange.reasoningEffort,
-        status: exchange.terminalType === 'completed' ? 'completed' : 'failed',
-        cacheScenario: cached === null ? 'unknown' : cached > 0 ? 'cached' : 'uncached',
-        inputTokens: exchange.usage?.inputTokens ?? null,
-        outputTokens: exchange.usage?.outputTokens ?? null,
-        cachedTokens: cached,
-        cacheHits: cached === null ? null : Number(cached > 0),
-        cacheMisses: cached === null ? null : Number(cached === 0),
-        sourceExchangeId: exchange.exchangeId })
+      const tracked = exchange.providerAttempts?.length > 0
+      const attempts = tracked ? exchange.providerAttempts.filter(attempt =>
+        !['prepared', 'not_sent'].includes(attempt.state)) : null
+      const provenUnsent = tracked && exchange.providerAttempts.every(attempt => attempt.state === 'not_sent')
+      const measured = attempts?.length ? [...attempts] : [{ usage: provenUnsent ? {
+        inputTokens: 0, outputTokens: 0, cachedTokens: 0,
+      } : tracked ? null : exchange.usage }]
+      if (attempts?.length && exchange.providerAttempts.some(attempt => attempt.state === 'prepared')) {
+        measured.push({ usage: null, state: 'prepared' })
+      }
+      for (const [index, attempt] of measured.entries()) {
+        const cached = attempt.usage?.cachedTokens ?? null
+        const invoked = attempt.state !== undefined && !['prepared', 'not_sent'].includes(attempt.state)
+        rows.push({ callKind: 'model', callCount: index === 0 ? 1 : 0,
+          requestedModelId: exchange.requestedModel,
+          observedModelId: tracked ? attempt.actualModels?.at(-1) ?? null : exchange.actualModels.at(-1) ?? null,
+          reasoningEffort: exchange.reasoningEffort,
+          status: tracked && invoked ? (attempt.state === 'completed' ? 'completed' : 'failed')
+            : exchange.terminalType === 'completed' ? 'completed' : 'failed',
+          logicalCallFailed: exchange.terminalType !== 'completed',
+          retry: tracked && invoked && index > 0,
+          ...(tracked ? { providerInvocation: invoked ? 1 : 0,
+            providerAccountingPending: attempt.state === 'prepared',
+            providerChargeUnknown: invoked && (attempt.usage == null
+              || ['invoking', 'interrupted_unknown'].includes(attempt.state)),
+            failedProviderInvocation: ['failed', 'interrupted_unknown'].includes(attempt.state) } : {}),
+          cacheScenario: provenUnsent ? 'not-sent' : cached === null ? 'unknown' : cached > 0 ? 'cached' : 'uncached',
+          inputTokens: attempt.usage?.inputTokens ?? null,
+          outputTokens: attempt.usage?.outputTokens ?? null,
+          cachedTokens: cached,
+          cacheHits: provenUnsent ? 0 : cached === null ? null : Number(cached > 0),
+          cacheMisses: provenUnsent ? 0 : cached === null ? null : Number(cached === 0),
+          sourceExchangeId: exchange.exchangeId,
+          ...(attempt.attemptNumber === undefined ? {} : { providerAttemptNumber: attempt.attemptNumber }) })
+      }
     }
     for (const jev of receipt.jev ?? []) {
       jevCalls += 1
@@ -734,6 +760,10 @@ function sumUsage(records) {
     cost: 0, wallMs: 0, modelWaitMs: 0, toolMs: 0,
     rebuildMs: 0, productCalls: 0 }
   let jevModelCalls = 0
+  let providerInvocations = 0
+  let failedProviderInvocations = 0
+  let trackedProviderInvocations = false
+  let untrackedProviderInvocations = false
   for (const record of records) {
     const evidence = retainedUsage(record)
     missing.productCalls += evidence.unmeasuredProductCalls
@@ -749,8 +779,16 @@ function sumUsage(records) {
     for (const call of evidence.rows) {
       totals.calls += call.callCount ?? 1
       totals[call.callKind === 'fusion-engine' ? 'fusionEngineCalls' : 'modelCalls'] += call.callCount ?? 1
-      totals.failedCalls += call.status === 'failed' ? 1 : 0
+      totals.failedCalls += (call.logicalCallFailed ?? (call.status === 'failed')) ? call.callCount ?? 1 : 0
       totals.retryCalls += call.retry === true ? 1 : 0
+      if (call.callKind === 'model' && evidence.real) {
+        if (call.providerInvocation === undefined) untrackedProviderInvocations = true
+        else {
+          trackedProviderInvocations = true
+          providerInvocations += call.providerInvocation
+          failedProviderInvocations += call.failedProviderInvocation ? 1 : 0
+        }
+      }
       const cacheScenario = call.cacheScenario ?? 'unspecified'
       const scenario = cacheScenarios.get(cacheScenario) ?? {
         calls: 0,
@@ -768,6 +806,9 @@ function sumUsage(records) {
       }
       scenario.calls += call.callCount ?? 1
       scenario[call.callKind === 'fusion-engine' ? 'fusionEngineCalls' : 'modelCalls'] += call.callCount ?? 1
+      if (call.providerInvocation !== undefined) {
+        scenario.providerInvocations = (scenario.providerInvocations ?? 0) + call.providerInvocation
+      }
       for (const field of ['inputTokens', 'outputTokens', 'cachedTokens', 'rebuildTokens', 'toolTokens', 'cacheHits', 'cacheMisses']) {
         if (call[field] == null) {
           if (field in missing && call.callKind !== 'fusion-engine') missing[field] += 1
@@ -794,9 +835,14 @@ function sumUsage(records) {
       cacheScenarios.set(cacheScenario, scenario)
     }
     if (evidence.real && record.calls.length > 0) {
-      const primaryCalls = evidence.rows.filter(call => call.callKind === 'model').length
+      const primaryCalls = evidence.rows.filter(call => call.callKind === 'model')
+        .reduce((sum, call) => sum + (call.callCount ?? 1), 0)
       const measuredCalls = evidence.performance.reduce((sum, run) => sum + run.modelCalls, 0)
+      const retriedProviderCalls = evidence.rows.some(call => call.providerInvocation === 1 && call.retry)
+      const pendingProviderAccounting = evidence.rows.some(call => call.providerAccountingPending)
+      const unknownProviderCharge = evidence.rows.some(call => call.providerChargeUnknown)
       if (evidence.performance.length === 0 || measuredCalls !== primaryCalls || evidence.jevCalls > 0
+          || retriedProviderCalls || pendingProviderAccounting || unknownProviderCharge
           || evidence.performance.some(run => run.actualCostMicros == null)) {
         missing.cost += 1
       } else {
@@ -838,6 +884,10 @@ function sumUsage(records) {
       modelCalls: totals.modelCalls,
       fusionEngineCalls: totals.fusionEngineCalls,
       jevModelCalls,
+      ...(trackedProviderInvocations ? {
+        providerInvocations: untrackedProviderInvocations ? null : providerInvocations,
+        failedProviderInvocations: untrackedProviderInvocations ? null : failedProviderInvocations,
+      } : {}),
       unmeasuredProductCalls: missing.productCalls,
     }),
     cost: Object.freeze({ costUsd: missing.cost === 0 ? Number(costUsd.toFixed(6)) : null,

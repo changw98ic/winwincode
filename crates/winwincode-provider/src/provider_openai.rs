@@ -216,6 +216,67 @@ pub(crate) struct ParsedOpenAiStream {
     pub terminal: ProviderGatewayTerminal,
 }
 
+/// Retains a real usage fact even when later stream data is incomplete.
+///
+/// Only a bounded, well-formed prefix from one validated response identity is
+/// considered. A usage fact does not establish successful model completion.
+pub(crate) fn observed_openai_usage(
+    bytes: &[u8],
+    max_event_bytes: usize,
+    max_events: usize,
+) -> Option<(String, ProviderTokenUsage)> {
+    let bytes = match std::str::from_utf8(bytes) {
+        Ok(_) => bytes,
+        Err(error) if error.error_len().is_none() => &bytes[..error.valid_up_to()],
+        Err(_) => return None,
+    };
+    let frames =
+        crate::provider_sse_framing::parse(bytes, max_event_bytes, max_events.saturating_add(1))
+            .ok()?;
+    let mut response_id: Option<String> = None;
+    let mut usage = None;
+    for frame in frames.into_iter().take(max_events) {
+        if frame.data == "[DONE]" {
+            break;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(&frame.data) else {
+            break;
+        };
+        let Some(value) = value.as_object() else {
+            break;
+        };
+        if value
+            .get("object")
+            .filter(|kind| !kind.is_null())
+            .is_some_and(|kind| kind.as_str() != Some("chat.completion.chunk"))
+        {
+            break;
+        }
+        if let Some(id) = value.get("id").filter(|id| !id.is_null()) {
+            let id = id.as_str()?;
+            validate_token(id, 256).ok()?;
+            if response_id
+                .as_deref()
+                .is_some_and(|existing| existing != id)
+            {
+                return None;
+            }
+            response_id = Some(id.to_owned());
+        } else if response_id.is_none() {
+            break;
+        }
+        if let Some(value) = value.get("usage")
+            && !value.is_null()
+        {
+            let Ok(observed) = openai_usage(value) else {
+                break;
+            };
+            usage = Some(observed);
+        }
+    }
+    Some((response_id?, usage?))
+}
+
 /// Converts `chat.completion.chunk` SSE into canonical Provider stream events.
 ///
 /// # Errors
@@ -229,20 +290,23 @@ pub(crate) fn parse_openai_chat_sse(
     options: AnthropicMessagesOptions,
 ) -> Result<ParsedOpenAiStream, AnthropicCodecError> {
     options.validate()?;
-    let wire =
-        parse_openai_sse_envelopes(bytes, max_event_bytes, max_events).inspect_err(|error| {
+    let wire = parse_openai_sse_envelopes(bytes, max_event_bytes, max_events)
+        .map_err(|error| error.with_diagnostic("sse_framing", "chat.completion.chunk", "$"))
+        .inspect_err(|error| {
             eprintln!("openai_sse_protocol stage=envelope kind={:?}", error.kind());
         })?;
-    let mut parser = OpenAiStreamParser::new(tool_bindings, options.pricing, wire.len());
-    for (index, envelope) in wire.iter().enumerate() {
-        parser.push(envelope).inspect_err(|error| {
+    let mut parser = OpenAiStreamParser::new(tool_bindings, options.pricing, wire.envelopes.len());
+    for (index, envelope) in wire.envelopes.iter().enumerate() {
+        parser.push(envelope)
+        .map_err(|error| error.with_diagnostic("response_fields", "chat.completion.chunk", "$"))
+        .inspect_err(|error| {
             let data = envelope.data.as_object();
             let choices = data.and_then(|value| value.get("choices")).and_then(Value::as_array);
             let delta = choices.and_then(|value| value.first())
                 .and_then(|value| value.get("delta")).and_then(Value::as_object);
             eprintln!(
-                "openai_sse_protocol stage=chunk index={index} kind={:?} choices={} usage={} finish={} tool_calls={} reasoning={} content={}",
-                error.kind(), choices.map_or(0, Vec::len),
+                "openai_sse_protocol stage=chunk index={index} kind={:?} done_seen={} choices={} usage={} finish={} tool_calls={} reasoning={} content={}",
+                error.kind(), wire.done, choices.map_or(0, Vec::len),
                 data.is_some_and(|value| value.get("usage").is_some_and(|value| !value.is_null())),
                 choices.is_some_and(|value| value.iter().any(|choice| choice.get("finish_reason")
                     .is_some_and(|value| !value.is_null()))),
@@ -255,25 +319,44 @@ pub(crate) fn parse_openai_chat_sse(
     let finished = parser.finish_reason.is_some();
     let measured = parser.usage.is_some();
     let open_tools = parser.open_tools.len();
-    parser.finish().inspect_err(|error| {
+    let parsed = parser.finish().inspect_err(|error| {
         eprintln!("openai_sse_protocol stage=finish kind={:?} finish_seen={finished} usage_seen={measured} open_tools={open_tools}", error.kind());
-    })
+    });
+    if !wire.done {
+        eprintln!(
+            "openai_sse_protocol stage=eof done_seen=false finish_seen={finished} usage_seen={measured} open_tools={open_tools} semantic_complete={}",
+            parsed.as_ref().is_ok_and(|parsed| matches!(
+                parsed.terminal,
+                ProviderGatewayTerminal::Completed { .. }
+            )),
+        );
+    }
+    parsed
 }
 
 struct OpenAiEnvelope {
     data: Value,
 }
 
+struct OpenAiWire {
+    envelopes: Vec<OpenAiEnvelope>,
+    done: bool,
+}
+
 fn parse_openai_sse_envelopes(
     bytes: &[u8],
     max_event_bytes: usize,
     max_events: usize,
-) -> Result<Vec<OpenAiEnvelope>, AnthropicCodecError> {
+) -> Result<OpenAiWire, AnthropicCodecError> {
     let frames =
         crate::provider_sse_framing::parse(bytes, max_event_bytes, max_events.saturating_add(1))
             .map_err(|error| match error {
                 crate::provider_sse_framing::SseFramingError::Utf8 => {
-                    AnthropicCodecError::invalid_sse()
+                    if std::str::from_utf8(bytes).is_err_and(|error| error.error_len().is_none()) {
+                        AnthropicCodecError::incomplete_stream()
+                    } else {
+                        AnthropicCodecError::invalid_sse()
+                    }
                 }
                 crate::provider_sse_framing::SseFramingError::SizeLimit => {
                     AnthropicCodecError::size_limit()
@@ -281,7 +364,8 @@ fn parse_openai_sse_envelopes(
             })?;
     let mut envelopes = Vec::new();
     let mut done = false;
-    for frame in frames {
+    let frame_count = frames.len();
+    for (index, frame) in frames.into_iter().enumerate() {
         let mut data = frame.data;
         flush_openai_envelope(
             &mut envelopes,
@@ -289,12 +373,13 @@ fn parse_openai_sse_envelopes(
             &mut done,
             max_event_bytes,
             max_events,
+            index + 1 == frame_count,
         )?;
     }
-    if !done {
-        return Err(AnthropicCodecError::incomplete_stream());
-    }
-    Ok(envelopes)
+    // [DONE] is a transport marker. The chunks still have to establish their
+    // own completion, valid output and usage, whether this marker is present
+    // or the peer closes the response immediately after the terminal chunk.
+    Ok(OpenAiWire { envelopes, done })
 }
 
 fn flush_openai_envelope(
@@ -303,6 +388,7 @@ fn flush_openai_envelope(
     done: &mut bool,
     max_event_bytes: usize,
     max_events: usize,
+    final_frame: bool,
 ) -> Result<(), AnthropicCodecError> {
     if data.is_empty() {
         return Ok(());
@@ -316,12 +402,23 @@ fn flush_openai_envelope(
         return Ok(());
     }
     if *done {
-        return Err(AnthropicCodecError::protocol());
+        return Err(AnthropicCodecError::protocol().with_diagnostic(
+            "response_lifecycle",
+            "chat.completion.chunk",
+            "$",
+        ));
     }
     if data.len() > max_event_bytes || envelopes.len() >= max_events {
         return Err(AnthropicCodecError::size_limit());
     }
-    let value: Value = serde_json::from_str(data).map_err(|_| AnthropicCodecError::protocol())?;
+    let value: Value = serde_json::from_str(data).map_err(|error| {
+        let error = if final_frame && error.is_eof() {
+            AnthropicCodecError::incomplete_stream()
+        } else {
+            AnthropicCodecError::protocol()
+        };
+        error.with_diagnostic("json_decode", "chat.completion.chunk", "$")
+    })?;
     envelopes.push(OpenAiEnvelope { data: value });
     data.clear();
     Ok(())
@@ -332,6 +429,7 @@ struct OpenAiStreamParser<'a> {
     pricing: ProviderTokenPricing,
     events: Vec<ProviderStreamEvent>,
     open_tools: BTreeMap<u32, String>,
+    function_arguments: BTreeMap<u32, String>,
     custom_arguments: BTreeMap<u32, String>,
     text_open: bool,
     reasoning_open: bool,
@@ -352,6 +450,7 @@ impl<'a> OpenAiStreamParser<'a> {
             pricing,
             events: Vec::with_capacity(capacity.saturating_add(4)),
             open_tools: BTreeMap::new(),
+            function_arguments: BTreeMap::new(),
             custom_arguments: BTreeMap::new(),
             text_open: false,
             reasoning_open: false,
@@ -548,6 +647,8 @@ impl<'a> OpenAiStreamParser<'a> {
             let identity = self.tool_bindings.response_identity(name)?;
             if identity.kind() == crate::ProviderToolKind::Custom {
                 self.custom_arguments.insert(index, String::new());
+            } else {
+                self.function_arguments.insert(index, String::new());
             }
             self.open_tools.insert(index, id.to_owned());
             self.events.push(ProviderStreamEvent::ToolCallStarted {
@@ -563,27 +664,29 @@ impl<'a> OpenAiStreamParser<'a> {
                     return Err(AnthropicCodecError::size_limit());
                 }
                 buffer.push_str(arguments);
-            } else if !arguments.is_empty() {
-                self.events
-                    .push(ProviderStreamEvent::ToolCallArgumentsDelta {
-                        index,
-                        provider_call_id: self.open_tools[&index].clone(),
-                        delta: arguments.to_owned(),
-                    });
+            } else if let Some(buffer) = self.function_arguments.get_mut(&index) {
+                if buffer.len().saturating_add(arguments.len()) > MAX_REQUEST_TEXT_BYTES {
+                    return Err(AnthropicCodecError::size_limit());
+                }
+                buffer.push_str(arguments);
+                if !arguments.is_empty() {
+                    self.events
+                        .push(ProviderStreamEvent::ToolCallArgumentsDelta {
+                            index,
+                            provider_call_id: self.open_tools[&index].clone(),
+                            delta: arguments.to_owned(),
+                        });
+                }
             }
         }
         Ok(())
     }
 
-    fn finish(mut self) -> Result<ParsedOpenAiStream, AnthropicCodecError> {
-        if !self.started {
-            return Err(AnthropicCodecError::protocol());
-        }
-        self.close_reasoning();
-        for (index, provider_call_id) in self.open_tools {
+    fn close_tools(&mut self, reason: ProviderFinishReason) -> Result<(), AnthropicCodecError> {
+        for (index, provider_call_id) in std::mem::take(&mut self.open_tools) {
             if let Some(arguments) = self.custom_arguments.remove(&index) {
-                let input: Value = serde_json::from_str(&arguments)
-                    .map_err(|_| AnthropicCodecError::protocol())?;
+                let input: Value =
+                    serde_json::from_str(&arguments).map_err(|_| tool_arguments_error(reason))?;
                 let input = object(&input)?;
                 exact_keys(input, &["input"])?;
                 let delta = string(input, "input")?.to_owned();
@@ -597,22 +700,49 @@ impl<'a> OpenAiStreamParser<'a> {
                         provider_call_id: provider_call_id.clone(),
                         delta,
                     });
+            } else if let Some(arguments) = self.function_arguments.remove(&index) {
+                let input: Value =
+                    serde_json::from_str(&arguments).map_err(|_| tool_arguments_error(reason))?;
+                if !input.is_object() {
+                    return Err(tool_arguments_error(reason));
+                }
             }
             self.events.push(ProviderStreamEvent::ToolCallEnded {
                 index,
                 provider_call_id,
             });
         }
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<ParsedOpenAiStream, AnthropicCodecError> {
+        if !self.started {
+            return Err(AnthropicCodecError::incomplete_stream().with_diagnostic(
+                "response_lifecycle",
+                "eof",
+                "$.id",
+            ));
+        }
+        let reason = self.finish_reason.ok_or_else(|| {
+            AnthropicCodecError::incomplete_stream().with_diagnostic(
+                "response_lifecycle",
+                "eof",
+                "$.choices[0].finish_reason",
+            )
+        })?;
+        let usage = self.usage.ok_or_else(|| {
+            AnthropicCodecError::incomplete_stream().with_diagnostic(
+                "response_lifecycle",
+                "eof",
+                "$.usage",
+            )
+        })?;
+        self.close_reasoning();
+        self.close_tools(reason)?;
         if self.text_open {
             self.events
                 .push(ProviderStreamEvent::TextEnded { index: 1 });
         }
-        let reason = self
-            .finish_reason
-            .ok_or_else(AnthropicCodecError::incomplete_stream)?;
-        let usage = self
-            .usage
-            .ok_or_else(AnthropicCodecError::incomplete_stream)?;
         self.events.push(ProviderStreamEvent::Usage(usage));
         self.events.push(ProviderStreamEvent::Finished(reason));
         let terminal = if matches!(
@@ -621,8 +751,23 @@ impl<'a> OpenAiStreamParser<'a> {
         ) {
             ProviderGatewayTerminal::Failed {
                 failure: crate::ModelAttemptFailureFact::from_stream(
-                    crate::ProviderStreamFailureKind::Unknown,
-                    crate::ModelExecutionCertainty::AcceptanceUnknown,
+                    if reason == ProviderFinishReason::Interrupted {
+                        crate::ProviderStreamFailureKind::Transport
+                    } else {
+                        crate::ProviderStreamFailureKind::InvalidRequest
+                    },
+                    if self.events.iter().any(|event| {
+                        matches!(
+                            event,
+                            ProviderStreamEvent::TextDelta { .. }
+                                | ProviderStreamEvent::ReasoningContentDelta { .. }
+                                | ProviderStreamEvent::ToolCallStarted { .. }
+                        )
+                    }) {
+                        crate::ModelExecutionCertainty::OutputObserved
+                    } else {
+                        crate::ModelExecutionCertainty::AcceptanceUnknown
+                    },
                 ),
                 charge: Some(crate::ProviderGatewayTerminalCharge {
                     usage,
@@ -640,6 +785,19 @@ impl<'a> OpenAiStreamParser<'a> {
             terminal,
         })
     }
+}
+
+fn tool_arguments_error(reason: ProviderFinishReason) -> AnthropicCodecError {
+    let error = if reason == ProviderFinishReason::Interrupted {
+        AnthropicCodecError::incomplete_stream()
+    } else {
+        AnthropicCodecError::protocol()
+    };
+    error.with_diagnostic(
+        "tool_arguments",
+        "chat.completion.chunk",
+        "$.choices[0].delta.tool_calls[].function.arguments",
+    )
 }
 
 fn openai_usage(value: &Value) -> Result<ProviderTokenUsage, AnthropicCodecError> {
@@ -1126,7 +1284,254 @@ mod tests {
     }
 
     #[test]
-    fn rejects_truncated_unmetered_and_multiple_choice_streams() {
+    fn semantic_text_completion_at_eof_does_not_require_done() {
+        let bindings = AnthropicToolBindings::default();
+        let terminal = json!({"id":"response-1","model":"observed-qwen",
+            "choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]});
+        let usage = json!({"id":"response-1","choices":[],
+            "usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}});
+        let wire = format!("data: {terminal}\n\ndata: {usage}\n\n");
+        let eof = parse_openai_chat_sse(wire.as_bytes(), 2048, 8, &bindings, options())
+            .expect("explicit finish and real usage survive transport EOF");
+        let done = parse_openai_chat_sse(
+            format!("{wire}data: [DONE]\n\n").as_bytes(),
+            2048,
+            8,
+            &bindings,
+            options(),
+        )
+        .expect("normal DONE completion");
+        assert_eq!(eof.events, done.events);
+        assert_eq!(eof.terminal, done.terminal);
+        assert_eq!(
+            eof.events
+                .iter()
+                .filter(|event| matches!(event, ProviderStreamEvent::TextEnded { .. }))
+                .count(),
+            1
+        );
+        assert!(matches!(eof.terminal,
+            ProviderGatewayTerminal::Completed { usage, .. }
+            if usage.input_tokens == 2 && usage.output_tokens == 1));
+    }
+
+    #[test]
+    fn semantic_tool_completion_at_eof_validates_assembled_arguments() {
+        let prepared =
+            prepare_openai_chat_request(&canonical_payload(), "qwen3.8-flash", options())
+                .expect("prepared");
+        let start = json!({"id":"response-1","choices":[{"index":0,"delta":{
+            "tool_calls":[{"index":0,"id":"call-1","type":"function","function":{
+                "name":"shell","arguments":"{\"cmd\":"}}]}}]});
+        let terminal = json!({"id":"response-1","choices":[{"index":0,"delta":{
+            "tool_calls":[{"index":0,"function":{"arguments":"\"ls\"}"}}]},
+            "finish_reason":"tool_calls"}],
+            "usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}});
+        let wire = format!("data: {start}\n\ndata: {terminal}\n\n");
+        let eof =
+            parse_openai_chat_sse(wire.as_bytes(), 2048, 8, &prepared.tool_bindings, options())
+                .expect("valid complete tool JSON at EOF");
+        let done = parse_openai_chat_sse(
+            format!("{wire}data: [DONE]\n\n").as_bytes(),
+            2048,
+            8,
+            &prepared.tool_bindings,
+            options(),
+        )
+        .expect("valid normal DONE completion");
+        assert_eq!(eof.events, done.events);
+        assert_eq!(eof.terminal, done.terminal);
+        assert_eq!(
+            eof.events
+                .iter()
+                .filter(|event| matches!(event, ProviderStreamEvent::ToolCallEnded { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn incomplete_eof_and_done_without_semantic_finish_remain_interrupted() {
+        let bindings = AnthropicToolBindings::default();
+        for delta in [
+            json!({"content":"still generating"}),
+            json!({"tool_calls":[{"index":0,"id":"call-1","type":"function",
+                "function":{"name":"shell","arguments":"{\"cmd\":"}}]}),
+        ] {
+            let chunk = json!({"id":"response-1","choices":[{"index":0,
+                "delta":delta,"finish_reason":null}],
+                "usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}});
+            for ending in ["", "data: [DONE]\n\n"] {
+                let wire = format!("data: {chunk}\n\n{ending}");
+                let error = parse_openai_chat_sse(wire.as_bytes(), 2048, 8, &bindings, options())
+                    .err()
+                    .expect("finish cannot be inferred from EOF or usage");
+                assert_eq!(
+                    error.kind(),
+                    crate::provider_anthropic::AnthropicCodecErrorKind::IncompleteStream
+                );
+                assert_eq!(
+                    error.diagnostic().expect("safe EOF diagnostic").field_path,
+                    "$.choices[0].finish_reason"
+                );
+            }
+        }
+        for wire in ["", "data: [DONE]\n\n"] {
+            let error = parse_openai_chat_sse(wire.as_bytes(), 2048, 8, &bindings, options())
+                .err()
+                .expect("an empty response cannot finish");
+            assert_eq!(
+                error.kind(),
+                crate::provider_anthropic::AnthropicCodecErrorKind::IncompleteStream
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_tool_json_is_never_closed_as_a_successful_call() {
+        let prepared =
+            prepare_openai_chat_request(&canonical_payload(), "qwen3.8-flash", options())
+                .expect("prepared");
+        for arguments in ["", "{\"cmd\":", "{bad}", "[]", "null"] {
+            let chunk = json!({"id":"response-1","choices":[{"index":0,
+                "delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function",
+                    "function":{"name":"shell","arguments":arguments}}]},
+                "finish_reason":"tool_calls"}],
+                "usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}});
+            for ending in ["", "data: [DONE]\n\n"] {
+                let wire = format!("data: {chunk}\n\n{ending}");
+                let error = parse_openai_chat_sse(
+                    wire.as_bytes(),
+                    2048,
+                    8,
+                    &prepared.tool_bindings,
+                    options(),
+                )
+                .err()
+                .expect("explicit finish does not make invalid tool JSON complete");
+                assert_eq!(
+                    error.kind(),
+                    crate::provider_anthropic::AnthropicCodecErrorKind::Protocol
+                );
+                let diagnostic = error.diagnostic().expect("safe tool JSON diagnostic");
+                assert_eq!(diagnostic.stage, "tool_arguments");
+                assert_eq!(
+                    diagnostic.field_path,
+                    "$.choices[0].delta.tool_calls[].function.arguments"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_interruption_and_filter_remain_typed_failed_attempts_with_real_usage() {
+        for (finish_reason, failure_kind) in [
+            ("aborted", crate::ModelAttemptFailureKind::Transport),
+            (
+                "insufficient_system_resource",
+                crate::ModelAttemptFailureKind::Transport,
+            ),
+            (
+                "content_filter",
+                crate::ModelAttemptFailureKind::InvalidRequest,
+            ),
+        ] {
+            for content in [Value::Null, json!("partial output")] {
+                let chunk = json!({"id":"response-1","choices":[{"index":0,
+                    "delta":{"content":content},"finish_reason":finish_reason}],
+                    "usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}});
+                let wire = format!("data: {chunk}\n\n");
+                let parsed = parse_openai_chat_sse(
+                    wire.as_bytes(),
+                    2048,
+                    8,
+                    &AnthropicToolBindings::default(),
+                    options(),
+                )
+                .expect("upstream explicitly reported a failed terminal");
+                let ProviderGatewayTerminal::Failed {
+                    failure,
+                    charge: Some(charge),
+                } = parsed.terminal
+                else {
+                    panic!("interrupted/filtered output must not succeed");
+                };
+                assert_eq!(failure.kind, failure_kind);
+                assert_eq!(
+                    failure.certainty,
+                    if content.is_null() {
+                        crate::ModelExecutionCertainty::AcceptanceUnknown
+                    } else {
+                        crate::ModelExecutionCertainty::OutputObserved
+                    }
+                );
+                assert_eq!(charge.usage.input_tokens, 2);
+                assert_eq!(charge.usage.output_tokens, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn observed_usage_survives_interruption_without_implying_completion() {
+        let chunk = json!({"id":"response-1","choices":[{"index":0,
+            "delta":{"content":"partial"},"finish_reason":null}],
+            "usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}});
+        let wire = format!("data: {chunk}\n\ndata: {{\"id\":");
+        let (id, usage) = observed_openai_usage(wire.as_bytes(), 2048, 8)
+            .expect("usage supplied before truncated JSON is a real usage fact");
+        assert_eq!(id, "response-1");
+        assert_eq!(usage.input_tokens, 2);
+        assert_eq!(usage.output_tokens, 1);
+        let mut utf8_tail = format!("data: {chunk}\n\ndata: {{\"content\":\"").into_bytes();
+        utf8_tail.extend_from_slice(&[0xe2, 0x82]);
+        let (_, prefix_usage) = observed_openai_usage(&utf8_tail, 2048, 8)
+            .expect("a partial UTF-8 tail cannot erase earlier real usage");
+        assert_eq!(prefix_usage, usage);
+        let utf8_error = parse_openai_chat_sse(
+            &utf8_tail,
+            2048,
+            8,
+            &AnthropicToolBindings::default(),
+            options(),
+        )
+        .err()
+        .expect("a partial UTF-8 tail cannot complete");
+        assert_eq!(
+            utf8_error.kind(),
+            crate::provider_anthropic::AnthropicCodecErrorKind::IncompleteStream
+        );
+        let error = parse_openai_chat_sse(
+            wire.as_bytes(),
+            2048,
+            8,
+            &AnthropicToolBindings::default(),
+            options(),
+        )
+        .err()
+        .expect("truncated JSON cannot complete");
+        assert_eq!(
+            error.kind(),
+            crate::provider_anthropic::AnthropicCodecErrorKind::IncompleteStream
+        );
+        assert_eq!(
+            error.diagnostic().expect("JSON EOF diagnostic").stage,
+            "json_decode"
+        );
+        let different = json!({"id":"response-2","choices":[]});
+        let ambiguous = format!("data: {chunk}\n\ndata: {different}\n\n");
+        assert!(observed_openai_usage(ambiguous.as_bytes(), 2048, 8).is_none());
+        for wire in ["", "data: [DONE]\n\n", "data: {\"id\":\"response-1\"}\n\n"] {
+            assert!(observed_openai_usage(wire.as_bytes(), 2048, 8).is_none());
+        }
+        let invalid = json!({"id":"response-1","choices":[],
+            "usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":4}});
+        assert!(
+            observed_openai_usage(format!("data: {invalid}\n\n").as_bytes(), 2048, 8).is_none()
+        );
+    }
+
+    #[test]
+    fn rejects_unmetered_multiple_choice_and_invalid_terminal_order_streams() {
         let bindings = AnthropicToolBindings::default();
         let chunk = json!({"id":"response-1","model":"observed-qwen","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}});
         let wire = format!("data: {chunk}\n\ndata: [DONE]\n\n");
@@ -1135,16 +1540,18 @@ mod tests {
         assert!(
             matches!(&parsed.events[0], ProviderStreamEvent::ResponseStarted { observed_model_id: Some(model), .. } if model == "observed-qwen")
         );
-        assert!(
-            parse_openai_chat_sse(
-                format!("data: {chunk}\n\n").as_bytes(),
-                2048,
-                8,
-                &bindings,
-                options()
-            )
-            .is_err()
-        );
+        for ending in ["data: [DONE]\n\n", "data: {\"id\":\"response-1\"}\n\n"] {
+            assert!(
+                parse_openai_chat_sse(
+                    format!("{wire}{ending}").as_bytes(),
+                    2048,
+                    8,
+                    &bindings,
+                    options(),
+                )
+                .is_err()
+            );
+        }
         for pointer in ["/usage", "/choices/0/index"] {
             let mut invalid = chunk.clone();
             *invalid.pointer_mut(pointer).unwrap() = if pointer == "/usage" {
@@ -1154,6 +1561,20 @@ mod tests {
             };
             let wire = format!("data: {invalid}\n\ndata: [DONE]\n\n");
             assert!(parse_openai_chat_sse(wire.as_bytes(), 2048, 8, &bindings, options()).is_err());
+            let eof = format!("data: {invalid}\n\n");
+            let error = parse_openai_chat_sse(eof.as_bytes(), 2048, 8, &bindings, options())
+                .err()
+                .expect("EOF does not bypass required metering/choice checks");
+            if pointer == "/usage" {
+                assert_eq!(
+                    error.kind(),
+                    crate::provider_anthropic::AnthropicCodecErrorKind::IncompleteStream
+                );
+                assert_eq!(
+                    error.diagnostic().expect("usage diagnostic").field_path,
+                    "$.usage"
+                );
+            }
         }
     }
 }

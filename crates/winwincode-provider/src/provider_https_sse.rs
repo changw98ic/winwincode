@@ -21,16 +21,16 @@ use ureq::unversioned::transport::{ConnectProxyConnector, Connector as _, Rustls
 use winwincode_domain::{ModelExchangeId, RequestId};
 
 use crate::provider_anthropic::{
-    AnthropicCodecErrorKind, AnthropicMessagesOptions, AnthropicToolBindings, ProviderTokenPricing,
-    parse_anthropic_sse, prepare_anthropic_request,
+    AnthropicCodecErrorKind, AnthropicMessagesOptions, AnthropicToolBindings,
+    PreparedAnthropicRequest, ProviderTokenPricing, parse_anthropic_sse, prepare_anthropic_request,
 };
 use crate::{
     CanonicalModelStreamFrame, ModelAttemptFailureFact, ModelExecutionCertainty,
     ProviderAdapterError, ProviderAdapterInvocation, ProviderAdapterOpenReceipt,
-    ProviderAdapterPort, ProviderFinishReason, ProviderGatewayOpenReceipt, ProviderGatewayTerminal,
-    ProviderStreamControlAction, ProviderStreamConverter, ProviderStreamEvent,
-    ProviderStreamFailure, ProviderStreamFailureKind, ProviderTokenUsage, ProviderToolIdentity,
-    ProviderToolKind, ResolvedSecret,
+    ProviderAdapterPort, ProviderFailureDiagnostic, ProviderFailureMetadata, ProviderFinishReason,
+    ProviderGatewayOpenReceipt, ProviderGatewayTerminal, ProviderStreamControlAction,
+    ProviderStreamConverter, ProviderStreamEvent, ProviderStreamFailure, ProviderStreamFailureKind,
+    ProviderTokenUsage, ProviderToolIdentity, ProviderToolKind, ResolvedSecret,
 };
 
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
@@ -369,19 +369,70 @@ pub enum HttpsSseProviderErrorKind {
 }
 
 /// Secret-free HTTPS/SSE error.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct HttpsSseProviderError {
     kind: HttpsSseProviderErrorKind,
+    metadata: Box<ProviderFailureMetadata>,
+    response: Option<Vec<u8>>,
+    observed_receipt: Option<Box<(String, ProviderTokenUsage)>>,
+}
+
+impl fmt::Debug for HttpsSseProviderError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HttpsSseProviderError")
+            .field("kind", &self.kind)
+            .field("metadata", &self.metadata)
+            .field("response", &self.response.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "observed_receipt",
+                &self.observed_receipt.as_deref().map(|(_, usage)| usage),
+            )
+            .finish()
+    }
 }
 
 impl HttpsSseProviderError {
-    const fn new(kind: HttpsSseProviderErrorKind) -> Self {
-        Self { kind }
+    fn new(kind: HttpsSseProviderErrorKind) -> Self {
+        Self {
+            kind,
+            metadata: Box::default(),
+            response: None,
+            observed_receipt: None,
+        }
     }
 
     #[must_use]
     pub const fn kind(&self) -> HttpsSseProviderErrorKind {
         self.kind
+    }
+
+    #[must_use]
+    pub fn metadata(&self) -> &ProviderFailureMetadata {
+        &self.metadata
+    }
+
+    #[must_use]
+    pub const fn retryable(&self) -> bool {
+        matches!(
+            self.kind,
+            HttpsSseProviderErrorKind::Transport
+                | HttpsSseProviderErrorKind::IncompleteStream
+                | HttpsSseProviderErrorKind::RateLimited
+        )
+    }
+
+    pub(crate) fn response(&self) -> Option<&[u8]> {
+        self.response.as_deref()
+    }
+
+    pub(crate) fn observed_receipt(&self) -> Option<&(String, ProviderTokenUsage)> {
+        self.observed_receipt.as_deref()
+    }
+
+    fn with_response(mut self, response: Vec<u8>) -> Self {
+        self.response = Some(response);
+        self
     }
 
     /// Produces the stable terminal fact used when an accepted stream breaks.
@@ -464,6 +515,7 @@ struct StreamRecord {
     tool_bindings: AnthropicToolBindings,
     state: StreamState,
     io: Arc<crate::provider_transport::ExchangeIo>,
+    metadata: ProviderFailureMetadata,
 }
 
 #[derive(Clone, Copy)]
@@ -597,7 +649,18 @@ impl HttpsSseProviderAdapter {
         }
         let mut body = self.take_body(receipt)?;
         let tool_bindings = self.stream_tool_bindings(receipt)?;
-        let result = self.convert_response(receipt, &mut body, &tool_bindings);
+        let result = self
+            .convert_response(receipt, &mut body, &tool_bindings)
+            .map_err(|mut error| {
+                if let Ok(streams) = self.shared.streams.lock()
+                    && let Some(record) = streams.get(&receipt.adapter_request_id)
+                {
+                    let diagnostic = error.metadata.diagnostic.take();
+                    error.metadata = Box::new(record.metadata.clone());
+                    error.metadata.diagnostic = diagnostic;
+                }
+                error
+            });
         self.finish_drain(receipt)?;
         result
     }
@@ -616,11 +679,51 @@ impl HttpsSseProviderAdapter {
             receipt.stream_leak_gate.track_secret(&secret);
         }
         let receipt = &receipt;
-        let bytes = self.read_bounded(receipt, body)?;
+        let bytes = match self.read_bounded(receipt, body) {
+            Ok(bytes) => bytes,
+            Err(mut error) => {
+                if let Some(bytes) = error.response.as_deref() {
+                    error.observed_receipt = self.observed_receipt(bytes, receipt).map(Box::new);
+                    let cancelled = self.shared.cancellation.lock().map_or(true, |value| {
+                        value
+                            .as_ref()
+                            .is_some_and(|cancellation| cancellation.is_cancelled())
+                    });
+                    if matches!(
+                        self.shared.config.protocol,
+                        HttpsSseProviderProtocol::OpenAiChatCompletions(_)
+                    ) && error.kind == HttpsSseProviderErrorKind::Transport
+                        && !cancelled
+                        && !self.drain_interrupted(receipt)?
+                        && let Ok(completion) = self.convert_bytes(receipt, tool_bindings, bytes)
+                        && matches!(
+                            completion.terminal,
+                            ProviderGatewayTerminal::Completed { .. }
+                        )
+                    {
+                        return Ok(completion);
+                    }
+                }
+                return Err(error);
+            }
+        };
+        self.convert_bytes(receipt, tool_bindings, &bytes)
+            .map_err(|mut error| {
+                error.observed_receipt = self.observed_receipt(&bytes, receipt).map(Box::new);
+                error.with_response(bytes)
+            })
+    }
+
+    fn convert_bytes(
+        &self,
+        receipt: &ProviderGatewayOpenReceipt,
+        tool_bindings: &AnthropicToolBindings,
+        bytes: &[u8],
+    ) -> Result<HttpsSseProviderCompletion, HttpsSseProviderError> {
         let (events, terminal) = match self.shared.config.protocol {
             HttpsSseProviderProtocol::Canonical => {
                 let parsed = parse_sse(
-                    &bytes,
+                    bytes,
                     self.shared.config.max_event_bytes,
                     self.shared.config.max_events,
                 )?;
@@ -628,7 +731,7 @@ impl HttpsSseProviderAdapter {
             }
             HttpsSseProviderProtocol::AnthropicMessages(options) => {
                 let parsed = parse_anthropic_sse(
-                    &bytes,
+                    bytes,
                     self.shared.config.max_event_bytes,
                     self.shared.config.max_events,
                     tool_bindings,
@@ -639,7 +742,7 @@ impl HttpsSseProviderAdapter {
             }
             HttpsSseProviderProtocol::OpenAiChatCompletions(options) => {
                 let parsed = crate::provider_openai::parse_openai_chat_sse(
-                    &bytes,
+                    bytes,
                     self.shared.config.max_event_bytes,
                     self.shared.config.max_events,
                     tool_bindings,
@@ -672,6 +775,37 @@ impl HttpsSseProviderAdapter {
         Ok(HttpsSseProviderCompletion { frames, terminal })
     }
 
+    fn observed_receipt(
+        &self,
+        bytes: &[u8],
+        receipt: &ProviderGatewayOpenReceipt,
+    ) -> Option<(String, ProviderTokenUsage)> {
+        let observed = match self.shared.config.protocol {
+            HttpsSseProviderProtocol::AnthropicMessages(options) => {
+                crate::provider_anthropic::observed_anthropic_receipt(
+                    bytes,
+                    self.shared.config.max_event_bytes,
+                    self.shared.config.max_events,
+                    options,
+                )
+            }
+            HttpsSseProviderProtocol::OpenAiChatCompletions(_) => {
+                crate::provider_openai::observed_openai_usage(
+                    bytes,
+                    self.shared.config.max_event_bytes,
+                    self.shared.config.max_events,
+                )
+            }
+            HttpsSseProviderProtocol::Canonical => None,
+        };
+        observed.filter(|(id, _)| {
+            receipt
+                .stream_leak_gate
+                .inspect_bytes(crate::CredentialOutputBoundary::Persistence, id.as_bytes())
+                .is_ok()
+        })
+    }
+
     fn stream_tool_bindings(
         &self,
         receipt: &ProviderGatewayOpenReceipt,
@@ -702,13 +836,17 @@ impl HttpsSseProviderAdapter {
         let mut buffer = [0_u8; 8 * 1024];
         loop {
             if self.drain_interrupted(receipt)? {
-                return Err(HttpsSseProviderError::new(
-                    HttpsSseProviderErrorKind::Transport,
-                ));
+                return Err(
+                    HttpsSseProviderError::new(HttpsSseProviderErrorKind::Transport)
+                        .with_response(bytes),
+                );
             }
-            let read = reader
-                .read(&mut buffer)
-                .map_err(|_| HttpsSseProviderError::new(HttpsSseProviderErrorKind::Transport))?;
+            let Ok(read) = reader.read(&mut buffer) else {
+                return Err(
+                    HttpsSseProviderError::new(HttpsSseProviderErrorKind::Transport)
+                        .with_response(bytes),
+                );
+            };
             if read == 0 {
                 return Ok(bytes);
             }
@@ -871,6 +1009,7 @@ impl HttpsSseProviderAdapter {
                 tool_bindings,
                 state: StreamState::Pending,
                 io: self.exchange_io(),
+                metadata: ProviderFailureMetadata::default(),
             },
         );
         Ok(())
@@ -936,16 +1075,11 @@ impl HttpsSseProviderAdapter {
         }
     }
 
-    fn open_https(
+    fn prepare_request(
         &self,
         invocation: HttpInvocation<'_>,
-        credential: &[u8],
-    ) -> Result<ProviderAdapterOpenReceipt, ProviderAdapterError> {
-        let digest = invocation_digest(invocation);
-        if let Some(replay) = self.existing_open(invocation, &digest)? {
-            return Ok(replay);
-        }
-        let prepared = match self.shared.config.protocol {
+    ) -> Result<Option<PreparedAnthropicRequest>, ProviderAdapterError> {
+        Ok(match self.shared.config.protocol {
             HttpsSseProviderProtocol::Canonical => None,
             HttpsSseProviderProtocol::AnthropicMessages(options) => Some(
                 prepare_anthropic_request(invocation.payload, invocation.model_id, options)
@@ -959,7 +1093,19 @@ impl HttpsSseProviderAdapter {
                 )
                 .map_err(map_anthropic_request)?,
             ),
-        };
+        })
+    }
+
+    fn open_https(
+        &self,
+        invocation: HttpInvocation<'_>,
+        credential: &[u8],
+    ) -> Result<ProviderAdapterOpenReceipt, ProviderAdapterError> {
+        let digest = invocation_digest(invocation);
+        if let Some(replay) = self.existing_open(invocation, &digest)? {
+            return Ok(replay);
+        }
+        let prepared = self.prepare_request(invocation)?;
         let tool_bindings = prepared
             .as_ref()
             .map_or_else(AnthropicToolBindings::default, |request| {
@@ -1003,22 +1149,31 @@ impl HttpsSseProviderAdapter {
         };
         let response = request.send(payload);
         drop(authorization);
-        let Ok(response) = response else {
-            self.abandon_retryable_open(invocation)?;
-            return Err(ProviderAdapterError::connection());
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                self.abandon_retryable_open(invocation)?;
+                return Err(classify_open_error(&error));
+            }
         };
         let status = response.status().as_u16();
+        let metadata = response_metadata(
+            response.headers(),
+            status,
+            credential,
+            &self.shared.config.custom_headers,
+        );
         if status == 429 {
             self.abandon_retryable_open(invocation)?;
-            return Err(ProviderAdapterError::rate_limited());
+            return Err(ProviderAdapterError::rate_limited().with_metadata(metadata));
         }
         if (500..=599).contains(&status) {
             self.abandon_retryable_open(invocation)?;
-            return Err(ProviderAdapterError::upstream());
+            return Err(ProviderAdapterError::upstream().with_metadata(metadata));
         }
         if !(200..=299).contains(&status) {
             self.finish_open(invocation, StreamState::Fenced)?;
-            return Err(ProviderAdapterError::rejected());
+            return Err(ProviderAdapterError::rejected().with_metadata(metadata));
         }
         if !response
             .headers()
@@ -1027,8 +1182,15 @@ impl HttpsSseProviderAdapter {
             .is_some_and(canonical_event_stream_content_type)
         {
             self.finish_open(invocation, StreamState::Fenced)?;
-            return Err(ProviderAdapterError::response_content_type());
+            return Err(ProviderAdapterError::response_content_type().with_metadata(metadata));
         }
+        self.shared
+            .streams
+            .lock()
+            .map_err(|_| ProviderAdapterError::unavailable())?
+            .get_mut(invocation.adapter_request_id)
+            .ok_or_else(ProviderAdapterError::unavailable)?
+            .metadata = metadata;
         io.body_started();
         self.finish_open(invocation, StreamState::Open(Some(response.into_body())))?;
         ProviderAdapterOpenReceipt::try_new(invocation.adapter_request_id.to_owned())
@@ -1074,6 +1236,7 @@ impl ProviderAdapterPort for HttpsSseProviderAdapter {
                 tool_bindings: AnthropicToolBindings::default(),
                 state: StreamState::Fenced,
                 io: self.exchange_io(),
+                metadata: ProviderFailureMetadata::default(),
             });
         if record.model_exchange_id != *model_exchange_id {
             return Err(ProviderAdapterError::identity_conflict());
@@ -1599,14 +1762,75 @@ fn map_anthropic_request(
 fn map_anthropic_response(
     error: crate::provider_anthropic::AnthropicCodecError,
 ) -> HttpsSseProviderError {
-    HttpsSseProviderError::new(match error.kind() {
+    let mut mapped = HttpsSseProviderError::new(match error.kind() {
         AnthropicCodecErrorKind::InvalidRequest | AnthropicCodecErrorKind::Protocol => {
             HttpsSseProviderErrorKind::SseEvent
         }
         AnthropicCodecErrorKind::InvalidSse => HttpsSseProviderErrorKind::SseFraming,
         AnthropicCodecErrorKind::IncompleteStream => HttpsSseProviderErrorKind::IncompleteStream,
         AnthropicCodecErrorKind::SizeLimit => HttpsSseProviderErrorKind::SizeLimit,
-    })
+    });
+    mapped.metadata.diagnostic = error
+        .diagnostic()
+        .map(|diagnostic| ProviderFailureDiagnostic {
+            stage: diagnostic.stage.to_owned(),
+            event_type: diagnostic.event_type.to_owned(),
+            field_path: diagnostic.field_path.to_owned(),
+        });
+    mapped
+}
+
+fn response_metadata(
+    headers: &ureq::http::HeaderMap,
+    status: u16,
+    credential: &[u8],
+    custom_headers: &[(String, String)],
+) -> ProviderFailureMetadata {
+    let provider_retry_after_millis = headers
+        .get("retry-after")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| {
+            let value = value.trim();
+            value
+                .parse::<u64>()
+                .ok()
+                .and_then(|seconds| seconds.checked_mul(1_000))
+                .or_else(|| {
+                    httpdate::parse_http_date(value).ok().map(|deadline| {
+                        u64::try_from(
+                            deadline
+                                .duration_since(std::time::SystemTime::now())
+                                .unwrap_or(Duration::ZERO)
+                                .as_millis(),
+                        )
+                        .unwrap_or(u64::MAX)
+                    })
+                })
+        });
+    let provider_request_id = ["x-request-id", "request-id", "x-amzn-requestid"]
+        .iter()
+        .find_map(|name| headers.get(*name).and_then(|value| value.to_str().ok()))
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 256
+                && value.bytes().all(|byte| byte.is_ascii_graphic())
+        })
+        .filter(|value| {
+            !value
+                .as_bytes()
+                .windows(credential.len().max(1))
+                .any(|window| window == credential)
+                && !custom_headers
+                    .iter()
+                    .any(|(_, secret)| !secret.is_empty() && value.contains(secret))
+        })
+        .map(str::to_owned);
+    ProviderFailureMetadata {
+        status: Some(status),
+        provider_retry_after_millis,
+        provider_request_id,
+        diagnostic: None,
+    }
 }
 
 fn invocation_digest(invocation: HttpInvocation<'_>) -> [u8; 32] {
@@ -1624,6 +1848,36 @@ fn invocation_digest(invocation: HttpInvocation<'_>) -> [u8; 32] {
         digest.update(value);
     }
     digest.finalize().into()
+}
+
+fn classify_open_error(error: &ureq::Error) -> ProviderAdapterError {
+    match error {
+        ureq::Error::Io(error)
+            if error.get_ref().is_some_and(
+                <dyn std::error::Error + Send + Sync + 'static>::is::<rustls::Error>,
+            ) || matches!(
+                error.kind(),
+                std::io::ErrorKind::InvalidInput
+                    | std::io::ErrorKind::InvalidData
+                    | std::io::ErrorKind::Unsupported
+                    | std::io::ErrorKind::PermissionDenied
+            ) =>
+        {
+            ProviderAdapterError::protocol()
+        }
+        ureq::Error::Io(_)
+        | ureq::Error::Timeout(_)
+        | ureq::Error::HostNotFound
+        | ureq::Error::ConnectionFailed
+        | ureq::Error::ConnectProxyFailed(_) => ProviderAdapterError::connection(),
+        ureq::Error::Http(_)
+        | ureq::Error::BadUri(_)
+        | ureq::Error::InvalidProxyUrl
+        | ureq::Error::RequireHttpsOnly(_) => ProviderAdapterError::request_invalid(),
+        // Permanent certificate, TLS configuration, request and HTTP protocol
+        // failures cannot become an endless paid retry while the task is live.
+        _ => ProviderAdapterError::protocol(),
+    }
 }
 
 fn authorization_value(secret: &[u8]) -> Result<String, ProviderAdapterError> {
@@ -1702,8 +1956,67 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn only_transient_connection_failures_request_another_attempt() {
+        for error in [
+            ureq::Error::HostNotFound,
+            ureq::Error::ConnectionFailed,
+            ureq::Error::Timeout(ureq::Timeout::Connect),
+            ureq::Error::Io(std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
+            ureq::Error::Io(std::io::Error::from(std::io::ErrorKind::UnexpectedEof)),
+        ] {
+            assert!(classify_open_error(&error).retryable());
+        }
+        for error in [
+            ureq::Error::Tls("private TLS diagnostic"),
+            ureq::Error::TlsRequired,
+            ureq::Error::InvalidProxyUrl,
+            ureq::Error::BadUri("private request".to_owned()),
+            ureq::Error::TooManyRedirects,
+            ureq::Error::Rustls(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::UnknownIssuer,
+            )),
+            ureq::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                rustls::Error::InvalidCertificate(rustls::CertificateError::NotValidForName),
+            )),
+        ] {
+            let failure = classify_open_error(&error);
+            assert!(!failure.retryable());
+            assert!(!format!("{failure:?}").contains("private"));
+        }
+    }
+
     const SECRET: &[u8] = b"provider-https-sse-secret-fixture";
     const PAYLOAD: &[u8] = br#"{"input":"local TLS fixture"}"#;
+
+    #[test]
+    fn retry_after_retains_delta_and_http_date_without_copying_secret_headers() {
+        let mut headers = ureq::http::HeaderMap::new();
+        headers.insert("retry-after", "12".parse().unwrap());
+        headers.insert("x-request-id", "provider-request-1".parse().unwrap());
+        let facts = response_metadata(&headers, 429, SECRET, &[]);
+        assert_eq!(facts.status, Some(429));
+        assert_eq!(facts.provider_retry_after_millis, Some(12_000));
+        assert_eq!(
+            facts.provider_request_id.as_deref(),
+            Some("provider-request-1")
+        );
+        let date = httpdate::fmt_http_date(std::time::SystemTime::now() + Duration::from_mins(1));
+        headers.insert("retry-after", date.parse().unwrap());
+        let wait = response_metadata(&headers, 503, SECRET, &[])
+            .provider_retry_after_millis
+            .unwrap();
+        assert!((58_000..=60_000).contains(&wait));
+        headers.insert("retry-after", "not a date or number".parse().unwrap());
+        headers.insert(
+            "x-request-id",
+            std::str::from_utf8(SECRET).unwrap().parse().unwrap(),
+        );
+        let facts = response_metadata(&headers, 403, SECRET, &[]);
+        assert_eq!(facts.provider_retry_after_millis, None);
+        assert_eq!(facts.provider_request_id, None);
+    }
 
     struct TestResponse {
         status: &'static str,
@@ -2548,12 +2861,12 @@ mod tests {
         let request_id = RequestId("req_00000000000000000000000002".to_owned());
         let request = invocation(&exchange, &request_id);
         assert_eq!(
-            adapter.open_https(request, SECRET).expect_err("5xx"),
-            ProviderAdapterError::upstream()
+            adapter.open_https(request, SECRET).expect_err("5xx").kind(),
+            crate::ProviderAdapterErrorKind::Upstream
         );
         assert_eq!(
-            adapter.open_https(request, SECRET).expect_err("429"),
-            ProviderAdapterError::rate_limited()
+            adapter.open_https(request, SECRET).expect_err("429").kind(),
+            crate::ProviderAdapterErrorKind::RateLimited
         );
         adapter
             .open_https(request, SECRET)

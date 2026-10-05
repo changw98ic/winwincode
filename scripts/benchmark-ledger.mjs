@@ -154,10 +154,11 @@ export function openBenchmarkLedger(path, identity, cells) {
             const resolved = record.calls[position]
             if (JSON.stringify(resolved) === JSON.stringify(prior)) continue
             const launch = observed.launches.find(target => target.callId === prior.callId)
-            // An export error is not a Provider outcome. Resolve only that
+            // An export or unresolved observation error is not a Provider outcome. Resolve only that
             // exact registered call from retained product evidence, and keep
             // its original failure in the same atomic recovery record.
-            if (prior.status !== 'failed' || prior.failure?.code !== 'BENCHMARK_EVIDENCE_FAILED'
+            if (prior.status !== 'failed' || (prior.failure?.code !== 'BENCHMARK_EVIDENCE_FAILED'
+                && prior.unresolvedDeviceExecution !== true)
               || resolved?.status !== 'returned' || resolved.callId !== prior.callId
               || !launch || resolved.result?.directory !== launch.directory || !resolved.result.recovery
               || record.recovery?.kind !== 'retained-product-result'

@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import test from 'node:test'
 import { benchmarkDeviceProfiles, deviceBenchmarkExperimentBinding,
-  removeTerminalBenchmarkPublicSmoke } from '../scripts/benchmark-device-adapter.mjs'
+  persistedBenchmarkDeviceFailure, removeTerminalBenchmarkPublicSmoke } from '../scripts/benchmark-device-adapter.mjs'
 import { buildBenchmarkPlan } from '../scripts/run-real-task-benchmark.mjs'
 import { benchmarkDeviceEnvironment } from '../scripts/run-device-task-vertical.mjs'
 import { runtimeChildEnvironment } from '../scripts/device-production-fixture.mjs'
@@ -138,6 +138,62 @@ function cleanupFixture(t) {
   return { launch, id, neighbor, report, reportPath, save, delivery, aggregate, mutations, servers,
     runtime: { api, devicePath: { publicClientId: report.publicClientId } } }
 }
+
+test('nonterminal and absent persisted product projections retain the typed interruption and original evidence', t => {
+  const fixture = cleanupFixture(t)
+  for (const delivery of [
+    null,
+    { detail: { ...fixture.delivery, status: 'running' },
+      workRunAggregate: { ...fixture.aggregate, runs: [{ id: 'run-owned', state: 'running' }],
+        items: [{ id: 'item-owned', state: 'in_progress' }] } },
+    { detail: { ...fixture.delivery, status: 'failed' },
+      workRunAggregate: { ...fixture.aggregate, runs: [{ id: 'run-owned', state: 'failed' },
+        { id: 'still-active', state: 'running' }] } },
+  ]) {
+    const report = { ...fixture.report, errorCode: 'TRUSTED_FACTS_UNAVAILABLE', delivery }
+    writeFileSync(fixture.reportPath, `${JSON.stringify(report)}\n`)
+    const bytes = readFileSync(fixture.reportPath, 'utf8')
+    const interruption = Object.assign(new Error('query returned 503'), {
+      code: report.errorCode, status: 503, report,
+    })
+    assert.throws(() => persistedBenchmarkDeviceFailure(report, fixture.launch, interruption), error => {
+      assert.equal(error.code, 'TRUSTED_FACTS_UNAVAILABLE')
+      assert.equal(error.status, 503)
+      assert.equal(error.cause, interruption)
+      assert.equal(error.unresolvedDeviceExecution, true)
+      return true
+    })
+    assert.equal(readFileSync(fixture.reportPath, 'utf8'), bytes)
+    assert.equal(fixture.mutations.length, 0)
+    assert.equal(fixture.servers.has(fixture.id), true)
+  }
+})
+
+test('persisted failure classification accepts terminal product facts and rejects identity or cursor conflicts', t => {
+  const fixture = cleanupFixture(t)
+  const report = { ...fixture.report,
+    delivery: { detail: fixture.delivery, workRunAggregate: fixture.aggregate } }
+  const failure = Object.assign(new Error('product failed'), { code: 'DEVICE_PRODUCT_FAILED', report })
+  const observation = persistedBenchmarkDeviceFailure(report, fixture.launch, failure)
+  assert.equal(observation.delivery, fixture.delivery)
+  assert.equal(observation.workRunAggregate, fixture.aggregate)
+  for (const conflict of ['report', 'session', 'delivery', 'cursor']) {
+    const changed = structuredClone(report)
+    if (conflict === 'session') changed.productSessionId = 'another-session'
+    if (conflict === 'delivery') changed.deliveryId = 'another-delivery'
+    if (conflict === 'cursor') changed.delivery.workRunAggregate.readCursor = {
+      ...changed.delivery.workRunAggregate.readCursor, token: 'older',
+    }
+    const error = Object.assign(new Error('query interrupted'), { code: 'TRUSTED_FACTS_UNAVAILABLE',
+      status: 503, report: conflict === 'report' ? report : changed })
+    if (conflict === 'report') changed.errorCode = 'changed'
+    assert.throws(() => persistedBenchmarkDeviceFailure(changed, fixture.launch, error), thrown => {
+      assert.equal(thrown.code, 'ERR_ASSERTION')
+      assert.notEqual(thrown.unresolvedDeviceExecution, true)
+      return true
+    })
+  }
+})
 
 test('terminal failed tasks delete only their own MCP and preserve the original result evidence', async t => {
   const fixture = cleanupFixture(t)

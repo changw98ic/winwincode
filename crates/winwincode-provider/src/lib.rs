@@ -44,10 +44,10 @@ pub use provider_stream::{
 pub use types::{
     ModelAttemptCharge, ModelAttemptFailureFact, ModelAttemptFailureKind, ModelExecutionCertainty,
     ProviderAdapterError, ProviderAdapterErrorKind, ProviderAdapterInvocation,
-    ProviderAdapterOpenReceipt, ProviderAdapterPort, ProviderGatewayErrorKind,
-    ProviderGatewayOpenReceipt, ProviderGatewayTerminal, ProviderGatewayTerminalCharge,
-    ProviderGatewayTerminalOutcome, ProviderStreamControlAction, ResolvedSecret, SecretStoreError,
-    SecretStoreErrorKind,
+    ProviderAdapterOpenReceipt, ProviderAdapterPort, ProviderFailureDiagnostic,
+    ProviderFailureMetadata, ProviderGatewayErrorKind, ProviderGatewayOpenReceipt,
+    ProviderGatewayTerminal, ProviderGatewayTerminalCharge, ProviderGatewayTerminalOutcome,
+    ProviderStreamControlAction, ResolvedSecret, SecretStoreError, SecretStoreErrorKind,
 };
 
 mod device_store;

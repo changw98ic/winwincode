@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Per-Provider model slots shared by every Worker on one Device.
-//! An OS file lock lives for the complete model call and is released on process exit.
+//! An OS file lock lives for each actual Provider invocation and is released during retry waits.
 
 use std::{
     fs::{self, File, OpenOptions, TryLockError},
@@ -36,6 +36,24 @@ pub enum DeviceModelAdmission {
 }
 
 impl DeviceProviderStore {
+    pub(crate) fn try_model_exchange_owner(
+        &self,
+        exchange_id: &str,
+    ) -> Result<Option<File>, DeviceProviderError> {
+        let database = Path::new(self.connection.path().ok_or(DeviceProviderError)?);
+        let root = database
+            .parent()
+            .ok_or(DeviceProviderError)?
+            .join("model-exchange-owners");
+        private_directory(&root)?;
+        let file =
+            private_slot_file(&root.join(format!("{:x}", Sha256::digest(exchange_id.as_bytes()))))?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(file)),
+            Err(TryLockError::WouldBlock) => Ok(None),
+            Err(TryLockError::Error(_)) => Err(DeviceProviderError),
+        }
+    }
     /// Non-blocking admission before creating a first-start exchange record.
     /// Existing exchanges use their original replay/failure path without another slot.
     /// Malformed requests retain their existing bounded failure path.
@@ -57,6 +75,18 @@ impl DeviceProviderStore {
         if existing.is_some() {
             return Ok(without_invocation());
         }
+        self.try_model_attempt_permit(open)
+    }
+
+    /// Acquires a Provider slot for a new invocation of an existing logical exchange.
+    /// Replaying a stored result uses `try_model_permit` and invokes no Provider.
+    ///
+    /// # Errors
+    /// Returns storage, file permission or OS lock failures; full slots are `Deferred`.
+    pub fn try_model_attempt_permit(
+        &self,
+        open: &ModelOpenMessage,
+    ) -> Result<DeviceModelAdmission, DeviceProviderError> {
         let Ok(payload) = validated_model_payload(open) else {
             return Ok(without_invocation());
         };

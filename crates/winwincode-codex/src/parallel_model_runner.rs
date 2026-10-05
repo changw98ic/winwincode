@@ -546,6 +546,15 @@ fn terminal(frame: &str) -> Result<Option<Terminal>, ModelPortFailure> {
                         .map(u16::try_from)
                         .transpose()
                         .map_err(|_| ModelPortFailure::new("PROTOCOL", "model error is invalid"))?,
+                    retryable: error
+                        .get("retryable")
+                        .filter(|value| !value.is_null())
+                        .map(|value| {
+                            value.as_bool().ok_or_else(|| {
+                                ModelPortFailure::new("PROTOCOL", "model error is invalid")
+                            })
+                        })
+                        .transpose()?,
                     provider_retry_after_millis: optional_u64(
                         error,
                         "providerRetryAfterMillis",

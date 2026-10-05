@@ -170,6 +170,153 @@ test('Delivery helpers keep each task on its own canonical Delivery identity', a
   assert.equal(result.detail.status, 'done')
 })
 
+function completedDeliveryObservation(deliveryId, token = 'terminal') {
+  const readCursor = { deliveryId, token }
+  return {
+    detail: { deliveryId, readCursor, deliveryRevision: 44, status: 'done', attention: [],
+      currentCandidate: { candidateRef: 'frozen-candidate' },
+      evidence: [{ id: 'real-command-evidence' }],
+      verdict: { status: 'pass', criteria: [{ verdict: 'pass' }] } },
+    workRunAggregate: { readCursor, items: [{ id: 'item', state: 'done' }],
+      runs: [{ id: 'run', workItemId: 'item', executionJobId: 'job', state: 'settled' }] },
+  }
+}
+
+test('temporary Delivery and cursor-bound WorkRun 503 queries re-read the same task before accepting completion', async () => {
+  const deliveryId = 'dlv_01J00000000000000000000003'
+  const terminal = completedDeliveryObservation(deliveryId)
+  const stale = { ...terminal.detail, deliveryRevision: 43, status: 'waiting_human',
+    readCursor: { deliveryId, token: 'unavailable-cursor' },
+    attention: [{ id: 'stale-approval', status: 'open' }] }
+  const original = structuredClone({ stale, terminal })
+  const queries = []
+  const projections = []
+  const unavailable = () => Object.assign(new Error('Trusted facts are temporarily unavailable'), {
+    code: 'TRUSTED_FACTS_UNAVAILABLE', status: 503,
+  })
+  const client = {
+    async query(name, parameters) {
+      queries.push({ name, parameters })
+      assert.equal(parameters.deliveryId, deliveryId)
+      switch (queries.length) {
+        case 1:
+          assert.equal(name, 'delivery.get')
+          throw unavailable()
+        case 2:
+          assert.equal(name, 'delivery.get')
+          return { result: stale }
+        case 3:
+          assert.equal(name, 'workrun.get')
+          assert.deepEqual(parameters.atCursor, stale.readCursor)
+          throw unavailable()
+        case 4:
+          assert.equal(name, 'delivery.get')
+          return { result: terminal.detail }
+        case 5:
+          assert.equal(name, 'workrun.get')
+          assert.deepEqual(parameters.atCursor, terminal.detail.readCursor)
+          return { result: terminal.workRunAggregate }
+        default:
+          assert.fail('completion must use its successful cursor-bound pair')
+      }
+    },
+    command: () => assert.fail('query recovery must not issue a product command'),
+    requestId: () => assert.fail('query recovery must not create a command request'),
+  }
+  const result = await driveDelivery(client, null, undefined, Date.now, {
+    deliveryId, resolveAttention: false,
+    onProjection: projection => projections.push(projection),
+    onActiveWorkRuns: () => assert.fail('unavailable observations must not launch work'),
+  })
+  assert.deepEqual(projections, [terminal])
+  assert.equal(result.detail, terminal.detail)
+  assert.equal(result.workRunAggregate, terminal.workRunAggregate)
+  assert.deepEqual(result.actions, [])
+  assert.deepEqual(result.observations, [{ revision: 44, status: 'done' }])
+  assert.deepEqual({ stale, terminal }, original, 'query recovery must not rewrite product evidence')
+})
+
+test('uncapped Delivery query recovery is not limited by the local stalled-projection budget', async () => {
+  const deliveryId = 'dlv_01J00000000000000000000003'
+  const terminal = completedDeliveryObservation(deliveryId)
+  let failures = 85
+  let acceptedQueries = 0
+  const client = {
+    async query(name) {
+      if (failures-- > 0) {
+        assert.equal(name, 'delivery.get')
+        throw Object.assign(new Error('Trusted facts are temporarily unavailable'), {
+          code: 'TRUSTED_FACTS_UNAVAILABLE', status: 503,
+        })
+      }
+      acceptedQueries += 1
+      return { result: name === 'delivery.get' ? terminal.detail : terminal.workRunAggregate }
+    },
+    command: () => assert.fail('repeated query unavailability cannot dispatch work'),
+  }
+  const result = await driveDelivery(client, null, undefined, () => Number.MAX_SAFE_INTEGER, { deliveryId })
+  assert.equal(result.detail, terminal.detail)
+  assert.equal(acceptedQueries, 2)
+  assert.equal(result.totalTransitionCount, 1)
+})
+
+test('temporary query unavailability respects the existing deadline and retains its typed unresolved cause', async () => {
+  const deliveryId = 'dlv_01J00000000000000000000003'
+  const terminal = completedDeliveryObservation(deliveryId)
+  for (const failedQuery of ['delivery.get', 'workrun.get']) {
+    let instant = 0
+    let queries = 0
+    const unavailable = Object.assign(new Error('Trusted facts are temporarily unavailable'), {
+      code: 'TRUSTED_FACTS_UNAVAILABLE', status: 503,
+    })
+    const client = {
+      async query(name) {
+        queries += 1
+        if (name === failedQuery) throw unavailable
+        return { result: terminal.detail }
+      },
+      command: () => assert.fail('an unresolved deadline cannot dispatch work'),
+    }
+    await assert.rejects(driveDelivery(client, 1, undefined, () => instant++, {
+      deliveryId, onProjection: () => assert.fail('a partial query pair is not evidence'),
+    }), error => {
+      assert.equal(error, unavailable)
+      assert.equal(error.status, 503)
+      assert.equal(error.code, 'TRUSTED_FACTS_UNAVAILABLE')
+      assert.equal(error.unresolvedDeviceExecution, true)
+      return true
+    })
+    assert.equal(queries, failedQuery === 'delivery.get' ? 1 : 2)
+  }
+})
+
+test('Delivery query recovery does not swallow invalid queries or unrelated transport failures', async () => {
+  const deliveryId = 'dlv_01J00000000000000000000003'
+  const terminal = completedDeliveryObservation(deliveryId)
+  for (const failedQuery of ['delivery.get', 'workrun.get']) {
+    for (const fields of [
+      { code: 'INVALID_QUERY', status: 503 },
+      { code: 'TRUSTED_FACTS_UNAVAILABLE', status: 400 },
+      { code: 'ECONNRESET' },
+    ]) {
+      let queries = 0
+      const failure = Object.assign(new Error('query failed'), fields)
+      const client = {
+        async query(name) {
+          queries += 1
+          if (name === failedQuery) throw failure
+          return { result: terminal.detail }
+        },
+        command: () => assert.fail('invalid queries cannot dispatch work'),
+      }
+      await assert.rejects(driveDelivery(client, null, undefined, Date.now, {
+        deliveryId, onProjection: () => assert.fail('failed queries are not evidence'),
+      }), error => error === failure)
+      assert.equal(queries, failedQuery === 'delivery.get' ? 1 : 2)
+    }
+  }
+})
+
 test('Delivery transition evidence keeps the newest bounded window without limiting progress', () => {
   const trace = { observations: [], totalTransitionCount: 0 }
   const transitionCount = DELIVERY_TRANSITION_DIAGNOSTIC_CAPACITY + 5

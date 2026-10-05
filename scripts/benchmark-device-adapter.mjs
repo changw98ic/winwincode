@@ -346,25 +346,13 @@ export async function runBenchmarkDeviceModel(request, runner, options) {
     try {
       const reportBytes = readFileSync(resolve(registeredLaunch.directory, 'device-task-result.json'))
       const report = JSON.parse(reportBytes)
-      assert.deepEqual(error.report, report, 'thrown product result must match its persisted projection')
-      assert.equal(report.productSessionId, registeredLaunch.productSessionId)
-      assert.equal(report.deliveryId, registeredLaunch.deliveryId)
-      if (!report.delivery?.detail || !report.delivery?.workRunAggregate) {
-        throw Object.assign(new Error('Device execution has no authoritative terminal outcome'), {
-          code: /^DEVICE_[A-Z0-9_]{1,100}$/.test(report.errorCode ?? '')
-            ? report.errorCode : 'DEVICE_EXECUTION_UNRESOLVED',
-          unresolvedDeviceExecution: true,
-        })
-      }
-      const observation = persistedDeviceObservation(report, registeredLaunch)
-      assert.ok(terminalBenchmarkDeviceFailure(observation), 'only a persisted terminal product result can be finalized')
+      const observation = persistedBenchmarkDeviceFailure(report, registeredLaunch, error)
       return await finalizeFailure(await resolveRegisteredDeviceTask(request, registeredLaunch, options, {
         report, reportBytes, observation,
       }))
     } catch (unresolved) {
       if (unresolved.unresolvedDeviceExecution === true) throw unresolved
-      // The product call has been launched, so uncertain state must stay
-      // unresolved in the durable ledger rather than be retried as a task.
+      // Report, identity or read-cursor conflicts remain evidence failures.
       throw evidenceFailure()
     }
   }
@@ -374,6 +362,27 @@ export async function runBenchmarkDeviceModel(request, runner, options) {
     if (options.productSourceSealSha256) assert.equal(result.productSourceSealSha256, options.productSourceSealSha256)
     return result
   } catch { throw evidenceFailure() }
+}
+
+export function persistedBenchmarkDeviceFailure(report, launch, error) {
+  assert.deepEqual(error.report, report, 'thrown product result must match its persisted projection')
+  assert.equal(report.productSessionId, launch.productSessionId)
+  assert.equal(report.deliveryId, launch.deliveryId)
+  let observation = null
+  if (report.delivery?.detail && report.delivery?.workRunAggregate) {
+    observation = persistedDeviceObservation(report, launch)
+    if (terminalBenchmarkDeviceFailure(observation)) return observation
+  }
+  // Transport/driver interruption is not a terminal product outcome, including
+  // when the last persisted observation still contains active execution.
+  // Retain the original typed cause so recovery can query the original launch.
+  const code = error.code ?? report.errorCode
+  throw Object.assign(new Error('Device execution has no authoritative terminal outcome', { cause: error }), {
+    code: typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,127}$/u.test(code)
+      ? code : 'DEVICE_EXECUTION_UNRESOLVED',
+    unresolvedDeviceExecution: true,
+    ...(Number.isInteger(error.status) ? { status: error.status } : {}),
+  })
 }
 
 // A failed call can still have a running role or an unresolved projection. Only
