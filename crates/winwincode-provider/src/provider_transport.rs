@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 use ureq::unversioned::transport::{
-    Buffers, ConnectionDetails, Connector, LazyBuffers, NextTimeout, Transport,
+    Buffers, ConnectionDetails, Connector, Either, LazyBuffers, NextTimeout, Transport,
 };
 
 #[derive(Debug)]
@@ -79,13 +79,16 @@ fn timed_out() -> ureq::Error {
 
 #[derive(Debug)]
 pub(crate) struct ExchangeConnector(pub(crate) Arc<ExchangeIo>);
-impl Connector for ExchangeConnector {
-    type Out = ExchangeTransport;
+impl<In: Transport> Connector<In> for ExchangeConnector {
+    type Out = Either<In, ExchangeTransport>;
     fn connect(
         &self,
         details: &ConnectionDetails<'_>,
-        _: Option<()>,
+        chained: Option<In>,
     ) -> Result<Option<Self::Out>, ureq::Error> {
+        if let Some(transport) = chained {
+            return Ok(Some(Either::A(transport)));
+        }
         let deadline = Instant::now() + self.0.connect;
         let mut last = std::io::Error::new(
             std::io::ErrorKind::ConnectionRefused,
@@ -108,14 +111,14 @@ impl Connector for ExchangeConnector {
                         let _ = socket.shutdown(Shutdown::Both);
                         return Err(interrupted());
                     }
-                    return Ok(Some(ExchangeTransport {
+                    return Ok(Some(Either::B(ExchangeTransport {
                         socket,
                         buffers: LazyBuffers::new(
                             details.config.input_buffer_size(),
                             details.config.output_buffer_size(),
                         ),
                         io: Arc::clone(&self.0),
-                    }));
+                    })));
                 }
                 Err(error) => last = error,
             }

@@ -720,7 +720,10 @@ impl ProductionCodexAdapter {
         Ok(self)
     }
 
-    fn refresh_device_extensions(&mut self) -> Result<(), ProductionCodexError> {
+    fn refresh_device_extensions(
+        &mut self,
+        job: &ExecutionJob,
+    ) -> Result<(), ProductionCodexError> {
         let Some(directory) = &self.device_extension_directory else {
             return Ok(());
         };
@@ -729,8 +732,14 @@ impl ProductionCodexAdapter {
         if !self.runs.is_empty() {
             return Err(conflict());
         }
+        let benchmark_server = sealed_benchmark_mcp_server(job, self.config.tool_repeat_guard)?;
         let extensions = winwincode_provider::DeviceProviderStore::open(directory)
-            .and_then(|store| store.refresh_extensions(&self.config.kernel_home))
+            .and_then(|store| match benchmark_server {
+                Some(server) => {
+                    store.refresh_benchmark_extensions(&self.config.kernel_home, server)
+                }
+                None => store.refresh_extensions(&self.config.kernel_home),
+            })
             .map_err(|_| unavailable())?;
         let mut discovered = Vec::new();
         for server in extensions {
@@ -4140,7 +4149,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             .map_err(|_| unavailable())?
             .0;
         if !self.runs.contains_key(&run_key) && load_stored_run(&self.store, &run_key)?.is_none() {
-            self.refresh_device_extensions()?;
+            self.refresh_device_extensions(start.job)?;
         }
         let job_digest = stage_product_job_digest(start.job).map_err(|_| invalid_job())?;
         let role_policy = sealed_role_session_policy(start.job)?;
@@ -6305,6 +6314,35 @@ impl StoredTerminal {
     }
 }
 
+fn sealed_benchmark_mcp_server(
+    job: &ExecutionJob,
+    benchmark_enabled: bool,
+) -> Result<Option<&str>, ProductionCodexError> {
+    const PREFIX: &str = "benchmark_public_smoke_";
+    if !benchmark_enabled {
+        return Ok(None);
+    }
+    let Some(input) = &job.work_input else {
+        return Ok(None);
+    };
+    // The benchmark harness seals the source session's server in the objective.
+    // Executor/reviewer/verifier scope sessions are different identities.
+    let mut servers = input
+        .work_contract
+        .objective
+        .split(|character: char| {
+            !(character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+        })
+        .filter(|word| word.starts_with(PREFIX));
+    let Some(server) = servers.next() else {
+        return Ok(None);
+    };
+    if server.len() == PREFIX.len() || server.len() > 64 || servers.any(|other| other != server) {
+        return Err(invalid_configuration());
+    }
+    Ok(Some(server))
+}
+
 fn validate_start(start: CodexThreadStart<'_>) -> Result<(), ProductionCodexError> {
     if !winwincode_execution_port::snapshot_freeze::snapshot_role_binding_valid(
         &start.job.execution_profile,
@@ -7706,9 +7744,10 @@ mod tests {
         performance_execution_mode, performance_execution_mode_for_role, project_helper,
         project_interactive_input_choices, read_helper_bytes,
         released_production_execution_mode_required, role_session_policy, seal_helper,
-        sealed_job_role_execution_mode, submission_input_digest, terminate_helper_process_group,
-        turn_submission_options, validate_delegated_patch, validate_delegated_patch_path,
-        validate_helper_image, validate_sealed_helper, validate_stored_batch_intent,
+        sealed_benchmark_mcp_server, sealed_job_role_execution_mode, submission_input_digest,
+        terminate_helper_process_group, turn_submission_options, validate_delegated_patch,
+        validate_delegated_patch_path, validate_helper_image, validate_sealed_helper,
+        validate_stored_batch_intent,
     };
     use super::{
         ApprovalActionCategory, ApprovalActionReasonCode, StoredApprovalOperationKind,
@@ -8015,6 +8054,48 @@ mod tests {
                 write_mode: ExecutionWorkspaceWriteMode::Candidate,
             },
         }
+    }
+
+    #[test]
+    fn benchmark_mcp_server_uses_sealed_source_identity_across_execution_roles() {
+        let mut job = executor_job();
+        job.work_input.as_mut().expect("work input").work_contract.objective =
+            "本任务只能调用 MCP server benchmark_public_smoke_source_session 的 public_smoke；其他任务的工具没有授权。".to_owned();
+        // Scope and role prompts deliberately refer to another session's server.
+        // Neither may replace the source identity sealed in the WorkContract.
+        job.goal = "benchmark_public_smoke_role_session".to_owned();
+        for role in ["executor", "reviewer", "verifier"] {
+            job.execution_profile = role.to_owned();
+            assert_eq!(
+                sealed_benchmark_mcp_server(&job, true).expect("source scope"),
+                Some("benchmark_public_smoke_source_session")
+            );
+            assert_eq!(
+                sealed_benchmark_mcp_server(&job, false).expect("ordinary mode"),
+                None
+            );
+        }
+        job.work_input
+            .as_mut()
+            .expect("work input")
+            .work_contract
+            .objective =
+            "benchmark_public_smoke_source_session benchmark_public_smoke_neighbor".to_owned();
+        assert!(sealed_benchmark_mcp_server(&job, true).is_err());
+        job.work_input
+            .as_mut()
+            .expect("work input")
+            .work_contract
+            .objective = "Implement an ordinary task".to_owned();
+        assert_eq!(
+            sealed_benchmark_mcp_server(&job, true).expect("ordinary objective"),
+            None
+        );
+        job.work_input = None;
+        assert_eq!(
+            sealed_benchmark_mcp_server(&job, true).expect("no work input"),
+            None
+        );
     }
 
     fn fixture_agent_config(

@@ -28,6 +28,7 @@ use crate::{
 
 const CONTEXT: &str = "winwincode.device-provider.v1";
 const DEVICE_PROVIDER_TLS_ROOT_DER_ENVIRONMENT: &str = "WWC_DEVICE_PROVIDER_TLS_ROOT_DER_FILE";
+const DEVICE_PROVIDER_HTTPS_PROXY_ENVIRONMENT: &str = "WWC_DEVICE_PROVIDER_HTTPS_PROXY";
 
 #[cfg(test)]
 #[path = "device_provider_probe_concurrency_tests.rs"]
@@ -576,6 +577,11 @@ pub(crate) fn adapter(
     .map_err(|_| DeviceProviderError)?;
     // Task progress has no total development deadline; opening and progress idle timeouts stay finite.
     transport = transport.without_deadlines();
+    if let Some(proxy_url) = std::env::var_os(DEVICE_PROVIDER_HTTPS_PROXY_ENVIRONMENT) {
+        transport = transport
+            .with_http_connect_proxy(&proxy_url.into_string().map_err(|_| DeviceProviderError)?)
+            .map_err(|_| DeviceProviderError)?;
+    }
     if let Some(path) = std::env::var_os(DEVICE_PROVIDER_TLS_ROOT_DER_ENVIRONMENT) {
         transport = transport
             .with_specific_tls_roots(vec![fs::read(path)?])

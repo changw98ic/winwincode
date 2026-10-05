@@ -1,13 +1,169 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { execFileSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import { once } from 'node:events'
+import { chmodSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync,
+  writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { deviceTaskIdentities, prepareDeviceTaskBaseline } from '../scripts/device-task-runtime.mjs'
+import { deviceTaskIdentities, prepareDeviceTaskBaseline,
+  prepareDeviceBenchmarkProviderSlots } from '../scripts/device-task-runtime.mjs'
 import { pendingDeviceTaskWorkRuns, cancelStoppedDeviceTask } from '../scripts/run-device-task-vertical.mjs'
 import { deviceTaskLaunchResult } from '../scripts/device-production-fixture.mjs'
+
+function providerSlotFixture(t) {
+  const directory = mkdtempSync(join(tmpdir(), 'device-provider-slots-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const profiles = ['main-A', 'main-B', 'main-C', 'main-D'].map(configurationId => ({ configurationId }))
+  const providers = [{ providerId: 'provider-a' }, { providerId: 'provider-b' }]
+  const input = { directory, profiles, providers }
+  const digest = provider => createHash('sha256').update(provider).digest('hex')
+  const slots = (profile, provider = 'provider-a') => join(profile === 0
+    ? join(directory, 'device-data') : join(directory, 'devices', profiles[profile].configurationId),
+  'providers', 'model-provider-slots', digest(provider))
+  return { input, slots, shared: provider => join(directory, 'model-provider-slots', digest(provider)) }
+}
+
+test('benchmark profiles retain shared private Provider slot inodes across restart', t => {
+  const { input, slots, shared } = providerSlotFixture(t)
+  prepareDeviceBenchmarkProviderSlots(input)
+  const before = input.providers.flatMap(({ providerId }) => Array.from({ length: 3 }, (_, index) => {
+    const source = lstatSync(join(shared(providerId), `slot-${index}`))
+    assert.equal(source.mode & 0o777, 0o600)
+    assert.equal(lstatSync(shared(providerId)).mode & 0o777, 0o700)
+    assert.equal(source.nlink, input.profiles.length + 1)
+    for (let profile = 0; profile < input.profiles.length; profile++) {
+      const device = lstatSync(join(slots(profile, providerId), `slot-${index}`))
+      assert.equal(lstatSync(slots(profile, providerId)).mode & 0o777, 0o700)
+      assert.equal(device.mode & 0o777, 0o600)
+      assert.deepEqual([device.dev, device.ino], [source.dev, source.ino])
+    }
+    return [source.dev, source.ino]
+  }))
+  prepareDeviceBenchmarkProviderSlots(input)
+  assert.deepEqual(input.providers.flatMap(({ providerId }) => Array.from({ length: 3 }, (_, index) => {
+    const source = lstatSync(join(shared(providerId), `slot-${index}`))
+    return [source.dev, source.ino]
+  })), before)
+})
+
+test('benchmark profile expansion preserves the base Device and rejects reassignment before provisioning', t => {
+  const { input } = providerSlotFixture(t)
+  const onlyC = { ...input, profiles: [input.profiles[2]] }
+  prepareDeviceBenchmarkProviderSlots(onlyC)
+  const identityPath = join(input.directory, 'base-profile.json')
+  const original = lstatSync(identityPath)
+  const bytes = readFileSync(identityPath, 'utf8')
+  assert.equal(original.mode & 0o777, 0o600)
+  assert.equal(JSON.parse(bytes).configurationId, 'main-C')
+  prepareDeviceBenchmarkProviderSlots(onlyC)
+  assert.throws(() => prepareDeviceBenchmarkProviderSlots({ ...input,
+    profiles: [input.profiles[0], input.profiles[2]] }), { code: 'BENCHMARK_BASE_PROFILE_MISMATCH' })
+  assert.deepEqual([lstatSync(identityPath).dev, lstatSync(identityPath).ino], [original.dev, original.ino])
+  assert.equal(readFileSync(identityPath, 'utf8'), bytes)
+  assert.throws(() => lstatSync(join(input.directory, 'devices')), { code: 'ENOENT' },
+    'a mismatched base profile must not provision another Device')
+
+  const retained = providerSlotFixture(t)
+  prepareDeviceBenchmarkProviderSlots({ ...retained.input,
+    profiles: [retained.input.profiles[0], retained.input.profiles[2]] })
+  const source = lstatSync(join(retained.slots(2), 'slot-0'))
+  prepareDeviceBenchmarkProviderSlots(retained.input)
+  assert.deepEqual([lstatSync(join(retained.slots(2), 'slot-0')).dev,
+    lstatSync(join(retained.slots(2), 'slot-0')).ino], [source.dev, source.ino])
+  assert.equal(JSON.parse(readFileSync(join(retained.input.directory, 'base-profile.json'), 'utf8')).configurationId,
+    'main-A')
+})
+
+test('retained benchmark Device data cannot acquire a guessed base profile identity', t => {
+  const { input } = providerSlotFixture(t)
+  const device = join(input.directory, 'device-data')
+  mkdirSync(device, { mode: 0o700 })
+  writeFileSync(join(device, 'device-client.sqlite3'), 'retained Device\n', { mode: 0o600 })
+  assert.throws(() => prepareDeviceBenchmarkProviderSlots(input), {
+    code: 'BENCHMARK_BASE_PROFILE_IDENTITY_MISSING',
+  })
+  assert.throws(() => lstatSync(join(input.directory, 'base-profile.json')), { code: 'ENOENT' })
+  assert.equal(readFileSync(join(device, 'device-client.sqlite3'), 'utf8'), 'retained Device\n')
+})
+
+test('benchmark startup preserves and rejects independent, public, or symbolic slot files', t => {
+  for (const kind of ['independent', 'public', 'symbolic']) {
+    const { input, slots } = providerSlotFixture(t)
+    mkdirSync(slots(1), { recursive: true, mode: 0o700 })
+    const retained = join(slots(1), 'slot-0')
+    if (kind === 'symbolic') symlinkSync('other-slot', retained)
+    else {
+      writeFileSync(retained, 'retained\n', { mode: 0o600 })
+      if (kind === 'public') chmodSync(retained, 0o644)
+    }
+    const original = lstatSync(retained)
+    assert.throws(() => prepareDeviceBenchmarkProviderSlots(input),
+      kind === 'independent' ? /independent inode/u : /private regular file/u)
+    assert.deepEqual([lstatSync(retained).dev, lstatSync(retained).ino], [original.dev, original.ino])
+    if (kind !== 'symbolic') assert.equal(readFileSync(retained, 'utf8'), 'retained\n')
+  }
+  const { input, shared } = providerSlotFixture(t)
+  prepareDeviceBenchmarkProviderSlots(input)
+  chmodSync(shared('provider-a'), 0o755)
+  assert.throws(() => prepareDeviceBenchmarkProviderSlots(input), /directory must be private/u)
+})
+
+test('three real processes fill one Provider across profile Devices and release slots on exit', async t => {
+  const { input, slots } = providerSlotFixture(t)
+  prepareDeviceBenchmarkProviderSlots(input)
+  const children = []
+  const release = async child => {
+    if (child.exitCode !== null) return
+    const exited = once(child, 'exit')
+    child.stdin.end('\n')
+    await exited
+  }
+  t.after(async () => { await Promise.all(children.map(release)) })
+  const acquire = async directory => {
+    const child = spawn('python3', ['-I', '-c', `import fcntl, json, os, sys
+held = None
+for index in range(3):
+    slot = open(os.path.join(sys.argv[1], 'slot-' + str(index)), 'r+b')
+    try:
+        fcntl.flock(slot, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        slot.close()
+        continue
+    held = index
+    break
+print(json.dumps(held), flush=True)
+if held is not None:
+    sys.stdin.readline()
+`, directory], { stdio: ['pipe', 'pipe', 'pipe'] })
+    children.push(child)
+    child.stdout.setEncoding('utf8')
+    return await new Promise((resolve, reject) => {
+      let output = '', stderr = ''
+      child.stderr.setEncoding('utf8')
+      child.stderr.on('data', chunk => { stderr += chunk })
+      child.once('error', reject)
+      child.stdout.on('data', chunk => {
+        output += chunk
+        if (output.includes('\n')) resolve({ child, slot: JSON.parse(output.trim()) })
+      })
+      child.once('exit', code => {
+        if (!output.includes('\n')) reject(new Error(`Provider slot process exited ${code}: ${stderr}`))
+      })
+    })
+  }
+  const holders = []
+  for (let profile = 0; profile < 3; profile++) holders.push(await acquire(slots(profile)))
+  assert.deepEqual(holders.map(holder => holder.slot), [0, 1, 2])
+  // Preparing again while locks are held must leave the same live lock inodes.
+  prepareDeviceBenchmarkProviderSlots(input)
+  assert.equal((await acquire(slots(3))).slot, null)
+  assert.equal((await acquire(slots(3, 'provider-b'))).slot, 0)
+  await release(holders[1].child)
+  assert.equal((await acquire(slots(3))).slot, 1)
+})
 
 function completedRoleFixture(t) {
   const directory = mkdtempSync(join(tmpdir(), 'device-completed-role-'))

@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Device MCP tool for the frozen benchmark's public examples, never hidden grading."""
 import argparse
+from contextlib import contextmanager
+import fcntl
 import hashlib
 import importlib.util
 import json
@@ -81,8 +83,43 @@ def source_identity(source, config):
     return capture_source(source, config)
 
 
+def trusted_execution_lock(path, source_directory):
+    if path is None:
+        return None
+    lock = Path(path)
+    if not lock.is_absolute():
+        raise ValueError('execution lock must be an absolute host path')
+    lock = lock.parent.resolve(strict=True) / lock.name
+    if lock == source_directory or source_directory in lock.parents:
+        raise ValueError('execution lock must be outside the candidate tree')
+    return lock
+
+
+@contextmanager
+def public_smoke_execution_slot(path):
+    """Optionally serialize host container copies without limiting model tasks."""
+    if path is None:
+        yield
+        return
+    path = Path(path)
+    if not path.is_absolute():
+        raise ValueError('execution lock must be an absolute host path')
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, 0o600)
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode) or stat.S_IMODE(opened.st_mode) != 0o600 or opened.st_uid != os.getuid():
+            raise ValueError('execution lock must be a private owned regular file')
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        retained = os.stat(path, follow_symlinks=False)
+        if (retained.st_dev, retained.st_ino) != (opened.st_dev, opened.st_ino):
+            raise ValueError('execution lock identity changed')
+        yield
+    finally:
+        os.close(fd)
+
+
 class PublicSmoke:
-    def __init__(self, task_root, task_id, image_id, evidence_directory):
+    def __init__(self, task_root, task_id, image_id, evidence_directory, execution_lock=None):
         self.root = Path(task_root).resolve(strict=True)
         revision = subprocess.run(['git', '-C', str(self.root), 'rev-parse', 'HEAD'],
                                   capture_output=True, text=True, check=True).stdout.strip()
@@ -100,6 +137,7 @@ class PublicSmoke:
         self.config = dict(self.config, image=image_id)
         self.cases = self.sandbox.strict_json((self.root / 'tasks' / task_id / 'examples.json').read_text())
         self.source_directory = Path.cwd().resolve(strict=True)
+        self.execution_lock = trusted_execution_lock(execution_lock, self.source_directory)
         self.task_id = task_id
         self.evidence = Path(evidence_directory).resolve()
         if self.evidence == self.source_directory or self.source_directory in self.evidence.parents:
@@ -155,7 +193,8 @@ class PublicSmoke:
             if platform != 'linux/arm64':
                 raise ValueError('frozen grading platform mismatch')
             payload = ''.join(json.dumps(case['input'], ensure_ascii=False) + '\n' for case in self.cases).encode()
-            result = self.sandbox.execute(attempt / 'source', self.config, payload)
+            with public_smoke_execution_slot(self.execution_lock):
+                result = self.sandbox.execute(attempt / 'source', self.config, payload)
             if result['image_id'] != self.config['image'] or result['submission'] != source:
                 raise ValueError('grading identity mismatch')
             (attempt / 'stdout.bin').write_bytes(result['stdout'])
@@ -215,10 +254,11 @@ def main():
     parser.add_argument('--task-id', required=True)
     parser.add_argument('--image-id', required=True)
     parser.add_argument('--evidence-directory', required=True)
+    parser.add_argument('--execution-lock', help='Optional trusted host lock for container execution')
     parser.add_argument('--run-source', choices=['.'], help='Execute and verify the current trusted checkout')
     parser.add_argument('--verify-source', help='Verify host public-test evidence against this read-only candidate')
     args = parser.parse_args()
-    service = PublicSmoke(args.task_root, args.task_id, args.image_id, args.evidence_directory)
+    service = PublicSmoke(args.task_root, args.task_id, args.image_id, args.evidence_directory, args.execution_lock)
     if args.run_source:
         report = service.call({})
         if report['status'] != 'evaluated':

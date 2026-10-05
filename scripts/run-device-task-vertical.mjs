@@ -128,7 +128,8 @@ export function benchmarkDeviceEnvironment(configuration, settings = {}, environ
   const result = { PYTHONDONTWRITEBYTECODE: '1',
     WWC_WORKER_MODEL_REASONING_EFFORT: 'max', WWC_BENCHMARK_TOOL_REPEAT_GUARD: '1',
     WWC_WORKER_FUSION: undefined, WWC_WORKER_JEV_CONTEXT: undefined,
-    WWC_WORKER_JEV_JUDGE: undefined, WWC_DEVICE_JEV_SETTINGS_FILE: undefined }
+    WWC_WORKER_JEV_JUDGE: undefined, WWC_DEVICE_JEV_SETTINGS_FILE: undefined,
+    WWC_DEVICE_PROVIDER_HTTPS_PROXY: environment.WWC_DEVICE_PROVIDER_HTTPS_PROXY }
   if (configuration.fusion) {
     const issues = fusionConfigurationIssues(environment)
     const details = [

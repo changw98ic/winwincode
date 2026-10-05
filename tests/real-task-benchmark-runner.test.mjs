@@ -34,6 +34,7 @@ import {
   runBenchmarkPlan,
   verifyBenchmarkLedgerIdentity,
   runBenchmarkSchedule,
+  validateBenchmarkDispatchPolicy,
   validateFrozenTaskSource,
 } from '../scripts/run-real-task-benchmark.mjs'
 
@@ -703,6 +704,7 @@ test('formal Device entry refuses an unavailable arm before creating the ledger 
   }))
   const evidenceRoot = resolve(directory, 'must-not-exist')
   await assert.rejects(executeDeviceBenchmark({ preparedInputsDirectory: directory, evidenceRoot,
+    providerEnvironment: {},
     agentSettings: { jevContext: { provider: 'context', policy: { version: 'frozen' } },
       jevJudge: 'judge', jevSettingsFile: resolve(directory, 'private-settings.json') } }),
   { code: 'BENCHMARK_CONFIGURATION_UNAVAILABLE' })
@@ -1684,8 +1686,12 @@ test('frozen source validation binds repository, exact revision and 20 task dire
   const prepared = await prepareBenchmarkDeviceTask({ taskId: 'task-1',
     runId: 'main-A:task-1:fusion-4', callId: 'main-A:task-1:fusion-4:aggregation',
     comparison: 'fusion-4' }, { preparedInputsDirectory, sourceRoot: repositoryRoot,
-    evidenceRoot, aggregation })
+    evidenceRoot, aggregation, publicSmokeExecutionLock: resolve(evidenceRoot, 'scoring.lock') })
   const aggregationTask = JSON.parse(await readFile(prepared.taskInputPath, 'utf8'))
+  assert.deepEqual(prepared.mcpConfiguration.args.slice(-2),
+    ['--execution-lock', resolve(evidenceRoot, 'scoring.lock')])
+  assert.ok(aggregationTask.verificationCommand.includes("'--execution-lock'"))
+  assert.ok(aggregationTask.verificationCommand.includes(resolve(evidenceRoot, 'scoring.lock')))
   assert.match(aggregationTask.verificationCommand, /'--verify-source' '\.'/u,
     'independent verification must read host receipts without executing Docker or writing evidence')
   assert.ok(!aggregationTask.verificationCommand.includes('--run-source'))
@@ -1731,6 +1737,185 @@ test('frozen source validation binds repository, exact revision and 20 task dire
   }), error => error.code === 'SOURCE_REPOSITORY_MISMATCH')
 })
 
+
+test('one 700-cell ledger admits twelve cells together and retains plan order after out-of-order completion', async t => {
+  const directory = await mkdtemp(resolve(tmpdir(), 'wwc-benchmark-parallel-ledger-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const plan = buildBenchmarkPlan({ taskIds: Array.from({ length: 20 }, (_, index) => `task-${index + 1}`) })
+  const options = { ledgerPath: resolve(directory, 'ledger.sqlite3'), experimentBinding: { experimentId: 'parallel' } }
+  const releases = []
+  const executed = []
+  const returned = []
+  const running = runBenchmarkPlan(plan, { ...options, concurrency: 12,
+    executeCell: cell => {
+      const index = executed.length
+      executed.push(cell.runId)
+      const result = index === 0 ? { termination: { reason: 'STUCK_TOOL_REPEAT_LIMIT' } } : { status: 'completed' }
+      return index < 12 ? new Promise(resolvePromise => { releases[index] = () => resolvePromise(result) }) : result
+    },
+    onRecord: record => { returned.push(record.runId) },
+  })
+  let result
+  try {
+    await new Promise(resolvePromise => setImmediate(resolvePromise))
+    assert.equal(executed.length, 12, 'every slot must start before the first answer')
+    assert.deepEqual(returned, [])
+    const database = new DatabaseSync(options.ledgerPath, { readOnly: true })
+    try {
+      assert.deepEqual({ ...database.prepare(`SELECT count(*) AS total,
+        sum(token IS NOT NULL) AS claimed, sum(record IS NOT NULL) AS finished FROM benchmark_cell`).get() },
+      { total: 700, claimed: 12, finished: 0 })
+    } finally { database.close() }
+    for (const release of releases.toReversed()) {
+      release()
+      await new Promise(resolvePromise => setImmediate(resolvePromise))
+    }
+    result = await running
+  } finally {
+    for (const release of releases) release()
+    await running
+  }
+  assert.equal(result.denominator, 700)
+  assert.deepEqual(result.records.map(record => record.runId), plan.cells.map(cell => cell.runId))
+  assert.equal(returned[0], plan.cells[11].runId)
+  assert.equal(returned.at(-1), plan.cells[0].runId)
+  assert.equal(result.records[0].status, 'failed')
+  assert.equal(result.records.slice(1).every(record => record.status === 'completed'), true)
+  assert.equal(new Set(executed).size, 700)
+  const retained = await runBenchmarkPlan(plan, { ...options, concurrency: 3,
+    executeCell: () => assert.fail('retained parallel results cannot execute again'),
+  })
+  assert.deepEqual(retained, result)
+})
+
+test('parallel ledger stops new claims on a hard evidence error and drains its already running cells', async t => {
+  const directory = await mkdtemp(resolve(tmpdir(), 'wwc-benchmark-parallel-drain-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const plan = buildBenchmarkPlan({ taskIds: Array.from({ length: 20 }, (_, index) => `task-${index + 1}`) })
+  const options = { ledgerPath: resolve(directory, 'ledger.sqlite3'), experimentBinding: { experimentId: 'drain' } }
+  const releases = []
+  const executed = []
+  const retained = []
+  const failure = Object.assign(new Error('evidence unavailable'), { code: 'BENCHMARK_EVIDENCE_FAILED' })
+  let settled = false
+  const running = runBenchmarkPlan(plan, { ...options, concurrency: 3,
+    executeCell: cell => {
+      const index = executed.length
+      executed.push(cell.runId)
+      if (index === 0) throw failure
+      return new Promise(resolvePromise => { releases.push(() => resolvePromise({ status: 'completed' })) })
+    },
+    onRecord: record => { retained.push(record.runId) },
+  })
+  const rejected = assert.rejects(running, error => error === failure && retained.length === 2)
+    .then(() => { settled = true })
+  try {
+    await new Promise(resolvePromise => setImmediate(resolvePromise))
+    assert.equal(executed.length, 3)
+    assert.equal(settled, false, 'the store must remain open for the two pending cells')
+  } finally {
+    for (const release of releases) release()
+    await rejected
+  }
+  const database = new DatabaseSync(options.ledgerPath, { readOnly: true })
+  try {
+    const rows = database.prepare('SELECT ordinal, token, record FROM benchmark_cell ORDER BY ordinal').all()
+    assert.equal(rows.length, 700)
+    assert.notEqual(rows[0].token, null)
+    assert.equal(rows[0].record, null, 'the unresolved evidence failure must not become a model result')
+    assert.equal(rows.slice(1, 3).every(row => JSON.parse(row.record).status === 'completed'), true)
+    assert.equal(rows.slice(3).every(row => row.token === null && row.record === null), true)
+  } finally { database.close() }
+  const resumed = await runBenchmarkPlan(plan, { ...options, concurrency: 4,
+    recoverCell: cell => {
+      assert.equal(cell.runId, plan.cells[0].runId)
+      return { status: 'failed', failure: { code: 'DEVICE_PRODUCT_FAILED' } }
+    },
+    executeCell: cell => {
+      assert.equal(executed.includes(cell.runId), false, 'the original three executions cannot replay')
+      executed.push(cell.runId)
+      return { status: 'completed' }
+    },
+  })
+  assert.equal(resumed.denominator, 700)
+  assert.equal(new Set(executed).size, 700)
+})
+
+test('configuration selection keeps all 700 cells and preserves completed and unresolved unselected rows', async t => {
+  const directory = await mkdtemp(resolve(tmpdir(), 'wwc-benchmark-selected-profiles-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const plan = buildBenchmarkPlan({ taskIds: Array.from({ length: 20 }, (_, index) => `task-${index + 1}`) })
+  const options = { ledgerPath: resolve(directory, 'ledger.sqlite3'), experimentBinding: { experimentId: 'profiles' } }
+  const execute = expected => cell => {
+    assert.equal(cell.configurationId, expected)
+    return { status: 'completed' }
+  }
+  const first = await runBenchmarkPlan(plan, { ...options, concurrency: 4,
+    selectedConfigurationIds: ['main-A'], executeCell: execute('main-A'),
+  })
+  assert.equal(first.denominator, 700)
+  assert.equal(first.records.filter(record => record.status === 'completed').length, 100)
+  assert.equal(first.records.filter(record => record.status === 'planned').length, 600)
+  const database = new DatabaseSync(options.ledgerPath)
+  let identity
+  let original
+  try {
+    identity = database.prepare('SELECT identity FROM benchmark_identity').get().identity
+    original = database.prepare('SELECT * FROM benchmark_cell ORDER BY ordinal').all()
+    assert.equal(original.slice(100).every(row => row.token === null && row.record === null), true)
+    database.prepare('UPDATE benchmark_cell SET token = ? WHERE ordinal = 100').run('crashed-unselected-claim')
+  } finally { database.close() }
+  const second = await runBenchmarkPlan(plan, { ...options, concurrency: 6,
+    selectedConfigurationIds: ['main-C'], executeCell: execute('main-C'),
+    recoverCell: () => assert.fail('an unselected claim must not be recovered'),
+  })
+  assert.equal(second.denominator, 700)
+  assert.deepEqual(second.records.slice(0, 100), first.records.slice(0, 100))
+  assert.equal(second.records.filter(record => record.status === 'completed').length, 200)
+  const reopened = new DatabaseSync(options.ledgerPath, { readOnly: true })
+  try {
+    assert.equal(reopened.prepare('SELECT identity FROM benchmark_identity').get().identity, identity)
+    const rows = reopened.prepare('SELECT * FROM benchmark_cell ORDER BY ordinal').all()
+    assert.deepEqual(rows.slice(0, 100), original.slice(0, 100))
+    assert.equal(rows[100].token, 'crashed-unselected-claim')
+    assert.equal(rows[100].record, null)
+    assert.deepEqual(rows.slice(101, 200), original.slice(101, 200))
+    assert.deepEqual(rows.slice(300), original.slice(300))
+  } finally { reopened.close() }
+  let newExecutions = 0
+  const expanded = await runBenchmarkPlan(plan, { ...options, concurrency: 5,
+    selectedConfigurationIds: ['main-A', 'main-B', 'main-C'],
+    recoverCell: cell => {
+      assert.equal(cell.runId, plan.cells[100].runId)
+      return { status: 'completed' }
+    },
+    executeCell: cell => {
+      assert.equal(cell.configurationId, 'main-B')
+      newExecutions += 1
+      return { status: 'completed' }
+    },
+  })
+  assert.equal(newExecutions, 99)
+  assert.equal(expanded.denominator, 700)
+  assert.equal(expanded.records.filter(record => record.status === 'completed').length, 300)
+})
+
+test('invalid concurrency and configuration selection are rejected before creating the ledger', async t => {
+  const directory = await mkdtemp(resolve(tmpdir(), 'wwc-benchmark-dispatch-policy-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const plan = buildBenchmarkPlan({ taskIds: Array.from({ length: 20 }, (_, index) => `task-${index + 1}`) })
+  const options = { ledgerPath: resolve(directory, 'ledger.sqlite3'), experimentBinding: { experimentId: 'invalid-policy' } }
+  for (const concurrency of [0, -1, 1.5, '3', null]) {
+    await assert.rejects(runBenchmarkPlan(plan, { ...options, concurrency, executeCell: () => assert.fail() }),
+      { code: 'BENCHMARK_CONCURRENCY_INVALID' })
+  }
+  for (const selectedConfigurationIds of [null, 'main-A', [], ['main-A', 'main-A'], ['unknown'], [undefined]]) {
+    await assert.rejects(runBenchmarkPlan(plan, { ...options, selectedConfigurationIds, executeCell: () => assert.fail() }),
+      { code: 'BENCHMARK_CONFIGURATION_SELECTION_INVALID' })
+  }
+  await assert.rejects(access(options.ledgerPath), { code: 'ENOENT' })
+  assert.doesNotThrow(() => validateBenchmarkDispatchPolicy(plan, { concurrency: 12, selectedConfigurationIds: ['main-A', 'main-C'] }))
+})
 
 test('durable runner resumes after export failure without replaying completed work and rejects changed identity', async t => {
   const directory = await mkdtemp(resolve(tmpdir(), 'wwc-benchmark-ledger-'))

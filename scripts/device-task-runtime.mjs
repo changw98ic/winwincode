@@ -3,7 +3,8 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, realpathSync, rmSync } from 'node:fs'
+import { closeSync, existsSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync,
+  realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { checkedWwc, configuredDeviceModelRoute, establishDeviceOnlyExecutionPath,
   registerOrReuseDeviceRepository, seedDeviceLocalProvider, waitFor } from './device-production-fixture.mjs'
@@ -63,6 +64,83 @@ export function prepareDeviceTaskBaseline(repository, taskInputPath, directory) 
 
 const taskRepositories = new WeakMap()
 
+// Profile Devices keep their settings and databases separate, but this benchmark
+// consumes the same four Provider accounts. Fixed hard links make their existing
+// OS-lock admission share three slots per Provider across every profile.
+export function prepareDeviceBenchmarkProviderSlots({ directory, profiles, providers }) {
+  const privateDirectory = path => {
+    mkdirSync(path, { recursive: true, mode: 0o700 })
+    const metadata = lstatSync(path)
+    assert.ok(metadata.isDirectory() && (metadata.mode & 0o777) === 0o700,
+      `benchmark Provider slot directory must be private: ${path}`)
+  }
+  const privateSlot = path => {
+    const metadata = lstatSync(path)
+    assert.ok(metadata.isFile() && (metadata.mode & 0o777) === 0o600,
+      `benchmark Provider slot must be a private regular file: ${path}`)
+    return metadata
+  }
+  const shared = join(directory, 'model-provider-slots')
+  privateDirectory(shared)
+  for (const profile of profiles) assert.match(profile.configurationId, /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/u,
+    'benchmark configuration must name one Device directory')
+  // The first profile owns device-data, while other profiles have named paths.
+  // Admission may expand, but cannot reassign that retained Device to a different
+  // immutable configuration on restart.
+  const baseProfilePath = join(directory, 'base-profile.json')
+  const baseProfile = `${JSON.stringify({ schemaVersion: 1,
+    configurationId: profiles[0].configurationId }, null, 2)}\n`
+  if (!existsSync(baseProfilePath) && existsSync(join(directory, 'device-data', 'device-client.sqlite3'))) {
+    throw Object.assign(new Error('retained benchmark base Device has no profile identity'), {
+      code: 'BENCHMARK_BASE_PROFILE_IDENTITY_MISSING',
+    })
+  }
+  try { writeFileSync(baseProfilePath, baseProfile, { flag: 'wx', mode: 0o600 }) }
+  catch (error) { if (error.code !== 'EEXIST') throw error }
+  privateSlot(baseProfilePath)
+  if (readFileSync(baseProfilePath, 'utf8') !== baseProfile) {
+    throw Object.assign(new Error('retained benchmark base Device belongs to another profile'), {
+      code: 'BENCHMARK_BASE_PROFILE_MISMATCH',
+    })
+  }
+  const devices = profiles.map((profile, index) => {
+    const device = index === 0 ? join(directory, 'device-data')
+      : join(directory, 'devices', profile.configurationId)
+    privateDirectory(device)
+    const providerDirectory = join(device, 'providers')
+    privateDirectory(providerDirectory)
+    const slots = join(providerDirectory, 'model-provider-slots')
+    privateDirectory(slots)
+    return slots
+  })
+  for (const { providerId } of providers) {
+    assert.ok(typeof providerId === 'string' && providerId.trim() === providerId && providerId.length > 0,
+      'benchmark Provider must have an exact identity')
+    const digest = createHash('sha256').update(providerId).digest('hex')
+    const providerShared = join(shared, digest)
+    privateDirectory(providerShared)
+    const providerDevices = devices.map(device => {
+      const path = join(device, digest)
+      privateDirectory(path)
+      return path
+    })
+    for (let index = 0; index < 3; index++) {
+      const source = join(providerShared, `slot-${index}`)
+      try { closeSync(openSync(source, 'wx', 0o600)) }
+      catch (error) { if (error.code !== 'EEXIST') throw error }
+      const expected = privateSlot(source)
+      for (const device of providerDevices) {
+        const destination = join(device, `slot-${index}`)
+        try { linkSync(source, destination) }
+        catch (error) { if (error.code !== 'EEXIST') throw error }
+        const actual = privateSlot(destination)
+        assert.ok(actual.dev === expected.dev && actual.ino === expected.ino,
+          `benchmark Device Provider slot has an independent inode: ${destination}`)
+      }
+    }
+  }
+}
+
 // Delivery creation checks the registered Device repository HEAD. Register a
 // detached baseline once per Device; concurrent Sessions get separate execution
 // worktrees from the product, while identical baselines share its unique binding.
@@ -109,6 +187,7 @@ export async function withDeviceTaskRuntime({ directory, profiles, providers, ag
   assert.ok(profiles.length > 0 && providers.length > 0)
   const first = profiles[0], primary = providers[0]
   const additionalDevices = []
+  prepareDeviceBenchmarkProviderSlots({ directory, profiles, providers })
   return runApiProductionVertical({ directory, build, restart: false, repeat: false,
     ...(timeoutMillis === undefined ? {} : { timeoutMillis }),
     retainRepository: true, deviceProvider: primary, deviceProviderSecrets: providers.flatMap(provider => [provider.apiKey,

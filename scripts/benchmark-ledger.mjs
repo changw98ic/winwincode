@@ -68,6 +68,15 @@ export function openBenchmarkLedger(path, identity, cells) {
     throw error
   }
   return {
+    // Read retained results without claiming or recovering any pending cell.
+    records() {
+      const rows = database.prepare('SELECT ordinal, record FROM benchmark_cell ORDER BY ordinal').all()
+      if (rows.length !== cells.length) reject('LEDGER_CELL_MISSING')
+      return rows.map((row, index) => {
+        if (row.ordinal !== index) reject('LEDGER_CELL_MISSING')
+        return row.record === null ? null : JSON.parse(row.record)
+      })
+    },
     claim(index) {
       return transaction(() => {
         const row = database.prepare('SELECT token, record FROM benchmark_cell WHERE ordinal = ?').get(index)

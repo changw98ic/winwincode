@@ -6,7 +6,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { pathToFileURL } from 'node:url'
 import { benchmarkAggregationDigest, buildBenchmarkPlan, executeBenchmarkCell, executeFormalBenchmark,
   recoverBenchmarkCell, validateBenchmarkConfiguration, validateFrozenTaskSource,
-  validateFormalBenchmarkOptions, verifyBenchmarkLedgerIdentity } from './run-real-task-benchmark.mjs'
+  validateBenchmarkDispatchPolicy, validateFormalBenchmarkOptions, verifyBenchmarkLedgerIdentity } from './run-real-task-benchmark.mjs'
 import { assertBenchmarkExecutionReceipts } from './benchmark-execution-receipts.mjs'
 import { benchmarkDeviceEnvironment, expiredCrashedDeviceWorkRun, failedDeviceDispatch,
   loadDeviceProviderEnvironment, deviceTaskProvider,
@@ -16,7 +16,7 @@ import { apiProductionSourceDigest, assertCompletedDelivery, inspectRegisteredDe
   serverTargetDirectory, verifyApiProductionSourceSeal } from './run-api-production-vertical.mjs'
 import { exportDeviceCandidate, exportDeviceExecutionReceipts } from './export-device-candidate.mjs'
 import { deviceFailureWithModelCauses } from './device-model-failures.mjs'
-import { assertDeviceBenchmarkRunning } from './device-production-fixture.mjs'
+import { assertDeviceBenchmarkRunning, removeDevicePublicSmoke } from './device-production-fixture.mjs'
 import { publishBenchmarkLedger } from './publish-benchmark-submission.mjs'
 import { deviceTaskIdentities, withDeviceTaskRuntime } from './device-task-runtime.mjs'
 
@@ -54,30 +54,46 @@ function benchmarkSourceIdentity(agentSettings) {
     privateSettingsDigest: agentSettings?.jevSettingsFile ? sha256(readFileSync(agentSettings.jevSettingsFile)) : null }
 }
 
+function publicSmokeExecutionLock(value) {
+  if (value === undefined) return null
+  assert.ok(typeof value === 'string' && value.length > 0, 'public smoke execution lock must be a host path')
+  return resolve(value)
+}
+
 export function deviceBenchmarkExperimentBinding(options, source, catalog) {
   const automaticTaskActions = options.automaticTaskActions === undefined ? false : options.automaticTaskActions
   assert.equal(typeof automaticTaskActions, 'boolean', 'task action authorization must be explicit')
+  const executionLock = publicSmokeExecutionLock(options.publicSmokeExecutionLock)
   return { experimentId: options.experimentId, source, aggregationProvider,
     automaticTaskActions,
+    ...(executionLock === null ? {} : { publicSmokeExecutionLock: executionLock }),
     preparedCatalogSha256: sha256(JSON.stringify(catalog)),
     agentSettingsSha256: sha256(JSON.stringify(options.agentSettings)),
     providerEvidenceSha256: sha256(JSON.stringify(options.providerEvidence)),
     ...options.frozenSourceIdentity, productSourceSealSha256: options.productSourceSealSha256 }
 }
 
+export function benchmarkDeviceProfiles(plan, options = {}) {
+  validateBenchmarkDispatchPolicy(plan, options)
+  const selected = options.selectedConfigurationIds === undefined ? null : new Set(options.selectedConfigurationIds)
+  const profiles = [...new Map(plan.cells.filter(cell => selected === null || selected.has(cell.configurationId))
+    .map(cell => [cell.configurationId, cell])).values()]
+  // Validate the profiles being admitted before claiming work. The full frozen
+  // plan stays in the ledger, including profiles awaiting real JEV settings.
+  for (const profile of profiles) benchmarkDeviceEnvironment(profile,
+    options.agentSettings, options.providerEnvironment ?? process.env)
+  return profiles
+}
+
 export async function executeDeviceBenchmark(options) {
   const automaticTaskActions = options.automaticTaskActions === undefined ? false : options.automaticTaskActions
   assert.equal(typeof automaticTaskActions, 'boolean', 'task action authorization must be explicit')
+  publicSmokeExecutionLock(options.publicSmokeExecutionLock)
   options = { ...options, automaticTaskActions }
   const catalog = JSON.parse(readFileSync(resolve(options.preparedInputsDirectory, 'prepared-inputs.json'), 'utf8'))
   const plan = buildBenchmarkPlan({ taskIds: catalog.tasks.map(task => task.taskId) })
   const providerEnvironment = options.providerEnvironment ?? process.env
-  // Check every arm before claiming even the first task. Unimplemented arms
-  // cannot turn into 700 apparently executed failure rows.
-  for (const configurationId of new Set(plan.cells.map(cell => cell.configurationId))) {
-    benchmarkDeviceEnvironment(plan.cells.find(cell => cell.configurationId === configurationId),
-      options.agentSettings, providerEnvironment)
-  }
+  const profiles = benchmarkDeviceProfiles(plan, { ...options, providerEnvironment })
   const ledgerPath = resolve(options.evidenceRoot, 'benchmark.sqlite3')
   // Invalid first-run configuration must not freeze an unused experiment.
   validateFormalBenchmarkOptions({ providerEvidence: options.providerEvidence, ledgerPath,
@@ -103,9 +119,10 @@ export async function executeDeviceBenchmark(options) {
   const experimentBinding = deviceBenchmarkExperimentBinding(options, source, catalog)
   // Reject changed experiment policy before opening Device/Worker services.
   // The execution driver rechecks the same identity before claiming work.
-  verifyBenchmarkLedgerIdentity(plan, { providerEvidence: options.providerEvidence, ledgerPath, experimentBinding })
+  verifyBenchmarkLedgerIdentity(plan, { providerEvidence: options.providerEvidence, ledgerPath, experimentBinding,
+    concurrency: options.concurrency, selectedConfigurationIds: options.selectedConfigurationIds })
   const shared = await withDeviceTaskRuntime({ directory: resolve(evidenceRoot, 'runtime'),
-    profiles: [...new Map(plan.cells.map(cell => [cell.configurationId, cell])).values()],
+    profiles,
     providers: Object.keys(seats).map(name => deviceTaskProvider(seats[name], providerEnvironment)),
     agentSettings: options.agentSettings, providerEnvironment,
   }, async runtime => {
@@ -117,6 +134,7 @@ export async function executeDeviceBenchmark(options) {
     return executeFormalBenchmark(plan, {
       providerEvidence: options.providerEvidence, ledgerPath,
       experimentBinding,
+      concurrency: options.concurrency, selectedConfigurationIds: options.selectedConfigurationIds,
       executeCell: (cell, runner) => executeBenchmarkCell(cell, adapter, runner),
       recoverCell: (cell, observed) => recoverBenchmarkDeviceCell(cell, observed, sharedOptions),
       onRecord: record => {
@@ -130,15 +148,20 @@ export async function executeDeviceBenchmark(options) {
     })
   })
   const result = shared.flow.scenario
-  publishBenchmarkLedger({ ledgerPath: resolve(evidenceRoot, 'benchmark.sqlite3'),
-    preparedInputsDirectory: options.preparedInputsDirectory,
-    repositoryUrl: options.publicationRepositoryUrl,
-    receiptDirectory: resolve(evidenceRoot, 'publication-receipts') })
+  // A selected cohort leaves real unclaimed rows in the full experiment. The
+  // public publisher requires a completely finalized ledger, so defer it while
+  // another profile is still planned instead of fabricating failure records.
+  if (result.records.every(record => ['completed', 'failed'].includes(record.status))) {
+    publishBenchmarkLedger({ ledgerPath: resolve(evidenceRoot, 'benchmark.sqlite3'),
+      preparedInputsDirectory: options.preparedInputsDirectory,
+      repositoryUrl: options.publicationRepositoryUrl,
+      receiptDirectory: resolve(evidenceRoot, 'publication-receipts') })
+  }
   return result
 }
 
 export async function prepareBenchmarkDeviceTask(request, { preparedInputsDirectory, sourceRoot, evidenceRoot,
-  aggregation, productSessionId }) {
+  aggregation, productSessionId, publicSmokeExecutionLock: executionLockPath }) {
   assert.ok(typeof request.callId === 'string' && request.callId.startsWith(`${request.runId}:`))
   const catalog = JSON.parse(readFileSync(resolve(preparedInputsDirectory, 'prepared-inputs.json'), 'utf8'))
   const taskRecord = catalog.tasks.find(task => task.taskId === request.taskId)
@@ -159,8 +182,10 @@ export async function prepareBenchmarkDeviceTask(request, { preparedInputsDirect
   const args = ['-I', resolve(import.meta.dirname, 'benchmark-public-smoke.py'), '--task-root', resolve(sourceRoot),
     '--task-id', request.taskId, '--image-id', artifact.imageId,
     '--evidence-directory', resolve(directory, 'public-attempts')]
+  const executionLock = publicSmokeExecutionLock(executionLockPath)
+  if (executionLock !== null) args.push('--execution-lock', executionLock)
   const mcpConfiguration = { command: '/usr/bin/python3', args,
-    env: { PATH: '/Applications/Docker.app/Contents/Resources/bin:/usr/bin:/bin:/usr/sbin:/sbin' } }
+    env: { PATH: '/Applications/Docker.app/Contents/Resources/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin' } }
   const task = {
     title: `${request.taskId} ${artifact.spec.title}`,
     goal: '完成 TASK.md 与 PROTOCOL.md 的全部业务和输入输出要求。开发任务不设置 token、调用、金额或开发时长上限。'
@@ -283,6 +308,15 @@ export async function runBenchmarkDeviceModel(request, runner, options) {
   let prepared
   try { prepared = await prepareBenchmarkDeviceTask(request, { ...options, ...identities }) } catch { throw evidenceFailure() }
   const runtime = options.runtimeResolver ? await options.runtimeResolver(request, prepared) : null
+  const finalizeFailure = async result => {
+    if (runtime && result.status === 'failed') {
+      try {
+        const removal = await removeTerminalBenchmarkPublicSmoke(registeredLaunch, runtime)
+        if (removal) result.publicSmokeRemoval = removal
+      } catch { result.publicSmokeRemoval = { outcome: 'unknown' } }
+    }
+    return result
+  }
   let registeredLaunch = null
   let report
   try {
@@ -298,15 +332,15 @@ export async function runBenchmarkDeviceModel(request, runner, options) {
   } catch (error) {
     if (!registeredLaunch) throw error
     if (error?.code === 'STUCK_TOOL_REPEAT_LIMIT') {
-      try { return stoppedDeviceResult(request, registeredLaunch, error.report) }
+      try { return await finalizeFailure(stoppedDeviceResult(request, registeredLaunch, error.report)) }
       catch { throw evidenceFailure() }
     }
     if (error?.code === 'DEVICE_WORKER_CRASHED') {
-      try { return crashedDeviceResult(request, registeredLaunch, options, error.report) }
+      try { return await finalizeFailure(crashedDeviceResult(request, registeredLaunch, options, error.report)) }
       catch { throw evidenceFailure() }
     }
     if (error?.code === 'DEVICE_DISPATCH_FAILED' || error.report?.dispatchFailure) {
-      try { return failedDispatchDeviceResult(request, registeredLaunch, options, error.report) }
+      try { return await finalizeFailure(failedDispatchDeviceResult(request, registeredLaunch, options, error.report)) }
       catch { throw evidenceFailure() }
     }
     try {
@@ -324,9 +358,9 @@ export async function runBenchmarkDeviceModel(request, runner, options) {
       }
       const observation = persistedDeviceObservation(report, registeredLaunch)
       assert.ok(terminalBenchmarkDeviceFailure(observation), 'only a persisted terminal product result can be finalized')
-      return await resolveRegisteredDeviceTask(request, registeredLaunch, options, {
+      return await finalizeFailure(await resolveRegisteredDeviceTask(request, registeredLaunch, options, {
         report, reportBytes, observation,
-      })
+      }))
     } catch (unresolved) {
       if (unresolved.unresolvedDeviceExecution === true) throw unresolved
       // The product call has been launched, so uncertain state must stay
@@ -340,6 +374,39 @@ export async function runBenchmarkDeviceModel(request, runner, options) {
     if (options.productSourceSealSha256) assert.equal(result.productSourceSealSha256, options.productSourceSealSha256)
     return result
   } catch { throw evidenceFailure() }
+}
+
+// A failed call can still have a running role or an unresolved projection. Only
+// current, matching terminal product facts allow removing its own MCP server.
+export async function removeTerminalBenchmarkPublicSmoke(launch, runtime) {
+  const report = JSON.parse(readFileSync(resolve(launch.directory, 'device-task-result.json'), 'utf8'))
+  assert.equal(report.productSessionId, launch.productSessionId)
+  assert.equal(report.deliveryId, launch.deliveryId)
+  if (!report.publicSmoke || report.publicSmokeRemoval?.outcome === 'deleted') return null
+  const id = `benchmark_public_smoke_${launch.productSessionId}`
+  assert.equal(report.publicSmoke.id, id)
+  assert.equal(report.publicClientId, runtime.devicePath.publicClientId)
+  const delivery = (await runtime.api.query('delivery.get', { deliveryId: launch.deliveryId })).result
+  assert.equal(delivery.deliveryId, launch.deliveryId)
+  assert.equal(delivery.readCursor.deliveryId, launch.deliveryId)
+  const workRunAggregate = (await runtime.api.query('workrun.get', {
+    deliveryId: launch.deliveryId, workItemId: null, atCursor: delivery.readCursor,
+  })).result
+  assert.deepEqual(workRunAggregate.readCursor, delivery.readCursor)
+  if (!terminalBenchmarkDeviceFailure({ delivery, workRunAggregate })) return null
+  const path = resolve(launch.directory, 'public-smoke-removal.json')
+  if (existsSync(path)) {
+    const retained = JSON.parse(readFileSync(path, 'utf8'))
+    assert.equal(retained.id, id)
+    assert.equal(retained.publicClientId, report.publicClientId)
+    assert.equal(retained.receipt.outcome, 'deleted')
+    return retained.receipt
+  }
+  const receipt = await removeDevicePublicSmoke({ api: runtime.api,
+    publicClientId: report.publicClientId, id })
+  writeFileSync(path, `${JSON.stringify({ id, publicClientId: report.publicClientId,
+    readCursor: delivery.readCursor, receipt }, null, 2)}\n`, { flag: 'wx', mode: 0o600 })
+  return receipt
 }
 
 function deviceResult(directory, evidenceDirectory, commit) {

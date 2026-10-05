@@ -17,7 +17,7 @@ use std::{
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use ureq::unversioned::transport::{Connector as _, RustlsConnector};
+use ureq::unversioned::transport::{ConnectProxyConnector, Connector as _, RustlsConnector};
 use winwincode_domain::{ModelExchangeId, RequestId};
 
 use crate::provider_anthropic::{
@@ -97,6 +97,7 @@ pub struct HttpsSseProviderConfig {
     tls_roots: ProviderTlsRoots,
     protocol: HttpsSseProviderProtocol,
     custom_headers: Vec<(String, String)>,
+    http_connect_proxy: Option<ureq::Proxy>,
 }
 
 impl fmt::Debug for HttpsSseProviderConfig {
@@ -106,6 +107,10 @@ impl fmt::Debug for HttpsSseProviderConfig {
             .field("provider_id", &self.provider_id)
             .field("endpoint", &"[REDACTED]")
             .field("protocol", &self.protocol)
+            .field(
+                "http_connect_proxy",
+                &self.http_connect_proxy.as_ref().map(|_| "[REDACTED]"),
+            )
             .field(
                 "custom_headers",
                 &self
@@ -178,9 +183,41 @@ impl HttpsSseProviderConfig {
             tls_roots: ProviderTlsRoots::WebPki,
             protocol: HttpsSseProviderProtocol::Canonical,
             custom_headers: Vec::new(),
+            http_connect_proxy: None,
         };
         config.validate()?;
         Ok(config)
+    }
+
+    /// Routes verified HTTPS through one explicitly configured HTTP CONNECT proxy.
+    /// No ambient proxy environment variables are read by this configuration.
+    ///
+    /// # Errors
+    /// Rejects malformed URLs, unsupported proxy protocols and URL paths or queries.
+    pub fn with_http_connect_proxy(
+        mut self,
+        proxy_url: &str,
+    ) -> Result<Self, HttpsSseProviderError> {
+        let invalid =
+            || HttpsSseProviderError::new(HttpsSseProviderErrorKind::InvalidConfiguration);
+        if !valid_token(proxy_url, MAX_ENDPOINT_BYTES) || proxy_url.contains('#') {
+            return Err(invalid());
+        }
+        let uri = ureq::http::Uri::from_str(proxy_url).map_err(|_| invalid())?;
+        if uri.scheme_str() != Some("http")
+            || !uri.authority().is_some_and(|authority| {
+                !authority.host().is_empty()
+                    && (authority.as_str().rsplit('@').next() == Some(authority.host())
+                        || authority.port_u16().is_some())
+            })
+            || !uri
+                .path_and_query()
+                .is_none_or(|path| matches!(path.path(), "" | "/") && path.query().is_none())
+        {
+            return Err(invalid());
+        }
+        self.http_connect_proxy = Some(ureq::Proxy::new(proxy_url).map_err(|_| invalid())?);
+        Ok(self)
     }
 
     /// Replaces `WebPKI` roots with an explicit non-empty DER trust set.
@@ -483,7 +520,7 @@ impl HttpsSseProviderAdapter {
         let agent_config = ureq::Agent::config_builder()
             .http_status_as_error(false)
             .max_redirects(0)
-            .proxy(None)
+            .proxy(config.http_connect_proxy.clone())
             .timeout_connect(Some(config.connect_timeout))
             // ureq 3.1.4 also applies recv_response's deadline while reading the body.
             // When enabled, the global deadline bounds headers and the complete stream.
@@ -491,8 +528,12 @@ impl HttpsSseProviderAdapter {
             .timeout_global(config.deadlines_enabled.then_some(config.total_timeout))
             .tls_config(tls)
             .build();
-        let connector =
-            crate::provider_transport::ExchangeConnector(io).chain(RustlsConnector::default());
+        // CONNECT recursively opens its proxy through this same chain without
+        // proxy settings. ExchangeConnector retains that TCP socket for real
+        // cancellation, then preserves the tunnel for target TLS verification.
+        let connector = ConnectProxyConnector::default()
+            .chain(crate::provider_transport::ExchangeConnector(io))
+            .chain(RustlsConnector::default());
         ureq::Agent::with_parts(
             agent_config,
             connector,
@@ -500,7 +541,7 @@ impl HttpsSseProviderAdapter {
         )
     }
 
-    /// Builds a verified no-proxy HTTP agent from one validated configuration.
+    /// Builds a verified HTTP agent from one validated, explicitly routed configuration.
     ///
     /// # Errors
     ///
@@ -1648,7 +1689,7 @@ fn valid_token(value: &str, max_len: usize) -> bool {
 mod tests {
     use std::{
         io::{Read, Write},
-        net::{TcpListener, TcpStream},
+        net::{Shutdown, TcpListener, TcpStream},
         sync::{Arc, mpsc},
         thread,
     };
@@ -1721,6 +1762,69 @@ mod tests {
 
         fn finish(self) -> Vec<Vec<u8>> {
             self.server.join().expect("join TLS fixture");
+            self.requests.try_iter().collect()
+        }
+    }
+
+    struct ConnectFixture {
+        url: String,
+        requests: mpsc::Receiver<Vec<u8>>,
+        server: thread::JoinHandle<()>,
+    }
+
+    impl ConnectFixture {
+        fn start(target: Option<&str>) -> Self {
+            let target = target.map(|endpoint| {
+                ureq::http::Uri::from_str(endpoint)
+                    .expect("target URI")
+                    .port_u16()
+                    .expect("target port")
+            });
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind CONNECT proxy");
+            let address = listener.local_addr().expect("proxy address");
+            let (request_tx, requests) = mpsc::channel();
+            let server = thread::spawn(move || {
+                let (mut client, _) = listener.accept().expect("proxy connection");
+                client
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .expect("proxy read timeout");
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    client.read_exact(&mut byte).expect("CONNECT header");
+                    request.push(byte[0]);
+                    assert!(request.len() < 16 * 1024);
+                }
+                request_tx.send(request).expect("record CONNECT");
+                let Some(port) = target else {
+                    let mut byte = [0];
+                    assert_eq!(client.read(&mut byte).expect("cancelled CONNECT socket"), 0);
+                    return;
+                };
+                let mut upstream = TcpStream::connect(("127.0.0.1", port)).expect("proxy target");
+                client
+                    .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                    .expect("CONNECT response");
+                client.set_read_timeout(None).expect("relay timeout");
+                let mut read_client = client.try_clone().expect("client relay");
+                let mut write_upstream = upstream.try_clone().expect("upstream relay");
+                let outbound = thread::spawn(move || {
+                    let _ = std::io::copy(&mut read_client, &mut write_upstream);
+                    let _ = write_upstream.shutdown(Shutdown::Both);
+                });
+                let _ = std::io::copy(&mut upstream, &mut client);
+                let _ = client.shutdown(Shutdown::Both);
+                outbound.join().expect("outbound relay");
+            });
+            Self {
+                url: format!("http://fixture-user:fixture-password@{address}"),
+                requests,
+                server,
+            }
+        }
+
+        fn finish(self) -> Vec<Vec<u8>> {
+            self.server.join().expect("join CONNECT fixture");
             self.requests.try_iter().collect()
         }
     }
@@ -2162,6 +2266,216 @@ mod tests {
             request,
             b"Idempotency-Key: pad_00000"
         ));
+    }
+
+    #[test]
+    fn explicit_http_connect_proxy_validates_and_redacts_its_route() {
+        let fixture = TlsFixture::start(Vec::new());
+        let settings = config(&fixture);
+        let io = crate::provider_transport::ExchangeIo::new(
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        );
+        assert!(
+            HttpsSseProviderAdapter::agent(&settings, io)
+                .config()
+                .proxy()
+                .is_none()
+        );
+        for url in [
+            "proxy.example:8080",
+            "https://proxy.example:8080",
+            "socks5://proxy.example:8080",
+            "http://",
+            "http://proxy.example/path",
+            "http://proxy.example/?query=secret",
+            "http://proxy.example/#fragment",
+            "http://proxy.example:not-a-port",
+            "http://proxy.example:65536",
+            " http://proxy.example",
+            "http://proxy.example\n",
+        ] {
+            assert_eq!(
+                settings
+                    .clone()
+                    .with_http_connect_proxy(url)
+                    .expect_err("invalid proxy")
+                    .kind(),
+                HttpsSseProviderErrorKind::InvalidConfiguration
+            );
+        }
+        let routed = settings
+            .with_http_connect_proxy("http://private-user:private-password@localhost:8080")
+            .expect("explicit HTTP proxy");
+        let debug = format!("{routed:?}");
+        assert!(!debug.contains("private-user"));
+        assert!(!debug.contains("private-password"));
+        assert!(!debug.contains("localhost:8080"));
+        fixture.finish();
+    }
+
+    #[test]
+    fn verified_tls_sse_through_http_connect_preserves_replay_and_private_headers() {
+        let fixture = TlsFixture::start(vec![TestResponse {
+            status: "200 OK",
+            content_type: "text/event-stream",
+            body: successful_sse(),
+            declared_length: None,
+            delay: Duration::ZERO,
+        }]);
+        let proxy = ConnectFixture::start(Some(&fixture.endpoint));
+        let settings = config(&fixture)
+            .with_http_connect_proxy(&proxy.url)
+            .expect("proxy config");
+        let adapter = HttpsSseProviderAdapter::try_new(settings).expect("adapter");
+        let exchange = ModelExchangeId("mdl_00000000000000000000000001".into());
+        let request_id = RequestId("req_00000000000000000000000001".into());
+        let request = invocation(&exchange, &request_id);
+        let first = adapter
+            .open_https(request, SECRET)
+            .expect("proxied TLS open");
+        assert_eq!(
+            adapter.open_https(request, SECRET).expect("exact replay"),
+            first
+        );
+        let receipt = ProviderGatewayOpenReceipt {
+            model_exchange_id: exchange,
+            request_id,
+            route: winwincode_api::generated::ModelRoute {
+                provider_id: "provider-https-fixture".into(),
+                model_id: "fixture-model".into(),
+                credential_reference_id: winwincode_domain::CredentialReferenceId(
+                    "crd_00000000000000000000000001".into(),
+                ),
+            },
+            adapter_request_id: "pad_00000000000000000000000001".into(),
+            idempotent_replay: false,
+            stream_leak_gate: crate::CredentialLeakGate::new(),
+        };
+        assert!(matches!(
+            adapter
+                .drain_canonical(&receipt)
+                .expect("proxied SSE")
+                .terminal,
+            ProviderGatewayTerminal::Completed { .. }
+        ));
+        let provider_requests = fixture.finish();
+        assert_eq!(provider_requests.len(), 1);
+        assert!(
+            provider_requests[0]
+                .windows(SECRET.len())
+                .any(|window| window == SECRET)
+        );
+        assert!(!contains_ascii_case_insensitive(
+            &provider_requests[0],
+            b"proxy-authorization:"
+        ));
+        let proxy_requests = proxy.finish();
+        assert_eq!(proxy_requests.len(), 1);
+        assert!(proxy_requests[0].starts_with(b"CONNECT localhost:"));
+        assert!(contains_ascii_case_insensitive(
+            &proxy_requests[0],
+            b"proxy-authorization: basic "
+        ));
+        assert!(
+            !proxy_requests[0]
+                .windows(SECRET.len())
+                .any(|window| window == SECRET)
+        );
+        assert!(
+            !proxy_requests[0]
+                .windows(PAYLOAD.len())
+                .any(|window| window == PAYLOAD)
+        );
+    }
+
+    #[test]
+    fn cancel_and_release_interrupt_a_pending_http_connect_socket() {
+        for action in [
+            ProviderStreamControlAction::Cancel,
+            ProviderStreamControlAction::Release,
+        ] {
+            let fixture = TlsFixture::start(Vec::new());
+            let proxy = ConnectFixture::start(None);
+            let adapter = HttpsSseProviderAdapter::try_new(
+                config(&fixture)
+                    .with_http_connect_proxy(&proxy.url)
+                    .expect("proxy config"),
+            )
+            .expect("adapter");
+            let exchange = ModelExchangeId("mdl_00000000000000000000000004".into());
+            let request_id = RequestId("req_00000000000000000000000004".into());
+            let opener_adapter = adapter.clone();
+            let opener_exchange = exchange.clone();
+            let opener_request_id = request_id.clone();
+            let opener = thread::spawn(move || {
+                opener_adapter.open_https(invocation(&opener_exchange, &opener_request_id), SECRET)
+            });
+            proxy
+                .requests
+                .recv_timeout(Duration::from_secs(2))
+                .expect("pending CONNECT");
+            let started = std::time::Instant::now();
+            adapter
+                .control(&exchange, "pad_00000000000000000000000001", action)
+                .expect("interrupt proxy socket");
+            assert_eq!(
+                opener.join().expect("pending open"),
+                Err(ProviderAdapterError::rejected())
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(1),
+                "control must close the TCP socket immediately"
+            );
+            assert_eq!(
+                adapter.open_https(invocation(&exchange, &request_id), SECRET),
+                Err(ProviderAdapterError::rejected())
+            );
+            assert!(fixture.finish().is_empty());
+            assert!(proxy.finish().is_empty());
+        }
+    }
+
+    #[test]
+    fn proxied_sse_body_keeps_the_progress_idle_timeout_without_a_total_deadline() {
+        let fixture = TlsFixture::start_streaming(
+            vec![TestResponse {
+                status: "200 OK",
+                content_type: "text/event-stream",
+                body: successful_sse(),
+                declared_length: None,
+                delay: Duration::ZERO,
+            }],
+            Duration::from_millis(350),
+        );
+        let proxy = ConnectFixture::start(Some(&fixture.endpoint));
+        let mut settings = config(&fixture)
+            .without_deadlines()
+            .with_http_connect_proxy(&proxy.url)
+            .expect("proxy config");
+        settings.idle_timeout = Duration::from_millis(100);
+        let io = crate::provider_transport::ExchangeIo::new(
+            settings.connect_timeout,
+            settings.idle_timeout,
+        );
+        let agent = HttpsSseProviderAdapter::agent(&settings, Arc::clone(&io));
+        let mut response = agent
+            .post(&fixture.endpoint)
+            .send(PAYLOAD)
+            .expect("proxied headers");
+        io.body_started();
+        let started = std::time::Instant::now();
+        assert!(
+            response
+                .body_mut()
+                .as_reader()
+                .read_to_end(&mut Vec::new())
+                .is_err()
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+        drop(response);
+        assert_eq!(fixture.finish().len(), 1);
+        assert_eq!(proxy.finish().len(), 1);
     }
 
     #[test]

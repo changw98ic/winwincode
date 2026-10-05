@@ -310,6 +310,9 @@ test('runtime children do not inherit orchestration credentials or injected star
     ZHIPU_API_KEY: 'synthetic-provider-secret', OPENCODE_SESSION_VALUE: 'synthetic-session',
     GH_TOKEN: 'synthetic-publisher-secret', PRIVATE_GRADER_CREDENTIAL: 'synthetic-grader-secret',
     WWC_DEVICE_PROVIDER_API_KEY: 'synthetic-device-secret',
+    WWC_DEVICE_PROVIDER_HTTPS_PROXY: 'http://synthetic-user:synthetic-password@proxy.invalid:8080',
+    HTTP_PROXY: 'http://synthetic-user:synthetic-password@proxy.invalid:8080',
+    HTTPS_PROXY: 'http://synthetic-user:synthetic-password@proxy.invalid:8080',
     NODE_OPTIONS: '--eval=throw new Error("injected")',
     DYLD_INSERT_LIBRARIES: '/tmp/untrusted.dylib',
   })
