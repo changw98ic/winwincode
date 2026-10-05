@@ -731,6 +731,32 @@ impl CodexCoreAdapter for FakeCodex {
             .collect())
     }
 
+    fn pending_execution_delivery_batch(
+        &mut self,
+        after_delivery: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<DurableExecutionDelivery>, Self::Error> {
+        let state = self.state.lock().expect("FakeCodex state");
+        // Production locates the cursor in the durable ledger, including sent
+        // rows, before selecting the next pending deliveries.
+        let start = after_delivery
+            .and_then(|id| {
+                state
+                    .durable_deliveries
+                    .iter()
+                    .position(|delivery| delivery.delivery_id == id)
+            })
+            .map_or(0, |index| index + 1);
+        Ok(state
+            .durable_deliveries
+            .iter()
+            .skip(start)
+            .filter(|delivery| state.pending_delivery_ids.contains(&delivery.delivery_id))
+            .take(limit)
+            .cloned()
+            .collect())
+    }
+
     fn record_execution_delivery_sent(&mut self, delivery_id: &str) -> Result<(), Self::Error> {
         let mut state = self.state.lock().expect("FakeCodex state");
         if !state.pending_delivery_ids.contains(delivery_id) {
@@ -3612,6 +3638,10 @@ async fn deferred_observer_start_uses_common_outbox_after_renewal() {
         worker.poll_codex_boxed().await.unwrap_err().code,
         WorkerErrorCode::ModelStartDeferred
     );
+    worker
+        .flush_durable_outbox()
+        .await
+        .expect("finish the deferred scan before retrying its original intent");
     let original = pump.state.lock().unwrap().model_start_requests[0].clone();
     assert!(
         pump.state
@@ -4627,6 +4657,10 @@ async fn deferred_local_model_start_obeys_current_lease_and_keeps_the_original_i
             worker.flush_durable_outbox().await.unwrap_err().code,
             WorkerErrorCode::ModelStartDeferred
         );
+        worker
+            .flush_durable_outbox()
+            .await
+            .expect("finish the deferred scan before the next start attempt");
         if renewed {
             let mut lease = active.lease.clone();
             lease.expires_at = Instant("2027-01-15T08:10:00.000Z".into());
@@ -4820,6 +4854,10 @@ async fn stale_driver_time_cannot_reset_elapsed_first_start_authority() {
                 .code,
             WorkerErrorCode::ModelStartDeferred
         );
+        worker
+            .flush_durable_outbox_at(now())
+            .await
+            .expect("finish the deferred scan before advancing elapsed time");
         if renewed {
             let mut lease = active.lease.clone();
             lease.expires_at = Instant("2027-01-15T08:10:00.000Z".into());
@@ -4862,6 +4900,320 @@ async fn stale_driver_time_cannot_reset_elapsed_first_start_authority() {
             usize::from(renewed)
         );
         worker.shutdown(now()).await.unwrap();
+    }
+}
+
+fn provider_quota_messages(
+    active: &winwincode_worker::ActiveJob,
+) -> (
+    winwincode_execution_port::generated::ModelOpenMessage,
+    winwincode_execution_port::generated::ModelOpenMessage,
+    winwincode_execution_port::generated::ModelAckMessage,
+) {
+    use base64::Engine as _;
+    let ExecutionPortMessage::ModelOpenMessage(mut open_a) = execution_port_fixture("model.open")
+    else {
+        unreachable!()
+    };
+    open_a.lease = active.lease.clone();
+    open_a.worker_session_id = active.worker_session_id.clone();
+    open_a.session_identity = active.session_identity.clone();
+    open_a.message_id = ExecutionMessageId(id("xmsg", 'P'));
+    open_a.model_exchange_id = winwincode_domain::ModelExchangeId(id("mdl", 'A'));
+    let payload_a = serde_json::to_vec(&serde_json::json!({
+        "provider": "quota-provider-A",
+        "request": {"model": "quota-model", "input": []}
+    }))
+    .unwrap();
+    open_a.request.data_base64 = base64::engine::general_purpose::STANDARD.encode(&payload_a);
+    open_a.request.payload_digest =
+        Sha256Digest(format!("sha256:{:x}", Sha256::digest(&payload_a)));
+    let mut open_b = open_a.clone();
+    open_b.message_id = ExecutionMessageId(id("xmsg", 'Q'));
+    open_b.model_exchange_id = winwincode_domain::ModelExchangeId(id("mdl", 'B'));
+    let payload_b = serde_json::to_vec(&serde_json::json!({
+        "provider": "quota-provider-B",
+        "request": {"model": "quota-model", "input": []}
+    }))
+    .unwrap();
+    open_b.request.data_base64 = base64::engine::general_purpose::STANDARD.encode(&payload_b);
+    open_b.request.payload_digest =
+        Sha256Digest(format!("sha256:{:x}", Sha256::digest(&payload_b)));
+    let ExecutionPortMessage::ModelAckMessage(mut cancellation) =
+        execution_port_fixture("model.ack")
+    else {
+        unreachable!()
+    };
+    cancellation.message_id = ExecutionMessageId(id("xmsg", 'R'));
+    cancellation.lease = active.lease.clone();
+    cancellation.worker_session_id = active.worker_session_id.clone();
+    cancellation.session_identity = active.session_identity.clone();
+    cancellation.model_exchange_id = winwincode_domain::ModelExchangeId(id("mdl", 'C'));
+    cancellation.error = Some(winwincode_execution_port::generated::ExecutionPortError {
+        code: winwincode_execution_port::generated::ExecutionPortErrorCode::ModelStreamFailed,
+        message: "model exchange cancelled".to_owned(),
+        retryable: false,
+    });
+    (open_a, open_b, cancellation)
+}
+
+#[tokio::test]
+async fn full_provider_slots_do_not_block_another_provider_or_model_cancellation() {
+    use winwincode_provider::{DeviceModelAdmission, DeviceProviderStore};
+
+    let port = RecordingPort::default();
+    let messages = Rc::clone(&port.messages);
+    let codex = FakeCodex::with_threads([thread('A')]);
+    let mut pump = codex.clone();
+    let root = tempfile::tempdir().unwrap();
+    let providers = root.path().join("providers");
+    let mut worker = test_worker(worker_config(1), port, codex)
+        .with_device_providers(&providers)
+        .unwrap();
+    register(&mut worker).await;
+    worker
+        .accept_control_and_drive(
+            &ExecutionPortMessage::JobDispatchMessage(dispatch('A', delivery_scope('A'))),
+            now(),
+        )
+        .await
+        .unwrap();
+    let (open_a, open_b, cancellation) = provider_quota_messages(worker.active_jobs()[0]);
+
+    let store = DeviceProviderStore::open(&providers).unwrap();
+    let mut held_slots = Vec::new();
+    for _ in 0..3 {
+        let DeviceModelAdmission::Ready(permit) = store.try_model_permit(&open_a).unwrap() else {
+            panic!("each of the first three Provider A calls acquires a slot");
+        };
+        held_slots.push(permit);
+    }
+    assert!(matches!(
+        store.try_model_permit(&open_a).unwrap(),
+        DeviceModelAdmission::Deferred
+    ));
+    let retained_a = pump
+        .retain_execution_delivery(&ExecutionPortMessage::ModelOpenMessage(open_a.clone()))
+        .unwrap();
+    let retained_b = pump
+        .retain_execution_delivery(&ExecutionPortMessage::ModelOpenMessage(open_b.clone()))
+        .unwrap();
+    let retained_cancellation = pump
+        .retain_execution_delivery(&ExecutionPortMessage::ModelAckMessage(cancellation.clone()))
+        .unwrap();
+
+    assert_eq!(
+        worker.flush_durable_outbox().await.unwrap_err().code,
+        WorkerErrorCode::ModelStartDeferred
+    );
+    assert!(
+        store
+            .model_cancelled(&cancellation.model_exchange_id.0)
+            .unwrap()
+    );
+    {
+        let state = pump.state.lock().unwrap();
+        assert!(state.pending_delivery_ids.contains(&retained_a.delivery_id));
+        assert!(!state.pending_delivery_ids.contains(&retained_b.delivery_id));
+        assert!(
+            !state
+                .pending_delivery_ids
+                .contains(&retained_cancellation.delivery_id),
+            "the same bounded batch handles cancellation after the full Provider"
+        );
+    }
+    assert!(
+        !store.model_start_recorded(&open_a).unwrap(),
+        "quota refusal must leave the first-start exchange record absent"
+    );
+    for _ in 0..100 {
+        if !store
+            .replay_model(&open_b.model_exchange_id.0, 1)
+            .unwrap()
+            .is_empty()
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let chunks_b = store.replay_model(&open_b.model_exchange_id.0, 1).unwrap();
+    assert!(
+        chunks_b
+            .iter()
+            .any(|chunk| chunk.is_final && chunk.error.is_some()),
+        "Provider B completes its existing unconfigured-provider error path without waiting for A"
+    );
+    assert!(store.model_start_recorded(&open_b).unwrap());
+    assert!(!store.model_start_recorded(&open_a).unwrap());
+
+    drop(held_slots.pop().unwrap());
+    worker
+        .flush_durable_outbox()
+        .await
+        .expect("an empty batch finishes the scan after the sent cancellation");
+    assert!(!store.model_start_recorded(&open_a).unwrap());
+    worker
+        .flush_durable_outbox()
+        .await
+        .expect("the next scan retries the original Provider A intent in the freed slot");
+    for _ in 0..100 {
+        if !store
+            .replay_model(&open_a.model_exchange_id.0, 1)
+            .unwrap()
+            .is_empty()
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(store.model_start_recorded(&open_a).unwrap());
+    assert_eq!(
+        store.list_stored_model_exchanges().unwrap(),
+        vec![
+            open_a.model_exchange_id.0.clone(),
+            open_b.model_exchange_id.0.clone()
+        ]
+    );
+    {
+        let state = pump.state.lock().unwrap();
+        assert!(!state.pending_delivery_ids.contains(&retained_a.delivery_id));
+        assert_eq!(
+            state
+                .durable_deliveries
+                .iter()
+                .filter(|delivery| delivery.delivery_id == retained_a.delivery_id)
+                .map(|delivery| &delivery.message)
+                .collect::<Vec<_>>(),
+            vec![&ExecutionPortMessage::ModelOpenMessage(open_a)],
+            "retry reuses the one durable intent and its exact original identity"
+        );
+    }
+    assert!(
+        !messages.borrow().iter().any(|message| matches!(
+            message,
+            ExecutionPortMessage::ModelOpenMessage(_) | ExecutionPortMessage::ModelAckMessage(_)
+        )),
+        "Provider admission and cancellation remain local to the Device"
+    );
+    drop(worker);
+}
+
+#[tokio::test]
+async fn invalid_provider_slot_permissions_complete_with_failure_without_blocking_the_batch() {
+    use std::os::unix::fs::PermissionsExt as _;
+    use winwincode_execution_port::generated::ExecutionPortErrorCode;
+    use winwincode_provider::{DeviceModelAdmission, DeviceProviderStore};
+
+    for corrupt_slot_file in [false, true] {
+        let codex = FakeCodex::with_threads([thread('A')]);
+        let mut pump = codex.clone();
+        let root = tempfile::tempdir().unwrap();
+        let providers = root.path().join("providers");
+        let mut worker = test_worker(worker_config(1), RecordingPort::default(), codex)
+            .with_device_providers(&providers)
+            .unwrap();
+        register(&mut worker).await;
+        worker
+            .accept_control_and_drive(
+                &ExecutionPortMessage::JobDispatchMessage(dispatch('A', delivery_scope('A'))),
+                now(),
+            )
+            .await
+            .unwrap();
+        let (open_a, open_b, cancellation) = provider_quota_messages(worker.active_jobs()[0]);
+        let store = DeviceProviderStore::open(&providers).unwrap();
+        let DeviceModelAdmission::Ready(permit) = store.try_model_permit(&open_a).unwrap() else {
+            panic!("initial Provider A slot is available before changing permissions");
+        };
+        drop(permit);
+        let slots = providers
+            .join("model-provider-slots")
+            .join(format!("{:x}", Sha256::digest(b"quota-provider-A")));
+        let (path, mode) = if corrupt_slot_file {
+            (slots.join("slot-0"), 0o644)
+        } else {
+            (slots, 0o755)
+        };
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        assert!(
+            store.try_model_permit(&open_a).is_err(),
+            "unsafe permissions are an admission failure, not a full quota"
+        );
+        let retained_a = pump
+            .retain_execution_delivery(&ExecutionPortMessage::ModelOpenMessage(open_a.clone()))
+            .unwrap();
+        let retained_b = pump
+            .retain_execution_delivery(&ExecutionPortMessage::ModelOpenMessage(open_b.clone()))
+            .unwrap();
+        let retained_cancellation = pump
+            .retain_execution_delivery(&ExecutionPortMessage::ModelAckMessage(cancellation.clone()))
+            .unwrap();
+
+        worker
+            .flush_durable_outbox()
+            .await
+            .expect("the admission failure becomes a terminal response while the batch continues");
+        let chunks_a = store.replay_model(&open_a.model_exchange_id.0, 1).unwrap();
+        assert_eq!(chunks_a.len(), 1);
+        assert!(chunks_a[0].is_final);
+        assert_eq!(
+            chunks_a[0].error.as_ref().unwrap().code,
+            ExecutionPortErrorCode::DeviceProviderUnavailable
+        );
+        assert!(!chunks_a[0].error.as_ref().unwrap().retryable);
+        assert!(store.model_start_recorded(&open_a).unwrap());
+        assert!(
+            store
+                .model_cancelled(&cancellation.model_exchange_id.0)
+                .unwrap(),
+            "the cancellation after the failed Provider is durably applied"
+        );
+        {
+            let state = pump.state.lock().unwrap();
+            for delivery in [&retained_a, &retained_b, &retained_cancellation] {
+                assert!(
+                    !state.pending_delivery_ids.contains(&delivery.delivery_id),
+                    "the failed Provider and later effects must not remain pending"
+                );
+            }
+        }
+        for _ in 0..100 {
+            if !store
+                .replay_model(&open_b.model_exchange_id.0, 1)
+                .unwrap()
+                .is_empty()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            store
+                .replay_model(&open_b.model_exchange_id.0, 1)
+                .unwrap()
+                .iter()
+                .any(|chunk| chunk.is_final && chunk.error.is_some()),
+            "Provider B still completes its normal local configuration error path"
+        );
+        for _ in 0..3 {
+            worker
+                .flush_durable_outbox()
+                .await
+                .expect("later scans must not indefinitely retry unavailable admission storage");
+        }
+        assert_eq!(
+            store.replay_model(&open_a.model_exchange_id.0, 1).unwrap(),
+            chunks_a,
+            "the admission failure remains one exact durable terminal response"
+        );
+        assert_eq!(
+            store.list_stored_model_exchanges().unwrap(),
+            vec![
+                open_a.model_exchange_id.0.clone(),
+                open_b.model_exchange_id.0.clone()
+            ]
+        );
+        drop(worker);
     }
 }
 

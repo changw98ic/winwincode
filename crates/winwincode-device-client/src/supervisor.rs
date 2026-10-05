@@ -82,6 +82,10 @@ use crate::worker_logs::{
     WorkerLogConfig, WorkerLogContentKind, WorkerLogRecorder, WorkerLogStream,
 };
 
+/// Technical capacity bound of the existing ClientControl contract. Provider
+/// request limits are independent of the number of supervised Worker processes.
+pub(crate) const PROTOCOL_WORKER_SESSION_CAPACITY: u32 = 1024;
+
 /// Registry lifecycle state of a supervised, believed-live worker process.
 pub const WORKER_STATE_RUNNING: &str = "running";
 /// Registry lifecycle state of a worker that exited with status zero.
@@ -1258,10 +1262,17 @@ impl SessionSupervisor {
 impl WorkerCapacitySource for SessionSupervisor {
     fn worker_capacity(&self) -> WorkerCapacitySnapshot {
         // Best effort: a supervision hiccup must not block the exchange
-        // loop, so an unobservable process keeps its slot reserved.
+        // loop. Failed observation must not imply that workers have drained,
+        // including when no additional local process cap is configured.
+        let configured_capacity = self.config().max_concurrent_worker_sessions;
+        let unobserved_capacity = if configured_capacity == 0 {
+            PROTOCOL_WORKER_SESSION_CAPACITY
+        } else {
+            configured_capacity
+        };
         let running = self
             .running_worker_sessions()
-            .unwrap_or(self.config().max_concurrent_worker_sessions);
+            .unwrap_or(unobserved_capacity);
         let reserved = self.reserved_worker_slots().unwrap_or(0);
         WorkerCapacitySnapshot {
             running_worker_sessions: running,
@@ -2833,6 +2844,45 @@ mod tests {
         let capacity = WorkerCapacitySource::worker_capacity(&supervisor);
         assert_eq!(capacity.running_worker_sessions, 0);
         assert_eq!(capacity.reserved_worker_sessions, 1);
+    }
+
+    #[test]
+    fn capacity_source_does_not_report_drained_when_worker_registry_is_unavailable() {
+        for (local_capacity, expected_running) in [(0, PROTOCOL_WORKER_SESSION_CAPACITY), (8, 8)] {
+            let root = temp_root("capacity-query-failure");
+            let store = DeviceStore::open(&root).expect("store opens");
+            let database_path = store.database_path().to_path_buf();
+            let mut config = test_config(&root.join("winwincode-worker"));
+            config.max_concurrent_worker_sessions = local_capacity;
+            let supervisor = SessionSupervisor::new(config, store).expect("supervisor builds");
+            let connection =
+                rusqlite::Connection::open(database_path).expect("fault injection opens database");
+            connection
+                .execute_batch(
+                    "ALTER TABLE worker_process_registry RENAME TO unavailable_worker_registry",
+                )
+                .expect("worker registry becomes unavailable");
+
+            assert!(
+                supervisor.running_worker_sessions().is_err(),
+                "the actual worker observation must fail"
+            );
+            let capacity = WorkerCapacitySource::worker_capacity(&supervisor);
+            assert_eq!(capacity.running_worker_sessions, expected_running);
+            assert!(
+                capacity.running_worker_sessions > 0,
+                "a failed observation cannot prove that all workers have drained"
+            );
+
+            connection
+                .execute_batch(
+                    "ALTER TABLE unavailable_worker_registry RENAME TO worker_process_registry",
+                )
+                .expect("worker registry is restored");
+            drop(connection);
+            drop(supervisor);
+            fs::remove_dir_all(root).expect("test root removes");
+        }
     }
 
     #[test]

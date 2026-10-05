@@ -39,13 +39,14 @@ use winwincode_local::{
     LocalExecutionPortHandle, LocalLauncher, LocalLauncherConfig, SharedControlPlaneHandle,
 };
 use winwincode_storage::{
-    ExecutionAdmissionBoundary, ExecutionAdmissionErrorCode, ExecutionAdmissionLimits,
-    ExecutionAdmissionPolicy, ExecutionJobRecord, ExecutionJobState, ExecutionLeaseClaim,
-    ExecutionRepositoryAccess, ExecutionReservationRequest, ExecutionReservationStart,
-    ExecutionReservationState, RepositorySchedulerClaimRequest, RepositorySchedulerScope,
-    WorkerOutboundAuthority, WorkerPoolId, WorkerSlotAuthority, WorkerSlotOpenRequest,
-    WorkerSlotResourceLimits, WorkerSlotResources,
+    ExecutionAdmissionBoundary, ExecutionAdmissionErrorCode, ExecutionJobRecord, ExecutionJobState,
+    ExecutionLeaseClaim, ExecutionRepositoryAccess, ExecutionReservationRequest,
+    ExecutionReservationStart, ExecutionReservationState, RepositorySchedulerClaimRequest,
+    RepositorySchedulerScope, WorkerOutboundAuthority, WorkerPoolId, WorkerSlotAuthority,
+    WorkerSlotOpenRequest, WorkerSlotResourceLimits, WorkerSlotResources,
 };
+#[cfg(test)]
+use winwincode_storage::{ExecutionAdmissionLimits, ExecutionAdmissionPolicy};
 #[cfg(feature = "local-worker")]
 use winwincode_worker::{CodexCoreAdapter, WorkerConfig};
 
@@ -60,6 +61,7 @@ const FAULTED: u8 = 1;
 const STOPPED: u8 = 2;
 const DEFAULT_RUNTIME_USER_ID: &str = "usr_00000000000000000000000001";
 const DEFAULT_RUNTIME_WORKER_POOL_ID: &str = "wpl_00000000000000000000000001";
+#[cfg(test)]
 const LOCAL_ADMISSION_LIMITS: ExecutionAdmissionLimits = ExecutionAdmissionLimits {
     max_concurrent: 1,
     max_queued: 10_000,
@@ -471,15 +473,17 @@ impl RepositoryRuntimeScheduler {
                 debug_scheduler_error("load execution admission reservation", &error);
                 scheduler_failure()
             })?;
+        if let Some(reservation) = &reservation {
+            self.ensure_reservation_identity(record, reservation)?;
+        }
+        self.configure_admission_policies(
+            &mut admission,
+            &record.scope,
+            runtime_limit_millis.is_some(),
+        )?;
         let reservation = if let Some(reservation) = reservation {
             reservation
         } else {
-            let policy_limits = ExecutionAdmissionLimits {
-                max_runtime_millis: runtime_limit_millis
-                    .and(LOCAL_ADMISSION_LIMITS.max_runtime_millis),
-                ..LOCAL_ADMISSION_LIMITS
-            };
-            self.configure_admission_policies(&mut admission, &record.scope, policy_limits)?;
             let Some(reservation) =
                 self.reserve_admission(&mut admission, record, &job, runtime_limit_millis)?
             else {
@@ -487,12 +491,7 @@ impl RepositoryRuntimeScheduler {
             };
             reservation
         };
-        if reservation.scope != record.scope || reservation.worker_pool_id != self.worker_pool_id {
-            return Err(RuntimeSupervisorError::new(
-                RuntimeSupervisorErrorKind::Driver,
-                "repository runtime scheduler admission identity differs",
-            ));
-        }
+        self.ensure_reservation_identity(record, &reservation)?;
         // Admission admits reservations from any active user account instead
         // of one fixed process subject: every browser session now carries its
         // own durable userId, so the reservation subject may differ per user.
@@ -562,6 +561,20 @@ impl RepositoryRuntimeScheduler {
         Ok(true)
     }
 
+    fn ensure_reservation_identity(
+        &self,
+        record: &ExecutionJobRecord,
+        reservation: &winwincode_storage::ExecutionReservationRecord,
+    ) -> Result<(), RuntimeSupervisorError> {
+        if reservation.scope != record.scope || reservation.worker_pool_id != self.worker_pool_id {
+            return Err(RuntimeSupervisorError::new(
+                RuntimeSupervisorErrorKind::Driver,
+                "repository runtime scheduler admission identity differs",
+            ));
+        }
+        Ok(())
+    }
+
     fn reserve_admission(
         &self,
         admission: &mut winwincode_storage::ExecutionAdmission<'_>,
@@ -605,14 +618,11 @@ impl RepositoryRuntimeScheduler {
         &self,
         admission: &mut winwincode_storage::ExecutionAdmission<'_>,
         scope: &winwincode_storage::ExecutionQueueScope,
-        policy_limits: ExecutionAdmissionLimits,
+        runtime_limited: bool,
     ) -> Result<(), RuntimeSupervisorError> {
         for boundary in admission_boundaries(scope, &self.worker_pool_id) {
             admission
-                .configure_policy(&ExecutionAdmissionPolicy {
-                    boundary,
-                    limits: policy_limits,
-                })
+                .configure_runtime_policy(boundary, runtime_limited)
                 .map_err(|error| {
                     debug_scheduler_error("configure execution admission policy", &error);
                     scheduler_failure()
@@ -3065,7 +3075,7 @@ mod tests {
     }
 
     #[test]
-    fn existing_device_reservation_keeps_its_worker_pool_policy() {
+    fn existing_device_reservation_upgrades_defaults_without_a_new_job() {
         let directory = unique_directory("device-reservation");
         std::fs::create_dir_all(&directory).expect("temp directory");
         let mut storage = SqliteStorage::open(&directory).expect("storage opens");
@@ -3116,6 +3126,17 @@ mod tests {
                 )
                 .expect("existing device reservation is admitted")
         );
+        let connection =
+            rusqlite::Connection::open(storage.database_path()).expect("policy database");
+        let remaining_former_limits: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM execution_admission_policies
+             WHERE boundary_json NOT LIKE '%product_session%' AND max_concurrent != ?1",
+                [i64::MAX],
+                |row| row.get(0),
+            )
+            .expect("default policies are readable");
+        assert_eq!(remaining_former_limits, 0);
         std::fs::remove_dir_all(&directory).ok();
     }
 

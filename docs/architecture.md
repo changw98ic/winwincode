@@ -182,18 +182,20 @@ Publication 先在 Control Plane 写入审批绑定、操作键和本地 receipt
 | 层级 | 当前限制 | 计数范围与实际影响 |
 | --- | --- | --- |
 | Device 占用 | 每设备 1 个活跃占用 | 约束设备持有者，同一持有者可启动多个 WorkerSession。 |
-| Device WorkerSession | 生产服务最多 4 个 | 约束设备上的 Worker 进程；由 Server 的持久预留和设备容量一起判断空位。 |
+| Device WorkerSession | 使用协议容量上界 1024，不再设生产业务上限 4 | 这是现有协议的计数边界；Supervisor 不再额外限制 Worker 进程数。Server 仍按持久预留和设备容量判断空位。 |
 | Worker Job | 生产 Worker 最多 1 个 | 约束一个 Worker 的执行任务，不限制该任务内部只能调用一个模型。 |
-| 执行准入 | 共享组织、项目、仓库、会话及可选 Delivery 边界为 1；StrongFlow WorkerPool 为 4；排队上限为 10000 | Job 开始时必须满足全部边界。同组织的独立 Job 仍会受组织上限 1 约束，设备有 4 个进程槽也不能绕过它。 |
-| Device Provider | 每 Worker 最多 16 个在途 exchange | 每个请求使用独立线程执行 HTTPS；满额时保留请求等待重试。四成员 Fusion 占用其中 4 个槽。 |
+| 执行准入 | 同一 ProductSession 为 1；组织、项目、仓库、Delivery 和 WorkerPool 不再额外限制业务并发；排队上限为 10000 | 同一上下文保持顺序，独立任务可并行；仓库写冲突检查仍生效。旧版默认 1/4 的策略原子升级，其他策略配置不覆盖。 |
+| Device Provider | 同一设备每个 Provider 最多 3 个在途模型请求 | 全设备 Worker 进程共用配额，不按 Worker 分别放大。三槽满后仅该请求等待，其他 Provider 和取消消息继续处理；完成或进程退出后释放。GLM、MiMo、DeepSeek、Qwen 四家合计最多 12 路。 |
 | Fusion 面板 | 3 至 16 个成员 | 同一轮所有成员并发发起，各自保存结果；收齐该轮结果后再执行依赖它们的聚合。 |
 | Benchmark 批次 | 调度器默认并发 1，可传入正整数；单个 plan 顺序推进 cell | 独立 Fusion cell 同时发起四个成员，再等待全部结果；批次并发与 cell 内成员并发分别控制。 |
 
 生产 Device 的容量值来自
 [`service.rs`](../crates/winwincode-device-client/src/service.rs)，Worker 的 Job 数量来自
-[`main.rs`](../crates/winwincode-worker/src/main.rs)。模型在途上限与线程派发位于
-[`device_model.rs`](../crates/winwincode-worker/src/device_model.rs)。Provider 的登记锁在网络调用前释放，
-不会把四个 HTTPS 请求包在同一个锁内。
+[`main.rs`](../crates/winwincode-worker/src/main.rs)。模型线程派发位于
+[`device_model.rs`](../crates/winwincode-worker/src/device_model.rs)。Provider 的配额按设备目录和
+Provider ID 共享；满额请求保留在 durable outbox 等待重试，不写入首次调用记录。
+已记录交换的精确重放不占新的调用槽位。连接测试共用同一 Provider 配额，
+满额时沿用不可用结果，不等待并阻塞 Device 控制循环。
 
 [`Fusion 面板`](../crates/winwincode-fusion/src/panel.rs)使用 `FuturesUnordered`
 并发收集成员；[`基准运行器`](../scripts/run-real-task-benchmark.mjs)使用
@@ -201,9 +203,9 @@ Publication 先在 Control Plane 写入审批绑定、操作键和本地 receipt
 成员结果分别落盘，恢复时保留原回执顺序。已启动成员收尾后才返回；
 持久化、证据及未决账本错误优先于成员终止，聚合不会提前开始。
 
-基准的四个成员若通过共享 runtime 启动四个独立 ProductSession/Job，仍会经过上述
-执行准入。因此成员同时发起不代表这四个独立 Job 已同时进入 Running；
-同一个 Job 内的生产 Fusion 四模型调用不受 Job 并发上限 1 的影响。
+基准的四个成员通过共享 runtime 启动独立 ProductSession/Job 时，各成员可以同时进入
+Running，再由 Provider 配额约束模型请求。生产 Fusion 在同一个 Job 内同时发起四家
+Provider 的成员调用，四家各占一个槽位；同一家 Provider 的其他任务共用该家的三个槽位。
 
 Server Model admission 另有 `workerConcurrencyLimit`、Provider `concurrentRequests`、
 RPM/TPM 和路由队列。这些控制服务端 Provider Gateway 装配；当前 managed Worker

@@ -87,6 +87,20 @@ impl DeviceProviderStore {
         self.execute_model_with(open, &can_start, || self.invoke_model(open, &can_start))
     }
 
+    /// Retains a bounded terminal failure when Provider admission storage is unavailable.
+    /// This never invokes the Provider; exact replays recover the same failure.
+    ///
+    /// # Errors
+    /// Rejects conflicting exchange identities and unavailable durable storage.
+    pub fn reject_model_start(
+        &self,
+        open: &ModelOpenMessage,
+    ) -> Result<Vec<ModelChunkMessage>, DeviceProviderError> {
+        self.execute_model_with(open, &|| true, || {
+            Ok(vec![model_failure(open, "DEVICE_PROVIDER_UNAVAILABLE")])
+        })
+    }
+
     /// Checks exact durable exchange identity without creating a first-start record.
     ///
     /// # Errors

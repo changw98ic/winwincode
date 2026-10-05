@@ -381,6 +381,7 @@ where
             return Ok(());
         }
         let mut sent_bytes = 0;
+        let mut deferred = None;
         for delivery in deliveries {
             if tokio::time::Instant::now() >= deadline {
                 break;
@@ -437,6 +438,12 @@ where
             // particular, do not cancel its receipt/accounting commit halfway.
             let sent = self.dispatch_retained_effect(delivery).await;
             if let Err(error) = sent {
+                if error.code == WorkerErrorCode::ModelStartDeferred {
+                    // One full Provider queue must not hold up other Providers or model ACKs.
+                    // Leave its original durable intent pending and continue this bounded scan.
+                    deferred.get_or_insert(error);
+                    continue;
+                }
                 if error.code != WorkerErrorCode::ExecutionMessageRejected {
                     // Keep the refused frame first on retry. Worker-wide
                     // failure yields immediately to control intake/heartbeat.
@@ -457,6 +464,6 @@ where
                 active.last_event_sequence = ExecutionAckSequence(sequence);
             }
         }
-        Ok(())
+        deferred.map_or(Ok(()), Err)
     }
 }

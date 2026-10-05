@@ -29,6 +29,10 @@ use crate::{
 const CONTEXT: &str = "winwincode.device-provider.v1";
 const DEVICE_PROVIDER_TLS_ROOT_DER_ENVIRONMENT: &str = "WWC_DEVICE_PROVIDER_TLS_ROOT_DER_FILE";
 
+#[cfg(test)]
+#[path = "device_provider_probe_concurrency_tests.rs"]
+mod concurrency_tests;
+
 /// Bounded failure: database and crypto errors never expose configuration or keys.
 #[derive(Debug, Clone, Copy)]
 pub struct DeviceProviderError;
@@ -428,6 +432,10 @@ impl DeviceProviderStore {
         let headers = match mutation.custom_headers {
             Some(headers) => headers,
             None => self.custom_headers(&mutation.config.provider_id)?,
+        };
+        let _permit = match self.try_provider_model_permit(&mutation.config.provider_id)? {
+            crate::DeviceModelAdmission::Ready(permit) => permit,
+            crate::DeviceModelAdmission::Deferred => return Err(DeviceProviderError),
         };
         let adapter = adapter(&mutation.config, headers)?;
         let mut leak_gate = CredentialLeakGate::new();

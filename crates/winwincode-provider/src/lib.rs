@@ -60,6 +60,9 @@ mod device_accounting;
 mod device_model;
 pub use device_model::{model_failure, public_model_chunk};
 
+mod device_model_concurrency;
+pub use device_model_concurrency::{DeviceModelAdmission, DeviceModelPermit};
+
 mod device_extensions;
 mod mcp_connection;
 pub use device_extensions::InstalledMcpTools;

@@ -137,6 +137,242 @@ fn generous_limits() -> ExecutionAdmissionLimits {
     }
 }
 
+fn former_runtime_limits(runtime_limited: bool) -> ExecutionAdmissionLimits {
+    ExecutionAdmissionLimits {
+        max_concurrent: 1,
+        max_queued: 10_000,
+        token_budget: None,
+        cost_budget_microunits: None,
+        max_runtime_millis: runtime_limited.then_some(604_800_000),
+    }
+}
+
+#[test]
+fn queued_runtime_jobs_upgrade_former_defaults_across_restart_and_keep_session_serial() {
+    for (pool_id, former_pool_limit) in [
+        ("wpl_00000000000000000000000001", 1),
+        ("wpl_000000000000000000000000D3", 1),
+        ("wpl_000000000000000000000000F7", 4),
+    ] {
+        for runtime_limited in [false, true] {
+            verify_runtime_policy_upgrade(pool_id, former_pool_limit, runtime_limited);
+        }
+    }
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the fixture checks legacy queued jobs, restart, all shared boundaries, and same-session exclusion"
+)]
+fn verify_runtime_policy_upgrade(pool_id: &str, former_pool_limit: u64, runtime_limited: bool) {
+    let root = temporary_directory("runtime-default-upgrade");
+    let worker_pool = WorkerPoolId(pool_id.to_owned());
+    let scopes = (0..5)
+        .map(|index| {
+            let mut request_scope = scope(400);
+            request_scope.product_session_id = ProductSessionId(id("psn", 400 + index));
+            request_scope
+        })
+        .collect::<Vec<_>>();
+    let requests = scopes
+        .iter()
+        .enumerate()
+        .map(|(index, request_scope)| {
+            let seed = 400 + u64::try_from(index).unwrap();
+            let mut request = reservation(
+                request_scope,
+                &worker_pool,
+                seed,
+                seed,
+                ExecutionRepositoryAccess::ReadOnly,
+            );
+            request.runtime_limit_millis = runtime_limited.then_some(30_000);
+            request
+        })
+        .collect::<Vec<_>>();
+    {
+        let mut storage = SqliteStorage::open(&root).unwrap();
+        let mut admission = storage.execution_admission().unwrap();
+        for request_scope in &scopes {
+            for boundary in boundaries(request_scope, &worker_pool) {
+                let limits = ExecutionAdmissionLimits {
+                    max_concurrent: if matches!(
+                        boundary,
+                        ExecutionAdmissionBoundary::WorkerPool { .. }
+                    ) {
+                        former_pool_limit
+                    } else {
+                        1
+                    },
+                    ..former_runtime_limits(runtime_limited)
+                };
+                admission
+                    .configure_policy(&ExecutionAdmissionPolicy { boundary, limits })
+                    .unwrap();
+            }
+        }
+        for request in &requests {
+            admission.reserve(request).unwrap();
+        }
+        admission.start(&start(&requests[0], 500)).unwrap();
+        assert_eq!(
+            admission
+                .start(&start(&requests[1], 501))
+                .unwrap_err()
+                .code(),
+            ExecutionAdmissionErrorCode::ConcurrencyExhausted
+        );
+    }
+    {
+        let mut storage = SqliteStorage::open(&root).unwrap();
+        let mut admission = storage.execution_admission().unwrap();
+        for request_scope in &scopes {
+            for boundary in boundaries(request_scope, &worker_pool) {
+                admission
+                    .configure_runtime_policy(boundary.clone(), runtime_limited)
+                    .unwrap();
+                assert!(
+                    !admission
+                        .configure_runtime_policy(boundary, runtime_limited)
+                        .unwrap()
+                );
+            }
+        }
+        for (index, request) in requests.iter().enumerate().skip(1) {
+            admission
+                .start(&start(request, 500 + u64::try_from(index).unwrap()))
+                .unwrap();
+        }
+        let organization = ExecutionAdmissionBoundary::Organization {
+            organization_id: scopes[0].organization_id.clone(),
+        };
+        assert_eq!(admission.usage(&organization).unwrap().running, 5);
+        let mut same_session = reservation(
+            &scopes[0],
+            &worker_pool,
+            410,
+            410,
+            ExecutionRepositoryAccess::ReadOnly,
+        );
+        same_session.runtime_limit_millis = runtime_limited.then_some(30_000);
+        admission.reserve(&same_session).unwrap();
+        let error = admission.start(&start(&same_session, 510)).unwrap_err();
+        assert_eq!(
+            error.code(),
+            ExecutionAdmissionErrorCode::ConcurrencyExhausted
+        );
+        assert_eq!(
+            error.boundary(),
+            Some(&ExecutionAdmissionBoundary::ProductSession {
+                organization_id: scopes[0].organization_id.clone(),
+                project_id: scopes[0].project_id.clone(),
+                product_session_id: scopes[0].product_session_id.clone(),
+            })
+        );
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn runtime_default_upgrade_refuses_custom_limits_and_unknown_pool_policies() {
+    let root = temporary_directory("runtime-default-custom-policy");
+    let mut storage = SqliteStorage::open(&root).unwrap();
+    let mut admission = storage.execution_admission().unwrap();
+    for (index, limits) in [
+        ExecutionAdmissionLimits {
+            max_concurrent: 2,
+            ..former_runtime_limits(true)
+        },
+        ExecutionAdmissionLimits {
+            max_queued: 9999,
+            ..former_runtime_limits(true)
+        },
+        ExecutionAdmissionLimits {
+            token_budget: Some(100),
+            ..former_runtime_limits(true)
+        },
+        ExecutionAdmissionLimits {
+            cost_budget_microunits: Some(100),
+            ..former_runtime_limits(true)
+        },
+        ExecutionAdmissionLimits {
+            max_runtime_millis: Some(100),
+            ..former_runtime_limits(true)
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let boundary = ExecutionAdmissionBoundary::Organization {
+            organization_id: OrganizationId(id("org", 600 + u64::try_from(index).unwrap())),
+        };
+        let original = ExecutionAdmissionPolicy {
+            boundary: boundary.clone(),
+            limits,
+        };
+        admission.configure_policy(&original).unwrap();
+        assert!(admission.configure_runtime_policy(boundary, true).is_err());
+        assert!(!admission.configure_policy(&original).unwrap());
+    }
+    let unknown_pool = ExecutionAdmissionBoundary::WorkerPool {
+        organization_id: OrganizationId(id("org", 610)),
+        worker_pool_id: pool(610),
+    };
+    let original = ExecutionAdmissionPolicy {
+        boundary: unknown_pool.clone(),
+        limits: former_runtime_limits(true),
+    };
+    admission.configure_policy(&original).unwrap();
+    assert!(
+        admission
+            .configure_runtime_policy(unknown_pool, true)
+            .is_err()
+    );
+    assert!(!admission.configure_policy(&original).unwrap());
+    drop(storage);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn runtime_default_upgrade_is_atomic_between_competing_connections() {
+    let root = temporary_directory("runtime-default-upgrade-race");
+    let boundary = ExecutionAdmissionBoundary::Organization {
+        organization_id: OrganizationId(id("org", 620)),
+    };
+    {
+        let mut storage = SqliteStorage::open(&root).unwrap();
+        storage
+            .execution_admission()
+            .unwrap()
+            .configure_policy(&ExecutionAdmissionPolicy {
+                boundary: boundary.clone(),
+                limits: former_runtime_limits(true),
+            })
+            .unwrap();
+    }
+    let barrier = Arc::new(Barrier::new(2));
+    let handles = (0..2)
+        .map(|_| {
+            let root = root.clone();
+            let boundary = boundary.clone();
+            let barrier = barrier.clone();
+            thread::spawn(move || {
+                let mut storage = SqliteStorage::open(root).unwrap();
+                let mut admission = storage.execution_admission().unwrap();
+                barrier.wait();
+                admission.configure_runtime_policy(boundary, true).unwrap()
+            })
+        })
+        .collect::<Vec<_>>();
+    let changed = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .filter(|changed| *changed)
+        .count();
+    assert_eq!(changed, 1);
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn late_predecessor_receipts_are_additive_idempotent_and_do_not_revive_cancelled_work() {
     for tokens_first in [true, false] {

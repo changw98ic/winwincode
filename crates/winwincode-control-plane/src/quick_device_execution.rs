@@ -39,10 +39,9 @@ use winwincode_execution_port::generated::{ExecutionJob, ExecutionWorkspaceWrite
 use winwincode_storage::{
     DeviceExecutionBindingIssuance, DeviceExecutionBindingRecord, DeviceExecutionBindingState,
     DeviceExecutionFactsAttachment, DeviceExecutionReservationFacts, ExecutionAdmissionBoundary,
-    ExecutionAdmissionErrorCode, ExecutionAdmissionLimits, ExecutionAdmissionPolicy,
-    ExecutionJobRecord, ExecutionQueueScope, ExecutionRepositoryAccess,
-    ExecutionReservationRequest, ExecutionReservationState, ProductStateStorage, SqliteStorage,
-    WorkerPoolId,
+    ExecutionAdmissionErrorCode, ExecutionJobRecord, ExecutionQueueScope,
+    ExecutionRepositoryAccess, ExecutionReservationRequest, ExecutionReservationState,
+    ProductStateStorage, SqliteStorage, WorkerPoolId,
 };
 
 use crate::client_launch_grant::{
@@ -56,18 +55,6 @@ use crate::product_session_service::chat_turn_execution_job_id;
 /// admission capacity and the local driver can never mistake device work
 /// for its own.
 pub const QUICK_DEVICE_WORKER_POOL_ID: &str = "wpl_000000000000000000000000D3";
-
-/// Admission bounds of the device dispatch reservation. They mirror the
-/// supervised local driver's constants exactly (including the derived
-/// runtime policy formula) so `configure_policy` stays an exact idempotent
-/// repeat for the boundaries both paths share.
-const QUICK_DEVICE_ADMISSION_LIMITS: ExecutionAdmissionLimits = ExecutionAdmissionLimits {
-    max_concurrent: 1,
-    max_queued: 10_000,
-    token_budget: None,
-    cost_budget_microunits: None,
-    max_runtime_millis: Some(604_800_000),
-};
 
 /// Stable Quick device dispatch failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -348,6 +335,11 @@ fn ensure_device_admission_reservation(
     let mut admission = storage
         .execution_admission()
         .map_err(|_| QuickDeviceDispatchError::storage())?;
+    for boundary in admission_boundaries(&record.scope) {
+        admission
+            .configure_runtime_policy(boundary, runtime_limit_millis.is_some())
+            .map_err(|error| admission_error(&error))?;
+    }
     if let Some(existing) = admission
         .load_reservation_by_job(execution_job_id)
         .map_err(|_| QuickDeviceDispatchError::storage())?
@@ -361,19 +353,6 @@ fn ensure_device_admission_reservation(
                 ))
             }
         };
-    }
-    let policy_limits = ExecutionAdmissionLimits {
-        max_runtime_millis: runtime_limit_millis
-            .and(QUICK_DEVICE_ADMISSION_LIMITS.max_runtime_millis),
-        ..QUICK_DEVICE_ADMISSION_LIMITS
-    };
-    for boundary in admission_boundaries(&record.scope) {
-        admission
-            .configure_policy(&ExecutionAdmissionPolicy {
-                boundary,
-                limits: policy_limits,
-            })
-            .map_err(|error| admission_error(&error))?;
     }
     let request = ExecutionReservationRequest {
         scope: record.scope.clone(),
