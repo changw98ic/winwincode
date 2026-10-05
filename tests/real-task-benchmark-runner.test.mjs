@@ -592,11 +592,13 @@ test('recovery leaves incomplete Fusion unresolved and propagates retained stops
   assert.deepEqual(recovered.aggregateReceipt, expected.aggregateReceipt)
   assert.deepEqual(recovered.members, expected.members)
   await assert.rejects(recoverBenchmarkCell(cell, { calls: calls.slice(0, 4), launches: [] }), { code: 'LEDGER_RUN_UNRESOLVED' })
-  const stopped = await recoverBenchmarkCell(cell, { launches: [], calls: [{
+  const stoppedCall = {
     callId: calls[0].callId, status: 'failed', failure: { code: 'STUCK_TOOL_REPEAT_LIMIT' },
-  }] })
+  }
+  const stopped = await recoverBenchmarkCell(cell, { launches: [], calls: [stoppedCall, ...calls.slice(1, 4)] })
   assert.equal(stopped.status, 'failed')
   assert.equal(stopped.termination.reason, 'STUCK_TOOL_REPEAT_LIMIT')
+  await assert.rejects(recoverBenchmarkCell(cell, { launches: [], calls: [stoppedCall] }), { code: 'LEDGER_RUN_UNRESOLVED' })
   await assert.rejects(recoverBenchmarkCell(cell, { launches: [], calls: [{
     callId: calls[0].callId, status: 'failed', failure: { code: 'BENCHMARK_EVIDENCE_FAILED' },
   }] }), { code: 'LEDGER_RUN_UNRESOLVED' })
@@ -636,7 +638,7 @@ test('one failed Fusion member does not omit siblings and recovery reproduces th
     },
     aggregate: () => assert.fail('storage failure must prevent aggregation'),
   }, { registerLaunch: () => { throw Object.assign(new Error('disk unavailable'), { code: 'ENOSPC' }) } }), { code: 'ENOSPC' })
-  assert.equal(attempts, 1)
+  assert.equal(attempts, 4)
 })
 
 test('product aggregation binds four independent frozen candidates and rejects reused or changed member inputs', async t => {
@@ -967,6 +969,208 @@ test('an independent fusion cell calls each member once and aggregates once', as
   assert.equal(result.aggregateReceipt.callKind, 'fusion-engine')
   assert.equal(result.aggregateReceipt.inputDigest, calls[4].request.inputDigest)
   assert.match(result.aggregateReceipt.outputDigest, /^[0-9a-f]{64}$/u)
+})
+
+test('Fusion members overlap and aggregation joins every result in provider order', async () => {
+  const plan = buildBenchmarkPlan({ taskIds: Array.from({ length: 20 }, (_, index) => `task-${index}`) })
+  const cell = plan.cells[4]
+  const providers = plan.cells.slice(0, 4).map(value => value.comparison)
+  const releases = new Map()
+  const receipts = new Map()
+  const started = []
+  const calls = []
+  let aggregations = 0
+  const execution = executeBenchmarkCell(cell, {
+    runModel: async request => {
+      started.push(request.provider)
+      await new Promise(resolve => releases.set(request.provider, resolve))
+      return { provider: request.provider, answer: request.provider }
+    },
+    aggregate: async request => {
+      aggregations += 1
+      assert.deepEqual(request.members.map(member => member.provider), providers)
+      assert.equal(calls.length, 4)
+      assert.equal(request.inputDigest, benchmarkAggregationDigest(cell.runId, cell.taskId, request.members))
+      return { answer: 'aggregated' }
+    },
+  }, { recordCall: call => {
+    calls.push(call)
+    receipts.get(call.callId)?.()
+  } })
+  try {
+    assert.deepEqual(started, providers, 'all four members must start before any member finishes')
+    for (const provider of [providers[3], providers[1], providers[2]]) {
+      const receipt = new Promise(resolve => receipts.set(`${cell.runId}:member:${provider}`, resolve))
+      releases.get(provider)()
+      await receipt
+      assert.equal(aggregations, 0, 'aggregation must wait for the slowest member')
+    }
+    releases.get(providers[0])()
+    const result = await execution
+    assert.equal(aggregations, 1)
+    assert.deepEqual(result.members.map(member => member.provider), providers)
+    assert.deepEqual(calls.map(call => call.callId), [
+      ...[providers[3], providers[1], providers[2], providers[0]].map(provider => `${cell.runId}:member:${provider}`),
+      `${cell.runId}:aggregation`,
+    ])
+  } finally {
+    for (const release of releases.values()) release()
+    await execution.catch(() => {})
+  }
+})
+
+test('a Fusion member stop waits for launched siblings to retain their results', async () => {
+  const cell = buildBenchmarkPlan({ taskIds: Array.from({ length: 20 }, (_, index) => `task-${index}`) }).cells[4]
+  const releases = []
+  const calls = []
+  let started = 0
+  let settled = false
+  const stop = { termination: { reason: 'STUCK_TOOL_REPEAT_LIMIT' } }
+  const execution = executeBenchmarkCell(cell, {
+    runModel: async request => {
+      const index = started++
+      if (index === 0) return stop
+      await new Promise(resolve => releases.push(resolve))
+      return { status: 'completed', provider: request.provider }
+    },
+    aggregate: () => assert.fail('a task stop must prevent aggregation'),
+  }, { recordCall: call => calls.push(call) })
+  const observed = execution.then(() => { settled = true }, error => { settled = true; return error })
+  try {
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(started, 4)
+    assert.equal(settled, false, 'a stop must not close the cell while siblings still run')
+    assert.equal(calls.length, 1)
+    for (const release of releases) release()
+    const error = await observed
+    assert.equal(error.code, 'STUCK_TOOL_REPEAT_LIMIT')
+    assert.equal(calls.length, 4)
+    assert.deepEqual(calls[0].result, stop)
+    assert.equal(calls.slice(1).every(call => call.status === 'returned'), true)
+  } finally {
+    for (const release of releases) release()
+    await observed
+  }
+})
+
+test('Fusion recovery preserves out-of-order durable member receipts', async t => {
+  const directory = await mkdtemp(resolve(tmpdir(), 'benchmark-parallel-recovery-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const plan = buildBenchmarkPlan({ taskIds: Array.from({ length: 20 }, (_, index) => `task-${index}`) })
+  const cell = plan.cells[4]
+  const providers = plan.cells.slice(0, 4).map(value => value.comparison)
+  const options = { ledgerPath: resolve(directory, 'ledger.sqlite3'),
+    experimentBinding: { experimentId: 'parallel-recovery' } }
+  const releases = new Map()
+  const receipts = new Map()
+  const calls = []
+  const execution = runBenchmarkPlan({ cells: [cell] }, { ...options,
+    executeCell: (value, context) => executeBenchmarkCell(value, {
+      runModel: async request => {
+        await new Promise(resolve => releases.set(request.provider, resolve))
+        return request.provider === providers[0]
+          ? { termination: { reason: 'STUCK_TOOL_REPEAT_LIMIT' } }
+          : { status: 'completed', provider: request.provider }
+      },
+      aggregate: () => assert.fail('a stopped member must not aggregate'),
+    }, { ...context, recordCall: call => {
+      context.recordCall(call)
+      calls.push(call)
+      receipts.get(call.callId)?.()
+    } }).catch(error => {
+      assert.equal(error.code, 'STUCK_TOOL_REPEAT_LIMIT')
+      // Preserve the unfinished claim as if the coordinator stopped before
+      // committing the cell, after every member receipt was already durable.
+      throw Object.assign(new Error('coordinator interrupted'), { code: 'BENCHMARK_EVIDENCE_FAILED' })
+    }),
+  }).catch(error => error)
+  try {
+    assert.equal(releases.size, 4)
+    for (const provider of [...providers].reverse()) {
+      const receipt = new Promise(resolve => receipts.set(`${cell.runId}:member:${provider}`, resolve))
+      releases.get(provider)()
+      await receipt
+    }
+    assert.equal((await execution).code, 'BENCHMARK_EVIDENCE_FAILED')
+    const recovered = await runBenchmarkPlan({ cells: [cell] }, { ...options,
+      executeCell: () => assert.fail('recovery must not launch new model work'),
+      recoverCell: recoverBenchmarkCell,
+    })
+    assert.equal(recovered.records[0].termination.reason, 'STUCK_TOOL_REPEAT_LIMIT')
+    assert.deepEqual(recovered.records[0].calls, calls)
+    assert.deepEqual(recovered.records[0].calls.map(call => call.callId),
+      [...providers].reverse().map(provider => `${cell.runId}:member:${provider}`))
+  } finally {
+    for (const release of releases.values()) release()
+    await execution
+  }
+})
+
+test('a Fusion member stop cannot hide a sibling evidence or unresolved-ledger failure', async t => {
+  const directory = await mkdtemp(resolve(tmpdir(), 'benchmark-mixed-stop-failure-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const full = buildBenchmarkPlan({ taskIds: Array.from({ length: 20 }, (_, index) => `task-${index}`) })
+  const cell = full.cells[4]
+  const providers = full.cells.slice(0, 4).map(value => value.comparison)
+  const plan = { cells: [cell, full.cells[0]] }
+  for (const code of ['BENCHMARK_EVIDENCE_FAILED', 'LEDGER_RUN_UNRESOLVED']) {
+    await t.test(code, async () => {
+      const options = { ledgerPath: resolve(directory, `${code}.sqlite3`),
+        experimentBinding: { experimentId: code } }
+      let models = 0
+      let nextCellStarted = false
+      await assert.rejects(runBenchmarkPlan(plan, { ...options,
+        executeCell: (value, context) => {
+          if (value.runId !== cell.runId) { nextCellStarted = true; assert.fail('a recovery error must stop the batch') }
+          return executeBenchmarkCell(value, {
+            runModel: async request => {
+              models += 1
+              if (request.provider === providers[0]) return { termination: { reason: 'STUCK_TOOL_REPEAT_LIMIT' } }
+              if (request.provider === providers[1]) throw Object.assign(new Error('member recovery required'), { code })
+              return { status: 'completed', provider: request.provider }
+            },
+            aggregate: () => assert.fail('recovery errors must prevent aggregation'),
+          }, context)
+        },
+      }), { code })
+      assert.equal(models, 4)
+      assert.equal(nextCellStarted, false)
+      await assert.rejects(runBenchmarkPlan(plan, { ...options,
+        executeCell: () => assert.fail('the original claim must remain unresolved'),
+      }), error => {
+        assert.equal(error.code, 'LEDGER_RUN_UNRESOLVED')
+        assert.equal(error.calls.length, 4)
+        assert.equal(error.calls.find(call => call.callId.endsWith(providers[1])).failure.code, code)
+        return true
+      })
+    })
+  }
+})
+
+test('one Fusion launch persistence failure preserves its siblings returned receipts', async () => {
+  const plan = buildBenchmarkPlan({ taskIds: Array.from({ length: 20 }, (_, index) => `task-${index}`) })
+  const cell = plan.cells[4]
+  const providers = plan.cells.slice(0, 4).map(value => value.comparison)
+  const calls = []
+  await assert.rejects(executeBenchmarkCell(cell, {
+    runModel: async (request, runner) => {
+      try { await runner.registerLaunch({ callId: request.callId }) } catch { /* Own launch failure must remain fatal. */ }
+      return { status: 'completed', provider: request.provider, answer: `answer-${request.provider}` }
+    },
+    aggregate: () => assert.fail('a launch persistence failure must prevent aggregation'),
+  }, {
+    registerLaunch: target => {
+      if (target.callId.endsWith(providers[0])) throw Object.assign(new Error('launch disk failure'), { code: 'ENOSPC' })
+    },
+    recordCall: call => calls.push(call),
+  }), { code: 'ENOSPC' })
+  assert.equal(calls.length, 4)
+  assert.equal(calls.find(call => call.callId.endsWith(providers[0])).status, 'failed')
+  for (const provider of providers.slice(1)) {
+    const call = calls.find(value => value.callId.endsWith(provider))
+    assert.equal(call.status, 'returned')
+    assert.deepEqual(call.result, { status: 'completed', provider, answer: `answer-${provider}` })
+  }
 })
 
 test('the sixth identical normalized tool request is intercepted before execution', async () => {
@@ -2133,6 +2337,7 @@ test('member receipt write failure stops execution and leaves the cell unresolve
     executeCell: (cell, context) => executeBenchmarkCell(cell, {
       runModel: () => {
         executions += 1
+        if (executions !== 1) return { candidateCommit: 'fixture' }
         const db = new DatabaseSync(ledgerPath)
         try { db.exec("CREATE TRIGGER reject_call BEFORE INSERT ON benchmark_call BEGIN SELECT RAISE(ABORT, 'receipt disk failure'); END;") }
         finally { db.close() }
@@ -2141,7 +2346,7 @@ test('member receipt write failure stops execution and leaves the cell unresolve
       aggregate: () => assert.fail('aggregation must not start'),
     }, context),
   }), /receipt disk failure/u)
-  assert.equal(executions, 1)
+  assert.equal(executions, 4)
   await assert.rejects(runBenchmarkPlan(plan, { ...options,
     executeCell: () => assert.fail('unresolved member must not rerun'),
   }), { code: 'LEDGER_RUN_UNRESOLVED' })
@@ -2166,7 +2371,7 @@ test('returned product stop halts its standalone or Fusion task while the next t
       executeCell: (cell, context) => executeBenchmarkCell(cell, cell.runId === first.runId
         ? adapter : { runModel: () => { calls += 1; return { answer: 'next task' } } }, context),
     })
-    assert.equal(calls, stage === 'aggregation' ? 6 : 2)
+    assert.equal(calls, stage === 'aggregation' ? 6 : stage === 'member' ? 5 : 2)
     assert.equal(ledger.records[0].status, 'failed')
     assert.equal(ledger.records[0].termination.reason, 'STUCK_TOOL_REPEAT_LIMIT')
     assert.deepEqual(ledger.records[0].claims, stop.claims)

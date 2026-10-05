@@ -13112,6 +13112,7 @@ dependencies = [
  "codex-utils-path-uri",
  "codex-utils-pty",
  "futures",
+ "rcgen",
  "reqwest 0.12.28",
  "rusqlite",
  "serde",

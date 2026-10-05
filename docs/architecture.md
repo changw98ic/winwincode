@@ -174,6 +174,42 @@ flowchart TD
 
 Publication 先在 Control Plane 写入审批绑定、操作键和本地 receipt，再执行外部写入；重试通过同一操作键查询已存在的结果。Audit Ledger 保存主体、范围、操作、结果和摘要链，不复制命令正文、模型正文或凭据。
 
+## 并发限制与 Fusion
+
+任务并发和任务内部的模型并发分别计数。一个 Worker 同时执行一个 Job，
+该 Job 内部的 Fusion 成员可以同时调用多个 Provider。
+
+| 层级 | 当前限制 | 计数范围与实际影响 |
+| --- | --- | --- |
+| Device 占用 | 每设备 1 个活跃占用 | 约束设备持有者，同一持有者可启动多个 WorkerSession。 |
+| Device WorkerSession | 生产服务最多 4 个 | 约束设备上的 Worker 进程；由 Server 的持久预留和设备容量一起判断空位。 |
+| Worker Job | 生产 Worker 最多 1 个 | 约束一个 Worker 的执行任务，不限制该任务内部只能调用一个模型。 |
+| 执行准入 | 共享组织、项目、仓库、会话及可选 Delivery 边界为 1；StrongFlow WorkerPool 为 4；排队上限为 10000 | Job 开始时必须满足全部边界。同组织的独立 Job 仍会受组织上限 1 约束，设备有 4 个进程槽也不能绕过它。 |
+| Device Provider | 每 Worker 最多 16 个在途 exchange | 每个请求使用独立线程执行 HTTPS；满额时保留请求等待重试。四成员 Fusion 占用其中 4 个槽。 |
+| Fusion 面板 | 3 至 16 个成员 | 同一轮所有成员并发发起，各自保存结果；收齐该轮结果后再执行依赖它们的聚合。 |
+| Benchmark 批次 | 调度器默认并发 1，可传入正整数；单个 plan 顺序推进 cell | 独立 Fusion cell 同时发起四个成员，再等待全部结果；批次并发与 cell 内成员并发分别控制。 |
+
+生产 Device 的容量值来自
+[`service.rs`](../crates/winwincode-device-client/src/service.rs)，Worker 的 Job 数量来自
+[`main.rs`](../crates/winwincode-worker/src/main.rs)。模型在途上限与线程派发位于
+[`device_model.rs`](../crates/winwincode-worker/src/device_model.rs)。Provider 的登记锁在网络调用前释放，
+不会把四个 HTTPS 请求包在同一个锁内。
+
+[`Fusion 面板`](../crates/winwincode-fusion/src/panel.rs)使用 `FuturesUnordered`
+并发收集成员；[`基准运行器`](../scripts/run-real-task-benchmark.mjs)使用
+`Promise.allSettled` 等待四个成员。完成顺序可以不同，聚合输入仍按固定供应商顺序排列。
+成员结果分别落盘，恢复时保留原回执顺序。已启动成员收尾后才返回；
+持久化、证据及未决账本错误优先于成员终止，聚合不会提前开始。
+
+基准的四个成员若通过共享 runtime 启动四个独立 ProductSession/Job，仍会经过上述
+执行准入。因此成员同时发起不代表这四个独立 Job 已同时进入 Running；
+同一个 Job 内的生产 Fusion 四模型调用不受 Job 并发上限 1 的影响。
+
+Server Model admission 另有 `workerConcurrencyLimit`、Provider `concurrentRequests`、
+RPM/TPM 和路由队列。这些控制服务端 Provider Gateway 装配；当前 managed Worker
+在 Device 本地处理 `ModelOpen`，不经过该服务端模型准入，不能把这些值当作当前
+Device Provider 的实际并发上限。
+
 ## 本地与企业部署
 
 ### 本地部署

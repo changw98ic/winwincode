@@ -2,6 +2,10 @@
 
 //! Device-local model lane. Only execution control and public task events use the server port.
 
+#[cfg(test)]
+#[path = "device_model_concurrency_tests.rs"]
+mod concurrency_tests;
+
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet, VecDeque},

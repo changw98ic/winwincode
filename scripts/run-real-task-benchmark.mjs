@@ -57,6 +57,11 @@ function runnerFailureCode(error) {
     ? error.code : 'RUNNER_UNEXPECTED'
 }
 
+function requiresBenchmarkRecovery(error) {
+  return error?.benchmarkPersistenceFailure === true
+    || ['BENCHMARK_EVIDENCE_FAILED', 'LEDGER_RUN_UNRESOLVED'].includes(error?.code)
+}
+
 function normalizeRepositoryUrl(value) {
   return String(value).replace(/\.git$/u, '').replace(/\/$/u, '')
 }
@@ -253,36 +258,34 @@ export async function executeBenchmarkCell(cell, adapter, {
     reasoningEffort: cell.reasoningEffort,
     budgetLimits: cell.budgetLimits,
   })
-  let persistenceFailure = null
-  const runner = Object.freeze({
-    registerLaunch: async target => {
-      try { await registerLaunch(target) } catch (error) {
-        persistenceFailure = error
-        error.benchmarkPersistenceFailure = true
-        throw error
-      }
-    },
-    requestTool: async (request, executor) => {
-      const result = await executeToolRequest(request, toolGate, executor)
-      if (result?.status === 'terminated') {
-        const error = new Error(result.reason)
-        error.code = result.reason
-        error.termination = result
-        throw error
-      }
-      return result
-    },
-  })
-
   const persistCall = call => {
     try { recordCall(call) } catch (error) {
-      persistenceFailure = error
       error.benchmarkPersistenceFailure = true
       throw error
     }
   }
 
   const executeCall = async (request, execute) => {
+    let persistenceFailure = null
+    const runner = Object.freeze({
+      registerLaunch: async target => {
+        try { await registerLaunch(target) } catch (error) {
+          persistenceFailure = error
+          error.benchmarkPersistenceFailure = true
+          throw error
+        }
+      },
+      requestTool: async (toolRequest, executor) => {
+        const result = await executeToolRequest(toolRequest, toolGate, executor)
+        if (result?.status === 'terminated') {
+          const error = new Error(result.reason)
+          error.code = result.reason
+          error.termination = result
+          throw error
+        }
+        return result
+      },
+    })
     let result
     try {
       result = await execute(request, runner)
@@ -305,23 +308,28 @@ export async function executeBenchmarkCell(cell, adapter, {
   }
 
   if (cell.fusionKind === 'independent-aggregate') {
-    const members = []
-    for (const provider of PROVIDERS) {
+    const outcomes = await Promise.allSettled(PROVIDERS.map(async provider => {
       const request = requestFor(provider, `${cell.runId}:member:${provider}`)
       try {
         const member = await executeCall(request, (input, context) => adapter.runModel(input, context))
-        members.push(member?.status === 'failed'
+        return member?.status === 'failed'
           ? { status: 'failed', provider, callId: request.callId, failure: member.failure }
-          : member)
+          : member
       } catch (error) {
-        if (runnerTermination(error) || error.benchmarkPersistenceFailure
-          || ['BENCHMARK_EVIDENCE_FAILED', 'LEDGER_RUN_UNRESOLVED'].includes(error.code)) throw error
+        if (runnerTermination(error) || requiresBenchmarkRecovery(error)) throw error
         // A failed model is one retained member outcome, not permission to
         // omit the remaining independent members or reuse another cell.
-        members.push({ status: 'failed', provider, callId: request.callId,
-          failure: { code: runnerFailureCode(error) } })
+        return { status: 'failed', provider, callId: request.callId,
+          failure: { code: runnerFailureCode(error) } }
       }
-    }
+    }))
+    // Keep the ledger open until every launched member has retained its result,
+    // including when a sibling stops the task. Aggregation preserves provider
+    // order independently of completion order and starts only after this join.
+    const failure = outcomes.find(outcome => outcome.status === 'rejected' && requiresBenchmarkRecovery(outcome.reason))
+      ?? outcomes.find(outcome => outcome.status === 'rejected')
+    if (failure) throw failure.reason
+    const members = outcomes.map(outcome => outcome.value)
     const inputDigest = benchmarkAggregationDigest(cell.runId, cell.taskId, members)
     const aggregate = await executeCall({
       runId: cell.runId,
@@ -397,11 +405,20 @@ export async function recoverBenchmarkCell(cell, observed, resolveModel) {
         productOutcome: terminalProductCall }
     }
   } catch (error) {
+    if (requiresBenchmarkRecovery(error)) throw error
     if (!error.retainedFailure && !runnerTermination(error)) throw error
     const code = runnerFailureCode(error)
     result = { status: 'failed', termination: runnerTermination(error), failure: { code, message: code } }
   }
-  return { ...result, calls: recoveredCalls, recovery: { kind: 'retained-product-result',
+  // Existing receipts retain their durable order for the recovery transaction;
+  // parallel member replay may finish in a different order from the first run.
+  const retainedCallIds = new Set(observed.calls.map(call => call.callId))
+  const recoveredByCallId = new Map(recoveredCalls.map(call => [call.callId, call]))
+  const calls = [
+    ...observed.calls.map(call => recoveredByCallId.get(call.callId) ?? call),
+    ...recoveredCalls.filter(call => !retainedCallIds.has(call.callId)),
+  ]
+  return { ...result, calls, recovery: { kind: 'retained-product-result',
     originalCalls: observed.calls } }
 }
 
@@ -501,7 +518,7 @@ export async function runBenchmarkPlan(plan, {
           }
         } catch (error) {
           if (persistenceError) throw persistenceError
-          if (error?.code === 'BENCHMARK_EVIDENCE_FAILED') throw error
+          if (requiresBenchmarkRecovery(error)) throw error
           const termination = runnerTermination(error)
           record = {
             ...record,

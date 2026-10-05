@@ -46,6 +46,7 @@ winwincode-domain = { path = "../winwincode-domain" }
 winwincode-execution-port = { path = "../winwincode-execution-port" }
 
 [dev-dependencies]
+rcgen.workspace = true
 rusqlite.workspace = true
 tempfile = "=3.27.0"
 winwincode-api.workspace = true
