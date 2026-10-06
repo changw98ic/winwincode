@@ -13,8 +13,8 @@ use serde_json::{Map, Value, json};
 
 use crate::provider_anthropic::{
     AnthropicCodecError, AnthropicMessagesOptions, AnthropicToolBindings, PreparedAnthropicRequest,
-    ProviderTokenPricing, array, exact_keys, object, optional_string, prepare_anthropic_request,
-    required, string, validate_text, validate_token,
+    ProviderTokenPricing, array, custom_tool_input, exact_keys, object, optional_string,
+    prepare_anthropic_request, required, string, validate_text, validate_token,
 };
 use crate::{
     ProviderFinishReason, ProviderGatewayTerminal, ProviderStreamEvent, ProviderTokenUsage,
@@ -582,21 +582,15 @@ impl<'a> OpenAiStreamParser<'a> {
         self.close_reasoning();
         for (index, provider_call_id) in self.open_tools {
             if let Some(arguments) = self.custom_arguments.remove(&index) {
-                let input: Value = serde_json::from_str(&arguments)
-                    .map_err(|_| AnthropicCodecError::protocol())?;
-                let input = object(&input)?;
-                exact_keys(input, &["input"])?;
-                let delta = string(input, "input")?.to_owned();
-                validate_text(&delta)?;
-                if delta.is_empty() {
-                    return Err(AnthropicCodecError::protocol());
+                let delta = custom_tool_input(&arguments)?;
+                if !delta.is_empty() {
+                    self.events
+                        .push(ProviderStreamEvent::ToolCallArgumentsDelta {
+                            index,
+                            provider_call_id: provider_call_id.clone(),
+                            delta,
+                        });
                 }
-                self.events
-                    .push(ProviderStreamEvent::ToolCallArgumentsDelta {
-                        index,
-                        provider_call_id: provider_call_id.clone(),
-                        delta,
-                    });
             }
             self.events.push(ProviderStreamEvent::ToolCallEnded {
                 index,
@@ -877,6 +871,65 @@ mod tests {
         assert!(parsed.events.iter().any(|event| matches!(event,
             ProviderStreamEvent::ToolCallArgumentsDelta { delta, .. }
             if delta == "*** Begin Patch\n*** End Patch")));
+    }
+
+    #[test]
+    fn openai_custom_model_input_errors_remain_tool_feedback() {
+        let mut payload: Value = serde_json::from_slice(&canonical_payload()).unwrap();
+        payload["request"]["tools"] = json!([{
+            "type":"custom", "name":"apply_patch", "description":"Use FREEFORM patch text; do not wrap the patch in JSON.",
+            "format":{"type":"grammar","syntax":"lark","definition":"start: /.+/"}
+        }]);
+        let prepared = prepare_openai_chat_request(
+            &serde_json::to_vec(&payload).unwrap(),
+            "qwen3.8-flash",
+            options(),
+        )
+        .unwrap();
+        let body: Value = serde_json::from_slice(&prepared.body).unwrap();
+        assert!(body["tools"][0]["function"]["description"].as_str().unwrap().starts_with("Call this function with a JSON object containing only the string field `input`."));
+        assert_eq!(
+            body["tools"][0]["function"]["parameters"]["additionalProperties"],
+            false
+        );
+        for (arguments, expected) in [
+            ("{\"input\":\"patch\"}", "patch"),
+            ("{\"input\":[]}", "{\"input\":[]}"),
+            ("{\"command\":[\"bad\"]}", "{\"command\":[\"bad\"]}"),
+            (
+                "{\"input\":\"patch\",\"extra\":1}",
+                "{\"input\":\"patch\",\"extra\":1}",
+            ),
+            (
+                "*** Begin Patch\n*** End Patch",
+                "*** Begin Patch\n*** End Patch",
+            ),
+            ("{bad", "{bad"),
+            ("{\"input\":\"\"}", ""),
+            ("", ""),
+        ] {
+            let mut parser = OpenAiStreamParser::new(&prepared.tool_bindings, options().pricing, 1);
+            parser.push(&envelope(json!({"id":"r1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call-patch","type":"function","function":{"name":"apply_patch","arguments":arguments}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":2,"completion_tokens":4}}))).unwrap();
+            let parsed = parser
+                .finish()
+                .expect("model argument errors do not corrupt SSE");
+            let received = parsed
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    ProviderStreamEvent::ToolCallArgumentsDelta { delta, .. } => {
+                        Some(delta.as_str())
+                    }
+                    _ => None,
+                })
+                .collect::<String>();
+            assert_eq!(received, expected);
+            assert!(parsed.events.iter().any(|event| matches!(event, ProviderStreamEvent::ToolCallEnded { provider_call_id, .. } if provider_call_id == "call-patch")));
+            assert!(matches!(
+                parsed.terminal,
+                ProviderGatewayTerminal::Completed { .. }
+            ));
+        }
     }
 
     #[test]

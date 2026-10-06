@@ -611,10 +611,10 @@ fn translate_tool(
             }
             json!({
                 "name": exposed_name,
-                "description": description,
+                "description": format!("Call this function with a JSON object containing only the string field `input`. Put the complete tool input in that field. The following instructions describe the contents of `input`, not the function argument envelope.\n\n{description}"),
                 "input_schema": {
                     "type": "object",
-                    "properties": {"input": {"type": "string"}},
+                    "properties": {"input": {"type": "string", "description": "Complete tool input as text, following the tool instructions."}},
                     "required": ["input"],
                     "additionalProperties": false,
                 },
@@ -623,6 +623,22 @@ fn translate_tool(
     };
     bindings.insert(exposed_name, identity)?;
     Ok(translated)
+}
+
+pub(crate) fn custom_tool_input(arguments: &str) -> Result<String, AnthropicCodecError> {
+    validate_text(arguments)?;
+    let input = match serde_json::from_str::<Value>(arguments) {
+        Ok(Value::Object(object)) if object.len() == 1 => object
+            .get("input")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        _ => None,
+    }
+    .unwrap_or_else(|| arguments.to_owned());
+    // Invalid model arguments remain tool input. Core validates them and returns
+    // tool feedback; they do not imply a corrupt or incomplete SSE response.
+    validate_text(&input)?;
+    Ok(input)
 }
 
 fn qualified_tool_description(
@@ -1426,37 +1442,30 @@ impl<'a> AnthropicStreamParser<'a> {
                 identity,
                 partial_json,
             } => {
-                let input = if partial_json.is_empty() {
-                    Value::Object(Map::new())
-                } else {
-                    serde_json::from_str::<Value>(&partial_json).map_err(|_| {
-                        AnthropicCodecError::protocol().at_stage("tool_arguments_json")
-                    })?
-                };
-                let input = input.as_object().ok_or_else(|| {
-                    AnthropicCodecError::protocol().at_stage("tool_arguments_object")
-                })?;
                 let arguments = match identity.kind() {
                     ProviderToolKind::Function => {
+                        let input = if partial_json.is_empty() {
+                            Value::Object(Map::new())
+                        } else {
+                            serde_json::from_str::<Value>(&partial_json).map_err(|_| {
+                                AnthropicCodecError::protocol().at_stage("tool_arguments_json")
+                            })?
+                        };
+                        let input = input.as_object().ok_or_else(|| {
+                            AnthropicCodecError::protocol().at_stage("tool_arguments_object")
+                        })?;
                         serde_json::to_string(input).map_err(|_| AnthropicCodecError::protocol())?
                     }
-                    ProviderToolKind::Custom => {
-                        exact_keys(input, &["input"])
-                            .map_err(|e| e.at_stage("custom_arguments_keys"))?;
-                        string(input, "input")
-                            .map_err(|e| e.at_stage("custom_arguments_input"))?
-                            .to_owned()
-                    }
+                    ProviderToolKind::Custom => custom_tool_input(&partial_json)?,
                 };
-                if arguments.is_empty() {
-                    return Err(AnthropicCodecError::protocol());
+                if !arguments.is_empty() {
+                    self.events
+                        .push(ProviderStreamEvent::ToolCallArgumentsDelta {
+                            index,
+                            provider_call_id: call_id.clone(),
+                            delta: arguments,
+                        });
                 }
-                self.events
-                    .push(ProviderStreamEvent::ToolCallArgumentsDelta {
-                        index,
-                        provider_call_id: call_id.clone(),
-                        delta: arguments,
-                    });
                 self.events.push(ProviderStreamEvent::ToolCallEnded {
                     index,
                     provider_call_id: call_id,
@@ -2347,6 +2356,65 @@ mod tests {
             ProviderStreamEvent::ToolCallArgumentsDelta { provider_call_id, delta, .. }
                 if provider_call_id == "call-custom" && delta == "patch"
         )));
+    }
+
+    #[test]
+    fn anthropic_custom_model_input_errors_remain_tool_feedback() {
+        use std::fmt::Write as _;
+
+        let bindings = bindings(&[("apply_patch", ProviderToolKind::Custom)]);
+        for (arguments, expected) in [
+            ("{\"input\":\"patch\"}", "patch"),
+            ("{\"input\":[]}", "{\"input\":[]}"),
+            ("{\"command\":[\"bad\"]}", "{\"command\":[\"bad\"]}"),
+            (
+                "{\"input\":\"patch\",\"extra\":1}",
+                "{\"input\":\"patch\",\"extra\":1}",
+            ),
+            (
+                "*** Begin Patch\n*** End Patch",
+                "*** Begin Patch\n*** End Patch",
+            ),
+            ("{bad", "{bad"),
+            ("{\"input\":\"\"}", ""),
+            ("", ""),
+        ] {
+            let values = [
+                json!({"type":"message_start","message":{"id":"msg-tools","type":"message","role":"assistant","usage":{"input_tokens":2,"output_tokens":0}}}),
+                json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call-patch","name":"apply_patch","input":{}}}),
+                json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":arguments}}),
+                json!({"type":"content_block_stop","index":0}),
+                json!({"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":4}}),
+                json!({"type":"message_stop"}),
+            ];
+            let mut body = String::new();
+            for value in values {
+                writeln!(
+                    body,
+                    "event: {}\ndata: {value}\n",
+                    value["type"].as_str().unwrap()
+                )
+                .unwrap();
+            }
+            let parsed = parse_anthropic_sse(body.as_bytes(), 64 * 1024, 64, &bindings, options())
+                .expect("model argument errors do not corrupt SSE");
+            let received = parsed
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    ProviderStreamEvent::ToolCallArgumentsDelta { delta, .. } => {
+                        Some(delta.as_str())
+                    }
+                    _ => None,
+                })
+                .collect::<String>();
+            assert_eq!(received, expected);
+            assert!(parsed.events.iter().any(|event| matches!(event, ProviderStreamEvent::ToolCallEnded { provider_call_id, .. } if provider_call_id == "call-patch")));
+            assert!(matches!(
+                parsed.terminal,
+                ProviderGatewayTerminal::Completed { .. }
+            ));
+        }
     }
 
     #[test]

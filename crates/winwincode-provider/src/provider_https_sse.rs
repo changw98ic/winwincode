@@ -2849,6 +2849,76 @@ mod tests {
     }
 
     #[test]
+    fn native_model_preserves_invalid_custom_input_for_tool_feedback() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        let body = concat!(
+            "data: {\"id\":\"tool-input\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-patch\",\"type\":\"function\",\"function\":{\"name\":\"apply_patch\",\"arguments\":\"{\\\"command\\\":[\\\"apply_patch\\\",\\\"bad input\\\"]}\"}}]},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1,\"total_tokens\":3}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let fixture = TlsFixture::start(vec![TestResponse {
+            status: "200 OK",
+            content_type: "text/event-stream",
+            body,
+            declared_length: None,
+            delay: Duration::ZERO,
+        }]);
+        let (store, mut open, root) = native_retry_store(&fixture, "custom-input");
+        let payload = serde_json::to_vec(&serde_json::json!({"requestId":open.request_id.0,"provider":"provider-https-fixture","sessionId":open.session_identity.product_session_id.0,"threadId":open.session_identity.codex_thread_id.0,"request":{"model":"fixture-model","instructions":"","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"fixture"}]}],"tools":[{"type":"custom","name":"apply_patch","description":"Apply patch","format":{"type":"grammar","syntax":"lark","definition":"start: /.+/"}}],"tool_choice":"auto","parallel_tool_calls":true,"stream":true,"store":false}})).unwrap();
+        open.request.data_base64 = STANDARD.encode(&payload);
+        open.request.payload_digest.0 = format!("sha256:{:x}", Sha256::digest(&payload));
+        let chunks = store
+            .execute_model_using(
+                &open,
+                || true,
+                |_, _| {
+                    HttpsSseProviderAdapter::try_new(
+                        config(&fixture)
+                            .with_openai_chat_completions(4096, ProviderTokenPricing::default())
+                            .unwrap(),
+                    )
+                    .map_err(|_| crate::DeviceProviderError)
+                },
+            )
+            .unwrap();
+        assert!(
+            chunks.iter().all(|chunk| chunk.payload.is_some()),
+            "bad model arguments must reach Core instead of becoming an SSE failure: {chunks:?}"
+        );
+        let frames: Vec<serde_json::Value> = chunks
+            .iter()
+            .map(|chunk| {
+                serde_json::from_slice(
+                    &STANDARD
+                        .decode(&chunk.payload.as_ref().unwrap().data_base64)
+                        .unwrap(),
+                )
+                .unwrap()
+            })
+            .collect();
+        assert_eq!(frames.last().unwrap()["type"], "completed");
+        assert!(
+            frames
+                .iter()
+                .any(|frame| frame["type"] == "output_item_done"
+                    && frame["item"]["type"] == "custom_tool_call"
+                    && frame["item"]["name"] == "apply_patch"
+                    && frame["item"]["input"] == "{\"command\":[\"apply_patch\",\"bad input\"]}")
+        );
+        assert!(store.model_attempt_accounting_complete(&open).unwrap());
+        let replay = store
+            .execute_model_using(
+                &open,
+                || false,
+                |_, _| panic!("replay cannot send a request"),
+            )
+            .unwrap();
+        assert_eq!(replay, chunks);
+        assert_eq!(fixture.finish().len(), 1);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn native_model_retries_empty_response_and_replays_success() {
         use base64::{Engine as _, engine::general_purpose::STANDARD};
         let empty = concat!(
