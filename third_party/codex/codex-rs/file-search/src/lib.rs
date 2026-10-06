@@ -701,7 +701,7 @@ mod tests {
 
     #[test]
     fn file_name_from_path_uses_basename() {
-        assert_eq!(file_name_from_path("foo/bar.txt"), "bar.txt");
+        assert_eq!(file_name_from_path("foo/bar.md"), "bar.md");
     }
 
     #[test]

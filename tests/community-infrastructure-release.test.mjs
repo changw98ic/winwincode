@@ -6,10 +6,10 @@ import test from 'node:test'
 import {
   validateInfrastructureContract,
   validateInfrastructureLock,
-} from '../scripts/build-community-infrastructure-release.mjs'
+} from '../scripts/release/build-community-infrastructure-release.mjs'
 
 const root = resolve(import.meta.dirname, '..')
-const contract = JSON.parse(readFileSync(join(root, 'docs/decisions/0031-infrastructure-ownership.json'), 'utf8'))
+const contract = JSON.parse(readFileSync(join(root, 'config/decisions/0031-infrastructure-ownership.json'), 'utf8'))
 const expectedPackages = [
   'winwincode-connector-github',
   'winwincode-connector-jira',

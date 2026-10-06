@@ -10,7 +10,7 @@ import {
   assertCredentialLeakFreeFile,
   scanCredentialLeakBytes,
   scanCredentialLeakFile,
-} from '../scripts/credential-leak-gate.mjs'
+} from '../scripts/check/credential-leak-gate.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 const fixtures = join(root, 'tests/fixtures/credential-leak-gate')

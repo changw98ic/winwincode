@@ -8,7 +8,7 @@ import {
 import { join, relative, resolve } from 'node:path'
 import test from 'node:test'
 
-import { pnpmPackDryRun } from '../scripts/pnpm-pack-report.mjs'
+import { pnpmPackDryRun } from '../scripts/release/pnpm-pack-report.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 const workspaceVersion = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version

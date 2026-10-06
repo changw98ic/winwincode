@@ -40,7 +40,7 @@ test('Client and Server expose independent version and rollback coordinates', ()
   const workspaceManifest = source('Cargo.toml')
   const server = source('crates/winwincode-server/src/server.rs')
   const build = source('apps/client/scripts/build.mjs')
-  const releaseArtifacts = source('scripts/release-artifact-contract.mjs')
+  const releaseArtifacts = source('scripts/lib/release-artifact-contract.mjs')
 
   const serverVersion = workspaceManifest.match(/\[workspace\.package\][\s\S]*?version = "([^"]+)"/u)?.[1]
   assert.ok(serverVersion)

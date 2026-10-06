@@ -543,7 +543,7 @@ pub fn reconcile_retained_candidates(
 }
 
 /// Progresses one candidate's lifecycle state along the device-local
-/// contract 6 transition table (`docs/contracts/client-control-state-machines.md`).
+/// contract 6 transition table (`config/contracts/client-control-state-machines.md`).
 ///
 /// The legal moves are `retained -> {branch_created, applied, discarded,
 /// failed}`, `branch_created -> {applied, discarded, failed}`, and

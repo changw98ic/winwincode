@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import test from 'node:test'
 
-import { selectSuccessfulMainlineRun } from '../scripts/verify-mainline-release-source.mjs'
+import { selectSuccessfulMainlineRun } from '../scripts/release/verify-mainline-release-source.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 const workflowPath = resolve(root, '.github/workflows/native-release.yml')
@@ -75,7 +75,7 @@ test('product release verifies one successful exact-commit mainline run before t
   assert.match(workflow, /^  verify-source:$/mu)
   assert.ok(workflow.includes('test "${SELECTED_REF}" = "refs/heads/${DEFAULT_BRANCH}"'))
   assert.ok(workflow.includes('ref: ${{ github.event.repository.default_branch }}'))
-  assert.ok(workflow.includes('node scripts/verify-mainline-release-source.mjs'))
+  assert.ok(workflow.includes('node scripts/release/verify-mainline-release-source.mjs'))
   assert.ok(workflow.includes('--source-commit "${SOURCE_COMMIT}"'))
   assert.ok(workflow.includes('--default-branch "${DEFAULT_BRANCH}"'))
   assert.match(workflow, /^    needs: verify-source$/mu)
@@ -114,7 +114,7 @@ test('product release verifies one successful exact-commit mainline run before t
   assert.equal([...workflow.matchAll(/^      SCCACHE_IDLE_TIMEOUT: "0"$/gmu)].length, 1)
   assert.doesNotMatch(workflow, /Select installed Rust compiler cache/u)
   assert.doesNotMatch(workflow, /windows|win32|msvc/iu)
-  const releaseRunner = readFileSync(resolve(root, 'scripts/run-release-artifact-gate.mjs'), 'utf8')
+  const releaseRunner = readFileSync(resolve(root, 'scripts/release/run-release-artifact-gate.mjs'), 'utf8')
   assert.doesNotMatch(releaseRunner, /pnpm', 'verify|pnpm verify/u)
 })
 
@@ -191,8 +191,8 @@ test('mainline source verifier accepts only the default-branch exact-SHA success
 })
 
 test('product release workflow passes immutable source identity to the canonical gate', () => {
-  assert.ok(existsSync(resolve(root, 'scripts/run-release-artifact-gate.mjs')))
-  assert.ok(workflow.includes('node scripts/run-release-artifact-gate.mjs'))
+  assert.ok(existsSync(resolve(root, 'scripts/release/run-release-artifact-gate.mjs')))
+  assert.ok(workflow.includes('node scripts/release/run-release-artifact-gate.mjs'))
   assert.ok(workflow.includes('--source-commit "${SOURCE_COMMIT}"'))
   assert.ok(workflow.includes('--source-date-epoch "$(git show -s --format=%ct "${SOURCE_COMMIT}")"'))
   assert.doesNotMatch(workflow, /GITHUB_SHA/u)
@@ -231,7 +231,7 @@ test('product release workflow binds the helper signing keys without embedding k
 })
 
 test('product release workflow blocks uploads until target security verification passes', () => {
-  const securityCommand = 'node scripts/verify-release-artifact-security.mjs'
+  const securityCommand = 'node scripts/release/verify-release-artifact-security.mjs'
   const securityStep = workflow.match(
     /      - name: Verify release artifact security\n[\s\S]*?(?=\n      - name:)/u,
   )?.[0]
@@ -271,7 +271,7 @@ test('product release workflow blocks uploads until target security verification
 })
 
 test('product release emits a verified Worker-only input for Community Core', () => {
-  assert.ok(existsSync(resolve(root, 'scripts/stage-community-core-worker-runtime.mjs')))
+  assert.ok(existsSync(resolve(root, 'scripts/release/stage-community-core-worker-runtime.mjs')))
   assert.ok(workflow.includes('corepack pnpm release:core-worker \\'))
   assert.equal(workflow.includes('corepack pnpm release:core-worker --'), false)
   assert.ok(workflow.includes('--artifact-root "release-artifacts/${{ matrix.target }}"'))
@@ -300,25 +300,11 @@ test('registry publication accepts only a signed release and publishes exact arc
   assert.match(registryWorkflow, /^  workflow_dispatch:$/mu)
   assert.ok(registryWorkflow.includes('CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}'))
   assert.ok(registryWorkflow.includes('NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}'))
-  assert.ok(registryWorkflow.includes('node publisher/scripts/verify-community-core-release.mjs \\'))
+  assert.ok(registryWorkflow.includes('node publisher/scripts/release/verify-community-core-release.mjs \\'))
   assert.ok(registryWorkflow.includes('test "$(git -C source rev-parse HEAD)" = \\'))
   assert.ok(registryWorkflow.includes('cargo publish --locked --no-verify -p "${crate}"'))
   assert.ok(registryWorkflow.includes(
     'npm publish "${CORE_INPUT}/${archive}" --access public --provenance --tag alpha',
   ))
   assert.ok(registryWorkflow.includes('sha256sum "${downloaded}"'))
-})
-
-test('release download instructions recreate the exact aggregate evidence roots', () => {
-  const releasing = readFileSync(resolve(root, 'docs/releasing.md'), 'utf8')
-  assert.ok(releasing.includes('gh run download "$RUN_ID" --name "$TARGET" --dir "release-artifacts/$TARGET"'))
-  assert.ok(releasing.includes(
-    'gh run download "$RUN_ID" --name "release-security-$TARGET" --dir "release-security-reports/$TARGET"',
-  ))
-  assert.ok(releasing.includes(
-    'gh run download "$RUN_ID" --name "community-core-worker-$TARGET" --dir "community-core-worker/$TARGET"',
-  ))
-  assert.ok(releasing.includes('release-artifacts/` 的一级目录因此精确为四个 Rust target'))
-  assert.ok(releasing.includes('release-security-reports/` 与产品 evidence root 分离'))
-  assert.ok(releasing.includes('`community-core-worker/` 每个平台只含 Worker'))
 })

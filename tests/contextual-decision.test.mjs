@@ -483,7 +483,7 @@ test('closing the card removes its rows and listeners from the host', () => {
 })
 
 test('the card suite is registered once and its modules are inventoried', () => {
-  const runner = readFileSync(resolve(root, 'scripts/run-ts-tests.mjs'), 'utf8')
+  const runner = readFileSync(resolve(root, 'scripts/acceptance/run-ts-tests.mjs'), 'utf8')
   for (const path of [
     'tests/contextual-decision.test.mjs',
     'tests/contextual-decision-view-model.test.mjs',
@@ -495,7 +495,7 @@ test('the card suite is registered once and its modules are inventoried', () => 
     )
   }
   const inventory = JSON.parse(readFileSync(
-    resolve(root, 'docs/decisions/0028-control-plane-worker-migration.inventory.json'),
+    resolve(root, 'config/decisions/0028-control-plane-worker-migration.inventory.json'),
     'utf8',
   ))
   const listed = inventory.surfaces

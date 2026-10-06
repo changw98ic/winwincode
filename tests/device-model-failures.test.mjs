@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { deviceFailureWithModelCauses } from '../scripts/device-model-failures.mjs'
+import { deviceFailureWithModelCauses } from '../scripts/lib/device-model-failures.mjs'
 
 test('recovered provider errors cannot overwrite an independent terminal failure', () => {
   const failure = { code: 'DEVICE_USAGE_INCOMPLETE', status: 'infrastructure_error' }

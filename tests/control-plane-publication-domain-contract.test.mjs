@@ -7,15 +7,9 @@ import test from 'node:test'
 const root = resolve(import.meta.dirname, '..')
 const rulesPath = join(
   root,
-  'docs',
+  'config',
   'contracts',
   'control-plane-publication-domain.rules.json',
-)
-const documentationPath = join(
-  root,
-  'docs',
-  'contracts',
-  'control-plane-publication-domain.md',
 )
 
 function read(path) {
@@ -57,8 +51,8 @@ test('phase 3.2 freezes one implemented Publication authority and effect path', 
       schemaVersion: 'winwincode.control-plane-publication-domain-rules.v1',
       status: 'implemented-enforced',
       issueId: 'winwincode-9c4.16.3.2',
-      decision: 'docs/decisions/0028-control-plane-worker-migration.md',
-      documentation: 'docs/contracts/control-plane-publication-domain.md',
+      decision: 'config/decisions/0028-control-plane-worker-migration.md',
+      documentation: 'config/contracts/control-plane-publication-domain.md',
       implementationCompletionSource: 'rust-black-box-tests-and-beads',
     },
   )
@@ -183,20 +177,5 @@ test('the contract gate executes the Publication and eligibility black-box suite
         `${gate.package} did not execute ${requiredTest}`,
       )
     }
-  }
-})
-
-test('the documentation states the same path and links the implemented GitHub adapter', () => {
-  const documentation = read(documentationPath)
-  for (const statement of [
-    'PublicationCoordinator + PublicationLedger + PublicationPort',
-    'branch → pull-request → issue-comment → commit-status',
-    '任何 provider 调用之前',
-    '不会重复创建 PR',
-    'Cancel 只改变 Publication',
-    'GitHub HTTP 与 credential reference adapter 已由阶段 3.3',
-    'control-plane-github-publication-adapter.md',
-  ]) {
-    assert.ok(documentation.includes(statement), `missing documentation statement: ${statement}`)
   }
 })

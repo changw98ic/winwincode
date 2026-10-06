@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Adapted from DeepSeek Harness (c) 2026 DeepSeek, MIT; see THIRD_PARTY_NOTICES.md.
+// Adapted from DeepSeek Harness (c) 2026 DeepSeek, MIT; see THIRD_PARTY_NOTICES.
 
 // Host clipboard write shared by Web UI copy controls. Success feedback stays
 // with each control; this helper only reports whether the host accepted a write.

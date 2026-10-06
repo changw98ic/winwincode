@@ -10,8 +10,7 @@ import test from 'node:test'
 import ts from 'typescript'
 
 const root = resolve(import.meta.dirname, '..')
-const rulesPath = join(root, 'docs', 'contracts', 'control-plane-web-client.rules.json')
-const contractPath = join(root, 'docs', 'contracts', 'control-plane-web-client.md')
+const rulesPath = join(root, 'config', 'contracts', 'control-plane-web-client.rules.json')
 
 function json(path) {
   return JSON.parse(readFileSync(path, 'utf8'))
@@ -165,7 +164,6 @@ test('preflight records the current Client, Server, Control Plane, Worker, Local
     ...rules.generation.canonicalInputs,
     rules.activation.trigger,
     rules.activation.behaviorProof,
-    rules.verification.documentation,
     rules.verification.test,
     ...rules.inventory.client.currentFiles,
     ...rules.inventory.server.paths,
@@ -186,17 +184,6 @@ test('preflight records the current Client, Server, Control Plane, Worker, Local
     rules.verification.singlePath,
     'apps/client -> Community composition -> neutral facade -> generated client -> winwincode-server -> winwincode-control-plane -> winwincode-worker',
   )
-
-  const contract = readFileSync(contractPath, 'utf8')
-  for (const phrase of [
-    'implemented-enforced',
-    '`apps/client` 是唯一浏览器应用',
-    '`winwincode-server` 是唯一公开 HTTP/WebSocket 边界',
-    '`winwincode-control-plane` 是 ProductSession、Delivery',
-    '`winwincode-worker` 只持有 Job、Lease',
-    '`winwincode-local` 负责本地组装',
-    '`crates/helper` 只提供经过身份校验的辅助可执行文件',
-  ]) assert.equal(contract.includes(phrase), true, phrase)
 })
 
 test('generated Client stays anchored to canonical schemas and transport unions', () => {
@@ -293,7 +280,7 @@ test('Client pages cannot hand-open transports or import Rust runtime authority'
   }
 })
 
-test('generated Client trigger, proof and documentation stay connected', () => {
+test('generated Client trigger and behavior proof stay connected', () => {
   const rules = json(rulesPath)
   const trigger = repositoryPath(rules.activation.trigger)
   const source = readFileSync(trigger, 'utf8')
@@ -317,16 +304,6 @@ test('generated Client trigger, proof and documentation stay connected', () => {
   for (const name of rules.activation.proofUsesExports) {
     assert.ok(proofIdentifiers.has(name), `${rules.activation.behaviorProof} does not exercise ${name}`)
   }
-
-  const contract = readFileSync(contractPath, 'utf8')
-  for (const phrase of [
-    '`requestId` 和 `expectedRevision`',
-    '业务 command 仍走 HTTP',
-    'Web 不直接连接 Worker',
-    '只公开稳定分类、canonical code、请求 ID',
-    'corepack pnpm contracts:check',
-    'corepack pnpm verify:source',
-  ]) assert.equal(contract.includes(phrase), true, phrase)
 })
 
 test('StrongFlow diagram execution crosses the generated Control Plane boundary once', () => {
@@ -345,11 +322,6 @@ test('StrongFlow diagram execution crosses the generated Control Plane boundary 
   )
 
   const clientPackage = json(join(root, 'apps', 'client', 'package.json'))
-  assert.equal(
-    clientPackage.dependencies?.['@winwincode/contracts'],
-    undefined,
-    'the browser must not add a second internal contract path',
-  )
   for (const file of [
     join(root, 'apps', 'client', 'src', 'home-dashboard-view-model.ts'),
     join(root, 'apps', 'client', 'src', 'chat-delivery-creator.ts'),

@@ -37,6 +37,12 @@ impl ExchangeIo {
     pub(crate) fn body_started(&self) {
         self.body.store(true, Ordering::Release);
     }
+    pub(crate) fn connection_established(&self) -> bool {
+        self.socket.lock().map_or(true, |socket| socket.is_some())
+    }
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
     pub(crate) fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
         if let Ok(socket) = self.socket.lock()
@@ -75,6 +81,28 @@ fn timed_out() -> ureq::Error {
         "provider stage made no progress",
     )
     .into()
+}
+
+pub(crate) fn transient_transport(error: &ureq::Error) -> bool {
+    matches!(
+        error,
+        ureq::Error::Io(_)
+            | ureq::Error::Timeout(_)
+            | ureq::Error::HostNotFound
+            | ureq::Error::ConnectionFailed
+            | ureq::Error::Protocol(_)
+    )
+}
+
+pub(crate) fn wait_for_connection(error: &ureq::Error, io: &ExchangeIo) -> bool {
+    !io.connection_established()
+        && matches!(
+            error,
+            ureq::Error::Io(_)
+                | ureq::Error::Timeout(_)
+                | ureq::Error::HostNotFound
+                | ureq::Error::ConnectionFailed
+        )
 }
 
 #[derive(Debug)]

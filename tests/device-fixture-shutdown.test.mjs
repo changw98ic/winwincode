@@ -9,7 +9,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { setTimeout as delay } from 'node:timers/promises'
 import test from 'node:test'
 
-import { stopProcessGroup, waitFor } from '../scripts/device-production-fixture.mjs'
+import { stopProcessGroup, waitFor } from '../scripts/lib/device-production-fixture.mjs'
 
 function processRunning(pid) {
   try {

@@ -6,12 +6,19 @@
 pub mod credential_leak_gate;
 mod jev;
 mod jev_context;
+pub mod opencode_auth;
+mod opencode_control;
+pub use winwincode_api::opencode::valid_opencode_projection;
+pub mod opencode_route;
+mod opencode_store;
+pub use opencode_store::OpenCodeCredentialError;
 mod provider_anthropic;
 pub mod provider_https_sse;
 mod provider_openai;
 mod provider_sse_framing;
 pub mod provider_stream;
 mod provider_transport;
+mod request_retry;
 mod types;
 
 pub use credential_leak_gate::{

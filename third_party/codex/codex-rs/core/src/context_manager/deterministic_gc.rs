@@ -167,7 +167,9 @@ fn output_positions(items: &[ResponseItemEnvelope]) -> HashMap<&str, (usize, Opt
     for (index, envelope) in items.iter().enumerate() {
         match &envelope.item {
             ResponseItem::FunctionCallOutput {
-                call_id, output, ..
+                call_id: Some(call_id),
+                output,
+                ..
             }
             | ResponseItem::CustomToolCallOutput {
                 call_id, output, ..

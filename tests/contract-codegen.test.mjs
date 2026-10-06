@@ -13,7 +13,7 @@ import { join, resolve } from 'node:path'
 import test from 'node:test'
 
 const root = resolve(import.meta.dirname, '..')
-const generator = join(root, 'scripts', 'generate-contracts.mjs')
+const generator = join(root, 'scripts/build/generate-contracts.mjs')
 const fixtureSchemas = join(root, 'tests', 'fixtures', 'contract-codegen', 'schema')
 
 function runGenerator(outputRoot, ...extraArguments) {
@@ -226,7 +226,7 @@ test('checked-in contract artifacts carry Apache-2.0 release metadata and one ca
   )
   assert.match(cargoManifest, /license\.workspace = true/u)
   assert.doesNotMatch(cargoManifest, /publish = false/u)
-  assert.match(cargoManifest, /include = \["src\/\*\*", "Cargo\.toml", "README\.md"\]/u)
+  assert.match(cargoManifest, /include = \["src\/\*\*", "Cargo\.toml"\]/u)
   assert.equal(existsAtProductPath('packages/api-client'), false)
   assert.equal(existsAtProductPath('packages/contracts/src/generated'), false)
 })

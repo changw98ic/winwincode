@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Adapted from DeepSeek Harness (c) 2026 DeepSeek, MIT; see THIRD_PARTY_NOTICES.md.
+// Adapted from DeepSeek Harness (c) 2026 DeepSeek, MIT; see THIRD_PARTY_NOTICES.
 
 import type { Root } from 'mdast'
 import { fromMarkdown } from 'mdast-util-from-markdown'

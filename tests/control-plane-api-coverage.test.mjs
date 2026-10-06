@@ -4,10 +4,10 @@ import { join, resolve } from 'node:path'
 import test from 'node:test'
 
 const root = resolve(import.meta.dirname, '..')
-const matrixPath = join(root, 'docs', 'contracts', 'control-plane-api-coverage.matrix.json')
+const matrixPath = join(root, 'config', 'contracts', 'control-plane-api-coverage.matrix.json')
 const inventoryPath = join(
   root,
-  'docs',
+  'config',
   'decisions',
   '0028-control-plane-worker-migration.inventory.json',
 )

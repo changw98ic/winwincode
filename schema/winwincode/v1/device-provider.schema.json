@@ -68,6 +68,9 @@
         },
         "credentialConfigured": {
           "type": "boolean"
+        },
+        "openCode": {
+          "$ref": "#/$defs/DeviceProviderOpenCodeConnection"
         }
       },
       "required": [
@@ -180,6 +183,25 @@
           "items": {
             "$ref": "#/$defs/DeviceProviderProjection"
           }
+        },
+        "openCodeAccounts": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/$defs/DeviceProviderOpenCodeAccount"
+          }
+        },
+        "openCodeLogins": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/$defs/DeviceProviderOpenCodeLogin"
+          }
+        },
+        "defaultProviderId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
         }
       },
       "required": [
@@ -492,6 +514,304 @@
       "enum": [
         "stdio",
         "streamable_http"
+      ]
+    },
+    "DeviceProviderOpenCodeAccountState": {
+      "type": "string",
+      "enum": [
+        "authorized",
+        "refresh_in_flight",
+        "reauthorization_required",
+        "logged_out"
+      ]
+    },
+    "DeviceProviderOpenCodeOrganization": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ]
+    },
+    "DeviceProviderOpenCodeUsageWindow": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "percent": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "resetsAt": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      },
+      "required": [
+        "status",
+        "percent",
+        "resetsAt"
+      ]
+    },
+    "DeviceProviderOpenCodeUsage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "rolling": {
+          "$ref": "#/$defs/DeviceProviderOpenCodeUsageWindow"
+        },
+        "weekly": {
+          "$ref": "#/$defs/DeviceProviderOpenCodeUsageWindow"
+        },
+        "monthly": {
+          "$ref": "#/$defs/DeviceProviderOpenCodeUsageWindow"
+        },
+        "updatedAtMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "organizationId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      },
+      "required": [
+        "rolling",
+        "weekly",
+        "monthly",
+        "updatedAtMs",
+        "organizationId"
+      ]
+    },
+    "DeviceProviderOpenCodeAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "accountRef": {
+          "$ref": "./domain.schema.json#/$defs/OpenCodeAccountId"
+        },
+        "issuer": {
+          "const": "https://opencode.ai/console"
+        },
+        "subject": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "email": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 320
+        },
+        "state": {
+          "$ref": "#/$defs/DeviceProviderOpenCodeAccountState"
+        },
+        "credentialVersion": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "usage": {
+          "$ref": "#/$defs/DeviceProviderOpenCodeUsage"
+        }
+      },
+      "required": [
+        "accountRef",
+        "issuer",
+        "subject",
+        "email",
+        "state",
+        "credentialVersion"
+      ]
+    },
+    "DeviceProviderOpenCodeConnection": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "accountRef": {
+          "$ref": "./domain.schema.json#/$defs/OpenCodeAccountId"
+        },
+        "organizationId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "organizationName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      },
+      "required": [
+        "accountRef",
+        "organizationId",
+        "organizationName"
+      ]
+    },
+    "DeviceProviderOpenCodeLoginState": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "authorized",
+        "denied",
+        "expired",
+        "cancelled",
+        "failed",
+        "completed"
+      ]
+    },
+    "DeviceProviderOpenCodeLogin": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "loginId": {
+          "$ref": "./domain.schema.json#/$defs/OpenCodeLoginId"
+        },
+        "state": {
+          "$ref": "#/$defs/DeviceProviderOpenCodeLoginState"
+        },
+        "verificationUri": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "userCode": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "expiresAtMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "pollAfterMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "accountRef": {
+          "$ref": "./domain.schema.json#/$defs/OpenCodeAccountId"
+        },
+        "organizations": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/$defs/DeviceProviderOpenCodeOrganization"
+          }
+        }
+      },
+      "required": [
+        "loginId",
+        "state",
+        "expiresAtMs",
+        "pollAfterMs",
+        "organizations"
+      ]
+    },
+    "DeviceProviderOpenCodeSessionBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "productSessionId": {
+          "$ref": "./domain.schema.json#/$defs/ProductSessionId"
+        },
+        "providerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "accountRef": {
+          "$ref": "./domain.schema.json#/$defs/OpenCodeAccountId"
+        },
+        "organizationId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "conversationId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      },
+      "required": [
+        "productSessionId",
+        "providerId",
+        "accountRef",
+        "organizationId",
+        "conversationId"
+      ]
+    },
+    "DeviceProviderOpenCodeOperation": {
+      "type": "string",
+      "enum": [
+        "begin_opencode_login",
+        "poll_opencode_login",
+        "cancel_opencode_login",
+        "connect_opencode",
+        "logout_opencode",
+        "opencode_usage",
+        "set_default_provider"
+      ]
+    },
+    "DeviceProviderOpenCodeCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "modelId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Optional Go model selector for connect_opencode; fixes the official protocol for the new connection."
+        },
+        "operation": {
+          "$ref": "#/$defs/DeviceProviderOpenCodeOperation"
+        },
+        "loginId": {
+          "$ref": "./domain.schema.json#/$defs/OpenCodeLoginId"
+        },
+        "accountRef": {
+          "$ref": "./domain.schema.json#/$defs/OpenCodeAccountId"
+        },
+        "organizationId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "providerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      },
+      "required": [
+        "operation"
       ]
     }
   },

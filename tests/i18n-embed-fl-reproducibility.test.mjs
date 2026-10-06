@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os'
 import { join, relative, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import test from 'node:test'
-import { releaseSourcePaths } from '../scripts/release-source-contract.mjs'
+import { releaseSourcePaths } from '../scripts/lib/release-source-contract.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 const sourceLock = JSON.parse(readFileSync(join(root, 'upstream', 'sources.lock.json'), 'utf8'))
@@ -108,7 +108,7 @@ test('vendored source identity, patch and MIT license are exact', () => {
     targets: ['upstream/vendor/i18n-embed-fl-0.9.4/src/lib.rs'],
   })
 
-  const notices = readFileSync(join(root, 'THIRD_PARTY_NOTICES.md'), 'utf8')
+  const notices = readFileSync(join(root, 'THIRD_PARTY_NOTICES'), 'utf8')
   assert.match(notices, /## i18n-embed-fl/u)
   assert.match(notices, /Copyright 2020 Luke Frisken/u)
   assert.match(notices, /upstream\/vendor\/i18n-embed-fl-0\.9\.4\/LICENSE\.txt/u)

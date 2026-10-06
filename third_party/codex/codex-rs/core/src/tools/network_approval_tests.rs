@@ -10,8 +10,154 @@ use core_test_support::test_path_buf;
 use futures::poll;
 use pretty_assertions::assert_eq;
 use std::time::Duration;
+use test_case::test_case;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
+
+enum ExecutionCancellationTiming {
+    PendingReview,
+    AcceptedReview,
+}
+
+#[test_case(ExecutionCancellationTiming::PendingReview; "pending_review")]
+#[test_case(ExecutionCancellationTiming::AcceptedReview; "accepted_review")]
+#[tokio::test]
+#[allow(
+    clippy::await_holding_invalid_type,
+    reason = "hold the commit lock to cancel execution after the review decision is accepted"
+)]
+async fn execution_cancellation_respects_network_approval_boundary(
+    timing: ExecutionCancellationTiming,
+) {
+    use crate::session::tests::make_session_and_context_with_rx;
+    use crate::tasks::SessionTask;
+
+    struct PendingTask;
+    impl SessionTask for PendingTask {
+        fn kind(&self) -> crate::state::TaskKind {
+            crate::state::TaskKind::Regular
+        }
+
+        fn span_name(&self) -> &'static str {
+            "network_approval_test"
+        }
+
+        async fn run(
+            self: Arc<Self>,
+            _session: Arc<Session>,
+            _ctx: Arc<crate::session::turn_context::TurnContext>,
+            _input: Vec<crate::session::TurnInput>,
+            cancellation_token: CancellationToken,
+        ) -> crate::tasks::SessionTaskResult {
+            cancellation_token.cancelled().await;
+            Ok(None)
+        }
+    }
+
+    let (session, _, events) = make_session_and_context_with_rx().await;
+    let (turn, _) = session
+        .new_turn_with_sub_id(
+            "active-turn".to_string(),
+            crate::session::SessionSettingsUpdate {
+                step_settings: crate::session::step_settings::StepSettingsUpdate {
+                    approval_policy: Some(AskForApproval::OnRequest),
+                    approvals_reviewer: Some(codex_config::types::ApprovalsReviewer::User),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            crate::session::turn_context::NewTurnContextOptions::default(),
+        )
+        .await
+        .unwrap();
+    session.start_task(turn, Vec::new(), PendingTask).await;
+    let service = &session.services.network_approval;
+    register_call_with_default_shell_trigger(service, "execution-1").await;
+    let request = NetworkPolicyRequest {
+        protocol: NetworkProtocol::Http,
+        host: "example.com".to_string(),
+        port: 80,
+        environment_id: Some("local".to_string()),
+        execution_id: Some("execution-1".to_string()),
+        client_addr: None,
+        method: None,
+        command: None,
+        exec_policy_hint: None,
+        disconnect: None,
+        cancellation: None,
+    };
+    let decision = service.handle_inline_policy_request(Arc::clone(&session), request.clone());
+    tokio::pin!(decision);
+    let approval = timeout(Duration::from_secs(5), async {
+        loop {
+            tokio::select! {
+                result = &mut decision => panic!("expected pending approval, got {result:?}"),
+                event = events.recv() => {
+                    if let EventMsg::ExecApprovalRequest(approval) = event.unwrap().msg {
+                        break approval;
+                    }
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let expected_decision = match timing {
+        ExecutionCancellationTiming::PendingReview => {
+            service.record_call_outcome("execution-1", "original execution denial".to_string());
+            NetworkDecision::deny("not_allowed")
+        }
+        ExecutionCancellationTiming::AcceptedReview => {
+            let commit_guard = service.session_policy_commit_lock.lock().await;
+            session
+                .notify_approval(
+                    &approval.effective_approval_id(),
+                    ReviewDecision::ApprovedForSession,
+                )
+                .await;
+            // Consume the approval and stop at the held policy commit lock.
+            assert!(poll!(decision.as_mut()).is_pending());
+            service.record_call_outcome("execution-1", "original execution denial".to_string());
+            assert!(poll!(decision.as_mut()).is_pending());
+            drop(commit_guard);
+            NetworkDecision::Allow
+        }
+    };
+    assert_eq!(
+        timeout(Duration::from_secs(5), &mut decision)
+            .await
+            .expect("finish cancelled or accepted review"),
+        expected_decision,
+    );
+    let key =
+        HostApprovalKey::from_request(&request, NetworkApprovalProtocol::Http, "local".to_string());
+    assert_eq!(
+        service.session_approved_hosts.lock().await.contains(&key),
+        expected_decision == NetworkDecision::Allow,
+    );
+    // A late callback must not resurrect the cancelled execution, even with a host grant.
+    service.session_approved_hosts.lock().await.insert(key);
+    assert_eq!(
+        service
+            .handle_inline_policy_request(Arc::clone(&session), request)
+            .await,
+        NetworkDecision::deny("not_allowed"),
+    );
+    assert_eq!(
+        service.take_call_outcome("execution-1").await,
+        Some("original execution denial".to_string())
+    );
+    assert!(service.pending_host_approvals.lock().unwrap().is_empty());
+    while let Ok(event) = events.try_recv() {
+        assert!(!matches!(
+            event.msg,
+            EventMsg::ExecApprovalRequest(_) | EventMsg::GuardianAssessment(_)
+        ));
+    }
+    session
+        .abort_all_tasks(codex_protocol::protocol::TurnAbortReason::Interrupted)
+        .await;
+}
 
 fn pending_key(host: HostApprovalKey, turn_id: &str, execution_id: &str) -> PendingHostApprovalKey {
     PendingHostApprovalKey {
@@ -478,9 +624,10 @@ async fn register_call_with_default_shell_trigger(
         .register_call(ActiveNetworkApprovalCall {
             registration_id: registration_id.to_string(),
             turn_id: "turn-1".to_string(),
+            tool_name: ToolName::plain("exec_command"),
             trigger: GuardianNetworkAccessTrigger {
                 call_id: "call-1".to_string(),
-                tool_name: "shell_command".to_string(),
+                tool_name: "exec_command".to_string(),
                 command: vec!["curl".to_string(), "https://example.com".to_string()],
                 cwd: PathUri::from_abs_path(&test_path_buf("/tmp").abs()),
                 sandbox_permissions: SandboxPermissions::UseDefault,
@@ -491,6 +638,7 @@ async fn register_call_with_default_shell_trigger(
             command: "curl https://example.com".to_string(),
             environment_id: "local".to_string(),
             permission_profile: PermissionProfile::workspace_write(),
+            environments: TurnEnvironmentSnapshot::default(),
             cancellation_token: cancellation_token.clone(),
         })
         .await;
@@ -500,9 +648,10 @@ async fn register_call_with_default_shell_trigger(
 #[tokio::test]
 async fn active_call_preserves_triggering_command_context() {
     let service = NetworkApprovalService::default();
+    let tool_name = ToolName::namespaced("mcp__example", "exec_command");
     let expected = GuardianNetworkAccessTrigger {
         call_id: "call-1".to_string(),
-        tool_name: "shell_command".to_string(),
+        tool_name: tool_name.to_string(),
         command: vec!["curl".to_string(), "https://example.com".to_string()],
         cwd: PathUri::parse("file:///C:/repo").expect("valid Windows path URI"),
         sandbox_permissions: SandboxPermissions::UseDefault,
@@ -516,9 +665,11 @@ async fn active_call_preserves_triggering_command_context() {
             registration_id: "registration-1".to_string(),
             turn_id: "turn-1".to_string(),
             trigger: expected.clone(),
+            tool_name: tool_name.clone(),
             command: "curl https://example.com".to_string(),
             environment_id: "remote".to_string(),
             permission_profile: PermissionProfile::workspace_write(),
+            environments: TurnEnvironmentSnapshot::default(),
             cancellation_token: CancellationToken::new(),
         })
         .await;
@@ -529,6 +680,7 @@ async fn active_call_preserves_triggering_command_context() {
         .expect("single active call should resolve");
 
     assert_eq!(&call.trigger, &expected);
+    assert_eq!(call.tool_name, tool_name);
     assert_eq!(call.command, "curl https://example.com");
     assert_eq!(call.environment_id, "remote");
 }
@@ -667,42 +819,6 @@ fn approval_denial_messages_are_bounded_for_model_context() {
 
     assert!(codex_utils_string::approx_token_count(&message) < 1_000);
     assert!(message.contains("tokens truncated"));
-}
-
-#[tokio::test]
-async fn finish_call_returns_denial_and_unregisters_active_call() {
-    let service = NetworkApprovalService::default();
-    let cancellation_token =
-        register_call_with_default_shell_trigger(&service, "registration-1").await;
-
-    service.record_call_outcome("registration-1", "network denied".to_string());
-
-    let err = service
-        .finish_call("registration-1", &cancellation_token)
-        .await
-        .expect_err("denial should be returned");
-
-    assert!(matches!(err, ToolError::Rejected(message) if message == "network denied"));
-    assert!(service.resolve_single_active_call().await.is_none());
-    assert_eq!(service.take_call_outcome("registration-1").await, None);
-}
-
-#[tokio::test]
-async fn finish_call_reports_abandoned_network_approval() {
-    let service = NetworkApprovalService::default();
-    let cancellation_token =
-        register_call_with_default_shell_trigger(&service, "registration-1").await;
-    cancellation_token.cancel();
-
-    let err = service
-        .finish_call("registration-1", &cancellation_token)
-        .await
-        .expect_err("abandoned approval should be returned");
-
-    assert!(matches!(
-        err,
-        ToolError::Rejected(message) if message == ABANDONED_NETWORK_APPROVAL_MESSAGE
-    ));
 }
 
 #[tokio::test]

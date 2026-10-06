@@ -101,6 +101,7 @@ fn serve_probe(listener: &TcpListener, config: Arc<ServerConfig>) -> serde_json:
     loop {
         match listener.accept() {
             Ok((socket, _)) => {
+                socket.set_nonblocking(false).unwrap();
                 socket.set_read_timeout(Some(WAIT)).unwrap();
                 socket.set_write_timeout(Some(WAIT)).unwrap();
                 let mut stream = StreamOwned::new(ServerConnection::new(config).unwrap(), socket);

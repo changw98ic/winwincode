@@ -10,7 +10,7 @@
 //! per-user `RepositoryAccessGrant` relationships (plan 7.7). The absolute
 //! local path is Device-Client-only knowledge and is never stored here;
 //! availability states follow the non-transactional projection machine in
-//! `docs/contracts/client-control-state-machines.md` contract 7: every
+//! `config/contracts/client-control-state-machines.md` contract 7: every
 //! rescan may recompute any state, there are no terminal states, and only
 //! `available` and `dirty` allow a Worker launch.
 //!

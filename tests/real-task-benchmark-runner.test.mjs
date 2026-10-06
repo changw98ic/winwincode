@@ -2,23 +2,23 @@ import assert from 'node:assert/strict'
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { once } from 'node:events'
 import { createHash } from 'node:crypto'
-import { exportDeviceCandidate, exportDeviceExecutionReceipts } from '../scripts/export-device-candidate.mjs'
-import { deviceFailureWithModelCauses } from '../scripts/device-model-failures.mjs'
+import { exportDeviceCandidate, exportDeviceExecutionReceipts } from '../scripts/acceptance/export-device-candidate.mjs'
+import { deviceFailureWithModelCauses } from '../scripts/lib/device-model-failures.mjs'
 import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:https'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import test from 'node:test'
-import { assertDeviceBenchmarkRunning } from '../scripts/device-production-fixture.mjs'
-import { driveDelivery } from '../scripts/run-api-production-vertical.mjs'
-import { openBenchmarkLedger } from '../scripts/benchmark-ledger.mjs'
+import { assertDeviceBenchmarkRunning } from '../scripts/lib/device-production-fixture.mjs'
+import { driveDelivery } from '../scripts/acceptance/run-api-production-vertical.mjs'
+import { openBenchmarkLedger } from '../scripts/lib/benchmark-ledger.mjs'
 import { benchmarkAggregationInput, deviceBenchmarkExperimentBinding, executeDeviceBenchmark, prepareBenchmarkDeviceTask, recoverBenchmarkDeviceCell,
   runBenchmarkDeviceAggregation, stoppedDeviceResult, assertRetainedDeviceTaskRunning, terminalBenchmarkDeviceFailure,
-  terminalDeviceFailure, failedDispatchDeviceResult, resolveRegisteredDeviceTask } from '../scripts/benchmark-device-adapter.mjs'
+  terminalDeviceFailure, failedDispatchDeviceResult, resolveRegisteredDeviceTask } from '../scripts/lib/benchmark-device-adapter.mjs'
 import { runDeviceTaskVertical, fusionDeviceProviders, inspectUnresolvedDeviceTasks, benchmarkDeviceEnvironment,
   expiredCrashedDeviceWorkRun, expiredDeviceWorkRunLease, failedDeviceDispatch,
-  loadDeviceProviderEnvironment } from '../scripts/run-device-task-vertical.mjs'
+  loadDeviceProviderEnvironment } from '../scripts/acceptance/run-device-task-vertical.mjs'
 
 import {
   aggregateBenchmarkReport,
@@ -36,7 +36,7 @@ import {
   runBenchmarkSchedule,
   validateBenchmarkDispatchPolicy,
   validateFrozenTaskSource,
-} from '../scripts/run-real-task-benchmark.mjs'
+} from '../scripts/benchmark/run-real-task-benchmark.mjs'
 
 test('expired crashed Device Worker is diagnosed from both durable authorities', async t => {
   const directory = await mkdtemp(resolve(tmpdir(), 'benchmark-worker-crash-'))
@@ -83,6 +83,23 @@ const dispatchLeaseSchema = `
   CREATE TABLE execution_lease_terminals (lease_id TEXT, job_id TEXT, worker_id TEXT,
     worker_instance_id TEXT, attempt INTEGER, fencing_token TEXT, outcome TEXT);
 `
+
+test('a claimed failed job is an execution failure rather than a dispatch failure', async t => {
+  const directory = await mkdtemp(resolve(tmpdir(), 'benchmark-claimed-failure-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  await mkdir(resolve(directory, 'server-data'))
+  const db = new DatabaseSync(resolve(directory, 'server-data/control-plane.sqlite3'))
+  t.after(() => db.close())
+  db.exec(`CREATE TABLE scheduler_execution_jobs (job_id TEXT, delivery_id TEXT,
+    work_run_id TEXT, state TEXT, attempt INTEGER, revision INTEGER, updated_at TEXT, payload_digest TEXT);
+    INSERT INTO scheduler_execution_jobs VALUES ('job','delivery','run','failed',2,5,'now','payload');
+    ${dispatchLeaseSchema}`)
+  assert.equal(failedDeviceDispatch(directory, 'run', 'delivery').failureOrigin, undefined)
+  db.exec("INSERT INTO execution_leases VALUES ('job','lease','payload','worker','instance',2,'2')")
+  assert.equal(failedDeviceDispatch(directory, 'run', 'delivery').failureOrigin, 'execution')
+  db.exec("UPDATE execution_leases SET payload_digest='different'")
+  assert.equal(failedDeviceDispatch(directory, 'run', 'delivery').failureOrigin, undefined)
+})
 
 test('current exact cancelled lease remains a product cancellation during recovery', async t => {
   const directory = await mkdtemp(resolve(tmpdir(), 'benchmark-cancelled-dispatch-'))
@@ -304,7 +321,8 @@ test('dispatch failure reports preserve a model cause only from the failed job',
     runId: 'run', callId: 'run:model', taskId: 'rust-001' }))
   await writeFile(resolve(directory, 'product-source-seal.json'), '{}')
   const report = { complete: false, productSessionId: 'product-session', deliveryId: 'delivery',
-    workRunId: 'work-run', errorCode: 'DEVICE_DISPATCH_FAILED' }
+    workRunId: 'work-run', errorCode: 'DEVICE_DISPATCH_FAILED',
+    dispatchFailure: failedDeviceDispatch(directory, 'work-run', 'delivery') }
   const request = { runId: 'run', callId: 'run:model', taskId: 'rust-001', provider: 'deepseek-flash' }
   const launch = { callId: request.callId, directory, productSessionId: 'product-session', deliveryId: 'delivery' }
   for (const errorCode of ['DEVICE_DISPATCH_FAILED']) {
@@ -496,7 +514,7 @@ test('recovery finalizes retained calls after process death and fences stale wri
         process.exit(86);
       }
     });
-  `, new URL('../scripts/run-real-task-benchmark.mjs', import.meta.url).href, JSON.stringify(plan), JSON.stringify(options)],
+  `, new URL('../scripts/benchmark/run-real-task-benchmark.mjs', import.meta.url).href, JSON.stringify(plan), JSON.stringify(options)],
   { encoding: 'utf8' })
   assert.equal(child.status, 86, child.stderr)
   const executeCell = () => assert.fail('recovery must not execute a model or product command')
@@ -537,7 +555,7 @@ test('recovered product calls are committed to the call table with the final rec
         process.exit(86);
       },
     });
-  `, new URL('../scripts/run-real-task-benchmark.mjs', import.meta.url).href,
+  `, new URL('../scripts/benchmark/run-real-task-benchmark.mjs', import.meta.url).href,
   JSON.stringify(plan), JSON.stringify(options), JSON.stringify(launch)], { encoding: 'utf8' })
   assert.equal(child.status, 86, child.stderr)
 
@@ -570,7 +588,7 @@ test('a prelaunch crash becomes an explicit failed row without starting a produc
     await runBenchmarkPlan(JSON.parse(process.argv[2]), { ...JSON.parse(process.argv[3]),
       executeCell: () => process.exit(86),
     });
-  `, new URL('../scripts/run-real-task-benchmark.mjs', import.meta.url).href,
+  `, new URL('../scripts/benchmark/run-real-task-benchmark.mjs', import.meta.url).href,
   JSON.stringify(plan), JSON.stringify(options)], { encoding: 'utf8' })
   assert.equal(child.status, 86, child.stderr)
   const result = await runBenchmarkPlan(plan, { ...options,
@@ -748,7 +766,7 @@ test('Device approval policy is frozen before effects and same-mode recovery pre
           process.exit(86);
         },
       });
-    `, new URL('../scripts/run-real-task-benchmark.mjs', import.meta.url).href,
+    `, new URL('../scripts/benchmark/run-real-task-benchmark.mjs', import.meta.url).href,
     JSON.stringify(plan), JSON.stringify(options), JSON.stringify(target)], { encoding: 'utf8' })
     assert.equal(child.status, 86, child.stderr)
     const snapshot = () => {
@@ -1962,7 +1980,7 @@ test('process death after durable claim prevents an automatic second execution',
         process.exit(86);
       },
     });
-  `, ledgerPath, new URL('../scripts/run-real-task-benchmark.mjs', import.meta.url).href, directory], { encoding: 'utf8' })
+  `, ledgerPath, new URL('../scripts/benchmark/run-real-task-benchmark.mjs', import.meta.url).href, directory], { encoding: 'utf8' })
   assert.equal(result.status, 86, result.stderr)
   let executions = 0
   await assert.rejects(runBenchmarkPlan({ cells: [{ runId: 'claimed' }] }, {
@@ -2095,8 +2113,8 @@ test('actual Device launcher commits its product address before starting and sur
         }),
       }, context),
     });
-  `, new URL('../scripts/run-real-task-benchmark.mjs', import.meta.url).href,
-  new URL('../scripts/run-device-task-vertical.mjs', import.meta.url).href,
+  `, new URL('../scripts/benchmark/run-real-task-benchmark.mjs', import.meta.url).href,
+  new URL('../scripts/acceptance/run-device-task-vertical.mjs', import.meta.url).href,
   JSON.stringify([cell, options, productDirectory, taskInputPath])], {
     encoding: 'utf8', env: {
       PATH: process.env.PATH, HOME: process.env.HOME,
@@ -2860,7 +2878,7 @@ test('candidate export verifies a self-contained Git bundle and preserves failed
     assert.equal(JSON.parse(await readFile(reportPath)).complete, false, 'original observation remains unchanged')
     assert.equal(JSON.parse(await readFile(resolve(directory, 'submission-evidence', commit, 'manifest.json'))).productComplete, false)
     assert.deepEqual(await runBenchmarkPlan(plan, recovery), restored)
-    await t.test('old dispatch failure report reconciles current cancellation without changing retained bytes', async () => {
+    await t.test('current execution failure receipt recovers from its exact terminal lease', async () => {
       await mkdir(resolve(directory, 'server-data'), { recursive: true })
       const scheduler = new DatabaseSync(resolve(directory, 'server-data/control-plane.sqlite3'))
       try {
@@ -2868,33 +2886,40 @@ test('candidate export verifies a self-contained Git bundle and preserves failed
           work_run_id TEXT, state TEXT, attempt INTEGER, revision INTEGER, updated_at TEXT, payload_digest TEXT);
           ${dispatchLeaseSchema}
           INSERT INTO execution_leases VALUES ('original-job','lease','payload','worker','instance',1,'1');
-          INSERT INTO execution_lease_terminals VALUES ('lease','original-job','worker','instance',1,'1','cancelled');`)
+          INSERT INTO execution_lease_terminals VALUES ('lease','original-job','worker','instance',1,'1','failed');`)
         scheduler.prepare('INSERT INTO scheduler_execution_jobs VALUES (?,?,?,?,?,?,?,?)')
           .run('original-job', launch.deliveryId, 'original-run', 'failed', 1, 5, 'now', 'payload')
-        const oldReport = { ...report, errorCode: 'DEVICE_DISPATCH_FAILED', workRunId: 'original-run',
-          dispatchFailure: { workRunId: 'original-run', deliveryId: launch.deliveryId,
-            jobId: 'original-job', state: 'failed', attempt: 1, revision: 5, updatedAt: 'now' } }
-        const oldBytes = JSON.stringify(oldReport)
-        await writeFile(reportPath, oldBytes)
+        const currentReport = { ...report, errorCode: 'DEVICE_EXECUTION_FAILED', workRunId: 'original-run',
+          dispatchFailure: failedDeviceDispatch(directory, 'original-run', launch.deliveryId) }
+        const currentBytes = JSON.stringify(currentReport)
+        await writeFile(reportPath, currentBytes)
         const originalProviderBytes = await readFile(resolve(providerDirectory, 'providers.sqlite3'))
-        cancelled = true
         const request = { ...cell, callId: launch.callId, provider: cell.comparison }
         const result = await resolveRegisteredDeviceTask(request, launch)
-        assert.equal(result.failure.code, 'DEVICE_PRODUCT_CANCELLED')
+        assert.equal(result.failure.code, 'DEVICE_EXECUTION_FAILED')
         assert.equal(result.productComplete, false)
         assert.equal(result.externalScore, null)
-        assert.equal(result.recovery.originalReportSha256, sha(oldBytes))
-        assert.equal(await readFile(reportPath, 'utf8'), oldBytes)
+        assert.deepEqual(result.dispatchFailure, currentReport.dispatchFailure)
+        assert.equal(await readFile(reportPath, 'utf8'), currentBytes)
         assert.deepEqual(await readFile(resolve(providerDirectory, 'providers.sqlite3')), originalProviderBytes)
         assert.equal(productStarts, 1)
-        cancelled = false
-        done = false
-        await assert.rejects(resolveRegisteredDeviceTask(request, launch))
-        assert.equal(await readFile(reportPath, 'utf8'), oldBytes)
-        scheduler.exec("UPDATE execution_lease_terminals SET outcome='failed'")
-        const failed = await resolveRegisteredDeviceTask(request, launch)
-        assert.equal(failed.failure.code, 'DEVICE_DISPATCH_FAILED')
-        assert.deepEqual(failed.dispatchFailure, oldReport.dispatchFailure)
+        const misclassifiedReport = { ...currentReport, errorCode: 'DEVICE_DISPATCH_FAILED' }
+        await writeFile(reportPath, JSON.stringify(misclassifiedReport))
+        await assert.rejects(resolveRegisteredDeviceTask(request, launch), { code: 'ERR_ASSERTION' })
+        const incompleteReceipt = structuredClone(currentReport)
+        delete incompleteReceipt.dispatchFailure.failureOrigin
+        await writeFile(reportPath, JSON.stringify(incompleteReceipt))
+        await assert.rejects(resolveRegisteredDeviceTask(request, launch), { code: 'ERR_ASSERTION' })
+        scheduler.exec("UPDATE execution_lease_terminals SET outcome='cancelled'")
+        await writeFile(reportPath, currentBytes)
+        await assert.rejects(resolveRegisteredDeviceTask(request, launch), { code: 'ERR_ASSERTION' })
+        await writeFile(reportPath, JSON.stringify(report))
+        cancelled = true
+        const cancellation = await resolveRegisteredDeviceTask(request, launch)
+        assert.equal(cancellation.failure.code, 'DEVICE_PRODUCT_CANCELLED')
+        assert.equal(await readFile(reportPath, 'utf8'), JSON.stringify(report))
+        assert.deepEqual(await readFile(resolve(providerDirectory, 'providers.sqlite3')), originalProviderBytes)
+        assert.equal(productStarts, 1)
       } finally { scheduler.close() }
     })
   } finally {
@@ -3040,7 +3065,7 @@ test('execution receipt export retains typed model failures without copying upst
   const requestBytes = Buffer.from(JSON.stringify({ provider: 'deepseek', request: { model: 'deepseek-flash' } }))
   for (const [exchange, code, message, expected] of [
     ['typed', 'DEVICE_PROVIDER_SSE_EVENT_INVALID', 'private upstream text', 'DEVICE_PROVIDER_SSE_EVENT_INVALID'],
-    ['legacy', 'MODEL_STREAM_FAILED', 'DEVICE_PROVIDER_PROTOCOL_FAILED', 'DEVICE_PROVIDER_PROTOCOL_FAILED'],
+    ['untyped', 'MODEL_STREAM_FAILED', 'DEVICE_PROVIDER_SSE_EVENT_INVALID: private upstream text', 'MODEL_STREAM_FAILED'],
     ['unknown', 'MODEL_STREAM_FAILED', 'private unrecognized diagnostic', 'MODEL_STREAM_FAILED'],
   ]) {
     const opened = { modelExchangeId: exchange, lease: { jobId: `job-${exchange}` }, workerSessionId: 'session',
@@ -3054,16 +3079,9 @@ test('execution receipt export retains typed model failures without copying upst
     await mkdir(evidenceDirectory)
     const { evidence } = exportDeviceExecutionReceipts(directory, evidenceDirectory)
     const call = evidence.calls.find(value => value.exchangeId === exchange)
-    assert.deepEqual(call.failure, { code: expected, retryable: false,
-      ...(exchange === 'legacy' ? { legacy: true } : {}) })
+    assert.deepEqual(call.failure, { code: expected, retryable: false })
     assert.equal(call.terminalType, 'error')
     assert.equal(call.usage, null)
-    if (exchange === 'legacy') {
-      const failure = deviceFailureWithModelCauses({ code: 'DEVICE_PRODUCT_FAILED', status: 'failed' },
-        evidence, [call.jobId])
-      assert.equal(failure.code, 'DEVICE_PRODUCT_FAILED', 'legacy categories must not become specific root causes')
-      assert.equal(failure.observedProviderFailures[0].legacy, true)
-    }
     assert.equal((await readFile(resolve(evidenceDirectory, 'execution-receipts.json'), 'utf8')).includes('private'), false)
   }
 })

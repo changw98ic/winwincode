@@ -19,14 +19,15 @@ use codex_exec_server::LOCAL_FS;
 use codex_http_client::ClientRouteClass;
 use codex_http_client::HttpClientFactory;
 use codex_http_client::OutboundProxyPolicy;
+use codex_http_client::RequestBuilder;
 use codex_http_client::RouteAwareClientPool;
-use codex_http_client::RouteAwareRequestBuilder;
 use codex_login::AuthHeaders;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_login::ExternalAuth;
 use codex_login::ExternalAuthFuture;
 use codex_login::ExternalAuthRefreshContext;
+use codex_login::auth::BedrockAccessKeysAuth;
 use codex_login::auth::BedrockApiKeyAuth;
 use codex_login::test_support::auth_manager_from_optional_auth;
 use codex_protocol::auth::AuthMode;
@@ -89,7 +90,11 @@ pub(crate) fn test_auth_manager(auth_mode: Option<AuthMode>) -> Arc<AuthManager>
 }
 
 pub(crate) async fn set_test_auth_mode(auth_manager: &AuthManager, auth_mode: Option<AuthMode>) {
-    let Some(auth) = test_codex_auth(auth_mode) else {
+    set_test_auth(auth_manager, test_codex_auth(auth_mode)).await;
+}
+
+pub(crate) async fn set_test_auth(auth_manager: &AuthManager, auth: Option<CodexAuth>) {
+    let Some(auth) = auth else {
         auth_manager.clear_external_auth();
         return;
     };
@@ -113,6 +118,11 @@ fn test_codex_auth(auth_mode: Option<AuthMode>) -> Option<CodexAuth> {
         AuthMode::BedrockApiKey => CodexAuth::BedrockApiKey(BedrockApiKeyAuth {
             api_key: "test-api-key".to_string(),
             region: "us-east-1".to_string(),
+        }),
+        AuthMode::BedrockAccessKeys => CodexAuth::BedrockAccessKeys(BedrockAccessKeysAuth {
+            access_key_id: "test-access-key-id".to_string(),
+            secret_access_key: "test-secret-access-key".to_string(),
+            session_token: None,
         }),
         AuthMode::AgentIdentity | AuthMode::PersonalAccessToken => {
             panic!("test auth mode requires a purpose-built CodexAuth")
@@ -310,7 +320,7 @@ impl RecordingHttpClientSelector {
 }
 
 impl HttpClientSelector for RecordingHttpClientSelector {
-    fn request(&self, method: Method, url: &str) -> RouteAwareRequestBuilder {
+    fn request(&self, method: Method, url: &str) -> RequestBuilder {
         match self.selected_urls.lock() {
             Ok(mut selected_urls) => selected_urls.push(url.to_string()),
             Err(error) => panic!("selected URL recorder lock should not be poisoned: {error}"),
@@ -329,6 +339,7 @@ pub(crate) fn recording_remote_plugin_service_config(
     (
         RemotePluginServiceConfig {
             chatgpt_base_url,
+            product_sku: crate::remote::CODEX_PRODUCT_SKU.to_string(),
             http_clients,
         },
         selected_urls,
@@ -487,6 +498,7 @@ pub(crate) async fn load_plugins_config(codex_home: &Path, cwd: &Path) -> Plugin
         ),
         "https://chatgpt.com/backend-api/".to_string(),
         test_http_client_factory(),
+        /*product_sku*/ None,
     )
 }
 

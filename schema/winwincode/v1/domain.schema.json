@@ -3145,6 +3145,16 @@
           "const": true
         }
       }
+    },
+    "OpenCodeAccountId": {
+      "type": "string",
+      "pattern": "^oca_[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "Device-local OAuth account identity. It refers to one verified issuer and upstream subject."
+    },
+    "OpenCodeLoginId": {
+      "type": "string",
+      "pattern": "^ocl_[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "Device-owned, bounded OpenCode device authorization operation."
     }
   }
 }

@@ -4,7 +4,7 @@
 //!
 //! This module implements the transmission semantics of
 //! `POST /internal/v1/client/exchange` (see
-//! `docs/contracts/client-control-port-v1.md`) as a pure synchronous library:
+//! `config/contracts/client-control-port-v1.md`) as a pure synchronous library:
 //! no IO, no async runtime, no adapter configuration beyond the frame byte
 //! bound. Both peers — the Device Client and the Control Plane — run the same
 //! machinery on both directions:

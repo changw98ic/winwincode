@@ -4,7 +4,7 @@ import test from 'node:test'
 import {
   parsePnpmPackReport,
   pnpmPackDryRun,
-} from '../scripts/pnpm-pack-report.mjs'
+} from '../scripts/release/pnpm-pack-report.mjs'
 
 test('package inspection uses the pinned pnpm pack report', () => {
   const calls = []

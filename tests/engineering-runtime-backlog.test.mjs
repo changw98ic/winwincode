@@ -7,8 +7,8 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 const root = resolve(import.meta.dirname, '..')
-const validator = join(root, 'scripts/validate-engineering-runtime-backlog.mjs')
-const raw = readFileSync(join(root, 'docs/engineering-runtime/backlog-migration.json'), 'utf8')
+const validator = join(root, 'scripts/check/validate-engineering-runtime-backlog.mjs')
+const raw = readFileSync(join(root, 'config/engineering-runtime/backlog-migration.json'), 'utf8')
 const snapshot = JSON.parse(raw)
 const temporaryDirectories = []
 after(() => { for (const dir of temporaryDirectories) rmSync(dir, { recursive: true, force: true }) })

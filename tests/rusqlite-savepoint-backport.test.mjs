@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os'
 import { join, relative, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import test from 'node:test'
-import { releaseSourcePaths } from '../scripts/release-source-contract.mjs'
+import { releaseSourcePaths } from '../scripts/lib/release-source-contract.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 const sourceLock = JSON.parse(readFileSync(join(root, 'upstream', 'sources.lock.json'), 'utf8'))
@@ -116,7 +116,7 @@ test('vendored source identity, patch and MIT license are exact', () => {
     targets: ['upstream/vendor/rusqlite-0.39.0/src/transaction.rs'],
   })
 
-  const notices = readFileSync(join(root, 'THIRD_PARTY_NOTICES.md'), 'utf8')
+  const notices = readFileSync(join(root, 'THIRD_PARTY_NOTICES'), 'utf8')
   assert.match(notices, /## rusqlite/u)
   assert.match(notices, /Copyright \(c\) 2014 The rusqlite developers/u)
   assert.match(notices, /upstream\/vendor\/rusqlite-0\.39\.0\/LICENSE/u)

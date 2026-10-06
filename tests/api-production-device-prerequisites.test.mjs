@@ -17,7 +17,7 @@ import {
   deviceCredentialReferenceId,
   deviceOnlyServerEnvironment,
   deviceProviderSecretBundle,
-} from '../scripts/run-api-production-vertical.mjs'
+} from '../scripts/acceptance/run-api-production-vertical.mjs'
 import {
   runtimeChildEnvironment,
   resolveDeviceTaskApprovals,
@@ -32,13 +32,13 @@ import {
   deviceConnectCodePublished,
   deviceHelloAcknowledged,
   workInputFromRequest,
-} from '../scripts/device-production-fixture.mjs'
+} from '../scripts/lib/device-production-fixture.mjs'
 
 const root = resolve(import.meta.dirname, '..')
-const runnerPath = resolve(root, 'scripts/run-api-production-vertical.mjs')
-const deviceTaskPath = resolve(root, 'scripts/run-device-task-vertical.mjs')
-const glmPath = resolve(root, 'scripts/run-glm-ui-rework.mjs')
-const fixturePath = resolve(root, 'scripts/device-production-fixture.mjs')
+const runnerPath = resolve(root, 'scripts/acceptance/run-api-production-vertical.mjs')
+const deviceTaskPath = resolve(root, 'scripts/acceptance/run-device-task-vertical.mjs')
+const glmPath = resolve(root, 'scripts/benchmark/run-glm-ui-rework.mjs')
+const fixturePath = resolve(root, 'scripts/lib/device-production-fixture.mjs')
 
 test('reopening waits for the new daemon instance hello acknowledgement', () => {
   const database = new DatabaseSync(':memory:')

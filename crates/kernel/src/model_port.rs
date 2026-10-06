@@ -128,6 +128,7 @@ impl ModelStreamTransport for KernelModelStreamTransport {
             Ok(ResponseStream {
                 rx_event,
                 upstream_request_id: Some(request_id),
+                interrupt: None,
             })
         })
     }
@@ -244,7 +245,7 @@ impl From<ModelPortFailureWire> for ModelPortFailure {
 impl ModelPortMessage {
     fn into_response_event(self) -> Result<ResponseEvent, ModelPortFailure> {
         match self {
-            Self::Created => Ok(ResponseEvent::Created),
+            Self::Created => Ok(ResponseEvent::Created { response_id: None }),
             Self::ServerModel { model } => Ok(ResponseEvent::ServerModel(model)),
             Self::OutputItemAdded { item } => Ok(ResponseEvent::OutputItemAdded(item)),
             Self::OutputItemDone { item } => Ok(ResponseEvent::OutputItemDone(item)),
@@ -289,6 +290,7 @@ impl ModelPortMessage {
                 token_usage,
                 end_turn,
             } => Ok(ResponseEvent::Completed {
+                usage_metadata: None,
                 response_id,
                 token_usage: token_usage.map(Into::into),
                 end_turn,
@@ -355,9 +357,10 @@ fn model_port_api_error(failure: &ModelPortFailure) -> ApiError {
         "RATE_LIMIT" | "SERVER" | "TIMEOUT" | "TRANSPORT" | "EMPTY_RESPONSE" => {
             ApiError::Retryable {
                 message,
-                delay: failure
+                retry_after: failure
                     .provider_retry_after_millis
-                    .map(Duration::from_millis),
+                    .map(Duration::from_millis)
+                    .and_then(codex_http_client::RetryAfter::from_delay),
             }
         }
         "AUTH"
@@ -414,10 +417,16 @@ mod tests {
     fn preserves_retry_category_and_delay() {
         let mut failure = ModelPortFailure::new("RATE_LIMIT", "slow down");
         failure.provider_retry_after_millis = Some(750);
+        let earliest_deadline = tokio::time::Instant::now() + Duration::from_millis(750);
         match model_port_api_error(&failure) {
-            ApiError::Retryable { message, delay } => {
+            ApiError::Retryable {
+                message,
+                retry_after,
+            } => {
                 assert_eq!(message, "[WINWINCODE_KERNEL:RATE_LIMIT] slow down");
-                assert_eq!(delay.map(|value| value.as_millis()), Some(750));
+                let deadline = retry_after.expect("retry advice").deadline();
+                assert!(deadline >= earliest_deadline);
+                assert!(deadline <= tokio::time::Instant::now() + Duration::from_millis(750));
             }
             other => panic!("unexpected error: {other:?}"),
         }

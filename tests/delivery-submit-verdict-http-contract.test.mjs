@@ -240,7 +240,7 @@ test('submit verdict errors and replay behavior are externally distinguishable',
 
 test('all generated clients and docs expose only the canonical verdict request', () => {
   const generated = spawnSync(process.execPath, [
-    join(root, 'scripts', 'generate-contracts.mjs'),
+    join(root, 'scripts/build/generate-contracts.mjs'),
     '--check',
   ], { cwd: root, encoding: 'utf8' })
   assert.equal(generated.status, 0, `${generated.stdout}\n${generated.stderr}`)
@@ -312,19 +312,9 @@ test('all generated clients and docs expose only the canonical verdict request',
   }
 
   const coverage = readFileSync(
-    join(root, 'docs', 'contracts', 'control-plane-api-coverage.matrix.json'),
+    join(root, 'config', 'contracts', 'control-plane-api-coverage.matrix.json'),
     'utf8',
   )
   assert.doesNotMatch(coverage, /submit candidate-bound criterion results/u)
   assert.match(coverage, /request server-computed verdicts for one candidate stale-check digest/u)
-
-  const contractDoc = readFileSync(
-    join(root, 'docs', 'contracts', 'delivery-evidence-verdict-rework.md'),
-    'utf8',
-  )
-  assert.match(contractDoc, /`candidateDigest` 只用于发现候选已经变化/u)
-  assert.match(contractDoc, /`IDEMPOTENCY_CONFLICT`/u)
-  assert.match(contractDoc, /`REVISION_CONFLICT`/u)
-  assert.match(contractDoc, /`CANDIDATE_STALE`/u)
-  assert.match(contractDoc, /`TRUSTED_FACTS_UNAVAILABLE`/u)
 })

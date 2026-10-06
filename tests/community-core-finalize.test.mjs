@@ -15,12 +15,12 @@ import test from 'node:test'
 import {
   CommunityCoreFinalizeError,
   finalizeCommunityCoreRelease,
-} from '../scripts/finalize-community-core-release.mjs'
-import { verifyCommunityCoreRelease } from '../scripts/verify-community-core-release.mjs'
+} from '../scripts/release/finalize-community-core-release.mjs'
+import { verifyCommunityCoreRelease } from '../scripts/release/verify-community-core-release.mjs'
 
 const repositoryRoot = resolve(import.meta.dirname, '..')
 const releaseContract = JSON.parse(readFileSync(
-  resolve(repositoryRoot, 'docs/decisions/0031-community-core-release.json'),
+  resolve(repositoryRoot, 'config/decisions/0031-community-core-release.json'),
   'utf8',
 ))
 const version = JSON.parse(readFileSync(resolve(repositoryRoot, 'package.json'), 'utf8')).version
@@ -51,13 +51,13 @@ function fixture(t) {
   t.after(() => rmSync(base, { recursive: true, force: true }))
   const root = join(base, 'root')
   const inputRoot = join(base, 'inputs')
-  mkdirSync(join(root, 'release-keys'), { recursive: true })
+  mkdirSync(join(root, 'config/release/keys'), { recursive: true })
   mkdirSync(inputRoot, { recursive: true })
   writeFileSync(join(root, 'package.json'), `${JSON.stringify({ version })}\n`)
 
   const { privateKey, publicKey } = generateKeyPairSync('ed25519')
   const publicKeyDer = publicKey.export({ type: 'spki', format: 'der' })
-  const publicKeyPath = 'release-keys/community-core-ed25519-public.pem'
+  const publicKeyPath = 'config/release/keys/community-core-ed25519-public.pem'
   writeFileSync(join(root, publicKeyPath), publicKey.export({ type: 'spki', format: 'pem' }))
   const contract = structuredClone(releaseContract)
   contract.targetState.releaseManifest.signature.publicKeyFile = publicKeyPath

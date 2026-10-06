@@ -186,6 +186,8 @@ pub enum JevProviderErrorKind {
 pub struct JevProviderError {
     kind: JevProviderErrorKind,
     message: &'static str,
+    retry_after: Option<Duration>,
+    connection_pending: bool,
 }
 
 impl JevProviderError {
@@ -199,7 +201,12 @@ impl JevProviderError {
             JevProviderErrorKind::Timeout => "Jev Provider timed out",
             JevProviderErrorKind::InvalidResponse => "Jev Provider response is invalid",
         };
-        Self { kind, message }
+        Self {
+            kind,
+            message,
+            retry_after: None,
+            connection_pending: false,
+        }
     }
 
     const fn invalid_response() -> Self {
@@ -218,6 +225,18 @@ impl JevProviderError {
                 | JevProviderErrorKind::ResourceExhausted
                 | JevProviderErrorKind::Timeout
         )
+    }
+}
+
+impl crate::request_retry::RetryFailure for JevProviderError {
+    fn retryable(&self) -> bool {
+        JevProviderError::retryable(self)
+    }
+    fn retry_after(&self) -> Option<Duration> {
+        self.retry_after
+    }
+    fn wait_for_connection(&self) -> bool {
+        self.connection_pending
     }
 }
 
@@ -425,6 +444,12 @@ impl JevRuntime {
         .await
     }
 
+    fn cancelled(&self) -> bool {
+        self.cancellation
+            .as_ref()
+            .is_some_and(|cancel| cancel.is_cancelled())
+    }
+
     async fn run<T>(
         &self,
         batch_size: usize,
@@ -437,11 +462,7 @@ impl JevRuntime {
     {
         let mut failures = Vec::new();
         for provider in &self.providers {
-            if self
-                .cancellation
-                .as_ref()
-                .is_some_and(|cancel| cancel.is_cancelled())
-            {
+            if self.cancelled() {
                 break;
             }
             let capabilities = provider.capabilities();
@@ -453,13 +474,14 @@ impl JevRuntime {
                 });
                 continue;
             }
-            for attempt in 0..=self.config.retries {
+            let mut retry = crate::request_retry::RequestRetry::new(
+                u32::from(self.config.retries) + 1,
+                capabilities.provider_id.as_bytes(),
+            )
+            .state();
+            loop {
                 let started = Instant::now();
-                if self
-                    .cancellation
-                    .as_ref()
-                    .is_some_and(|cancel| cancel.is_cancelled())
-                {
+                if self.cancelled() {
                     break;
                 }
                 // Check the live execution authority immediately before each
@@ -485,7 +507,7 @@ impl JevRuntime {
                     inference.await
                 };
                 let latency = started.elapsed();
-                match result {
+                let error = match result {
                     Ok(Ok(value)) => {
                         if let Some(observation) =
                             value.observation(&capabilities, latency, batch_size)
@@ -503,22 +525,30 @@ impl JevRuntime {
                         });
                         break;
                     }
-                    Ok(Err(error)) => {
-                        let retryable = error.retryable();
-                        failures.push(JevAttemptFailure {
-                            provider_id: capabilities.provider_id.clone(),
-                            kind: error.kind(),
-                            latency,
-                        });
-                        if !retryable || attempt == self.config.retries {
-                            break;
-                        }
-                    }
-                    Err(_) => failures.push(JevAttemptFailure {
+                    Ok(Err(error)) => error,
+                    Err(_) => JevProviderError::new(JevProviderErrorKind::Timeout),
+                };
+                let disconnected = crate::request_retry::RetryFailure::wait_for_connection(&error);
+                if !disconnected {
+                    failures.push(JevAttemptFailure {
                         provider_id: capabilities.provider_id.clone(),
-                        kind: JevProviderErrorKind::Timeout,
+                        kind: error.kind(),
                         latency,
-                    }),
+                    });
+                }
+                let Some(delay) = retry.delay_after(&error) else {
+                    break;
+                };
+                if !crate::request_retry::RequestRetry::wait_async(delay, || {
+                    can_start() && !self.cancelled()
+                })
+                .await
+                {
+                    return JevRun {
+                        value: None,
+                        observation: None,
+                        failures,
+                    };
                 }
             }
         }
@@ -1132,16 +1162,32 @@ impl HttpsJevRemoteTransport {
         if body.len() > 2 * 1024 * 1024 {
             return Err(JevProviderError::new(JevProviderErrorKind::InvalidRequest));
         }
-        let response = request
-            .send(body.as_slice())
-            .map_err(|_| JevProviderError::new(JevProviderErrorKind::Unavailable))?;
+        let response = request.send(body.as_slice()).map_err(|error| {
+            let mut retained =
+                JevProviderError::new(if crate::provider_transport::transient_transport(&error) {
+                    JevProviderErrorKind::Unavailable
+                } else {
+                    JevProviderErrorKind::InvalidRequest
+                });
+            retained.connection_pending =
+                crate::provider_transport::wait_for_connection(&error, &io);
+            retained
+        })?;
         let status = response.status();
         if !(200..300).contains(&status.as_u16()) {
-            return Err(JevProviderError::new(match status.as_u16() {
+            let mut error = JevProviderError::new(match status.as_u16() {
                 408 | 425 | 429 => JevProviderErrorKind::ResourceExhausted,
                 400..=499 => JevProviderErrorKind::InvalidRequest,
                 _ => JevProviderErrorKind::Unavailable,
-            }));
+            });
+            error.retry_after = response
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| {
+                    crate::request_retry::retry_after_delay(v, time::OffsetDateTime::now_utc())
+                });
+            return Err(error);
         }
         let mut bytes = Vec::new();
         response

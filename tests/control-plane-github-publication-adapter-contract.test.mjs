@@ -7,15 +7,9 @@ import test from 'node:test'
 const root = resolve(import.meta.dirname, '..')
 const rulesPath = join(
   root,
-  'docs',
+  'config',
   'contracts',
   'control-plane-github-publication-adapter.rules.json',
-)
-const documentationPath = join(
-  root,
-  'docs',
-  'contracts',
-  'control-plane-github-publication-adapter.md',
 )
 
 function read(path) {
@@ -58,7 +52,7 @@ test('phase 3.3 freezes one implemented GitHub Publication adapter', () => {
       schemaVersion: 'winwincode.control-plane-github-publication-adapter-rules.v1',
       status: 'implemented-enforced',
       issueId: 'winwincode-9c4.16.3.3',
-      documentation: 'docs/contracts/control-plane-github-publication-adapter.md',
+      documentation: 'config/contracts/control-plane-github-publication-adapter.md',
       ownerCrate: 'winwincode-publication',
       implementation: 'GitHubPublicationAdapter',
       providerPort: 'PublicationPort',
@@ -164,21 +158,5 @@ test('the contract gate executes the loopback GitHub and SQLite recovery suite',
       new RegExp(`test ${requiredTest} \\.\\.\\. ok`, 'u'),
       `GitHub adapter gate did not execute ${requiredTest}`,
     )
-  }
-})
-
-test('the documentation states the same credential, recovery, and protocol boundary', () => {
-  const documentation = read(documentationPath)
-  for (const statement of [
-    'GitHubPublicationAdapter + PublicationCoordinator + PublicationLedger',
-    '每次 HTTP 请求',
-    'branch → pull-request → issue-comment → commit-status',
-    '409 或 422',
-    'github-rate-limited',
-    '不会调用 comment 或 status',
-    'Release 尚未进入 canonical v1 operation protocol',
-    'WINWINCODE_GITHUB_LIVE_TEST=1',
-  ]) {
-    assert.ok(documentation.includes(statement), `missing documentation statement: ${statement}`)
   }
 })

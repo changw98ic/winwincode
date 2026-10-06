@@ -6,3 +6,6 @@
 //! JSON Schema remains the only source that may define public wire shapes.
 
 pub mod generated;
+
+/// Cross-field validation for public OpenCode metadata.
+pub mod opencode;

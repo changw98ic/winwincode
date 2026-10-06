@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Executable ADR-0037 regression fixtures under `fusion-regression/`.
+//! Executable ADR-0037 regression fixtures under `tests/fixtures/fusion/`.
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -211,55 +211,55 @@ fn check_fixture(raw: &str) {
 #[test]
 fn regression_q2_root_shared_fixture_race() {
     check_fixture(include_str!(
-        "../../../fusion-regression/q2-root-shared-fixture-race.json"
+        "../../../tests/fixtures/fusion/q2-root-shared-fixture-race.json"
     ));
 }
 
 #[test]
 fn regression_q1_defect_null_unwrap() {
     check_fixture(include_str!(
-        "../../../fusion-regression/q1-defect-null-unwrap.json"
+        "../../../tests/fixtures/fusion/q1-defect-null-unwrap.json"
     ));
 }
 
 #[test]
 fn regression_q1_defect_shared_map_race() {
     check_fixture(include_str!(
-        "../../../fusion-regression/q1-defect-shared-map-race.json"
+        "../../../tests/fixtures/fusion/q1-defect-shared-map-race.json"
     ));
 }
 
 #[test]
 fn regression_q2_root_float_precision() {
     check_fixture(include_str!(
-        "../../../fusion-regression/q2-root-float-precision.json"
+        "../../../tests/fixtures/fusion/q2-root-float-precision.json"
     ));
 }
 
 #[test]
 fn regression_q2_blocking_ci() {
     check_fixture(include_str!(
-        "../../../fusion-regression/q2-blocking-ci.json"
+        "../../../tests/fixtures/fusion/q2-blocking-ci.json"
     ));
 }
 
 #[test]
 fn regression_minority_1v4() {
     check_fixture(include_str!(
-        "../../../fusion-regression/special-minority-1v4.json"
+        "../../../tests/fixtures/fusion/special-minority-1v4.json"
     ));
 }
 
 #[test]
 fn regression_unique_truth() {
     check_fixture(include_str!(
-        "../../../fusion-regression/special-unique-truth.json"
+        "../../../tests/fixtures/fusion/special-unique-truth.json"
     ));
 }
 
 #[test]
 fn regression_false_unique_requires_verified_counter_to_refute() {
     check_fixture(include_str!(
-        "../../../fusion-regression/special-false-unique.json"
+        "../../../tests/fixtures/fusion/special-false-unique.json"
     ));
 }

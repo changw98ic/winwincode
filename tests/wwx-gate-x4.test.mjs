@@ -9,7 +9,7 @@ const root = resolve(import.meta.dirname, '..')
 test('GATE-X4 runner passes automation/notification/git-reflow/effect lanes', () => {
   const result = spawnSync(
     'node',
-    ['scripts/run-wwx-gate-x4.mjs'],
+    ['scripts/acceptance/run-wwx-gate-x4.mjs'],
     { cwd: root, encoding: 'utf8' },
   )
   assert.equal(result.status, 0, result.stdout + result.stderr)

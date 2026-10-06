@@ -547,7 +547,7 @@ test('an empty difference list renders as a clean report', () => {
 })
 
 test('the visual reference lanes stay outside the canonical TypeScript lane', () => {
-  const runner = readFileSync(resolve(root, 'scripts/run-ts-tests.mjs'), 'utf8')
+  const runner = readFileSync(resolve(root, 'scripts/acceptance/run-ts-tests.mjs'), 'utf8')
   for (const path of [
     'tests/ui608-visual-regression.test.mjs',
     'tests/ui608-component-state-visual-browser.test.mjs',
@@ -563,7 +563,7 @@ test('the visual reference lanes stay outside the canonical TypeScript lane', ()
 
 test('the visual module and both browser suites are listed in the decision inventory', () => {
   const inventory = JSON.parse(readFileSync(
-    resolve(root, 'docs/decisions/0028-control-plane-worker-migration.inventory.json'),
+    resolve(root, 'config/decisions/0028-control-plane-worker-migration.inventory.json'),
     'utf8',
   ))
   const listed = new Set(inventory.surfaces.flatMap(surface => surface.sourcePaths))

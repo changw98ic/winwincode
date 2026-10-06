@@ -51,6 +51,8 @@ license = "Apache-2.0"
 repository = "https://github.com/changw98ic/winwincode"
 
 [workspace.dependencies]
+codex-attachment-store = { path = "third_party/codex/codex-rs/attachment-store" }
+codex-http-client = { path = "third_party/codex/codex-rs/http-client" }
 argon2 = "=0.5.3"
 axum = { version = "=0.8.8", features = ["json", "ws"] }
 axum-server = { version = "=0.8.0", features = ["tls-rustls"] }
@@ -72,7 +74,7 @@ quick-xml = "=0.41.0"
 # native link. The path source below backports the upstream named-SAVEPOINT fix.
 rusqlite = { version = "=0.39.0", default-features = false, features = ["bundled"] }
 rcgen = "=0.14.7"
-rustls = "=0.23.36"
+rustls = "=0.23.45"
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = { version = "=1.0.149", features = ["float_roundtrip"] }
 sha2 = "=0.10.9"

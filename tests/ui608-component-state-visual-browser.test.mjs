@@ -29,7 +29,7 @@ import {
 import {
   assertCredentialLeakFreeFile,
   scanCredentialLeakBytes,
-} from '../scripts/credential-leak-gate.mjs'
+} from '../scripts/check/credential-leak-gate.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 const baselinePath = resolve(root, 'tests/fixtures/visual-regression/component-states.baseline.json')

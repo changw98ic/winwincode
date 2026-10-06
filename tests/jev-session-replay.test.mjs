@@ -12,11 +12,11 @@ import {
   PHASE1_MODES,
   REPORT_KIND,
   evaluateJevSessionReplay,
-} from '../scripts/evaluate-jev-session-replay.mjs'
+} from '../scripts/benchmark/evaluate-jev-session-replay.mjs'
 import {
   BenchmarkError,
   evaluateRealTaskBenchmark,
-} from '../scripts/evaluate-real-task-benchmark.mjs'
+} from '../scripts/benchmark/evaluate-real-task-benchmark.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const skeletonPath = resolve(root, 'tests/fixtures/jev-session-replay/phase1.skeleton.json')

@@ -7,7 +7,7 @@
 //! per-client bidirectional `ClientControlPort` exchange acknowledgement cursors
 //! that must survive a Server restart. Presence states and their legal
 //! transitions follow the frozen state machine in
-//! `docs/contracts/client-control-state-machines.md`; every mutation uses
+//! `config/contracts/client-control-state-machines.md`; every mutation uses
 //! optimistic `expectedRevision` compare-and-swap on the node revision.
 
 use std::fmt;

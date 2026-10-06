@@ -36,6 +36,8 @@ enum DeviceModelFailure {
     RequestInvalid,
     InvalidConfiguration,
     Unavailable,
+    OpenCodeReauthorizationRequired,
+    OpenCodeConnectionChanged,
 }
 
 impl DeviceModelFailure {
@@ -45,6 +47,8 @@ impl DeviceModelFailure {
             Self::RequestInvalid => "DEVICE_PROVIDER_REQUEST_INVALID",
             Self::InvalidConfiguration => "DEVICE_PROVIDER_INVALID_CONFIGURATION",
             Self::Unavailable => "DEVICE_PROVIDER_UNAVAILABLE",
+            Self::OpenCodeReauthorizationRequired => "DEVICE_OPENCODE_REAUTHORIZATION_REQUIRED",
+            Self::OpenCodeConnectionChanged => "DEVICE_OPENCODE_CONNECTION_CHANGED",
         }
     }
 }
@@ -59,6 +63,116 @@ impl From<serde_json::Error> for DeviceModelFailure {
     fn from(_: serde_json::Error) -> Self {
         Self::RequestInvalid
     }
+}
+
+impl From<crate::OpenCodeCredentialError> for DeviceModelFailure {
+    fn from(error: crate::OpenCodeCredentialError) -> Self {
+        match error {
+            crate::OpenCodeCredentialError::ReauthorizationRequired => {
+                Self::OpenCodeReauthorizationRequired
+            }
+            crate::OpenCodeCredentialError::ConnectionChanged => Self::OpenCodeConnectionChanged,
+            crate::OpenCodeCredentialError::Cancelled => Self::LeaseExpired,
+            crate::OpenCodeCredentialError::Unavailable => Self::Unavailable,
+        }
+    }
+}
+
+enum DeviceAttemptError {
+    Open(crate::ProviderAdapterError),
+    Stream(crate::HttpsSseProviderError),
+    Stopped,
+    Storage,
+    Configuration,
+}
+
+impl crate::request_retry::RetryFailure for DeviceAttemptError {
+    fn retryable(&self) -> bool {
+        match self {
+            Self::Open(error) => crate::request_retry::RetryFailure::retryable(error),
+            Self::Stream(error) => matches!(
+                error.kind(),
+                crate::HttpsSseProviderErrorKind::Transport
+                    | crate::HttpsSseProviderErrorKind::IncompleteStream
+            ),
+            Self::Stopped | Self::Storage | Self::Configuration => false,
+        }
+    }
+    fn retry_after(&self) -> Option<std::time::Duration> {
+        match self {
+            Self::Open(error) => error.retry_after(),
+            _ => None,
+        }
+    }
+    fn wait_for_connection(&self) -> bool {
+        match self {
+            Self::Open(error) => crate::request_retry::RetryFailure::wait_for_connection(error),
+            _ => false,
+        }
+    }
+}
+
+fn invoke_provider_attempt(
+    adapter: &crate::HttpsSseProviderAdapter,
+    open: &ModelOpenMessage,
+    secret: &crate::ResolvedSecret,
+    payload: &[u8],
+    provider_id: &str,
+    model_id: &str,
+) -> Result<Vec<ModelChunkMessage>, DeviceAttemptError> {
+    let adapter_request_id = format!("device-{}", open.model_exchange_id.0);
+    adapter
+        .open(
+            &ProviderAdapterInvocation {
+                model_exchange_id: &open.model_exchange_id,
+                request_id: &open.request_id,
+                adapter_request_id: &adapter_request_id,
+                model_id,
+                content_type: &open.request.content_type,
+                payload,
+            },
+            secret,
+        )
+        .map_err(DeviceAttemptError::Open)?;
+    let receipt = ProviderGatewayOpenReceipt {
+        model_exchange_id: open.model_exchange_id.clone(),
+        request_id: open.request_id.clone(),
+        route: ModelRoute {
+            provider_id: provider_id.to_owned(),
+            model_id: model_id.to_owned(),
+            credential_reference_id: CredentialReferenceId(format!(
+                "crd_0{}",
+                &format!("{:X}", Sha256::digest(provider_id.as_bytes()))[..25]
+            )),
+        },
+        adapter_request_id,
+        idempotent_replay: false,
+        stream_leak_gate: {
+            let mut gate = CredentialLeakGate::new();
+            gate.track_secret(secret);
+            gate
+        },
+    };
+    let completion = adapter.drain_canonical(&receipt);
+    let _ = adapter.control(
+        &open.model_exchange_id,
+        &receipt.adapter_request_id,
+        ProviderStreamControlAction::Release,
+    );
+    let completion = completion.map_err(DeviceAttemptError::Stream)?;
+    completion
+        .frames
+        .iter()
+        .map(|frame| {
+            let mut chunk = model_chunk(
+                open,
+                i64::try_from(frame.sequence()).map_err(|_| DeviceAttemptError::Storage)?,
+            );
+            chunk.payload = Some(frame.encoded_payload());
+            chunk.is_final = frame.is_terminal();
+            Ok(chunk)
+        })
+        .collect()
 }
 
 impl DeviceProviderStore {
@@ -85,6 +199,21 @@ impl DeviceProviderStore {
         can_start: impl Fn() -> bool,
     ) -> Result<Vec<ModelChunkMessage>, DeviceProviderError> {
         self.execute_model_with(open, &can_start, || self.invoke_model(open, &can_start))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn execute_model_using(
+        &self,
+        open: &ModelOpenMessage,
+        can_start: impl Fn() -> bool,
+        make_adapter: impl Fn(
+            &winwincode_api::generated::DeviceProviderConfig,
+            std::collections::BTreeMap<String, String>,
+        ) -> Result<crate::HttpsSseProviderAdapter, DeviceProviderError>,
+    ) -> Result<Vec<ModelChunkMessage>, DeviceProviderError> {
+        self.execute_model_with(open, &can_start, || {
+            self.invoke_model_using(open, &can_start, make_adapter)
+        })
     }
 
     /// Retains a bounded terminal failure when Provider admission storage is unavailable.
@@ -204,11 +333,26 @@ impl DeviceProviderStore {
         Ok(chunks)
     }
 
-    #[allow(clippy::too_many_lines)]
     fn invoke_model(
         &self,
         open: &ModelOpenMessage,
         can_start: &impl Fn() -> bool,
+    ) -> Result<Vec<ModelChunkMessage>, DeviceModelFailure> {
+        self.invoke_model_using(open, can_start, crate::device_store::adapter)
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one exchange prepares its input once and retains each physical attempt before delivery"
+    )]
+    fn invoke_model_using(
+        &self,
+        open: &ModelOpenMessage,
+        can_start: &impl Fn() -> bool,
+        make_adapter: impl Fn(
+            &winwincode_api::generated::DeviceProviderConfig,
+            std::collections::BTreeMap<String, String>,
+        ) -> Result<crate::HttpsSseProviderAdapter, DeviceProviderError>,
     ) -> Result<Vec<ModelChunkMessage>, DeviceModelFailure> {
         let mut payload =
             validated_model_payload(open).map_err(|_| DeviceModelFailure::RequestInvalid)?;
@@ -223,10 +367,12 @@ impl DeviceProviderStore {
             .and_then(serde_json::Value::as_str)
             .ok_or(DeviceModelFailure::RequestInvalid)?
             .to_owned();
-        let (config, secret) = self.resolve(&provider_id)?;
+        let config = self.provider_config(&provider_id)?;
         if !config.enabled || !config.model_ids.iter().any(|model| model == &model_id) {
             return Err(DeviceModelFailure::Unavailable);
         }
+        let binding =
+            self.bind_opencode_session(&open.session_identity.product_session_id, &provider_id)?;
         if request.get("winwincodeJevContext").is_some()
             || request.get("winwincodeJevTask").is_some()
         {
@@ -245,87 +391,147 @@ impl DeviceProviderStore {
             }
             payload = serde_json::to_vec(&request)?;
         }
-        let adapter = crate::device_store::adapter(&config, self.custom_headers(&provider_id)?)
-            .map_err(|_| DeviceModelFailure::InvalidConfiguration)?;
-        let adapter_request_id = format!("device-{}", open.model_exchange_id.0);
-        let adapter = match self.active_cancellation(&open.model_exchange_id.0)? {
-            Some(cancellation) => adapter.with_cancellation(cancellation),
-            None => return Err(DeviceModelFailure::Unavailable),
+        let (secret, headers) = match &binding {
+            Some(binding) => (
+                self.opencode_access(&binding.account_ref, can_start)?,
+                self.opencode_model_headers(binding)?,
+            ),
+            None => (
+                self.resolve(&provider_id)?.1,
+                self.custom_headers(&provider_id)?,
+            ),
         };
-        if self.model_cancelled(&open.model_exchange_id.0)? {
-            let _ = adapter.control(
-                &open.model_exchange_id,
-                &adapter_request_id,
-                ProviderStreamControlAction::Cancel,
-            );
-            return Ok(Vec::new());
-        }
-        let mut leak_gate = CredentialLeakGate::new();
-        leak_gate.track_secret(&secret);
+        let cancellation = self
+            .active_cancellation(&open.model_exchange_id.0)?
+            .ok_or(DeviceModelFailure::Unavailable)?;
         self.retain_prepared_payload(open, &payload)?;
-        if !can_start() {
-            return Err(DeviceModelFailure::LeaseExpired);
-        }
-        if let Err(error) = adapter.open(
-            &ProviderAdapterInvocation {
-                model_exchange_id: &open.model_exchange_id,
-                request_id: &open.request_id,
-                adapter_request_id: &adapter_request_id,
-                model_id: &model_id,
-                content_type: &open.request.content_type,
-                payload: &payload,
+        let retry = crate::request_retry::RequestRetry::new(4, open.model_exchange_id.0.as_bytes());
+        let result = retry.run_blocking(
+            || {
+                can_start()
+                    && !self
+                        .model_cancelled(&open.model_exchange_id.0)
+                        .unwrap_or(true)
             },
-            &secret,
-        ) {
-            return Ok(vec![model_failure(
-                open,
-                adapter_error_message(error.kind()),
-            )]);
-        }
-        drop(secret);
-        let receipt = ProviderGatewayOpenReceipt {
-            model_exchange_id: open.model_exchange_id.clone(),
-            request_id: open.request_id.clone(),
-            route: ModelRoute {
-                provider_id: provider_id.clone(),
-                model_id,
-                credential_reference_id: CredentialReferenceId(format!(
-                    "crd_0{}",
-                    &format!("{:X}", Sha256::digest(provider_id.as_bytes()))[..25]
-                )),
+            || DeviceAttemptError::Stopped,
+            |attempt| {
+                let adapter = make_adapter(&config, headers.clone())
+                    .map_err(|_| DeviceAttemptError::Configuration)?
+                    .with_cancellation(cancellation.clone());
+                if !can_start()
+                    || self
+                        .model_cancelled(&open.model_exchange_id.0)
+                        .unwrap_or(true)
+                {
+                    return Err(DeviceAttemptError::Stopped);
+                }
+                // Retain a possible paid attempt before its network side effect.
+                self.retain_model_attempt(open, attempt, "failed", None, None)
+                    .map_err(|_| DeviceAttemptError::Storage)?;
+                invoke_provider_attempt(&adapter, open, &secret, &payload, &provider_id, &model_id)
             },
-            adapter_request_id,
-            idempotent_replay: false,
-            stream_leak_gate: leak_gate,
-        };
-        let completion = adapter.drain_canonical(&receipt);
-        let _ = adapter.control(
-            &open.model_exchange_id,
-            &receipt.adapter_request_id,
-            ProviderStreamControlAction::Release,
+            |attempt, result| {
+                if matches!(
+                    result,
+                    Err(DeviceAttemptError::Configuration
+                        | DeviceAttemptError::Storage
+                        | DeviceAttemptError::Stopped)
+                ) {
+                    return Ok(());
+                }
+                if let Err(DeviceAttemptError::Open(error)) = result
+                    && crate::request_retry::RetryFailure::wait_for_connection(error)
+                {
+                    // The tracked socket was never established. Remove only this
+                    // provisional attempt; no HTTP request could have been sent.
+                    self.connection
+                        .execute(
+                            "DELETE FROM model_open_attempts WHERE exchange_id=?1 AND attempt=?2",
+                            params![open.model_exchange_id.0, attempt],
+                        )
+                        .map_err(|_| DeviceAttemptError::Storage)?;
+                    return Ok(());
+                }
+                let (outcome, status, retry_after) = match result {
+                    Ok(_) => ("accepted", None, None),
+                    Err(DeviceAttemptError::Open(error)) => (
+                        if error.http_status() == Some(429) {
+                            "rate_limited"
+                        } else {
+                            "failed"
+                        },
+                        error.http_status(),
+                        error.retry_after(),
+                    ),
+                    Err(_) => ("failed", None, None),
+                };
+                self.retain_model_attempt(open, attempt, outcome, status, retry_after)
+                    .map_err(|_| DeviceAttemptError::Storage)
+            },
         );
-        let completion = match completion {
-            Ok(completion) => completion,
-            Err(error) => {
-                return Ok(vec![model_failure(
+        match result {
+            Ok(chunks) => Ok(chunks),
+            Err(DeviceAttemptError::Open(error)) => {
+                if let Some(binding) = &binding {
+                    if error.http_status() == Some(401) {
+                        self.reject_opencode_access(&binding.account_ref, &secret)?;
+                        return Ok(vec![model_failure(
+                            open,
+                            "DEVICE_OPENCODE_REAUTHORIZATION_REQUIRED",
+                        )]);
+                    }
+                    if error.http_status() == Some(403) {
+                        return Ok(vec![model_failure(open, "DEVICE_OPENCODE_ACCESS_DENIED")]);
+                    }
+                }
+                Ok(vec![model_failure(
                     open,
-                    provider_error_message(error.kind()),
-                )]);
+                    adapter_error_message(error.kind()),
+                )])
             }
-        };
-        completion
-            .frames
-            .iter()
-            .map(|frame| {
-                let mut chunk = model_chunk(
-                    open,
-                    i64::try_from(frame.sequence()).map_err(|_| DeviceProviderError)?,
-                );
-                chunk.payload = Some(frame.encoded_payload());
-                chunk.is_final = frame.is_terminal();
-                Ok(chunk)
-            })
-            .collect()
+            Err(DeviceAttemptError::Stream(error)) => {
+                let mut failure = model_failure(open, provider_error_message(error.kind()));
+                if let (Some(diagnostic), Some(retained)) =
+                    (error.diagnostic(), failure.error.as_mut())
+                {
+                    retained.message.push_str("; ");
+                    retained.message.push_str(diagnostic);
+                }
+                Ok(vec![failure])
+            }
+            Err(DeviceAttemptError::Stopped) => Err(DeviceModelFailure::LeaseExpired),
+            Err(DeviceAttemptError::Storage) => Err(DeviceModelFailure::Unavailable),
+            Err(DeviceAttemptError::Configuration) => Err(DeviceModelFailure::InvalidConfiguration),
+        }
+    }
+
+    fn retain_model_attempt(
+        &self,
+        open: &ModelOpenMessage,
+        attempt: u32,
+        outcome: &str,
+        status: Option<u16>,
+        retry_after: Option<std::time::Duration>,
+    ) -> Result<(), DeviceProviderError> {
+        self.connection.execute(
+            "INSERT INTO model_open_attempts VALUES (?1,?2,?3,?4,?5) ON CONFLICT(exchange_id,attempt) DO UPDATE SET outcome=excluded.outcome,http_status=excluded.http_status,retry_after_seconds=excluded.retry_after_seconds",
+            params![open.model_exchange_id.0, attempt, outcome, status, retry_after.map(|v| v.as_secs().to_string())],
+        )?;
+        Ok(())
+    }
+
+    /// Reports whether this exact exchange has any unmeasured failed HTTP attempts.
+    /// Completed response usage is a lower bound when an earlier request failed.
+    /// # Errors
+    /// Rejects foreign exchange identity or unavailable retained attempt facts.
+    pub fn model_attempt_accounting_complete(
+        &self,
+        open: &ModelOpenMessage,
+    ) -> Result<bool, DeviceProviderError> {
+        if !self.model_start_recorded(open)? {
+            return Err(DeviceProviderError);
+        }
+        self.connection.query_row("SELECT NOT EXISTS(SELECT 1 FROM model_open_attempts WHERE exchange_id=?1 AND outcome='failed')", [&open.model_exchange_id.0], |row| row.get(0)).map_err(Into::into)
     }
 
     // Retain the exact adapter input before any network side effect. Prepared does

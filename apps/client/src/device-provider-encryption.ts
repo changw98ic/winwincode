@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type { DeviceProviderConfig, DeviceConfigurationEnvelope, DeviceProviderSnapshot } from './generated/contracts.js'
+import type { DeviceProviderConfig, DeviceConfigurationEnvelope, DeviceProviderSnapshot, DeviceProviderOpenCodeCommand } from './generated/contracts.js'
 
 export interface DeviceProviderMutation {
   readonly operation: 'save' | 'delete' | 'test'
@@ -18,7 +18,9 @@ export type DeviceExtensionMutation =
 
 type ConfigurationSnapshot = Pick<DeviceProviderSnapshot, 'clientNodeId' | 'revision' | 'encryptionPublicKey'>
 
-export function encryptDeviceProvider(snapshot: DeviceProviderSnapshot, requestId: string, mutation: DeviceProviderMutation, crypto: Crypto = globalThis.crypto): Promise<DeviceConfigurationEnvelope> {
+export type DeviceProviderCommand = DeviceProviderMutation | DeviceProviderOpenCodeCommand
+
+export function encryptDeviceProvider(snapshot: DeviceProviderSnapshot, requestId: string, mutation: DeviceProviderCommand, crypto: Crypto = globalThis.crypto): Promise<DeviceConfigurationEnvelope> {
   return encryptConfiguration('winwincode.device-provider.v1', snapshot, requestId, mutation, crypto)
 }
 export function encryptDeviceExtension(snapshot: ConfigurationSnapshot, requestId: string, mutation: DeviceExtensionMutation, crypto: Crypto = globalThis.crypto): Promise<DeviceConfigurationEnvelope> {
@@ -35,7 +37,7 @@ async function encryptConfiguration(
   context: string,
   snapshot: ConfigurationSnapshot,
   requestId: string,
-  mutation: DeviceProviderMutation | DeviceExtensionMutation | { readonly path: string; readonly confirmGitInit: boolean },
+  mutation: DeviceProviderCommand | DeviceExtensionMutation | { readonly path: string; readonly confirmGitInit: boolean },
   crypto: Crypto = globalThis.crypto,
 ): Promise<DeviceConfigurationEnvelope> {
   const encoder = new TextEncoder()

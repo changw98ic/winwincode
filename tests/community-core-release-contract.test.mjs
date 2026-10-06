@@ -7,7 +7,7 @@ import { resolve } from 'node:path'
 import Ajv2020 from 'ajv/dist/2020.js'
 
 const root = resolve(import.meta.dirname, '..')
-const contractPath = resolve(root, 'docs/decisions/0031-community-core-release.json')
+const contractPath = resolve(root, 'config/decisions/0031-community-core-release.json')
 const contract = JSON.parse(readFileSync(contractPath, 'utf8'))
 const schemaPath = resolve(root, contract.targetState.coreLockManifest.schemaPath)
 const schema = JSON.parse(readFileSync(schemaPath, 'utf8'))
@@ -176,7 +176,7 @@ test('every audited current source path exists in the repository', () => {
   for (const path of contract.currentState.currentSourcePaths) {
     assert.equal(existsSync(resolve(root, path)), true, `missing currentSourcePath: ${path}`)
   }
-  assert.equal(existsSync(resolve(root, 'scripts/build-community.mjs')), true)
+  assert.equal(existsSync(resolve(root, 'scripts/build/build-community.mjs')), true)
   assert.equal(existsSync(resolve(root, 'scripts/build-products.mjs')), false)
 })
 

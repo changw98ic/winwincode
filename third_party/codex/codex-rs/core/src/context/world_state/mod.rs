@@ -5,11 +5,12 @@ mod compact_permissions;
 mod context_window_guidance;
 mod environment;
 mod environments_instructions;
+mod managed_developer_instructions;
 mod model;
 mod multi_agent_mode;
 mod multi_agent_usage_hint;
 mod permissions;
-mod personality;
+mod persistent_mode;
 mod plugins_instructions;
 mod realtime;
 #[cfg(test)]
@@ -21,6 +22,7 @@ use codex_extension_api::PreviousWorldStateSection;
 use codex_extension_api::RenderedWorldStateFragment;
 use codex_extension_api::WorldStateSectionContribution;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::ContentItemKind;
 use codex_protocol::models::ResponseItem;
 use indexmap::IndexMap;
 use serde::Deserialize;
@@ -40,11 +42,14 @@ pub(crate) use compact_permissions::CompactPermissionsState;
 pub(crate) use context_window_guidance::ContextWindowGuidanceState;
 pub(crate) use environment::EnvironmentsState;
 pub(crate) use environments_instructions::EnvironmentsInstructionsState;
+pub(crate) use managed_developer_instructions::ManagedDeveloperInstructions;
+pub(crate) use managed_developer_instructions::ManagedDeveloperInstructionsState;
+pub(crate) use managed_developer_instructions::validate_managed_developer_instructions;
 pub(crate) use model::ModelInstructionsState;
 pub(crate) use multi_agent_mode::MultiAgentModeState;
 pub(crate) use multi_agent_usage_hint::MultiAgentUsageHintState;
 pub(crate) use permissions::PermissionsState;
-pub(crate) use personality::PersonalityState;
+pub(crate) use persistent_mode::PersistentModeState;
 pub(crate) use plugins_instructions::PluginsInstructionsState;
 pub(crate) use realtime::RealtimeState;
 pub(crate) use tools::ToolsState;
@@ -163,25 +168,35 @@ impl ErasedWorldStateSection for ExtensionWorldStateSection {
             PreviousSectionState::Unknown => PreviousWorldStateSection::Unknown,
             PreviousSectionState::Known(previous) => PreviousWorldStateSection::Known(previous),
         };
-        self.0
-            .render_diff(previous)
-            .map(|fragment| Box::new(WorldStateContextFragment(fragment)) as _)
+        self.0.render_diff(previous).map(|fragment| {
+            Box::new(WorldStateContextFragment {
+                fragment,
+                content_kind: ContentItemKind(format!("{}.instructions", self.0.id())),
+            }) as _
+        })
     }
 }
 
-struct WorldStateContextFragment(RenderedWorldStateFragment);
+struct WorldStateContextFragment {
+    fragment: RenderedWorldStateFragment,
+    content_kind: ContentItemKind,
+}
 
 impl ContextualUserFragment for WorldStateContextFragment {
+    fn content_kind(&self) -> ContentItemKind {
+        self.content_kind.clone()
+    }
+
     fn role(&self) -> &'static str {
-        self.0.role()
+        self.fragment.role()
     }
 
     fn markers(&self) -> (&'static str, &'static str) {
-        self.0.markers()
+        self.fragment.markers()
     }
 
     fn body(&self) -> String {
-        self.0.body().to_string()
+        self.fragment.body().to_string()
     }
 
     fn type_markers() -> (&'static str, &'static str) {
@@ -385,6 +400,7 @@ impl WorldState {
     }
 
     /// Renders each section against the exact persisted snapshot when available.
+    #[cfg(test)]
     pub(crate) fn render_diff(
         &self,
         previous: &WorldStateSnapshot,

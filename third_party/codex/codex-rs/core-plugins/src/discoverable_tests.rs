@@ -640,7 +640,7 @@ async fn omits_not_available_curated_plugins() {
 }
 
 #[tokio::test]
-async fn does_not_reload_marketplace_per_plugin() {
+async fn discovery_warns_once_per_invalid_manifest() {
     let codex_home = tempdir().expect("tempdir should succeed");
     let curated_root = curated_plugins_repo_path(codex_home.path());
     write_openai_curated_marketplace(&curated_root, &["slack", "gmail", "openai-developers"]);
@@ -697,12 +697,12 @@ async fn does_not_reload_marketplace_per_plugin() {
     let logs = String::from_utf8(buffer.lock().expect("buffer lock").clone())
         .expect("utf8 logs")
         .replace('\\', "/");
-    assert_eq!(logs.matches("ignoring interface.defaultPrompt").count(), 8);
-    assert_eq!(logs.matches("gmail/.codex-plugin/plugin.json").count(), 4);
+    assert_eq!(logs.matches("ignoring interface.defaultPrompt").count(), 2);
+    assert_eq!(logs.matches("gmail/.codex-plugin/plugin.json").count(), 1);
     assert_eq!(
         logs.matches("openai-developers/.codex-plugin/plugin.json")
             .count(),
-        4
+        1
     );
 }
 
@@ -946,12 +946,17 @@ plugins = true
     let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
     let mut plugins = load_plugins_config(codex_home.path(), codex_home.path()).await;
     plugins.chatgpt_base_url = format!("{}/backend-api", server.uri());
-    let plugins_manager = test_plugins_manager(codex_home.path().to_path_buf());
+    let plugins_manager = test_plugins_manager_with_options(
+        codex_home.path().to_path_buf(),
+        Some(Product::Codex),
+        Some(AuthMode::Chatgpt),
+    );
     fetch_and_cache_global_remote_plugin_catalog(
         codex_home.path(),
         &RemotePluginServiceConfig::new(
             plugins.chatgpt_base_url.clone(),
             crate::test_support::test_http_client_factory(),
+            /*product_sku*/ None,
         ),
         Some(&auth),
     )

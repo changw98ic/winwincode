@@ -8,7 +8,7 @@ import test from 'node:test'
 import {
   BenchmarkError,
   evaluateRealTaskBenchmark,
-} from '../scripts/evaluate-real-task-benchmark.mjs'
+} from '../scripts/benchmark/evaluate-real-task-benchmark.mjs'
 
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
 const canonicalId = (prefix, index) => `${prefix}_${index.toString(10).padStart(26, '0')}`

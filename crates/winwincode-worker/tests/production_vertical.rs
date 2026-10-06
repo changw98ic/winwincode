@@ -1976,9 +1976,9 @@ async fn benchmark_repeat_guard(cancel_after_trace: bool, reopen_before_outcome:
         let frames = [
             serde_json::json!({"type":"created"}),
             serde_json::json!({"type":"output_item_done", "item": {
-                "type":"function_call", "name":"shell_command", "namespace":"functions",
+                "type":"function_call", "name":"exec_command", "namespace":"functions",
                 "call_id":format!("repeat-call-{occurrence}"),
-                "arguments":serde_json::json!({"command":"cat src/lib.rs",
+                "arguments":serde_json::json!({"cmd":"cat src/lib.rs",
                     "workdir":detached_checkout(&root).to_string_lossy(), "sandbox_permissions":"use_default"}).to_string(),
             }}),
             serde_json::json!({"type":"completed", "responseId":format!("repeat-response-{occurrence}"),
@@ -2297,7 +2297,7 @@ fn delegated_structured_proposal_is_retained_once_without_terminal_outcome() {
         let checkout = detached_checkout(&root);
         let identity = ProviderToolIdentity::try_new(
             ProviderToolKind::Function,
-            "shell_command".to_owned(),
+            "exec_command".to_owned(),
             Some("functions".to_owned()),
         )
         .expect("canonical delegated shell tool");
@@ -2326,7 +2326,7 @@ fn delegated_structured_proposal_is_retained_once_without_terminal_outcome() {
                     index: 0,
                     provider_call_id: call_id.clone(),
                     delta: serde_json::json!({
-                        "command": "cat src/lib.rs",
+                        "cmd": "cat src/lib.rs",
                         "workdir": checkout.to_string_lossy(),
                         "justification": "read candidate source before proposing a ChangeBatch",
                         "sandbox_permissions": "use_default"
@@ -3816,7 +3816,12 @@ async fn poll_until_message<T>(
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    panic!("{context}");
+    let terminal = port
+        .messages()
+        .into_iter()
+        .rev()
+        .find(|message| matches!(message, ExecutionPortMessage::JobOutcomeMessage(_)));
+    panic!("{context}; terminal outcomes: {terminal:?}");
 }
 
 async fn poll_until_candidate_outcome(
@@ -4130,7 +4135,7 @@ async fn run_verification_work_run(root: &TestDirectory, role: &str, command: &s
     );
     let identity = ProviderToolIdentity::try_new(
         ProviderToolKind::Function,
-        "shell_command".to_owned(),
+        "exec_command".to_owned(),
         Some("functions".to_owned()),
     )
     .expect("canonical verification shell tool");
@@ -4159,7 +4164,7 @@ async fn run_verification_work_run(root: &TestDirectory, role: &str, command: &s
                 index: 0,
                 provider_call_id: call_id.clone(),
                 delta: serde_json::json!({
-                    "command": command,
+                    "cmd": command,
                     "workdir": checkout.to_string_lossy()
                 })
                 .to_string(),
@@ -6629,7 +6634,7 @@ fn real_shell_approval_and_action_receipt_reach_one_kernel_handler() {
         );
         let identity = ProviderToolIdentity::try_new(
             ProviderToolKind::Function,
-            "shell_command".to_owned(),
+            "exec_command".to_owned(),
             Some("functions".to_owned()),
         )
         .expect("canonical built-in shell tool");
@@ -6659,7 +6664,7 @@ fn real_shell_approval_and_action_receipt_reach_one_kernel_handler() {
                     index: 0,
                     provider_call_id: call_id.clone(),
                     delta: serde_json::json!({
-                        "command": command,
+                        "cmd": command,
                         "workdir": checkout.to_string_lossy(),
                         "justification": "exercise the canonical approval path",
                         "sandbox_permissions": "require_escalated"

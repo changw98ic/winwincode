@@ -1250,6 +1250,12 @@ impl ExecutionPortModelBridge {
                     .retain_jev_performance(&owner.run_key, &receipt, received_at)
                     .map_err(model_frame_store_error)?;
             }
+            if !device
+                .model_attempt_accounting_complete(&open)
+                .map_err(|_| BridgeError::Unavailable)?
+            {
+                return Err(BridgeError::Unavailable);
+            }
         }
         Ok(())
     }
@@ -3010,6 +3016,11 @@ mod tests {
         assert_jev_receipt_faults(&["pending"]).await;
     }
 
+    #[tokio::test]
+    async fn successful_model_retry_keeps_usage_a_lower_bound_after_replay_and_restart() {
+        assert_jev_receipt_faults(&["primary-retry"]).await;
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "Exercise receipt faults through the real bridge, Device store and restart"
@@ -3085,6 +3096,7 @@ mod tests {
                 "partial" => store.lock().unwrap().execute_batch("CREATE TRIGGER deny_jev BEFORE INSERT ON performance_jev_receipt WHEN substr(NEW.operation_id,-2)=':1' BEGIN SELECT RAISE(FAIL,'second receipt unavailable'); END;").unwrap(),
                 "source" => { db.execute("UPDATE jev_context_exchanges SET result='corrupt'", []).unwrap(); },
                 "pending" => store.lock().unwrap().execute_batch("CREATE TRIGGER deny_primary_completion BEFORE UPDATE ON performance_operation BEGIN SELECT RAISE(FAIL,'optional completion unavailable'); END;").unwrap(),
+                "primary-retry" => { db.execute("INSERT INTO model_open_attempts VALUES (?1,1,'failed',NULL,NULL),(?1,2,'accepted',NULL,NULL)", [&open.model_exchange_id.0]).unwrap(); },
                 "none" => {},
                 _ => unreachable!(),
             }
@@ -3125,7 +3137,7 @@ mod tests {
             assert_eq!(
                 imported,
                 match fault {
-                    "none" | "pending" => 2,
+                    "none" | "pending" | "primary-retry" => 2,
                     "partial" => 1,
                     _ => 0,
                 }
@@ -3140,7 +3152,7 @@ mod tests {
                 fault == "none",
                 "{fault}: missing receipts must not open token budgets"
             );
-            if fault == "none" {
+            if matches!(fault, "none" | "primary-retry") {
                 assert_eq!(totals.total_tokens, 115);
             }
             assert!(

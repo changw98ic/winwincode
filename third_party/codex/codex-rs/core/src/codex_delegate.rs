@@ -1,16 +1,15 @@
 use std::sync::Arc;
 
+use crate::session::Submission;
 use async_channel::Receiver;
 use async_channel::Sender;
 use codex_async_utils::OrCancelExt;
-use codex_extension_api::LoadedUserInstructions;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
-use codex_protocol::protocol::Submission;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::user_input::UserInput;
 use serde_json::Value;
@@ -56,6 +55,7 @@ pub(crate) async fn run_codex_thread_interactive(
     parent_environments: TurnEnvironmentSnapshot,
     cancel_token: CancellationToken,
     subagent_source: SubAgentSource,
+    isolation: codex_extension_api::SessionIsolation,
     initial_history: Option<InitialHistory>,
     git_enrichment_policy: GitEnrichmentPolicy,
     windows_sandbox_proxy_settings_mode: codex_sandboxing::WindowsSandboxProxySettingsMode,
@@ -71,27 +71,27 @@ pub(crate) async fn run_codex_thread_interactive(
         .model_client
         .responses_websocket_enabled();
 
-    let (tx_sub, rx_sub) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
-    let (tx_ops, rx_ops) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
     let conversation_history = initial_history.unwrap_or(InitialHistory::New);
     let forked_from_thread_id = conversation_history.forked_from_id();
-    let user_instructions = LoadedUserInstructions {
-        instructions: parent_session.user_instructions().await,
-        warnings: Vec::new(),
-    };
+    let instructions = parent_session.inherited_instructions().await;
     let session_source = SessionSource::SubAgent(subagent_source.clone());
-    let extensions = if crate::guardian::is_guardian_reviewer_source(&session_source) {
+    let is_guardian_reviewer = crate::guardian::is_basic_session_source(&session_source);
+    let extensions = if isolation == codex_extension_api::SessionIsolation::Isolated {
         codex_extension_api::empty_extension_registry()
     } else {
         Arc::clone(&parent_session.services.extensions)
     };
-    let (session, io) = Box::pin(Session::spawn(SessionSpawnArgs {
+    let mut thread_extension_init = codex_extension_api::ExtensionDataInit::default();
+    thread_extension_init.insert(isolation);
+    let (session, io) = Session::spawn(SessionSpawnArgs {
+        startup: None,
         config,
         allow_provider_model_fallback: false,
-        user_instructions,
+        instructions,
         installation_id: parent_session.installation_id.clone(),
         auth_manager,
         models_manager,
+        git_root_discovery: Arc::clone(&parent_session.services.git_root_discovery),
         model_stream_transport: parent_session
             .services
             .model_client
@@ -106,14 +106,22 @@ pub(crate) async fn run_codex_thread_interactive(
         code_mode_session_provider: parent_session.services.code_mode_service.session_provider(),
         extensions,
         conversation_history,
+        disabled_plugin_ids: None,
         requested_history_mode: None,
         fork_persistence: ForkPersistence::Copied,
         session_source,
         forked_from_thread_id,
         parent_thread_id: Some(parent_session.thread_id),
-        thread_source: Some(ThreadSource::Subagent),
+        thread_source: Some(if is_guardian_reviewer {
+            ThreadSource::GuardianReview
+        } else {
+            ThreadSource::Subagent
+        }),
         originator: parent_ctx.originator.clone(),
-        agent_control: parent_session.services.agent_control.clone(),
+        agent_control: crate::agent::control::AgentControlInit::Provided {
+            control: Arc::clone(&parent_session.services.agent_control),
+            runtime: parent_session.services.local_agent_runtime.clone(),
+        },
         dynamic_tools: Vec::new(),
         metrics_service_name: None,
         user_shell_override: None,
@@ -122,23 +130,24 @@ pub(crate) async fn run_codex_thread_interactive(
         parent_rollout_thread_trace: codex_rollout_trace::ThreadTraceContext::disabled(),
         parent_trace: None,
         environment_selections: parent_environments.to_selections(),
-        thread_extension_init: codex_extension_api::ExtensionDataInit::default(),
+        thread_extension_init,
         client_mcp_extensions: parent_session.services.client_mcp_extensions.clone(),
         reserved_thread_id: None,
         analytics_events_client: Some(parent_session.services.analytics_events_client.clone()),
+        image_store: Arc::clone(&parent_session.services.image_store),
         thread_store: Arc::clone(&parent_session.services.thread_store),
         attestation_provider: parent_session.services.attestation_provider.clone(),
         external_time_provider: Some(Arc::clone(&parent_session.services.time_provider)),
         inherited_multi_agent_version: Some(MultiAgentVersion::Disabled),
         git_enrichment_policy,
         windows_sandbox_proxy_settings_mode,
-    }))
+    })
     .or_cancel(&cancel_token)
     .await??;
     let thread_config = session.thread_config_snapshot().await;
     let client_metadata = parent_session.app_server_client_metadata().await;
     emit_subagent_session_started(
-        &parent_session.services.analytics_events_client,
+        &session.services.analytics_events_client,
         client_metadata,
         session.session_id(),
         session.thread_id(),
@@ -146,12 +155,18 @@ pub(crate) async fn run_codex_thread_interactive(
         thread_config,
         subagent_source,
     );
+    Ok((session, forward_session_io(Arc::new(io), cancel_token)))
+}
+
+/// Keeps delegate IO cancellation identical for standalone and manager-owned reviewers.
+pub(crate) fn forward_session_io(io: Arc<SessionIo>, cancel_token: CancellationToken) -> SessionIo {
+    let (tx_sub, rx_sub) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
+    let (tx_ops, rx_ops) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
     // Use a child token so parent cancel cascades but we can scope it to this task
     let cancel_token_events = cancel_token.child_token();
     let cancel_token_ops = cancel_token.child_token();
 
     // Forward public events from the sub-agent to the consumer.
-    let io = Arc::new(io);
     let caller_io = SessionIo {
         tx_sub: tx_ops,
         rx_event: rx_sub,
@@ -168,7 +183,7 @@ pub(crate) async fn run_codex_thread_interactive(
         forward_ops(io, rx_ops, cancel_token_ops).await;
     });
 
-    Ok((session, caller_io))
+    caller_io
 }
 
 /// Convenience wrapper for one-time use with an initial prompt.
@@ -191,7 +206,7 @@ pub(crate) async fn run_codex_thread_one_shot(
     // requiring the caller to cancel the parent token.
     let child_cancel = cancel_token.child_token();
     let parent_turn_id = parent_ctx.sub_id.clone();
-    let parent_environments = parent_ctx.environments.clone();
+    let parent_environments = parent_ctx.initial_environments.clone();
     let root_turn_id = parent_ctx.turn_metadata_state.root_turn_id();
     let (session, io) = Box::pin(run_codex_thread_interactive(
         config,
@@ -202,6 +217,7 @@ pub(crate) async fn run_codex_thread_one_shot(
         parent_environments,
         child_cancel.clone(),
         subagent_source,
+        codex_extension_api::SessionIsolation::Inherit,
         initial_history,
         GitEnrichmentPolicy::Fresh,
         codex_sandboxing::WindowsSandboxProxySettingsMode::Reconcile,
@@ -213,9 +229,11 @@ pub(crate) async fn run_codex_thread_one_shot(
         .submit_turn_input(
             TurnInputRequest::user_input(input).on_start(TurnStartOptions {
                 final_output_json_schema,
+                service_tier: None,
                 submit_change_batch: false,
                 parent_turn_id: Some(parent_turn_id),
                 root_turn_id,
+                ..Default::default()
             }),
             TurnInputMode::StartIfIdle,
         )
@@ -250,6 +268,7 @@ pub(crate) async fn run_codex_thread_one_shot(
                         trace: None,
                         parent_turn_id: None,
                         root_turn_id: None,
+                        residency_guard: None,
                     })
                     .await;
                 child_cancel.cancel();

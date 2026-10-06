@@ -6,7 +6,7 @@
 //! The Control Plane is the authoritative owner of client occupancy (ADR-0030,
 //! plan 6): it atomically judges the five-condition claim gate, mints the
 //! strictly monotonic occupancy fencing tokens, and drives the frozen lease
-//! state machine of `docs/contracts/client-control-state-machines.md`
+//! state machine of `config/contracts/client-control-state-machines.md`
 //! contract 4. The Device Client executes occupancy locally: only its ACK of
 //! the exact lease and token promotes `reserving -> occupied`, and stale
 //! tokens are rejected forever.

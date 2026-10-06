@@ -4,15 +4,9 @@ import { join, resolve } from 'node:path'
 import test from 'node:test'
 
 const root = resolve(import.meta.dirname, '..')
-const contractPath = join(
-  root,
-  'docs',
-  'contracts',
-  'delivery-evidence-verdict-rework.md',
-)
 const rulesPath = join(
   root,
-  'docs',
+  'config',
   'contracts',
   'delivery-evidence-verdict-rework.rules.json',
 )
@@ -286,19 +280,6 @@ test('phase 2.4 rules freeze candidate, evidence, verdict, and rework behavior',
 
     assert.match(rule.rust.module, /^domain\/(?:candidate|evidence|rework|verdict|verification)\.rs$/u)
     assert.match(rule.rust.testName, /^[a-z][a-z0-9_]+$/u)
-  }
-})
-
-test('plain-language phase 2.4 contract and machine rules stay paired', () => {
-  const contract = readFileSync(contractPath, 'utf8')
-  const rules = json(rulesPath)
-  assert.match(contract, /^# Rust Delivery 候选、证据、结论与返工合同$/mu)
-  assert.match(contract, /缺少必需 Session.*`inconclusive`/u)
-  assert.match(contract, /运行环境失败.*`infra_error`/u)
-  assert.match(contract, /失败的测试.*不能.*`pass`/u)
-  assert.match(contract, /ProductSession.*WorkerSession.*CodexThread/u)
-  for (const rule of rules.rules) {
-    assert.equal(contract.includes(`\`${rule.id}\``), true, `${rule.id} is absent from the prose`)
   }
 })
 

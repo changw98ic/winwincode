@@ -8,7 +8,7 @@
 //! the derived `ClientAccessGrant`, revocation and refresh, temporary-grant
 //! expiry judgement, and the fixed-window connect attempt counters that
 //! throttle the user, IP, and Client dimensions. Semantics follow the frozen
-//! state machine in `docs/contracts/client-control-state-machines.md`
+//! state machine in `config/contracts/client-control-state-machines.md`
 //! (contracts 2 and 3).
 
 use std::fmt;

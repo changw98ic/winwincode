@@ -6,6 +6,7 @@
 //! authenticated response body rather than the Credential, and converts its
 //! bounded Provider-neutral SSE stream through the canonical stream converter.
 
+use crate::request_retry::retry_after_delay;
 use std::{
     collections::BTreeMap,
     fmt,
@@ -372,16 +373,24 @@ pub enum HttpsSseProviderErrorKind {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HttpsSseProviderError {
     kind: HttpsSseProviderErrorKind,
+    diagnostic: Option<String>,
 }
 
 impl HttpsSseProviderError {
     const fn new(kind: HttpsSseProviderErrorKind) -> Self {
-        Self { kind }
+        Self {
+            kind,
+            diagnostic: None,
+        }
     }
 
     #[must_use]
     pub const fn kind(&self) -> HttpsSseProviderErrorKind {
         self.kind
+    }
+
+    pub(crate) fn diagnostic(&self) -> Option<&str> {
+        self.diagnostic.as_deref()
     }
 
     /// Produces the stable terminal fact used when an accepted stream breaks.
@@ -499,6 +508,26 @@ enum StreamState {
 }
 
 impl HttpsSseProviderAdapter {
+    #[cfg(test)]
+    pub(crate) fn open_with_backoff(
+        &self,
+        invocation: &ProviderAdapterInvocation<'_>,
+        credential: &ResolvedSecret,
+        can_start: impl Fn() -> bool,
+        retain_attempt: impl FnMut(
+            u32,
+            &Result<ProviderAdapterOpenReceipt, ProviderAdapterError>,
+        ) -> Result<(), ProviderAdapterError>,
+    ) -> Result<ProviderAdapterOpenReceipt, ProviderAdapterError> {
+        crate::request_retry::RequestRetry::new(4, invocation.adapter_request_id().as_bytes())
+            .run_blocking(
+                can_start,
+                ProviderAdapterError::rejected,
+                |_| self.open(invocation, credential),
+                retain_attempt,
+            )
+    }
+
     fn agent(
         config: &HttpsSseProviderConfig,
         io: Arc<crate::provider_transport::ExchangeIo>,
@@ -634,7 +663,7 @@ impl HttpsSseProviderAdapter {
                     tool_bindings,
                     options,
                 )
-                .map_err(map_anthropic_response)?;
+                .map_err(|error| map_anthropic_response(&error))?;
                 (parsed.events, parsed.terminal)
             }
             HttpsSseProviderProtocol::OpenAiChatCompletions(options) => {
@@ -645,7 +674,7 @@ impl HttpsSseProviderAdapter {
                     tool_bindings,
                     options,
                 )
-                .map_err(map_anthropic_response)?;
+                .map_err(|error| map_anthropic_response(&error))?;
                 (parsed.events, parsed.terminal)
             }
         };
@@ -706,9 +735,15 @@ impl HttpsSseProviderAdapter {
                     HttpsSseProviderErrorKind::Transport,
                 ));
             }
-            let read = reader
-                .read(&mut buffer)
-                .map_err(|_| HttpsSseProviderError::new(HttpsSseProviderErrorKind::Transport))?;
+            let read = reader.read(&mut buffer).map_err(|error| {
+                let mut retained = HttpsSseProviderError::new(HttpsSseProviderErrorKind::Transport);
+                retained.diagnostic = Some(format!(
+                    "stage=response_read;io={:?};bytes={}",
+                    error.kind(),
+                    bytes.len()
+                ));
+                retained
+            })?;
             if read == 0 {
                 return Ok(bytes);
             }
@@ -949,7 +984,7 @@ impl HttpsSseProviderAdapter {
             HttpsSseProviderProtocol::Canonical => None,
             HttpsSseProviderProtocol::AnthropicMessages(options) => Some(
                 prepare_anthropic_request(invocation.payload, invocation.model_id, options)
-                    .map_err(map_anthropic_request)?,
+                    .map_err(|error| map_anthropic_request(&error))?,
             ),
             HttpsSseProviderProtocol::OpenAiChatCompletions(options) => Some(
                 crate::provider_openai::prepare_openai_chat_request(
@@ -957,7 +992,7 @@ impl HttpsSseProviderAdapter {
                     invocation.model_id,
                     options,
                 )
-                .map_err(map_anthropic_request)?,
+                .map_err(|error| map_anthropic_request(&error))?,
             ),
         };
         let tool_bindings = prepared
@@ -1003,22 +1038,29 @@ impl HttpsSseProviderAdapter {
         };
         let response = request.send(payload);
         drop(authorization);
-        let Ok(response) = response else {
-            self.abandon_retryable_open(invocation)?;
-            return Err(ProviderAdapterError::connection());
-        };
+        let response = response.map_err(|error| {
+            if !io.is_cancelled() {
+                let _ = self.abandon_retryable_open(invocation);
+            }
+            classify_open_transport(&error, &io)
+        })?;
         let status = response.status().as_u16();
-        if status == 429 {
+        if status == 429 || (500..=599).contains(&status) {
+            let retry_after = response
+                .headers()
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| retry_after_delay(value, time::OffsetDateTime::now_utc()));
             self.abandon_retryable_open(invocation)?;
-            return Err(ProviderAdapterError::rate_limited());
-        }
-        if (500..=599).contains(&status) {
-            self.abandon_retryable_open(invocation)?;
-            return Err(ProviderAdapterError::upstream());
+            return Err(if status == 429 {
+                ProviderAdapterError::rate_limited_after(retry_after)
+            } else {
+                ProviderAdapterError::upstream_after(status, retry_after)
+            });
         }
         if !(200..=299).contains(&status) {
             self.finish_open(invocation, StreamState::Fenced)?;
-            return Err(ProviderAdapterError::rejected());
+            return Err(ProviderAdapterError::rejected_status(status));
         }
         if !response
             .headers()
@@ -1032,6 +1074,21 @@ impl HttpsSseProviderAdapter {
         io.body_started();
         self.finish_open(invocation, StreamState::Open(Some(response.into_body())))?;
         ProviderAdapterOpenReceipt::try_new(invocation.adapter_request_id.to_owned())
+    }
+}
+
+fn classify_open_transport(
+    error: &ureq::Error,
+    io: &crate::provider_transport::ExchangeIo,
+) -> ProviderAdapterError {
+    if io.is_cancelled() {
+        ProviderAdapterError::rejected()
+    } else if crate::provider_transport::wait_for_connection(error, io) {
+        ProviderAdapterError::connection_not_sent()
+    } else if crate::provider_transport::transient_transport(error) {
+        ProviderAdapterError::connection()
+    } else {
+        ProviderAdapterError::protocol()
     }
 }
 
@@ -1585,7 +1642,7 @@ fn map_anthropic_configuration(
 }
 
 fn map_anthropic_request(
-    error: crate::provider_anthropic::AnthropicCodecError,
+    error: &crate::provider_anthropic::AnthropicCodecError,
 ) -> ProviderAdapterError {
     match error.kind() {
         AnthropicCodecErrorKind::InvalidRequest => ProviderAdapterError::request_invalid(),
@@ -1597,16 +1654,18 @@ fn map_anthropic_request(
 }
 
 fn map_anthropic_response(
-    error: crate::provider_anthropic::AnthropicCodecError,
+    error: &crate::provider_anthropic::AnthropicCodecError,
 ) -> HttpsSseProviderError {
-    HttpsSseProviderError::new(match error.kind() {
+    let mut mapped = HttpsSseProviderError::new(match error.kind() {
         AnthropicCodecErrorKind::InvalidRequest | AnthropicCodecErrorKind::Protocol => {
             HttpsSseProviderErrorKind::SseEvent
         }
         AnthropicCodecErrorKind::InvalidSse => HttpsSseProviderErrorKind::SseFraming,
         AnthropicCodecErrorKind::IncompleteStream => HttpsSseProviderErrorKind::IncompleteStream,
         AnthropicCodecErrorKind::SizeLimit => HttpsSseProviderErrorKind::SizeLimit,
-    })
+    });
+    mapped.diagnostic = error.diagnostic().map(str::to_owned);
+    mapped
 }
 
 fn invocation_digest(invocation: HttpInvocation<'_>) -> [u8; 32] {
@@ -1717,6 +1776,7 @@ mod tests {
         endpoint: String,
         certificate_der: Vec<u8>,
         requests: mpsc::Receiver<Vec<u8>>,
+        ready: mpsc::Receiver<()>,
         server: thread::JoinHandle<()>,
     }
 
@@ -1726,6 +1786,14 @@ mod tests {
         }
 
         fn start_streaming(responses: Vec<TestResponse>, chunk_delay: Duration) -> Self {
+            Self::start_gated(responses, chunk_delay, None)
+        }
+
+        fn start_gated(
+            responses: Vec<TestResponse>,
+            chunk_delay: Duration,
+            gate: Option<mpsc::Receiver<()>>,
+        ) -> Self {
             let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
             let CertifiedKey { cert, signing_key } =
                 generate_simple_self_signed(vec!["localhost".to_owned()])
@@ -1738,8 +1806,20 @@ mod tests {
                 .expect("build TLS fixture server config");
             let listener = TcpListener::bind("127.0.0.1:0").expect("bind TLS fixture");
             let address = listener.local_addr().expect("TLS fixture address");
+            let listener = if gate.is_some() {
+                drop(listener);
+                None
+            } else {
+                Some(listener)
+            };
             let (request_tx, requests) = mpsc::channel();
+            let (ready_tx, ready) = mpsc::channel();
             let server = thread::spawn(move || {
+                let listener = listener.unwrap_or_else(|| {
+                    gate.unwrap().recv().unwrap();
+                    TcpListener::bind(address).unwrap()
+                });
+                ready_tx.send(()).unwrap();
                 let config = Arc::new(config);
                 for response in responses {
                     let (socket, _) = listener.accept().expect("accept TLS request");
@@ -1756,6 +1836,7 @@ mod tests {
                 endpoint: format!("https://localhost:{}/v1/model", address.port()),
                 certificate_der: cert.der().to_vec(),
                 requests,
+                ready,
                 server,
             }
         }
@@ -1851,6 +1932,9 @@ mod tests {
         response: &TestResponse,
         chunk_delay: Duration,
     ) {
+        if response.status.is_empty() {
+            return;
+        }
         if write!(
             stream,
             "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -2023,7 +2107,7 @@ mod tests {
                     .err()
                     .unwrap();
             for error in [anthropic, openai] {
-                assert_eq!(map_anthropic_response(error).kind(), expected);
+                assert_eq!(map_anthropic_response(&error).kind(), expected);
             }
         }
     }
@@ -2519,6 +2603,565 @@ mod tests {
     }
 
     #[test]
+    fn auth_rejection_retains_only_status_and_fences_the_original_open() {
+        for (status, expected) in [("401 Unauthorized", 401), ("403 Forbidden", 403)] {
+            let fixture = TlsFixture::start(vec![TestResponse {
+                status,
+                content_type: "application/json",
+                body: "upstream-secret-never-diagnostic",
+                declared_length: None,
+                delay: Duration::ZERO,
+            }]);
+            let adapter = HttpsSseProviderAdapter::try_new(config(&fixture)).unwrap();
+            let exchange = ModelExchangeId("mdl_00000000000000000000000001".into());
+            let request_id = RequestId("req_00000000000000000000000001".into());
+            let error = adapter
+                .open_https(invocation(&exchange, &request_id), SECRET)
+                .unwrap_err();
+            assert_eq!(error.kind(), crate::ProviderAdapterErrorKind::Rejected);
+            assert_eq!(error.http_status(), Some(expected));
+            assert!(!format!("{error:?}").contains("upstream-secret"));
+            let replay = adapter
+                .open_https(invocation(&exchange, &request_id), SECRET)
+                .unwrap_err();
+            assert_eq!(replay.http_status(), None);
+            assert_eq!(fixture.finish().len(), 1);
+        }
+    }
+
+    #[test]
+    fn retry_after_accepts_seconds_and_http_date() {
+        let now = time::OffsetDateTime::from_unix_timestamp(0).unwrap();
+        assert_eq!(retry_after_delay("12", now), Some(Duration::from_secs(12)));
+        assert_eq!(
+            retry_after_delay("Thu, 01 Jan 1970 00:01:00 GMT", now),
+            Some(Duration::from_mins(1))
+        );
+        assert_eq!(retry_after_delay("provider-secret", now), None);
+        assert_eq!(
+            retry_after_delay("Wed, 31 Dec 1969 23:59:00 GMT", now),
+            Some(Duration::ZERO)
+        );
+    }
+
+    #[test]
+    fn explicit_rate_limit_retries_same_identity_and_retains_each_attempt() {
+        let fixture = TlsFixture::start(vec![
+            TestResponse {
+                status: "429 Too Many Requests",
+                content_type: "application/json\r\nRetry-After: 0",
+                body: "secret-not-retained",
+                declared_length: None,
+                delay: Duration::ZERO,
+            },
+            TestResponse {
+                status: "200 OK",
+                content_type: "text/event-stream",
+                body: successful_sse(),
+                declared_length: None,
+                delay: Duration::ZERO,
+            },
+        ]);
+        let adapter = HttpsSseProviderAdapter::try_new(config(&fixture)).unwrap();
+        let exchange = ModelExchangeId("mdl_00000000000000000000000002".to_owned());
+        let request = RequestId("req_00000000000000000000000002".to_owned());
+        let invocation = invocation(&exchange, &request);
+        let invocation = ProviderAdapterInvocation {
+            model_exchange_id: invocation.model_exchange_id,
+            request_id: invocation.request_id,
+            adapter_request_id: invocation.adapter_request_id,
+            model_id: invocation.model_id,
+            content_type: invocation.content_type,
+            payload: invocation.payload,
+        };
+        let mut attempts = Vec::new();
+        let result = adapter.open_with_backoff(
+            &invocation,
+            &ResolvedSecret::from_bytes(SECRET.to_vec()).unwrap(),
+            || true,
+            |n, result| {
+                attempts.push((n, result.as_ref().err().map(ProviderAdapterError::kind)));
+                Ok(())
+            },
+        );
+        assert!(
+            result.is_ok(),
+            "an explicit rejection can retry safely: {result:?}"
+        );
+        assert_eq!(attempts.len(), 2);
+        let requests = fixture.finish();
+        assert_eq!(requests.len(), 2);
+        for request in requests {
+            assert!(contains_ascii_case_insensitive(
+                &request,
+                b"Idempotency-Key: pad_00000000000000000000000001"
+            ));
+        }
+    }
+
+    fn native_retry_store(
+        fixture: &TlsFixture,
+        label: &str,
+    ) -> (
+        crate::DeviceProviderStore,
+        winwincode_execution_port::generated::ModelOpenMessage,
+        std::path::PathBuf,
+    ) {
+        use base64::Engine as _;
+        let root = std::env::temp_dir().join(format!(
+            "wwc-native-retry-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = crate::DeviceProviderStore::open(&root).unwrap();
+        let provider = serde_json::json!({"providerId":"provider-https-fixture","displayName":"Retry fixture","endpoint":fixture.endpoint,"protocol":"canonical","modelIds":["fixture-model"],"enabled":true});
+        store
+            .connection
+            .execute(
+                "INSERT INTO providers VALUES (?1,?2,?3)",
+                rusqlite::params!["provider-https-fixture", provider.to_string(), SECRET],
+            )
+            .unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/contracts/execution-port.valid.json"
+        ))
+        .unwrap();
+        let mut open: winwincode_execution_port::generated::ModelOpenMessage =
+            serde_json::from_value(
+                fixture["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|v| v["kind"] == "model.open")
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap();
+        let payload = serde_json::to_vec(&serde_json::json!({"provider":"provider-https-fixture","request":{"model":"fixture-model"}})).unwrap();
+        open.request.content_type = "application/json".into();
+        open.request.data_base64 = base64::engine::general_purpose::STANDARD.encode(&payload);
+        open.request.payload_digest.0 = format!("sha256:{:x}", Sha256::digest(payload));
+        (store, open, root)
+    }
+
+    #[test]
+    fn offline_connection_waits_for_recovery_without_consuming_http_attempt_limit() {
+        let (release, gate) = mpsc::channel();
+        let fixture = TlsFixture::start_gated(
+            vec![TestResponse {
+                status: "200 OK",
+                content_type: "text/event-stream",
+                body: successful_sse(),
+                declared_length: None,
+                delay: Duration::ZERO,
+            }],
+            Duration::ZERO,
+            Some(gate),
+        );
+        let adapter = HttpsSseProviderAdapter::try_new(config(&fixture)).unwrap();
+        let exchange = ModelExchangeId("mdl_00000000000000000000000002".into());
+        let request = RequestId("req_00000000000000000000000002".into());
+        let input = invocation(&exchange, &request);
+        let input = ProviderAdapterInvocation {
+            model_exchange_id: input.model_exchange_id,
+            request_id: input.request_id,
+            adapter_request_id: input.adapter_request_id,
+            model_id: input.model_id,
+            content_type: input.content_type,
+            payload: input.payload,
+        };
+        let mut recorded = Vec::new();
+        let result = crate::request_retry::RequestRetry::new(1, b"offline request").run_blocking(
+            || true,
+            ProviderAdapterError::rejected,
+            |_| {
+                adapter.open(
+                    &input,
+                    &ResolvedSecret::from_bytes(SECRET.to_vec()).unwrap(),
+                )
+            },
+            |attempt, result| {
+                recorded.push(attempt);
+                if result.is_err() {
+                    release.send(()).unwrap();
+                    fixture.ready.recv().unwrap();
+                }
+                Ok(())
+            },
+        );
+        assert!(
+            result.is_ok(),
+            "an unavailable connection must keep waiting despite the one-request cap"
+        );
+        assert_eq!(recorded, [1, 1]);
+        assert_eq!(
+            fixture.finish().len(),
+            1,
+            "no HTTP request was sent while disconnected"
+        );
+    }
+
+    #[test]
+    fn native_model_connection_recovery_retains_only_the_sent_http_attempt() {
+        let (release, gate) = mpsc::channel();
+        let fixture = TlsFixture::start_gated(
+            vec![TestResponse {
+                status: "200 OK",
+                content_type: "text/event-stream",
+                body: successful_sse(),
+                declared_length: None,
+                delay: Duration::ZERO,
+            }],
+            Duration::ZERO,
+            Some(gate),
+        );
+        let (store, open, root) = native_retry_store(&fixture, "connection-recovery");
+        let adapters = std::cell::Cell::new(0);
+        let chunks = store
+            .execute_model_using(
+                &open,
+                || true,
+                |_, _| {
+                    adapters.set(adapters.get() + 1);
+                    if adapters.get() == 2 {
+                        release.send(()).unwrap();
+                        fixture.ready.recv().unwrap();
+                    }
+                    HttpsSseProviderAdapter::try_new(config(&fixture))
+                        .map_err(|_| crate::DeviceProviderError)
+                },
+            )
+            .unwrap();
+        assert_eq!(adapters.get(), 2);
+        assert!(chunks.iter().all(|chunk| chunk.error.is_none()));
+        let attempts: i64 = store
+            .connection
+            .query_row("SELECT count(*) FROM model_open_attempts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(attempts, 1);
+        assert!(store.model_attempt_accounting_complete(&open).unwrap());
+        assert_eq!(fixture.finish().len(), 1);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_model_retries_received_request_without_response_and_truncated_stream() {
+        use base64::Engine as _;
+        for (label, status, body, declared_length) in [
+            ("no-response", "", "", None),
+            ("truncated-http", "200 OK", "data: incomplete", Some(1000)),
+            (
+                "incomplete-sse",
+                "200 OK",
+                "data: {\"type\":\"response.started\",\"responseId\":\"partial\"}\n\n",
+                None,
+            ),
+        ] {
+            let fixture = TlsFixture::start(vec![
+                TestResponse {
+                    status,
+                    content_type: "text/event-stream",
+                    body,
+                    declared_length,
+                    delay: Duration::ZERO,
+                },
+                TestResponse {
+                    status: "200 OK",
+                    content_type: "text/event-stream",
+                    body: successful_sse(),
+                    declared_length: None,
+                    delay: Duration::ZERO,
+                },
+            ]);
+            let (store, open, root) = native_retry_store(&fixture, label);
+            let chunks = store
+                .execute_model_using(
+                    &open,
+                    || true,
+                    |_, _| {
+                        HttpsSseProviderAdapter::try_new(config(&fixture))
+                            .map_err(|_| crate::DeviceProviderError)
+                    },
+                )
+                .unwrap();
+            assert!(chunks.last().unwrap().is_final);
+            assert!(
+                chunks.iter().all(|chunk| chunk.error.is_none()),
+                "{label}: {chunks:?}"
+            );
+            let text: String = chunks
+                .iter()
+                .filter_map(|chunk| chunk.payload.as_ref())
+                .map(|p| {
+                    serde_json::from_slice::<serde_json::Value>(
+                        &base64::engine::general_purpose::STANDARD
+                            .decode(&p.data_base64)
+                            .unwrap(),
+                    )
+                    .unwrap()
+                })
+                .filter(|v| v["type"] == "output_text_delta")
+                .filter_map(|v| v["delta"].as_str().map(str::to_owned))
+                .collect();
+            assert_eq!(
+                text, "hello",
+                "incomplete attempt output must not be delivered"
+            );
+            assert!(!store.model_attempt_accounting_complete(&open).unwrap());
+            let signing_key = winwincode_execution_port::action_enforcement::ActionEnforcementSigningKey::from_bytes([7; 32]).unwrap();
+            let statement = store
+                .accounting_statement(&open.lease, &signing_key)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                statement.manifest.len(),
+                2,
+                "the failed paid attempt remains unknown"
+            );
+            assert_eq!(statement.receipts.len(), 1);
+            let replay = store
+                .execute_model_using(
+                    &open,
+                    || false,
+                    |_, _| panic!("a completed exchange must never call Provider again"),
+                )
+                .unwrap();
+            assert_eq!(replay, chunks);
+            let requests = fixture.finish();
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[0], requests[1]);
+            drop(store);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn native_model_transient_attempt_limit_and_permanent_errors() {
+        for (label, status, count) in [
+            ("server", "503 Service Unavailable", 4),
+            ("auth", "401 Unauthorized", 1),
+            ("request", "400 Bad Request", 1),
+        ] {
+            let fixture = TlsFixture::start(
+                (0..count)
+                    .map(|_| TestResponse {
+                        status,
+                        content_type: "application/json\r\nRetry-After: 0",
+                        body: "private-upstream-error",
+                        declared_length: None,
+                        delay: Duration::ZERO,
+                    })
+                    .collect(),
+            );
+            let (store, open, root) = native_retry_store(&fixture, label);
+            let chunks = store
+                .execute_model_using(
+                    &open,
+                    || true,
+                    |_, _| {
+                        HttpsSseProviderAdapter::try_new(config(&fixture))
+                            .map_err(|_| crate::DeviceProviderError)
+                    },
+                )
+                .unwrap();
+            assert!(chunks.last().unwrap().error.is_some());
+            let attempts: i64 = store
+                .connection
+                .query_row("SELECT count(*) FROM model_open_attempts", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(attempts, count);
+            assert_eq!(i64::try_from(fixture.finish().len()).unwrap(), count);
+            drop(store);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn native_model_cancellation_during_backoff_prevents_a_second_request() {
+        let fixture = TlsFixture::start(vec![TestResponse {
+            status: "503 Service Unavailable",
+            content_type: "application/json\r\nRetry-After: 60",
+            body: "private-error",
+            declared_length: None,
+            delay: Duration::ZERO,
+        }]);
+        let (store, open, root) = native_retry_store(&fixture, "cancel");
+        let chunks = store
+            .execute_model_using(
+                &open,
+                || store.connection.query_row("SELECT NOT EXISTS(SELECT 1 FROM model_open_attempts WHERE http_status=503)", [], |r| r.get::<_, bool>(0)).unwrap(),
+                |_, _| {
+                    HttpsSseProviderAdapter::try_new(config(&fixture))
+                        .map_err(|_| crate::DeviceProviderError)
+                },
+            )
+            .unwrap();
+        assert!(chunks.last().unwrap().error.is_some());
+        assert_eq!(fixture.finish().len(), 1);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn transient_server_error_retries_unknown_acceptance() {
+        let fixture = TlsFixture::start(vec![
+            TestResponse {
+                status: "503 Service Unavailable",
+                content_type: "application/json\r\nRetry-After: 0",
+                body: "private-error",
+                declared_length: None,
+                delay: Duration::ZERO,
+            },
+            TestResponse {
+                status: "200 OK",
+                content_type: "text/event-stream",
+                body: successful_sse(),
+                declared_length: None,
+                delay: Duration::ZERO,
+            },
+        ]);
+        let adapter = HttpsSseProviderAdapter::try_new(config(&fixture)).unwrap();
+        let exchange = ModelExchangeId("mdl_00000000000000000000000002".into());
+        let request = RequestId("req_00000000000000000000000002".into());
+        let input = invocation(&exchange, &request);
+        let input = ProviderAdapterInvocation {
+            model_exchange_id: input.model_exchange_id,
+            request_id: input.request_id,
+            adapter_request_id: input.adapter_request_id,
+            model_id: input.model_id,
+            content_type: input.content_type,
+            payload: input.payload,
+        };
+        let mut attempts = Vec::new();
+        let result = adapter.open_with_backoff(
+            &input,
+            &ResolvedSecret::from_bytes(SECRET.to_vec()).unwrap(),
+            || true,
+            |n, result| {
+                attempts.push((
+                    n,
+                    result
+                        .as_ref()
+                        .err()
+                        .and_then(ProviderAdapterError::http_status),
+                ));
+                Ok(())
+            },
+        );
+        assert!(
+            result.is_ok(),
+            "unknown acceptance is authorized to retry: {result:?}"
+        );
+        assert_eq!(attempts, [(1, Some(503)), (2, None)]);
+        let requests = fixture.finish();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0], requests[1]);
+    }
+
+    #[test]
+    fn transient_backoff_is_bounded_and_preserves_long_cooldowns() {
+        for (status, header, expected) in [
+            (
+                "429 Too Many Requests",
+                "application/json\r\nRetry-After: 0",
+                4,
+            ),
+            (
+                "503 Service Unavailable",
+                "application/json\r\nRetry-After: 0",
+                4,
+            ),
+            (
+                "429 Too Many Requests",
+                "application/json\r\nRetry-After: 301",
+                1,
+            ),
+        ] {
+            let fixture = TlsFixture::start(
+                (0..expected)
+                    .map(|_| TestResponse {
+                        status,
+                        content_type: header,
+                        body: "private-error",
+                        declared_length: None,
+                        delay: Duration::ZERO,
+                    })
+                    .collect(),
+            );
+            let adapter = HttpsSseProviderAdapter::try_new(config(&fixture)).unwrap();
+            let exchange = ModelExchangeId("mdl_00000000000000000000000002".into());
+            let request = RequestId("req_00000000000000000000000002".into());
+            let input = invocation(&exchange, &request);
+            let invocation = ProviderAdapterInvocation {
+                model_exchange_id: input.model_exchange_id,
+                request_id: input.request_id,
+                adapter_request_id: input.adapter_request_id,
+                model_id: input.model_id,
+                content_type: input.content_type,
+                payload: input.payload,
+            };
+            let mut attempts = Vec::new();
+            let error = adapter
+                .open_with_backoff(
+                    &invocation,
+                    &ResolvedSecret::from_bytes(SECRET.to_vec()).unwrap(),
+                    || true,
+                    |n, result| {
+                        attempts.push(n);
+                        assert!(result.is_err());
+                        Ok(())
+                    },
+                )
+                .unwrap_err();
+            assert_eq!(attempts.len(), expected);
+            assert_eq!(fixture.finish().len(), expected);
+            assert!(!format!("{error:?}").contains("private-error"));
+        }
+    }
+
+    #[test]
+    fn cancellation_during_rate_limit_backoff_prevents_a_second_request() {
+        let fixture = TlsFixture::start(vec![TestResponse {
+            status: "429 Too Many Requests",
+            content_type: "application/json\r\nRetry-After: 60",
+            body: "{}",
+            declared_length: None,
+            delay: Duration::ZERO,
+        }]);
+        let adapter = HttpsSseProviderAdapter::try_new(config(&fixture)).unwrap();
+        let exchange = ModelExchangeId("mdl_00000000000000000000000002".into());
+        let request = RequestId("req_00000000000000000000000002".into());
+        let input = invocation(&exchange, &request);
+        let invocation = ProviderAdapterInvocation {
+            model_exchange_id: input.model_exchange_id,
+            request_id: input.request_id,
+            adapter_request_id: input.adapter_request_id,
+            model_id: input.model_id,
+            content_type: input.content_type,
+            payload: input.payload,
+        };
+        let active = std::cell::Cell::new(true);
+        let error = adapter
+            .open_with_backoff(
+                &invocation,
+                &ResolvedSecret::from_bytes(SECRET.to_vec()).unwrap(),
+                || active.get(),
+                |n, _| {
+                    assert_eq!(n, 1);
+                    active.set(false);
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error.kind(), crate::ProviderAdapterErrorKind::Rejected);
+        assert_eq!(fixture.finish().len(), 1);
+    }
+
+    #[test]
     fn retryable_status_reuses_identity_and_sse_is_strict_and_accounted() {
         let fixture = TlsFixture::start(vec![
             TestResponse {
@@ -2549,7 +3192,7 @@ mod tests {
         let request = invocation(&exchange, &request_id);
         assert_eq!(
             adapter.open_https(request, SECRET).expect_err("5xx"),
-            ProviderAdapterError::upstream()
+            ProviderAdapterError::upstream_after(500, None)
         );
         assert_eq!(
             adapter.open_https(request, SECRET).expect_err("429"),

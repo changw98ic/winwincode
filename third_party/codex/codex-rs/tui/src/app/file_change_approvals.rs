@@ -1,4 +1,8 @@
 //! Recover file-change details for live and replayed approval requests.
+//!
+//! The approval RPC identifies an item but does not repeat its diff. Recover the
+//! matching item before constructing the approval so its full-screen pager owns
+//! the same changes that were already displayed in the transcript.
 
 use super::*;
 
@@ -61,7 +65,7 @@ impl App {
                 grant_root: params.grant_root,
             },
         );
-        if self.startup_protected_input_boundary && !self.chat_widget.has_active_view() {
+        if self.startup_protected_input_boundary && !self.chat_widget.has_active_modal() {
             self.startup_pending_protected_request = true;
         }
     }

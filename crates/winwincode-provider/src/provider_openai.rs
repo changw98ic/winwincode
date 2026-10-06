@@ -659,16 +659,20 @@ fn openai_usage(value: &Value) -> Result<ProviderTokenUsage, AnthropicCodecError
     let prompt = usage_number(value, "prompt_tokens")?;
     let completion = usage_number(value, "completion_tokens")?;
     let mut cached = None;
+    let mut cache_write = 0;
     if let Some(details) = value.get("prompt_tokens_details")
         && !details.is_null()
     {
         let details = object(details)?;
-        exact_keys(details, &["cached_tokens"])?;
-        cached = details
-            .get("cached_tokens")
-            .filter(|value| !value.is_null())
-            .map(|value| value.as_u64().ok_or_else(AnthropicCodecError::protocol))
-            .transpose()?;
+        exact_keys(
+            details,
+            &["cached_tokens", "cache_write_tokens", "audio_tokens"],
+        )?;
+        cached = optional_usage_number(details, "cached_tokens")?;
+        cache_write = optional_usage_number(details, "cache_write_tokens")?.unwrap_or(0);
+        if optional_usage_number(details, "audio_tokens")?.is_some_and(|audio| audio > prompt) {
+            return Err(AnthropicCodecError::protocol());
+        }
     }
     match (
         value.get("prompt_cache_hit_tokens"),
@@ -704,6 +708,10 @@ fn openai_usage(value: &Value) -> Result<ProviderTokenUsage, AnthropicCodecError
     if prompt > MAX_SAFE_INTEGER
         || completion > MAX_SAFE_INTEGER
         || cached.is_some_and(|cached| cached > prompt)
+        || cached
+            .unwrap_or(0)
+            .checked_add(cache_write)
+            .is_none_or(|total| total > prompt)
         || reasoning > completion
     {
         return Err(AnthropicCodecError::protocol());
@@ -711,7 +719,7 @@ fn openai_usage(value: &Value) -> Result<ProviderTokenUsage, AnthropicCodecError
     Ok(ProviderTokenUsage {
         input_tokens: prompt,
         cached_input_tokens: cached,
-        cache_write_input_tokens: 0,
+        cache_write_input_tokens: cache_write,
         output_tokens: completion,
         reasoning_output_tokens: reasoning,
     })
@@ -721,6 +729,17 @@ fn usage_number(object: &Map<String, Value>, key: &str) -> Result<u64, Anthropic
     required(object, key)?
         .as_u64()
         .ok_or_else(AnthropicCodecError::protocol)
+}
+
+fn optional_usage_number(
+    object: &Map<String, Value>,
+    key: &str,
+) -> Result<Option<u64>, AnthropicCodecError> {
+    object
+        .get(key)
+        .filter(|value| !value.is_null())
+        .map(|value| value.as_u64().ok_or_else(AnthropicCodecError::protocol))
+        .transpose()
 }
 
 #[cfg(test)]
@@ -1035,6 +1054,65 @@ mod tests {
             };
             assert_eq!(same.cost_micros(usage).unwrap(), Some(32));
         }
+    }
+
+    #[test]
+    fn opencode_go_stream_accepts_measured_token_details() {
+        use std::fmt::Write as _;
+        let prepared =
+            prepare_openai_chat_request(&canonical_payload(), "glm-5.3-flash", options()).unwrap();
+        let chunks = [
+            json!({"id":"go-response", "object":"chat.completion.chunk", "model":"glm-5.3-flash",
+                "choices":[{"index":0,"finish_reason":null,"logprobs":null,
+                    "delta":{"role":"assistant","content":"","refusal":null}}],"usage":null}),
+            json!({"id":"go-response", "choices":[{"index":0,"delta":{"tool_calls":[
+                {"index":0,"id":"go-call","type":"function","function":{"name":"shell","arguments":""}}]}}]}),
+            json!({"id":"go-response", "choices":[{"index":0,"delta":{"tool_calls":[
+                {"index":0,"function":{"arguments":"{}"}}]}}]}),
+            json!({"id":"go-response", "choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}),
+            json!({"id":"go-response", "choices":[], "usage":{
+                "prompt_tokens":167,"completion_tokens":33,"total_tokens":200,
+                "prompt_tokens_details":{"audio_tokens":0,"cached_tokens":6,"cache_write_tokens":4},
+                "completion_tokens_details":{"accepted_prediction_tokens":0,"audio_tokens":0,
+                    "reasoning_tokens":0,"rejected_prediction_tokens":0}}}),
+        ];
+        let mut wire = String::new();
+        for chunk in chunks {
+            write!(wire, "data: {chunk}\n\n").unwrap();
+        }
+        wire.push_str("data: [DONE]\n\n");
+        let parsed = parse_openai_chat_sse(
+            wire.as_bytes(),
+            4096,
+            16,
+            &prepared.tool_bindings,
+            options(),
+        )
+        .expect("measured Go stream");
+        let ProviderGatewayTerminal::Completed { usage, .. } = parsed.terminal else {
+            panic!("expected metered completion");
+        };
+        assert_eq!(usage.input_tokens, 167);
+        assert_eq!(usage.cached_input_tokens, Some(6));
+        assert_eq!(usage.cache_write_input_tokens, 4);
+        assert_eq!(usage.output_tokens, 33);
+        assert!(parsed.events.iter().any(|event| matches!(event,
+            ProviderStreamEvent::ToolCallArgumentsDelta { delta, .. } if delta == "{}")));
+    }
+
+    #[test]
+    fn opencode_go_token_details_reject_invalid_or_overlapping_counts() {
+        let usage = json!({"prompt_tokens":10,"completion_tokens":3,"total_tokens":13,
+            "prompt_tokens_details":{"cached_tokens":6,"cache_write_tokens":4,"audio_tokens":0}});
+        assert!(openai_usage(&usage).is_ok());
+        for value in [json!(-1), json!("4"), json!(5), json!(MAX_SAFE_INTEGER + 1)] {
+            let mut invalid = usage.clone();
+            invalid["prompt_tokens_details"]["cache_write_tokens"] = value;
+            assert!(openai_usage(&invalid).is_err());
+        }
+        let mut invalid = usage;
+        invalid["prompt_tokens_details"]["audio_tokens"] = json!(11);
+        assert!(openai_usage(&invalid).is_err());
     }
 
     #[test]

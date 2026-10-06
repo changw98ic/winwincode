@@ -38,7 +38,7 @@ jobs:
           echo "$install_dir" >> "$GITHUB_PATH"
           "$install_dir/bd" version | grep -F "bd version $version"
       - name: Validate portable snapshot
-        run: node scripts/validate-engineering-runtime-backlog.mjs --mode=snapshot
+        run: node scripts/check/validate-engineering-runtime-backlog.mjs --mode=snapshot
       - name: Pin and pull authoritative Dolt ref
         shell: bash
         env:
@@ -57,4 +57,4 @@ jobs:
           test "$latest_sha" = "$remote_sha" || { echo "FAIL: refs/dolt/data moved during pull ($remote_sha -> $latest_sha)." >&2; exit 1; }
           echo "pulled authoritative revision=$remote_sha"
       - name: Run live authoritative audit
-        run: node scripts/validate-engineering-runtime-backlog.mjs --mode=live
+        run: node scripts/check/validate-engineering-runtime-backlog.mjs --mode=live

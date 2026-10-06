@@ -9,7 +9,7 @@ import {
   collectScanFiles,
   scanPublicSurface,
   scanText,
-} from '../scripts/check-no-absolute-paths.mjs'
+} from '../scripts/check/check-no-absolute-paths.mjs'
 
 // Phase 0 path-ban lint lane: absolute local paths must never enter the
 // Client public surface (original plan §8.1, §13, §17.3, §20.7, gate
@@ -17,7 +17,7 @@ import {
 // against fabricated temporary trees plus the current repository tree.
 
 const root = resolve(import.meta.dirname, '..')
-const scriptPath = join(root, 'scripts', 'check-no-absolute-paths.mjs')
+const scriptPath = join(root, 'scripts/check/check-no-absolute-paths.mjs')
 
 function ruleIds(findings) {
   return [...new Set(findings.map(finding => finding.ruleId))].sort()
@@ -80,20 +80,8 @@ function writeTree(target) {
     'export const route = \'/internal/v1/client/exchange\'\n',
   )
   writeFileSync(
-    join(target, 'docs/contracts/client-control-port-v1.md'),
-    '# ClientControlPort v1\n\nNo local paths here.\n',
-  )
-  writeFileSync(
-    join(target, 'docs/contracts/client-control-state-machines.md'),
-    '# Client control state machines\n',
-  )
-  writeFileSync(
     join(target, 'tests/fixtures/client-control/sample.json'),
     '{\n  "root": "/Users/alice/work/repo"\n}\n',
-  )
-  writeFileSync(
-    join(target, 'docs/decisions/0030-multi-user-client-access-and-occupancy.md'),
-    '# ADR-0030\n',
   )
   // Untouched target kinds must be skipped without failing the scan.
 }
@@ -105,7 +93,7 @@ test('scanPublicSurface scans every target kind and skips missing ones', (t) => 
 
   const report = scanPublicSurface({ root: target })
   assert.equal(report.schemaVersion, 1)
-  assert.equal(report.scannedFiles, 6)
+  assert.equal(report.scannedFiles, 3)
   assert.equal(report.status, 'red')
   assert.deepEqual(
     report.findings.map(finding => `${finding.path}:${finding.line}:${finding.ruleId}`),
@@ -122,11 +110,8 @@ test('scanPublicSurface scans every target kind and skips missing ones', (t) => 
 
 test('collectScanFiles covers the current public surface', () => {
   const files = collectScanFiles().map(path => path.replaceAll('\\', '/'))
-  assert.ok(files.some(path => path.endsWith('docs/contracts/client-control-port-v1.md')))
-  assert.ok(files.some(path => path.endsWith('docs/contracts/client-control-state-machines.md')))
-  assert.ok(
-    files.some(path => path.endsWith('docs/decisions/0030-multi-user-client-access-and-occupancy.md')),
-  )
+  assert.ok(files.some(path => path.endsWith('schema/winwincode/v1/client-control.schema.json')))
+  assert.ok(files.some(path => path.endsWith('packages/contracts/src/client-control.ts')))
   assert.ok(
     !files.some(path => path.includes('/src/') && !path.endsWith('client-control.ts')),
     'scan must stay limited to the client-control contract surface',

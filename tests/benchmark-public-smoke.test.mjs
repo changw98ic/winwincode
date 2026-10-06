@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { createECDH, createDecipheriv, hkdfSync } from 'node:crypto'
-import { installDevicePublicSmoke } from '../scripts/device-production-fixture.mjs'
+import { installDevicePublicSmoke } from '../scripts/lib/device-production-fixture.mjs'
 
 test('Device public smoke uses encrypted save then discovery and rejects failed connections', async () => {
   for (const outcome of ['tested', 'connection_failed']) {
@@ -48,7 +48,7 @@ test('Device public smoke uses encrypted save then discovery and rejects failed 
 })
 
 test('public smoke rejects host controls and unsafe source paths before execution', () => {
-  const script = fileURLToPath(new URL('../scripts/benchmark-public-smoke.py', import.meta.url))
+  const script = fileURLToPath(new URL('../scripts/benchmark/benchmark-public-smoke.py', import.meta.url))
   const result = spawnSync('python3', ['-I', '-c', `
 import runpy, sys
 m = runpy.run_path(sys.argv[1])
@@ -129,7 +129,7 @@ with tempfile.TemporaryDirectory() as directory:
 })
 
 test('read-only source identity binds a portable snapshot and rejects unsafe trees', () => {
-  const script = fileURLToPath(new URL('../scripts/benchmark-public-smoke.py', import.meta.url))
+  const script = fileURLToPath(new URL('../scripts/benchmark/benchmark-public-smoke.py', import.meta.url))
   const result = spawnSync('python3', ['-I', '-c', `
 import pathlib, runpy, sys, tempfile
 module = runpy.run_path(sys.argv[1])
@@ -175,7 +175,7 @@ with tempfile.TemporaryDirectory() as directory:
 })
 
 test('optional public smoke queue excludes real processes and releases its stable lock on exit', () => {
-  const script = fileURLToPath(new URL('../scripts/benchmark-public-smoke.py', import.meta.url))
+  const script = fileURLToPath(new URL('../scripts/benchmark/benchmark-public-smoke.py', import.meta.url))
   const result = spawnSync('python3', ['-I', '-c', `
 import os, pathlib, runpy, select, stat, subprocess, sys, tempfile
 module = runpy.run_path(sys.argv[1])
@@ -251,7 +251,7 @@ finally:
 })
 
 test('queued public smoke captures source before waiting and runs those exact bytes after admission', () => {
-  const script = fileURLToPath(new URL('../scripts/benchmark-public-smoke.py', import.meta.url))
+  const script = fileURLToPath(new URL('../scripts/benchmark/benchmark-public-smoke.py', import.meta.url))
   const result = spawnSync('python3', ['-I', '-c', `
 import pathlib, runpy, subprocess, sys, tempfile, threading, time, types
 from unittest.mock import patch

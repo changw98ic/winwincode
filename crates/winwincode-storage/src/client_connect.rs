@@ -8,7 +8,7 @@
 //! establish, and the fixed-window connect attempt counters that throttle the
 //! user, IP, and Client dimensions. Code and grant states and their legal
 //! transitions follow the frozen state machine in
-//! `docs/contracts/client-control-state-machines.md` (contracts 2 and 3); the
+//! `config/contracts/client-control-state-machines.md` (contracts 2 and 3); the
 //! Server only ever persists the SHA-256 digest of a connect code, never the
 //! code itself.
 //!

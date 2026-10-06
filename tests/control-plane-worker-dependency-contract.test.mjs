@@ -11,15 +11,11 @@ import test from 'node:test'
 const root = resolve(import.meta.dirname, '..')
 const targetGraphPath = join(
   root,
-  'docs/decisions/0028-control-plane-worker-target-graph.json',
-)
-const dependencyRulesPath = join(
-  root,
-  'docs/decisions/0028-control-plane-worker-dependency-rules.md',
+  'config/decisions/0028-control-plane-worker-target-graph.json',
 )
 const inventoryPath = join(
   root,
-  'docs/decisions/0028-control-plane-worker-migration.inventory.json',
+  'config/decisions/0028-control-plane-worker-migration.inventory.json',
 )
 
 const REQUIRED_GUARDRAILS = Object.freeze({
@@ -122,7 +118,7 @@ test('target graph declares the accepted single path and existing directories', 
   const graph = json(targetGraphPath)
   assert.equal(graph.schemaVersion, 1)
   assert.equal(graph.status, 'accepted-target')
-  assert.equal(graph.decision, 'docs/decisions/0028-control-plane-worker-migration.md')
+  assert.equal(graph.decision, 'config/decisions/0028-control-plane-worker-migration.md')
   assert.deepEqual(graph.verification, {
     plannedModulesMayBeAbsent: false,
     enforceCargoDependenciesWhenManifestExists: true,
@@ -458,19 +454,4 @@ test('Client and Local sources cannot bypass their declared owners', () => {
     productDependencies(package_).sort(),
     [...graph.guardrails.localLauncherAllowedProductDependencies].sort(),
   )
-})
-
-test('dependency rules document the current single path and exact checks', () => {
-  const text = readFileSync(dependencyRulesPath, 'utf8')
-  for (const requiredStatement of [
-    '已接受的单一路径合同',
-    'Control Plane 不得到达 Codex 执行模块',
-    'Worker 只持有执行闭包',
-    'Client 只能访问 Server',
-    'Local 只负责组装',
-    'Provider Gateway 和 Credential',
-    '`winwincode-kernel-helper`',
-    '`cargo metadata --locked`',
-    '不为旧入口或临时适配器留下允许边',
-  ]) assert.ok(text.includes(requiredStatement), `missing rule: ${requiredStatement}`)
 })

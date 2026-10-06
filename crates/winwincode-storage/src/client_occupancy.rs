@@ -8,7 +8,7 @@
 //! strictly higher fencing token for every new occupancy, and only the Device
 //! Client ACK of the exact lease and token promotes a lease from `reserving`
 //! to `occupied` (plan 12.2, 12.6). States and legal transitions follow the
-//! frozen state machine in `docs/contracts/client-control-state-machines.md`
+//! frozen state machine in `config/contracts/client-control-state-machines.md`
 //! contract 4: `available` is the projection of "no active lease", the active
 //! lease starts at `reserving`, at most one active lease exists per
 //! `clientNodeId` (enforced durably by a partial unique index), a `reserving`

@@ -1,0 +1,146 @@
+{
+  "schemaVersion": 2,
+  "kind": "winwincode.infrastructure-release-contract.v2",
+  "status": "accepted",
+  "ownerRepository": "winwincode",
+  "task": "winwincode-edition.2.4.5",
+  "release": {
+    "channel": "community-infrastructure-addons",
+    "version": "0.1.0-alpha.1",
+    "sourceTag": "community-infrastructure-v0.1.0-alpha.1",
+    "baseUri": "https://github.com/changw98ic/winwincode/releases/download/community-infrastructure-v0.1.0-alpha.1",
+    "manifest": "community-infrastructure-release-manifest.json",
+    "signature": "community-infrastructure-release-manifest.json.sig",
+    "consumerLock": "infrastructure.lock.json",
+    "sbom": "community-infrastructure-sbom.cdx.json",
+    "licenseManifest": "community-infrastructure-licenses.json",
+    "fixtureCargoLock": "community-infrastructure-fixture-Cargo.lock"
+  },
+  "signing": {
+    "algorithm": "Ed25519",
+    "publicKey": "config/release/keys/community-infrastructure-ed25519-public.pem",
+    "publicKeySha256": "85f2bf31f8ac903e6eb9578e5d5b6c52d9393d97d9c8b24a7797ff1b6d5b41ca"
+  },
+  "persistenceContract": {
+    "artifact": "community-persistence-ports.inventory.json",
+    "source": "config/decisions/0032-community-persistence-ports.inventory.json",
+    "crate": "winwincode-data-export",
+    "rule": "The signed inventory pins the three application persistence ports; the database-neutral export crate is the only released data-transfer package. Product database runtimes stay in their product repositories."
+  },
+  "packages": [
+    {
+      "name": "winwincode-domain",
+      "manifest": "crates/winwincode-domain/Cargo.toml",
+      "role": "core-dependency"
+    },
+    {
+      "name": "winwincode-data-export",
+      "manifest": "crates/winwincode-data-export/Cargo.toml",
+      "role": "persistence-contract"
+    },
+    {
+      "name": "winwincode-observability-core",
+      "manifest": "crates/winwincode-observability-core/Cargo.toml",
+      "role": "observability-core"
+    },
+    {
+      "name": "winwincode-integration-core",
+      "manifest": "crates/winwincode-integration-core/Cargo.toml",
+      "role": "integration-core"
+    },
+    {
+      "name": "winwincode-s3-artifact-adapter",
+      "manifest": "crates/winwincode-s3-artifact-adapter/Cargo.toml",
+      "role": "object-storage-protocol"
+    },
+    {
+      "name": "winwincode-connector-github",
+      "manifest": "crates/winwincode-connector-github/Cargo.toml",
+      "role": "provider-protocol"
+    },
+    {
+      "name": "winwincode-connector-jira",
+      "manifest": "crates/winwincode-connector-jira/Cargo.toml",
+      "role": "provider-protocol"
+    },
+    {
+      "name": "winwincode-connector-linear",
+      "manifest": "crates/winwincode-connector-linear/Cargo.toml",
+      "role": "provider-protocol"
+    },
+    {
+      "name": "winwincode-connector-slack",
+      "manifest": "crates/winwincode-connector-slack/Cargo.toml",
+      "role": "provider-protocol"
+    },
+    {
+      "name": "winwincode-connector-teams",
+      "manifest": "crates/winwincode-connector-teams/Cargo.toml",
+      "role": "provider-protocol"
+    },
+    {
+      "name": "winwincode-connector-webhook",
+      "manifest": "crates/winwincode-connector-webhook/Cargo.toml",
+      "role": "provider-protocol"
+    }
+  ],
+  "consumers": [
+    "winwincode-cloud",
+    "winwincode-enterprise"
+  ],
+  "requiredLockFields": [
+    "version",
+    "sourceCommit",
+    "artifactUri",
+    "sha256",
+    "sbom",
+    "licenseManifest",
+    "signature"
+  ],
+  "forbiddenReleaseContent": {
+    "runtimeDependencies": [
+      "postgres",
+      "sqlx-postgres",
+      "tokio-postgres",
+      "rusqlite",
+      "diesel"
+    ],
+    "sourcePatterns": [
+      "postgres://",
+      "postgresql://",
+      "DATABASE_URL",
+      "SqliteStorage",
+      "PgPool",
+      "CREATE TABLE",
+      "ALTER TABLE"
+    ],
+    "pathPatterns": [
+      "migrations/",
+      ".sql",
+      "data-import",
+      "backup-runtime"
+    ]
+  },
+  "ownership": {
+    "winwincode": [
+      "database-neutral persistence and transfer contracts",
+      "S3-compatible protocol adapter",
+      "storage-neutral observability core",
+      "integration core and six provider protocols"
+    ],
+    "winwincode-cloud": [
+      "Hosted PostgreSQL, object storage, telemetry and integration composition"
+    ],
+    "winwincode-enterprise": [
+      "customer PostgreSQL, object storage, telemetry and integration composition"
+    ]
+  },
+  "verification": {
+    "source": "clean committed Git archive",
+    "packageFormat": "Cargo .crate",
+    "consumerBuild": "all released crates compile from extracted artifacts with a generated Cargo.lock and cargo check --frozen",
+    "crossRepositoryPathDependencies": false,
+    "gitBranchDependencies": false,
+    "exactVersionOnly": true
+  }
+}

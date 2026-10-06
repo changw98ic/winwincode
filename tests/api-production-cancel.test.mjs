@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { runApiProductionVertical } from '../scripts/run-api-production-vertical.mjs'
+import { runApiProductionVertical } from '../scripts/acceptance/run-api-production-vertical.mjs'
 
 test('standalone Server API exposes health, cancellation, terminal Chat, and restart evidence', async () => {
   const report = await runApiProductionVertical({

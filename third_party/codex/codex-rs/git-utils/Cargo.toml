@@ -3,12 +3,12 @@ name = "codex-git-utils"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-readme = "README.md"
 
 [lints]
 workspace = true
 
 [dependencies]
+codex-utils-process = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
 codex-file-system = { workspace = true }

@@ -148,7 +148,7 @@ jobs:
         run: |
           corepack enable
           corepack pnpm build:rust
-          node scripts/verify-products.mjs --scope rust
+          node scripts/check/verify-products.mjs --scope rust
 
       - name: Verify API production vertical
         if: ${{ matrix.lane == 'runtime' }}

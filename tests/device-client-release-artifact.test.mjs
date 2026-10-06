@@ -33,12 +33,12 @@ import {
   deviceClientSbom,
   parseDeviceClientReleaseArguments,
   verifyDeviceClientReleaseDirectory,
-} from '../scripts/build-device-client-release.mjs'
+} from '../scripts/release/build-device-client-release.mjs'
 import {
   RELEASE_TARGETS,
   canonicalJson,
   targetConfiguration,
-} from '../scripts/release-artifact-contract.mjs'
+} from '../scripts/lib/release-artifact-contract.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 const sourceCommit = '1234567890abcdef1234567890abcdef12345678'
@@ -63,7 +63,7 @@ function makePackageFixture({ options = {}, target = 'aarch64-apple-darwin' } = 
     writeFileSync(path, options.binaryBytes?.[binaryName] ?? bytes)
     chmodSync(path, 0o755)
   }
-  for (const name of ['LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md']) {
+  for (const name of ['LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES']) {
     const destination = join(artifactRoot, 'legal', name)
     copyFileSync(join(root, name), destination)
     chmodSync(destination, 0o644)

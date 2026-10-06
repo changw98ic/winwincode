@@ -6,12 +6,12 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
 import { driveDelivery, runApiProductionVertical, waitForDeviceWorkerRegistered,
-  workItemCreatePayload } from '../scripts/run-api-production-vertical.mjs'
-import { readDeviceExecutionReceipts } from '../scripts/export-device-candidate.mjs'
-import { runDeviceTaskVertical } from '../scripts/run-device-task-vertical.mjs'
-import { deviceTaskIdentities, withDeviceTaskRuntime } from '../scripts/device-task-runtime.mjs'
-import { benchmarkConfiguration } from '../scripts/run-real-task-benchmark.mjs'
-import { deterministicDeviceProvider, waitFor } from '../scripts/device-production-fixture.mjs'
+  workItemCreatePayload } from '../scripts/acceptance/run-api-production-vertical.mjs'
+import { readDeviceExecutionReceipts } from '../scripts/acceptance/export-device-candidate.mjs'
+import { runDeviceTaskVertical } from '../scripts/acceptance/run-device-task-vertical.mjs'
+import { deviceTaskIdentities, withDeviceTaskRuntime } from '../scripts/lib/device-task-runtime.mjs'
+import { benchmarkConfiguration } from '../scripts/benchmark/run-real-task-benchmark.mjs'
+import { deterministicDeviceProvider, waitFor } from '../scripts/lib/device-production-fixture.mjs'
 
 /**
  * Production vertical acceptance coverage is retained: Chat, StrongFlow,

@@ -6,10 +6,10 @@ import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import test from 'node:test'
 import { benchmarkDeviceProfiles, deviceBenchmarkExperimentBinding,
-  removeTerminalBenchmarkPublicSmoke } from '../scripts/benchmark-device-adapter.mjs'
-import { buildBenchmarkPlan } from '../scripts/run-real-task-benchmark.mjs'
-import { benchmarkDeviceEnvironment } from '../scripts/run-device-task-vertical.mjs'
-import { runtimeChildEnvironment } from '../scripts/device-production-fixture.mjs'
+  removeTerminalBenchmarkPublicSmoke } from '../scripts/lib/benchmark-device-adapter.mjs'
+import { buildBenchmarkPlan } from '../scripts/benchmark/run-real-task-benchmark.mjs'
+import { benchmarkDeviceEnvironment } from '../scripts/acceptance/run-device-task-vertical.mjs'
+import { runtimeChildEnvironment } from '../scripts/lib/device-production-fixture.mjs'
 
 const models = ['glm-5.3-flash', 'mimo-v2.6-pro', 'deepseek-flash', 'qwen3.8-flash']
 const providerEnvironment = Object.fromEntries(['ZHIPU', 'XIAOMI', 'DEEPSEEK', 'OPENCODE']

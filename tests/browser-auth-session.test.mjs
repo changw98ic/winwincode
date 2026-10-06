@@ -19,7 +19,7 @@ import test from 'node:test'
 import {
   serverTargetDirectory,
   writeHelperReleaseManifest,
-} from '../scripts/run-api-production-vertical.mjs'
+} from '../scripts/acceptance/run-api-production-vertical.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 

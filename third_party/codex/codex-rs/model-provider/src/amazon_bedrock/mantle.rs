@@ -1,10 +1,11 @@
 use codex_aws_auth::AwsAuthConfig;
-use codex_login::auth::BedrockApiKeyAuth;
+use codex_login::CodexAuth;
 use codex_model_provider_info::ModelProviderAwsAuthInfo;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result;
 
 use super::BedrockEndpoint;
+use super::auth::BedrockAuthSource;
 use super::auth::resolve_region;
 
 const BEDROCK_MANTLE_SERVICE_NAME: &str = "bedrock-mantle";
@@ -49,16 +50,25 @@ pub(super) fn base_url(region: &str) -> Result<String> {
         Ok(format!("https://bedrock-mantle.{region}.api.aws/openai/v1"))
     } else {
         Err(CodexErr::Fatal(format!(
-            "Amazon Bedrock Mantle does not support region `{region}`"
+            "Amazon Bedrock does not support region `{region}`"
         )))
     }
 }
 
 pub(super) async fn bedrock_mantle_runtime_base_url(
-    managed_auth: Option<&BedrockApiKeyAuth>,
+    source: BedrockAuthSource,
+    managed_auth: Option<&CodexAuth>,
     aws: &ModelProviderAwsAuthInfo,
+    http_client_factory: &codex_http_client::HttpClientFactory,
 ) -> Result<String> {
-    let region = resolve_region(managed_auth, aws, BedrockEndpoint::Mantle).await?;
+    let region = resolve_region(
+        source,
+        managed_auth,
+        aws,
+        BedrockEndpoint::Mantle,
+        http_client_factory,
+    )
+    .await?;
     base_url(&region)
 }
 
@@ -82,7 +92,7 @@ mod tests {
 
         assert_eq!(
             err.to_string(),
-            "Fatal error: Amazon Bedrock Mantle does not support region `us-west-1`"
+            "Fatal error: Amazon Bedrock does not support region `us-west-1`"
         );
     }
 
@@ -92,6 +102,7 @@ mod tests {
             aws_auth_config(&ModelProviderAwsAuthInfo {
                 profile: Some("codex-bedrock".to_string()),
                 region: None,
+                credential_export: None,
                 auth_refresh: None,
             }),
             AwsAuthConfig {
@@ -108,6 +119,7 @@ mod tests {
             aws_auth_config(&ModelProviderAwsAuthInfo {
                 profile: None,
                 region: Some(" us-west-2 ".to_string()),
+                credential_export: None,
                 auth_refresh: None,
             }),
             AwsAuthConfig {

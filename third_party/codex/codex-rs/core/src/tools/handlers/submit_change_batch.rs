@@ -34,7 +34,10 @@ impl ToolExecutor<ToolInvocation> for SubmitChangeBatchHandler {
         })
     }
 
-    fn handle(&self, _invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+    fn handle<'a>(&'a self, _invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
+    where
+        ToolInvocation: 'a,
+    {
         Box::pin(async {
             Err(FunctionCallError::Fatal(
                 "submit_change_batch must be handled by the host handoff boundary".to_string(),

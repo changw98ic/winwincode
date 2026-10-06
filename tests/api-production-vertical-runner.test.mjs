@@ -11,7 +11,7 @@ import {
 import { resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import test from 'node:test'
-import { loadDeviceAgentTask } from '../scripts/device-agent-task.mjs'
+import { loadDeviceAgentTask } from '../scripts/lib/device-agent-task.mjs'
 
 import {
   prepareControlledRepository,
@@ -24,10 +24,10 @@ import {
   writeHelperReleaseManifest,
   runApiProductionVertical,
   waitForDeviceWorkerRegistered,
-} from '../scripts/run-api-production-vertical.mjs'
+} from '../scripts/acceptance/run-api-production-vertical.mjs'
 
 const root = resolve(import.meta.dirname, '..')
-const runnerPath = resolve(root, 'scripts/run-api-production-vertical.mjs')
+const runnerPath = resolve(root, 'scripts/acceptance/run-api-production-vertical.mjs')
 const browserGatePath = resolve(root, 'tests/browser-chat-production.test.mjs')
 
 test('registration reads the exact Worker beyond a full historical first page', async () => {

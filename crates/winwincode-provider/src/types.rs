@@ -126,11 +126,20 @@ pub enum ProviderAdapterErrorKind {
 pub struct ProviderAdapterError {
     kind: ProviderAdapterErrorKind,
     message: &'static str,
+    http_status: Option<u16>,
+    retry_after: Option<std::time::Duration>,
+    connection_pending: bool,
 }
 
 impl ProviderAdapterError {
     const fn new(kind: ProviderAdapterErrorKind, message: &'static str) -> Self {
-        Self { kind, message }
+        Self {
+            kind,
+            message,
+            http_status: None,
+            retry_after: None,
+            connection_pending: false,
+        }
     }
 
     #[must_use]
@@ -172,6 +181,12 @@ impl ProviderAdapterError {
             "Provider connection failed",
         )
     }
+    pub(crate) const fn connection_not_sent() -> Self {
+        Self {
+            connection_pending: true,
+            ..Self::connection()
+        }
+    }
 
     #[must_use]
     pub const fn upstream() -> Self {
@@ -179,6 +194,17 @@ impl ProviderAdapterError {
             ProviderAdapterErrorKind::Upstream,
             "Provider returned a server error",
         )
+    }
+
+    pub(crate) const fn upstream_after(
+        status: u16,
+        retry_after: Option<std::time::Duration>,
+    ) -> Self {
+        Self {
+            http_status: Some(status),
+            retry_after,
+            ..Self::upstream()
+        }
     }
 
     #[must_use]
@@ -194,6 +220,9 @@ impl ProviderAdapterError {
         Self {
             kind: ProviderAdapterErrorKind::Rejected,
             message: "Provider rejected the request",
+            http_status: None,
+            retry_after: None,
+            connection_pending: false,
         }
     }
 
@@ -202,7 +231,21 @@ impl ProviderAdapterError {
         Self {
             kind: ProviderAdapterErrorKind::RateLimited,
             message: "Provider rate limit rejected the request",
+            http_status: Some(429),
+            retry_after: None,
+            connection_pending: false,
         }
+    }
+
+    pub(crate) fn rate_limited_after(delay: Option<std::time::Duration>) -> Self {
+        Self {
+            retry_after: delay,
+            ..Self::rate_limited()
+        }
+    }
+
+    pub(crate) const fn retry_after(&self) -> Option<std::time::Duration> {
+        self.retry_after
     }
 
     #[must_use]
@@ -210,6 +253,9 @@ impl ProviderAdapterError {
         Self {
             kind: ProviderAdapterErrorKind::Unavailable,
             message: "Provider adapter is unavailable",
+            http_status: None,
+            retry_after: None,
+            connection_pending: false,
         }
     }
 
@@ -218,12 +264,28 @@ impl ProviderAdapterError {
         Self {
             kind: ProviderAdapterErrorKind::Protocol,
             message: "Provider adapter response is invalid",
+            http_status: None,
+            retry_after: None,
+            connection_pending: false,
         }
     }
 
     #[must_use]
     pub const fn kind(&self) -> ProviderAdapterErrorKind {
         self.kind
+    }
+
+    pub(crate) const fn rejected_status(status: u16) -> Self {
+        Self {
+            http_status: Some(status),
+            ..Self::rejected()
+        }
+    }
+
+    /// Only the bounded status is retained; upstream bodies and headers are discarded.
+    #[must_use]
+    pub const fn http_status(&self) -> Option<u16> {
+        self.http_status
     }
 }
 
@@ -234,6 +296,23 @@ impl fmt::Display for ProviderAdapterError {
 }
 
 impl std::error::Error for ProviderAdapterError {}
+
+impl crate::request_retry::RetryFailure for ProviderAdapterError {
+    fn retryable(&self) -> bool {
+        matches!(
+            self.kind,
+            ProviderAdapterErrorKind::Connection
+                | ProviderAdapterErrorKind::Upstream
+                | ProviderAdapterErrorKind::RateLimited
+        )
+    }
+    fn retry_after(&self) -> Option<std::time::Duration> {
+        self.retry_after
+    }
+    fn wait_for_connection(&self) -> bool {
+        self.connection_pending
+    }
+}
 
 /// Secret-free acknowledgement returned after the adapter accepts a request.
 #[derive(Clone, Eq, PartialEq)]

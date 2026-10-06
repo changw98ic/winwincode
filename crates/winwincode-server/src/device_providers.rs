@@ -222,6 +222,7 @@ pub(crate) fn observe(
     report: &DeviceProviderReport,
 ) -> Result<(), ProviderRelayError> {
     if report.snapshot.client_node_id != node_id
+        || !winwincode_api::opencode::valid_opencode_projection(&report.snapshot)
         || report.snapshot.providers.len() > 100
         || !(0..=9_007_199_254_740_991).contains(&report.snapshot.revision)
         || report.snapshot.encryption_public_key.len() != 88
@@ -491,6 +492,7 @@ pub(crate) fn model_routes(
     if !(1..=200).contains(&query.page.limit) {
         return Err(ProviderRelayError::Invalid);
     }
+    let mut session_route = None;
     let target = if let Some(session) = &query.parameters.product_session_id {
         let scope = repository_scope_key(&query.scope)?;
         let record = ProductSessionService::new(storage)
@@ -501,6 +503,7 @@ pub(crate) fn model_routes(
         {
             return Err(ProviderRelayError::Denied);
         }
+        session_route = Some(record.model_route().clone());
         WorkerLaunchGrantService::new(storage)
             .newest_grant_for_product_session(&session.0)
             .map_err(|_| ProviderRelayError::Unavailable)?
@@ -512,6 +515,7 @@ pub(crate) fn model_routes(
         .active_grants_for_user(&actor.id.0)
         .map_err(|_| ProviderRelayError::Unavailable)?;
     let mut items = Vec::new();
+    let mut preferred_routes = std::collections::BTreeSet::new();
     for grant in grants {
         if !grant.permissions.can_use()
             || grant.expires_at.is_some_and(|expiry| expiry.0 <= now.0)
@@ -538,6 +542,12 @@ pub(crate) fn model_routes(
         let snapshot: winwincode_api::generated::DeviceProviderSnapshot =
             serde_json::from_slice(&state.payload)?;
         for provider in snapshot.providers {
+            if snapshot.default_provider_id.as_ref() == Some(&provider.config.provider_id) {
+                preferred_routes.insert(route_reference(
+                    &node.client_node_id,
+                    &provider.config.provider_id,
+                ));
+            }
             let (status, reason) = if !online(&node, now) {
                 ("unknown", "runtime_status_unknown")
             } else if !provider.config.enabled {
@@ -561,7 +571,17 @@ pub(crate) fn model_routes(
         }
     }
     items.sort_by_key(|item| item["route"].to_string());
-    let default = items.iter().position(|item| item["status"] == "available");
+    let default = if let Some(route) = session_route {
+        items.iter().position(|item| item["route"] == json!(route))
+    } else if preferred_routes.is_empty() {
+        items.iter().position(|item| item["status"] == "available")
+    } else {
+        items.iter().position(|item| {
+            item["route"]["credentialReferenceId"]
+                .as_str()
+                .is_some_and(|id| preferred_routes.contains(id))
+        })
+    };
     if let Some(index) = default {
         items[index]["isDefault"] = json!(true);
     }
@@ -596,7 +616,18 @@ pub(crate) fn model_routes(
     let end = offset
         .saturating_add(usize::try_from(query.page.limit).map_err(|_| ProviderRelayError::Invalid)?)
         .min(items.len());
-    let ready = selected.is_some();
+    let selected_status =
+        default.map_or_else(|| json!("unknown"), |index| items[index]["status"].clone());
+    let selected_reason = default.map_or_else(
+        || {
+            json!(if items.is_empty() {
+                "no_provider"
+            } else {
+                "default_route_invalid"
+            })
+        },
+        |index| items[index]["reason"].clone(),
+    );
     Ok(serde_json::from_value(json!({
         "schemaVersion":"winwincode/v1", "query":"model.route.availability.list", "requestId":query.request_id,
         "page":{"hasMore":end<items.len(), "nextCursor":(end<items.len()).then(|| format!("{fingerprint}:{end}"))},
@@ -606,8 +637,8 @@ pub(crate) fn model_routes(
                 "workspaceId":query.scope.workspace_id, "projectId":query.scope.project_id},
             "requestPoolRevision":0, "defaultProviderId":selected.as_ref().map(|route| route["providerId"].clone()),
             "defaultModelId":selected.as_ref().map(|route| route["modelId"].clone()),
-            "status":if ready {"available"} else {"unknown"},
-            "reason":if ready {"ready"} else if items.is_empty() {"no_provider"} else {"runtime_status_unknown"},
+            "status":selected_status,
+            "reason":selected_reason,
             "items":items[offset..end]
         }
     }))?)

@@ -47,7 +47,7 @@ jobs:
           SOURCE_COMMIT: ${{ inputs.source_commit }}
         run: |
           set -euo pipefail
-          node scripts/verify-mainline-release-source.mjs \
+          node scripts/release/verify-mainline-release-source.mjs \
             --source-commit "${SOURCE_COMMIT}" \
             --default-branch "${DEFAULT_BRANCH}"
           printf 'source_commit=%s\n' "${SOURCE_COMMIT}" >> "${GITHUB_OUTPUT}"
@@ -132,7 +132,7 @@ jobs:
           WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX: ${{ vars.WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX }}
         run: |
           set -euo pipefail
-          node scripts/run-release-artifact-gate.mjs \
+          node scripts/release/run-release-artifact-gate.mjs \
             --target ${{ matrix.target }} \
             --source-commit "${SOURCE_COMMIT}" \
             --source-date-epoch "$(git show -s --format=%ct "${SOURCE_COMMIT}")" \
@@ -150,7 +150,7 @@ jobs:
           umask 077
           trap 'rm -f -- "$key_file"' EXIT
           printf '%s' "${WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX}" > "$key_file"
-          node scripts/verify-release-artifact-security.mjs \
+          node scripts/release/verify-release-artifact-security.mjs \
             --target "${{ matrix.target }}" \
             --expected-commit "${SOURCE_COMMIT}" \
             --source-date-epoch "$(git show -s --format=%ct "${SOURCE_COMMIT}")" \
@@ -272,7 +272,7 @@ jobs:
           mkdir -p "${input_root}" "${cargo_root}"
           version="$(node -p "require('./package.json').version")"
           source_date_epoch="$(git show -s --format=%ct "${SOURCE_COMMIT}")"
-          contract="docs/decisions/0031-community-core-release.json"
+          contract="config/decisions/0031-community-core-release.json"
 
           mapfile -t crates < <(jq -r '.currentState.rustPackages.intendedLinkableCore[].name' "${contract}")
           cargo_args=(package --locked --no-verify)
@@ -312,7 +312,7 @@ jobs:
               --numeric-owner \
               -C "${RUNNER_TEMP}/community-core-workers/${target}" \
               -cf - \
-              LICENSE NOTICE THIRD_PARTY_NOTICES.md bin |
+              LICENSE NOTICE THIRD_PARTY_NOTICES bin |
               zstd --quiet -19 -T0 \
                 -o "${input_root}/winwincode-worker-${version}-${target}.tar.zst"
           done

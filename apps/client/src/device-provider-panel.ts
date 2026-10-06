@@ -2,9 +2,10 @@
 
 import type { ControlPlaneClientTransport } from './community-control-plane-client.js'
 
-import { encryptDeviceProvider, type DeviceProviderMutation } from './device-provider-encryption.js'
-import { DeviceProviderProtocol, type DeviceProviderConfig, type DeviceProviderView } from './generated/contracts.js'
+import { encryptDeviceProvider, type DeviceProviderMutation, type DeviceProviderCommand } from './device-provider-encryption.js'
+import { DeviceProviderProtocol, DeviceProviderOpenCodeOperation, type DeviceProviderConfig, type DeviceProviderView } from './generated/contracts.js'
 import { matchesCanonicalSchema } from './generated/control-plane-client.js'
+import { mountOpenCodeProviderPanel } from './opencode-provider-panel.js'
 
 interface Device { readonly clientId: string; readonly displayName: string }
 
@@ -24,6 +25,7 @@ export function mountDeviceProviderPanel(options: DeviceProviderPanelOptions) {
   let busy = false
   let generation = 0
   let closed = false
+  let editingOAuth = false
   const node = <K extends keyof HTMLElementTagNameMap>(tag: K, text = ''): HTMLElementTagNameMap[K] => {
     const element = document.createElement(tag)
     element.textContent = text
@@ -87,7 +89,14 @@ export function mountDeviceProviderPanel(options: DeviceProviderPanelOptions) {
   const clear = node('button', '添加服务商'); clear.type = 'button'
   const controls = node('div'); controls.className = 'wwc-settings-route-controls'; controls.append(save, test, remove, clear)
   form.append(enabledLabel, note, controls)
-  options.root.append(deviceLabel, devices, refresh, status, list, form)
+  const openCodeRoot = node('section')
+  options.root.append(deviceLabel, devices, refresh, status, openCodeRoot, list, form)
+  const openCode = mountOpenCodeProviderPanel({ root: openCodeRoot,
+    snapshot: () => view?.snapshot ?? null,
+    available: () => !busy && options.readOnly !== true && view?.online === true && view.snapshot !== null,
+    send: applyCommand,
+    report: message => { status.textContent = message },
+  })
 
   async function request(path: string, method: 'GET' | 'POST' | 'DELETE' = 'GET', body?: unknown): Promise<unknown> {
     if (fetcher === undefined) throw new Error('设备设置连接尚未就绪。')
@@ -106,14 +115,18 @@ export function mountDeviceProviderPanel(options: DeviceProviderPanelOptions) {
     for (const control of [provider, name, endpoint, protocol, models, key, headers, enabled, save, test, remove, clear]) {
       control.disabled = busy || options.readOnly === true || view?.online !== true || view.snapshot === null
     }
+    if (editingOAuth) for (const control of [provider, endpoint, protocol, models, key, headers]) control.disabled = true
   }
   function providerView(value: unknown): DeviceProviderView {
     if (!matchesCanonicalSchema('DeviceProviderView', value)) throw new Error('设备返回了无效的配置。')
     return value as DeviceProviderView
   }
   function edit(config: DeviceProviderConfig): void {
+    editingOAuth = view?.snapshot?.providers.some(entry => entry.config.providerId === config.providerId && entry.openCode !== undefined) === true
     provider.value = config.providerId; name.value = config.displayName; endpoint.value = config.endpoint
     protocol.value = config.protocol; models.value = config.modelIds.join(', '); enabled.checked = config.enabled; key.value = ''; headers.value = ''
+    note.textContent = editingOAuth ? '此连接的账号、组织和 Go 路由已固定。更换账号或组织时，请添加新连接。' : '配置保存在所选设备。编辑时留空 API Key，可继续使用设备中的密钥。'
+    lock()
   }
   function show(): void {
     list.replaceChildren()
@@ -121,14 +134,23 @@ export function mountDeviceProviderPanel(options: DeviceProviderPanelOptions) {
       const item = node('li'); const editButton = node('button', '编辑'); editButton.type = 'button'
       editButton.disabled = busy || options.readOnly === true
       editButton.addEventListener('click', () => edit(entry.config))
-      item.append(node('span', `${entry.config.displayName} · ${entry.config.modelIds.join(', ')} · ${entry.credentialConfigured ? '已配置密钥' : '待配置'}`), editButton)
+      const credential = entry.openCode === undefined ? (entry.credentialConfigured ? '已配置密钥' : '待配置') : (entry.credentialConfigured ? '已授权' : '需要授权')
+      item.append(node('span', `${entry.config.displayName} · ${entry.config.modelIds.join(', ')} · ${credential}`), editButton)
+      if (view?.snapshot?.defaultProviderId === entry.config.providerId) item.append(node('span', ' · 新任务默认连接'))
+      else {
+        const setDefault = node('button', '设为新任务默认'); setDefault.type = 'button'
+        setDefault.disabled = busy || options.readOnly === true || view?.online !== true || !entry.config.enabled || !entry.credentialConfigured
+        setDefault.addEventListener('click', () => { void applyCommand({ operation: DeviceProviderOpenCodeOperation.SetDefaultProvider, providerId: entry.config.providerId }) })
+        item.append(setDefault)
+      }
       list.append(item)
     }
     lock()
+    openCode.render()
   }
   async function load(): Promise<void> {
     const current = ++generation
-    key.value = ''; headers.value = ''; view = null; lock()
+    key.value = ''; headers.value = ''; editingOAuth = false; view = null; show()
     if (devices.value === '') { status.textContent = '请先在设备页面连接一台设备，再设置服务商。'; return }
     try {
       const result = providerView(await request(`/api/v1/clients/${encodeURIComponent(devices.value)}/providers`))
@@ -150,8 +172,6 @@ export function mountDeviceProviderPanel(options: DeviceProviderPanelOptions) {
   }
   async function submit(operation: DeviceProviderMutation['operation']): Promise<void> {
     if (options.readOnly === true || busy || view?.online !== true || view.snapshot === null || !form.reportValidity()) return
-    const snapshot = view.snapshot
-    const selected = devices.value
     let customHeaders: Record<string, string> | undefined
     if (headers.value.trim() !== '') {
       try {
@@ -164,7 +184,13 @@ export function mountDeviceProviderPanel(options: DeviceProviderPanelOptions) {
     const secret = key.value
     const mutation: DeviceProviderMutation = { operation, config: { providerId: provider.value.trim(), displayName: name.value.trim(), endpoint: endpoint.value.trim(),
       protocol: protocol.value as DeviceProviderProtocol, modelIds: models.value.split(',').map(value => value.trim()).filter(Boolean), enabled: enabled.checked }, ...(secret === '' ? {} : { apiKey: secret }), ...(customHeaders === undefined ? {} : { customHeaders }) }
-    busy = true; show(); status.textContent = operation === 'test' ? '等待设备测试连接…' : '等待设备保存回执…'
+    await applyCommand(mutation)
+  }
+  async function applyCommand(mutation: DeviceProviderCommand): Promise<void> {
+    if (options.readOnly === true || busy || view?.online !== true || view.snapshot === null) return
+    const snapshot = view.snapshot
+    const selected = devices.value
+    busy = true; show(); status.textContent = mutation.operation === 'test' ? '等待设备测试连接…' : '等待设备处理回执…'
     try {
       const id = `provider_${(browser?.crypto ?? crypto).randomUUID().replaceAll('-', '')}`
       const encrypted = await encryptDeviceProvider(snapshot, id, mutation, browser?.crypto ?? crypto)
@@ -176,7 +202,7 @@ export function mountDeviceProviderPanel(options: DeviceProviderPanelOptions) {
         if (closed) return
         view = result
         if (result.receipt !== null) {
-          const labels: Record<string, string> = { saved: '已保存到设备。', deleted: '已从设备删除。', tested: '设备已成功调用模型，连接测试通过。', invalid_request: '设备拒绝了配置，请检查 API 地址、模型和密钥。', revision_conflict: '设备配置已变更，请刷新后重试。', provider_unavailable: '设备调用失败，请检查服务商配置和网络。', interrupted: '设备测试被中断，请重新测试。' }
+          const labels: Record<string, string> = { saved: '设备已完成操作。', deleted: '已从设备删除。', tested: '设备已成功调用模型，连接测试通过。', invalid_request: '设备拒绝了配置，请检查输入。', revision_conflict: '设备配置已变更，请刷新后重试。', provider_unavailable: '设备调用失败。用量查询失败时，界面保留上次数据。', interrupted: '操作结果尚不确定。请刷新设备状态后再操作。' }
           status.textContent = labels[result.receipt.outcome] ?? '设备返回了未知结果。'
           show(); return
         }
@@ -190,10 +216,10 @@ export function mountDeviceProviderPanel(options: DeviceProviderPanelOptions) {
   form.addEventListener('submit', event => { event.preventDefault(); void submit('save') })
   test.addEventListener('click', () => { void submit('test') })
   remove.addEventListener('click', () => { void submit('delete') })
-  clear.addEventListener('click', () => { form.reset(); provider.focus() })
+  clear.addEventListener('click', () => { editingOAuth = false; form.reset(); note.textContent = '配置保存在所选设备。编辑时留空 API Key，可继续使用设备中的密钥。'; lock(); provider.focus() })
   devices.addEventListener('change', () => { form.reset(); void load() })
   refresh.addEventListener('click', () => { void directory() })
   lock(); void directory()
-  return { close() { closed = true; controller.abort(); key.value = ''; headers.value = ''; options.root.replaceChildren() },
+  return { close() { closed = true; controller.abort(); openCode.close(); key.value = ''; headers.value = ''; options.root.replaceChildren() },
     refresh: directory, get online() { return view?.online === true }, get configured() { return (view?.snapshot?.providers.length ?? 0) > 0 } }
 }

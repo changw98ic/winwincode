@@ -112,7 +112,7 @@ impl DeviceProviderStore {
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;",
         )?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        let key = if version == 9 {
+        let key = if version == 11 {
             load_device_key(&connection)?
         } else {
             // Only an actual migration needs the writer lock. Worker polling,
@@ -136,6 +136,10 @@ impl DeviceProviderStore {
         &self,
         client_node_id: &str,
     ) -> Result<DeviceProviderSnapshot, DeviceProviderError> {
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &self.connection,
+            rusqlite::TransactionBehavior::Deferred,
+        )?;
         let revision = self.revision()?;
         let mut query = self
             .connection
@@ -145,23 +149,47 @@ impl DeviceProviderStore {
         })?;
         let mut providers = Vec::new();
         for row in rows {
-            let (config, credential_configured) = row?;
-            let config = serde_json::from_str(&config)?;
+            let (config, mut credential_configured) = row?;
+            let config: DeviceProviderConfig = serde_json::from_str(&config)?;
             if !valid_device_provider_config(&config) {
                 return Err(DeviceProviderError);
+            }
+            let open_code = self.opencode_connection(&config.provider_id)?;
+            if let Some(connection) = &open_code {
+                credential_configured = self.connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM opencode_accounts WHERE account_ref=?1 AND state IN ('authorized','refresh_in_flight'))",
+                    [&connection.account_ref.0], |row|row.get(0),
+                )?;
             }
             providers.push(DeviceProviderProjection {
                 config,
                 credential_configured,
+                open_code,
             });
         }
-        Ok(DeviceProviderSnapshot {
+        let accounts = self.opencode_accounts()?;
+        let logins = self.opencode_logins()?;
+        let default_provider_id = self
+            .connection
+            .query_row(
+                "SELECT provider_id FROM provider_defaults WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let snapshot = DeviceProviderSnapshot {
             client_node_id: client_node_id.to_owned(),
             revision,
             encryption_public_key: STANDARD
                 .encode(self.key.public_key().to_encoded_point(false).as_bytes()),
             providers,
-        })
+            default_provider_id,
+            open_code_accounts: (!accounts.is_empty()).then_some(accounts),
+            open_code_logins: (!logins.is_empty()).then_some(logins),
+        };
+        self.guard_opencode_projection(&snapshot)?;
+        transaction.commit()?;
+        Ok(snapshot)
     }
 
     pub(crate) fn revision(&self) -> Result<i64, DeviceProviderError> {
@@ -187,10 +215,13 @@ impl DeviceProviderStore {
         {
             return Err(DeviceProviderError);
         }
+        if let Some(command) = self.opencode_command(envelope) {
+            return self.apply_opencode_command(envelope, command);
+        }
         let digest = format!("{:x}", Sha256::digest(serde_json::to_vec(envelope)?));
         // Serialize mutation and receipt publication. No network work occurs inside this transaction.
         self.connection.execute_batch("BEGIN IMMEDIATE")?;
-        let result = self.apply_transaction(envelope, &digest);
+        let result = self.apply_transaction(envelope, &digest, false);
         match result {
             Ok((mut receipt, replayed)) => {
                 self.connection.execute_batch("COMMIT")?;
@@ -216,10 +247,42 @@ impl DeviceProviderStore {
         }
     }
 
+    /// Recovers an old process's receipt without executing its command.
+    ///
+    /// Unstarted commands receive a durable interrupted receipt.
+    ///
+    /// # Errors
+    /// Rejects foreign Devices, altered replays and storage failures.
+    pub fn recover_provider_receipt(
+        &mut self,
+        device: &str,
+        envelope: &DeviceConfigurationEnvelope,
+    ) -> Result<DeviceProviderReceipt, DeviceProviderError> {
+        if !valid_token(&envelope.request_id, 200)
+            || envelope.request_id.len() < 8
+            || envelope.client_node_id != device
+        {
+            return Err(DeviceProviderError);
+        }
+        let digest = format!("{:x}", Sha256::digest(serde_json::to_vec(envelope)?));
+        self.connection.execute_batch("BEGIN IMMEDIATE")?;
+        match self.apply_transaction(envelope, &digest, true) {
+            Ok((receipt, _)) => {
+                self.connection.execute_batch("COMMIT")?;
+                Ok(receipt)
+            }
+            Err(error) => {
+                let _ = self.connection.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
     fn apply_transaction(
         &self,
         envelope: &DeviceConfigurationEnvelope,
         digest: &str,
+        stale: bool,
     ) -> Result<(DeviceProviderReceipt, bool), DeviceProviderError> {
         let previous: Option<(String, String)> = self
             .connection
@@ -236,7 +299,9 @@ impl DeviceProviderStore {
             return Ok((serde_json::from_str(&receipt)?, true));
         }
         let revision = self.revision()?;
-        let outcome = if revision == envelope.expected_revision {
+        let outcome = if stale {
+            DeviceProviderOutcome::Interrupted
+        } else if revision == envelope.expected_revision {
             match self.decrypt(envelope) {
                 Ok(mutation) => self.mutate(mutation)?,
                 Err(_) => DeviceProviderOutcome::InvalidRequest,
@@ -337,6 +402,15 @@ impl DeviceProviderStore {
         }
         match mutation.operation.as_str() {
             "save" => {
+                if self
+                    .opencode_connection(&mutation.config.provider_id)?
+                    .is_some()
+                {
+                    if mutation.api_key.is_some() || mutation.custom_headers.is_some() {
+                        return Ok(DeviceProviderOutcome::InvalidRequest);
+                    }
+                    return self.edit_opencode_connection(&mutation.config);
+                }
                 let secret = match mutation.api_key.take() {
                     Some(value)
                         if !value.is_empty()
@@ -376,12 +450,17 @@ impl DeviceProviderStore {
             }
             "test" => Ok(DeviceProviderOutcome::Interrupted),
             "delete" => {
+                // Retain immutable OAuth identities so deleting a connection cannot recycle its ID.
                 self.connection.execute(
                     "DELETE FROM provider_headers WHERE provider_id=?1",
                     [&mutation.config.provider_id],
                 )?;
                 self.connection.execute(
                     "DELETE FROM providers WHERE provider_id=?1",
+                    [&mutation.config.provider_id],
+                )?;
+                self.connection.execute(
+                    "DELETE FROM provider_defaults WHERE provider_id=?1",
                     [&mutation.config.provider_id],
                 )?;
                 self.connection.execute(
@@ -405,6 +484,20 @@ impl DeviceProviderStore {
         };
         use winwincode_api::generated::ModelRoute;
         use winwincode_domain::{CredentialReferenceId, ModelExchangeId, RequestId};
+        if self
+            .opencode_connection(&mutation.config.provider_id)?
+            .is_some()
+        {
+            let original = self.provider_config(&mutation.config.provider_id)?;
+            if mutation.api_key.is_some()
+                || mutation.custom_headers.is_some()
+                || mutation.config.endpoint != original.endpoint
+                || mutation.config.protocol != original.protocol
+                || mutation.config.model_ids != original.model_ids
+            {
+                return Err(DeviceProviderError);
+            }
+        }
         let secret = match mutation.api_key.take() {
             Some(key)
                 if !key.is_empty() && key.len() <= 8192 && !key.chars().any(char::is_control) =>
@@ -480,6 +573,22 @@ impl DeviceProviderStore {
         &self,
         provider_id: &str,
     ) -> Result<BTreeMap<String, String>, DeviceProviderError> {
+        if let Some(connection) = self.opencode_connection(provider_id)? {
+            return Ok(BTreeMap::from([
+                ("x-opencode-org-id".into(), connection.organization_id),
+                (
+                    "x-opencode-session".into(),
+                    format!(
+                        "wwc-provider-{}",
+                        &format!("{:x}", Sha256::digest(provider_id.as_bytes()))[..32]
+                    ),
+                ),
+                (
+                    "User-Agent".into(),
+                    concat!("winwincode/", env!("CARGO_PKG_VERSION")).into(),
+                ),
+            ]));
+        }
         let json: Option<String> = self
             .connection
             .query_row(
@@ -502,6 +611,13 @@ impl DeviceProviderStore {
         &self,
         provider_id: &str,
     ) -> Result<(DeviceProviderConfig, ResolvedSecret), DeviceProviderError> {
+        if let Some(connection) = self.opencode_connection(provider_id)? {
+            let config = self.provider_config(provider_id)?;
+            let secret = self
+                .opencode_access(&connection.account_ref, || true)
+                .map_err(|_| DeviceProviderError)?;
+            return Ok((config, secret));
+        }
         let (config, secret): (String, Vec<u8>) = self.connection.query_row(
             "SELECT config, secret FROM providers WHERE provider_id=?1",
             [provider_id],
@@ -513,6 +629,22 @@ impl DeviceProviderStore {
             return Err(DeviceProviderError);
         }
         Ok((config, secret))
+    }
+
+    pub(crate) fn provider_config(
+        &self,
+        provider_id: &str,
+    ) -> Result<DeviceProviderConfig, DeviceProviderError> {
+        let config: String = self.connection.query_row(
+            "SELECT config FROM providers WHERE provider_id=?1",
+            [provider_id],
+            |row| row.get(0),
+        )?;
+        let config = serde_json::from_str(&config)?;
+        if !valid_device_provider_config(&config) {
+            return Err(DeviceProviderError);
+        }
+        Ok(config)
     }
 }
 
@@ -630,7 +762,7 @@ fn migrate_device_store(
             "INSERT INTO identity VALUES (1, ?1, 0)",
             [key.to_bytes().as_slice()],
         )?;
-    } else if ![1, 2, 3, 4, 5, 6, 7, 8, 9].contains(&version) {
+    } else if ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].contains(&version) {
         return Err(DeviceProviderError);
     }
     if version < 2 {
@@ -684,5 +816,44 @@ fn migrate_device_store(
             CREATE TABLE accounting_closed_attempts (job_id TEXT NOT NULL,attempt INTEGER NOT NULL,lease_id TEXT NOT NULL,PRIMARY KEY(job_id,attempt));
             PRAGMA user_version=9;")?;
     }
+    if version < 10 {
+        transaction.execute_batch(
+            "CREATE TABLE opencode_accounts (
+                account_ref TEXT PRIMARY KEY, issuer TEXT NOT NULL, subject TEXT NOT NULL,
+                client_id TEXT NOT NULL, email TEXT NOT NULL, access_token BLOB NOT NULL,
+                refresh_token BLOB NOT NULL, expires_at_ms INTEGER NOT NULL,
+                credential_version INTEGER NOT NULL CHECK(credential_version>0),
+                state TEXT NOT NULL CHECK(state IN ('authorized','refresh_in_flight','reauthorization_required','logged_out')),
+                usage TEXT, UNIQUE(issuer,subject));
+             CREATE TABLE opencode_connections (
+                provider_id TEXT PRIMARY KEY, account_ref TEXT NOT NULL,
+                organization_id TEXT NOT NULL, organization_name TEXT NOT NULL);
+             CREATE TABLE opencode_session_bindings (
+                product_session_id TEXT NOT NULL, provider_id TEXT NOT NULL, binding TEXT NOT NULL,
+                PRIMARY KEY(product_session_id,provider_id));
+             CREATE TABLE opencode_logins (
+                login_id TEXT PRIMARY KEY, projection TEXT NOT NULL, device_code BLOB NOT NULL,
+                interval_ms INTEGER NOT NULL, in_flight INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE provider_defaults (singleton INTEGER PRIMARY KEY CHECK(singleton=1), provider_id TEXT NOT NULL);
+             PRAGMA user_version=10;",
+        )?;
+    }
+    if version < 11 {
+        migrate_model_open_attempts(transaction)?;
+    }
+    Ok(())
+}
+
+fn migrate_model_open_attempts(
+    transaction: &rusqlite::Transaction<'_>,
+) -> Result<(), DeviceProviderError> {
+    transaction.execute_batch(
+        "CREATE TABLE model_open_attempts (
+            exchange_id TEXT NOT NULL REFERENCES exchanges(exchange_id),
+            attempt INTEGER NOT NULL CHECK(attempt BETWEEN 1 AND 4),
+            outcome TEXT NOT NULL CHECK(outcome IN ('accepted','rate_limited','failed')),
+            http_status INTEGER, retry_after_seconds TEXT,
+            PRIMARY KEY(exchange_id,attempt)); PRAGMA user_version=11;",
+    )?;
     Ok(())
 }

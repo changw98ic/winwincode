@@ -7,15 +7,9 @@ import test from 'node:test'
 const root = resolve(import.meta.dirname, '..')
 const rulesPath = join(
   root,
-  'docs',
+  'config',
   'contracts',
   'control-plane-strongflow-projection.rules.json',
-)
-const contractPath = join(
-  root,
-  'docs',
-  'contracts',
-  'control-plane-strongflow-projection.md',
 )
 
 const REQUIRED_RULE_IDS = Object.freeze([
@@ -209,22 +203,6 @@ test('current crate dependencies preserve Delivery ownership and generated API m
   for (const dependency of rules.implementationGate.deliveryForbiddenDependencies) {
     assert.equal(deliveryDependencies.has(dependency), false, dependency)
   }
-})
-
-test('plain-language contract states the concrete read, publication, and adapter outcomes', () => {
-  const contract = readFileSync(contractPath, 'utf8')
-  assert.doesNotMatch(contract, /尚未成立的部分|当前应当不存在|## P0 风险/u)
-  assert.match(contract, /implemented\/enforced/u)
-  assert.match(contract, /已关闭的预检风险/u)
-  for (const phrase of [
-    'Delivery 模块先生成内部投影',
-    '同一个有上限的读取截面',
-    '不能把两次独立的最新读取拼在一起',
-    '发布摘要必须同时匹配当前 Delivery、候选、通过结论、人工批准和目标',
-    '缺少可信运行台账或发布 adapter 时，生产查询返回可信事实不可用',
-    'HTTP 和 WebSocket 输入不能构造领域投影、运行事实或发布事实',
-    'Delivery crate 不依赖 winwincode-api',
-  ]) assert.equal(contract.includes(phrase), true, phrase)
 })
 
 test('implementation trigger activates public-seam and black-box behavior gates', () => {

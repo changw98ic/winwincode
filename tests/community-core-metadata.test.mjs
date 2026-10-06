@@ -8,7 +8,7 @@ import test from 'node:test'
 import {
   buildCommunityCoreMetadata,
   CommunityCoreMetadataError,
-} from '../scripts/build-community-core-metadata.mjs'
+} from '../scripts/release/build-community-core-metadata.mjs'
 
 function digest(bytes) {
   return createHash('sha256').update(bytes).digest('hex')
@@ -51,7 +51,7 @@ function defaultFiles() {
   return [
     file('LICENSE', ['legal']),
     file('NOTICE', ['legal']),
-    file('THIRD_PARTY_NOTICES.md', ['legal']),
+    file('THIRD_PARTY_NOTICES', ['legal']),
     file('crates/domain/Cargo.toml', ['rust:winwincode-domain']),
     file('crates/domain/src/lib.rs', ['rust:winwincode-domain']),
     file('crates/worker/src/main.rs', ['runtime-source:winwincode-worker']),

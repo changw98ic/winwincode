@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const matrix = JSON.parse(readFileSync(
-  join(root, 'docs/contracts/community-extension-compatibility.matrix.json'),
+  join(root, 'config/contracts/community-extension-compatibility.matrix.json'),
   'utf8',
 ))
 

@@ -35,7 +35,11 @@ use codex_protocol::permissions::PROTECTED_METADATA_PATH_NAMES;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
+use std::ffi::CStr;
+use std::ffi::OsStr;
 use std::fs;
+use std::mem::MaybeUninit;
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -47,6 +51,11 @@ fn assert_seatbelt_denied(stderr: &[u8], path: &Path) {
     let expected = format!("bash: {}: Operation not permitted\n", path.display());
     assert!(
         stderr == expected
+            || stderr
+                == format!(
+                    "bash: line 1: {}: Operation not permitted\n",
+                    path.display()
+                )
             || stderr.contains("sandbox-exec: sandbox_apply: Operation not permitted"),
         "unexpected stderr: {stderr}"
     );
@@ -65,7 +74,7 @@ fn seatbelt_policy_arg(args: &[String]) -> &str {
         .expect("seatbelt args should include policy text")
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 fn restricted_write_policy(paths: &[&Path]) -> FileSystemSandboxPolicy {
     let mut entries = vec![FileSystemSandboxEntry::new(
         FileSystemPath::Special {
@@ -133,6 +142,41 @@ fn base_policy_allows_node_cpu_sysctls() {
 }
 
 #[test]
+fn seatbelt_allows_semaphore_limit_sysconf() {
+    let workspace = TempDir::new().expect("temp workspace");
+    for policy in [
+        SandboxPolicy::new_read_only_policy(),
+        SandboxPolicy::new_workspace_write_policy(),
+    ] {
+        // getconf calls the same sysconf used by Python's ProcessPoolExecutor.
+        let args = create_seatbelt_command_args_for_legacy_policy(
+            vec!["/usr/bin/getconf".to_string(), "SEM_NSEMS_MAX".to_string()],
+            &policy,
+            workspace.path(),
+            /*enforce_managed_network*/ false,
+            /*network*/ None,
+        )
+        .expect("create seatbelt args");
+        let output = Command::new(MACOS_PATH_TO_SEATBELT_EXECUTABLE)
+            .args(args)
+            .current_dir(workspace.path())
+            .output()
+            .expect("execute semaphore limit query under seatbelt");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !output.status.success()
+            && stderr.contains("sandbox-exec: sandbox_apply: Operation not permitted")
+        {
+            eprintln!("skipping semaphore limit query: nested Seatbelt is unavailable");
+            return;
+        }
+        assert!(
+            output.status.success(),
+            "semaphore limit query should succeed under {policy:?}: {stderr}"
+        );
+    }
+}
+
+#[test]
 fn base_policy_allows_kmp_registration_shm_read_create_and_unlink() {
     let expected = r##"(allow ipc-posix-shm-read-data
   ipc-posix-shm-write-create
@@ -179,6 +223,7 @@ fn filesystem_helper_platform_defaults_do_not_grant_applications_directory() {
                 extra_allow_unix_sockets: &[],
             },
             profile,
+            /*allowed_symlinked_codex_home*/ None,
         )
         .expect("build restricted seatbelt command");
 
@@ -217,6 +262,132 @@ fn filesystem_helper_platform_defaults_do_not_grant_applications_directory() {
         !denied.status.success() && denied_stderr.contains("Operation not permitted"),
         "filesystem helper platform defaults should not grant /Applications: {denied_stderr}"
     );
+}
+
+#[test]
+fn process_platform_defaults_allow_scratch_without_granting_it_to_filesystem_helpers() {
+    let workspace = tempfile::Builder::new()
+        .prefix("codex-seatbelt-approved-project-")
+        .tempdir_in("/private/tmp")
+        .expect("approved project directory");
+    let approved_file = workspace.path().join("approved.txt");
+    fs::write(&approved_file, "approved-project").expect("write approved project file");
+    let workspace_root = AbsolutePathBuf::from_absolute_path(workspace.path())
+        .expect("workspace path should be absolute");
+    let file_system_policy = FileSystemSandboxPolicy::restricted(vec![
+        FileSystemSandboxEntry::new(
+            FileSystemPath::Path {
+                path: workspace_root.into(),
+            },
+            FileSystemAccessMode::Read,
+        ),
+        FileSystemSandboxEntry::new(
+            FileSystemPath::Special {
+                value: FileSystemSpecialPath::Minimal,
+            },
+            FileSystemAccessMode::Read,
+        ),
+    ]);
+
+    let sandboxed_args = |command: Vec<String>, profile: MacosSeatbeltProfile| {
+        create_seatbelt_command_args_with_profile(
+            CreateSeatbeltCommandArgsParams {
+                command,
+                file_system_sandbox_policy: &file_system_policy,
+                network_sandbox_policy: NetworkSandboxPolicy::Restricted,
+                sandbox_policy_cwd: workspace.path(),
+                enforce_managed_network: false,
+                managed_network: None,
+                environment_id: None,
+                network: None,
+                extra_allow_unix_sockets: &[],
+            },
+            profile,
+            /*allowed_symlinked_codex_home*/ None,
+        )
+        .expect("build restricted seatbelt command")
+    };
+
+    let run_sandboxed = |command: Vec<String>, profile: MacosSeatbeltProfile| {
+        Command::new(MACOS_PATH_TO_SEATBELT_EXECUTABLE)
+            .args(sandboxed_args(command, profile))
+            .current_dir(workspace.path())
+            .output()
+            .expect("run restricted seatbelt command")
+    };
+
+    for scratch_root in ["/private/tmp", "/private/var/tmp"] {
+        let scratch = tempfile::Builder::new()
+            .prefix("codex-seatbelt-process-scratch-")
+            .tempdir_in(scratch_root)
+            .expect("scratch directory");
+        let scratch_file = scratch.path().join("scratch.txt");
+        let process_result = run_sandboxed(
+            vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "printf '%s' 'scratch-access' > \"$1\" && /bin/cat \"$1\"".to_string(),
+                "seatbelt-scratch".to_string(),
+                scratch_file.display().to_string(),
+            ],
+            MacosSeatbeltProfile::Process,
+        );
+        let process_stderr = String::from_utf8_lossy(&process_result.stderr);
+        if !process_result.status.success()
+            && process_stderr.contains("sandbox-exec: sandbox_apply: Operation not permitted")
+        {
+            eprintln!("nested Seatbelt is unavailable; scratch access behavior was not verified");
+            break;
+        }
+        assert!(
+            process_result.status.success(),
+            "processes should retain scratch read/write access to {scratch_root}: {process_stderr}"
+        );
+        assert_eq!(process_result.stdout, b"scratch-access");
+
+        let helper_result = run_sandboxed(
+            vec!["/bin/cat".to_string(), scratch_file.display().to_string()],
+            MacosSeatbeltProfile::FileSystemHelper,
+        );
+        let helper_stderr = String::from_utf8_lossy(&helper_result.stderr);
+        assert!(
+            !helper_result.status.success() && helper_stderr.contains("Operation not permitted"),
+            "filesystem helpers should not inherit scratch access to {scratch_root}: {helper_stderr}"
+        );
+
+        if scratch_root == "/private/tmp" {
+            let approved_read = run_sandboxed(
+                vec!["/bin/cat".to_string(), approved_file.display().to_string()],
+                MacosSeatbeltProfile::FileSystemHelper,
+            );
+            let approved_stderr = String::from_utf8_lossy(&approved_read.stderr);
+            assert!(
+                approved_read.status.success(),
+                "filesystem helpers should read files in the approved project: {approved_stderr}"
+            );
+            assert_eq!(approved_read.stdout, b"approved-project");
+
+            let canonicalized = run_sandboxed(
+                vec![
+                    "/bin/realpath".to_string(),
+                    approved_file.display().to_string(),
+                ],
+                MacosSeatbeltProfile::FileSystemHelper,
+            );
+            let canonicalize_stderr = String::from_utf8_lossy(&canonicalized.stderr);
+            assert!(
+                canonicalized.status.success(),
+                "filesystem helpers should canonicalize approved project files: {canonicalize_stderr}"
+            );
+            let expected_path = approved_file
+                .canonicalize()
+                .expect("canonicalize approved project file");
+            assert_eq!(
+                canonicalized.stdout,
+                format!("{}\n", expected_path.display()).as_bytes()
+            );
+        }
+    }
 }
 
 #[test]
@@ -357,6 +528,168 @@ fn explicit_unreadable_paths_are_excluded_from_full_disk_read_and_write_access()
         ],
         "unexpected write carveout parameters in args: {args:#?}"
     );
+}
+
+#[test]
+fn global_literal_basename_denies_survive_directory_moves() {
+    for name in [".env", "credentials", "secret+file.txt"] {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let root = temp_dir.path().canonicalize().expect("canonical temp dir");
+        let workspace = root.join("workspace");
+        let destination = root.join("destination");
+        for path in [
+            workspace.join("staging/chunks"),
+            workspace.join("protected"),
+            workspace.join("late"),
+            workspace.join("private"),
+            workspace.join("directory").join(name),
+            destination.clone(),
+        ] {
+            fs::create_dir_all(path).expect("create fixture directory");
+        }
+        fs::write(workspace.join("staging/chunks/output.js"), "output").expect("build output");
+        fs::write(workspace.join("protected").join(name), "secret").expect("protected file");
+        fs::write(workspace.join("private/config.json"), "config").expect("scoped file");
+        fs::write(
+            workspace.join("directory").join(name).join("child"),
+            "secret",
+        )
+        .expect("protected directory child");
+        std::os::unix::fs::symlink(
+            workspace.join("protected").join(name),
+            workspace.join("alias"),
+        )
+        .expect("protected file alias");
+        let mut policy = restricted_write_policy(&[&workspace, &destination]);
+        policy.entries.push(FileSystemSandboxEntry::new(
+            FileSystemPath::GlobPattern {
+                pattern: format!("/**/{name}"),
+            },
+            FileSystemAccessMode::Deny,
+        ));
+        policy.entries.push(FileSystemSandboxEntry::new(
+            AbsolutePathBuf::from_absolute_path(workspace.join("private/config.json"))
+                .expect("absolute scoped path")
+                .into(),
+            FileSystemAccessMode::Deny,
+        ));
+        let args = create_seatbelt_command_args(CreateSeatbeltCommandArgsParams {
+            command: vec![
+                "/bin/sh".to_string(),
+                "-euc".to_string(),
+                r#"
+workspace=$1 destination=$2 name=$3
+denied() {
+    if "$@" > /dev/null 2>&1; then
+        echo "unexpectedly allowed: $*" >&2
+        exit 1
+    fi
+}
+/bin/mkdir "$workspace/empty"
+/bin/rmdir "$workspace/empty"
+/bin/mv "$workspace/staging" "$workspace/output"
+/bin/rm -r "$workspace/output"
+denied /bin/cat "$workspace/protected/$name"
+denied /bin/cat "$workspace/alias"
+denied /bin/cat "$workspace/directory/$name/child"
+denied /bin/mv "$workspace/directory/$name" "$workspace/exposed-directory"
+denied /bin/mv "$workspace/protected/$name" "$workspace/exposed"
+denied /bin/rm "$workspace/protected/$name"
+denied /usr/bin/touch "$workspace/$name"
+denied /bin/mv "$workspace/private" "$workspace/public"
+/bin/mv "$workspace/protected" "$workspace/renamed"
+denied /bin/cat "$workspace/renamed/$name"
+/bin/mv "$workspace/renamed" "$destination/moved"
+denied /bin/cat "$destination/moved/$name"
+denied /usr/bin/touch "$destination/moved/$name"
+/bin/mv "$workspace/late" "$destination/late"
+denied /bin/cat "$destination/late/$name"
+denied /bin/mv "$workspace" "$destination/workspace"
+"#
+                .to_string(),
+                "sh".to_string(),
+                workspace.display().to_string(),
+                destination.display().to_string(),
+                name.to_string(),
+            ],
+            file_system_sandbox_policy: &policy,
+            network_sandbox_policy: NetworkSandboxPolicy::Restricted,
+            sandbox_policy_cwd: &workspace,
+            enforce_managed_network: false,
+            managed_network: None,
+            environment_id: None,
+            network: None,
+            extra_allow_unix_sockets: &[],
+        })
+        .expect("generate full Seatbelt policy");
+        // The generated policy must also protect matches absent during preparation.
+        fs::write(workspace.join("late").join(name), "late secret").expect("late protected file");
+        let output = Command::new(MACOS_PATH_TO_SEATBELT_EXECUTABLE)
+            .args(args)
+            .output()
+            .expect("execute generated policy");
+        assert!(output.status.success(), "{name}: {output:?}");
+        for (path, contents) in [
+            (destination.join("moved").join(name), "secret"),
+            (destination.join("late").join(name), "late secret"),
+            (workspace.join("private/config.json"), "config"),
+        ] {
+            assert_eq!(fs::read_to_string(path).expect("preserved file"), contents);
+        }
+    }
+}
+
+#[test]
+fn scoped_or_nonliteral_basename_denies_still_block_directory_moves() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let workspace = temp_dir.path().canonicalize().expect("canonical temp dir");
+    fs::create_dir(workspace.join("source")).expect("source directory");
+    fs::write(workspace.join("source/.env"), "secret").expect("protected file");
+    for pattern in [
+        "**/.env".to_string(),
+        format!("{}/**/.env", workspace.display()),
+        format!("{}/*/.env", workspace.display()),
+        "/**/source/.env".to_string(),
+        "/**/*.env".to_string(),
+        "/**/{.env,credentials}".to_string(),
+    ] {
+        let mut policy = restricted_write_policy(&[&workspace]);
+        policy.entries.push(FileSystemSandboxEntry::new(
+            FileSystemPath::GlobPattern {
+                pattern: pattern.clone(),
+            },
+            FileSystemAccessMode::Deny,
+        ));
+        let args = create_seatbelt_command_args(CreateSeatbeltCommandArgsParams {
+            command: vec![
+                "/bin/mv".to_string(),
+                workspace.join("source").display().to_string(),
+                workspace.join("target").display().to_string(),
+            ],
+            file_system_sandbox_policy: &policy,
+            network_sandbox_policy: NetworkSandboxPolicy::Restricted,
+            sandbox_policy_cwd: &workspace,
+            enforce_managed_network: false,
+            managed_network: None,
+            environment_id: None,
+            network: None,
+            extra_allow_unix_sockets: &[],
+        })
+        .expect("generate full Seatbelt policy");
+        let output = Command::new(MACOS_PATH_TO_SEATBELT_EXECUTABLE)
+            .args(args)
+            .output()
+            .expect("execute generated policy");
+        assert!(!output.status.success(), "{pattern}: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("Operation not permitted"),
+            "{pattern}: {output:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.join("source/.env")).expect("preserved file"),
+            "secret"
+        );
+    }
 }
 
 #[test]
@@ -569,6 +902,7 @@ fn prepared_managed_network_context_allows_only_its_proxy_ports() {
     let managed_network = ManagedNetworkSandboxContext {
         loopback_ports: vec![43123, 48081],
         allow_local_binding: false,
+        ..Default::default()
     };
     let args = create_seatbelt_command_args(CreateSeatbeltCommandArgsParams {
         command: vec!["/bin/true".to_string()],
@@ -589,6 +923,113 @@ fn prepared_managed_network_context_allows_only_its_proxy_ports() {
     assert!(!policy.contains("(allow network-outbound (remote ip \"localhost:9999\"))"));
     assert!(!policy.contains("(allow network-bind (local ip \"*:*\"))"));
     assert!(!policy.contains("(allow network-outbound)\n"));
+    assert!(!policy.contains("(allow system-socket (socket-domain AF_UNIX))"));
+    assert!(!policy.contains("(allow network-outbound (remote unix-socket))"));
+}
+
+#[tokio::test]
+async fn prepared_managed_network_context_takes_precedence_over_live_proxy_socket_policy()
+-> anyhow::Result<()> {
+    let cwd = TempDir::new().expect("temp cwd");
+    let file_system_policy = FileSystemSandboxPolicy::from_legacy_sandbox_policy_for_cwd(
+        &SandboxPolicy::new_read_only_policy(),
+        cwd.path(),
+    );
+    let network_config = NetworkProxyConfig {
+        enabled: true,
+        mode: NetworkMode::Full,
+        dangerously_allow_all_unix_sockets: Some(true),
+        ..Default::default()
+    };
+    let state = build_config_state(
+        network_config,
+        NetworkProxyConstraints::default(),
+        codex_utils_path_uri::Platform::native(),
+    )?;
+    let network_proxy = NetworkProxy::builder()
+        .state(Arc::new(NetworkProxyState::with_reloader(
+            state,
+            Arc::new(TestConfigReloader),
+        )))
+        .managed_by_codex(/*managed_by_codex*/ false)
+        .build()
+        .await?;
+    let prepared_socket = "/tmp/codex-prepared-use";
+    let explicit_socket = "/tmp/codex-browser-use";
+    let managed_network = ManagedNetworkSandboxContext {
+        loopback_ports: vec![43123],
+        allow_unix_sockets: vec![prepared_socket.to_string(), "relative.sock".to_string()],
+        ..Default::default()
+    };
+    let extra_allow_unix_sockets = vec![absolute_path(explicit_socket)];
+    let args = create_seatbelt_command_args(CreateSeatbeltCommandArgsParams {
+        command: vec!["/usr/bin/true".to_string()],
+        file_system_sandbox_policy: &file_system_policy,
+        network_sandbox_policy: NetworkSandboxPolicy::Restricted,
+        sandbox_policy_cwd: cwd.path(),
+        enforce_managed_network: true,
+        managed_network: Some(&managed_network),
+        environment_id: None,
+        network: Some(&network_proxy),
+        extra_allow_unix_sockets: &extra_allow_unix_sockets,
+    })
+    .expect("create seatbelt args");
+
+    let policy = seatbelt_policy_arg(&args);
+    assert!(policy.contains("(allow network-outbound (remote ip \"localhost:43123\"))"));
+    assert!(policy.contains("(allow system-socket (socket-domain AF_UNIX))"));
+    assert!(!policy.contains("(allow network-bind (local unix-socket))"));
+    assert!(!policy.contains("(allow network-outbound (remote unix-socket))"));
+    let expected_explicit_socket = normalize_path_for_sandbox(Path::new(explicit_socket))
+        .expect("explicit socket root should normalize");
+    let expected_prepared_socket = normalize_path_for_sandbox(Path::new(prepared_socket))
+        .expect("prepared socket root should normalize");
+    assert_eq!(
+        args.iter()
+            .filter(|arg| arg.starts_with("-DUNIX_SOCKET_PATH_"))
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![
+            format!(
+                "-DUNIX_SOCKET_PATH_0={}",
+                expected_explicit_socket.display()
+            ),
+            format!(
+                "-DUNIX_SOCKET_PATH_1={}",
+                expected_prepared_socket.display()
+            ),
+        ]
+    );
+
+    // An empty prepared policy must not inherit the live proxy's allow-all grant.
+    let managed_network = ManagedNetworkSandboxContext {
+        loopback_ports: vec![43123],
+        ..Default::default()
+    };
+    let args = create_seatbelt_command_args(CreateSeatbeltCommandArgsParams {
+        command: vec!["/usr/bin/true".to_string()],
+        file_system_sandbox_policy: &file_system_policy,
+        network_sandbox_policy: NetworkSandboxPolicy::Restricted,
+        sandbox_policy_cwd: cwd.path(),
+        enforce_managed_network: true,
+        managed_network: Some(&managed_network),
+        environment_id: None,
+        network: Some(&network_proxy),
+        extra_allow_unix_sockets: &[],
+    })
+    .expect("create seatbelt args for empty prepared policy");
+
+    let policy = seatbelt_policy_arg(&args);
+    assert!(policy.contains("(allow network-outbound (remote ip \"localhost:43123\"))"));
+    assert!(!policy.contains("(allow system-socket (socket-domain AF_UNIX))"));
+    assert!(!policy.contains("(allow network-bind (local unix-socket))"));
+    assert!(!policy.contains("(allow network-outbound (remote unix-socket))"));
+    assert!(
+        !args
+            .iter()
+            .any(|arg| arg.starts_with("-DUNIX_SOCKET_PATH_"))
+    );
+    Ok(())
 }
 
 #[test]
@@ -685,7 +1126,7 @@ fn unreadable_globs_support_brace_alternation() {
 
     assert!(regex.is_match("/tmp/repo/.env"));
     assert!(regex.is_match("/tmp/repo/secrets.yml"));
-    assert!(!regex.is_match("/tmp/repo/notes.txt"));
+    assert!(!regex.is_match("/tmp/repo/notes.md"));
 }
 
 #[test]
@@ -762,19 +1203,228 @@ fn unreadable_glob_policy_includes_canonicalized_static_prefix() {
 }
 
 #[test]
-fn seatbelt_args_without_extension_profile_keep_legacy_preferences_read_access() {
-    let cwd = std::env::temp_dir();
-    let args = create_seatbelt_command_args_for_legacy_policy(
-        vec!["echo".to_string(), "ok".to_string()],
+fn preferences_access_requires_unrestricted_reads() {
+    let cwd = Path::new("/tmp");
+    let full_read = FileSystemSandboxPolicy::from_legacy_sandbox_policy_for_cwd(
+        &SandboxPolicy::new_workspace_write_policy(),
+        cwd,
+    );
+    let minimal = FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry::new(
+        FileSystemPath::Special {
+            value: FileSystemSpecialPath::Minimal,
+        },
+        FileSystemAccessMode::Read,
+    )]);
+    let workspace_only = FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry::new(
+        absolute_path("/tmp").into(),
+        FileSystemAccessMode::Read,
+    )]);
+    let mut denied_path = full_read.clone();
+    denied_path.entries.push(FileSystemSandboxEntry::new(
+        absolute_path("/tmp/codex-private").into(),
+        FileSystemAccessMode::Deny,
+    ));
+    let mut denied_glob = full_read.clone();
+    denied_glob.entries.push(FileSystemSandboxEntry::new(
+        FileSystemPath::GlobPattern {
+            pattern: "/tmp/**/*.private".to_string(),
+        },
+        FileSystemAccessMode::Deny,
+    ));
+
+    for (name, file_system_policy, allow_preferences) in [
+        ("legacy workspace-write", full_read, true),
+        ("minimal", minimal, false),
+        ("workspace only", workspace_only, false),
+        ("denied path", denied_path, false),
+        ("denied glob", denied_glob, false),
+    ] {
+        for profile in [
+            MacosSeatbeltProfile::Process,
+            MacosSeatbeltProfile::FileSystemHelper,
+        ] {
+            let args = create_seatbelt_command_args_with_profile(
+                CreateSeatbeltCommandArgsParams {
+                    command: vec!["/usr/bin/true".to_string()],
+                    file_system_sandbox_policy: &file_system_policy,
+                    network_sandbox_policy: NetworkSandboxPolicy::Restricted,
+                    sandbox_policy_cwd: cwd,
+                    enforce_managed_network: false,
+                    managed_network: None,
+                    environment_id: None,
+                    network: None,
+                    extra_allow_unix_sockets: &[],
+                },
+                profile,
+                /*allowed_symlinked_codex_home*/ None,
+            )
+            .expect("build seatbelt policy");
+            let policy = seatbelt_policy_arg(&args);
+            for grant in [
+                "apple.cfprefs.",
+                "com.apple.cfprefsd.daemon",
+                "com.apple.cfprefsd.agent",
+                "(allow user-preference-read)",
+            ] {
+                assert_eq!(
+                    policy.contains(grant),
+                    allow_preferences,
+                    "unexpected {grant} permission for {name} ({profile:?})"
+                );
+            }
+            assert!(!policy.contains("(allow user-preference-write)"));
+        }
+    }
+}
+
+#[test]
+fn restricted_reads_cannot_read_preferences_outside_allowed_roots() {
+    struct PreferenceDomain(String);
+
+    impl Drop for PreferenceDomain {
+        fn drop(&mut self) {
+            let _ = Command::new("/usr/bin/defaults")
+                .args(["delete", &self.0])
+                .output();
+        }
+    }
+
+    let workspace = tempfile::Builder::new()
+        .prefix("codex-prefs-")
+        .tempdir()
+        .expect("temp workspace");
+    let domain = PreferenceDomain(format!(
+        "com.openai.codex.{}",
+        workspace
+            .path()
+            .file_name()
+            .expect("workspace name")
+            .to_string_lossy()
+    ));
+    let marker = "codex-preferences-read-canary";
+    // Bazel gives tests a temporary HOME, but preferences use the account home.
+    // Use caller-owned storage because tests can query the account concurrently.
+    let mut passwd = MaybeUninit::<libc::passwd>::uninit();
+    let mut buffer = vec![0_u8; 16 * 1024];
+    let mut result = std::ptr::null_mut();
+    let status = unsafe {
+        libc::getpwuid_r(
+            libc::getuid(),
+            passwd.as_mut_ptr(),
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+            &mut result,
+        )
+    };
+    assert_eq!(status, 0, "look up current account");
+    assert!(!result.is_null(), "current account was not found");
+    // SAFETY: getpwuid_r succeeded and initialized passwd; buffer is still alive.
+    let passwd = unsafe { passwd.assume_init_ref() };
+    assert!(!passwd.pw_dir.is_null(), "current account has no home");
+    let account_home = unsafe { CStr::from_ptr(passwd.pw_dir) };
+    let plist = PathBuf::from(OsStr::from_bytes(account_home.to_bytes()))
+        .join("Library/Preferences")
+        .join(format!("{}.plist", domain.0));
+    let written = Command::new("/usr/bin/defaults")
+        .args(["write", &domain.0, "canary", "-string", marker])
+        .output()
+        .expect("write test preference");
+    assert!(
+        written.status.success(),
+        "write test preference: {}",
+        String::from_utf8_lossy(&written.stderr)
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !plist.is_file() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(
+        plist.is_file(),
+        "test preference was not persisted at {}",
+        plist.display()
+    );
+
+    let workspace_root =
+        AbsolutePathBuf::from_absolute_path(workspace.path()).expect("absolute workspace");
+    let plist_path = AbsolutePathBuf::from_absolute_path(&plist).expect("absolute plist path");
+    let restricted = FileSystemSandboxPolicy::restricted(vec![
+        FileSystemSandboxEntry::new(
+            FileSystemPath::Special {
+                value: FileSystemSpecialPath::Minimal,
+            },
+            FileSystemAccessMode::Read,
+        ),
+        FileSystemSandboxEntry::new(workspace_root.into(), FileSystemAccessMode::Read),
+        FileSystemSandboxEntry::new(plist_path.into(), FileSystemAccessMode::Deny),
+    ]);
+    let full_read = FileSystemSandboxPolicy::from_legacy_sandbox_policy_for_cwd(
         &SandboxPolicy::new_read_only_policy(),
-        cwd.as_path(),
-        /*enforce_managed_network*/ false,
-        /*network*/ None,
-    )
-    .unwrap();
-    let policy = &args[1];
-    assert!(policy.contains("(allow user-preference-read)"));
-    assert!(!policy.contains("(allow user-preference-write)"));
+        workspace.path(),
+    );
+    let run = |policy: &FileSystemSandboxPolicy, command: Vec<String>| {
+        let args = create_seatbelt_command_args(CreateSeatbeltCommandArgsParams {
+            command,
+            file_system_sandbox_policy: policy,
+            network_sandbox_policy: NetworkSandboxPolicy::Restricted,
+            sandbox_policy_cwd: workspace.path(),
+            enforce_managed_network: false,
+            managed_network: None,
+            environment_id: None,
+            network: None,
+            extra_allow_unix_sockets: &[],
+        })
+        .expect("build seatbelt command");
+        Command::new(MACOS_PATH_TO_SEATBELT_EXECUTABLE)
+            .args(args)
+            .current_dir(workspace.path())
+            .output()
+            .expect("run seatbelt command")
+    };
+    let allowed_file = workspace.path().join("allowed.txt");
+    fs::write(&allowed_file, "allowed").expect("write allowed file");
+    let control = run(
+        &restricted,
+        vec!["/bin/cat".to_string(), allowed_file.display().to_string()],
+    );
+    let control_stderr = String::from_utf8_lossy(&control.stderr);
+    if !control.status.success()
+        && control_stderr.contains("sandbox-exec: sandbox_apply: Operation not permitted")
+    {
+        return;
+    }
+    assert!(control.status.success(), "control failed: {control_stderr}");
+    assert_eq!(control.stdout, b"allowed");
+
+    let direct = run(
+        &restricted,
+        vec!["/bin/cat".to_string(), plist.display().to_string()],
+    );
+    assert!(
+        !direct.status.success()
+            && String::from_utf8_lossy(&direct.stderr).contains("Operation not permitted"),
+        "direct plist read should be denied: {direct:?}"
+    );
+
+    let read_preference = || {
+        vec![
+            "/usr/bin/defaults".to_string(),
+            "read".to_string(),
+            domain.0.clone(),
+            "canary".to_string(),
+        ]
+    };
+    for _ in 0..2 {
+        let denied = run(&restricted, read_preference());
+        assert!(
+            !denied.status.success() && !String::from_utf8_lossy(&denied.stdout).contains(marker),
+            "restricted preferences read returned protected data: {denied:?}"
+        );
+
+        // The full-read control also warms the cache before the next attempt.
+        let allowed = run(&full_read, read_preference());
+        assert!(allowed.status.success(), "full-read control: {allowed:?}");
+        assert_eq!(String::from_utf8_lossy(&allowed.stdout).trim(), marker);
+    }
 }
 
 #[test]
@@ -1003,7 +1653,11 @@ async fn create_seatbelt_args_merges_proxy_and_explicit_unix_socket_paths() -> a
         ..Default::default()
     };
     network_config.set_allow_unix_sockets(vec![network_socket.to_string()]);
-    let state = build_config_state(network_config, NetworkProxyConstraints::default())?;
+    let state = build_config_state(
+        network_config,
+        NetworkProxyConstraints::default(),
+        codex_utils_path_uri::Platform::native(),
+    )?;
     let network_proxy = NetworkProxy::builder()
         .state(Arc::new(NetworkProxyState::with_reloader(
             state,
@@ -1327,6 +1981,13 @@ fn create_seatbelt_args_with_read_only_git_and_codex_subpaths() {
                 .display()
         ),
         format!(
+            "-DWRITABLE_ROOT_0_EXCLUDED_3={}",
+            cwd.canonicalize()
+                .expect("canonicalize cwd")
+                .join(".aws")
+                .display()
+        ),
+        format!(
             "-DWRITABLE_ROOT_1={}",
             vulnerable_root_canonical.to_string_lossy()
         ),
@@ -1553,6 +2214,51 @@ fn seatbelt_prevents_writable_root_replacement() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn create_seatbelt_args_uses_literal_non_directory_writable_roots() {
+    let tmp = TempDir::new().expect("tempdir");
+    let target = tmp.path().join("target.txt");
+    fs::write(&target, "contents").expect("write target");
+    let policy = restricted_write_policy(&[target.as_path(), Path::new("/dev/null")]);
+    let args = create_seatbelt_command_args(CreateSeatbeltCommandArgsParams {
+        command: vec!["/usr/bin/true".to_string()],
+        file_system_sandbox_policy: &policy,
+        network_sandbox_policy: NetworkSandboxPolicy::Restricted,
+        sandbox_policy_cwd: tmp.path(),
+        enforce_managed_network: false,
+        managed_network: None,
+        environment_id: None,
+        network: None,
+        extra_allow_unix_sockets: &[],
+    })
+    .expect("file writable root should be supported");
+    let policy_text = seatbelt_policy_arg(&args);
+
+    assert!(
+        policy_text.contains("(literal (param \"WRITABLE_ROOT_0\"))"),
+        "expected literal file grant in policy:\n{policy_text}"
+    );
+    assert!(
+        !policy_text.contains("(subpath (param \"WRITABLE_ROOT_0\"))"),
+        "file grant should not include descendants:\n{policy_text}"
+    );
+    assert!(
+        policy_text.contains("(literal (param \"WRITABLE_ROOT_1\"))"),
+        "expected literal device grant in policy:\n{policy_text}"
+    );
+    assert!(
+        !policy_text.contains("(subpath (param \"WRITABLE_ROOT_1\"))"),
+        "device grant should not include descendants:\n{policy_text}"
+    );
+    assert!(
+        policy_text.contains(
+            "(deny file-write-unlink (require-all (literal (param \"WRITABLE_ROOT_0\")) (vnode-type DIRECTORY)))"
+        ),
+        "file grant should protect the path if it becomes a directory:\n{policy_text}"
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn seatbelt_allows_file_root_replacement_and_deletion() {
@@ -1595,6 +2301,159 @@ fn seatbelt_allows_file_root_replacement_and_deletion() {
     );
     assert!(!target.exists(), "target should have been deleted");
     assert!(!replacement.exists(), "replacement should have been moved");
+
+    create_seatbelt_command_args(CreateSeatbeltCommandArgsParams {
+        command: vec!["/usr/bin/true".to_string()],
+        file_system_sandbox_policy: &policy,
+        network_sandbox_policy: NetworkSandboxPolicy::Restricted,
+        sandbox_policy_cwd: tmp.path(),
+        enforce_managed_network: false,
+        managed_network: None,
+        environment_id: None,
+        network: None,
+        extra_allow_unix_sockets: &[],
+    })
+    .expect("deleted file roots should remain usable by later commands");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn seatbelt_file_root_does_not_follow_replacement_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let writable_file = tmp.path().join("writable.txt");
+    let outside_file = tmp.path().join("outside.txt");
+    fs::write(&writable_file, "writable").expect("write writable file");
+    fs::write(&outside_file, "outside").expect("write outside file");
+    let policy = restricted_write_policy(&[writable_file.as_path()]);
+    let args = create_seatbelt_command_args(CreateSeatbeltCommandArgsParams {
+        command: vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "printf escaped > \"$1\"".to_string(),
+            "sh".to_string(),
+            writable_file.display().to_string(),
+        ],
+        file_system_sandbox_policy: &policy,
+        network_sandbox_policy: NetworkSandboxPolicy::Restricted,
+        sandbox_policy_cwd: tmp.path(),
+        enforce_managed_network: false,
+        managed_network: None,
+        environment_id: None,
+        network: None,
+        extra_allow_unix_sockets: &[],
+    })
+    .expect("build seatbelt command");
+    fs::remove_file(&writable_file).expect("remove writable file");
+    symlink(&outside_file, &writable_file).expect("replace writable file with symlink");
+
+    let output = Command::new(MACOS_PATH_TO_SEATBELT_EXECUTABLE)
+        .args(&args)
+        .current_dir(tmp.path())
+        .output()
+        .expect("execute seatbelt command");
+
+    assert!(
+        !output.status.success(),
+        "replacement symlink should not grant access to its target"
+    );
+    assert_eq!(
+        fs::read_to_string(&outside_file).expect("read outside file"),
+        "outside"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn seatbelt_protects_file_root_replaced_with_directory() {
+    let tmp = TempDir::new().expect("tempdir");
+    let writable_file = tmp.path().join("writable");
+    fs::write(&writable_file, "contents").expect("write writable file");
+    let policy = restricted_write_policy(&[writable_file.as_path()]);
+    let args = create_seatbelt_command_args(CreateSeatbeltCommandArgsParams {
+        command: vec![
+            "/bin/rmdir".to_string(),
+            writable_file.display().to_string(),
+        ],
+        file_system_sandbox_policy: &policy,
+        network_sandbox_policy: NetworkSandboxPolicy::Restricted,
+        sandbox_policy_cwd: tmp.path(),
+        enforce_managed_network: false,
+        managed_network: None,
+        environment_id: None,
+        network: None,
+        extra_allow_unix_sockets: &[],
+    })
+    .expect("build seatbelt command");
+    fs::remove_file(&writable_file).expect("remove writable file");
+    fs::create_dir(&writable_file).expect("replace writable file with directory");
+
+    let output = Command::new(MACOS_PATH_TO_SEATBELT_EXECUTABLE)
+        .args(&args)
+        .current_dir(tmp.path())
+        .output()
+        .expect("execute seatbelt command");
+
+    assert!(
+        !output.status.success(),
+        "directory replacement should remain anchored"
+    );
+    assert!(
+        writable_file.is_dir(),
+        "replacement directory should remain in place"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn seatbelt_does_not_follow_rebound_writable_root_ancestor() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let ancestor = tmp.path().join("ancestor");
+    let original_ancestor = tmp.path().join("ancestor-original");
+    let writable_root = ancestor.join("workspace");
+    let outside_ancestor = tmp.path().join("outside");
+    let outside_root = outside_ancestor.join("workspace");
+    let logical_file = writable_root.join("escaped.txt");
+    let escaped_file = outside_root.join("escaped.txt");
+    fs::create_dir_all(&writable_root).expect("create writable root");
+    fs::create_dir_all(&outside_root).expect("create outside root");
+    let policy = restricted_write_policy(&[writable_root.as_path()]);
+    let args = create_seatbelt_command_args(CreateSeatbeltCommandArgsParams {
+        command: vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "printf escaped > \"$1\"".to_string(),
+            "sh".to_string(),
+            logical_file.display().to_string(),
+        ],
+        file_system_sandbox_policy: &policy,
+        network_sandbox_policy: NetworkSandboxPolicy::Restricted,
+        sandbox_policy_cwd: tmp.path(),
+        enforce_managed_network: false,
+        managed_network: None,
+        environment_id: None,
+        network: None,
+        extra_allow_unix_sockets: &[],
+    })
+    .expect("build seatbelt command");
+
+    fs::rename(&ancestor, &original_ancestor).expect("move writable ancestor");
+    symlink(&outside_ancestor, &ancestor).expect("rebind writable ancestor");
+
+    let output = Command::new(MACOS_PATH_TO_SEATBELT_EXECUTABLE)
+        .args(&args)
+        .current_dir(tmp.path())
+        .output()
+        .expect("execute seatbelt command");
+
+    assert!(
+        !output.status.success(),
+        "rebound ancestor should not grant the outside root"
+    );
+    assert!(!escaped_file.exists(), "outside file should not be created");
 }
 
 #[cfg(target_os = "macos")]
@@ -1603,13 +2462,15 @@ fn seatbelt_prevents_writable_directory_root_rename() {
     let tmp = TempDir::new().expect("tempdir");
     let source = tmp.path().join("source");
     let destination = tmp.path().join("destination");
+    let renamed = destination.join("renamed");
     fs::create_dir(&source).expect("create source");
+    fs::create_dir(&destination).expect("create destination");
     let policy = restricted_write_policy(&[source.as_path(), destination.as_path()]);
     let args = create_seatbelt_command_args(CreateSeatbeltCommandArgsParams {
         command: vec![
             "/bin/mv".to_string(),
             source.display().to_string(),
-            destination.display().to_string(),
+            renamed.display().to_string(),
         ],
         file_system_sandbox_policy: &policy,
         network_sandbox_policy: NetworkSandboxPolicy::Restricted,
@@ -1634,8 +2495,8 @@ fn seatbelt_prevents_writable_directory_root_rename() {
     );
     assert!(source.is_dir(), "source directory should remain in place");
     assert!(
-        !destination.exists(),
-        "destination should not have been created"
+        !renamed.exists(),
+        "renamed directory should not have been created"
     );
 }
 
@@ -1644,14 +2505,17 @@ fn seatbelt_prevents_writable_directory_root_rename() {
 fn seatbelt_protects_writable_root_created_as_directory() {
     let tmp = TempDir::new().expect("tempdir");
     let writable_root = tmp.path().join("writable-root");
-    let policy = restricted_write_policy(&[writable_root.as_path()]);
+    let progress = tmp.path().join("progress.txt");
+    fs::write(&progress, "pending").expect("write progress file");
+    let policy = restricted_write_policy(&[writable_root.as_path(), progress.as_path()]);
     let args = create_seatbelt_command_args(CreateSeatbeltCommandArgsParams {
         command: vec![
             "/bin/sh".to_string(),
             "-c".to_string(),
-            "mkdir \"$1\" && rmdir \"$1\"".to_string(),
+            "mkdir \"$1\" && touch \"$1/file\" && printf ok > \"$2\" && rm \"$1/file\" && rmdir \"$1\"".to_string(),
             "sh".to_string(),
             writable_root.display().to_string(),
+            progress.display().to_string(),
         ],
         file_system_sandbox_policy: &policy,
         network_sandbox_policy: NetworkSandboxPolicy::Restricted,
@@ -1678,6 +2542,152 @@ fn seatbelt_protects_writable_root_created_as_directory() {
         writable_root.is_dir(),
         "newly created directory root should remain protected"
     );
+    assert_eq!(
+        fs::read_to_string(&progress).expect("read progress file"),
+        "ok",
+        "missing writable root should allow descendant writes"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn seatbelt_protects_aws_in_extra_writable_home() {
+    for existing in [true, false] {
+        let tmp = TempDir::new().expect("tempdir");
+        let home = tmp.path().join("home");
+        let workspace = tmp.path().join("workspace");
+        let aws = home.join(".aws");
+        let config = aws.join("config");
+        let probe = home.join("probe");
+        fs::create_dir_all(&home).expect("create home");
+        fs::create_dir_all(&workspace).expect("create workspace");
+        fs::write(home.join("replacement"), "replacement").expect("write replacement");
+        fs::create_dir(home.join("replacement-dir")).expect("create replacement directory");
+        if existing {
+            fs::create_dir(&aws).expect("create .aws");
+            fs::write(&config, "original").expect("write AWS config");
+        }
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![home.as_path().try_into().expect("absolute home")],
+            network_access: false,
+            exclude_tmpdir_env_var: true,
+            exclude_slash_tmp: true,
+        };
+        let attempts: &[&str] = if existing {
+            &[
+                r#"printf changed > "$HOME/.aws/config""#,
+                r#"/bin/rm "$HOME/.aws/config""#,
+                r#"/bin/mv "$HOME/.aws/config" "$HOME/renamed-config""#,
+                r#"/bin/mv "$HOME/replacement" "$HOME/.aws/config""#,
+                r#"/bin/mv "$HOME/.aws" "$HOME/renamed-aws""#,
+            ]
+        } else {
+            &[
+                r#"/bin/mkdir "$HOME/.aws""#,
+                r#"/bin/mv "$HOME/replacement-dir" "$HOME/.aws""#,
+                r#"/bin/ln -s "$HOME/replacement-dir" "$HOME/.aws""#,
+            ]
+        };
+        for attempt in attempts {
+            let args = create_seatbelt_command_args_for_legacy_policy(
+                vec![
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    format!(r#"printf ran > "$HOME/probe" && {attempt}"#),
+                ],
+                &policy,
+                &workspace,
+                /*enforce_managed_network*/ false,
+                /*network*/ None,
+            )
+            .expect("build seatbelt command");
+            let output = Command::new(MACOS_PATH_TO_SEATBELT_EXECUTABLE)
+                .args(args)
+                .env("HOME", &home)
+                .current_dir(&workspace)
+                .output()
+                .expect("execute seatbelt command");
+            assert_eq!(
+                fs::read_to_string(&probe).expect("read sibling probe"),
+                "ran"
+            );
+            fs::remove_file(&probe).expect("reset sibling probe");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                !output.status.success() && stderr.contains("Operation not permitted"),
+                "expected Seatbelt denial for {attempt}: {stderr}"
+            );
+            if existing {
+                assert_eq!(
+                    fs::read_to_string(&config).expect("read AWS config"),
+                    "original"
+                );
+            } else {
+                assert!(
+                    fs::symlink_metadata(&aws).is_err(),
+                    ".aws should remain absent"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn seatbelt_protects_resolved_target_of_symlinked_metadata_directory() {
+    use std::os::unix::fs::symlink;
+
+    for (name, config_name) in [(".codex", "config.toml"), (".aws", "config")] {
+        let tmp = TempDir::new().expect("tempdir");
+        let writable_root = tmp.path().join("workspace");
+        let actual_config = writable_root.join("actual-config");
+        let metadata_dir = writable_root.join(name);
+        let config = actual_config.join(config_name);
+        let probe = writable_root.join("probe");
+        fs::create_dir_all(&actual_config).expect("create actual config directory");
+        fs::write(&config, "original").expect("write config");
+        symlink(&actual_config, &metadata_dir).expect("create metadata symlink");
+        let policy = restricted_write_policy(&[writable_root.as_path()]);
+        let args = create_seatbelt_command_args(CreateSeatbeltCommandArgsParams {
+            command: vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "printf ran > \"$2\" && printf escaped > \"$1\"".to_string(),
+                "sh".to_string(),
+                config.display().to_string(),
+                probe.display().to_string(),
+            ],
+            file_system_sandbox_policy: &policy,
+            network_sandbox_policy: NetworkSandboxPolicy::Restricted,
+            sandbox_policy_cwd: &writable_root,
+            enforce_managed_network: false,
+            managed_network: None,
+            environment_id: None,
+            network: None,
+            extra_allow_unix_sockets: &[],
+        })
+        .expect("build seatbelt command");
+
+        let output = Command::new(MACOS_PATH_TO_SEATBELT_EXECUTABLE)
+            .args(&args)
+            .current_dir(&writable_root)
+            .output()
+            .expect("execute seatbelt command");
+
+        assert_eq!(
+            fs::read_to_string(&probe).expect("read sibling probe"),
+            "ran"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success() && stderr.contains("Operation not permitted"),
+            "resolved {name} target should remain read-only: {stderr}"
+        );
+        assert_eq!(
+            fs::read_to_string(&config).expect("read config"),
+            "original"
+        );
+    }
 }
 
 #[test]
@@ -1831,6 +2841,69 @@ fn create_seatbelt_args_with_read_only_git_pointer_file() {
 }
 
 #[test]
+fn workspace_write_protects_linked_worktree_gitdir_under_tmp() {
+    let tmp = TempDir::new_in("/private/tmp").expect("tempdir");
+    let worktree = tmp.path().join("worktree");
+    let gitdir = tmp.path().join("common/.git/worktrees/worktree");
+    fs::create_dir(&worktree).expect("create worktree");
+    fs::create_dir_all(&gitdir).expect("create gitdir");
+    fs::write(
+        worktree.join(".git"),
+        format!("gitdir: {}\n", gitdir.display()),
+    )
+    .expect("write .git pointer");
+    let commondir = gitdir.join("commondir");
+    fs::write(&commondir, "../..\n").expect("write commondir");
+    let allowed = tmp.path().join("allowed");
+    let policy = FileSystemSandboxPolicy::workspace_write(
+        &[],
+        /*exclude_tmpdir_env_var*/ false,
+        /*exclude_slash_tmp*/ false,
+    );
+    let args = create_seatbelt_command_args(CreateSeatbeltCommandArgsParams {
+        command: vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "printf allowed > \"$1\" && printf changed > \"$2\"".to_string(),
+            "sh".to_string(),
+            allowed.display().to_string(),
+            commondir.display().to_string(),
+        ],
+        file_system_sandbox_policy: &policy,
+        network_sandbox_policy: NetworkSandboxPolicy::Restricted,
+        sandbox_policy_cwd: &worktree,
+        enforce_managed_network: false,
+        managed_network: None,
+        environment_id: None,
+        network: None,
+        extra_allow_unix_sockets: &[],
+    })
+    .expect("create seatbelt args");
+    let output = Command::new(MACOS_PATH_TO_SEATBELT_EXECUTABLE)
+        .args(args)
+        .current_dir(&worktree)
+        .output()
+        .expect("execute seatbelt command");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.contains("sandbox-exec: sandbox_apply: Operation not permitted") {
+        return;
+    }
+
+    assert_eq!(
+        fs::read_to_string(allowed).expect("read allowed file"),
+        "allowed"
+    );
+    assert!(
+        !output.status.success(),
+        "gitdir write succeeded: {output:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(commondir).expect("read commondir"),
+        "../..\n"
+    );
+}
+
+#[test]
 fn create_seatbelt_args_for_cwd_as_git_repo() {
     // Create a temporary workspace with two writable roots: one containing
     // top-level workspace metadata paths and one without them.
@@ -1927,13 +3000,13 @@ fn create_seatbelt_args_for_cwd_as_git_repo() {
         args.contains(&expected_dot_codex),
         "missing {expected_dot_codex}: {args:#?}"
     );
-    let unexpected_dot_agents = format!(
-        "-DWRITABLE_ROOT_0_EXCLUDED_1={}",
+    let expected_dot_agents = format!(
+        "-DWRITABLE_ROOT_0_EXCLUDED_2={}",
         dot_agents_canonical.to_string_lossy()
     );
     assert!(
-        !args.contains(&unexpected_dot_agents),
-        "missing .agents should be handled by regex rather than materialized as a path param: {args:#?}"
+        args.contains(&expected_dot_agents),
+        "missing {expected_dot_agents}: {args:#?}"
     );
     let expected_slash_tmp = format!("-DWRITABLE_ROOT_1={}", slash_tmp.to_string_lossy());
     assert!(

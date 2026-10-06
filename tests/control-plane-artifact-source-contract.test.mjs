@@ -7,15 +7,9 @@ import test from 'node:test'
 const root = resolve(import.meta.dirname, '..')
 const rulesPath = join(
   root,
-  'docs',
+  'config',
   'contracts',
   'control-plane-artifact-source.rules.json',
-)
-const documentationPath = join(
-  root,
-  'docs',
-  'contracts',
-  'control-plane-artifact-source.md',
 )
 
 function read(path) {
@@ -57,8 +51,8 @@ test('phase 3.1 freezes one implemented Artifact and source authority chain', ()
       schemaVersion: 'winwincode.control-plane-artifact-source-rules.v1',
       status: 'implemented-enforced',
       issueId: 'winwincode-9c4.16.3.1',
-      decision: 'docs/decisions/0028-control-plane-worker-migration.md',
-      documentation: 'docs/contracts/control-plane-artifact-source.md',
+      decision: 'config/decisions/0028-control-plane-worker-migration.md',
+      documentation: 'config/contracts/control-plane-artifact-source.md',
       implementationCompletionSource: 'rust-black-box-tests-and-beads',
     },
   )
@@ -213,21 +207,5 @@ test('the contract gate executes every Artifact and source black-box suite', () 
         `${gate.package} did not execute ${requiredTest}`,
       )
     }
-  }
-})
-
-test('the documentation states the same single path without completion overclaim', () => {
-  const documentation = read(documentationPath)
-  for (const statement of [
-    'generated artifact.open / artifact.chunk',
-    'opaque ValidatedGitSourceArtifact',
-    'ARTIFACT_DIGEST_MISMATCH',
-    '另一个 Job 也不能接续上传',
-    '调用方不能传本地路径、对象存储键或上传 URL',
-    'Fake adapter',
-    '它不是企业对象存储已经交付的声明',
-    '没有保留调用方自报 commit/tree/diff/path 的旧候选路径',
-  ]) {
-    assert.match(documentation, new RegExp(statement.replaceAll('.', '\\.'), 'u'))
   }
 })

@@ -718,6 +718,12 @@ impl DeviceDaemon {
         &self.status
     }
 
+    /// An in-process restart must wait for the active configuration effect and receipt.
+    #[must_use]
+    pub const fn configuration_apply_pending(&self) -> bool {
+        self.configuration_pending.is_some()
+    }
+
     /// This device's stable local device id.
     #[must_use]
     pub fn device_id(&self) -> &str {
@@ -1544,7 +1550,6 @@ impl DeviceDaemon {
                 let extension =
                     matches!(&envelope.message, ServerToClientMessage::ExtensionApply(_));
                 if envelope.client_node_id != self.node_id
-                    || envelope.client_instance_id != self.instance_id
                     || payload.command.idempotency_key != payload.encrypted.request_id
                     || i64::try_from(payload.command.expected_revision).ok()
                         != Some(payload.encrypted.expected_revision)
@@ -1552,6 +1557,30 @@ impl DeviceDaemon {
                     return Err(DownlinkFailure::Retriable(
                         "Provider command belongs to another device instance".to_owned(),
                     ));
+                }
+                if envelope.client_instance_id != self.instance_id {
+                    if extension {
+                        return Err(DownlinkFailure::Retriable(
+                            "Provider command belongs to another device instance".to_owned(),
+                        ));
+                    }
+                    // A restart must return already-durable effects without starting HTTP
+                    // again. Unstarted old commands are interrupted, preserving fencing.
+                    let directory = self.provider_directory().map_err(DownlinkFailure::Fatal)?;
+                    let receipt = winwincode_provider::DeviceProviderStore::open(&directory)
+                        .and_then(|mut store| {
+                            store.recover_provider_receipt(&self.node_id, &payload.encrypted)
+                        })
+                        .map_err(|_| {
+                            DownlinkFailure::Retriable(
+                                "device Provider receipt could not recover".to_owned(),
+                            )
+                        })?;
+                    self.publish_provider_state(Some(receipt))
+                        .map_err(DownlinkFailure::Fatal)?;
+                    self.advance_downlink_cursor(&envelope)?;
+                    accepted += 1;
+                    continue;
                 }
                 if self.configuration_pending.as_ref().is_some_and(|pending| {
                     pending.envelope != payload.encrypted || pending.extension != extension

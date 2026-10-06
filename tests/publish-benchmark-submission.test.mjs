@@ -6,9 +6,9 @@ import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import test from 'node:test'
 import { prepareBenchmarkSubmission, publishBenchmarkLedger,
-  publishBenchmarkSubmission } from '../scripts/publish-benchmark-submission.mjs'
+  publishBenchmarkSubmission } from '../scripts/benchmark/publish-benchmark-submission.mjs'
 import { buildBenchmarkPlan, runBenchmarkPlan,
-  validateBenchmarkConfiguration } from '../scripts/run-real-task-benchmark.mjs'
+  validateBenchmarkConfiguration } from '../scripts/benchmark/run-real-task-benchmark.mjs'
 
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
 const gitBlob = bytes => createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex')

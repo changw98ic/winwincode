@@ -37,10 +37,10 @@ const retiredStrongFlowModules = [
 ]
 
 const retiredTestsAndFixtures = [
-  'docs/contracts/delivery-domain-rules.v1.json',
-  'docs/contracts/delivery-solution-review-authority.md',
-  'docs/contracts/delivery-solution-review-authority.rules.json',
-  'docs/contracts/session-worker-fault-differential.rules.json',
+  'config/contracts/delivery-domain-rules.v1.json',
+  'config/contracts/delivery-solution-review-authority.md',
+  'config/contracts/delivery-solution-review-authority.rules.json',
+  'config/contracts/session-worker-fault-differential.rules.json',
   'docs/live-evaluation.md',
   'scripts/evaluation-measures.mjs',
   'scripts/run-evaluation-measures.mjs',

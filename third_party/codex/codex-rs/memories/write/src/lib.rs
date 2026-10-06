@@ -9,8 +9,10 @@ mod extensions;
 mod guard;
 mod metrics;
 mod phase1;
+mod phase1_output;
 mod phase2;
 mod prompts;
+mod rollout_input;
 mod runtime;
 mod start;
 mod storage;
@@ -85,7 +87,7 @@ mod stage_one {
     pub(super) const PRUNE_BATCH_SIZE: usize = 200;
 
     /// Prompt used for phase 1 extraction.
-    pub(super) const PROMPT: &str = include_str!("../templates/memories/stage_one_system.md");
+    pub(super) const PROMPT: &str = include_str!("../templates/memories/stage_one_system.txt");
 
     /// Fallback stage-1 rollout truncation limit (tokens) when model metadata
     /// does not include a valid context window.

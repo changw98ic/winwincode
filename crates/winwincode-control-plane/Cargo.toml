@@ -7,7 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
-include = ["src/**", "tests/**", "Cargo.toml", "README.md"]
+include = ["src/**", "tests/**", "Cargo.toml"]
 
 [features]
 # Exposes deterministic trusted-authority fixture builders only to Rust tests.

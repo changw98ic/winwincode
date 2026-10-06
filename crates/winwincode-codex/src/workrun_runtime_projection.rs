@@ -159,8 +159,13 @@ impl WorkRunRuntimeProjector {
         sources.sort_by(|left, right| left["source_id"].as_str().cmp(&right["source_id"].as_str()));
         let input = serde_json::to_string(&job.work_input)
             .map_err(|_| WorkRunRuntimeProjectionError::InvalidSource)?;
+        let evidence_instruction = if sources.is_empty() {
+            "There are no retained verification command receipts. First run each assigned criterion's exact verificationMethod through exec_command in this read-only checkout and wait for completion. Only then return the verdict JSON. Tool names and command text are not source_id values."
+        } else {
+            "Use the retained direct command receipts. Run any still-unverified assigned method before returning a verdict."
+        };
         Ok(format!(
-            "The preceding verification result was rejected: its JSON, sealed input identities, or evidence references are invalid. Return one corrected JSON object matching the active independent-verification-result schema. Use the exact delivery specification, revision, candidate and assigned criterion IDs in the sealed input below. Choose a unique finding_id and describe the actual observed result in explanation. Cite only source_id values from the retained direct command receipts below; their outcomes are authoritative. If further evidence is needed, run the exact assigned verification command in this same read-only candidate checkout. Do not modify files or invent evidence. Preserve every required Fusion investigation and claim key from the original instructions.\nSealed workInput: {input}\nRetained direct receipts: {}",
+            "The preceding verification result was rejected: its JSON, sealed input identities, or evidence references are invalid. {evidence_instruction} Return one corrected JSON object matching the active independent-verification-result schema. Use the exact delivery specification, revision, candidate and assigned criterion IDs in the sealed input below. Choose a unique finding_id and describe the actual observed result in explanation. Cite only source_id values from the retained direct command receipts below; their outcomes are authoritative. Do not modify files or invent evidence. Preserve every required Fusion investigation and claim key from the original instructions.\nSealed workInput: {input}\nRetained direct receipts: {}",
             serde_json::to_string(&sources)
                 .map_err(|_| WorkRunRuntimeProjectionError::InvalidSource)?
         ))

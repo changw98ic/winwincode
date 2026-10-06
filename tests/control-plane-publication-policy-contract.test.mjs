@@ -7,15 +7,9 @@ import test from 'node:test'
 const root = resolve(import.meta.dirname, '..')
 const rulesPath = join(
   root,
-  'docs',
+  'config',
   'contracts',
   'control-plane-publication-policy.rules.json',
-)
-const documentationPath = join(
-  root,
-  'docs',
-  'contracts',
-  'control-plane-publication-policy.md',
 )
 
 function read(path) {
@@ -109,8 +103,8 @@ test('phase 3.5 freezes one implemented repository Publication policy path', () 
       schemaVersion: 'winwincode.control-plane-publication-policy-rules.v1',
       status: 'implemented-enforced',
       issueId: 'winwincode-9c4.16.3.5',
-      decision: 'docs/decisions/0028-control-plane-worker-migration.md',
-      documentation: 'docs/contracts/control-plane-publication-policy.md',
+      decision: 'config/decisions/0028-control-plane-worker-migration.md',
+      documentation: 'config/contracts/control-plane-publication-policy.md',
       implementationCompletionSource: 'rust-black-box-tests-and-beads',
     },
   )
@@ -237,7 +231,12 @@ test('publish replays first and every new publish or resume audits before effect
     'self.authorize_resume(',
     'PublicationState::Pending',
     'self.port.lookup(',
-    'self.port.apply(',
+    'self.apply_absent_operation(',
+  ])
+  assertOrdered(functionBlock(coordinator, '    fn apply_absent_operation('), [
+    'self.transition(',
+    'PublicationStepState::Applying',
+    '.apply(operation)',
   ])
 })
 
@@ -307,6 +306,8 @@ test('GitHub and Worker code cannot construct a second Publication effect path',
     .map(path => relative(root, path))
     .sort()
   assert.deepEqual(constructorFiles, [
+    'crates/winwincode-connector-github/tests/live_gate.rs',
+    'crates/winwincode-control-plane/src/publication_application.rs',
     'crates/winwincode-control-plane/src/publication_policy.rs',
     'crates/winwincode-publication/src/test_support.rs',
   ])
@@ -329,28 +330,6 @@ test('the gate executes every real Control Plane policy and audit tracer', () =>
       output,
       new RegExp(`test ${requiredTest} \\.\\.\\. ok`, 'u'),
       `${gate.package} did not execute ${requiredTest}`,
-    )
-  }
-})
-
-test('documentation states the same fail-closed policy and adapter boundary', () => {
-  const documentation = read(documentationPath)
-  for (const statement of [
-    'generated `publication.publish`',
-    '显式 deny 固定优先于 allow',
-    'canonical\n`RepositoryPolicyScope` JSON 的 SHA-256',
-    '任何 Publication intent 之前',
-    '任何 provider lookup 或 apply 之前',
-    '先写入不可变 AuditStore',
-    '`PERMISSION_DENIED`',
-    '`SERVICE_UNAVAILABLE`',
-    'exact receipt replay',
-    '`GitHubPublicationAdapter` 只实现 `PublicationPort`',
-    '不新增 HTTP resume 或 Audit query',
-  ]) {
-    assert.ok(
-      documentation.includes(statement),
-      `documentation is missing: ${statement}`,
     )
   }
 })

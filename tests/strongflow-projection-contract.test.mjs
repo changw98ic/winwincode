@@ -4,8 +4,7 @@ import { extname, join, resolve } from 'node:path'
 import test from 'node:test'
 
 const root = resolve(import.meta.dirname, '..')
-const rulesPath = join(root, 'docs', 'contracts', 'strongflow-projection.rules.json')
-const contractPath = join(root, 'docs', 'contracts', 'strongflow-projection.md')
+const rulesPath = join(root, 'config', 'contracts', 'strongflow-projection.rules.json')
 const domainSchemaPath = join(root, 'schema', 'winwincode', 'v1', 'domain.schema.json')
 const httpSchemaPath = join(
   root,
@@ -301,18 +300,6 @@ test('canonical contracts close every StrongFlow transport finding', () => {
   assert.ok(executionPort.$defs.RuntimeEventMessage.required.includes('codexThreadId'))
   assert.ok(oneOfValues(executionPort, 'ExecutionPortMessage', 'kind')
     .includes('session.binding'))
-})
-
-test('plain-language contract states reload, live Diff, and generated-Web boundaries', () => {
-  const contract = readFileSync(contractPath, 'utf8')
-  for (const phrase of [
-    '未绑定的事件不进入投影',
-    '刷新和重启后得到同一份结果',
-    '执行中只显示 Diff 数量摘要',
-    'Web 只使用生成的 HTTP 和 WebSocket 客户端',
-    'Web 不连接 Execution Worker',
-    'WebSocket 只通知读取方刷新',
-  ]) assert.equal(contract.includes(phrase), true, phrase)
 })
 
 test('Rust projection modules implement every named rule once their seam appears', () => {

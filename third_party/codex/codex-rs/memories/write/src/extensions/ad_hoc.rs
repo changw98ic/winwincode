@@ -3,7 +3,7 @@ use std::path::Path;
 use tokio::io::AsyncWriteExt;
 
 pub(super) const INSTRUCTIONS: &str =
-    include_str!("../../templates/extensions/ad_hoc/instructions.md");
+    include_str!("../../templates/extensions/ad_hoc/instructions.txt");
 
 pub(super) async fn seed_instructions(memory_root: &Path) -> std::io::Result<()> {
     let extension_root = memory_extensions_root(memory_root).join("ad_hoc");

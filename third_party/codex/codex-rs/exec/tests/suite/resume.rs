@@ -199,6 +199,7 @@ async fn exec_resume_last_appends_to_existing_file() -> anyhow::Result<()> {
             .expect("rollout should contain session metadata"),
     )?;
     assert_eq!(meta["payload"]["history_mode"], "paginated");
+    assert_eq!(meta["payload"]["thread_source"], "user");
 
     // 2) Second run: resume the most recent file with a new marker.
     let marker2 = format!("resume-last-2-{}", Uuid::new_v4());
@@ -237,6 +238,18 @@ async fn exec_resume_last_appends_to_existing_file() -> anyhow::Result<()> {
     assert!(content.contains(&marker2));
     let requests = response_mock.requests();
     assert_eq!(requests.len(), 2);
+    for request in &requests {
+        let body = request.body_json();
+        let metadata: Value = serde_json::from_str(
+            body["client_metadata"]["x-codex-turn-metadata"]
+                .as_str()
+                .context("canonical turn metadata")?,
+        )?;
+        assert_eq!(
+            (&metadata["thread_id"], &metadata["turn_trigger"]),
+            (&meta["payload"]["id"], &serde_json::json!("exec"))
+        );
+    }
     let resumed_request = requests[1].body_json().to_string();
     assert!(resumed_request.contains(&marker));
     assert!(resumed_request.contains(&marker2));
@@ -563,6 +576,14 @@ async fn exec_resume_last_respects_cwd_filter_and_all_flag() -> anyhow::Result<(
         "resume --last --all should pick newest session"
     );
 
+    // Selection must still use the latest turn's cwd when only the compressed rollout exists.
+    zstd::stream::copy_encode(
+        std::fs::File::open(&path_b)?,
+        std::fs::File::create(path_b.with_extension("jsonl.zst"))?,
+        /*level*/ 3,
+    )?;
+    std::fs::remove_file(&path_b)?;
+
     let marker_a2 = format!("resume-cwd-a-2-{}", Uuid::new_v4());
     let prompt_a2 = format!("echo {marker_a2}");
     test.cmd_with_server(&server)
@@ -883,6 +904,8 @@ async fn exec_fork_creates_distinct_threads_with_and_without_a_prompt() -> anyho
 
     test.cmd_with_server(&server)
         .arg("--skip-git-repo-check")
+        .arg("--thread-source")
+        .arg("source_feature")
         .arg(format!("echo {source_marker}"))
         .assert()
         .success();
@@ -892,6 +915,13 @@ async fn exec_fork_creates_distinct_threads_with_and_without_a_prompt() -> anyho
         .expect("source thread should have a rollout");
     let source_id = extract_conversation_id(&source_path);
     let original_source = std::fs::read_to_string(&source_path)?;
+    let source_meta: Value = serde_json::from_str(
+        original_source
+            .lines()
+            .next()
+            .expect("source rollout should contain session metadata"),
+    )?;
+    assert_eq!(source_meta["payload"]["thread_source"], "source_feature");
 
     for (args, expected_error) in [
         (
@@ -986,6 +1016,8 @@ async fn exec_fork_creates_distinct_threads_with_and_without_a_prompt() -> anyho
         .arg(test.home_path())
         .arg("fork")
         .arg(&source_name)
+        .arg("--thread-source")
+        .arg("fork_feature")
         .arg("--json")
         .arg("-")
         .write_stdin(format!("echo {fork_marker}"))
@@ -1018,6 +1050,7 @@ async fn exec_fork_creates_distinct_threads_with_and_without_a_prompt() -> anyho
             .expect("fork rollout should contain session metadata"),
     )?;
     assert_eq!(fork_meta["payload"]["forked_from_id"], source_id);
+    assert_eq!(fork_meta["payload"]["thread_source"], "fork_feature");
     assert_eq!(fork_meta["payload"]["history_base"]["thread_id"], source_id);
     assert!(!fork_contents.contains(&source_marker));
     assert!(fork_contents.contains(&fork_marker));

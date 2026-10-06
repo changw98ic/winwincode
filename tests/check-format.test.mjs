@@ -13,7 +13,7 @@ test('source formatting ignores generated test results', () => {
   writeFileSync(join(fixture, 'generated.json'), '{"generated":true}')
 
   try {
-    const result = spawnSync(process.execPath, ['scripts/check-format.mjs'], {
+    const result = spawnSync(process.execPath, ['scripts/check/check-format.mjs'], {
       cwd: root,
       encoding: 'utf8',
     })

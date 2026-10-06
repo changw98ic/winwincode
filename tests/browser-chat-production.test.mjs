@@ -21,7 +21,7 @@ import {
   serverTargetDirectory,
   verifyApiProductionSourceSeal,
   writeHelperReleaseManifest,
-} from '../scripts/run-api-production-vertical.mjs'
+} from '../scripts/acceptance/run-api-production-vertical.mjs'
 
 import {
   certificate,
@@ -44,7 +44,7 @@ import { boundedRemoteObjectText } from './fixtures/bounded-browser-diagnostics.
 const root = resolve(import.meta.dirname, '..')
 const artifactDirectory = resolve(root, 'test-results/browser-chat-production')
 const rules = JSON.parse(readFileSync(
-  resolve(root, 'docs/contracts/browser-chat-production.rules.json'),
+  resolve(root, 'config/contracts/browser-chat-production.rules.json'),
   'utf8',
 ))
 const expectedBrowserRule = 'Chrome DevTools Protocol over a real headless Chrome or Chromium process'

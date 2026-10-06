@@ -14,7 +14,7 @@
 //! (receipt id, client node, repository binding, candidate ref), never an
 //! absolute filesystem path.
 //!
-//! Semantics frozen by `docs/contracts/client-control-state-machines.md`
+//! Semantics frozen by `config/contracts/client-control-state-machines.md`
 //! contract 6 and 8 and `schema/winwincode/v1/client-control.schema.json`:
 //!
 //! - Candidate retention is idempotent. A replay of the same receipt, or a

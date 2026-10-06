@@ -8,13 +8,13 @@ import {
   assertRustTestSource,
   runProviderDifferentialGate,
   validateProviderDifferential,
-} from '../scripts/run-provider-dsh-rust-differential.mjs'
+} from '../scripts/acceptance/run-provider-dsh-rust-differential.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 
 async function contract() {
   const rulesText = await readFile(
-    join(root, 'docs/contracts/provider-dsh-rust-differential.rules.json'),
+    join(root, 'config/contracts/provider-dsh-rust-differential.rules.json'),
     'utf8',
   )
   const rules = JSON.parse(rulesText)
@@ -191,11 +191,11 @@ test('provider differential rejects skipped Node and ignored Rust evidence', () 
 test('workspace test wiring runs the provider differential after the parallel Node suite', async () => {
   const [packageText, runnerText] = await Promise.all([
     readFile(join(root, 'package.json'), 'utf8'),
-    readFile(join(root, 'scripts/run-ts-tests.mjs'), 'utf8'),
+    readFile(join(root, 'scripts/acceptance/run-ts-tests.mjs'), 'utf8'),
   ])
   assert.equal(
     JSON.parse(packageText).scripts['verify:provider-dsh-rust-differential'],
-    'pnpm build:ts && node scripts/run-provider-dsh-rust-differential.mjs --check',
+    'pnpm build:ts && node scripts/acceptance/run-provider-dsh-rust-differential.mjs --check',
   )
   assert.match(
     runnerText,

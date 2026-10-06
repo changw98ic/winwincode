@@ -58,7 +58,7 @@ jobs:
           core_input="${RUNNER_TEMP}/community-core-release"
           mkdir -p "${core_input}"
           gh release download "${CORE_TAG}" --repo "${GITHUB_REPOSITORY}" --dir "${core_input}"
-          node publisher/scripts/verify-community-core-release.mjs \
+          node publisher/scripts/release/verify-community-core-release.mjs \
             --input "${core_input}" \
             --root source \
             --tag "${CORE_TAG}"
@@ -72,7 +72,7 @@ jobs:
         working-directory: source
         run: |
           set -euo pipefail
-          contract="docs/decisions/0031-community-core-release.json"
+          contract="config/decisions/0031-community-core-release.json"
           version="$(jq -r '.version' "${CORE_INPUT}/community-core-release-manifest.json")"
           mapfile -t crates < <(jq -r '.targetState.consumableRustCrates[].name' "${contract}")
           cargo_args=(package --locked --no-verify)

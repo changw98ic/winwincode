@@ -1132,12 +1132,12 @@ impl StandaloneModelExecutionApplication {
             if let Some((provider_call_id, command)) = loopback_tool_call_for_profile(&profile) {
                 let identity = ProviderToolIdentity::try_new(
                     ProviderToolKind::Function,
-                    "shell_command".to_owned(),
+                    "exec_command".to_owned(),
                     Some("functions".to_owned()),
                 )
                 .map_err(|_| runtime_failure())?;
                 let arguments = serde_json::json!({
-                    "command": command,
+                    "cmd": command,
                     "workdir": ".",
                 })
                 .to_string();

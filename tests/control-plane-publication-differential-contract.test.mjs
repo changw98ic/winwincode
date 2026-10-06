@@ -10,15 +10,9 @@ import test from 'node:test'
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const rulesPath = join(
   root,
-  'docs',
+  'config',
   'contracts',
   'control-plane-publication-differential.rules.json',
-)
-const documentationPath = join(
-  root,
-  'docs',
-  'contracts',
-  'control-plane-publication-differential.md',
 )
 
 const read = path => readFileSync(path, 'utf8')
@@ -68,9 +62,9 @@ test('phase 3.7 freezes one Rust Control Plane Publication writer', () => {
       schemaVersion: 'winwincode.control-plane-publication-cutover-rules.v1',
       status: 'implemented-enforced',
       issueId: 'winwincode-9c4.16.3.7',
-      decision: 'docs/decisions/0028-control-plane-worker-migration.md',
+      decision: 'config/decisions/0028-control-plane-worker-migration.md',
       documentation:
-        'docs/contracts/control-plane-publication-differential.md',
+        'config/contracts/control-plane-publication-differential.md',
     },
   )
   assert.deepEqual(contract.cutoverBoundary, {
@@ -237,9 +231,6 @@ test('the old TypeScript Publication writer, package exports, and DSH row are ab
 
   const strongflowIndex = read(repositoryPath('packages/strongflow/src/index.ts'))
   const contractsIndex = read(repositoryPath('packages/contracts/src/index.ts'))
-  const dshIndex = read(repositoryPath('packages/dsh-profile/src/index.ts'))
-  const dshManifest = JSON.parse(read(repositoryPath('packages/dsh-profile/package.json')))
-  const dshPatch = read(repositoryPath('packages/dsh-profile/cordis.patch.yml'))
   for (const module of [
     'github-review-package',
     'github-publication-provider',
@@ -247,9 +238,7 @@ test('the old TypeScript Publication writer, package exports, and DSH row are ab
     'github-publication-runner',
   ]) assert.equal(strongflowIndex.includes(module), false, module)
   assert.equal(contractsIndex.includes('strongflow-github-review-package'), false)
-  assert.equal(dshIndex.includes('github-publication-provider'), false)
-  assert.equal(Object.hasOwn(dshManifest.exports, removal.dshPackageExport), false)
-  assert.equal(dshPatch.includes(removal.dshPatchRow), false)
+  assert.equal(existsSync(repositoryPath('packages/dsh-profile')), false)
   assert.equal(
     existsSync(repositoryPath(removal.remainingPresentationModule)),
     true,
@@ -265,30 +254,5 @@ test('the cutover gate executes the canonical Rust samples', () => {
         new RegExp(`test ${testName} \\.\\.\\. ok`, 'u'),
       )
     }
-  }
-})
-
-test('plain-language documentation explains the completed cutover and recovery result', () => {
-  const documentation = read(documentationPath)
-  for (const statement of [
-    '旧 TypeScript 写入入口已经删除',
-    'Delivery → review package Artifact → policy/audit → GitHub',
-    'branch → pull-request → issue-comment → commit-status',
-    '`github-permission-denied`',
-    '`github-rate-limited`',
-    'PR conflict',
-    'comment rejection',
-    'Artifact object corruption',
-    '`PERMISSION_DENIED`',
-    '`publication.intent-recorded`',
-    '`publication.incomplete`',
-    '`publication.published`',
-    '失败不会被记录成 Published',
-    '阶段 4 可以开始',
-  ]) {
-    assert.ok(
-      documentation.includes(statement),
-      `documentation is missing: ${statement}`,
-    )
   }
 })

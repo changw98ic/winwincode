@@ -9,7 +9,7 @@ import test from 'node:test'
 import {
   buildCommunityCoreSourceManifest,
   CommunityCoreSourceError,
-} from '../scripts/build-community-core-release.mjs'
+} from '../scripts/release/build-community-core-release.mjs'
 
 function runGit(root, arguments_) {
   const result = spawnSync('git', arguments_, { cwd: root, encoding: 'utf8' })
@@ -41,7 +41,7 @@ function contract(overrides = {}) {
       npmPackages: {
         packages: [{ name: '@winwincode/contracts', manifest: 'packages/contracts/package.json' }],
       },
-      contracts: { generator: 'scripts/generate-contracts.mjs' },
+      contracts: { generator: 'scripts/build/generate-contracts.mjs' },
     },
     targetState: {
       consumableRustCrates: [{ name: 'winwincode-domain' }],
@@ -87,10 +87,10 @@ async function createFixture(t) {
   await write(root, 'schema/v1/domain.samples.json', '[]\n')
   await write(root, 'schema/core-lock.schema.json', '{}\n')
   await write(root, 'release-key.pem', 'fixture public key\n')
-  await write(root, 'scripts/generate-contracts.mjs', 'export {}\n')
+  await write(root, 'scripts/build/generate-contracts.mjs', 'export {}\n')
   await write(root, 'LICENSE', 'Apache-2.0\n')
   await write(root, 'NOTICE', 'fixture\n')
-  await write(root, 'THIRD_PARTY_NOTICES.md', 'none\n')
+  await write(root, 'THIRD_PARTY_NOTICES', 'none\n')
   runGit(root, ['init', '-q'])
   runGit(root, ['config', 'user.email', 'fixture@example.invalid'])
   runGit(root, ['config', 'user.name', 'Fixture'])

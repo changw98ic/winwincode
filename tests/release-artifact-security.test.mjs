@@ -7,7 +7,7 @@ import {
   inspectElf64,
   inspectMachO64,
   scanReleaseArtifactContent,
-} from '../scripts/verify-release-artifact-security.mjs'
+} from '../scripts/release/verify-release-artifact-security.mjs'
 
 function machO({ cpu = 0x0100000c, library = '/usr/lib/libSystem.B.dylib' } = {}) {
   const name = Buffer.from(`${library}\0`)

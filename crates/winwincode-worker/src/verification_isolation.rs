@@ -436,7 +436,7 @@ impl VerificationIsolation {
         let sandbox = manager.select_initial(
             &policy,
             SandboxablePreference::Require,
-            WindowsSandboxLevel::Disabled,
+            SandboxType::None,
             false,
         );
         if sandbox == SandboxType::None {
@@ -496,10 +496,9 @@ impl VerificationIsolation {
                 environment_id: None,
                 network: None,
                 sandbox_policy_cwd: &PathUri::from_abs_path(&absolute_path(&self.scope.root)?),
-                codex_linux_sandbox_exe: self.helper_executable.as_deref(),
+                sandbox_exe: self.helper_executable.as_deref(),
                 use_legacy_landlock: false,
                 windows_sandbox_level: WindowsSandboxLevel::Disabled,
-                windows_sandbox_private_desktop: false,
             })
             .map_err(|error| IsolationError::new(error.to_string()))
     }

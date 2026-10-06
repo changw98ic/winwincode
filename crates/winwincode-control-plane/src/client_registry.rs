@@ -6,7 +6,7 @@
 //! The Control Plane owns the persisted projection of device-reported Client
 //! facts (ADR-0030): registration, presence transitions, heartbeat ageing, and
 //! the per-client bidirectional exchange cursors. Presence semantics follow the
-//! frozen state machine in `docs/contracts/client-control-state-machines.md`;
+//! frozen state machine in `config/contracts/client-control-state-machines.md`;
 //! every mutation carries the caller's `expectedRevision` so concurrent
 //! exchange and admin paths fail closed instead of overwriting each other.
 

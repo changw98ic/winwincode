@@ -1060,7 +1060,7 @@ test('presentation derives distinct labels for every worker, provider and creden
 })
 
 test('the summary suite is registered once in the canonical lane and the decision inventory', () => {
-  const runner = readFileSync(resolve(root, 'scripts/run-ts-tests.mjs'), 'utf8')
+  const runner = readFileSync(resolve(root, 'scripts/acceptance/run-ts-tests.mjs'), 'utf8')
   for (const path of [
     'tests/usage-health-client.test.mjs',
     'tests/usage-health-browser.test.mjs',
@@ -1072,7 +1072,7 @@ test('the summary suite is registered once in the canonical lane and the decisio
     )
   }
   const inventory = JSON.parse(readFileSync(
-    resolve(root, 'docs/decisions/0028-control-plane-worker-migration.inventory.json'),
+    resolve(root, 'config/decisions/0028-control-plane-worker-migration.inventory.json'),
     'utf8',
   ))
   const listed = new Set(inventory.surfaces.flatMap(surface => surface.sourcePaths))

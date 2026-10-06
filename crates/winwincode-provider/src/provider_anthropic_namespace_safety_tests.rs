@@ -13,6 +13,89 @@ fn options() -> AnthropicMessagesOptions {
     }
 }
 
+#[test]
+fn malformed_stream_diagnostics_retain_shape_without_provider_text() {
+    let bytes = br#"event: message_start
+data: {"type":"message_start","message":{"id":"msg-private","type":"message","role":"assistant","usage":{"input_tokens":10,"output_tokens":0,"secret-marker":"never-retain-me"}}}
+
+"#;
+    let error = parse_anthropic_sse(
+        bytes,
+        4096,
+        10,
+        &AnthropicToolBindings::default(),
+        options(),
+    )
+    .err()
+    .expect("invalid fixture stream");
+    let diagnostic = error.diagnostic().expect("bounded parsing context");
+    assert!(diagnostic.contains("sse_event=message_start"));
+    assert!(diagnostic.contains("index=0"));
+    assert!(!format!("{error:?}").contains("secret-marker"));
+    assert!(!format!("{error:?}").contains("never-retain-me"));
+    assert!(!format!("{error:?}").contains("msg-private"));
+    assert!(diagnostic.len() < 400);
+}
+
+#[test]
+fn cumulative_message_deltas_and_cache_breakdown_preserve_measured_usage() {
+    for cache_breakdown in [false, true] {
+        let cache = if cache_breakdown {
+            r#", "cache_creation":{"ephemeral_5m_input_tokens":3,"ephemeral_1h_input_tokens":2}"#
+        } else {
+            ""
+        };
+        let wire = format!(
+            r#"event: message_start
+data: {{"type":"message_start","message":{{"id":"msg-deltas","type":"message","role":"assistant","usage":{{"input_tokens":10,"output_tokens":0,"cache_creation_input_tokens":5{cache}}}}}}}
+
+event: message_delta
+data: {{"type":"message_delta","delta":{{"stop_reason":null}},"usage":{{"output_tokens":2}}}}
+
+event: message_delta
+data: {{"type":"message_delta","delta":{{"stop_reason":"end_turn"}},"usage":{{"output_tokens":3}}}}
+
+event: message_stop
+data: {{"type":"message_stop"}}
+
+"#
+        );
+        let parsed = parse_anthropic_sse(
+            wire.as_bytes(),
+            4096,
+            10,
+            &AnthropicToolBindings::default(),
+            options(),
+        )
+        .expect("cumulative usage updates before the final stop reason");
+        assert!(
+            matches!(parsed.terminal, ProviderGatewayTerminal::Completed { usage, .. } if usage.input_tokens == 15 && usage.cache_write_input_tokens == 5 && usage.output_tokens == 3)
+        );
+        for invalid in [
+            wire.replace(
+                "\"ephemeral_1h_input_tokens\":2",
+                "\"ephemeral_1h_input_tokens\":3",
+            ),
+            wire.replace("\"output_tokens\":3", "\"output_tokens\":1"),
+            wire.replace("\"stop_reason\":\"end_turn\"", "\"stop_reason\":null"),
+        ] {
+            if invalid != wire {
+                assert!(
+                    parse_anthropic_sse(
+                        invalid.as_bytes(),
+                        4096,
+                        10,
+                        &AnthropicToolBindings::default(),
+                        options()
+                    )
+                    .is_err(),
+                    "inconsistent accounting or missing stop reason must fail closed"
+                );
+            }
+        }
+    }
+}
+
 fn function_tool(name: &str) -> Value {
     json!({
         "type": "function",
@@ -192,4 +275,38 @@ fn history_kind_cannot_rebind_an_exact_name_and_namespace() {
         AnthropicCodecErrorKind::InvalidRequest
     );
     assert!(!format!("{wrong_function:?}").contains("safety-marker-function"));
+}
+
+#[test]
+fn compaction_translates_history_without_advertising_or_authorizing_tools() {
+    let history = vec![
+        json!({"type":"function_call","name":"exec_command","arguments":"{}","call_id":"call-exec"}),
+        json!({"type":"function_call_output","call_id":"call-exec","output":"completed"}),
+        json!({"type":"custom_tool_call","name":"apply_patch","namespace":"functions","input":"patch","call_id":"call-patch"}),
+        json!({"type":"custom_tool_call_output","call_id":"call-patch","output":"completed"}),
+    ];
+    let input = canonical_request(Vec::new(), history);
+    let prepared = prepare_anthropic_request(&input, "deepseek-flash", options())
+        .expect("compaction history remains translatable with no advertised tools");
+    let body: Value = serde_json::from_slice(&prepared.body).unwrap();
+    assert!(body.get("tools").is_none());
+    assert!(body.get("tool_choice").is_none());
+    assert_eq!(body["messages"][1]["content"][0]["name"], "exec_command");
+    assert_eq!(
+        body["messages"][3]["content"][0]["name"],
+        "functions__apply_patch"
+    );
+    for name in ["exec_command", "functions__apply_patch"] {
+        let identity = prepared.tool_bindings.response_identity(name).unwrap();
+        assert_eq!(identity.namespace(), Some(UNADVERTISED_TOOL_NAMESPACE));
+    }
+    let chat =
+        crate::provider_openai::prepare_openai_chat_request(&input, "deepseek-flash", options())
+            .expect("OpenAI compaction uses the same historical identity translation");
+    let body: Value = serde_json::from_slice(&chat.body).unwrap();
+    assert!(body.get("tools").is_none());
+    assert_eq!(
+        body["messages"][2]["tool_calls"][0]["function"]["name"],
+        "exec_command"
+    );
 }

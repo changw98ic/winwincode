@@ -9,7 +9,7 @@ import {
   verifyCoreLock,
   verifyCoreLockUpgrade,
   CORE_PROTOCOL_VERSION,
-} from '../scripts/verify-core-lock.mjs'
+} from '../scripts/release/verify-core-lock.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 
@@ -154,7 +154,7 @@ test('edition.3: CLI exits non-zero on protocol mismatch', () => {
     writeFileSync(lockPath, `${JSON.stringify(lock, null, 2)}\n`)
     const result = spawnSync(
       'node',
-      ['scripts/verify-core-lock.mjs', '--lock', lockPath],
+      ['scripts/release/verify-core-lock.mjs', '--lock', lockPath],
       { cwd: root, encoding: 'utf8' },
     )
     assert.notEqual(result.status, 0)
@@ -171,7 +171,7 @@ test('edition.3: CLI exits zero for a valid lock', () => {
     writeFileSync(lockPath, `${JSON.stringify(completeLock('winwincode-enterprise'), null, 2)}\n`)
     const result = spawnSync(
       'node',
-      ['scripts/verify-core-lock.mjs', '--lock', lockPath],
+      ['scripts/release/verify-core-lock.mjs', '--lock', lockPath],
       { cwd: root, encoding: 'utf8' },
     )
     assert.equal(result.status, 0, result.stdout + result.stderr)

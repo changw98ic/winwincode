@@ -9,9 +9,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { deviceTaskIdentities, prepareDeviceTaskBaseline,
-  prepareDeviceBenchmarkProviderSlots } from '../scripts/device-task-runtime.mjs'
-import { pendingDeviceTaskWorkRuns, cancelStoppedDeviceTask } from '../scripts/run-device-task-vertical.mjs'
-import { deviceTaskLaunchResult } from '../scripts/device-production-fixture.mjs'
+  prepareDeviceBenchmarkProviderSlots } from '../scripts/lib/device-task-runtime.mjs'
+import { pendingDeviceTaskWorkRuns, cancelStoppedDeviceTask } from '../scripts/acceptance/run-device-task-vertical.mjs'
+import { deviceTaskLaunchResult } from '../scripts/lib/device-production-fixture.mjs'
 
 function providerSlotFixture(t) {
   const directory = mkdtempSync(join(tmpdir(), 'device-provider-slots-'))

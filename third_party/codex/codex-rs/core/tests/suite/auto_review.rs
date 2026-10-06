@@ -7,9 +7,7 @@ use anyhow::Result;
 use codex_config::test_support::CloudConfigBundleFixture;
 use codex_core::config::Constrained;
 use codex_extension_api::ApprovalReviewContributor;
-use codex_extension_api::ExtensionData;
 use codex_extension_api::ExtensionFuture;
-use codex_extension_api::ExtensionMetrics;
 use codex_extension_api::ExtensionRegistryBuilder;
 use codex_features::Feature;
 use codex_login::CodexAuth;
@@ -29,7 +27,6 @@ use codex_protocol::openai_models::default_input_modalities;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
-use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::request_permissions::PermissionGrantScope;
 use codex_protocol::request_permissions::RequestPermissionProfile;
@@ -65,17 +62,28 @@ use wiremock::matchers::path;
 struct ApprovedReviewContributor;
 
 impl ApprovalReviewContributor for ApprovedReviewContributor {
-    fn contribute<'a>(
+    fn decide<'a>(
         &'a self,
-        _session_store: &'a ExtensionData,
-        _thread_store: &'a ExtensionData,
-        prompt: &'a str,
-        extension_metrics: Option<Arc<dyn ExtensionMetrics>>,
-    ) -> ExtensionFuture<'a, Option<ReviewDecision>> {
+        input: &'a codex_extension_api::ApprovalDecisionInput<'_>,
+    ) -> ExtensionFuture<'a, Option<codex_extension_api::ApprovalDecision>> {
         Box::pin(async move {
-            assert!(extension_metrics.is_some());
-            assert!(prompt.contains("\"tool\":\"request_permissions\""));
-            Some(ReviewDecision::Approved)
+            assert!(input.metrics.is_some());
+            assert_eq!(input.action["tool"], "request_permissions");
+            Some(codex_extension_api::ApprovalDecision::Allow)
+        })
+    }
+}
+
+struct EscalationApprovingReviewContributor;
+
+impl ApprovalReviewContributor for EscalationApprovingReviewContributor {
+    fn decide<'a>(
+        &'a self,
+        input: &'a codex_extension_api::ApprovalDecisionInput<'_>,
+    ) -> ExtensionFuture<'a, Option<codex_extension_api::ApprovalDecision>> {
+        Box::pin(async move {
+            assert_eq!(input.action["sandbox_permissions"], "require_escalated");
+            Some(codex_extension_api::ApprovalDecision::Allow)
         })
     }
 }
@@ -155,6 +163,103 @@ async fn approval_review_contributor_skips_existing_guardian_model_call() -> Res
             .function_call_output(permissions_call_id)
             .to_string()
             .contains("enabled")
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn require_escalated_bypasses_extension_approval_and_runs_guardian() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_wine_exec!(Ok(()), "exec_command requires host-native paths");
+
+    let server = MockServer::start().await;
+    let call_id = "require-escalated-command";
+    let justification = "run outside the sandbox after a blocked attempt";
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-parent-1"),
+                ev_function_call(
+                    call_id,
+                    "exec_command",
+                    &json!({
+                        "cmd": "pwd",
+                        "sandbox_permissions": "require_escalated",
+                        "justification": justification,
+                    })
+                    .to_string(),
+                ),
+                ev_completed("resp-parent-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-guardian"),
+                ev_assistant_message(
+                    "msg-guardian",
+                    &json!({
+                        "risk_level": "high",
+                        "user_authorization": "low",
+                        "outcome": "deny",
+                        "rationale": "The unsandboxed command is not authorized.",
+                    })
+                    .to_string(),
+                ),
+                ev_completed("resp-guardian"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-parent-2"),
+                ev_assistant_message("msg-parent", "done"),
+                ev_completed("resp-parent-2"),
+            ]),
+        ],
+    )
+    .await;
+
+    let mut extensions = ExtensionRegistryBuilder::new();
+    extensions.approval_review_contributor(Arc::new(EscalationApprovingReviewContributor));
+    let mut builder = test_codex()
+        .with_extensions(Arc::new(extensions.build()))
+        .with_config(|config| {
+            config.approvals_reviewer = ApprovalsReviewer::AutoReview;
+            config.permissions.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
+            config
+                .permissions
+                .set_permission_profile(PermissionProfile::read_only())
+                .expect("set read-only permission profile");
+        });
+    let test = builder.build_with_auto_env(&server).await?;
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "retry the blocked command outside the sandbox".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+
+    loop {
+        match wait_for_event(&test.codex, |_| true).await {
+            EventMsg::ExecApprovalRequest(event) => {
+                panic!("escalated command should not prompt the user: {event:?}")
+            }
+            EventMsg::TurnComplete(_) => break,
+            _ => {}
+        }
+    }
+
+    let requests = responses.requests();
+    assert_eq!(requests.len(), 3);
+    let guardian_request = requests
+        .iter()
+        .find(|request| {
+            request.body_json()["client_metadata"]["x-openai-subagent"].as_str() == Some("guardian")
+        })
+        .context("expected full Guardian review for require_escalated")?;
+    assert!(guardian_request.body_contains_text(justification));
+    assert!(
+        responses
+            .function_call_output_text(call_id)
+            .context("expected exec_command output")?
+            .contains("not authorized")
     );
 
     Ok(())
@@ -485,6 +590,7 @@ async fn remote_model_override_uses_catalog_model_for_strict_auto_review() -> Re
         guardian_request.body_json()["model"].as_str(),
         Some(review_model)
     );
+    assert_eq!(guardian_request.path(), "/v1/responses");
 
     timeout(Duration::from_secs(10), codex.shutdown_and_wait()).await??;
 
@@ -501,23 +607,27 @@ fn remote_model_with_auto_review_override(slug: &str, review_model: &str) -> Mod
             effort: ReasoningEffort::Medium,
             description: ReasoningEffort::Medium.to_string(),
         }],
-        shell_type: ConfigShellToolType::ShellCommand,
+        shell_type: ConfigShellToolType::UnifiedExec,
         visibility: ModelVisibility::List,
         supported_in_api: true,
         input_modalities: default_input_modalities(),
         used_fallback_model_metadata: false,
         supports_search_tool: false,
+        supports_experimental_context: false,
         use_responses_lite: false,
+        supports_reasoning_effort_updates: false,
         node_repl_auto_review_required: false,
         node_repl_disabled: false,
         auto_review_model_override: Some(review_model.to_string()),
         model_specialty: None,
         tool_mode: None,
         multi_agent_version: None,
+        multi_agent_reasoning_effort: None,
         priority: 1,
         additional_speed_tiers: Vec::new(),
         service_tiers: Vec::new(),
         default_service_tier: None,
+        available_access_programs: None,
         upgrade: None,
         model_messages: None,
         include_skills_usage_instructions: false,
@@ -534,6 +644,7 @@ fn remote_model_with_auto_review_override(slug: &str, review_model: &str) -> Mod
         supports_image_detail_original: false,
         context_window: Some(272_000),
         max_context_window: None,
+        guardian: None,
         auto_compact_token_limit: None,
         comp_hash: None,
         effective_context_window_percent: 95,

@@ -7,7 +7,7 @@ import test from 'node:test'
 const root = resolve(import.meta.dirname, '..')
 const inventoryPath = join(
   root,
-  'docs/decisions/0028-control-plane-worker-migration.inventory.json',
+  'config/decisions/0028-control-plane-worker-migration.inventory.json',
 )
 const TARGET_SOURCE_ROOTS = Object.freeze([
   'schema/winwincode/v1',
@@ -102,7 +102,7 @@ function duplicate(values) {
 }
 
 test('inventory names the current apps/client and Rust source roots', async () => {
-  const inventory = await json('docs/decisions/0028-control-plane-worker-migration.inventory.json')
+  const inventory = await json('config/decisions/0028-control-plane-worker-migration.inventory.json')
 
   assert.equal(inventory.schemaVersion, 1)
   assert.deepEqual(inventory.architecture, {
@@ -131,8 +131,8 @@ test('inventory names the current apps/client and Rust source roots', async () =
 })
 
 test('inventory surfaces have one phase, owner, target module and observable contract', async () => {
-  const inventory = await json('docs/decisions/0028-control-plane-worker-migration.inventory.json')
-  const graph = await json('docs/decisions/0028-control-plane-worker-target-graph.json')
+  const inventory = await json('config/decisions/0028-control-plane-worker-migration.inventory.json')
+  const graph = await json('config/decisions/0028-control-plane-worker-target-graph.json')
   const graphPaths = new Set(graph.nodes.map(node => node.path))
   const baselineIds = new Set(inventory.behaviorBaselines.map(baseline => baseline.id))
   for (const surface of inventory.surfaces) {
@@ -165,7 +165,7 @@ test('inventory surfaces have one phase, owner, target module and observable con
 })
 
 test('inventory behavior baselines cover success, failure, cancel, recovery, approval and close', async () => {
-  const inventory = await json('docs/decisions/0028-control-plane-worker-migration.inventory.json')
+  const inventory = await json('config/decisions/0028-control-plane-worker-migration.inventory.json')
   const baselineIds = inventory.behaviorBaselines.map(baseline => baseline.id)
   assert.equal(duplicate(baselineIds), undefined)
   assert.deepEqual(
@@ -184,7 +184,7 @@ test('inventory behavior baselines cover success, failure, cancel, recovery, app
 })
 
 test('inventory callers cover Client, Server, Local, Rust tests and release checks', async () => {
-  const inventory = await json('docs/decisions/0028-control-plane-worker-migration.inventory.json')
+  const inventory = await json('config/decisions/0028-control-plane-worker-migration.inventory.json')
   const callerIds = inventory.callers.map(caller => caller.id)
   assert.equal(duplicate(callerIds), undefined)
   assert.deepEqual(
@@ -208,7 +208,7 @@ test('inventory callers cover Client, Server, Local, Rust tests and release chec
 })
 
 test('inventory freezes persistence, event and error observations independently', async () => {
-  const inventory = await json('docs/decisions/0028-control-plane-worker-migration.inventory.json')
+  const inventory = await json('config/decisions/0028-control-plane-worker-migration.inventory.json')
   const contractIds = inventory.observableBehaviors.map(contract => contract.id)
   assert.equal(duplicate(contractIds), undefined)
   assert.deepEqual(
@@ -226,7 +226,7 @@ test('inventory freezes persistence, event and error observations independently'
 })
 
 test('inventory paths are repository-relative and stay inside declared roots', async () => {
-  const inventory = await json('docs/decisions/0028-control-plane-worker-migration.inventory.json')
+  const inventory = await json('config/decisions/0028-control-plane-worker-migration.inventory.json')
   for (const path of inventory.surfaces.flatMap(surface => surface.sourcePaths)) {
     assert.equal(path.includes('\\'), false)
     assert.equal(path.startsWith('/'), false)

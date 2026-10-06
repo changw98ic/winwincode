@@ -268,7 +268,7 @@ fn run_device_service_until(
                 append_log(&config.data_directory, "service stopped")?;
                 return Ok(());
             }
-            if restart_path.exists() {
+            if restart_path.exists() && !daemon.configuration_apply_pending() {
                 fs::remove_file(&restart_path)?;
                 append_log(&config.data_directory, "daemon session restarted")?;
                 drop(preview_tunnel.take());

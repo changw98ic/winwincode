@@ -15,8 +15,8 @@ const patches = sourceLock.patches.filter(({ file, planned }) => (
 ))
 // Measured from the archive whose commit and SHA-256 are pinned below.
 const originalHashes = {
-  'codex-rs/core/src/session/turn.rs': '4465f3e33dc8ee65f79ec02cfba8716d6873948e92bc51f30fbab813c2e0c7b6',
-  'codex-rs/core/src/session/turn_tests.rs': '8e6b6071c7b6a33e69311f6c792616d95a6add796d010851eb5953a7137ea2b5',
+  'codex-rs/core/src/session/turn.rs': '8c27407110003a384cc7a9f85985d83ff824378f1feb22e7e5c19d927d77ca1d',
+  'codex-rs/core/src/session/turn_tests.rs': '6572c864f660c8a594afac024a921868c0397c7db80c74114176a87027a97429',
 }
 const digest = bytes => createHash('sha256').update(bytes).digest('hex')
 
@@ -50,8 +50,8 @@ function apply(directory, patch, reverse = false) {
 }
 
 test('declared Codex patches reproduce both handoff files from the pinned source', t => {
-  assert.equal(sourceLock.codex.commit, '758ef40f50c1a458425c7cfbf1eb12cbc07af0b0')
-  assert.equal(sourceLock.codex.archiveSha256, '0413a0e7680bcc2b6c6e998a6ad358115707317ef5d0121dcb9275e88c36121a')
+  assert.equal(sourceLock.codex.commit, 'd27764b82f7118f674371e6d6e76271d9d606edb')
+  assert.equal(sourceLock.codex.archiveSha256, '5226394058e04c5404fe737b84fbede38ebf41d88a72eb8b27f3d1c6ea23373b')
   const directory = mkdtempSync(join(tmpdir(), 'winwincode-codex-handoff-replay-'))
   t.after(() => rmSync(directory, { force: true, recursive: true }))
   const current = new Map()
@@ -81,8 +81,8 @@ test('Codex manifest, ordered patches, digests and handoff targets agree', () =>
       assert.equal(digest(readFileSync(join(root, patch.file))), patch.patchSha256, patch.file)
     }
   }
-  const handoff = patches.find(({ id }) => id === 'codex-record-delegated-handoff-output')
+  const handoff = patches.find(({ id }) => id === 'codex-winwincode-integration')
   assert.ok(handoff)
-  assert.deepEqual(handoff.targets, Object.keys(originalHashes))
+  for (const path of Object.keys(originalHashes)) assert.ok(handoff.targets.includes(path), path)
   assert.equal(patches.at(-1), handoff)
 })

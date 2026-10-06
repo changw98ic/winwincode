@@ -1,23 +1,18 @@
 {
   "schemaVersion": 1,
   "repository": "https://github.com/openai/codex",
-  "tag": "rust-v0.149.0",
-  "version": "0.149.0",
-  "commit": "758ef40f50c1a458425c7cfbf1eb12cbc07af0b0",
-  "archiveSha256": "0413a0e7680bcc2b6c6e998a6ad358115707317ef5d0121dcb9275e88c36121a",
-  "cargoLockSha256BeforePatches": "0c32858e9c47d0acf82735c8620c96840a5381152eec63acad15d1acadb9edad",
+  "tag": "rust-v0.160.1",
+  "version": "0.160.1",
+  "commit": "d27764b82f7118f674371e6d6e76271d9d606edb",
+  "archiveSha256": "5226394058e04c5404fe737b84fbede38ebf41d88a72eb8b27f3d1c6ea23373b",
+  "cargoLockSha256BeforePatches": "5553f06583159ed64666b6eb4beea3154e06b612e6312528131bdc226a6a860c",
   "license": "Apache-2.0",
   "patchesApplied": [
-    "upstream/patches/codex/0001-export-client-mcp-extensions.patch",
-    "upstream/patches/codex/0002-inject-model-stream-transport.patch",
-    "upstream/patches/codex/0003-export-config-builder.patch",
-    "upstream/patches/codex/0005-remount-split-bwrap-root-read-only.patch",
-    "upstream/patches/codex/0006-tool-gate-and-exact-turn-replay.patch",
-    "upstream/patches/codex/0007-bind-tool-gate-executable-identity.patch",
-    "upstream/patches/codex/0008-atomic-apply-patch.patch",
-    "upstream/patches/codex/0009-canonicalize-intercepted-apply-patch.patch",
-    "upstream/patches/codex/0010-submit-change-batch-handoff.patch",
-    "upstream/patches/codex/0011-deterministic-tool-context-gc.patch",
-    "upstream/patches/codex/0012-record-delegated-handoff-output.patch"
-  ]
+    "upstream/patches/codex/0001-winwincode-integration.patch"
+  ],
+  "archiveUrl": "https://codeload.github.com/openai/codex/tar.gz/refs/tags/rust-v0.160.1",
+  "excludedSourceExtensions": [
+    ".md"
+  ],
+  "sourceTreeSha256": "ddcb8c77401e65c5a0b30ea75c204118d5049300572aa31f8886e31e47ef4004"
 }

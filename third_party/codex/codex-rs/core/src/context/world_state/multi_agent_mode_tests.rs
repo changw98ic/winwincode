@@ -4,6 +4,7 @@ use crate::context::MultiAgentRoleInstructions;
 use crate::context::world_state::WorldState;
 use codex_protocol::models::ResponseItem;
 use codex_utils_output_truncation::approx_token_count;
+use pretty_assertions::assert_eq;
 
 fn state(mode: Option<MultiAgentMode>) -> MultiAgentModeState {
     MultiAgentModeState::new(mode)
@@ -71,8 +72,8 @@ fn persisted_mode_is_restored_only_when_missing_from_history() {
 fn unchanged_mode_is_reemitted_after_usage_hint_migration() {
     let previous = state(Some(MultiAgentMode::Proactive));
     let current = MultiAgentModeState::new(Some(MultiAgentMode::Proactive)).with_usage_hint(
-        &MultiAgentUsageHintState::new(MultiAgentRoleInstructions::unmarked(
-            "Current usage instructions.",
+        &MultiAgentUsageHintState::new(MultiAgentRoleInstructions::Configured(
+            "Current usage instructions.".to_string(),
         )),
     );
 
@@ -90,15 +91,22 @@ fn unchanged_mode_is_reemitted_after_usage_hint_migration() {
 
 #[test]
 fn catalog_role_updates_remain_separate_from_active_mode() {
-    let previous_hint =
-        MultiAgentUsageHintState::new(MultiAgentRoleInstructions::catalog("Previous role."));
+    let catalog_role = |base: &str| MultiAgentRoleInstructions::Composed {
+        base: base.to_string(),
+        marked: true,
+        omit_update_plan_instructions: false,
+        max_concurrency: 2,
+        wait_agent_enabled: false,
+        expose_model_overrides: false,
+    };
+    let previous_hint = MultiAgentUsageHintState::new(catalog_role("Previous role."));
     let previous_mode =
         MultiAgentModeState::new(Some(MultiAgentMode::Proactive)).with_usage_hint(&previous_hint);
     let mut previous = WorldState::default();
     previous.add_section(previous_hint);
     previous.add_section(previous_mode);
 
-    let current_role = MultiAgentRoleInstructions::catalog("Current role.");
+    let current_role = catalog_role("Current role.");
     let current_hint = MultiAgentUsageHintState::new(current_role.clone());
     let current_mode =
         MultiAgentModeState::new(Some(MultiAgentMode::Proactive)).with_usage_hint(&current_hint);

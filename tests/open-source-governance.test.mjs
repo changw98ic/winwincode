@@ -17,11 +17,11 @@ import {
   PRODUCT_PACKAGE_DIRECTORIES,
   releaseSourcePaths,
   verifyReleaseLegalBoundary,
-} from '../scripts/release-source-contract.mjs'
+} from '../scripts/lib/release-source-contract.mjs'
 import {
   assertProductVersion,
   setProductVersion,
-} from '../scripts/set-product-version.mjs'
+} from '../scripts/release/set-product-version.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -36,109 +36,7 @@ function relativeMarkdownLinks(text) {
     .map(target => decodeURIComponent(target.split('#', 1)[0]))
 }
 
-test('public contribution, security, conduct, release, and upstream guides are linked', () => {
-  const documents = [
-    'README.md',
-    'CONTRIBUTING.md',
-    'SECURITY.md',
-    'CODE_OF_CONDUCT.md',
-    'docs/releasing.md',
-    'docs/releases/0.1.0-alpha.2.md',
-    'docs/upstream-updates.md',
-    '.github/pull_request_template.md',
-  ]
-  for (const document of documents) assert.equal(existsSync(join(root, document)), true, document)
-  for (const document of documents) {
-    const text = read(document)
-    for (const target of relativeMarkdownLinks(text)) {
-      assert.equal(
-        existsSync(resolve(dirname(join(root, document)), target)),
-        true,
-        `${document}: ${target}`,
-      )
-    }
-  }
-
-  const readme = read('README.md')
-  for (const target of documents.slice(1, 7)) {
-    assert.equal(readme.includes(`](${target})`), true, `README does not link ${target}`)
-  }
-})
-
-test('contribution guide provides exact checks and one Delivery migration path', () => {
-  const guide = read('CONTRIBUTING.md')
-  for (const command of [
-    'corepack pnpm install --frozen-lockfile',
-    'corepack pnpm typecheck',
-    'corepack pnpm test',
-    'corepack pnpm lint',
-    'corepack pnpm build',
-    'corepack pnpm verify',
-  ]) assert.equal(guide.includes(command), true, command)
-  for (const policy of [
-    'DELIVERY_SCHEMA_VERSION = 3',
-    '离线、一次性迁移程序',
-    '只接收上一受支持版本并输出当前版本',
-    '原副本保留为回滚点',
-    '不保留双读、双写、静默回退或长期适配器',
-  ]) assert.equal(guide.includes(policy), true, policy)
-})
-
-test('upstream guide has independent Codex and vendored-source checks with rollback points', () => {
-  const guide = read('docs/upstream-updates.md')
-  for (const command of [
-    'cargo metadata --locked --offline --format-version 1',
-    'cargo check --workspace --all-targets --all-features --locked --offline',
-    'cargo update --offline -p PACKAGE --precise VERSION',
-    'node --test tests/i18n-embed-fl-reproducibility.test.mjs',
-    'corepack pnpm verify',
-  ]) assert.equal(guide.includes(command), true, command)
-  assert.match(guide, /回滚点 A/gu)
-  assert.match(guide, /回滚点 B/gu)
-  assert.match(guide, /回滚点 C/gu)
-  for (const path of [
-    'third_party/codex/',
-    'third_party/codex.UPSTREAM.json',
-    'upstream/vendor/PACKAGE-VERSION/',
-    'upstream/patches/PACKAGE/',
-    'Cargo.lock',
-    'upstream/sources.lock.json',
-  ]) assert.equal(guide.includes(path), true, path)
-
-  for (const obsolete of [
-    'apps/host',
-    'packages/dsh-profile',
-    'packages/native',
-    'verify:installed-host',
-    '--dsh-root',
-    'N-API',
-  ]) assert.equal(guide.includes(obsolete), false, obsolete)
-})
-
-test('release guide fixes one version, four target artifacts, and rollback', () => {
-  const guide = read('docs/releasing.md')
-  for (const marker of [
-    'corepack pnpm version:set 0.1.0-alpha.2',
-    'aarch64-apple-darwin',
-    'x86_64-apple-darwin',
-    'aarch64-unknown-linux-gnu',
-    'x86_64-unknown-linux-gnu',
-    'pnpm verify:release-artifacts',
-    'pnpm verify:release-artifact-security',
-    'winwincode-server',
-    'winwincode-worker',
-    'winwincode-kernel-helper',
-    'winwincode-local',
-    'SOURCE_DATE_EPOCH',
-    '新的 SemVer',
-  ]) assert.equal(guide.includes(marker), true, marker)
-})
-
 test('documented pnpm release commands forward script options without a separator token', () => {
-  assert.doesNotMatch(
-    read('docs/release-gate.md'),
-    /pnpm (?:release:artifact|verify:release-artifacts|verify:release-artifact-security) --/gu,
-  )
   const commands = [
     {
       script: 'release:artifact',
@@ -198,37 +96,9 @@ test('documented pnpm release commands forward script options without a separato
   }
 })
 
-test('current release notes match the package version and public alpha scope', () => {
-  const manifest = JSON.parse(read('package.json'))
-  const path = `docs/releases/${manifest.version}.md`
-  assert.equal(existsSync(join(root, path)), true)
-  const notes = read(path)
-  for (const marker of [
-    `# WinWinCode ${manifest.version}`,
-    'Delivery 数据结构版本为 3',
-    'aarch64-apple-darwin',
-    'x86_64-apple-darwin',
-    'aarch64-unknown-linux-gnu',
-    'x86_64-unknown-linux-gnu',
-    'SOURCE_DATE_EPOCH',
-    'ExecutionPort v1',
-  ]) assert.equal(notes.includes(marker), true, marker)
-})
-
-test('security policy directs reports to the enabled private advisory channel', () => {
-  const policy = read('SECURITY.md')
-  assert.equal(
-    policy.includes('https://github.com/changw98ic/winwincode/security/advisories/new'),
-    true,
-  )
-  assert.match(policy, /已经启用 Private Vulnerability Reporting/u)
-  assert.match(policy, /不要通过公开 Issue、Pull Request、Discussion/u)
-  assert.match(policy, /不需要先公开问题/u)
-})
-
 test('release source and package metadata retain the Apache-2.0 project boundary', () => {
   const sourcePaths = releaseSourcePaths(root)
-  for (const path of ['CONTRIBUTING.md', 'SECURITY.md', 'CODE_OF_CONDUCT.md']) {
+  for (const path of ['LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES']) {
     assert.equal(sourcePaths.includes(path), true, path)
   }
   assert.deepEqual(verifyReleaseLegalBoundary(root), [])
@@ -244,14 +114,14 @@ test('release source and package metadata retain the Apache-2.0 project boundary
   assert.equal(manifests.every(manifest => manifest.license === 'Apache-2.0'), true)
   assert.match(read('LICENSE'), /Apache License\s+Version 2\.0/u)
   assert.match(
-    read('THIRD_PARTY_NOTICES.md'),
+    read('THIRD_PARTY_NOTICES'),
     /Ratatui and DeepSeek Harness MIT terms/u,
   )
   assert.match(
-    read('THIRD_PARTY_NOTICES.md'),
+    read('THIRD_PARTY_NOTICES'),
     /Client incorporates adapted DeepSeek Harness frontend components/u,
   )
-  assert.match(read('THIRD_PARTY_NOTICES.md'), /Permission is hereby granted/u)
+  assert.match(read('THIRD_PARTY_NOTICES'), /Permission is hereby granted/u)
 })
 
 test('upstream records distinguish current dependencies from historical attribution', () => {
@@ -282,16 +152,6 @@ test('upstream records distinguish current dependencies from historical attribut
     assert.equal(currentRecords.includes(obsolete), false, obsolete)
   }
 
-  for (const document of [
-    'CONTRIBUTING.md',
-    'docs/decisions/0001-upstream-integration.md',
-    'docs/upstream-updates.md',
-  ]) {
-    const text = read(document)
-    for (const obsolete of ['apps/host', 'packages/dsh-profile', 'packages/native', 'crates/native']) {
-      assert.equal(text.includes(obsolete), false, `${document}: ${obsolete}`)
-    }
-  }
 })
 
 test('product version command updates every manifest and rejects invalid versions', () => {

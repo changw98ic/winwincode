@@ -170,7 +170,7 @@ try {
     '--outfile=dist/public/assets/client.css',
     '--banner:css=/* SPDX-License-Identifier: Apache-2.0 */',
   ], packageRoot)
-  cpSync(join(repositoryRoot, 'THIRD_PARTY_NOTICES.md'), join(publicOutputRoot, 'THIRD_PARTY_NOTICES.md'))
+  cpSync(join(repositoryRoot, 'THIRD_PARTY_NOTICES'), join(publicOutputRoot, 'THIRD_PARTY_NOTICES'))
   cpSync(join(packageRoot, 'public'), publicOutputRoot, { recursive: true, force: true })
 
   const version = Object.freeze({

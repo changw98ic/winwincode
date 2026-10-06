@@ -15,7 +15,7 @@ codex-skills = { path = "../../third_party/codex/codex-rs/skills" }
 codex-rmcp-client = { path = "../../third_party/codex/codex-rs/rmcp-client" }
 codex-exec-server = { path = "../../third_party/codex/codex-rs/exec-server" }
 codex-http-client = { path = "../../third_party/codex/codex-rs/http-client" }
-rmcp = { version = "=3.1.2", default-features = false }
+rmcp = { version = "=3.2.0", default-features = false }
 futures.workspace = true
 tokio = { workspace = true, features = ["rt", "time"] }
 toml.workspace = true
@@ -28,6 +28,7 @@ base64.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+time = { workspace = true, features = ["parsing"] }
 ureq = { version = "=3.1.4", default-features = false, features = ["rustls", "json"] }
 winwincode-api.workspace = true
 winwincode-domain.workspace = true

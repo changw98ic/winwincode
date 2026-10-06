@@ -41,12 +41,12 @@ import {
   stageCommunityCoreWorkerRuntime,
   targetConfiguration,
   verifyReleaseArtifactDirectory,
-} from '../scripts/release-artifact-contract.mjs'
+} from '../scripts/lib/release-artifact-contract.mjs'
 import {
   releaseSourcePaths,
   releaseSourceSha256,
-} from '../scripts/release-source-contract.mjs'
-import { capturedStandardOutput } from '../scripts/child-process-output.mjs'
+} from '../scripts/lib/release-source-contract.mjs'
+import { capturedStandardOutput } from '../scripts/lib/child-process-output.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 const workspaceVersion = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version
@@ -213,7 +213,7 @@ function createArtifactFixture(evidenceRoot, target) {
   }, null, 2)}\n`)
   writeFixtureFile(artifactRoot, 'client/assets/client.js', 'console.log("fixture")\n')
   writeClientAssetManifest(artifactRoot)
-  for (const name of ['LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md']) {
+  for (const name of ['LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES']) {
     const destination = writeFixtureFile(artifactRoot, `legal/${name}`, '')
     copyFileSync(join(root, name), destination)
   }
@@ -275,7 +275,7 @@ test('release verification isolates both helper keys while release builds receiv
   assert.equal(baseEnvironment.WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX, 'fixture-private-key')
   assert.equal(baseEnvironment.WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX, 'fixture-public-key')
 
-  const runner = readFileSync(join(root, 'scripts/run-release-artifact-gate.mjs'), 'utf8')
+  const runner = readFileSync(join(root, 'scripts/release/run-release-artifact-gate.mjs'), 'utf8')
   assert.match(
     runner,
     /run\(process\.execPath,[\s\S]*env: verificationChildEnvironment\(\)/u,
@@ -291,7 +291,7 @@ test('release verification isolates both helper keys while release builds receiv
 })
 
 test('release runner rejects source mutation around both isolated builds', () => {
-  const runner = readFileSync(join(root, 'scripts/run-release-artifact-gate.mjs'), 'utf8')
+  const runner = readFileSync(join(root, 'scripts/release/run-release-artifact-gate.mjs'), 'utf8')
   assert.match(
     runner,
     /const expectedReleaseSourceSha256 = assertCleanCommit\(sourceCommit, sourceDateEpoch\)/u,
@@ -312,12 +312,12 @@ test('release runner accepts inherited output and trims only captured output', (
     /captured child process stdout must be a string/u,
   )
 
-  const runner = readFileSync(join(root, 'scripts/run-release-artifact-gate.mjs'), 'utf8')
+  const runner = readFileSync(join(root, 'scripts/release/run-release-artifact-gate.mjs'), 'utf8')
   assert.match(runner, /return capturedStandardOutput\(result, options\.capture\)/u)
 })
 
 test('release runner leaves the complete workspace gate to mainline and runs one release API vertical', () => {
-  const runner = readFileSync(join(root, 'scripts/run-release-artifact-gate.mjs'), 'utf8')
+  const runner = readFileSync(join(root, 'scripts/release/run-release-artifact-gate.mjs'), 'utf8')
   assert.doesNotMatch(runner, /pnpm', 'verify|pnpm verify/u)
   assert.deepEqual(RELEASE_ARTIFACT_CHECKS, [
     'product-build',
@@ -345,7 +345,7 @@ test('release runner leaves the complete workspace gate to mainline and runs one
 })
 
 test('release runner cold-builds twice at one physical Cargo target outside its snapshot', () => {
-  const runner = readFileSync(join(root, 'scripts/run-release-artifact-gate.mjs'), 'utf8')
+  const runner = readFileSync(join(root, 'scripts/release/run-release-artifact-gate.mjs'), 'utf8')
   assert.match(runner, /const cargoTarget = resolve\(buildRoot, 'cargo-target'\)/u)
   assert.match(
     runner,
@@ -366,7 +366,7 @@ test('release runner cold-builds twice at one physical Cargo target outside its 
 })
 
 test('macOS release builds ad-hoc sign every Rust artifact before hashing and the helper sidecar', () => {
-  const runner = readFileSync(join(root, 'scripts/run-release-artifact-gate.mjs'), 'utf8')
+  const runner = readFileSync(join(root, 'scripts/release/run-release-artifact-gate.mjs'), 'utf8')
   assert.match(
     runner,
     /function signMacReleaseArtifacts\(targetIdentity, artifactPaths\) \{[\s\S]*if \(targetIdentity\.os !== 'macos'\) return[\s\S]*run\('codesign', \['--force', '--sign', '-', path\]\)/u,
@@ -585,7 +585,7 @@ test('Community Core worker runtime excludes Server and Client product files', t
     `bin/${HELPER_RELEASE_MANIFEST_NAME}`,
     'LICENSE',
     'NOTICE',
-    'THIRD_PARTY_NOTICES.md',
+    'THIRD_PARTY_NOTICES',
   ])
   assert.equal(existsSync(join(outputRoot, 'bin/winwincode-server')), false)
   assert.equal(existsSync(join(outputRoot, 'client')), false)

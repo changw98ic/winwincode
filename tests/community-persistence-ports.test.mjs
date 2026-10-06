@@ -4,7 +4,7 @@ import { join, relative, resolve } from 'node:path'
 import test from 'node:test'
 
 const root = resolve(import.meta.dirname, '..')
-const inventory = JSON.parse(readFileSync(join(root, 'docs/decisions/0032-community-persistence-ports.inventory.json'), 'utf8'))
+const inventory = JSON.parse(readFileSync(join(root, 'config/decisions/0032-community-persistence-ports.inventory.json'), 'utf8'))
 const source = path => readFileSync(join(root, path), 'utf8')
 
 function filesBelow(path) {

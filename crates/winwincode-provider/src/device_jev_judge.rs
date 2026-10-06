@@ -589,7 +589,8 @@ mod tests {
         ));
         let store = DeviceProviderStore::open(&root).unwrap();
         // Upgrade an existing version-7 store without changing its context rows.
-        store.connection.execute_batch("DROP TABLE jev_judge_exchanges; DROP TABLE accounting_closed_attempts; ALTER TABLE exchanges DROP COLUMN accounting_chunks; PRAGMA user_version=7;
+        store.connection.execute_batch("DROP TABLE model_open_attempts; DROP TABLE jev_judge_exchanges; DROP TABLE accounting_closed_attempts; ALTER TABLE exchanges DROP COLUMN accounting_chunks;
+            DROP TABLE opencode_accounts; DROP TABLE opencode_connections; DROP TABLE opencode_session_bindings; DROP TABLE opencode_logins; DROP TABLE provider_defaults; PRAGMA user_version=7;
             INSERT INTO jev_context_exchanges(operation_id,digest,request_json) VALUES('retained','digest','input');").unwrap();
         drop(store);
         let store = DeviceProviderStore::open(&root).unwrap();

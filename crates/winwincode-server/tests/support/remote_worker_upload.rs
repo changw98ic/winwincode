@@ -430,7 +430,10 @@ async fn scenario(chunks: usize) {
                     if tls.write_all(headers.as_bytes()).await.is_err() {
                         return;
                     }
-                    let _ = tls.write_all(&response).await;
+                    if tls.write_all(&response).await.is_ok() {
+                        // Finish the TLS response before dropping the connection.
+                        let _ = tls.shutdown().await;
+                    }
                 });
             }
         })

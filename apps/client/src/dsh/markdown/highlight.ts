@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Adapted from DeepSeek Harness (c) 2026 DeepSeek, MIT; see THIRD_PARTY_NOTICES.md.
+// Adapted from DeepSeek Harness (c) 2026 DeepSeek, MIT; see THIRD_PARTY_NOTICES.
 
 /**
  * The client's ONE syntax highlighter: a synchronous fine-grained shiki core

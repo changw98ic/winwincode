@@ -998,6 +998,113 @@ fn graceful_shutdown_keeps_taken_frames_durable() {
 struct LockCommandTransport {
     server: Arc<ServerSim>,
 }
+
+struct StaleProviderTransport {
+    server: Arc<ServerSim>,
+    commands: Vec<winwincode_api::generated::DeviceConfigurationEnvelope>,
+}
+
+impl ExchangeTransport for StaleProviderTransport {
+    fn exchange(
+        &self,
+        credential: Option<&str>,
+        request_bytes: &[u8],
+    ) -> Result<Vec<u8>, ExchangeTransportError> {
+        let request: ExchangeRequest = serde_json::from_slice(request_bytes).unwrap();
+        let mut response: ExchangeResponse =
+            serde_json::from_slice(&self.server.exchange(credential, request_bytes)?).unwrap();
+        if response.enrollment.is_none() {
+            for (index, encrypted) in self.commands.iter().enumerate() {
+                let sequence = u64::try_from(index).unwrap() + 1;
+                if sequence <= request.ack_sequence {
+                    continue;
+                }
+                response.frames.push(
+                    serde_json::to_value(ServerToClientEnvelope {
+                        schema_version: CLIENT_CONTROL_PORT_SCHEMA_VERSION.into(),
+                        message_id: format!("stale-provider-{sequence}"),
+                        client_node_id: ASSIGNED_NODE.into(),
+                        client_instance_id: "previous-instance".into(),
+                        sequence,
+                        occurred_at: "2026-09-04T00:00:00.000Z".into(),
+                        message: ServerToClientMessage::ProviderApply(Box::new(
+                            winwincode_client_port::messages::ServerConfigurationApplyPayload {
+                                command: winwincode_client_port::messages::CommandContext {
+                                    expected_revision: 0,
+                                    idempotency_key: encrypted.request_id.clone(),
+                                },
+                                encrypted: encrypted.clone(),
+                            },
+                        )),
+                    })
+                    .unwrap(),
+                );
+            }
+        }
+        Ok(serde_json::to_vec(&response).unwrap())
+    }
+}
+
+#[test]
+fn stale_provider_commands_recover_receipts_and_never_execute_new_effects() {
+    use winwincode_api::generated::{DeviceConfigurationEnvelope, DeviceProviderOutcome};
+    use winwincode_provider::DeviceProviderStore;
+
+    let root = temporary_directory("stale-provider-receipts");
+    let (store, identity) = open_identity(&root);
+    let saved = DeviceConfigurationEnvelope {
+        client_node_id: ASSIGNED_NODE.into(),
+        request_id: "oauth_stale_saved".into(),
+        expected_revision: 0,
+        public_key: "fixture-invalid-key".into(),
+        nonce: "fixture-invalid-nonce".into(),
+        ciphertext: "fixture-invalid-ciphertext".into(),
+    };
+    let unknown = DeviceConfigurationEnvelope {
+        request_id: "oauth_stale_unknown".into(),
+        ..saved.clone()
+    };
+    let mut providers = DeviceProviderStore::open(&root.join("providers")).unwrap();
+    let original = providers.apply(ASSIGNED_NODE, &saved).unwrap();
+    assert_eq!(original.outcome, DeviceProviderOutcome::InvalidRequest);
+    let transport = Arc::new(StaleProviderTransport {
+        server: Arc::new(ServerSim::new()),
+        commands: vec![saved.clone(), unknown.clone()],
+    });
+    let mut daemon = DeviceDaemon::start(
+        quiet_daemon_config("stale-provider"),
+        store,
+        transport.clone(),
+        &identity,
+    )
+    .unwrap();
+    drive_until_enrolled_and_settled(&mut daemon);
+    assert_eq!(daemon.status().downlink_accepted_through, 2);
+    let reports = transport.server.frames_with_kind("client.provider.report");
+    let receipts: Vec<_> = reports
+        .iter()
+        .filter_map(|frame| {
+            frame
+                .frame
+                .pointer("/payload/receipt")
+                .filter(|value| !value.is_null())
+        })
+        .collect();
+    assert_eq!(receipts.len(), 2);
+    assert_eq!(receipts[0], &serde_json::to_value(original).unwrap());
+    assert_eq!(receipts[1]["outcome"], "interrupted");
+    assert_eq!(
+        providers.apply(ASSIGNED_NODE, &unknown).unwrap().outcome,
+        DeviceProviderOutcome::Interrupted
+    );
+    assert_eq!(providers.snapshot(ASSIGNED_NODE).unwrap().revision, 0);
+    let mut changed = saved;
+    changed.ciphertext.push('x');
+    assert!(providers.apply(ASSIGNED_NODE, &changed).is_err());
+    drop(daemon);
+    drop(providers);
+    cleanup(&root);
+}
 impl ExchangeTransport for LockCommandTransport {
     fn exchange(
         &self,

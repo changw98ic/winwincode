@@ -5,14 +5,13 @@ import test from 'node:test'
 
 // Phase 0 guard: the existing ExecutionPort contract must not absorb
 // ClientControlPort (multi-user device control) messages. See
-// docs/contracts/execution-port-v1.md and the Phase 0 plan task
+// config/contracts/execution-port-v1.md and the Phase 0 plan task
 // "freeze the existing ExecutionPort against device-control messages".
 //
 // This test intentionally uses plain regex/string parsing and recursive JSON
 // walks so the boundary check stays dependency-free.
 
 const root = resolve(import.meta.dirname, '..')
-const contractDocPath = join(root, 'docs', 'contracts', 'execution-port-v1.md')
 const executionPortSchemaPath = join(
   root,
   'schema',
@@ -102,19 +101,12 @@ function findConceptMentions(markdown, keyword) {
   }
   return hits
 }
-
-const docMarkdown = readFileSync(contractDocPath, 'utf8')
-const docKinds = extractDocKinds(docMarkdown)
 const schemaKindEntries = extractSchemaKindEntries(executionPortSchemaPath)
 const schemaKinds = schemaKindEntries.map((entry) => entry.kind)
 
 assert.ok(
   schemaKinds.length > 0,
   'execution-port.schema.json must expose at least one kind constant',
-)
-assert.ok(
-  docKinds.length > 0,
-  'execution-port-v1.md must reference at least one dotted message kind',
 )
 
 test('execution-port schema kind surface contains no client.* device-control kinds', () => {
@@ -123,17 +115,6 @@ test('execution-port schema kind surface contains no client.* device-control kin
     conflicts,
     [],
     `ExecutionPort schema must not register ClientControlPort (device-control) message kinds, found: ${formatKindConflicts(conflicts)}`,
-  )
-})
-
-test('execution-port contract doc kind surface contains no client.* device-control kinds', () => {
-  const conflicts = docKinds
-    .filter((kind) => kind.startsWith('client.'))
-    .map((kind) => ({ source: 'execution-port-v1.md', kind }))
-  assert.deepEqual(
-    conflicts,
-    [],
-    `ExecutionPort contract doc must not reference ClientControlPort (device-control) message kinds, found: ${formatKindConflicts(conflicts)}`,
   )
 })
 
@@ -156,19 +137,5 @@ test('client-control schema kind set is disjoint from execution-port kind set', 
     overlap,
     [],
     `ClientControlPort kinds must not overlap ExecutionPort kinds, shared kinds: ${overlap.map((kind) => `"${kind}"`).join(', ')}`,
-  )
-})
-
-test('execution-port contract doc does not mention device-control concepts', () => {
-  const conflicts = []
-  for (const { keyword, concept } of deviceControlConceptKeywords) {
-    for (const hit of findConceptMentions(docMarkdown, keyword)) {
-      conflicts.push(`${hit.line}: keyword "${keyword}" (${concept}) in "${hit.text}"`)
-    }
-  }
-  assert.deepEqual(
-    conflicts,
-    [],
-    `ExecutionPort contract doc must not reference ClientControlPort device-control concepts, found:\n${conflicts.join('\n')}`,
   )
 })

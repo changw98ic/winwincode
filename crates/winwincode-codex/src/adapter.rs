@@ -6583,7 +6583,15 @@ fn turn_submission_options(record: &StoredRun) -> TurnSubmissionOptions {
                     .then(crate::stage_product::planner_solution_json_schema)
             })
             .or_else(|| {
-                verification_role(&record.job.execution_profile).then(|| {
+                // A response schema on the evidence-gathering turn can make
+                // compatible providers emit a verdict before calling tools.
+                // Final result validation remains authoritative on every turn.
+                (verification_role(&record.job.execution_profile)
+                    && record
+                        .stage_product_sources
+                        .iter()
+                        .any(|source| source.starts_with("evidence:")))
+                .then(|| {
                     if fusion_review {
                         fusion_verification_result_json_schema()
                     } else {
@@ -10941,6 +10949,20 @@ mod tests {
         );
         for role in ["reviewer", "verifier", "adversarial-verifier"] {
             record.job.execution_profile = role.to_owned();
+            record.stage_product_sources.clear();
+            assert!(
+                turn_submission_options(&record)
+                    .final_output_json_schema
+                    .is_none(),
+                "verification starts with tool evidence gathering before structured final output"
+            );
+            record
+                .stage_product_sources
+                .push(crate::workrun_runtime_projection::source_key(
+                    "evidence",
+                    "turn-verifier",
+                    Some("call-test"),
+                ));
             let options = turn_submission_options(&record);
             let schema = options
                 .final_output_json_schema

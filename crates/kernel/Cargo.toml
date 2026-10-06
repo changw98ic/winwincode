@@ -11,6 +11,8 @@ repository.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+codex-attachment-store.workspace = true
+codex-http-client.workspace = true
 codex-api.workspace = true
 codex-core-api.workspace = true
 codex-skills-extension = { path = "../../third_party/codex/codex-rs/ext/skills" }

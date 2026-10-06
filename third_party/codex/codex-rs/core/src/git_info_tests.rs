@@ -11,21 +11,28 @@ use codex_exec_server::LOCAL_FS;
 use codex_exec_server::ReadDirectoryEntry;
 use codex_exec_server::ReadFileOptions;
 use codex_exec_server::RemoveOptions;
+use codex_exec_server::WalkOptions;
+use codex_exec_server::WalkOutcome;
 use codex_exec_server::WriteFileOptions;
 use codex_git_utils::GitInfo;
 use codex_git_utils::GitSha;
+use codex_git_utils::SanitizedGitUrl;
 use codex_git_utils::collect_git_info;
 use codex_git_utils::get_git_repo_root;
 use codex_git_utils::get_has_changes_in_repo;
 use codex_git_utils::git_diff_to_remote;
 use codex_git_utils::recent_commits;
-use codex_git_utils::resolve_root_git_project_for_trust;
+use codex_git_utils::resolve_root_git_project_uri_for_trust;
+// Existing trust fixtures check both entry points through this shared wrapper.
+use self::resolve_native_and_portable_trust_roots as resolve_root_git_project_for_trust;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path::normalize_for_path_comparison;
 use codex_utils_path_uri::PathUri;
 use core_test_support::PathBufExt;
 use core_test_support::PathExt;
 use core_test_support::skip_if_sandbox;
 use pretty_assertions::assert_eq;
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 #[cfg(unix)]
@@ -35,13 +42,36 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 use tokio::process::Command;
 
+#[derive(Default)]
 struct MetadataOverrideFileSystem {
-    path: PathUri,
+    path: Option<PathUri>,
     replacement: Option<PathBuf>,
     canonical_overrides: Vec<(PathUri, PathUri)>,
+    // Optional virtual filesystem; entries without contents are directories.
+    entries: Option<HashMap<String, Option<String>>>,
 }
 
 impl MetadataOverrideFileSystem {
+    fn with_entries(entries: impl IntoIterator<Item = (PathUri, Option<String>)>) -> Self {
+        Self {
+            entries: Some(
+                entries
+                    .into_iter()
+                    .map(|(path, contents)| (path.to_string(), contents))
+                    .collect(),
+            ),
+            ..Default::default()
+        }
+    }
+
+    fn entry(&self, path: &PathUri) -> Option<FileSystemResult<&Option<String>>> {
+        self.entries.as_ref().map(|entries| {
+            entries
+                .get(path.to_url().as_str())
+                .ok_or_else(|| io::ErrorKind::NotFound.into())
+        })
+    }
+
     fn unsupported<T>() -> FileSystemResult<T> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -57,6 +87,9 @@ impl ExecutorFileSystem for MetadataOverrideFileSystem {
         sandbox: Option<&'a FileSystemSandboxContext>,
     ) -> ExecutorFileSystemFuture<'a, PathUri> {
         Box::pin(async move {
+            if let Some(entry) = self.entry(path) {
+                return entry.map(|_| path.clone());
+            }
             if let Some((_, canonical)) = self
                 .canonical_overrides
                 .iter()
@@ -75,8 +108,14 @@ impl ExecutorFileSystem for MetadataOverrideFileSystem {
         sandbox: Option<&'a FileSystemSandboxContext>,
     ) -> ExecutorFileSystemFuture<'a, Vec<u8>> {
         Box::pin(async move {
+            if let Some(entry) = self.entry(path) {
+                return entry?
+                    .as_ref()
+                    .map(|contents| contents.as_bytes().to_vec())
+                    .ok_or_else(|| io::ErrorKind::IsADirectory.into());
+            }
             #[cfg(unix)]
-            if path == &self.path
+            if Some(path) == self.path.as_ref()
                 && let Some(replacement) = &self.replacement
             {
                 let local_path = path.to_abs_path()?;
@@ -121,7 +160,20 @@ impl ExecutorFileSystem for MetadataOverrideFileSystem {
         sandbox: Option<&'a FileSystemSandboxContext>,
     ) -> ExecutorFileSystemFuture<'a, FileMetadata> {
         Box::pin(async move {
-            if path == &self.path && self.replacement.is_none() {
+            if let Some(entry) = self.entry(path) {
+                let contents = entry?;
+                return Ok(FileMetadata {
+                    is_directory: contents.is_none(),
+                    is_file: contents.is_some(),
+                    is_symlink: false,
+                    size: contents
+                        .as_ref()
+                        .map_or(/*default*/ 0, |contents| contents.len() as u64),
+                    created_at_ms: 0,
+                    modified_at_ms: 0,
+                });
+            }
+            if Some(path) == self.path.as_ref() && self.replacement.is_none() {
                 Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
                     "injected metadata failure",
@@ -137,6 +189,15 @@ impl ExecutorFileSystem for MetadataOverrideFileSystem {
         _path: &'a PathUri,
         _sandbox: Option<&'a FileSystemSandboxContext>,
     ) -> ExecutorFileSystemFuture<'a, Vec<ReadDirectoryEntry>> {
+        Box::pin(async { Self::unsupported() })
+    }
+
+    fn walk<'a>(
+        &'a self,
+        _path: &'a PathUri,
+        _options: WalkOptions,
+        _sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, WalkOutcome> {
         Box::pin(async { Self::unsupported() })
     }
 
@@ -158,6 +219,27 @@ impl ExecutorFileSystem for MetadataOverrideFileSystem {
     ) -> ExecutorFileSystemFuture<'a, ()> {
         Box::pin(async { Self::unsupported() })
     }
+}
+
+async fn resolve_native_and_portable_trust_roots(
+    fs: &dyn ExecutorFileSystem,
+    cwd: &AbsolutePathBuf,
+) -> Option<AbsolutePathBuf> {
+    let native = codex_git_utils::resolve_root_git_project_for_trust(fs, cwd).await;
+    let cwd_uri = PathUri::from_abs_path(cwd);
+    let portable = resolve_root_git_project_uri_for_trust(fs, &cwd_uri).await;
+    if cwd_uri.is_opaque() {
+        // Opaque URI components cannot provide ancestry, but native lookup still can.
+        assert_eq!(portable, None);
+    } else {
+        assert_eq!(
+            portable.map(|path| path.to_url()),
+            native
+                .as_ref()
+                .map(|path| PathUri::from_abs_path(path).to_url()),
+        );
+    }
+    native
 }
 
 // Helper function to create a test git repository
@@ -395,7 +477,10 @@ async fn test_collect_git_info_with_remote() {
         .to_string();
 
     // Should have repository URL
-    assert_eq!(git_info.repository_url, Some(expected_remote));
+    assert_eq!(
+        git_info.repository_url,
+        Some(SanitizedGitUrl::try_from(expected_remote.as_str()).unwrap())
+    );
 }
 
 #[tokio::test]
@@ -670,9 +755,8 @@ async fn resolve_root_git_project_for_trust_ignores_metadata_errors() {
     std::fs::write(proj.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
     std::fs::create_dir_all(&nested).unwrap();
     let fs = MetadataOverrideFileSystem {
-        path: PathUri::from_abs_path(&nested.join(".git").abs()),
-        replacement: None,
-        canonical_overrides: Vec::new(),
+        path: Some(PathUri::from_abs_path(&nested.join(".git").abs())),
+        ..Default::default()
     };
 
     assert_eq!(
@@ -955,7 +1039,9 @@ fn test_git_info_serialization() {
     let git_info = GitInfo {
         commit_hash: Some(GitSha::new("abc123def456")),
         branch: Some("main".to_string()),
-        repository_url: Some("https://github.com/example/repo.git".to_string()),
+        repository_url: Some(
+            SanitizedGitUrl::try_from("https://github.com/example/repo.git").unwrap(),
+        ),
     };
 
     let json = serde_json::to_string(&git_info).expect("Should serialize GitInfo");

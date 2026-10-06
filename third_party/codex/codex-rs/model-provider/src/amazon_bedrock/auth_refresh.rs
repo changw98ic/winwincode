@@ -1,4 +1,5 @@
 use std::io::IsTerminal;
+use std::ops::Deref;
 use std::process::Stdio;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -42,10 +43,17 @@ impl AwsAuthRecovery {
             return Ok(());
         }
 
-        let mut command = Command::new(&self.config.command);
+        let interactive = std::io::stdin().is_terminal();
+        let mut command = if interactive {
+            Command::new(&self.config.command)
+        } else {
+            Command::from(codex_utils_process::background_command(
+                &self.config.command,
+            ))
+        };
         command
-            .args(&self.config.args)
-            .stdin(if std::io::stdin().is_terminal() {
+            .args(self.config.args.iter().map(Deref::deref))
+            .stdin(if interactive {
                 Stdio::inherit()
             } else {
                 Stdio::null()

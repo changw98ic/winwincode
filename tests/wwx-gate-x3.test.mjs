@@ -178,7 +178,7 @@ test('repository rules override personal rules of the same key', () => {
 test('gate runner passes success/reject/replay and binds evidence to HEAD', () => {
   const result = spawnSync(
     'node',
-    ['scripts/run-wwx-gate-x3.mjs'],
+    ['scripts/acceptance/run-wwx-gate-x3.mjs'],
     { cwd: root, encoding: 'utf8' },
   )
   assert.equal(result.status, 0, result.stdout + result.stderr)

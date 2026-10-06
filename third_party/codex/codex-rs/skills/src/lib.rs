@@ -157,7 +157,19 @@ fn write_embedded_dir(dir: &Dir<'_>, dest: &AbsolutePathBuf) -> Result<(), Syste
                 write_embedded_dir(subdir, dest)?;
             }
             include_dir::DirEntry::File(file) => {
-                let path = dest.join(file.path());
+                // Source assets use .txt; installed skills retain the runtime protocol.
+                let is_license = file
+                    .path()
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.eq_ignore_ascii_case("license.txt"));
+                let relative_path =
+                    if !is_license && file.path().extension().is_some_and(|ext| ext == "txt") {
+                        file.path().with_extension("md")
+                    } else {
+                        file.path().to_path_buf()
+                    };
+                let path = dest.join(relative_path);
                 if let Some(parent) = path.as_path().parent() {
                     fs::create_dir_all(parent).map_err(|source| {
                         SystemSkillsError::io("create system skills file parent", source)
@@ -202,7 +214,7 @@ mod tests {
 
         assert!(
             paths
-                .binary_search_by(|probe| probe.as_str().cmp("skill-creator/SKILL.md"))
+                .binary_search_by(|probe| probe.as_str().cmp("skill-creator/SKILL.txt"))
                 .is_ok()
         );
         assert!(

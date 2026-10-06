@@ -6,7 +6,7 @@ use codex_utils_template::Template;
 use std::sync::LazyLock;
 
 /// Review thread system prompt.
-pub const REVIEW_PROMPT: &str = include_str!("../templates/review/rubric.md");
+pub const REVIEW_PROMPT: &str = include_str!("../templates/review/rubric.txt");
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedReviewRequest {

@@ -50,6 +50,11 @@ fn failed_device_key_validation_does_not_commit_a_schema_upgrade() {
         .execute_batch(
             "ALTER TABLE exchanges DROP COLUMN accounting_chunks;
              DROP TABLE accounting_closed_attempts;
+             DROP TABLE model_open_attempts; DROP TABLE opencode_accounts;
+             DROP TABLE opencode_connections;
+             DROP TABLE opencode_session_bindings;
+             DROP TABLE opencode_logins;
+             DROP TABLE provider_defaults;
              UPDATE identity SET private_key=zeroblob(32);
              PRAGMA user_version=8;",
         )
@@ -60,7 +65,7 @@ fn failed_device_key_validation_does_not_commit_a_schema_upgrade() {
         .expect("retained schema version");
     assert_eq!(version, 8, "a failed open must roll back the migration");
     database
-        .pragma_update(None, "user_version", 10)
+        .pragma_update(None, "user_version", 12)
         .expect("future schema");
     assert!(DeviceProviderStore::open(&directory).is_err());
     drop(database);
@@ -127,8 +132,10 @@ fn browser_crypto_device_storage_replay_and_tamper() {
         b"device-only-test-secret"
     );
     assert_private_headers(&store, &directory, &snapshot.client_node_id);
+    reconstruct_v9(&directory);
     drop(store);
     let mut store = DeviceProviderStore::open(&directory).expect("restart");
+    assert_migrated_static(&store, &directory, &snapshot.client_node_id);
     assert_eq!(
         store
             .apply(&snapshot.client_node_id, &envelope)
@@ -357,7 +364,7 @@ fn old_database_upgrade_preserves_identity_and_provider_state() {
         let before = store.snapshot("device-1").expect("snapshot");
         drop(store);
         let db = rusqlite::Connection::open(directory.join("providers.sqlite3")).expect("db");
-        db.execute_batch("DROP TABLE accounting_closed_attempts; ALTER TABLE exchanges DROP COLUMN accounting_chunks; DROP TABLE jev_judge_exchanges;")
+        db.execute_batch("DROP TABLE model_open_attempts; DROP TABLE opencode_accounts; DROP TABLE opencode_connections; DROP TABLE opencode_session_bindings; DROP TABLE opencode_logins; DROP TABLE provider_defaults; DROP TABLE accounting_closed_attempts; ALTER TABLE exchanges DROP COLUMN accounting_chunks; DROP TABLE jev_judge_exchanges;")
             .expect("old schema");
         db.execute_batch("ALTER TABLE jev_context_exchanges DROP COLUMN request_json;")
             .expect("old schema");
@@ -392,7 +399,7 @@ fn old_database_upgrade_preserves_identity_and_provider_state() {
         let upgraded: i64 = db
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(upgraded, 9);
+        assert_eq!(upgraded, 11);
         let old: (String, String, Option<String>, Option<Vec<u8>>) = db.query_row(
             "SELECT digest, chunks, request_open, prepared_payload FROM exchanges WHERE exchange_id='old-exchange'", [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
@@ -434,4 +441,21 @@ fn assert_private_headers(store: &DeviceProviderStore, directory: &std::path::Pa
         .expect("private headers");
     assert!(headers.contains("private-session-value"));
     drop(db);
+}
+
+fn reconstruct_v9(directory: &std::path::Path) {
+    // Reconstruct v9 with real static credentials, headers and replay receipts.
+    let database = rusqlite::Connection::open(directory.join("providers.sqlite3")).unwrap();
+    database.execute_batch("DROP TABLE model_open_attempts; DROP TABLE opencode_accounts; DROP TABLE opencode_connections;
+        DROP TABLE opencode_session_bindings; DROP TABLE opencode_logins; DROP TABLE provider_defaults;
+        PRAGMA user_version=9;").unwrap();
+    drop(database);
+}
+
+fn assert_migrated_static(store: &DeviceProviderStore, directory: &std::path::Path, device: &str) {
+    assert_eq!(
+        store.resolve("test-provider").unwrap().1.expose(),
+        b"device-only-test-secret"
+    );
+    assert_private_headers(store, directory, device);
 }

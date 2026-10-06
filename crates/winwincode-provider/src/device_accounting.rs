@@ -71,6 +71,16 @@ impl DeviceProviderStore {
                     .ok_or(DeviceProviderError)?;
                 let slot = format!("primary:{}", open.model_exchange_id.0);
                 statement.manifest.push(slot.clone());
+                let mut attempts = self.connection.prepare("SELECT attempt FROM model_open_attempts WHERE exchange_id=?1 AND outcome='failed' ORDER BY attempt")?;
+                for attempt in
+                    attempts.query_map([&open.model_exchange_id.0], |row| row.get::<_, u32>(0))?
+                {
+                    // Unknown failed attempts have no fabricated zero-cost receipt.
+                    statement.manifest.push(format!(
+                        "primary:{}:failed:{}",
+                        open.model_exchange_id.0, attempt?
+                    ));
+                }
                 let chunks: Vec<ModelChunkMessage> =
                     serde_json::from_str(chunks.as_deref().ok_or(DeviceProviderError)?)?;
                 if let Some(chunk) = chunks.last().filter(|chunk| chunk.is_final) {

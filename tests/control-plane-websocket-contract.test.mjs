@@ -12,7 +12,6 @@ const schemaPath = join(
   'control-plane-events.schema.json',
 )
 const domainSchemaPath = join(root, 'schema', 'winwincode', 'v1', 'domain.schema.json')
-const contractPath = join(root, 'docs', 'contracts', 'control-plane-websocket.md')
 const validFixturePath = join(
   root,
   'tests',
@@ -28,7 +27,6 @@ const invalidFixturePath = join(
 
 const schema = JSON.parse(readFileSync(schemaPath, 'utf8'))
 const domainSchema = JSON.parse(readFileSync(domainSchemaPath, 'utf8'))
-const contract = readFileSync(contractPath, 'utf8')
 const validFixture = JSON.parse(readFileSync(validFixturePath, 'utf8'))
 const invalidFixture = JSON.parse(readFileSync(invalidFixturePath, 'utf8'))
 
@@ -491,8 +489,6 @@ test('client frames only subscribe, resume, acknowledge, or answer a heartbeat',
   )
   assert.equal(JSON.stringify(schema.$defs.ControlPlaneWebSocketClientFrame).includes('Command'), false)
   assert.equal(JSON.stringify(schema.$defs.ControlPlaneWebSocketClientFrame).includes('command'), false)
-  assert.match(contract, /主要业务写入只走 HTTP/u)
-  assert.match(contract, /WebSocket[^\n]+不接受主要业务 command/u)
 })
 
 test('WebSocket authentication exists only on the HTTP upgrade', () => {
@@ -512,11 +508,6 @@ test('WebSocket authentication exists only on the HTTP upgrade', () => {
     credentialsInUrlQueryAllowed: false,
     credentialsInFramesAllowed: false,
   })
-  assert.match(contract, /HTTP upgrade/u)
-  assert.match(contract, /`wwc_session`/u)
-  assert.match(contract, /`Authorization: Bearer <JWT>`/u)
-  assert.match(contract, /URL query/u)
-  assert.match(contract, /frame/u)
 })
 
 test('Chat event exposes only the canonical secret-safe message projection', () => {
@@ -561,15 +552,6 @@ test('resume, authorization recheck, and slow-client rules are machine visible',
       .properties.reloadQueries.prefixItems,
     [{ $ref: '#/$defs/ControlPlaneWebSocketRuntimeProjectionGetReloadQuery' }],
   )
-
-  for (const phrase of [
-    '最后一个已确认 cursor',
-    '每次续传前',
-    '每一批重放前',
-    '每次实时发送前',
-    '暂停发送新的实时事件',
-    'HTTP Query',
-  ]) assert.equal(contract.includes(phrase), true, phrase)
 })
 
 test('positive transcripts cover every public event and reconnect control frame', () => {

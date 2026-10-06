@@ -9,12 +9,12 @@ import {
   scanProductRepositoryBoundary,
   validateEditionContract,
   validateRepositoryIdentity,
-} from '../scripts/check-product-repository-boundary.mjs'
-import { forbiddenCoreProductExports } from '../scripts/source-boundary-lint.mjs'
+} from '../scripts/check/check-product-repository-boundary.mjs'
+import { forbiddenCoreProductExports } from '../scripts/lib/source-boundary-lint.mjs'
 
 const ROOT = resolve(import.meta.dirname, '..')
-const SCRIPT = join(ROOT, 'scripts/check-product-repository-boundary.mjs')
-const CONTRACT_PATH = join(ROOT, 'docs/decisions/0031-product-editions.json')
+const SCRIPT = join(ROOT, 'scripts/check/check-product-repository-boundary.mjs')
+const CONTRACT_PATH = join(ROOT, 'config/decisions/0031-product-editions.json')
 const IDENTITY_PATH = join(ROOT, 'product-repository.json')
 
 async function json(path) {
@@ -29,7 +29,7 @@ async function writeJson(path, value) {
 async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), 'winwincode-repository-boundary-'))
   t.after(() => rm(root, { recursive: true, force: true }))
-  await writeJson(join(root, 'docs/decisions/0031-product-editions.json'), await json(CONTRACT_PATH))
+  await writeJson(join(root, 'config/decisions/0031-product-editions.json'), await json(CONTRACT_PATH))
   await writeJson(join(root, 'product-repository.json'), await json(IDENTITY_PATH))
   return root
 }

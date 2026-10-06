@@ -12682,6 +12682,304 @@
         ],
         "type": "object"
       },
+      "DeviceProviderOpenCodeAccount": {
+        "additionalProperties": false,
+        "properties": {
+          "accountRef": {
+            "$ref": "#/components/schemas/OpenCodeAccountId"
+          },
+          "credentialVersion": {
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "email": {
+            "maxLength": 320,
+            "minLength": 1,
+            "type": "string"
+          },
+          "issuer": {
+            "const": "https://opencode.ai/console"
+          },
+          "state": {
+            "$ref": "#/components/schemas/DeviceProviderOpenCodeAccountState"
+          },
+          "subject": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "usage": {
+            "$ref": "#/components/schemas/DeviceProviderOpenCodeUsage"
+          }
+        },
+        "required": [
+          "accountRef",
+          "issuer",
+          "subject",
+          "email",
+          "state",
+          "credentialVersion"
+        ],
+        "type": "object"
+      },
+      "DeviceProviderOpenCodeAccountState": {
+        "enum": [
+          "authorized",
+          "refresh_in_flight",
+          "reauthorization_required",
+          "logged_out"
+        ],
+        "type": "string"
+      },
+      "DeviceProviderOpenCodeCommand": {
+        "additionalProperties": false,
+        "properties": {
+          "accountRef": {
+            "$ref": "#/components/schemas/OpenCodeAccountId"
+          },
+          "displayName": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "loginId": {
+            "$ref": "#/components/schemas/OpenCodeLoginId"
+          },
+          "modelId": {
+            "description": "Optional Go model selector for connect_opencode; fixes the official protocol for the new connection.",
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "operation": {
+            "$ref": "#/components/schemas/DeviceProviderOpenCodeOperation"
+          },
+          "organizationId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "providerId": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation"
+        ],
+        "type": "object"
+      },
+      "DeviceProviderOpenCodeConnection": {
+        "additionalProperties": false,
+        "properties": {
+          "accountRef": {
+            "$ref": "#/components/schemas/OpenCodeAccountId"
+          },
+          "organizationId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "organizationName": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "accountRef",
+          "organizationId",
+          "organizationName"
+        ],
+        "type": "object"
+      },
+      "DeviceProviderOpenCodeLogin": {
+        "additionalProperties": false,
+        "properties": {
+          "accountRef": {
+            "$ref": "#/components/schemas/OpenCodeAccountId"
+          },
+          "expiresAtMs": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "loginId": {
+            "$ref": "#/components/schemas/OpenCodeLoginId"
+          },
+          "organizations": {
+            "items": {
+              "$ref": "#/components/schemas/DeviceProviderOpenCodeOrganization"
+            },
+            "maxItems": 100,
+            "type": "array"
+          },
+          "pollAfterMs": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "state": {
+            "$ref": "#/components/schemas/DeviceProviderOpenCodeLoginState"
+          },
+          "userCode": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "verificationUri": {
+            "maxLength": 2048,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "loginId",
+          "state",
+          "expiresAtMs",
+          "pollAfterMs",
+          "organizations"
+        ],
+        "type": "object"
+      },
+      "DeviceProviderOpenCodeLoginState": {
+        "enum": [
+          "pending",
+          "authorized",
+          "denied",
+          "expired",
+          "cancelled",
+          "failed",
+          "completed"
+        ],
+        "type": "string"
+      },
+      "DeviceProviderOpenCodeOperation": {
+        "enum": [
+          "begin_opencode_login",
+          "poll_opencode_login",
+          "cancel_opencode_login",
+          "connect_opencode",
+          "logout_opencode",
+          "opencode_usage",
+          "set_default_provider"
+        ],
+        "type": "string"
+      },
+      "DeviceProviderOpenCodeOrganization": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "type": "object"
+      },
+      "DeviceProviderOpenCodeSessionBinding": {
+        "additionalProperties": false,
+        "properties": {
+          "accountRef": {
+            "$ref": "#/components/schemas/OpenCodeAccountId"
+          },
+          "conversationId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "organizationId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "productSessionId": {
+            "$ref": "#/components/schemas/ProductSessionId"
+          },
+          "providerId": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "productSessionId",
+          "providerId",
+          "accountRef",
+          "organizationId",
+          "conversationId"
+        ],
+        "type": "object"
+      },
+      "DeviceProviderOpenCodeUsage": {
+        "additionalProperties": false,
+        "properties": {
+          "monthly": {
+            "$ref": "#/components/schemas/DeviceProviderOpenCodeUsageWindow"
+          },
+          "organizationId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "rolling": {
+            "$ref": "#/components/schemas/DeviceProviderOpenCodeUsageWindow"
+          },
+          "updatedAtMs": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "weekly": {
+            "$ref": "#/components/schemas/DeviceProviderOpenCodeUsageWindow"
+          }
+        },
+        "required": [
+          "rolling",
+          "weekly",
+          "monthly",
+          "updatedAtMs",
+          "organizationId"
+        ],
+        "type": "object"
+      },
+      "DeviceProviderOpenCodeUsageWindow": {
+        "additionalProperties": false,
+        "properties": {
+          "percent": {
+            "maximum": 10000,
+            "minimum": 0,
+            "type": "number"
+          },
+          "resetsAt": {
+            "maxLength": 64,
+            "minLength": 1,
+            "type": "string"
+          },
+          "status": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "percent",
+          "resetsAt"
+        ],
+        "type": "object"
+      },
       "DeviceProviderOutcome": {
         "enum": [
           "saved",
@@ -12702,6 +13000,9 @@
           },
           "credentialConfigured": {
             "type": "boolean"
+          },
+          "openCode": {
+            "$ref": "#/components/schemas/DeviceProviderOpenCodeConnection"
           }
         },
         "required": [
@@ -12773,10 +13074,29 @@
             "minLength": 1,
             "type": "string"
           },
+          "defaultProviderId": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
           "encryptionPublicKey": {
             "maxLength": 128,
             "minLength": 1,
             "type": "string"
+          },
+          "openCodeAccounts": {
+            "items": {
+              "$ref": "#/components/schemas/DeviceProviderOpenCodeAccount"
+            },
+            "maxItems": 100,
+            "type": "array"
+          },
+          "openCodeLogins": {
+            "items": {
+              "$ref": "#/components/schemas/DeviceProviderOpenCodeLogin"
+            },
+            "maxItems": 100,
+            "type": "array"
           },
           "providers": {
             "items": {
@@ -17485,6 +17805,16 @@
         "maxLength": 2048,
         "minLength": 16,
         "pattern": "^[A-Za-z0-9_-]+$",
+        "type": "string"
+      },
+      "OpenCodeAccountId": {
+        "description": "Device-local OAuth account identity. It refers to one verified issuer and upstream subject.",
+        "pattern": "^oca_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "OpenCodeLoginId": {
+        "description": "Device-owned, bounded OpenCode device authorization operation.",
+        "pattern": "^ocl_[0-9A-HJKMNP-TV-Z]{26}$",
         "type": "string"
       },
       "OrganizationId": {
@@ -28505,7 +28835,7 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:e15068ffc6f78f354ec9a8d233ac7e087a55e0e30a994e08e1d2c20594bbda56",
+  "x-source-digest": "sha256:0eb129c6d46b2f0a87b1565e78509e6cb262ad75a68e7a35039f17b5a82635ad",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {

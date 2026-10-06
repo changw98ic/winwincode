@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Adapted from DeepSeek Harness (c) 2026 DeepSeek, MIT; see THIRD_PARTY_NOTICES.md.
+// Adapted from DeepSeek Harness (c) 2026 DeepSeek, MIT; see THIRD_PARTY_NOTICES.
 
 /** Let asterisk strong emphasis close after punctuation when CJK prose continues without whitespace. */
 

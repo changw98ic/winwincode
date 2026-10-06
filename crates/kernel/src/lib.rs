@@ -30,7 +30,7 @@ use codex_core_api::Constrained;
 use codex_core_api::DurableTurnInspection;
 use codex_core_api::DurableTurnTerminal;
 use codex_core_api::EnvironmentManager;
-use codex_core_api::ExecServerRuntimePaths;
+use codex_core_api::ExecServerRuntimeOptions;
 use codex_core_api::Feature;
 use codex_core_api::ForkSnapshot;
 use codex_core_api::NewThread;
@@ -66,6 +66,7 @@ use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::protocol::Event as CodexEvent;
 use codex_protocol::protocol::EventMsg as CodexEventMsg;
 use codex_protocol::protocol::ReviewDecision as CodexReviewDecision;
+use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::request_user_input::RequestUserInputResponse;
 use futures::FutureExt;
@@ -416,22 +417,13 @@ fn kernel_action_request(request: ToolCallGateRequest) -> KernelActionRequest {
 }
 
 /// Exact embedded Codex source commit.
-pub const CODEX_COMMIT: &str = "758ef40f50c1a458425c7cfbf1eb12cbc07af0b0";
+pub const CODEX_COMMIT: &str = "d27764b82f7118f674371e6d6e76271d9d606edb";
 /// Exact embedded Codex release tag.
-pub const CODEX_TAG: &str = "rust-v0.149.0";
+pub const CODEX_TAG: &str = "rust-v0.160.1";
 /// Native contract version, independent of the application package version.
 pub const INTERFACE_VERSION: u32 = 9;
 /// Patches applied to the embedded source in deterministic order.
-pub const CODEX_PATCH_SET: &[&str] = &[
-    "upstream/patches/codex/0001-export-client-mcp-extensions.patch",
-    "upstream/patches/codex/0002-inject-model-stream-transport.patch",
-    "upstream/patches/codex/0003-export-config-builder.patch",
-    "upstream/patches/codex/0005-remount-split-bwrap-root-read-only.patch",
-    "upstream/patches/codex/0006-tool-gate-and-exact-turn-replay.patch",
-    "upstream/patches/codex/0007-bind-tool-gate-executable-identity.patch",
-    "upstream/patches/codex/0008-atomic-apply-patch.patch",
-    "upstream/patches/codex/0009-canonicalize-intercepted-apply-patch.patch",
-];
+pub const CODEX_PATCH_SET: &[&str] = &["upstream/patches/codex/0001-winwincode-integration.patch"];
 
 const ROLE_SESSION_POLICY_SCHEMA_VERSION: u32 = 2;
 
@@ -1011,7 +1003,7 @@ impl Kernel {
                     .map_err(|error| {
                         KernelFailure::new("AUTH_INITIALIZATION_FAILED", error.to_string())
                     })?;
-            let runtime_paths = ExecServerRuntimePaths::new(
+            let runtime_paths = ExecServerRuntimeOptions::new(
                 self.options.helper_executable.clone(),
                 self.options.linux_sandbox_executable.clone(),
             )
@@ -1040,7 +1032,7 @@ impl Kernel {
                     include_instructions: config.include_skill_instructions,
                     max_context_tokens: config.skill_max_context_tokens,
                     bundled_skills_enabled: false,
-                    orchestrator_skills_enabled: false,
+                    cloud_skill_enabled: false,
                     shadow_selection_enabled: false,
                 }
             });
@@ -1055,6 +1047,7 @@ impl Kernel {
                     extensions.build().into(),
                     user_instructions_provider,
                     /* analytics_events_client */ None,
+                    Arc::new(codex_attachment_store::InlineAttachmentStore),
                     Arc::clone(&thread_store),
                     local_agent_graph_store_from_state_db(state_db.as_ref()),
                     installation_id,
@@ -1259,7 +1252,7 @@ impl Kernel {
             let config = Self::session_config(&runtime, &options).await?;
             let thread = runtime
                 .manager
-                .start_thread(StartThreadOptions::new(config.clone()))
+                .start_thread(host_thread_options(config.clone()))
                 .await
                 .map_err(|error| KernelFailure::new("SESSION_CREATE_FAILED", error.to_string()))?;
             Box::pin(self.register_session(&runtime, thread, config)).await
@@ -1287,7 +1280,7 @@ impl Kernel {
             }
             let runtime = self.runtime().await?;
             let config = Self::session_config(&runtime, &options).await?;
-            let thread = Box::pin(runtime.manager.resume_thread_from_rollout(
+            let thread = Box::pin(runtime.manager.resume_legacy_thread_from_rollout(
                 config.clone(),
                 rollout_path,
                 Arc::clone(&runtime.auth_manager),
@@ -1346,12 +1339,10 @@ impl Kernel {
                     ));
                 }
             }
-            let thread = Box::pin(runtime.manager.fork_thread(
+            let thread = Box::pin(runtime.manager.fork_legacy_thread(
                 ForkSnapshot::Interrupted,
-                config.clone(),
+                host_thread_options(config.clone()),
                 rollout_path,
-                /* thread_source */ None,
-                /* parent_trace */ None,
             ))
             .await
             .map_err(|error| KernelFailure::new("SESSION_FORK_FAILED", error.to_string()))?;
@@ -1445,6 +1436,7 @@ impl Kernel {
                                 turn_id,
                                 thread_settings: ThreadSettingsOverrides::default(),
                                 trace: None,
+                                cyber_access_program: None,
                                 submit_change_batch: options.submit_change_batch,
                             })
                             .await
@@ -1780,7 +1772,7 @@ impl Kernel {
         let thread = Arc::clone(&new_thread.thread);
         let configured = CodexEvent {
             id: "winwincode-session-configured".to_string(),
-            msg: CodexEventMsg::SessionConfigured(thread.session_configured()),
+            msg: CodexEventMsg::SessionConfigured(new_thread.session_configured),
         };
         event_tx
             .send(serialize_codex_event(1, &configured))
@@ -1929,7 +1921,9 @@ fn user_text_request(text: String, options: &TurnSubmissionOptions) -> TurnInput
         text_elements: Vec::new(),
     }];
     input.extend(options.image_urls.iter().map(|url| UserInput::Image {
-        image_url: url.clone(),
+        image: codex_protocol::models::ImageReference::Inline {
+            image_url: url.clone(),
+        },
         detail: None,
     }));
     TurnInputRequest::user_input(input).on_start(TurnStartOptions {
@@ -1957,6 +1951,15 @@ fn submission_info(submission: TurnInputSubmission) -> SubmissionInfo {
             reason: Some(format!("{reason:?}")),
         },
     }
+}
+
+fn host_thread_options(config: Config) -> StartThreadOptions {
+    let mut options = StartThreadOptions::new(config);
+    // Exact host turn reconciliation, resume, and fork all read complete rollout history.
+    // Upstream local stores now default to paginated history; choose the supported legacy
+    // contract explicitly so durable replay uses the same format as session creation.
+    options.history_mode = Some(ThreadHistoryMode::Legacy);
+    options
 }
 
 fn exact_turn_submission(
@@ -2496,16 +2499,7 @@ mod tests {
         assert_eq!(build.codex_commit, CODEX_COMMIT);
         assert_eq!(
             build.patch_set,
-            vec![
-                "upstream/patches/codex/0001-export-client-mcp-extensions.patch",
-                "upstream/patches/codex/0002-inject-model-stream-transport.patch",
-                "upstream/patches/codex/0003-export-config-builder.patch",
-                "upstream/patches/codex/0005-remount-split-bwrap-root-read-only.patch",
-                "upstream/patches/codex/0006-tool-gate-and-exact-turn-replay.patch",
-                "upstream/patches/codex/0007-bind-tool-gate-executable-identity.patch",
-                "upstream/patches/codex/0008-atomic-apply-patch.patch",
-                "upstream/patches/codex/0009-canonicalize-intercepted-apply-patch.patch",
-            ]
+            vec!["upstream/patches/codex/0001-winwincode-integration.patch"]
         );
         assert_eq!(build.event_capacity, 16);
         let _ = std::fs::remove_dir_all(home);
@@ -2555,7 +2549,7 @@ mod tests {
             panic!("expected user input")
         };
         assert!(
-            matches!(&content[1], codex_core_api::UserInput::Image { image_url: actual, .. } if actual == &image_url)
+            matches!(&content[1], codex_core_api::UserInput::Image { image: codex_protocol::models::ImageReference::Inline { image_url: actual }, .. } if actual == &image_url)
         );
         assert_eq!(request.start.final_output_json_schema, Some(schema));
         assert_eq!(
@@ -2725,14 +2719,14 @@ mod tests {
             assert_eq!(config.mcp_servers.get().contains_key("live"), writer);
             let policy = config.permissions.file_system_sandbox_policy();
             assert_eq!(
-                policy.can_write_path_with_cwd(
+                policy.can_write_local_path_with_cwd(
                     config.cwd.join("package.json").as_path(),
                     config.cwd.as_path(),
                 ),
                 writer,
                 "{sandbox}"
             );
-            assert!(!policy.can_write_path_with_cwd(
+            assert!(!policy.can_write_local_path_with_cwd(
                 std::path::Path::new("/outside-project.txt"),
                 config.cwd.as_path(),
             ));
@@ -2953,7 +2947,7 @@ mod tests {
         );
         let policy = config.permissions.file_system_sandbox_policy();
         assert!(
-            policy.can_write_path_with_cwd(
+            policy.can_write_local_path_with_cwd(
                 canonical.join("sandbox-smoke.txt").as_path(),
                 canonical.as_path(),
             ),
@@ -2994,6 +2988,8 @@ mod tests {
                 id: "submission".to_string(),
                 msg: EventMsg::McpToolCallBegin(McpToolCallBeginEvent {
                     call_id: "tool-call".to_string(),
+                    turn_id: "turn".to_string(),
+                    mcp_app_ui: None,
                     invocation: McpInvocation {
                         server: "fixture".to_string(),
                         tool: "inspect".to_string(),

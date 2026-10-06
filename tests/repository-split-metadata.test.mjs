@@ -8,10 +8,10 @@ import test from 'node:test'
 import {
   validateRepositorySplitMetadata,
   validateRepositorySplitFiles,
-} from '../scripts/verify-repository-split-metadata.mjs'
+} from '../scripts/check/verify-repository-split-metadata.mjs'
 
 const root = resolve(import.meta.dirname, '..')
-const verifierPath = resolve(root, 'scripts/verify-repository-split-metadata.mjs')
+const verifierPath = resolve(root, 'scripts/check/verify-repository-split-metadata.mjs')
 
 function readJson(path) {
   return JSON.parse(readFileSync(resolve(root, path), 'utf8'))
@@ -19,9 +19,9 @@ function readJson(path) {
 
 function fixture() {
   return structuredClone({
-    editions: readJson('docs/decisions/0031-product-editions.json'),
-    inventory: readJson('docs/decisions/0031-repository-split.inventory.json'),
-    taskMap: readJson('docs/decisions/0031-task-repository-map.json'),
+    editions: readJson('config/decisions/0031-product-editions.json'),
+    inventory: readJson('config/decisions/0031-repository-split.inventory.json'),
+    taskMap: readJson('config/decisions/0031-task-repository-map.json'),
   })
 }
 
@@ -39,7 +39,7 @@ function rejected(mutate, pattern) {
 }
 
 function currentTrackedPaths() {
-  return trackedPathsAt(root, readJson('docs/decisions/0031-repository-split.inventory.json'))
+  return trackedPathsAt(root, readJson('config/decisions/0031-repository-split.inventory.json'))
 }
 
 function trackedPathsAt(repositoryRoot, inventory) {
@@ -78,7 +78,7 @@ const EXPECTED_VALIDATION_RESULT = {
   communityPrunePermission: 'community-owned-ready-for-1.1-freeze',
 }
 
-// Documented re-audit pins (keep lockstep with scripts/verify-repository-split-metadata.mjs)
+// Documented re-audit pins (keep lockstep with scripts/check/verify-repository-split-metadata.mjs)
 // 2026-09-21 follow-up on accepted main a878d4c5 after JEV/fusion/device merges.
 const AUDITED_COMMUNITY_HEAD = 'a878d4c53b927c80357becb29bed7e897a1c9b16'
 const AUDITED_MIGRATE_OUT_RECOVERY_HEAD = '52f2eda69fd0b03e6f42b980be3b9a4965092497'
@@ -105,9 +105,9 @@ const AUDITED_OWNERSHIP_LOCKSTEP_PATHS = [
   'crates/winwincode-storage/src/managed_app.rs',
   'docs/jev-session-replay.md',
   'packages/contracts/src/fusion.ts',
-  'scripts/device-production-fixture.mjs',
-  'scripts/evaluate-jev-session-replay.mjs',
-  'scripts/run-00os-device-live-vertical.mjs',
+  'scripts/lib/device-production-fixture.mjs',
+  'scripts/benchmark/evaluate-jev-session-replay.mjs',
+  'scripts/acceptance/run-00os-device-live-vertical.mjs',
   'tests/api-production-device-prerequisites.test.mjs',
   'tests/fixtures/jev-session-replay/fixture-evidence-detgc.txt',
   'tests/fixtures/jev-session-replay/fixture-evidence-gcjev.txt',
@@ -407,15 +407,15 @@ test('metadata-only commit may advance live HEAD while audited product tree stay
       )
     }
     appendFileSync(
-      join(repositoryRoot, 'docs/decisions/0031-repository-split.inventory.json'),
+      join(repositoryRoot, 'config/decisions/0031-repository-split.inventory.json'),
       '\n',
     )
-    execFileSync('git', ['-C', repositoryRoot, 'add', 'docs/decisions/0031-repository-split.inventory.json'])
+    execFileSync('git', ['-C', repositoryRoot, 'add', 'config/decisions/0031-repository-split.inventory.json'])
     execFileSync('git', [
       '-C', repositoryRoot,
       'commit',
       '-m', 'test: update split metadata',
-      '--', 'docs/decisions/0031-repository-split.inventory.json',
+      '--', 'config/decisions/0031-repository-split.inventory.json',
     ])
     assert.notEqual(
       execFileSync('git', ['-C', repositoryRoot, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
@@ -489,7 +489,7 @@ test('mixed seam target and test mappings are exact and current-head pinned', as
     rejectedAgainstCurrentHead(
       documents => {
         const cloud = documents.inventory.currentHeadTargetEvidence.mixedSeamEvidence[0].cloud
-        cloud.targetPaths = ['docs/decisions/0031-repository-split.inventory.json']
+        cloud.targetPaths = ['config/decisions/0031-repository-split.inventory.json']
         cloud.tests = ['tests/repository-split-metadata.test.mjs']
       },
       /canonical mapping/u,
