@@ -12,6 +12,7 @@ on:
       - 'third_party/codex/codex-rs/**'
       - 'tests/code_mode_kernel.rs'
       - 'tests/fixtures/code-mode-mcp.mjs'
+      - 'tests/workspace-smoke.test.mjs'
       - 'scripts/code-mode-ninja.mjs'
       - 'scripts/install-code-mode-linux-build-deps.sh'
       - '.github/workflows/native-code-mode.yml'

@@ -57,7 +57,12 @@ test('ordinary CI runs one exact-SHA aggregate over five independent lanes', () 
     mainlineWorkflow,
     /WINWINCODE_HELPER_RELEASE_(?:PRIVATE|PUBLIC)_KEY_HEX|secrets\./u,
   )
-  assert.ok(mainlineWorkflow.includes('binutils bubblewrap pkg-config libcap-dev'))
+  assert.ok(mainlineWorkflow.includes('sudo bash scripts/install-code-mode-linux-build-deps.sh'))
+  const linuxDependencyInstaller = readFileSync(
+    resolve(root, 'scripts/install-code-mode-linux-build-deps.sh'),
+    'utf8',
+  )
+  assert.ok(linuxDependencyInstaller.includes('binutils bubblewrap pkg-config libcap-dev'))
   assert.ok(mainlineWorkflow.includes('kernel.apparmor_restrict_unprivileged_userns=0'))
   assert.ok(mainlineWorkflow.includes(
     'bwrap --ro-bind / / --unshare-user --unshare-pid --unshare-net',
