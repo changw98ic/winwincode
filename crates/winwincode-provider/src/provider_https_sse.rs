@@ -2849,6 +2849,181 @@ mod tests {
     }
 
     #[test]
+    fn native_model_retries_empty_response_and_replays_success() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        let empty = concat!(
+            "data: {\"id\":\"empty\",\"model\":\"fixture-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"empty\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":0,\"total_tokens\":2}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let success = concat!(
+            "data: {\"id\":\"success\",\"model\":\"fixture-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"OK\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"success\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1,\"total_tokens\":3}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let fixture = TlsFixture::start(
+            [empty, success]
+                .into_iter()
+                .map(|body| TestResponse {
+                    status: "200 OK",
+                    content_type: "text/event-stream",
+                    body,
+                    declared_length: None,
+                    delay: Duration::ZERO,
+                })
+                .collect(),
+        );
+        let (store, mut open, root) = native_retry_store(&fixture, "empty-response");
+        let payload = serde_json::to_vec(&serde_json::json!({"requestId":open.request_id.0,"provider":"provider-https-fixture","sessionId":open.session_identity.product_session_id.0,"threadId":open.session_identity.codex_thread_id.0,"request":{"model":"fixture-model","instructions":"","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"fixture"}]}],"tools":[],"tool_choice":"auto","parallel_tool_calls":true,"stream":true,"store":false}})).unwrap();
+        open.request.data_base64 = STANDARD.encode(&payload);
+        open.request.payload_digest.0 = format!("sha256:{:x}", Sha256::digest(&payload));
+        let chunks = store
+            .execute_model_using(
+                &open,
+                || true,
+                |_, _| {
+                    HttpsSseProviderAdapter::try_new(
+                        config(&fixture)
+                            .with_openai_chat_completions(4096, ProviderTokenPricing::default())
+                            .unwrap(),
+                    )
+                    .map_err(|_| crate::DeviceProviderError)
+                },
+            )
+            .unwrap();
+        assert!(
+            chunks.iter().all(|chunk| chunk.payload.is_some()),
+            "fixture must reach the canonical response boundary: {chunks:?}"
+        );
+        let frames: Vec<serde_json::Value> = chunks
+            .iter()
+            .map(|chunk| {
+                serde_json::from_slice(
+                    &STANDARD
+                        .decode(&chunk.payload.as_ref().unwrap().data_base64)
+                        .unwrap(),
+                )
+                .unwrap()
+            })
+            .collect();
+        assert_eq!(
+            frames.last().unwrap()["type"],
+            "completed",
+            "an empty terminal response must retry before reaching Core"
+        );
+        assert!(
+            frames
+                .iter()
+                .any(|frame| frame["type"] == "output_text_delta" && frame["delta"] == "OK")
+        );
+        assert!(!frames.iter().any(|frame| frame["type"] == "error"));
+        assert!(!store.model_attempt_accounting_complete(&open).unwrap());
+        let replay = store
+            .execute_model_using(
+                &open,
+                || false,
+                |_, _| panic!("completed exchange replay cannot send a request"),
+            )
+            .unwrap();
+        assert_eq!(replay, chunks);
+        let requests = fixture.finish();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0], requests[1]);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_model_empty_response_retry_limit_and_cancellation_preserve_authority() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        for cancel in [false, true] {
+            let count = if cancel { 1 } else { 4 };
+            let fixture = TlsFixture::start(
+                (0..count)
+                    .map(|_| TestResponse {
+                        status: "200 OK",
+                        content_type: "text/event-stream",
+                        body: concat!(
+                            "data: {\"id\":\"empty\",\"model\":\"fixture-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n",
+                            "data: {\"id\":\"empty\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":0,\"total_tokens\":2}}\n\n",
+                            "data: [DONE]\n\n"
+                        ),
+                        declared_length: None,
+                        delay: Duration::ZERO,
+                    })
+                    .collect(),
+            );
+            let (store, mut open, root) = native_retry_store(
+                &fixture,
+                if cancel {
+                    "empty-cancel"
+                } else {
+                    "empty-limit"
+                },
+            );
+            let payload = serde_json::to_vec(&serde_json::json!({"requestId":open.request_id.0,"provider":"provider-https-fixture","sessionId":open.session_identity.product_session_id.0,"threadId":open.session_identity.codex_thread_id.0,"request":{"model":"fixture-model","instructions":"","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"fixture"}]}],"tools":[],"tool_choice":"auto","parallel_tool_calls":true,"stream":true,"store":false}})).unwrap();
+            open.request.data_base64 = STANDARD.encode(&payload);
+            open.request.payload_digest.0 = format!("sha256:{:x}", Sha256::digest(&payload));
+            let request_seen = std::cell::Cell::new(false);
+            let chunks = store
+                .execute_model_using(
+                    &open,
+                    || {
+                        if cancel && fixture.requests.try_recv().is_ok() {
+                            request_seen.set(true);
+                        }
+                        !request_seen.get()
+                    },
+                    |_, _| {
+                        HttpsSseProviderAdapter::try_new(
+                            config(&fixture)
+                                .with_openai_chat_completions(4096, ProviderTokenPricing::default())
+                                .unwrap(),
+                        )
+                        .map_err(|_| crate::DeviceProviderError)
+                    },
+                )
+                .unwrap();
+            if cancel {
+                assert!(request_seen.get());
+                assert_eq!(
+                    chunks.last().unwrap().error.as_ref().unwrap().code,
+                    winwincode_execution_port::generated::ExecutionPortErrorCode::LeaseExpired
+                );
+            } else {
+                let frame: serde_json::Value = serde_json::from_slice(
+                    &STANDARD
+                        .decode(&chunks.last().unwrap().payload.as_ref().unwrap().data_base64)
+                        .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(frame["type"], "error");
+                assert_eq!(frame["error"]["code"], "EMPTY_RESPONSE");
+            }
+            let attempts: i64 = store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM model_open_attempts WHERE outcome='failed'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(attempts, count);
+            let replay = store
+                .execute_model_using(
+                    &open,
+                    || false,
+                    |_, _| panic!("retained failure replay must not open an adapter"),
+                )
+                .unwrap();
+            assert_eq!(replay, chunks);
+            assert_eq!(fixture.finish().len(), if cancel { 0 } else { 4 });
+            drop(store);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
     fn native_model_retries_received_request_without_response_and_truncated_stream() {
         use base64::Engine as _;
         for (label, status, body, declared_length) in [

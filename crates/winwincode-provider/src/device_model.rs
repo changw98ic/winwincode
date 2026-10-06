@@ -81,6 +81,7 @@ impl From<crate::OpenCodeCredentialError> for DeviceModelFailure {
 enum DeviceAttemptError {
     Open(crate::ProviderAdapterError),
     Stream(crate::HttpsSseProviderError),
+    EmptyResponse(Vec<ModelChunkMessage>),
     Stopped,
     Storage,
     Configuration,
@@ -95,6 +96,7 @@ impl crate::request_retry::RetryFailure for DeviceAttemptError {
                 crate::HttpsSseProviderErrorKind::Transport
                     | crate::HttpsSseProviderErrorKind::IncompleteStream
             ),
+            Self::EmptyResponse(_) => true,
             Self::Stopped | Self::Storage | Self::Configuration => false,
         }
     }
@@ -160,7 +162,7 @@ fn invoke_provider_attempt(
         ProviderStreamControlAction::Release,
     );
     let completion = completion.map_err(DeviceAttemptError::Stream)?;
-    completion
+    let chunks = completion
         .frames
         .iter()
         .map(|frame| {
@@ -172,7 +174,19 @@ fn invoke_provider_attempt(
             chunk.is_final = frame.is_terminal();
             Ok(chunk)
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    let empty_response = completion
+        .frames
+        .last()
+        .and_then(|frame| serde_json::from_str::<serde_json::Value>(frame.payload_json()).ok())
+        .is_some_and(|message| {
+            message["type"] == "error" && message["error"]["code"] == "EMPTY_RESPONSE"
+        });
+    if empty_response {
+        Err(DeviceAttemptError::EmptyResponse(chunks))
+    } else {
+        Ok(chunks)
+    }
 }
 
 impl DeviceProviderStore {
@@ -470,7 +484,7 @@ impl DeviceProviderStore {
             },
         );
         match result {
-            Ok(chunks) => Ok(chunks),
+            Ok(chunks) | Err(DeviceAttemptError::EmptyResponse(chunks)) => Ok(chunks),
             Err(DeviceAttemptError::Open(error)) => {
                 if let Some(binding) = &binding {
                     if error.http_status() == Some(401) {
