@@ -416,7 +416,7 @@ impl DeviceProviderStore {
             .and_then(serde_json::Value::as_str)
             .ok_or(DeviceModelFailure::RequestInvalid)?
             .to_owned();
-        let (config, secret) = self.resolve(&provider_id)?;
+        let (config, secret, codex_account) = self.resolve_connection(&provider_id)?;
         if !config.enabled || !config.model_ids.iter().any(|model| model == &model_id) {
             return Err(DeviceModelFailure::Unavailable);
         }
@@ -463,8 +463,9 @@ impl DeviceProviderStore {
                 "device-{}:attempt:{attempt_number}",
                 open.model_exchange_id.0
             );
-            let adapter = crate::device_store::adapter(&config, headers.clone())
-                .map_err(|_| DeviceModelFailure::InvalidConfiguration)?;
+            let adapter =
+                crate::device_store::adapter(&config, headers.clone(), codex_account.clone())
+                    .map_err(|_| DeviceModelFailure::InvalidConfiguration)?;
             let Some(cancellation) = self.active_cancellation(&open.model_exchange_id.0)? else {
                 return Err(DeviceModelFailure::Unavailable);
             };

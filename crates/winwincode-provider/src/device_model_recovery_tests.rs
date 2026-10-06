@@ -735,6 +735,8 @@ fn serve(
                 Err(error) => panic!("expected actual HTTPS request: {error}"),
             }
         };
+        // macOS accepted sockets inherit the listener's nonblocking mode.
+        socket.set_nonblocking(false).unwrap();
         socket
             .set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();

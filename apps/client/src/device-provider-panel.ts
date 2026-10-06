@@ -59,7 +59,7 @@ export function mountDeviceProviderPanel(options: DeviceProviderPanelOptions) {
   endpoint.placeholder = 'https://open.bigmodel.cn/api/anthropic/v1/messages'
   const protocol = node('select')
   protocol.id = 'wwc-device-provider-protocol'
-  for (const [value, label] of [[DeviceProviderProtocol.AnthropicMessages, 'Anthropic Messages'], [DeviceProviderProtocol.OpenaiChatCompletions, 'OpenAI Chat Completions'], [DeviceProviderProtocol.Canonical, 'Canonical SSE']] as const) {
+  for (const [value, label] of [[DeviceProviderProtocol.AnthropicMessages, 'Anthropic Messages'], [DeviceProviderProtocol.OpenaiChatCompletions, 'OpenAI Chat Completions'], [DeviceProviderProtocol.Canonical, 'Canonical SSE'], [DeviceProviderProtocol.CodexChatgpt, 'Codex ChatGPT（设备登录态）'], [DeviceProviderProtocol.ChatgptPlan, 'ChatGPT（直接授权）']] as const) {
     const option = node('option', label); option.value = value; protocol.append(option)
   }
   const protocolLabel = node('label', '接口协议'); protocolLabel.htmlFor = protocol.id; protocolLabel.append(protocol); form.append(protocolLabel)
@@ -82,10 +82,12 @@ export function mountDeviceProviderPanel(options: DeviceProviderPanelOptions) {
   const enabled = node('input'); enabled.type = 'checkbox'; enabled.checked = true; enabled.id = 'wwc-device-provider-enabled'
   const enabledLabel = node('label', '启用此服务商'); enabledLabel.htmlFor = enabled.id; enabledLabel.append(enabled)
   const save = node('button', '保存到设备'); save.type = 'submit'
+  const authorize = node('button', 'Continue with ChatGPT'); authorize.type = 'button'; authorize.hidden = true
+  authorize.id = 'wwc-device-provider-authorize'
   const test = node('button', '测试连接'); test.type = 'button'
   const remove = node('button', '删除'); remove.type = 'button'
   const clear = node('button', '添加服务商'); clear.type = 'button'
-  const controls = node('div'); controls.className = 'wwc-settings-route-controls'; controls.append(save, test, remove, clear)
+  const controls = node('div'); controls.className = 'wwc-settings-route-controls'; controls.append(authorize, save, test, remove, clear)
   form.append(enabledLabel, note, controls)
   options.root.append(deviceLabel, devices, refresh, status, list, form)
 
@@ -100,10 +102,32 @@ export function mountDeviceProviderPanel(options: DeviceProviderPanelOptions) {
     }
     return JSON.parse(await response.text()) as unknown
   }
+  function syncProtocol(): void {
+    const codex = protocol.value === DeviceProviderProtocol.CodexChatgpt
+    const plan = protocol.value === DeviceProviderProtocol.ChatgptPlan
+    endpoint.readOnly = codex || plan
+    key.closest('label')?.toggleAttribute('hidden', codex || plan)
+    authorize.hidden = !plan
+    headersLabel.hidden = codex || plan
+    if (codex || plan) headers.value = ''
+    if (codex) { endpoint.value = 'https://chatgpt.com/backend-api/codex/responses'; key.value = '' }
+    if (plan) {
+      endpoint.value = 'https://api.openai.com/v1/responses'; key.value = ''
+      if (provider.value === '') provider.value = 'chatgpt-personal'
+      if (name.value === '') name.value = 'ChatGPT'
+      if (models.value === '') models.value = 'gpt-6.1-sol'
+    }
+    note.textContent = plan
+      ? '首次使用请点击 Continue with ChatGPT，在所选设备打开的系统浏览器中完成授权。授权后，凭据保存在该设备并自动刷新。可用模型以账号权限为准。'
+      : codex
+      ? '绑定所选设备当前的 Codex ChatGPT 账号。登录过期后，请在该设备的 Codex 中重新登录。切换账号时，请删除服务商后重新添加。'
+      : '配置保存在所选设备。编辑时留空 API Key，可继续使用设备中的密钥。'
+  }
+  protocol.addEventListener('change', syncProtocol)
   function lock(): void {
     devices.disabled = busy
     refresh.disabled = busy
-    for (const control of [provider, name, endpoint, protocol, models, key, headers, enabled, save, test, remove, clear]) {
+    for (const control of [provider, name, endpoint, protocol, models, key, headers, enabled, authorize, save, test, remove, clear]) {
       control.disabled = busy || options.readOnly === true || view?.online !== true || view.snapshot === null
     }
   }
@@ -113,7 +137,7 @@ export function mountDeviceProviderPanel(options: DeviceProviderPanelOptions) {
   }
   function edit(config: DeviceProviderConfig): void {
     provider.value = config.providerId; name.value = config.displayName; endpoint.value = config.endpoint
-    protocol.value = config.protocol; models.value = config.modelIds.join(', '); enabled.checked = config.enabled; key.value = ''; headers.value = ''
+    protocol.value = config.protocol; models.value = config.modelIds.join(', '); enabled.checked = config.enabled; key.value = ''; headers.value = ''; syncProtocol()
   }
   function show(): void {
     list.replaceChildren()
@@ -121,7 +145,7 @@ export function mountDeviceProviderPanel(options: DeviceProviderPanelOptions) {
       const item = node('li'); const editButton = node('button', '编辑'); editButton.type = 'button'
       editButton.disabled = busy || options.readOnly === true
       editButton.addEventListener('click', () => edit(entry.config))
-      item.append(node('span', `${entry.config.displayName} · ${entry.config.modelIds.join(', ')} · ${entry.credentialConfigured ? '已配置密钥' : '待配置'}`), editButton)
+      item.append(node('span', `${entry.config.displayName} · ${entry.config.modelIds.join(', ')} · ${entry.credentialConfigured ? (entry.config.protocol === DeviceProviderProtocol.CodexChatgpt ? '已绑定 Codex 登录态' : entry.config.protocol === DeviceProviderProtocol.ChatgptPlan ? '已授权 ChatGPT' : '已配置密钥') : '待配置'}`), editButton)
       list.append(item)
     }
     lock()
@@ -161,23 +185,29 @@ export function mountDeviceProviderPanel(options: DeviceProviderPanelOptions) {
         customHeaders = parsed as Record<string, string>
       } catch { status.textContent = '请求头需要填写 JSON 对象，名称和值都必须是字符串。'; return }
     }
-    const secret = key.value
+    const secret = protocol.value === DeviceProviderProtocol.CodexChatgpt || protocol.value === DeviceProviderProtocol.ChatgptPlan ? '' : key.value
     const mutation: DeviceProviderMutation = { operation, config: { providerId: provider.value.trim(), displayName: name.value.trim(), endpoint: endpoint.value.trim(),
       protocol: protocol.value as DeviceProviderProtocol, modelIds: models.value.split(',').map(value => value.trim()).filter(Boolean), enabled: enabled.checked }, ...(secret === '' ? {} : { apiKey: secret }), ...(customHeaders === undefined ? {} : { customHeaders }) }
-    busy = true; show(); status.textContent = operation === 'test' ? '等待设备测试连接…' : '等待设备保存回执…'
+    busy = true; show(); status.textContent = operation === 'authorize' ? '请在所选设备的系统浏览器中完成 ChatGPT 授权，最长等待三分钟…' : operation === 'test' ? '等待设备测试连接…' : '等待设备保存回执…'
     try {
       const id = `provider_${(browser?.crypto ?? crypto).randomUUID().replaceAll('-', '')}`
       const encrypted = await encryptDeviceProvider(snapshot, id, mutation, browser?.crypto ?? crypto)
       key.value = ''; headers.value = ''
       await request(`/api/v1/clients/${encodeURIComponent(selected)}/providers`, 'POST', encrypted)
-      const deadline = Date.now() + 120_000
+      const deadline = Date.now() + (operation === 'authorize' ? 300_000 : 120_000)
       while (!closed && Date.now() < deadline) {
         const result = providerView(await request(`/api/v1/clients/${encodeURIComponent(selected)}/providers/receipts/${id}`))
         if (closed) return
         view = result
         if (result.receipt !== null) {
-          const labels: Record<string, string> = { saved: '已保存到设备。', deleted: '已从设备删除。', tested: '设备已成功调用模型，连接测试通过。', invalid_request: '设备拒绝了配置，请检查 API 地址、模型和密钥。', revision_conflict: '设备配置已变更，请刷新后重试。', provider_unavailable: '设备调用失败，请检查服务商配置和网络。', interrupted: '设备测试被中断，请重新测试。' }
-          status.textContent = labels[result.receipt.outcome] ?? '设备返回了未知结果。'
+          const labels: Record<string, string> = { saved: '已保存到设备。', deleted: '已从设备删除。', tested: '设备已成功调用模型，连接测试通过。', invalid_request: '设备拒绝了配置，请检查 API 地址、模型和密钥。', revision_conflict: '设备配置已变更，请刷新后重试。', provider_unavailable: protocol.value === DeviceProviderProtocol.CodexChatgpt ? '设备调用失败，请检查该设备的 Codex 登录态、模型权限和网络。' : '设备调用失败，请检查服务商配置和网络。', interrupted: '设备测试被中断，请重新测试。' }
+          status.textContent = operation === 'authorize'
+            ? result.receipt.outcome === 'saved' ? 'ChatGPT 授权已保存到设备，可继续测试连接。' : result.receipt.outcome === 'revision_conflict' ? labels.revision_conflict ?? '' : '授权未完成。请确认所选设备能打开浏览器，并允许 ChatGPT 计划使用权限后重试。'
+            : labels[result.receipt.outcome] ?? '设备返回了未知结果。'
+          if (operation === 'authorize' && result.receipt.outcome === 'saved') {
+            const saved = result.snapshot?.providers.find(entry => entry.config.providerId === mutation.config.providerId)
+            if (saved !== undefined) edit(saved.config)
+          }
           show(); return
         }
         if (!result.online) { status.textContent = '设备已离线，尚未收到完成回执。'; return }
@@ -189,9 +219,10 @@ export function mountDeviceProviderPanel(options: DeviceProviderPanelOptions) {
   }
   form.addEventListener('submit', event => { event.preventDefault(); void submit('save') })
   test.addEventListener('click', () => { void submit('test') })
+  authorize.addEventListener('click', () => { void submit('authorize') })
   remove.addEventListener('click', () => { void submit('delete') })
-  clear.addEventListener('click', () => { form.reset(); provider.focus() })
-  devices.addEventListener('change', () => { form.reset(); void load() })
+  clear.addEventListener('click', () => { form.reset(); syncProtocol(); provider.focus() })
+  devices.addEventListener('change', () => { form.reset(); syncProtocol(); void load() })
   refresh.addEventListener('click', () => { void directory() })
   lock(); void directory()
   return { close() { closed = true; controller.abort(); key.value = ''; headers.value = ''; options.root.replaceChildren() },

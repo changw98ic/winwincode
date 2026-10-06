@@ -97,6 +97,8 @@ export enum DeviceProviderProtocol {
   AnthropicMessages = "anthropic_messages",
   OpenaiChatCompletions = "openai_chat_completions",
   Canonical = "canonical",
+  CodexChatgpt = "codex_chatgpt",
+  ChatgptPlan = "chatgpt_plan",
 }
 
 export type DeviceProviderReceipt = {

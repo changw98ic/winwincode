@@ -195,10 +195,12 @@ impl DeviceProviderStore {
             Ok((mut receipt, replayed)) => {
                 self.connection.execute_batch("COMMIT")?;
                 if !replayed && receipt.outcome == DeviceProviderOutcome::Interrupted {
-                    receipt.outcome = match self
-                        .decrypt(envelope)
-                        .and_then(|mutation| self.test_provider(mutation, &envelope.request_id))
-                    {
+                    let mutation = self.decrypt(envelope)?;
+                    if mutation.operation == "authorize" {
+                        self.authorize_provider(mutation, &mut receipt)?;
+                        return Ok(receipt);
+                    }
+                    receipt.outcome = match self.test_provider(mutation, &envelope.request_id) {
                         Ok(()) => DeviceProviderOutcome::Tested,
                         Err(_) => DeviceProviderOutcome::ProviderUnavailable,
                     };
@@ -321,7 +323,7 @@ impl DeviceProviderStore {
         Ok(mutation?)
     }
 
-    fn mutate(&self, mut mutation: Mutation) -> Result<DeviceProviderOutcome, DeviceProviderError> {
+    fn mutate(&self, mutation: Mutation) -> Result<DeviceProviderOutcome, DeviceProviderError> {
         if !valid_device_provider_config(&mutation.config)
             || mutation.custom_headers.as_ref().is_some_and(|headers| {
                 crate::provider_https_sse::validate_custom_headers(
@@ -335,46 +337,23 @@ impl DeviceProviderStore {
         {
             return Ok(DeviceProviderOutcome::InvalidRequest);
         }
+        if matches!(
+            mutation.config.protocol,
+            DeviceProviderProtocol::CodexChatgpt | DeviceProviderProtocol::ChatgptPlan
+        ) && (mutation.api_key.is_some()
+            || mutation
+                .custom_headers
+                .as_ref()
+                .is_some_and(|headers| !headers.is_empty()))
+        {
+            return Ok(DeviceProviderOutcome::InvalidRequest);
+        }
         match mutation.operation.as_str() {
-            "save" => {
-                let secret = match mutation.api_key.take() {
-                    Some(value)
-                        if !value.is_empty()
-                            && value.len() <= 8192
-                            && !value.chars().any(char::is_control) =>
-                    {
-                        ResolvedSecret::from_bytes(value.into_bytes())
-                            .map_err(|_| DeviceProviderError)?
-                    }
-                    None => match self.resolve(&mutation.config.provider_id) {
-                        Ok((_, secret)) => secret,
-                        Err(_) => return Ok(DeviceProviderOutcome::InvalidRequest),
-                    },
-                    _ => return Ok(DeviceProviderOutcome::InvalidRequest),
-                };
-                let count: i64 = self.connection.query_row(
-                    "SELECT count(*) FROM providers WHERE provider_id != ?1",
-                    [&mutation.config.provider_id],
-                    |row| row.get(0),
-                )?;
-                if count >= 100 {
-                    return Ok(DeviceProviderOutcome::InvalidRequest);
-                }
-                self.connection.execute("INSERT INTO providers VALUES (?1, ?2, ?3) ON CONFLICT(provider_id) DO UPDATE SET config=excluded.config, secret=excluded.secret",
-                    params![mutation.config.provider_id, serde_json::to_string(&mutation.config)?, secret.expose()])?;
-                if let Some(headers) = &mutation.custom_headers {
-                    self.connection.execute(
-                        "INSERT INTO provider_headers VALUES (?1, ?2) ON CONFLICT(provider_id) DO UPDATE SET headers=excluded.headers",
-                        params![mutation.config.provider_id, serde_json::to_string(headers)?],
-                    )?;
-                }
-                self.connection.execute(
-                    "UPDATE identity SET revision=revision+1 WHERE singleton=1",
-                    [],
-                )?;
-                Ok(DeviceProviderOutcome::Saved)
-            }
+            "save" => self.save_provider(mutation),
             "test" => Ok(DeviceProviderOutcome::Interrupted),
+            "authorize" if mutation.config.protocol == DeviceProviderProtocol::ChatgptPlan => {
+                Ok(DeviceProviderOutcome::Interrupted)
+            }
             "delete" => {
                 self.connection.execute(
                     "DELETE FROM provider_headers WHERE provider_id=?1",
@@ -394,6 +373,122 @@ impl DeviceProviderStore {
         }
     }
 
+    fn save_provider(
+        &self,
+        mut mutation: Mutation,
+    ) -> Result<DeviceProviderOutcome, DeviceProviderError> {
+        let secret = if mutation.config.protocol == DeviceProviderProtocol::CodexChatgpt {
+            let Ok(binding) = self.codex_binding(&mutation.config.provider_id) else {
+                return Ok(DeviceProviderOutcome::InvalidRequest);
+            };
+            if binding.resolve().is_err() {
+                return Ok(DeviceProviderOutcome::ProviderUnavailable);
+            }
+            ResolvedSecret::from_bytes(serde_json::to_vec(&binding)?)
+                .map_err(|_| DeviceProviderError)?
+        } else if mutation.config.protocol == DeviceProviderProtocol::ChatgptPlan {
+            let Ok(record) = self.chatgpt_credentials(&mutation.config.provider_id) else {
+                return Ok(DeviceProviderOutcome::InvalidRequest);
+            };
+            ResolvedSecret::from_bytes(serde_json::to_vec(&record)?)
+                .map_err(|_| DeviceProviderError)?
+        } else {
+            match mutation.api_key.take() {
+                Some(value)
+                    if !value.is_empty()
+                        && value.len() <= 8192
+                        && !value.chars().any(char::is_control) =>
+                {
+                    ResolvedSecret::from_bytes(value.into_bytes())
+                        .map_err(|_| DeviceProviderError)?
+                }
+                None => match self.resolve(&mutation.config.provider_id) {
+                    Ok((config, secret)) if config.protocol == mutation.config.protocol => secret,
+                    _ => return Ok(DeviceProviderOutcome::InvalidRequest),
+                },
+                _ => return Ok(DeviceProviderOutcome::InvalidRequest),
+            }
+        };
+        let count: i64 = self.connection.query_row(
+            "SELECT count(*) FROM providers WHERE provider_id != ?1",
+            [&mutation.config.provider_id],
+            |row| row.get(0),
+        )?;
+        if count >= 100 {
+            return Ok(DeviceProviderOutcome::InvalidRequest);
+        }
+        self.connection.execute("INSERT INTO providers VALUES (?1, ?2, ?3) ON CONFLICT(provider_id) DO UPDATE SET config=excluded.config, secret=excluded.secret",
+            params![mutation.config.provider_id, serde_json::to_string(&mutation.config)?, secret.expose()])?;
+        if matches!(
+            mutation.config.protocol,
+            DeviceProviderProtocol::CodexChatgpt | DeviceProviderProtocol::ChatgptPlan
+        ) {
+            self.connection.execute(
+                "DELETE FROM provider_headers WHERE provider_id=?1",
+                [&mutation.config.provider_id],
+            )?;
+        }
+        if let Some(headers) = &mutation.custom_headers {
+            self.connection.execute(
+                "INSERT INTO provider_headers VALUES (?1, ?2) ON CONFLICT(provider_id) DO UPDATE SET headers=excluded.headers",
+                params![mutation.config.provider_id, serde_json::to_string(headers)?],
+            )?;
+        }
+        self.connection.execute(
+            "UPDATE identity SET revision=revision+1 WHERE singleton=1",
+            [],
+        )?;
+        Ok(DeviceProviderOutcome::Saved)
+    }
+
+    fn test_credentials(
+        &self,
+        mutation: &mut Mutation,
+    ) -> Result<(ResolvedSecret, Option<String>), DeviceProviderError> {
+        let (secret, codex_account) =
+            if mutation.config.protocol == DeviceProviderProtocol::CodexChatgpt {
+                if mutation.api_key.is_some() {
+                    return Err(DeviceProviderError);
+                }
+                let (secret, account) = self
+                    .codex_binding(&mutation.config.provider_id)?
+                    .resolve()?;
+                (secret, Some(account))
+            } else if mutation.config.protocol == DeviceProviderProtocol::ChatgptPlan {
+                if mutation.api_key.is_some() {
+                    return Err(DeviceProviderError);
+                }
+                let (config, secret, _) = self.resolve_connection(&mutation.config.provider_id)?;
+                if config.protocol != DeviceProviderProtocol::ChatgptPlan {
+                    return Err(DeviceProviderError);
+                }
+                (secret, None)
+            } else {
+                (
+                    match mutation.api_key.take() {
+                        Some(key)
+                            if !key.is_empty()
+                                && key.len() <= 8192
+                                && !key.chars().any(char::is_control) =>
+                        {
+                            ResolvedSecret::from_bytes(key.into_bytes())
+                                .map_err(|_| DeviceProviderError)?
+                        }
+                        None => {
+                            let (config, secret) = self.resolve(&mutation.config.provider_id)?;
+                            if config.protocol != mutation.config.protocol {
+                                return Err(DeviceProviderError);
+                            }
+                            secret
+                        }
+                        _ => return Err(DeviceProviderError),
+                    },
+                    None,
+                )
+            };
+        Ok((secret, codex_account))
+    }
+
     fn test_provider(
         &self,
         mut mutation: Mutation,
@@ -405,15 +500,10 @@ impl DeviceProviderStore {
         };
         use winwincode_api::generated::ModelRoute;
         use winwincode_domain::{CredentialReferenceId, ModelExchangeId, RequestId};
-        let secret = match mutation.api_key.take() {
-            Some(key)
-                if !key.is_empty() && key.len() <= 8192 && !key.chars().any(char::is_control) =>
-            {
-                ResolvedSecret::from_bytes(key.into_bytes()).map_err(|_| DeviceProviderError)?
-            }
-            None => self.resolve(&mutation.config.provider_id)?.1,
-            _ => return Err(DeviceProviderError),
-        };
+        if !valid_device_provider_config(&mutation.config) {
+            return Err(DeviceProviderError);
+        }
+        let (secret, codex_account) = self.test_credentials(&mut mutation)?;
         let model = mutation
             .config
             .model_ids
@@ -438,7 +528,7 @@ impl DeviceProviderStore {
             crate::DeviceModelAdmission::Ready(permit) => permit,
             crate::DeviceModelAdmission::Deferred => return Err(DeviceProviderError),
         };
-        let adapter = adapter(&mutation.config, headers)?;
+        let adapter = adapter(&mutation.config, headers, codex_account)?;
         let mut leak_gate = CredentialLeakGate::new();
         leak_gate.track_secret(&secret);
         adapter
@@ -502,17 +592,204 @@ impl DeviceProviderStore {
         &self,
         provider_id: &str,
     ) -> Result<(DeviceProviderConfig, ResolvedSecret), DeviceProviderError> {
+        let (config, secret, _) = self.resolve_connection(provider_id)?;
+        Ok((config, secret))
+    }
+
+    pub(crate) fn resolve_connection(
+        &self,
+        provider_id: &str,
+    ) -> Result<(DeviceProviderConfig, ResolvedSecret, Option<String>), DeviceProviderError> {
         let (config, secret): (String, Vec<u8>) = self.connection.query_row(
             "SELECT config, secret FROM providers WHERE provider_id=?1",
             [provider_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
-        let secret = ResolvedSecret::from_bytes(secret).map_err(|_| DeviceProviderError)?;
-        let config = serde_json::from_str(&config)?;
+        let mut secret = secret;
+        let config: DeviceProviderConfig = serde_json::from_str(&config)?;
         if !valid_device_provider_config(&config) {
             return Err(DeviceProviderError);
         }
-        Ok((config, secret))
+        if config.protocol == DeviceProviderProtocol::CodexChatgpt {
+            let binding = serde_json::from_slice::<crate::codex_login::CodexLoginBinding>(&secret);
+            secret.fill(0);
+            let (secret, account) = binding?.resolve()?;
+            Ok((config, secret, Some(account)))
+        } else if config.protocol == DeviceProviderProtocol::ChatgptPlan {
+            secret.fill(0);
+            // Serialize rotating refresh tokens across daemon and Worker processes.
+            self.connection.execute_batch("BEGIN IMMEDIATE")?;
+            let result = (|| {
+                let mut record = self.chatgpt_credentials(provider_id)?;
+                if record.needs_refresh()? {
+                    record.refresh()?;
+                    let mut bytes = serde_json::to_vec(&record)?;
+                    let saved = self.connection.execute(
+                        "UPDATE providers SET secret=?1 WHERE provider_id=?2",
+                        params![bytes, provider_id],
+                    );
+                    bytes.fill(0);
+                    saved?;
+                }
+                record.secret()
+            })();
+            match result {
+                Ok(secret) => {
+                    self.connection.execute_batch("COMMIT")?;
+                    Ok((config, secret, None))
+                }
+                Err(error) => {
+                    let _ = self.connection.execute_batch("ROLLBACK");
+                    Err(error)
+                }
+            }
+        } else {
+            let secret = ResolvedSecret::from_bytes(secret).map_err(|_| DeviceProviderError)?;
+            Ok((config, secret, None))
+        }
+    }
+
+    fn codex_binding(
+        &self,
+        provider_id: &str,
+    ) -> Result<crate::codex_login::CodexLoginBinding, DeviceProviderError> {
+        let previous: Option<(String, Vec<u8>)> = self
+            .connection
+            .query_row(
+                "SELECT config, secret FROM providers WHERE provider_id=?1",
+                [provider_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if let Some((config, mut secret)) = previous {
+            let config: DeviceProviderConfig = serde_json::from_str(&config)?;
+            if config.protocol == DeviceProviderProtocol::CodexChatgpt {
+                let binding = serde_json::from_slice(&secret);
+                secret.fill(0);
+                return Ok(binding?);
+            }
+            secret.fill(0);
+        }
+        crate::codex_login::CodexLoginBinding::current()
+    }
+
+    fn chatgpt_credentials(
+        &self,
+        provider_id: &str,
+    ) -> Result<crate::chatgpt_oauth::Credentials, DeviceProviderError> {
+        let (config, mut bytes): (String, Vec<u8>) = self.connection.query_row(
+            "SELECT config, secret FROM providers WHERE provider_id=?1",
+            [provider_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let config: DeviceProviderConfig = serde_json::from_str(&config)?;
+        let result = if config.protocol == DeviceProviderProtocol::ChatgptPlan {
+            serde_json::from_slice(&bytes).map_err(|_| DeviceProviderError)
+        } else {
+            Err(DeviceProviderError)
+        };
+        bytes.fill(0);
+        result
+    }
+
+    fn authorize_provider(
+        &self,
+        mutation: Mutation,
+        receipt: &mut DeviceProviderReceipt,
+    ) -> Result<(), DeviceProviderError> {
+        let previous = self
+            .connection
+            .query_row(
+                "SELECT config FROM providers WHERE provider_id=?1",
+                [&mutation.config.provider_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let previous = match previous {
+            Some(config)
+                if serde_json::from_str::<DeviceProviderConfig>(&config)?.protocol
+                    == DeviceProviderProtocol::ChatgptPlan =>
+            {
+                Some(self.chatgpt_credentials(&mutation.config.provider_id)?)
+            }
+            _ => None,
+        };
+        let public = self.key.public_key().to_encoded_point(false);
+        let thumbprint = serde_json::json!({"crv":"P-256", "kty":"EC", "x":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(public.x().ok_or(DeviceProviderError)?), "y":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(public.y().ok_or(DeviceProviderError)?)});
+        let host = format!(
+            "urn:ietf:params:oauth:jwk-thumbprint:sha-256:{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(Sha256::digest(serde_json::to_vec(&thumbprint)?))
+        );
+        let result = crate::chatgpt_oauth::authorize(&host, previous.as_ref()).and_then(|record| {
+            crate::chatgpt_oauth::models(&record).map(|models| (record, models))
+        });
+        self.finish_authorization(mutation, receipt, result)
+    }
+
+    fn finish_authorization(
+        &self,
+        mut mutation: Mutation,
+        receipt: &mut DeviceProviderReceipt,
+        result: Result<(crate::chatgpt_oauth::Credentials, Vec<String>), DeviceProviderError>,
+    ) -> Result<(), DeviceProviderError> {
+        self.connection.execute_batch("BEGIN IMMEDIATE")?;
+        let saved = (|| {
+            if self.revision()? != receipt.revision {
+                receipt.outcome = DeviceProviderOutcome::RevisionConflict;
+            } else if let Ok((record, models)) = result {
+                if models.is_empty() {
+                    return Err(DeviceProviderError);
+                }
+                let count: i64 = self.connection.query_row(
+                    "SELECT count(*) FROM providers WHERE provider_id != ?1",
+                    [&mutation.config.provider_id],
+                    |row| row.get(0),
+                )?;
+                if count >= 100 {
+                    receipt.outcome = DeviceProviderOutcome::InvalidRequest;
+                } else {
+                    mutation
+                        .config
+                        .model_ids
+                        .retain(|model| models.contains(model));
+                    if mutation.config.model_ids.is_empty() {
+                        mutation.config.model_ids.push(models[0].clone());
+                    }
+                    let mut bytes = serde_json::to_vec(&record)?;
+                    let save = self.connection.execute("INSERT INTO providers VALUES (?1,?2,?3) ON CONFLICT(provider_id) DO UPDATE SET config=excluded.config, secret=excluded.secret", params![mutation.config.provider_id, serde_json::to_string(&mutation.config)?, bytes]);
+                    bytes.fill(0);
+                    save?;
+                    self.connection.execute(
+                        "DELETE FROM provider_headers WHERE provider_id=?1",
+                        [&mutation.config.provider_id],
+                    )?;
+                    self.connection.execute(
+                        "UPDATE identity SET revision=revision+1 WHERE singleton=1",
+                        [],
+                    )?;
+                    receipt.outcome = DeviceProviderOutcome::Saved;
+                }
+            } else {
+                receipt.outcome = DeviceProviderOutcome::ProviderUnavailable;
+            }
+            receipt.revision = self.revision()?;
+            self.connection.execute(
+                "UPDATE receipts SET receipt=?1 WHERE request_id=?2",
+                params![serde_json::to_string(receipt)?, receipt.request_id],
+            )?;
+            Ok(())
+        })();
+        match saved {
+            Ok(()) => {
+                self.connection.execute_batch("COMMIT")?;
+                Ok(())
+            }
+            Err(error) => {
+                let _ = self.connection.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
     }
 }
 
@@ -551,11 +828,16 @@ pub fn valid_device_provider_config(config: &DeviceProviderConfig) -> bool {
             == config.model_ids.len()
         && config.endpoint.len() <= 2048
         && crate::canonical_https_endpoint(&config.endpoint)
+        && (config.protocol != DeviceProviderProtocol::CodexChatgpt
+            || config.endpoint == crate::codex_login::CODEX_ENDPOINT)
+        && (config.protocol != DeviceProviderProtocol::ChatgptPlan
+            || config.endpoint == crate::chatgpt_oauth::ENDPOINT)
 }
 
 pub(crate) fn adapter(
     config: &DeviceProviderConfig,
     headers: BTreeMap<String, String>,
+    codex_account: Option<String>,
 ) -> Result<HttpsSseProviderAdapter, DeviceProviderError> {
     // Reasoning tokens count toward this per-response limit. The previous
     // 8,192-token value truncated real Fusion review responses mid-turn.
@@ -596,6 +878,10 @@ pub(crate) fn adapter(
         }
         DeviceProviderProtocol::OpenaiChatCompletions => transport
             .with_openai_chat_completions(MAX_OUTPUT_TOKENS, ProviderTokenPricing::default()),
+        DeviceProviderProtocol::CodexChatgpt => {
+            transport.with_codex_chatgpt(codex_account.ok_or(DeviceProviderError)?)
+        }
+        DeviceProviderProtocol::ChatgptPlan => transport.with_chatgpt_plan(),
         DeviceProviderProtocol::Canonical => Ok(transport),
     }
     .map_err(|_| DeviceProviderError)?;
@@ -695,4 +981,370 @@ fn migrate_device_store(
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod codex_tests {
+    use super::*;
+    fn config() -> DeviceProviderConfig {
+        DeviceProviderConfig {
+            provider_id: "codex-chatgpt".into(),
+            display_name: "Codex ChatGPT".into(),
+            endpoint: crate::codex_login::CODEX_ENDPOINT.into(),
+            protocol: DeviceProviderProtocol::CodexChatgpt,
+            model_ids: vec![
+                std::env::var("WWC_CODEX_TEST_MODEL").unwrap_or_else(|_| "gpt-6.1-sol".into()),
+            ],
+            enabled: true,
+        }
+    }
+    #[test]
+    fn codex_endpoint_cannot_be_redirected() {
+        let mut config = config();
+        assert!(valid_device_provider_config(&config));
+        config.endpoint = "https://example.com/responses".into();
+        assert!(!valid_device_provider_config(&config));
+    }
+    #[test]
+    fn saved_binding_keeps_tokens_out_of_database_and_refuses_credential_reuse() {
+        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+        let directory =
+            std::env::temp_dir().join(format!("wwc-codex-binding-{}", std::process::id()));
+        let home = directory.join("codex-home");
+        fs::create_dir_all(&home).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        let claims = serde_json::json!({"exp":u64::MAX,"https://api.openai.com/auth":{"chatgpt_account_id":"account-one"}});
+        let token = format!(
+            "e30.{}.test",
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap())
+        );
+        let auth = serde_json::json!({"auth_mode":"chatgpt","tokens":{"account_id":"account-one","access_token":token,"refresh_token":"refresh-must-stay-in-codex"}});
+        fs::write(home.join("auth.json"), serde_json::to_vec(&auth).unwrap()).unwrap();
+        fs::set_permissions(home.join("auth.json"), fs::Permissions::from_mode(0o600)).unwrap();
+        let store = DeviceProviderStore::open(&directory).unwrap();
+        let binding = serde_json::json!({"codexHome":fs::canonicalize(&home).unwrap(),"accountId":"account-one"});
+        store
+            .connection
+            .execute(
+                "INSERT INTO providers VALUES (?1,?2,?3)",
+                params![
+                    config().provider_id,
+                    serde_json::to_string(&config()).unwrap(),
+                    serde_json::to_vec(&binding).unwrap()
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .mutate(Mutation {
+                    operation: "save".into(),
+                    config: config(),
+                    api_key: None,
+                    custom_headers: None,
+                })
+                .unwrap(),
+            DeviceProviderOutcome::Saved
+        );
+        assert_eq!(
+            store.resolve("codex-chatgpt").unwrap().1.expose(),
+            token.as_bytes()
+        );
+        let snapshot = serde_json::to_string(&store.snapshot("device").unwrap()).unwrap();
+        assert!(!snapshot.contains("account-one"));
+        assert!(!snapshot.contains("codexHome"));
+        assert!(!snapshot.contains(&token));
+        let stored: Vec<u8> = store
+            .connection
+            .query_row("SELECT secret FROM providers", [], |row| row.get(0))
+            .unwrap();
+        assert!(!String::from_utf8(stored).unwrap().contains(&token));
+        assert_eq!(
+            store
+                .mutate(Mutation {
+                    operation: "save".into(),
+                    config: config(),
+                    api_key: Some("should-be-rejected".into()),
+                    custom_headers: None,
+                })
+                .unwrap(),
+            DeviceProviderOutcome::InvalidRequest
+        );
+        let mut other = config();
+        other.protocol = DeviceProviderProtocol::Canonical;
+        other.endpoint = "https://example.com/responses".into();
+        assert_eq!(
+            store
+                .mutate(Mutation {
+                    operation: "save".into(),
+                    config: other,
+                    api_key: None,
+                    custom_headers: None,
+                })
+                .unwrap(),
+            DeviceProviderOutcome::InvalidRequest
+        );
+        drop(store);
+        let store = DeviceProviderStore::open(&directory).unwrap();
+        assert!(store.resolve("codex-chatgpt").is_ok());
+        fs::remove_file(home.join("auth.json")).unwrap();
+        assert!(store.resolve("codex-chatgpt").is_err());
+        drop(store);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    #[ignore = "calls the real ChatGPT subscription using the device's current Codex login"]
+    fn current_codex_login_live_probe() {
+        let directory = std::env::temp_dir().join(format!("wwc-codex-live-{}", std::process::id()));
+        let store = DeviceProviderStore::open(&directory).unwrap();
+        assert_eq!(
+            store
+                .mutate(Mutation {
+                    operation: "save".into(),
+                    config: config(),
+                    api_key: None,
+                    custom_headers: None,
+                })
+                .unwrap(),
+            DeviceProviderOutcome::Saved
+        );
+        let binding: Vec<u8> = store
+            .connection
+            .query_row("SELECT secret FROM providers", [], |row| row.get(0))
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&binding).unwrap();
+        assert!(json.get("codexHome").is_some());
+        assert!(json.get("accessToken").is_none());
+        let result = store.test_provider(
+            Mutation {
+                operation: "test".into(),
+                config: config(),
+                api_key: None,
+                custom_headers: None,
+            },
+            "codex-live-probe",
+        );
+        drop(store);
+        fs::remove_dir_all(directory).unwrap();
+        result.expect("current Codex login must complete one native Provider probe");
+    }
+
+    #[test]
+    fn chatgpt_credentials_survive_restart_and_stay_out_of_public_snapshots() {
+        let directory =
+            std::env::temp_dir().join(format!("wwc-chatgpt-record-{}", std::process::id()));
+        let mut config = config();
+        config.protocol = DeviceProviderProtocol::ChatgptPlan;
+        config.endpoint = crate::chatgpt_oauth::ENDPOINT.into();
+        assert!(valid_device_provider_config(&config));
+        let store = DeviceProviderStore::open(&directory).unwrap();
+        let record = serde_json::json!({"client_id":"oaiapp_record", "subject":"private-subject", "access_token":"private-access",
+            "refresh_token":"private-refresh", "id_token":"private-id", "scope":"resource.invoke chatgpt.tokens.use.direct", "expires_at":u64::MAX});
+        store
+            .connection
+            .execute(
+                "INSERT INTO providers VALUES (?1,?2,?3)",
+                params![
+                    config.provider_id,
+                    serde_json::to_string(&config).unwrap(),
+                    serde_json::to_vec(&record).unwrap()
+                ],
+            )
+            .unwrap();
+        let snapshot = serde_json::to_string(&store.snapshot("device").unwrap()).unwrap();
+        for private in [
+            "private-subject",
+            "private-access",
+            "private-refresh",
+            "private-id",
+            "oaiapp_record",
+        ] {
+            assert!(!snapshot.contains(private));
+        }
+        assert_eq!(
+            store.resolve(&config.provider_id).unwrap().1.expose(),
+            b"private-access"
+        );
+        assert_eq!(
+            store
+                .mutate(Mutation {
+                    operation: "save".into(),
+                    config: config.clone(),
+                    api_key: None,
+                    custom_headers: None,
+                })
+                .unwrap(),
+            DeviceProviderOutcome::Saved
+        );
+        assert_eq!(
+            store
+                .mutate(Mutation {
+                    operation: "authorize".into(),
+                    config: config.clone(),
+                    api_key: Some("api-key".into()),
+                    custom_headers: None,
+                })
+                .unwrap(),
+            DeviceProviderOutcome::InvalidRequest
+        );
+        let mut custom = config.clone();
+        custom.endpoint = "https://other.example/responses".into();
+        assert!(!valid_device_provider_config(&custom));
+        custom.protocol = DeviceProviderProtocol::Canonical;
+        assert_eq!(
+            store
+                .mutate(Mutation {
+                    operation: "save".into(),
+                    config: custom,
+                    api_key: None,
+                    custom_headers: None,
+                })
+                .unwrap(),
+            DeviceProviderOutcome::InvalidRequest
+        );
+        assert_failed_authorization_preserves_credentials(&store, &config);
+        drop(store);
+        let store = DeviceProviderStore::open(&directory).unwrap();
+        assert_eq!(
+            store.resolve(&config.provider_id).unwrap().1.expose(),
+            b"private-access"
+        );
+        drop(store);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    fn assert_failed_authorization_preserves_credentials(
+        store: &DeviceProviderStore,
+        config: &DeviceProviderConfig,
+    ) {
+        let mut receipt = DeviceProviderReceipt {
+            request_id: "failed-authorization".into(),
+            outcome: DeviceProviderOutcome::Interrupted,
+            revision: store.revision().unwrap(),
+        };
+        store
+            .connection
+            .execute(
+                "INSERT INTO receipts VALUES (?1,?2,?3)",
+                params![
+                    receipt.request_id,
+                    "test-digest",
+                    serde_json::to_string(&receipt).unwrap()
+                ],
+            )
+            .unwrap();
+        store
+            .finish_authorization(
+                Mutation {
+                    operation: "authorize".into(),
+                    config: config.clone(),
+                    api_key: None,
+                    custom_headers: None,
+                },
+                &mut receipt,
+                Err(DeviceProviderError),
+            )
+            .unwrap();
+        assert_eq!(receipt.outcome, DeviceProviderOutcome::ProviderUnavailable);
+        assert_eq!(
+            store.resolve(&config.provider_id).unwrap().1.expose(),
+            b"private-access"
+        );
+        receipt.revision -= 1;
+        store
+            .finish_authorization(
+                Mutation {
+                    operation: "authorize".into(),
+                    config: config.clone(),
+                    api_key: None,
+                    custom_headers: None,
+                },
+                &mut receipt,
+                Err(DeviceProviderError),
+            )
+            .unwrap();
+        assert_eq!(receipt.outcome, DeviceProviderOutcome::RevisionConflict);
+        assert_eq!(
+            store.resolve(&config.provider_id).unwrap().1.expose(),
+            b"private-access"
+        );
+    }
+
+    #[test]
+    #[ignore = "opens a system browser for human consent and saves credentials in WWC_CHATGPT_LOGIN_DEVICE_DIR"]
+    fn direct_chatgpt_authorization_live_probe() {
+        let directory = std::env::var_os("WWC_CHATGPT_LOGIN_DEVICE_DIR")
+            .expect("explicit private Device Provider directory is required");
+        let store = DeviceProviderStore::open(Path::new(&directory)).unwrap();
+        let mut config = config();
+        config.provider_id = "chatgpt-personal".into();
+        config.display_name = "ChatGPT".into();
+        config.protocol = DeviceProviderProtocol::ChatgptPlan;
+        config.endpoint = crate::chatgpt_oauth::ENDPOINT.into();
+        let mut receipt = DeviceProviderReceipt {
+            request_id: format!("chatgpt-login-{}", std::process::id()),
+            outcome: DeviceProviderOutcome::Interrupted,
+            revision: store.revision().unwrap(),
+        };
+        store
+            .connection
+            .execute(
+                "INSERT INTO receipts VALUES (?1,?2,?3)",
+                params![
+                    receipt.request_id,
+                    "manual-live-probe",
+                    serde_json::to_string(&receipt).unwrap()
+                ],
+            )
+            .unwrap();
+        store
+            .authorize_provider(
+                Mutation {
+                    operation: "authorize".into(),
+                    config: config.clone(),
+                    api_key: None,
+                    custom_headers: None,
+                },
+                &mut receipt,
+            )
+            .unwrap();
+        assert_eq!(
+            receipt.outcome,
+            DeviceProviderOutcome::Saved,
+            "browser authorization must finish successfully"
+        );
+        let (saved, _) = store.resolve(&config.provider_id).unwrap();
+        store
+            .test_provider(
+                Mutation {
+                    operation: "test".into(),
+                    config: saved,
+                    api_key: None,
+                    custom_headers: None,
+                },
+                "chatgpt-login-inference-probe",
+            )
+            .expect("authorized account must complete a native Provider inference");
+    }
+
+    #[test]
+    #[ignore = "calls a real model using the authorized WWC_CHATGPT_LOGIN_DEVICE_DIR account"]
+    fn saved_chatgpt_connection_live_probe() {
+        let directory = std::env::var_os("WWC_CHATGPT_LOGIN_DEVICE_DIR")
+            .expect("explicit private Device Provider directory is required");
+        let store = DeviceProviderStore::open(Path::new(&directory)).unwrap();
+        let (config, _) = store.resolve("chatgpt-personal").unwrap();
+        assert_eq!(config.protocol, DeviceProviderProtocol::ChatgptPlan);
+        store
+            .test_provider(
+                Mutation {
+                    operation: "test".into(),
+                    config,
+                    api_key: None,
+                    custom_headers: None,
+                },
+                "chatgpt-saved-connection-probe",
+            )
+            .expect("saved authorization must complete one native Provider inference");
+    }
 }

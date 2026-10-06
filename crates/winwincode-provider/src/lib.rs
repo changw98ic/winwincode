@@ -3,10 +3,13 @@
 //! Provider IO and stream conversion for the device execution runtime.
 //! This crate does not depend on the Server or Control Plane.
 
+mod chatgpt_oauth;
+mod codex_login;
 pub mod credential_leak_gate;
 mod jev;
 mod jev_context;
 mod provider_anthropic;
+mod provider_codex;
 pub mod provider_https_sse;
 mod provider_openai;
 mod provider_sse_framing;

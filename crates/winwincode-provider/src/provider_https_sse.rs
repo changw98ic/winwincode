@@ -97,6 +97,7 @@ pub struct HttpsSseProviderConfig {
     tls_roots: ProviderTlsRoots,
     protocol: HttpsSseProviderProtocol,
     custom_headers: Vec<(String, String)>,
+    codex_account_id: Option<String>,
     http_connect_proxy: Option<ureq::Proxy>,
 }
 
@@ -126,6 +127,8 @@ impl fmt::Debug for HttpsSseProviderConfig {
 #[derive(Clone, Copy, Debug)]
 enum HttpsSseProviderProtocol {
     Canonical,
+    CodexChatgpt,
+    ChatgptPlan,
     AnthropicMessages(AnthropicMessagesOptions),
     OpenAiChatCompletions(AnthropicMessagesOptions),
 }
@@ -183,6 +186,7 @@ impl HttpsSseProviderConfig {
             tls_roots: ProviderTlsRoots::WebPki,
             protocol: HttpsSseProviderProtocol::Canonical,
             custom_headers: Vec::new(),
+            codex_account_id: None,
             http_connect_proxy: None,
         };
         config.validate()?;
@@ -314,6 +318,38 @@ impl HttpsSseProviderConfig {
         self
     }
 
+    /// Selects the fixed `ChatGPT` Codex endpoint with an account-bound OAuth token.
+    ///
+    /// # Errors
+    /// Rejects custom endpoints and invalid account header values.
+    pub fn with_codex_chatgpt(mut self, account_id: String) -> Result<Self, HttpsSseProviderError> {
+        if self.endpoint != crate::codex_login::CODEX_ENDPOINT || !valid_token(&account_id, 200) {
+            return Err(HttpsSseProviderError::new(
+                HttpsSseProviderErrorKind::InvalidConfiguration,
+            ));
+        }
+        self.protocol = HttpsSseProviderProtocol::CodexChatgpt;
+        self.codex_account_id = Some(account_id);
+        self.validate()?;
+        Ok(self)
+    }
+
+    /// Selects the official public Responses endpoint for a `WinWinCode` OAuth grant.
+    ///
+    /// # Errors
+    /// Rejects any custom endpoint to keep the account credential on its intended origin.
+    pub fn with_chatgpt_plan(mut self) -> Result<Self, HttpsSseProviderError> {
+        if self.endpoint != crate::chatgpt_oauth::ENDPOINT {
+            return Err(HttpsSseProviderError::new(
+                HttpsSseProviderErrorKind::InvalidConfiguration,
+            ));
+        }
+        self.protocol = HttpsSseProviderProtocol::ChatgptPlan;
+        self.codex_account_id = None;
+        self.validate()?;
+        Ok(self)
+    }
+
     fn validate(&self) -> Result<(), HttpsSseProviderError> {
         if !valid_token(&self.provider_id, MAX_PROVIDER_ID_BYTES)
             || self.endpoint.len() > MAX_ENDPOINT_BYTES
@@ -334,12 +370,23 @@ impl HttpsSseProviderConfig {
             ));
         }
         validate_custom_headers(&self.custom_headers)?;
+        if matches!(
+            self.protocol,
+            HttpsSseProviderProtocol::CodexChatgpt | HttpsSseProviderProtocol::ChatgptPlan
+        ) && !self.custom_headers.is_empty()
+        {
+            return Err(HttpsSseProviderError::new(
+                HttpsSseProviderErrorKind::InvalidConfiguration,
+            ));
+        }
         match self.protocol {
             HttpsSseProviderProtocol::AnthropicMessages(options)
             | HttpsSseProviderProtocol::OpenAiChatCompletions(options) => {
                 options.validate().map_err(map_anthropic_configuration)?;
             }
-            HttpsSseProviderProtocol::Canonical => {}
+            HttpsSseProviderProtocol::Canonical
+            | HttpsSseProviderProtocol::CodexChatgpt
+            | HttpsSseProviderProtocol::ChatgptPlan => {}
         }
         Ok(())
     }
@@ -393,7 +440,7 @@ impl fmt::Debug for HttpsSseProviderError {
 }
 
 impl HttpsSseProviderError {
-    fn new(kind: HttpsSseProviderErrorKind) -> Self {
+    pub(crate) fn new(kind: HttpsSseProviderErrorKind) -> Self {
         Self {
             kind,
             metadata: Box::default(),
@@ -720,7 +767,21 @@ impl HttpsSseProviderAdapter {
         tool_bindings: &AnthropicToolBindings,
         bytes: &[u8],
     ) -> Result<HttpsSseProviderCompletion, HttpsSseProviderError> {
+        if matches!(
+            self.shared.config.protocol,
+            HttpsSseProviderProtocol::CodexChatgpt | HttpsSseProviderProtocol::ChatgptPlan
+        ) {
+            return crate::provider_codex::parse_response(
+                bytes,
+                receipt,
+                self.shared.config.max_event_bytes,
+                self.shared.config.max_events,
+            );
+        }
         let (events, terminal) = match self.shared.config.protocol {
+            HttpsSseProviderProtocol::CodexChatgpt | HttpsSseProviderProtocol::ChatgptPlan => {
+                unreachable!("Responses protocols return above")
+            }
             HttpsSseProviderProtocol::Canonical => {
                 let parsed = parse_sse(
                     bytes,
@@ -796,7 +857,9 @@ impl HttpsSseProviderAdapter {
                     self.shared.config.max_events,
                 )
             }
-            HttpsSseProviderProtocol::Canonical => None,
+            HttpsSseProviderProtocol::Canonical
+            | HttpsSseProviderProtocol::CodexChatgpt
+            | HttpsSseProviderProtocol::ChatgptPlan => None,
         };
         observed.filter(|(id, _)| {
             receipt
@@ -1080,7 +1143,9 @@ impl HttpsSseProviderAdapter {
         invocation: HttpInvocation<'_>,
     ) -> Result<Option<PreparedAnthropicRequest>, ProviderAdapterError> {
         Ok(match self.shared.config.protocol {
-            HttpsSseProviderProtocol::Canonical => None,
+            HttpsSseProviderProtocol::Canonical
+            | HttpsSseProviderProtocol::CodexChatgpt
+            | HttpsSseProviderProtocol::ChatgptPlan => None,
             HttpsSseProviderProtocol::AnthropicMessages(options) => Some(
                 prepare_anthropic_request(invocation.payload, invocation.model_id, options)
                     .map_err(map_anthropic_request)?,
@@ -1094,6 +1159,68 @@ impl HttpsSseProviderAdapter {
                 .map_err(map_anthropic_request)?,
             ),
         })
+    }
+
+    fn prepare_responses_payload(
+        &self,
+        invocation: HttpInvocation<'_>,
+    ) -> Result<Option<Vec<u8>>, ProviderAdapterError> {
+        let payload = match self.shared.config.protocol {
+            HttpsSseProviderProtocol::CodexChatgpt => {
+                crate::provider_codex::prepare_request(invocation.payload, invocation.model_id)
+            }
+            HttpsSseProviderProtocol::ChatgptPlan => {
+                crate::provider_codex::prepare_plan_request(invocation.payload, invocation.model_id)
+            }
+            _ => return Ok(None),
+        };
+        payload
+            .map(Some)
+            .map_err(|_| ProviderAdapterError::request_translation())
+    }
+
+    fn validate_http_response(
+        &self,
+        invocation: HttpInvocation<'_>,
+        response: &ureq::http::Response<ureq::Body>,
+        credential: &[u8],
+    ) -> Result<ProviderFailureMetadata, ProviderAdapterError> {
+        let status = response.status().as_u16();
+        let metadata = response_metadata(
+            response.headers(),
+            status,
+            credential,
+            &self.shared.config.custom_headers,
+        );
+        if status == 429 {
+            self.abandon_retryable_open(invocation)?;
+            return Err(ProviderAdapterError::rate_limited().with_metadata(metadata));
+        }
+        if (500..=599).contains(&status) {
+            self.abandon_retryable_open(invocation)?;
+            return Err(ProviderAdapterError::upstream().with_metadata(metadata));
+        }
+        if !(200..=299).contains(&status) {
+            self.finish_open(invocation, StreamState::Fenced)?;
+            return Err(ProviderAdapterError::rejected().with_metadata(metadata));
+        }
+        let content_type = response.headers().get("content-type");
+        // These fixed official endpoints can omit MIME; the bounded Responses parser
+        // still validates every event before it reaches the embedded Core.
+        let responses_without_mime = content_type.is_none()
+            && matches!(
+                self.shared.config.protocol,
+                HttpsSseProviderProtocol::CodexChatgpt | HttpsSseProviderProtocol::ChatgptPlan
+            );
+        if !responses_without_mime
+            && !content_type
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(canonical_event_stream_content_type)
+        {
+            self.finish_open(invocation, StreamState::Fenced)?;
+            return Err(ProviderAdapterError::response_content_type().with_metadata(metadata));
+        }
+        Ok(metadata)
     }
 
     fn open_https(
@@ -1111,6 +1238,7 @@ impl HttpsSseProviderAdapter {
             .map_or_else(AnthropicToolBindings::default, |request| {
                 request.tool_bindings.clone()
             });
+        let responses_payload = self.prepare_responses_payload(invocation)?;
         self.begin_open(invocation, digest, tool_bindings)?;
         let authorization = authorization_value(credential).inspect_err(|_error| {
             let _ = self.finish_open(invocation, StreamState::Fenced);
@@ -1133,13 +1261,33 @@ impl HttpsSseProviderAdapter {
         for (name, value) in &self.shared.config.custom_headers {
             request = request.header(name.as_str(), value.as_str());
         }
-        let payload = if let Some(prepared) = prepared.as_ref() {
+        if matches!(
+            self.shared.config.protocol,
+            HttpsSseProviderProtocol::CodexChatgpt
+        ) {
+            let account = self
+                .shared
+                .config
+                .codex_account_id
+                .as_deref()
+                .ok_or_else(ProviderAdapterError::rejected)?;
+            request = request
+                .header("ChatGPT-Account-Id", account)
+                .header("OpenAI-Beta", "responses=experimental")
+                .header("originator", "codex_cli_rs");
+        }
+        let payload = if let Some(payload) = responses_payload.as_ref() {
+            request = request.header("Content-Type", "application/json");
+            payload.as_slice()
+        } else if let Some(prepared) = prepared.as_ref() {
             request = request.header("Content-Type", "application/json");
             match self.shared.config.protocol {
                 HttpsSseProviderProtocol::AnthropicMessages(_) => {
                     request = request.header("Anthropic-Version", "2023-06-01");
                 }
                 HttpsSseProviderProtocol::Canonical
+                | HttpsSseProviderProtocol::CodexChatgpt
+                | HttpsSseProviderProtocol::ChatgptPlan
                 | HttpsSseProviderProtocol::OpenAiChatCompletions(_) => {}
             }
             prepared.body.as_slice()
@@ -1156,34 +1304,7 @@ impl HttpsSseProviderAdapter {
                 return Err(classify_open_error(&error));
             }
         };
-        let status = response.status().as_u16();
-        let metadata = response_metadata(
-            response.headers(),
-            status,
-            credential,
-            &self.shared.config.custom_headers,
-        );
-        if status == 429 {
-            self.abandon_retryable_open(invocation)?;
-            return Err(ProviderAdapterError::rate_limited().with_metadata(metadata));
-        }
-        if (500..=599).contains(&status) {
-            self.abandon_retryable_open(invocation)?;
-            return Err(ProviderAdapterError::upstream().with_metadata(metadata));
-        }
-        if !(200..=299).contains(&status) {
-            self.finish_open(invocation, StreamState::Fenced)?;
-            return Err(ProviderAdapterError::rejected().with_metadata(metadata));
-        }
-        if !response
-            .headers()
-            .get("content-type")
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(canonical_event_stream_content_type)
-        {
-            self.finish_open(invocation, StreamState::Fenced)?;
-            return Err(ProviderAdapterError::response_content_type().with_metadata(metadata));
-        }
+        let metadata = self.validate_http_response(invocation, &response, credential)?;
         self.shared
             .streams
             .lock()
@@ -2164,11 +2285,16 @@ mod tests {
         response: &TestResponse,
         chunk_delay: Duration,
     ) {
+        let content_type = if response.content_type.is_empty() {
+            String::new()
+        } else {
+            format!("Content-Type: {}\r\n", response.content_type)
+        };
         if write!(
             stream,
-            "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 {}\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n",
             response.status,
-            response.content_type,
+            content_type,
             response.declared_length.unwrap_or(response.body.len()),
         )
         .is_err()
@@ -3012,6 +3138,121 @@ mod tests {
             result.expect_err("fragment-bearing endpoint").kind(),
             HttpsSseProviderErrorKind::InvalidConfiguration
         );
+    }
+    #[test]
+    fn codex_missing_mime_preserves_account_headers_and_unwraps_request() {
+        use winwincode_api::generated::ModelRoute;
+        use winwincode_domain::CredentialReferenceId;
+        let fixture = TlsFixture::start(vec![TestResponse {
+            status: "200 OK",
+            content_type: "",
+            body: concat!(
+                "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-one\"}}\n\n",
+                "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"message\",\"id\":\"msg-one\",\"role\":\"assistant\",\"content\":[]}}\n\n",
+                "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"id\":\"msg-one\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"OK\"}],\"phase\":\"final_answer\"}}\n\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-one\",\"usage\":{\"input_tokens\":2,\"output_tokens\":1}}}\n\n"
+            ),
+            declared_length: None,
+            delay: Duration::ZERO,
+        }]);
+        let mut settings = config(&fixture);
+        settings.endpoint = crate::codex_login::CODEX_ENDPOINT.into();
+        let mut settings = settings
+            .with_codex_chatgpt("account-fixture".into())
+            .unwrap();
+        // Only this private TLS test substitutes a local endpoint after validating production settings.
+        settings.endpoint = fixture.endpoint.clone();
+        let adapter = HttpsSseProviderAdapter::try_new(settings).unwrap();
+        let exchange = ModelExchangeId("mdl_00000000000000000000000001".into());
+        let request_id = RequestId("req_00000000000000000000000001".into());
+        let mut request = invocation(&exchange, &request_id);
+        request.payload=br#"{"request":{"model":"fixture-model","instructions":"Reply OK","input":[],"stream":true,"store":false}}"#;
+        adapter.open_https(request, SECRET).unwrap();
+        let mut leak_gate = crate::CredentialLeakGate::new();
+        leak_gate.track_secret(&ResolvedSecret::from_bytes(SECRET.to_vec()).unwrap());
+        let adapter_request_id = request.adapter_request_id.to_owned();
+        let receipt = ProviderGatewayOpenReceipt {
+            model_exchange_id: exchange,
+            request_id,
+            route: ModelRoute {
+                provider_id: "provider-https-fixture".into(),
+                model_id: "fixture-model".into(),
+                credential_reference_id: CredentialReferenceId(
+                    "crd_00000000000000000000000001".into(),
+                ),
+            },
+            adapter_request_id,
+            idempotent_replay: false,
+            stream_leak_gate: leak_gate,
+        };
+        assert_eq!(
+            adapter
+                .drain_canonical(&receipt)
+                .unwrap()
+                .terminal
+                .outcome(),
+            crate::ProviderGatewayTerminalOutcome::Succeeded
+        );
+        let requests = fixture.finish();
+        assert!(contains_ascii_case_insensitive(
+            &requests[0],
+            b"ChatGPT-Account-Id: account-fixture"
+        ));
+        assert!(contains_ascii_case_insensitive(
+            &requests[0],
+            b"Authorization: Bearer provider-https-sse-secret-fixture"
+        ));
+        let start = find_bytes(&requests[0], b"\r\n\r\n").unwrap() + 4;
+        let body: serde_json::Value = serde_json::from_slice(&requests[0][start..]).unwrap();
+        assert_eq!(body["model"], "fixture-model");
+        assert!(body.get("request").is_none());
+    }
+
+    #[test]
+    fn chatgpt_plan_uses_the_public_endpoint_protocol_without_codex_headers() {
+        for content_type in ["text/event-stream", "", "application/json"] {
+            let fixture = TlsFixture::start(vec![TestResponse {
+                status: "200 OK",
+                content_type,
+                body: "data: {}\n\n",
+                declared_length: None,
+                delay: Duration::ZERO,
+            }]);
+            assert!(config(&fixture).with_chatgpt_plan().is_err());
+            let mut settings = config(&fixture);
+            settings.endpoint = crate::chatgpt_oauth::ENDPOINT.into();
+            let mut settings = settings.with_chatgpt_plan().unwrap();
+            // Production pins are validated before substituting this private TLS fixture.
+            settings.endpoint = fixture.endpoint.clone();
+            let adapter = HttpsSseProviderAdapter::try_new(settings).unwrap();
+            let exchange = ModelExchangeId("mdl_00000000000000000000000001".into());
+            let request_id = RequestId("req_00000000000000000000000001".into());
+            let mut request = invocation(&exchange, &request_id);
+            request.payload = br#"{"request":{"model":"fixture-model","input":[],"stream":false,"store":true,"max_output_tokens":128}}"#;
+            assert_eq!(
+                adapter.open_https(request, SECRET).is_ok(),
+                content_type != "application/json"
+            );
+            let requests = fixture.finish();
+            assert!(!contains_ascii_case_insensitive(
+                &requests[0],
+                b"ChatGPT-Account-Id:"
+            ));
+            assert!(!contains_ascii_case_insensitive(
+                &requests[0],
+                b"originator:"
+            ));
+            assert!(contains_ascii_case_insensitive(
+                &requests[0],
+                b"Authorization: Bearer provider-https-sse-secret-fixture"
+            ));
+            let start = find_bytes(&requests[0], b"\r\n\r\n").unwrap() + 4;
+            let body: serde_json::Value = serde_json::from_slice(&requests[0][start..]).unwrap();
+            assert_eq!(body["max_output_tokens"], 128);
+            assert_eq!(body["stream"], true);
+            assert_eq!(body["store"], false);
+            assert!(body.get("request").is_none());
+        }
     }
 }
 

@@ -95,6 +95,7 @@ const canonicalTestFiles = Object.freeze([
   'tests/server-durable-event-hub-contract.test.mjs',
   'tests/session-identity-contract.test.mjs',
   'tests/settings-control-plane-integration.test.mjs',
+  'tests/codex-login-settings.test.mjs',
   'tests/strongflow-canonical-api-contract.test.mjs',
   'tests/workrun-single-path-source-gate.test.mjs',
   'tests/strongflow-projection-contract.test.mjs',

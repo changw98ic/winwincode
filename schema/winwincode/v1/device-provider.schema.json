@@ -10,7 +10,9 @@
       "enum": [
         "anthropic_messages",
         "openai_chat_completions",
-        "canonical"
+        "canonical",
+        "codex_chatgpt",
+        "chatgpt_plan"
       ]
     },
     "DeviceProviderConfig": {

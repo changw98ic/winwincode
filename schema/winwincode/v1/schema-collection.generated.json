@@ -12713,7 +12713,9 @@
       "enum": [
         "anthropic_messages",
         "openai_chat_completions",
-        "canonical"
+        "canonical",
+        "codex_chatgpt",
+        "chatgpt_plan"
       ],
       "type": "string"
     },
@@ -28073,7 +28075,7 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:e15068ffc6f78f354ec9a8d233ac7e087a55e0e30a994e08e1d2c20594bbda56",
+  "x-source-digest": "sha256:4e8d05c778ae7d0112abbedcd2fde751792ab4afa66d10eb4c25a206f8727e3b",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {

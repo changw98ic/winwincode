@@ -3,7 +3,7 @@
 import type { DeviceProviderConfig, DeviceConfigurationEnvelope, DeviceProviderSnapshot } from './generated/contracts.js'
 
 export interface DeviceProviderMutation {
-  readonly operation: 'save' | 'delete' | 'test'
+  readonly operation: 'save' | 'delete' | 'test' | 'authorize'
   readonly config: DeviceProviderConfig
   readonly apiKey?: string
   readonly customHeaders?: Readonly<Record<string, string>>

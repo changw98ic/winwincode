@@ -346,6 +346,13 @@ pub struct CanonicalModelStreamFrame {
 }
 
 impl CanonicalModelStreamFrame {
+    pub(crate) fn from_codex_event(sequence: u64, payload_json: String, terminal: bool) -> Self {
+        Self {
+            sequence,
+            payload_json,
+            terminal,
+        }
+    }
     #[must_use]
     pub const fn sequence(&self) -> u64 {
         self.sequence
