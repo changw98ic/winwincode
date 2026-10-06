@@ -192,6 +192,8 @@ impl Fixture {
             "build the product helper before this test"
         );
         std::fs::copy(product_helper, root.join("helper")).unwrap();
+        #[cfg(target_os = "linux")]
+        std::fs::hard_link(root.join("helper"), root.join("codex-linux-sandbox")).unwrap();
         let mcp = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/fixtures/code-mode-mcp.mjs");
         std::fs::write(root.join("home/config.toml"), format!(
@@ -199,6 +201,15 @@ impl Fixture {
             serde_json::to_string(&mcp.canonicalize().unwrap()).unwrap()
         )).unwrap();
         Self(root)
+    }
+
+    fn kernel_options(&self) -> KernelOptions {
+        let mut options = KernelOptions::new(self.0.join("home"), self.0.join("helper"));
+        // Product composition supplies this alias so older bubblewrap can
+        // re-execute the sandbox helper through argv0.
+        options.linux_sandbox_executable =
+            cfg!(target_os = "linux").then(|| self.0.join("codex-linux-sandbox"));
+        options
     }
 
     fn session_options(&self) -> SessionOptions {
@@ -280,12 +291,8 @@ fn native_host_discovers_calls_and_waits_through_the_real_kernel() {
                 cancelled_cell: Mutex::new(None),
             });
             let gate = Arc::new(RecordingGate::default());
-            let kernel = Kernel::new(
-                KernelOptions::new(fixture.0.join("home"), fixture.0.join("helper")),
-                model.clone(),
-                gate.clone(),
-            )
-            .unwrap();
+            let kernel =
+                Kernel::new(fixture.kernel_options(), model.clone(), gate.clone()).unwrap();
             let session = kernel
                 .create_session(fixture.session_options())
                 .await
@@ -357,7 +364,7 @@ fn user_interrupt_closes_the_native_cell_before_the_next_turn() {
                 cancelled_cell: Mutex::new(None),
             });
             let kernel = Kernel::new(
-                KernelOptions::new(fixture.0.join("home"), fixture.0.join("helper")),
+                fixture.kernel_options(),
                 model.clone(),
                 Arc::new(RecordingGate::default()),
             )
