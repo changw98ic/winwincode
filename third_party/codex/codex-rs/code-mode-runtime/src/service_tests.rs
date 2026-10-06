@@ -786,6 +786,55 @@ text("done");
 }
 
 #[tokio::test]
+async fn tool_definition_loads_only_authorized_schemas_and_returns_detached_values() {
+    let service = InProcessCodeModeSession::new();
+    let mut tool = echo_tool();
+    tool.input_schema = Some(serde_json::json!({
+        "type": "object", "required": ["value"]
+    }));
+    tool.output_schema = Some(serde_json::json!({"type": "string"}));
+    let response = execute(
+        &service,
+        ExecuteRequest {
+            enabled_tools: vec![tool],
+            source: r#"
+const definition = toolDefinition(ALL_TOOLS[0].name);
+definition.input_schema.required[0] = 'modified';
+text(toolDefinition('echo').input_schema.required[0]);
+text(toolDefinition('echo').output_schema.type);
+try { toolDefinition('unavailable'); } catch { text('unavailable rejected'); }
+try { toolDefinition({name:'echo'}); } catch { text('invalid name rejected'); }
+"#
+            .to_string(),
+            yield_time_ms: None,
+            ..execute_request("")
+        },
+    )
+    .await;
+    assert_eq!(
+        response,
+        RuntimeResponse::Result {
+            cell_id: cell_id("1"),
+            content_items: vec![
+                FunctionCallOutputContentItem::InputText {
+                    text: "value".to_string()
+                },
+                FunctionCallOutputContentItem::InputText {
+                    text: "string".to_string()
+                },
+                FunctionCallOutputContentItem::InputText {
+                    text: "unavailable rejected".to_string()
+                },
+                FunctionCallOutputContentItem::InputText {
+                    text: "invalid name rejected".to_string()
+                },
+            ],
+            error_text: None,
+        }
+    );
+}
+
+#[tokio::test]
 async fn v8_console_is_not_exposed_on_global_this() {
     let service = InProcessCodeModeSession::new();
 

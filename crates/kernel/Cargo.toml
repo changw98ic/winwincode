@@ -10,9 +10,14 @@ repository.workspace = true
 [lib]
 path = "src/lib.rs"
 
+[[test]]
+name = "code_mode_kernel"
+path = "../../tests/code_mode_kernel.rs"
+
 [dependencies]
 codex-api.workspace = true
 codex-core-api.workspace = true
+codex-code-mode.workspace = true
 codex-skills-extension = { path = "../../third_party/codex/codex-rs/ext/skills" }
 codex-protocol.workspace = true
 codex-model-provider-info.workspace = true

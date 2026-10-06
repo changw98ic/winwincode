@@ -431,6 +431,10 @@ pub const CODEX_PATCH_SET: &[&str] = &[
     "upstream/patches/codex/0007-bind-tool-gate-executable-identity.patch",
     "upstream/patches/codex/0008-atomic-apply-patch.patch",
     "upstream/patches/codex/0009-canonicalize-intercepted-apply-patch.patch",
+    "upstream/patches/codex/0010-submit-change-batch-handoff.patch",
+    "upstream/patches/codex/0011-deterministic-tool-context-gc.patch",
+    "upstream/patches/codex/0012-record-delegated-handoff-output.patch",
+    "upstream/patches/codex/0013-code-mode-authorized-tool-definitions.patch",
 ];
 
 const ROLE_SESSION_POLICY_SCHEMA_VERSION: u32 = 2;
@@ -1001,6 +1005,16 @@ impl Kernel {
                     )
                 })?;
             config.experimental_request_user_input_enabled = true;
+            // User interruption closes Code Mode cells before the next turn.
+            config
+                .features
+                .enable(Feature::CodeModeInterrupt)
+                .map_err(|error| {
+                    KernelFailure::new(
+                        "CONFIG_FEATURE_FAILED",
+                        format!("Code Mode interruption could not be enabled: {error}"),
+                    )
+                })?;
             config.codex_self_exe = Some(self.options.helper_executable.clone());
             config.codex_linux_sandbox_exe = self.options.linux_sandbox_executable.clone();
 
@@ -1064,6 +1078,11 @@ impl Kernel {
                 .with_model_stream_transport(Arc::new(KernelModelStreamTransport::new(Arc::clone(
                     &self.model_port,
                 ))))
+                .with_code_mode_session_provider(Arc::new(
+                    codex_code_mode::ProcessOwnedCodeModeSessionProvider::with_host_program(
+                        self.options.helper_executable.clone(),
+                    ),
+                ))
                 .with_tool_call_gate(Arc::new(CoreToolCallGate {
                     host: Arc::clone(&self.action_gate),
                 })),
@@ -2505,6 +2524,10 @@ mod tests {
                 "upstream/patches/codex/0007-bind-tool-gate-executable-identity.patch",
                 "upstream/patches/codex/0008-atomic-apply-patch.patch",
                 "upstream/patches/codex/0009-canonicalize-intercepted-apply-patch.patch",
+                "upstream/patches/codex/0010-submit-change-batch-handoff.patch",
+                "upstream/patches/codex/0011-deterministic-tool-context-gc.patch",
+                "upstream/patches/codex/0012-record-delegated-handoff-output.patch",
+                "upstream/patches/codex/0013-code-mode-authorized-tool-definitions.patch",
             ]
         );
         assert_eq!(build.event_capacity, 16);

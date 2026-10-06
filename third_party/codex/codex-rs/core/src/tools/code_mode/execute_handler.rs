@@ -53,11 +53,7 @@ impl CodeModeExecuteHandler {
 
             let definitions =
                 codex_tools::collect_code_mode_tool_definitions(std::iter::once(spec.as_ref()));
-            enabled_tools.extend(definitions.into_iter().map(|mut definition| {
-                definition.input_schema = None;
-                definition.output_schema = None;
-                definition
-            }));
+            enabled_tools.extend(definitions);
         }
         enabled_tools.sort_by(|left, right| left.name.cmp(&right.name));
         enabled_tools.dedup_by(|left, right| left.name == right.name);

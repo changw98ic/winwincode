@@ -13,14 +13,21 @@ const manifest = JSON.parse(readFileSync(join(root, 'third_party/codex.UPSTREAM.
 const patches = sourceLock.patches.filter(({ file, planned }) => (
   file.startsWith('upstream/patches/codex/') && !planned
 ))
-// Measured from the archive whose commit and SHA-256 are pinned below.
+// Baseline files from the pinned Codex tree, before the Code Mode definition patch.
 const originalHashes = {
-  'codex-rs/core/src/session/turn.rs': '4465f3e33dc8ee65f79ec02cfba8716d6873948e92bc51f30fbab813c2e0c7b6',
-  'codex-rs/core/src/session/turn_tests.rs': '8e6b6071c7b6a33e69311f6c792616d95a6add796d010851eb5953a7137ea2b5',
+  "codex-rs/code-mode-protocol/src/description.rs": "a85090f7b639db03dc336937490b3230e37203da5d780d5c20b0bf378276ee24",
+  "codex-rs/code-mode-runtime/src/cell_actor/conversions.rs": "6030fa4322e4c198c296f8f1b9190f02185411d7dfdb056cde2cd9da9b4c2237",
+  "codex-rs/code-mode-runtime/src/runtime/callbacks.rs": "79d2bf693103a238dfc5f7aee4f6b216955e9f01a4da4a90aebc32884a0f428c",
+  "codex-rs/code-mode-runtime/src/runtime/globals.rs": "e62df37ddd8d36f3f799d3a2713b225661e3706dcaf2fe97b3cf183427903c07",
+  "codex-rs/code-mode-runtime/src/service.rs": "24e7bc94f6f9318f0612f6f37fdf5ffbacfccd454a2de43c98fdc353aad1c018",
+  "codex-rs/code-mode-runtime/src/service_tests.rs": "1145cbeb4689592af348957265052a7b1347c44b9cfa1c5473858f12b8cb5f4b",
+  "codex-rs/code-mode-runtime/src/session_runtime/types.rs": "30b92086f42d5eee5b5e1d053b07563219d8dcd18fecad9e38c663c1ad194fe2",
+  "codex-rs/core/src/tools/code_mode/execute_handler.rs": "3833a098b4b7f8506b18a65a943818ba7933cccce1765ffd1b5fecefdde0a9cc",
+  "codex-rs/core/src/tools/handlers/mcp.rs": "b2b6a2c138d576e7b3818240c83f875728d59366eb858403b79097bd2b9b0db1"
 }
 const digest = bytes => createHash('sha256').update(bytes).digest('hex')
 
-function handoffSections(patch) {
+function definitionSections(patch) {
   const strip = patch.stripComponents ?? 1
   assert.equal(Number.isInteger(strip) && strip >= 1, true, patch.file)
   return readFileSync(join(root, patch.file), 'utf8')
@@ -36,7 +43,7 @@ function handoffSections(patch) {
 }
 
 function apply(directory, patch, reverse = false) {
-  const input = handoffSections(patch)
+  const input = definitionSections(patch)
   if (!input) return
   const result = spawnSync('patch', [
     '--batch',
@@ -49,10 +56,10 @@ function apply(directory, patch, reverse = false) {
   assert.equal(result.status, 0, `${patch.file}\n${result.stdout}\n${result.stderr}`)
 }
 
-test('declared Codex patches reproduce both handoff files from the pinned source', t => {
+test('declared Codex patches reproduce the Code Mode definition files from the pinned source', t => {
   assert.equal(sourceLock.codex.commit, '758ef40f50c1a458425c7cfbf1eb12cbc07af0b0')
   assert.equal(sourceLock.codex.archiveSha256, '0413a0e7680bcc2b6c6e998a6ad358115707317ef5d0121dcb9275e88c36121a')
-  const directory = mkdtempSync(join(tmpdir(), 'winwincode-codex-handoff-replay-'))
+  const directory = mkdtempSync(join(tmpdir(), 'winwincode-code-mode-replay-'))
   t.after(() => rmSync(directory, { force: true, recursive: true }))
   const current = new Map()
   for (const path of Object.keys(originalHashes)) {
@@ -71,7 +78,7 @@ test('declared Codex patches reproduce both handoff files from the pinned source
   }
 })
 
-test('Codex manifest, ordered patches, digests and handoff targets agree', () => {
+test('Code Mode definition patch retains its target and digest identity', () => {
   assert.deepEqual(manifest.patchesApplied, patches.map(({ file }) => file))
   for (const field of ['repository', 'tag', 'version', 'commit', 'archiveSha256', 'license']) {
     assert.equal(manifest[field], sourceLock.codex[field], field)
@@ -81,8 +88,8 @@ test('Codex manifest, ordered patches, digests and handoff targets agree', () =>
       assert.equal(digest(readFileSync(join(root, patch.file))), patch.patchSha256, patch.file)
     }
   }
-  const handoff = patches.find(({ id }) => id === 'codex-record-delegated-handoff-output')
-  assert.ok(handoff)
-  assert.deepEqual(handoff.targets, Object.keys(originalHashes))
-  assert.equal(patches.indexOf(handoff), patches.findIndex(({ id }) => id === 'codex-deterministic-tool-context-gc') + 1)
+  const definitions = patches.find(({ id }) => id === 'codex-code-mode-authorized-tool-definitions')
+  assert.ok(definitions)
+  assert.deepEqual(definitions.targets, Object.keys(originalHashes))
+  assert.equal(patches.indexOf(definitions), patches.findIndex(({ id }) => id === 'codex-record-delegated-handoff-output') + 1)
 })

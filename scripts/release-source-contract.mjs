@@ -47,6 +47,7 @@ const releaseRootFiles = Object.freeze([
 ])
 
 const releaseRoots = Object.freeze([
+  '.cargo',
   '.github',
   'apps',
   'crates',

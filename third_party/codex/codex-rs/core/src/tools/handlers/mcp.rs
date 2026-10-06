@@ -220,14 +220,9 @@ impl CoreToolRuntime for McpHandler {
         Some(
             self.code_mode_tool_definitions
                 .get_or_init(|| {
-                    let mut definitions = codex_tools::collect_code_mode_tool_definitions(
-                        std::iter::once(self.spec.as_ref()),
-                    );
-                    for definition in &mut definitions {
-                        definition.input_schema = None;
-                        definition.output_schema = None;
-                    }
-                    definitions
+                    codex_tools::collect_code_mode_tool_definitions(std::iter::once(
+                        self.spec.as_ref(),
+                    ))
                 })
                 .as_slice(),
         )
@@ -702,7 +697,7 @@ mod tests {
             .cached_code_mode_definitions()
             .expect("MCP definitions should be cached");
         assert_eq!(first.len(), 1);
-        assert!(first[0].input_schema.is_none());
+        assert!(first[0].input_schema.is_some());
         assert!(first[0].output_schema.is_none());
 
         let second = handler

@@ -33,6 +33,12 @@ shasum -a 256 /tmp/winwincode-upstream/SOURCE-CANDIDATE_COMMIT.tar.gz
 
 Codex 源码位于 `third_party/codex/`，Rust Kernel 直接构建它，不经过命令行回退或独立 app-server。
 
+Code Mode 使用产品 helper 中的原生 V8 运行时。Kernel 直接启动已认证 helper 的 stdio 模式，并通过协议管理 cell。安装目录和数据目录可以位于不同文件系统。`.cargo/config.toml` 固定 V8 sandbox 的源码构建参数。ICU 数据由 `deno_core_icudata` 内嵌；构建驱动核对固定数据摘要，再将数据提供给 V8 快照生成。Date 和 Intl 在运行时使用这份数据。Temporal 保持关闭。
+
+源码构建需要 Python 3、curl 和本机编译工具链。macOS 使用 Xcode，并为 bindgen 指定 libclang 19 或更新版本的 `LIBCLANG_PATH`；V8 使用固定 Chromium Clang。Linux 使用 `scripts/install-code-mode-linux-build-deps.sh` 安装 LLVM 23 和运行资源，并设置 `LIBCLANG_PATH=/usr/lib/llvm-23/lib`、`CLANG_BASE_PATH=/usr/lib/llvm-23`。安装脚本核对 LLVM 软件源签名密钥，并将 Debian 的原生 compiler-rt 资源映射到 GN 要求的目录。开发构建和发布构建都使用优化的 V8 引擎。首次构建会下载 Chromium 构建工具并编译 V8。`corepack pnpm test:rust` 先构建产品 helper，再运行真实 Kernel 的 Code Mode 测试。四目标发布矩阵使用各目标的 release helper 执行同一测试。
+
+`.github/workflows/native-code-mode.yml` 在 PR 中执行四目标原生 host 构建、身份查询和真实 Kernel 验收。正式发布在主线核验通过后执行产物验收。
+
 ### 1. 核对候选
 
 在仓库外展开候选并检查：

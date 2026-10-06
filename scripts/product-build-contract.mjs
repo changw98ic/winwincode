@@ -3,6 +3,9 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { join, relative } from 'node:path'
 
 const SOURCE_ROOT_FILES = Object.freeze([
+  '.cargo/config.toml',
+  'scripts/code-mode-ninja.mjs',
+  'scripts/install-code-mode-linux-build-deps.sh',
   'Cargo.lock',
   'Cargo.toml',
   'rust-toolchain.toml',

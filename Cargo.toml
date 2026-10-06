@@ -59,6 +59,8 @@ ed25519-dalek = { version = "=2.2.0", default-features = false, features = ["std
 codex-core-api = { path = "third_party/codex/codex-rs/core-api" }
 codex-api = { path = "third_party/codex/codex-rs/codex-api" }
 codex-arg0 = { path = "third_party/codex/codex-rs/arg0" }
+codex-code-mode = { path = "third_party/codex/codex-rs/code-mode" }
+codex-code-mode-host = { path = "third_party/codex/codex-rs/code-mode-host" }
 codex-protocol = { path = "third_party/codex/codex-rs/protocol" }
 codex-shell-command = { path = "third_party/codex/codex-rs/shell-command" }
 codex-model-provider-info = { path = "third_party/codex/codex-rs/model-provider-info" }
@@ -117,9 +119,8 @@ codegen-units = 1
 lto = "thin"
 strip = "symbols"
 
-# The production adapter bounds the authenticated helper image at 64 MiB.
-# Strip the development helper so local composition uses the same bounded
-# release-shaped executable rather than an oversized debug image.
+# Strip the development helper. Production composition rebuilds it in release
+# mode when it exceeds the authenticated helper's 64 MiB image boundary.
 [profile.dev.package.winwincode-kernel-helper]
 strip = "symbols"
 

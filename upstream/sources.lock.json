@@ -42,7 +42,9 @@
       "codex-aws-auth",
       "codex-client",
       "codex-code-mode",
+      "codex-code-mode-host",
       "codex-code-mode-protocol",
+      "codex-code-mode-runtime",
       "codex-collaboration-mode-templates",
       "codex-config",
       "codex-connectors",
@@ -376,6 +378,23 @@
       "targets": [
         "codex-rs/core/src/session/turn.rs",
         "codex-rs/core/src/session/turn_tests.rs"
+      ]
+    },
+    {
+      "id": "codex-code-mode-authorized-tool-definitions",
+      "file": "upstream/patches/codex/0013-code-mode-authorized-tool-definitions.patch",
+      "planned": false,
+      "patchSha256": "93da27b2f23108bed25b426e2438005dcb2d948d049fe8a5ae5441b2219db33e",
+      "targets": [
+        "codex-rs/code-mode-protocol/src/description.rs",
+        "codex-rs/code-mode-runtime/src/cell_actor/conversions.rs",
+        "codex-rs/code-mode-runtime/src/runtime/callbacks.rs",
+        "codex-rs/code-mode-runtime/src/runtime/globals.rs",
+        "codex-rs/code-mode-runtime/src/service.rs",
+        "codex-rs/code-mode-runtime/src/service_tests.rs",
+        "codex-rs/code-mode-runtime/src/session_runtime/types.rs",
+        "codex-rs/core/src/tools/code_mode/execute_handler.rs",
+        "codex-rs/core/src/tools/handlers/mcp.rs"
       ]
     }
   ],
