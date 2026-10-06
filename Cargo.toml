@@ -64,6 +64,7 @@ codex-arg0 = { path = "third_party/codex/codex-rs/arg0" }
 codex-protocol = { path = "third_party/codex/codex-rs/protocol" }
 codex-shell-command = { path = "third_party/codex/codex-rs/shell-command" }
 codex-model-provider-info = { path = "third_party/codex/codex-rs/model-provider-info" }
+codex-models-manager = { path = "third_party/codex/codex-rs/models-manager" }
 futures = "=0.3.31"
 getrandom = "=0.3.4"
 http = "=1.4.0"

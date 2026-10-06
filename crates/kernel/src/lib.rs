@@ -1,6 +1,7 @@
 //! Embedded Codex Core ownership boundary.
 
 mod model_port;
+mod model_tools;
 
 pub use model_port::ModelPort;
 pub use model_port::ModelPortFailure;
@@ -1040,7 +1041,10 @@ impl Kernel {
                 ThreadManager::new(
                     &config,
                     Arc::clone(&auth_manager),
-                    build_models_manager(&config, Arc::clone(&auth_manager)),
+                    model_tools::with_patch_tools(build_models_manager(
+                        &config,
+                        Arc::clone(&auth_manager),
+                    )),
                     CodexAppsToolsCache::default(),
                     SessionSource::Exec,
                     environment_manager,
@@ -2629,6 +2633,127 @@ mod tests {
         std::fs::create_dir_all(workspace.join(".codex")).expect("repository config directory");
         std::fs::write(workspace.join(".codex/config.toml"), "not valid TOML [")
             .expect("candidate config");
+    }
+
+    #[derive(Debug)]
+    struct CapturingModelPort(tokio::sync::mpsc::UnboundedSender<ModelPortRequest>);
+
+    impl ModelPort for CapturingModelPort {
+        fn stream(
+            &self,
+            request: ModelPortRequest,
+        ) -> futures::future::BoxFuture<'static, Result<ModelPortStream, ModelPortFailure>>
+        {
+            self.0.send(request).expect("capture native request");
+            Box::pin(async {
+                let mut error = ModelPortFailure::new("FIXTURE_STOP", "request captured");
+                error.status = Some(400);
+                Err(error)
+            })
+        }
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn third_party_model_native_request_exposes_apply_patch() {
+        // Core thread startup has large in-process futures. Keep its native
+        // stack independent of the test runner's small default thread stack.
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("native test runtime")
+                    .block_on(async {
+                        use winwincode_execution_port::agent_config::{
+                            AgentProfileSettings, resolve_agent_session_config,
+                        };
+
+                        let root = std::env::temp_dir().join(format!(
+                            "winwincode-native-patch-tools-{}",
+                            std::process::id()
+                        ));
+                        let workspace = root.join("workspace");
+                        let home = root.join("home");
+                        prepare_chat_permission_workspace(&workspace, &home);
+                        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+                        let kernel = Kernel::new(
+                            KernelOptions::new(
+                                home,
+                                std::env::current_exe().expect("test executable"),
+                            ),
+                            Arc::new(CapturingModelPort(sender)),
+                            Arc::new(RejectingKernelActionGate),
+                        )
+                        .expect("construct kernel");
+                        let worker = serde_json::from_value(serde_json::json!("wrk_patch_fixture"))
+                            .expect("worker id");
+                        let capabilities = serde_json::from_value(serde_json::json!({
+                            "capabilityDigest": format!("sha256:{}", "a".repeat(64)),
+                            "features": ["sandbox"],
+                            "maxConcurrentJobs": 1,
+                            "platform": "aarch64-apple-darwin"
+                        }))
+                        .expect("capabilities");
+                        let agent_config = resolve_agent_session_config(
+                            &worker,
+                            &capabilities,
+                            "codex-chat",
+                            AgentProfileSettings {
+                                fusion: None,
+                                jev_judge: None,
+                                jev_context: None,
+                                provider: "go-account-a".into(),
+                                model: "glm-5.3-flash".into(),
+                                reasoning: "max".into(),
+                                tools: vec!["worker:sandbox".into()],
+                                sandbox: "candidate".into(),
+                                instructions: None,
+                            },
+                        )
+                        .expect("agent config");
+                        let session = kernel
+                            .create_session(super::SessionOptions {
+                                cwd: workspace,
+                                provider: "go-account-a".into(),
+                                model: "glm-5.3-flash".into(),
+                                role_policy: None,
+                                agent_config,
+                            })
+                            .await
+                            .expect("native session");
+                        kernel
+                            .submit_turn(
+                                &session.session_id,
+                                "Update main.rs using apply_patch.".into(),
+                                TurnSubmissionOptions::default(),
+                            )
+                            .await
+                            .expect("submit native turn");
+                        let request =
+                            tokio::time::timeout(Duration::from_secs(30), receiver.recv())
+                                .await
+                                .expect("native model request deadline")
+                                .expect("native model request");
+                        kernel.shutdown().await.expect("shutdown kernel");
+                        std::fs::remove_dir_all(root).expect("remove fixture");
+                        let payload: serde_json::Value =
+                            serde_json::from_str(&request.payload_json)
+                                .expect("native request JSON");
+                        assert!(
+                            payload["request"]["tools"]
+                                .as_array()
+                                .expect("tools")
+                                .iter()
+                                .any(|tool| tool["name"] == "apply_patch"
+                                    && tool["type"] == "custom")
+                        );
+                    });
+            })
+            .expect("native test thread")
+            .join()
+            .expect("native test completion");
     }
 
     #[tokio::test]

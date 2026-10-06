@@ -13085,6 +13085,7 @@ dependencies = [
  "codex-core-api",
  "codex-http-client",
  "codex-model-provider-info",
+ "codex-models-manager",
  "codex-protocol",
  "codex-skills-extension",
  "futures",
