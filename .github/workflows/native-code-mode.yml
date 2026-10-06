@@ -41,10 +41,10 @@ jobs:
             timeout_minutes: 300
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
-            timeout_minutes: 120
+            timeout_minutes: 300
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-24.04
-            timeout_minutes: 120
+            timeout_minutes: 300
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
@@ -71,6 +71,7 @@ jobs:
           set -euo pipefail
           sudo bash scripts/install-code-mode-linux-build-deps.sh
           printf 'LIBCLANG_PATH=/usr/lib/llvm-23/lib\nCLANG_BASE_PATH=/usr/lib/llvm-23\n' >> "${GITHUB_ENV}"
+          printf 'CLANG_PATH=/usr/lib/llvm-23/bin/clang\n' >> "${GITHUB_ENV}"
           if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
@@ -83,6 +84,7 @@ jobs:
           set -euo pipefail
           HOMEBREW_NO_AUTO_UPDATE=1 brew install llvm@19
           printf 'LIBCLANG_PATH=%s/lib\n' "$(brew --prefix llvm@19)" >> "${GITHUB_ENV}"
+          printf 'CLANG_PATH=%s/bin/clang\n' "$(brew --prefix llvm@19)" >> "${GITHUB_ENV}"
 
       - name: Install pinned Rust
         shell: bash

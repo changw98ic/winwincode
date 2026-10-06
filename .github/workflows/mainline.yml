@@ -109,6 +109,7 @@ jobs:
           sudo bash scripts/install-code-mode-linux-build-deps.sh
           printf 'LIBCLANG_PATH=/usr/lib/llvm-23/lib\n' >> "${GITHUB_ENV}"
           printf 'CLANG_BASE_PATH=/usr/lib/llvm-23\n' >> "${GITHUB_ENV}"
+          printf 'CLANG_PATH=/usr/lib/llvm-23/bin/clang\n' >> "${GITHUB_ENV}"
           if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
