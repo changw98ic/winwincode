@@ -135,7 +135,9 @@ const originalHashes = {
   "codex-rs/state/src/tool_diagnostics.rs": null,
   "codex-rs/state/src/tool_execution.rs": null,
   "codex-rs/state/src/tool_runtime.rs": null,
-  "codex-rs/state/src/tool_sharing.rs": null
+  "codex-rs/state/src/tool_sharing.rs": null,
+  "codex-rs/v8-poc/Cargo.toml": "e98d307ee1683087debb02cf5fba46cc1a23177a25cd6b03f74f1539239312c9",
+  "codex-rs/v8-poc/src/lib.rs": "7121f241941ebc18758bbc9dbfb0848a9ea25a93a65eecd34c890fc86ccecfcc"
 }
 const digest = bytes => createHash('sha256').update(bytes).digest('hex')
 
@@ -197,7 +199,7 @@ test('the tool runtime patch stack reproduces every changed dispatch file from t
 test('the tool runtime manifest and ordered patch digests describe the dispatch sources', () => {
   const applied = sourceLock.patches.filter(({ file, planned }) => file.startsWith('upstream/patches/codex/') && !planned)
   assert.deepEqual(manifest.patchesApplied, applied.map(({ file }) => file))
-  assert.equal(patches.length, 51)
+  assert.equal(patches.length, 52)
   assert.deepEqual([...new Set(patches.flatMap(({ targets }) => targets))].sort(), Object.keys(originalHashes).sort())
   for (const patch of patches) {
     assert.equal(digest(readFileSync(join(root, patch.file))), patch.patchSha256, patch.file)

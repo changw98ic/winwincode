@@ -987,6 +987,16 @@
         "codex-rs/core/src/context_manager/history_tests.rs",
         "codex-rs/core/src/context_manager/normalize.rs"
       ]
+    },
+    {
+      "id": "codex-tool-receipts-workspace-v8-link",
+      "file": "upstream/patches/codex/0065-tool-receipts-workspace-v8-link.patch",
+      "planned": false,
+      "patchSha256": "84c1d6c4d629b102a2d27d2f2d2269272a7fc602f5961491151c61830e1626a1",
+      "targets": [
+        "codex-rs/v8-poc/Cargo.toml",
+        "codex-rs/v8-poc/src/lib.rs"
+      ]
     }
   ],
   "licenseObligations": {

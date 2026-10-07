@@ -620,6 +620,7 @@ pub const CODEX_PATCH_SET: &[&str] = &[
     "upstream/patches/codex/0062-tool-receipts-boundaries.patch",
     "upstream/patches/codex/0063-tool-receipts-test-isolation.patch",
     "upstream/patches/codex/0064-tool-receipts-interrupted-history.patch",
+    "upstream/patches/codex/0065-tool-receipts-workspace-v8-link.patch",
 ];
 
 const ROLE_SESSION_POLICY_SCHEMA_VERSION: u32 = 2;
@@ -2774,6 +2775,7 @@ mod tests {
                 "upstream/patches/codex/0062-tool-receipts-boundaries.patch",
                 "upstream/patches/codex/0063-tool-receipts-test-isolation.patch",
                 "upstream/patches/codex/0064-tool-receipts-interrupted-history.patch",
+                "upstream/patches/codex/0065-tool-receipts-workspace-v8-link.patch",
             ]
         );
         assert_eq!(build.event_capacity, 16);

@@ -1,5 +1,14 @@
 //! Bazel-wired proof-of-concept crate reserved for future V8 experiments.
 
+// V8's macOS allocator checks the process code-signing entitlements.
+#[cfg(target_os = "macos")]
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {}
+
+#[cfg(target_os = "macos")]
+#[link(name = "Security", kind = "framework")]
+unsafe extern "C" {}
+
 /// Returns the Bazel label for this proof-of-concept crate.
 #[must_use]
 pub fn bazel_target() -> &'static str {

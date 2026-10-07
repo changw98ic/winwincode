@@ -70,6 +70,7 @@
     "upstream/patches/codex/0061-tool-receipts-context.patch",
     "upstream/patches/codex/0062-tool-receipts-boundaries.patch",
     "upstream/patches/codex/0063-tool-receipts-test-isolation.patch",
-    "upstream/patches/codex/0064-tool-receipts-interrupted-history.patch"
+    "upstream/patches/codex/0064-tool-receipts-interrupted-history.patch",
+    "upstream/patches/codex/0065-tool-receipts-workspace-v8-link.patch"
   ]
 }
