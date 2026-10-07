@@ -545,6 +545,42 @@ test('source seal binds the Device Worker and CLI binaries', () => {
   } finally { rmSync(target, { recursive: true, force: true }) }
 })
 
+test('source seal rejects a changed helper build script at the same Git HEAD', t => {
+  const directory = mkdtempSync(resolve(tmpdir(), 'winwincode-api-build-source-seal-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const sourceRoot = resolve(directory, 'source')
+  const binaryRoot = resolve(directory, 'bin')
+  mkdirSync(resolve(sourceRoot, 'scripts'), { recursive: true })
+  mkdirSync(resolve(sourceRoot, 'crates/helper/src'), { recursive: true })
+  mkdirSync(binaryRoot)
+  writeFileSync(resolve(sourceRoot, 'package.json'), JSON.stringify({ version: '0.1.0' }))
+  writeFileSync(resolve(sourceRoot, 'Cargo.toml'), '[workspace.package]\nversion = "0.1.0"\n')
+  writeFileSync(resolve(sourceRoot, 'crates/helper/src/main.rs'), 'fn main() {}\n')
+  for (const name of ['run-api-production-vertical.mjs', 'product-build-contract.mjs', 'compact-kernel-helper.mjs']) {
+    writeFileSync(resolve(sourceRoot, 'scripts', name), '// build input\n')
+  }
+  const git = (...args) => execFileSync('git', ['-C', sourceRoot, ...args], { encoding: 'utf8' }).trim()
+  git('init', '--quiet')
+  git('add', '.')
+  git('-c', 'user.name=Source Seal Test', '-c', 'user.email=source-seal@example.invalid',
+    '-c', 'commit.gpgSign=false', 'commit', '--quiet', '-m', 'fixture')
+  const head = git('rev-parse', 'HEAD')
+  for (const name of ['winwincode-server', 'winwincode-kernel-helper', 'winwincode-worker', 'wwc']) {
+    const path = resolve(binaryRoot, name)
+    writeFileSync(path, '#!/bin/sh\nexit 0\n')
+    chmodSync(path, 0o755)
+  }
+  const serverBinary = resolve(binaryRoot, 'winwincode-server')
+  const helperExecutable = resolve(binaryRoot, 'winwincode-kernel-helper')
+  const options = { root: sourceRoot, serverBinary, helperExecutable }
+  writeApiProductionSourceSeal({ ...options,
+    helperReleaseManifest: writeHelperReleaseManifest(sourceRoot, helperExecutable) })
+  verifyApiProductionSourceSeal(options)
+  writeFileSync(resolve(sourceRoot, 'scripts/compact-kernel-helper.mjs'), '// changed build input\n')
+  assert.equal(git('rev-parse', 'HEAD'), head)
+  assert.throws(() => verifyApiProductionSourceSeal(options), /source seal is stale/u)
+})
+
 test('browser skip-build verifies the production source seal before replacing artifacts', () => {
   const source = readFileSync(browserGatePath, 'utf8')
   const verification = source.indexOf('verifyApiProductionSourceSeal({')

@@ -61,7 +61,7 @@ pub struct TrustedRuntimeFoldSnapshot {
 /// still exposes one `sessionBindingId` field, so the mapping layer derives a
 /// stable projection key from those two durable identities. No independent
 /// binding authority is created here.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct TrustedProductSessionRuntimeSession {
     pub(crate) product_session_id: ProductSessionId,
     pub(crate) execution_job_id: ExecutionJobId,
@@ -71,6 +71,7 @@ pub(crate) struct TrustedProductSessionRuntimeSession {
     pub(crate) attempt: u64,
     pub(crate) fencing_token: FencingToken,
     pub(crate) as_of_sequence: u64,
+    pub(crate) activities: Vec<RuntimeActivityProjection>,
 }
 
 impl TrustedRuntimeFoldSnapshot {
@@ -827,6 +828,10 @@ impl TrustedRuntimeProjectionReadCutReader for SqliteStorageRuntimeProjectionRea
             attempt: ledger.attempt,
             fencing_token: ledger.fencing_token.clone(),
             as_of_sequence: ledger.revision(),
+            activities: winwincode_delivery::projection::runtime::fold_runtime_activities(
+                &persisted_runtime_events(&ledger.events)?,
+            )
+            .map_err(|_| TrustedProjectionReadError::Invalid)?,
         };
         let ledger_revision = Revision(
             i64::try_from(ledger.revision()).map_err(|_| TrustedProjectionReadError::Invalid)?,

@@ -380,6 +380,22 @@ fn assert_io_authorizations(admitted: &[KernelActionRequest]) {
     assert!(admitted.iter().any(|request| matches!(&request.payload, KernelActionPayload::ProcessInteraction { input, origin_call_id, .. } if !input.is_empty() && !origin_call_id.is_empty())));
 }
 
+async fn assert_closed_tool_facts(kernel: &Kernel, session_id: &str) {
+    let before_close = kernel
+        .tool_runtime_events(session_id, 0, 200)
+        .await
+        .unwrap();
+    kernel.close_session(session_id).await.unwrap();
+    let after_close = kernel
+        .tool_runtime_events(session_id, 0, 200)
+        .await
+        .unwrap();
+    assert_eq!(
+        after_close, before_close,
+        "closed Core receipts remain readable"
+    );
+}
+
 async fn assert_durable_tool_facts(kernel: &Kernel, session_id: &str) {
     let facts = kernel
         .tool_runtime_events(session_id, 0, 200)
@@ -452,6 +468,7 @@ fn native_host_discovers_calls_and_waits_through_the_real_kernel() {
                 .unwrap();
             wait_for_kind(&kernel, &session.session_id, "turn_complete").await;
             assert_durable_tool_facts(&kernel, &session.session_id).await;
+            assert_closed_tool_facts(&kernel, &session.session_id).await;
             kernel.shutdown().await.unwrap();
             let requests = model.requests.lock().unwrap();
             let outputs = requests
@@ -633,6 +650,18 @@ fn user_interrupt_closes_the_native_cell_before_the_next_turn() {
                 .await
                 .unwrap();
             wait_for_kind(&kernel, &session.session_id, "turn_complete").await;
+            kernel.close_session(&session.session_id).await.unwrap();
+            let final_facts = kernel
+                .tool_runtime_events(&session.session_id, 0, 200)
+                .await
+                .unwrap();
+            let cell = model.cancelled_cell.lock().unwrap().clone().unwrap();
+            let final_cell = final_facts
+                .iter()
+                .filter_map(|event| serde_json::from_str::<Value>(&event.fact_json).ok())
+                .rfind(|fact| fact["kind"] == "cell" && fact["fact"]["cell_id"] == cell)
+                .unwrap();
+            assert_eq!(final_cell["fact"]["lifecycle"], "closed");
             kernel.shutdown().await.unwrap();
             let requests = model.requests.lock().unwrap();
             let input = requests.last().unwrap()["request"]["input"]

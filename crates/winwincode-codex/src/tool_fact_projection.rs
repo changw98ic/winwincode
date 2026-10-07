@@ -22,6 +22,50 @@ use winwincode_kernel::KernelToolRuntimeEvent;
 const CONTENT_TYPE: &str = "application/vnd.winwincode.core-tool-fact+json";
 
 impl ProductionCodexAdapter {
+    /// Stop the final Core owner, then drain its fixed receipt stream before
+    /// publishing a business terminal. The final source cursor survives restart.
+    pub(super) async fn poll_final_tool_facts(
+        &mut self,
+        run_key: &str,
+        now: &Instant,
+    ) -> Result<Option<CodexPoll>, ProductionCodexError> {
+        let run = self.runs.get(run_key).ok_or_else(unknown_thread)?;
+        if run.record.terminal.is_none()
+            && run.record.final_candidate_freeze.is_none()
+            && run.record.delegated_stop.is_none()
+        {
+            return Ok(None);
+        }
+        if let Some(cursor) = run.record.core_tool_final_cursor {
+            if cursor != run.record.core_tool_cursor || run.record.core_tool_pending.is_some() {
+                return Err(unavailable());
+            }
+            return Ok(None);
+        }
+        let session = run.record.kernel_session_id.clone();
+        if run.kernel_live {
+            self.kernel
+                .close_session(&session)
+                .await
+                .map_err(|_| unavailable())?;
+            self.runs
+                .get_mut(run_key)
+                .ok_or_else(unknown_thread)?
+                .kernel_live = false;
+        }
+        if let Some(fact) = self.poll_tool_facts(run_key, &session, now).await? {
+            return Ok(Some(fact));
+        }
+        let record = &mut self
+            .runs
+            .get_mut(run_key)
+            .ok_or_else(unknown_thread)?
+            .record;
+        record.core_tool_final_cursor = Some(record.core_tool_cursor);
+        self.persist_run(run_key)?;
+        Ok(None)
+    }
+
     /// Drain original Core receipts before consuming a terminal Codex event.
     /// The single pending frame bridges crashes between replay, outbox and cursor commits.
     pub(super) async fn poll_tool_facts(

@@ -110,6 +110,50 @@ for (let i = 0; i < 6; i++) text(await tools[smoke.name]({}));
 await yield_control();
 text('shared-cell-resumed');
 ";
+
+#[test]
+fn native_progress_write_failure_preserves_accepted_tool_results() {
+    run_native_test(|runtime| {
+        runtime.block_on(async {
+            let fixture = Fixture::new();
+            std::fs::write(fixture.0.join("workspace/source.txt"), "A").unwrap();
+            let model = Arc::new(ScriptedModel {
+                requests: Mutex::new(Vec::new()), source: SHARING_SOURCE, exec_count: 1,
+                cancel_boundary: None, cancelled_cell: Mutex::new(None), direct_probe: false,
+            });
+            let gate = Arc::new(SharingGate {
+                workspace: fixture.0.join("workspace"),
+                flip_on_freeze: std::sync::atomic::AtomicBool::new(false),
+            });
+            let kernel = Kernel::new(fixture.kernel_options(), model.clone(), gate).unwrap();
+            let session = kernel.create_session(fixture.session_options()).await.unwrap();
+            let database = std::fs::read_dir(fixture.0.join("home")).unwrap()
+                .filter_map(Result::ok).map(|entry| entry.path())
+                .filter(|path| path.extension().is_some_and(|extension| extension == "sqlite"))
+                .find_map(|path| {
+                    let database = rusqlite::Connection::open(path).unwrap();
+                    database.query_row("SELECT name FROM sqlite_master WHERE name='tool_progress_receipts'",
+                        [], |row| row.get::<_, String>(0)).ok().map(|_| database)
+                }).expect("Core state database");
+            database.execute_batch("CREATE TRIGGER fail_diagnostic_progress BEFORE INSERT ON tool_progress_receipts BEGIN SELECT RAISE(FAIL, 'progress fixture failure'); END;").unwrap();
+            kernel.submit_turn(&session.session_id, "Read the trusted source".into(),
+                TurnSubmissionOptions::default()).await.unwrap();
+            wait_for_kind(&kernel, &session.session_id, "turn_complete").await;
+            let outputs = model_outputs(&model);
+            assert!(outputs.contains("shared-cell-resumed"), "{outputs}");
+            assert!(!outputs.contains("progress fixture failure"), "{outputs}");
+            let facts = all_facts(&kernel, &session.session_id).await;
+            assert_eq!(facts.iter().filter(|fact| fact["kind"] == "progress").count(), 0);
+            let accepted = facts.iter().filter(|fact| fact["kind"] == "request"
+                && fact["fact"]["request"]["tool_name"].as_str().is_some_and(|name| name.ends_with("public_smoke"))
+                && fact["fact"]["attempt"]["disposition"] == "accepted"
+                && fact["fact"]["attempt"]["delivery"] == "offered").count();
+            assert!(accepted > 0, "accepted execution must still be offered");
+            assert_model_receipts(&model, &facts);
+            kernel.shutdown().await.unwrap();
+        });
+    });
+}
 #[test]
 fn native_shared_execution_reuse_and_diagnosis_keep_each_logical_observation() {
     run_native_test(|runtime| {

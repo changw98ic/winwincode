@@ -626,6 +626,8 @@ pub const CODEX_PATCH_SET: &[&str] = &[
     "upstream/patches/codex/0068-tool-receipts-surface-fixtures.patch",
     "upstream/patches/codex/0069-tool-receipts-portable-fixtures.patch",
     "upstream/patches/codex/0070-tool-receipts-stream-dispatch.patch",
+    "upstream/patches/codex/0071-tool-review-stream-delivery.patch",
+    "upstream/patches/codex/0072-tool-review-progress-isolation.patch",
 ];
 
 const ROLE_SESSION_POLICY_SCHEMA_VERSION: u32 = 2;
@@ -1888,9 +1890,10 @@ impl Kernel {
             let runtime = self.runtime().await?;
             let session = runtime
                 .sessions
-                .write()
+                .read()
                 .await
-                .remove(session_id)
+                .get(session_id)
+                .cloned()
                 .ok_or_else(|| session_not_found(session_id))?;
             let _ = session.stop.send(true);
             tokio::time::timeout(
@@ -1905,6 +1908,7 @@ impl Kernel {
                 )
             })?
             .map_err(|error| KernelFailure::new("SESSION_SHUTDOWN_FAILED", error.to_string()))?;
+            runtime.sessions.write().await.remove(session_id);
             if let Ok(thread_id) = ThreadId::try_from(session_id) {
                 let _ = runtime.manager.remove_thread(&thread_id).await;
             }
@@ -2786,6 +2790,8 @@ mod tests {
                 "upstream/patches/codex/0068-tool-receipts-surface-fixtures.patch",
                 "upstream/patches/codex/0069-tool-receipts-portable-fixtures.patch",
                 "upstream/patches/codex/0070-tool-receipts-stream-dispatch.patch",
+                "upstream/patches/codex/0071-tool-review-stream-delivery.patch",
+                "upstream/patches/codex/0072-tool-review-progress-isolation.patch",
             ]
         );
         assert_eq!(build.event_capacity, 16);

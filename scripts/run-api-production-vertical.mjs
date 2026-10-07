@@ -104,6 +104,7 @@ const API_SOURCE_TRACKED_PATHS = [
   'upstream/sources.lock.json',
   API_RUNNER_SOURCE_PATH,
   'scripts/product-build-contract.mjs',
+  'scripts/compact-kernel-helper.mjs',
 ]
 const API_SOURCE_SEAL_KEYS = [
   'cliBinaryMode',

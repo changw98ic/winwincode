@@ -14,7 +14,8 @@ impl Kernel {
     ///
     /// # Errors
     ///
-    /// Rejects an unavailable session or a Core storage/encoding failure.
+    /// Rejects a Core storage/encoding failure. Closed threads remain readable
+    /// from this Kernel's private Core database so final receipts can drain.
     pub async fn tool_runtime_events(
         &self,
         session_id: &str,
@@ -22,17 +23,26 @@ impl Kernel {
         limit: u32,
     ) -> KernelResult<Vec<KernelToolRuntimeEvent>> {
         let runtime = self.runtime().await?;
-        let session = self.session(&runtime, session_id).await?;
-        let facts = session
-            .thread
-            .tool_runtime_events(after, limit)
-            .await
-            .map_err(|_| {
+        let session = runtime.sessions.read().await.get(session_id).cloned();
+        let facts = if let Some(session) = session {
+            session.thread.tool_runtime_events(after, limit).await
+        } else {
+            let store = runtime.state_db.as_ref().ok_or_else(|| {
                 KernelFailure::new(
                     "TOOL_FACT_READ_FAILED",
-                    "Core execution facts could not be read",
+                    "Core execution fact storage is unavailable",
                 )
             })?;
+            store
+                .list_tool_runtime_events(session_id, after, limit)
+                .await
+        }
+        .map_err(|_| {
+            KernelFailure::new(
+                "TOOL_FACT_READ_FAILED",
+                "Core execution facts could not be read",
+            )
+        })?;
         facts
             .into_iter()
             .map(|event| {

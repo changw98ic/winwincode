@@ -2830,10 +2830,13 @@ async fn try_run_sampling_request(
     } else {
         Some(turn_context.turn_timing_state.begin_tool_blocking())
     };
-    let handoff = if response_completed {
+    let handoff = if response_completed || !turn_context.submit_change_batch {
+        // Ordinary tools already started when their call item arrived. Preserve
+        // their actual output even when the surrounding stream closes early.
+        // ToolCallRuntime still owns cancellation and handler teardown.
         drain_in_flight(&mut in_flight, sess.clone(), turn_context.clone()).await?
     } else {
-        // A cancelled or incomplete stream never commits a terminal handoff.
+        // An incomplete delegated batch never starts or commits a handoff.
         in_flight.clear();
         None
     };

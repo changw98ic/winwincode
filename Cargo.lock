@@ -13243,6 +13243,7 @@ dependencies = [
  "codex-protocol",
  "codex-skills-extension",
  "futures",
+ "rusqlite",
  "serde",
  "serde_json",
  "tokio",

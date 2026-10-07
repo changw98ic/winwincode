@@ -1788,6 +1788,9 @@ impl ProductionCodexAdapter {
             self.persist_run(run_key)?;
             self.quiesce_infrastructure_run(run_key, now).await;
         }
+        if let Some(fact) = self.poll_final_tool_facts(run_key, now).await? {
+            return Ok(fact);
+        }
         self.poll_retained_terminal(run_key)?
             .ok_or_else(unavailable)
     }
@@ -1909,6 +1912,14 @@ impl ProductionCodexAdapter {
             // model frames so that this pre-start fault has no Provider side
             // effect and cannot leave a live Core session behind.
             self.quiesce_infrastructure_run(run_key, now).await;
+        }
+        // Runtime traces already retained by this event keep their original
+        // delivery order. A direct terminal must first drain the final Core cut.
+        if result.is_ok()
+            && !matches!(&result, Ok(CodexPoll::RuntimeTrace(_) | CodexPoll::Pending))
+            && let Some(fact) = self.poll_final_tool_facts(run_key, now).await?
+        {
+            return Ok(fact);
         }
         result
     }
@@ -4296,6 +4307,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             stage_product_sources: Vec::new(),
             core_tool_cursor: 0,
             core_tool_pending: None,
+            core_tool_final_cursor: None,
             tool_runtime_contract: Some(ToolRuntimeContract::capture(&self.config, &agent_config)?),
             batch_intent: None,
             format_repair: None,
@@ -4841,17 +4853,20 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             .update_now(now)
             .map_err(|_| unavailable())?;
         let run_key = self.run_key_for_thread(thread_id)?.to_owned();
-        if self.runs.get(&run_key).is_some_and(|run| {
-            run.record.final_candidate_freeze.is_some() || run.record.delegated_stop.is_some()
-        }) {
-            return Ok(CodexPoll::Pending);
-        }
         if let Some(message) = self
             .runs
             .get_mut(&run_key)
             .and_then(|run| run.replay.pop_front())
         {
             return Ok(CodexPoll::RuntimeTrace(Box::new(message)));
+        }
+        if let Some(fact) = self.poll_final_tool_facts(&run_key, now).await? {
+            return Ok(fact);
+        }
+        if self.runs.get(&run_key).is_some_and(|run| {
+            run.record.final_candidate_freeze.is_some() || run.record.delegated_stop.is_some()
+        }) {
+            return Ok(CodexPoll::Pending);
         }
         // A TurnComplete observed before the command/test Artifact's final
         // ACK is a durable wait state. Do not let a later Core close/error
@@ -4861,7 +4876,17 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             .get(&run_key)
             .is_some_and(|run| run.record.pending_completion.is_some())
         {
-            return Ok(CodexPoll::Pending);
+            let session = self
+                .runs
+                .get(&run_key)
+                .ok_or_else(unknown_thread)?
+                .record
+                .kernel_session_id
+                .clone();
+            return Ok(self
+                .poll_tool_facts(&run_key, &session, now)
+                .await?
+                .unwrap_or(CodexPoll::Pending));
         }
         let pending_delegated_turn = self.runs.get(&run_key).and_then(|run| {
             run.record
@@ -5982,6 +6007,8 @@ struct StoredRun {
     core_tool_cursor: i64,
     #[serde(default)]
     core_tool_pending: Option<RuntimeEventMessage>,
+    #[serde(default)]
+    core_tool_final_cursor: Option<i64>,
     #[serde(default)]
     tool_runtime_contract: Option<ToolRuntimeContract>,
     /// Durable single-writer intent emitted by a delegated Composer instead
@@ -10679,6 +10706,7 @@ mod tests {
             stage_product_sources: Vec::new(),
             core_tool_cursor: 0,
             core_tool_pending: None,
+            core_tool_final_cursor: None,
             tool_runtime_contract: None,
             batch_intent: None,
             format_repair: None,
@@ -10840,6 +10868,7 @@ mod tests {
             stage_product_sources: Vec::new(),
             core_tool_cursor: 0,
             core_tool_pending: None,
+            core_tool_final_cursor: None,
             tool_runtime_contract: None,
             batch_intent: None,
             format_repair: None,

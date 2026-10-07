@@ -919,14 +919,17 @@ impl ToolRegistry {
                 facts
                     .accepted(super::execution_facts::snapshot(&result)?)
                     .await?;
-                facts
+                if let Err(error) = facts
                     .store
                     .record_verified_tool_progress(
                         &invocation.session.thread_id.to_string(),
                         facts.sequence,
                     )
                     .await
-                    .map_err(super::execution_facts::storage_error)?;
+                {
+                    tracing::warn!(request_sequence = facts.sequence, %error,
+                        "failed to record optional tool diagnostic progress");
+                }
                 tool.on_tool_result_accepted(&invocation, result.result.as_ref());
                 if let Some(continuation) = &result.continuation
                     && let super::context::ToolCallSource::CodeMode { cell_id, .. } =

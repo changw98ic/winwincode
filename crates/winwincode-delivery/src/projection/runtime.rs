@@ -662,7 +662,7 @@ fn fold_fact(
             fold_agent(session, agent)?;
         }
         AcceptedRuntimeFact::Activity(activity) => {
-            fold_activity(session, activity)?;
+            fold_activity(&mut session.activities, activity)?;
         }
         AcceptedRuntimeFact::Usage(usage) => {
             let mut usage = usage.clone();
@@ -681,16 +681,33 @@ fn fold_fact(
     Ok(())
 }
 
+/// Folds accepted activities with the same identity, terminal and window rules
+/// for Delivery sessions and standalone product sessions.
+///
+/// # Errors
+/// Rejects invalid activities, identity changes and terminal status regression.
+pub fn fold_runtime_activities(
+    events: &[PersistedRuntimeEvent],
+) -> Result<Vec<RuntimeActivityProjection>, RuntimeProjectionError> {
+    let mut activities = Vec::new();
+    for event in events {
+        if let PersistedRuntimeFact::Activity(activity) = &event.fact {
+            validate_activity(activity)?;
+            fold_activity(&mut activities, activity)?;
+        }
+    }
+    Ok(activities)
+}
+
 fn fold_activity(
-    session: &mut RuntimeSessionProjection,
+    activities: &mut Vec<RuntimeActivityProjection>,
     activity: &RuntimeActivityProjection,
 ) -> Result<(), RuntimeProjectionError> {
-    if let Some(index) = session
-        .activities
+    if let Some(index) = activities
         .iter()
         .position(|existing| existing.call_id == activity.call_id)
     {
-        let existing = &session.activities[index];
+        let existing = &activities[index];
         if existing.activity_type != activity.activity_type
             || existing.command != activity.command
             || (activity_status_is_terminal(existing.status)
@@ -701,12 +718,12 @@ fn fold_activity(
                 "runtime activity identity is immutable and terminal status cannot regress",
             ));
         }
-        session.activities.remove(index);
+        activities.remove(index);
     }
-    if session.activities.len() >= MAX_ACTIVITIES {
-        session.activities.remove(0);
+    if activities.len() >= MAX_ACTIVITIES {
+        activities.remove(0);
     }
-    session.activities.push(activity.clone());
+    activities.push(activity.clone());
     Ok(())
 }
 

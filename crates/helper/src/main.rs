@@ -1,6 +1,7 @@
 //! Internal child-process entrypoint for embedded Codex helper modes.
 
 fn main() {
+    let _path_guard = codex_arg0::arg0_dispatch();
     // The process-owned provider starts its stdio host without arguments.
     if std::env::args_os().nth(1).is_none() {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -13,7 +14,6 @@ fn main() {
         }
         return;
     }
-    let _path_guard = codex_arg0::arg0_dispatch();
     if std::env::args().nth(1).as_deref() == Some("--winwincode-helper-handshake") {
         println!(
             "{{\"protocol\":\"winwincode-kernel-helper\",\"version\":1,\"packageVersion\":\"{}\"}}",

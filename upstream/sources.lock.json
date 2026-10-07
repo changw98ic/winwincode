@@ -1074,6 +1074,25 @@
         "codex-rs/core/src/tools/parallel.rs",
         "codex-rs/core/tests/suite/tool_parallelism.rs"
       ]
+    },
+    {
+      "id": "codex-tool-review-stream-delivery",
+      "file": "upstream/patches/codex/0071-tool-review-stream-delivery.patch",
+      "planned": false,
+      "patchSha256": "fc93211c9d5237f38a70f41cad692d291b5e9ff4347c215b5eff51bcf4a8c38f",
+      "targets": [
+        "codex-rs/core/src/session/turn.rs",
+        "codex-rs/core/tests/suite/stream_no_completed.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-review-progress-isolation",
+      "file": "upstream/patches/codex/0072-tool-review-progress-isolation.patch",
+      "planned": false,
+      "patchSha256": "0d1eddcb8a7e8386b8fd495a0d48da4f84c54cee9492b5646acef244f3ddd70a",
+      "targets": [
+        "codex-rs/core/src/tools/registry.rs"
+      ]
     }
   ],
   "licenseObligations": {
