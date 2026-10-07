@@ -1068,7 +1068,10 @@ async fn code_mode_exec_emits_correlated_production_analytics() -> Result<()> {
     let codex_home = TempDir::new()?;
     MockResponsesConfig::new(&server.uri())
         .enable_feature(Feature::CodeModeOnly)
-        .with_root_config(&format!("chatgpt_base_url = \"{}\"", server.uri()))
+        .with_root_config(&format!(
+            "chatgpt_base_url = \"{}\"\nweb_search = \"disabled\"",
+            server.uri()
+        ))
         .write(codex_home.path())?;
     mount_analytics_capture(&server, codex_home.path()).await?;
 

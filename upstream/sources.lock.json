@@ -997,6 +997,33 @@
         "codex-rs/v8-poc/Cargo.toml",
         "codex-rs/v8-poc/src/lib.rs"
       ]
+    },
+    {
+      "id": "codex-tool-receipts-integration-feedback",
+      "file": "upstream/patches/codex/0066-tool-receipts-integration-feedback.patch",
+      "planned": false,
+      "patchSha256": "d4ab3a66f03f34f92d5dd5be4fde4e975e60a7c546d97c7b86aec619487a9aeb",
+      "targets": [
+        "codex-rs/app-server/tests/suite/v2/code_mode_host.rs",
+        "codex-rs/app-server/tests/suite/v2/imagegen_extension.rs",
+        "codex-rs/app-server/tests/suite/v2/turn_start.rs",
+        "codex-rs/core/tests/suite/code_mode.rs",
+        "codex-rs/core/tests/suite/model_runtime_selectors.rs",
+        "codex-rs/tui/src/version.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-receipts-concurrent-writes",
+      "file": "upstream/patches/codex/0067-tool-receipts-concurrent-writes.patch",
+      "planned": false,
+      "patchSha256": "742f5a1ee508267c29b588158851d5b539cb4f61c7422f57ff3d70859d271d8e",
+      "targets": [
+        "codex-rs/state/src/runtime/tool_diagnostic_responses.rs",
+        "codex-rs/state/src/runtime/tool_diagnostics.rs",
+        "codex-rs/state/src/runtime/tool_reconciliation.rs",
+        "codex-rs/state/src/runtime/tool_runtime.rs",
+        "codex-rs/state/src/runtime/tool_runtime_tests.rs"
+      ]
     }
   ],
   "licenseObligations": {

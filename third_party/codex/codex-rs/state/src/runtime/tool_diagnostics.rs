@@ -45,7 +45,7 @@ impl StateRuntime {
         thread_id: &str,
         boundary_logical_id: &str,
     ) -> anyhow::Result<Vec<ToolDiagnostic>> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let boundary: i64 = sqlx::query_scalar("SELECT r.sequence FROM tool_requests r JOIN tool_attempts a ON a.request_sequence = r.sequence WHERE r.thread_id = ? AND r.logical_id = ? AND a.execution = 'running'")
             .bind(thread_id).bind(boundary_logical_id).fetch_one(&mut *tx).await?;
         let rows = sqlx::query("SELECT diagnostic_id, evidence_version, diagnostic_json FROM tool_diagnostics WHERE thread_id = ? AND evidence_version > offered_version ORDER BY evidence_version, diagnostic_id LIMIT 2")

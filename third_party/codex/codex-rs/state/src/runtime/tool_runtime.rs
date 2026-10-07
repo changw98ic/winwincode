@@ -23,7 +23,7 @@ impl StateRuntime {
             cell_id.len() <= 1024 && scope_id.len() <= 1024,
             "cell identity exceeds limit"
         );
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let parent: i64 = sqlx::query_scalar("SELECT r.sequence FROM tool_requests r JOIN tool_attempts a ON a.request_sequence = r.sequence WHERE r.thread_id = ? AND r.logical_id = ? AND a.owner_id = ? AND a.execution = 'running'")
             .bind(thread_id).bind(parent_logical_id).bind(owner_id).fetch_one(&mut *tx).await?;
         let row = sqlx::query("INSERT INTO tool_runtime_cells(thread_id, parent_request_sequence, cell_id, scope_id, owner_id, lifecycle) VALUES (?, ?, ?, ?, ?, 'live') RETURNING *")
@@ -49,7 +49,7 @@ impl StateRuntime {
         scope_id: &str,
         owner_id: &str,
     ) -> anyhow::Result<Option<ToolWaitFact>> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let waiter: i64 = sqlx::query_scalar("SELECT r.sequence FROM tool_requests r JOIN tool_attempts a ON a.request_sequence = r.sequence WHERE r.thread_id = ? AND r.logical_id = ? AND a.owner_id = ? AND a.execution = 'running'")
             .bind(thread_id).bind(waiter_logical_id).bind(owner_id).fetch_one(&mut *tx).await?;
         let target: Option<i64> = sqlx::query_scalar("SELECT sequence FROM tool_runtime_cells WHERE thread_id = ? AND cell_id = ? AND scope_id = ? AND owner_id = ? AND lifecycle = 'live'")
@@ -86,7 +86,7 @@ impl StateRuntime {
         waiter: i64,
         owner_id: &str,
     ) -> anyhow::Result<()> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let row = sqlx::query("UPDATE tool_runtime_waits SET state = 'settled', revision = revision + 1 WHERE waiter_request_sequence = ? AND owner_id = ? AND state = 'waiting' AND EXISTS(SELECT 1 FROM tool_requests WHERE sequence = ? AND thread_id = ?) RETURNING target_cell_sequence, revision")
             .bind(waiter).bind(owner_id).bind(waiter).bind(thread_id).fetch_one(&mut *tx).await?;
         let fact = ToolWaitFact {
@@ -112,7 +112,7 @@ impl StateRuntime {
         scope_id: &str,
         owner_id: &str,
     ) -> anyhow::Result<()> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let row = sqlx::query("UPDATE tool_runtime_cells SET lifecycle = 'closed', revision = revision + 1 WHERE thread_id = ? AND cell_id = ? AND scope_id = ? AND owner_id = ? AND lifecycle = 'live' RETURNING *")
             .bind(thread_id).bind(cell_id).bind(scope_id).bind(owner_id).fetch_optional(&mut *tx).await?;
         if let Some(row) = row {

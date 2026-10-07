@@ -91,6 +91,7 @@ async fn assert_shared_remote_code_mode_host(listen_url: &str) -> Result<()> {
     let codex_home = TempDir::new()?;
     MockResponsesConfig::new(&model_server.uri())
         .enable_feature(Feature::CodeModeOnly)
+        .with_root_config("web_search = \"disabled\"")
         .write(codex_home.path())?;
     let original_config = std::fs::read_to_string(codex_home.path().join("config.toml"))?;
     let mut app_server = TestAppServer::builder()

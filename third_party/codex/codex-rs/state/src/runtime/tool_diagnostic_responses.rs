@@ -13,7 +13,7 @@ impl StateRuntime {
         response_digest: &str,
     ) -> anyhow::Result<()> {
         anyhow::ensure!(response_digest.len() == 64, "invalid model response digest");
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let rows = sqlx::query("SELECT diagnostic_id, evidence_version, boundary FROM (SELECT f.diagnostic_id, f.evidence_version, f.boundary_request_sequence AS boundary, ROW_NUMBER() OVER (PARTITION BY f.diagnostic_id ORDER BY f.evidence_version DESC, f.boundary_request_sequence DESC) AS ordinal FROM tool_diagnostic_feedback f JOIN tool_requests r ON r.sequence = f.boundary_request_sequence WHERE f.thread_id = ? AND r.request_json ->> '$.turn_id' = ? AND f.offered = 1) WHERE ordinal = 1")
             .bind(thread_id).bind(turn_id).fetch_all(&mut *tx).await?;
         for row in rows {

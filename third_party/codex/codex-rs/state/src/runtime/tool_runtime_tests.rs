@@ -148,3 +148,46 @@ async fn foreign_owner_and_unknown_cell_cannot_create_trusted_wait_edges() {
             .all(|event| !matches!(event.fact, ToolRuntimeFact::Wait(_)))
     );
 }
+
+#[tokio::test]
+async fn cell_wait_creation_waits_for_the_current_writer_before_reading_its_snapshot() {
+    let home = unique_temp_dir();
+    let store = StateRuntime::init(
+        SqliteConfig::new_for_testing(home.as_path().abs()),
+        "test".into(),
+    )
+    .await
+    .unwrap();
+    let parent = request(&store, "exec").await;
+    store
+        .open_tool_cell("thread", "exec", "cell", "scope", "owner")
+        .await
+        .unwrap();
+    let waiter = request(&store, "wait").await;
+    let mut writer = store.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    sqlx::query("UPDATE tool_requests SET binding = binding WHERE sequence = ?")
+        .bind(parent)
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+    let waiting_store = store.clone();
+    let mut waiting = tokio::spawn(async move {
+        waiting_store
+            .begin_tool_cell_wait("thread", "wait", "cell", "scope", "owner")
+            .await
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut waiting)
+            .await
+            .is_err(),
+        "wait creation must wait for the writer instead of failing a read-to-write upgrade"
+    );
+    writer.commit().await.unwrap();
+    let fact = waiting.await.unwrap().unwrap().unwrap();
+    assert_eq!(fact.waiter_request_sequence, waiter);
+    assert_eq!(fact.state, ToolWaitState::Waiting);
+    store
+        .settle_tool_cell_wait("thread", waiter, "owner")
+        .await
+        .unwrap();
+}

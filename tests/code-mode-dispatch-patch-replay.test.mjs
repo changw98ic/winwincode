@@ -14,6 +14,9 @@ const patches = sourceLock.patches.filter(({ id }) => id.startsWith('codex-code-
 // Measured from P1 commit a3533326af80d7aa0b19bfdf89ba54575dfe1b74.
 const originalHashes = {
   "codex-rs/Cargo.lock": "058e337a1f6ffd2abe4e520a70bcecbed51cfa4078e67f14dc8d5fed94953d65",
+  "codex-rs/app-server/tests/suite/v2/code_mode_host.rs": "09cd91e4f8c47a1bd48a7641b2af9b5f0f7ce02a70d995418d3f1dbffb0960b4",
+  "codex-rs/app-server/tests/suite/v2/imagegen_extension.rs": "e32b57ab4c9541b13903c0220debcb276029de9f0bcf5174a579a10c89156aa1",
+  "codex-rs/app-server/tests/suite/v2/turn_start.rs": "3d946838f8e58b753a37330918cc183bc79d0791d4164182e5c9f982d5cb6034",
   "codex-rs/codex-mcp/src/binding.rs": "a6a65c0634c19136c774814154b66b6bc9c32f679d55bc36e7c8560fc55081e7",
   "codex-rs/codex-mcp/src/binding_clients.rs": "6902fce3a1e34922a6964b522a47de4041b8251eefad0504627017fb19f06856",
   "codex-rs/core-api/src/lib.rs": "4b23373a367bad795290f210da5cac8ab50a692e400564e6ba78ea42c08af454",
@@ -136,6 +139,7 @@ const originalHashes = {
   "codex-rs/state/src/tool_execution.rs": null,
   "codex-rs/state/src/tool_runtime.rs": null,
   "codex-rs/state/src/tool_sharing.rs": null,
+  "codex-rs/tui/src/version.rs": "c908ba75a710fb92d84995f8b512f109930501e2cba8f04a33f41b4bd3c9cbb6",
   "codex-rs/v8-poc/Cargo.toml": "e98d307ee1683087debb02cf5fba46cc1a23177a25cd6b03f74f1539239312c9",
   "codex-rs/v8-poc/src/lib.rs": "7121f241941ebc18758bbc9dbfb0848a9ea25a93a65eecd34c890fc86ccecfcc"
 }
@@ -199,7 +203,7 @@ test('the tool runtime patch stack reproduces every changed dispatch file from t
 test('the tool runtime manifest and ordered patch digests describe the dispatch sources', () => {
   const applied = sourceLock.patches.filter(({ file, planned }) => file.startsWith('upstream/patches/codex/') && !planned)
   assert.deepEqual(manifest.patchesApplied, applied.map(({ file }) => file))
-  assert.equal(patches.length, 52)
+  assert.equal(patches.length, 54)
   assert.deepEqual([...new Set(patches.flatMap(({ targets }) => targets))].sort(), Object.keys(originalHashes).sort())
   for (const patch of patches) {
     assert.equal(digest(readFileSync(join(root, patch.file))), patch.patchSha256, patch.file)

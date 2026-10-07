@@ -127,13 +127,14 @@ fn test_codex() -> TestCodexBuilder {
 }
 
 fn custom_tool_output_items(req: &ResponsesRequest, call_id: &str) -> Vec<Value> {
-    match req.custom_tool_call_output(call_id).get("output") {
+    let items = match req.custom_tool_call_output(call_id).get("output") {
         Some(Value::Array(items)) => items.clone(),
         Some(Value::String(text)) => {
             vec![serde_json::json!({ "type": "input_text", "text": text })]
         }
         _ => panic!("custom tool output should be serialized as text or content items"),
-    }
+    };
+    runtime_output_items(items)
 }
 
 fn tool_names(body: &Value) -> Vec<String> {
@@ -154,13 +155,80 @@ fn tool_names(body: &Value) -> Vec<String> {
 }
 
 fn function_tool_output_items(req: &ResponsesRequest, call_id: &str) -> Vec<Value> {
-    match req.function_call_output(call_id).get("output") {
+    let items = match req.function_call_output(call_id).get("output") {
         Some(Value::Array(items)) => items.clone(),
         Some(Value::String(text)) => {
             vec![serde_json::json!({ "type": "input_text", "text": text })]
         }
         _ => panic!("function tool output should be serialized as text or content items"),
+    };
+    runtime_output_items(items)
+}
+
+fn runtime_output_items(mut items: Vec<Value>) -> Vec<Value> {
+    // Check Core feedback while preserving exact runtime payload assertions.
+    while let Some(text) = items
+        .last()
+        .and_then(|item| item.get("text"))
+        .and_then(Value::as_str)
+    {
+        let (kind, payload_key, limit) = if text.starts_with("<core_tool_receipts>") {
+            ("core_tool_receipts", "receipts", 4)
+        } else if text.starts_with("<model_behavior_diagnosis>") {
+            ("model_behavior_diagnosis", "diagnostics", 2)
+        } else {
+            break;
+        };
+        let payload = text
+            .strip_prefix(&format!("<{kind}>"))
+            .and_then(|text| text.strip_suffix(&format!("</{kind}>")))
+            .expect("Core feedback should have complete fragment markers");
+        let feedback: Value = serde_json::from_str(payload).expect("Core feedback should be JSON");
+        assert_eq!(feedback["type"], kind);
+        assert_eq!(feedback["schema_version"], 1);
+        let entries = feedback[payload_key]
+            .as_array()
+            .expect("Core feedback should contain evidence references");
+        assert!(!entries.is_empty() && entries.len() <= limit);
+        if kind == "core_tool_receipts" {
+            for receipt in entries {
+                assert!(
+                    receipt["source_id"]
+                        .as_str()
+                        .is_some_and(|id| !id.is_empty() && id.len() <= 80)
+                );
+                assert!(
+                    receipt["tool"]
+                        .as_str()
+                        .is_some_and(|tool| !tool.is_empty() && tool.chars().count() <= 64)
+                );
+                assert!(
+                    receipt["request_sequence"]
+                        .as_i64()
+                        .is_some_and(|sequence| sequence > 0)
+                );
+            }
+        } else {
+            assert_eq!(feedback["assessment"], "possible");
+            for diagnostic in entries {
+                assert!(
+                    diagnostic["diagnostic_id"]
+                        .as_str()
+                        .is_some_and(|id| !id.is_empty() && id.len() <= 80)
+                );
+                assert!(
+                    diagnostic["calls"]
+                        .as_array()
+                        .is_some_and(|calls| calls.len() <= 2)
+                );
+                assert!(diagnostic["question"].as_str().is_some_and(
+                    |question| !question.is_empty() && question.chars().count() <= 256
+                ));
+            }
+        }
+        items.pop();
     }
+    items
 }
 
 fn text_item(items: &[Value], index: usize) -> &str {
@@ -214,20 +282,11 @@ fn custom_tool_output_body_and_success(
 }
 
 fn custom_tool_output_last_non_empty_text(req: &ResponsesRequest, call_id: &str) -> Option<String> {
-    match req.custom_tool_call_output(call_id).get("output") {
-        Some(Value::String(text)) if !text.trim().is_empty() => Some(text.clone()),
-        Some(Value::Array(items)) => items
-            .iter()
-            .filter_map(|item| item.get("text").and_then(Value::as_str))
-            .rfind(|text| !text.trim().is_empty())
-            .map(str::to_string),
-        Some(Value::String(_))
-        | Some(Value::Object(_))
-        | Some(Value::Number(_))
-        | Some(Value::Bool(_))
-        | Some(Value::Null)
-        | None => None,
-    }
+    custom_tool_output_items(req, call_id)
+        .iter()
+        .filter_map(|item| item.get("text").and_then(Value::as_str))
+        .rfind(|text| !text.trim().is_empty())
+        .map(str::to_string)
 }
 
 async fn run_code_mode_turn(
