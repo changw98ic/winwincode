@@ -558,7 +558,7 @@ fn materialize_extensions(
                 let mut config = mcp_connection::validate(&entry.data)?;
                 config.enabled = true;
                 config.enabled_tools = Some(projection.tool_names.clone());
-                if std::env::var("WWC_BENCHMARK_TOOL_REPEAT_GUARD").as_deref() == Ok("1") {
+                if std::env::var("WWC_BENCHMARK_SEALED_TOOLS").as_deref() == Ok("1") {
                     config.tool_timeout_sec = Some(std::time::Duration::ZERO);
                 }
                 servers.insert(entry.id.clone(), config);

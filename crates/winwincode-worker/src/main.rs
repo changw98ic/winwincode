@@ -422,6 +422,17 @@ fn production_codex(
     let extensions = store.restore_extensions(&data_directory.join("codex-runtime/kernel-home"))?;
     let mut discovered_capabilities = Vec::new();
     for server in extensions {
+        for operation in winwincode_execution_port::mcp_resource::McpResourceOperation::ALL {
+            discovered_capabilities.push(
+                winwincode_execution_port::capability_adapter::CapabilityDescriptor::mcp_resource(
+                    &server.server,
+                    operation,
+                    server.digest.trim_start_matches("sha256:"),
+                    winwincode_execution_port::capability_adapter::CapabilityHealth::Healthy,
+                    winwincode_execution_port::capability_adapter::CapabilityOrigin::CodexCoreMcp,
+                )?,
+            );
+        }
         for tool in server.tools {
             discovered_capabilities.push(
                 winwincode_execution_port::capability_adapter::CapabilityDescriptor::mcp(
@@ -463,11 +474,11 @@ fn production_codex(
         observer_mode,
     };
     let mut config = ProductionCodexConfig::try_new(options)?;
-    if let Some(value) = env::var_os("WWC_BENCHMARK_TOOL_REPEAT_GUARD") {
+    if let Some(value) = env::var_os("WWC_BENCHMARK_SEALED_TOOLS") {
         if value != "1" {
-            return Err("invalid benchmark tool repeat guard".into());
+            return Err("invalid benchmark sealed tools".into());
         }
-        config = config.with_benchmark_tool_repeat_guard();
+        config = config.with_sealed_benchmark_tools();
     }
     if let Some(effort) = env::var_os("WWC_WORKER_MODEL_REASONING_EFFORT") {
         config =

@@ -698,7 +698,7 @@ mod tests {
             .expect("MCP definitions should be cached");
         assert_eq!(first.len(), 1);
         assert!(first[0].input_schema.is_some());
-        assert!(first[0].output_schema.is_none());
+        assert!(first[0].output_schema.is_some());
 
         let second = handler
             .cached_code_mode_definitions()

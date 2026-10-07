@@ -13,7 +13,7 @@ use serde_json::{Map, Value, json};
 
 use crate::provider_anthropic::{
     AnthropicCodecError, AnthropicMessagesOptions, AnthropicToolBindings, PreparedAnthropicRequest,
-    ProviderTokenPricing, array, exact_keys, object, optional_string, prepare_anthropic_request,
+    ProviderTokenPricing, array, exact_keys, normalize_messages_request, object, optional_string,
     required, string, validate_text, validate_token,
 };
 use crate::{
@@ -22,6 +22,10 @@ use crate::{
 
 const MAX_REQUEST_TEXT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+
+#[cfg(test)]
+#[path = "provider_media_tests.rs"]
+mod media_tests;
 
 /// Translates one Codex `ModelStreamRequest` payload into an `OpenAI` chat body.
 ///
@@ -33,10 +37,8 @@ pub(crate) fn prepare_openai_chat_request(
     upstream_model_id: &str,
     options: AnthropicMessagesOptions,
 ) -> Result<PreparedAnthropicRequest, AnthropicCodecError> {
-    let prepared = prepare_anthropic_request(payload, upstream_model_id, options)?;
-    let normalized: Value = serde_json::from_slice(&prepared.body)
-        .map_err(|_| AnthropicCodecError::invalid_request())?;
-    let normalized = object(&normalized)?;
+    let prepared = normalize_messages_request(payload, upstream_model_id, options)?;
+    let normalized = object(&prepared.body)?;
     let request: Value =
         serde_json::from_slice(payload).map_err(|_| AnthropicCodecError::invalid_request())?;
     let mut body = json!({
@@ -99,7 +101,8 @@ fn openai_messages(
         let mut text_parts: Vec<String> = Vec::new();
         let mut tool_calls: Vec<Value> = Vec::new();
         let mut tool_results: Vec<Value> = Vec::new();
-        let mut images: Vec<Value> = Vec::new();
+        let mut tool_media: Vec<Value> = Vec::new();
+        let mut media_parts: Vec<Value> = Vec::new();
         for block in blocks {
             let block = object(block)?;
             match string(block, "type")? {
@@ -126,23 +129,18 @@ fn openai_messages(
                 "tool_result" => {
                     let id = string(block, "tool_use_id")?;
                     let content = required(block, "content")?;
-                    let text = flatten_tool_result_text(content)?;
+                    let (text, media) = tool_result_content(content, id)?;
                     tool_results.push(json!({
                         "role": "tool",
                         "tool_call_id": id,
                         "content": text,
                     }));
+                    tool_media.extend(media);
                 }
                 "image" => {
-                    let source = object(required(block, "source")?)?;
-                    exact_keys(source, &["type", "media_type", "data"])?;
-                    let media_type = string(source, "media_type")?;
-                    let data = string(source, "data")?;
-                    images.push(json!({
-                        "type": "image_url",
-                        "image_url": {"url": format!("data:{media_type};base64,{data}")},
-                    }));
+                    media_parts.push(openai_image(block)?);
                 }
+                "audio" => media_parts.push(crate::provider_media::openai_audio(block)?),
                 _ => return Err(AnthropicCodecError::invalid_request()),
             }
         }
@@ -150,16 +148,16 @@ fn openai_messages(
             for result in tool_results {
                 messages.push(result);
             }
-            if !text_parts.is_empty() || !images.is_empty() {
-                let mut content: Vec<Value> = Vec::new();
+            if !text_parts.is_empty() || !media_parts.is_empty() || !tool_media.is_empty() {
+                let mut content = tool_media;
                 if !text_parts.is_empty() {
-                    if images.is_empty() && text_parts.len() == 1 {
+                    if content.is_empty() && media_parts.is_empty() && text_parts.len() == 1 {
                         messages.push(json!({"role": "user", "content": text_parts[0]}));
                         continue;
                     }
                     content.push(json!({"type": "text", "text": text_parts.join("\n")}));
                 }
-                content.extend(images);
+                content.extend(media_parts);
                 messages.push(json!({"role": "user", "content": content}));
             }
         } else if role == "assistant" {
@@ -186,28 +184,69 @@ fn openai_messages(
     Ok(messages)
 }
 
-fn flatten_tool_result_text(content: &Value) -> Result<String, AnthropicCodecError> {
+fn tool_result_content(
+    content: &Value,
+    call_id: &str,
+) -> Result<(String, Vec<Value>), AnthropicCodecError> {
     if let Some(text) = content.as_str() {
         validate_text(text)?;
-        return Ok(text.to_owned());
+        return Ok((text.to_owned(), Vec::new()));
     }
     let blocks = content
         .as_array()
         .ok_or_else(AnthropicCodecError::invalid_request)?;
     let mut parts = Vec::new();
+    let mut media = Vec::new();
+    let mut has_media = false;
     for block in blocks {
         let block = object(block)?;
-        exact_keys(block, &["type", "text"])?;
-        if string(block, "type")? != "text" {
-            return Err(AnthropicCodecError::invalid_request());
-        }
-        let text = string(block, "text")?;
-        validate_text(text)?;
-        if !text.is_empty() {
-            parts.push(text.to_owned());
+        match string(block, "type")? {
+            "text" => {
+                exact_keys(block, &["type", "text"])?;
+                let text = string(block, "text")?;
+                validate_text(text)?;
+                if !text.is_empty() {
+                    parts.push(text.to_owned());
+                }
+                media.push(json!({"type":"text", "text":text}));
+            }
+            "image" => {
+                has_media = true;
+                media.push(openai_image(block)?);
+            }
+            "audio" => {
+                has_media = true;
+                media.push(crate::provider_media::openai_audio(block)?);
+            }
+            _ => return Err(AnthropicCodecError::invalid_request()),
         }
     }
-    Ok(parts.join("\n"))
+    // Chat tool messages accept text only. A matched receipt precedes the
+    // mixed content, whose source marker and block order remain intact.
+    if has_media {
+        Ok((format!("Tool call source_id: {call_id}"), media))
+    } else {
+        Ok((parts.join("\n"), Vec::new()))
+    }
+}
+
+fn openai_image(block: &Map<String, Value>) -> Result<Value, AnthropicCodecError> {
+    exact_keys(block, &["type", "source", "detail"])?;
+    let source = object(required(block, "source")?)?;
+    exact_keys(source, &["type", "media_type", "data"])?;
+    if string(source, "type")? != "base64" {
+        return Err(AnthropicCodecError::invalid_request());
+    }
+    let media_type = string(source, "media_type")?;
+    let data = string(source, "data")?;
+    let mut image = json!({
+        "type": "image_url",
+        "image_url": {"url": format!("data:{media_type};base64,{data}")},
+    });
+    if let Some(detail) = block.get("detail") {
+        image["image_url"]["detail"] = detail.clone();
+    }
+    Ok(image)
 }
 
 /// Parsed `OpenAI` chat stream: canonical events plus a terminal fact.
@@ -885,6 +924,7 @@ fn usage_number(object: &Map<String, Value>, key: &str) -> Result<u64, Anthropic
 mod tests {
     use super::*;
     use crate::provider_anthropic::ProviderTokenPricing;
+    use crate::provider_anthropic::prepare_anthropic_request;
 
     fn options() -> AnthropicMessagesOptions {
         AnthropicMessagesOptions {
@@ -921,6 +961,93 @@ mod tests {
             }
         }))
         .expect("payload")
+    }
+
+    #[test]
+    fn code_mode_controls_and_resumed_history_survive_both_provider_routes() {
+        let source = "text(await tools.repository__lookup({path:'src/lib.rs'}));";
+        let waiting = "Script running with cell ID cell-1";
+        let completed = "Script completed";
+        let mut payload: Value = serde_json::from_slice(&canonical_payload()).unwrap();
+        payload["request"]["tools"] = json!([
+            {"type":"custom", "name":"exec", "description":"Run JavaScript",
+                "format":{"type":"grammar","syntax":"lark","definition":"start: /.+/"}},
+            {"type":"function", "name":"wait", "description":"Wait for a cell",
+                "parameters":{"type":"object","properties":{"cell_id":{"type":"string"}},"required":["cell_id"]}}
+        ]);
+        payload["request"]["input"].as_array_mut().unwrap().extend([
+            json!({"type":"custom_tool_call","name":"exec","call_id":"exec-1","input":source}),
+            json!({"type":"custom_tool_call_output","call_id":"exec-1","output":waiting}),
+            json!({"type":"function_call","name":"wait","call_id":"wait-1","arguments":"{\"cell_id\":\"cell-1\"}"}),
+            json!({"type":"function_call_output","call_id":"wait-1","output":completed}),
+        ]);
+        let bytes = serde_json::to_vec(&payload).unwrap();
+        let openai = prepare_openai_chat_request(&bytes, "fixture-model", options()).unwrap();
+        let anthropic = prepare_anthropic_request(&bytes, "fixture-model", options()).unwrap();
+        let openai: Value = serde_json::from_slice(&openai.body).unwrap();
+        let anthropic: Value = serde_json::from_slice(&anthropic.body).unwrap();
+        assert_eq!(
+            openai["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tool| tool["function"]["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["exec", "wait"],
+        );
+        assert_eq!(
+            anthropic["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tool| tool["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["exec", "wait"],
+        );
+        let openai_calls = openai["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|message| message["tool_calls"].as_array().into_iter().flatten())
+            .map(|call| {
+                (
+                    call["id"].as_str().unwrap(),
+                    call["function"]["arguments"].as_str().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            openai_calls,
+            [
+                (
+                    "exec-1",
+                    serde_json::to_string(&json!({"input":source}))
+                        .unwrap()
+                        .as_str()
+                ),
+                ("wait-1", "{\"cell_id\":\"cell-1\"}"),
+            ]
+        );
+        let anthropic_calls = anthropic["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|message| message["content"].as_array().into_iter().flatten())
+            .filter(|block| block["type"] == "tool_use")
+            .map(|block| (block["id"].clone(), block["input"].clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            anthropic_calls,
+            [
+                (json!("exec-1"), json!({"input":source})),
+                (json!("wait-1"), json!({"cell_id":"cell-1"})),
+            ]
+        );
+        for body in [&openai, &anthropic] {
+            let history = body["messages"].to_string();
+            assert!(history.contains(waiting));
+            assert!(history.contains(completed));
+        }
     }
 
     #[test]

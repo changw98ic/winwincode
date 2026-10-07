@@ -11,6 +11,7 @@ mod jev_context;
 mod provider_anthropic;
 mod provider_codex;
 pub mod provider_https_sse;
+mod provider_media;
 mod provider_openai;
 mod provider_sse_framing;
 pub mod provider_stream;

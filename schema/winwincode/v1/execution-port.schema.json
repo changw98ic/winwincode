@@ -100,11 +100,6 @@
       "pattern": "^[1-9][0-9]{0,19}$",
       "description": "Monotonically increasing decimal token encoded as a string to preserve 64-bit precision."
     },
-    "ExecutionSequence": {
-      "type": "integer",
-      "minimum": 1,
-      "maximum": 9007199254740991
-    },
     "ExecutionAckSequence": {
       "type": "integer",
       "minimum": 0,
@@ -639,7 +634,7 @@
           "$ref": "#/$defs/ExecutionEventId"
         },
         "sequence": {
-          "$ref": "#/$defs/ExecutionSequence"
+          "$ref": "./domain.schema.json#/$defs/ExecutionSequence"
         },
         "occurredAt": {
           "$ref": "./domain.schema.json#/$defs/Instant"
@@ -1166,7 +1161,7 @@
           "$ref": "./domain.schema.json#/$defs/WorkerInstanceId"
         },
         "heartbeatSequence": {
-          "$ref": "#/$defs/ExecutionSequence"
+          "$ref": "./domain.schema.json#/$defs/ExecutionSequence"
         },
         "observedAt": {
           "$ref": "./domain.schema.json#/$defs/Instant"
@@ -1223,7 +1218,7 @@
           "$ref": "./domain.schema.json#/$defs/WorkerInstanceId"
         },
         "heartbeatSequence": {
-          "$ref": "#/$defs/ExecutionSequence"
+          "$ref": "./domain.schema.json#/$defs/ExecutionSequence"
         },
         "status": {
           "type": "string",
@@ -1497,7 +1492,7 @@
           "$ref": "#/$defs/ExecutionAckSequence"
         },
         "replayFromSequence": {
-          "$ref": "#/$defs/ExecutionSequence"
+          "$ref": "./domain.schema.json#/$defs/ExecutionSequence"
         },
         "error": {
           "$ref": "#/$defs/ExecutionPortError"
@@ -1703,7 +1698,7 @@
           "$ref": "./domain.schema.json#/$defs/ArtifactId"
         },
         "sequence": {
-          "$ref": "#/$defs/ExecutionSequence"
+          "$ref": "./domain.schema.json#/$defs/ExecutionSequence"
         },
         "payload": {
           "$ref": "#/$defs/EncodedPayload"
@@ -1768,7 +1763,7 @@
           "$ref": "#/$defs/ExecutionAckSequence"
         },
         "replayFromSequence": {
-          "$ref": "#/$defs/ExecutionSequence"
+          "$ref": "./domain.schema.json#/$defs/ExecutionSequence"
         },
         "error": {
           "$ref": "#/$defs/ExecutionPortError"
@@ -1926,7 +1921,7 @@
           "$ref": "#/$defs/ModelExchangeId"
         },
         "sequence": {
-          "$ref": "#/$defs/ExecutionSequence"
+          "$ref": "./domain.schema.json#/$defs/ExecutionSequence"
         },
         "payload": {
           "$ref": "#/$defs/EncodedPayload"
@@ -1990,7 +1985,7 @@
           "$ref": "#/$defs/ExecutionAckSequence"
         },
         "replayFromSequence": {
-          "$ref": "#/$defs/ExecutionSequence"
+          "$ref": "./domain.schema.json#/$defs/ExecutionSequence"
         },
         "error": {
           "$ref": "#/$defs/ExecutionPortError"
@@ -7773,7 +7768,7 @@
           "$ref": "#/$defs/DebugProbeIdentity"
         },
         "sequence": {
-          "$ref": "#/$defs/ExecutionSequence"
+          "$ref": "./domain.schema.json#/$defs/ExecutionSequence"
         },
         "kind": {
           "$ref": "#/$defs/ProbeExecutionEventKind"
@@ -7857,7 +7852,7 @@
           "$ref": "#/$defs/DebugProbeRoundAuthority"
         },
         "sequence": {
-          "$ref": "#/$defs/ExecutionSequence"
+          "$ref": "./domain.schema.json#/$defs/ExecutionSequence"
         },
         "kind": {
           "$ref": "#/$defs/ProbeRoundEventKind"
@@ -9046,7 +9041,7 @@
           "$ref": "#/$defs/DebugSessionStatus"
         },
         "eventSequence": {
-          "$ref": "#/$defs/ExecutionSequence"
+          "$ref": "./domain.schema.json#/$defs/ExecutionSequence"
         },
         "lastEventDigest": {
           "$ref": "./domain.schema.json#/$defs/Sha256Digest"
@@ -9741,7 +9736,7 @@
           "$ref": "#/$defs/DebugHypothesisLedgerEventKind"
         },
         "sequence": {
-          "$ref": "#/$defs/ExecutionSequence"
+          "$ref": "./domain.schema.json#/$defs/ExecutionSequence"
         },
         "authority": {
           "$ref": "#/$defs/DebugProbeRoundAuthority"
@@ -10617,6 +10612,36 @@
       "description": "Starts the exact planned verification only after Control Plane has committed this canonical Snapshot and binding.",
       "x-direction": "control-plane-to-worker",
       "x-authority": "control-command"
+    },
+    "CoreToolRuntimeFactPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Original payload-free Codex Core tool fact carried by a lease-bound runtime.event. The source cursor is independent of the Worker transport sequence.",
+      "properties": {
+        "schemaVersion": {
+          "type": "string",
+          "const": "winwincode.core-tool-fact.v1"
+        },
+        "sourceThreadId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "sourceSequence": {
+          "$ref": "./domain.schema.json#/$defs/ExecutionSequence"
+        },
+        "factJson": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32768
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "sourceThreadId",
+        "sourceSequence",
+        "factJson"
+      ]
     }
   }
 }

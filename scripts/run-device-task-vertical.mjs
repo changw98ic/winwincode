@@ -126,7 +126,7 @@ export function fusionDeviceProviders(profile, environment = process.env) {
 export function benchmarkDeviceEnvironment(configuration, settings = {}, environment = process.env) {
   validateBenchmarkConfiguration(configuration)
   const result = { PYTHONDONTWRITEBYTECODE: '1',
-    WWC_WORKER_MODEL_REASONING_EFFORT: 'max', WWC_BENCHMARK_TOOL_REPEAT_GUARD: '1',
+    WWC_WORKER_MODEL_REASONING_EFFORT: 'max', WWC_BENCHMARK_SEALED_TOOLS: '1',
     WWC_WORKER_FUSION: undefined, WWC_WORKER_JEV_CONTEXT: undefined,
     WWC_WORKER_JEV_JUDGE: undefined, WWC_DEVICE_JEV_SETTINGS_FILE: undefined,
     WWC_DEVICE_PROVIDER_HTTPS_PROXY: environment.WWC_DEVICE_PROVIDER_HTTPS_PROXY }
@@ -315,38 +315,6 @@ export function pendingDeviceTaskWorkRuns(directory, deliveryId) {
   } finally { database.close() }
 }
 
-// A durable Core stop belongs to one task. Cancel its own Controller work and
-// source Session through product commands; the shared Server/Device stays live.
-export async function cancelStoppedDeviceTask(api, directory, deliveryId, productSessionId) {
-  const aggregate = (await api.query('workrun.get', { deliveryId, workItemId: null, atCursor: null })).result
-  assert.equal(aggregate.readCursor.deliveryId, deliveryId)
-  const pending = new Set([...aggregate.runs.filter(run => ['queued', 'leased', 'running'].includes(run.state))
-    .map(run => run.id), ...pendingDeviceTaskWorkRuns(directory, deliveryId)])
-  const cancelled = []
-  for (const workRunId of pending) {
-    for (let attempt = 0; ; attempt++) {
-      const detail = (await api.query('delivery.get', { deliveryId })).result
-      assert.equal(detail.deliveryId, deliveryId)
-      try {
-        const result = await api.command('workrun.cancel', detail.deliveryRevision, { deliveryId, workRunId })
-        assert.equal(result.outcome, 'completed')
-        cancelled.push(workRunId)
-        break
-      } catch (error) {
-        if (error.code !== 'REVISION_CONFLICT' || attempt >= 9) throw error
-      }
-    }
-  }
-  const source = (await api.query('session.get', { productSessionId })).result
-  assert.equal(source.id, productSessionId)
-  if (source.state !== 'cancelled') {
-    const result = await api.command('session.cancel', source.revision, {
-      productSessionId, reason: 'Core stopped this task at the repeated-tool admission limit.',
-    })
-    assert.equal(result.outcome, 'completed')
-  }
-  return { deliveryId, productSessionId, workRunIds: cancelled, sourceState: 'cancelled' }
-}
 
 export async function runDeviceTaskVertical({
   directory: requestedDirectory,
@@ -457,7 +425,7 @@ export async function runDeviceTaskVertical({
   if (input) {
     assert.equal(useDeviceDeterministic, false, 'explicit task input requires an external Provider')
     assert.equal(deviceAgentEnvironment.WWC_WORKER_MODEL_REASONING_EFFORT, 'max', 'explicit tasks require max')
-    assert.equal(deviceAgentEnvironment.WWC_BENCHMARK_TOOL_REPEAT_GUARD, '1', 'explicit tasks require the repeated-tool guard')
+    assert.equal(deviceAgentEnvironment.WWC_BENCHMARK_SEALED_TOOLS, '1', 'explicit benchmark tasks require sealed tools')
   }
 
   if (registerLaunch !== undefined) {
@@ -592,7 +560,6 @@ export async function runDeviceTaskVertical({
       strictLaunchAnchor: true,
       pendingDeviceWorkRunIds: () => [...new Set([...anchored.keys(),
         ...pendingDeviceTaskWorkRuns(directory, deliveryId)])],
-      assertRunning: devicePath.assertBenchmarkRunning,
       onProjection: ({ detail, workRunAggregate }) => {
         if (report.delivery?.detail?.readCursor?.token === detail.readCursor?.token) return
         report.delivery = { detail, workRunAggregate }
@@ -600,7 +567,6 @@ export async function runDeviceTaskVertical({
         save()
       },
       onActiveWorkRuns: async runs => {
-        devicePath.assertBenchmarkRunning(runs)
         report.workRuns = runs
         save()
         for (const run of runs) checkDispatchFailure(run.id)
@@ -701,22 +667,6 @@ export async function runDeviceTaskVertical({
     save()
     return report
   } catch (error) {
-    if (runtime !== null && error?.code === 'STUCK_TOOL_REPEAT_LIMIT') {
-      try {
-        report.taskCancellation = await cancelStoppedDeviceTask(runtime.api, directory, deliveryId, productSessionId)
-      } catch {
-        error = Object.assign(new Error('Stopped task cancellation is not confirmed'), {
-          code: 'DEVICE_TASK_CANCEL_UNRESOLVED',
-        })
-      }
-      if (report.taskCancellation && report.publicSmoke) {
-        try {
-          report.publicSmokeRemoval = await removeDevicePublicSmoke({
-            api: runtime.api, publicClientId: report.publicClientId, id: report.publicSmoke.id,
-          })
-        } catch { report.publicSmokeRemoval = { outcome: 'unknown' } }
-      }
-    }
     report.error = String(error instanceof Error ? error.message : error)
     report.errorCode = error?.code ?? null
     report.errorStatus = Number.isInteger(error?.status) && error.status >= 100 && error.status <= 599

@@ -296,6 +296,64 @@ pub(crate) fn prepare_anthropic_request(
     upstream_model_id: &str,
     options: AnthropicMessagesOptions,
 ) -> Result<PreparedAnthropicRequest, AnthropicCodecError> {
+    let mut normalized = normalize_messages_request(payload, upstream_model_id, options)?;
+    for message in normalized.body["messages"]
+        .as_array_mut()
+        .ok_or_else(AnthropicCodecError::invalid_request)?
+    {
+        for block in message["content"]
+            .as_array_mut()
+            .ok_or_else(AnthropicCodecError::invalid_request)?
+        {
+            let content = if block["type"] == "tool_result" {
+                block["content"]
+                    .as_array_mut()
+                    .ok_or_else(AnthropicCodecError::invalid_request)?
+                    .as_mut_slice()
+            } else {
+                std::slice::from_mut(block)
+            };
+            for item in content {
+                if item["type"] == "audio" {
+                    return Err(AnthropicCodecError::invalid_request().with_diagnostic(
+                        "unsupported_media",
+                        "input_audio",
+                        "$.request.input[]",
+                    ));
+                }
+                if item["type"] == "image" {
+                    item.as_object_mut()
+                        .ok_or_else(AnthropicCodecError::invalid_request)?
+                        .remove("detail");
+                }
+            }
+        }
+    }
+    let body =
+        serde_json::to_vec(&normalized.body).map_err(|_| AnthropicCodecError::invalid_request())?;
+    if body.len() > MAX_REQUEST_TEXT_BYTES {
+        return Err(AnthropicCodecError::size_limit());
+    }
+    Ok(PreparedAnthropicRequest {
+        body,
+        tool_bindings: normalized.tool_bindings,
+    })
+}
+
+/// Shared request validation and normalized message blocks before wire projection.
+pub(crate) struct NormalizedMessagesRequest {
+    pub body: Value,
+    pub tool_bindings: AnthropicToolBindings,
+}
+
+pub(crate) fn normalize_messages_request(
+    payload: &[u8],
+    upstream_model_id: &str,
+    options: AnthropicMessagesOptions,
+) -> Result<NormalizedMessagesRequest, AnthropicCodecError> {
+    if payload.len() > MAX_REQUEST_TEXT_BYTES {
+        return Err(AnthropicCodecError::size_limit());
+    }
     options.validate()?;
     validate_token(upstream_model_id, 256)?;
     if has_local_context_annotation(upstream_model_id) {
@@ -389,13 +447,8 @@ pub(crate) fn prepare_anthropic_request(
             body.insert("tool_choice".to_owned(), tool_choice);
         }
     }
-    let body = serde_json::to_vec(&Value::Object(body))
-        .map_err(|_| AnthropicCodecError::invalid_request())?;
-    if body.len() > MAX_REQUEST_TEXT_BYTES {
-        return Err(AnthropicCodecError::size_limit());
-    }
-    Ok(PreparedAnthropicRequest {
-        body,
+    Ok(NormalizedMessagesRequest {
+        body: Value::Object(body),
         tool_bindings,
     })
 }
@@ -972,6 +1025,9 @@ fn translate_message(
                 }
             }
             "input_image" if role == "user" => blocks.push(image_block(value)?),
+            "input_audio" if role == "user" => {
+                blocks.push(crate::provider_media::normalize_audio(value)?);
+            }
             _ => return Err(AnthropicCodecError::invalid_request()),
         }
     }
@@ -1002,7 +1058,7 @@ fn translate_message(
 fn image_block(value: &Map<String, Value>) -> Result<Value, AnthropicCodecError> {
     exact_keys(value, &["type", "image_url", "detail"])?;
     if value.get("detail").is_some_and(|detail| {
-        !detail.is_null() && !matches!(detail.as_str(), Some("auto" | "low" | "high"))
+        !detail.is_null() && !matches!(detail.as_str(), Some("auto" | "low" | "high" | "original"))
     }) {
         return Err(AnthropicCodecError::invalid_request());
     }
@@ -1019,7 +1075,12 @@ fn image_block(value: &Map<String, Value>) -> Result<Value, AnthropicCodecError>
         content: data.to_owned(),
     }])
     .map_err(|_| AnthropicCodecError::invalid_request())?;
-    Ok(json!({"type":"image", "source":{"type":"base64", "media_type":media_type, "data":data}}))
+    let mut block =
+        json!({"type":"image", "source":{"type":"base64", "media_type":media_type, "data":data}});
+    if let Some(detail) = value.get("detail").filter(|value| !value.is_null()) {
+        block["detail"] = detail.clone();
+    }
+    Ok(block)
 }
 
 fn tool_output(value: &Value) -> Result<Value, AnthropicCodecError> {
@@ -1033,13 +1094,17 @@ fn tool_output(value: &Value) -> Result<Value, AnthropicCodecError> {
     let mut blocks = Vec::with_capacity(values.len());
     for value in values {
         let value = object(value)?;
-        exact_keys(value, &["type", "text"])?;
-        if string(value, "type")? != "input_text" {
-            return Err(AnthropicCodecError::invalid_request());
+        match string(value, "type")? {
+            "input_text" => {
+                exact_keys(value, &["type", "text"])?;
+                let text = string(value, "text")?;
+                validate_text(text)?;
+                blocks.push(json!({"type":"text", "text":text}));
+            }
+            "input_image" => blocks.push(image_block(value)?),
+            "input_audio" => blocks.push(crate::provider_media::normalize_audio(value)?),
+            _ => return Err(AnthropicCodecError::invalid_request()),
         }
-        let text = string(value, "text")?;
-        validate_text(text)?;
-        blocks.push(json!({"type":"text", "text":text}));
     }
     Ok(Value::Array(blocks))
 }

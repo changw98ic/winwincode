@@ -2182,44 +2182,33 @@ async fn drain_in_flight(
 ) -> CodexResult<Option<ChangeBatchHandoff>> {
     let mut handoff = None;
     while let Some(res) = in_flight.next().await {
-        match res {
-            Ok(ToolCallCompletion::Response(response_input)) => {
-                let response_item = response_input.into();
-                sess.record_conversation_items(&turn_context, std::slice::from_ref(&response_item))
-                    .await;
-                mark_thread_memory_mode_polluted_if_external_context(
-                    sess.as_ref(),
-                    turn_context.as_ref(),
-                    &response_item,
-                )
-                .await;
-            }
-            Ok(ToolCallCompletion::Continuation(ToolContinuation::YieldToHost(next))) => {
+        let response_input = match res {
+            Ok(ToolCallCompletion::Response(response)) => response,
+            Ok(ToolCallCompletion::Continuation {
+                response,
+                continuation: ToolContinuation::YieldToHost(next),
+            }) => {
                 if handoff.replace(next).is_some() {
                     return Err(CodexErr::InvalidRequest(
                         "multiple submit_change_batch handoffs in one response".to_string(),
                     ));
                 }
+                response
             }
             Err(err) => {
                 error_or_panic(format!("in-flight tool future failed during drain: {err}"));
+                continue;
             }
-        }
-    }
-    if let Some(handoff) = &handoff {
-        // The delegated tool completes by yielding to the host. Preserve that
-        // fact in history before the next turn can normalize the original call;
-        // patch application and validation are still owned by the host.
-        let response_item = ResponseInputItem::CustomToolCallOutput {
-            call_id: handoff.call_id.clone(),
-            name: Some("submit_change_batch".to_string()),
-            output: codex_protocol::models::FunctionCallOutputPayload::from_text(
-                "ChangeBatch proposal handed to host for application and validation.".to_string(),
-            ),
-        }
-        .into();
+        };
+        let response_item = response_input.into();
         sess.record_conversation_items(&turn_context, std::slice::from_ref(&response_item))
             .await;
+        mark_thread_memory_mode_polluted_if_external_context(
+            sess.as_ref(),
+            turn_context.as_ref(),
+            &response_item,
+        )
+        .await;
     }
     Ok(handoff)
 }

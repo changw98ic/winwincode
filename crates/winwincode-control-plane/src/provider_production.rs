@@ -6,6 +6,9 @@
 //! database. Local and remote transports therefore share one typed core and
 //! neither transport owns Provider, Credential, admission, or retry state.
 
+#[path = "provider_loopback_code_mode.rs"]
+mod code_mode;
+
 use std::{
     collections::BTreeMap,
     fmt, fs,
@@ -68,6 +71,9 @@ const VERIFICATION_BEHAVIOR_MARKER: &str =
 #[derive(Clone, Debug)]
 enum LoopbackResponseProfile {
     PlainText,
+    CodeModeWait {
+        cell_id: String,
+    },
     Planner {
         criterion_ids: Vec<String>,
     },
@@ -82,6 +88,7 @@ enum LoopbackResponseProfile {
         /// product cannot claim `pass` merely because a tool-output item
         /// exists.
         verification_outcome: LoopbackVerificationOutcome,
+        evidence_source_id: Option<String>,
         delivery_spec_id: String,
         delivery_spec_revision: u64,
         candidate_ref: String,
@@ -130,7 +137,7 @@ struct LoopbackVerificationFinding {
 
 #[derive(Serialize)]
 struct LoopbackVerificationEvidenceSource {
-    source_id: &'static str,
+    source_id: String,
 }
 
 #[derive(Serialize)]
@@ -239,6 +246,9 @@ fn loopback_profile(message: &ModelOpenMessage) -> LoopbackResponseProfile {
 }
 
 fn loopback_profile_from_request(request: &serde_json::Value) -> LoopbackResponseProfile {
+    if let Some(cell_id) = code_mode::active_cell(request) {
+        return LoopbackResponseProfile::CodeModeWait { cell_id };
+    }
     let completed = contains_value_with_type(request, "function_call_output")
         || contains_value_with_type(request, "custom_tool_call_output");
 
@@ -253,13 +263,15 @@ fn loopback_profile_from_request(request: &serde_json::Value) -> LoopbackRespons
         let Some(candidate_ref) = work_input.candidate_ref else {
             return LoopbackResponseProfile::PlainText;
         };
-        // The production loopback emits direct shell-command evidence for
-        // this verifier turn.  Keep the model response bound to that exact
-        // event category so the Worker can resolve the source by identity;
-        // the Server only routes the resulting typed frame.
+        let evidence_source_id = code_mode::verification_source_id(request);
         return LoopbackResponseProfile::Verification {
             completed,
-            verification_outcome: loopback_verification_outcome(request),
+            verification_outcome: if evidence_source_id.is_some() {
+                loopback_verification_outcome(request)
+            } else {
+                LoopbackVerificationOutcome::Unknown
+            },
+            evidence_source_id,
             delivery_spec_id: work_input.delivery_spec_id,
             delivery_spec_revision: work_input.delivery_spec_revision,
             candidate_ref,
@@ -285,17 +297,11 @@ fn loopback_profile_from_request(request: &serde_json::Value) -> LoopbackRespons
 
 /// Reads the actual Worker-produced output for the deterministic verification
 /// command.  The embedded Codex protocol serializes the command result as a
-/// plain text `function_call_output`; the exit-code line is therefore the
+/// Code Mode output; the exit-code line is therefore the
 /// durable bridge between the tool result and the Provider's structured
 /// verification product.
 fn loopback_verification_outcome(request: &serde_json::Value) -> LoopbackVerificationOutcome {
-    let Some(output) = find_tool_output(request, "loopback-verification-command") else {
-        return LoopbackVerificationOutcome::Unknown;
-    };
-    let Some(text) = tool_output_text(output) else {
-        return LoopbackVerificationOutcome::Unknown;
-    };
-    let Some(exit_code) = parse_process_exit_code(text) else {
+    let Some(exit_code) = code_mode::exit_code(request) else {
         return LoopbackVerificationOutcome::Unknown;
     };
     if exit_code == 0 {
@@ -305,41 +311,17 @@ fn loopback_verification_outcome(request: &serde_json::Value) -> LoopbackVerific
     }
 }
 
-fn find_tool_output<'value>(
-    value: &'value serde_json::Value,
-    call_id: &str,
-) -> Option<&'value serde_json::Value> {
-    match value {
-        serde_json::Value::Object(values) => {
-            let is_tool_output = values
-                .get("type")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|kind| {
-                    matches!(kind, "function_call_output" | "custom_tool_call_output")
-                });
-            if is_tool_output
-                && values.get("call_id").and_then(serde_json::Value::as_str) == Some(call_id)
-            {
-                return Some(value);
-            }
-            values
-                .values()
-                .find_map(|value| find_tool_output(value, call_id))
-        }
-        serde_json::Value::Array(values) => values
-            .iter()
-            .find_map(|value| find_tool_output(value, call_id)),
-        _ => None,
-    }
-}
-
-fn tool_output_text(output: &serde_json::Value) -> Option<&str> {
+fn tool_output_text(output: &serde_json::Value) -> Option<String> {
     let body = output.get("output")?;
     match body {
-        serde_json::Value::String(text) => Some(text),
-        serde_json::Value::Array(items) => items
-            .iter()
-            .find_map(|item| item.get("text").and_then(serde_json::Value::as_str)),
+        serde_json::Value::String(text) => Some(text.clone()),
+        serde_json::Value::Array(items) => {
+            let parts: Vec<_> = items
+                .iter()
+                .filter_map(|item| item.get("text").and_then(serde_json::Value::as_str))
+                .collect();
+            (!parts.is_empty()).then(|| parts.join("\n"))
+        }
         _ => None,
     }
 }
@@ -534,7 +516,8 @@ fn loopback_response_for_profile(profile: &LoopbackResponseProfile) -> String {
             // real Git tree change rather than a Server-side product.
             String::new()
         }
-        LoopbackResponseProfile::Verification {
+        LoopbackResponseProfile::CodeModeWait { .. }
+        | LoopbackResponseProfile::Verification {
             completed: false, ..
         } => String::new(),
     }
@@ -564,6 +547,7 @@ fn loopback_verification_response(profile: &LoopbackResponseProfile) -> Option<S
     let LoopbackResponseProfile::Verification {
         completed: true,
         verification_outcome,
+        evidence_source_id,
         delivery_spec_id,
         delivery_spec_revision,
         candidate_ref,
@@ -598,9 +582,12 @@ fn loopback_verification_response(profile: &LoopbackResponseProfile) -> Option<S
             criterion_id: criterion_id.clone(),
             verdict,
             explanation,
-            evidence_sources: vec![LoopbackVerificationEvidenceSource {
-                source_id: "loopback-verification-command",
-            }],
+            evidence_sources: evidence_source_id
+                .iter()
+                .map(|source_id| LoopbackVerificationEvidenceSource {
+                    source_id: source_id.clone(),
+                })
+                .collect(),
         })
         .collect();
     Some(
@@ -1128,47 +1115,55 @@ impl StandaloneModelExecutionApplication {
             observed_model_id: None,
             provider_response_id: response_id,
         }];
-        let finish_reason =
-            if let Some((provider_call_id, command)) = loopback_tool_call_for_profile(&profile) {
-                let identity = ProviderToolIdentity::try_new(
-                    ProviderToolKind::Function,
-                    "shell_command".to_owned(),
-                    Some("functions".to_owned()),
-                )
-                .map_err(|_| runtime_failure())?;
-                let arguments = serde_json::json!({
-                    "command": command,
-                    "workdir": ".",
-                })
-                .to_string();
-                events.push(ProviderStreamEvent::ToolCallStarted {
+        let tool_call = if let LoopbackResponseProfile::CodeModeWait { cell_id } = &profile {
+            Some((
+                format!(
+                    "loopback-wait-{:x}",
+                    Sha256::digest(open.adapter_request_id.as_bytes())
+                ),
+                ProviderToolIdentity::try_new(ProviderToolKind::Function, "wait".to_owned(), None)
+                    .map_err(|_| runtime_failure())?,
+                serde_json::json!({"cell_id":cell_id,"yield_time_ms":10000}).to_string(),
+            ))
+        } else if let Some((call_id, command)) = loopback_tool_call_for_profile(&profile) {
+            Some((
+                call_id.to_owned(),
+                ProviderToolIdentity::try_new(ProviderToolKind::Custom, "exec".to_owned(), None)
+                    .map_err(|_| runtime_failure())?,
+                code_mode::shell_source(&command),
+            ))
+        } else {
+            None
+        };
+        let finish_reason = if let Some((provider_call_id, identity, arguments)) = tool_call {
+            events.push(ProviderStreamEvent::ToolCallStarted {
+                index: 0,
+                provider_call_id: provider_call_id.clone(),
+                identity,
+            });
+            events.push(ProviderStreamEvent::ToolCallArgumentsDelta {
+                index: 0,
+                provider_call_id: provider_call_id.clone(),
+                delta: arguments,
+            });
+            events.push(ProviderStreamEvent::ToolCallEnded {
+                index: 0,
+                provider_call_id,
+            });
+            ProviderFinishReason::ToolCalls
+        } else {
+            let response = loopback_verification_response(&profile)
+                .unwrap_or_else(|| loopback_response_for_profile(&profile));
+            events.extend([
+                ProviderStreamEvent::TextStarted { index: 0 },
+                ProviderStreamEvent::TextDelta {
                     index: 0,
-                    provider_call_id: provider_call_id.to_owned(),
-                    identity,
-                });
-                events.push(ProviderStreamEvent::ToolCallArgumentsDelta {
-                    index: 0,
-                    provider_call_id: provider_call_id.to_owned(),
-                    delta: arguments,
-                });
-                events.push(ProviderStreamEvent::ToolCallEnded {
-                    index: 0,
-                    provider_call_id: provider_call_id.to_owned(),
-                });
-                ProviderFinishReason::ToolCalls
-            } else {
-                let response = loopback_verification_response(&profile)
-                    .unwrap_or_else(|| loopback_response_for_profile(&profile));
-                events.extend([
-                    ProviderStreamEvent::TextStarted { index: 0 },
-                    ProviderStreamEvent::TextDelta {
-                        index: 0,
-                        delta: response,
-                    },
-                    ProviderStreamEvent::TextEnded { index: 0 },
-                ]);
-                ProviderFinishReason::Stop
-            };
+                    delta: response,
+                },
+                ProviderStreamEvent::TextEnded { index: 0 },
+            ]);
+            ProviderFinishReason::Stop
+        };
         events.push(ProviderStreamEvent::Usage(usage));
         events.push(ProviderStreamEvent::Finished(finish_reason));
         let mut frames = Vec::new();
@@ -1606,10 +1601,14 @@ mod verification_tests {
     }
 
     fn output_item(text: &str) -> Value {
+        let receipt = json!({"type":"core_tool_receipts","schema_version":1,"receipts":[{
+            "source_id":"code-mode:fixture-command", "tool":"exec_command",
+            "execution":"completed", "disposition":"accepted", "delivery":"offered"
+        }]});
         json!({
-            "type": "function_call_output",
+            "type": "custom_tool_call_output",
             "call_id": "loopback-verification-command",
-            "output": text,
+            "output": format!("{text}\n<core_tool_receipts>{receipt}</core_tool_receipts>"),
         })
     }
 
@@ -1628,6 +1627,80 @@ mod verification_tests {
         };
         assert!(completed);
         assert_eq!(verification_outcome, LoopbackVerificationOutcome::Succeeded);
+    }
+
+    #[test]
+    fn verification_retains_original_source_across_code_mode_waits() {
+        let original = output_item("Script running with cell ID cell_1\nOutput:\nok");
+        let mut request = request_with_output(Some(original));
+        assert!(matches!(
+            loopback_profile_from_request(&request),
+            LoopbackResponseProfile::CodeModeWait { cell_id } if cell_id == "cell_1"
+        ));
+        request["input"].as_array_mut().unwrap().push(json!({
+            "type": "function_call_output",
+            "call_id": "wait-1",
+            "output": [{"type":"input_text", "text":"Script completed\nExit code: 0"}],
+        }));
+        let profile = loopback_profile_from_request(&request);
+        let LoopbackResponseProfile::Verification {
+            completed,
+            verification_outcome,
+            evidence_source_id,
+            ..
+        } = &profile
+        else {
+            panic!("expected completed verification after wait");
+        };
+        assert!(*completed);
+        assert_eq!(
+            *verification_outcome,
+            LoopbackVerificationOutcome::Succeeded
+        );
+        assert_eq!(
+            evidence_source_id.as_deref(),
+            Some("code-mode:fixture-command")
+        );
+        let response: Value = serde_json::from_str(
+            &loopback_verification_response(&profile).expect("verification result"),
+        )
+        .unwrap();
+        assert_eq!(
+            response["findings"][0]["evidence_sources"][0]["source_id"],
+            "code-mode:fixture-command"
+        );
+    }
+
+    #[test]
+    fn verification_reads_receipts_in_separate_output_blocks() {
+        let original = output_item("Exit code: 0");
+        let text = original["output"].as_str().unwrap();
+        let (result, receipt) = text.split_once("<core_tool_receipts>").unwrap();
+        let mut output = original.clone();
+        output["output"] = json!([
+            {"type":"input_text", "text": result},
+            {"type":"input_text", "text": format!("<core_tool_receipts>{receipt}")},
+        ]);
+        let profile = loopback_profile_from_request(&request_with_output(Some(output)));
+        assert!(matches!(profile, LoopbackResponseProfile::Verification {
+            verification_outcome: LoopbackVerificationOutcome::Succeeded,
+            evidence_source_id: Some(source), ..
+        } if source == "code-mode:fixture-command"));
+    }
+
+    #[test]
+    fn verification_fails_closed_when_original_core_receipt_is_missing() {
+        let output = json!({"type":"custom_tool_call_output", "call_id":"outer-exec",
+            "output":"Exit code: 0"});
+        let profile = loopback_profile_from_request(&request_with_output(Some(output)));
+        assert!(matches!(
+            profile,
+            LoopbackResponseProfile::Verification {
+                verification_outcome: LoopbackVerificationOutcome::Unknown,
+                evidence_source_id: None,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1678,6 +1751,7 @@ mod verification_tests {
         let response = loopback_verification_response(&LoopbackResponseProfile::Verification {
             completed: true,
             verification_outcome,
+            evidence_source_id: Some("code-mode:fixture-command".to_owned()),
             delivery_spec_id: "spec-test".to_owned(),
             delivery_spec_revision: 1,
             candidate_ref: "git-candidate:sha256:test".to_owned(),

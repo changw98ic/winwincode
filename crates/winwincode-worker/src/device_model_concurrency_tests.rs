@@ -174,6 +174,9 @@ fn accept_members(
                 let config = Arc::clone(config);
                 let request_tx = request_tx.clone();
                 members.push(thread::spawn(move || {
+                    // macOS inherits the listener's nonblocking mode. This TLS
+                    // fixture uses blocking reads with a finite timeout.
+                    socket.set_nonblocking(false).unwrap();
                     socket.set_read_timeout(Some(WAIT)).unwrap();
                     socket.set_write_timeout(Some(WAIT)).unwrap();
                     let mut stream =

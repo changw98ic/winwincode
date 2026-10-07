@@ -40,6 +40,7 @@ impl ListMcpResourcesHandler {
         &self,
         invocation: ToolInvocation,
     ) -> Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError> {
+        let resource_invocation = invocation.clone();
         let ToolInvocation {
             session,
             step_context,
@@ -62,6 +63,23 @@ impl ListMcpResourcesHandler {
         let arguments = parse_arguments(arguments.as_str())?;
         let args: ListResourceArgs = parse_args_with_default(arguments.clone())?;
         let args = args.normalized();
+        let servers = match args.target(turn.as_ref())? {
+            Some((server, _)) => vec![server],
+            None => mcp
+                .resource_server_names()
+                .into_iter()
+                .filter(|server| model_can_access_mcp_server(turn.as_ref(), server))
+                .collect(),
+        };
+        for server in &servers {
+            super::authorization::authorize(
+                &resource_invocation,
+                server,
+                "resources/list",
+                &arguments,
+            )
+            .await?;
+        }
 
         let invocation = McpInvocation {
             server: args.server.clone().unwrap_or_else(|| "codex".to_string()),
@@ -94,4 +112,12 @@ impl ListMcpResourcesHandler {
     }
 }
 
-impl CoreToolRuntime for ListMcpResourcesHandler {}
+impl CoreToolRuntime for ListMcpResourcesHandler {
+    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
+        crate::tools::authorization::AuthorizationPolicy::ParsedOperation
+    }
+
+    fn uses_mcp_binding(&self) -> bool {
+        true
+    }
+}

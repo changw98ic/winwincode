@@ -93,7 +93,7 @@
   "currentCanonicalSources": [
     {
       "path": "schema/winwincode/v1/domain.schema.json",
-      "sha256": "a73c17fae84b24464c5cf3ca3eb4271e70a621c711400f992b8855a471e8ef39",
+      "sha256": "f37c8c6fa289a492996a69365651ba4dc1e7def3b132bab3d5555abfb600744f",
       "facts": [
         "WorkContract",
         "WorkItem",
@@ -120,7 +120,7 @@
     },
     {
       "path": "schema/winwincode/v1/execution-port.schema.json",
-      "sha256": "6273b50a888080eb49808dde4e849267f50314e344641d843850cfc1da221014",
+      "sha256": "1b7f0db12a833103f8380534007e328748c5c45fc957fd33cc32c2514451789e",
       "facts": [
         "Worker execution transport and fenced identity",
         "Snapshot freeze request, freeze receipt and verification dispatch"
@@ -155,7 +155,7 @@
     },
     {
       "path": "scripts/generate-contracts.mjs",
-      "sha256": "be59a994716c39c8eeaf8e69d33c0e3c78ac4fa935c483d79cabea93cf987c13",
+      "sha256": "026462783d03b38e0e67bf62dd9018e13b9f9dbecf60fd615a9b3b91e1ae675c",
       "facts": [
         "canonical schema to generated Rust/TypeScript/OpenAPI chain"
       ]

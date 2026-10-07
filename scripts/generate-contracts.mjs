@@ -2569,10 +2569,13 @@ function rustSharedDefinitionNamesForExecutionPort(context) {
   for (const name of [
     'Candidate', 'CandidateDigest', 'Criterion', 'ExecutionFactIdentity', 'Snapshot', 'VerificationSession', 'VerifierResult', 'WorkContractId', 'WorkItemId', 'WorkRunId', 'VerificationPlanId',
     'WorkItemState', 'WorkRunState', 'WorkContract', 'WorkItem', 'WorkRun',
-    'VerificationPlan', 'Evidence', 'Verdict',
+    'VerificationPlan', 'Evidence', 'Verdict', 'CoreToolRuntimeProjection',
   ]) {
     const entry = context.registry.get(name)
-    if (entry?.document.fileName === 'domain.schema.json') names.add(name)
+    if (entry?.document.fileName === 'domain.schema.json') {
+      names.add(name)
+      pending.push(entry)
+    }
   }
   const visited = new Set()
 

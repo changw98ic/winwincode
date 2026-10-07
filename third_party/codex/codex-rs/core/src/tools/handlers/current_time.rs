@@ -104,4 +104,12 @@ impl ToolExecutor<ToolInvocation> for CurrentTimeHandler {
     }
 }
 
-impl CoreToolRuntime for CurrentTimeHandler {}
+impl CoreToolRuntime for CurrentTimeHandler {
+    fn supports_result_replay(&self) -> bool {
+        true
+    }
+
+    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
+        crate::tools::authorization::AuthorizationPolicy::CoreControl
+    }
+}

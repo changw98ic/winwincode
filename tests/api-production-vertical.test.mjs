@@ -26,6 +26,22 @@ import { deterministicDeviceProvider, waitFor } from '../scripts/device-producti
  * Device Provider runtime is unavailable, this test fails with that exact
  * runtime gap instead of fabricating success.
  */
+test('a scenario propagates its Device cleanup failure', async () => {
+  await assert.rejects(runApiProductionVertical({
+    devicePrerequisites: true,
+    restart: false,
+    repeat: false,
+    scenario: { async run({ devicePath }) {
+      const stop = devicePath.stop
+      devicePath.stop = async () => {
+        await stop()
+        throw new Error('scenario cleanup probe')
+      }
+      return { completed: true }
+    } },
+  }), /scenario cleanup probe/u)
+})
+
 test('standalone Server API drives Chat and StrongFlow through Device Worker production vertical', async () => {
   const report = await runApiProductionVertical({
     devicePrerequisites: true,
@@ -48,6 +64,12 @@ test('standalone Server API drives Chat and StrongFlow through Device Worker pro
   assert.equal(report.flow.strongflow.workItemStates.every(state => state === 'done'), true)
   assert.ok(report.flow.strongflow.workRunStates.length > 0)
   assert.equal(report.flow.strongflow.workRunStates.every(state => state === 'settled'), true)
+  const calls = report.flow.strongflow.workRunRuntime.flatMap(run => run.coreToolCalls)
+  assert.ok(calls.some(call => call.toolName.endsWith('exec_command')
+    && call.cellId !== null && call.parentRequestSequence !== null
+    && call.execution === 'completed' && call.disposition === 'accepted'
+    && call.delivery === 'offered'), 'public API must preserve the original nested Core command receipt')
+
   assert.deepEqual(report.deterministic, {
     contentEqual: true,
     firstSessionId: 'psn_01J00000000000000000000001',
@@ -58,120 +80,6 @@ test('standalone Server API drives Chat and StrongFlow through Device Worker pro
     messageBytesStable: true,
     status: 'done',
   })
-})
-
-test('one stopped ProductSession does not block another Session on the same Server and Device', async t => {
-  const directory = mkdtempSync(join(tmpdir(), 'wwc-shared-session-'))
-  t.after(() => rmSync(directory, { recursive: true, force: true }))
-  const firstId = 'psn_01J00000000000000000000003'
-  const secondId = 'psn_01J00000000000000000000004'
-  const repeatToolMarker = 'shared-session-repeat-tool-fixture'
-  const report = await runApiProductionVertical({
-    directory, restart: false, repeat: false,
-    deviceProvider: deterministicDeviceProvider({ repeatToolMarker }),
-    deviceAgentEnvironment: { WWC_BENCHMARK_TOOL_REPEAT_GUARD: '1' },
-    scenario: {
-      async run({ api, baseline, devicePath, modelRoute }) {
-        const create = async productSessionId => {
-          const created = await api.command('session.create', 0, {
-            productSessionId, projectId: 'prj_01J00000000000000000000000',
-            repositoryId: 'rep_01J00000000000000000000000', title: productSessionId, modelRoute,
-          })
-          assert.equal(created.outcome, 'completed')
-          return created
-        }
-        const first = devicePath.forProductSession(firstId)
-        const second = devicePath.forProductSession(secondId)
-        const a = await create(firstId)
-        const launchedA = await first.launchAnchor({ productSessionId: firstId })
-        await waitForDeviceWorkerRegistered(api, launchedA, 60_000)
-        const submittedA = await api.command('chat.submit', a.currentRevision, {
-          productSessionId: firstId, message: repeatToolMarker,
-        })
-        assert.equal(submittedA.outcome, 'completed')
-        await waitFor(() => {
-          try { first.assertBenchmarkRunning() } catch (error) {
-            if (error.code === 'STUCK_TOOL_REPEAT_LIMIT') return true
-            throw error
-          }
-          return false
-        }, 'first Session durable Core stop', 90_000)
-        const retained = (await api.query('session.get', { productSessionId: firstId })).result
-        const cancelled = await api.command('session.cancel', retained.revision, {
-          productSessionId: firstId, reason: 'local fixture stops only this Session',
-        })
-        assert.equal(cancelled.outcome, 'completed')
-        const aCalls = devicePath.modelServer.requests.filter(request => request.repeatTool).length
-        assert.equal(aCalls, 6)
-
-        const b = await create(secondId)
-        const launchedB = await second.launchAnchor({ productSessionId: secondId })
-        await waitForDeviceWorkerRegistered(api, launchedB, 60_000)
-        second.assertBenchmarkRunning()
-        const submittedB = await api.command('chat.submit', b.currentRevision, {
-          productSessionId: secondId, message: 'Complete this independent Session.',
-        })
-        assert.equal(submittedB.outcome, 'completed')
-        await waitFor(async () => {
-          second.assertBenchmarkRunning()
-          const response = await api.query('session.messages.list', { productSessionId: secondId })
-          return response.result.items.some(message => message.role === 'assistant'
-            && message.state === 'completed' && message.content.trim().length > 0)
-        }, 'second Session completed projection', 60_000)
-        assert.equal((await api.query('session.get', { productSessionId: firstId })).result.state, 'cancelled')
-        assert.equal(devicePath.modelServer.requests.filter(request => request.repeatTool).length, aCalls)
-        assert.equal(devicePath.modelServer.requests.filter(request => !request.repeatTool).length, 1)
-        assert.equal(devicePath.modelServer.errors.length, 0)
-        assert.notEqual(launchedA.workerSessionId, launchedB.workerSessionId)
-        const deliveryId = 'dlv_01J00000000000000000000003'
-        const created = await api.command('delivery.create', 0, { deliveryId, spec: {
-          title: 'Independent StrongFlow task', goal: 'Write status: complete to TASK.md.',
-          scope: ['TASK.md'], constraints: [], outOfScope: [], baseRevision: baseline,
-          repositoryId: 'rep_01J00000000000000000000000', publicationTarget: null,
-          sourceProductSessionId: secondId, verificationCommand: 'git rev-parse --verify HEAD',
-          acceptanceCriteria: [{ id: 'shared-task', required: true, title: 'Complete the independent task' }],
-        } })
-        const aggregate = (await api.query('workrun.get', { deliveryId, workItemId: null, atCursor: null })).result
-        const items = await api.command('workitems.create', created.currentRevision,
-          workItemCreatePayload(aggregate, created.currentRevision))
-        const started = await api.command('workrun.start', items.currentRevision, { deliveryId, dispatchProfile: 'executor' })
-        const anchored = new Map()
-        const anchor = async workRunId => {
-          const launched = await second.launchAnchor({ workRunId })
-          anchored.set(workRunId, launched.workerSessionId)
-        }
-        await anchor(started.result.activeWorkRunId)
-        const delivery = await driveDelivery(api, 300_000, modelRoute, Date.now, {
-          deliveryId,
-          expectDeviceWorkRun: true, strictLaunchAnchor: true,
-          pendingDeviceWorkRunIds: () => [...anchored.keys()], assertRunning: second.assertBenchmarkRunning,
-          onActiveWorkRuns: async runs => {
-            second.assertBenchmarkRunning(runs)
-            for (const run of runs) if (!anchored.has(run.id)) await anchor(run.id)
-          },
-        })
-        assert.equal(delivery.detail.status, 'done')
-        assert.equal(delivery.detail.verdict.status, 'pass')
-        assert.ok(delivery.workRunAggregate.runs.length >= 2)
-        assert.ok(delivery.workRunAggregate.runs.every(run => run.productSessionId !== secondId && run.state === 'settled'))
-        assert.equal((await api.query('session.get', { productSessionId: firstId })).result.state, 'cancelled')
-        assert.equal(devicePath.modelServer.requests.filter(request => request.repeatTool).length, aCalls)
-        const core = new DatabaseSync(join(devicePath.deviceData, 'worker-sessions', launchedA.workerSessionId,
-          'data', 'codex-runtime', 'worker-codex.sqlite3'), { readOnly: true })
-        try {
-          const stopped = core.prepare('SELECT run_key, stopped FROM tool_repeat_run WHERE stopped = 1').get()
-          assert.equal(stopped.stopped, 1)
-          assert.equal(core.prepare('SELECT COUNT(*) AS n FROM tool_repeat_admission WHERE run_key = ?').get(stopped.run_key).n, 6)
-        } finally { core.close() }
-        return { firstId, secondId, localChatProviderCalls: aCalls + 1,
-          localProviderCalls: devicePath.modelServer.requests.length, delivery: delivery.detail.status, complete: true }
-      },
-    },
-  })
-  assert.equal(report.flow.scenario.complete, true)
-  assert.equal(report.flow.scenario.localChatProviderCalls, 7)
-  assert.ok(report.flow.scenario.localProviderCalls > 7)
-  assert.equal(report.flow.scenario.delivery, 'done')
 })
 
 

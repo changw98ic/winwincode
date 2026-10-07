@@ -241,7 +241,7 @@ try:
             except ValueError: pass
             else: raise AssertionError('candidate-owned execution lock accepted')
         assert module['trusted_execution_lock'](None, candidate) is None
-        assert module['trusted_execution_lock'](lock, candidate) == lock
+        assert module['trusted_execution_lock'](lock, candidate) == lock.resolve(strict=True)
 finally:
     for child in children:
         if child.poll() is None: child.kill()

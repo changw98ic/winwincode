@@ -915,7 +915,11 @@ impl ModelClient {
         service_tier: Option<String>,
         responses_metadata: &CodexResponsesMetadata,
     ) -> Result<ResponsesApiRequest> {
-        let mut input = prompt.get_formatted_input_for_request(model_info.use_responses_lite);
+        // Injected host transports consume the provider-neutral Responses API
+        // contract, including an explicit tools array.
+        let use_responses_lite =
+            model_info.use_responses_lite && self.state.model_stream_transport.is_none();
+        let mut input = prompt.get_formatted_input_for_request(use_responses_lite);
         let is_openai = self.state.provider.info().is_openai();
         if !is_openai {
             for item in &mut input {
@@ -929,7 +933,7 @@ impl ModelClient {
                 }
             }
         }
-        let (instructions, tools) = if model_info.use_responses_lite {
+        let (instructions, tools) = if use_responses_lite {
             let tools = if self.state.provider.capabilities().namespace_tools {
                 create_tools_json_for_responses_lite(&prompt.tools)?
             } else {
@@ -959,7 +963,10 @@ impl ModelClient {
                 Some(create_tools_raw_json_for_responses_api(&prompt.tools)?.into()),
             )
         };
-        let reasoning = Self::build_reasoning(model_info, effort, summary);
+        let mut reasoning = Self::build_reasoning(model_info, effort, summary);
+        if !use_responses_lite {
+            reasoning.context = None;
+        }
         let stream_options = (self.state.concurrent_reasoning_summaries_enabled
             && is_openai
             && reasoning.summary.is_some())
@@ -991,7 +998,7 @@ impl ModelClient {
             input,
             tools,
             tool_choice: "auto".to_string(),
-            parallel_tool_calls: prompt.parallel_tool_calls && !model_info.use_responses_lite,
+            parallel_tool_calls: prompt.parallel_tool_calls && !use_responses_lite,
             reasoning: Some(reasoning),
             store: false,
             stream: true,

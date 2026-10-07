@@ -136,3 +136,17 @@ test('fixture shutdown refuses a registry PID whose boot identity has changed', 
     rmSync(directory, { recursive: true, force: true })
   }
 })
+
+test('fixture shutdown rejects an unowned live parent and preserves its process', async () => {
+  const { parent, pids } = await fixtureTree()
+  try {
+    const foreignParent = { pid: pids[1], exitCode: null, signalCode: null }
+    await assert.rejects(stopProcessGroup(foreignParent, { graceMillis: 100 }),
+      /cannot confirm ownership of a live fixture parent/u)
+    assert.equal(pids.every(processRunning), true)
+  } finally {
+    await cleanup(pids)
+    await waitFor(() => parent.exitCode !== null || parent.signalCode !== null,
+      'fixture parent reaped', 1000, 10)
+  }
+})

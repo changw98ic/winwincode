@@ -407,8 +407,13 @@ async fn shutdown_session_runtime(sess: &Arc<Session>) {
         .unified_exec_manager
         .terminate_all_processes()
         .await;
-    if let Err(err) = sess.services.code_mode_service.shutdown().await {
-        warn!("failed to shutdown code mode session: {err}");
+    match sess.services.code_mode_service.shutdown().await {
+        Err(err) => warn!("failed to shutdown code mode session: {err}"),
+        Ok(()) => {
+            if let Err(err) = crate::tools::ExecutionFacts::close_owned_cells(sess).await {
+                warn!("failed to retain closed code mode cells: {err}");
+            }
+        }
     }
     sess.stop_mcp_prewarm_worker().await;
     {

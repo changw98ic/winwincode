@@ -9,6 +9,8 @@ const SOURCE_ROOT_FILES = Object.freeze([
   'Cargo.lock',
   'Cargo.toml',
   'rust-toolchain.toml',
+  'upstream/sources.lock.json',
+  'third_party/codex.UPSTREAM.json',
 ])
 
 const IGNORED_DIRECTORY_NAMES = new Set([
@@ -39,6 +41,7 @@ export function projectSourceDigest(root) {
     .map(path => join(root, path))
     .filter(path => existsSync(path))
   walk(join(root, 'crates'), paths)
+  walk(join(root, 'third_party/codex/codex-rs'), paths)
   const hash = createHash('sha256')
   for (const path of paths.toSorted((left, right) => left.localeCompare(right))) {
     hash.update(relative(root, path).replaceAll('\\', '/'))

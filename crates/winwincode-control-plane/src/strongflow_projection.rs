@@ -9,6 +9,8 @@
 mod application;
 mod candidate_history;
 mod candidate_review;
+mod core_tool_facts;
+mod core_tool_relations;
 mod evidence_detail;
 mod mapping;
 mod production_sources;

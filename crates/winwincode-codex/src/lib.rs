@@ -30,11 +30,12 @@ pub use parallel_model_runner::{
 };
 mod performance;
 pub mod performance_evidence;
+mod public_smoke_adapter;
 pub mod stage_product;
 mod store;
 mod structured_result;
-mod tool_repeat;
-mod tool_repeat_source;
+mod tool_dependencies;
+mod tool_input_source;
 pub mod workrun_runtime_projection;
 
 pub use adapter::{

@@ -361,7 +361,6 @@ fn model_port_api_error(failure: &ModelPortFailure) -> ApiError {
         | "MISSING_CREDENTIAL"
         | "INVALID_CREDENTIAL"
         | "INVALID_REQUEST"
-        | "STUCK_TOOL_REPEAT_LIMIT"
         | "NO_ADAPTER"
         | "UNKNOWN_MODEL"
         | "UNSUPPORTED_CONTENT"
@@ -529,14 +528,6 @@ mod tests {
         failure.retryable = Some(true);
         assert!(matches!(
             model_port_api_error(&failure),
-            ApiError::InvalidRequest { .. }
-        ));
-    }
-
-    #[test]
-    fn repeated_tool_stop_is_not_retryable() {
-        assert!(matches!(
-            model_port_api_error(&ModelPortFailure::new("STUCK_TOOL_REPEAT_LIMIT", "stopped")),
             ApiError::InvalidRequest { .. }
         ));
     }

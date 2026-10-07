@@ -16,7 +16,7 @@ import { apiProductionSourceDigest, assertCompletedDelivery, inspectRegisteredDe
   serverTargetDirectory, verifyApiProductionSourceSeal } from './run-api-production-vertical.mjs'
 import { exportDeviceCandidate, exportDeviceExecutionReceipts } from './export-device-candidate.mjs'
 import { deviceFailureWithModelCauses } from './device-model-failures.mjs'
-import { assertDeviceBenchmarkRunning, removeDevicePublicSmoke } from './device-production-fixture.mjs'
+import { removeDevicePublicSmoke } from './device-production-fixture.mjs'
 import { publishBenchmarkLedger } from './publish-benchmark-submission.mjs'
 import { deviceTaskIdentities, withDeviceTaskRuntime } from './device-task-runtime.mjs'
 
@@ -331,10 +331,6 @@ export async function runBenchmarkDeviceModel(request, runner, options) {
       providerEnvironment: options.providerEnvironment ?? process.env })
   } catch (error) {
     if (!registeredLaunch) throw error
-    if (error?.code === 'STUCK_TOOL_REPEAT_LIMIT') {
-      try { return await finalizeFailure(stoppedDeviceResult(request, registeredLaunch, error.report)) }
-      catch { throw evidenceFailure() }
-    }
     if (error?.code === 'DEVICE_WORKER_CRASHED') {
       try { return await finalizeFailure(crashedDeviceResult(request, registeredLaunch, options, error.report)) }
       catch { throw evidenceFailure() }
@@ -429,78 +425,6 @@ function deviceResult(directory, evidenceDirectory, commit) {
     submissionManifest: { path: manifestPath, sha256: sha256(manifestBytes) },
     executionReceipts,
     taskSourceBindingSha256: sha256(readFileSync(resolve(directory, 'task-source-binding.json'))),
-    externalVerdict: null, externalScore: null }
-}
-
-// Shared recovery reads all physical directories but checks only this launch's
-// source Session and its Controller-created role Sessions. A neighbor's stop
-// cannot become this task's outcome when its projection has not arrived yet.
-export function assertRetainedDeviceTaskRunning(launch, runs = []) {
-  const deviceData = realpathSync(resolve(launch.directory, 'device-data'))
-  const workers = globSync('worker-sessions/*', { cwd: deviceData }).map(path => basename(path))
-  if (!existsSync(resolve(launch.directory, 'runtime-binding.json'))) {
-    assertDeviceBenchmarkRunning(deviceData, workers, runs)
-    return workers
-  }
-  const sessions = new Set([launch.productSessionId])
-  const database = new DatabaseSync(resolve(launch.directory, 'server-data/control-plane.sqlite3'), { readOnly: true })
-  try {
-    database.exec('PRAGMA busy_timeout = 5000')
-    for (const row of database.prepare(`SELECT work_run_id, dispatch_payload FROM scheduler_execution_jobs
-      WHERE delivery_id = ?`).all(launch.deliveryId)) {
-      const job = JSON.parse(Buffer.from(row.dispatch_payload).toString('utf8'))
-      assert.equal(job.scope.kind, 'work-run')
-      assert.equal(job.scope.workRunId, row.work_run_id)
-      assert.match(job.scope.productSessionId, /^psn_[0-9A-HJKMNP-TV-Z]{26}$/u)
-      sessions.add(job.scope.productSessionId)
-    }
-  } finally { database.close() }
-  for (const session of sessions) assertDeviceBenchmarkRunning(deviceData, workers, runs, session)
-  return workers
-}
-
-export function stoppedDeviceResult(request, launch, expectedReport, { recovering = false } = {}) {
-  const reportBytes = readFileSync(resolve(launch.directory, 'device-task-result.json'))
-  const report = JSON.parse(reportBytes)
-  if (expectedReport !== null) assert.deepEqual(report, expectedReport, 'Core stop must match the persisted product report')
-  assert.ok(recovering ? report.errorCode === undefined || report.errorCode === 'STUCK_TOOL_REPEAT_LIMIT'
-    : report.errorCode === 'STUCK_TOOL_REPEAT_LIMIT')
-  assert.equal(report.productSessionId, launch.productSessionId)
-  assert.equal(report.deliveryId, launch.deliveryId)
-  assert.equal(report.complete, false)
-  const runs = report.delivery?.workRunAggregate?.runs ?? []
-  const workerSessionIds = recovering
-    ? globSync('worker-sessions/*', { cwd: realpathSync(resolve(launch.directory, 'device-data')) })
-      .map(path => basename(path))
-    : runs.map(run => run.workerSessionId).filter(Boolean)
-  let stop = null
-  try {
-    if (recovering) assertRetainedDeviceTaskRunning(launch, runs)
-    else assertDeviceBenchmarkRunning(resolve(launch.directory, 'device-data'), workerSessionIds, runs)
-  }
-  catch (error) { stop = error }
-  assert.equal(stop?.code, 'STUCK_TOOL_REPEAT_LIMIT')
-  assert.ok(workerSessionIds.includes(stop.logicalWorkerSessionId ?? stop.workerSessionId)
-    || runs.some(run => run.workerSessionId === stop.logicalWorkerSessionId))
-  const evidenceDirectory = recovering
-    ? resolve(launch.directory, 'recovery', `core-stop-${sha256(reportBytes)}`) : launch.directory
-  if (recovering) mkdirSync(evidenceDirectory, { recursive: true, mode: 0o700 })
-  const executionReceipts = recovering
-    ? exportDeviceExecutionReceipts(launch.directory, evidenceDirectory).evidence
-    : JSON.parse(readFileSync(resolve(launch.directory, 'execution-receipts.json')))
-  assert.ok(Array.isArray(executionReceipts.calls), 'Core stop has no model receipt ledger')
-  const binding = JSON.parse(readFileSync(resolve(launch.directory, 'task-source-binding.json')))
-  assert.equal(binding.runId, request.runId)
-  assert.equal(binding.callId, request.callId)
-  assert.equal(binding.taskId, request.taskId)
-  return { status: 'failed', failure: { code: 'STUCK_TOOL_REPEAT_LIMIT' },
-    termination: { reason: 'STUCK_TOOL_REPEAT_LIMIT' }, productComplete: false,
-    provider: request.provider, callId: request.callId, directory: launch.directory,
-    executionReceipts, delivery: report.delivery,
-    stopProof: { workerSessionId: stop.workerSessionId, runKey: stop.runKey,
-      ...(stop.logicalWorkerSessionId ? { logicalWorkerSessionId: stop.logicalWorkerSessionId } : {}),
-      productReportSha256: sha256(reportBytes) },
-    ...(recovering ? { recovery: { kind: 'retained-core-stop' } } : {}),
     externalVerdict: null, externalScore: null }
 }
 
@@ -622,12 +546,6 @@ export async function resolveRegisteredDeviceTask(request, launch, options = {},
       && [original.workRunId, ...(original.workRuns ?? []).map(run => run.id)]
         .some(id => id && failedDeviceDispatch(launch.directory, id, launch.deliveryId))) {
       return failedDispatchDeviceResult(request, launch, options, null, { recovering: true })
-    }
-    try {
-      assertRetainedDeviceTaskRunning(launch, original.delivery?.workRunAggregate?.runs ?? [])
-    } catch (error) {
-      if (error.code !== 'STUCK_TOOL_REPEAT_LIMIT' || original.complete !== false) throw error
-      return stoppedDeviceResult(request, launch, null, { recovering: true })
     }
     if (persisted) {
       assert.deepEqual(originalBytes, persisted.reportBytes)

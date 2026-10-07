@@ -98,6 +98,7 @@ pub(crate) async fn record_completed_response_item_with_finalized_facts(
 ) {
     sess.record_conversation_items(turn_context, std::slice::from_ref(item))
         .await;
+    crate::tools::ToolDiagnostics::record_model_response(sess, turn_context, item).await;
     let defers_mailbox_delivery = finalized_facts.map_or_else(
         || {
             completed_item_defers_mailbox_delivery_to_next_turn(

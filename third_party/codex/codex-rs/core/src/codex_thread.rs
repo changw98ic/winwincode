@@ -279,6 +279,15 @@ impl CodexThread {
         }
     }
 
+    /// Reads bounded, payload-free Core execution facts after a durable cursor.
+    pub async fn tool_runtime_events(
+        &self,
+        after: i64,
+        limit: u32,
+    ) -> anyhow::Result<Vec<codex_state::ToolRuntimeEvent>> {
+        crate::tools::ExecutionFacts::read_events(&self.session, after, limit).await
+    }
+
     pub async fn submit(&self, op: Op) -> CodexResult<String> {
         self.io.submit(op).await
     }

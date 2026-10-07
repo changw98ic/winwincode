@@ -449,3 +449,16 @@ test('authorized task Sessions automatically approve actions while preserving cu
   await resolveDeviceTaskApprovals({ api, runs: [{ ...run, state: 'cancelled' }],
     automaticTaskActions: true, onDecision: () => {} })
 })
+
+ test('Code Mode verification cites the original command receipt across process polling', () => {
+  const original = `code-mode:${'a'.repeat(64)}`
+  const observation = resolveVerificationObservation({ messages: [{
+    type: 'function_call_output', call_id: DETERMINISTIC_VERIFICATION_CALL_ID,
+    output: `Process running with session ID 123\n<core_tool_receipts>${JSON.stringify({ receipts: [{ tool: 'functions.exec_command', source_id: original }] })}</core_tool_receipts>`,
+  }, {
+    type: 'function_call_output', call_id: DETERMINISTIC_VERIFICATION_POLL_CALL_ID,
+    output: 'Exit code: 0\n',
+  }] })
+  assert.equal(observation.exitCode, 0)
+  assert.equal(observation.evidenceSourceId, original)
+ })

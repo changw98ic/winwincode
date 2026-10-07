@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { renderRuntimeActivity } from './runtime-activity.js'
 import {
   retentionLabel,
   mountStrongFlowReviewAnnotations,
@@ -324,7 +325,7 @@ function renderSegment(
   item.dataset.reviewSegmentIndex = String(segmentIndex + 1)
   const head = element(document, 'p', 'wwc-review-segment-head')
   head.textContent = `${ROLE_LABEL[segment.role ?? ''] ?? '执行'} · 第 ${String(segment.attempt)} 次运行`
-    + (segment.truncated ? ' · 已达单会话活动上限（仅展示前 100 条）' : '')
+    + (segment.truncated ? ' · 最多展示最近 100 条活动' : '')
   const list = element(document, 'ul', 'wwc-review-activities')
   if (segment.activities.length === 0) {
     const empty = element(document, 'li', 'wwc-review-activity-empty')
@@ -335,14 +336,7 @@ function renderSegment(
     const row = element(document, 'li', 'wwc-review-activity')
     row.dataset.reviewActivityIndex = String(activityIndex + 1)
     row.dataset.reviewOutcome = activity.outcome
-    const command = element(document, 'span', 'wwc-review-activity-command')
-    command.textContent = redactPublicText(activity.command ?? `(${activity.activityType})`)
-    const fact = element(document, 'span', 'wwc-review-activity-fact')
-    fact.textContent = `${activity.status} · outcome ${activity.outcome}`
-      + (activity.exitCode === null ? '' : ` · 退出码 ${activity.exitCode}`)
-    const source = element(document, 'span', 'wwc-review-activity-source')
-    source.textContent = '执行结果来源已绑定当前运行'
-    row.append(command, fact, source)
+    row.append(renderRuntimeActivity(document, activity))
     if (activity.outcome === 'task-failed' || activity.outcome === 'timed-out') {
       row.append(button(
         document,

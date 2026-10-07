@@ -1,0 +1,127 @@
+diff --git a/codex-rs/core/src/context/code_mode_result_unavailable.rs b/codex-rs/core/src/context/code_mode_result_unavailable.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/core/src/context/code_mode_result_unavailable.rs
+@@ -0,0 +1,26 @@
++// SPDX-License-Identifier: Apache-2.0
++use super::ContextualUserFragment;
++
++/// A bounded recovery observation for an exec call whose result was not retained.
++pub(crate) struct CodeModeResultUnavailable;
++impl ContextualUserFragment for CodeModeResultUnavailable {
++    fn role(&self) -> &'static str {
++        "developer"
++    }
++    fn markers(&self) -> (&'static str, &'static str) {
++        Self::type_markers()
++    }
++    fn type_markers() -> (&'static str, &'static str) {
++        (
++            "<code_mode_result_unavailable>",
++            "</code_mode_result_unavailable>",
++        )
++    }
++    fn body(&self) -> String {
++        serde_json::json!({
++            "type": "code_mode_result_unavailable", "schema_version": 1,
++            "result": "unavailable", "execution": "outcome_unknown",
++            "next_step": "Read durable Core tool facts before retrying side effects. Resume pending user input through its original request identity.",
++        }).to_string()
++    }
++}
+diff --git a/codex-rs/core/src/context_manager/history_tests.rs b/codex-rs/core/src/context_manager/history_tests.rs
+--- a/codex-rs/core/src/context_manager/history_tests.rs
++++ b/codex-rs/core/src/context_manager/history_tests.rs
+@@ -1584,6 +1584,43 @@
+     );
+ }
+ 
++#[test]
++fn normalize_reports_unavailable_code_mode_result_without_rewriting_call() {
++    let call = ResponseItem::CustomToolCall {
++        id: Some(ResponseItemId::with_suffix("ctc", "interrupted")),
++        status: None,
++        call_id: "interrupted-exec".to_string(),
++        name: "exec".to_string(),
++        namespace: None,
++        input: "await tools.request_user_input({questions: []})".to_string(),
++        internal_chat_message_metadata_passthrough: None,
++    };
++    let mut history = create_history_with_items(vec![call.clone()]);
++    history.normalize_history(&default_input_modalities());
++    let items = raw_items(&history);
++    assert_eq!(items.len(), 2);
++    assert_eq!(items[0], call);
++    let ResponseItem::CustomToolCallOutput {
++        id,
++        call_id,
++        output,
++        ..
++    } = &items[1]
++    else {
++        panic!("expected recovery observation for the original exec call");
++    };
++    assert!(id.is_some());
++    assert_eq!(call_id, "interrupted-exec");
++    let text = output.text_content().expect("recovery observation");
++    assert!(text.contains("<code_mode_result_unavailable>"));
++    assert!(text.contains("outcome_unknown"));
++    history.normalize_history(&default_input_modalities());
++    assert_eq!(raw_items(&history), items);
++    let mut replay = create_history_with_items(vec![call]);
++    replay.normalize_history(&default_input_modalities());
++    assert_eq!(raw_items(&replay), items);
++}
++
+ #[cfg(not(debug_assertions))]
+ #[test]
+ fn normalize_adds_missing_output_for_custom_tool_call() {
+diff --git a/codex-rs/core/src/context_manager/normalize.rs b/codex-rs/core/src/context_manager/normalize.rs
+--- a/codex-rs/core/src/context_manager/normalize.rs
++++ b/codex-rs/core/src/context_manager/normalize.rs
+@@ -8,6 +8,8 @@
+ use std::collections::HashSet;
+ use uuid::Uuid;
+ 
++use crate::context::CodeModeResultUnavailable;
++use crate::context::ContextualUserFragment;
+ use crate::util::error_or_panic;
+ use tracing::info;
+ 
+@@ -79,19 +81,29 @@
+                     }),
+                 ));
+             }
+-            ResponseItem::CustomToolCall { id, call_id, .. }
+-                if !custom_tool_output_ids.contains(call_id.as_str()) =>
+-            {
+-                error_or_panic(format!(
+-                    "Custom tool call output is missing for call id: {call_id}"
+-                ));
++            ResponseItem::CustomToolCall {
++                id,
++                call_id,
++                name,
++                namespace,
++                ..
++            } if !custom_tool_output_ids.contains(call_id.as_str()) => {
++                let output = if name == "exec" && namespace.is_none() {
++                    info!("Code Mode result is unavailable for call id: {call_id}");
++                    CodeModeResultUnavailable.render()
++                } else {
++                    error_or_panic(format!(
++                        "Custom tool call output is missing for call id: {call_id}"
++                    ));
++                    "aborted".to_string()
++                };
+                 missing_outputs_to_insert.push((
+                     idx,
+                     ResponseItemEnvelope::new(ResponseItem::CustomToolCallOutput {
+                         id: synthetic_output_id("ctco", id.as_deref()),
+                         call_id: call_id.clone(),
+                         name: None,
+-                        output: FunctionCallOutputPayload::from_text("aborted".to_string()),
++                        output: FunctionCallOutputPayload::from_text(output),
+                         internal_chat_message_metadata_passthrough: None,
+                     }),
+                 ));

@@ -57,6 +57,7 @@ impl WriteStdinHandler {
             session,
             turn,
             payload,
+            call_id,
             ..
         } = invocation;
 
@@ -82,6 +83,7 @@ impl WriteStdinHandler {
                 interaction_event: Some(WriteStdinInteractionEvent {
                     session: &session,
                     turn: &turn,
+                    call_id: &call_id,
                 }),
             })
             .await
@@ -94,6 +96,10 @@ impl WriteStdinHandler {
 }
 
 impl CoreToolRuntime for WriteStdinHandler {
+    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
+        crate::tools::authorization::AuthorizationPolicy::ParsedOperation
+    }
+
     fn matches_kind(&self, payload: &ToolPayload) -> bool {
         matches!(payload, ToolPayload::Function { .. })
     }

@@ -1,0 +1,299 @@
+diff --git a/codex-rs/state/migrations/0051_tool_execution_facts.sql b/codex-rs/state/migrations/0051_tool_execution_facts.sql
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/state/migrations/0051_tool_execution_facts.sql
+@@ -0,0 +1,37 @@
++-- Execution receipts outlive result bodies. Thread cleanup removes both.
++CREATE TABLE tool_requests (
++    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
++    thread_id TEXT NOT NULL,
++    logical_id TEXT NOT NULL,
++    binding TEXT NOT NULL,
++    resolution TEXT NOT NULL DEFAULT 'observed' CHECK(resolution IN ('observed', 'denied')),
++    request_json TEXT NOT NULL,
++    UNIQUE(thread_id, logical_id)
++);
++CREATE TABLE tool_attempts (
++    request_sequence INTEGER PRIMARY KEY REFERENCES tool_requests(sequence) ON DELETE CASCADE,
++    attempt_id TEXT NOT NULL UNIQUE,
++    owner_id TEXT NOT NULL,
++    operation_digest TEXT NOT NULL,
++    effective_input TEXT NOT NULL,
++    execution TEXT NOT NULL CHECK(execution IN ('running', 'completed', 'uncertain')),
++    disposition TEXT NOT NULL DEFAULT 'pending' CHECK(disposition IN ('pending', 'accepted', 'rejected')),
++    delivery TEXT NOT NULL DEFAULT 'pending' CHECK(delivery IN ('pending', 'offered')),
++    execution_result TEXT,
++    accepted_result TEXT,
++    rejection TEXT,
++    revision INTEGER NOT NULL DEFAULT 1
++);
++CREATE TABLE tool_fact_events (
++    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
++    request_sequence INTEGER NOT NULL REFERENCES tool_requests(sequence) ON DELETE CASCADE,
++    thread_id TEXT NOT NULL,
++    fact_json TEXT NOT NULL
++);
++CREATE INDEX tool_fact_events_thread_sequence ON tool_fact_events(thread_id, sequence);
++
++-- Older binaries ignore newer migration versions. Their thread deletes must
++-- still remove private execution data created by a newer binary.
++CREATE TRIGGER threads_delete_tool_facts AFTER DELETE ON threads BEGIN
++    DELETE FROM tool_requests WHERE thread_id = OLD.id;
++END;
+diff --git a/codex-rs/state/src/lib.rs b/codex-rs/state/src/lib.rs
+--- a/codex-rs/state/src/lib.rs
++++ b/codex-rs/state/src/lib.rs
+@@ -1,8 +1,8 @@
+-//! SQLite-backed state for rollout metadata.
++//! SQLite-backed Core state for rollout metadata and tool execution facts.
+ //!
+-//! This crate is intentionally small and focused: it extracts rollout metadata
+-//! from JSONL rollouts and mirrors it into a local SQLite database. Backfill
+-//! orchestration and rollout scanning live in `codex-core`.
++//! This crate owns atomic storage and recovery receipts. Rollout metadata is
++//! extracted from JSONL rollouts; backfill orchestration and rollout scanning
++//! live in `codex-core`.
+ 
+ const _: () = assert!(
+     libsqlite3_sys::SQLITE_VERSION_NUMBER >= 3_051_003,
+@@ -18,6 +18,7 @@
+ mod runtime;
+ mod sqlite;
+ mod telemetry;
++mod tool_execution;
+ 
+ pub use model::CreatedProject;
+ pub use model::LogEntry;
+@@ -114,3 +115,16 @@
+ pub const DB_INIT_DURATION_METRIC: &str = "codex.sqlite.init.duration_ms";
+ /// Rollout fallback attempts. Tags: [caller, reason]
+ pub const DB_FALLBACK_METRIC: &str = "codex.sqlite.fallback.count";
++
++pub use tool_execution::MAX_TOOL_RESULT_BYTES;
++pub use tool_execution::ToolAttemptClaim;
++pub use tool_execution::ToolAttemptReceipt;
++pub use tool_execution::ToolExecutionFact;
++pub use tool_execution::ToolExecutionStatus;
++pub use tool_execution::ToolFactEvent;
++pub use tool_execution::ToolOutputDelivery;
++pub use tool_execution::ToolOutputDisposition;
++pub use tool_execution::ToolRequestIdentity;
++pub use tool_execution::ToolRequestObservation;
++pub use tool_execution::ToolRequestResolution;
++pub use tool_execution::ToolStoredResults;
+diff --git a/codex-rs/state/src/runtime.rs b/codex-rs/state/src/runtime.rs
+--- a/codex-rs/state/src/runtime.rs
++++ b/codex-rs/state/src/runtime.rs
+@@ -54,6 +54,7 @@
+ mod thread_section_order;
+ mod thread_sections;
+ mod threads;
++mod tool_execution;
+ 
+ pub use external_agent_config_imports::ExternalAgentConfigImportDetailsRecord;
+ pub use external_agent_config_imports::ExternalAgentConfigImportFailureRecord;
+diff --git a/codex-rs/state/src/runtime/tool_execution_migration_tests.rs b/codex-rs/state/src/runtime/tool_execution_migration_tests.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/state/src/runtime/tool_execution_migration_tests.rs
+@@ -0,0 +1,89 @@
++// SPDX-License-Identifier: Apache-2.0
++
++use super::*;
++use crate::runtime::test_support::unique_temp_dir;
++use codex_protocol::ThreadId;
++use codex_utils_absolute_path::test_support::PathExt;
++use pretty_assertions::assert_eq;
++
++#[tokio::test]
++async fn additive_migration_preserves_existing_thread_metadata_and_old_readers() {
++    use std::borrow::Cow;
++    let home = unique_temp_dir();
++    tokio::fs::create_dir_all(&home).await.unwrap();
++    let sqlite = crate::SqliteConfig::new_for_testing(home.as_path().abs());
++    let current = &crate::migrations::STATE_MIGRATOR;
++    let old = sqlx::migrate::Migrator {
++        migrations: Cow::Owned(
++            current
++                .migrations
++                .iter()
++                .filter(|m| m.version < 51)
++                .cloned()
++                .collect(),
++        ),
++        ignore_missing: true,
++        locking: current.locking,
++        no_tx: current.no_tx,
++        table_name: current.table_name.clone(),
++        create_schemas: current.create_schemas.clone(),
++    };
++    let pool = sqlite
++        .open_read_write_pool(&sqlite.state_db_path())
++        .await
++        .unwrap();
++    old.run(&pool).await.unwrap();
++    let thread = ThreadId::new();
++    sqlx::query("INSERT INTO threads(id, rollout_path, created_at, updated_at, source, model_provider, cwd, title, sandbox_policy, approval_mode) VALUES (?, 'rollout', 1, 1, 'cli', 'test', '/workspace', 'existing', 'read-only', 'never')")
++        .bind(thread.to_string()).execute(&pool).await.unwrap();
++    pool.close().await;
++    let runtime = StateRuntime::init(sqlite.clone(), "test".into())
++        .await
++        .unwrap();
++    let pool = sqlite
++        .open_read_write_pool(&sqlite.state_db_path())
++        .await
++        .unwrap();
++    old.run(&pool).await.unwrap();
++    let row = sqlx::query("SELECT title FROM threads WHERE id = ?")
++        .bind(thread.to_string())
++        .fetch_one(&pool)
++        .await
++        .unwrap();
++    assert_eq!(row.get::<String, _>("title"), "existing");
++    let request = ToolRequestIdentity {
++        thread_id: thread.to_string(),
++        logical_id: "call".into(),
++        turn_id: "turn".into(),
++        scope_id: "scope".into(),
++        cell_id: None,
++        parent_call_id: None,
++        tool_name: "test".into(),
++        source: "model".into(),
++        binding: "digest".into(),
++    };
++    assert!(matches!(
++        runtime.observe_tool_request(&request).await.unwrap(),
++        ToolRequestObservation::New(_)
++    ));
++    assert_eq!(
++        runtime
++            .list_tool_fact_events(&thread.to_string(), 0, 200)
++            .await
++            .unwrap()
++            .len(),
++        1
++    );
++    sqlx::query("DELETE FROM threads WHERE id = ?")
++        .bind(thread.to_string())
++        .execute(&pool)
++        .await
++        .unwrap();
++    assert!(
++        runtime
++            .list_tool_fact_events(&thread.to_string(), 0, 200)
++            .await
++            .unwrap()
++            .is_empty()
++    );
++}
+diff --git a/codex-rs/state/src/tool_execution.rs b/codex-rs/state/src/tool_execution.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/state/src/tool_execution.rs
+@@ -0,0 +1,106 @@
++// SPDX-License-Identifier: Apache-2.0
++
++use serde::Deserialize;
++use serde::Serialize;
++
++/// Immutable identity of one model or runtime request. Digests contain no raw input.
++#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
++pub struct ToolRequestIdentity {
++    pub thread_id: String,
++    pub logical_id: String,
++    pub turn_id: String,
++    pub scope_id: String,
++    pub cell_id: Option<String>,
++    pub parent_call_id: Option<String>,
++    pub tool_name: String,
++    pub source: String,
++    pub binding: String,
++}
++
++/// Execution facts do not assert that a handler error had no side effects.
++#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
++#[serde(rename_all = "snake_case")]
++pub enum ToolExecutionStatus {
++    Running,
++    Completed,
++    Uncertain,
++}
++
++#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
++#[serde(rename_all = "snake_case")]
++pub enum ToolOutputDisposition {
++    Pending,
++    Accepted,
++    Rejected,
++}
++
++#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
++#[serde(rename_all = "snake_case")]
++pub enum ToolOutputDelivery {
++    Pending,
++    /// Core offered the output to its caller; this is not a model acknowledgement.
++    Offered,
++}
++
++/// Payload-free receipt suitable for rebuilding projections and diagnostics.
++#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
++pub struct ToolAttemptReceipt {
++    pub attempt_id: String,
++    pub owner_id: String,
++    pub operation_digest: String,
++    pub execution: ToolExecutionStatus,
++    pub disposition: ToolOutputDisposition,
++    pub delivery: ToolOutputDelivery,
++    pub revision: i64,
++    pub execution_result_retained: bool,
++    pub accepted_result_retained: bool,
++}
++
++#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
++#[serde(rename_all = "snake_case")]
++pub enum ToolRequestResolution {
++    Observed,
++    Denied,
++}
++
++#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
++pub struct ToolExecutionFact {
++    pub schema_version: u32,
++    pub request_sequence: i64,
++    pub request: ToolRequestIdentity,
++    pub resolution: ToolRequestResolution,
++    pub attempt: Option<ToolAttemptReceipt>,
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct ToolFactEvent {
++    pub sequence: i64,
++    pub fact: ToolExecutionFact,
++}
++
++/// Exact transport replay preserves the original observation.
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub enum ToolRequestObservation {
++    New(ToolExecutionFact),
++    Replay(ToolExecutionFact),
++    IdentityConflict,
++}
++
++/// A successful claim is the only permission to dispatch a handler.
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub enum ToolAttemptClaim {
++    Claimed(ToolExecutionFact),
++    Existing(ToolExecutionFact),
++}
++
++/// Bound result bytes are separate from payload-free projection receipts.
++/// Deliberately has no Debug implementation.
++pub struct ToolStoredResults {
++    pub effective_input: String,
++    pub execution: Option<String>,
++    pub accepted: Option<String>,
++    pub rejection: Option<String>,
++}
++
++/// Receipt retention is independent of the optional result body retention.
++pub const MAX_TOOL_RESULT_BYTES: usize = 4 * 1024 * 1024;

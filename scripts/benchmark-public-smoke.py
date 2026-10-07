@@ -90,6 +90,7 @@ def trusted_execution_lock(path, source_directory):
     if not lock.is_absolute():
         raise ValueError('execution lock must be an absolute host path')
     lock = lock.parent.resolve(strict=True) / lock.name
+    source_directory = Path(source_directory).resolve(strict=True)
     if lock == source_directory or source_directory in lock.parents:
         raise ValueError('execution lock must be outside the candidate tree')
     return lock

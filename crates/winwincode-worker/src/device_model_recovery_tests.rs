@@ -117,6 +117,7 @@ fn serve_retry(
                 Err(error) => panic!("expected actual Worker HTTPS attempt: {error}"),
             }
         };
+        socket.set_nonblocking(false).unwrap();
         socket.set_read_timeout(Some(WAIT)).unwrap();
         socket.set_write_timeout(Some(WAIT)).unwrap();
         let mut stream = TlsStream::new(ServerConnection::new(Arc::clone(config)).unwrap(), socket);

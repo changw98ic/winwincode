@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
+#[path = "tool_fact_projection.rs"]
+mod tool_fact_projection;
+#[path = "tool_runtime_contract.rs"]
+mod tool_runtime_contract;
+use tool_runtime_contract::ToolRuntimeContract;
+
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::fs::OpenOptions;
@@ -181,7 +187,7 @@ pub struct ProductionCodexConfig {
     fusion: Option<winwincode_execution_port::agent_config::AgentFusionSettings>,
     jev_context: Option<AgentJevContextSettings>,
     jev_judge: Option<String>,
-    tool_repeat_guard: bool,
+    sealed_benchmark_tools: bool,
     gateway_route: ModelGatewayRoute,
     registered_capabilities: WorkerCapabilitySet,
     discovered_capabilities: Vec<CapabilityDescriptor>,
@@ -291,7 +297,7 @@ impl ProductionCodexConfig {
             fusion: None,
             jev_judge: None,
             jev_context: None,
-            tool_repeat_guard: false,
+            sealed_benchmark_tools: false,
             gateway_route: options.gateway_route,
             registered_capabilities: options.registered_capabilities,
             discovered_capabilities: options.discovered_capabilities,
@@ -319,10 +325,10 @@ impl ProductionCodexConfig {
         self
     }
 
-    /// Enables the benchmark's durable sixth-identical-tool-request stop.
+    /// Registers the benchmark's sealed tool capabilities.
     #[must_use]
-    pub fn with_benchmark_tool_repeat_guard(mut self) -> Self {
-        self.tool_repeat_guard = true;
+    pub fn with_sealed_benchmark_tools(mut self) -> Self {
+        self.sealed_benchmark_tools = true;
         self
     }
 
@@ -545,16 +551,13 @@ impl ProductionCodexAdapter {
         let diagnostic_artifacts =
             DiagnosticArtifactOutbox::open(store.clone()).map_err(map_store_error)?;
         let authority = SharedAuthoritySource::default();
-        let bridge = Arc::new(
-            ExecutionPortModelBridge::new(
-                store.clone(),
-                outbox.clone(),
-                config.gateway_route.clone(),
-                config.provider.clone(),
-                authority,
-            )
-            .with_tool_repeat_guard(config.tool_repeat_guard),
-        );
+        let bridge = Arc::new(ExecutionPortModelBridge::new(
+            store.clone(),
+            outbox.clone(),
+            config.gateway_route.clone(),
+            config.provider.clone(),
+            authority,
+        ));
         let action_gate = Arc::new(
             ExecutionPortActionGate::open(
                 &config.data_directory,
@@ -732,7 +735,8 @@ impl ProductionCodexAdapter {
         if !self.runs.is_empty() {
             return Err(conflict());
         }
-        let benchmark_server = sealed_benchmark_mcp_server(job, self.config.tool_repeat_guard)?;
+        let benchmark_server =
+            sealed_benchmark_mcp_server(job, self.config.sealed_benchmark_tools)?;
         let extensions = winwincode_provider::DeviceProviderStore::open(directory)
             .and_then(|store| match benchmark_server {
                 Some(server) => {
@@ -743,6 +747,15 @@ impl ProductionCodexAdapter {
             .map_err(|_| unavailable())?;
         let mut discovered = Vec::new();
         for server in extensions {
+            for operation in winwincode_execution_port::mcp_resource::McpResourceOperation::ALL {
+                discovered.push(CapabilityDescriptor::mcp_resource(
+                    &server.server,
+                    operation,
+                    server.digest.trim_start_matches("sha256:"),
+                    winwincode_execution_port::capability_adapter::CapabilityHealth::Healthy,
+                    winwincode_execution_port::capability_adapter::CapabilityOrigin::CodexCoreMcp,
+                ).map_err(|_| invalid_configuration())?);
+            }
             for tool in server.tools {
                 discovered.push(CapabilityDescriptor::mcp(
                     &server.server,
@@ -1730,13 +1743,6 @@ impl ProductionCodexAdapter {
         run_key: &str,
         now: &Instant,
     ) -> Result<CodexPoll, ProductionCodexError> {
-        let repeated = self
-            .store
-            .tool_repeat_stopped(run_key)
-            .map_err(map_store_error)?;
-        if repeated {
-            self.quiesce_infrastructure_run(run_key, now).await;
-        }
         let authority = {
             let run = self.runs.get(run_key).ok_or_else(unknown_thread)?;
             DiagnosticArtifactAuthority {
@@ -1756,11 +1762,7 @@ impl ProductionCodexAdapter {
             let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
             run.record.pending_completion = Some(StoredPendingCompletion {
                 final_message: None,
-                kind: if repeated {
-                    StoredPendingTerminalKind::ToolRepeatLimit
-                } else {
-                    StoredPendingTerminalKind::InfrastructureFailed
-                },
+                kind: StoredPendingTerminalKind::InfrastructureFailed,
             });
             self.persist_run(run_key)?;
             return Ok(CodexPoll::Pending);
@@ -1771,8 +1773,7 @@ impl ProductionCodexAdapter {
             .ok_or_else(unknown_thread)?
             .record
             .terminal;
-        let first_failure = terminal.is_none()
-            || (repeated && !matches!(terminal, Some(StoredTerminal::ToolRepeatLimit { .. })));
+        let first_failure = terminal.is_none();
         if first_failure {
             let artifacts = self
                 .diagnostic_artifacts
@@ -1781,11 +1782,7 @@ impl ProductionCodexAdapter {
             {
                 let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
                 run.record.last_activity_at = now.clone();
-                run.record.terminal = Some(if repeated {
-                    StoredTerminal::ToolRepeatLimit { artifacts }
-                } else {
-                    StoredTerminal::InfrastructureFailed { artifacts }
-                });
+                run.record.terminal = Some(StoredTerminal::InfrastructureFailed { artifacts });
                 run.record.phase = StoredRunPhase::TerminalTracePending;
             }
             self.persist_run(run_key)?;
@@ -1888,18 +1885,14 @@ impl ProductionCodexAdapter {
         session: &str,
         now: &Instant,
     ) -> Result<CodexPoll, ProductionCodexError> {
+        if let Some(fact) = self.poll_tool_facts(run_key, session, now).await? {
+            return Ok(fact);
+        }
         let Ok(event) = self.next_kernel_event(session).await else {
             return self.poll_infrastructure_terminal(run_key, now).await;
         };
-        let stopped = self
-            .store
-            .tool_repeat_stopped(run_key)
-            .map_err(map_store_error)?;
         let EventPoll::Event(event) = event else {
             return match event {
-                EventPoll::Timeout if stopped => {
-                    self.poll_infrastructure_terminal(run_key, now).await
-                }
                 EventPoll::Timeout => Ok(CodexPoll::Pending),
                 EventPoll::Closed => self.poll_infrastructure_terminal(run_key, now).await,
                 EventPoll::Event(_) => unreachable!(),
@@ -1908,19 +1901,6 @@ impl ProductionCodexAdapter {
         let Ok(event) = decode_kernel_event(&event.payload_json) else {
             return self.poll_infrastructure_terminal(run_key, now).await;
         };
-        // Admission already blocks new tools and model calls. Drain earlier
-        // Core execution facts before closing the session, or completed tools
-        // disappear from the durable counters and diagnostic artifacts.
-        if stopped
-            && matches!(
-                &event.msg,
-                CodexEventMsg::Error(_)
-                    | CodexEventMsg::TurnComplete(_)
-                    | CodexEventMsg::TurnAborted(_)
-            )
-        {
-            return self.poll_infrastructure_terminal(run_key, now).await;
-        }
         let is_error_event = matches!(&event.msg, CodexEventMsg::Error(_));
         let result = self.accept_polled_event(run_key, event, now);
         if is_error_event && result.is_ok() {
@@ -3210,6 +3190,9 @@ impl ProductionCodexAdapter {
                 is_delegated_composer(&record).then_some(record.workspace.as_path()),
             )
             .map_err(|_| unavailable())?;
+        self.action_gate
+            .install_tool_dependencies(&binding, &self.config.kernel_home, &record.workspace)
+            .map_err(|_| unavailable())?;
         // Core may have emitted an approval event immediately before the
         // process stopped.  The durable operation is the source of truth for
         // the resumed action-gate queue; terminal runs must not resurrect a
@@ -3247,6 +3230,18 @@ impl ProductionCodexAdapter {
                 pending_fusion: None,
             },
         );
+        // Complete the reserved Core transport frame before assigning any later
+        // post-action or lifecycle frame a sequence in this same replay stream.
+        if let Some(CodexPoll::RuntimeTrace(message)) = self.retain_pending_tool_fact(run_key)? {
+            let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
+            if !run
+                .replay
+                .iter()
+                .any(|frame| frame.event.event_id == message.event.event_id)
+            {
+                run.replay.push_back(*message);
+            }
+        }
         for trace in pending_post_actions {
             if let Some(message) = self.retain_post_action_trace(
                 run_key,
@@ -3515,6 +3510,8 @@ impl ProductionCodexAdapter {
         {
             return Ok(false);
         }
+        ToolRuntimeContract::capture(&self.config, &record.agent_config)?
+            .validate_resume(record.tool_runtime_contract.as_ref())?;
         let rollout_path = record.rollout_path.clone().ok_or_else(|| {
             ProductionCodexError::new(
                 ProductionCodexErrorKind::Restart,
@@ -4116,6 +4113,9 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
                 is_delegated_composer(&run.record).then_some(run.record.workspace.as_path()),
             )
             .map_err(|_| unavailable())?;
+        self.action_gate
+            .install_tool_dependencies(&binding, &self.config.kernel_home, &run.record.workspace)
+            .map_err(|_| unavailable())?;
         self.runs
             .get_mut(&run_key)
             .ok_or_else(unknown_thread)?
@@ -4294,6 +4294,9 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             current_turn_id: None,
             last_agent_message: None,
             stage_product_sources: Vec::new(),
+            core_tool_cursor: 0,
+            core_tool_pending: None,
+            tool_runtime_contract: Some(ToolRuntimeContract::capture(&self.config, &agent_config)?),
             batch_intent: None,
             format_repair: None,
             delegated_transitions: Vec::new(),
@@ -4838,32 +4841,6 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             .update_now(now)
             .map_err(|_| unavailable())?;
         let run_key = self.run_key_for_thread(thread_id)?.to_owned();
-        let stopped = self
-            .store
-            .tool_repeat_stopped(&run_key)
-            .map_err(map_store_error)?;
-        if stopped
-            && self.runs.get(&run_key).is_some_and(|run| {
-                // An accepted cancellation owns the terminal decision, including
-                // its wait for exact diagnostic ACKs. A prior repeat-stop marker
-                // must not restore the failure on the next poll or after reopen.
-                !matches!(run.record.terminal, Some(StoredTerminal::Cancelled { .. }))
-                    && !run
-                        .record
-                        .pending_completion
-                        .as_ref()
-                        .is_some_and(|pending| {
-                            matches!(pending.kind, StoredPendingTerminalKind::Cancelled)
-                        })
-                    && (run.record.terminal.is_some()
-                        || run.record.pending_completion.is_some()
-                        || run.record.final_candidate_freeze.is_some()
-                        || run.record.delegated_stop.is_some())
-            })
-        {
-            return self.poll_infrastructure_terminal(&run_key, now).await;
-        }
-
         if self.runs.get(&run_key).is_some_and(|run| {
             run.record.final_candidate_freeze.is_some() || run.record.delegated_stop.is_some()
         }) {
@@ -6001,6 +5978,12 @@ struct StoredRun {
     last_agent_message: Option<String>,
     #[serde(default)]
     stage_product_sources: Vec<String>,
+    #[serde(default)]
+    core_tool_cursor: i64,
+    #[serde(default)]
+    core_tool_pending: Option<RuntimeEventMessage>,
+    #[serde(default)]
+    tool_runtime_contract: Option<ToolRuntimeContract>,
     /// Durable single-writer intent emitted by a delegated Composer instead
     /// of terminalizing the execution Job.
     #[serde(default)]
@@ -6033,7 +6016,6 @@ struct StoredRun {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 enum StoredPendingTerminalKind {
-    ToolRepeatLimit,
     Completed,
     #[default]
     Failed,
@@ -6111,7 +6093,6 @@ fn terminal_from_pending_completion(
     usage: Option<ExecutionOutcomeUsage>,
 ) -> StoredTerminal {
     match completion.kind {
-        StoredPendingTerminalKind::ToolRepeatLimit => StoredTerminal::ToolRepeatLimit { artifacts },
         StoredPendingTerminalKind::Completed => StoredTerminal::Completed {
             summary: "embedded Codex turn completed".to_owned(),
             final_message: completion.final_message,
@@ -6207,9 +6188,6 @@ enum StoredRunPhase {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum StoredTerminal {
-    ToolRepeatLimit {
-        artifacts: Vec<ArtifactReference>,
-    },
     Completed {
         summary: String,
         final_message: Option<String>,
@@ -6232,7 +6210,6 @@ enum StoredTerminal {
 impl StoredTerminal {
     fn trace_summary(&self) -> &'static str {
         match self {
-            Self::ToolRepeatLimit { .. } => crate::tool_repeat::STOP_REASON,
             Self::Completed { .. } => "embedded Codex turn stopped",
             Self::Failed { .. } => "embedded Codex turn failed",
             Self::DelegatedInconclusive => "delegated ChangeBatch proposal was inconclusive",
@@ -6246,15 +6223,6 @@ impl StoredTerminal {
 
     fn into_poll(self) -> Result<CodexPoll, ProductionCodexError> {
         match self {
-            Self::ToolRepeatLimit { artifacts } => {
-                let summary = SecretSafeTraceSummary::new(crate::tool_repeat::STOP_REASON)
-                    .map_err(|_| unavailable())?;
-                Ok(if artifacts.is_empty() {
-                    CodexPoll::Failed(summary)
-                } else {
-                    CodexPoll::FailedWithDiagnostics(summary, artifacts)
-                })
-            }
             Self::Completed {
                 summary,
                 final_message: _,
@@ -9143,7 +9111,7 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    fn diagnostic_adapter_config(root: &std::path::Path) -> ProductionCodexConfig {
+    pub(super) fn diagnostic_adapter_config(root: &std::path::Path) -> ProductionCodexConfig {
         use std::os::unix::fs::PermissionsExt as _;
 
         std::fs::create_dir_all(root).expect("create diagnostic adapter root");
@@ -10709,6 +10677,9 @@ mod tests {
             current_turn_id: None,
             last_agent_message: None,
             stage_product_sources: Vec::new(),
+            core_tool_cursor: 0,
+            core_tool_pending: None,
+            tool_runtime_contract: None,
             batch_intent: None,
             format_repair: None,
             delegated_transitions: Vec::new(),
@@ -10835,7 +10806,7 @@ mod tests {
         );
     }
 
-    fn delegated_record_and_binding() -> (StoredRun, ModelRunBinding) {
+    pub(super) fn delegated_record_and_binding() -> (StoredRun, ModelRunBinding) {
         let mut job = executor_job();
         job.workspace.write_mode = ExecutionWorkspaceWriteMode::ReadOnly;
         let thread_id = CodexThreadId("cdx_00000000000000000000000001".to_owned());
@@ -10867,6 +10838,9 @@ mod tests {
             current_turn_id: Some("turn-fixture".to_owned()),
             last_agent_message: None,
             stage_product_sources: Vec::new(),
+            core_tool_cursor: 0,
+            core_tool_pending: None,
+            tool_runtime_contract: None,
             batch_intent: None,
             format_repair: None,
             delegated_transitions: Vec::new(),

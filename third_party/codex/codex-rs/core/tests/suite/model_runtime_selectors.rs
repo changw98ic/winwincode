@@ -232,6 +232,9 @@ async fn remote_code_mode_only_selector_fails_closed_when_host_is_disabled() -> 
     let mut model = remote_model("test-tool-mode-code-mode-only-host-disabled");
     model.tool_mode = Some(ToolMode::CodeModeOnly);
     let response = response_for_remote_model(model, |config| {
+        config.web_search_mode = codex_core::config::Constrained::allow_any(
+            codex_protocol::config_types::WebSearchMode::Disabled,
+        );
         config
             .features
             .disable(Feature::CodeModeHost)

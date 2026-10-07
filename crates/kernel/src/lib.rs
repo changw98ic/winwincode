@@ -85,6 +85,11 @@ pub use winwincode_execution_port::generated::{
 
 use crate::model_port::KernelModelStreamTransport;
 
+mod result_read;
+mod tool_facts;
+pub use result_read::KernelToolResultReadRequest;
+pub use tool_facts::KernelToolRuntimeEvent;
+
 /// Host-owned tool request observed before Codex Core enters the tool handler.
 #[derive(Clone, Eq, PartialEq)]
 pub struct KernelActionRequest {
@@ -184,6 +189,10 @@ impl KernelExecutableAuthorization {
 /// Exact Codex tool payload retained only for in-process pre-action authorization.
 #[derive(Clone, Eq, PartialEq)]
 pub enum KernelActionPayload {
+    /// Core-certified orchestration. Nested operations require independent admission.
+    CoreControl {
+        input: String,
+    },
     Function {
         arguments: String,
     },
@@ -197,6 +206,19 @@ pub enum KernelActionPayload {
         program: String,
         args: Vec<String>,
         working_directory: String,
+    },
+    FileRead {
+        path: String,
+    },
+    McpResource {
+        server: String,
+        method: String,
+        arguments: String,
+    },
+    ProcessInteraction {
+        process_id: i32,
+        origin_call_id: String,
+        input: String,
     },
     Files {
         changes: Vec<KernelFileChange>,
@@ -245,17 +267,58 @@ impl fmt::Debug for KernelActionRequest {
 impl fmt::Debug for KernelActionPayload {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
+            Self::CoreControl { .. } => "CoreControl(<private>)",
             Self::Function { .. } => "Function(<private>)",
             Self::ToolSearch { .. } => "ToolSearch(<private>)",
             Self::Custom { .. } => "Custom(<private>)",
             Self::Shell { .. } => "Shell(<private>)",
+            Self::FileRead { .. } => "FileRead(<private>)",
+            Self::McpResource { .. } => "McpResource(<private>)",
+            Self::ProcessInteraction { .. } => "ProcessInteraction(<private>)",
             Self::Files { .. } => "Files(<private>)",
         })
     }
 }
 
 /// Required host admission boundary for every embedded Codex tool call.
+pub use codex_core_api::ToolCallGatePayload as ToolInputGatePayload;
+pub use codex_core_api::ToolCallGateRequest as ToolInputGateRequest;
+pub use codex_core_api::{
+    ToolCoalescingPermission, ToolDependencySnapshot, ToolInputContext, ToolInputProof,
+    ToolInputProofRequest, ToolReusePermission,
+};
+
 pub trait KernelActionGate: Send + Sync {
+    /// Host-recognized adapter policy and dependencies for the effective request.
+    fn freeze_tool_input(
+        &self,
+        _context: ToolInputContext,
+    ) -> BoxFuture<'static, Option<ToolDependencySnapshot>> {
+        Box::pin(async { None })
+    }
+    fn verify_tool_input(
+        &self,
+        _request: ToolInputProofRequest,
+    ) -> BoxFuture<'static, Option<ToolInputProof>> {
+        Box::pin(async { None })
+    }
+
+    /// Grant current read access to one accepted Core receipt. Hosts that do
+    /// not implement a read policy reject recovery by default.
+    fn authorize_result_read(
+        &self,
+        _request: KernelToolResultReadRequest,
+    ) -> BoxFuture<'static, KernelResult<KernelActionAuthorization>> {
+        Box::pin(async { Err(KernelFailure::action_rejected()) })
+    }
+    fn revalidate_result_read(
+        &self,
+        _request: KernelToolResultReadRequest,
+        _authorization: KernelActionAuthorization,
+    ) -> BoxFuture<'static, KernelResult<()>> {
+        Box::pin(async { Err(KernelFailure::action_rejected()) })
+    }
+
     fn authorize(
         &self,
         request: KernelActionRequest,
@@ -303,6 +366,55 @@ struct CoreToolCallGate {
 }
 
 impl ToolCallGate for CoreToolCallGate {
+    fn freeze_tool_input(
+        &self,
+        context: ToolInputContext,
+    ) -> BoxFuture<'static, Option<ToolDependencySnapshot>> {
+        self.host.freeze_tool_input(context)
+    }
+    fn verify_tool_input(
+        &self,
+        request: ToolInputProofRequest,
+    ) -> BoxFuture<'static, Option<ToolInputProof>> {
+        self.host.verify_tool_input(request)
+    }
+
+    fn authorize_result_read(
+        &self,
+        request: codex_core_api::ToolResultReadRequest,
+    ) -> BoxFuture<'static, Result<ToolCallGateAuthorization, ToolCallGateRejection>> {
+        let host = Arc::clone(&self.host);
+        Box::pin(async move {
+            host.authorize_result_read(request.into())
+                .await
+                .map(tool_call_gate_authorization)
+                .map_err(|_| {
+                    ToolCallGateRejection::new(
+                        "RESULT_READ_DENIED",
+                        "current result read authority rejected recovery",
+                    )
+                })
+        })
+    }
+
+    fn revalidate_result_read(
+        &self,
+        request: codex_core_api::ToolResultReadRequest,
+        authorization: ToolCallGateAuthorization,
+    ) -> BoxFuture<'static, Result<(), ToolCallGateRejection>> {
+        let host = Arc::clone(&self.host);
+        Box::pin(async move {
+            host.revalidate_result_read(request.into(), kernel_action_authorization(&authorization))
+                .await
+                .map_err(|_| {
+                    ToolCallGateRejection::new(
+                        "RESULT_READ_STALE",
+                        "result read authority is no longer current",
+                    )
+                })
+        })
+    }
+
     fn authorize(
         &self,
         request: ToolCallGateRequest,
@@ -381,6 +493,9 @@ fn kernel_action_request(request: ToolCallGateRequest) -> KernelActionRequest {
         namespace: request.namespace,
         tool_name: request.tool_name,
         payload: match request.payload {
+            ToolCallGatePayload::CoreControl { input } => {
+                KernelActionPayload::CoreControl { input }
+            }
             ToolCallGatePayload::Function { arguments } => {
                 KernelActionPayload::Function { arguments }
             }
@@ -388,6 +503,25 @@ fn kernel_action_request(request: ToolCallGateRequest) -> KernelActionRequest {
                 KernelActionPayload::ToolSearch { arguments_json }
             }
             ToolCallGatePayload::Custom { input } => KernelActionPayload::Custom { input },
+            ToolCallGatePayload::FileRead { path } => KernelActionPayload::FileRead { path },
+            ToolCallGatePayload::McpResource {
+                server,
+                method,
+                arguments,
+            } => KernelActionPayload::McpResource {
+                server,
+                method,
+                arguments,
+            },
+            ToolCallGatePayload::ProcessInteraction {
+                process_id,
+                origin_call_id,
+                input,
+            } => KernelActionPayload::ProcessInteraction {
+                process_id,
+                origin_call_id,
+                input,
+            },
             ToolCallGatePayload::Shell {
                 program,
                 args,
@@ -420,7 +554,7 @@ pub const CODEX_COMMIT: &str = "758ef40f50c1a458425c7cfbf1eb12cbc07af0b0";
 /// Exact embedded Codex release tag.
 pub const CODEX_TAG: &str = "rust-v0.149.0";
 /// Native contract version, independent of the application package version.
-pub const INTERFACE_VERSION: u32 = 9;
+pub const INTERFACE_VERSION: u32 = 12;
 /// Patches applied to the embedded source in deterministic order.
 pub const CODEX_PATCH_SET: &[&str] = &[
     "upstream/patches/codex/0001-export-client-mcp-extensions.patch",
@@ -435,6 +569,57 @@ pub const CODEX_PATCH_SET: &[&str] = &[
     "upstream/patches/codex/0011-deterministic-tool-context-gc.patch",
     "upstream/patches/codex/0012-record-delegated-handoff-output.patch",
     "upstream/patches/codex/0013-code-mode-authorized-tool-definitions.patch",
+    "upstream/patches/codex/0014-code-mode-dispatch-catalog.patch",
+    "upstream/patches/codex/0015-code-mode-dispatch-portable-requests.patch",
+    "upstream/patches/codex/0016-code-mode-dispatch-authorization.patch",
+    "upstream/patches/codex/0017-code-mode-dispatch-hook-tests.patch",
+    "upstream/patches/codex/0018-code-mode-dispatch-cell-scope.patch",
+    "upstream/patches/codex/0019-code-mode-dispatch-continuations.patch",
+    "upstream/patches/codex/0020-code-mode-dispatch-terminal-boundaries.patch",
+    "upstream/patches/codex/0021-code-mode-dispatch-io-authorization.patch",
+    "upstream/patches/codex/0022-tool-execution-facts-schema.patch",
+    "upstream/patches/codex/0023-tool-execution-facts-store.patch",
+    "upstream/patches/codex/0024-tool-execution-facts-store-tests.patch",
+    "upstream/patches/codex/0025-tool-execution-facts-dispatch.patch",
+    "upstream/patches/codex/0026-tool-execution-facts-wiring.patch",
+    "upstream/patches/codex/0027-tool-execution-facts-tests.patch",
+    "upstream/patches/codex/0028-tool-execution-facts-catalog-tests.patch",
+    "upstream/patches/codex/0029-tool-runtime-recovery-relations-schema.patch",
+    "upstream/patches/codex/0030-tool-runtime-recovery-relations-store.patch",
+    "upstream/patches/codex/0031-tool-runtime-recovery-read-authority.patch",
+    "upstream/patches/codex/0032-tool-runtime-recovery-result-recovery.patch",
+    "upstream/patches/codex/0033-tool-runtime-recovery-recovery-tests.patch",
+    "upstream/patches/codex/0034-tool-runtime-recovery-cell-lifecycle.patch",
+    "upstream/patches/codex/0035-tool-runtime-reconciliation-state.patch",
+    "upstream/patches/codex/0036-tool-runtime-reconciliation-dispatch.patch",
+    "upstream/patches/codex/0037-tool-runtime-reconciliation-tests.patch",
+    "upstream/patches/codex/0038-tool-runtime-reconciliation-process-receipt.patch",
+    "upstream/patches/codex/0039-tool-diagnostics-schema.patch",
+    "upstream/patches/codex/0040-tool-diagnostics-queue.patch",
+    "upstream/patches/codex/0041-tool-diagnostics-responses.patch",
+    "upstream/patches/codex/0042-tool-diagnostics-queue-tests.patch",
+    "upstream/patches/codex/0043-tool-diagnostics-detector.patch",
+    "upstream/patches/codex/0044-tool-diagnostics-detector-tests.patch",
+    "upstream/patches/codex/0045-tool-diagnostics-feedback.patch",
+    "upstream/patches/codex/0046-tool-diagnostics-boundaries.patch",
+    "upstream/patches/codex/0047-tool-dependencies-schema.patch",
+    "upstream/patches/codex/0048-tool-dependencies-input-store.patch",
+    "upstream/patches/codex/0049-tool-dependencies-input-tests.patch",
+    "upstream/patches/codex/0050-tool-dependencies-sharing-store.patch",
+    "upstream/patches/codex/0051-tool-dependencies-sharing-store-tests.patch",
+    "upstream/patches/codex/0052-tool-dependencies-adapter-contract.patch",
+    "upstream/patches/codex/0053-tool-dependencies-dispatch.patch",
+    "upstream/patches/codex/0054-tool-dependencies-sharing-runtime.patch",
+    "upstream/patches/codex/0055-tool-dependencies-sharing-io.patch",
+    "upstream/patches/codex/0056-tool-dependencies-sharing-tests.patch",
+    "upstream/patches/codex/0057-tool-dependencies-responses.patch",
+    "upstream/patches/codex/0058-tool-dependencies-diagnostics.patch",
+    "upstream/patches/codex/0059-tool-receipts-state.patch",
+    "upstream/patches/codex/0060-tool-receipts-state-tests.patch",
+    "upstream/patches/codex/0061-tool-receipts-context.patch",
+    "upstream/patches/codex/0062-tool-receipts-boundaries.patch",
+    "upstream/patches/codex/0063-tool-receipts-test-isolation.patch",
+    "upstream/patches/codex/0064-tool-receipts-interrupted-history.patch",
 ];
 
 const ROLE_SESSION_POLICY_SCHEMA_VERSION: u32 = 2;
@@ -1005,6 +1190,16 @@ impl Kernel {
                     )
                 })?;
             config.experimental_request_user_input_enabled = true;
+            // One product tool surface covers built-in, MCP and host operations.
+            config
+                .features
+                .enable(Feature::CodeModeOnly)
+                .map_err(|error| {
+                    KernelFailure::new(
+                        "CONFIG_FEATURE_FAILED",
+                        format!("Code Mode tool surface could not be enabled: {error}"),
+                    )
+                })?;
             // User interruption closes Code Mode cells before the next turn.
             config
                 .features
@@ -2511,7 +2706,7 @@ mod tests {
         .expect("construct kernel");
         let build = kernel.build_info();
         assert_eq!(build.interface_version, INTERFACE_VERSION);
-        assert_eq!(build.interface_version, 9);
+        assert_eq!(build.interface_version, 12);
         assert_eq!(build.codex_commit, CODEX_COMMIT);
         assert_eq!(
             build.patch_set,
@@ -2528,6 +2723,57 @@ mod tests {
                 "upstream/patches/codex/0011-deterministic-tool-context-gc.patch",
                 "upstream/patches/codex/0012-record-delegated-handoff-output.patch",
                 "upstream/patches/codex/0013-code-mode-authorized-tool-definitions.patch",
+                "upstream/patches/codex/0014-code-mode-dispatch-catalog.patch",
+                "upstream/patches/codex/0015-code-mode-dispatch-portable-requests.patch",
+                "upstream/patches/codex/0016-code-mode-dispatch-authorization.patch",
+                "upstream/patches/codex/0017-code-mode-dispatch-hook-tests.patch",
+                "upstream/patches/codex/0018-code-mode-dispatch-cell-scope.patch",
+                "upstream/patches/codex/0019-code-mode-dispatch-continuations.patch",
+                "upstream/patches/codex/0020-code-mode-dispatch-terminal-boundaries.patch",
+                "upstream/patches/codex/0021-code-mode-dispatch-io-authorization.patch",
+                "upstream/patches/codex/0022-tool-execution-facts-schema.patch",
+                "upstream/patches/codex/0023-tool-execution-facts-store.patch",
+                "upstream/patches/codex/0024-tool-execution-facts-store-tests.patch",
+                "upstream/patches/codex/0025-tool-execution-facts-dispatch.patch",
+                "upstream/patches/codex/0026-tool-execution-facts-wiring.patch",
+                "upstream/patches/codex/0027-tool-execution-facts-tests.patch",
+                "upstream/patches/codex/0028-tool-execution-facts-catalog-tests.patch",
+                "upstream/patches/codex/0029-tool-runtime-recovery-relations-schema.patch",
+                "upstream/patches/codex/0030-tool-runtime-recovery-relations-store.patch",
+                "upstream/patches/codex/0031-tool-runtime-recovery-read-authority.patch",
+                "upstream/patches/codex/0032-tool-runtime-recovery-result-recovery.patch",
+                "upstream/patches/codex/0033-tool-runtime-recovery-recovery-tests.patch",
+                "upstream/patches/codex/0034-tool-runtime-recovery-cell-lifecycle.patch",
+                "upstream/patches/codex/0035-tool-runtime-reconciliation-state.patch",
+                "upstream/patches/codex/0036-tool-runtime-reconciliation-dispatch.patch",
+                "upstream/patches/codex/0037-tool-runtime-reconciliation-tests.patch",
+                "upstream/patches/codex/0038-tool-runtime-reconciliation-process-receipt.patch",
+                "upstream/patches/codex/0039-tool-diagnostics-schema.patch",
+                "upstream/patches/codex/0040-tool-diagnostics-queue.patch",
+                "upstream/patches/codex/0041-tool-diagnostics-responses.patch",
+                "upstream/patches/codex/0042-tool-diagnostics-queue-tests.patch",
+                "upstream/patches/codex/0043-tool-diagnostics-detector.patch",
+                "upstream/patches/codex/0044-tool-diagnostics-detector-tests.patch",
+                "upstream/patches/codex/0045-tool-diagnostics-feedback.patch",
+                "upstream/patches/codex/0046-tool-diagnostics-boundaries.patch",
+                "upstream/patches/codex/0047-tool-dependencies-schema.patch",
+                "upstream/patches/codex/0048-tool-dependencies-input-store.patch",
+                "upstream/patches/codex/0049-tool-dependencies-input-tests.patch",
+                "upstream/patches/codex/0050-tool-dependencies-sharing-store.patch",
+                "upstream/patches/codex/0051-tool-dependencies-sharing-store-tests.patch",
+                "upstream/patches/codex/0052-tool-dependencies-adapter-contract.patch",
+                "upstream/patches/codex/0053-tool-dependencies-dispatch.patch",
+                "upstream/patches/codex/0054-tool-dependencies-sharing-runtime.patch",
+                "upstream/patches/codex/0055-tool-dependencies-sharing-io.patch",
+                "upstream/patches/codex/0056-tool-dependencies-sharing-tests.patch",
+                "upstream/patches/codex/0057-tool-dependencies-responses.patch",
+                "upstream/patches/codex/0058-tool-dependencies-diagnostics.patch",
+                "upstream/patches/codex/0059-tool-receipts-state.patch",
+                "upstream/patches/codex/0060-tool-receipts-state-tests.patch",
+                "upstream/patches/codex/0061-tool-receipts-context.patch",
+                "upstream/patches/codex/0062-tool-receipts-boundaries.patch",
+                "upstream/patches/codex/0063-tool-receipts-test-isolation.patch",
+                "upstream/patches/codex/0064-tool-receipts-interrupted-history.patch",
             ]
         );
         assert_eq!(build.event_capacity, 16);

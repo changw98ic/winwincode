@@ -2,6 +2,9 @@
 
 #![allow(clippy::large_futures, clippy::too_many_lines)]
 
+#[path = "support/production_code_mode.rs"]
+mod production_code_mode;
+
 use std::{
     fs,
     future::Future,
@@ -1186,7 +1189,7 @@ fn provider_chunks(
     message_seed: u64,
 ) -> Vec<ModelChunkMessage> {
     let mut converter = ProviderStreamConverter::from_gateway_receipt(gateway);
-    events
+    production_code_mode::events(events)
         .into_iter()
         .flat_map(|event| converter.ingest(event).expect("convert Provider event"))
         .map(|frame| ModelChunkMessage {
@@ -1765,9 +1768,11 @@ commandIds = ["check", "rust", "python"]
                 1,
                 "the original custom call has exactly one handoff output in real model history"
             );
-            assert_eq!(
-                outputs[0]["output"],
-                "ChangeBatch proposal handed to host for application and validation."
+            let output = serde_json::to_string(&outputs[0]["output"]).unwrap();
+            assert!(output.contains("Script terminated"));
+            assert!(
+                production_code_mode::source_id(&next_composer, "submit_change_batch")
+                    .starts_with("code-mode:")
             );
         }
         // Drive B through the real workspace intake and patch/validation store;
@@ -1915,324 +1920,6 @@ commandIds = ["check", "rust", "python"]
 }
 
 #[test]
-fn benchmark_repeat_guard_stops_core_before_sixth_shell_execution() {
-    run_on_large_stack(benchmark_repeat_guard(false, false));
-}
-
-#[test]
-fn benchmark_repeat_guard_accepts_cancellation_after_retaining_stop_trace() {
-    run_on_large_stack(benchmark_repeat_guard(true, false));
-}
-
-#[test]
-fn benchmark_repeat_guard_cancellation_reopens_before_outcome() {
-    run_on_large_stack(benchmark_repeat_guard(true, true));
-}
-
-async fn benchmark_repeat_guard(cancel_after_trace: bool, reopen_before_outcome: bool) {
-    let root = TestDirectory::new("production-tool-repeat");
-    let mut dispatch = dispatch(&root);
-    dispatch.job.workspace.write_mode = ExecutionWorkspaceWriteMode::ReadOnly;
-    let port = RecordedPort::default();
-    let adapter = winwincode_codex::ProductionCodexAdapter::open(
-        adapter_config_with_mode(&root, winwincode_codex::ExecutionMode::DelegatedPatch)
-            .with_benchmark_tool_repeat_guard(),
-    )
-    .expect("open guarded embedded Core");
-    let mut worker = winwincode_worker::WorkerMain::new(
-        worker_config(),
-        port.clone(),
-        adapter,
-        root.workspace_runtime(),
-    );
-    register(&mut worker, &port).await;
-    worker
-        .accept_control(
-            &ExecutionPortMessage::JobDispatchMessage(dispatch.clone()),
-            at("2030-01-01T00:00:00.000Z"),
-        )
-        .await
-        .unwrap();
-    let now = at("2030-01-01T00:00:02.000Z");
-    // Script canonical model responses at the Worker boundary; the Core,
-    // shell, action gate, durable admission and terminal path are real.
-    for occurrence in 0..6 {
-        let open = poll_until_message(
-            &mut worker,
-            &port,
-            &now,
-            |messages| {
-                messages
-                    .iter()
-                    .filter_map(|message| match message {
-                        ExecutionPortMessage::ModelOpenMessage(open) => Some(open.clone()),
-                        _ => None,
-                    })
-                    .nth(occurrence)
-            },
-            "Core did not request the next model turn",
-        )
-        .await;
-        let frames = [
-            serde_json::json!({"type":"created"}),
-            serde_json::json!({"type":"output_item_done", "item": {
-                "type":"function_call", "name":"shell_command", "namespace":"functions",
-                "call_id":format!("repeat-call-{occurrence}"),
-                "arguments":serde_json::json!({"command":"cat src/lib.rs",
-                    "workdir":detached_checkout(&root).to_string_lossy(), "sandbox_permissions":"use_default"}).to_string(),
-            }}),
-            serde_json::json!({"type":"completed", "responseId":format!("repeat-response-{occurrence}"),
-                    "tokenUsage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":5,"reasoning_output_tokens":0,"total_tokens":15}, "endTurn":false}),
-        ];
-        for (index, frame) in frames.iter().enumerate() {
-            let bytes = serde_json::to_vec(frame).unwrap();
-            let chunk = ModelChunkMessage {
-                error: None,
-                is_final: index == 2,
-                kind: ModelChunkMessageKind::ModelChunk,
-                lease: open.lease.clone(),
-                message_id: ExecutionMessageId(id(
-                    "xmsg",
-                    12_000 + u64::try_from(occurrence * 10 + index).unwrap(),
-                )),
-                model_exchange_id: open.model_exchange_id.clone(),
-                payload: Some(winwincode_execution_port::generated::EncodedPayload {
-                    content_type: "application/json".into(),
-                    data_base64: STANDARD.encode(&bytes),
-                    payload_digest: Sha256Digest(format!("sha256:{:x}", Sha256::digest(&bytes))),
-                }),
-                schema_version: SchemaVersion::WinwincodeV1,
-                sent_at: now.clone(),
-                sequence: ExecutionSequence(i64::try_from(index + 1).unwrap()),
-                session_identity: open.session_identity.clone(),
-                worker_session_id: open.worker_session_id.clone(),
-            };
-            worker
-                .accept_control(&ExecutionPortMessage::ModelChunkMessage(chunk), now.clone())
-                .await
-                .unwrap_or_else(|error| {
-                    panic!("model occurrence {occurrence} frame {index}: {error:?}")
-                });
-        }
-    }
-    if cancel_after_trace {
-        for _ in 0..400 {
-            worker
-                .poll_codex(now.clone())
-                .await
-                .expect("poll repeat stop trace");
-            let run = stored_run_json(&root);
-            if run["terminal"]["kind"] == "tool_repeat_limit"
-                && run["terminalTrace"]["retained"] == true
-            {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        let run = stored_run_json(&root);
-        assert_eq!(run["terminal"]["kind"], "tool_repeat_limit");
-        assert_eq!(run["terminalTrace"]["retained"], true);
-        assert!(
-            !port
-                .messages()
-                .iter()
-                .any(|message| matches!(message, ExecutionPortMessage::JobOutcomeMessage(_)))
-        );
-        let original_stop = run["terminalTrace"].clone();
-        let original_runtime_frames = runtime_outbox_frames(&root);
-        assert!(!original_runtime_frames.is_empty());
-        let replay_store =
-            rusqlite::Connection::open(root.worker().join("worker-codex.sqlite3")).unwrap();
-        let original_replay: Vec<u8> = replay_store
-            .query_row(
-                "SELECT snapshot_json FROM runtime_replay LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let original_replay: serde_json::Value = serde_json::from_slice(&original_replay).unwrap();
-        let active = worker.active_jobs()[0].clone();
-        worker
-            .accept_control(
-                &ExecutionPortMessage::JobCancelMessage(JobCancelMessage {
-                    kind: JobCancelMessageKind::JobCancel,
-                    lease: active.lease.clone(),
-                    message_id: ExecutionMessageId(id("xmsg", 91)),
-                    reason: JobCancelMessageReason::UserRequested,
-                    requested_at: now.clone(),
-                    request_id: RequestId(id("req", 91)),
-                    schema_version: SchemaVersion::WinwincodeV1,
-                    sent_at: now.clone(),
-                    session_identity: active.session_identity.clone(),
-                    worker_session_id: active.worker_session_id.clone(),
-                }),
-                now.clone(),
-            )
-            .await
-            .expect("cancel the exact stopped Core run");
-        let cancelled = stored_run_json(&root);
-        assert_eq!(cancelled["terminal"]["kind"], "cancelled");
-        assert_ne!(
-            cancelled["terminalTrace"]["eventId"], original_stop["eventId"],
-            "cancellation retains a new fact instead of rewriting the original stopped trace"
-        );
-        assert_eq!(cancelled["phase"], "terminal");
-        assert!(
-            runtime_outbox_frames(&root).starts_with(&original_runtime_frames),
-            "original event positions, identities, digests and raw frame bytes remain unchanged"
-        );
-        let cancelled_replay: Vec<u8> = replay_store
-            .query_row(
-                "SELECT snapshot_json FROM runtime_replay LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let cancelled_replay: serde_json::Value =
-            serde_json::from_slice(&cancelled_replay).unwrap();
-        for original in original_replay["events"].as_array().unwrap() {
-            assert!(
-                cancelled_replay["events"]
-                    .as_array()
-                    .unwrap()
-                    .contains(original),
-                "cancellation preserves each original runtime replay frame byte-for-byte"
-            );
-        }
-        if reopen_before_outcome {
-            drop(worker);
-            let adapter = winwincode_codex::ProductionCodexAdapter::open(
-                adapter_config_with_mode(&root, winwincode_codex::ExecutionMode::DelegatedPatch)
-                    .with_benchmark_tool_repeat_guard(),
-            )
-            .expect("reopen before the cancelled outcome is sent");
-            worker = winwincode_worker::WorkerMain::new(
-                worker_config(),
-                port.clone(),
-                adapter,
-                root.workspace_runtime(),
-            );
-            register(&mut worker, &port).await;
-            worker
-                .accept_control(
-                    &ExecutionPortMessage::JobDispatchMessage(dispatch.clone()),
-                    now.clone(),
-                )
-                .await
-                .expect("recover cancellation before outcome");
-        }
-    }
-    let outcome = poll_until_candidate_outcome(&mut worker, &port, &now).await;
-    if cancel_after_trace {
-        assert_eq!(outcome.outcome.status, ExecutionOutcomeStatus::Cancelled);
-    } else {
-        assert_eq!(outcome.outcome.status, ExecutionOutcomeStatus::Failed);
-        assert_eq!(outcome.outcome.summary, "STUCK_TOOL_REPEAT_LIMIT");
-    }
-    let run = stored_run_json(&root);
-    let retained_runtime_frames = runtime_outbox_frames(&root);
-    assert_eq!(
-        run["terminal"]["kind"],
-        if cancel_after_trace {
-            "cancelled"
-        } else {
-            "tool_repeat_limit"
-        }
-    );
-    let rollout = fs::read_to_string(run["rolloutPath"].as_str().unwrap()).unwrap();
-    let executed = rollout
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .filter(|item| {
-            item["type"] == "response_item" && item["payload"]["type"] == "function_call_output"
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        executed.len(),
-        5,
-        "Core must execute exactly the first five commands"
-    );
-    assert!(executed.iter().all(|item| {
-        item["payload"]["output"]
-            .to_string()
-            .contains("pub fn fixture_value() -> u64 { 1 }")
-    }));
-    assert_eq!(
-        port.messages()
-            .iter()
-            .filter(|message| matches!(message, ExecutionPortMessage::ModelOpenMessage(_)))
-            .count(),
-        6
-    );
-    let connection =
-        rusqlite::Connection::open(root.worker().join("worker-codex.sqlite3")).unwrap();
-    let completed: i64 = connection.query_row(
-            "SELECT COUNT(*) FROM performance_operation WHERE operation_kind = 'tool' AND completed = 1",
-            [], |row| row.get(0)).unwrap();
-    assert_eq!(
-        completed, 5,
-        "Worker must observe five actual Core command completions"
-    );
-    let stopped: bool = connection
-        .query_row("SELECT stopped FROM tool_repeat_run", [], |row| row.get(0))
-        .unwrap();
-    assert!(stopped);
-    if cancel_after_trace {
-        let original_outcome = outcome.clone();
-        let original_trace = stored_run_json(&root)["terminalTrace"].clone();
-        worker
-            .shutdown(now.clone())
-            .await
-            .expect("shutdown cancelled repeat run");
-        drop(worker);
-        let replay_port = RecordedPort::default();
-        let adapter = winwincode_codex::ProductionCodexAdapter::open(
-            adapter_config_with_mode(&root, winwincode_codex::ExecutionMode::DelegatedPatch)
-                .with_benchmark_tool_repeat_guard(),
-        )
-        .expect("reopen the cancelled repeat run");
-        let mut replay = winwincode_worker::WorkerMain::new(
-            worker_config(),
-            replay_port.clone(),
-            adapter,
-            root.workspace_runtime(),
-        );
-        register(&mut replay, &replay_port).await;
-        replay
-            .accept_control(
-                &ExecutionPortMessage::JobDispatchMessage(dispatch),
-                now.clone(),
-            )
-            .await
-            .expect("recover the original cancelled dispatch");
-        let recovered = poll_until_candidate_outcome(&mut replay, &replay_port, &now).await;
-        assert_eq!(
-            recovered, original_outcome,
-            "reopen retains the exact cancelled outcome"
-        );
-        assert_eq!(stored_run_json(&root)["terminalTrace"], original_trace);
-        assert!(
-            runtime_outbox_frames(&root).starts_with(&retained_runtime_frames),
-            "outcome recovery preserves all retained runtime frame bytes in original order"
-        );
-        assert!(
-            !replay_port
-                .messages()
-                .iter()
-                .any(|message| matches!(message, ExecutionPortMessage::ModelOpenMessage(_))),
-            "recovering a cancellation must not open another model call"
-        );
-        let completed_after: i64 = connection.query_row(
-                "SELECT COUNT(*) FROM performance_operation WHERE operation_kind = 'tool' AND completed = 1",
-                [], |row| row.get(0)).unwrap();
-        assert_eq!(
-            completed_after, 5,
-            "reopen does not execute another command"
-        );
-    }
-}
-
-#[test]
 fn delegated_structured_proposal_is_retained_once_without_terminal_outcome() {
     run_on_large_stack(async {
         let root = TestDirectory::new("production-delegated-proposal");
@@ -2279,14 +1966,13 @@ fn delegated_structured_proposal_is_retained_once_without_terminal_outcome() {
             serde_json::from_slice(&request_bytes).expect("decode delegated request JSON");
         let format = &request["request"]["text"]["format"];
         assert!(format.is_null(), "{request:#}");
-        let submit_tool = request["request"]["tools"]
+        let model_tools = request["request"]["tools"]
             .as_array()
             .expect("delegated tools")
             .iter()
-            .find(|tool| tool["name"] == "submit_change_batch")
-            .expect("terminal ChangeBatch tool");
-        assert_eq!(submit_tool["type"], "custom");
-        assert_eq!(submit_tool["format"]["type"], "grammar");
+            .map(|tool| tool["name"].as_str().expect("tool name"))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(model_tools, ["exec", "wait"].into_iter().collect());
 
         setup_model(&root, &open, &dispatch.job);
         let mut app = application(&root);
@@ -2297,7 +1983,7 @@ fn delegated_structured_proposal_is_retained_once_without_terminal_outcome() {
         let checkout = detached_checkout(&root);
         let identity = ProviderToolIdentity::try_new(
             ProviderToolKind::Function,
-            "shell_command".to_owned(),
+            "exec_command".to_owned(),
             Some("functions".to_owned()),
         )
         .expect("canonical delegated shell tool");
@@ -2326,7 +2012,9 @@ fn delegated_structured_proposal_is_retained_once_without_terminal_outcome() {
                     index: 0,
                     provider_call_id: call_id.clone(),
                     delta: serde_json::json!({
-                        "command": "cat src/lib.rs",
+                        "cmd": "cat src/lib.rs",
+                        "login": false,
+                        "yield_time_ms": 10000,
                         "workdir": checkout.to_string_lossy(),
                         "justification": "read candidate source before proposing a ChangeBatch",
                         "sandbox_permissions": "use_default"
@@ -4130,7 +3818,7 @@ async fn run_verification_work_run(root: &TestDirectory, role: &str, command: &s
     );
     let identity = ProviderToolIdentity::try_new(
         ProviderToolKind::Function,
-        "shell_command".to_owned(),
+        "exec_command".to_owned(),
         Some("functions".to_owned()),
     )
     .expect("canonical verification shell tool");
@@ -4159,7 +3847,9 @@ async fn run_verification_work_run(root: &TestDirectory, role: &str, command: &s
                 index: 0,
                 provider_call_id: call_id.clone(),
                 delta: serde_json::json!({
-                    "command": command,
+                    "cmd": command,
+                    "login": false,
+                    "yield_time_ms": 10000,
                     "workdir": checkout.to_string_lossy()
                 })
                 .to_string(),
@@ -4260,6 +3950,7 @@ async fn run_verification_work_run(root: &TestDirectory, role: &str, command: &s
         .work_input
         .as_ref()
         .expect("verification work input");
+    let evidence_call_id = production_code_mode::source_id(&second_open, "exec_command");
     // The adapter accepts only the exact field order emitted by the
     // canonical verification-result serializer.  serde_json::json! stores
     // object keys in sorted order in this build, so build the fixture with
@@ -4275,7 +3966,7 @@ async fn run_verification_work_run(root: &TestDirectory, role: &str, command: &s
             .expect("verification criterion JSON"),
         serde_json::to_string(&format!("{role} observed the exact direct evidence."))
             .expect("verification explanation JSON"),
-        serde_json::to_string(&call_id).expect("verification source JSON"),
+        serde_json::to_string(&evidence_call_id).expect("verification source JSON"),
     );
     let second_gateway = opened(
         app.accept_local(&typed(ExecutionPortMessage::ModelOpenMessage(
@@ -4341,7 +4032,7 @@ async fn run_verification_work_run(root: &TestDirectory, role: &str, command: &s
             assert_eq!(open.snapshot_id, dispatch.snapshot_id);
         }
     }
-    assert_verification_products(&port.messages(), role, &call_id);
+    assert_verification_products(&port.messages(), role, &evidence_call_id);
     worker
         .shutdown(at("2030-01-01T00:00:03.000Z"))
         .await
@@ -4449,13 +4140,6 @@ fn simulate_terminal_persisted_before_stopped_trace(root: &TestDirectory) {
             ],
         )
         .expect("persist terminal-before-trace replay boundary");
-}
-
-fn runtime_outbox_frames(root: &TestDirectory) -> Vec<(i64, String, String, Vec<u8>)> {
-    let db = rusqlite::Connection::open(root.worker().join("worker-codex.sqlite3")).unwrap();
-    db.prepare("SELECT position, delivery_id, frame_digest, frame_json FROM execution_outbox WHERE family='runtime' ORDER BY position")
-        .unwrap().query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
-        .unwrap().collect::<Result<Vec<_>, _>>().unwrap()
 }
 
 fn stored_run_json(root: &TestDirectory) -> serde_json::Value {
@@ -5009,7 +4693,11 @@ fn production_worker_kernel_gateway_loopback_and_restart_replay_are_exact() {
         assert_eq!(
             first_terminal_facts
                 .iter()
-                .filter(|message| matches!(message, ExecutionPortMessage::RuntimeEventMessage(_)))
+                .filter(
+                    |message| matches!(message, ExecutionPortMessage::RuntimeEventMessage(event)
+                    if event.event.payload.as_ref().is_none_or(|payload|
+                        payload.content_type != "application/vnd.winwincode.core-tool-fact+json"))
+                )
                 .count(),
             3
         );
@@ -6629,7 +6317,7 @@ fn real_shell_approval_and_action_receipt_reach_one_kernel_handler() {
         );
         let identity = ProviderToolIdentity::try_new(
             ProviderToolKind::Function,
-            "shell_command".to_owned(),
+            "exec_command".to_owned(),
             Some("functions".to_owned()),
         )
         .expect("canonical built-in shell tool");
@@ -6659,7 +6347,9 @@ fn real_shell_approval_and_action_receipt_reach_one_kernel_handler() {
                     index: 0,
                     provider_call_id: call_id.clone(),
                     delta: serde_json::json!({
-                        "command": command,
+                        "cmd": command,
+                    "login": false,
+                    "yield_time_ms": 10000,
                         "workdir": checkout.to_string_lossy(),
                         "justification": "exercise the canonical approval path",
                         "sandbox_permissions": "require_escalated"

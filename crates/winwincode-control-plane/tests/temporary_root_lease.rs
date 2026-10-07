@@ -108,6 +108,49 @@ fn mode(path: &Path) -> u32 {
 }
 
 #[test]
+fn concurrent_first_acquisitions_share_one_lifecycle_lock() {
+    let directory = TestDirectory::new("concurrent-first-acquisitions");
+    let runtime = Arc::new(FakeRuntime::new(1_000));
+    let owner = manager(
+        &directory.0,
+        TemporaryRootTarget::Aarch64AppleDarwin,
+        &runtime,
+    );
+    let barrier = Arc::new(Barrier::new(8));
+    let threads: Vec<_> = (0..8)
+        .map(|_| {
+            let owner = owner.clone();
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                owner.acquire()
+            })
+        })
+        .collect();
+    let leases: Vec<_> = threads
+        .into_iter()
+        .map(|thread| {
+            thread
+                .join()
+                .expect("acquisition thread")
+                .expect("acquire lease")
+        })
+        .collect();
+    assert_eq!(leases.len(), 8);
+    assert_eq!(
+        mode(&directory.child(".winwincode-control-plane-lifecycle.lock")),
+        0o600
+    );
+    for lease in leases {
+        lease.release().expect("release lease");
+    }
+    assert_eq!(
+        owner.reclaim_expired().expect("final scan").retained_active,
+        0
+    );
+}
+
+#[test]
 fn four_release_targets_share_the_fenced_path_lifecycle() {
     let targets = [
         (

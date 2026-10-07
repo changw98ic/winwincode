@@ -718,7 +718,7 @@ async fn elevated_apps_catalog_limit_requires_host_owned_registration() -> Resul
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn code_mode_only_exposes_direct_model_only_mcp_namespaces() -> Result<()> {
+async fn code_mode_only_routes_configured_mcp_namespaces_through_exec() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
@@ -739,11 +739,14 @@ async fn code_mode_only_exposes_direct_model_only_mcp_namespaces() -> Result<()>
                 .features
                 .enable(Feature::CodeModeOnly)
                 .expect("test config should allow feature update");
+            config.web_search_mode = codex_core::config::Constrained::allow_any(
+                codex_protocol::config_types::WebSearchMode::Disabled,
+            );
             config.code_mode.direct_only_tool_namespaces =
                 vec![SEARCH_CALENDAR_NAMESPACE.to_string()];
         });
     let test = builder.build(&server).await?;
-    test.submit_turn("inspect directly exposed MCP tools")
+    test.submit_turn("inspect Code Mode MCP tool exposure")
         .await?;
     let body = response.single_request().body_json();
     let tools = body
@@ -751,35 +754,12 @@ async fn code_mode_only_exposes_direct_model_only_mcp_namespaces() -> Result<()>
         .and_then(Value::as_array)
         .expect("request should contain tools");
 
-    assert!(
-        namespace_child_tool(
-            &body,
-            SEARCH_CALENDAR_NAMESPACE,
-            SEARCH_CALENDAR_CREATE_TOOL,
-        )
-        .is_some(),
-        "configured MCP namespace should remain top-level: {body}"
-    );
-    assert!(
-        !tools.iter().any(|tool| {
-            tool.get("name")
-                .or_else(|| tool.get("type"))
-                .and_then(Value::as_str)
-                == Some("tool_search")
-        }),
-        "configured MCP namespace should not be deferred: {body}"
-    );
-    let exec_description = tools.iter().find_map(|tool| {
-        (tool.get("name").and_then(Value::as_str) == Some("exec"))
-            .then(|| tool.get("description").and_then(Value::as_str))
-            .flatten()
-    });
-    assert!(
-        exec_description.is_some_and(|description| {
-            !description.contains("mcp__codex_apps__calendar_create_event(args:")
-        }),
-        "direct-model-only MCP namespace should not be available through exec: {body}"
-    );
+    let mut names = tools
+        .iter()
+        .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    names.sort_unstable();
+    assert_eq!(names, vec!["exec", "wait"]);
 
     Ok(())
 }

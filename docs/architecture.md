@@ -97,6 +97,38 @@ flowchart TB
 `SessionBinding` 把四种身份与 Delivery、WorkItem、Job、Lease 和 Fencing 事实关联起来。
 重启、重试、Worker 替换或重新验证时，每个身份按自己的生命周期推进；旧尝试的运行、结果和取消事实保持不变。
 
+### Code Mode 与公共工具执行
+
+工具执行边界由 [ADR-0040](decisions/0040-code-mode-shared-tool-runtime.md) 固定。
+
+模型通过 `exec` 和 `wait` 使用工具。Code Mode 在内部按需发现获准工具、加载定义并编排调用。Shell、文件、MCP 和宿主工具都进入 Core 公共执行层，由实际工具的 Adapter 执行。
+
+```mermaid
+flowchart TD
+  Model[当前模型] <-->|exec / wait| Mode
+  subgraph Core[Codex Core]
+    Mode[Code Mode：执行与编排] <-->|查询与定义| Discovery[按需发现与定义加载]
+    Discovery -. 读取获准视图 .-> Catalog[统一工具目录]
+    Mode <-->|真实工具调用与结果| Dispatch[公共工具执行层]
+    Dispatch <--> Builtin[内置工具 Adapter]
+    Dispatch <--> MCP[MCP Adapter]
+    Dispatch <--> Host[宿主工具 Adapter]
+    Mode -. 控制与等待事实 .-> Diagnosis[模型行为诊断]
+    Dispatch -. 调用与结果事实 .-> Diagnosis
+    Diagnosis --> Context[模型上下文：证据与问题]
+  end
+  MCP <--> Server[MCP Server]
+  Context -->|exec / wait / yield 边界| Model
+```
+
+公共执行层按真实工具身份处理授权和 hook，并保存逻辑请求、实际尝试、父调用、cell、等待和恢复事实。执行状态、结果接受和交付处置分别保存。精确传输回放恢复原观测；新的逻辑请求形成新的观测。
+
+Adapter 提供可信输入依赖、账号与会话作用域，以及结果有效性和业务恢复规则。结果复用与并发合并分别取得许可。共享一次实际执行的每个逻辑请求保留自己的结果处置和取消状态。
+
+模型行为诊断默认覆盖所有任务。诊断依据调用、等待及可信进展事实，判断疑似循环、等待死锁和执行爆炸。Core 将证据和问题送入当前模型上下文，由模型选择下一步。正常 yield 和诊断交付保留活跃 cell。
+
+Worker 将 Core 事实可靠交付给 Control Plane。DSH 与 StrongFlow 使用同一份公共投影，显示真实工具、父子关联、共享来源、恢复和诊断状态。任务恢复前核对原工具目录、策略、Kernel 接口及运行时身份。
+
 ## 唯一的交付数据模型
 
 WinWinCode 的可执行交付模型由 [ADR-0033](decisions/0033-community-engineering-runtime.md) 固定为七个对象：

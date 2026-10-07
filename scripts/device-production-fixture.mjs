@@ -388,7 +388,8 @@ export function workInputFromRequest(request) {
 }
 
 export function observeToolProcess(providerRequest, callId) {
-  let output = findToolOutput(providerRequest, callId)
+  const originalOutput = findToolOutput(providerRequest, callId)
+  let output = originalOutput
   let pollIndex = 1
   let nextCallId = `${callId}-poll`
   for (;;) {
@@ -406,7 +407,7 @@ export function observeToolProcess(providerRequest, callId) {
     exitCode,
     sessionId: Number.isSafeInteger(sessionId) ? sessionId : null,
     nextCallId,
-    evidenceSourceId: output === null ? null : callId,
+    evidenceSourceId: output === null ? null : codeModeCommandSource(originalOutput) ?? callId,
     hasToolOutput: output !== null,
   }
 }
@@ -542,9 +543,7 @@ export function startDeterministicDeviceModelServer({
           hasToolOutput: /function_call_output|custom_tool_call_output|tool_result/u.test(bodyText),
           repeatTool,
         })
-        let shellTool = providerRequest.tools?.find(tool => (
-          /(?:^|__)shell_command$|(?:^|__)exec_command$/u.test(tool.name)
-        )) ?? null
+        const executionTool = providerRequest.tools?.find(tool => /(?:^|__)exec$/u.test(tool.name)) ?? null
         const workInput = workInputFromRequest(providerRequest)
         const isExecutor = bodyText.includes(DETERMINISTIC_EXECUTOR_BEHAVIOR_MARKER)
         const isVerification = bodyText.includes(DETERMINISTIC_VERIFICATION_BEHAVIOR_MARKER)
@@ -569,8 +568,7 @@ export function startDeterministicDeviceModelServer({
 
         const observation = isExecutor ? executorObservation : verificationObservation
         if ((isExecutor || isVerification) && observation.sessionId !== null) {
-          shellTool = providerRequest.tools?.find(tool => /(?:^|__)write_stdin$/u.test(tool.name)) ?? null
-          assert.ok(shellTool, 'running command requires the exposed write_stdin tool')
+          assert.ok(executionTool, 'running command requires the Code Mode exec tool')
           useTool = true
           stopReason = 'tool_use'
           toolCallId = observation.nextCallId
@@ -580,15 +578,13 @@ export function startDeterministicDeviceModelServer({
           useTool = true
           stopReason = 'tool_use'
           toolCallId = 'loopback-executor-change'
-          toolCommand = shellTool?.input_schema?.properties?.cmd
-            ? "printf '%s\\n' 'status: complete' > TASK.md; printf '%s\\n' 'deterministic Device candidate' > .winwincode-api-candidate; git status --porcelain=v1 --untracked-files=all"
-            : "printf '%s\\n' 'status: complete' > TASK.md; printf '%s\\n' 'deterministic Device candidate' > .winwincode-api-candidate; git status --porcelain=v1 --untracked-files=all"
+          toolCommand = "printf '%s\\n' 'status: complete' > TASK.md; printf '%s\\n' 'deterministic Device candidate' > .winwincode-api-candidate; git status --porcelain=v1 --untracked-files=all"
           text = ''
         } else if (isExecutor) {
           text = executorObservation.exitCode === 0
             ? 'The requested stage action completed.'
             : 'The stage command did not complete successfully.'
-        } else if (isVerification && !verificationObservation.hasToolOutput && shellTool) {
+        } else if (isVerification && !verificationObservation.hasToolOutput && executionTool) {
           useTool = true
           stopReason = 'tool_use'
           toolCallId = DETERMINISTIC_VERIFICATION_CALL_ID
@@ -630,20 +626,20 @@ export function startDeterministicDeviceModelServer({
           }],
         ]
         if (useTool) {
-          assert.ok(shellTool !== null, 'Device Provider fixture requires an exposed shell tool')
+          assert.ok(executionTool !== null, 'Device Provider fixture requires Code Mode exec')
           events.push(['content_block_start', {
             type: 'content_block_start',
             index: 0,
             content_block: {
               type: 'tool_use',
               id: toolCallId,
-              name: shellTool.name,
+              name: executionTool.name,
               input: {},
             },
           }])
-          const input = toolInput ?? (shellTool.input_schema?.properties?.cmd
-            ? { cmd: toolCommand, workdir: '.', yield_time_ms: toolYieldMs }
-            : { command: toolCommand, workdir: '.' })
+          const input = { input: deviceFixtureCodeModeCommand(toolInput ?? {
+            cmd: toolCommand, workdir: '.', yield_time_ms: toolYieldMs,
+          }) }
           events.push(['content_block_delta', {
             type: 'content_block_delta',
             index: 0,
@@ -956,67 +952,6 @@ export function deviceHelloAcknowledged(database, previousInstanceId) {
       AND (? IS NULL OR client_instance_id <> ?)`).get(previousInstanceId, previousInstanceId) !== undefined
 }
 
-/** Read the owned Workers' authoritative Core admission records, never model text. */
-export function assertDeviceBenchmarkRunning(deviceData, workerSessionIds, workRuns = [], productSessionId = null) {
-  if (productSessionId !== null) assert.match(productSessionId, /^psn_[0-9A-HJKMNP-TV-Z]{26}$/u)
-  const targets = Array.from(workerSessionIds, workerSessionId => ({ workerSessionId }))
-  const devicePath = join(deviceData, 'device-client.sqlite3')
-  if (workRuns.length && existsSync(devicePath)) {
-    const device = new DatabaseSync(devicePath, { readOnly: true })
-    try {
-      device.exec('PRAGMA busy_timeout = 5000')
-      for (const run of workRuns) {
-        if (!run.workerId || !run.workerInstanceId || !run.executionJobId || !run.codexThreadId
-          || !run.id || !run.productSessionId || !Number.isSafeInteger(run.attempt)) continue
-        for (const worker of device.prepare(`SELECT worker_session_id FROM worker_process_registry
-          WHERE worker_id = ? AND worker_instance_id = ?`).all(run.workerId, run.workerInstanceId)) {
-          if (worker.worker_session_id !== run.workerSessionId) {
-            targets.push({ workerSessionId: worker.worker_session_id, run })
-          }
-        }
-      }
-    } finally { device.close() }
-  }
-  for (const { workerSessionId, run } of targets) {
-    assert.match(workerSessionId, /^wsn_[0-9A-HJKMNP-TV-Z]{26}$/u)
-    const path = join(deviceData, 'worker-sessions', workerSessionId, 'data', 'codex-runtime', 'worker-codex.sqlite3')
-    // A launch anchor can precede Worker startup and database creation.
-    if (!existsSync(path)) continue
-    const database = new DatabaseSync(path, { readOnly: true })
-    try {
-      database.exec('PRAGMA busy_timeout = 5000')
-      // The file is visible before Core finishes its schema migration.
-      if (!database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tool_repeat_run'").get()) continue
-      let stopped
-      if (run || productSessionId !== null) {
-        if (!database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'codex_run'").get()) continue
-        stopped = run ? database.prepare(`SELECT stop.run_key FROM tool_repeat_run AS stop
-          JOIN codex_run AS core ON core.run_key = stop.run_key WHERE stop.stopped = 1
-          AND json_extract(core.record_json, '$.job.jobId') = ?
-          AND json_extract(core.record_json, '$.job.attempt') = ?
-          AND json_extract(core.record_json, '$.job.scope.workRunId') = ?
-          AND json_extract(core.record_json, '$.job.scope.productSessionId') = ?
-          AND json_extract(core.record_json, '$.canonicalThreadId') = ? LIMIT 1`)
-          .get(run.executionJobId, run.attempt, run.id, run.productSessionId, run.codexThreadId)
-          : database.prepare(`SELECT stop.run_key FROM tool_repeat_run AS stop
-            JOIN codex_run AS core ON core.run_key = stop.run_key WHERE stop.stopped = 1
-            AND json_extract(core.record_json, '$.job.scope.productSessionId') = ? LIMIT 1`)
-            .get(productSessionId)
-      } else {
-        stopped = database.prepare('SELECT run_key FROM tool_repeat_run WHERE stopped = 1 LIMIT 1').get()
-      }
-      if (stopped) {
-        throw Object.assign(new Error('Core stopped before the sixth identical tool request'), {
-          code: 'STUCK_TOOL_REPEAT_LIMIT', workerSessionId, runKey: stopped.run_key,
-          ...(run ? { logicalWorkerSessionId: run.workerSessionId } : {}),
-        })
-      }
-    } finally {
-      database.close()
-    }
-  }
-}
-
 export async function waitFor(check, label, timeoutMillis = 30_000, pollMillis = 200) {
   const deadline = Date.now() + timeoutMillis
   for (;;) {
@@ -1152,7 +1087,10 @@ export async function stopProcessGroup(child, { graceMillis = 1000, deviceData }
   // Capture boot identities before TERM reparents descendants to init/launchd.
   const owned = new Map(registeredFixtureWorkers(deviceData, snapshot).map(row => [row.pid, row]))
   if (root?.parent === process.pid) owned.set(root.pid, root)
-  if (owned.size === 0) return
+  if (owned.size === 0) {
+    assert.equal(parentExited(), true, 'cannot confirm ownership of a live fixture parent')
+    return
+  }
   for (;;) {
     const before = owned.size
     for (const row of snapshot.values()) {
@@ -1250,7 +1188,7 @@ export async function establishDeviceOnlyExecutionPath({
     WWC_WORKER_JEV_CONTEXT: agentEnvironment.WWC_WORKER_JEV_CONTEXT,
     WWC_DEVICE_JEV_SETTINGS_FILE: agentEnvironment.WWC_DEVICE_JEV_SETTINGS_FILE,
     WWC_DEVICE_PROVIDER_HTTPS_PROXY: agentEnvironment.WWC_DEVICE_PROVIDER_HTTPS_PROXY,
-    WWC_BENCHMARK_TOOL_REPEAT_GUARD: agentEnvironment.WWC_BENCHMARK_TOOL_REPEAT_GUARD,
+    WWC_BENCHMARK_SEALED_TOOLS: agentEnvironment.WWC_BENCHMARK_SEALED_TOOLS,
     WWC_DEVICE_TLS_ROOT_DER_FILE: tlsRoot,
     WWC_DEVICE_PROVIDER_TLS_ROOT_DER_FILE: deviceProvider?.endpoint
       ? process.env.WWC_DEVICE_PROVIDER_TLS_ROOT_DER_FILE
@@ -1434,25 +1372,12 @@ export async function establishDeviceOnlyExecutionPath({
           ?? 'device-deterministic-model',
       })
     report.modelRoute = modelRoute
-    const launchedWorkerSessions = new Set()
-    const productSessionWorkers = new Map()
-    const productSessionScopes = new Map()
-    const assertBenchmarkRunning = (productSessionId = null, workRuns = []) => {
-      if (deviceEnvironment.WWC_BENCHMARK_TOOL_REPEAT_GUARD === '1') {
-        if (productSessionId === null) assertDeviceBenchmarkRunning(deviceData, launchedWorkerSessions)
-        else for (const scope of productSessionScopes.get(productSessionId) ?? [productSessionId]) {
-          assertDeviceBenchmarkRunning(deviceData, productSessionWorkers.get(productSessionId) ?? [], workRuns, scope)
-        }
-      }
-    }
-
     const launchAnchor = async ({ workRunId = null, productSessionId = null, deliveryId = null, repositoryBindingId: selectedBindingId = repositoryBindingId } = {}, owner = null) => {
       if (owner !== null) {
         assert.ok(productSessionId === null || productSessionId === owner,
           'launch anchor must belong to its ProductSession')
         productSessionId = owner
       }
-      assertBenchmarkRunning(owner)
       const body = {
         schemaVersion,
         clientId: status.publicClientId,
@@ -1474,7 +1399,6 @@ export async function establishDeviceOnlyExecutionPath({
         }
       }
       const launched = await waitFor(async () => {
-        assertBenchmarkRunning(owner)
         const response = await api.request('/api/v1/sessions', {
           method: 'POST', timeoutMillis: 30_000, body,
         })
@@ -1494,14 +1418,6 @@ export async function establishDeviceOnlyExecutionPath({
       steps.push(anchor.recoveredCompleted === true ? 'recover-completed-anchor'
         : workRunId !== null || productSessionId === null
           ? 'launch-anchor' : `launch-anchor:${productSessionId}`)
-      launchedWorkerSessions.add(anchor.workerSessionId)
-      const taskSessionId = owner ?? anchor.productSessionId
-      const members = productSessionWorkers.get(taskSessionId) ?? new Set()
-      members.add(anchor.workerSessionId)
-      productSessionWorkers.set(taskSessionId, members)
-      const scopes = productSessionScopes.get(taskSessionId) ?? new Set([taskSessionId])
-      scopes.add(anchor.productSessionId)
-      productSessionScopes.set(taskSessionId, scopes)
       report.workerSessionId = anchor.workerSessionId
       report.workerId = anchor.workerId
       report.workerInstanceId = anchor.workerInstanceId
@@ -1509,7 +1425,6 @@ export async function establishDeviceOnlyExecutionPath({
     }
 
     return {
-      assertBenchmarkRunning,
       ...report,
       api,
       device,
@@ -1534,7 +1449,6 @@ export async function establishDeviceOnlyExecutionPath({
       forProductSession(productSessionId, selectedBindingId = repositoryBindingId) {
         assert.match(productSessionId, /^psn_[0-9A-HJKMNP-TV-Z]{26}$/u)
         return Object.freeze({
-          assertBenchmarkRunning: workRuns => assertBenchmarkRunning(productSessionId, workRuns),
           launchAnchor: options => launchAnchor({ ...options, repositoryBindingId: selectedBindingId }, productSessionId),
         })
       },
@@ -1587,4 +1501,23 @@ export function deviceProviderSecretBundle({
 export function chmodDeviceCredential(path) {
   chmodSync(path, 0o600)
   return path
+}
+
+/** Executes each fixture command through the product's model-facing tool surface. */
+export function deviceFixtureCodeModeCommand(input) {
+  const name = input.session_id === undefined ? 'exec_command' : 'write_stdin'
+  return `const tool = ALL_TOOLS.find(item => item.name.endsWith(${JSON.stringify(name)}));
+if (!tool) throw new Error('Required command tool is unavailable');
+const result = await tools[tool.name](${JSON.stringify(input)});
+text(result.output);
+if (Number.isInteger(result.session_id)) text('Process running with session ID ' + result.session_id);
+if (Number.isInteger(result.exit_code)) text('Exit code: ' + result.exit_code);`
+}
+
+function codeModeCommandSource(output) {
+  const text = toolOutputText(output)
+  const packet = text?.match(/<core_tool_receipts>(.*?)<\/core_tool_receipts>/su)?.[1]
+  if (packet === undefined) return null
+  const receipts = JSON.parse(packet).receipts
+  return receipts.find(receipt => receipt.tool.endsWith('exec_command'))?.source_id ?? null
 }

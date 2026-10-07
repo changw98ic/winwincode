@@ -68,6 +68,7 @@ pub(crate) fn tool_log_payload<'a>(
 pub struct ToolRouter {
     registry: ToolRegistry,
     model_visible_specs: Arc<[ToolSpec]>,
+    code_mode_tool_names: BTreeMap<String, ToolName>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -99,11 +100,31 @@ impl ToolRouter {
         .expect("test tool registry should not contain duplicate tools")
     }
 
-    pub(crate) fn from_parts(registry: ToolRegistry, model_visible_specs: Vec<ToolSpec>) -> Self {
+    pub(crate) fn from_parts(
+        registry: ToolRegistry,
+        model_visible_specs: Vec<ToolSpec>,
+        code_mode_tool_names: BTreeMap<String, ToolName>,
+    ) -> Self {
         Self {
             registry,
             model_visible_specs: model_visible_specs.into(),
+            code_mode_tool_names,
         }
+    }
+
+    pub(crate) fn code_mode_tool_runtime(
+        &self,
+        name: &ToolName,
+    ) -> Option<Arc<dyn CoreToolRuntime>> {
+        let name = name.clone().with_default_namespace();
+        let alias = codex_code_mode::normalize_code_mode_identifier(
+            &codex_tools::code_mode_name_for_tool_name(&name),
+        );
+        self.code_mode_tool_names
+            .get(&alias)
+            .is_some_and(|bound| bound.clone().with_default_namespace() == name)
+            .then(|| self.registry.tool(&name))
+            .flatten()
     }
 
     pub(crate) fn model_visible_specs(&self) -> Arc<[ToolSpec]> {

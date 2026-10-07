@@ -10,7 +10,7 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { deviceTaskIdentities, prepareDeviceTaskBaseline,
   prepareDeviceBenchmarkProviderSlots } from '../scripts/device-task-runtime.mjs'
-import { pendingDeviceTaskWorkRuns, cancelStoppedDeviceTask } from '../scripts/run-device-task-vertical.mjs'
+import { pendingDeviceTaskWorkRuns } from '../scripts/run-device-task-vertical.mjs'
 import { deviceTaskLaunchResult } from '../scripts/device-production-fixture.mjs'
 
 function providerSlotFixture(t) {
@@ -313,27 +313,4 @@ test('queued Controller roles are discovered only for their own Delivery before 
   assert.deepEqual(pendingDeviceTaskWorkRuns(directory, 'task-a'), [])
   db.prepare("UPDATE scheduler_execution_jobs SET state = 'queued', dispatch_payload = '{}' WHERE job_id = 'reviewer'").run()
   assert.throws(() => pendingDeviceTaskWorkRuns(directory, 'task-a'))
-})
-
-
-test('a stopped task cancels only its active and queued roles and source Session', async () => {
-  const commands = []
-  const api = {
-    query: async (name, payload) => {
-      assert.equal(payload.deliveryId ?? 'task-a', 'task-a')
-      return { result: name === 'workrun.get'
-        ? { readCursor: { deliveryId: 'task-a' }, runs: [
-          { id: 'active-a', state: 'running' }, { id: 'done-a', state: 'settled' }] }
-        : name === 'delivery.get' ? { deliveryId: 'task-a', deliveryRevision: 3 }
-          : { id: 'source-a', revision: 1, state: 'active' } }
-    },
-    command: async (name, revision, payload) => {
-      commands.push({ name, revision, payload })
-      return { outcome: 'completed' }
-    },
-  }
-  const result = await cancelStoppedDeviceTask(api, '/missing-task-directory', 'task-a', 'source-a')
-  assert.deepEqual(result.workRunIds, ['active-a'])
-  assert.deepEqual(commands.map(command => [command.name, command.payload.workRunId ?? command.payload.productSessionId]),
-    [['workrun.cancel', 'active-a'], ['session.cancel', 'source-a']])
 })

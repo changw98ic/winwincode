@@ -106,6 +106,28 @@ pub struct CapabilityDescriptor {
 }
 
 impl CapabilityDescriptor {
+    /// Builds a descriptor for one server resource method exposed by Core.
+    ///
+    /// # Errors
+    /// Rejects invalid server identifiers or capability versions.
+    pub fn mcp_resource(
+        server: &str,
+        operation: crate::mcp_resource::McpResourceOperation,
+        version: &str,
+        health: CapabilityHealth,
+        origin: CapabilityOrigin,
+    ) -> Result<Self, CapabilityDescriptorError> {
+        validate_version(version).map_err(CapabilityDescriptorError::Catalog)?;
+        let id = crate::mcp_resource::canonical_resource_capability_id(server, operation)
+            .map_err(|_| CapabilityDescriptorError::InvalidMcpTarget)?;
+        Ok(Self {
+            id,
+            version: version.to_owned(),
+            health,
+            origin,
+        })
+    }
+
     /// Builds a descriptor from secret-free MCP server and tool identifiers.
     ///
     /// # Errors
@@ -488,20 +510,28 @@ where
         verifier: &ActionEnforcementVerifier,
         receipt_store: &mut dyn ActionReceiptUseStore,
     ) -> CapabilityAdapterResult<Executor::Output, Recorder::Error, Executor::Error> {
-        let mcp = match &invocation.action.request {
-            ToolRequest::Mcp(request) => request,
+        let actual_id = match &invocation.action.request {
+            ToolRequest::Mcp(request) => {
+                canonical_mcp_capability_id(&request.server, &request.tool)
+            }
+            ToolRequest::McpResource(request) => {
+                crate::mcp_resource::canonical_resource_capability_id(
+                    &request.server,
+                    request.operation,
+                )
+            }
             ToolRequest::File(_)
             | ToolRequest::Git(_)
             | ToolRequest::Shell(_)
-            | ToolRequest::Network(_) => {
+            | ToolRequest::Network(_)
+            | ToolRequest::ProcessInput(_) => {
                 return Err(capability_rejection(
                     CapabilityRejectionCode::RequestFamilyMismatch,
                     "Worker Capability Adapter accepts MCP requests only",
                 ));
             }
-        };
-        let actual_id = canonical_mcp_capability_id(&mcp.server, &mcp.tool)
-            .map_err(|_| CapabilityAdapterError::InvalidMcpTarget)?;
+        }
+        .map_err(|_| CapabilityAdapterError::InvalidMcpTarget)?;
         if actual_id != invocation.capability_id {
             return Err(capability_rejection(
                 CapabilityRejectionCode::CapabilityTargetMismatch,

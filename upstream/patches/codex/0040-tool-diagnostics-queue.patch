@@ -1,0 +1,158 @@
+diff --git a/codex-rs/state/src/runtime/tool_diagnostics.rs b/codex-rs/state/src/runtime/tool_diagnostics.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/state/src/runtime/tool_diagnostics.rs
+@@ -0,0 +1,114 @@
++// SPDX-License-Identifier: Apache-2.0
++use super::StateRuntime;
++use crate::ToolDiagnostic;
++use crate::ToolDiagnosticDelivery;
++use crate::ToolDiagnosticFact;
++use crate::ToolRuntimeFact;
++use anyhow::ensure;
++use sqlx::Row;
++use sqlx::SqliteConnection;
++
++impl StateRuntime {
++    /// Stores only newer evidence under its stable diagnosis identity.
++    pub async fn enqueue_tool_diagnostic(&self, diagnostic: &ToolDiagnostic) -> anyhow::Result<()> {
++        let anchor = diagnostic
++            .evidence
++            .last()
++            .ok_or_else(|| anyhow::anyhow!("diagnostic evidence is empty"))?
++            .request_sequence;
++        let encoded = serde_json::to_string(diagnostic)?;
++        ensure!(
++            encoded.len() <= 16 * 1024,
++            "diagnostic exceeds metadata limit"
++        );
++        let mut tx = self.pool.begin().await?;
++        let changed = sqlx::query("INSERT INTO tool_diagnostics(thread_id, diagnostic_id, evidence_version, anchor_request_sequence, diagnostic_json) VALUES (?, ?, ?, ?, ?) ON CONFLICT(thread_id, diagnostic_id) DO UPDATE SET evidence_version = excluded.evidence_version, anchor_request_sequence = excluded.anchor_request_sequence, diagnostic_json = excluded.diagnostic_json WHERE excluded.evidence_version > tool_diagnostics.evidence_version")
++            .bind(&diagnostic.thread_id).bind(&diagnostic.diagnostic_id).bind(diagnostic.evidence_version).bind(anchor).bind(encoded).execute(&mut *tx).await?.rows_affected();
++        if changed == 1 {
++            append(
++                &mut tx,
++                anchor,
++                diagnostic,
++                ToolDiagnosticDelivery::Queued,
++                None,
++            )
++            .await?;
++        }
++        tx.commit().await?;
++        Ok(())
++    }
++
++    /// A staged item is offered only with its boundary's accepted output receipt.
++    /// An interrupted boundary leaves the diagnostic available for a later boundary.
++    pub async fn stage_tool_diagnostic_feedback(
++        &self,
++        thread_id: &str,
++        boundary_logical_id: &str,
++    ) -> anyhow::Result<Vec<ToolDiagnostic>> {
++        let mut tx = self.pool.begin().await?;
++        let boundary: i64 = sqlx::query_scalar("SELECT r.sequence FROM tool_requests r JOIN tool_attempts a ON a.request_sequence = r.sequence WHERE r.thread_id = ? AND r.logical_id = ? AND a.execution = 'running'")
++            .bind(thread_id).bind(boundary_logical_id).fetch_one(&mut *tx).await?;
++        let rows = sqlx::query("SELECT diagnostic_id, evidence_version, diagnostic_json FROM tool_diagnostics WHERE thread_id = ? AND evidence_version > offered_version ORDER BY evidence_version, diagnostic_id LIMIT 2")
++            .bind(thread_id).fetch_all(&mut *tx).await?;
++        let mut diagnostics = Vec::new();
++        for row in rows {
++            let encoded: String = row.try_get("diagnostic_json")?;
++            let diagnostic: ToolDiagnostic = serde_json::from_str(&encoded)?;
++            sqlx::query("INSERT OR IGNORE INTO tool_diagnostic_feedback(boundary_request_sequence, thread_id, diagnostic_id, evidence_version, diagnostic_json) VALUES (?, ?, ?, ?, ?)")
++                .bind(boundary).bind(thread_id).bind(&diagnostic.diagnostic_id).bind(diagnostic.evidence_version).bind(encoded).execute(&mut *tx).await?;
++            diagnostics.push(diagnostic);
++        }
++        tx.commit().await?;
++        Ok(diagnostics)
++    }
++}
++
++/// Shares the output-offer transaction, so a durable delivery always has its output body.
++pub(super) async fn offer_staged_diagnostics(
++    connection: &mut SqliteConnection,
++    boundary: i64,
++) -> anyhow::Result<()> {
++    let rows = sqlx::query("UPDATE tool_diagnostic_feedback SET offered = 1 WHERE boundary_request_sequence = ? AND offered = 0 RETURNING diagnostic_json")
++        .bind(boundary).fetch_all(&mut *connection).await?;
++    for row in rows {
++        let diagnostic: ToolDiagnostic = serde_json::from_str(row.try_get("diagnostic_json")?)?;
++        sqlx::query("UPDATE tool_diagnostics SET offered_version = MAX(offered_version, ?) WHERE thread_id = ? AND diagnostic_id = ?")
++            .bind(diagnostic.evidence_version).bind(&diagnostic.thread_id).bind(&diagnostic.diagnostic_id).execute(&mut *connection).await?;
++        append(
++            connection,
++            boundary,
++            &diagnostic,
++            ToolDiagnosticDelivery::Offered,
++            Some(boundary),
++        )
++        .await?;
++    }
++    Ok(())
++}
++async fn append(
++    connection: &mut SqliteConnection,
++    anchor: i64,
++    diagnostic: &ToolDiagnostic,
++    delivery: ToolDiagnosticDelivery,
++    boundary_request_sequence: Option<i64>,
++) -> anyhow::Result<()> {
++    let fact = ToolRuntimeFact::Diagnostic(ToolDiagnosticFact {
++        schema_version: 1,
++        diagnostic: diagnostic.clone(),
++        delivery,
++        boundary_request_sequence,
++    });
++    sqlx::query(
++        "INSERT INTO tool_fact_events(request_sequence, thread_id, fact_json) VALUES (?, ?, ?)",
++    )
++    .bind(anchor)
++    .bind(&diagnostic.thread_id)
++    .bind(serde_json::to_string(&fact)?)
++    .execute(connection)
++    .await?;
++    Ok(())
++}
++
++#[cfg(test)]
++#[path = "tool_diagnostics_tests.rs"]
++mod tests;
+diff --git a/codex-rs/state/src/runtime/tool_execution.rs b/codex-rs/state/src/runtime/tool_execution.rs
+--- a/codex-rs/state/src/runtime/tool_execution.rs
++++ b/codex-rs/state/src/runtime/tool_execution.rs
+@@ -101,6 +101,27 @@
+         .transpose()
+     }
+ 
++    /// Reads receipt metadata by its original logical identity.
++    pub async fn tool_request_fact(
++        &self,
++        thread_id: &str,
++        logical_id: &str,
++    ) -> anyhow::Result<Option<ToolExecutionFact>> {
++        let mut query = QueryBuilder::<Sqlite>::new(FACT_SELECT);
++        query
++            .push(" WHERE r.thread_id = ")
++            .push_bind(thread_id)
++            .push(" AND r.logical_id = ")
++            .push_bind(logical_id);
++        query
++            .build()
++            .fetch_optional(self.pool.as_ref())
++            .await?
++            .as_ref()
++            .map(decode_fact)
++            .transpose()
++    }
++
+     /// A pre-dispatch rejection remains distinct from an executed handler.
+     pub async fn deny_tool_request(&self, request_sequence: i64) -> anyhow::Result<()> {
+         let mut tx = self.pool.begin().await?;
+@@ -235,6 +256,7 @@
+                 "tool output has not been accepted"
+             );
+         }
++        super::tool_diagnostics::offer_staged_diagnostics(&mut tx, request_sequence).await?;
+         tx.commit().await?;
+         Ok(())
+     }

@@ -1,0 +1,62 @@
+diff --git a/codex-rs/state/src/runtime/tool_execution.rs b/codex-rs/state/src/runtime/tool_execution.rs
+--- a/codex-rs/state/src/runtime/tool_execution.rs
++++ b/codex-rs/state/src/runtime/tool_execution.rs
+@@ -26,6 +26,26 @@
+  FROM tool_requests r LEFT JOIN tool_attempts a ON a.request_sequence = r.sequence";
+ 
+ impl StateRuntime {
++    /// The latest four payload-free calls in one exact Code Mode cell scope.
++    pub async fn list_tool_cell_receipts(
++        &self,
++        thread: &str,
++        cell: &str,
++        scope: &str,
++    ) -> anyhow::Result<Vec<ToolExecutionFact>> {
++        let mut query = QueryBuilder::<Sqlite>::new(FACT_SELECT);
++        query
++            .push(" WHERE r.thread_id=")
++            .push_bind(thread)
++            .push(" AND json_extract(r.request_json,'$.cell_id')=")
++            .push_bind(cell)
++            .push(" AND json_extract(r.request_json,'$.scope_id')=")
++            .push_bind(scope)
++            .push(" ORDER BY r.sequence DESC LIMIT 4");
++        let rows = query.build().fetch_all(self.pool.as_ref()).await?;
++        rows.iter().map(decode_fact).collect()
++    }
++
+     /// Creates one observation, atomically distinguishing transport replays and conflicts.
+     pub async fn observe_tool_request(
+         &self,
+@@ -376,3 +396,7 @@
+ #[cfg(test)]
+ #[path = "tool_execution_migration_tests.rs"]
+ mod migration_tests;
++
++#[cfg(test)]
++#[path = "tool_receipts_tests.rs"]
++mod receipt_tests;
+diff --git a/codex-rs/state/src/runtime/tool_execution_tests.rs b/codex-rs/state/src/runtime/tool_execution_tests.rs
+--- a/codex-rs/state/src/runtime/tool_execution_tests.rs
++++ b/codex-rs/state/src/runtime/tool_execution_tests.rs
+@@ -7,7 +7,7 @@
+ use pretty_assertions::assert_eq;
+ use std::sync::Arc;
+ 
+-async fn setup() -> (Arc<StateRuntime>, ToolRequestIdentity) {
++pub(super) async fn setup() -> (Arc<StateRuntime>, ToolRequestIdentity) {
+     let home = unique_temp_dir();
+     let runtime = StateRuntime::init(
+         crate::SqliteConfig::new_for_testing(home.as_path().abs()),
+@@ -29,7 +29,10 @@
+     (runtime, request)
+ }
+ 
+-async fn observe(runtime: &StateRuntime, request: &ToolRequestIdentity) -> ToolExecutionFact {
++pub(super) async fn observe(
++    runtime: &StateRuntime,
++    request: &ToolRequestIdentity,
++) -> ToolExecutionFact {
+     let ToolRequestObservation::New(fact) = runtime.observe_tool_request(request).await.unwrap()
+     else {
+         panic!("new observation")

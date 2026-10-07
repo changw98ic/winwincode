@@ -99,6 +99,9 @@ const API_SOURCE_TRACKED_PATHS = [
   'Cargo.toml',
   'rust-toolchain.toml',
   'crates',
+  'third_party/codex/codex-rs',
+  'third_party/codex.UPSTREAM.json',
+  'upstream/sources.lock.json',
   API_RUNNER_SOURCE_PATH,
   'scripts/product-build-contract.mjs',
 ]
@@ -1294,7 +1297,7 @@ function spawnStandaloneWorker({
       WWC_WORKER_JEV_JUDGE: process.env.WWC_WORKER_JEV_JUDGE,
       WWC_WORKER_JEV_CONTEXT: process.env.WWC_WORKER_JEV_CONTEXT,
       WWC_DEVICE_JEV_SETTINGS_FILE: process.env.WWC_DEVICE_JEV_SETTINGS_FILE,
-      WWC_BENCHMARK_TOOL_REPEAT_GUARD: process.env.WWC_BENCHMARK_TOOL_REPEAT_GUARD,
+      WWC_BENCHMARK_SEALED_TOOLS: process.env.WWC_BENCHMARK_SEALED_TOOLS,
       WWC_WORKER_ID: IDS.remoteWorker,
       WWC_WORKER_INSTANCE_ID: IDS.remoteWorkerInstance,
       WWC_WORKER_STARTED_AT: fixture.startedAt,
@@ -2577,6 +2580,8 @@ export async function runApiProductionVertical({
             executionJobId: item.session.executionJobId,
             workerSessionId: item.session.workerSessionId,
             codexThreadId: item.session.codexThreadId,
+            coreToolCalls: item.session.activities.flatMap(activity => activity.coreTool?.call === null
+              || activity.coreTool?.call === undefined ? [] : [activity.coreTool.call]),
           })),
           status: delivery.detail.status,
           workItemStates: delivery.workRunAggregate.items.map(item => item.state),
@@ -2776,8 +2781,9 @@ export async function runApiProductionVertical({
     }
     if (!retainRepository) removeControlledRepository({ repository: controlledRepository.repository })
     if (ownedDirectory) rmSync(fixtureDirectory, { recursive: true, force: true })
+    // Cleanup failures also reject a scenario's early return.
+    if (failure !== null) throw failure
   }
-  if (failure !== null) throw failure
   return report
 }
 

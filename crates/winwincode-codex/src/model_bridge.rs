@@ -17,7 +17,7 @@ use crate::{
     },
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use futures::{StreamExt as _, future::BoxFuture, stream};
+use futures::{future::BoxFuture, stream};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
@@ -619,7 +619,6 @@ impl ModelChunkSink for KernelStreamSink {
 pub(crate) struct ExecutionPortModelBridge {
     route: ModelGatewayRoute,
     expected_provider: String,
-    tool_repeat_guard: bool,
     device_provider_directory: std::sync::OnceLock<std::path::PathBuf>,
     queue: QueuedModelPort,
     sink: KernelStreamSink,
@@ -654,11 +653,7 @@ struct OpenStreamExchange {
 }
 
 enum OpenStreamPreparation {
-    Replay {
-        stream: ModelPortStream,
-        run_key: String,
-        model_call_id: String,
-    },
+    Replay(ModelPortStream),
     Open(Box<OpenStreamExchange>),
 }
 
@@ -682,7 +677,6 @@ impl ExecutionPortModelBridge {
         Self {
             route,
             expected_provider,
-            tool_repeat_guard: false,
             device_provider_directory: std::sync::OnceLock::new(),
             queue,
             sink,
@@ -706,34 +700,6 @@ impl ExecutionPortModelBridge {
         self.device_provider_directory
             .set(directory)
             .map_err(|_| BridgeError::Conflict)
-    }
-
-    pub(crate) fn with_tool_repeat_guard(mut self, enabled: bool) -> Self {
-        self.tool_repeat_guard = enabled;
-        self
-    }
-
-    fn guard_stream(
-        &self,
-        stream: ModelPortStream,
-        run_key: String,
-        model_call_id: String,
-    ) -> ModelPortStream {
-        let store = self.ordinal_store.clone();
-        Box::pin(stream.map(move |item| {
-            let output = item?;
-            match store.admit_tool_output(&run_key, &model_call_id, &output) {
-                Ok(true) => Ok(output),
-                Ok(false) => Err(ModelPortFailure::new(
-                    crate::tool_repeat::STOP_REASON,
-                    "sixth identical tool request blocked before execution",
-                )),
-                Err(_) => Err(ModelPortFailure::new(
-                    "INVALID_REQUEST",
-                    "tool admission ledger rejected model output",
-                )),
-            }
-        }))
     }
 
     pub(crate) fn attach_action_gate(
@@ -1569,11 +1535,7 @@ impl ExecutionPortModelBridge {
     ) -> Result<ModelPortStream, ModelPortFailure> {
         let prepared = self.prepare_member_stream(&request, fusion_member.as_deref())?;
         let exchange = match prepared {
-            OpenStreamPreparation::Replay {
-                stream,
-                run_key,
-                model_call_id,
-            } => return Ok(self.guard_stream(stream, run_key, model_call_id)),
+            OpenStreamPreparation::Replay(stream) => return Ok(stream),
             OpenStreamPreparation::Open(exchange) => *exchange,
         };
         let command = self.open_command(&exchange)?;
@@ -1637,11 +1599,7 @@ impl ExecutionPortModelBridge {
         let stream = stream::unfold(receiver, |mut receiver| async move {
             receiver.recv().await.map(|item| (item, receiver))
         });
-        Ok(self.guard_stream(
-            Box::pin(stream),
-            exchange.binding.run_key,
-            exchange.model_call_id,
-        ))
+        Ok(Box::pin(stream))
     }
 
     #[cfg(test)]
@@ -1696,21 +1654,6 @@ impl ExecutionPortModelBridge {
             return Err(model_failure(BridgeError::InvalidPayload));
         }
         let binding = self.binding_for(&envelope).map_err(model_failure)?;
-        if self.tool_repeat_guard {
-            self.ordinal_store
-                .enable_tool_repeat_guard(&binding.run_key)
-                .map_err(model_store_failure)?;
-        }
-        if self
-            .ordinal_store
-            .tool_repeat_stopped(&binding.run_key)
-            .map_err(model_store_failure)?
-        {
-            return Err(ModelPortFailure::new(
-                crate::tool_repeat::STOP_REASON,
-                "run stopped after repeated tool requests",
-            ));
-        }
         // A session can select a different configured provider from the Worker
         // default. Root and child requests use the same sealed run settings.
         let stored = self
@@ -1775,11 +1718,12 @@ impl ExecutionPortModelBridge {
                     .mark_model_call_provider_final(&binding.run_key, &model_call_id)
                     .map_err(model_store_failure)?;
             }
-            return Ok(OpenStreamPreparation::Replay {
-                stream: replay_model_call_frames(&frames, &binding, &exchange, &self.authority)?,
-                run_key: binding.run_key,
-                model_call_id,
-            });
+            return Ok(OpenStreamPreparation::Replay(replay_model_call_frames(
+                &frames,
+                &binding,
+                &exchange,
+                &self.authority,
+            )?));
         }
         Ok(OpenStreamPreparation::Open(Box::new(OpenStreamExchange {
             binding,
@@ -2593,7 +2537,7 @@ mod tests {
     };
     use winwincode_execution_port::runtime_trace_outbox::{ExecutionMode, ObserverMode};
     use winwincode_execution_port::typed_replay::frame_from_message;
-    use winwincode_kernel::{ModelPortFailure, ModelPortRequest};
+    use winwincode_kernel::ModelPortRequest;
 
     #[tokio::test]
     #[allow(
@@ -2804,389 +2748,6 @@ mod tests {
             assert_eq!(failure.code, expected);
             assert_eq!(failure.retryable, Some(false));
         }
-    }
-
-    #[tokio::test]
-    async fn tool_repeat_guard_intercepts_live_and_replayed_output_before_core() {
-        let root = std::env::temp_dir().join(format!("wwc-tool-stream-{}", uuid::Uuid::now_v7()));
-        let store = AdapterStore::open(&root).unwrap();
-        let authority = authority(&id("cdx", 'A'));
-        let bridge = Arc::new(
-            installed_loopback_bridge(
-                &store,
-                SharedAuthoritySource::default(),
-                "tool repeat",
-                "run",
-                &authority,
-                "kernel",
-            )
-            .with_tool_repeat_guard(true),
-        );
-        for occurrence in 0..6 {
-            let request_id = format!("model-{occurrence}");
-            let request = ModelPortRequest {
-                request_id: request_id.clone(),
-                payload_json: json!({
-                    "requestId":request_id, "provider":"loopback", "sessionId":"kernel",
-                    "threadId":authority.session_identity.codex_thread_id.0,
-                    "request":{"model":"loopback", "input":[]},
-                })
-                .to_string(),
-            };
-            let mut stream = bridge.model_port().stream(request.clone()).await.unwrap();
-            let open = bridge
-                .take_messages()
-                .unwrap()
-                .into_iter()
-                .find_map(|message| match message {
-                    ExecutionPortMessage::ModelOpenMessage(open) => Some(open),
-                    _ => None,
-                })
-                .unwrap();
-            let output = json!({"type":"output_item_done", "item":{
-                "type":"function_call", "call_id":"same-provider-call-id", "name":"exec_command",
-                "arguments":json!({"cmd":"ls", "requestId":occurrence}).to_string(),
-            }})
-            .to_string();
-            let chunk = test_chunk(
-                &authority,
-                &open.model_exchange_id,
-                1,
-                true,
-                output.as_bytes(),
-                'R',
-            );
-            bridge
-                .accept_chunk(&chunk, &authority.lease.issued_at)
-                .await
-                .unwrap();
-            let received = stream.next().await.unwrap();
-            if occurrence == 5 {
-                assert_eq!(received.unwrap_err().code, crate::tool_repeat::STOP_REASON);
-                assert!(store.tool_repeat_stopped("run").unwrap());
-                assert!(bridge.model_port().stream(request).await.is_err());
-                assert!(
-                    !bridge
-                        .take_messages()
-                        .unwrap()
-                        .iter()
-                        .any(|message| matches!(
-                            message,
-                            ExecutionPortMessage::ModelOpenMessage(_)
-                        ))
-                );
-            } else {
-                assert_eq!(received.unwrap(), output);
-                // ProviderFinal recovery goes through the same guard but must
-                // neither open another provider call nor consume another count.
-                let mut replay = bridge.model_port().stream(request).await.unwrap();
-                assert_eq!(replay.next().await.unwrap().unwrap(), output);
-                assert!(
-                    !bridge
-                        .take_messages()
-                        .unwrap()
-                        .iter()
-                        .any(|message| matches!(
-                            message,
-                            ExecutionPortMessage::ModelOpenMessage(_)
-                        ))
-                );
-            }
-        }
-        drop(bridge);
-        drop(store);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    struct PublicSmokeStreamFixture {
-        root: std::path::PathBuf,
-        workspace: std::path::PathBuf,
-        store: AdapterStore,
-        authority: ModelLeaseAuthority,
-        bridge: Arc<ExecutionPortModelBridge>,
-    }
-
-    impl PublicSmokeStreamFixture {
-        fn new() -> Self {
-            let root = std::env::temp_dir()
-                .join(format!("wwc-public-smoke-stream-{}", uuid::Uuid::now_v7()));
-            let workspace = root.join("checkout");
-            std::fs::create_dir_all(&workspace).unwrap();
-            std::fs::write(workspace.join("main.py"), "print(0)\n").unwrap();
-            let store = AdapterStore::open(&root).unwrap();
-            store
-                .save_run(
-                    "smoke-run",
-                    &json!({
-                        "workspace": workspace,
-                        "agentConfig": sealed_profile("loopback", "loopback", "provider_default"),
-                        "job": {"workInput": {"workContract": {
-                            "scope": ["main.py", "*.py"]
-                        }}},
-                    }),
-                )
-                .unwrap();
-            Self::install(root, workspace, store, authority(&id("cdx", 'A')))
-        }
-
-        fn install(
-            root: std::path::PathBuf,
-            workspace: std::path::PathBuf,
-            store: AdapterStore,
-            authority: ModelLeaseAuthority,
-        ) -> Self {
-            let bridge = Arc::new(
-                installed_loopback_bridge(
-                    &store,
-                    SharedAuthoritySource::default(),
-                    "public smoke repeat",
-                    "smoke-run",
-                    &authority,
-                    "kernel",
-                )
-                .with_tool_repeat_guard(true),
-            );
-            Self {
-                root,
-                workspace,
-                store,
-                authority,
-                bridge,
-            }
-        }
-
-        fn reopen(self) -> Self {
-            let Self {
-                root,
-                workspace,
-                store,
-                authority,
-                bridge,
-            } = self;
-            drop(bridge);
-            drop(store);
-            let store = AdapterStore::open(&root).unwrap();
-            Self::install(root, workspace, store, authority)
-        }
-
-        fn remove(self) {
-            let Self {
-                root,
-                store,
-                bridge,
-                ..
-            } = self;
-            drop(bridge);
-            drop(store);
-            std::fs::remove_dir_all(root).unwrap();
-        }
-    }
-
-    fn public_smoke_model_request(
-        fixture: &PublicSmokeStreamFixture,
-        occurrence: usize,
-    ) -> ModelPortRequest {
-        let request_id = format!("smoke-model-{occurrence}");
-        ModelPortRequest {
-            request_id: request_id.clone(),
-            payload_json: json!({
-                "requestId": request_id, "provider": "loopback", "sessionId": "kernel",
-                "threadId": fixture.authority.session_identity.codex_thread_id.0,
-                "request": {"model": "loopback", "input": []},
-            })
-            .to_string(),
-        }
-    }
-
-    fn public_smoke_tool_output(fixture: &PublicSmokeStreamFixture, namespaced: bool) -> String {
-        let mut item = json!({
-            "type": "function_call", "call_id": "public-smoke-call", "arguments": "{}",
-            "name": "mcp__benchmark_public_smoke__public_smoke",
-        });
-        if namespaced {
-            item["namespace"] = json!(format!(
-                "mcp__benchmark_public_smoke_{}",
-                fixture.authority.session_identity.product_session_id.0
-            ));
-            item["name"] = json!("public_smoke");
-        }
-        json!({"type": "output_item_done", "item": item}).to_string()
-    }
-
-    async fn deliver_public_smoke_tool_output(
-        fixture: &PublicSmokeStreamFixture,
-        occurrence: usize,
-        namespaced: bool,
-    ) -> Result<String, ModelPortFailure> {
-        let mut stream = fixture
-            .bridge
-            .model_port()
-            .stream(public_smoke_model_request(fixture, occurrence))
-            .await
-            .unwrap();
-        let opens = fixture
-            .bridge
-            .take_messages()
-            .unwrap()
-            .into_iter()
-            .filter_map(|message| match message {
-                ExecutionPortMessage::ModelOpenMessage(open) => Some(open),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(opens.len(), 1, "each new model request opens once");
-        let output = public_smoke_tool_output(fixture, namespaced);
-        fixture
-            .bridge
-            .accept_chunk(
-                &test_chunk(
-                    &fixture.authority,
-                    &opens[0].model_exchange_id,
-                    1,
-                    true,
-                    output.as_bytes(),
-                    'S',
-                ),
-                &fixture.authority.lease.issued_at,
-            )
-            .await
-            .unwrap();
-        stream.next().await.unwrap()
-    }
-
-    async fn replay_public_smoke_tool_output(fixture: &PublicSmokeStreamFixture) {
-        assert_eq!(
-            fixture
-                .store
-                .model_call_phase("smoke-run", "smoke-model-0")
-                .unwrap(),
-            Some(ModelCallPhase::ProviderFinal)
-        );
-        let mut replay = fixture
-            .bridge
-            .model_port()
-            .stream(public_smoke_model_request(fixture, 0))
-            .await
-            .unwrap();
-        assert_eq!(
-            replay.next().await.unwrap().unwrap(),
-            public_smoke_tool_output(fixture, true),
-            "replay retains the exact original empty arguments"
-        );
-        assert!(
-            !fixture
-                .bridge
-                .take_messages()
-                .unwrap()
-                .iter()
-                .any(|message| matches!(message, ExecutionPortMessage::ModelOpenMessage(_))),
-            "ProviderFinal replay must not reopen the provider"
-        );
-    }
-
-    #[tokio::test]
-    async fn public_smoke_stream_keeps_empty_arguments_and_admits_six_distinct_sources() {
-        for namespaced in [true, false] {
-            let fixture = PublicSmokeStreamFixture::new();
-            for occurrence in 0..6 {
-                std::fs::write(
-                    fixture.workspace.join("main.py"),
-                    format!("print({occurrence})\n"),
-                )
-                .unwrap();
-                assert_eq!(
-                    deliver_public_smoke_tool_output(&fixture, occurrence, namespaced)
-                        .await
-                        .unwrap(),
-                    public_smoke_tool_output(&fixture, namespaced),
-                    "source-aware admission must not rewrite model output or arguments"
-                );
-            }
-            assert!(!fixture.store.tool_repeat_stopped("smoke-run").unwrap());
-            fixture.remove();
-        }
-    }
-
-    #[tokio::test]
-    async fn public_smoke_stream_blocks_sixth_request_for_unchanged_source() {
-        for namespaced in [true, false] {
-            let fixture = PublicSmokeStreamFixture::new();
-            for occurrence in 0..5 {
-                assert_eq!(
-                    deliver_public_smoke_tool_output(&fixture, occurrence, namespaced)
-                        .await
-                        .unwrap(),
-                    public_smoke_tool_output(&fixture, namespaced)
-                );
-            }
-            let failure = deliver_public_smoke_tool_output(&fixture, 5, namespaced)
-                .await
-                .unwrap_err();
-            assert_eq!(failure.code, crate::tool_repeat::STOP_REASON);
-            assert!(fixture.store.tool_repeat_stopped("smoke-run").unwrap());
-            assert!(
-                fixture
-                    .bridge
-                    .model_port()
-                    .stream(public_smoke_model_request(&fixture, 6))
-                    .await
-                    .is_err(),
-                "a retained stop blocks another model request"
-            );
-            assert!(
-                !fixture
-                    .bridge
-                    .take_messages()
-                    .unwrap()
-                    .iter()
-                    .any(|message| matches!(message, ExecutionPortMessage::ModelOpenMessage(_)))
-            );
-            fixture.remove();
-        }
-    }
-
-    #[tokio::test]
-    async fn public_smoke_stream_replay_after_source_change_and_restart_counts_once() {
-        let fixture = PublicSmokeStreamFixture::new();
-        assert_eq!(
-            deliver_public_smoke_tool_output(&fixture, 0, true)
-                .await
-                .unwrap(),
-            public_smoke_tool_output(&fixture, true)
-        );
-        std::fs::write(fixture.workspace.join("main.py"), "print(999)\n").unwrap();
-        replay_public_smoke_tool_output(&fixture).await;
-        let fixture = fixture.reopen();
-        replay_public_smoke_tool_output(&fixture).await;
-        let admissions: i64 = fixture
-            .store
-            .lock()
-            .unwrap()
-            .query_row(
-                "SELECT COUNT(*) FROM tool_repeat_admission WHERE run_key = 'smoke-run'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(admissions, 1, "both replays use the retained admission");
-        std::fs::write(fixture.workspace.join("main.py"), "print(0)\n").unwrap();
-        for occurrence in 1..5 {
-            assert_eq!(
-                deliver_public_smoke_tool_output(&fixture, occurrence, true)
-                    .await
-                    .unwrap(),
-                public_smoke_tool_output(&fixture, true)
-            );
-        }
-        assert_eq!(
-            deliver_public_smoke_tool_output(&fixture, 5, true)
-                .await
-                .unwrap_err()
-                .code,
-            crate::tool_repeat::STOP_REASON,
-            "replay must neither consume counts nor change the original comparison identity"
-        );
-        fixture.remove();
     }
 
     #[tokio::test]

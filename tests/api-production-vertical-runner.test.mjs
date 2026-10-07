@@ -11,6 +11,7 @@ import {
 import { resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import test from 'node:test'
+import { projectSourceDigest } from '../scripts/product-build-contract.mjs'
 import { loadDeviceAgentTask } from '../scripts/device-agent-task.mjs'
 
 import {
@@ -711,4 +712,19 @@ test('Device runner confirms only the current verified candidate without publica
       assert.equal(commands.length, 0)
     }
   }
+})
+
+test('product source identity includes embedded Core while excluding build outputs', t => {
+  const fixture = mkdtempSync(resolve(tmpdir(), 'wwc-core-source-'))
+  t.after(() => rmSync(fixture, { recursive: true, force: true }))
+  const source = resolve(fixture, 'third_party/codex/codex-rs/core/src')
+  const target = resolve(fixture, 'third_party/codex/codex-rs/target')
+  mkdirSync(source, { recursive: true })
+  mkdirSync(target, { recursive: true })
+  writeFileSync(resolve(source, 'lib.rs'), 'pub const VERSION: u32 = 1;\n')
+  const original = projectSourceDigest(fixture)
+  writeFileSync(resolve(target, 'generated'), 'build output')
+  assert.equal(projectSourceDigest(fixture), original)
+  writeFileSync(resolve(source, 'lib.rs'), 'pub const VERSION: u32 = 2;\n')
+  assert.notEqual(projectSourceDigest(fixture), original)
 })

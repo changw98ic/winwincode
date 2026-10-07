@@ -72,6 +72,7 @@ const domainDefinitions = [
   'DebugSessionId',
   'EvidenceId',
   'ExecutionJobId',
+  'ExecutionSequence',
   'GitObjectId',
   'InputRequestId',
   'Instant',

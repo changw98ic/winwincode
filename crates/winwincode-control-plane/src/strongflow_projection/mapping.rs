@@ -1191,12 +1191,14 @@ fn runtime_session(
             .activities
             .iter()
             .map(|activity| api::RuntimeActivityProjection {
+                core_tool: activity.core_tool.as_deref().cloned(),
                 call_id: activity.call_id.clone(),
                 activity_type: match activity.activity_type {
                     runtime_projection::RuntimeActivityType::Command => {
                         api::RuntimeActivityType::Command
                     }
                     runtime_projection::RuntimeActivityType::Test => api::RuntimeActivityType::Test,
+                    runtime_projection::RuntimeActivityType::Tool => api::RuntimeActivityType::Tool,
                 },
                 command: activity.command.clone(),
                 status: match activity.status {

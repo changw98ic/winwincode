@@ -147,20 +147,6 @@ fn initialize_schema(connection: &Connection) -> Result<(), AdapterStoreError> {
                    frame_json BLOB NOT NULL,
                    PRIMARY KEY (run_key, model_call_id, sequence)
                  );
-                 CREATE TABLE IF NOT EXISTS tool_repeat_run (
-                   run_key TEXT PRIMARY KEY NOT NULL,
-                   stopped INTEGER NOT NULL DEFAULT 0 CHECK(stopped IN (0, 1))
-                 );
-                 CREATE TABLE IF NOT EXISTS tool_repeat_admission (
-                   run_key TEXT NOT NULL REFERENCES tool_repeat_run(run_key),
-                   model_call_id TEXT NOT NULL,
-                   call_id TEXT NOT NULL,
-                   request_digest TEXT NOT NULL,
-                   comparison_digest TEXT,
-                   PRIMARY KEY(run_key, model_call_id, call_id)
-                 );
-                 CREATE INDEX IF NOT EXISTS tool_repeat_identity_idx
-                   ON tool_repeat_admission(run_key, request_digest);
                  CREATE TABLE IF NOT EXISTS model_thread_lineage (
                    thread_id TEXT PRIMARY KEY NOT NULL,
                    run_key TEXT NOT NULL,
@@ -246,37 +232,7 @@ fn initialize_schema(connection: &Connection) -> Result<(), AdapterStoreError> {
             )
             .map_err(|_| AdapterStoreError::Unavailable)?;
     migrate_mcp_approval_schema(connection)?;
-    migrate_tool_repeat_comparison_schema(connection)?;
     initialize_performance_schema(connection)
-}
-
-fn migrate_tool_repeat_comparison_schema(connection: &Connection) -> Result<(), AdapterStoreError> {
-    let transaction = Transaction::new_unchecked(connection, TransactionBehavior::Immediate)
-        .map_err(|_| AdapterStoreError::Unavailable)?;
-    let exists: bool = transaction
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('tool_repeat_admission')
-             WHERE name = 'comparison_digest')",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|_| AdapterStoreError::Unavailable)?;
-    if !exists {
-        // Legacy calls have no recorded source identity. Keep their request
-        // identity for exact replay; never backfill it from today's checkout.
-        transaction
-            .execute_batch("ALTER TABLE tool_repeat_admission ADD COLUMN comparison_digest TEXT;")
-            .map_err(|_| AdapterStoreError::Unavailable)?;
-    }
-    transaction
-        .execute_batch(
-            "CREATE INDEX IF NOT EXISTS tool_repeat_comparison_idx
-             ON tool_repeat_admission(run_key, COALESCE(comparison_digest, request_digest));",
-        )
-        .map_err(|_| AdapterStoreError::Unavailable)?;
-    transaction
-        .commit()
-        .map_err(|_| AdapterStoreError::Unavailable)
 }
 
 fn migrate_mcp_approval_schema(connection: &Connection) -> Result<(), AdapterStoreError> {

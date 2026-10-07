@@ -612,3 +612,10 @@
 
 .wwc-chat-send:hover:not(:disabled) { background: var(--dsw-alias-button-info-hover); }
 .wwc-chat-composer-controls > button { min-height: 36px; }
+
+.wwc-chat-runtime { margin-block: 12px; padding: 12px; border: 1px solid var(--wwc-color-border); border-radius: 8px; }
+.wwc-chat-runtime-heading { cursor: pointer; font-weight: 600; }
+.wwc-runtime-activity { display: grid; gap: 4px; padding-block: 8px; overflow-wrap: anywhere; }
+.wwc-runtime-activity-detail { font-size: 0.875rem; color: var(--wwc-color-text-muted); }
+.wwc-runtime-activity-question { margin-block: 4px; }
+.wwc-runtime-activity-evidence { font-size: 0.875rem; padding-inline-start: 20px; }

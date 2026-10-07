@@ -1,0 +1,197 @@
+diff --git a/codex-rs/core/src/tools/tool_diagnostics.rs b/codex-rs/core/src/tools/tool_diagnostics.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/core/src/tools/tool_diagnostics.rs
+@@ -0,0 +1,192 @@
++// SPDX-License-Identifier: Apache-2.0
++#[path = "tool_diagnostic_detector.rs"]
++mod detector;
++use super::execution_facts::ExecutionFacts;
++use super::execution_facts::digest;
++use crate::session::session::Session;
++use crate::session::turn_context::TurnContext;
++use codex_protocol::models::FunctionCallOutputContentItem;
++use codex_state::StateRuntime;
++use std::sync::Arc;
++use std::sync::Mutex;
++use tokio::sync::Semaphore;
++
++pub(crate) struct ToolDiagnostics {
++    detector: Mutex<detector::Detector>,
++    refresh_gate: Semaphore,
++}
++impl Default for ToolDiagnostics {
++    fn default() -> Self {
++        Self {
++            detector: Mutex::new(detector::Detector::default()),
++            refresh_gate: Semaphore::new(1),
++        }
++    }
++}
++impl ToolDiagnostics {
++    /// Default for every Core task. Diagnostics cannot deny or cancel execution.
++    pub(super) async fn refresh(session: &Session) {
++        if let Err(error) = Self::refresh_inner(session).await {
++            tracing::warn!(%error, "tool diagnosis facts unavailable");
++        }
++    }
++    async fn refresh_inner(session: &Session) -> anyhow::Result<()> {
++        let facts = ExecutionFacts::for_session(session);
++        let Some(store) = facts.store.get() else {
++            return Ok(());
++        };
++        let Some(owner_id) = facts.owner_id.get() else {
++            return Ok(());
++        };
++        let service = session
++            .services
++            .thread_extension_data
++            .get_or_init(Self::default);
++        let _permit = service.refresh_gate.acquire().await?;
++        loop {
++            let cursor = service
++                .detector
++                .lock()
++                .map_err(|_| anyhow::anyhow!("tool diagnosis state unavailable"))?
++                .cursor;
++            let events = store
++                .list_tool_runtime_events(&session.thread_id.to_string(), cursor, 200)
++                .await?;
++            let end = events.len() < 200;
++            service
++                .detector
++                .lock()
++                .map_err(|_| anyhow::anyhow!("tool diagnosis state unavailable"))?
++                .consume(events);
++            if end {
++                break;
++            }
++        }
++        let diagnostics = service
++            .detector
++            .lock()
++            .map_err(|_| anyhow::anyhow!("tool diagnosis state unavailable"))?
++            .diagnose(&session.thread_id.to_string(), owner_id);
++        for diagnostic in diagnostics {
++            store.enqueue_tool_diagnostic(&diagnostic).await?;
++        }
++        Ok(())
++    }
++    pub(super) async fn unavailable_wait(
++        session: &Session,
++        turn: &TurnContext,
++        call_id: &str,
++        cell_id: &str,
++        state: &str,
++    ) {
++        let facts = ExecutionFacts::for_session(session);
++        let Some(store) = facts.store.get() else {
++            return;
++        };
++        let thread = session.thread_id.to_string();
++        let logical = format!(
++            "direct:{}",
++            digest(serde_json::json!([turn.sub_id, call_id]))
++        );
++        let Ok(Some(request)) = store.tool_request_fact(&thread, &logical).await else {
++            return;
++        };
++        let diagnostic = codex_state::ToolDiagnostic {
++            schema_version: 1,
++            diagnostic_id: digest(serde_json::json!(["unavailable-wait-v1", thread, cell_id])),
++            thread_id: thread,
++            kind: codex_state::ToolDiagnosticKind::UnavailableWait,
++            evidence_version: request.request_sequence,
++            progress_source_sequence: None,
++            evidence: vec![codex_state::ToolDiagnosticCall {
++                request_sequence: request.request_sequence,
++                logical_id: logical,
++                tool_name: request.request.tool_name,
++                operation_digest: request
++                    .attempt
++                    .map(|attempt| attempt.operation_digest)
++                    .unwrap_or_default(),
++                parent_call_id: request.request.parent_call_id,
++                cell_id: Some(cell_id.into()),
++            }],
++            question: format!(
++                "Core reports {state} for the requested cell. Which current execution or alternative action can advance the task?"
++            ),
++        };
++        if let Err(error) = store.enqueue_tool_diagnostic(&diagnostic).await {
++            tracing::warn!(%error, "wait diagnosis unavailable");
++        }
++    }
++
++    pub(crate) async fn record_model_response(
++        session: &Session,
++        turn: &TurnContext,
++        item: &codex_protocol::models::ResponseItem,
++    ) {
++        if !matches!(item, codex_protocol::models::ResponseItem::Message { role, .. } if role == "assistant")
++        {
++            return;
++        }
++        let facts = ExecutionFacts::for_session(session);
++        let Some(store) = facts.store.get() else {
++            return;
++        };
++        let Ok(value) = serde_json::to_value(item) else {
++            return;
++        };
++        if let Err(error) = store
++            .record_tool_diagnostic_response(
++                &session.thread_id.to_string(),
++                &turn.sub_id,
++                &digest(value),
++            )
++            .await
++        {
++            tracing::warn!(%error, "model diagnosis response reference unavailable");
++        }
++    }
++
++    /// The normal exec/wait boundary carries evidence into current model history.
++    pub(super) async fn feedback(
++        session: &Session,
++        turn: &TurnContext,
++        call_id: &str,
++    ) -> Option<FunctionCallOutputContentItem> {
++        Self::refresh(session).await;
++        let facts = ExecutionFacts::for_session(session);
++        let store: &Arc<StateRuntime> = facts.store.get()?;
++        let logical = format!(
++            "direct:{}",
++            digest(serde_json::json!([turn.sub_id, call_id]))
++        );
++        let diagnostics = match store
++            .stage_tool_diagnostic_feedback(&session.thread_id.to_string(), &logical)
++            .await
++        {
++            Ok(diagnostics) => diagnostics,
++            Err(error) => {
++                tracing::warn!(%error, "tool diagnosis feedback unavailable");
++                return None;
++            }
++        };
++        if diagnostics.is_empty() {
++            return None;
++        }
++        // Compact references resolve to full durable facts. Fixed two-item and
++        // two-call bounds keep this context item below 1,000 tokens.
++        let feedback: Vec<_> = diagnostics.iter().map(|diagnostic| serde_json::json!({
++            "diagnostic_id": diagnostic.diagnostic_id, "evidence_version": diagnostic.evidence_version,
++            "kind": diagnostic.kind, "progress": diagnostic.progress_source_sequence.map_or("unknown", |_| "verified_receipt"),
++            "calls": diagnostic.evidence.iter().rev().take(2).map(|call| serde_json::json!({
++                "request_sequence": call.request_sequence,
++                "tool": call.tool_name.chars().take(64).collect::<String>(),
++            })).collect::<Vec<_>>(),
++            "question": diagnostic.question,
++        })).collect();
++        Some(FunctionCallOutputContentItem::InputText { text: serde_json::json!({
++            "type": "model_behavior_diagnosis", "schema_version": 1,
++            "assessment": "possible", "diagnostics": feedback,
++            "next_step": "Assess the evidence, explain whether the waiting or repetition is justified, and choose the next action.",
++        }).to_string() })
++    }
++}

@@ -1,8 +1,8 @@
-//! SQLite-backed state for rollout metadata.
+//! SQLite-backed Core state for rollout metadata and tool execution facts.
 //!
-//! This crate is intentionally small and focused: it extracts rollout metadata
-//! from JSONL rollouts and mirrors it into a local SQLite database. Backfill
-//! orchestration and rollout scanning live in `codex-core`.
+//! This crate owns atomic storage and recovery receipts. Rollout metadata is
+//! extracted from JSONL rollouts; backfill orchestration and rollout scanning
+//! live in `codex-core`.
 
 const _: () = assert!(
     libsqlite3_sys::SQLITE_VERSION_NUMBER >= 3_051_003,
@@ -18,6 +18,11 @@ mod paths;
 mod runtime;
 mod sqlite;
 mod telemetry;
+mod tool_dependencies;
+mod tool_diagnostics;
+mod tool_execution;
+mod tool_runtime;
+mod tool_sharing;
 
 pub use model::CreatedProject;
 pub use model::LogEntry;
@@ -114,3 +119,46 @@ pub const DB_INIT_METRIC: &str = "codex.sqlite.init.count";
 pub const DB_INIT_DURATION_METRIC: &str = "codex.sqlite.init.duration_ms";
 /// Rollout fallback attempts. Tags: [caller, reason]
 pub const DB_FALLBACK_METRIC: &str = "codex.sqlite.fallback.count";
+
+pub use tool_dependencies::ToolCoalescingPermission;
+pub use tool_dependencies::ToolDependencySnapshot;
+pub use tool_dependencies::ToolInputBindingFact;
+pub use tool_dependencies::ToolInputProof;
+pub use tool_dependencies::ToolInputValidation;
+pub use tool_dependencies::ToolInputValidationFact;
+pub use tool_dependencies::ToolReusePermission;
+pub use tool_execution::MAX_TOOL_RESULT_BYTES;
+pub use tool_execution::ToolAttemptClaim;
+pub use tool_execution::ToolAttemptReceipt;
+pub use tool_execution::ToolExecutionFact;
+pub use tool_execution::ToolExecutionStatus;
+pub use tool_execution::ToolFactEvent;
+pub use tool_execution::ToolOutputDelivery;
+pub use tool_execution::ToolOutputDisposition;
+pub use tool_execution::ToolRequestIdentity;
+pub use tool_execution::ToolRequestObservation;
+pub use tool_execution::ToolRequestResolution;
+pub use tool_execution::ToolStoredResults;
+
+pub use tool_runtime::ToolCellFact;
+pub use tool_runtime::ToolCellLifecycle;
+pub use tool_runtime::ToolRuntimeEvent;
+pub use tool_runtime::ToolRuntimeFact;
+pub use tool_runtime::ToolWaitFact;
+pub use tool_runtime::ToolWaitState;
+
+pub use tool_runtime::ToolReconciliationFact;
+pub use tool_runtime::ToolRecoveryEvidence;
+
+pub use tool_diagnostics::ToolDiagnostic;
+pub use tool_diagnostics::ToolDiagnosticCall;
+pub use tool_diagnostics::ToolDiagnosticDelivery;
+pub use tool_diagnostics::ToolDiagnosticFact;
+pub use tool_diagnostics::ToolDiagnosticKind;
+pub use tool_diagnostics::ToolProgressFact;
+
+pub use tool_diagnostics::ToolDiagnosticResponse;
+
+pub use tool_sharing::ToolSharingFact;
+pub use tool_sharing::ToolSharingKind;
+pub use tool_sharing::ToolWaiterCancellationFact;

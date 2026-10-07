@@ -125,91 +125,6 @@ export function benchmarkAggregationDigest(runId, taskId, members) {
   return createHash('sha256').update(canonicalJson({ runId, taskId, members })).digest('hex')
 }
 
-const TOOL_METADATA_KEYS = new Set([
-  'requestid',
-  'timestamp',
-  'timestampms',
-  'progress',
-  'progressmetadata',
-])
-
-function canonicalToolArgs(value) {
-  if (Array.isArray(value)) return value.map(canonicalToolArgs)
-  if (value === null || typeof value !== 'object') return value
-  return Object.fromEntries(Object.entries(value)
-    .filter(([key]) => !TOOL_METADATA_KEYS.has(key.toLowerCase().replace(/[^a-z0-9]/gu, '')))
-    .map(([key, nested]) => [key, canonicalToolArgs(nested)]))
-}
-
-export function normalizeToolRequestIdentity(request) {
-  if (!request || typeof request !== 'object' || Array.isArray(request)) {
-    throw new TypeError('tool request must be an object')
-  }
-  const { tool, target } = request
-  const args = request.args ?? request.params
-  const requestedContentDigest = request.requestedContentDigest ?? request.contentDigest
-  if (typeof tool !== 'string' || tool.length === 0 || typeof target !== 'string' || target.length === 0) {
-    throw new TypeError('tool request requires tool and target identities')
-  }
-  if (args === undefined || typeof requestedContentDigest !== 'string'
-    || !/^[0-9a-f]{64}$/u.test(requestedContentDigest)) {
-    throw new TypeError('tool request requires canonical args and a SHA-256 requested-content digest')
-  }
-  return createHash('sha256')
-    .update(canonicalJson({ tool, target, args: canonicalToolArgs(args), requestedContentDigest }))
-    .digest('hex')
-}
-
-const LEGACY_GATE_TERMINATION = Symbol('tool-repeat-termination')
-
-export function createToolRequestGuard() {
-  const occurrences = new Map()
-  let termination = null
-  return Object.freeze({
-    admit(request) {
-      if (termination) return termination
-      const identity = normalizeToolRequestIdentity(request)
-      const occurrence = (occurrences.get(identity) ?? 0) + 1
-      occurrences.set(identity, occurrence)
-      if (occurrence >= 6) {
-        termination = Object.freeze({
-          status: 'terminated',
-          reason: 'STUCK_TOOL_REPEAT_LIMIT',
-          identity,
-          occurrence: 6,
-        })
-        return termination
-      }
-      return Object.freeze({ status: 'admitted', identity, occurrence })
-    },
-  })
-}
-
-export async function executeToolRequest(request, gate, executor) {
-  if (gate && typeof gate.admit === 'function') {
-    const admission = gate.admit(request)
-    if (admission.status === 'terminated') return admission
-    return executor(request, { identity: admission.identity, occurrence: admission.occurrence })
-  }
-  if (!(gate instanceof Map)) throw new TypeError('tool gate must be a Map or tool request guard')
-  const termination = gate.get(LEGACY_GATE_TERMINATION)
-  if (termination) return termination
-  const identity = normalizeToolRequestIdentity(request)
-  const occurrence = (gate.get(identity) ?? 0) + 1
-  gate.set(identity, occurrence)
-  if (occurrence >= 6) {
-    const nextTermination = Object.freeze({
-      status: 'terminated',
-      reason: 'STUCK_TOOL_REPEAT_LIMIT',
-      identity,
-      occurrence: 6,
-    })
-    gate.set(LEGACY_GATE_TERMINATION, nextTermination)
-    return nextTermination
-  }
-  return executor(request, { identity, occurrence })
-}
-
 function taskIdentities(taskIds) {
   if (!Array.isArray(taskIds) || taskIds.length !== 20 || new Set(taskIds).size !== 20) {
     throw new TypeError('taskIds must contain exactly 20 unique task identities')
@@ -240,7 +155,6 @@ export function buildBenchmarkPlan({ taskIds }) {
 }
 
 export async function executeBenchmarkCell(cell, adapter, {
-  toolGate = createToolRequestGuard(),
   recordCall = () => {},
   registerLaunch = () => fail('LEDGER_REQUIRED', 'product launch registration requires a durable ledger'),
 } = {}) {
@@ -276,16 +190,7 @@ export async function executeBenchmarkCell(cell, adapter, {
           throw error
         }
       },
-      requestTool: async (toolRequest, executor) => {
-        const result = await executeToolRequest(toolRequest, toolGate, executor)
-        if (result?.status === 'terminated') {
-          const error = new Error(result.reason)
-          error.code = result.reason
-          error.termination = result
-          throw error
-        }
-        return result
-      },
+
     })
     let result
     try {
@@ -294,6 +199,7 @@ export async function executeBenchmarkCell(cell, adapter, {
     } catch (error) {
       const code = runnerFailureCode(error)
       persistCall({ callId: request.callId, status: 'failed', failure: { code },
+        ...(error?.termination ? { termination: error.termination } : {}),
         ...(error?.unresolvedDeviceExecution === true ? { unresolvedDeviceExecution: true } : {}) })
       throw error
     }
@@ -369,9 +275,7 @@ export async function executeBenchmarkCell(cell, adapter, {
 
 function runnerTermination(value) {
   if (value?.termination) return value.termination
-  if ((value?.code ?? value?.failure?.code) === 'STUCK_TOOL_REPEAT_LIMIT') {
-    return { reason: 'STUCK_TOOL_REPEAT_LIMIT' }
-  }
+
   return null
 }
 
@@ -391,7 +295,7 @@ export async function recoverBenchmarkCell(cell, observed, resolveModel) {
     if (retained?.status === 'returned') return retained.result
     if (retained?.status === 'failed' && retained.failure.code !== 'BENCHMARK_EVIDENCE_FAILED'
         && retained.unresolvedDeviceExecution !== true) {
-      throw Object.assign(new Error(retained.failure.code), { code: retained.failure.code, retainedFailure: true })
+      throw Object.assign(new Error(retained.failure.code), { code: retained.failure.code, retainedFailure: true, ...(retained.termination ? { termination: retained.termination } : {}) })
     }
     const launch = observed.launches.find(target => target.callId === request.callId)
     if ((request.provider || request.engine === 'fusion-engine') && launch && resolveModel) return resolveModel(request, launch)
@@ -476,7 +380,6 @@ export function verifyBenchmarkLedgerIdentity(plan, options) {
 
 export async function runBenchmarkPlan(plan, {
   executeCell,
-  createToolGate = () => createToolRequestGuard(),
   onRecord = () => {},
   ledgerPath,
   experimentBinding,
@@ -532,7 +435,7 @@ export async function runBenchmarkPlan(plan, {
         }
         record = { ...cell, status: 'planned', termination: null }
         try {
-          const result = await executeCell(cell, { toolGate: createToolGate(cell), registerLaunch, recordCall })
+          const result = await executeCell(cell, { registerLaunch, recordCall })
           if (persistenceError) throw persistenceError
           const termination = runnerTermination(result)
           record = {
@@ -1069,7 +972,7 @@ export function aggregateBenchmarkReport(plan, { records, experimentId, ...bindi
       denominator: records.length,
       completed: completed.length,
       unsuccessful: records.length - completed.length,
-      stuckToolRepeatLimit: records.filter(record => record.termination?.reason === 'STUCK_TOOL_REPEAT_LIMIT').length,
+      terminated: records.filter(record => record.termination !== null && record.termination !== undefined).length,
       runnerTerminatedNotRun: records.filter(record => record.status === 'not_run_runner_terminated').length,
     }),
     quality,

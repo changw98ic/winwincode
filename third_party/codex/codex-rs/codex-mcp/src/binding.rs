@@ -100,6 +100,12 @@ impl McpBinding {
         self.connections.has_servers()
     }
 
+    /// Ready resource clients frozen into this binding, including servers
+    /// whose tool catalog is empty.
+    pub fn resource_server_names(&self) -> Vec<String> {
+        self.clients.server_names()
+    }
+
     pub async fn list_resources(
         &self,
         server: &str,

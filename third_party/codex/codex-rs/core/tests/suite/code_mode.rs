@@ -79,7 +79,7 @@ use core_test_support::skip_if_wine_exec;
 use core_test_support::stdio_server_bin;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::TestCodexBuilder;
-use core_test_support::test_codex::test_codex;
+use core_test_support::test_codex::test_codex as core_test_codex;
 use core_test_support::test_codex::turn_permission_fields;
 use core_test_support::wait_for_event;
 use core_test_support::wait_for_event_match;
@@ -117,6 +117,14 @@ use wiremock::matchers::path;
 
 use super::rmcp_client::remote_aware_environment_id;
 use super::rmcp_client::remote_aware_stdio_server_bin;
+
+fn test_codex() -> TestCodexBuilder {
+    // These fixtures exercise registered Core executors. Search tests opt in
+    // to their specific hosted or standalone search configuration.
+    core_test_codex().with_config(|config| {
+        config.web_search_mode = Constrained::allow_any(WebSearchMode::Disabled);
+    })
+}
 
 fn custom_tool_output_items(req: &ResponsesRequest, call_id: &str) -> Vec<Value> {
     match req.custom_tool_call_output(call_id).get("output") {
@@ -170,10 +178,17 @@ fn extract_running_cell_id(text: &str) -> String {
 }
 
 fn wait_for_file_source(path: &Path) -> Result<String> {
+    // Exercise controlled filesystem access through one retained process.
+    // The caller's wait budget includes host dispatch and process startup.
     let quoted_path = shlex::try_join([path.to_string_lossy().as_ref()])?;
-    let command = format!("if [ -f {quoted_path} ]; then printf ready; fi");
+    let command = format!("while [ ! -f {quoted_path} ]; do sleep 0.01; done");
     Ok(format!(
-        r#"while ((await tools.exec_command({{ cmd: {command:?} }})).output !== "ready") {{
+        r#"{{
+let gate = await tools.exec_command({{ cmd: {command:?}, login: false, yield_time_ms: 1000 }});
+while (gate.session_id) {{
+  gate = await tools.write_stdin({{ session_id: gate.session_id, yield_time_ms: 1000 }});
+}}
+if (gate.exit_code !== 0) throw new Error('file gate failed: ' + JSON.stringify(gate));
 }}"#
     ))
 }
@@ -839,12 +854,7 @@ async fn code_mode_only_restricts_prompt_tools() -> Result<()> {
     let first_body = resp_mock.single_request().body_json();
     assert_eq!(
         tool_names(&first_body),
-        vec![
-            "exec".to_string(),
-            "wait".to_string(),
-            "request_user_input".to_string(),
-            "web_search".to_string()
-        ]
+        vec!["exec".to_string(), "wait".to_string()]
     );
 
     Ok(())
@@ -968,7 +978,7 @@ async fn code_mode_excludes_mcp_servers_using_their_configured_identity() -> Res
             let omit_direct = omit_tools_from.contains(&"direct");
             let available_directly = !omit_direct
                 && (!supports_search_tool || omit_deferred || code_mode_only && omit_code_mode);
-            let visible_directly = available_directly && (!code_mode_only || omit_code_mode);
+            let visible_directly = available_directly && !code_mode_only;
             let echo_tool = namespace_child_tool(&body, namespace, "echo");
             assert_eq!(
                 echo_tool.is_some(),
@@ -1280,12 +1290,7 @@ if (!tool) {
     let first_body = resp_mock.single_request().body_json();
     assert_eq!(
         tool_names(&first_body),
-        vec![
-            "exec".to_string(),
-            "wait".to_string(),
-            "request_user_input".to_string(),
-            "web_search".to_string()
-        ]
+        vec!["exec".to_string(), "wait".to_string()]
     );
 
     let exec_description = first_body
@@ -1378,6 +1383,7 @@ text(JSON.stringify({{
 
     let mut builder = search_capable_apps_builder(apps_server.chatgpt_base_url.clone())
         .with_config(|config| {
+            config.web_search_mode = Constrained::allow_any(WebSearchMode::Disabled);
             config
                 .features
                 .enable(Feature::CodeMode)
@@ -2091,13 +2097,36 @@ try {
 }
 
 /// A stalled host wait must return its timeout to the model and reconnect for the next exec.
+struct WaitStartObserver(Mutex<Option<oneshot::Sender<()>>>);
+
+impl ToolLifecycleContributor for WaitStartObserver {
+    fn on_tool_start<'a>(&'a self, input: ToolStartInput<'a>) -> ToolLifecycleFuture<'a> {
+        Box::pin(async move {
+            if input.tool_name.name == "wait"
+                && let Some(sender) = self
+                    .0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+            {
+                let _ = sender.send(());
+            }
+        })
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn code_mode_wait_timeout_reconnects_on_next_exec() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
+    let (started_tx, started_rx) = oneshot::channel();
+    let mut extensions = ExtensionRegistryBuilder::<Config>::new();
+    extensions
+        .tool_lifecycle_contributor(Arc::new(WaitStartObserver(Mutex::new(Some(started_tx)))));
     let server = responses::start_mock_server().await;
     let mut builder = test_codex()
         .with_model("test-gpt-5.1-codex")
+        .with_extensions(Arc::new(extensions.build()))
         .with_config(|config| {
             config
                 .features
@@ -2160,6 +2189,20 @@ async fn code_mode_wait_timeout_reconnects_on_next_exec() -> Result<()> {
     })
     .await;
 
+    // SQLite commits use a real I/O worker. Pause virtual time only after
+    // dispatch reaches the actual handler, rather than the raw model response.
+    started_rx.await?;
+    // Wait for the durable edge as well: the handler commits it before entering
+    // the timed runtime wait. SQLite's real I/O must finish before virtual time.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if test.codex.tool_runtime_events(0, 200).await.unwrap().iter().any(|event| {
+                matches!(&event.fact, codex_state::ToolRuntimeFact::Wait(wait) if wait.state == codex_state::ToolWaitState::Waiting)
+            }) { break; }
+            tokio::task::yield_now().await;
+        }
+    }).await?;
+    tokio::task::yield_now().await;
     tokio::time::pause();
     for _ in 0..130 {
         tokio::time::advance(Duration::from_secs(1)).await;
@@ -2286,7 +2329,7 @@ text("phase 3");
                 "wait",
                 &serde_json::to_string(&serde_json::json!({
                     "cell_id": cell_id.clone(),
-                    "yield_time_ms": 1_000,
+                    "yield_time_ms": 10_000,
                 }))?,
             ),
             ev_completed("resp-3"),
@@ -2307,7 +2350,7 @@ text("phase 3");
 
     let second_request = second_completion.single_request();
     let second_items = function_tool_output_items(&second_request, "call-2");
-    assert_eq!(second_items.len(), 2);
+    assert_eq!(second_items.len(), 2, "{second_items:?}");
     assert_regex_match(
         concat!(
             r"(?s)\A",
@@ -2330,7 +2373,7 @@ text("phase 3");
                 "wait",
                 &serde_json::to_string(&serde_json::json!({
                     "cell_id": cell_id.clone(),
-                    "yield_time_ms": 1_000,
+                    "yield_time_ms": 10_000,
                 }))?,
             ),
             ev_completed("resp-5"),
@@ -2556,7 +2599,7 @@ text("session b done");
                 "wait",
                 &serde_json::to_string(&serde_json::json!({
                     "cell_id": session_a_id.clone(),
-                    "yield_time_ms": 1_000,
+                    "yield_time_ms": 10_000,
                 }))?,
             ),
             ev_completed("resp-5"),
@@ -2596,7 +2639,7 @@ text("session b done");
                 "wait",
                 &serde_json::to_string(&serde_json::json!({
                     "cell_id": session_b_id.clone(),
-                    "yield_time_ms": 1_000,
+                    "yield_time_ms": 10_000,
                 }))?,
             ),
             ev_completed("resp-7"),
@@ -2730,7 +2773,7 @@ yield_control();
                 "wait",
                 &serde_json::to_string(&serde_json::json!({
                     "cell_id": first_cell_id,
-                    "yield_time_ms": 1_000,
+                    "yield_time_ms": 10_000,
                 }))?,
             ),
             ev_completed("resp-7"),
@@ -3069,7 +3112,7 @@ text("session b done");
                 "wait",
                 &serde_json::to_string(&serde_json::json!({
                     "cell_id": session_b_id.clone(),
-                    "yield_time_ms": 1_000,
+                    "yield_time_ms": 10_000,
                 }))?,
             ),
             ev_completed("resp-5"),
@@ -3512,7 +3555,7 @@ text("token one token two token three token four token five token six token seve
                 "wait",
                 &serde_json::to_string(&serde_json::json!({
                     "cell_id": cell_id.clone(),
-                    "yield_time_ms": 1_000,
+                    "yield_time_ms": 10_000,
                     "max_tokens": 6,
                 }))?,
             ),
@@ -5219,6 +5262,7 @@ text(JSON.stringify(Object.getOwnPropertyNames(globalThis).sort()));
         "store",
         "text",
         "tools",
+        "toolDefinition",
         "undefined",
         "unescape",
         "yield_control",
@@ -5316,7 +5360,7 @@ text(JSON.stringify(tool));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn code_mode_uses_the_first_dynamic_tool_for_a_normalized_name() -> Result<()> {
+async fn code_mode_rejects_normalized_dynamic_tool_collisions_before_sampling() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     for use_responses_lite in [false, true] {
@@ -5324,236 +5368,60 @@ async fn code_mode_uses_the_first_dynamic_tool_for_a_normalized_name() -> Result
         let mut builder = test_codex()
             .with_model_info_override("gpt-5.5", move |model_info| {
                 model_info.use_responses_lite = use_responses_lite;
-                model_info.tool_mode = Some(ToolMode::CodeMode);
+                model_info.tool_mode = Some(ToolMode::CodeModeOnly);
             })
             .with_config(|config| {
-                config.tool_registry.turn_metadata_includes_tool_info = true;
-                config
-                    .features
-                    .enable(Feature::CodeMode)
-                    .expect("code mode should be enabled");
+                let _ = config.features.enable(Feature::CodeModeOnly);
             });
-        let base_test = builder.build_with_auto_env(&server).await?;
-        let new_thread = base_test
+        let test = builder.build_with_auto_env(&server).await?;
+        let thread = test
             .thread_manager
             .start_thread(StartThreadOptions {
-                dynamic_tools: [
-                    ("foo-bar", "First normalized dynamic tool."),
-                    ("foo_bar", "Shadowed normalized dynamic tool."),
-                ]
-                .into_iter()
-                .map(|(name, description)| {
-                    DynamicToolSpec::Function(DynamicToolFunctionSpec {
-                        name: name.to_string(),
-                        description: description.to_string(),
-                        input_schema: serde_json::json!({
-                            "type": "object",
-                            "properties": {},
-                            "additionalProperties": false,
-                        }),
-                        defer_loading: false,
+                dynamic_tools: ["foo-bar", "foo_bar"]
+                    .into_iter()
+                    .map(|name| {
+                        DynamicToolSpec::Function(DynamicToolFunctionSpec {
+                            name: name.to_string(),
+                            description: "A colliding dynamic tool.".to_string(),
+                            input_schema: serde_json::json!({"type":"object","properties":{}}),
+                            defer_loading: false,
+                        })
                     })
-                })
-                .collect(),
-                ..StartThreadOptions::new(base_test.config.clone())
+                    .collect(),
+                ..StartThreadOptions::new(test.config.clone())
             })
+            .await?
+            .thread;
+        thread
+            .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+                text: "inspect the tools".to_string(),
+                text_elements: Vec::new(),
+            }]))
             .await?;
-        let mut test = base_test;
-        test.codex = new_thread.thread;
-        test.session_configured = new_thread.session_configured;
-
-        let first_response = if use_responses_lite {
-            sse(vec![
-                ev_response_created("resp-1"),
-                ev_custom_tool_call(
-                    "call-1",
-                    "exec",
-                    r#"
-const matches = ALL_TOOLS.filter(({ name }) => name === "foo_bar");
-const output = await tools.foo_bar({});
-text(JSON.stringify({
-  count: matches.length,
-  name: matches[0]?.name ?? null,
-  description: matches[0]?.description ?? null,
-  output,
-}));
-"#,
-                ),
-                ev_completed("resp-1"),
-            ])
-        } else {
-            sse(vec![
-                ev_assistant_message("msg-1", "done"),
-                ev_completed("resp-1"),
-            ])
+        let EventMsg::Error(error) =
+            wait_for_event(&thread, |event| matches!(event, EventMsg::Error(_))).await
+        else {
+            unreachable!("expected collision error");
         };
-        let first_mock = responses::mount_sse_once(&server, first_response).await;
-        let second_mock = if use_responses_lite {
-            Some(
-                responses::mount_sse_once(
-                    &server,
-                    sse(vec![
-                        ev_assistant_message("msg-1", "done"),
-                        ev_completed("resp-2"),
-                    ]),
-                )
-                .await,
-            )
-        } else {
-            None
-        };
-
-        let cwd = test.config.cwd.clone();
-        let (sandbox_policy, permission_profile) =
-            turn_permission_fields(PermissionProfile::Disabled, cwd.as_path());
-        test.codex
-            .start_or_steer_turn(
-                TurnInputRequest::user_input(vec![UserInput::Text {
-                    text: "inspect and call normalized dynamic tools".to_string(),
-                    text_elements: Vec::new(),
-                }])
-                .with_thread_settings(ThreadSettingsOverrides {
-                    environments: Some(codex_protocol::protocol::TurnEnvironmentSelections::new(
-                        cwd,
-                        Vec::new(),
-                    )),
-                    approval_policy: Some(AskForApproval::Never),
-                    sandbox_policy: Some(sandbox_policy),
-                    permission_profile,
-                    collaboration_mode: Some(CollaborationMode {
-                        mode: ModeKind::Default,
-                        settings: Settings {
-                            model: test.session_configured.model.clone(),
-                            reasoning_effort: None,
-                            developer_instructions: None,
-                        },
-                    }),
-                    ..Default::default()
-                }),
-            )
-            .await?;
-
-        let turn_id = wait_for_event_match(&test.codex, |event| match event {
-            EventMsg::TurnStarted(event) => Some(event.turn_id.clone()),
-            _ => None,
-        })
-        .await;
-        if use_responses_lite {
-            let request = wait_for_event_match(&test.codex, |event| match event {
-                EventMsg::DynamicToolCallRequest(request) => Some(request.clone()),
-                _ => None,
-            })
-            .await;
-            assert_eq!(request.namespace, None);
-            assert_eq!(request.tool, "foo-bar");
-            assert_eq!(request.arguments, serde_json::json!({}));
-            test.codex
-                .submit(Op::DynamicToolResponse {
-                    id: request.call_id,
-                    response: DynamicToolResponse {
-                        content_items: vec![DynamicToolCallOutputContentItem::InputText {
-                            text: "first-winner".to_string(),
-                        }],
-                        success: true,
-                    },
-                })
-                .await?;
-        }
-        wait_for_event(&test.codex, |event| match event {
-            EventMsg::TurnComplete(event) => event.turn_id == turn_id,
-            _ => false,
-        })
-        .await;
-
-        let first_body = first_mock.single_request().body_json();
-        let model_tools = if use_responses_lite {
-            first_body["input"]
-                .as_array()
-                .and_then(|input| {
-                    input.iter().find(|item| {
-                        item.get("type").and_then(Value::as_str) == Some("additional_tools")
-                    })
-                })
-                .and_then(|item| item["tools"].as_array())
-                .and_then(|tools| {
-                    tools.iter().find(|tool| {
-                        tool.get("type").and_then(Value::as_str) == Some("namespace")
-                            && tool.get("name").and_then(Value::as_str) == Some("functions")
-                    })
-                })
-                .and_then(|namespace| namespace["tools"].as_array())
-                .expect("the Responses Lite request should contain its default-namespace tools")
-        } else {
-            first_body["tools"]
-                .as_array()
-                .expect("the Responses request should contain its visible tools")
-        };
-        let visible_dynamic_tools = model_tools
-            .iter()
-            .filter(|tool| matches!(tool["name"].as_str(), Some("foo-bar" | "foo_bar")))
-            .map(|tool| {
-                (
-                    tool["name"]
-                        .as_str()
-                        .expect("dynamic tools should have a name"),
-                    tool["description"]
-                        .as_str()
-                        .expect("dynamic tools should have a description"),
-                )
-            })
-            .collect::<Vec<_>>();
         assert_eq!(
-            visible_dynamic_tools,
-            [
-                (
-                    "foo-bar",
-                    concat!(
-                        "First normalized dynamic tool.\n\n",
-                        "exec tool declaration:\n",
-                        "```ts\n",
-                        "declare const tools: { foo_bar(args: {}): Promise<unknown>; };\n",
-                        "```",
-                    ),
-                ),
-                ("foo_bar", "Shadowed normalized dynamic tool."),
-            ]
+            error.message,
+            "duplicate tool: Code Mode foo_bar: functions.foo-bar and functions.foo_bar"
         );
-
-        if use_responses_lite {
-            let metadata: Value = serde_json::from_str(
-                first_body["client_metadata"]["x-codex-turn-metadata"]
-                    .as_str()
-                    .expect("Responses Lite should contain serialized turn metadata"),
-            )?;
-            let functions = &metadata["tool_namespaces_info"]["functions"]["functions"];
-            assert_eq!(functions["foo-bar"]["code_mode_name"], "foo_bar");
-            assert!(functions["foo_bar"]["code_mode_name"].is_null());
-        }
-
-        let exec_description = model_tools
-            .iter()
-            .find(|tool| tool["name"] == "exec")
-            .and_then(|tool| tool["description"].as_str())
-            .expect("the model request should contain the code-mode exec tool");
-        assert!(!exec_description.contains("First normalized dynamic tool."));
-        assert!(!exec_description.contains("Shadowed normalized dynamic tool."));
-
-        if let Some(second_mock) = second_mock {
-            let request = second_mock.single_request();
-            let output = custom_tool_output_last_non_empty_text(&request, "call-1")
-                .expect("code mode should return normalized tool metadata");
-            let result: Value = serde_json::from_str(&output)?;
-            assert_eq!(result["count"], serde_json::json!(1));
-            assert_eq!(result["name"], serde_json::json!("foo_bar"));
-            assert_eq!(result["output"], serde_json::json!("first-winner"));
-            let description = result["description"]
-                .as_str()
-                .expect("the winning tool should have a description");
-            assert!(description.contains("First normalized dynamic tool."));
-            assert!(!description.contains("Shadowed normalized dynamic tool."));
-        }
+        let EventMsg::TurnComplete(completed) =
+            wait_for_event(&thread, |event| matches!(event, EventMsg::TurnComplete(_))).await
+        else {
+            unreachable!("expected turn completion");
+        };
+        assert_eq!(completed.error, Some(error));
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|request| request.url.path() != "/v1/responses")
+        );
     }
-
     Ok(())
 }
 
@@ -5989,7 +5857,7 @@ text(JSON.stringify({
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn code_mode_only_keeps_mcp_tools_direct_when_nested_exposure_is_omitted() -> Result<()> {
+async fn code_mode_only_rejects_mcp_tools_when_nested_exposure_is_omitted() -> Result<()> {
     skip_if_wine_exec!(
         Ok(()),
         "requires a Windows test_stdio_server in the Wine-exec environment"
@@ -6046,13 +5914,13 @@ async fn code_mode_only_keeps_mcp_tools_direct_when_nested_exposure_is_omitted()
     )
     .await;
 
-    test.submit_turn("call the directly exposed MCP echo tool")
+    test.submit_turn("probe an MCP tool omitted from Code Mode")
         .await?;
 
     let first_request = first_mock.single_request().body_json();
     assert!(
-        namespace_child_tool(&first_request, "mcp__rmcp", "echo").is_some(),
-        "an MCP tool omitted only from Code Mode must remain directly callable"
+        namespace_child_tool(&first_request, "mcp__rmcp", "echo").is_none(),
+        "strict Code Mode must preserve the host omission policy"
     );
     let exec_description = first_request["tools"]
         .as_array()
@@ -6073,8 +5941,8 @@ async fn code_mode_only_keeps_mcp_tools_direct_when_nested_exposure_is_omitted()
     assert!(
         output["output"]
             .as_str()
-            .is_some_and(|output| output.contains("ECHOING: ping")),
-        "the directly exposed MCP tool must execute successfully: {output:?}"
+            .is_some_and(|output| output.contains("must be invoked through Code Mode exec")),
+        "strict Code Mode must reject the direct call: {output:?}"
     );
 
     Ok(())
@@ -6399,5 +6267,67 @@ text(JSON.stringify({
     );
     assert_eq!(compared.get("waited_long_enough"), Some(&Value::Bool(true)));
 
+    Ok(())
+}
+
+#[cfg_attr(windows, ignore = "shell fixture uses Unix commands")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn code_mode_exact_transport_replay_keeps_one_side_effect_and_one_observation() -> Result<()>
+{
+    skip_if_no_network!(Ok(()));
+    let server = responses::start_mock_server().await;
+    let mut builder = test_codex().with_config(|config| {
+        let _ = config.features.enable(Feature::CodeMode);
+    });
+    let test = builder.build_with_auto_env(&server).await?;
+    let code = r#"const result = await tools.exec_command({cmd: "printf x >> replay-effect", login: false, yield_time_ms: 10000}); text(result);"#;
+    let response_mock = responses::mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_custom_tool_call("replayed-exec", "exec", code),
+                ev_completed("response-1"),
+            ]),
+            sse(vec![
+                ev_custom_tool_call("replayed-exec", "exec", code),
+                ev_completed("response-2"),
+            ]),
+            sse(vec![
+                ev_assistant_message("done", "done"),
+                ev_completed("response-3"),
+            ]),
+        ],
+    )
+    .await;
+    test.submit_turn("append once even if transport repeats the call")
+        .await?;
+    assert_eq!(
+        fs::read_to_string(test.cwd_path().join("replay-effect"))?,
+        "x"
+    );
+    let requests = response_mock.requests();
+    let replay_request = requests.last().expect("replayed output reaches model");
+    let serialized = serde_json::to_string(&replay_request.input())?;
+    assert!(
+        serialized.contains("stored_result_requires_validation"),
+        "{serialized}"
+    );
+    let store = test.codex.state_db().expect("Core state runtime");
+    let events = store
+        .list_tool_fact_events(&test.session_configured.session_id.to_string(), 0, 200)
+        .await?;
+    let observations = events
+        .iter()
+        .filter(|event| event.fact.attempt.is_none())
+        .collect::<Vec<_>>();
+    assert_eq!(observations.len(), 2);
+    let nested = observations
+        .iter()
+        .find(|event| event.fact.request.source == "code_mode")
+        .expect("nested receipt");
+    assert_eq!(
+        nested.fact.request.parent_call_id.as_deref(),
+        Some("replayed-exec")
+    );
     Ok(())
 }

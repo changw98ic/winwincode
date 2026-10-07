@@ -127,6 +127,11 @@ async fn dispatch_lifecycle_trace_records_direct_and_code_mode_requesters() -> a
     }));
     let session = Arc::new(session);
     let turn = Arc::new(turn);
+    super::super::execution_facts::ExecutionFacts::for_session(&session).register_cell(
+        "cell-1".into(),
+        "call-code".into(),
+        &turn.sub_id,
+    );
 
     registry
         .dispatch_any_with_terminal_outcome(

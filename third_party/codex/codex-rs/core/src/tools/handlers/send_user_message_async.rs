@@ -98,4 +98,8 @@ impl ToolExecutor<ToolInvocation> for SendUserMessageAsyncHandler {
     }
 }
 
-impl CoreToolRuntime for SendUserMessageAsyncHandler {}
+impl CoreToolRuntime for SendUserMessageAsyncHandler {
+    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
+        crate::tools::authorization::AuthorizationPolicy::CoreControl
+    }
+}

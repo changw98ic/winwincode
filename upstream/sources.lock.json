@@ -396,6 +396,597 @@
         "codex-rs/core/src/tools/code_mode/execute_handler.rs",
         "codex-rs/core/src/tools/handlers/mcp.rs"
       ]
+    },
+    {
+      "id": "codex-code-mode-dispatch-catalog",
+      "file": "upstream/patches/codex/0014-code-mode-dispatch-catalog.patch",
+      "planned": false,
+      "patchSha256": "44b743610eb8cfec12ce05050d9866a6f96edce3b7a5ed71adc1d5458afddb82",
+      "targets": [
+        "codex-rs/core/src/session/tests.rs",
+        "codex-rs/core/src/tools/router.rs",
+        "codex-rs/core/src/tools/spec_plan.rs",
+        "codex-rs/core/src/tools/spec_plan_tests.rs"
+      ]
+    },
+    {
+      "id": "codex-code-mode-dispatch-portable-requests",
+      "file": "upstream/patches/codex/0015-code-mode-dispatch-portable-requests.patch",
+      "planned": false,
+      "patchSha256": "de9a272e54721a0a0af1c5d5998562833db632ea4237d89944e2cf8aeb133cb0",
+      "targets": [
+        "codex-rs/core/src/client.rs",
+        "codex-rs/core/tests/suite/code_mode.rs"
+      ]
+    },
+    {
+      "id": "codex-code-mode-dispatch-authorization",
+      "file": "upstream/patches/codex/0016-code-mode-dispatch-authorization.patch",
+      "planned": false,
+      "patchSha256": "2fe1737e4ff369e87750f2f4046f38c8749b16588f78f0961975ec5b328b5a17",
+      "targets": [
+        "codex-rs/core/src/tools/handlers/apply_patch.rs",
+        "codex-rs/core/src/tools/handlers/current_time.rs",
+        "codex-rs/core/src/tools/handlers/multi_agents/close_agent.rs",
+        "codex-rs/core/src/tools/handlers/multi_agents/resume_agent.rs",
+        "codex-rs/core/src/tools/handlers/multi_agents/send_input.rs",
+        "codex-rs/core/src/tools/handlers/multi_agents/spawn.rs",
+        "codex-rs/core/src/tools/handlers/multi_agents/wait.rs",
+        "codex-rs/core/src/tools/handlers/multi_agents_v2/followup_task.rs",
+        "codex-rs/core/src/tools/handlers/multi_agents_v2/interrupt_agent.rs",
+        "codex-rs/core/src/tools/handlers/multi_agents_v2/list_agents.rs",
+        "codex-rs/core/src/tools/handlers/multi_agents_v2/send_message.rs",
+        "codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs",
+        "codex-rs/core/src/tools/handlers/multi_agents_v2/wait.rs",
+        "codex-rs/core/src/tools/handlers/new_context_window.rs",
+        "codex-rs/core/src/tools/handlers/plan.rs",
+        "codex-rs/core/src/tools/handlers/request_permissions.rs",
+        "codex-rs/core/src/tools/handlers/request_user_input.rs",
+        "codex-rs/core/src/tools/handlers/send_user_message_async.rs",
+        "codex-rs/core/src/tools/handlers/shell/shell_command.rs",
+        "codex-rs/core/src/tools/handlers/sleep.rs",
+        "codex-rs/core/src/tools/handlers/submit_change_batch.rs",
+        "codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs",
+        "codex-rs/core/src/tools/mod.rs",
+        "codex-rs/core/src/tools/registry.rs",
+        "codex-rs/core/src/tools/registry_tests.rs"
+      ]
+    },
+    {
+      "id": "codex-code-mode-dispatch-hook-tests",
+      "file": "upstream/patches/codex/0017-code-mode-dispatch-hook-tests.patch",
+      "planned": false,
+      "patchSha256": "926a6a80b7523e82f1eeb32731e09e42fd8ff538d4162970ae62e23ae3241d09",
+      "targets": [
+        "codex-rs/core/src/tools/authorization_tests.rs"
+      ]
+    },
+    {
+      "id": "codex-code-mode-dispatch-cell-scope",
+      "file": "upstream/patches/codex/0018-code-mode-dispatch-cell-scope.patch",
+      "planned": false,
+      "patchSha256": "c6c2df4021c3f8062189d223d9984f7d3f4e637597a6a636f0033c00093c5232",
+      "targets": [
+        "codex-rs/core/src/tools/code_mode/cell_scope.rs",
+        "codex-rs/core/src/tools/code_mode/cell_scope_tests.rs",
+        "codex-rs/core/src/tools/code_mode/delegate.rs",
+        "codex-rs/core/src/tools/code_mode/mod.rs"
+      ]
+    },
+    {
+      "id": "codex-code-mode-dispatch-continuations",
+      "file": "upstream/patches/codex/0019-code-mode-dispatch-continuations.patch",
+      "planned": false,
+      "patchSha256": "c86a65d115d69730072fe7190b4f2ac6a85a16a2a40578a080a70e204a80eca0",
+      "targets": [
+        "codex-rs/core/src/session/turn.rs",
+        "codex-rs/core/src/session/turn_tests.rs",
+        "codex-rs/core/src/tools/parallel.rs"
+      ]
+    },
+    {
+      "id": "codex-code-mode-dispatch-terminal-boundaries",
+      "file": "upstream/patches/codex/0020-code-mode-dispatch-terminal-boundaries.patch",
+      "planned": false,
+      "patchSha256": "f52a59aefa5bfcfd3fb11f03ec59556c242a9363b4a4b2836a69148ac66cc3dc",
+      "targets": [
+        "codex-rs/core/src/tools/code_mode/execute_handler.rs",
+        "codex-rs/core/src/tools/code_mode/terminal.rs",
+        "codex-rs/core/src/tools/code_mode/terminal_tests.rs",
+        "codex-rs/core/src/tools/code_mode/wait_handler.rs"
+      ]
+    },
+    {
+      "id": "codex-code-mode-dispatch-io-authorization",
+      "file": "upstream/patches/codex/0021-code-mode-dispatch-io-authorization.patch",
+      "planned": false,
+      "patchSha256": "3ea4ee230d10292eb0c405ac16667d24e03795006a8893f8e0037856f3c178d3",
+      "targets": [
+        "codex-rs/codex-mcp/src/binding.rs",
+        "codex-rs/codex-mcp/src/binding_clients.rs",
+        "codex-rs/core/src/tool_call_gate.rs",
+        "codex-rs/core/src/tools/authorization.rs",
+        "codex-rs/core/src/tools/handlers/mcp_resource.rs",
+        "codex-rs/core/src/tools/handlers/mcp_resource/authorization.rs",
+        "codex-rs/core/src/tools/handlers/mcp_resource/list_mcp_resource_templates.rs",
+        "codex-rs/core/src/tools/handlers/mcp_resource/list_mcp_resources.rs",
+        "codex-rs/core/src/tools/handlers/mcp_resource/read_mcp_resource.rs",
+        "codex-rs/core/src/tools/handlers/tool_search.rs",
+        "codex-rs/core/src/tools/handlers/unified_exec/write_stdin.rs",
+        "codex-rs/core/src/tools/handlers/view_image.rs",
+        "codex-rs/core/src/unified_exec/action_admission.rs",
+        "codex-rs/core/src/unified_exec/mod.rs",
+        "codex-rs/core/src/unified_exec/process_manager.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-execution-facts-schema",
+      "file": "upstream/patches/codex/0022-tool-execution-facts-schema.patch",
+      "planned": false,
+      "patchSha256": "24f835c106414f7da7ef456b0a7ed6563cc6c020ed2772f3a93b6d83100e0085",
+      "targets": [
+        "codex-rs/state/migrations/0051_tool_execution_facts.sql",
+        "codex-rs/state/src/lib.rs",
+        "codex-rs/state/src/runtime.rs",
+        "codex-rs/state/src/runtime/tool_execution_migration_tests.rs",
+        "codex-rs/state/src/tool_execution.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-execution-facts-store",
+      "file": "upstream/patches/codex/0023-tool-execution-facts-store.patch",
+      "planned": false,
+      "patchSha256": "ff9b4e148e92e0b9c75fc977e02e621a667ec300ddc68c10fff046c59623d520",
+      "targets": [
+        "codex-rs/state/src/runtime/threads.rs",
+        "codex-rs/state/src/runtime/tool_execution.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-execution-facts-store-tests",
+      "file": "upstream/patches/codex/0024-tool-execution-facts-store-tests.patch",
+      "planned": false,
+      "patchSha256": "62b4dd611f9573ff0c9025fe17e5f934a24f6f76b22fe0c0b538cb6abb3fdaab",
+      "targets": [
+        "codex-rs/state/src/runtime/tool_execution_tests.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-execution-facts-dispatch",
+      "file": "upstream/patches/codex/0025-tool-execution-facts-dispatch.patch",
+      "planned": false,
+      "patchSha256": "a4e052b2fba9aa505d6d79cf30d4a2ac0733e67a21f19c66684988e7dea609be",
+      "targets": [
+        "codex-rs/Cargo.lock",
+        "codex-rs/core/Cargo.toml",
+        "codex-rs/core/src/tools/execution_facts.rs",
+        "codex-rs/core/src/tools/mod.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-execution-facts-wiring",
+      "file": "upstream/patches/codex/0026-tool-execution-facts-wiring.patch",
+      "planned": false,
+      "patchSha256": "bc08cb01769c62ac0bd8ee39cf3595eb1039a8cb94dbe97000d22c407d868842",
+      "targets": [
+        "codex-rs/core/src/tools/code_mode/execute_handler.rs",
+        "codex-rs/core/src/tools/code_mode/mod.rs",
+        "codex-rs/core/src/tools/parallel.rs",
+        "codex-rs/core/src/tools/registry.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-execution-facts-tests",
+      "file": "upstream/patches/codex/0027-tool-execution-facts-tests.patch",
+      "planned": false,
+      "patchSha256": "f7762467e0d357fd483c6513c3b9857821025be7a33d0a33a1e7455c277c2af4",
+      "targets": [
+        "codex-rs/core/src/tools/authorization_tests.rs",
+        "codex-rs/core/src/tools/execution_facts_tests.rs",
+        "codex-rs/core/src/tools/tool_dispatch_trace_tests.rs",
+        "codex-rs/core/tests/suite/code_mode.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-execution-facts-catalog-tests",
+      "file": "upstream/patches/codex/0028-tool-execution-facts-catalog-tests.patch",
+      "planned": false,
+      "patchSha256": "7d0bdd80e50897cbd7a01c42bc19ff7205b36c5fb5f90cae19bab99a9b0cb732",
+      "targets": [
+        "codex-rs/core/src/tools/handlers/mcp.rs",
+        "codex-rs/core/tests/suite/mcp_tool_exposure.rs",
+        "codex-rs/core/tests/suite/model_runtime_selectors.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-runtime-recovery-relations-schema",
+      "file": "upstream/patches/codex/0029-tool-runtime-recovery-relations-schema.patch",
+      "planned": false,
+      "patchSha256": "211f8f07a8b308c631758f40aeacd273910a32d34c52834d35f6319613505658",
+      "targets": [
+        "codex-rs/state/migrations/0052_tool_runtime_relations.sql",
+        "codex-rs/state/src/lib.rs",
+        "codex-rs/state/src/runtime.rs",
+        "codex-rs/state/src/tool_runtime.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-runtime-recovery-relations-store",
+      "file": "upstream/patches/codex/0030-tool-runtime-recovery-relations-store.patch",
+      "planned": false,
+      "patchSha256": "94e88bfad4c2a3ae497c942621b829abb383c3d664d8392439250b810ac333a4",
+      "targets": [
+        "codex-rs/state/src/runtime/tool_execution.rs",
+        "codex-rs/state/src/runtime/tool_execution_tests.rs",
+        "codex-rs/state/src/runtime/tool_runtime.rs",
+        "codex-rs/state/src/runtime/tool_runtime_tests.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-runtime-recovery-read-authority",
+      "file": "upstream/patches/codex/0031-tool-runtime-recovery-read-authority.patch",
+      "planned": false,
+      "patchSha256": "604e949a2611631933dd662e08acf010d7628722d89e66a02655274e2b4260c2",
+      "targets": [
+        "codex-rs/core-api/src/lib.rs",
+        "codex-rs/core/src/lib.rs",
+        "codex-rs/core/src/tool_call_gate.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-runtime-recovery-result-recovery",
+      "file": "upstream/patches/codex/0032-tool-runtime-recovery-result-recovery.patch",
+      "planned": false,
+      "patchSha256": "713addf590c94a85210ceebb27e5daecd82561099e1a696e4d85bd658313975a",
+      "targets": [
+        "codex-rs/core/src/tools/execution_facts.rs",
+        "codex-rs/core/src/tools/handlers/current_time.rs",
+        "codex-rs/core/src/tools/handlers/shell/shell_command.rs",
+        "codex-rs/core/src/tools/mod.rs",
+        "codex-rs/core/src/tools/registry.rs",
+        "codex-rs/core/src/tools/result_recovery.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-runtime-recovery-recovery-tests",
+      "file": "upstream/patches/codex/0033-tool-runtime-recovery-recovery-tests.patch",
+      "planned": false,
+      "patchSha256": "51f6d237f84ffc553938b55a41c83f0c3b66fb9bef6efaddb205d8a5447c3dfa",
+      "targets": [
+        "codex-rs/core/src/tools/execution_facts_tests.rs",
+        "codex-rs/core/src/tools/result_recovery_tests.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-runtime-recovery-cell-lifecycle",
+      "file": "upstream/patches/codex/0034-tool-runtime-recovery-cell-lifecycle.patch",
+      "planned": false,
+      "patchSha256": "3c65edb5e5a6271949eac2f39c14cc9c5a0ae6a08b51d41ebc8f5f2ef76980df",
+      "targets": [
+        "codex-rs/core/src/codex_thread.rs",
+        "codex-rs/core/src/session/handlers.rs",
+        "codex-rs/core/src/tasks/mod.rs",
+        "codex-rs/core/src/tools/cell_facts.rs",
+        "codex-rs/core/src/tools/code_mode/execute_handler.rs",
+        "codex-rs/core/src/tools/code_mode/mod.rs",
+        "codex-rs/core/src/tools/code_mode/wait_handler.rs",
+        "codex-rs/core/tests/suite/code_mode.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-runtime-reconciliation-state",
+      "file": "upstream/patches/codex/0035-tool-runtime-reconciliation-state.patch",
+      "planned": false,
+      "patchSha256": "bde79e6c1acd704e365f6c7852e8ca80134dafca0cf49095de01c2ecae49ae5e",
+      "targets": [
+        "codex-rs/state/src/lib.rs",
+        "codex-rs/state/src/runtime.rs",
+        "codex-rs/state/src/runtime/tool_reconciliation.rs",
+        "codex-rs/state/src/runtime/tool_reconciliation_tests.rs",
+        "codex-rs/state/src/tool_runtime.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-runtime-reconciliation-dispatch",
+      "file": "upstream/patches/codex/0036-tool-runtime-reconciliation-dispatch.patch",
+      "planned": false,
+      "patchSha256": "5bf7ecfcaee10f20f0575401b589f7a22b8c1911f87abdffcdb1d69b1ad4d9d9",
+      "targets": [
+        "codex-rs/core/src/tools/execution_facts.rs",
+        "codex-rs/core/src/tools/mod.rs",
+        "codex-rs/core/src/tools/registry.rs",
+        "codex-rs/core/src/tools/result_recovery.rs",
+        "codex-rs/core/src/tools/tool_reconciliation.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-runtime-reconciliation-tests",
+      "file": "upstream/patches/codex/0037-tool-runtime-reconciliation-tests.patch",
+      "planned": false,
+      "patchSha256": "932c84cda6a5a6871da0a345d21a18aa966acdb4bf09c2bf6079a0992b0cc2b9",
+      "targets": [
+        "codex-rs/core/src/tools/tool_reconciliation_tests.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-runtime-reconciliation-process-receipt",
+      "file": "upstream/patches/codex/0038-tool-runtime-reconciliation-process-receipt.patch",
+      "planned": false,
+      "patchSha256": "e6208145d94aaf6929403ecf36d4e9f46bd6caca312e27a4885410b51e12ea8f",
+      "targets": [
+        "codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs",
+        "codex-rs/core/src/unified_exec/mod.rs",
+        "codex-rs/core/src/unified_exec/mod_tests.rs",
+        "codex-rs/core/src/unified_exec/recovery.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-diagnostics-schema",
+      "file": "upstream/patches/codex/0039-tool-diagnostics-schema.patch",
+      "planned": false,
+      "patchSha256": "38d012ba696f3fe941ef7497ec35c273aec71ecfbae63311743c4d19233663b3",
+      "targets": [
+        "codex-rs/state/migrations/0053_tool_diagnostics.sql",
+        "codex-rs/state/src/lib.rs",
+        "codex-rs/state/src/runtime.rs",
+        "codex-rs/state/src/tool_diagnostics.rs",
+        "codex-rs/state/src/tool_runtime.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-diagnostics-queue",
+      "file": "upstream/patches/codex/0040-tool-diagnostics-queue.patch",
+      "planned": false,
+      "patchSha256": "0db37cc7546b8618680acb19939033e233e77114827996db99b6c56a4cc1bddc",
+      "targets": [
+        "codex-rs/state/src/runtime/tool_diagnostics.rs",
+        "codex-rs/state/src/runtime/tool_execution.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-diagnostics-responses",
+      "file": "upstream/patches/codex/0041-tool-diagnostics-responses.patch",
+      "planned": false,
+      "patchSha256": "2204fb9fb9b22e81b14572d4b03566183499b391684defceef872207808f591a",
+      "targets": [
+        "codex-rs/state/src/runtime/tool_diagnostic_responses.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-diagnostics-queue-tests",
+      "file": "upstream/patches/codex/0042-tool-diagnostics-queue-tests.patch",
+      "planned": false,
+      "patchSha256": "6333a54fdb5e062b06af57010ab38ca7b130f24d7b9670fee3cf16cdc4759433",
+      "targets": [
+        "codex-rs/state/src/runtime/tool_diagnostics_tests.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-diagnostics-detector",
+      "file": "upstream/patches/codex/0043-tool-diagnostics-detector.patch",
+      "planned": false,
+      "patchSha256": "f936902312268578d61b34c9ba6481e1e88100c21439d39474dd7c82b175cb66",
+      "targets": [
+        "codex-rs/core/src/tools/tool_diagnostic_detector.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-diagnostics-detector-tests",
+      "file": "upstream/patches/codex/0044-tool-diagnostics-detector-tests.patch",
+      "planned": false,
+      "patchSha256": "c497c59ad5a0068489fd63fde7e226cbc9396f8505b48c01c5ec17e818b30e94",
+      "targets": [
+        "codex-rs/core/src/tools/tool_diagnostic_detector_tests.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-diagnostics-feedback",
+      "file": "upstream/patches/codex/0045-tool-diagnostics-feedback.patch",
+      "planned": false,
+      "patchSha256": "b298ae62b1447228aa91ddbfedab0d5d11559f7cd64291828a1818ff6ebea352",
+      "targets": [
+        "codex-rs/core/src/tools/tool_diagnostics.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-diagnostics-boundaries",
+      "file": "upstream/patches/codex/0046-tool-diagnostics-boundaries.patch",
+      "planned": false,
+      "patchSha256": "023eb385f54b45ac76d6aa731ae17140db502d0b066dfe05e97a17754265056d",
+      "targets": [
+        "codex-rs/core/src/stream_events_utils.rs",
+        "codex-rs/core/src/tools/cell_facts.rs",
+        "codex-rs/core/src/tools/code_mode/execute_handler.rs",
+        "codex-rs/core/src/tools/code_mode/mod.rs",
+        "codex-rs/core/src/tools/code_mode/wait_handler.rs",
+        "codex-rs/core/src/tools/execution_facts.rs",
+        "codex-rs/core/src/tools/mod.rs",
+        "codex-rs/core/src/tools/registry.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-dependencies-schema",
+      "file": "upstream/patches/codex/0047-tool-dependencies-schema.patch",
+      "planned": false,
+      "patchSha256": "83eead1d5e375039aa591aef48706547e0ef6cfaf0f20ccad1d077facaef895c",
+      "targets": [
+        "codex-rs/state/migrations/0054_tool_input_bindings.sql",
+        "codex-rs/state/migrations/0055_tool_sharing.sql",
+        "codex-rs/state/src/lib.rs",
+        "codex-rs/state/src/runtime.rs",
+        "codex-rs/state/src/tool_dependencies.rs",
+        "codex-rs/state/src/tool_runtime.rs",
+        "codex-rs/state/src/tool_sharing.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-dependencies-input-store",
+      "file": "upstream/patches/codex/0048-tool-dependencies-input-store.patch",
+      "planned": false,
+      "patchSha256": "8cbc29a776cf2326dfd61197763aa0a71c4cc0f9a84bf4884f91acdb7656c73e",
+      "targets": [
+        "codex-rs/state/src/runtime/tool_dependencies.rs",
+        "codex-rs/state/src/runtime/tool_execution.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-dependencies-input-tests",
+      "file": "upstream/patches/codex/0049-tool-dependencies-input-tests.patch",
+      "planned": false,
+      "patchSha256": "f7c08064676109345681ed729ba47542188500185038583d1f36a0d77ffe932a",
+      "targets": [
+        "codex-rs/state/src/runtime/tool_dependencies_tests.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-dependencies-sharing-store",
+      "file": "upstream/patches/codex/0050-tool-dependencies-sharing-store.patch",
+      "planned": false,
+      "patchSha256": "774766ad0709dfff0bafd10e5912827949337cec40bbe5d4f130e55cae1e3370",
+      "targets": [
+        "codex-rs/state/src/runtime/tool_sharing.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-dependencies-sharing-store-tests",
+      "file": "upstream/patches/codex/0051-tool-dependencies-sharing-store-tests.patch",
+      "planned": false,
+      "patchSha256": "52a20dbe9286dbad8edb86b9c3f6b442137361f758a0bbe8324ec960709edfd4",
+      "targets": [
+        "codex-rs/state/src/runtime/tool_sharing_tests.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-dependencies-adapter-contract",
+      "file": "upstream/patches/codex/0052-tool-dependencies-adapter-contract.patch",
+      "planned": false,
+      "patchSha256": "0b04cba857e861b7cce0634113bec440e4c162db5a1fcca3b07f931c1de84334",
+      "targets": [
+        "codex-rs/core-api/src/lib.rs",
+        "codex-rs/core/src/lib.rs",
+        "codex-rs/core/src/tool_call_gate.rs",
+        "codex-rs/core/src/tool_input_adapter.rs",
+        "codex-rs/core/src/tools/mod.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-dependencies-dispatch",
+      "file": "upstream/patches/codex/0053-tool-dependencies-dispatch.patch",
+      "planned": false,
+      "patchSha256": "06348a8ac098c089d74e28b3b844c820195c86f9109b8f0c83736c7c9bfaa05b",
+      "targets": [
+        "codex-rs/core/src/tools/execution_facts.rs",
+        "codex-rs/core/src/tools/registry.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-dependencies-sharing-runtime",
+      "file": "upstream/patches/codex/0054-tool-dependencies-sharing-runtime.patch",
+      "planned": false,
+      "patchSha256": "d3d4a2de3f220d90a033e847709b81b461aa1ab5e231ef968835183d5ea18cb0",
+      "targets": [
+        "codex-rs/core/src/tools/tool_sharing.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-dependencies-sharing-io",
+      "file": "upstream/patches/codex/0055-tool-dependencies-sharing-io.patch",
+      "planned": false,
+      "patchSha256": "09db78f09e91e2f95de840d8da6f0a10013676a7c9d1521887877c04055574af",
+      "targets": [
+        "codex-rs/core/src/tools/tool_sharing_io.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-dependencies-sharing-tests",
+      "file": "upstream/patches/codex/0056-tool-dependencies-sharing-tests.patch",
+      "planned": false,
+      "patchSha256": "1cc1b0aae43c8958d1f20025b2c82453b6af9131c020541bf6367ed94ba17211",
+      "targets": [
+        "codex-rs/core/src/tools/tool_sharing_tests.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-dependencies-responses",
+      "file": "upstream/patches/codex/0057-tool-dependencies-responses.patch",
+      "planned": false,
+      "patchSha256": "8e77c6a21fc4f2958d01fbde5ed815b6744fbf7bf1b3f926947a3573948b315c",
+      "targets": [
+        "codex-rs/core/src/tools/result_recovery.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-dependencies-diagnostics",
+      "file": "upstream/patches/codex/0058-tool-dependencies-diagnostics.patch",
+      "planned": false,
+      "patchSha256": "e7edaca6e6f04f2a59735cce59bfed7562d07eecc7c860b62eb5b0df66a92adc",
+      "targets": [
+        "codex-rs/core/src/tools/tool_diagnostic_detector.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-receipts-state",
+      "file": "upstream/patches/codex/0059-tool-receipts-state.patch",
+      "planned": false,
+      "patchSha256": "f805bc9589ad5eb792b8e74a02c74e0d8e8dcbf992eed658e590418e445466b1",
+      "targets": [
+        "codex-rs/state/src/runtime/tool_execution.rs",
+        "codex-rs/state/src/runtime/tool_execution_tests.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-receipts-state-tests",
+      "file": "upstream/patches/codex/0060-tool-receipts-state-tests.patch",
+      "planned": false,
+      "patchSha256": "8b01b9db049f0740639a0d50621b76a9dd8ec4a453df2c65a0a6264ccf572f5f",
+      "targets": [
+        "codex-rs/state/src/runtime/tool_receipts_tests.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-receipts-context",
+      "file": "upstream/patches/codex/0061-tool-receipts-context.patch",
+      "planned": false,
+      "patchSha256": "1fe012ef28a180c714e087e287a918112a5aaa3173682e2d7e71dd0c5bb8c9bc",
+      "targets": [
+        "codex-rs/core/src/context/mod.rs",
+        "codex-rs/core/src/context/tool_diagnostics.rs",
+        "codex-rs/core/src/context/tool_diagnostics_tests.rs",
+        "codex-rs/core/src/context/tool_receipts.rs",
+        "codex-rs/core/src/context/tool_receipts_tests.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-receipts-boundaries",
+      "file": "upstream/patches/codex/0062-tool-receipts-boundaries.patch",
+      "planned": false,
+      "patchSha256": "806b64ad4a70f4d352644777524dfa2711a8fd5ad30cf605fd1d485c0058b64f",
+      "targets": [
+        "codex-rs/core/src/tools/code_mode/mod.rs",
+        "codex-rs/core/src/tools/mod.rs",
+        "codex-rs/core/src/tools/tool_diagnostics.rs",
+        "codex-rs/core/src/tools/tool_receipts.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-receipts-test-isolation",
+      "file": "upstream/patches/codex/0063-tool-receipts-test-isolation.patch",
+      "planned": false,
+      "patchSha256": "d34d6dfe48195da69f84fa6f822f539e65ecf312bd0bdb33149c3707760d1b28",
+      "targets": [
+        "codex-rs/core/src/session/tests.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-receipts-interrupted-history",
+      "file": "upstream/patches/codex/0064-tool-receipts-interrupted-history.patch",
+      "planned": false,
+      "patchSha256": "2a9b8fd51d6dfd6d0e0b4780984ea6be8b336d5e866a2fafd871712a42734860",
+      "targets": [
+        "codex-rs/core/src/context/code_mode_result_unavailable.rs",
+        "codex-rs/core/src/context_manager/history_tests.rs",
+        "codex-rs/core/src/context_manager/normalize.rs"
+      ]
     }
   ],
   "licenseObligations": {

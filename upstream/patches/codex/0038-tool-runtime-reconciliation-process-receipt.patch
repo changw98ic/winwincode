@@ -1,0 +1,116 @@
+diff --git a/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs b/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
+--- a/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
++++ b/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
+@@ -405,6 +405,20 @@
+ }
+ 
+ impl CoreToolRuntime for ExecCommandHandler {
++    fn reconcile_execution<'a>(
++        &'a self,
++        original: &'a ToolInvocation,
++    ) -> futures::future::BoxFuture<'a, codex_state::ToolRecoveryEvidence> {
++        Box::pin(async {
++            original
++                .session
++                .services
++                .unified_exec_manager
++                .reconcile_original_call(&original.session, &original.call_id)
++                .await
++        })
++    }
++
+     fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
+         crate::tools::authorization::AuthorizationPolicy::ParsedOperation
+     }
+diff --git a/codex-rs/core/src/unified_exec/mod.rs b/codex-rs/core/src/unified_exec/mod.rs
+--- a/codex-rs/core/src/unified_exec/mod.rs
++++ b/codex-rs/core/src/unified_exec/mod.rs
+@@ -52,6 +52,7 @@
+ mod process;
+ mod process_manager;
+ mod process_state;
++mod recovery;
+ 
+ pub(crate) fn set_deterministic_process_ids_for_tests(enabled: bool) {
+     process_manager::set_deterministic_process_ids_for_tests(enabled);
+diff --git a/codex-rs/core/src/unified_exec/mod_tests.rs b/codex-rs/core/src/unified_exec/mod_tests.rs
+--- a/codex-rs/core/src/unified_exec/mod_tests.rs
++++ b/codex-rs/core/src/unified_exec/mod_tests.rs
+@@ -863,3 +863,39 @@
+     );
+     Ok(())
+ }
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn original_process_receipt_is_scoped_to_session_and_call_identity() -> anyhow::Result<()> {
++    let (session, turn) = test_session_and_turn().await;
++    let opened = exec_command(
++        &session, &turn, "sleep 30", /*yield_time_ms*/ 10, /*workdir*/ None,
++    )
++    .await?;
++    let process_id = opened.process_id.expect("live process");
++    let manager = &session.services.unified_exec_manager;
++    assert_eq!(
++        manager.reconcile_original_call(&session, "call").await,
++        codex_state::ToolRecoveryEvidence::Running {
++            business_id: process_id.to_string()
++        }
++    );
++    assert_eq!(
++        manager
++            .reconcile_original_call(&session, "other-call")
++            .await,
++        codex_state::ToolRecoveryEvidence::Unconfirmed
++    );
++    let (other_session, _) = test_session_and_turn().await;
++    assert_eq!(
++        manager
++            .reconcile_original_call(&other_session, "call")
++            .await,
++        codex_state::ToolRecoveryEvidence::Unconfirmed
++    );
++    assert!(session.terminate_background_terminal(process_id).await);
++    assert_eq!(
++        manager.reconcile_original_call(&session, "call").await,
++        codex_state::ToolRecoveryEvidence::Unconfirmed
++    );
++    Ok(())
++}
+diff --git a/codex-rs/core/src/unified_exec/recovery.rs b/codex-rs/core/src/unified_exec/recovery.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/core/src/unified_exec/recovery.rs
+@@ -0,0 +1,33 @@
++// SPDX-License-Identifier: Apache-2.0
++use super::UnifiedExecProcessManager;
++use crate::session::session::Session;
++use codex_state::ToolRecoveryEvidence;
++
++impl UnifiedExecProcessManager {
++    /// A process receipt is scoped to its original Core session and call, not its command text.
++    pub(crate) async fn reconcile_original_call(
++        &self,
++        session: &Session,
++        call_id: &str,
++    ) -> ToolRecoveryEvidence {
++        let store = self.process_store.lock().await;
++        let Some(entry) = store.processes.values().find(|entry| {
++            entry.call_id == call_id
++                && entry
++                    .session
++                    .upgrade()
++                    .is_some_and(|owner| std::ptr::eq(owner.as_ref(), session))
++        }) else {
++            return ToolRecoveryEvidence::Unconfirmed;
++        };
++        let business_id = entry.process_id.to_string();
++        if entry.process.has_exited() {
++            ToolRecoveryEvidence::Exited {
++                business_id,
++                exit_code: entry.process.exit_code(),
++            }
++        } else {
++            ToolRecoveryEvidence::Running { business_id }
++        }
++    }
++}

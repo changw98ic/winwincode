@@ -5,6 +5,7 @@ use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
 use crate::tools::context::boxed_tool_output;
+use crate::tools::registry::CoreToolOutput;
 use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::PostToolUsePayload;
 use crate::tools::registry::PreToolUsePayload;
@@ -55,7 +56,11 @@ impl ToolExecutor<ToolInvocation> for CodeModeWaitHandler {
     }
 
     fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
-        Box::pin(self.handle_call(invocation))
+        Box::pin(async move {
+            self.handle_call(invocation)
+                .await
+                .map(|result| result.output)
+        })
     }
 }
 
@@ -63,7 +68,7 @@ impl CodeModeWaitHandler {
     async fn handle_call(
         &self,
         invocation: ToolInvocation,
-    ) -> Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError> {
+    ) -> Result<CoreToolOutput, FunctionCallError> {
         let ToolInvocation {
             session,
             turn,
@@ -91,26 +96,76 @@ impl CodeModeWaitHandler {
                 let exec = ExecContext { session, turn };
                 let started_at = std::time::Instant::now();
                 let cell_id = codex_code_mode::CellId::new(args.cell_id);
-                let wait_response = if args.terminate {
-                    exec.session
-                        .services
-                        .code_mode_service
-                        .terminate(cell_id)
-                        .await
-                } else {
-                    exec.session
-                        .services
-                        .code_mode_service
-                        .wait(codex_code_mode::WaitRequest {
-                            cell_id,
-                            yield_time_ms: args.yield_time_ms,
-                        })
-                        .await
+                let durable_wait =
+                    match crate::tools::execution_facts::ExecutionFacts::begin_cell_wait(
+                        &exec.session,
+                        &exec.turn,
+                        cell_id.as_str(),
+                        &call_id,
+                    )
+                    .await
+                    {
+                        Ok(wait) => wait,
+                        Err(FunctionCallError::RespondToModel(error)) => {
+                            let mut content = vec![
+                                codex_protocol::models::FunctionCallOutputContentItem::InputText {
+                                    text: error,
+                                },
+                            ];
+                            if let Some(feedback) =
+                                crate::tools::tool_diagnostics::ToolDiagnostics::feedback(
+                                    &exec.session,
+                                    &exec.turn,
+                                    &call_id,
+                                )
+                                .await
+                            {
+                                content.push(feedback);
+                            }
+                            telemetry.finish(/*success*/ false);
+                            return Ok(CoreToolOutput {
+                                output: boxed_tool_output(
+                                    crate::tools::context::FunctionToolOutput::from_content(
+                                        content,
+                                        Some(false),
+                                    ),
+                                ),
+                                continuation: None,
+                            });
+                        }
+                        Err(error) => return Err(error),
+                    };
+                let wait_future = async {
+                    if args.terminate {
+                        exec.session
+                            .services
+                            .code_mode_service
+                            .terminate(cell_id.clone())
+                            .await
+                    } else {
+                        exec.session
+                            .services
+                            .code_mode_service
+                            .wait(codex_code_mode::WaitRequest {
+                                cell_id: cell_id.clone(),
+                                yield_time_ms: args.yield_time_ms,
+                            })
+                            .await
+                    }
+                };
+                let (wait_response, continuation) = exec
+                    .session
+                    .services
+                    .code_mode_service
+                    .await_boundary(&cell_id, wait_future)
+                    .await
+                    .map_err(|error| {
+                        telemetry.finish(/*success*/ false);
+                        FunctionCallError::RespondToModel(error)
+                    })?;
+                if let Some(durable_wait) = durable_wait {
+                    durable_wait.settle().await?;
                 }
-                .map_err(|error| {
-                    telemetry.finish(/*success*/ false);
-                    FunctionCallError::RespondToModel(error)
-                })?;
                 if let codex_code_mode::WaitOutcome::LiveCell(response) = &wait_response {
                     let runtime_cell_id = match response {
                         codex_code_mode::RuntimeResponse::Yielded { cell_id, .. }
@@ -124,6 +179,11 @@ impl CodeModeWaitHandler {
                         executed_tool_calls.register_cell(runtime_cell_id, &call_id);
                     }
                     if !matches!(response, codex_code_mode::RuntimeResponse::Yielded { .. }) {
+                        crate::tools::execution_facts::ExecutionFacts::close_cell(
+                            &exec.session,
+                            runtime_cell_id.as_str(),
+                        )
+                        .await?;
                         exec.session
                             .services
                             .rollout_thread_trace
@@ -149,10 +209,19 @@ impl CodeModeWaitHandler {
                     }
                 }
                 exec.session.services.elicitations.wait_until_clear().await;
-                handle_runtime_response(&exec, wait_response.into(), args.max_tokens, started_at)
-                    .await
-                    .map_err(FunctionCallError::RespondToModel)
-                    .map(boxed_tool_output)
+                let output = handle_runtime_response(
+                    &exec,
+                    wait_response.into(),
+                    &call_id,
+                    args.max_tokens,
+                    started_at,
+                )
+                .await
+                .map_err(FunctionCallError::RespondToModel)?;
+                Ok(CoreToolOutput {
+                    output: boxed_tool_output(output),
+                    continuation,
+                })
             }
             _ => Err(FunctionCallError::RespondToModel(format!(
                 "{WAIT_TOOL_NAME} expects JSON arguments"
@@ -161,13 +230,24 @@ impl CodeModeWaitHandler {
         telemetry.finish(
             result
                 .as_ref()
-                .is_ok_and(codex_tools::ToolOutput::success_for_logging),
+                .is_ok_and(|result| result.output.success_for_logging()),
         );
         result
     }
 }
 
 impl CoreToolRuntime for CodeModeWaitHandler {
+    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
+        crate::tools::authorization::AuthorizationPolicy::CoreControl
+    }
+
+    fn handle_core(
+        &self,
+        invocation: ToolInvocation,
+    ) -> futures::future::BoxFuture<'_, Result<CoreToolOutput, FunctionCallError>> {
+        Box::pin(self.handle_call(invocation))
+    }
+
     fn pre_tool_use_payload(&self, _invocation: &ToolInvocation) -> Option<PreToolUsePayload> {
         // Code-mode `wait` is runtime control for an existing code cell, not a
         // standalone user action. Tool calls made from code mode still flow

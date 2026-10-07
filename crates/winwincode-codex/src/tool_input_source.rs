@@ -33,20 +33,31 @@ pub(crate) fn source_digest(
     let mut snapshot = SourceSnapshot::default();
     snapshot.visit(workspace, workspace, suffixes)?;
     snapshot.files.sort_by(|left, right| left.0.cmp(&right.0));
-    let mut digest = Sha256::new();
-    digest.update(b"winwincode-public-smoke-source-v1\0");
-    for (path, content_digest) in snapshot.files {
-        let length = u64::try_from(path.len()).map_err(|_| AdapterStoreError::Corrupt)?;
-        digest.update(length.to_be_bytes());
-        digest.update(path.as_bytes());
-        digest.update(content_digest);
+    let files = snapshot
+        .files
+        .into_iter()
+        .map(|(path, digest)| (path, format!("{digest:x}")))
+        .collect::<Vec<_>>();
+    // Match Python json.dumps(..., separators=(',', ':')) with ensure_ascii.
+    // UTF-16 escapes also preserve supplementary Unicode path characters.
+    let json = serde_json::to_string(&files).map_err(|_| AdapterStoreError::Corrupt)?;
+    let mut encoded = String::new();
+    for character in json.chars() {
+        if character.is_ascii() && character != '\u{7f}' {
+            encoded.push(character);
+        } else {
+            use std::fmt::Write as _;
+            for unit in character.encode_utf16(&mut [0; 2]) {
+                write!(&mut encoded, "\\u{unit:04x}").map_err(|_| AdapterStoreError::Corrupt)?;
+            }
+        }
     }
-    Ok(format!("{:x}", digest.finalize()))
+    Ok(format!("{:x}", Sha256::digest(encoded.as_bytes())))
 }
 
 #[derive(Default)]
 struct SourceSnapshot {
-    files: Vec<(String, [u8; 32])>,
+    files: Vec<(String, sha2::digest::Output<Sha256>)>,
     bytes: u64,
 }
 
@@ -99,7 +110,7 @@ impl SourceSnapshot {
                     .to_str()
                     .ok_or(AdapterStoreError::Corrupt)?
                     .to_owned();
-                self.files.push((relative, Sha256::digest(content).into()));
+                self.files.push((relative, Sha256::digest(content)));
             }
         }
         let after = checked_metadata(directory)?;
@@ -130,7 +141,7 @@ fn checked_metadata(path: &Path) -> Result<Metadata, AdapterStoreError> {
     Ok(metadata)
 }
 
-fn read_source_file(path: &Path, remaining: u64) -> Result<Vec<u8>, AdapterStoreError> {
+pub(crate) fn read_source_file(path: &Path, remaining: u64) -> Result<Vec<u8>, AdapterStoreError> {
     let before = checked_metadata(path)?;
     if !before.is_file() || before.len() > remaining {
         return Err(AdapterStoreError::Corrupt);
@@ -199,8 +210,8 @@ mod tests {
 
     impl Checkout {
         fn new() -> Self {
-            let path = std::env::temp_dir()
-                .join(format!("wwc-tool-repeat-source-{}", uuid::Uuid::now_v7()));
+            let path =
+                std::env::temp_dir().join(format!("wwc-src-{}", uuid::Uuid::now_v7().simple()));
             fs::create_dir(&path).unwrap();
             Self(path)
         }
@@ -366,3 +377,7 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "tool_input_source_tests.rs"]
+mod contract_tests;

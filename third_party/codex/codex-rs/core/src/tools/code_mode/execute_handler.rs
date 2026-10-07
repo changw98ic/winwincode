@@ -1,8 +1,8 @@
 use crate::function_tool::FunctionCallError;
-use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolPayload;
 use crate::tools::context::boxed_tool_output;
+use crate::tools::registry::CoreToolOutput;
 use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::ToolExecutor;
 use codex_tools::ToolName;
@@ -35,9 +35,10 @@ impl CodeModeExecuteHandler {
         session: std::sync::Arc<crate::session::session::Session>,
         turn: std::sync::Arc<crate::session::turn_context::TurnContext>,
         call_id: String,
+        step_context: Arc<crate::session::step_context::StepContext>,
         code: String,
         telemetry: &mut CodeModeToolCallGuard,
-    ) -> Result<FunctionToolOutput, FunctionCallError> {
+    ) -> Result<CoreToolOutput, FunctionCallError> {
         let args =
             codex_code_mode::parse_exec_source(&code).map_err(FunctionCallError::RespondToModel)?;
         let exec = ExecContext { session, turn };
@@ -72,6 +73,22 @@ impl CodeModeExecuteHandler {
             .await
             .map_err(FunctionCallError::RespondToModel)?;
         let cell_id = started_cell.cell_id.clone();
+        if let Err(error) = crate::tools::execution_facts::ExecutionFacts::start_cell(
+            &exec.session,
+            &exec.turn,
+            cell_id.as_str(),
+            &call_id,
+        )
+        .await
+        {
+            let _ = exec
+                .session
+                .services
+                .code_mode_service
+                .terminate(cell_id.clone())
+                .await;
+            return Err(error);
+        }
         telemetry.cell_id = Some(cell_id.to_string());
         exec.session
             .services
@@ -99,11 +116,20 @@ impl CodeModeExecuteHandler {
         exec.session
             .services
             .code_mode_service
-            .mark_cell_ready_for_dispatch(&cell_id);
-        let response = started_cell
-            .initial_response()
+            .mark_cell_ready_for_dispatch(&cell_id, step_context);
+        let (response, continuation) = exec
+            .session
+            .services
+            .code_mode_service
+            .await_boundary(&cell_id, async {
+                started_cell
+                    .initial_response()
+                    .await
+                    .map(codex_code_mode::WaitOutcome::LiveCell)
+            })
             .await
             .map_err(FunctionCallError::RespondToModel)?;
+        let response = response.into();
         // Record the raw runtime boundary. The model-visible custom-tool output
         // is produced by `handle_runtime_response` and later linked through
         // `CodeCell.output_item_ids` in the reduced trace.
@@ -111,6 +137,11 @@ impl CodeModeExecuteHandler {
         // Yielded cells keep running, so terminal lifecycle is only emitted
         // here when the first response also ended the runtime.
         if !matches!(response, codex_code_mode::RuntimeResponse::Yielded { .. }) {
+            crate::tools::execution_facts::ExecutionFacts::close_cell(
+                &exec.session,
+                cell_id.as_str(),
+            )
+            .await?;
             code_cell_trace.record_ended(&response);
             exec.session
                 .services
@@ -126,9 +157,19 @@ impl CodeModeExecuteHandler {
                 });
         }
         exec.session.services.elicitations.wait_until_clear().await;
-        handle_runtime_response(&exec, response, args.max_output_tokens, started_at)
-            .await
-            .map_err(FunctionCallError::RespondToModel)
+        let output = handle_runtime_response(
+            &exec,
+            response,
+            &call_id,
+            args.max_output_tokens,
+            started_at,
+        )
+        .await
+        .map_err(FunctionCallError::RespondToModel)?;
+        Ok(CoreToolOutput {
+            output: boxed_tool_output(output),
+            continuation,
+        })
     }
 }
 
@@ -142,7 +183,11 @@ impl ToolExecutor<ToolInvocation> for CodeModeExecuteHandler {
     }
 
     fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
-        Box::pin(self.handle_call(invocation))
+        Box::pin(async move {
+            self.handle_call(invocation)
+                .await
+                .map(|result| result.output)
+        })
     }
 }
 
@@ -150,12 +195,13 @@ impl CodeModeExecuteHandler {
     async fn handle_call(
         &self,
         invocation: ToolInvocation,
-    ) -> Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError> {
+    ) -> Result<CoreToolOutput, FunctionCallError> {
         let ToolInvocation {
             session,
             turn,
             call_id,
             tool_name,
+            step_context,
             payload,
             ..
         } = invocation;
@@ -168,10 +214,10 @@ impl CodeModeExecuteHandler {
             PUBLIC_TOOL_NAME,
         );
         let result = match payload {
-            ToolPayload::Custom { input } if is_exec_tool_name(&tool_name) => self
-                .execute(session, turn, call_id, input, &mut telemetry)
-                .await
-                .map(boxed_tool_output),
+            ToolPayload::Custom { input } if is_exec_tool_name(&tool_name) => {
+                self.execute(session, turn, call_id, step_context, input, &mut telemetry)
+                    .await
+            }
             _ => Err(FunctionCallError::RespondToModel(format!(
                 "{PUBLIC_TOOL_NAME} expects raw JavaScript source text"
             ))),
@@ -179,13 +225,39 @@ impl CodeModeExecuteHandler {
         telemetry.finish(
             result
                 .as_ref()
-                .is_ok_and(|output| output.success_for_logging()),
+                .is_ok_and(|result| result.output.success_for_logging()),
         );
         result
     }
 }
 
 impl CoreToolRuntime for CodeModeExecuteHandler {
+    fn authorization_policy(&self) -> crate::tools::authorization::AuthorizationPolicy {
+        crate::tools::authorization::AuthorizationPolicy::CoreControl
+    }
+
+    fn pre_tool_use_payload(
+        &self,
+        _invocation: &ToolInvocation,
+    ) -> Option<crate::tools::registry::PreToolUsePayload> {
+        None
+    }
+
+    fn post_tool_use_payload(
+        &self,
+        _invocation: &ToolInvocation,
+        _result: &dyn crate::tools::context::ToolOutput,
+    ) -> Option<crate::tools::registry::PostToolUsePayload> {
+        None
+    }
+
+    fn handle_core(
+        &self,
+        invocation: ToolInvocation,
+    ) -> futures::future::BoxFuture<'_, Result<CoreToolOutput, FunctionCallError>> {
+        Box::pin(self.handle_call(invocation))
+    }
+
     fn matches_kind(&self, payload: &ToolPayload) -> bool {
         matches!(payload, ToolPayload::Custom { .. })
     }

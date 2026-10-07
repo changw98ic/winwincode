@@ -54,6 +54,13 @@ pub(crate) mod test_support;
 mod thread_section_order;
 mod thread_sections;
 mod threads;
+mod tool_dependencies;
+mod tool_diagnostic_responses;
+mod tool_diagnostics;
+mod tool_execution;
+mod tool_reconciliation;
+mod tool_runtime;
+mod tool_sharing;
 
 pub use external_agent_config_imports::ExternalAgentConfigImportDetailsRecord;
 pub use external_agent_config_imports::ExternalAgentConfigImportFailureRecord;

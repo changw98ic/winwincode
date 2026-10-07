@@ -142,6 +142,7 @@ pub struct ActionIntent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileOperation {
+    Read,
     Create,
     Write,
     Delete,
@@ -273,12 +274,15 @@ pub enum ToolRequest {
     Shell(ShellRequest),
     Network(NetworkRequest),
     Mcp(McpRequest),
+    McpResource(crate::mcp_resource::McpResourceRequest),
+    ProcessInput(crate::process_input::ProcessInputRequest),
 }
 
 /// Runtime category of one typed tool request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolExecutionKind {
+    Read,
     Edit,
     Git,
     Shell,
@@ -293,10 +297,14 @@ impl ToolRequest {
     #[must_use]
     pub fn execution_kind(&self) -> ToolExecutionKind {
         match self {
+            Self::File(request) if request.operation == FileOperation::Read => {
+                ToolExecutionKind::Read
+            }
             Self::File(_) => ToolExecutionKind::Edit,
             Self::Git(_) => ToolExecutionKind::Git,
             Self::Network(_) => ToolExecutionKind::Network,
-            Self::Mcp(_) => ToolExecutionKind::Mcp,
+            Self::Mcp(_) | Self::McpResource(_) => ToolExecutionKind::Mcp,
+            Self::ProcessInput(_) => ToolExecutionKind::Shell,
             Self::Shell(request) => {
                 let program = basename(&request.program).to_ascii_lowercase();
                 let args = request.args.iter().map(String::as_str).collect::<Vec<_>>();
@@ -327,6 +335,7 @@ pub enum ActionSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ObservedFact {
+    FileRead,
     FilePath,
     TestPath,
     DependencyManifest,
@@ -628,6 +637,8 @@ fn normalize_request(request: &ToolRequest) -> Result<ObservedAction, ActionNorm
         ToolRequest::Shell(request) => normalize_shell(request),
         ToolRequest::Network(request) => normalize_network(request),
         ToolRequest::Mcp(request) => normalize_mcp(request),
+        ToolRequest::McpResource(request) => crate::mcp_resource::observe(request),
+        ToolRequest::ProcessInput(request) => crate::process_input::observe(request),
     }
 }
 
@@ -643,6 +654,9 @@ fn normalize_file(request: &FileRequest) -> Result<ObservedAction, ActionNormali
 
     let mut objects = BTreeSet::new();
     let mut facts = BTreeSet::from([ObservedFact::FilePath]);
+    if request.operation == FileOperation::Read {
+        facts.insert(ObservedFact::FileRead);
+    }
     for path in &targets {
         let classification = classify_path(path);
         objects.insert(classification.object);
@@ -702,7 +716,7 @@ fn normalize_file(request: &FileRequest) -> Result<ObservedAction, ActionNormali
         FileOperation::Create => ActionOperation::Create,
         FileOperation::Write => ActionOperation::Modify,
         FileOperation::Delete => ActionOperation::Delete,
-        FileOperation::Execute => ActionOperation::Execute,
+        FileOperation::Read | FileOperation::Execute => ActionOperation::Execute,
     };
     let scope = file_scope(&targets);
     let facts = facts.into_iter().collect::<Vec<_>>();
