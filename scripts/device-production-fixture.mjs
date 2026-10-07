@@ -390,12 +390,14 @@ export function workInputFromRequest(request) {
 export function observeToolProcess(providerRequest, callId) {
   const originalOutput = findToolOutput(providerRequest, callId)
   let output = originalOutput
+  let evidenceSourceId = codeModeCommandSource(originalOutput)
   let pollIndex = 1
   let nextCallId = `${callId}-poll`
   for (;;) {
     const poll = findToolOutput(providerRequest, nextCallId)
     if (poll === null) break
     output = poll
+    evidenceSourceId ??= codeModeCommandSource(poll)
     pollIndex += 1
     nextCallId = `${callId}-poll-${pollIndex}`
   }
@@ -403,11 +405,13 @@ export function observeToolProcess(providerRequest, callId) {
   const exitCode = parseProcessExitCode(text)
   const session = text?.match(/^Process running with session ID (\d+)\s*$/mu)
   const sessionId = session ? Number(session[1]) : null
+  const cell = text?.match(/^Script running with cell ID (\S+)\s*$/mu)
   return {
     exitCode,
+    cellId: cell?.[1] ?? null,
     sessionId: Number.isSafeInteger(sessionId) ? sessionId : null,
     nextCallId,
-    evidenceSourceId: output === null ? null : codeModeCommandSource(originalOutput) ?? callId,
+    evidenceSourceId: output === null ? null : evidenceSourceId ?? callId,
     hasToolOutput: output !== null,
   }
 }
@@ -544,6 +548,7 @@ export function startDeterministicDeviceModelServer({
           repeatTool,
         })
         const executionTool = providerRequest.tools?.find(tool => /(?:^|__)exec$/u.test(tool.name)) ?? null
+        const waitTool = providerRequest.tools?.find(tool => /(?:^|__)wait$/u.test(tool.name)) ?? null
         const workInput = workInputFromRequest(providerRequest)
         const isExecutor = bodyText.includes(DETERMINISTIC_EXECUTOR_BEHAVIOR_MARKER)
         const isVerification = bodyText.includes(DETERMINISTIC_VERIFICATION_BEHAVIOR_MARKER)
@@ -565,9 +570,19 @@ export function startDeterministicDeviceModelServer({
         let stopReason = 'end_turn'
         let toolYieldMs = 1000
         let toolInput = null
+        let selectedTool = executionTool
+        let waitInput = null
 
         const observation = isExecutor ? executorObservation : verificationObservation
-        if ((isExecutor || isVerification) && observation.sessionId !== null) {
+        if ((isExecutor || isVerification) && observation.cellId !== null) {
+          assert.ok(waitTool, 'running cell requires the Code Mode wait tool')
+          selectedTool = waitTool
+          useTool = true
+          stopReason = 'tool_use'
+          toolCallId = observation.nextCallId
+          waitInput = { cell_id: observation.cellId, yield_time_ms: 1000 }
+          text = ''
+        } else if ((isExecutor || isVerification) && observation.sessionId !== null) {
           assert.ok(executionTool, 'running command requires the Code Mode exec tool')
           useTool = true
           stopReason = 'tool_use'
@@ -626,18 +641,18 @@ export function startDeterministicDeviceModelServer({
           }],
         ]
         if (useTool) {
-          assert.ok(executionTool !== null, 'Device Provider fixture requires Code Mode exec')
+          assert.ok(selectedTool !== null, 'Device Provider fixture requires a Code Mode tool')
           events.push(['content_block_start', {
             type: 'content_block_start',
             index: 0,
             content_block: {
               type: 'tool_use',
               id: toolCallId,
-              name: executionTool.name,
+              name: selectedTool.name,
               input: {},
             },
           }])
-          const input = { input: deviceFixtureCodeModeCommand(toolInput ?? {
+          const input = waitInput ?? { input: deviceFixtureCodeModeCommand(toolInput ?? {
             cmd: toolCommand, workdir: '.', yield_time_ms: toolYieldMs,
           }) }
           events.push(['content_block_delta', {

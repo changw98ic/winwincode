@@ -450,7 +450,7 @@ test('authorized task Sessions automatically approve actions while preserving cu
     automaticTaskActions: true, onDecision: () => {} })
 })
 
- test('Code Mode verification cites the original command receipt across process polling', () => {
+test('Code Mode verification cites the original command receipt across process polling', () => {
   const original = `code-mode:${'a'.repeat(64)}`
   const observation = resolveVerificationObservation({ messages: [{
     type: 'function_call_output', call_id: DETERMINISTIC_VERIFICATION_CALL_ID,
@@ -461,4 +461,29 @@ test('authorized task Sessions automatically approve actions while preserving cu
   }] })
   assert.equal(observation.exitCode, 0)
   assert.equal(observation.evidenceSourceId, original)
- })
+})
+
+test('Device verification follows yielded cells and processes until the command exits', () => {
+  const sourceId = `code-mode:${'b'.repeat(64)}`
+  const receipt = `<core_tool_receipts>${JSON.stringify({ receipts: [
+    { tool: 'exec_command', source_id: sourceId },
+  ] })}</core_tool_receipts>`
+  for (const receiptAtStart of [false, true]) {
+    const messages = [{ type: 'tool_result', tool_use_id: DETERMINISTIC_VERIFICATION_CALL_ID,
+      content: [{ type: 'text', text: `Script running with cell ID 17\nOutput:\n${receiptAtStart ? receipt : ''}` }] }]
+    let observed = resolveVerificationObservation({ messages })
+    assert.equal(observed.cellId, '17')
+    assert.equal(observed.sessionId, null)
+    assert.equal(observed.exitCode, null)
+    for (const output of ['Script running with cell ID 17\n',
+      `Process running with session ID 42\n${receipt}`, 'Script running with cell ID 18\n', 'Exit code: 0\n']) {
+      messages.push({ type: 'tool_result', tool_use_id: observed.nextCallId, content: output })
+      observed = resolveVerificationObservation({ messages })
+    }
+    assert.equal(observed.cellId, null)
+    assert.equal(observed.sessionId, null)
+    assert.equal(observed.exitCode, 0)
+    assert.equal(observed.evidenceSourceId, sourceId)
+    assert.equal(observed.nextCallId, `${DETERMINISTIC_VERIFICATION_CALL_ID}-poll-5`)
+  }
+})
