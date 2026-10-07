@@ -5108,6 +5108,8 @@ impl std::error::Error for WorkerLaunchBundleError {}
 
 /// Atomically publishes one launch, its credential lifecycle row and downlink.
 /// Encrypted private material must already be fsynced before this commit.
+/// The encoder receives the next downlink sequence inside the same immediate
+/// transaction, so concurrent launches each publish at their own position.
 /// # Errors
 /// Rejects changed authority, duplicate publication or unavailable storage.
 pub fn issue_worker_launch_bundle(
@@ -5115,7 +5117,7 @@ pub fn issue_worker_launch_bundle(
     issuance: &LaunchGrantIssuance,
     predecessor: Option<&str>,
     credential: &CredentialIssuance,
-    append: &ClientDownlinkAppend,
+    build_downlink: impl FnOnce(u64) -> Result<ClientDownlinkAppend, StorageError>,
     now: &Instant,
 ) -> Result<WorkerLaunchGrantRecord, WorkerLaunchBundleError> {
     storage
@@ -5135,6 +5137,9 @@ pub fn issue_worker_launch_bundle(
         .map_err(|_|StorageError::adapter("launch publication unavailable"))?;
     let grant = client_launch_grant::issue_launch_in_transaction(&tx, issuance, predecessor, now)
         .map_err(WorkerLaunchBundleError::Launch)?;
+    let sequence = client_downlink::next_sequence_in_transaction(&tx, &grant.client_node_id)
+        .map_err(|_| StorageError::adapter("launch sequence unavailable"))?;
+    let append = build_downlink(sequence)?;
     if credential.worker_session_id != grant.worker_session_id
         || credential.worker_id != grant.worker_id
         || credential.worker_instance_id != grant.worker_instance_id
@@ -5171,7 +5176,7 @@ pub fn issue_worker_launch_bundle(
     }
     worker_session_credential::issue_credential_in_transaction(&tx, credential, now)
         .map_err(|_| StorageError::invalid_input("launch credential rejected"))?;
-    let frame = client_downlink::append_launch_in_transaction(&tx, append, now)
+    let frame = client_downlink::append_launch_in_transaction(&tx, &append, now)
         .map_err(|_| StorageError::invalid_input("launch downlink rejected"))?;
     tx.execute(
         "INSERT INTO worker_launch_publications VALUES (?1,?2,?3,?4,?5,?6)",

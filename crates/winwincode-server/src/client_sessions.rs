@@ -64,6 +64,7 @@ use winwincode_storage::ClientPresenceState;
 use winwincode_storage::DeviceExecutionBindingState;
 use winwincode_storage::ExecutionJobState;
 use winwincode_storage::SqliteStorage;
+use winwincode_storage::StorageError;
 use winwincode_storage::{WorkerSessionCredentialState, WorkerSlotState};
 
 use crate::client_exchange::{
@@ -795,46 +796,44 @@ impl ClientSessionsApplication {
         let mirror_revision_view =
             client_mirror_revision_view(&self.data_directory, &node.client_node_id)
                 .map_err(|_| ClientSessionsError::unavailable())?;
-        let frame = prepare_frame(
-            &mut storage,
-            &node,
-            ServerToClientMessage::WorkerLaunch(ServerWorkerLaunchPayload {
-                occupancy: occupancy_stamp(
-                    mirror_revision_view,
-                    &lease.occupancy_lease_id,
-                    lease.fencing_token,
-                    &format!("idem_launch_{worker_launch_grant_id}"),
-                ),
-                launch_grant: WorkerLaunchGrant {
-                    worker_launch_grant_id: worker_launch_grant_id.clone(),
-                    client_node_id: node.client_node_id.clone(),
-                    client_instance_id: node
-                        .current_instance_id
-                        .clone()
-                        .ok_or_else(ClientSessionsError::unavailable)?,
-                    occupancy_lease_id: lease.occupancy_lease_id.clone(),
-                    occupancy_fencing_token: lease.fencing_token,
-                    repository_binding_id: repository_binding_id.clone(),
-                    product_session_id: product_session_id.clone(),
-                    work_run_id: work_run_id.as_ref().map(|id| id.0.clone()),
-                    worker_session_id: worker_session_id.clone(),
-                    worker_id: worker_id.clone(),
-                    worker_instance_id: worker_instance_id.clone(),
-                    credential_digest: credential_material.credential_digest().to_owned(),
-                    expires_at: expires_at.0.clone(),
-                    state: WireGrantState::Issued,
-                    revision: 1,
-                },
-            }),
-            &now,
-        )?;
+        let message = ServerToClientMessage::WorkerLaunch(ServerWorkerLaunchPayload {
+            occupancy: occupancy_stamp(
+                mirror_revision_view,
+                &lease.occupancy_lease_id,
+                lease.fencing_token,
+                &format!("idem_launch_{worker_launch_grant_id}"),
+            ),
+            launch_grant: WorkerLaunchGrant {
+                worker_launch_grant_id: worker_launch_grant_id.clone(),
+                client_node_id: node.client_node_id.clone(),
+                client_instance_id: node
+                    .current_instance_id
+                    .clone()
+                    .ok_or_else(ClientSessionsError::unavailable)?,
+                occupancy_lease_id: lease.occupancy_lease_id.clone(),
+                occupancy_fencing_token: lease.fencing_token,
+                repository_binding_id: repository_binding_id.clone(),
+                product_session_id: product_session_id.clone(),
+                work_run_id: work_run_id.as_ref().map(|id| id.0.clone()),
+                worker_session_id: worker_session_id.clone(),
+                worker_id: worker_id.clone(),
+                worker_instance_id: worker_instance_id.clone(),
+                credential_digest: credential_material.credential_digest().to_owned(),
+                expires_at: expires_at.0.clone(),
+                state: WireGrantState::Issued,
+                revision: 1,
+            },
+        });
 
         let grant = winwincode_storage::issue_worker_launch_bundle(
             &mut storage,
             &issuance,
             predecessor_grant_id.as_deref(),
             &credential_issuance,
-            &frame,
+            |sequence| {
+                encode_frame(&node, message, sequence, &now)
+                    .map_err(|_| StorageError::invalid_input("launch downlink encoding failed"))
+            },
             &now,
         )
         .map_err(|error| match error {
@@ -1357,10 +1356,6 @@ fn prepare_frame(
     message: ServerToClientMessage,
     now: &Instant,
 ) -> Result<ClientDownlinkAppend, ClientSessionsError> {
-    let instance = node
-        .current_instance_id
-        .clone()
-        .ok_or_else(ClientSessionsError::unavailable)?;
     let cursors = {
         let mut registry = ClientRegistryService::new(storage);
         registry
@@ -1378,6 +1373,19 @@ fn prepare_frame(
         .server_to_client_ack_sequence
         .max(outbox_high_water)
         .checked_add(1)
+        .ok_or_else(ClientSessionsError::unavailable)?;
+    encode_frame(node, message, sequence, now)
+}
+
+fn encode_frame(
+    node: &ClientNodeRecord,
+    message: ServerToClientMessage,
+    sequence: u64,
+    now: &Instant,
+) -> Result<ClientDownlinkAppend, ClientSessionsError> {
+    let instance = node
+        .current_instance_id
+        .clone()
         .ok_or_else(ClientSessionsError::unavailable)?;
     let envelope = ServerToClientEnvelope {
         schema_version: CLIENT_CONTROL_PORT_SCHEMA_VERSION.to_owned(),

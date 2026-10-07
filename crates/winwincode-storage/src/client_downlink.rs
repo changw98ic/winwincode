@@ -549,6 +549,24 @@ fn error(kind: ClientDownlinkErrorKind, message: impl Into<String>) -> ClientDow
     }
 }
 
+pub(crate) fn next_sequence_in_transaction(
+    connection: &rusqlite::Connection,
+    client_node_id: &str,
+) -> Result<u64, ClientDownlinkError> {
+    let cursor = server_to_client_ack(connection, client_node_id)?;
+    let highest = highest_sequence(connection, client_node_id)?;
+    cursor
+        .max(highest)
+        .checked_add(1)
+        .filter(|sequence| *sequence <= MAX_SAFE_INTEGER)
+        .ok_or_else(|| {
+            error(
+                ClientDownlinkErrorKind::InvalidInput,
+                "downlink sequence exhausted",
+            )
+        })
+}
+
 pub(crate) fn append_launch_in_transaction(
     connection: &rusqlite::Connection,
     append: &ClientDownlinkAppend,
@@ -557,9 +575,7 @@ pub(crate) fn append_launch_in_transaction(
     validate_client_node_id(&append.client_node_id)?;
     validate_instant(now)?;
     require_client_node(connection, &append.client_node_id)?;
-    let cursor = server_to_client_ack(connection, &append.client_node_id)?;
-    let highest = highest_sequence(connection, &append.client_node_id)?;
-    if append.sequence != cursor.max(highest) + 1 {
+    if append.sequence != next_sequence_in_transaction(connection, &append.client_node_id)? {
         return Err(error(
             ClientDownlinkErrorKind::InvalidInput,
             "downlink sequence is not the next stream position",
