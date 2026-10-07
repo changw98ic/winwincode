@@ -143,7 +143,7 @@ fn without_invocation() -> DeviceModelAdmission {
     DeviceModelAdmission::Ready(DeviceModelPermit { _slot: None })
 }
 
-fn private_directory(path: &Path) -> Result<(), DeviceProviderError> {
+pub(crate) fn private_directory(path: &Path) -> Result<(), DeviceProviderError> {
     match fs::DirBuilder::new().mode(0o700).create(path) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -156,7 +156,7 @@ fn private_directory(path: &Path) -> Result<(), DeviceProviderError> {
     Ok(())
 }
 
-fn private_slot_file(path: &Path) -> Result<File, DeviceProviderError> {
+pub(crate) fn private_slot_file(path: &Path) -> Result<File, DeviceProviderError> {
     if let Ok(meta) = fs::symlink_metadata(path)
         && (!meta.is_file() || meta.permissions().mode() & 0o077 != 0)
     {

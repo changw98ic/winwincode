@@ -6,8 +6,9 @@
 use crate::{
     CanonicalModelStreamFrame, CredentialOutputBoundary, HttpsSseProviderCompletion,
     HttpsSseProviderError, HttpsSseProviderErrorKind, ModelAttemptFailureFact,
-    ModelExecutionCertainty, ProviderGatewayOpenReceipt, ProviderGatewayTerminal,
-    ProviderStreamFailureKind, ProviderTokenUsage,
+    ModelExecutionCertainty, ProviderFinishReason, ProviderGatewayOpenReceipt,
+    ProviderGatewayTerminal, ProviderGatewayTerminalCharge, ProviderStreamConverter,
+    ProviderStreamEvent, ProviderStreamFailure, ProviderStreamFailureKind, ProviderTokenUsage,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -64,45 +65,78 @@ pub(crate) fn parse_response(
     max_event_bytes: usize,
     max_events: usize,
 ) -> Result<HttpsSseProviderCompletion, HttpsSseProviderError> {
-    let text = std::str::from_utf8(bytes)
-        .map_err(|_| protocol())?
-        .replace("\r\n", "\n");
-    if text.contains(['\0', '\r']) {
-        return Err(protocol());
-    }
     let mut stream = Responses::new(receipt);
-    let mut data = String::new();
-    let mut count = 0;
-    for line in text.split('\n').chain(std::iter::once("")) {
-        if line.len() > max_event_bytes {
-            return Err(HttpsSseProviderError::new(
-                HttpsSseProviderErrorKind::SizeLimit,
-            ));
-        }
-        if line.is_empty() && !data.is_empty() {
-            count += 1;
-            if count > max_events {
-                return Err(HttpsSseProviderError::new(
-                    HttpsSseProviderErrorKind::SizeLimit,
-                ));
-            }
-            stream.push(&serde_json::from_str(&data).map_err(|_| protocol())?)?;
-            data.clear();
-        } else if let Some(value) = line.strip_prefix("data:") {
-            if !data.is_empty() {
-                data.push('\n');
-            }
-            data.push_str(value.strip_prefix(' ').unwrap_or(value));
-            if data.len() > max_event_bytes {
-                return Err(HttpsSseProviderError::new(
-                    HttpsSseProviderErrorKind::SizeLimit,
-                ));
-            }
-        } else if !line.is_empty() && !line.starts_with(':') && !line.starts_with("event:") {
-            return Err(protocol());
-        }
+    for event in response_events(bytes, max_event_bytes, max_events)? {
+        stream.push(&event)?;
     }
     stream.finish()
+}
+
+fn response_events(
+    bytes: &[u8],
+    max_event_bytes: usize,
+    max_events: usize,
+) -> Result<Vec<Value>, HttpsSseProviderError> {
+    response_frames(bytes, max_event_bytes, max_events)?
+        .into_iter()
+        .map(|frame| serde_json::from_str(&frame.data).map_err(|_| protocol()))
+        .collect()
+}
+
+fn response_frames(
+    bytes: &[u8],
+    max_event_bytes: usize,
+    max_events: usize,
+) -> Result<Vec<crate::provider_sse_framing::SseFrame>, HttpsSseProviderError> {
+    crate::provider_sse_framing::parse(bytes, max_event_bytes, max_events).map_err(|error| {
+        HttpsSseProviderError::new(match error {
+            crate::provider_sse_framing::SseFramingError::Utf8 => {
+                HttpsSseProviderErrorKind::SseEvent
+            }
+            crate::provider_sse_framing::SseFramingError::SizeLimit => {
+                HttpsSseProviderErrorKind::SizeLimit
+            }
+        })
+    })
+}
+
+pub(crate) fn observed_receipt(
+    bytes: &[u8],
+    max_event_bytes: usize,
+    max_events: usize,
+) -> Option<(String, ProviderTokenUsage)> {
+    let mut id = None;
+    let mut usage = None;
+    let bytes = match std::str::from_utf8(bytes) {
+        Ok(_) => bytes,
+        Err(error) if error.error_len().is_none() => &bytes[..error.valid_up_to()],
+        Err(_) => return None,
+    };
+    for frame in response_frames(bytes, max_event_bytes, max_events.saturating_add(1))
+        .ok()?
+        .into_iter()
+        .take(max_events)
+    {
+        let Ok(event) = serde_json::from_str::<Value>(&frame.data) else {
+            break;
+        };
+        if let Some(response) = event.get("response") {
+            if let Some(observed) = response.get("id").and_then(Value::as_str) {
+                if observed.is_empty()
+                    || observed.len() > 200
+                    || observed.chars().any(char::is_control)
+                    || id.as_deref().is_some_and(|previous| previous != observed)
+                {
+                    return None;
+                }
+                id = Some(observed.to_owned());
+            }
+            if response.get("usage").is_some_and(|value| !value.is_null()) {
+                usage = Some(token_usage(response).ok()?);
+            }
+        }
+    }
+    Some((id?, usage?))
 }
 
 struct Responses<'a> {
@@ -112,6 +146,7 @@ struct Responses<'a> {
     items: BTreeSet<String>,
     done: BTreeSet<String>,
     terminal: Option<ProviderGatewayTerminal>,
+    output_observed: bool,
 }
 
 impl<'a> Responses<'a> {
@@ -123,10 +158,16 @@ impl<'a> Responses<'a> {
             items: BTreeSet::new(),
             done: BTreeSet::new(),
             terminal: None,
+            output_observed: false,
         }
     }
 
     fn emit(&mut self, value: &Value, terminal: bool) -> Result<(), HttpsSseProviderError> {
+        let sequence = u64::try_from(self.frames.len())
+            .ok()
+            .and_then(|value| value.checked_add(1))
+            .filter(|value| *value <= 9_007_199_254_740_991)
+            .ok_or_else(protocol)?;
         let payload = serde_json::to_string(&value).map_err(|_| protocol())?;
         self.receipt
             .stream_leak_gate
@@ -134,9 +175,7 @@ impl<'a> Responses<'a> {
             .map_err(|_| HttpsSseProviderError::new(HttpsSseProviderErrorKind::CredentialLeak))?;
         self.frames
             .push(CanonicalModelStreamFrame::from_codex_event(
-                self.frames.len() as u64,
-                payload,
-                terminal,
+                sequence, payload, terminal,
             ));
         Ok(())
     }
@@ -162,7 +201,7 @@ impl<'a> Responses<'a> {
             );
         }
         if matches!(kind, "response.failed" | "response.incomplete" | "error") {
-            return self.fail();
+            return self.fail(event);
         }
         if self.response_id.is_none() {
             return Err(protocol());
@@ -216,31 +255,9 @@ impl<'a> Responses<'a> {
                 {
                     return Err(protocol());
                 }
-                let usage = ProviderTokenUsage {
-                    input_tokens: number(event, "/response/usage/input_tokens")?,
-                    output_tokens: number(event, "/response/usage/output_tokens")?,
-                    cached_input_tokens: optional_cache_number(
-                        event,
-                        "/response/usage/input_tokens_details/cached_tokens",
-                    )?,
-                    cache_write_input_tokens: optional_number(
-                        event,
-                        "/response/usage/input_tokens_details/cache_write_tokens",
-                    )?,
-                    reasoning_output_tokens: optional_number(
-                        event,
-                        "/response/usage/output_tokens_details/reasoning_tokens",
-                    )?,
-                };
-                if usage
-                    .cached_input_tokens
-                    .is_some_and(|cached| cached > usage.input_tokens)
-                    || usage.reasoning_output_tokens > usage.output_tokens
-                {
-                    return Err(protocol());
-                }
+                let usage = token_usage(&event["response"])?;
                 self.emit(&json!({"type":"completed","responseId":self.response_id,"tokenUsage":{
-                    "input_tokens":usage.input_tokens,"cached_input_tokens":usage.cached_input_tokens.unwrap_or(0),"cache_write_input_tokens":usage.cache_write_input_tokens,
+                    "input_tokens":usage.input_tokens,"cached_input_tokens":usage.cached_input_tokens,"cache_write_input_tokens":usage.cache_write_input_tokens,
                     "output_tokens":usage.output_tokens,"reasoning_output_tokens":usage.reasoning_output_tokens,"total_tokens":usage.input_tokens+usage.output_tokens},"endTurn":event.pointer("/response/end_turn")}),true)?;
                 self.terminal = Some(ProviderGatewayTerminal::Completed {
                     usage,
@@ -261,19 +278,104 @@ impl<'a> Responses<'a> {
             _ => return Err(protocol()),
         };
         if let Some(value) = mapped {
+            self.output_observed |=
+                kind == "response.output_item.done" || value.get("delta").is_some();
             self.emit(&value, false)?;
         }
         Ok(())
     }
 
-    fn fail(&mut self) -> Result<(), HttpsSseProviderError> {
-        self.emit(&json!({"type":"error","error":{"code":"CODEX_RESPONSE_FAILED","message":"Codex response failed or ended before completion"}}),true)?;
+    fn fail(&mut self, event: &Value) -> Result<(), HttpsSseProviderError> {
+        let response = event.get("response");
+        if let Some(id) = response
+            .and_then(|response| response.get("id"))
+            .and_then(Value::as_str)
+        {
+            if self
+                .response_id
+                .as_deref()
+                .is_some_and(|previous| previous != id)
+            {
+                return Err(protocol());
+            }
+            self.response_id = Some(id.to_owned());
+        }
+        let code = response
+            .and_then(|response| response.pointer("/error/code"))
+            .or_else(|| event.pointer("/error/code"))
+            .or_else(|| event.get("code"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let kind = match code {
+            "invalid_api_key" | "authentication_error" | "unauthorized" => {
+                ProviderStreamFailureKind::Authentication
+            }
+            "invalid_request_error" | "invalid_request" => {
+                ProviderStreamFailureKind::InvalidRequest
+            }
+            "rate_limit_exceeded" | "rate_limit_error" => ProviderStreamFailureKind::RateLimit,
+            "insufficient_quota" | "quota_exceeded" => ProviderStreamFailureKind::Quota,
+            "context_length_exceeded" => ProviderStreamFailureKind::ContextWindowExceeded,
+            "server_error" | "internal_error" => ProviderStreamFailureKind::Server,
+            _ => ProviderStreamFailureKind::Unknown,
+        };
+        let usage = response
+            .filter(|response| response.get("usage").is_some_and(|value| !value.is_null()))
+            .map(token_usage)
+            .transpose()?;
+        let mut converter = ProviderStreamConverter::from_gateway_receipt(self.receipt);
+        if let Some(id) = &self.response_id {
+            converter
+                .ingest(ProviderStreamEvent::ResponseStarted {
+                    provider_response_id: id.clone(),
+                    observed_model_id: None,
+                })
+                .map_err(|_| protocol())?;
+        }
+        if let Some(usage) = usage {
+            converter
+                .ingest(ProviderStreamEvent::Usage(usage))
+                .map_err(|_| protocol())?;
+        }
+        let mut failure = ProviderStreamFailure::new(kind);
+        if let Some(id) = &self.response_id {
+            failure = failure.with_provider_request_id(id.clone());
+        }
+        let incomplete = response
+            .and_then(|response| response.pointer("/incomplete_details/reason"))
+            .and_then(Value::as_str);
+        let terminal_event = match incomplete {
+            Some("max_output_tokens") => {
+                ProviderStreamEvent::Finished(ProviderFinishReason::MaxTokens)
+            }
+            Some("content_filter") => ProviderStreamEvent::Finished(ProviderFinishReason::Filtered),
+            _ => ProviderStreamEvent::Failed(failure),
+        };
+        let frames = converter.ingest(terminal_event).map_err(|error| {
+            if error.kind() == crate::ProviderStreamConversionErrorKind::CredentialLeak {
+                HttpsSseProviderError::new(HttpsSseProviderErrorKind::CredentialLeak)
+            } else {
+                protocol()
+            }
+        })?;
+        let terminal = frames.last().ok_or_else(protocol)?;
+        self.emit(
+            &serde_json::from_str(terminal.payload_json()).map_err(|_| protocol())?,
+            true,
+        )?;
         self.terminal = Some(ProviderGatewayTerminal::Failed {
             failure: ModelAttemptFailureFact::from_stream(
-                ProviderStreamFailureKind::Unknown,
-                ModelExecutionCertainty::AcceptanceUnknown,
+                kind,
+                if self.output_observed {
+                    ModelExecutionCertainty::OutputObserved
+                } else {
+                    ModelExecutionCertainty::AcceptanceUnknown
+                },
             ),
-            charge: None,
+            charge: usage.map(|usage| ProviderGatewayTerminalCharge {
+                usage,
+                actual_cost_micros: None,
+            }),
         });
         Ok(())
     }
@@ -289,6 +391,37 @@ impl<'a> Responses<'a> {
             terminal: self.terminal.ok_or_else(protocol)?,
         })
     }
+}
+
+fn token_usage(response: &Value) -> Result<ProviderTokenUsage, HttpsSseProviderError> {
+    let usage = ProviderTokenUsage {
+        input_tokens: number(response, "/usage/input_tokens")?,
+        output_tokens: number(response, "/usage/output_tokens")?,
+        cached_input_tokens: optional_cache_number(
+            response,
+            "/usage/input_tokens_details/cached_tokens",
+        )?,
+        cache_write_input_tokens: optional_number(
+            response,
+            "/usage/input_tokens_details/cache_write_tokens",
+        )?,
+        reasoning_output_tokens: optional_number(
+            response,
+            "/usage/output_tokens_details/reasoning_tokens",
+        )?,
+    };
+    if usage
+        .cached_input_tokens
+        .is_some_and(|cached| cached > usage.input_tokens)
+        || usage.reasoning_output_tokens > usage.output_tokens
+        || usage
+            .input_tokens
+            .checked_add(usage.output_tokens)
+            .is_none_or(|total| total > 9_007_199_254_740_991)
+    {
+        return Err(protocol());
+    }
+    Ok(usage)
 }
 
 fn string<'a>(value: &'a Value, path: &str) -> Result<&'a str, HttpsSseProviderError> {
@@ -362,6 +495,74 @@ mod tests {
         ]
     }
     #[test]
+    fn responses_frames_enter_the_typed_model_replay_stream() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/contracts/execution-port.valid.json"
+        ))
+        .unwrap();
+        let template = fixture["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["kind"] == "model.chunk")
+            .unwrap();
+        let completion = parse_response(&wire(&response_events()), &receipt(), 4096, 100).unwrap();
+        for (index, frame) in completion.frames.iter().enumerate() {
+            let mut chunk: winwincode_execution_port::generated::ModelChunkMessage =
+                serde_json::from_value(template.clone()).unwrap();
+            chunk.sequence =
+                winwincode_domain::ExecutionSequence(i64::try_from(frame.sequence()).unwrap());
+            chunk.payload = Some(frame.encoded_payload());
+            chunk.error = None;
+            chunk.is_final = frame.is_terminal();
+            let mapped = winwincode_execution_port::typed_replay::frame_from_message(
+                &winwincode_execution_port::generated::ExecutionPortMessage::ModelChunkMessage(
+                    chunk,
+                ),
+            )
+            .expect("Responses frames must satisfy the actual replay ingress contract");
+            assert_eq!(mapped.frame.sequence, u64::try_from(index).unwrap() + 1);
+        }
+        assert!(completion.frames.last().unwrap().is_terminal());
+    }
+
+    #[test]
+    fn responses_failures_preserve_retry_classification_and_paid_usage() {
+        for (code, expected) in [
+            ("invalid_api_key", "AUTH"),
+            ("invalid_request_error", "INVALID_REQUEST"),
+            ("rate_limit_exceeded", "RATE_LIMIT"),
+            ("insufficient_quota", "QUOTA"),
+            ("context_length_exceeded", "CONTEXT_WINDOW_EXCEEDED"),
+            ("server_error", "SERVER"),
+        ] {
+            let mut events = response_events();
+            *events.last_mut().unwrap() = json!({"type":"response.failed","response":{
+                "id":"resp-one","error":{"code":code,"message":"untrusted provider message"},
+                "usage":{"input_tokens":10,"output_tokens":4}}});
+            let completion = parse_response(&wire(&events), &receipt(), 4096, 100).unwrap();
+            let value: Value =
+                serde_json::from_str(completion.frames.last().unwrap().payload_json()).unwrap();
+            assert_eq!(value["error"]["code"], expected);
+            assert!(!value.to_string().contains("untrusted provider message"));
+            assert_eq!(value["tokenUsage"]["input_tokens"], 10);
+            assert!(
+                value["error"]["providerRequestId"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("sha256:")
+            );
+            let ProviderGatewayTerminal::Failed { failure, charge } = completion.terminal else {
+                panic!("failed response");
+            };
+            assert_eq!(failure.certainty, ModelExecutionCertainty::OutputObserved);
+            assert_eq!(charge.unwrap().usage.output_tokens, 4);
+            events.last_mut().unwrap()["response"]["id"] = json!("other-response");
+            assert!(parse_response(&wire(&events), &receipt(), 4096, 100).is_err());
+        }
+    }
+
+    #[test]
     fn responses_preserve_phase_encrypted_reasoning_and_usage() {
         let completion = parse_response(&wire(&response_events()), &receipt(), 4096, 100).unwrap();
         assert_eq!(
@@ -397,6 +598,25 @@ mod tests {
         assert_eq!(usage.cached_input_tokens, None);
         assert_eq!(actual_cost_micros, None);
     }
+    #[test]
+    fn observed_responses_usage_does_not_require_a_successful_terminal() {
+        let events = vec![
+            json!({"type":"response.created","response":{"id":"resp-one"}}),
+            json!({"type":"response.in_progress","response":{"id":"resp-one","usage":{"input_tokens":10,"output_tokens":4}}}),
+        ];
+        let observed = observed_receipt(&wire(&events), 4096, 100).unwrap();
+        assert_eq!(observed.0, "resp-one");
+        assert_eq!(observed.1.input_tokens, 10);
+        assert_eq!(observed.1.cached_input_tokens, None);
+        let mut cut = wire(&events);
+        cut.extend_from_slice(b"data: {\"type\":\"response.out");
+        cut.extend_from_slice(&[0xe4, 0xb8]);
+        assert_eq!(observed_receipt(&cut, 4096, 100), Some(observed));
+        let mut drifted = events;
+        drifted.last_mut().unwrap()["response"]["id"] = json!("other-response");
+        assert!(observed_receipt(&wire(&drifted), 4096, 100).is_none());
+    }
+
     #[test]
     fn cutoff_identity_drift_and_echoed_credentials_fail_closed() {
         let mut events = response_events();

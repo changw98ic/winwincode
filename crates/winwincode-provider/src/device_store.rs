@@ -617,36 +617,60 @@ impl DeviceProviderStore {
             Ok((config, secret, Some(account)))
         } else if config.protocol == DeviceProviderProtocol::ChatgptPlan {
             secret.fill(0);
-            // Serialize rotating refresh tokens across daemon and Worker processes.
-            self.connection.execute_batch("BEGIN IMMEDIATE")?;
-            let result = (|| {
-                let mut record = self.chatgpt_credentials(provider_id)?;
-                if record.needs_refresh()? {
-                    record.refresh()?;
-                    let mut bytes = serde_json::to_vec(&record)?;
-                    let saved = self.connection.execute(
-                        "UPDATE providers SET secret=?1 WHERE provider_id=?2",
-                        params![bytes, provider_id],
-                    );
-                    bytes.fill(0);
-                    saved?;
-                }
-                record.secret()
-            })();
-            match result {
-                Ok(secret) => {
-                    self.connection.execute_batch("COMMIT")?;
-                    Ok((config, secret, None))
-                }
-                Err(error) => {
-                    let _ = self.connection.execute_batch("ROLLBACK");
-                    Err(error)
-                }
-            }
+            self.resolve_chatgpt_connection(provider_id, crate::chatgpt_oauth::Credentials::refresh)
         } else {
             let secret = ResolvedSecret::from_bytes(secret).map_err(|_| DeviceProviderError)?;
             Ok((config, secret, None))
         }
+    }
+
+    fn resolve_chatgpt_connection(
+        &self,
+        provider_id: &str,
+        refresh: impl FnOnce(&mut crate::chatgpt_oauth::Credentials) -> Result<(), DeviceProviderError>,
+    ) -> Result<(DeviceProviderConfig, ResolvedSecret, Option<String>), DeviceProviderError> {
+        use crate::device_model_concurrency::{private_directory, private_slot_file};
+        use sha2::{Digest as _, Sha256};
+        let database = Path::new(self.connection.path().ok_or(DeviceProviderError)?);
+        let locks = database
+            .parent()
+            .ok_or(DeviceProviderError)?
+            .join("provider-credential-locks");
+        private_directory(&locks)?;
+        let owner = private_slot_file(
+            &locks.join(format!("{:x}", Sha256::digest(provider_id.as_bytes()))),
+        )?;
+        owner.lock()?;
+        // Reload under the credential lock. Network I/O holds no SQLite transaction.
+        let (current_config, mut previous): (String, Vec<u8>) = self.connection.query_row(
+            "SELECT config, secret FROM providers WHERE provider_id=?1",
+            [provider_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let result = (|| {
+            let config: DeviceProviderConfig = serde_json::from_str(&current_config)?;
+            if !valid_device_provider_config(&config)
+                || config.protocol != DeviceProviderProtocol::ChatgptPlan
+            {
+                return Err(DeviceProviderError);
+            }
+            let mut record: crate::chatgpt_oauth::Credentials = serde_json::from_slice(&previous)?;
+            if record.needs_refresh()? {
+                refresh(&mut record)?;
+                let mut bytes = serde_json::to_vec(&record)?;
+                let saved = self.connection.execute(
+                    "UPDATE providers SET secret=?1 WHERE provider_id=?2 AND secret=?3 AND config=?4",
+                    params![bytes, provider_id, previous, current_config],
+                );
+                bytes.fill(0);
+                if saved? != 1 {
+                    return Err(DeviceProviderError);
+                }
+            }
+            Ok((config, record.secret()?, None))
+        })();
+        previous.fill(0);
+        result
     }
 
     fn codex_binding(
@@ -1127,6 +1151,117 @@ mod codex_tests {
         drop(store);
         fs::remove_dir_all(directory).unwrap();
         result.expect("current Codex login must complete one native Provider probe");
+    }
+
+    #[test]
+    fn refreshing_one_credential_keeps_unrelated_database_writes_available() {
+        let directory =
+            std::env::temp_dir().join(format!("wwc-refresh-lock-{}", std::process::id()));
+        let store = DeviceProviderStore::open(&directory).unwrap();
+        let mut config = config();
+        config.protocol = DeviceProviderProtocol::ChatgptPlan;
+        config.endpoint = crate::chatgpt_oauth::ENDPOINT.into();
+        let mut record = serde_json::json!({"client_id":"oaiapp_record","subject":"private-subject","access_token":"old-access",
+            "refresh_token":"old-refresh","id_token":"private-id","scope":"resource.invoke chatgpt.tokens.use.direct","expires_at":0});
+        store
+            .connection
+            .execute(
+                "INSERT INTO providers VALUES (?1,?2,?3)",
+                params![
+                    config.provider_id,
+                    serde_json::to_string(&config).unwrap(),
+                    serde_json::to_vec(&record).unwrap()
+                ],
+            )
+            .unwrap();
+        let other = DeviceProviderStore::open(&directory).unwrap();
+        other
+            .connection
+            .busy_timeout(Duration::from_millis(50))
+            .unwrap();
+        let (start, ready) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            ready.recv().unwrap();
+            other.connection.execute(
+                "UPDATE identity SET revision=revision+1 WHERE singleton=1",
+                [],
+            )
+        });
+        let result = store
+            .resolve_chatgpt_connection(&config.provider_id, |credentials| {
+                start.send(()).unwrap();
+                assert!(
+                    writer.join().unwrap().is_ok(),
+                    "OAuth network waits must not hold the shared SQLite writer lock"
+                );
+                record["expires_at"] = serde_json::json!(u64::MAX);
+                record["access_token"] = serde_json::json!("rotated-access");
+                *credentials = serde_json::from_value(record).unwrap();
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(result.1.expose(), b"rotated-access");
+        drop(store);
+        let store = DeviceProviderStore::open(&directory).unwrap();
+        assert_eq!(
+            store.resolve(&config.provider_id).unwrap().1.expose(),
+            b"rotated-access"
+        );
+        drop(store);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn refreshed_credentials_cannot_overwrite_a_replacement_authorization() {
+        let directory =
+            std::env::temp_dir().join(format!("wwc-refresh-cas-{}", std::process::id()));
+        let store = DeviceProviderStore::open(&directory).unwrap();
+        let mut config = config();
+        config.protocol = DeviceProviderProtocol::ChatgptPlan;
+        config.endpoint = crate::chatgpt_oauth::ENDPOINT.into();
+        let record = serde_json::json!({"client_id":"oaiapp_record","subject":"old-subject","access_token":"old-access",
+            "refresh_token":"old-refresh","id_token":"private-id","scope":"resource.invoke chatgpt.tokens.use.direct","expires_at":0});
+        store
+            .connection
+            .execute(
+                "INSERT INTO providers VALUES (?1,?2,?3)",
+                params![
+                    config.provider_id,
+                    serde_json::to_string(&config).unwrap(),
+                    serde_json::to_vec(&record).unwrap()
+                ],
+            )
+            .unwrap();
+        let other = DeviceProviderStore::open(&directory).unwrap();
+        let result = store.resolve_chatgpt_connection(&config.provider_id, |credentials| {
+            let mut replacement = record.clone();
+            replacement["subject"] = serde_json::json!("new-subject");
+            replacement["access_token"] = serde_json::json!("new-authorization");
+            replacement["expires_at"] = serde_json::json!(u64::MAX);
+            other
+                .connection
+                .execute(
+                    "UPDATE providers SET secret=?1 WHERE provider_id=?2",
+                    params![
+                        serde_json::to_vec(&replacement).unwrap(),
+                        config.provider_id
+                    ],
+                )
+                .unwrap();
+            let mut rotated = record;
+            rotated["expires_at"] = serde_json::json!(u64::MAX);
+            rotated["access_token"] = serde_json::json!("stale-rotation");
+            *credentials = serde_json::from_value(rotated).unwrap();
+            Ok(())
+        });
+        assert!(result.is_err());
+        assert_eq!(
+            store.resolve(&config.provider_id).unwrap().1.expose(),
+            b"new-authorization"
+        );
+        drop(other);
+        drop(store);
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

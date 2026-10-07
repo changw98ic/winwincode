@@ -73,21 +73,31 @@ impl Credentials {
             return Err(DeviceProviderError);
         }
         let agent = agent();
-        let response = token_request(
-            &agent,
-            &[
-                ("grant_type", "refresh_token"),
-                ("client_id", &self.client_id),
-                ("refresh_token", &self.refresh_token),
-                ("resource", RESOURCE),
-            ],
-        )?;
-        let keys = if response.id_token.is_some() {
-            Some(load_jwks(&agent)?)
-        } else {
-            None
-        };
-        self.accept_refresh(&response, keys.as_ref())
+        self.refresh_with(
+            || load_jwks(&agent),
+            |client_id, refresh_token| {
+                token_request(
+                    &agent,
+                    &[
+                        ("grant_type", "refresh_token"),
+                        ("client_id", client_id),
+                        ("refresh_token", refresh_token),
+                        ("resource", RESOURCE),
+                    ],
+                )
+            },
+        )
+    }
+
+    fn refresh_with(
+        &mut self,
+        load_keys: impl FnOnce() -> Result<JwkSet, DeviceProviderError>,
+        exchange: impl FnOnce(&str, &str) -> Result<TokenResponse, DeviceProviderError>,
+    ) -> Result<(), DeviceProviderError> {
+        // Discover identity keys before sending a grant that can rotate the refresh token.
+        let keys = load_keys()?;
+        let response = exchange(&self.client_id, &self.refresh_token)?;
+        self.accept_refresh(&response, Some(&keys))
     }
 
     fn accept_refresh(
@@ -791,6 +801,30 @@ z3AxPR+IWK+k7GyAWgO6vtXmUm6is+DCthbCX8goI8kqDB8VUO0=
             let response = signed_response(&changed);
             assert!(credentials(&response, "oaiapp_test", "pending-nonce", &keys, None).is_err());
         }
+    }
+
+    #[test]
+    fn unavailable_identity_keys_do_not_consume_a_rotating_refresh_token() {
+        let keys: JwkSet = serde_json::from_str(TEST_JWKS).unwrap();
+        let response = signed_response(&claims());
+        let mut record =
+            credentials(&response, "oaiapp_test", "pending-nonce", &keys, None).unwrap();
+        let consumed = std::cell::Cell::new(false);
+        assert!(
+            record
+                .refresh_with(
+                    || Err(DeviceProviderError),
+                    |_, _| {
+                        consumed.set(true);
+                        Ok(signed_response(&claims()))
+                    }
+                )
+                .is_err()
+        );
+        assert!(
+            !consumed.get(),
+            "key discovery must succeed before the rotating grant is sent"
+        );
     }
 
     #[test]

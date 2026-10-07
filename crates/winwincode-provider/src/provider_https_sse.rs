@@ -739,6 +739,8 @@ impl HttpsSseProviderAdapter {
                     if matches!(
                         self.shared.config.protocol,
                         HttpsSseProviderProtocol::OpenAiChatCompletions(_)
+                            | HttpsSseProviderProtocol::CodexChatgpt
+                            | HttpsSseProviderProtocol::ChatgptPlan
                     ) && error.kind == HttpsSseProviderErrorKind::Transport
                         && !cancelled
                         && !self.drain_interrupted(receipt)?
@@ -857,9 +859,14 @@ impl HttpsSseProviderAdapter {
                     self.shared.config.max_events,
                 )
             }
-            HttpsSseProviderProtocol::Canonical
-            | HttpsSseProviderProtocol::CodexChatgpt
-            | HttpsSseProviderProtocol::ChatgptPlan => None,
+            HttpsSseProviderProtocol::CodexChatgpt | HttpsSseProviderProtocol::ChatgptPlan => {
+                crate::provider_codex::observed_receipt(
+                    bytes,
+                    self.shared.config.max_event_bytes,
+                    self.shared.config.max_events,
+                )
+            }
+            HttpsSseProviderProtocol::Canonical => None,
         };
         observed.filter(|(id, _)| {
             receipt
@@ -3143,69 +3150,83 @@ mod tests {
     fn codex_missing_mime_preserves_account_headers_and_unwraps_request() {
         use winwincode_api::generated::ModelRoute;
         use winwincode_domain::CredentialReferenceId;
-        let fixture = TlsFixture::start(vec![TestResponse {
-            status: "200 OK",
-            content_type: "",
-            body: concat!(
-                "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-one\"}}\n\n",
-                "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"message\",\"id\":\"msg-one\",\"role\":\"assistant\",\"content\":[]}}\n\n",
-                "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"id\":\"msg-one\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"OK\"}],\"phase\":\"final_answer\"}}\n\n",
-                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-one\",\"usage\":{\"input_tokens\":2,\"output_tokens\":1}}}\n\n"
-            ),
-            declared_length: None,
-            delay: Duration::ZERO,
-        }]);
-        let mut settings = config(&fixture);
-        settings.endpoint = crate::codex_login::CODEX_ENDPOINT.into();
-        let mut settings = settings
-            .with_codex_chatgpt("account-fixture".into())
-            .unwrap();
-        // Only this private TLS test substitutes a local endpoint after validating production settings.
-        settings.endpoint = fixture.endpoint.clone();
-        let adapter = HttpsSseProviderAdapter::try_new(settings).unwrap();
-        let exchange = ModelExchangeId("mdl_00000000000000000000000001".into());
-        let request_id = RequestId("req_00000000000000000000000001".into());
-        let mut request = invocation(&exchange, &request_id);
-        request.payload=br#"{"request":{"model":"fixture-model","instructions":"Reply OK","input":[],"stream":true,"store":false}}"#;
-        adapter.open_https(request, SECRET).unwrap();
-        let mut leak_gate = crate::CredentialLeakGate::new();
-        leak_gate.track_secret(&ResolvedSecret::from_bytes(SECRET.to_vec()).unwrap());
-        let adapter_request_id = request.adapter_request_id.to_owned();
-        let receipt = ProviderGatewayOpenReceipt {
-            model_exchange_id: exchange,
-            request_id,
-            route: ModelRoute {
-                provider_id: "provider-https-fixture".into(),
-                model_id: "fixture-model".into(),
-                credential_reference_id: CredentialReferenceId(
-                    "crd_00000000000000000000000001".into(),
+        for plan in [false, true] {
+            let fixture = TlsFixture::start(vec![TestResponse {
+                status: "200 OK",
+                content_type: "",
+                body: concat!(
+                    "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-one\"}}\n\n",
+                    "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"message\",\"id\":\"msg-one\",\"role\":\"assistant\",\"content\":[]}}\n\n",
+                    "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"id\":\"msg-one\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"OK\"}],\"phase\":\"final_answer\"}}\n\n",
+                    "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-one\",\"usage\":{\"input_tokens\":2,\"output_tokens\":1}}}\n\n"
                 ),
-            },
-            adapter_request_id,
-            idempotent_replay: false,
-            stream_leak_gate: leak_gate,
-        };
-        assert_eq!(
-            adapter
-                .drain_canonical(&receipt)
-                .unwrap()
-                .terminal
-                .outcome(),
-            crate::ProviderGatewayTerminalOutcome::Succeeded
-        );
-        let requests = fixture.finish();
-        assert!(contains_ascii_case_insensitive(
-            &requests[0],
-            b"ChatGPT-Account-Id: account-fixture"
-        ));
-        assert!(contains_ascii_case_insensitive(
-            &requests[0],
-            b"Authorization: Bearer provider-https-sse-secret-fixture"
-        ));
-        let start = find_bytes(&requests[0], b"\r\n\r\n").unwrap() + 4;
-        let body: serde_json::Value = serde_json::from_slice(&requests[0][start..]).unwrap();
-        assert_eq!(body["model"], "fixture-model");
-        assert!(body.get("request").is_none());
+                declared_length: Some(100_000),
+                delay: Duration::ZERO,
+            }]);
+            let mut settings = config(&fixture);
+            settings.endpoint = if plan {
+                crate::chatgpt_oauth::ENDPOINT
+            } else {
+                crate::codex_login::CODEX_ENDPOINT
+            }
+            .into();
+            let mut settings = if plan {
+                settings.with_chatgpt_plan().unwrap()
+            } else {
+                settings
+                    .with_codex_chatgpt("account-fixture".into())
+                    .unwrap()
+            };
+            // Only this private TLS test substitutes a local endpoint after validating production settings.
+            settings.endpoint = fixture.endpoint.clone();
+            let adapter = HttpsSseProviderAdapter::try_new(settings).unwrap();
+            let exchange = ModelExchangeId("mdl_00000000000000000000000001".into());
+            let request_id = RequestId("req_00000000000000000000000001".into());
+            let mut request = invocation(&exchange, &request_id);
+            request.payload=br#"{"request":{"model":"fixture-model","instructions":"Reply OK","input":[],"stream":true,"store":false}}"#;
+            adapter.open_https(request, SECRET).unwrap();
+            let mut leak_gate = crate::CredentialLeakGate::new();
+            leak_gate.track_secret(&ResolvedSecret::from_bytes(SECRET.to_vec()).unwrap());
+            let adapter_request_id = request.adapter_request_id.to_owned();
+            let receipt = ProviderGatewayOpenReceipt {
+                model_exchange_id: exchange,
+                request_id,
+                route: ModelRoute {
+                    provider_id: "provider-https-fixture".into(),
+                    model_id: "fixture-model".into(),
+                    credential_reference_id: CredentialReferenceId(
+                        "crd_00000000000000000000000001".into(),
+                    ),
+                },
+                adapter_request_id,
+                idempotent_replay: false,
+                stream_leak_gate: leak_gate,
+            };
+            assert_eq!(
+                adapter
+                    .drain_canonical(&receipt)
+                    .unwrap()
+                    .terminal
+                    .outcome(),
+                crate::ProviderGatewayTerminalOutcome::Succeeded
+            );
+            let requests = fixture.finish();
+            assert_eq!(
+                contains_ascii_case_insensitive(
+                    &requests[0],
+                    b"ChatGPT-Account-Id: account-fixture"
+                ),
+                !plan
+            );
+            assert!(contains_ascii_case_insensitive(
+                &requests[0],
+                b"Authorization: Bearer provider-https-sse-secret-fixture"
+            ));
+            let start = find_bytes(&requests[0], b"\r\n\r\n").unwrap() + 4;
+            let body: serde_json::Value = serde_json::from_slice(&requests[0][start..]).unwrap();
+            assert_eq!(body["model"], "fixture-model");
+            assert!(body.get("request").is_none());
+        }
     }
 
     #[test]
