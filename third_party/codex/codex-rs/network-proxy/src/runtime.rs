@@ -1219,7 +1219,11 @@ mod tests {
 
     #[tokio::test]
     async fn host_blocked_requires_allowlist_match() {
-        let state = network_proxy_state_for_policy(network_settings(&["example.com"], &[]));
+        let state = network_proxy_state_for_policy({
+            let mut config = network_settings(&["example.com"], &[]);
+            config.allow_local_binding = true;
+            config
+        });
 
         assert_eq!(
             state
@@ -1262,7 +1266,11 @@ mod tests {
 
     #[tokio::test]
     async fn add_allowed_domain_removes_matching_deny_entry() {
-        let state = network_proxy_state_for_policy(network_settings(&[], &["example.com"]));
+        let state = network_proxy_state_for_policy({
+            let mut config = network_settings(&[], &["example.com"]);
+            config.allow_local_binding = true;
+            config
+        });
 
         state.add_allowed_domain("ExAmPlE.CoM").await.unwrap();
 
@@ -1483,7 +1491,11 @@ mod tests {
 
     #[tokio::test]
     async fn host_blocked_subdomain_wildcards_exclude_apex() {
-        let state = network_proxy_state_for_policy(network_settings(&["*.openai.com"], &[]));
+        let state = network_proxy_state_for_policy({
+            let mut config = network_settings(&["*.openai.com"], &[]);
+            config.allow_local_binding = true;
+            config
+        });
 
         assert_eq!(
             state
@@ -1503,17 +1515,11 @@ mod tests {
         let state = network_proxy_state_for_policy(network_settings(&["*"], &["evil.example"]));
 
         assert_eq!(
-            state
-                .host_blocked("example.com", /*port*/ 80)
-                .await
-                .unwrap(),
+            state.host_blocked("8.8.8.8", /*port*/ 80).await.unwrap(),
             HostBlockDecision::Allowed
         );
         assert_eq!(
-            state
-                .host_blocked("api.openai.com", /*port*/ 443)
-                .await
-                .unwrap(),
+            state.host_blocked("1.1.1.1", /*port*/ 443).await.unwrap(),
             HostBlockDecision::Allowed
         );
         assert_eq!(

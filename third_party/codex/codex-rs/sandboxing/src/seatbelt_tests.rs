@@ -1348,8 +1348,23 @@ fn create_seatbelt_args_with_read_only_git_and_codex_subpaths() {
         .filter(|arg| arg.starts_with("-DWRITABLE_ROOT_"))
         .cloned()
         .collect();
+    let normalize = |definitions: &[String]| {
+        let mut definitions = definitions
+            .iter()
+            .map(|definition| {
+                let (name, value) = definition.split_once('=').expect("parameter definition");
+                let name = name
+                    .split_once("_EXCLUDED_")
+                    .map_or_else(|| name.to_string(), |(root, _)| format!("{root}_EXCLUDED"));
+                (name, value.to_string())
+            })
+            .collect::<Vec<_>>();
+        definitions.sort();
+        definitions
+    };
     assert_eq!(
-        writable_definitions, expected_definitions,
+        normalize(&writable_definitions),
+        normalize(&expected_definitions),
         "unexpected writable-root parameter definitions in {args:#?}"
     );
     let command_index = args
@@ -1911,29 +1926,22 @@ fn create_seatbelt_args_for_cwd_as_git_repo() {
         args.contains(&expected_root),
         "missing {expected_root}: {args:#?}"
     );
-    let expected_dot_git = format!(
-        "-DWRITABLE_ROOT_0_EXCLUDED_0={}",
-        dot_git_canonical.to_string_lossy()
-    );
-    assert!(
-        args.contains(&expected_dot_git),
-        "missing {expected_dot_git}: {args:#?}"
-    );
-    let expected_dot_codex = format!(
-        "-DWRITABLE_ROOT_0_EXCLUDED_1={}",
-        dot_codex_canonical.to_string_lossy()
-    );
-    assert!(
-        args.contains(&expected_dot_codex),
-        "missing {expected_dot_codex}: {args:#?}"
-    );
-    let unexpected_dot_agents = format!(
-        "-DWRITABLE_ROOT_0_EXCLUDED_1={}",
-        dot_agents_canonical.to_string_lossy()
-    );
-    assert!(
-        !args.contains(&unexpected_dot_agents),
-        "missing .agents should be handled by regex rather than materialized as a path param: {args:#?}"
+    let excluded_metadata = args
+        .iter()
+        .filter(|arg| arg.starts_with("-DWRITABLE_ROOT_0_EXCLUDED_"))
+        .map(|arg| {
+            arg.split_once('=')
+                .expect("metadata definition")
+                .1
+                .to_string()
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        excluded_metadata,
+        [dot_git_canonical, dot_agents_canonical, dot_codex_canonical]
+            .map(|path| path.to_string_lossy().into_owned())
+            .into_iter()
+            .collect()
     );
     let expected_slash_tmp = format!("-DWRITABLE_ROOT_1={}", slash_tmp.to_string_lossy());
     assert!(

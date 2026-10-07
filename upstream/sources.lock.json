@@ -1024,6 +1024,56 @@
         "codex-rs/state/src/runtime/tool_runtime.rs",
         "codex-rs/state/src/runtime/tool_runtime_tests.rs"
       ]
+    },
+    {
+      "id": "codex-tool-receipts-surface-fixtures",
+      "file": "upstream/patches/codex/0068-tool-receipts-surface-fixtures.patch",
+      "planned": false,
+      "patchSha256": "6b2ea3f77b52844b838f31eeedb8ef214ed38d10ac5c9a60e97cfd61fcc6db21",
+      "targets": [
+        "codex-rs/app-server/tests/suite/v2/mcp_server_elicitation.rs",
+        "codex-rs/core/tests/common/responses.rs",
+        "codex-rs/core/tests/common/test_codex_exec.rs",
+        "codex-rs/core/tests/suite/agent_execution.rs",
+        "codex-rs/core/tests/suite/apply_patch_cli.rs",
+        "codex-rs/core/tests/suite/codex_delegate.rs",
+        "codex-rs/core/tests/suite/mcp_tool_exposure.rs",
+        "codex-rs/core/tests/suite/multi_agent_resume.rs",
+        "codex-rs/core/tests/suite/send_user_message_async.rs",
+        "codex-rs/core/tests/suite/skills_extension.rs",
+        "codex-rs/core/tests/suite/subagent_notifications.rs",
+        "codex-rs/core/tests/suite/unified_exec_process_events.rs",
+        "codex-rs/exec/tests/suite/resume.rs",
+        "codex-rs/mcp-server/tests/common/mcp_process.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-receipts-portable-fixtures",
+      "file": "upstream/patches/codex/0069-tool-receipts-portable-fixtures.patch",
+      "planned": false,
+      "patchSha256": "1f8d84080c810be4581d99b20c95c6be9fb15a1ff9d36b0f28827c7e3030bb92",
+      "targets": [
+        "codex-rs/app-server/tests/suite/v2/attestation.rs",
+        "codex-rs/ext/skills/src/host_service_tests.rs",
+        "codex-rs/network-proxy/src/http_proxy.rs",
+        "codex-rs/network-proxy/src/mitm_tests.rs",
+        "codex-rs/network-proxy/src/network_policy.rs",
+        "codex-rs/network-proxy/src/runtime.rs",
+        "codex-rs/network-proxy/src/socks5.rs",
+        "codex-rs/protocol/src/permission_profile_intersection_tests.rs",
+        "codex-rs/rmcp-client/src/oauth_http_client_security_tests.rs",
+        "codex-rs/sandboxing/src/seatbelt_tests.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-receipts-stream-dispatch",
+      "file": "upstream/patches/codex/0070-tool-receipts-stream-dispatch.patch",
+      "planned": false,
+      "patchSha256": "a27ea92177fb2b5779b02077b6868d1276315a16bf6853e9bb41b7f9342d6735",
+      "targets": [
+        "codex-rs/core/src/tools/parallel.rs",
+        "codex-rs/core/tests/suite/tool_parallelism.rs"
+      ]
     }
   ],
   "licenseObligations": {

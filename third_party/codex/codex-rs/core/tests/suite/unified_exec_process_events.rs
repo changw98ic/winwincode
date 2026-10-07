@@ -171,6 +171,7 @@ async fn serve_exec_with_pushed_events(
     );
     let mut websocket = accept_initialized_exec_server(listener).await;
     send_environment_info(&mut websocket, scenario).await;
+    let mut denied_patch_write = None;
 
     let process_start = loop {
         let request = read_exec_server_json(&mut websocket).await;
@@ -243,10 +244,28 @@ async fn serve_exec_with_pushed_events(
                     }),
                 )
                 .await;
+                denied_patch_write = Some(request);
+            }
+            Some("fs/remove")
+                if matches!(
+                    scenario,
+                    PushedExecScenario::SandboxedDirectPatchDenied
+                        | PushedExecScenario::SandboxedDirectPatchRetry
+                ) =>
+            {
+                let denied = denied_patch_write
+                    .as_ref()
+                    .expect("rollback follows a denied patch write");
+                assert_eq!(request["params"]["path"], denied["params"]["path"]);
+                assert_eq!(request["params"]["sandbox"], denied["params"]["sandbox"]);
+                assert_eq!(request["params"]["recursive"], false);
+                assert_eq!(request["params"]["force"], true);
+                send_exec_server_json(&mut websocket, json!({ "id": request["id"], "result": {} }))
+                    .await;
                 if matches!(scenario, PushedExecScenario::SandboxedDirectPatchDenied) {
                     return PushedExecServerResult {
                         process_read_requests: 0,
-                        process_start: request,
+                        process_start: denied_patch_write.take().expect("denied patch write"),
                     };
                 }
             }

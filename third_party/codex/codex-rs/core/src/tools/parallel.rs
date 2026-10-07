@@ -98,11 +98,20 @@ impl ToolCallRuntime {
         call: ToolCall,
         cancellation_token: CancellationToken,
     ) -> BoxFuture<'static, Result<ToolCallCompletion, CodexErr>> {
+        let error_call = call.clone();
+        let source = call.direct_source();
+        // Delegated change batches must validate the complete response before any side effect.
+        let future: BoxFuture<'static, Result<AnyToolResult, FunctionCallError>> =
+            if self.step_context.turn.submit_change_batch {
+                Box::pin(async move {
+                    self.handle_tool_call_with_source(call, source, cancellation_token)
+                        .await
+                })
+            } else {
+                Box::pin(self.handle_tool_call_with_source(call, source, cancellation_token))
+            };
         Box::pin(
             async move {
-                let error_call = call.clone();
-                let source = call.direct_source();
-                let future = self.handle_tool_call_with_source(call, source, cancellation_token);
                 match future.await {
                     Ok(mut response) => Ok(match response.continuation.take() {
                         Some(continuation) => ToolCallCompletion::Continuation {

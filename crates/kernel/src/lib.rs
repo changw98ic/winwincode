@@ -623,6 +623,9 @@ pub const CODEX_PATCH_SET: &[&str] = &[
     "upstream/patches/codex/0065-tool-receipts-workspace-v8-link.patch",
     "upstream/patches/codex/0066-tool-receipts-integration-feedback.patch",
     "upstream/patches/codex/0067-tool-receipts-concurrent-writes.patch",
+    "upstream/patches/codex/0068-tool-receipts-surface-fixtures.patch",
+    "upstream/patches/codex/0069-tool-receipts-portable-fixtures.patch",
+    "upstream/patches/codex/0070-tool-receipts-stream-dispatch.patch",
 ];
 
 const ROLE_SESSION_POLICY_SCHEMA_VERSION: u32 = 2;
@@ -2780,6 +2783,9 @@ mod tests {
                 "upstream/patches/codex/0065-tool-receipts-workspace-v8-link.patch",
                 "upstream/patches/codex/0066-tool-receipts-integration-feedback.patch",
                 "upstream/patches/codex/0067-tool-receipts-concurrent-writes.patch",
+                "upstream/patches/codex/0068-tool-receipts-surface-fixtures.patch",
+                "upstream/patches/codex/0069-tool-receipts-portable-fixtures.patch",
+                "upstream/patches/codex/0070-tool-receipts-stream-dispatch.patch",
             ]
         );
         assert_eq!(build.event_capacity, 16);

@@ -73,6 +73,9 @@
     "upstream/patches/codex/0064-tool-receipts-interrupted-history.patch",
     "upstream/patches/codex/0065-tool-receipts-workspace-v8-link.patch",
     "upstream/patches/codex/0066-tool-receipts-integration-feedback.patch",
-    "upstream/patches/codex/0067-tool-receipts-concurrent-writes.patch"
+    "upstream/patches/codex/0067-tool-receipts-concurrent-writes.patch",
+    "upstream/patches/codex/0068-tool-receipts-surface-fixtures.patch",
+    "upstream/patches/codex/0069-tool-receipts-portable-fixtures.patch",
+    "upstream/patches/codex/0070-tool-receipts-stream-dispatch.patch"
   ]
 }

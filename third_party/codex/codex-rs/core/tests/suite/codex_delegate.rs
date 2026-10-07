@@ -19,6 +19,7 @@ use core_test_support::apps_test_server::SEARCH_CALENDAR_NAMESPACE;
 use core_test_support::apps_test_server::recorded_apps_tool_calls;
 use core_test_support::apps_test_server::search_capable_apps_builder;
 use core_test_support::responses::ev_assistant_message;
+use core_test_support::responses::ev_code_mode_call;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_function_call;
 use core_test_support::responses::ev_function_call_with_namespace;
@@ -390,8 +391,9 @@ async fn guardian_delegate_rejects_escalation_requests_without_prompting() {
             ]),
             sse(vec![
                 ev_response_created("resp-guardian-command"),
-                ev_function_call(
+                ev_code_mode_call(
                     guardian_call_id,
+                    "functions",
                     "exec_command",
                     &guardian_command.to_string(),
                 ),
@@ -448,7 +450,7 @@ async fn guardian_delegate_rejects_escalation_requests_without_prompting() {
     assert_eq!(guardian_requests.len(), 2);
     let guardian_output = guardian_requests
         .iter()
-        .find_map(|request| request.function_call_output_text(guardian_call_id))
+        .find_map(|request| request.custom_tool_call_output_text(guardian_call_id))
         .expect("guardian continuation should include the rejected command output");
     assert!(
         guardian_output.contains("approval policy is Never"),

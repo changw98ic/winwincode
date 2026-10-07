@@ -14,8 +14,10 @@ const patches = sourceLock.patches.filter(({ id }) => id.startsWith('codex-code-
 // Measured from P1 commit a3533326af80d7aa0b19bfdf89ba54575dfe1b74.
 const originalHashes = {
   "codex-rs/Cargo.lock": "058e337a1f6ffd2abe4e520a70bcecbed51cfa4078e67f14dc8d5fed94953d65",
+  "codex-rs/app-server/tests/suite/v2/attestation.rs": "37b25c30950628129aa546f3929b80de5f2c7cfa72baaa7fe9d9864756bdddbd",
   "codex-rs/app-server/tests/suite/v2/code_mode_host.rs": "09cd91e4f8c47a1bd48a7641b2af9b5f0f7ce02a70d995418d3f1dbffb0960b4",
   "codex-rs/app-server/tests/suite/v2/imagegen_extension.rs": "e32b57ab4c9541b13903c0220debcb276029de9f0bcf5174a579a10c89156aa1",
+  "codex-rs/app-server/tests/suite/v2/mcp_server_elicitation.rs": "f1ecb33e88cf8a98c7baff175ce34c3e79aef8170f992204a4d0e3d228bf0df6",
   "codex-rs/app-server/tests/suite/v2/turn_start.rs": "3d946838f8e58b753a37330918cc183bc79d0791d4164182e5c9f982d5cb6034",
   "codex-rs/codex-mcp/src/binding.rs": "a6a65c0634c19136c774814154b66b6bc9c32f679d55bc36e7c8560fc55081e7",
   "codex-rs/codex-mcp/src/binding_clients.rs": "6902fce3a1e34922a6964b522a47de4041b8251eefad0504627017fb19f06856",
@@ -108,9 +110,31 @@ const originalHashes = {
   "codex-rs/core/src/unified_exec/mod_tests.rs": "ef28473cc6913822d4f308a92a55f2148dfe8c146af59bf671af4fee6e7f9ed7",
   "codex-rs/core/src/unified_exec/process_manager.rs": "a7016c5c321df20a89b85fced47d002fd695e0e88fa690d66fd2dcad9f0e38d6",
   "codex-rs/core/src/unified_exec/recovery.rs": null,
+  "codex-rs/core/tests/common/responses.rs": "037d19de69ab93731e324562ee873ac851716e2cb5af6ee753aba50b356d1ca5",
+  "codex-rs/core/tests/common/test_codex_exec.rs": "eedf3eb43f5568e3a5d14c4cb55d679d380564e3a6841ec0ba0925985e5c0f21",
+  "codex-rs/core/tests/suite/agent_execution.rs": "8aefcc225aa95169f527b7cac192b5f022a294448da7d3e0bc139157f4889a44",
+  "codex-rs/core/tests/suite/apply_patch_cli.rs": "4ad3ebc23190a6fdb82c0416b7b0ed812bc5433aa7534e22e8fa0dae1c1fa5ba",
   "codex-rs/core/tests/suite/code_mode.rs": "a27380946930f0404622987e3b23c5ce1478398714b48b5b35d63b79247dd69f",
+  "codex-rs/core/tests/suite/codex_delegate.rs": "0b6c86bbe4ac9492f2bf763cec4bace5a7c69eb5aabbeebd151685210b76ee1c",
   "codex-rs/core/tests/suite/mcp_tool_exposure.rs": "02d5aa372f94c8c87974b73381701d119d08f93224cde5debaa52bb842d9a100",
   "codex-rs/core/tests/suite/model_runtime_selectors.rs": "301d554123ef29ee252375e500a9a951d43955add31a21893e1c2e8b38d45ab4",
+  "codex-rs/core/tests/suite/multi_agent_resume.rs": "fa3e452b96ec3f02f79cafeac3c15e6329bf201a298767f7823f1a78380b92a3",
+  "codex-rs/core/tests/suite/send_user_message_async.rs": "f921f899c80f9047fdd377b03df69dc927b87a505393c93214a1cf005c087255",
+  "codex-rs/core/tests/suite/skills_extension.rs": "42a74c95549c12cf4f0918dff87b4a16f8dcc91de5e89d88eaff33523739eaac",
+  "codex-rs/core/tests/suite/subagent_notifications.rs": "4b9277bd89e66179c50ec2cab17d77b665480ce69055fd7a1b410649ed9a2a2d",
+  "codex-rs/core/tests/suite/tool_parallelism.rs": "ed2124f4b31699992d7c1686a303489883de46035dcf792a5caeabb6757831b6",
+  "codex-rs/core/tests/suite/unified_exec_process_events.rs": "8ec45892c4f06aa4a0cda6072c878d2762373a4a54dfaca4e306f0b8258ba170",
+  "codex-rs/exec/tests/suite/resume.rs": "1926675df9b8d90daf0e66c0a1401a732cdfcdf28ab9876d281fb69dcca454c0",
+  "codex-rs/ext/skills/src/host_service_tests.rs": "a71446d59f6475c4736bb4be23dcaadda024dc9ae1e8cd94f1ddcbbca0ce0958",
+  "codex-rs/mcp-server/tests/common/mcp_process.rs": "e437b90dac12fda18291c79d326c7e1a41974d7b208d65bf17b1c600ba143fe9",
+  "codex-rs/network-proxy/src/http_proxy.rs": "a9c82e4f8142a5072a1cf9e8969c580232f5e0fa1d2bf80f96f7f5203ddd1de6",
+  "codex-rs/network-proxy/src/mitm_tests.rs": "1bd9724bec234ef83ec0174c82afc102778b4f1a5224e982af83132f2202de9d",
+  "codex-rs/network-proxy/src/network_policy.rs": "87fdcffab34867f3e182ed67983fad3298dbfa3aa640e0f79906d8cd02a11dc2",
+  "codex-rs/network-proxy/src/runtime.rs": "3214446d85796e5d1c4a308ba53aab3bf7098fc18cd38cfc6f97a1cbb14d2e4f",
+  "codex-rs/network-proxy/src/socks5.rs": "b7580e5aef3ebbfe31fbc3d8901e7316a71b1a17dc44db8dcd4db25765b93c9d",
+  "codex-rs/protocol/src/permission_profile_intersection_tests.rs": "762245cece9db9ed4d9b0afe5b303442fc8fe1978af9f7d737b456a1d7b207e1",
+  "codex-rs/rmcp-client/src/oauth_http_client_security_tests.rs": "3acfe4d7429fbb667c93b5def4d7b779ff135cfe576ad159717cfacf3e2aed9d",
+  "codex-rs/sandboxing/src/seatbelt_tests.rs": "75cde093a6d326b079f9df03fec90188e3ce45e0a74a15cbb698e53f04cb7ad7",
   "codex-rs/state/migrations/0051_tool_execution_facts.sql": null,
   "codex-rs/state/migrations/0052_tool_runtime_relations.sql": null,
   "codex-rs/state/migrations/0053_tool_diagnostics.sql": null,
@@ -203,7 +227,7 @@ test('the tool runtime patch stack reproduces every changed dispatch file from t
 test('the tool runtime manifest and ordered patch digests describe the dispatch sources', () => {
   const applied = sourceLock.patches.filter(({ file, planned }) => file.startsWith('upstream/patches/codex/') && !planned)
   assert.deepEqual(manifest.patchesApplied, applied.map(({ file }) => file))
-  assert.equal(patches.length, 54)
+  assert.equal(patches.length, 57)
   assert.deepEqual([...new Set(patches.flatMap(({ targets }) => targets))].sort(), Object.keys(originalHashes).sort())
   for (const patch of patches) {
     assert.equal(digest(readFileSync(join(root, patch.file))), patch.patchSha256, patch.file)
