@@ -425,7 +425,9 @@ export async function recoverBenchmarkCell(cell, observed, resolveModel) {
 // Coordinate independent durable task runners. Their returned task outcomes
 // never stop admission; a thrown ledger/evidence error stops new admission and
 // waits for already running tasks to retain their results before propagating.
-export async function runBenchmarkSchedule(cells, { concurrency = 1, executeCell }) {
+export async function runBenchmarkSchedule(cells, {
+  concurrency = 1, executeCell, onAdmissionFailure = () => {},
+}) {
   validateBenchmarkConcurrency(concurrency)
   const results = Array(cells.length)
   let cursor = 0
@@ -434,7 +436,13 @@ export async function runBenchmarkSchedule(cells, { concurrency = 1, executeCell
     while (cursor < cells.length && !failure) {
       const index = cursor++
       try { results[index] = await executeCell(cells[index], index) }
-      catch (error) { failure ??= { error } }
+      catch (error) {
+        if (!failure) {
+          failure = { error }
+          try { await onAdmissionFailure({ error, cell: cells[index], index }) }
+          catch (observationError) { failure.error = observationError }
+        }
+      }
     }
   }
   await Promise.all(Array.from({ length: Math.min(concurrency, cells.length) }, worker))
@@ -475,6 +483,7 @@ export async function runBenchmarkPlan(plan, {
   executeCell,
   createToolGate = () => createToolRequestGuard(),
   onRecord = () => {},
+  onAdmissionFailure = () => {},
   ledgerPath,
   experimentBinding,
   recoverCell,
@@ -577,7 +586,7 @@ export async function runBenchmarkPlan(plan, {
       await onRecord(record, index)
       return record
     }
-    await runBenchmarkSchedule(plan.cells, { concurrency, executeCell: execute })
+    await runBenchmarkSchedule(plan.cells, { concurrency, executeCell: execute, onAdmissionFailure })
   } finally {
     store?.close()
   }

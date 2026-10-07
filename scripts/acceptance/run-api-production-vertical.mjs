@@ -782,6 +782,9 @@ function requestJson(url, {
       const chunks = []
       response.setEncoding('utf8')
       response.on('data', chunk => chunks.push(chunk))
+      response.on('error', reject)
+      response.on('aborted', () => reject(Object.assign(
+        new Error('HTTP response was interrupted'), { code: 'ECONNRESET' })))
       response.on('end', () => {
         const text = chunks.join('')
         let json = null
@@ -801,11 +804,45 @@ function requestJson(url, {
         })
       })
     })
-    request.on('timeout', () => request.destroy(new Error('HTTP request timed out')))
+    request.on('timeout', () => request.destroy(Object.assign(
+      new Error('HTTP request timed out'), { code: 'ETIMEDOUT' })))
     request.on('error', reject)
     if (serialized !== null) request.write(serialized)
     request.end()
   })
+}
+
+// Only read-only control requests use this recovery path. The same serialized
+// query identity is retained on every attempt; no product/model work is replayed.
+async function requestReadOnlyJson(url, options) {
+  const transientNetworkCodes = new Set([
+    'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE', 'EAI_AGAIN',
+    'ENETUNREACH', 'EHOSTUNREACH',
+  ])
+  for (let attempt = 1; ; attempt += 1) {
+    let response
+    try {
+      response = await requestJson(url, options)
+    } catch (error) {
+      if (attempt >= 4 || !transientNetworkCodes.has(error.code)) throw error
+      await new Promise(resolvePromise => setTimeout(resolvePromise,
+        5000 * 2 ** (attempt - 1) + randomBytes(1)[0]))
+      continue
+    }
+    if (attempt >= 4 || !(response.status === 408 || response.status === 429
+      || (response.status >= 500 && response.status <= 599))) return response
+    const retryAfter = response.headers['retry-after']
+    let delay = 5000 * 2 ** (attempt - 1)
+    if (typeof retryAfter === 'string') {
+      if (/^\s*\d+\s*$/u.test(retryAfter)) delay = Number(retryAfter) * 1000
+      else {
+        const instant = Date.parse(retryAfter)
+        if (Number.isFinite(instant)) delay = Math.max(0, instant - Date.now())
+      }
+    }
+    if (delay > 300_000) return response
+    await new Promise(resolvePromise => setTimeout(resolvePromise, delay + randomBytes(1)[0]))
+  }
 }
 
 class ApiClient {
@@ -898,7 +935,7 @@ class ApiClient {
 
   async query(query, parameters, pagination = page()) {
     const request = queryRequest(this.requestId(), query, parameters, this.actor ?? ACTOR, pagination)
-    const response = await requestJson(`${this.baseUrl}/api/v1/queries`, {
+    const response = await requestReadOnlyJson(`${this.baseUrl}/api/v1/queries`, {
       method: 'POST',
       origin: this.origin,
       ca: this.ca,

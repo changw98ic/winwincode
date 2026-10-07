@@ -1411,7 +1411,10 @@ test('parallel coordinator continues after a durable task stop and drains admitt
   let drained = false
   const pending = new Promise(resolve => { release = resolve })
   const storageFailure = Object.assign(new Error('evidence disk failure'), { code: 'BENCHMARK_EVIDENCE_FAILED' })
-  const failed = runBenchmarkSchedule(cells, { concurrency: 2, executeCell: async (_cell, index) => {
+  const admissionFailures = []
+  const failed = runBenchmarkSchedule(cells, { concurrency: 2,
+    onAdmissionFailure: failure => admissionFailures.push(failure),
+    executeCell: async (_cell, index) => {
     admitted += 1
     if (index === 0) throw storageFailure
     await pending
@@ -1422,9 +1425,40 @@ test('parallel coordinator continues after a durable task stop and drains admitt
   assert.equal(admitted, 2)
   assert.equal(drained, false)
   const rejected = assert.rejects(failed, error => error === storageFailure && drained)
+  const failureBeforeDrain = admissionFailures[0]
   release()
   await rejected
+  assert.equal(admissionFailures.length, 1)
+  assert.deepEqual(failureBeforeDrain, { error: storageFailure, cell: cells[0], index: 0 })
   assert.equal(admitted, 2)
+  let releaseAfterObserverFailure
+  let observerFailureDrained = false
+  const observerPending = new Promise(resolve => { releaseAfterObserverFailure = resolve })
+  const observerFailure = Object.assign(new Error('progress export failed'), { code: 'ENOSPC' })
+  let failureNotification
+  const planFailure = runBenchmarkPlan({ cells }, {
+    concurrency: 2,
+    executeCell: async (_cell, _runner) => {
+      if (!failureNotification) {
+        failureNotification = 'started'
+        throw storageFailure
+      }
+      await observerPending
+      observerFailureDrained = true
+      return { status: 'completed' }
+    },
+    onAdmissionFailure: failure => {
+      failureNotification = failure
+      throw observerFailure
+    },
+  })
+  const rejectedObserver = assert.rejects(planFailure,
+    error => error === observerFailure && observerFailureDrained)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(observerFailureDrained, false)
+  assert.equal(failureNotification.error, storageFailure, 'plan must forward the admission failure hook')
+  releaseAfterObserverFailure()
+  await rejectedObserver
   await assert.rejects(runBenchmarkSchedule(cells, { concurrency: 0, executeCell: () => assert.fail() }),
     { code: 'BENCHMARK_CONCURRENCY_INVALID' })
 })
@@ -2653,6 +2687,7 @@ test('unresolved Device inspection queries the original TLS endpoint without cha
   const cursor = { deliveryId: target.deliveryId, token: 'frozen-cursor' }
   const requests = []
   let wrongCursor = false
+  const interruptions = []
   const server = createServer({ key: await readFile(keyPath), cert: await readFile(certPath) }, async (request, response) => {
     const chunks = []
     for await (const chunk of request) chunks.push(chunk)
@@ -2665,6 +2700,24 @@ test('unresolved Device inspection queries the original TLS endpoint without cha
     }
     if (request.url !== '/api/v1/queries') {
       response.writeHead(405).end('{}')
+      return
+    }
+    if (body.query === 'delivery.get' && interruptions.length > 0) {
+      const interruption = interruptions.shift()
+      if (interruption === 'reset') {
+        request.socket.destroy()
+        return
+      }
+      if (interruption === 'truncated') {
+        response.writeHead(200, { 'Content-Length': 1000 })
+        response.write('{"schemaVersion":')
+        setImmediate(() => response.destroy())
+        return
+      }
+      response.setHeader('Retry-After', '0')
+      response.writeHead(interruption === 'unavailable' ? 503 : 403)
+      response.end(JSON.stringify({ error: { code: interruption === 'unavailable'
+        ? 'TRUSTED_FACTS_UNAVAILABLE' : 'PERMISSION_DENIED' } }))
       return
     }
     const results = {
@@ -2697,6 +2750,31 @@ test('unresolved Device inspection queries the original TLS endpoint without cha
     assert.deepEqual(requests.map(r => r.body?.query ?? r.path),
       ['/api/v1/auth/session', 'delivery.get', 'workrun.get', 'session.get'])
     assert.deepEqual(requests[2].body.parameters.atCursor, cursor)
+    interruptions.push('reset', 'unavailable')
+    const retryStart = requests.length
+    const recovered = await inspectUnresolvedDeviceTasks(path)
+    assert.equal(recovered[0].observation, 'queried', 'transient queries must retain the native task')
+    const attempts = requests.slice(retryStart).filter(row => row.body?.query === 'delivery.get')
+    assert.equal(attempts.length, 3)
+    assert.deepEqual(attempts[1], attempts[0], 'retry must preserve the exact query request')
+    assert.deepEqual(attempts[2], attempts[0])
+    interruptions.push('truncated')
+    const truncatedStart = requests.length
+    assert.equal((await inspectUnresolvedDeviceTasks(path))[0].observation, 'queried')
+    const truncatedAttempts = requests.slice(truncatedStart).filter(row => row.body?.query === 'delivery.get')
+    assert.equal(truncatedAttempts.length, 2)
+    assert.deepEqual(truncatedAttempts[1], truncatedAttempts[0])
+    interruptions.push('forbidden')
+    const forbiddenStart = requests.length
+    assert.equal((await inspectUnresolvedDeviceTasks(path))[0].observation, 'unavailable')
+    assert.equal(requests.slice(forbiddenStart).filter(row => row.body?.query === 'delivery.get').length, 1,
+      'permission errors must not retry')
+    interruptions.push(...Array(4).fill('unavailable'))
+    const exhaustedStart = requests.length
+    assert.equal((await inspectUnresolvedDeviceTasks(path))[0].observation, 'unavailable')
+    assert.equal(requests.slice(exhaustedStart).filter(row => row.body?.query === 'delivery.get').length, 4,
+      'query retries must stop after four attempts')
+    assert.equal(interruptions.length, 0)
     wrongCursor = true
     assert.equal((await inspectUnresolvedDeviceTasks(path))[0].observation, 'unavailable')
     const requestCount = requests.length
