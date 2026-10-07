@@ -43,6 +43,8 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { pathToFileURL } from 'node:url'
 
+import { prepareCompactKernelHelper } from './compact-kernel-helper.mjs'
+
 import { projectSourceDigest } from './product-build-contract.mjs'
 import {
   runtimeChildEnvironment,
@@ -2072,17 +2074,9 @@ export async function runApiProductionVertical({
       '--locked', '--offline',
     ], { cwd: root, encoding: 'utf8', env: buildEnvironment, stdio: 'inherit' })
     assert.equal(result.status, 0, 'winwincode-server production binary build failed')
-    // Prefer the freshly built compact helper; oversized development builds
-    // still require release compilation to satisfy the signed helper boundary.
-    const debugHelper = resolve(serverTargetDirectory(root), 'debug/winwincode-kernel-helper')
-    let builtHelper = debugHelper
-    if (lstatSync(debugHelper).size > 64 * 1024 * 1024) {
-      const helperResult = spawnSync('cargo', [
-        'build', '--release', '-p', 'winwincode-kernel-helper', '--locked', '--offline',
-      ], { cwd: root, encoding: 'utf8', env: buildEnvironment, stdio: 'inherit' })
-      assert.equal(helperResult.status, 0, 'winwincode-kernel-helper release build failed')
-      builtHelper = resolve(serverTargetDirectory(root), 'release/winwincode-kernel-helper')
-    }
+    const builtHelper = prepareCompactKernelHelper({
+      root, targetDirectory: serverTargetDirectory(root), environment: buildEnvironment, offline: true,
+    })
     const colocatedHelper = resolve(dirname(binary), 'winwincode-kernel-helper')
     if (builtHelper !== colocatedHelper) copyFileSync(builtHelper, colocatedHelper)
     chmodSync(colocatedHelper, 0o755)
