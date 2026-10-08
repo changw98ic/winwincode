@@ -318,13 +318,16 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
                 // Core even when that batch is backpressured. A separate
                 // pre-flush must not prevent cancellation facts from draining.
                 if let Err(error) = Box::pin(worker.poll_codex(now_instant()?)).await {
-                    // Retain each finite category once. Raw errors and frames can
-                    // carry private input; the category is sufficient to locate
-                    // a stalled drive without producing an unbounded retry log.
+                    // Retain each finite category once. A trace mismatch also
+                    // carries only numeric cursors and identity-match booleans;
+                    // never persist raw frames, identities or Provider content.
                     if !observed_drive_failures.contains(&error.code) {
                         observed_drive_failures.push(error.code);
                         if let Ok(mut log) = fs::OpenOptions::new().create(true).append(true).open(&intake_log) {
-                            let _ = writeln!(log, "component=worker stage=drive code={:?} ", error.code);
+                            let diagnostic = if error.code == winwincode_worker::WorkerErrorCode::RuntimeTraceMismatch {
+                                error.reason.as_str()
+                            } else { "" };
+                            let _ = writeln!(log, "component=worker stage=drive code={:?} {diagnostic}", error.code);
                         }
                     }
                     if env::var_os("WWC_WORKER_POLL_DEBUG").is_some() {

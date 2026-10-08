@@ -3840,7 +3840,14 @@ where
         {
             return Err(worker_error(
                 WorkerErrorCode::RuntimeTraceMismatch,
-                "runtime trace identity or sequence differs from the active Job",
+                &format!(
+                    "runtime trace differs from active Job: trace_next={} trace_observed={sequence} trace_lease={} trace_worker={} trace_session={} trace_thread={}",
+                    last_sequence.saturating_add(1),
+                    message.lease == active.lease,
+                    message.worker_session_id == active.worker_session_id,
+                    message.session_identity == active.session_identity,
+                    message.codex_thread_id == active.codex_thread_id,
+                ),
             ));
         }
         let delivery =

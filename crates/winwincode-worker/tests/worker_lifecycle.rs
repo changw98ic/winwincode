@@ -6347,6 +6347,81 @@ async fn failed_candidate_cancel_is_retryable_and_never_flushes_a_post_cancel_ar
 }
 
 #[tokio::test]
+async fn runtime_trace_mismatch_identifies_sequence_and_authority_without_payloads() {
+    let port = RecordingPort::default();
+    let messages = Rc::clone(&port.messages);
+    let codex = FakeCodex::with_threads([thread('A')]);
+    let pump = codex.clone();
+    let mut worker = test_worker(worker_config(1), port, codex);
+    register(&mut worker).await;
+    worker
+        .accept_control(
+            &ExecutionPortMessage::JobDispatchMessage(dispatch('A', delivery_scope('A'))),
+            now(),
+        )
+        .await
+        .unwrap();
+    let active = worker.active_jobs()[0].clone();
+    let trace = RuntimeEventMessage {
+        codex_thread_id: active.codex_thread_id.clone(),
+        event: ExecutionEventRecord {
+            category: ExecutionEventCategory::Activity,
+            event_id: ExecutionEventId(id("evt", 'I')),
+            occurred_at: now(),
+            payload: None,
+            sequence: ExecutionSequence(1),
+            summary: "PRIVATE_TRACE_CANARY".to_owned(),
+        },
+        kind: RuntimeEventMessageKind::RuntimeEvent,
+        lease: active.lease.clone(),
+        message_id: ExecutionMessageId(id("msg", 'I')),
+        schema_version: SchemaVersion::WinwincodeV1,
+        sent_at: now(),
+        session_identity: active.session_identity.clone(),
+        worker_session_id: active.worker_session_id.clone(),
+    };
+    pump.queue_poll(
+        &thread('A'),
+        Ok(CodexPoll::RuntimeTrace(Box::new(trace.clone()))),
+    );
+    worker.poll_codex_boxed().await.unwrap();
+    let delivered = messages.borrow().len();
+    let mut gap = trace.clone();
+    gap.event.sequence = ExecutionSequence(3);
+    gap.message_id = ExecutionMessageId(id("msg", 'G'));
+    gap.event.event_id = ExecutionEventId(id("evt", 'G'));
+    pump.queue_poll(&thread('A'), Ok(CodexPoll::RuntimeTrace(Box::new(gap))));
+    let error = worker.poll_codex_boxed().await.unwrap_err();
+    assert_eq!(error.code, WorkerErrorCode::RuntimeTraceMismatch);
+    assert_eq!(
+        error.reason,
+        "runtime trace differs from active Job: trace_next=2 trace_observed=3 trace_lease=true trace_worker=true trace_session=true trace_thread=true"
+    );
+    assert_eq!(
+        messages.borrow().len(),
+        delivered,
+        "a sequence gap remains rejected"
+    );
+    let mut foreign = trace;
+    foreign.event.sequence = ExecutionSequence(2);
+    foreign.worker_session_id.0 = id("wsn", 'Z');
+    pump.queue_poll(&thread('A'), Ok(CodexPoll::RuntimeTrace(Box::new(foreign))));
+    let error = worker.poll_codex_boxed().await.unwrap_err();
+    assert_eq!(error.code, WorkerErrorCode::RuntimeTraceMismatch);
+    assert_eq!(
+        error.reason,
+        "runtime trace differs from active Job: trace_next=2 trace_observed=2 trace_lease=true trace_worker=false trace_session=true trace_thread=true"
+    );
+    assert!(!error.reason.contains("PRIVATE_TRACE_CANARY"));
+    assert!(!error.reason.contains(&active.worker_session_id.0));
+    assert_eq!(
+        messages.borrow().len(),
+        delivered,
+        "foreign authority remains rejected"
+    );
+}
+
+#[tokio::test]
 async fn durable_codex_infrastructure_terminal_emits_stopped_before_one_outcome() {
     let port = RecordingPort::default();
     let messages = Rc::clone(&port.messages);

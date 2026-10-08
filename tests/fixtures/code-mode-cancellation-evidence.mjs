@@ -17,6 +17,19 @@ function readDatabase(path, read) {
   } finally { database?.close() }
 }
 
+function traceMismatch(line) {
+  const match = /\btrace_next=(\d{1,19}) trace_observed=(\d{1,19}) trace_lease=(true|false) trace_worker=(true|false) trace_session=(true|false) trace_thread=(true|false)\b/u.exec(line)
+  if (match === null) return undefined
+  const [, next, observed, lease, worker, session, thread] = match
+  const nextSequence = Number(next), observedSequence = Number(observed)
+  if (!Number.isSafeInteger(nextSequence) || !Number.isSafeInteger(observedSequence)) return undefined
+  return {
+    nextSequence, observedSequence, leaseMatches: lease === 'true',
+    workerSessionMatches: worker === 'true', sessionIdentityMatches: session === 'true',
+    codexThreadMatches: thread === 'true',
+  }
+}
+
 function intakeFailures(path) {
   if (!existsSync(path)) return { unavailable: 'missing' }
   const allowed = new Set([
@@ -49,7 +62,12 @@ function intakeFailures(path) {
       if (!match) continue
       const [, component, stage, code] = match, key = `${component}:${stage}:${code}`
       if (!allowed.has(key)) continue
-      totals.set(key, { component, stage, code, count: (totals.get(key)?.count ?? 0) + 1 })
+      const row = { component, stage, code, count: (totals.get(key)?.count ?? 0) + 1 }
+      if (key === 'worker:drive:RuntimeTraceMismatch') {
+        const mismatch = totals.get(key)?.traceMismatch ?? traceMismatch(line)
+        if (mismatch !== undefined) row.traceMismatch = mismatch
+      }
+      totals.set(key, row)
     }
     return [...totals.values()].slice(-16)
   } catch { return { unavailable: 'read-failed' } }

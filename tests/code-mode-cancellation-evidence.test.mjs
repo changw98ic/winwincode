@@ -17,7 +17,9 @@ test('cancellation failure evidence distinguishes Core closure from a stalled Wo
     'SECRET-CANARY'.repeat(6000),
     'component=model_bridge stage=resolve code=MODEL_EXCHANGE_UNKNOWN exchange=SECRET-CANARY detail=SECRET-CANARY',
     'component=worker stage=accept_chunk code=MODEL_CHUNK_ACCEPT_FAILED exchange=SECRET-CANARY',
-    'component=worker stage=drive code=RuntimeTraceMismatch detail=SECRET-CANARY',
+    'component=worker stage=drive code=RuntimeTraceMismatch trace_next=9007199254740993 trace_observed=106 trace_lease=true trace_worker=true trace_session=true trace_thread=true',
+    'component=worker stage=drive code=RuntimeTraceMismatch trace_next=104 trace_observed=106 trace_lease=SECRET-CANARY trace_worker=true trace_session=true trace_thread=true',
+    'component=worker stage=drive code=RuntimeTraceMismatch runtime trace differs from active Job: trace_next=104 trace_observed=106 trace_lease=true trace_worker=true trace_session=false trace_thread=true detail=SECRET-CANARY',
     'component=worker stage=drive code=SECRET_CANARY detail=SECRET-CANARY',
     'component=worker stage=accept_chunk code=MODEL_CHUNK_ACCEPT_FAILED exchange=SECRET-CANARY',
     'component=SECRET-CANARY stage=SECRET-CANARY code=SECRET-CANARY detail=SECRET-CANARY',
@@ -58,7 +60,7 @@ test('cancellation failure evidence distinguishes Core closure from a stalled Wo
   assert.deepEqual(evidence[0].intakeFailures, [
     { component: 'model_bridge', stage: 'resolve', code: 'MODEL_EXCHANGE_UNKNOWN', count: 1 },
     { component: 'worker', stage: 'accept_chunk', code: 'MODEL_CHUNK_ACCEPT_FAILED', count: 2 },
-    { component: 'worker', stage: 'drive', code: 'RuntimeTraceMismatch', count: 1 },
+    { component: 'worker', stage: 'drive', code: 'RuntimeTraceMismatch', count: 3, traceMismatch: { nextSequence: 104, observedSequence: 106, leaseMatches: true, workerSessionMatches: true, sessionIdentityMatches: false, codexThreadMatches: true } },
   ])
   assert.deepEqual(evidence[0].adapter.outbox.map(row => ({ ...row })), [
     { family: 'runtime', state: 'pending', count: 1 },
