@@ -10,6 +10,39 @@ use sqlx::Row;
 use sqlx::SqliteConnection;
 
 impl StateRuntime {
+    /// Core has already resolved the target within its AgentControl tree.
+    pub async fn record_tool_agent_wait(
+        &self,
+        fact: &crate::ToolAgentWaitFact,
+    ) -> anyhow::Result<()> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let crate::ToolWaitNode::Cell {
+            thread_id,
+            owner_id,
+            cell_id,
+            scope_id,
+        } = &fact.edge.source
+        else {
+            anyhow::bail!("agent completion wait requires an owned source cell");
+        };
+        anyhow::ensure!(
+            thread_id == &fact.thread_id && !fact.edge.targets.is_empty(),
+            "invalid completion wait scope"
+        );
+        let valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tool_requests r JOIN tool_attempts a ON a.request_sequence = r.sequence WHERE r.sequence = ? AND r.thread_id = ? AND r.logical_id = ? AND a.owner_id = ? AND r.request_json ->> '$.cell_id' = ? AND r.request_json ->> '$.scope_id' = ?)")
+            .bind(fact.edge.request_sequence).bind(thread_id).bind(&fact.edge.logical_id).bind(owner_id).bind(cell_id).bind(scope_id).fetch_one(&mut *tx).await?;
+        anyhow::ensure!(valid, "completion wait does not match its Core request");
+        append(
+            &mut tx,
+            fact.edge.request_sequence,
+            thread_id,
+            &ToolRuntimeFact::AgentWait(fact.clone()),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Waits for fact transactions whose COMMIT outlived a cancelled Rust future.
     /// Fact writers must be sealed and drained before acquiring this barrier.
     pub async fn flush_tool_runtime_events(&self) -> anyhow::Result<()> {

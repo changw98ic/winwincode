@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
 import { driveDelivery, runApiProductionVertical, waitForDeviceWorkerRegistered,
@@ -11,7 +11,7 @@ import { readDeviceExecutionReceipts } from '../scripts/export-device-candidate.
 import { runDeviceTaskVertical } from '../scripts/run-device-task-vertical.mjs'
 import { deviceTaskIdentities, withDeviceTaskRuntime } from '../scripts/device-task-runtime.mjs'
 import { benchmarkConfiguration } from '../scripts/run-real-task-benchmark.mjs'
-import { deterministicDeviceProvider, waitFor } from '../scripts/device-production-fixture.mjs'
+import { deterministicDeviceProvider, installDevicePublicSmoke, waitFor } from '../scripts/device-production-fixture.mjs'
 
 /**
  * Production vertical acceptance coverage is retained: Chat, StrongFlow,
@@ -80,6 +80,96 @@ test('standalone Server API drives Chat and StrongFlow through Device Worker pro
     messageBytesStable: true,
     status: 'done',
   })
+})
+
+test('public API cancellation closes an active native cell and preserves an independent Session', async t => {
+  const installed = process.env.WWC_CODE_MODE_ACCEPTANCE_BIN_DIR
+  const directory = mkdtempSync(join(tmpdir(), 'wwc-native-cancel-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const ids = { A: 'psn_01J00000000000000000000011', B: 'psn_01J00000000000000000000012' }
+  const nativeCellScripts = Object.fromEntries(Object.entries(ids).map(([tag, id]) => [
+    `native-cell-${tag}`, `// @exec: {"yield_time_ms":1000}\nconst tool=ALL_TOOLS.find(t=>t.name.endsWith(${JSON.stringify(`benchmark_public_smoke_${id}__public_smoke`)})); if(!tool) throw new Error('fixture missing'); text(await tools[tool.name]({tag:${JSON.stringify(tag)},phase:'hold'})); text(await tools[tool.name]({tag:${JSON.stringify(tag)},phase:'after'}));`,
+  ]))
+  const calls = () => existsSync(join(directory, 'calls.jsonl'))
+    ? readFileSync(join(directory, 'calls.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)) : []
+  const report = await runApiProductionVertical({
+    directory, build: installed === undefined && process.env.WWC_API_SKIP_BUILD !== '1', restart: false, repeat: false,
+    ...(installed === undefined ? {} : {
+      serverBinary: join(installed, 'winwincode-server'), workerBinary: join(installed, 'winwincode-worker'),
+      wwcBinary: join(installed, 'wwc'),
+    }),
+    deviceProvider: { ...deterministicDeviceProvider(), nativeCellScripts },
+    scenario: { async run({ api, modelRoute, devicePath }) {
+      const activities = async id => (await api.query('runtime.projection.get', {
+        kind: 'product-session', productSessionId: id,
+      })).result.sessions.find(session => session.productSessionId === id)?.activities ?? []
+      const approve = async id => {
+        const pending = (await api.query('approval.list', { states: ['pending'] })).result.items
+        for (const row of pending) {
+          const approval = (await api.query('approval.get', { approvalId: row.id })).result
+          if (approval.binding?.productSessionId !== id || !approval.decisionEnabled) continue
+          assert.equal(approval.category, 'mcp')
+          assert.deepEqual(approval.sanitizedDetail.targetSummaries, [`server:benchmark_public_smoke_${id}`])
+          const decided = await api.command('approval.decide', approval.revision, {
+            approvalId: approval.id, binding: approval.binding, decision: 'approve',
+            reason: 'Run this Session cancellation fixture.',
+          })
+          assert.equal(decided.outcome, 'completed')
+        }
+      }
+      const live = {}
+      for (const [tag, id] of Object.entries(ids)) {
+        await installDevicePublicSmoke({ api, publicClientId: devicePath.publicClientId,
+          id: `benchmark_public_smoke_${id}`, configuration: {
+            command: process.execPath, args: [resolve('tests/fixtures/code-mode-cancellation-mcp.mjs'), directory],
+          } })
+        const created = await api.command('session.create', 0, { productSessionId: id,
+          projectId: 'prj_01J00000000000000000000000', repositoryId: 'rep_01J00000000000000000000000',
+          title: `Native cell ${tag}`, modelRoute })
+        assert.equal(created.outcome, 'completed')
+        await devicePath.launchAnchor({ productSessionId: id })
+        const submitted = await api.command('chat.submit', 1, { productSessionId: id, message: `native-cell-${tag}` })
+        assert.equal(submitted.outcome, 'completed')
+        live[tag] = await waitFor(async () => {
+          await approve(id)
+          const rows = await activities(id)
+          const cellRow = rows.find(row => row.coreTool?.cell?.lifecycle === 'live')
+          const cell = cellRow?.coreTool.cell
+          const nested = rows.find(row => row.coreTool?.call?.toolName.endsWith('public_smoke')
+            && row.coreTool.call.execution === 'running')?.coreTool.call
+          return cell && nested && calls().some(call => call.tag === tag && call.phase === 'hold' && call.state === 'started')
+            ? { cell, nested, sourceThreadId: cellRow.coreTool.sourceThreadId } : false
+        }, `native cell ${tag} entered a real blocked MCP call`, 60_000)
+        assert.equal(live[tag].nested.cellId, live[tag].cell.cellId)
+        assert.ok(live[tag].nested.parentRequestSequence > 0)
+      }
+      assert.notEqual(live.A.sourceThreadId, live.B.sourceThreadId)
+      const current = (await api.query('session.get', { productSessionId: ids.A })).result
+      const cancelled = await api.command('session.cancel', current.revision, {
+        productSessionId: ids.A, reason: 'Cancel the observed active native cell',
+      })
+      assert.equal(cancelled.result.state, 'cancelled')
+      await waitFor(async () => (await activities(ids.A)).some(row => row.coreTool?.cell?.cellId === live.A.cell.cellId
+        && row.coreTool.cell.lifecycle === 'closed'), 'cancelled cell closed in the Core projection', 60_000)
+      assert.ok(!(await activities(ids.B)).some(row => row.coreTool?.cell?.cellId === live.B.cell.cellId
+        && row.coreTool.cell.lifecycle === 'closed'), 'Session B remains active while A closes')
+      writeFileSync(join(directory, 'A.release'), '')
+      writeFileSync(join(directory, 'B.release'), '')
+      await waitFor(async () => {
+        await approve(ids.B)
+        const messages = (await api.query('session.messages.list', { productSessionId: ids.B })).result.items
+        return messages.some(message => message.role === 'assistant' && message.state === 'completed'
+          && message.content.includes('native-cell-B completed'))
+      }, 'independent Session B completed after A cancellation', 60_000)
+      assert.equal(calls().filter(call => call.tag === 'A' && call.phase === 'after').length, 0)
+      assert.equal(calls().filter(call => call.tag === 'B' && call.phase === 'after' && call.state === 'completed').length, 1)
+      const settledA = (await api.query('session.get', { productSessionId: ids.A })).result
+      assert.equal(settledA.state, 'cancelled')
+      return { cancelled: ids.A, completed: ids.B, live, calls: calls() }
+    } },
+  })
+  assert.equal(report.flow.scenario.cancelled, ids.A)
+  assert.equal(report.flow.scenario.completed, ids.B)
 })
 
 

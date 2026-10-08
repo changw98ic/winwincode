@@ -169,6 +169,20 @@ fn project(
                 RuntimeActivityOutcome::Observed,
             )
         }
+        Some("agent_wait") => {
+            let waiter = number(&fact["edge"]["request_sequence"])?;
+            let status = match fact["state"].as_str() {
+                Some("settled") => RuntimeActivityStatus::Completed,
+                Some("waiting") => RuntimeActivityStatus::Unknown,
+                _ => return Err(invalid()),
+            };
+            (
+                format!("agent-wait:{waiter}"),
+                "Agent completion wait".into(),
+                status,
+                RuntimeActivityOutcome::Observed,
+            )
+        }
         _ => return Err(invalid()),
     };
     Ok(RuntimeActivityProjection {

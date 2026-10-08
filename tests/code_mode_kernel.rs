@@ -258,6 +258,7 @@ impl Fixture {
         let mcp = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/fixtures/code-mode-mcp.mjs");
         let mcp_arg = serde_json::to_string(&mcp.canonicalize().unwrap()).unwrap();
+        let oracle_arg = serde_json::to_string(&root.join("echo-calls.jsonl")).unwrap();
         let catalog: Value = serde_json::from_str(include_str!(
             "../third_party/codex/codex-rs/models-manager/models.json"
         ))
@@ -273,7 +274,7 @@ impl Fixture {
         )
         .unwrap();
         std::fs::write(root.join("home/config.toml"), format!(
-            "model_catalog_json = \"models.json\"\n[features]\ncode_mode_only = false\n[mcp_servers.fixture]\ncommand = \"node\"\nargs = [{mcp_arg}]\nrequired = true\n[mcp_servers.fixture_other]\ncommand = \"node\"\nargs = [{mcp_arg}]\nrequired = true\n"
+            "model_catalog_json = \"models.json\"\n[features]\ncode_mode_only = false\n[mcp_servers.fixture]\ncommand = \"node\"\nargs = [{mcp_arg}, {oracle_arg}]\nrequired = true\n[mcp_servers.fixture_other]\ncommand = \"node\"\nargs = [{mcp_arg}]\nrequired = true\n"
         )).unwrap();
         Self(root)
     }
@@ -1252,3 +1253,9 @@ fn republished_historical_diagnosis_cannot_substitute_for_current_scope_evidence
 
 #[path = "code_mode_sharing.rs"]
 mod sharing;
+
+#[path = "code_mode_recovery.rs"]
+mod recovery;
+
+#[path = "code_mode_agent_wait.rs"]
+mod agent_wait;

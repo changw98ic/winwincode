@@ -32,6 +32,8 @@ pub struct ToolDiagnostic {
     pub evidence_version: i64,
     pub progress_source_sequence: Option<i64>,
     pub evidence: Vec<ToolDiagnosticCall>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wait_graph: Vec<crate::ToolWaitEdge>,
     pub question: String,
 }
 

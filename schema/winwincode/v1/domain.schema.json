@@ -3163,7 +3163,8 @@
         "sharing",
         "waiter_cancellation",
         "input_binding",
-        "input_validation"
+        "input_validation",
+        "agent_wait"
       ]
     },
     "CoreToolExecutionState": {
@@ -3542,6 +3543,13 @@
               "type": "null"
             }
           ]
+        },
+        "waitGraph": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/CoreToolWaitEdgeProjection"
+          }
         }
       }
     },
@@ -3672,6 +3680,16 @@
               "type": "null"
             }
           ]
+        },
+        "agentWait": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/CoreToolAgentWaitProjection"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       }
     },
@@ -3679,6 +3697,127 @@
       "type": "integer",
       "minimum": 1,
       "maximum": 9007199254740991
+    },
+    "CoreToolWaitNodeKind": {
+      "type": "string",
+      "enum": [
+        "thread",
+        "cell"
+      ]
+    },
+    "CoreToolWaitNodeProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "threadId",
+        "ownerId",
+        "cellId",
+        "scopeId"
+      ],
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/CoreToolWaitNodeKind"
+        },
+        "threadId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "cellId": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scopeId": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 80
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "CoreToolWaitEdgeProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "treeId",
+        "requestSequence",
+        "logicalId",
+        "source",
+        "targets",
+        "targetCount",
+        "deadlineUnixMs"
+      ],
+      "properties": {
+        "treeId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "requestSequence": {
+          "$ref": "#/$defs/ExecutionSequence"
+        },
+        "logicalId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "source": {
+          "$ref": "#/$defs/CoreToolWaitNodeProjection"
+        },
+        "targets": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/CoreToolWaitNodeProjection"
+          }
+        },
+        "targetCount": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "deadlineUnixMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "CoreToolAgentWaitProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "edge",
+        "state"
+      ],
+      "properties": {
+        "edge": {
+          "$ref": "#/$defs/CoreToolWaitEdgeProjection"
+        },
+        "state": {
+          "$ref": "#/$defs/CoreToolWaitState"
+        }
+      }
     }
   }
 }

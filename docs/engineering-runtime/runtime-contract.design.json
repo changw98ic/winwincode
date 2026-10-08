@@ -93,7 +93,7 @@
   "currentCanonicalSources": [
     {
       "path": "schema/winwincode/v1/domain.schema.json",
-      "sha256": "f37c8c6fa289a492996a69365651ba4dc1e7def3b132bab3d5555abfb600744f",
+      "sha256": "132acd0624f11b3741ac6ff84f32b9838107ecaa0fe16d765f1a018c74c3ae57",
       "facts": [
         "WorkContract",
         "WorkItem",

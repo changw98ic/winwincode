@@ -26,7 +26,28 @@ export function diagnosticCoreActivity() {
         diagnosticId: 'diagnostic-1', evidenceVersion: 2, kind: 'wait_cycle', delivery: 'offered',
         question: '这些等待是否成环？<script>window.pwned=true</script>',
         evidence: [{ requestSequence: 8, logicalId: 'logical-8', toolName: 'public_smoke', parentCallId: 'outer-exec', cellId: 'cell-1' }],
+        waitGraph: [agentWaitEdge()],
       },
+    },
+  }
+}
+
+function agentWaitEdge() {
+  return {
+    treeId: 'tree-1', requestSequence: 8, logicalId: 'logical-8',
+    source: { kind: 'cell', threadId: 'thread', ownerId: 'owner-1', cellId: 'cell-1', scopeId: 'scope-1' },
+    targets: [{ kind: 'thread', threadId: 'agent-2', ownerId: 'owner-2', cellId: null, scopeId: null }],
+    targetCount: 1, deadlineUnixMs: 1893456000000,
+  }
+}
+
+export function agentWaitCoreActivity() {
+  const activity = sharedCoreActivity()
+  return {
+    ...activity, callId: 'agent-wait-8', status: 'unknown', command: 'Agent completion wait',
+    coreTool: {
+      ...activity.coreTool, call: null, sharing: null, kind: 'agent_wait',
+      agentWait: { edge: agentWaitEdge(), state: 'waiting' },
     },
   }
 }

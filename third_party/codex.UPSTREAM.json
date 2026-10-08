@@ -91,6 +91,10 @@
     "upstream/patches/codex/0082-tool-review-fixture-resource-lifetime.patch",
     "upstream/patches/codex/0083-tool-review-tool-fact-shutdown-regressions.patch",
     "upstream/patches/codex/0084-tool-review-tool-fact-shutdown-barrier.patch",
-    "upstream/patches/codex/0085-tool-review-app-client-timeout-phases.patch"
+    "upstream/patches/codex/0085-tool-review-app-client-timeout-phases.patch",
+    "upstream/patches/codex/0086-tool-review-completion-wait-state.patch",
+    "upstream/patches/codex/0087-tool-review-agent-completion-graph.patch",
+    "upstream/patches/codex/0088-tool-review-agent-completion-runtime.patch",
+    "upstream/patches/codex/0089-tool-review-shell-telemetry-outcomes.patch"
   ]
 }

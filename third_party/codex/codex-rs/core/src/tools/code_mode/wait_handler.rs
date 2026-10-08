@@ -102,6 +102,11 @@ impl CodeModeWaitHandler {
                         &exec.turn,
                         cell_id.as_str(),
                         &call_id,
+                        if args.terminate {
+                            0
+                        } else {
+                            args.yield_time_ms
+                        },
                     )
                     .await
                     {

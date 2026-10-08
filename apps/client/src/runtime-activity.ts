@@ -23,6 +23,14 @@ export function runtimeActivityPresentation(activity: RuntimeActivityProjection)
   if (call?.cellId) relations.push(`代码运行 ${call.cellId}`)
   if (meta?.cell) relations.push(`父请求 #${String(meta.cell.parentRequestSequence)}`)
   if (meta?.wait) relations.push(`等待代码运行 #${String(meta.wait.targetCellSequence)}`)
+  if (meta?.agentWait) {
+    const { edge, state } = meta.agentWait
+    relations.push(`代码运行 ${edge.source.cellId ?? edge.source.threadId}`)
+    for (const target of edge.targets) relations.push(`等待 Agent ${target.threadId}`)
+    if (edge.targetCount > edge.targets.length) relations.push(`另有 ${String(edge.targetCount - edge.targets.length)} 个等待目标`)
+    details.push(state === 'settled' ? '等待已结束' : '等待状态待核对')
+    details.push(`等待期限 ${waitDeadline(edge.deadlineUnixMs)}`)
+  }
   if (meta?.sharing) relations.push(`${meta.sharing.kind === 'reuse' ? '复用' : '合并等待'}请求 #${String(meta.sharing.sourceRequestSequence)}`)
   if (call?.execution) details.push({ running: '原执行已登记', completed: '执行已完成', uncertain: '执行结果待核对' }[call.execution])
   if (call?.disposition && call.disposition !== 'pending') details.push(call.disposition === 'accepted' ? '结果已接受' : '结果已拒绝')
@@ -42,8 +50,17 @@ export function runtimeActivityPresentation(activity: RuntimeActivityProjection)
     relations: Object.freeze(relations.map(redactPublicText)),
     details: Object.freeze(details),
     question: diagnosis?.question === null || diagnosis?.question === undefined ? null : redactPublicText(diagnosis.question),
-    evidence: Object.freeze(diagnosis?.evidence.map(reference => `${reference.toolName} · 调用 ${reference.logicalId}`) ?? []),
+    evidence: Object.freeze([
+      ...diagnosis?.evidence.map(reference => `${reference.toolName} · 调用 ${reference.logicalId}`) ?? [],
+      ...diagnosis?.waitGraph?.flatMap(edge => edge.targets.map(target =>
+        `${edge.source.kind === 'cell' ? `代码运行 ${edge.source.cellId ?? ''}` : `Agent ${edge.source.threadId}`} → ${target.kind === 'cell' ? `代码运行 ${target.cellId ?? ''}` : `Agent ${target.threadId}`} · 期限 ${waitDeadline(edge.deadlineUnixMs)}`)) ?? [],
+    ]),
   })
+}
+
+function waitDeadline(unixMs: number): string {
+  const date = new Date(unixMs)
+  return Number.isFinite(date.getTime()) ? date.toISOString() : '待核对'
 }
 
 export function renderRuntimeActivity(document: Document, activity: RuntimeActivityProjection): HTMLElement {

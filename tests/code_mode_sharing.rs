@@ -5,9 +5,9 @@ use winwincode_kernel::{
     ToolInputContext, ToolInputProof, ToolInputProofRequest, ToolReusePermission,
 };
 
-struct SharingGate {
-    workspace: PathBuf,
-    flip_on_freeze: std::sync::atomic::AtomicBool,
+pub(super) struct SharingGate {
+    pub(super) workspace: PathBuf,
+    pub(super) flip_on_freeze: std::sync::atomic::AtomicBool,
 }
 fn version(source: &str) -> Option<String> {
     match source {
@@ -158,10 +158,10 @@ fn native_progress_write_failure_preserves_accepted_tool_results() {
     });
 }
 #[derive(Debug)]
-struct DiagnosticOfferFaultModel {
-    script: ScriptedModel,
-    output_seen: Arc<tokio::sync::Notify>,
-    resume: Arc<tokio::sync::Notify>,
+pub(super) struct DiagnosticOfferFaultModel {
+    pub(super) script: ScriptedModel,
+    pub(super) output_seen: Arc<tokio::sync::Notify>,
+    pub(super) resume: Arc<tokio::sync::Notify>,
 }
 
 impl ModelPort for DiagnosticOfferFaultModel {
@@ -184,7 +184,7 @@ impl ModelPort for DiagnosticOfferFaultModel {
     }
 }
 
-fn diagnostic_payloads(outputs: &[Value]) -> Vec<Value> {
+pub(super) fn diagnostic_payloads(outputs: &[Value]) -> Vec<Value> {
     fn collect(value: &Value, diagnostics: &mut Vec<Value>) {
         match value {
             Value::String(text) => {

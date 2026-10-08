@@ -388,6 +388,7 @@ async fn restarted_wait_reports_historical_cell_owner_without_creating_a_wait_ed
         &second.turn,
         "historical-cell",
         &second.call_id,
+        1000,
     )
     .await
     .err()

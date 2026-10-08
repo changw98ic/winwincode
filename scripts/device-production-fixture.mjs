@@ -519,8 +519,14 @@ export function startDeterministicDeviceModelServer({
   privateKeyPath,
   chatContent = 'WinWinCode Device deterministic Provider completed the Chat workflow.',
   repeatToolMarker = null,
+  nativeCellScripts = {},
 }) {
   assert.ok(repeatToolMarker === null || (typeof repeatToolMarker === 'string' && repeatToolMarker.length > 0))
+  for (const [marker, source] of Object.entries(nativeCellScripts)) {
+    assert.match(marker, /^native-cell-[AB]$/u)
+    assert.equal(typeof source, 'string')
+    assert.ok(source.length <= 6000)
+  }
   const errors = []
   const requests = []
   const server = createHttpsServer({
@@ -539,6 +545,7 @@ export function startDeterministicDeviceModelServer({
         assert.ok(size <= 512 * 1024, 'Device Provider request exceeds fixture bound')
         const providerRequest = JSON.parse(bodyText)
         const repeatTool = repeatToolMarker !== null && bodyText.includes(repeatToolMarker)
+        const nativeCell = Object.keys(nativeCellScripts).find(marker => bodyText.includes(marker)) ?? null
         requests.push({
           path: request.url ?? '',
           verification: bodyText.includes(DETERMINISTIC_VERIFICATION_BEHAVIOR_MARKER),
@@ -570,11 +577,25 @@ export function startDeterministicDeviceModelServer({
         let stopReason = 'end_turn'
         let toolYieldMs = 1000
         let toolInput = null
+        let toolSource = null
         let selectedTool = executionTool
         let waitInput = null
 
         const observation = isExecutor ? executorObservation : verificationObservation
-        if ((isExecutor || isVerification) && observation.cellId !== null) {
+        if (nativeCell !== null) {
+          assert.deepEqual(providerRequest.tools.map(tool => tool.name).sort(), ['exec', 'wait'])
+          const native = observeToolProcess(providerRequest, nativeCell)
+          toolCallId = native.hasToolOutput ? native.nextCallId : nativeCell
+          if (native.cellId !== null) {
+            selectedTool = waitTool
+            waitInput = { cell_id: native.cellId, yield_time_ms: 1000 }
+          } else if (!native.hasToolOutput) {
+            toolSource = nativeCellScripts[nativeCell]
+          }
+          useTool = native.cellId !== null || !native.hasToolOutput
+          stopReason = useTool ? 'tool_use' : 'end_turn'
+          text = useTool ? '' : `${nativeCell} completed`
+        } else if ((isExecutor || isVerification) && observation.cellId !== null) {
           assert.ok(waitTool, 'running cell requires the Code Mode wait tool')
           selectedTool = waitTool
           useTool = true
@@ -652,7 +673,7 @@ export function startDeterministicDeviceModelServer({
               input: {},
             },
           }])
-          const input = waitInput ?? { input: deviceFixtureCodeModeCommand(toolInput ?? {
+          const input = waitInput ?? { input: toolSource ?? deviceFixtureCodeModeCommand(toolInput ?? {
             cmd: toolCommand, workdir: '.', yield_time_ms: toolYieldMs,
           }) }
           events.push(['content_block_delta', {
@@ -1334,6 +1355,7 @@ export async function establishDeviceOnlyExecutionPath({
           certificatePath,
           privateKeyPath,
           repeatToolMarker: deviceProvider.repeatToolMarker,
+          nativeCellScripts: deviceProvider.nativeCellScripts,
         }).listen()
       }
       providerApiKey = deviceSecret ?? `device-local-${randomBytes(24).toString('hex')}`

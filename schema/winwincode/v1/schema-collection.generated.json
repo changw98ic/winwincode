@@ -8608,6 +8608,22 @@
       ],
       "type": "object"
     },
+    "CoreToolAgentWaitProjection": {
+      "additionalProperties": false,
+      "properties": {
+        "edge": {
+          "$ref": "#/$defs/CoreToolWaitEdgeProjection"
+        },
+        "state": {
+          "$ref": "#/$defs/CoreToolWaitState"
+        }
+      },
+      "required": [
+        "edge",
+        "state"
+      ],
+      "type": "object"
+    },
     "CoreToolCallProjection": {
       "additionalProperties": false,
       "properties": {
@@ -8879,6 +8895,13 @@
               "type": "null"
             }
           ]
+        },
+        "waitGraph": {
+          "items": {
+            "$ref": "#/$defs/CoreToolWaitEdgeProjection"
+          },
+          "maxItems": 8,
+          "type": "array"
         }
       },
       "required": [
@@ -8911,7 +8934,8 @@
         "sharing",
         "waiter_cancellation",
         "input_binding",
-        "input_validation"
+        "input_validation",
+        "agent_wait"
       ],
       "type": "string"
     },
@@ -9022,6 +9046,16 @@
     "CoreToolRuntimeProjection": {
       "additionalProperties": false,
       "properties": {
+        "agentWait": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/CoreToolAgentWaitProjection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "call": {
           "oneOf": [
             {
@@ -9133,6 +9167,111 @@
         "sourceRequestSequence",
         "sourceAttemptId",
         "kind"
+      ],
+      "type": "object"
+    },
+    "CoreToolWaitEdgeProjection": {
+      "additionalProperties": false,
+      "properties": {
+        "deadlineUnixMs": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "logicalId": {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        },
+        "requestSequence": {
+          "$ref": "#/$defs/ExecutionSequence"
+        },
+        "source": {
+          "$ref": "#/$defs/CoreToolWaitNodeProjection"
+        },
+        "targetCount": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "targets": {
+          "items": {
+            "$ref": "#/$defs/CoreToolWaitNodeProjection"
+          },
+          "maxItems": 8,
+          "minItems": 1,
+          "type": "array"
+        },
+        "treeId": {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "treeId",
+        "requestSequence",
+        "logicalId",
+        "source",
+        "targets",
+        "targetCount",
+        "deadlineUnixMs"
+      ],
+      "type": "object"
+    },
+    "CoreToolWaitNodeKind": {
+      "enum": [
+        "thread",
+        "cell"
+      ],
+      "type": "string"
+    },
+    "CoreToolWaitNodeProjection": {
+      "additionalProperties": false,
+      "properties": {
+        "cellId": {
+          "oneOf": [
+            {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/CoreToolWaitNodeKind"
+        },
+        "ownerId": {
+          "maxLength": 80,
+          "minLength": 1,
+          "type": "string"
+        },
+        "scopeId": {
+          "oneOf": [
+            {
+              "maxLength": 80,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "threadId": {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "threadId",
+        "ownerId",
+        "cellId",
+        "scopeId"
       ],
       "type": "object"
     },
@@ -28634,7 +28773,7 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:aa3ed5d81770e6735fd26eed81b271af3a6f7efe220a0f2e6af421fd498241b1",
+  "x-source-digest": "sha256:52119f3f0011c4d459a0cb4f7b6a52d185e8e6b18786980203fe3bb10d40b923",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {

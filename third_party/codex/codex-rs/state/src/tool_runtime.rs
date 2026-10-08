@@ -43,12 +43,47 @@ pub struct ToolWaitFact {
     pub revision: i64,
 }
 
+/// A Core-resolved dependency. The owner identifies a live session incarnation.
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ToolWaitNode {
+    Thread {
+        thread_id: String,
+        owner_id: String,
+    },
+    Cell {
+        thread_id: String,
+        owner_id: String,
+        cell_id: String,
+        scope_id: String,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ToolWaitEdge {
+    pub tree_id: String,
+    pub request_sequence: i64,
+    pub logical_id: String,
+    pub source: ToolWaitNode,
+    pub targets: Vec<ToolWaitNode>,
+    pub deadline_unix_ms: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ToolAgentWaitFact {
+    pub schema_version: u32,
+    pub thread_id: String,
+    pub edge: ToolWaitEdge,
+    pub state: ToolWaitState,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", content = "fact", rename_all = "snake_case")]
 pub enum ToolRuntimeFact {
     Request(ToolExecutionFact),
     Cell(ToolCellFact),
     Wait(ToolWaitFact),
+    AgentWait(ToolAgentWaitFact),
     Reconciliation(ToolReconciliationFact),
     Diagnostic(crate::ToolDiagnosticFact),
     Progress(crate::ToolProgressFact),

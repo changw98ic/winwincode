@@ -1,0 +1,224 @@
+diff --git a/codex-rs/state/src/lib.rs b/codex-rs/state/src/lib.rs
+--- a/codex-rs/state/src/lib.rs
++++ b/codex-rs/state/src/lib.rs
+@@ -140,11 +140,14 @@
+ pub use tool_execution::ToolRequestResolution;
+ pub use tool_execution::ToolStoredResults;
+ 
++pub use tool_runtime::ToolAgentWaitFact;
+ pub use tool_runtime::ToolCellFact;
+ pub use tool_runtime::ToolCellLifecycle;
+ pub use tool_runtime::ToolRuntimeEvent;
+ pub use tool_runtime::ToolRuntimeFact;
++pub use tool_runtime::ToolWaitEdge;
+ pub use tool_runtime::ToolWaitFact;
++pub use tool_runtime::ToolWaitNode;
+ pub use tool_runtime::ToolWaitState;
+ 
+ pub use tool_runtime::ToolReconciliationFact;
+diff --git a/codex-rs/state/src/tool_runtime.rs b/codex-rs/state/src/tool_runtime.rs
+--- a/codex-rs/state/src/tool_runtime.rs
++++ b/codex-rs/state/src/tool_runtime.rs
+@@ -43,12 +43,47 @@
+     pub revision: i64,
+ }
+ 
++/// A Core-resolved dependency. The owner identifies a live session incarnation.
++#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
++#[serde(tag = "kind", rename_all = "snake_case")]
++pub enum ToolWaitNode {
++    Thread {
++        thread_id: String,
++        owner_id: String,
++    },
++    Cell {
++        thread_id: String,
++        owner_id: String,
++        cell_id: String,
++        scope_id: String,
++    },
++}
++
++#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
++pub struct ToolWaitEdge {
++    pub tree_id: String,
++    pub request_sequence: i64,
++    pub logical_id: String,
++    pub source: ToolWaitNode,
++    pub targets: Vec<ToolWaitNode>,
++    pub deadline_unix_ms: u64,
++}
++
++#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
++pub struct ToolAgentWaitFact {
++    pub schema_version: u32,
++    pub thread_id: String,
++    pub edge: ToolWaitEdge,
++    pub state: ToolWaitState,
++}
++
+ #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+ #[serde(tag = "kind", content = "fact", rename_all = "snake_case")]
+ pub enum ToolRuntimeFact {
+     Request(ToolExecutionFact),
+     Cell(ToolCellFact),
+     Wait(ToolWaitFact),
++    AgentWait(ToolAgentWaitFact),
+     Reconciliation(ToolReconciliationFact),
+     Diagnostic(crate::ToolDiagnosticFact),
+     Progress(crate::ToolProgressFact),
+diff --git a/codex-rs/state/src/tool_diagnostics.rs b/codex-rs/state/src/tool_diagnostics.rs
+--- a/codex-rs/state/src/tool_diagnostics.rs
++++ b/codex-rs/state/src/tool_diagnostics.rs
+@@ -32,6 +32,8 @@
+     pub evidence_version: i64,
+     pub progress_source_sequence: Option<i64>,
+     pub evidence: Vec<ToolDiagnosticCall>,
++    #[serde(default, skip_serializing_if = "Vec::is_empty")]
++    pub wait_graph: Vec<crate::ToolWaitEdge>,
+     pub question: String,
+ }
+ 
+diff --git a/codex-rs/state/src/runtime/tool_runtime.rs b/codex-rs/state/src/runtime/tool_runtime.rs
+--- a/codex-rs/state/src/runtime/tool_runtime.rs
++++ b/codex-rs/state/src/runtime/tool_runtime.rs
+@@ -10,6 +10,39 @@
+ use sqlx::SqliteConnection;
+ 
+ impl StateRuntime {
++    /// Core has already resolved the target within its AgentControl tree.
++    pub async fn record_tool_agent_wait(
++        &self,
++        fact: &crate::ToolAgentWaitFact,
++    ) -> anyhow::Result<()> {
++        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
++        let crate::ToolWaitNode::Cell {
++            thread_id,
++            owner_id,
++            cell_id,
++            scope_id,
++        } = &fact.edge.source
++        else {
++            anyhow::bail!("agent completion wait requires an owned source cell");
++        };
++        anyhow::ensure!(
++            thread_id == &fact.thread_id && !fact.edge.targets.is_empty(),
++            "invalid completion wait scope"
++        );
++        let valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tool_requests r JOIN tool_attempts a ON a.request_sequence = r.sequence WHERE r.sequence = ? AND r.thread_id = ? AND r.logical_id = ? AND a.owner_id = ? AND r.request_json ->> '$.cell_id' = ? AND r.request_json ->> '$.scope_id' = ?)")
++            .bind(fact.edge.request_sequence).bind(thread_id).bind(&fact.edge.logical_id).bind(owner_id).bind(cell_id).bind(scope_id).fetch_one(&mut *tx).await?;
++        anyhow::ensure!(valid, "completion wait does not match its Core request");
++        append(
++            &mut tx,
++            fact.edge.request_sequence,
++            thread_id,
++            &ToolRuntimeFact::AgentWait(fact.clone()),
++        )
++        .await?;
++        tx.commit().await?;
++        Ok(())
++    }
++
+     /// Waits for fact transactions whose COMMIT outlived a cancelled Rust future.
+     /// Fact writers must be sealed and drained before acquiring this barrier.
+     pub async fn flush_tool_runtime_events(&self) -> anyhow::Result<()> {
+diff --git a/codex-rs/state/src/runtime/tool_diagnostics_tests.rs b/codex-rs/state/src/runtime/tool_diagnostics_tests.rs
+--- a/codex-rs/state/src/runtime/tool_diagnostics_tests.rs
++++ b/codex-rs/state/src/runtime/tool_diagnostics_tests.rs
+@@ -55,6 +55,7 @@
+             parent_call_id: None,
+             cell_id: None,
+         }],
++        wait_graph: Vec::new(),
+         question: "What can advance the task?".into(),
+     };
+     store.enqueue_tool_diagnostic(&diagnostic).await.unwrap();
+@@ -173,6 +174,7 @@
+ const ORIGINAL_DIAGNOSTIC_OUTPUT: &str = "original output + diagnosis";
+ 
+ async fn diagnostic_offer_fixture(
++    wait_graph: Vec::new(),
+     question: String,
+ ) -> (
+     StateRuntime,
+diff --git a/codex-rs/core/src/context/tool_diagnostics.rs b/codex-rs/core/src/context/tool_diagnostics.rs
+--- a/codex-rs/core/src/context/tool_diagnostics.rs
++++ b/codex-rs/core/src/context/tool_diagnostics.rs
+@@ -28,12 +28,25 @@
+                     "operation_digest": bounded_reference(&call.operation_digest),
+                 })).collect::<Vec<_>>(),
+                 "question": bounded_text(&diagnostic.question, 256, 256),
++                "wait_graph": bounded_wait_graph(&diagnostic.wait_graph),
+             })).collect();
+         serde_json::json!({
+             "type": "model_behavior_diagnosis", "schema_version": 1,
+             "assessment": "possible", "diagnostics": diagnostics,
+             "next_step": "Assess the evidence, explain whether the waiting or repetition is justified, and choose the next action.",
+         }).to_string()
++    }
++}
++
++fn bounded_wait_graph(edges: &[codex_state::ToolWaitEdge]) -> serde_json::Value {
++    if edges.is_empty() {
++        return serde_json::Value::Null;
++    }
++    let value = serde_json::json!(edges);
++    if edges.len() <= 8 && value.to_string().len() <= 4096 {
++        value
++    } else {
++        serde_json::json!({"state":"evidence_exceeds_context_bound","edge_count":edges.len()})
+     }
+ }
+ 
+diff --git a/codex-rs/core/src/context/tool_diagnostics_tests.rs b/codex-rs/core/src/context/tool_diagnostics_tests.rs
+--- a/codex-rs/core/src/context/tool_diagnostics_tests.rs
++++ b/codex-rs/core/src/context/tool_diagnostics_tests.rs
+@@ -14,6 +14,7 @@
+         kind: ToolDiagnosticKind::RepeatedOperation,
+         evidence_version: i64::MAX,
+         progress_source_sequence: Some(i64::MAX),
++        wait_graph: Vec::new(),
+         question: "Is this repetition justified?".into(),
+         evidence: vec![ToolDiagnosticCall {
+             request_sequence: i64::MAX,
+diff --git a/codex-rs/core/src/tools/code_mode/terminal_tests.rs b/codex-rs/core/src/tools/code_mode/terminal_tests.rs
+--- a/codex-rs/core/src/tools/code_mode/terminal_tests.rs
++++ b/codex-rs/core/src/tools/code_mode/terminal_tests.rs
+@@ -159,6 +159,7 @@
+                     parent_call_id: boundary.request.parent_call_id.clone(),
+                     cell_id: boundary.request.cell_id.clone(),
+                 }],
++                wait_graph: Vec::new(),
+                 question: "What can advance the task?".into(),
+             };
+             store
+diff --git a/codex-rs/core/src/tools/result_recovery_tests.rs b/codex-rs/core/src/tools/result_recovery_tests.rs
+--- a/codex-rs/core/src/tools/result_recovery_tests.rs
++++ b/codex-rs/core/src/tools/result_recovery_tests.rs
+@@ -310,6 +310,7 @@
+                     parent_call_id: None,
+                     cell_id: None,
+                 }],
++                wait_graph: Vec::new(),
+                 question: "What can advance the task?".into(),
+             };
+             store
+diff --git a/codex-rs/core/src/tools/tool_diagnostic_detector.rs b/codex-rs/core/src/tools/tool_diagnostic_detector.rs
+--- a/codex-rs/core/src/tools/tool_diagnostic_detector.rs
++++ b/codex-rs/core/src/tools/tool_diagnostic_detector.rs
+@@ -48,6 +48,7 @@
+                         self.requests.keys().next_back().copied().unwrap_or(0);
+                 }
+                 ToolRuntimeFact::Reconciliation(_)
++                | ToolRuntimeFact::AgentWait(_)
+                 | ToolRuntimeFact::InputBinding(_)
+                 | ToolRuntimeFact::InputValidation(_)
+                 | ToolRuntimeFact::WaiterCancellation(_)
+@@ -183,6 +184,7 @@
+                 })
+                 .collect(),
+             question: question.into(),
++            wait_graph: Vec::new(),
+         }
+     }
+     fn wait_cycle(&self, owner: &str) -> Option<Vec<&ToolExecutionFact>> {
