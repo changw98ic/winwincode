@@ -195,18 +195,171 @@ fn diagnostic_payloads(outputs: &[Value]) -> Vec<Value> {
                     diagnostics.extend(fragment["diagnostics"].as_array().unwrap().iter().cloned());
                 }
             }
-            Value::Array(values) => values.iter().for_each(|value| collect(value, diagnostics)),
-            Value::Object(values) => values
-                .values()
-                .for_each(|value| collect(value, diagnostics)),
+            Value::Array(values) => {
+                for value in values {
+                    collect(value, diagnostics);
+                }
+            }
+            Value::Object(values) => {
+                for value in values.values() {
+                    collect(value, diagnostics);
+                }
+            }
             _ => {}
         }
     }
     let mut diagnostics = Vec::new();
-    outputs
-        .iter()
-        .for_each(|output| collect(output, &mut diagnostics));
+    for output in outputs {
+        collect(output, &mut diagnostics);
+    }
     diagnostics
+}
+
+fn assert_queued_diagnostic_rollback(
+    database: &rusqlite::Connection,
+    before: &[Value],
+    outputs: &[Value],
+    exec_sequence: i64,
+    nested: &std::collections::BTreeMap<i64, &Value>,
+) -> Vec<Value> {
+    let diagnostics = diagnostic_payloads(outputs);
+    assert!(
+        !diagnostics.is_empty(),
+        "exec must still expose its staged question"
+    );
+    for diagnostic in &diagnostics {
+        let same_version = |fact: &&Value| {
+            fact["kind"] == "diagnostic"
+                && fact["fact"]["diagnostic"]["diagnostic_id"] == diagnostic["diagnostic_id"]
+                && fact["fact"]["diagnostic"]["evidence_version"] == diagnostic["evidence_version"]
+        };
+        let queued = before
+            .iter()
+            .filter(same_version)
+            .find(|fact| fact["fact"]["delivery"] == "queued")
+            .expect("question remains durably queued");
+        assert!(
+            before
+                .iter()
+                .filter(same_version)
+                .all(|fact| fact["fact"]["delivery"] != "offered")
+        );
+        assert!(
+            diagnostic["calls"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|call| nested.contains_key(&call["request_sequence"].as_i64().unwrap()))
+        );
+        let (encoded, offered): (String, i64) = database.query_row(
+        "SELECT diagnostic_json, offered FROM tool_diagnostic_feedback WHERE boundary_request_sequence = ?1 AND diagnostic_id = ?2 AND evidence_version = ?3",
+        rusqlite::params![exec_sequence, diagnostic["diagnostic_id"].as_str().unwrap(), diagnostic["evidence_version"].as_i64().unwrap()],
+        |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        assert_eq!(
+            offered, 0,
+            "rolled-back diagnostic delivery stays retryable"
+        );
+        let offered_version: i64 = database
+            .query_row(
+                "SELECT offered_version FROM tool_diagnostics WHERE diagnostic_id = ?1",
+                [diagnostic["diagnostic_id"].as_str().unwrap()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            offered_version, 0,
+            "rollback must not advance diagnostic delivery"
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&encoded).unwrap(),
+            queued["fact"]["diagnostic"]
+        );
+    }
+    diagnostics
+}
+
+fn assert_same_cell_wait_and_diagnostic_retry(
+    model: &ScriptedModel,
+    after: &[Value],
+    cell_id: &str,
+    exec_sequence: i64,
+    cell: &Value,
+    nested: &std::collections::BTreeMap<i64, &Value>,
+    diagnostics: &[Value],
+) {
+    let waits: std::collections::BTreeMap<_, _> = after
+        .iter()
+        .filter(|fact| {
+            fact["kind"] == "request"
+                && matches!(
+                    fact["fact"]["request"]["tool_name"].as_str(),
+                    Some("wait" | "functions.wait")
+                )
+        })
+        .map(|fact| {
+            (
+                fact["fact"]["request_sequence"].as_i64().unwrap(),
+                &fact["fact"],
+            )
+        })
+        .collect();
+    assert!(!waits.is_empty(), "yield must be followed by a real wait");
+    assert!(
+        waits
+            .values()
+            .all(|wait| wait["attempt"]["disposition"] == "accepted"
+                && wait["attempt"]["delivery"] == "offered")
+    );
+    for sequence in waits.keys() {
+        assert!(after.iter().any(|fact| fact["kind"] == "wait"
+            && fact["fact"]["waiter_request_sequence"] == *sequence
+            && fact["fact"]["target_cell_sequence"] == cell["fact"]["sequence"]
+            && fact["fact"]["state"] == "settled"));
+    }
+    assert!(after.iter().any(|fact| fact["kind"] == "cell"
+        && fact["fact"]["cell_id"] == cell_id
+        && fact["fact"]["scope_id"] == cell["fact"]["scope_id"]
+        && fact["fact"]["parent_request_sequence"] == exec_sequence
+        && fact["fact"]["lifecycle"] == "closed"));
+    assert_eq!(
+        after
+            .iter()
+            .filter(|fact| fact["kind"] == "request"
+                && matches!(
+                    fact["fact"]["request"]["tool_name"].as_str(),
+                    Some("exec" | "functions.exec")
+                ))
+            .map(|fact| fact["fact"]["request_sequence"].as_i64().unwrap())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        1
+    );
+    let nested_after = latest_exec_requests(after);
+    assert_eq!(
+        nested_after.keys().copied().collect::<Vec<_>>(),
+        nested.keys().copied().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        nested_after
+            .values()
+            .filter(|request| !request["attempt"].is_null())
+            .count(),
+        1
+    );
+    for diagnostic in diagnostics {
+        assert!(
+            after.iter().any(|fact| fact["kind"] == "diagnostic"
+                && fact["fact"]["delivery"] == "offered"
+                && fact["fact"]["diagnostic"]["diagnostic_id"] == diagnostic["diagnostic_id"]
+                && fact["fact"]["diagnostic"]["evidence_version"]
+                    == diagnostic["evidence_version"]
+                && waits
+                    .contains_key(&fact["fact"]["boundary_request_sequence"].as_i64().unwrap())),
+            "the queued question must retry at an actual wait boundary"
+        );
+    }
+    assert_model_diagnostic_sources(model, after);
+    assert_model_receipts(model, after);
 }
 
 #[test]
@@ -286,28 +439,9 @@ fn native_diagnostic_offer_rollback_preserves_exec_and_retries_on_same_cell_wait
                 assert_eq!(receipt["delivery"], "offered");
             }
             assert_model_receipts(&model.script, &before);
-            let diagnostics = diagnostic_payloads(&outputs);
-            assert!(!diagnostics.is_empty(), "exec must still expose its staged question");
-            for diagnostic in &diagnostics {
-                let same_version = |fact: &&Value| fact["kind"] == "diagnostic"
-                    && fact["fact"]["diagnostic"]["diagnostic_id"] == diagnostic["diagnostic_id"]
-                    && fact["fact"]["diagnostic"]["evidence_version"] == diagnostic["evidence_version"];
-                let queued = before.iter().filter(same_version)
-                    .find(|fact| fact["fact"]["delivery"] == "queued").expect("question remains durably queued");
-                assert!(before.iter().filter(same_version).all(|fact| fact["fact"]["delivery"] != "offered"));
-                assert!(diagnostic["calls"].as_array().unwrap().iter().all(|call|
-                    nested.contains_key(&call["request_sequence"].as_i64().unwrap())));
-                let (encoded, offered): (String, i64) = database.query_row(
-                    "SELECT diagnostic_json, offered FROM tool_diagnostic_feedback WHERE boundary_request_sequence = ?1 AND diagnostic_id = ?2 AND evidence_version = ?3",
-                    rusqlite::params![exec_sequence, diagnostic["diagnostic_id"].as_str().unwrap(), diagnostic["evidence_version"].as_i64().unwrap()],
-                    |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
-                assert_eq!(offered, 0, "rolled-back diagnostic delivery stays retryable");
-                let offered_version: i64 = database.query_row(
-                    "SELECT offered_version FROM tool_diagnostics WHERE diagnostic_id = ?1",
-                    [diagnostic["diagnostic_id"].as_str().unwrap()], |row| row.get(0)).unwrap();
-                assert_eq!(offered_version, 0, "rollback must not advance diagnostic delivery");
-                assert_eq!(serde_json::from_str::<Value>(&encoded).unwrap(), queued["fact"]["diagnostic"]);
-            }
+            let diagnostics = assert_queued_diagnostic_rollback(
+                &database, &before, &outputs, exec_sequence, &nested,
+            );
 
             database.execute_batch("DROP TRIGGER fail_optional_diagnostic_offer;").unwrap();
             model.resume.notify_one();
@@ -320,40 +454,9 @@ fn native_diagnostic_offer_rollback_preserves_exec_and_retries_on_same_cell_wait
             assert!(!history.contains("code_cell_recovery"), "necessary offer must preserve usable cell ownership");
             assert_smoke_outputs(&model.script, &vec![json!({"source":"A","execution":1}); 9]);
             let after = all_facts(&kernel, &session.session_id).await;
-            let waits: std::collections::BTreeMap<_, _> = after.iter()
-                .filter(|fact| fact["kind"] == "request" && matches!(fact["fact"]["request"]["tool_name"].as_str(), Some("wait" | "functions.wait")))
-                .map(|fact| (fact["fact"]["request_sequence"].as_i64().unwrap(), &fact["fact"]))
-                .collect();
-            assert!(!waits.is_empty(), "yield must be followed by a real wait");
-            assert!(waits.values().all(|wait| wait["attempt"]["disposition"] == "accepted" && wait["attempt"]["delivery"] == "offered"));
-            for sequence in waits.keys() {
-                assert!(after.iter().any(|fact| fact["kind"] == "wait"
-                    && fact["fact"]["waiter_request_sequence"] == *sequence
-                    && fact["fact"]["target_cell_sequence"] == cell["fact"]["sequence"]
-                    && fact["fact"]["state"] == "settled"));
-            }
-            assert!(after.iter().any(|fact| fact["kind"] == "cell"
-                && fact["fact"]["cell_id"] == cell_id
-                && fact["fact"]["scope_id"] == cell["fact"]["scope_id"]
-                && fact["fact"]["parent_request_sequence"] == exec_sequence
-                && fact["fact"]["lifecycle"] == "closed"));
-            assert_eq!(after.iter().filter(|fact| fact["kind"] == "request"
-                && matches!(fact["fact"]["request"]["tool_name"].as_str(), Some("exec" | "functions.exec")))
-                .map(|fact| fact["fact"]["request_sequence"].as_i64().unwrap())
-                .collect::<std::collections::BTreeSet<_>>().len(), 1);
-            let nested_after = latest_exec_requests(&after);
-            assert_eq!(nested_after.keys().copied().collect::<Vec<_>>(), nested.keys().copied().collect::<Vec<_>>());
-            assert_eq!(nested_after.values().filter(|request| !request["attempt"].is_null()).count(), 1);
-            for diagnostic in &diagnostics {
-                assert!(after.iter().any(|fact| fact["kind"] == "diagnostic"
-                    && fact["fact"]["delivery"] == "offered"
-                    && fact["fact"]["diagnostic"]["diagnostic_id"] == diagnostic["diagnostic_id"]
-                    && fact["fact"]["diagnostic"]["evidence_version"] == diagnostic["evidence_version"]
-                    && waits.contains_key(&fact["fact"]["boundary_request_sequence"].as_i64().unwrap())),
-                    "the queued question must retry at an actual wait boundary");
-            }
-            assert_model_diagnostic_sources(&model.script, &after);
-            assert_model_receipts(&model.script, &after);
+            assert_same_cell_wait_and_diagnostic_retry(
+                &model.script, &after, &cell_id, exec_sequence, cell, &nested, &diagnostics,
+            );
             kernel.shutdown().await.unwrap();
         });
     });
