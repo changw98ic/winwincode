@@ -266,3 +266,204 @@ async fn switching_to_code_mode_only_keeps_direct_replay_outside_the_model_surfa
     assert_eq!(gate.reads.load(Ordering::SeqCst), 0);
     assert_eq!(tool.effects.load(Ordering::SeqCst), 1);
 }
+
+struct DiagnosticOfferTool(Arc<HistoryTool>);
+
+impl ToolExecutor<ToolInvocation> for DiagnosticOfferTool {
+    fn tool_name(&self) -> ToolName {
+        self.0.tool_name()
+    }
+
+    fn spec(&self) -> ToolSpec {
+        self.0.spec()
+    }
+
+    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+        Box::pin(async move {
+            let facts =
+                super::super::execution_facts::ExecutionFacts::for_session(&invocation.session);
+            let store = facts.store.get().expect("registry initialized State");
+            let logical = format!(
+                "direct:{}",
+                digest(serde_json::json!([
+                    invocation.turn.sub_id,
+                    invocation.call_id
+                ]))
+            );
+            let boundary = store
+                .tool_request_fact(&invocation.session.thread_id.to_string(), &logical)
+                .await
+                .map_err(storage_error)?
+                .expect("running boundary");
+            let diagnostic = codex_state::ToolDiagnostic {
+                schema_version: 1,
+                diagnostic_id: "registry-offer-diagnosis".into(),
+                thread_id: invocation.session.thread_id.to_string(),
+                kind: codex_state::ToolDiagnosticKind::RepeatedOperation,
+                evidence_version: boundary.request_sequence,
+                progress_source_sequence: None,
+                evidence: vec![codex_state::ToolDiagnosticCall {
+                    request_sequence: boundary.request_sequence,
+                    logical_id: logical.clone(),
+                    tool_name: invocation.tool_name.to_string(),
+                    operation_digest: boundary.attempt.as_ref().unwrap().operation_digest.clone(),
+                    parent_call_id: None,
+                    cell_id: None,
+                }],
+                question: "What can advance the task?".into(),
+            };
+            store
+                .enqueue_tool_diagnostic(&diagnostic)
+                .await
+                .map_err(storage_error)?;
+            assert_eq!(
+                store
+                    .stage_tool_diagnostic_feedback(&diagnostic.thread_id, &logical)
+                    .await
+                    .map_err(storage_error)?,
+                vec![diagnostic]
+            );
+            self.0.handle(invocation).await
+        })
+    }
+}
+
+impl CoreToolRuntime for DiagnosticOfferTool {
+    fn supports_result_replay(&self) -> bool {
+        true
+    }
+
+    fn on_tool_result_accepted(&self, invocation: &ToolInvocation, result: &dyn ToolOutput) {
+        self.0.on_tool_result_accepted(invocation, result);
+    }
+}
+
+#[tokio::test]
+async fn optional_diagnostic_rollback_keeps_registry_output_and_replay_without_duplicate_acceptance()
+ {
+    let (invocation, gate, history) = setup().await;
+    let store = codex_state::StateRuntime::init(
+        invocation.turn.config.sqlite_config().clone(),
+        "test".into(),
+    )
+    .await
+    .unwrap();
+    let pool = store
+        .sqlite()
+        .open_read_write_pool(&store.sqlite().state_db_path())
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER fail_diagnostic_offer BEFORE INSERT ON tool_fact_events
+        WHEN json_extract(NEW.fact_json,'$.kind')='diagnostic'
+            AND json_extract(NEW.fact_json,'$.fact.delivery')='offered'
+        BEGIN SELECT RAISE(ROLLBACK,'diagnostic offer fixture'); END",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let registry =
+        ToolRegistry::with_handler_for_test(Arc::new(DiagnosticOfferTool(history.clone())));
+    let first = registry
+        .dispatch_any_with_terminal_outcome(
+            invocation.clone(),
+            /*terminal_outcome_reached*/ None,
+        )
+        .await
+        .unwrap()
+        .into_response();
+    assert!(
+        serde_json::to_string(&first)
+            .unwrap()
+            .contains("private historical result")
+    );
+    assert_eq!(
+        (
+            history.effects.load(Ordering::SeqCst),
+            history.accepted.load(Ordering::SeqCst)
+        ),
+        (1, 1)
+    );
+    let events = store
+        .list_tool_fact_events(
+            &invocation.session.thread_id.to_string(),
+            /*after*/ 0,
+            /*limit*/ 200,
+        )
+        .await
+        .unwrap();
+    let required = &events.last().unwrap().fact;
+    let boundary = required.request_sequence;
+    assert_eq!(
+        required.attempt.as_ref().unwrap().delivery,
+        codex_state::ToolOutputDelivery::Offered
+    );
+    let pending: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM tool_diagnostic_feedback
+        WHERE boundary_request_sequence=? AND offered=0",
+    )
+    .bind(boundary)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(pending, 1);
+    sqlx::query("DROP TRIGGER fail_diagnostic_offer")
+        .execute(&pool)
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        let replay = registry
+            .dispatch_any_with_terminal_outcome(
+                invocation.clone(),
+                /*terminal_outcome_reached*/ None,
+            )
+            .await
+            .unwrap()
+            .into_response();
+        assert_eq!(replay, first);
+        assert_eq!(
+            (
+                history.effects.load(Ordering::SeqCst),
+                history.accepted.load(Ordering::SeqCst)
+            ),
+            (1, 1)
+        );
+    }
+    assert_eq!(gate.reads.load(Ordering::SeqCst), 2);
+    let (required_count, diagnostic_count): (i64, i64) = sqlx::query_as(
+        "SELECT
+        COALESCE(SUM(json_extract(fact_json,'$.kind')='request'
+            AND json_extract(fact_json,'$.fact.attempt.delivery')='offered'),0),
+        COALESCE(SUM(json_extract(fact_json,'$.kind')='diagnostic'
+            AND json_extract(fact_json,'$.fact.delivery')='offered'),0)
+        FROM tool_fact_events WHERE request_sequence=?",
+    )
+    .bind(boundary)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((required_count, diagnostic_count), (1, 1));
+    let events = store
+        .list_tool_runtime_events(
+            &invocation.session.thread_id.to_string(),
+            /*after*/ 0,
+            /*limit*/ 200,
+        )
+        .await
+        .unwrap();
+    let offered = events
+        .iter()
+        .filter_map(|event| match &event.fact {
+            codex_state::ToolRuntimeFact::Diagnostic(fact)
+                if fact.delivery == codex_state::ToolDiagnosticDelivery::Offered =>
+            {
+                Some(fact)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(offered.len(), 1);
+    assert_eq!(offered[0].boundary_request_sequence, Some(boundary));
+    assert_eq!(offered[0].diagnostic.evidence_version, boundary);
+    pool.close().await;
+}

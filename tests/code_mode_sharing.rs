@@ -157,6 +157,208 @@ fn native_progress_write_failure_preserves_accepted_tool_results() {
         });
     });
 }
+#[derive(Debug)]
+struct DiagnosticOfferFaultModel {
+    script: ScriptedModel,
+    output_seen: Arc<tokio::sync::Notify>,
+    resume: Arc<tokio::sync::Notify>,
+}
+
+impl ModelPort for DiagnosticOfferFaultModel {
+    fn stream(
+        &self,
+        request: ModelPortRequest,
+    ) -> BoxFuture<'static, Result<ModelPortStream, ModelPortFailure>> {
+        let first_exec_output = self.script.requests.lock().unwrap().len() == 1;
+        let stream = self.script.stream(request);
+        if !first_exec_output {
+            return stream;
+        }
+        let output_seen = Arc::clone(&self.output_seen);
+        let resume = Arc::clone(&self.resume);
+        Box::pin(async move {
+            output_seen.notify_one();
+            resume.notified().await;
+            stream.await
+        })
+    }
+}
+
+fn diagnostic_payloads(outputs: &[Value]) -> Vec<Value> {
+    fn collect(value: &Value, diagnostics: &mut Vec<Value>) {
+        match value {
+            Value::String(text) => {
+                if let Some((_, tail)) = text.split_once("<model_behavior_diagnosis>") {
+                    let body = tail.split_once("</model_behavior_diagnosis>").unwrap().0;
+                    let fragment: Value = serde_json::from_str(body).unwrap();
+                    assert_eq!(fragment["type"], "model_behavior_diagnosis");
+                    diagnostics.extend(fragment["diagnostics"].as_array().unwrap().iter().cloned());
+                }
+            }
+            Value::Array(values) => values.iter().for_each(|value| collect(value, diagnostics)),
+            Value::Object(values) => values
+                .values()
+                .for_each(|value| collect(value, diagnostics)),
+            _ => {}
+        }
+    }
+    let mut diagnostics = Vec::new();
+    outputs
+        .iter()
+        .for_each(|output| collect(output, &mut diagnostics));
+    diagnostics
+}
+
+#[test]
+fn native_diagnostic_offer_rollback_preserves_exec_and_retries_on_same_cell_wait() {
+    run_native_test(|runtime| {
+        runtime.block_on(async {
+            let fixture = Fixture::new();
+            std::fs::write(fixture.0.join("workspace/source.txt"), "A").unwrap();
+            let model = Arc::new(DiagnosticOfferFaultModel {
+                script: ScriptedModel {
+                    requests: Mutex::new(Vec::new()),
+                    source: SHARING_SOURCE,
+                    exec_count: 1,
+                    cancel_boundary: None,
+                    cancelled_cell: Mutex::new(None),
+                    direct_probe: false,
+                },
+                output_seen: Arc::new(tokio::sync::Notify::new()),
+                resume: Arc::new(tokio::sync::Notify::new()),
+            });
+            let gate = Arc::new(SharingGate {
+                workspace: fixture.0.join("workspace"),
+                flip_on_freeze: std::sync::atomic::AtomicBool::new(false),
+            });
+            let kernel = Kernel::new(fixture.kernel_options(), model.clone(), gate).unwrap();
+            let session = kernel.create_session(fixture.session_options()).await.unwrap();
+            let database = std::fs::read_dir(fixture.0.join("home")).unwrap()
+                .filter_map(Result::ok).map(|entry| entry.path())
+                .filter(|path| path.extension().is_some_and(|extension| extension == "sqlite"))
+                .find_map(|path| {
+                    let database = rusqlite::Connection::open(path).unwrap();
+                    database.query_row("SELECT name FROM sqlite_master WHERE name='tool_diagnostic_feedback'",
+                        [], |row| row.get::<_, String>(0)).ok().map(|_| database)
+                }).expect("Core state database");
+            // This is a deterministic whole-transaction rollback, not SQLITE_FULL.
+            database.execute_batch("CREATE TRIGGER fail_optional_diagnostic_offer BEFORE INSERT ON tool_fact_events WHEN json_extract(NEW.fact_json, '$.kind') = 'diagnostic' AND json_extract(NEW.fact_json, '$.fact.delivery') = 'offered' BEGIN SELECT RAISE(ROLLBACK, 'optional diagnostic offer fixture'); END;").unwrap();
+            kernel.submit_turn(&session.session_id, "Inspect shared reads while diagnostic delivery fails".into(),
+                TurnSubmissionOptions::default()).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(30), model.output_seen.notified())
+                .await.expect("model received current exec output under diagnostic rollback");
+
+            // Observe the fault before any wait can offer a later diagnostic version.
+            let outputs = latest_exec_outputs(&model.script);
+            assert_eq!(outputs.len(), 1, "only the current exec has returned");
+            let current_output = serde_json::to_string(&outputs[0]).unwrap();
+            let (_, rest) = current_output.split_once("Script running with cell ID ")
+                .unwrap_or_else(|| panic!("optional diagnostic failure must preserve the yielded cell identity; current output: {current_output}"));
+            let cell_id = rest.split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+                .next().unwrap().to_owned();
+            assert!(!current_output.contains("optional diagnostic offer fixture"));
+            assert_smoke_outputs(&model.script, &vec![json!({"source":"A","execution":1}); 9]);
+            let before = all_facts(&kernel, &session.session_id).await;
+            let exec = before.iter().rfind(|fact| fact["kind"] == "request"
+                && matches!(fact["fact"]["request"]["tool_name"].as_str(), Some("exec" | "functions.exec")))
+                .expect("current exec receipt");
+            let exec_sequence = exec["fact"]["request_sequence"].as_i64().unwrap();
+            assert_eq!(exec["fact"]["attempt"]["disposition"], "accepted");
+            assert_eq!(exec["fact"]["attempt"]["delivery"], "offered");
+            let cell = before.iter().rfind(|fact| fact["kind"] == "cell"
+                && fact["fact"]["parent_request_sequence"] == exec_sequence)
+                .expect("current exec cell");
+            assert_eq!(cell["fact"]["cell_id"], cell_id);
+            assert_eq!(cell["fact"]["lifecycle"], "live");
+            let nested = latest_exec_requests(&before);
+            assert_eq!(nested.len(), 9);
+            assert!(nested.values().all(|request| request["request"]["cell_id"] == cell_id
+                && request["request"]["scope_id"] == cell["fact"]["scope_id"]));
+            assert_eq!(nested.values().filter(|request| !request["attempt"].is_null()).count(), 1);
+            for (sequence, request) in &nested {
+                let receipt = if request["attempt"].is_null() {
+                    &before.iter().rfind(|fact| fact["kind"] == "sharing"
+                        && fact["fact"]["request_sequence"] == *sequence).expect("logical shared receipt")["fact"]
+                } else {
+                    &request["attempt"]
+                };
+                assert_eq!(receipt["disposition"], "accepted");
+                assert_eq!(receipt["delivery"], "offered");
+            }
+            assert_model_receipts(&model.script, &before);
+            let diagnostics = diagnostic_payloads(&outputs);
+            assert!(!diagnostics.is_empty(), "exec must still expose its staged question");
+            for diagnostic in &diagnostics {
+                let same_version = |fact: &&Value| fact["kind"] == "diagnostic"
+                    && fact["fact"]["diagnostic"]["diagnostic_id"] == diagnostic["diagnostic_id"]
+                    && fact["fact"]["diagnostic"]["evidence_version"] == diagnostic["evidence_version"];
+                let queued = before.iter().filter(same_version)
+                    .find(|fact| fact["fact"]["delivery"] == "queued").expect("question remains durably queued");
+                assert!(before.iter().filter(same_version).all(|fact| fact["fact"]["delivery"] != "offered"));
+                assert!(diagnostic["calls"].as_array().unwrap().iter().all(|call|
+                    nested.contains_key(&call["request_sequence"].as_i64().unwrap())));
+                let (encoded, offered): (String, i64) = database.query_row(
+                    "SELECT diagnostic_json, offered FROM tool_diagnostic_feedback WHERE boundary_request_sequence = ?1 AND diagnostic_id = ?2 AND evidence_version = ?3",
+                    rusqlite::params![exec_sequence, diagnostic["diagnostic_id"].as_str().unwrap(), diagnostic["evidence_version"].as_i64().unwrap()],
+                    |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+                assert_eq!(offered, 0, "rolled-back diagnostic delivery stays retryable");
+                let offered_version: i64 = database.query_row(
+                    "SELECT offered_version FROM tool_diagnostics WHERE diagnostic_id = ?1",
+                    [diagnostic["diagnostic_id"].as_str().unwrap()], |row| row.get(0)).unwrap();
+                assert_eq!(offered_version, 0, "rollback must not advance diagnostic delivery");
+                assert_eq!(serde_json::from_str::<Value>(&encoded).unwrap(), queued["fact"]["diagnostic"]);
+            }
+
+            database.execute_batch("DROP TRIGGER fail_optional_diagnostic_offer;").unwrap();
+            model.resume.notify_one();
+            wait_for_kind(&kernel, &session.session_id, "turn_complete").await;
+            let current_outputs = latest_exec_outputs(&model.script);
+            let history = serde_json::to_string(&current_outputs).unwrap();
+            assert!(current_outputs.len() >= 2, "current exec must have a wait output");
+            assert!(current_outputs.last().unwrap().to_string().contains("shared-cell-resumed"),
+                "the current wait output must read the same cell's completion");
+            assert!(!history.contains("code_cell_recovery"), "necessary offer must preserve usable cell ownership");
+            assert_smoke_outputs(&model.script, &vec![json!({"source":"A","execution":1}); 9]);
+            let after = all_facts(&kernel, &session.session_id).await;
+            let waits: std::collections::BTreeMap<_, _> = after.iter()
+                .filter(|fact| fact["kind"] == "request" && matches!(fact["fact"]["request"]["tool_name"].as_str(), Some("wait" | "functions.wait")))
+                .map(|fact| (fact["fact"]["request_sequence"].as_i64().unwrap(), &fact["fact"]))
+                .collect();
+            assert!(!waits.is_empty(), "yield must be followed by a real wait");
+            assert!(waits.values().all(|wait| wait["attempt"]["disposition"] == "accepted" && wait["attempt"]["delivery"] == "offered"));
+            for sequence in waits.keys() {
+                assert!(after.iter().any(|fact| fact["kind"] == "wait"
+                    && fact["fact"]["waiter_request_sequence"] == *sequence
+                    && fact["fact"]["target_cell_sequence"] == cell["fact"]["sequence"]
+                    && fact["fact"]["state"] == "settled"));
+            }
+            assert!(after.iter().any(|fact| fact["kind"] == "cell"
+                && fact["fact"]["cell_id"] == cell_id
+                && fact["fact"]["scope_id"] == cell["fact"]["scope_id"]
+                && fact["fact"]["parent_request_sequence"] == exec_sequence
+                && fact["fact"]["lifecycle"] == "closed"));
+            assert_eq!(after.iter().filter(|fact| fact["kind"] == "request"
+                && matches!(fact["fact"]["request"]["tool_name"].as_str(), Some("exec" | "functions.exec")))
+                .map(|fact| fact["fact"]["request_sequence"].as_i64().unwrap())
+                .collect::<std::collections::BTreeSet<_>>().len(), 1);
+            let nested_after = latest_exec_requests(&after);
+            assert_eq!(nested_after.keys().copied().collect::<Vec<_>>(), nested.keys().copied().collect::<Vec<_>>());
+            assert_eq!(nested_after.values().filter(|request| !request["attempt"].is_null()).count(), 1);
+            for diagnostic in &diagnostics {
+                assert!(after.iter().any(|fact| fact["kind"] == "diagnostic"
+                    && fact["fact"]["delivery"] == "offered"
+                    && fact["fact"]["diagnostic"]["diagnostic_id"] == diagnostic["diagnostic_id"]
+                    && fact["fact"]["diagnostic"]["evidence_version"] == diagnostic["evidence_version"]
+                    && waits.contains_key(&fact["fact"]["boundary_request_sequence"].as_i64().unwrap())),
+                    "the queued question must retry at an actual wait boundary");
+            }
+            assert_model_diagnostic_sources(&model.script, &after);
+            assert_model_receipts(&model.script, &after);
+            kernel.shutdown().await.unwrap();
+        });
+    });
+}
+
 #[test]
 fn native_shared_execution_reuse_and_diagnosis_keep_each_logical_observation() {
     run_native_test(|runtime| {

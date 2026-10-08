@@ -1167,6 +1167,17 @@
         "codex-rs/state/src/runtime/tool_diagnostics.rs",
         "codex-rs/state/src/runtime/tool_execution.rs"
       ]
+    },
+    {
+      "id": "codex-tool-review-diagnostic-receipt-recovery",
+      "file": "upstream/patches/codex/0080-tool-review-diagnostic-receipt-recovery.patch",
+      "planned": false,
+      "patchSha256": "091814a764263510b48e91b82d6073260f06a75d5bd12821580fcc2e4c1fdbd8",
+      "targets": [
+        "codex-rs/Cargo.lock",
+        "codex-rs/core/Cargo.toml",
+        "codex-rs/core/src/tools/result_recovery_tests.rs"
+      ]
     }
   ],
   "licenseObligations": {
