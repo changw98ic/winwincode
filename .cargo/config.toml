@@ -6,6 +6,12 @@ color = "always"
 verbose = false
 
 [env]
+# Build the crypto backend from the registry source fixed by Cargo.lock.
+AWS_LC_SYS_USE_SYSTEM = { value = "0", force = true }
+AWS_LC_SYS_USE_SYSTEM_aarch64_apple_darwin = { value = "0", force = true }
+AWS_LC_SYS_USE_SYSTEM_x86_64_apple_darwin = { value = "0", force = true }
+AWS_LC_SYS_USE_SYSTEM_aarch64_unknown_linux_gnu = { value = "0", force = true }
+AWS_LC_SYS_USE_SYSTEM_x86_64_unknown_linux_gnu = { value = "0", force = true }
 # The pinned V8 sandbox configuration has no upstream prebuilt archive.
 V8_FROM_SOURCE = { value = "1", force = true }
 NINJA = { value = "scripts/code-mode-ninja.mjs", relative = true, force = true }

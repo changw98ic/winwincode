@@ -1127,6 +1127,16 @@
         "codex-rs/core/src/tools/tool_diagnostic_detector.rs",
         "codex-rs/core/src/tools/tool_diagnostic_detector_tests.rs"
       ]
+    },
+    {
+      "id": "codex-tool-review-tls",
+      "file": "upstream/patches/codex/0076-tool-review-tls.patch",
+      "planned": false,
+      "patchSha256": "a77a664dc6921d1d58b9a25974879302623d82ee5150e4a7ea9d8cc0c4d60ee6",
+      "targets": [
+        "MODULE.bazel.lock",
+        "codex-rs/Cargo.lock"
+      ]
     }
   ],
   "licenseObligations": {
