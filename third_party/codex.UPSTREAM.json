@@ -86,6 +86,7 @@
     "upstream/patches/codex/0077-tool-review-memmap.patch",
     "upstream/patches/codex/0078-tool-review-diagnostic-offer-regressions.patch",
     "upstream/patches/codex/0079-tool-review-optional-diagnostic-isolation.patch",
-    "upstream/patches/codex/0080-tool-review-diagnostic-receipt-recovery.patch"
+    "upstream/patches/codex/0080-tool-review-diagnostic-receipt-recovery.patch",
+    "upstream/patches/codex/0081-tool-review-typed-handoff-replay.patch"
   ]
 }

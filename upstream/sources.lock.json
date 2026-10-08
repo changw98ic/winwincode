@@ -1178,6 +1178,15 @@
         "codex-rs/core/Cargo.toml",
         "codex-rs/core/src/tools/result_recovery_tests.rs"
       ]
+    },
+    {
+      "id": "codex-tool-review-typed-handoff-replay",
+      "file": "upstream/patches/codex/0081-tool-review-typed-handoff-replay.patch",
+      "planned": false,
+      "patchSha256": "33fd25e8f6611e60d9fb230f3070224d0a264c37896d19bded802dfad8d0cef1",
+      "targets": [
+        "codex-rs/core/src/tools/code_mode/terminal_tests.rs"
+      ]
     }
   ],
   "licenseObligations": {
