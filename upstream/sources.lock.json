@@ -1285,6 +1285,16 @@
       "targets": [
         "codex-rs/core/tests/suite/otel.rs"
       ]
+    },
+    {
+      "id": "codex-tool-review-wait-agent-tree-fixtures",
+      "file": "upstream/patches/codex/0090-tool-review-wait-agent-tree-fixtures.patch",
+      "planned": false,
+      "patchSha256": "190b3d90f840e01056996558ffe434962744397ba183ae2d56f906391e21a5b7",
+      "targets": [
+        "codex-rs/core/src/agent/control_tests.rs",
+        "codex-rs/core/src/tools/handlers/multi_agents_tests.rs"
+      ]
     }
   ],
   "licenseObligations": {

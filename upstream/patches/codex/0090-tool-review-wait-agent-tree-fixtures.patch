@@ -1,0 +1,123 @@
+diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
+index c0cc479e..e591cb9f 100644
+--- a/codex-rs/core/src/agent/control_tests.rs
++++ b/codex-rs/core/src/agent/control_tests.rs
+@@ -569,6 +569,43 @@ async fn get_status_returns_pending_init_for_new_thread() {
+     assert_eq!(status, AgentStatus::PendingInit);
+ }
+ 
++#[tokio::test]
++async fn completion_wait_owner_resolves_registered_thread_in_current_tree() {
++    let harness = AgentControlHarness::new().await;
++    let (thread_id, thread) = harness.start_thread().await;
++    let control = thread.session.services.agent_control.clone();
++    control.register_session_root(thread_id, /*current_parent_thread_id*/ None);
++    assert_eq!(
++        control
++            .completion_wait_owner(thread_id)
++            .await
++            .expect("same-tree thread should have a verified completion owner"),
++        crate::tools::ExecutionFacts::current_owner(&thread.session)
++    );
++    thread.submit(Op::Shutdown {}).await.expect("shutdown");
++}
++
++#[tokio::test]
++async fn completion_wait_owner_rejects_registered_thread_in_another_tree() {
++    let harness = AgentControlHarness::new().await;
++    let (thread_id, thread) = harness.start_thread().await;
++    // The same manager may load several independent agent trees.
++    harness
++        .control
++        .register_session_root(thread_id, /*current_parent_thread_id*/ None);
++    assert!(harness.control.get_agent_metadata(thread_id).is_some());
++    let error = harness
++        .control
++        .completion_wait_owner(thread_id)
++        .await
++        .expect_err("foreign thread must not become a completion target");
++    assert_matches!(
++        error.details(),
++        CodexErrorDetails::ThreadNotFound(id) if *id == thread_id
++    );
++    thread.submit(Op::Shutdown {}).await.expect("shutdown");
++}
++
+ #[tokio::test]
+ async fn subscribe_status_errors_for_missing_thread() {
+     let harness = AgentControlHarness::new().await;
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
+index fc76ab4b..09dee238 100644
+--- a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
+@@ -3327,13 +3327,17 @@ async fn wait_agent_returns_not_found_for_missing_agents() {
+ async fn wait_agent_times_out_when_status_is_not_final() {
+     let (mut session, turn) = make_session_and_context().await;
+     let manager = thread_manager();
+-    session.services.agent_control = manager.agent_control();
+     let config = turn.config.as_ref().clone();
+     let thread = manager
+         .start_thread(StartThreadOptions::new(config.clone()))
+         .await
+         .expect("start thread");
+     let agent_id = thread.thread_id;
++    session.services.agent_control = thread.thread.session.services.agent_control.clone();
++    session
++        .services
++        .agent_control
++        .register_session_root(agent_id, /*current_parent_thread_id*/ None);
+     let invocation = invocation(
+         Arc::new(session),
+         Arc::new(turn),
+@@ -3370,13 +3374,17 @@ async fn wait_agent_times_out_when_status_is_not_final() {
+ async fn wait_agent_clamps_short_timeouts_to_minimum() {
+     let (mut session, turn) = make_session_and_context().await;
+     let manager = thread_manager();
+-    session.services.agent_control = manager.agent_control();
+     let config = turn.config.as_ref().clone();
+     let thread = manager
+         .start_thread(StartThreadOptions::new(config.clone()))
+         .await
+         .expect("start thread");
+     let agent_id = thread.thread_id;
++    session.services.agent_control = thread.thread.session.services.agent_control.clone();
++    session
++        .services
++        .agent_control
++        .register_session_root(agent_id, /*current_parent_thread_id*/ None);
+     let invocation = invocation(
+         Arc::new(session),
+         Arc::new(turn),
+@@ -3408,15 +3416,20 @@ async fn wait_agent_clamps_short_timeouts_to_minimum() {
+ async fn wait_agent_returns_final_status_without_timeout() {
+     let (mut session, turn) = make_session_and_context().await;
+     let manager = thread_manager();
+-    session.services.agent_control = manager.agent_control();
+     let config = turn.config.as_ref().clone();
+     let thread = manager
+         .start_thread(StartThreadOptions::new(config.clone()))
+         .await
+         .expect("start thread");
+     let agent_id = thread.thread_id;
+-    let mut status_rx = manager
+-        .agent_control()
++    session.services.agent_control = thread.thread.session.services.agent_control.clone();
++    session
++        .services
++        .agent_control
++        .register_session_root(agent_id, /*current_parent_thread_id*/ None);
++    let mut status_rx = session
++        .services
++        .agent_control
+         .subscribe_status(agent_id)
+         .await
+         .expect("subscribe should succeed");
+@@ -3449,7 +3462,7 @@ async fn wait_agent_returns_final_status_without_timeout() {
+     assert_eq!(
+         result,
+         wait::WaitAgentResult {
+-            status: HashMap::from([(agent_id.to_string(), AgentStatus::Shutdown)]),
++            status: HashMap::from([(AgentPath::root().to_string(), AgentStatus::Shutdown)]),
+             timed_out: false
+         }
+     );

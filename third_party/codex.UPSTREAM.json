@@ -95,6 +95,7 @@
     "upstream/patches/codex/0086-tool-review-completion-wait-state.patch",
     "upstream/patches/codex/0087-tool-review-agent-completion-graph.patch",
     "upstream/patches/codex/0088-tool-review-agent-completion-runtime.patch",
-    "upstream/patches/codex/0089-tool-review-shell-telemetry-outcomes.patch"
+    "upstream/patches/codex/0089-tool-review-shell-telemetry-outcomes.patch",
+    "upstream/patches/codex/0090-tool-review-wait-agent-tree-fixtures.patch"
   ]
 }
