@@ -1207,6 +1207,22 @@
         "codex-rs/core/src/session/mod.rs",
         "codex-rs/core/src/session/tool_fact_shutdown_tests.rs"
       ]
+    },
+    {
+      "id": "codex-tool-review-tool-fact-shutdown-barrier",
+      "file": "upstream/patches/codex/0084-tool-review-tool-fact-shutdown-barrier.patch",
+      "planned": false,
+      "patchSha256": "1bf01ae1815bd28804c5e8dc275d8a56360e3145a210ad89331fe20535cd2125",
+      "targets": [
+        "codex-rs/core/src/codex_thread.rs",
+        "codex-rs/core/src/session/handlers.rs",
+        "codex-rs/core/src/tools/cell_facts.rs",
+        "codex-rs/core/src/tools/execution_facts.rs",
+        "codex-rs/core/src/tools/tool_diagnostics.rs",
+        "codex-rs/core/src/tools/tool_fact_owner.rs",
+        "codex-rs/core/src/tools/tool_sharing.rs",
+        "codex-rs/state/src/runtime/tool_runtime.rs"
+      ]
     }
   ],
   "licenseObligations": {

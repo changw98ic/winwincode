@@ -34,6 +34,9 @@ impl ToolDiagnostics {
     }
     async fn refresh_inner(session: &Session) -> anyhow::Result<()> {
         let facts = ExecutionFacts::for_session(session);
+        let Some(_writer) = facts.try_writer() else {
+            return Ok(());
+        };
         let Some(store) = facts.store.get() else {
             return Ok(());
         };
@@ -82,6 +85,9 @@ impl ToolDiagnostics {
         state: &str,
     ) {
         let facts = ExecutionFacts::for_session(session);
+        let Some(_writer) = facts.try_writer() else {
+            return;
+        };
         let Some(store) = facts.store.get() else {
             return;
         };
@@ -130,6 +136,9 @@ impl ToolDiagnostics {
             return;
         }
         let facts = ExecutionFacts::for_session(session);
+        let Some(_writer) = facts.try_writer() else {
+            return;
+        };
         let Some(store) = facts.store.get() else {
             return;
         };
@@ -156,6 +165,7 @@ impl ToolDiagnostics {
     ) -> Option<FunctionCallOutputContentItem> {
         Self::refresh(session).await;
         let facts = ExecutionFacts::for_session(session);
+        let _writer = facts.try_writer()?;
         let store: &Arc<StateRuntime> = facts.store.get()?;
         let logical = format!(
             "direct:{}",

@@ -2,6 +2,10 @@
 
 #[path = "cell_facts.rs"]
 mod cell_facts;
+#[path = "tool_fact_owner.rs"]
+mod owner;
+use owner::ToolFactOwner;
+use tokio_util::task::task_tracker::TaskTrackerToken;
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -32,6 +36,7 @@ use crate::session::session::Session;
 /// Core-owned process incarnation and durable receipts, shared by all tool families.
 #[derive(Default)]
 pub(crate) struct ExecutionFacts {
+    owner: ToolFactOwner,
     pub(super) store: OnceCell<Arc<StateRuntime>>,
     pub(super) owner_id: OnceCell<String>,
     cells: Mutex<HashMap<String, (String, String)>>,
@@ -87,6 +92,7 @@ impl ExecutionFacts {
 
 /// Held only for the new logical request. A replay never executes hooks or the handler.
 pub(super) struct ToolFactRecord {
+    writer: TaskTrackerToken,
     service: Arc<ExecutionFacts>,
     pub(super) store: Arc<StateRuntime>,
     pub(super) sequence: i64,
@@ -103,6 +109,7 @@ pub(super) enum ToolFactAdmission {
 }
 
 pub(super) struct ToolFactReplay {
+    _writer: TaskTrackerToken,
     pub(super) service: Arc<ExecutionFacts>,
     pub(super) store: Arc<StateRuntime>,
     pub(super) fact: Box<ToolExecutionFact>,
@@ -126,6 +133,7 @@ impl ToolFactRecord {
         invocation: &ToolInvocation,
     ) -> Result<ToolFactAdmission, FunctionCallError> {
         let service = ExecutionFacts::for_session(&invocation.session);
+        let writer = service.try_writer().ok_or_else(owner::closing_error)?;
         let owner_id = service
             .owner_id
             .get_or_init(|| async { uuid::Uuid::new_v4().to_string() })
@@ -193,6 +201,7 @@ impl ToolFactRecord {
         };
         match store.observe_tool_request(&request).await.map_err(storage_error)? {
             ToolRequestObservation::New(fact) => Ok(ToolFactAdmission::New(Self {
+                writer,
                 service: service.clone(),
                 store,
                 sequence: fact.request_sequence,
@@ -203,7 +212,7 @@ impl ToolFactRecord {
                 settled: AtomicBool::new(false),
             })),
             ToolRequestObservation::Replay(fact) => {
-                Ok(ToolFactAdmission::Replay(ToolFactReplay { service, store, fact: Box::new(fact), owner_id }))
+                Ok(ToolFactAdmission::Replay(ToolFactReplay { _writer: writer, service, store, fact: Box::new(fact), owner_id }))
             }
             ToolRequestObservation::IdentityConflict => {
                 Err(FunctionCallError::RespondToModel(
@@ -336,28 +345,6 @@ impl ToolFactRecord {
             .offer_tool_output(self.sequence, &self.attempt_id, &self.owner_id)
             .await
             .map_err(storage_error)
-    }
-}
-
-impl Drop for ToolFactRecord {
-    fn drop(&mut self) {
-        if (self.shared.load(Ordering::Acquire) || self.completed.load(Ordering::Acquire))
-            && !self.settled.load(Ordering::Acquire)
-            && let Ok(runtime) = tokio::runtime::Handle::try_current()
-        {
-            let store = Arc::clone(&self.store);
-            let sequence = self.sequence;
-            runtime.spawn(async move {
-                if let Err(error) = store.cancel_tool_waiter(sequence).await {
-                    tracing::warn!(%error, "logical tool waiter cancellation was not persisted");
-                }
-            });
-        }
-        self.service
-            .active_requests
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&self.sequence);
     }
 }
 

@@ -303,7 +303,8 @@ impl CodexThread {
     }
 
     pub async fn shutdown_and_wait(&self) -> CodexResult<()> {
-        self.io.shutdown_and_wait().await
+        self.io.shutdown_and_wait().await?;
+        crate::tools::ExecutionFacts::shutdown_result(&self.session)
     }
 
     /// Wait until the underlying session loop has terminated.

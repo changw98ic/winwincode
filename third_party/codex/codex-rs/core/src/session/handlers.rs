@@ -395,6 +395,7 @@ pub async fn set_thread_memory_mode(sess: &Arc<Session>, sub_id: String, mode: T
 }
 
 async fn shutdown_session_runtime(sess: &Arc<Session>) {
+    crate::tools::ExecutionFacts::seal(sess);
     if let Some(startup_prewarm) = sess.take_session_startup_prewarm().await {
         startup_prewarm.abort().await;
     }
@@ -407,14 +408,8 @@ async fn shutdown_session_runtime(sess: &Arc<Session>) {
         .unified_exec_manager
         .terminate_all_processes()
         .await;
-    match sess.services.code_mode_service.shutdown().await {
-        Err(err) => warn!("failed to shutdown code mode session: {err}"),
-        Ok(()) => {
-            if let Err(err) = crate::tools::ExecutionFacts::close_owned_cells(sess).await {
-                warn!("failed to retain closed code mode cells: {err}");
-            }
-        }
-    }
+    let code_mode_result = sess.services.code_mode_service.shutdown().await;
+    crate::tools::ExecutionFacts::finish_shutdown(sess, code_mode_result).await;
     sess.stop_mcp_prewarm_worker().await;
     {
         let _refresh = sess.mcp_refresh.acquire().await;

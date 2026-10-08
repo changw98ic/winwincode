@@ -15,6 +15,7 @@ impl ExecutionFacts {
         call_id: &str,
     ) -> Result<(), FunctionCallError> {
         let facts = Self::for_session(session);
+        let _writer = facts.try_writer().ok_or_else(super::owner::closing_error)?;
         let store = facts
             .store
             .get()
@@ -43,6 +44,15 @@ impl ExecutionFacts {
         cell_id: &str,
     ) -> Result<(), FunctionCallError> {
         let facts = Self::for_session(session);
+        let _writer = facts.try_writer().ok_or_else(super::owner::closing_error)?;
+        Self::close_cell_inner(session, &facts, cell_id).await
+    }
+
+    async fn close_cell_inner(
+        session: &Session,
+        facts: &ExecutionFacts,
+        cell_id: &str,
+    ) -> Result<(), FunctionCallError> {
         let Some((_, scope)) = facts.parent(cell_id) else {
             return Ok(());
         };
@@ -70,7 +80,7 @@ impl ExecutionFacts {
             .cloned()
             .collect();
         for id in ids {
-            Self::close_cell(session, &id).await?;
+            Self::close_cell_inner(session, &facts, &id).await?;
         }
         Ok(())
     }
@@ -82,6 +92,7 @@ impl ExecutionFacts {
         call_id: &str,
     ) -> Result<Option<ToolCellWait>, FunctionCallError> {
         let facts = Self::for_session(session);
+        let writer = facts.try_writer().ok_or_else(super::owner::closing_error)?;
         let Some((_, scope)) = facts.parent(cell_id) else {
             if let Some(store) = facts.store.get()
                 && let Some(cell) = store
@@ -147,6 +158,7 @@ impl ExecutionFacts {
         };
         crate::tools::tool_diagnostics::ToolDiagnostics::refresh(session).await;
         Ok(Some(ToolCellWait {
+            _writer: writer,
             facts: Arc::clone(&facts),
             thread_id: session.thread_id.to_string(),
             sequence: wait.waiter_request_sequence,
@@ -156,6 +168,7 @@ impl ExecutionFacts {
 
 /// Dropping an interrupted waiter preserves its unresolved durable edge.
 pub(crate) struct ToolCellWait {
+    _writer: tokio_util::task::task_tracker::TaskTrackerToken,
     facts: Arc<ExecutionFacts>,
     thread_id: String,
     sequence: i64,

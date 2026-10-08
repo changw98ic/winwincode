@@ -10,6 +10,14 @@ use sqlx::Row;
 use sqlx::SqliteConnection;
 
 impl StateRuntime {
+    /// Waits for fact transactions whose COMMIT outlived a cancelled Rust future.
+    /// Fact writers must be sealed and drained before acquiring this barrier.
+    pub async fn flush_tool_runtime_events(&self) -> anyhow::Result<()> {
+        let tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Binds a host-created cell to its already claimed outer exec request.
     pub async fn open_tool_cell(
         &self,

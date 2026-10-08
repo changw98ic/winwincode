@@ -75,13 +75,7 @@ impl Waiter {
 impl Drop for Waiter {
     fn drop(&mut self) {
         if !self.finished {
-            let store = Arc::clone(&self.facts.store);
-            let sequence = self.facts.sequence;
-            tokio::spawn(async move {
-                if let Err(error) = store.cancel_tool_waiter(sequence).await {
-                    tracing::warn!(%error, "logical tool waiter cancellation was not persisted");
-                }
-            });
+            self.facts.persist_cancellation();
         }
         if self.flight.waiters.fetch_sub(1, Ordering::AcqRel) == 1 {
             self.flight.cancellation.cancel();
