@@ -183,6 +183,12 @@ export const DETERMINISTIC_VERIFICATION_YIELD_MS = 30_000
  * never appears in Server environment maps or public receipts.
  */
 export function encryptDeviceProviderEnvelope(snapshot, requestId, mutation) {
+  return encryptDeviceConfigurationEnvelope(DEVICE_PROVIDER_ENCRYPTION_CONTEXT, snapshot, requestId, mutation)
+}
+
+// API and installed-product acceptance run without Client build artifacts.
+// Match the Web client envelope using only Node's standard crypto primitives.
+function encryptDeviceConfigurationEnvelope(context, snapshot, requestId, mutation) {
   assert.equal(typeof snapshot?.clientNodeId, 'string')
   assert.equal(typeof snapshot?.encryptionPublicKey, 'string')
   assert.equal(typeof requestId, 'string')
@@ -190,11 +196,11 @@ export function encryptDeviceProviderEnvelope(snapshot, requestId, mutation) {
   const ephemeral = createECDH('prime256v1')
   ephemeral.generateKeys()
   const shared = ephemeral.computeSecret(Buffer.from(snapshot.encryptionPublicKey, 'base64'))
-  const aad = `${DEVICE_PROVIDER_ENCRYPTION_CONTEXT}\n${snapshot.clientNodeId}\n${requestId}\n${expectedRevision}`
+  const aad = `${context}\n${snapshot.clientNodeId}\n${requestId}\n${expectedRevision}`
   const key = Buffer.from(hkdfSync(
     'sha256',
     shared,
-    Buffer.from(DEVICE_PROVIDER_ENCRYPTION_CONTEXT),
+    Buffer.from(context),
     Buffer.from(aad),
     32,
   ))
@@ -747,13 +753,14 @@ async function mutateDeviceExtension(api, publicClientId, mutation, expected, ti
   if (!clients) { clients = new Map(); deviceExtensionMutations.set(api, clients) }
   const previous = clients.get(publicClientId) ?? Promise.resolve()
   const result = previous.catch(() => {}).then(async () => {
-    const { encryptDeviceExtension } = await import('../apps/client/dist/module/device-provider-encryption.js')
     const base = `/api/v1/clients/${encodeURIComponent(publicClientId)}/extensions`
     const current = await api.request(base)
     assert.equal(current.status, 200)
     assert.equal(current.json?.online, true, 'Device must be online to configure public smoke')
     const requestId = `extension_${randomBytes(16).toString('hex')}`
-    const envelope = await encryptDeviceExtension(current.json.snapshot, requestId, mutation)
+    const envelope = encryptDeviceConfigurationEnvelope(
+      'winwincode.device-extensions.v1', current.json.snapshot, requestId, mutation,
+    )
     const applied = await api.request(base, { method: 'POST', body: envelope })
     assert.equal(applied.status, 202, 'Device extension apply was rejected')
     const completed = await waitFor(async () => {

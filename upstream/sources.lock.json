@@ -1237,7 +1237,7 @@
       "id": "codex-tool-review-completion-wait-state",
       "file": "upstream/patches/codex/0086-tool-review-completion-wait-state.patch",
       "planned": false,
-      "patchSha256": "bccce54a913d50064661af63286805cbd4df42af7a23e8ba5aad93400d0726c4",
+      "patchSha256": "28b257109a820f7cfe5f5911d895af61596dfa7c7e8f96921d5b618391740c30",
       "targets": [
         "codex-rs/state/src/lib.rs",
         "codex-rs/state/src/tool_runtime.rs",

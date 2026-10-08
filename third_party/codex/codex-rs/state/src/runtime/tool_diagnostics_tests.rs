@@ -174,7 +174,6 @@ async fn feedback_survives_interruption_and_is_offered_after_original_output() {
 const ORIGINAL_DIAGNOSTIC_OUTPUT: &str = "original output + diagnosis";
 
 async fn diagnostic_offer_fixture(
-    wait_graph: Vec::new(),
     question: String,
 ) -> (
     StateRuntime,
@@ -214,6 +213,7 @@ async fn diagnostic_offer_fixture(
             parent_call_id: None,
             cell_id: None,
         }],
+        wait_graph: Vec::new(),
         question,
     };
     store.enqueue_tool_diagnostic(&diagnostic).await.unwrap();

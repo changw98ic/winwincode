@@ -2,11 +2,19 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { test } from 'node:test'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { copyFile, mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { createECDH, createDecipheriv, hkdfSync } from 'node:crypto'
-import { installDevicePublicSmoke } from '../scripts/device-production-fixture.mjs'
 
-test('Device public smoke uses encrypted save then discovery and rejects failed connections', async () => {
+test('Device public smoke configures encrypted extensions without Client build artifacts', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'wwc-smoke-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  await mkdir(join(directory, 'scripts'))
+  const fixture = join(directory, 'scripts/device-production-fixture.mjs')
+  await copyFile(new URL('../scripts/device-production-fixture.mjs', import.meta.url), fixture)
+  const { installDevicePublicSmoke } = await import(pathToFileURL(fixture).href)
   for (const outcome of ['tested', 'connection_failed']) {
     const device = createECDH('prime256v1')
     device.generateKeys()
@@ -22,15 +30,19 @@ test('Device public smoke uses encrypted save then discovery and rejects failed 
       if (options?.method === 'POST') {
         const envelope = options.body
         assert.equal(envelope.expectedRevision, revision)
-        const context = 'winwincode.device-extensions.v1'
-        const aad = `${context}\n${envelope.clientNodeId}\n${envelope.requestId}\n${revision}`
         const shared = device.computeSecret(Buffer.from(envelope.publicKey, 'base64'))
-        const key = hkdfSync('sha256', shared, Buffer.from(context), Buffer.from(aad), 32)
-        const cipher = createDecipheriv('aes-256-gcm', key, Buffer.from(envelope.nonce, 'base64'))
         const bytes = Buffer.from(envelope.ciphertext, 'base64')
-        cipher.setAAD(Buffer.from(aad))
-        cipher.setAuthTag(bytes.subarray(-16))
-        mutation = JSON.parse(Buffer.concat([cipher.update(bytes.subarray(0, -16)), cipher.final()]).toString())
+        const decrypt = (context, expectedRevision) => {
+          const aad = `${context}\n${envelope.clientNodeId}\n${envelope.requestId}\n${expectedRevision}`
+          const key = hkdfSync('sha256', shared, Buffer.from(context), Buffer.from(aad), 32)
+          const cipher = createDecipheriv('aes-256-gcm', key, Buffer.from(envelope.nonce, 'base64'))
+          cipher.setAAD(Buffer.from(aad))
+          cipher.setAuthTag(bytes.subarray(-16))
+          return JSON.parse(Buffer.concat([cipher.update(bytes.subarray(0, -16)), cipher.final()]).toString())
+        }
+        assert.throws(() => decrypt('winwincode.device-provider.v1', revision))
+        assert.throws(() => decrypt('winwincode.device-extensions.v1', revision + 1))
+        mutation = decrypt('winwincode.device-extensions.v1', revision)
         operations.push(mutation.operation)
         if (mutation.operation === 'save_mcp') assert.deepEqual(JSON.parse(mutation.configuration), configuration)
         revision += 1
