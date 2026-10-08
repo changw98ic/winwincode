@@ -1197,6 +1197,16 @@
         "codex-rs/core/tests/common/test_codex.rs",
         "codex-rs/core/tests/suite/otel.rs"
       ]
+    },
+    {
+      "id": "codex-tool-review-tool-fact-shutdown-regressions",
+      "file": "upstream/patches/codex/0083-tool-review-tool-fact-shutdown-regressions.patch",
+      "planned": false,
+      "patchSha256": "dcebe41543ef68dcb21eaff25d19630110d253a7d9a8bea0968718d6058516e1",
+      "targets": [
+        "codex-rs/core/src/session/mod.rs",
+        "codex-rs/core/src/session/tool_fact_shutdown_tests.rs"
+      ]
     }
   ],
   "licenseObligations": {

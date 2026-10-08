@@ -638,6 +638,7 @@ pub const CODEX_PATCH_SET: &[&str] = &[
     "upstream/patches/codex/0080-tool-review-diagnostic-receipt-recovery.patch",
     "upstream/patches/codex/0081-tool-review-typed-handoff-replay.patch",
     "upstream/patches/codex/0082-tool-review-fixture-resource-lifetime.patch",
+    "upstream/patches/codex/0083-tool-review-tool-fact-shutdown-regressions.patch",
 ];
 
 const ROLE_SESSION_POLICY_SCHEMA_VERSION: u32 = 2;
@@ -2812,6 +2813,7 @@ mod tests {
                 "upstream/patches/codex/0080-tool-review-diagnostic-receipt-recovery.patch",
                 "upstream/patches/codex/0081-tool-review-typed-handoff-replay.patch",
                 "upstream/patches/codex/0082-tool-review-fixture-resource-lifetime.patch",
+                "upstream/patches/codex/0083-tool-review-tool-fact-shutdown-regressions.patch",
             ]
         );
         assert_eq!(build.event_capacity, 16);

@@ -1,0 +1,336 @@
+// SPDX-License-Identifier: Apache-2.0
+
+use super::SessionIo;
+use super::handlers::submission_loop;
+use super::session_loop_termination_from_handle;
+use super::step_context::StepContext;
+use crate::codex_thread::CodexThread;
+use crate::tools::ToolRouter;
+use crate::tools::code_mode::CodeModeService;
+use crate::tools::code_mode::PUBLIC_TOOL_NAME;
+use crate::tools::context::FunctionToolOutput;
+use crate::tools::context::ToolInvocation;
+use crate::tools::context::ToolOutput;
+use crate::tools::context::ToolPayload;
+use crate::tools::handlers::ToolSearchHandlerCache;
+use crate::tools::parallel::ToolCallCompletion;
+use crate::tools::parallel::ToolCallRuntime;
+use crate::tools::registry::CoreToolRuntime;
+use crate::tools::registry::ToolExecutor;
+use crate::tools::registry::ToolRegistry;
+use crate::tools::router::ToolCall;
+use crate::turn_diff_tracker::TurnDiffTracker;
+use codex_code_mode::ProcessOwnedCodeModeSessionProvider;
+use codex_features::Feature;
+use codex_protocol::SessionId;
+use codex_protocol::models::FunctionCallOutputBody;
+use codex_protocol::models::ResponseInputItem;
+use codex_protocol::protocol::SessionConfiguredEvent;
+use codex_protocol::protocol::SessionSource;
+use codex_state::ToolExecutionStatus;
+use codex_state::ToolRuntimeFact;
+use codex_tools::ToolName;
+use codex_utils_absolute_path::AbsolutePathBuf;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+use tokio::sync::Notify;
+use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
+
+struct CleanupTool {
+    calls: Arc<AtomicUsize>,
+    started: Mutex<Option<oneshot::Sender<()>>>,
+    cleanup_started: Mutex<Option<oneshot::Sender<()>>>,
+    release: Arc<Notify>,
+}
+
+impl ToolExecutor<ToolInvocation> for CleanupTool {
+    fn tool_name(&self) -> ToolName {
+        ToolName::plain("cleanup_tool")
+    }
+
+    fn spec(&self) -> codex_tools::ToolSpec {
+        codex_tools::ToolSpec::Function(codex_tools::ResponsesApiTool {
+            name: "cleanup_tool".to_string(),
+            description: "Hold real Core cancellation cleanup until released.".to_string(),
+            strict: false,
+            defer_loading: None,
+            parameters: codex_tools::JsonSchema::default(),
+            output_schema: None,
+        })
+    }
+
+    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+        Box::pin(async move {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(tx) = self.started.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+            invocation.cancellation_token.cancelled().await;
+            if let Some(tx) = self.cleanup_started.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+            self.release.notified().await;
+            Ok(Box::new(FunctionToolOutput::from_text(
+                "cleanup complete".to_string(),
+                /*success*/ Some(false),
+            )) as Box<dyn ToolOutput>)
+        })
+    }
+}
+
+impl CoreToolRuntime for CleanupTool {
+    fn waits_for_runtime_cancellation(&self) -> bool {
+        true
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_waits_for_core_tool_facts_before_fixing_the_final_cursor() -> anyhow::Result<()> {
+    // TempDir creates a unique root and stays alive through host shutdown and all writes.
+    let home = tempfile::tempdir()?;
+    let (mut session, mut turn) = super::tests::make_session_and_context().await;
+    {
+        let config = Arc::make_mut(&mut turn.config);
+        config.codex_home = AbsolutePathBuf::try_from(home.path())?;
+        config.sqlite =
+            codex_state::SqliteConfig::from_sqlite_home(AbsolutePathBuf::try_from(home.path())?);
+        config
+            .features
+            .enable(Feature::CodeModeOnly)
+            .expect("test feature can be enabled");
+    }
+    turn.code_mode_available = true;
+    session.services.state_db = Some(
+        codex_state::StateRuntime::init(
+            turn.config.sqlite.clone(),
+            turn.config.model_provider_id.clone(),
+        )
+        .await?,
+    );
+    session.services.code_mode_service = CodeModeService::new(
+        Arc::new(ProcessOwnedCodeModeSessionProvider::with_host_program(
+            codex_utils_cargo_bin::cargo_bin("codex-code-mode-host")?,
+        )),
+        &turn.config.code_mode,
+    );
+    let (tx_event, rx_event) = async_channel::unbounded();
+    session.tx_event = tx_event;
+    let (started_tx, started_rx) = oneshot::channel();
+    let (cleanup_tx, cleanup_rx) = oneshot::channel();
+    let release = Arc::new(Notify::new());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let tool: Arc<dyn CoreToolRuntime> = Arc::new(CleanupTool {
+        calls: Arc::clone(&calls),
+        started: Mutex::new(Some(started_tx)),
+        cleanup_started: Mutex::new(Some(cleanup_tx)),
+        release: Arc::clone(&release),
+    });
+    let router = Arc::new(ToolRouter::from_registry(
+        &turn,
+        ToolRegistry::from_tools([tool]),
+        Vec::new(),
+        &ToolSearchHandlerCache::default(),
+    ));
+    let turn = Arc::new(turn);
+    let step = StepContext::for_test(Arc::clone(&turn)).with_tool_router_for_test(router);
+    let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
+    let session = Arc::new(session);
+    let _dispatch_worker = session
+        .services
+        .code_mode_service
+        .start_turn_worker(&session, Arc::clone(&step), Arc::clone(&tracker))
+        .expect("real code mode broker");
+    let runtime = ToolCallRuntime::new(Arc::clone(&session), step, tracker);
+    let exec = tokio::spawn(runtime.clone().handle_tool_call(
+        ToolCall {
+            tool_name: ToolName::plain(PUBLIC_TOOL_NAME),
+            call_id: "shutdown-owner-exec".to_string(),
+            payload: ToolPayload::Custom {
+                input:
+                    "// @exec: {\"yield_time_ms\": 1}\nawait tools.cleanup_tool({});".to_string(),
+            },
+            encrypted_function_args: None,
+        },
+        CancellationToken::new(),
+    ));
+    tokio::time::timeout(Duration::from_secs(5), started_rx).await??;
+    tokio::time::timeout(Duration::from_secs(5), exec).await???;
+
+    let thread = start_thread(session, &turn, rx_event);
+    let closing = Arc::clone(&thread);
+    // Keep the existing Kernel deadline. A caller timeout does not release the tool gate.
+    let mut shutdown = tokio::spawn(async move {
+        tokio::time::timeout(Duration::from_secs(5), closing.shutdown_and_wait()).await
+    });
+    tokio::time::timeout(Duration::from_secs(5), cleanup_rx).await??;
+    let early = tokio::time::timeout(Duration::from_secs(1), &mut shutdown).await;
+    let before_release = thread
+        .tool_runtime_events(/*after*/ 0, /*limit*/ 200)
+        .await?;
+    assert!(before_release.iter().any(|event| matches!(&event.fact,
+        ToolRuntimeFact::Request(fact) if fact.request.tool_name == "cleanup_tool"
+            && fact.attempt.as_ref().is_some_and(|attempt| attempt.execution == ToolExecutionStatus::Running)
+    )), "real Core handler must have a durable running receipt before release");
+    let early_cut = before_release.last().map_or(0, |event| event.sequence);
+    release.notify_one();
+    let returned_before_release = match early {
+        Ok(result) => {
+            result???;
+            true
+        }
+        Err(_) => {
+            shutdown.await???;
+            false
+        }
+    };
+    let after_release = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let events = thread.tool_runtime_events(/*after*/ 0, /*limit*/ 200).await?;
+            if events.iter().any(|event| matches!(&event.fact,
+                ToolRuntimeFact::Request(fact) if fact.request.tool_name == "cleanup_tool"
+                    && fact.attempt.as_ref().is_some_and(|attempt| attempt.execution == ToolExecutionStatus::Completed)
+            )) {
+                return anyhow::Ok(events);
+            }
+            tokio::task::yield_now().await;
+        }
+    }).await??;
+    let late = after_release
+        .iter()
+        .filter(|event| event.sequence > early_cut)
+        .collect::<Vec<_>>();
+    assert!(
+        !returned_before_release,
+        "shutdown returned with cleanup blocked at cursor {early_cut}; real Core facts arrived after close: {late:?}"
+    );
+    let final_cut = after_release.last().map_or(0, |event| event.sequence);
+    assert!(
+        final_cut > early_cut,
+        "cleanup must persist its final receipt"
+    );
+    assert!(
+        thread
+            .tool_runtime_events(final_cut, /*limit*/ 200)
+            .await?
+            .is_empty()
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let denied = tokio::time::timeout(
+        Duration::from_secs(5),
+        runtime.handle_tool_call(
+            ToolCall {
+                tool_name: ToolName::plain(PUBLIC_TOOL_NAME),
+                call_id: "sealed-owner-probe".to_string(),
+                payload: ToolPayload::Custom {
+                    input: "await tools.cleanup_tool({});".to_string(),
+                },
+                encrypted_function_args: None,
+            },
+            CancellationToken::new(),
+        ),
+    )
+    .await??;
+    let ToolCallCompletion::Response(ResponseInputItem::CustomToolCallOutput {
+        call_id,
+        output,
+        ..
+    }) = denied
+    else {
+        panic!("closed owner must return a normal Core denial response");
+    };
+    assert_eq!(call_id, "sealed-owner-probe");
+    assert_eq!(output.success, Some(false));
+    assert_eq!(
+        output.body,
+        FunctionCallOutputBody::Text(
+            "tool_fact_owner_closed: Core tool facts owner is closing".to_string()
+        )
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "sealed owner must not invoke the handler"
+    );
+    assert!(
+        thread
+            .tool_runtime_events(final_cut, /*limit*/ 200)
+            .await?
+            .is_empty(),
+        "sealed owner must not append a new request or optional diagnostic"
+    );
+    Ok(())
+}
+
+fn start_thread(
+    session: Arc<super::session::Session>,
+    turn: &super::turn_context::TurnContext,
+    rx_event: async_channel::Receiver<codex_protocol::protocol::Event>,
+) -> Arc<CodexThread> {
+    let configured = SessionConfiguredEvent {
+        session_id: SessionId::from(session.thread_id),
+        thread_id: session.thread_id,
+        forked_from_id: None,
+        parent_thread_id: None,
+        thread_source: None,
+        thread_name: None,
+        model: turn.model_info.slug.clone(),
+        model_provider_id: turn.config.model_provider_id.clone(),
+        service_tier: None,
+        approval_policy: turn.approval_policy(),
+        approvals_reviewer: turn.config.approvals_reviewer,
+        permission_profile: turn.permission_profile(),
+        active_permission_profile: None,
+        cwd: turn.config.cwd.clone(),
+        reasoning_effort: None,
+        initial_messages: None,
+        network_proxy: None,
+        rollout_path: None,
+    };
+    let (tx_sub, rx_sub) = async_channel::bounded(4);
+    let session_loop = tokio::spawn(submission_loop(
+        Arc::clone(&session),
+        Arc::clone(&turn.config),
+        rx_sub,
+    ));
+    let io = SessionIo {
+        tx_sub,
+        rx_event,
+        agent_status: session.agent_status.subscribe(),
+        session_loop_termination: session_loop_termination_from_handle(session_loop),
+    };
+    Arc::new(CodexThread::new(
+        session,
+        io,
+        configured,
+        /*rollout_path*/ None,
+        SessionSource::Exec,
+    ))
+}
+
+#[tokio::test]
+async fn shutdown_fails_when_the_final_tool_fact_storage_barrier_fails() -> anyhow::Result<()> {
+    let home = tempfile::tempdir()?;
+    let (mut session, mut turn) = super::tests::make_session_and_context().await;
+    let config = Arc::make_mut(&mut turn.config);
+    config.sqlite =
+        codex_state::SqliteConfig::from_sqlite_home(AbsolutePathBuf::try_from(home.path())?);
+    let store =
+        codex_state::StateRuntime::init(config.sqlite.clone(), config.model_provider_id.clone())
+            .await?;
+    session.services.state_db = Some(Arc::clone(&store));
+    let (tx_event, rx_event) = async_channel::unbounded();
+    session.tx_event = tx_event;
+    // Direct-only sessions have no cell transaction to incidentally fence the store.
+    store.close().await;
+    let thread = start_thread(Arc::new(session), &turn, rx_event);
+    let result = tokio::time::timeout(Duration::from_secs(5), thread.shutdown_and_wait()).await?;
+    assert!(
+        result.is_err(),
+        "closed fact storage must not certify a final Core cursor"
+    );
+    Ok(())
+}

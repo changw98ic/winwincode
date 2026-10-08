@@ -4295,3 +4295,7 @@ mod elicitation_holders_tests;
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+#[cfg(test)]
+#[path = "tool_fact_shutdown_tests.rs"]
+mod tool_fact_shutdown_tests;
