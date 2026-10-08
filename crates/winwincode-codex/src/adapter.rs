@@ -3294,6 +3294,7 @@ impl ProductionCodexAdapter {
                 binding,
                 replay,
                 kernel_live,
+                kernel_close_pending: false,
                 recovered,
                 batch_intent_emission: OneShotState::Ready,
                 format_repair_reconciliation: OneShotState::Ready,
@@ -6019,6 +6020,8 @@ struct ActiveRun {
     binding: ModelRunBinding,
     replay: VecDeque<RuntimeEventMessage>,
     kernel_live: bool,
+    // Process-local close progress; durable final authority remains in StoredRun.
+    kernel_close_pending: bool,
     recovered: bool,
     batch_intent_emission: OneShotState,
     format_repair_reconciliation: OneShotState,
@@ -8642,6 +8645,122 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn recorded_closed_cell_is_projected_while_core_shutdown_is_pending() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(Box::pin(recorded_closed_cell_projection_test()));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[cfg(unix)]
+    async fn recorded_closed_cell_projection_test() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        let mut fixture = session_end_shutdown_fixture(true, "closed-cell-during-shutdown").await;
+        let terminal =
+            serde_json::to_value(&fixture.adapter.runs[&fixture.key].record.terminal).unwrap();
+        assert!(matches!(
+            fixture
+                .adapter
+                .poll(&fixture.thread, &fixture.now)
+                .await
+                .unwrap(),
+            CodexPoll::Pending
+        ));
+        assert_shutdown_timeout_is_unsealed(&fixture, &terminal).await;
+        let session = fixture.adapter.runs[&fixture.key]
+            .record
+            .kernel_session_id
+            .clone();
+        // Seed the Core store at the failing adapter boundary: a recorded
+        // closed-cell fact exists while the same Core awaits SessionEnd.
+        let home = &fixture.adapter.config.kernel_home;
+        let database = std::fs::read_dir(home)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("state_") && name.ends_with(".sqlite"))
+            })
+            .unwrap();
+        let fact = serde_json::json!({"kind":"cell","fact":{
+            "schema_version":1,"sequence":1,"thread_id":session,
+            "parent_request_sequence":1,"cell_id":"1","scope_id":"recorded-scope",
+            "owner_id":"recorded-owner","lifecycle":"closed","revision":2
+        }})
+        .to_string();
+        let database = rusqlite::Connection::open(database).unwrap();
+        database.execute("INSERT INTO tool_requests(sequence,thread_id,logical_id,binding,request_json) VALUES (1,?1,'recorded-exec','recorded-binding','{}')", [&session]).unwrap();
+        database.execute("INSERT INTO tool_fact_events(request_sequence,thread_id,fact_json) VALUES (1,?1,?2)", [&session, &fact]).unwrap();
+        drop(database);
+        let poll = fixture.adapter.poll(&fixture.thread, &fixture.now).await;
+        assert!(
+            !fixture.done.exists(),
+            "the original Core must still await its trusted hook"
+        );
+        std::fs::write(&fixture.release, b"release").unwrap();
+        let CodexPoll::RuntimeTrace(message) = poll.unwrap() else {
+            panic!("recorded closed cell was withheld behind full Core shutdown");
+        };
+        let payload: winwincode_execution_port::generated::CoreToolRuntimeFactPayload =
+            serde_json::from_slice(
+                &STANDARD
+                    .decode(&message.event.payload.as_ref().unwrap().data_base64)
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&payload.fact_json).unwrap(),
+            serde_json::from_str::<serde_json::Value>(&fact).unwrap()
+        );
+        assert_eq!(payload.source_sequence.0, 1);
+        assert_eq!(payload.source_thread_id, session);
+        let run = &fixture.adapter.runs[&fixture.key];
+        assert_eq!(run.record.core_tool_cursor, 1);
+        assert_eq!(
+            run.record.core_tool_final_cursor, None,
+            "delivery cannot seal the final cut before the same Core closes"
+        );
+        assert!(run.kernel_live);
+        assert!(run.record.terminal_message_id.is_none());
+        let retained = fixture.adapter.outbox.pending().unwrap();
+        assert!(retained.iter().any(|delivery| matches!(&delivery.message,
+            ExecutionPortMessage::RuntimeEventMessage(event) if event == message.as_ref())));
+        for _ in 0..8 {
+            if matches!(
+                fixture
+                    .adapter
+                    .poll(&fixture.thread, &fixture.now)
+                    .await
+                    .unwrap(),
+                CodexPoll::Cancelled(_)
+            ) {
+                break;
+            }
+        }
+        assert_eq!(
+            fixture.adapter.runs[&fixture.key]
+                .record
+                .core_tool_final_cursor,
+            Some(1)
+        );
+        assert!(!fixture.adapter.runs[&fixture.key].kernel_live);
+        fixture.adapter.shutdown().await.unwrap();
+        drop(fixture.adapter);
+        std::fs::remove_dir_all(fixture.root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn session_shutdown_timeout_keeps_completed_authority_pending_until_same_core_closes() {
         run_session_end_shutdown_test(false, false);
     }
@@ -9521,6 +9640,7 @@ mod tests {
                 binding,
                 replay: std::collections::VecDeque::default(),
                 kernel_live: false,
+                kernel_close_pending: false,
                 recovered: true,
                 batch_intent_emission: OneShotState::Ready,
                 format_repair_reconciliation: OneShotState::Ready,

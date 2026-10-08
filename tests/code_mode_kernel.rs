@@ -655,7 +655,7 @@ fn native_cell_hands_control_to_the_host_through_common_dispatch() {
 
 #[test]
 fn user_interrupt_closes_the_native_cell_before_the_next_turn() {
-    assert_interrupt_closes_native_cell(CANCEL_SOURCE, false);
+    assert_interrupt_closes_native_cell(CANCEL_SOURCE, false, false);
 }
 
 #[test]
@@ -666,6 +666,20 @@ const tool = ALL_TOOLS.find(t => t.name.endsWith('fixture__public_smoke'));
 text(await tools[tool.name]({tag:'A', phase:'hold'}));
 text(await tools[tool.name]({tag:'A', phase:'after'}));
 "#,
+        true,
+        false,
+    );
+}
+
+#[test]
+fn shutdown_immediately_after_interrupt_drains_a_blocked_native_cell() {
+    assert_interrupt_closes_native_cell(
+        r#"// @exec: {"yield_time_ms":1000}
+const tool = ALL_TOOLS.find(t => t.name.endsWith('fixture__public_smoke'));
+text(await tools[tool.name]({tag:'A', phase:'hold'}));
+text(await tools[tool.name]({tag:'A', phase:'after'}));
+"#,
+        true,
         true,
     );
 }
@@ -703,7 +717,11 @@ async fn assert_blocked_mcp_wait(fixture: &Fixture, kernel: &Kernel, session_id:
     .expect("interrupt reaches a real blocked MCP call while functions.wait is active");
 }
 
-fn assert_interrupt_closes_native_cell(source: &'static str, blocked_mcp: bool) {
+fn assert_interrupt_closes_native_cell(
+    source: &'static str,
+    blocked_mcp: bool,
+    shutdown_immediately: bool,
+) {
     run_native_test(move |runtime| {
         runtime.block_on(async {
             let fixture = Fixture::new();
@@ -751,16 +769,18 @@ fn assert_interrupt_closes_native_cell(source: &'static str, blocked_mcp: bool) 
                 assert_blocked_mcp_wait(&fixture, &kernel, &session.session_id).await;
             }
             kernel.interrupt(&session.session_id).await.unwrap();
-            wait_for_kind(&kernel, &session.session_id, "turn_aborted").await;
-            kernel
-                .submit_turn(
-                    &session.session_id,
-                    "Check the interrupted cell".into(),
-                    TurnSubmissionOptions::default(),
-                )
-                .await
-                .unwrap();
-            wait_for_kind(&kernel, &session.session_id, "turn_complete").await;
+            if !shutdown_immediately {
+                wait_for_kind(&kernel, &session.session_id, "turn_aborted").await;
+                kernel
+                    .submit_turn(
+                        &session.session_id,
+                        "Check the interrupted cell".into(),
+                        TurnSubmissionOptions::default(),
+                    )
+                    .await
+                    .unwrap();
+                wait_for_kind(&kernel, &session.session_id, "turn_complete").await;
+            }
             kernel.close_session(&session.session_id).await.unwrap();
             let final_facts = kernel
                 .tool_runtime_events(&session.session_id, 0, 200)
@@ -777,29 +797,33 @@ fn assert_interrupt_closes_native_cell(source: &'static str, blocked_mcp: bool) 
             if blocked_mcp {
                 fixture.assert_no_mcp_phase("after");
             }
-            let requests = model.requests.lock().unwrap();
-            let input = requests.last().unwrap()["request"]["input"]
-                .as_array()
-                .unwrap();
-            let last_input = input
-                .iter()
-                .find(|item| {
-                    item["type"] == "function_call_output" && item["call_id"] == "wait-cancelled"
-                })
-                .expect("wait result after cancellation")["output"]
-                .to_string();
-            assert!(
-                last_input.contains("not found"),
-                "cancelled cell remained live: {last_input}"
-            );
-            assert!(!last_input.contains("should-never-complete"));
-            assert!(
-                last_input.contains("unavailable_wait"),
-                "missing wait diagnosis: {last_input}"
-            );
-            assert!(last_input.contains("model_behavior_diagnosis"));
+            if !shutdown_immediately {
+                assert_cancelled_cell_unavailable(&model);
+            }
         });
     });
+}
+
+fn assert_cancelled_cell_unavailable(model: &ScriptedModel) {
+    let requests = model.requests.lock().unwrap();
+    let input = requests.last().unwrap()["request"]["input"]
+        .as_array()
+        .unwrap();
+    let last_input = input
+        .iter()
+        .find(|item| item["type"] == "function_call_output" && item["call_id"] == "wait-cancelled")
+        .expect("wait result after cancellation")["output"]
+        .to_string();
+    assert!(
+        last_input.contains("not found"),
+        "cancelled cell remained live: {last_input}"
+    );
+    assert!(!last_input.contains("should-never-complete"));
+    assert!(
+        last_input.contains("unavailable_wait"),
+        "missing wait diagnosis: {last_input}"
+    );
+    assert!(last_input.contains("model_behavior_diagnosis"));
 }
 
 #[test]
