@@ -2007,7 +2007,7 @@
         "sessionIdentity"
       ],
       "title": "model.ack",
-      "description": "Acknowledges model chunks. Core progress stays inside the Device; server acknowledgements confirm durable public text projection.",
+      "description": "Acknowledges model chunks. Core progress stays inside the Device; server acknowledgements confirm durable public frame handling. After ProductSession cancellation, frames from its accepted execution are retained without appending Chat text or continuing model exchanges.",
       "x-direction": "control-plane-to-worker",
       "x-authority": "control-command",
       "allOf": [

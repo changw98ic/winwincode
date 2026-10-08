@@ -749,12 +749,13 @@ where
                     if canonical.payload != chunk.payload {
                         return Err(storage_ingress("non-public model payload"));
                     }
-                    attach_model_exchange(&mut context, dispatch, chunk)?;
-                    project_verified_product_session_chunks(
-                        context.storage(),
-                        std::slice::from_ref(chunk),
-                    )
-                    .map_err(application_ingress)?;
+                    if prepare_public_model_frame(&mut context, dispatch, chunk)? {
+                        project_verified_product_session_chunks(
+                            context.storage(),
+                            std::slice::from_ref(chunk),
+                        )
+                        .map_err(application_ingress)?;
+                    }
                     return Ok(vec![ExecutionPortMessage::ModelAckMessage(
                         ModelAckMessage {
                             ack_sequence: winwincode_domain::ExecutionAckSequence(chunk.sequence.0),
@@ -1243,11 +1244,12 @@ fn accept_worker_binding(
 }
 
 #[allow(clippy::too_many_lines)]
-fn attach_model_exchange(
+/// Retains an authorized public frame and returns whether Chat may project it.
+fn prepare_public_model_frame(
     context: &mut DurableExecutionPortContext<'_>,
     dispatch: &ExecutionDispatchAuthority,
     message: &ModelChunkMessage,
-) -> Result<(), DurableExecutionPortError> {
+) -> Result<bool, DurableExecutionPortError> {
     let repository_scope = context.repository_scope().clone();
     let scope_key =
         repository_scope_key(&repository_scope).map_err(DurableExecutionPortError::Storage)?;
@@ -1296,13 +1298,24 @@ fn attach_model_exchange(
             && binding.execution_scope() == &staged.execution_scope
             && binding.worker_pool_id() == &staged.worker_pool_id
     });
+    if record.session().state() == winwincode_session::ProductSessionState::Cancelled {
+        // Cancellation fences execution and public text, not observations of
+        // the already accepted dispatch. Keep the immutable frame receipt and
+        // acknowledge it without opening an exchange or changing Chat state.
+        if successor_binding.is_none() {
+            return Err(storage_ingress(
+                "cancelled Chat model frame differs from the bound execution",
+            ));
+        }
+        return Ok(false);
+    }
     if successor_binding
         .is_some_and(|binding| binding.includes_model_exchange(&message.model_exchange_id))
     {
         // The original durable binding already attached this exact exchange.
         // Its receipt can be Continued or ExecutionBindingReplaced; never
         // reinterpret that receipt through a different command on later frames.
-        return Ok(());
+        return Ok(true);
     }
     let replacement = context
         .storage()
@@ -1364,7 +1377,7 @@ fn attach_model_exchange(
             .map_err(|error| product_session_ingress(&error))?;
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 /// Seals one exact public frame before projection. A known exchange alone is
@@ -1396,6 +1409,7 @@ fn retain_chat_model_frame_authority(
         "protocol":"winwincode.chat-model-frame-authority.v1",
         "messageId":message.message_id,"modelExchangeId":message.model_exchange_id,
         "lease":message.lease,"sequence":message.sequence,"frameDigest":digest,
+        "frame":message,
     }))
     .map_err(|_| storage_ingress("Chat model frame cannot encode"))?;
     context

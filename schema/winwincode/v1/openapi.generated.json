@@ -16868,7 +16868,7 @@
             }
           }
         ],
-        "description": "Acknowledges model chunks. Core progress stays inside the Device; server acknowledgements confirm durable public text projection.",
+        "description": "Acknowledges model chunks. Core progress stays inside the Device; server acknowledgements confirm durable public frame handling. After ProductSession cancellation, frames from its accepted execution are retained without appending Chat text or continuing model exchanges.",
         "properties": {
           "ackSequence": {
             "$ref": "#/components/schemas/ExecutionAckSequence"
@@ -29205,7 +29205,7 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:52119f3f0011c4d459a0cb4f7b6a52d185e8e6b18786980203fe3bb10d40b923",
+  "x-source-digest": "sha256:a08b95781a3d93af9811d0a391dd39002ef2c1f9384f5e4cf4247163446e2326",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {
