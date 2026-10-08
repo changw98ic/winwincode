@@ -28,6 +28,16 @@ pub struct DeviceModelPermit {
     _slot: Option<File>,
 }
 
+impl Drop for DeviceModelPermit {
+    fn drop(&mut self) {
+        if let Some(slot) = &self._slot {
+            // An unrelated child can retain this open file description until exec.
+            // The invocation owner returns its slot before those aliases close.
+            let _ = slot.unlock();
+        }
+    }
+}
+
 /// A full Provider queue leaves the original request unstarted and retryable.
 #[derive(Debug)]
 pub enum DeviceModelAdmission {

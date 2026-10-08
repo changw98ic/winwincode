@@ -231,3 +231,183 @@ fn unsafe_provider_slot_paths_are_hard_errors_and_never_report_a_full_queue() {
     std::os::unix::fs::symlink(directory.0.join("providers.sqlite3"), &slot).unwrap();
     assert!(store.try_model_permit(&open).is_err());
 }
+
+#[test]
+fn invocation_slot_drop_releases_a_lock_with_a_duplicated_descriptor() {
+    let directory = TestDirectory::new("drop-with-duplicate");
+    let store = DeviceProviderStore::open(&directory.0).unwrap();
+    let retained = model_open("provider-a", 10);
+    let previous = store.execute_model(&retained).unwrap();
+    let mut held = (0..3)
+        .map(|index| permit(&store, &model_open("provider-a", index)))
+        .collect::<Vec<_>>();
+    let duplicate = held
+        .last()
+        .unwrap()
+        ._slot
+        .as_ref()
+        .unwrap()
+        .try_clone()
+        .unwrap();
+    let replay = permit(&store, &retained);
+    assert!(replay._slot.is_none());
+    assert_eq!(store.execute_model(&retained).unwrap(), previous);
+    assert!(matches!(
+        store.try_model_attempt_permit(&retained).unwrap(),
+        DeviceModelAdmission::Deferred
+    ));
+    drop(held.pop());
+    let retry = match store.try_model_attempt_permit(&retained).unwrap() {
+        DeviceModelAdmission::Ready(acquired) => acquired,
+        DeviceModelAdmission::Deferred => {
+            panic!("the invocation owner returns its slot while an alias remains open")
+        }
+    };
+    assert!(matches!(
+        store.try_model_attempt_permit(&retained).unwrap(),
+        DeviceModelAdmission::Deferred
+    ));
+    drop(duplicate);
+    assert!(
+        matches!(
+            store.try_model_attempt_permit(&retained).unwrap(),
+            DeviceModelAdmission::Deferred
+        ),
+        "closing the old alias cannot release the new invocation's lock"
+    );
+    drop(retry);
+    assert!(matches!(
+        store.try_model_attempt_permit(&retained).unwrap(),
+        DeviceModelAdmission::Ready(_)
+    ));
+}
+
+const SLOT_ALIAS_CHILD_RELEASE: &str = "WWC_PROVIDER_SLOT_ALIAS_CHILD_RELEASE";
+const SLOT_ALIAS_CHILD_READY: &str = "PROVIDER_SLOT_ALIAS_CHILD_READY";
+
+struct SlotAliasChild {
+    child: Child,
+    release: PathBuf,
+    reader: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for SlotAliasChild {
+    fn drop(&mut self) {
+        let _ = fs::write(&self.release, b"release");
+        let _ = self.child.wait();
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
+    }
+}
+
+#[test]
+fn provider_slot_inherited_descriptor_child() {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let Some(release) = std::env::var_os(SLOT_ALIAS_CHILD_RELEASE) else {
+        return;
+    };
+    println!("{SLOT_ALIAS_CHILD_READY}");
+    std::io::stdout().flush().unwrap();
+    while !Path::new(&release).exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "parent must release the descriptor child"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+#[test]
+fn invocation_slot_drop_releases_a_lock_still_inherited_by_a_live_child() {
+    let directory = TestDirectory::new("drop-with-child-alias");
+    let store = DeviceProviderStore::open(&directory.0).unwrap();
+    let retained = model_open("provider-a", 10);
+    let previous = store.execute_model(&retained).unwrap();
+    let mut held = (0..3)
+        .map(|index| permit(&store, &model_open("provider-a", index)))
+        .collect::<Vec<_>>();
+    let inherited = held
+        .last()
+        .unwrap()
+        ._slot
+        .as_ref()
+        .unwrap()
+        .try_clone()
+        .unwrap();
+    let release = directory.0.join("release-child");
+    // Explicit stdin inheritance pins the same open file description after exec.
+    // This deterministically models the transient inherited descriptor before exec.
+    let mut child = SlotAliasChild {
+        child: Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "device_model_concurrency::tests::provider_slot_inherited_descriptor_child",
+                "--nocapture",
+            ])
+            .env(SLOT_ALIAS_CHILD_RELEASE, &release)
+            .stdin(Stdio::from(inherited))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap(),
+        release,
+        reader: None,
+    };
+    let mut output = BufReader::new(child.child.stdout.take().unwrap());
+    let (ready, receiver) = std::sync::mpsc::sync_channel(1);
+    child.reader = Some(std::thread::spawn(move || {
+        let result = (|| -> std::io::Result<()> {
+            loop {
+                let mut line = String::new();
+                if output.read_line(&mut line)? == 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "child exited before holding the inherited descriptor",
+                    ));
+                }
+                if line.contains(SLOT_ALIAS_CHILD_READY) {
+                    return Ok(());
+                }
+            }
+        })();
+        let _ = ready.send(result);
+        // libtest still writes its result after the helper's release.
+        let _ = std::io::copy(&mut output, &mut std::io::sink());
+    }));
+    receiver
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("descriptor child must become ready before the handshake deadline")
+        .expect("descriptor child must hold the inherited descriptor");
+    let replay = permit(&store, &retained);
+    assert!(replay._slot.is_none());
+    assert_eq!(store.execute_model(&retained).unwrap(), previous);
+    assert!(matches!(
+        store.try_model_attempt_permit(&retained).unwrap(),
+        DeviceModelAdmission::Deferred
+    ));
+    drop(held.pop());
+    let admission = store.try_model_attempt_permit(&retained).unwrap();
+    assert!(
+        child.child.try_wait().unwrap().is_none(),
+        "the child must still retain stdin at the release boundary"
+    );
+    // Always release and reap naturally before asserting the red-capable verdict.
+    fs::write(&child.release, b"release").unwrap();
+    assert!(child.child.wait().unwrap().success());
+    child.reader.take().unwrap().join().unwrap();
+    let DeviceModelAdmission::Ready(retry) = admission else {
+        panic!(
+            "the invocation owner returns its slot before the inherited child descriptor closes"
+        );
+    };
+    assert!(matches!(
+        store.try_model_attempt_permit(&retained).unwrap(),
+        DeviceModelAdmission::Deferred
+    ));
+    drop(retry);
+    assert!(matches!(
+        store.try_model_attempt_permit(&retained).unwrap(),
+        DeviceModelAdmission::Ready(_)
+    ));
+}
