@@ -29,6 +29,11 @@ async function inspectProcesses() {
   return stdout
 }
 
+async function retainInspectionFailure(failure) {
+  await mkdir(evidenceRoot, { recursive: true })
+  await writeFile(join(evidenceRoot, 'inspection-failure.json'), `${JSON.stringify(failure, null, 2)}\n`)
+}
+
 async function captureStack(target) {
   await mkdir(evidenceRoot, { recursive: true })
   const temporary = join(evidenceRoot, 'sample.tmp')
@@ -56,6 +61,7 @@ export async function runNativeKernelAcceptance(command, args, {
   platform = process.platform,
   inspect = inspectProcesses,
   capture = captureStack,
+  recordInspectionFailure = retainInspectionFailure,
   captureAfterMillis = 20_000,
   pollMillis = 1_000,
   stdio = 'inherit',
@@ -72,6 +78,7 @@ export async function runNativeKernelAcceptance(command, args, {
   let firstSeen
   let pending
   let sampled = false
+  let inspectionFailure
   const timer = platform === 'darwin' ? setInterval(() => {
     if (pending !== undefined || sampled) return
     pending = (async () => {
@@ -82,8 +89,20 @@ export async function runNativeKernelAcceptance(command, args, {
       sampled = true
       await capture(target)
     })().catch(error => {
-      sampled = true
-      process.stderr.write(`Native Kernel startup evidence unavailable: ${error.code ?? error.name}\n`)
+      if (sampled || inspectionFailure === undefined) {
+        process.stderr.write(`Native Kernel startup evidence unavailable (${sampled ? 'stack_capture' : 'process_inspection'}): ${error.code ?? error.name}\n`)
+      }
+      // A failed observation during compilation is not a completed sample.
+      // Keep observing this command's descendants; never rerun the test.
+      if (!sampled) {
+        inspectionFailure ??= {
+          schemaVersion: 1, stage: 'process_inspection', count: 0,
+          code: String(error.code ?? error.name).slice(0, 64),
+          signal: error.signal === undefined ? null : String(error.signal).slice(0, 16),
+          killed: error.killed === true,
+        }
+        inspectionFailure.count = Math.min(Number.MAX_SAFE_INTEGER, inspectionFailure.count + 1)
+      }
     }).finally(() => { pending = undefined })
   }, pollMillis) : undefined
   try {
@@ -93,6 +112,13 @@ export async function runNativeKernelAcceptance(command, args, {
     process.off('SIGINT', forwardInterrupt)
     process.off('SIGTERM', forwardTermination)
     await pending
+    if (inspectionFailure !== undefined) {
+      try {
+        await recordInspectionFailure({ ...inspectionFailure, sampled })
+      } catch {
+        process.stderr.write('Native Kernel process inspection evidence could not be retained\n')
+      }
+    }
   }
 }
 

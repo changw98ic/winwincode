@@ -71,6 +71,32 @@ test('non-macOS acceptance preserves success without invoking the macOS sampler'
   assert.deepEqual(result, { code: 0, signal: null })
 })
 
+test('a transient process inspection failure does not discard the later Kernel sample', { timeout: 5_000 }, async t => {
+  const command = blockedCommand(t, 19)
+  let inspections = 0
+  const samples = []
+  const failures = []
+  const release = setTimeout(command.release, 1_000)
+  t.after(() => clearTimeout(release))
+  const result = await runNativeKernelAcceptance(process.execPath, command.args, {
+    platform: 'darwin', stdio: 'pipe', captureAfterMillis: 0, pollMillis: 5,
+    inspect: async rootPid => {
+      inspections += 1
+      if (inspections === 1) throw Object.assign(new Error('ps unavailable during compilation'), { code: 'ETIMEDOUT' })
+      command.observe(rootPid)
+      return `${rootPid + 1} ${rootPid} /build/code_mode_kernel-owned`
+    },
+    capture: async target => { samples.push(target.pid); command.release() },
+    recordInspectionFailure: async failure => failures.push(failure),
+  })
+  command.finished()
+  assert.deepEqual(result, { code: 19, signal: null })
+  assert.equal(samples.length, 1, 'the later owned Kernel process must still be sampled')
+  assert.equal(failures.length, 1)
+  assert.equal(failures[0].count, 1)
+  assert.equal(failures[0].sampled, true)
+})
+
 test('failed sampling preserves the command failure and does not retry the test', { timeout: 5_000 }, async t => {
   const command = blockedCommand(t, 23)
   let attempts = 0
@@ -86,6 +112,32 @@ test('failed sampling preserves the command failure and does not retry the test'
   command.finished()
   assert.deepEqual(result, { code: 23, signal: null })
   assert.equal(attempts, 1)
+})
+
+test('unavailable process inspection retains one bounded failure record and the test exit code', { timeout: 5_000 }, async t => {
+  const command = blockedCommand(t, 29)
+  const failures = []
+  let inspections = 0
+  const release = setTimeout(command.release, 1_000)
+  t.after(() => clearTimeout(release))
+  const result = await runNativeKernelAcceptance(process.execPath, command.args, {
+    platform: 'darwin', stdio: 'pipe', captureAfterMillis: 0, pollMillis: 5,
+    inspect: async () => {
+      inspections += 1
+      if (inspections === 3) command.release()
+      throw Object.assign(new Error('inspection failed'), { code: 'ETIMEDOUT', killed: true })
+    },
+    capture: async () => assert.fail('there is no selected target'),
+    recordInspectionFailure: async failure => failures.push(failure),
+  })
+  command.finished()
+  assert.deepEqual(result, { code: 29, signal: null })
+  assert.equal(failures.length, 1)
+  assert.ok(failures[0].count > 1)
+  assert.equal(failures[0].stage, 'process_inspection')
+  assert.equal(failures[0].code, 'ETIMEDOUT')
+  assert.equal(failures[0].killed, true)
+  assert.equal(failures[0].sampled, false)
 })
 
 test('acceptance preserves test termination by signal', async () => {
