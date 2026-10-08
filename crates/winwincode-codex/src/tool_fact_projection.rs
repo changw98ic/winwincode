@@ -44,10 +44,15 @@ impl ProductionCodexAdapter {
         }
         let session = run.record.kernel_session_id.clone();
         if run.kernel_live {
-            self.kernel
-                .close_session(&session)
-                .await
-                .map_err(|_| unavailable())?;
+            match self.kernel.close_session(&session).await {
+                Ok(()) => {}
+                // The original terminal remains authoritative while the same
+                // Core session finishes closing. A later poll can wait again.
+                Err(error) if error.code() == "SESSION_SHUTDOWN_TIMEOUT" => {
+                    return Ok(Some(CodexPoll::Pending));
+                }
+                Err(_) => return Err(unavailable()),
+            }
             self.runs
                 .get_mut(run_key)
                 .ok_or_else(unknown_thread)?

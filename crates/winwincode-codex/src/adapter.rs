@@ -5590,11 +5590,16 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         // Candidate acceptance, delegated stops and Worker shutdown can reach
         // this entry without another ordinary poll. Retain the final Core cut
         // before the outcome so closing the run cannot strand late receipts.
-        while self
-            .poll_final_tool_facts(&run_key, &outcome.sent_at)
-            .await?
-            .is_some()
-        {}
+        loop {
+            match self
+                .poll_final_tool_facts(&run_key, &outcome.sent_at)
+                .await?
+            {
+                Some(CodexPoll::RuntimeTrace(_)) => {}
+                Some(_) => return Err(unavailable()),
+                None => break,
+            }
+        }
         let highest_sequence = ReplayStore::load(&mut self.store, &identity.stream_key())
             .map_err(map_store_error)?
             .unwrap_or_default()
@@ -8410,6 +8415,458 @@ mod tests {
                     std::fs::remove_dir_all(root).unwrap();
                 }));
         }).unwrap().join().unwrap();
+    }
+
+    #[cfg(unix)]
+    struct SessionEndShutdownFixture {
+        root: PathBuf,
+        adapter: ProductionCodexAdapter,
+        key: String,
+        thread: CodexThreadId,
+        now: Instant,
+        entered: PathBuf,
+        release: PathBuf,
+        done: PathBuf,
+    }
+
+    #[cfg(unix)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one fixture installs a trusted real Core shutdown hook and a durable terminal"
+    )]
+    async fn session_end_shutdown_fixture(
+        cancelled: bool,
+        case_name: &str,
+    ) -> SessionEndShutdownFixture {
+        use sha2::{Digest as _, Sha256};
+        use std::{sync::Arc, time::Duration};
+        use winwincode_kernel::{Kernel, KernelOptions};
+        let root = test_root(case_name);
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (record, binding) = delegated_record_and_binding();
+        let mut job = record.job;
+        job.workspace.write_mode = ExecutionWorkspaceWriteMode::Candidate;
+        let mut lease = binding.authority.lease;
+        lease.lease_id = LeaseId("lse_00000000000000000000000001".into());
+        lease.fencing_token = FencingToken("1".into());
+        lease.issued_at = Instant("2026-08-28T00:00:00.000Z".into());
+        lease.expires_at = Instant("2026-08-28T01:00:00.000Z".into());
+        let worker_session = binding.authority.worker_session_id;
+        let run_key = CodexRunKey {
+            job_id: job.job_id.clone(),
+            attempt: job.attempt,
+            fencing_token: lease.fencing_token.clone(),
+            payload_digest: job.payload_digest.clone(),
+        };
+        let key = run_key.canonical_digest().unwrap().0;
+        let revision = WorkspaceRevision(format!("git-tree:{}", "1".repeat(40)));
+        let mut adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+        let home = adapter.config.kernel_home.clone();
+        let entered = home.join("session-end-entered.json");
+        let release = home.join("session-end-release");
+        let done = home.join("session-end-done");
+        let script = home.join("session-end-gate.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\ncat >> \"$1\"\nwhile [ ! -f \"$2\" ]; do sleep 0.01; done\nprintf 'done\\n' >> \"$3\"\n",
+        ).unwrap();
+        let quote =
+            |path: &std::path::Path| format!("'{}'", path.to_str().unwrap().replace('\'', "'\\''"));
+        let command = format!(
+            "/bin/sh {} {} {} {}",
+            quote(&script),
+            quote(&entered),
+            quote(&release),
+            quote(&done)
+        );
+        std::fs::write(
+            home.join("hooks.json"),
+            serde_json::json!({
+                "hooks": {"SessionEnd": [{"matcher": "other", "hooks": [{
+                    "type": "command", "command": command, "timeout": 3
+                }]}]}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        // Match hooks/discovery.rs's normalized identity and config/fingerprint.rs's
+        // sorted JSON SHA256. The marker assertion below rejects a stale trust hash.
+        let identity = format!(
+            "{{\"event_name\":\"session_end\",\"hooks\":[{{\"async\":false,\"command\":{},\"timeout\":3,\"type\":\"command\"}}],\"matcher\":\"other\"}}",
+            serde_json::to_string(&command).unwrap()
+        );
+        let trusted_hash = format!("sha256:{:x}", Sha256::digest(identity.as_bytes()));
+        let hook_key = format!("{}:session_end:0:0", home.join("hooks.json").display());
+        std::fs::write(
+            home.join("config.toml"),
+            format!(
+                "[features]\nhooks = true\n[hooks.state.{}]\ntrusted_hash = {}\n",
+                serde_json::to_string(&hook_key).unwrap(),
+                serde_json::to_string(&trusted_hash).unwrap()
+            ),
+        )
+        .unwrap();
+        let mut options = KernelOptions::new(home, adapter.config.helper_executable.clone());
+        assert_eq!(options.shutdown_timeout, Duration::from_secs(5));
+        // A stricter existing Kernel option exposes the real 3s-bounded hook seam.
+        options.shutdown_timeout = Duration::from_secs(1);
+        #[cfg(target_os = "linux")]
+        {
+            options.linux_sandbox_executable = Some(
+                super::install_linux_sandbox_alias(&adapter.config.helper_executable).unwrap(),
+            );
+        }
+        adapter.kernel = Arc::new(
+            Kernel::new(
+                options,
+                adapter.bridge.model_port(),
+                adapter.action_gate.clone(),
+            )
+            .unwrap(),
+        );
+        let session = Box::pin(adapter.ensure_thread(CodexThreadStart {
+            snapshot_id: None,
+            run_key: &run_key,
+            worker_id: &lease.worker_id,
+            job: &job,
+            lease: &lease,
+            worker_session_id: &worker_session,
+            workspace: &workspace,
+            workspace_revision: &revision,
+        }))
+        .await
+        .unwrap();
+        let now = Instant("2026-08-28T00:00:02.000Z".into());
+        if cancelled {
+            adapter.interrupt(&session.thread_id, &now).await.unwrap();
+        } else {
+            // Exercise the real terminal acceptance boundary. Provider generation
+            // and Worker candidate verification are covered by production_vertical.
+            adapter
+                .accept_turn_complete(
+                    &key,
+                    &TurnCompleteEvent {
+                        turn_id: "shutdown-timeout-completed-turn".into(),
+                        last_agent_message: Some("original completed result".into()),
+                        error: None,
+                        started_at: None,
+                        completed_at: None,
+                        duration_ms: Some(1),
+                        time_to_first_token_ms: None,
+                    },
+                    &now,
+                )
+                .unwrap();
+        }
+        SessionEndShutdownFixture {
+            root,
+            adapter,
+            key,
+            thread: session.thread_id,
+            now,
+            entered,
+            release,
+            done,
+        }
+    }
+
+    #[cfg(unix)]
+    async fn assert_shutdown_timeout_is_unsealed(
+        fixture: &SessionEndShutdownFixture,
+        original_terminal: &serde_json::Value,
+    ) {
+        let payload: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&fixture.entered)
+                .expect("the real trusted SessionEnd hook must have started"),
+        )
+        .unwrap();
+        assert_eq!(payload["hook_event_name"], "SessionEnd");
+        assert_eq!(payload["reason"], "other");
+        assert_eq!(
+            payload["session_id"],
+            fixture.adapter.runs[&fixture.key].record.kernel_session_id
+        );
+        assert!(
+            !fixture.done.exists(),
+            "the hook must still await the release file"
+        );
+        let run = &fixture.adapter.runs[&fixture.key];
+        assert!(run.kernel_live);
+        assert_eq!(
+            &serde_json::to_value(&run.record.terminal).unwrap(),
+            original_terminal
+        );
+        assert!(run.record.core_tool_final_cursor.is_none());
+        assert!(run.record.terminal_message_id.is_none());
+        assert_ne!(run.record.phase, StoredRunPhase::OutcomeRetained);
+        assert!(
+            fixture
+                .adapter
+                .outbox
+                .terminal_outcome(&fixture.key)
+                .unwrap()
+                .is_none()
+        );
+        let sessions = fixture.adapter.kernel.list_sessions().await.unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0], run.record.kernel_session_id);
+        let stored = load_stored_run(&fixture.adapter.store, &fixture.key)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&stored.terminal).unwrap(),
+            serde_json::to_value(&run.record.terminal).unwrap()
+        );
+        assert!(stored.core_tool_final_cursor.is_none());
+    }
+
+    #[cfg(unix)]
+    fn run_session_end_shutdown_test(cancelled: bool, direct_retention: bool) {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(Box::pin(session_end_shutdown_test_body(
+                        cancelled,
+                        direct_retention,
+                    )));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_shutdown_timeout_keeps_completed_authority_pending_until_same_core_closes() {
+        run_session_end_shutdown_test(false, false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_shutdown_timeout_keeps_cancelled_authority_pending_until_same_core_closes() {
+        run_session_end_shutdown_test(true, false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn direct_outcome_retention_returns_on_real_shutdown_timeout_without_busy_retry() {
+        run_session_end_shutdown_test(true, true);
+    }
+
+    #[cfg(unix)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one real timeout lifecycle checks terminal authority, final cut, canonical replay and ACK"
+    )]
+    async fn session_end_shutdown_test_body(cancelled: bool, direct_retention: bool) {
+        use std::time::Duration;
+        use winwincode_domain::ExecutionAckSequence;
+        use winwincode_execution_port::generated::{
+            ExecutionOutcome, ExecutionOutcomeStatus, ExecutionPortError, ExecutionPortErrorCode,
+            JobOutcomeAckMessage, JobOutcomeAckMessageKind, JobOutcomeAckMessageStatus,
+            JobOutcomeMessage, JobOutcomeMessageKind,
+        };
+        let case_name = match (cancelled, direct_retention) {
+            (_, true) => "session-end-shutdown-direct-retention",
+            (true, false) => "session-end-shutdown-cancelled",
+            (false, false) => "session-end-shutdown-completed",
+        };
+        let mut fixture = session_end_shutdown_fixture(cancelled, case_name).await;
+        let terminal =
+            serde_json::to_value(&fixture.adapter.runs[&fixture.key].record.terminal).unwrap();
+        let binding = fixture.adapter.runs[&fixture.key].binding.clone();
+        assert!(fixture.adapter.runs[&fixture.key].replay.is_empty());
+        assert!(
+            fixture.adapter.runs[&fixture.key]
+                .record
+                .pending_completion
+                .is_none()
+        );
+        // Completed authorizes Worker verification, whose failure remains valid.
+        // This adapter fixture does not synthesize successful candidate acceptance.
+        let outcome = JobOutcomeMessage {
+            kind: JobOutcomeMessageKind::JobOutcome,
+            lease: binding.authority.lease.clone(),
+            message_id: ExecutionMessageId("xmsg_00000000000000000000000071".into()),
+            outcome: ExecutionOutcome {
+                artifacts: Vec::new(),
+                codex_thread_id: Some(fixture.thread.clone()),
+                error: (!cancelled).then(|| ExecutionPortError {
+                    code: ExecutionPortErrorCode::ExecutionFailed,
+                    message: "Worker candidate verification rejected the completed result".into(),
+                    retryable: false,
+                }),
+                finished_at: fixture.now.clone(),
+                last_event_sequence: ExecutionAckSequence(0),
+                status: if cancelled {
+                    ExecutionOutcomeStatus::Cancelled
+                } else {
+                    ExecutionOutcomeStatus::Failed
+                },
+                summary: "Worker resolved the original business terminal".into(),
+                usage: None,
+            },
+            schema_version: SchemaVersion::WinwincodeV1,
+            sent_at: fixture.now.clone(),
+            session_identity: binding.authority.session_identity.clone(),
+            worker_session_id: binding.authority.worker_session_id.clone(),
+        };
+        if direct_retention {
+            // Independent fixture: one 1s close wait fits below the real hook's 3s
+            // cap. A Pending busy loop exceeds this bound instead of turning green.
+            let first = tokio::time::timeout(
+                Duration::from_secs(2),
+                fixture
+                    .adapter
+                    .retain_job_outcome(&fixture.thread, &outcome),
+            )
+            .await;
+            assert_shutdown_timeout_is_unsealed(&fixture, &terminal).await;
+            std::fs::write(&fixture.release, b"release").unwrap();
+            let failure = first
+                .expect("retention must return after one close deadline")
+                .expect_err("a pending real close cannot retain an outcome");
+            assert_eq!(failure.kind(), ProductionCodexErrorKind::DurableState);
+        } else {
+            let first = fixture.adapter.poll(&fixture.thread, &fixture.now).await;
+            assert_shutdown_timeout_is_unsealed(&fixture, &terminal).await;
+            std::fs::write(&fixture.release, b"release").unwrap();
+            assert!(
+                matches!(first, Ok(CodexPoll::Pending)),
+                "a real close timeout must preserve the original terminal: {first:?}"
+            );
+            let mut observed_terminal = false;
+            for _ in 0..8 {
+                match fixture
+                    .adapter
+                    .poll(&fixture.thread, &fixture.now)
+                    .await
+                    .unwrap()
+                {
+                    CodexPoll::RuntimeTrace(_) => {}
+                    CodexPoll::Cancelled(_) if cancelled => {
+                        observed_terminal = true;
+                        break;
+                    }
+                    CodexPoll::Completed(completion) if !cancelled => {
+                        assert_eq!(completion.summary.as_str(), "embedded Codex turn completed");
+                        observed_terminal = true;
+                        break;
+                    }
+                    other => panic!(
+                        "the same Core shutdown must resume the original terminal: {other:?}"
+                    ),
+                }
+            }
+            assert!(observed_terminal);
+        }
+        let original = fixture
+            .adapter
+            .retain_job_outcome(&fixture.thread, &outcome)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&fixture.done).unwrap(),
+            "done\n",
+            "the one real hook must exit through release, not its own timeout"
+        );
+        assert!(
+            fixture
+                .adapter
+                .kernel
+                .list_sessions()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let record = load_stored_run(&fixture.adapter.store, &fixture.key)
+            .unwrap()
+            .unwrap();
+        assert_eq!(serde_json::to_value(&record.terminal).unwrap(), terminal);
+        assert_eq!(record.core_tool_final_cursor, Some(record.core_tool_cursor));
+        assert!(record.core_tool_pending.is_none());
+        assert!(!fixture.adapter.runs[&fixture.key].kernel_live);
+        let ExecutionPortMessage::JobOutcomeMessage(canonical) = &original.message else {
+            panic!("canonical outcome")
+        };
+        assert_eq!(canonical.outcome.status, outcome.outcome.status);
+        assert_eq!(canonical.lease, outcome.lease);
+        assert_eq!(canonical.session_identity, outcome.session_identity);
+        assert_eq!(canonical.worker_session_id, outcome.worker_session_id);
+        assert_eq!(
+            canonical.outcome.codex_thread_id,
+            outcome.outcome.codex_thread_id
+        );
+        let sequence = canonical.outcome.last_event_sequence.0;
+        assert!(
+            sequence > 0,
+            "the retained usage/terminal facts must precede the outcome"
+        );
+        fixture
+            .adapter
+            .accept_execution_delivery_ack(&ExecutionPortMessage::JobOutcomeAckMessage(
+                JobOutcomeAckMessage {
+                    error: None,
+                    kind: JobOutcomeAckMessageKind::JobOutcomeAck,
+                    lease: canonical.lease.clone(),
+                    message_id: ExecutionMessageId("xmsg_00000000000000000000000072".into()),
+                    schema_version: SchemaVersion::WinwincodeV1,
+                    sent_at: fixture.now.clone(),
+                    session_identity: canonical.session_identity.clone(),
+                    status: JobOutcomeAckMessageStatus::Accepted,
+                    worker_session_id: canonical.worker_session_id.clone(),
+                },
+            ))
+            .unwrap();
+        assert!(
+            !fixture
+                .adapter
+                .outbox
+                .pending()
+                .unwrap()
+                .iter()
+                .any(|delivery| matches!(
+                    delivery.message,
+                    ExecutionPortMessage::JobOutcomeMessage(_)
+                ))
+        );
+        drop(fixture.adapter);
+        let mut restarted =
+            ProductionCodexAdapter::open(diagnostic_adapter_config(&fixture.root)).unwrap();
+        let stored = load_stored_run(&restarted.store, &fixture.key)
+            .unwrap()
+            .unwrap();
+        restarted
+            .install_active_run(&fixture.key, stored, binding, false, true)
+            .unwrap();
+        assert!(restarted.kernel.list_sessions().await.unwrap().is_empty());
+        assert!(
+            !restarted
+                .outbox
+                .pending()
+                .unwrap()
+                .iter()
+                .any(|delivery| matches!(
+                    delivery.message,
+                    ExecutionPortMessage::JobOutcomeMessage(_)
+                )),
+            "restart alone cannot resurrect the acknowledged outcome"
+        );
+        assert_eq!(
+            restarted
+                .retain_job_outcome(&fixture.thread, &outcome)
+                .await
+                .unwrap(),
+            original,
+            "explicit replay must preserve the entire canonical frame after ACK and restart"
+        );
+        drop(restarted);
+        std::fs::remove_dir_all(fixture.root).unwrap();
     }
 
     #[cfg(unix)]
