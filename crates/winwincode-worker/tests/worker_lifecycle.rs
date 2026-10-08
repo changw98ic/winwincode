@@ -1075,7 +1075,7 @@ impl CodexCoreAdapter for FakeCodex {
         Ok(Vec::new())
     }
 
-    fn retain_job_outcome(
+    async fn retain_job_outcome(
         &mut self,
         _thread_id: &CodexThreadId,
         outcome: &winwincode_execution_port::generated::JobOutcomeMessage,

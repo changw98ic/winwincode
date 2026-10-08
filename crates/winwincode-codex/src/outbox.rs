@@ -60,6 +60,20 @@ impl ExecutionOutbox {
             .transaction(|transaction| Self::retain_in_transaction(transaction, message))
     }
 
+    /// Reads the original outcome snapshot without requeueing its delivery.
+    pub(crate) fn terminal_outcome(
+        &self,
+        run_key: &str,
+    ) -> Result<Option<JobOutcomeMessage>, AdapterStoreError> {
+        let saved = self.store.lock()?.query_row(
+            "SELECT frame_digest, frame_json FROM execution_terminal_outcome WHERE run_key = ?1",
+            [run_key], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)))
+            .optional().map_err(|_| AdapterStoreError::Unavailable)?;
+        saved
+            .map(|(frame_digest, bytes)| decode_terminal_outcome(&frame_digest, &bytes))
+            .transpose()
+    }
+
     /// Keeps the first complete terminal frame after its transport row is acknowledged.
     /// The run, terminal snapshot and pending delivery commit in one transaction.
     pub(crate) fn retain_terminal_in_transaction(
@@ -82,14 +96,7 @@ impl ExecutionOutbox {
                 .optional().map_err(|_| AdapterStoreError::Unavailable)?
         };
         let canonical = if let Some((frame_digest, bytes)) = saved {
-            if digest(&bytes) != frame_digest {
-                return Err(AdapterStoreError::Corrupt);
-            }
-            let message: ExecutionPortMessage =
-                serde_json::from_slice(&bytes).map_err(|_| AdapterStoreError::Corrupt)?;
-            let ExecutionPortMessage::JobOutcomeMessage(original) = &message else {
-                return Err(AdapterStoreError::Corrupt);
-            };
+            let original = decode_terminal_outcome(&frame_digest, &bytes)?;
             if original.lease != outcome.lease
                 || original.worker_session_id != outcome.worker_session_id
                 || original.session_identity != outcome.session_identity
@@ -98,7 +105,7 @@ impl ExecutionOutbox {
             {
                 return Err(AdapterStoreError::Conflict);
             }
-            message
+            ExecutionPortMessage::JobOutcomeMessage(original)
         } else {
             ExecutionPortMessage::JobOutcomeMessage(outcome.clone())
         };
@@ -1152,6 +1159,20 @@ fn same_replay_facts(first: &[u8], second: &[u8]) -> Result<bool, AdapterStoreEr
         Ok(value)
     }
     Ok(normalized(first)? == normalized(second)?)
+}
+
+fn decode_terminal_outcome(
+    frame_digest: &str,
+    bytes: &[u8],
+) -> Result<JobOutcomeMessage, AdapterStoreError> {
+    if digest(bytes) != frame_digest {
+        return Err(AdapterStoreError::Corrupt);
+    }
+    let message = serde_json::from_slice(bytes).map_err(|_| AdapterStoreError::Corrupt)?;
+    let ExecutionPortMessage::JobOutcomeMessage(original) = message else {
+        return Err(AdapterStoreError::Corrupt);
+    };
+    Ok(original)
 }
 
 fn decode_delivery(

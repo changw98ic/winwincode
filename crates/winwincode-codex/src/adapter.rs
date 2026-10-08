@@ -101,7 +101,9 @@ use winwincode_kernel::{
     KernelOptions, RoleExecutionMode, RoleSessionPolicy, SessionOptions, TurnSubmissionOptions,
 };
 
-use winwincode_execution_port::execution_identity::{canonical_instant, valid_lease_renewal};
+use winwincode_execution_port::execution_identity::{
+    canonical_instant, retained_lease_matches_current, valid_lease_renewal,
+};
 
 use crate::action_bridge::{ActionBridgeError, ExecutionPortActionGate};
 use crate::helper_release::{HELPER_RELEASE_BINARY_MODE, HelperReleaseManifest, MAX_HELPER_BYTES};
@@ -1786,7 +1788,7 @@ impl ProductionCodexAdapter {
                 run.record.phase = StoredRunPhase::TerminalTracePending;
             }
             self.persist_run(run_key)?;
-            self.quiesce_infrastructure_run(run_key, now).await;
+            self.quiesce_infrastructure_run(run_key, now).await?;
         }
         if let Some(fact) = self.poll_final_tool_facts(run_key, now).await? {
             return Ok(fact);
@@ -1852,16 +1854,19 @@ impl ProductionCodexAdapter {
             run.record.phase = StoredRunPhase::TerminalTracePending;
         }
         self.persist_run(run_key)?;
-        self.quiesce_infrastructure_run(run_key, &activity_at).await;
+        self.quiesce_infrastructure_run(run_key, &activity_at)
+            .await?;
         let _ = self.retain_performance_baseline_trace(run_key);
         let _ = self.retain_terminal_trace(run_key, "embedded Codex infrastructure failure");
         Ok(())
     }
 
-    async fn quiesce_infrastructure_run(&mut self, run_key: &str, now: &Instant) {
-        let Some(run) = self.runs.get_mut(run_key) else {
-            return;
-        };
+    async fn quiesce_infrastructure_run(
+        &mut self,
+        run_key: &str,
+        now: &Instant,
+    ) -> Result<(), ProductionCodexError> {
+        let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
         run.pending_fusion = None;
         let thread_id = run.binding.canonical_thread_id.clone();
         let session_id = run.record.kernel_session_id.clone();
@@ -1869,17 +1874,25 @@ impl ProductionCodexAdapter {
         let _ = self.bridge.cancel_thread(&thread_id, now).await;
         let _ = self.bridge.discard_messages_for_thread(&thread_id);
         let _ = self.action_gate.cancel_session(&session_id);
-        if kernel_live {
-            let _ = self.kernel.close_session(&session_id).await;
-            if let Some(run) = self.runs.get_mut(run_key) {
-                run.kernel_live = false;
-            }
-        }
+        let closed = if kernel_live {
+            self.kernel
+                .close_session(&session_id)
+                .await
+                .map_err(|_| unavailable())
+        } else {
+            Ok(())
+        };
         // A model-port task can finish its in-flight open while Core is
         // shutting down.  Discard once more after the shutdown barrier so a
         // late ModelOpen/ModelAck cannot escape a terminal infrastructure
         // path.
         let _ = self.bridge.discard_messages_for_thread(&thread_id);
+        closed?;
+        self.runs
+            .get_mut(run_key)
+            .ok_or_else(unknown_thread)?
+            .kernel_live = false;
+        Ok(())
     }
 
     async fn poll_kernel_events(
@@ -1911,7 +1924,7 @@ impl ProductionCodexAdapter {
             // frame.  Quiesce the bridge before WorkerMain flushes queued
             // model frames so that this pre-start fault has no Provider side
             // effect and cannot leave a live Core session behind.
-            self.quiesce_infrastructure_run(run_key, now).await;
+            self.quiesce_infrastructure_run(run_key, now).await?;
         }
         // Runtime traces already retained by this event keep their original
         // delivery order. A direct terminal must first drain the final Core cut.
@@ -2439,7 +2452,7 @@ impl ProductionCodexAdapter {
                 run.record.phase = StoredRunPhase::TerminalTracePending;
             }
             self.persist_run(run_key)?;
-            self.quiesce_infrastructure_run(run_key, now).await;
+            self.quiesce_infrastructure_run(run_key, now).await?;
         }
         self.poll_retained_terminal(run_key)?
             .ok_or_else(unavailable)
@@ -3094,6 +3107,55 @@ impl ProductionCodexAdapter {
         }))
     }
 
+    /// A business outcome is sealed by its authority, original frame and Core cut.
+    /// Optional lifecycle traces are not prerequisites for restoring that outcome.
+    fn validate_retained_outcome(
+        &mut self,
+        run_key: &str,
+        record: &StoredRun,
+        binding: &ModelRunBinding,
+        kernel_live: bool,
+    ) -> Result<Option<JobOutcomeMessage>, ProductionCodexError> {
+        if record.phase != StoredRunPhase::OutcomeRetained {
+            return Ok(None);
+        }
+        let authorities = usize::from(record.terminal.is_some())
+            + usize::from(record.final_candidate_freeze.is_some())
+            + usize::from(record.delegated_stop.is_some());
+        if authorities != 1
+            || kernel_live
+            || record.core_tool_final_cursor != Some(record.core_tool_cursor)
+            || record.core_tool_pending.is_some()
+        {
+            return Err(conflict());
+        }
+        let original = self
+            .outbox
+            .terminal_outcome(run_key)
+            .map_err(map_store_error)?
+            .ok_or_else(conflict)?;
+        let identity = RuntimeReplayIdentity {
+            lease: binding.authority.lease.clone(),
+            worker_session_id: binding.authority.worker_session_id.clone(),
+            session_identity: binding.authority.session_identity.clone(),
+            codex_thread_id: binding.canonical_thread_id.clone(),
+        };
+        let highest_sequence = ReplayStore::load(&mut self.store, &identity.stream_key())
+            .map_err(map_store_error)?
+            .unwrap_or_default()
+            .highest_sequence;
+        if record.terminal_message_id.as_ref() != Some(&original.message_id)
+            || !retained_lease_matches_current(&original.lease, &binding.authority.lease)
+            || original.worker_session_id != binding.authority.worker_session_id
+            || original.session_identity != binding.authority.session_identity
+            || original.outcome.codex_thread_id.as_ref() != Some(&binding.canonical_thread_id)
+            || u64::try_from(original.outcome.last_event_sequence.0).ok() != Some(highest_sequence)
+        {
+            return Err(conflict());
+        }
+        Ok(Some(original))
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "restart validation installs one run only after all durable identities reconcile"
@@ -3171,11 +3233,7 @@ impl ProductionCodexAdapter {
             terminal_trace.retained = true;
             record.phase = StoredRunPhase::Terminal;
         }
-        let terminal_phase = matches!(
-            record.phase,
-            StoredRunPhase::Terminal | StoredRunPhase::OutcomeRetained
-        );
-        if terminal_phase
+        if record.phase == StoredRunPhase::Terminal
             && !record
                 .terminal_trace
                 .as_ref()
@@ -3186,6 +3244,7 @@ impl ProductionCodexAdapter {
         if record.terminal.is_none() && record.terminal_trace.is_some() {
             return Err(conflict());
         }
+        let _ = self.validate_retained_outcome(run_key, &record, &binding, kernel_live)?;
         if let Some(intent) = record.batch_intent.as_ref() {
             validate_stored_batch_intent(&record, &binding, intent)?;
         }
@@ -5221,11 +5280,11 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             run.record.terminal = Some(StoredTerminal::InfrastructureFailed {
                 artifacts: Vec::new(),
             });
-            run.record.phase = StoredRunPhase::Terminal;
+            run.record.phase = StoredRunPhase::TerminalTracePending;
             run.record.last_activity_at = at.clone();
             self.persist_run(&run_key)?;
         }
-        self.quiesce_infrastructure_run(&run_key, at).await;
+        self.quiesce_infrastructure_run(&run_key, at).await?;
         Ok(())
     }
 
@@ -5503,7 +5562,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             .map_err(map_store_error)
     }
 
-    fn retain_job_outcome(
+    async fn retain_job_outcome(
         &mut self,
         thread_id: &CodexThreadId,
         outcome: &JobOutcomeMessage,
@@ -5521,20 +5580,58 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         {
             return Err(conflict());
         }
-        // The Control Plane may compact the acknowledged outcome row. Keep
-        // its original transport identity in the durable run, and keep the
-        // complete terminal frame in a separate snapshot. Recovery must not
-        // recompute usage, timestamps or the final event cursor after ACK.
-        let canonical_message_id = run
-            .record
-            .terminal_message_id
-            .clone()
-            .unwrap_or_else(|| outcome.message_id.clone());
+        let identity = RuntimeReplayIdentity {
+            lease: run.binding.authority.lease.clone(),
+            worker_session_id: run.binding.authority.worker_session_id.clone(),
+            session_identity: run.binding.authority.session_identity.clone(),
+            codex_thread_id: run.binding.canonical_thread_id.clone(),
+        };
+        self.observe_now(&outcome.sent_at)?;
+        // Candidate acceptance, delegated stops and Worker shutdown can reach
+        // this entry without another ordinary poll. Retain the final Core cut
+        // before the outcome so closing the run cannot strand late receipts.
+        while self
+            .poll_final_tool_facts(&run_key, &outcome.sent_at)
+            .await?
+            .is_some()
+        {}
+        let highest_sequence = ReplayStore::load(&mut self.store, &identity.stream_key())
+            .map_err(map_store_error)?
+            .unwrap_or_default()
+            .highest_sequence;
+        let last_event_sequence = i64::try_from(highest_sequence).map_err(|_| unavailable())?;
+        if outcome.outcome.last_event_sequence.0 > last_event_sequence {
+            return Err(conflict());
+        }
+        let run = self.runs.get(&run_key).ok_or_else(unknown_thread)?;
+        if run.kernel_live
+            || run.record.core_tool_final_cursor != Some(run.record.core_tool_cursor)
+            || run.record.core_tool_pending.is_some()
+        {
+            return Err(unavailable());
+        }
         let mut finalized = run.record.clone();
+        let binding = run.binding.clone();
+        let kernel_live = run.kernel_live;
+        // The caller owns the authenticated current lease, but an earlier
+        // terminal frame still owns its original lease period and ACK identity.
+        // Validate its authority and final Core cut before reusing that frame.
+        let canonical_outcome = if let Some(original) =
+            self.validate_retained_outcome(&run_key, &finalized, &binding, kernel_live)?
+        {
+            original
+        } else {
+            let mut proposed = outcome.clone();
+            proposed.message_id = finalized
+                .terminal_message_id
+                .clone()
+                .unwrap_or_else(|| outcome.message_id.clone());
+            proposed.outcome.last_event_sequence =
+                winwincode_domain::ExecutionAckSequence(last_event_sequence);
+            proposed
+        };
         finalized.phase = StoredRunPhase::OutcomeRetained;
-        finalized.terminal_message_id = Some(canonical_message_id.clone());
-        let mut canonical_outcome = outcome.clone();
-        canonical_outcome.message_id = canonical_message_id;
+        finalized.terminal_message_id = Some(canonical_outcome.message_id.clone());
         let delivery = self
             .store
             .transaction(|transaction| {
@@ -8227,6 +8324,8 @@ mod tests {
                     let mut lease = original_binding.authority.lease;
                     lease.lease_id = LeaseId("lse_00000000000000000000000001".into());
                     lease.fencing_token = FencingToken("1".into());
+                    lease.issued_at = Instant("2026-08-28T00:00:00.000Z".into());
+                    lease.expires_at = Instant("2026-08-28T01:00:00.000Z".into());
                     let worker_session = original_binding.authority.worker_session_id;
                     let run_key = CodexRunKey { job_id: job.job_id.clone(), attempt: job.attempt,
                         fencing_token: lease.fencing_token.clone(), payload_digest: job.payload_digest.clone() };
@@ -8282,10 +8381,188 @@ mod tests {
                     invalid = fact.clone();
                     invalid.candidate_artifact_ref.digest.0 = format!("sha256:{}", "9".repeat(64));
                     assert!(adapter.retain_final_candidate_freeze(&session.thread_id, &invalid).is_err());
+                    // The final freeze reaches Worker completion without another adapter poll.
+                    // Retaining its outcome must close the real Core session and seal its source cut.
+                    let binding = adapter.runs[&key].binding.clone();
+                    let authority = binding.authority.clone();
+                    let outcome: winwincode_execution_port::generated::JobOutcomeMessage = serde_json::from_value(serde_json::json!({
+                        "kind":"job.outcome", "lease":authority.lease,
+                        "messageId":"xmsg_00000000000000000000000001", "schemaVersion":"winwincode/v1",
+                        "sessionIdentity":authority.session_identity, "workerSessionId":authority.worker_session_id,
+                        "sentAt":completed,
+                        "outcome":{"artifacts":[frozen.candidate_artifact_ref], "codexThreadId":session.thread_id,
+                            "error":null,"finishedAt":completed,"lastEventSequence":0,"status":"succeeded",
+                            "summary":"final delegated ChangeBatch accepted and frozen","usage":null}
+                    })).unwrap();
+                    assert!(adapter.runs[&key].kernel_live);
+                    let delivery = adapter.retain_job_outcome(&session.thread_id, &outcome).await.unwrap();
+                    assert!(!adapter.runs[&key].kernel_live);
+                    assert!(adapter.kernel.list_sessions().await.unwrap().is_empty());
+                    let saved = load_stored_run(&adapter.store, &key).unwrap().unwrap();
+                    assert_eq!(saved.core_tool_final_cursor, Some(saved.core_tool_cursor));
+                    assert!(saved.core_tool_pending.is_none());
+                    assert!(saved.terminal_trace.is_none());
                     drop(adapter);
+                    let mut restarted = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+                    restarted.install_active_run(&key, saved, binding, false, true).unwrap();
+                    assert_eq!(restarted.retain_job_outcome(&session.thread_id, &outcome).await.unwrap(), delivery);
+                    drop(restarted);
                     std::fs::remove_dir_all(root).unwrap();
                 }));
         }).unwrap().join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn required_delivery_failure_restarts_before_outcome_and_replays_exactly() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("required delivery recovery runtime")
+                    .block_on(Box::pin(required_delivery_failure_recovery_body()));
+            })
+            .expect("required delivery recovery thread")
+            .join()
+            .expect("required delivery recovery test");
+    }
+
+    #[cfg(unix)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the public adapter lifecycle covers rejection, a real Core close and two restarts"
+    )]
+    async fn required_delivery_failure_recovery_body() {
+        use super::StoredTerminal;
+        use winwincode_execution_port::generated::{
+            ExecutionOutcome, ExecutionOutcomeStatus, ExecutionPortError, ExecutionPortErrorCode,
+            JobOutcomeMessage, JobOutcomeMessageKind,
+        };
+        let root = test_root("required-delivery-recovery");
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let job = executor_job();
+        let lease = ExecutionLeaseStamp {
+            attempt: 1,
+            expires_at: Instant("2030-01-01T00:05:00.000Z".into()),
+            fencing_token: FencingToken("1".into()),
+            issued_at: Instant("2030-01-01T00:00:00.000Z".into()),
+            job_id: job.job_id.clone(),
+            lease_id: LeaseId("lse_00000000000000000000000001".into()),
+            worker_id: WorkerId("wrk_00000000000000000000000001".into()),
+            worker_instance_id: WorkerInstanceId("wki_00000000000000000000000001".into()),
+        };
+        let run_key = CodexRunKey {
+            job_id: job.job_id.clone(),
+            attempt: job.attempt,
+            fencing_token: lease.fencing_token.clone(),
+            payload_digest: job.payload_digest.clone(),
+        };
+        let key = run_key.canonical_digest().unwrap().0;
+        let worker_session_id = WorkerSessionId("wsn_00000000000000000000000001".into());
+        let revision = WorkspaceRevision(format!("git-tree:{}", "1".repeat(40)));
+        let start = || CodexThreadStart {
+            snapshot_id: None,
+            run_key: &run_key,
+            worker_id: &lease.worker_id,
+            job: &job,
+            lease: &lease,
+            worker_session_id: &worker_session_id,
+            workspace: &workspace,
+            workspace_revision: &revision,
+        };
+        let now = Instant("2030-01-01T00:00:01.000Z".into());
+        let mut adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+        let session = Box::pin(adapter.ensure_thread(start())).await.unwrap();
+        assert!(adapter.runs[&key].kernel_live);
+        adapter
+            .fail_required_execution_delivery(&session.thread_id, &now)
+            .await
+            .unwrap();
+        assert!(!adapter.runs[&key].kernel_live);
+        assert!(adapter.kernel.list_sessions().await.unwrap().is_empty());
+        let stored = load_stored_run(&adapter.store, &key).unwrap().unwrap();
+        assert!(matches!(
+            stored.terminal,
+            Some(StoredTerminal::InfrastructureFailed { .. })
+        ));
+        assert!(stored.terminal_trace.is_none());
+        assert!(stored.terminal_message_id.is_none());
+        assert!(adapter.outbox.terminal_outcome(&key).unwrap().is_none());
+        let terminal = serde_json::to_vec(&stored.terminal).unwrap();
+        // Worker can crash after the failure authority is durable but before finish_job.
+        drop(adapter);
+
+        let mut adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+        let recovered = Box::pin(adapter.ensure_thread(start()))
+            .await
+            .expect("required-delivery terminal must recover before outcome retention");
+        assert_eq!(recovered.thread_id, session.thread_id);
+        assert!(!adapter.runs[&key].kernel_live);
+        assert!(adapter.kernel.list_sessions().await.unwrap().is_empty());
+        assert_eq!(
+            serde_json::to_vec(&adapter.runs[&key].record.terminal).unwrap(),
+            terminal,
+            "recovery preserves the original failure authority"
+        );
+        let authority = adapter.runs[&key].binding.authority.clone();
+        let outcome = JobOutcomeMessage {
+            kind: JobOutcomeMessageKind::JobOutcome,
+            lease: authority.lease,
+            message_id: ExecutionMessageId("xmsg_00000000000000000000000001".into()),
+            outcome: ExecutionOutcome {
+                artifacts: Vec::new(),
+                codex_thread_id: Some(session.thread_id.clone()),
+                error: Some(ExecutionPortError {
+                    code: ExecutionPortErrorCode::ExecutionFailed,
+                    message: "required execution delivery rejected".into(),
+                    retryable: false,
+                }),
+                finished_at: now.clone(),
+                last_event_sequence: ExecutionAckSequence(0),
+                status: ExecutionOutcomeStatus::InfrastructureError,
+                summary: "required execution delivery rejected".into(),
+                usage: None,
+            },
+            schema_version: SchemaVersion::WinwincodeV1,
+            sent_at: now,
+            session_identity: authority.session_identity,
+            worker_session_id: authority.worker_session_id,
+        };
+        let original = adapter
+            .retain_job_outcome(&session.thread_id, &outcome)
+            .await
+            .unwrap();
+        let stored = load_stored_run(&adapter.store, &key).unwrap().unwrap();
+        assert_eq!(stored.phase, StoredRunPhase::OutcomeRetained);
+        assert_eq!(stored.core_tool_final_cursor, Some(stored.core_tool_cursor));
+        assert!(stored.core_tool_pending.is_none());
+        assert_eq!(serde_json::to_vec(&stored.terminal).unwrap(), terminal);
+        drop(adapter);
+
+        let mut adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+        let recovered = Box::pin(adapter.ensure_thread(start())).await.unwrap();
+        assert_eq!(recovered.thread_id, session.thread_id);
+        let mut proposed = outcome;
+        proposed.message_id = ExecutionMessageId("xmsg_00000000000000000000000002".into());
+        proposed.outcome.summary = "Worker retried the rejected delivery after restart".into();
+        let replayed = adapter
+            .retain_job_outcome(&session.thread_id, &proposed)
+            .await
+            .unwrap();
+        assert_eq!(
+            replayed, original,
+            "recovery replays the complete original frame"
+        );
+        assert_eq!(
+            adapter.pending_execution_deliveries().unwrap(),
+            vec![original]
+        );
+        assert!(adapter.kernel.list_sessions().await.unwrap().is_empty());
+        drop(adapter);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]

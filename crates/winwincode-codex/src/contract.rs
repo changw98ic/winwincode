@@ -804,7 +804,8 @@ pub trait CodexCoreAdapter {
         request: &RuntimeReplayRequestMessage,
     ) -> Result<Vec<DurableExecutionDelivery>, Self::Error>;
 
-    /// Atomically finalizes the adapter run and retains its first canonical outcome frame.
+    /// Closes Core, retains its final execution facts, then atomically finalizes
+    /// the run and its first canonical outcome with the complete runtime cursor.
     /// Exact retries return the originally retained frame.
     ///
     /// # Errors
@@ -814,7 +815,7 @@ pub trait CodexCoreAdapter {
         &mut self,
         thread_id: &CodexThreadId,
         outcome: &JobOutcomeMessage,
-    ) -> Result<DurableExecutionDelivery, Self::Error>;
+    ) -> impl Future<Output = Result<DurableExecutionDelivery, Self::Error>> + Send;
 
     /// Drains newly produced adapter messages for durable retention by the worker.
     ///

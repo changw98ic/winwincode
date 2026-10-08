@@ -918,7 +918,7 @@ impl CodexCoreAdapter for ScriptedStageProductAdapter {
         Ok(deliveries)
     }
 
-    fn retain_job_outcome(
+    async fn retain_job_outcome(
         &mut self,
         _thread_id: &CodexThreadId,
         outcome: &JobOutcomeMessage,

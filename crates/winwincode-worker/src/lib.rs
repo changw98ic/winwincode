@@ -3992,6 +3992,7 @@ where
         let delivery = self
             .codex
             .retain_job_outcome(&active.codex_thread_id, &outcome)
+            .await
             .map_err(|_| codex_model_error())?;
         // Retain the terminal outcome before consuming the checkout.  If the
         // process stops between these durable boundaries, the accepted
