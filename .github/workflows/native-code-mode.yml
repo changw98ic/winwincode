@@ -19,6 +19,8 @@ on:
       - 'tests/fixtures/code-mode-mcp.mjs'
       - 'tests/workspace-smoke.test.mjs'
       - 'scripts/code-mode-ninja.mjs'
+      - 'scripts/run-native-kernel-acceptance.mjs'
+      - 'tests/native-kernel-acceptance-runner.test.mjs'
       - 'scripts/install-code-mode-linux-build-deps.sh'
       - '.github/workflows/native-code-mode.yml'
 
@@ -128,7 +130,16 @@ jobs:
             sourceSha256: `sha256:${createHash('sha256').update(source).digest('hex')}`,
           })
           NODE
-          WINWINCODE_CODE_MODE_TEST_HELPER="${helper}" cargo test --locked -p winwincode-kernel --test code_mode_kernel --target "${{ matrix.target }}"
+          WINWINCODE_CODE_MODE_TEST_HELPER="${helper}" node scripts/run-native-kernel-acceptance.mjs cargo test --locked -p winwincode-kernel --test code_mode_kernel --target "${{ matrix.target }}"
+
+      - name: Retain failed macOS Kernel startup evidence
+        if: ${{ failure() && runner.os == 'macOS' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-kernel-startup-${{ matrix.target }}
+          path: .cache/native-kernel-startup/
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Install pinned vendor test tools
         if: ${{ matrix.target == 'aarch64-apple-darwin' }}

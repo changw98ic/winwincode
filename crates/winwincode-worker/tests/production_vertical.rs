@@ -5490,7 +5490,16 @@ fn production_worker_cancellation_closes_the_same_gateway_exchange() {
 
 #[test]
 fn production_worker_cancel_forwards_closed_native_cell() {
-    run_on_large_stack(async {
+    native_cell_cancellation_fixture(false);
+}
+
+#[test]
+fn production_worker_cancel_forwards_closed_native_cell_after_runtime_acknowledgements() {
+    native_cell_cancellation_fixture(true);
+}
+
+fn native_cell_cancellation_fixture(acknowledge: bool) {
+    run_on_large_stack(async move {
         let root = TestDirectory::new("production-cancel-native-cell");
         let dispatch = dispatch(&root);
         let port = RecordedPort::default();
@@ -5552,12 +5561,14 @@ fn production_worker_cancel_forwards_closed_native_cell() {
                 .await
                 .unwrap();
         }
-        let cell = poll_until_message(
+        let mut acked_sequence = 0;
+        let cell = poll_native_cell(
             &mut worker,
             &port,
             &at("2030-01-01T00:00:02.000Z"),
-            |messages| native_cell_fact(messages, "live"),
-            "native cell did not become live",
+            "live",
+            acknowledge,
+            &mut acked_sequence,
         )
         .await;
         let active = worker.active_jobs()[0].clone();
@@ -5580,17 +5591,64 @@ fn production_worker_cancel_forwards_closed_native_cell() {
             )
             .await
             .unwrap();
-        let closed = poll_until_message(
+        let closed = poll_native_cell(
             &mut worker,
             &port,
             &now,
-            |messages| native_cell_fact(messages, "closed"),
-            "cancelled native cell was not forwarded",
+            "closed",
+            acknowledge,
+            &mut acked_sequence,
         )
         .await;
         assert_eq!(closed["fact"]["cell_id"], cell["fact"]["cell_id"]);
         worker.shutdown(now).await.unwrap();
     });
+}
+
+async fn poll_native_cell(
+    worker: &mut winwincode_worker::WorkerMain<
+        RecordedPort,
+        winwincode_codex::ProductionCodexAdapter,
+    >,
+    port: &RecordedPort,
+    now: &Instant,
+    lifecycle: &str,
+    acknowledge: bool,
+    acked_sequence: &mut i64,
+) -> serde_json::Value {
+    for _ in 0..400 {
+        worker.poll_codex(now.clone()).await.unwrap();
+        let messages = port.messages();
+        if acknowledge {
+            for message in &messages {
+                let ExecutionPortMessage::RuntimeEventMessage(event) = message else {
+                    continue;
+                };
+                if event.event.sequence.0 <= *acked_sequence {
+                    continue;
+                }
+                assert_eq!(event.event.sequence.0, *acked_sequence + 1);
+                let ack = serde_json::from_value(serde_json::json!({
+                    "kind":"runtime.ack", "schemaVersion":SchemaVersion::WinwincodeV1,
+                    "messageId":id("xmsg", 10_000 + u64::try_from(event.event.sequence.0).unwrap()),
+                    "sentAt":now, "lease":event.lease, "workerSessionId":event.worker_session_id,
+                    "sessionIdentity":event.session_identity, "ackSequence":event.event.sequence,
+                    "status":"accepted",
+                }))
+                .unwrap();
+                worker
+                    .accept_control(&ExecutionPortMessage::RuntimeAckMessage(ack), now.clone())
+                    .await
+                    .unwrap();
+                *acked_sequence = event.event.sequence.0;
+            }
+        }
+        if let Some(cell) = native_cell_fact(&messages, lifecycle) {
+            return cell;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("native cell lifecycle {lifecycle} was not forwarded");
 }
 
 fn native_cell_fact(

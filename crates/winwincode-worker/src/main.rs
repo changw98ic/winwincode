@@ -9,6 +9,7 @@ mod shutdown_signal;
 use std::env;
 use std::fs;
 use std::future::Future;
+use std::io::Write as _;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -300,6 +301,7 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
 
     let mut heartbeat = tokio::time::interval(Duration::from_secs(1));
     let mut drive = tokio::time::interval(Duration::from_millis(25));
+    let mut observed_drive_failures = Vec::new();
     loop {
         tokio::select! {
             () = interrupt.wait() => break,
@@ -315,10 +317,19 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
                 // The shared driver retries one bounded outbox batch and polls
                 // Core even when that batch is backpressured. A separate
                 // pre-flush must not prevent cancellation facts from draining.
-                if let Err(error) = Box::pin(worker.poll_codex(now_instant()?)).await
-                    && env::var_os("WWC_WORKER_POLL_DEBUG").is_some()
-                {
-                    eprintln!("winwincode-worker: Core drive retry failed: {:?}", error.code);
+                if let Err(error) = Box::pin(worker.poll_codex(now_instant()?)).await {
+                    // Retain each finite category once. Raw errors and frames can
+                    // carry private input; the category is sufficient to locate
+                    // a stalled drive without producing an unbounded retry log.
+                    if !observed_drive_failures.contains(&error.code) {
+                        observed_drive_failures.push(error.code);
+                        if let Ok(mut log) = fs::OpenOptions::new().create(true).append(true).open(&intake_log) {
+                            let _ = writeln!(log, "component=worker stage=drive code={:?} ", error.code);
+                        }
+                    }
+                    if env::var_os("WWC_WORKER_POLL_DEBUG").is_some() {
+                        eprintln!("winwincode-worker: Core drive retry failed: {:?}", error.code);
+                    }
                 }
                 if exit_after_work && worker.work_drained() { break; }
             }

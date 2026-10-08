@@ -17,6 +17,8 @@ test('cancellation failure evidence distinguishes Core closure from a stalled Wo
     'SECRET-CANARY'.repeat(6000),
     'component=model_bridge stage=resolve code=MODEL_EXCHANGE_UNKNOWN exchange=SECRET-CANARY detail=SECRET-CANARY',
     'component=worker stage=accept_chunk code=MODEL_CHUNK_ACCEPT_FAILED exchange=SECRET-CANARY',
+    'component=worker stage=drive code=RuntimeTraceMismatch detail=SECRET-CANARY',
+    'component=worker stage=drive code=SECRET_CANARY detail=SECRET-CANARY',
     'component=worker stage=accept_chunk code=MODEL_CHUNK_ACCEPT_FAILED exchange=SECRET-CANARY',
     'component=SECRET-CANARY stage=SECRET-CANARY code=SECRET-CANARY detail=SECRET-CANARY',
   ].join('\n'))
@@ -33,10 +35,13 @@ test('cancellation failure evidence distinguishes Core closure from a stalled Wo
     kernelSessionId: 'kernel', canonicalThreadId: 'thread', phase: 'running',
     terminal: { kind: 'cancelled', secret: 'SECRET-CANARY' },
     coreToolCursor: 7, coreToolFinalCursor: null, coreToolPending: null,
+    terminalTrace: { sequence: 42, retained: true },
     lastAgentMessage: 'SECRET-CANARY', providerApiKey: 'SECRET-CANARY',
   })))
   adapter.prepare('INSERT INTO execution_outbox VALUES (?, ?, ?)')
     .run('runtime-event', 'sent_attempt', Buffer.from('SECRET-CANARY'))
+  adapter.prepare('INSERT INTO execution_outbox VALUES (?, ?, ?)')
+    .run('runtime', 'pending', Buffer.from(JSON.stringify({ event: { sequence: 43 }, secret: 'SECRET-CANARY' })))
   adapter.close()
   const core = new DatabaseSync(join(home, 'state_5.sqlite'))
   core.exec(`CREATE TABLE tool_runtime_cells (
@@ -53,10 +58,15 @@ test('cancellation failure evidence distinguishes Core closure from a stalled Wo
   assert.deepEqual(evidence[0].intakeFailures, [
     { component: 'model_bridge', stage: 'resolve', code: 'MODEL_EXCHANGE_UNKNOWN', count: 1 },
     { component: 'worker', stage: 'accept_chunk', code: 'MODEL_CHUNK_ACCEPT_FAILED', count: 2 },
+    { component: 'worker', stage: 'drive', code: 'RuntimeTraceMismatch', count: 1 },
   ])
   assert.deepEqual(evidence[0].adapter.outbox.map(row => ({ ...row })), [
+    { family: 'runtime', state: 'pending', count: 1 },
     { family: 'runtime-event', state: 'sent_attempt', count: 1 },
   ])
+  assert.equal(evidence[0].adapter.runs[0].terminalTraceSequence, 42)
+  assert.equal(evidence[0].adapter.runs[0].terminalTraceRetained, 1)
+  assert.deepEqual(evidence[0].adapter.pendingRuntime.map(row => ({ ...row })), [{ executionSequence: 43 }])
   assert.ok(!JSON.stringify(evidence).includes('SECRET-CANARY'))
   assert.ok(!JSON.stringify(evidence).includes(root))
 })

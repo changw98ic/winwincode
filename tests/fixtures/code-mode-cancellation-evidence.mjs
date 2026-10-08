@@ -29,6 +29,11 @@ function intakeFailures(path) {
     'device_models:accept_chunk:MODEL_CHUNK_ACCEPT_FAILED',
     'device_models:poll_codex:FOREIGN_OR_UNOWNED_EXCHANGE',
     'device_models:recover_skip:FOREIGN_EXCHANGE',
+    ...['InvalidLifecycle', 'UnexpectedMessage', 'RegistrationMismatch', 'RegistrationRejected',
+      'InvalidDispatchAuthority', 'RuntimeTraceMismatch', 'DelegatedPollMismatch', 'DelegatedContextLimit',
+      'Workspace', 'CandidateArtifactMismatch', 'ExecutionPort', 'ExecutionBackpressure',
+      'ModelStartDeferred', 'ExecutionMessageRejected', 'ExecutionTerminal']
+      .map(code => `worker:drive:${code}`),
   ])
   let descriptor
   try {
@@ -73,10 +78,15 @@ export function cancellationEvidence(deviceData) {
             json_extract(record_json, '$.pendingCompletion.kind') AS pendingCompletion,
             json_extract(record_json, '$.coreToolCursor') AS coreToolCursor,
             json_extract(record_json, '$.coreToolFinalCursor') AS coreToolFinalCursor,
-            json_type(record_json, '$.coreToolPending') AS pendingToolFact
+            json_type(record_json, '$.coreToolPending') AS pendingToolFact,
+            json_extract(record_json, '$.terminalTrace.sequence') AS terminalTraceSequence,
+            json_extract(record_json, '$.terminalTrace.retained') AS terminalTraceRetained
             FROM codex_run ORDER BY run_key LIMIT 16`).all(),
           outbox: adapter.prepare(`SELECT family, state, count(*) AS count
             FROM execution_outbox GROUP BY family, state ORDER BY family, state LIMIT 16`).all(),
+          pendingRuntime: adapter.prepare(`SELECT
+            CASE WHEN json_valid(frame_json) THEN json_extract(frame_json, '$.event.sequence') END AS executionSequence
+            FROM execution_outbox WHERE family = 'runtime' AND state = 'pending' LIMIT 16`).all(),
         })),
         core: existsSync(home) ? readdirSync(home).filter(name => /^state_\d+\.sqlite$/u.test(name))
           .sort().slice(0, 4).map(name => readDatabase(join(home, name), core => ({
