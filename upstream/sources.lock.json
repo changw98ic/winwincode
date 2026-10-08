@@ -1157,6 +1157,16 @@
         "codex-rs/state/src/runtime/tool_diagnostics_tests.rs",
         "codex-rs/state/src/sqlite.rs"
       ]
+    },
+    {
+      "id": "codex-tool-review-optional-diagnostic-isolation",
+      "file": "upstream/patches/codex/0079-tool-review-optional-diagnostic-isolation.patch",
+      "planned": false,
+      "patchSha256": "d025876e2955da202f39833d06988ff4c8973e950eef91b33526e5055025d407",
+      "targets": [
+        "codex-rs/state/src/runtime/tool_diagnostics.rs",
+        "codex-rs/state/src/runtime/tool_execution.rs"
+      ]
     }
   ],
   "licenseObligations": {

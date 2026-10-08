@@ -282,8 +282,11 @@ impl StateRuntime {
                 "tool output has not been accepted"
             );
         }
-        super::tool_diagnostics::offer_staged_diagnostics(&mut tx, request_sequence).await?;
         tx.commit().await?;
+        if let Err(error) = self.offer_staged_diagnostics(request_sequence).await {
+            tracing::warn!(request_sequence, %error,
+                "failed to record optional tool diagnosis offer");
+        }
         Ok(())
     }
 

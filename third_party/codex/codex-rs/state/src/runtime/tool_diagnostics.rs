@@ -63,28 +63,36 @@ impl StateRuntime {
     }
 }
 
-/// Shares the output-offer transaction, so a durable delivery always has its output body.
-pub(super) async fn offer_staged_diagnostics(
-    connection: &mut SqliteConnection,
-    boundary: i64,
-) -> anyhow::Result<()> {
-    let rows = sqlx::query("UPDATE tool_diagnostic_feedback SET offered = 1 WHERE boundary_request_sequence = ? AND offered = 0 RETURNING diagnostic_json")
-        .bind(boundary).fetch_all(&mut *connection).await?;
-    for row in rows {
-        let diagnostic: ToolDiagnostic = serde_json::from_str(row.try_get("diagnostic_json")?)?;
-        sqlx::query("UPDATE tool_diagnostics SET offered_version = MAX(offered_version, ?) WHERE thread_id = ? AND diagnostic_id = ?")
-            .bind(diagnostic.evidence_version).bind(&diagnostic.thread_id).bind(&diagnostic.diagnostic_id).execute(&mut *connection).await?;
-        append(
-            connection,
-            boundary,
-            &diagnostic,
-            ToolDiagnosticDelivery::Offered,
-            Some(boundary),
-        )
-        .await?;
+impl StateRuntime {
+    /// Records optional feedback after its boundary's required output offer commits.
+    /// Errors and cancellation discard the connection after possible SQLite auto-rollback.
+    pub(super) async fn offer_staged_diagnostics(&self, boundary: i64) -> anyhow::Result<()> {
+        let mut connection = self.pool.acquire().await?;
+        connection.close_on_drop();
+        let mut tx = sqlx::Connection::begin_with(&mut *connection, "BEGIN IMMEDIATE").await?;
+        let rows = sqlx::query("UPDATE tool_diagnostic_feedback SET offered = 1 WHERE boundary_request_sequence = ? AND offered = 0 RETURNING diagnostic_json")
+            .bind(boundary).fetch_all(&mut *tx).await?;
+        for row in rows {
+            let diagnostic: ToolDiagnostic = serde_json::from_str(row.try_get("diagnostic_json")?)?;
+            sqlx::query("UPDATE tool_diagnostics SET offered_version = MAX(offered_version, ?) WHERE thread_id = ? AND diagnostic_id = ?")
+                .bind(diagnostic.evidence_version).bind(&diagnostic.thread_id).bind(&diagnostic.diagnostic_id).execute(&mut *tx).await?;
+            append(
+                &mut tx,
+                boundary,
+                &diagnostic,
+                ToolDiagnosticDelivery::Offered,
+                Some(boundary),
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        // SQLx 0.9 exposes this explicitly; only a successfully committed
+        // connection may return to the pool with close_on_drop set.
+        connection.return_to_pool().await;
+        Ok(())
     }
-    Ok(())
 }
+
 async fn append(
     connection: &mut SqliteConnection,
     anchor: i64,
