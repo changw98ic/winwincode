@@ -34,6 +34,10 @@ const DEVICE_PROVIDER_HTTPS_PROXY_ENVIRONMENT: &str = "WWC_DEVICE_PROVIDER_HTTPS
 #[path = "device_provider_probe_concurrency_tests.rs"]
 mod concurrency_tests;
 
+#[cfg(test)]
+#[path = "device_provider_refresh_tests.rs"]
+mod refresh_tests;
+
 /// Bounded failure: database and crypto errors never expose configuration or keys.
 #[derive(Debug, Clone, Copy)]
 pub struct DeviceProviderError;
@@ -387,11 +391,10 @@ impl DeviceProviderStore {
             ResolvedSecret::from_bytes(serde_json::to_vec(&binding)?)
                 .map_err(|_| DeviceProviderError)?
         } else if mutation.config.protocol == DeviceProviderProtocol::ChatgptPlan {
-            let Ok(record) = self.chatgpt_credentials(&mutation.config.provider_id) else {
+            let Ok(secret) = self.saved_secret_for_config(&mutation.config) else {
                 return Ok(DeviceProviderOutcome::InvalidRequest);
             };
-            ResolvedSecret::from_bytes(serde_json::to_vec(&record)?)
-                .map_err(|_| DeviceProviderError)?
+            secret
         } else {
             match mutation.api_key.take() {
                 Some(value)
@@ -402,10 +405,12 @@ impl DeviceProviderStore {
                     ResolvedSecret::from_bytes(value.into_bytes())
                         .map_err(|_| DeviceProviderError)?
                 }
-                None => match self.resolve(&mutation.config.provider_id) {
-                    Ok((config, secret)) if config.protocol == mutation.config.protocol => secret,
-                    _ => return Ok(DeviceProviderOutcome::InvalidRequest),
-                },
+                None => {
+                    let Ok(secret) = self.saved_secret_for_config(&mutation.config) else {
+                        return Ok(DeviceProviderOutcome::InvalidRequest);
+                    };
+                    secret
+                }
                 _ => return Ok(DeviceProviderOutcome::InvalidRequest),
             }
         };
@@ -439,6 +444,31 @@ impl DeviceProviderStore {
             [],
         )?;
         Ok(DeviceProviderOutcome::Saved)
+    }
+
+    fn saved_secret_for_config(
+        &self,
+        config: &DeviceProviderConfig,
+    ) -> Result<ResolvedSecret, DeviceProviderError> {
+        // Configuration saves hold SQLite's writer transaction. Read only local
+        // state here, preserving the credential bytes used by rotation's CAS.
+        let (stored_config, bytes): (String, Vec<u8>) = self.connection.query_row(
+            "SELECT config, secret FROM providers WHERE provider_id=?1",
+            [&config.provider_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let secret = ResolvedSecret::from_bytes(bytes).map_err(|_| DeviceProviderError)?;
+        let stored_config: DeviceProviderConfig = serde_json::from_str(&stored_config)?;
+        if !valid_device_provider_config(&stored_config)
+            || stored_config.protocol != config.protocol
+        {
+            return Err(DeviceProviderError);
+        }
+        if config.protocol == DeviceProviderProtocol::ChatgptPlan {
+            // Validate the protected record without re-encoding an unchanged grant.
+            let _: crate::chatgpt_oauth::Credentials = serde_json::from_slice(secret.expose())?;
+        }
+        Ok(secret)
     }
 
     fn test_credentials(
@@ -648,7 +678,7 @@ impl DeviceProviderStore {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         let result = (|| {
-            let config: DeviceProviderConfig = serde_json::from_str(&current_config)?;
+            let mut config: DeviceProviderConfig = serde_json::from_str(&current_config)?;
             if !valid_device_provider_config(&config)
                 || config.protocol != DeviceProviderProtocol::ChatgptPlan
             {
@@ -657,15 +687,38 @@ impl DeviceProviderStore {
             let mut record: crate::chatgpt_oauth::Credentials = serde_json::from_slice(&previous)?;
             if record.needs_refresh()? {
                 refresh(&mut record)?;
+                // Ordinary saves may change configuration while the grant is in flight.
+                // Serialize only this local check/write, preserving the newest config
+                // whenever the credential itself and the protocol are still current.
+                let transaction = rusqlite::Transaction::new_unchecked(
+                    &self.connection,
+                    rusqlite::TransactionBehavior::Immediate,
+                )?;
+                let (latest_config, latest_secret): (String, Vec<u8>) = transaction.query_row(
+                    "SELECT config, secret FROM providers WHERE provider_id=?1",
+                    [provider_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                let latest_secret =
+                    ResolvedSecret::from_bytes(latest_secret).map_err(|_| DeviceProviderError)?;
+                let latest_config: DeviceProviderConfig = serde_json::from_str(&latest_config)?;
+                if latest_secret.expose() != previous
+                    || !valid_device_provider_config(&latest_config)
+                    || latest_config.protocol != DeviceProviderProtocol::ChatgptPlan
+                {
+                    return Err(DeviceProviderError);
+                }
                 let mut bytes = serde_json::to_vec(&record)?;
-                let saved = self.connection.execute(
-                    "UPDATE providers SET secret=?1 WHERE provider_id=?2 AND secret=?3 AND config=?4",
-                    params![bytes, provider_id, previous, current_config],
+                let saved = transaction.execute(
+                    "UPDATE providers SET secret=?1 WHERE provider_id=?2 AND secret=?3",
+                    params![bytes, provider_id, previous],
                 );
                 bytes.fill(0);
                 if saved? != 1 {
                     return Err(DeviceProviderError);
                 }
+                transaction.commit()?;
+                config = latest_config;
             }
             Ok((config, record.secret()?, None))
         })();
