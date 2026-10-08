@@ -1295,6 +1295,16 @@
         "codex-rs/core/src/agent/control_tests.rs",
         "codex-rs/core/src/tools/handlers/multi_agents_tests.rs"
       ]
+    },
+    {
+      "id": "codex-tool-review-exec-server-resume-diagnostics",
+      "file": "upstream/patches/codex/0091-tool-review-exec-server-resume-diagnostics.patch",
+      "planned": false,
+      "patchSha256": "0a9a78007e9fb8abd2f964e39fa5f54a540428db069492a2b1584619c88fe454",
+      "targets": [
+        "codex-rs/exec-server/tests/common/exec_server.rs",
+        "codex-rs/exec-server/tests/process.rs"
+      ]
     }
   ],
   "licenseObligations": {

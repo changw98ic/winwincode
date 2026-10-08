@@ -1,0 +1,100 @@
+diff --git a/codex-rs/exec-server/tests/common/exec_server.rs b/codex-rs/exec-server/tests/common/exec_server.rs
+index ea4f5b16..7be34842 100644
+--- a/codex-rs/exec-server/tests/common/exec_server.rs
++++ b/codex-rs/exec-server/tests/common/exec_server.rs
+@@ -215,18 +215,30 @@ impl ExecServerHarness {
+         F: FnMut(&JSONRPCMessage) -> bool,
+     {
+         let deadline = Instant::now() + EVENT_TIMEOUT;
++        let mut last_error_code = None;
+         loop {
+             let now = Instant::now();
+             if now >= deadline {
+                 return Err(anyhow!(
+-                    "timed out waiting for matching exec-server event after {EVENT_TIMEOUT:?}"
++                    "timed out waiting for matching exec-server event after {EVENT_TIMEOUT:?}; last unmatched JSON-RPC error code: {last_error_code:?}"
+                 ));
+             }
+             let remaining = deadline.duration_since(now);
+-            let event = self.next_event_with_timeout(remaining).await?;
++            let event = self
++                .next_event_with_timeout(remaining)
++                .await
++                .map_err(|error| match last_error_code {
++                    Some(code) => error.context(format!(
++                        "last unmatched exec-server JSON-RPC error code: {code}"
++                    )),
++                    None => error,
++                })?;
+             if predicate(&event) {
+                 return Ok(event);
+             }
++            if let JSONRPCMessage::Error(error) = event {
++                last_error_code = Some(error.error.code);
++            }
+         }
+     }
+ 
+diff --git a/codex-rs/exec-server/tests/process.rs b/codex-rs/exec-server/tests/process.rs
+index 34dab559..ab512ebd 100644
+--- a/codex-rs/exec-server/tests/process.rs
++++ b/codex-rs/exec-server/tests/process.rs
+@@ -2,6 +2,8 @@ mod common;
+ 
+ use std::collections::HashMap;
+ 
++use anyhow::Context;
++
+ use codex_exec_server::EnvironmentInfo;
+ use codex_exec_server::EnvironmentStatus;
+ use codex_exec_server::EnvironmentStatusKind;
+@@ -720,7 +722,8 @@ async fn exec_server_resumes_detached_session_without_killing_processes() -> any
+                 JSONRPCMessage::Response(JSONRPCResponse { id, .. }) if id == &initialize_id
+             )
+         })
+-        .await?;
++        .await
++        .context("waiting for initial initialize response")?;
+     let JSONRPCMessage::Response(JSONRPCResponse { result, .. }) = response else {
+         panic!("expected initialize response");
+     };
+@@ -751,7 +754,8 @@ async fn exec_server_resumes_detached_session_without_killing_processes() -> any
+                 JSONRPCMessage::Response(JSONRPCResponse { id, .. }) if id == &process_start_id
+             )
+         })
+-        .await?;
++        .await
++        .context("waiting for process/start before disconnect response")?;
+ 
+     server.disconnect_websocket().await?;
+     server.reconnect_websocket().await?;
+@@ -772,7 +776,8 @@ async fn exec_server_resumes_detached_session_without_killing_processes() -> any
+                 JSONRPCMessage::Response(JSONRPCResponse { id, .. }) if id == &resume_initialize_id
+             )
+         })
+-        .await?;
++        .await
++        .context("waiting for resume initialize after reconnect response")?;
+     let JSONRPCMessage::Response(JSONRPCResponse { result, .. }) = response else {
+         panic!("expected resume initialize response");
+     };
+@@ -801,7 +806,8 @@ async fn exec_server_resumes_detached_session_without_killing_processes() -> any
+                 JSONRPCMessage::Response(JSONRPCResponse { id, .. }) if id == &process_read_id
+             )
+         })
+-        .await?;
++        .await
++        .context("waiting for process/read after resume response")?;
+     let JSONRPCMessage::Response(JSONRPCResponse { result, .. }) = response else {
+         panic!("expected process/read response");
+     };
+@@ -825,7 +831,8 @@ async fn exec_server_resumes_detached_session_without_killing_processes() -> any
+                 JSONRPCMessage::Response(JSONRPCResponse { id, .. }) if id == &terminate_id
+             )
+         })
+-        .await?;
++        .await
++        .context("waiting for process/terminate after resume response")?;
+     let JSONRPCMessage::Response(JSONRPCResponse { result, .. }) = response else {
+         panic!("expected process/terminate response");
+     };
