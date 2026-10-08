@@ -52,7 +52,7 @@ struct SharingPoolState {
     revision: u64,
 }
 struct Flight {
-    source: Arc<ToolFactRecord>,
+    source_sequence: i64,
     result: watch::Receiver<Option<Result<String, String>>>,
     ready: watch::Receiver<Option<()>>,
     waiters: AtomicUsize,
@@ -165,7 +165,7 @@ impl ToolDispatch {
         let (sender, receiver) = watch::channel(None);
         let (ready_sender, ready_receiver) = watch::channel(None);
         let candidate = Arc::new(Flight {
-            source: Arc::clone(&facts),
+            source_sequence: facts.sequence,
             result: receiver,
             ready: ready_receiver,
             waiters: AtomicUsize::new(1),
@@ -218,7 +218,7 @@ impl ToolDispatch {
         let lease = Waiter::new(Arc::clone(&flight), Arc::clone(&facts));
         if follower {
             wait_ready(&flight, invocation).await?;
-            let source = source_fact(&flight.source, invocation).await?;
+            let source = source_fact(&facts.store, flight.source_sequence, invocation).await?;
             link(&facts, &source, input, ToolSharingKind::Merged).await?;
             dispatch.sharing = Some(SharingDispatch::Flight { lease, follower });
             return Ok(dispatch);
@@ -280,7 +280,9 @@ impl ToolDispatch {
                         .trusted
                         .as_ref()
                         .ok_or_else(|| sharing_error("shared_policy_unavailable"))?;
-                    let source = source_fact(&lease.flight.source, &invocation).await?;
+                    let source =
+                        source_fact(&self.facts.store, lease.flight.source_sequence, &invocation)
+                            .await?;
                     // Re-read the exact durable source after current authority and
                     // input validation; the watch channel is only a wake-up.
                     let retained =

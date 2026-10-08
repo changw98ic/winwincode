@@ -79,6 +79,8 @@
     "upstream/patches/codex/0070-tool-receipts-stream-dispatch.patch",
     "upstream/patches/codex/0071-tool-review-stream-delivery.patch",
     "upstream/patches/codex/0072-tool-review-progress-isolation.patch",
-    "upstream/patches/codex/0073-tool-review-sharing-settlement.patch"
+    "upstream/patches/codex/0073-tool-review-sharing-settlement.patch",
+    "upstream/patches/codex/0074-tool-review-sharing-cancellation.patch",
+    "upstream/patches/codex/0075-tool-review-diagnostic-evidence.patch"
   ]
 }

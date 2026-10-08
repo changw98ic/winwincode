@@ -629,6 +629,8 @@ pub const CODEX_PATCH_SET: &[&str] = &[
     "upstream/patches/codex/0071-tool-review-stream-delivery.patch",
     "upstream/patches/codex/0072-tool-review-progress-isolation.patch",
     "upstream/patches/codex/0073-tool-review-sharing-settlement.patch",
+    "upstream/patches/codex/0074-tool-review-sharing-cancellation.patch",
+    "upstream/patches/codex/0075-tool-review-diagnostic-evidence.patch",
 ];
 
 const ROLE_SESSION_POLICY_SCHEMA_VERSION: u32 = 2;
@@ -2794,6 +2796,8 @@ mod tests {
                 "upstream/patches/codex/0071-tool-review-stream-delivery.patch",
                 "upstream/patches/codex/0072-tool-review-progress-isolation.patch",
                 "upstream/patches/codex/0073-tool-review-sharing-settlement.patch",
+                "upstream/patches/codex/0074-tool-review-sharing-cancellation.patch",
+                "upstream/patches/codex/0075-tool-review-diagnostic-evidence.patch",
             ]
         );
         assert_eq!(build.event_capacity, 16);

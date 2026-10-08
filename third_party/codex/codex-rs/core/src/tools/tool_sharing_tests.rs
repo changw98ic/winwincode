@@ -173,6 +173,117 @@ async fn begin(invocation: &ToolInvocation) -> Arc<ToolFactRecord> {
     Arc::new(facts)
 }
 #[tokio::test]
+async fn completed_leader_cancellation_is_durable_while_follower_remains_live() {
+    let first = invocation(gate(false, true)).await;
+    let mut second = first.clone();
+    second.call_id = "surviving-follower".into();
+    second.cancellation_token = CancellationToken::new();
+    let runtime = tool(false);
+    let second_facts = begin(&second).await;
+    let (mut follower, store, source_sequence) = {
+        let first_facts = begin(&first).await;
+        let mut leader = ToolDispatch::prepare(&first, runtime.clone(), first_facts.clone())
+            .await
+            .unwrap();
+        leader.run(first.clone(), runtime.clone()).await.unwrap();
+        let follower = ToolDispatch::prepare(&second, runtime.clone(), second_facts.clone())
+            .await
+            .unwrap();
+        // The leader is cancelled after actual completion, before acceptance.
+        // A surviving logical caller and the session still own the shared pool.
+        (follower, first_facts.store.clone(), first_facts.sequence)
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !store.tool_waiter_cancelled(source_sequence).await.unwrap() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("completed leader cancellation must not wait for pool eviction");
+    let output = follower.run(second, runtime.clone()).await.unwrap();
+    assert_eq!(
+        output.result.code_mode_result(&output.payload),
+        serde_json::json!("verified output")
+    );
+    second_facts
+        .accepted(snapshot(&output).unwrap())
+        .await
+        .unwrap();
+    second_facts.offered().await.unwrap();
+    assert_eq!(runtime.calls.load(Ordering::SeqCst), 1);
+    assert!(store.tool_waiter_cancelled(source_sequence).await.unwrap());
+}
+#[tokio::test]
+async fn cancelling_all_waiters_stops_actual_and_admits_a_new_flight() {
+    let first = invocation(gate(false, true)).await;
+    let mut second = first.clone();
+    second.call_id = "second-cancelled".into();
+    second.cancellation_token = CancellationToken::new();
+    let runtime = tool(true);
+    let first_facts = begin(&first).await;
+    let second_facts = begin(&second).await;
+    let leader = ToolDispatch::prepare(&first, runtime.clone(), first_facts.clone())
+        .await
+        .unwrap();
+    runtime.started.notified().await;
+    let follower = ToolDispatch::prepare(&second, runtime.clone(), second_facts.clone())
+        .await
+        .unwrap();
+    drop(leader);
+    drop(follower);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let source = first_facts
+                .store
+                .tool_execution_fact(first_facts.sequence)
+                .await
+                .unwrap();
+            if source.attempt.unwrap().execution == codex_state::ToolExecutionStatus::Uncertain
+                && first_facts
+                    .store
+                    .tool_waiter_cancelled(first_facts.sequence)
+                    .await
+                    .unwrap()
+                && second_facts
+                    .store
+                    .tool_waiter_cancelled(second_facts.sequence)
+                    .await
+                    .unwrap()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("last logical waiter must stop the actual execution");
+    let mut next = first.clone();
+    next.call_id = "new-after-cancellation".into();
+    next.cancellation_token = CancellationToken::new();
+    runtime.release.notify_one();
+    let registry = ToolRegistry::from_tools([runtime.clone() as Arc<dyn CoreToolRuntime>]);
+    let output = registry
+        .dispatch_any_with_terminal_outcome(next, None)
+        .await
+        .unwrap();
+    assert_eq!(runtime.calls.load(Ordering::SeqCst), 2);
+    let codex_protocol::models::ResponseInputItem::FunctionCallOutput { call_id, .. } =
+        output.into_response()
+    else {
+        panic!("function output")
+    };
+    assert_eq!(call_id, "new-after-cancellation");
+    drop(first_facts);
+    drop(second_facts);
+    assert!(
+        registry
+            .dispatch_any_with_terminal_outcome(first, None)
+            .await
+            .is_err()
+    );
+    assert_eq!(runtime.calls.load(Ordering::SeqCst), 2);
+}
+#[tokio::test]
 async fn completed_execution_stays_shared_until_logical_settlement() {
     for reuse in [false, true] {
         let first = invocation(gate(reuse, true)).await;

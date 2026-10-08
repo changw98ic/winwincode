@@ -16,15 +16,18 @@ impl ContextualUserFragment for ToolDiagnosticFeedback {
     }
     fn body(&self) -> String {
         let diagnostics: Vec<_> = self.0.iter()
-            .filter(|diagnostic| diagnostic.diagnostic_id.len() <= 80).take(2)
+            .filter(|diagnostic| bounded_reference(&diagnostic.diagnostic_id).is_some()).take(2)
             .map(|diagnostic| serde_json::json!({
                 "diagnostic_id": diagnostic.diagnostic_id, "evidence_version": diagnostic.evidence_version,
                 "kind": diagnostic.kind, "progress": diagnostic.progress_source_sequence.map_or("unknown", |_| "verified_receipt"),
                 "calls": diagnostic.evidence.iter().rev().take(2).map(|call| serde_json::json!({
                     "request_sequence": call.request_sequence,
-                    "tool": call.tool_name.chars().take(64).collect::<String>(),
+                    "tool": bounded_text(&call.tool_name, 64, 96),
+                    "parent_call_id": call.parent_call_id.as_deref().and_then(bounded_reference),
+                    "cell_id": call.cell_id.as_deref().and_then(bounded_reference),
+                    "operation_digest": bounded_reference(&call.operation_digest),
                 })).collect::<Vec<_>>(),
-                "question": diagnostic.question.chars().take(256).collect::<String>(),
+                "question": bounded_text(&diagnostic.question, 256, 256),
             })).collect();
         serde_json::json!({
             "type": "model_behavior_diagnosis", "schema_version": 1,
@@ -32,4 +35,33 @@ impl ContextualUserFragment for ToolDiagnosticFeedback {
             "next_step": "Assess the evidence, explain whether the waiting or repetition is justified, and choose the next action.",
         }).to_string()
     }
+}
+
+/// Omit an oversized identity rather than truncating it into a different identity.
+fn bounded_reference(value: &str) -> Option<&str> {
+    if value.len() > 80 {
+        return None;
+    }
+    (serde_json::to_string(value).ok()?.len() <= 96).then_some(value)
+}
+
+/// Bound JSON-escaped bytes as well as characters, including control characters.
+fn bounded_text(value: &str, max_chars: usize, max_json_bytes: usize) -> String {
+    let mut remaining = max_json_bytes.saturating_sub(2);
+    value
+        .chars()
+        .take(max_chars)
+        .take_while(|character| {
+            let size = match *character {
+                '"' | '\\' => 2,
+                '\u{0000}'..='\u{001f}' => 6,
+                _ => character.len_utf8(),
+            };
+            if size > remaining {
+                return false;
+            }
+            remaining -= size;
+            true
+        })
+        .collect()
 }

@@ -1,12 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 use super::*;
 use codex_state::ToolAttemptReceipt;
+use codex_state::ToolCoalescingPermission;
+use codex_state::ToolDependencySnapshot;
 use codex_state::ToolExecutionStatus;
 use codex_state::ToolOutputDelivery;
 use codex_state::ToolOutputDisposition;
 use codex_state::ToolProgressFact;
 use codex_state::ToolRequestIdentity;
 use codex_state::ToolRequestResolution;
+use codex_state::ToolReusePermission;
+use codex_state::ToolSharingFact;
+use codex_state::ToolSharingKind;
 use pretty_assertions::assert_eq;
 fn request(
     sequence: i64,
@@ -64,6 +69,106 @@ fn repeated_requests_produce_stable_evidence_but_transport_replay_does_not_count
     let second = detector.diagnose("thread", "owner");
     assert_eq!(first[0].diagnostic_id, second[0].diagnostic_id);
     assert!(second[0].evidence_version > first[0].evidence_version);
+}
+
+#[test]
+fn shared_call_evidence_keeps_the_operation_that_triggered_the_diagnosis() {
+    for kind in [ToolSharingKind::Reuse, ToolSharingKind::Merged] {
+        let mut detector = Detector::default();
+        let operation = "a".repeat(64);
+        detector.consume(vec![request(1, &operation, Some("parent"), Some("cell"))]);
+        for sequence in 2..=6 {
+            let mut event = request(sequence, "same-input", Some("parent"), Some("cell"));
+            event.sequence = sequence * 2;
+            if let ToolRuntimeFact::Request(fact) = &mut event.fact {
+                fact.attempt = None;
+            }
+            detector.consume(vec![
+                event,
+                ToolRuntimeEvent {
+                    sequence: sequence * 2 + 1,
+                    fact: ToolRuntimeFact::Sharing(ToolSharingFact {
+                        schema_version: 1,
+                        thread_id: "thread".into(),
+                        request_sequence: sequence,
+                        source_request_sequence: 1,
+                        source_attempt_id: "attempt-1".into(),
+                        operation_digest: operation.clone(),
+                        snapshot: ToolDependencySnapshot {
+                            policy_revision: "1".repeat(64),
+                            dependency_digest: "2".repeat(64),
+                            account_scope_digest: "3".repeat(64),
+                            session_scope_digest: "4".repeat(64),
+                            validity_epoch: "5".repeat(64),
+                            reuse: ToolReusePermission::ImmutableValue,
+                            coalescing: ToolCoalescingPermission::SharedRead,
+                        },
+                        kind,
+                        disposition: ToolOutputDisposition::Accepted,
+                        delivery: ToolOutputDelivery::Offered,
+                        cancelled: false,
+                    }),
+                },
+            ]);
+        }
+        let diagnoses = detector.diagnose("thread", "owner");
+        assert_eq!(diagnoses.len(), 1);
+        assert_eq!(diagnoses[0].kind, ToolDiagnosticKind::RepeatedOperation);
+        assert_eq!(diagnoses[0].evidence.len(), 4);
+        assert!(diagnoses[0].evidence.iter().all(|call| {
+            call.request_sequence >= 3
+                && call.operation_digest == operation
+                && call.parent_call_id.as_deref() == Some("parent")
+                && call.cell_id.as_deref() == Some("cell")
+        }));
+    }
+}
+
+#[test]
+fn branch_expansion_evidence_compares_distinct_parent_calls() {
+    let mut detector = Detector::default();
+    detector.consume(
+        (1..=12)
+            .map(|sequence| {
+                let branch = (sequence - 1) / 4;
+                request(
+                    sequence,
+                    "same",
+                    Some(&format!("parent-{branch}")),
+                    Some(&format!("cell-{branch}")),
+                )
+            })
+            .collect(),
+    );
+    let diagnoses = detector.diagnose("thread", "owner");
+    let branch = diagnoses
+        .iter()
+        .find(|diagnostic| diagnostic.kind == ToolDiagnosticKind::BranchExpansion)
+        .unwrap();
+    assert_eq!(branch.evidence.len(), 3);
+    assert_eq!(
+        branch
+            .evidence
+            .iter()
+            .map(|call| call.request_sequence)
+            .collect::<Vec<_>>(),
+        [4, 8, 12]
+    );
+    let visible = branch.evidence.iter().rev().take(2).collect::<Vec<_>>();
+    assert_ne!(visible[0].parent_call_id, visible[1].parent_call_id);
+    assert_ne!(visible[0].cell_id, visible[1].cell_id);
+    let repeated = diagnoses
+        .iter()
+        .find(|diagnostic| diagnostic.kind == ToolDiagnosticKind::RepeatedOperation)
+        .unwrap();
+    assert_eq!(
+        repeated
+            .evidence
+            .iter()
+            .map(|call| call.request_sequence)
+            .collect::<Vec<_>>(),
+        [9, 10, 11, 12]
+    );
 }
 #[test]
 fn alternating_cycles_and_branch_expansion_are_separate_questions() {

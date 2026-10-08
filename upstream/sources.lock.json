@@ -1104,6 +1104,29 @@
         "codex-rs/core/src/tools/tool_sharing.rs",
         "codex-rs/core/src/tools/tool_sharing_tests.rs"
       ]
+    },
+    {
+      "id": "codex-tool-review-sharing-cancellation",
+      "file": "upstream/patches/codex/0074-tool-review-sharing-cancellation.patch",
+      "planned": false,
+      "patchSha256": "722bff04611dcba4b4d7f1c58714da31aee6bab79881e4d754a3fbc8ef4d7e46",
+      "targets": [
+        "codex-rs/core/src/tools/tool_sharing.rs",
+        "codex-rs/core/src/tools/tool_sharing_io.rs",
+        "codex-rs/core/src/tools/tool_sharing_tests.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-review-diagnostic-evidence",
+      "file": "upstream/patches/codex/0075-tool-review-diagnostic-evidence.patch",
+      "planned": false,
+      "patchSha256": "68d7f8423875760542fa5e19707701f0f82db9a781397a51321bd05cc078d745",
+      "targets": [
+        "codex-rs/core/src/context/tool_diagnostics.rs",
+        "codex-rs/core/src/context/tool_diagnostics_tests.rs",
+        "codex-rs/core/src/tools/tool_diagnostic_detector.rs",
+        "codex-rs/core/src/tools/tool_diagnostic_detector_tests.rs"
+      ]
     }
   ],
   "licenseObligations": {

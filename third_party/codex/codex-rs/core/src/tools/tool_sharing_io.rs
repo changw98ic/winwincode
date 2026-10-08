@@ -50,12 +50,12 @@ pub(super) async fn bind(
         .map_err(storage_error)
 }
 pub(super) async fn source_fact(
-    facts: &ToolFactRecord,
+    store: &codex_state::StateRuntime,
+    sequence: i64,
     invocation: &ToolInvocation,
 ) -> Result<codex_state::ToolExecutionFact, FunctionCallError> {
-    let events = facts
-        .store
-        .tool_execution_fact(facts.sequence)
+    let events = store
+        .tool_execution_fact(sequence)
         .await
         .map_err(storage_error)?;
     if events.request.thread_id != invocation.session.thread_id.to_string() {

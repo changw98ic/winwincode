@@ -139,6 +139,20 @@ impl Detector {
         calls: &[&ToolExecutionFact],
         question: &str,
     ) -> ToolDiagnostic {
+        let mut branches = BTreeSet::new();
+        let evidence = calls
+            .iter()
+            .rev()
+            .filter(|fact| {
+                kind != ToolDiagnosticKind::BranchExpansion
+                    || fact
+                        .request
+                        .parent_call_id
+                        .as_deref()
+                        .is_some_and(|parent| branches.insert(parent))
+            })
+            .take(4)
+            .collect::<Vec<_>>();
         ToolDiagnostic {
             schema_version: 1,
             diagnostic_id: digest(serde_json::json!([
@@ -156,16 +170,14 @@ impl Detector {
                 .max()
                 .unwrap_or(1),
             progress_source_sequence: self.progress,
-            evidence: calls
-                .iter()
-                .rev()
-                .take(4)
+            evidence: evidence
+                .into_iter()
                 .rev()
                 .map(|fact| ToolDiagnosticCall {
                     request_sequence: fact.request_sequence,
                     logical_id: fact.request.logical_id.clone(),
                     tool_name: fact.request.tool_name.clone(),
-                    operation_digest: operation(fact),
+                    operation_digest: self.operation(fact),
                     parent_call_id: fact.request.parent_call_id.clone(),
                     cell_id: fact.request.cell_id.clone(),
                 })
