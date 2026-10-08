@@ -10,6 +10,8 @@ on:
       - 'crates/helper/**'
       - 'crates/kernel/**'
       - 'third_party/codex/codex-rs/**'
+      - 'third_party/codex/justfile'
+      - 'third_party/codex/scripts/just-shell.py'
       - 'tests/code_mode_kernel.rs'
       - 'tests/code_mode_sharing.rs'
       - 'tests/fixtures/code-mode-mcp.mjs'
@@ -125,3 +127,42 @@ jobs:
           })
           NODE
           WINWINCODE_CODE_MODE_TEST_HELPER="${helper}" cargo test --locked -p winwincode-kernel --test code_mode_kernel --target "${{ matrix.target }}"
+
+      - name: Install pinned vendor test tools
+        if: ${{ matrix.target == 'aarch64-apple-darwin' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools="${RUNNER_TEMP}/codex-test-tools"
+          mkdir -p "${tools}/bin"
+          install_tool() {
+            local binary="$1" url="$2" checksum="$3"
+            local archive="${tools}/${binary}.tar.gz"
+            curl --fail --location --silent --show-error --output "${archive}" "${url}"
+            printf '%s  %s\n' "${checksum}" "${archive}" | shasum -a 256 -c -
+            tar -xzf "${archive}" -C "${tools}/bin" "${binary}"
+          }
+          install_tool just \
+            https://github.com/casey/just/releases/download/1.58.0/just-1.58.0-aarch64-apple-darwin.tar.gz \
+            50ae3e996c974a0bf32ea7d10f495070df33f1b43e0616b2769e3d4821ed8f48
+          install_tool cargo-nextest \
+            https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.143/cargo-nextest-0.9.143-universal-apple-darwin.tar.gz \
+            4830d430411148d17602a75cc880bfb4dc8dac153dea59a48a2ef4cc93577f07
+          install_tool dotslash \
+            https://github.com/facebook/dotslash/releases/download/v0.5.9/dotslash-macos-arm64.v0.5.9.tar.gz \
+            eef15be1b554de7b1409cb0c69c24f2cd04f19c0f101ad69fcdf9d66d4d51639
+          sudo cp -f "${tools}/bin/dotslash" /usr/local/bin/dotslash
+          printf '%s\n' "${tools}/bin" >> "${GITHUB_PATH}"
+
+      - name: Test complete vendored workspace
+        if: ${{ matrix.target == 'aarch64-apple-darwin' }}
+        working-directory: third_party/codex
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v python3 git dotslash
+          just --version
+          cargo nextest --version
+          dotslash --version
+          dotslash -- fetch codex-rs/app-server/tests/suite/zsh
+          just test --workspace --locked --target "${{ matrix.target }}" --test-threads 2 --retries 0
