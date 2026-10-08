@@ -13,6 +13,7 @@ const manifest = JSON.parse(readFileSync(join(root, 'third_party/codex.UPSTREAM.
 const patches = sourceLock.patches.filter(({ id }) => id.startsWith('codex-code-mode-dispatch-') || id.startsWith('codex-tool-execution-facts-') || id.startsWith('codex-tool-runtime-recovery-') || id.startsWith('codex-tool-diagnostics-') || id.startsWith('codex-tool-dependencies-') || id.startsWith('codex-tool-receipts-') || id.startsWith('codex-tool-review-') || id.startsWith('codex-tool-runtime-reconciliation-'))
 // Measured from P1 commit a3533326af80d7aa0b19bfdf89ba54575dfe1b74.
 const originalHashes = {
+  "codex-rs/app-server-client/src/lib.rs": "2b9d6f6f5b965d3433fd45be49add3e60486af51ae5b4270c37a410005600717",
   "codex-rs/core/src/tools/tool_fact_owner.rs": null,
   "codex-rs/core/src/session/mod.rs": "64fe93a45d45b19b5c4be46b0f4667bdbeeeaa1a779527dfa0d9f7d8bf184a0d",
   "codex-rs/core/src/session/tool_fact_shutdown_tests.rs": null,
@@ -235,7 +236,7 @@ test('the tool runtime patch stack reproduces every changed dispatch file from t
 test('the tool runtime manifest and ordered patch digests describe the dispatch sources', () => {
   const applied = sourceLock.patches.filter(({ file, planned }) => file.startsWith('upstream/patches/codex/') && !planned)
   assert.deepEqual(manifest.patchesApplied, applied.map(({ file }) => file))
-  assert.equal(patches.length, 71)
+  assert.equal(patches.length, 72)
   assert.deepEqual([...new Set(patches.flatMap(({ targets }) => targets))].sort(), Object.keys(originalHashes).sort())
   for (const patch of patches) {
     assert.equal(digest(readFileSync(join(root, patch.file))), patch.patchSha256, patch.file)

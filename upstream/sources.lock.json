@@ -1223,6 +1223,15 @@
         "codex-rs/core/src/tools/tool_sharing.rs",
         "codex-rs/state/src/runtime/tool_runtime.rs"
       ]
+    },
+    {
+      "id": "codex-tool-review-app-client-timeout-phases",
+      "file": "upstream/patches/codex/0085-tool-review-app-client-timeout-phases.patch",
+      "planned": false,
+      "patchSha256": "3a2eb204a1d17e6c0b2d6b8476ec9777f6c5d685acf3de9b0dcf42567e4b8452",
+      "targets": [
+        "codex-rs/app-server-client/src/lib.rs"
+      ]
     }
   ],
   "licenseObligations": {
