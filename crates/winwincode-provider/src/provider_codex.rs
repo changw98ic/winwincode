@@ -112,10 +112,8 @@ pub(crate) fn observed_receipt(
         Err(error) if error.error_len().is_none() => &bytes[..error.valid_up_to()],
         Err(_) => return None,
     };
-    for frame in response_frames(bytes, max_event_bytes, max_events.saturating_add(1))
-        .ok()?
-        .into_iter()
-        .take(max_events)
+    for frame in
+        crate::provider_sse_framing::parse_prefix(bytes, max_event_bytes, max_events).ok()?
     {
         let Ok(event) = serde_json::from_str::<Value>(&frame.data) else {
             break;
@@ -146,6 +144,7 @@ struct Responses<'a> {
     items: BTreeSet<String>,
     done: BTreeSet<String>,
     terminal: Option<ProviderGatewayTerminal>,
+    latest_usage: Option<ProviderTokenUsage>,
     output_observed: bool,
 }
 
@@ -158,6 +157,7 @@ impl<'a> Responses<'a> {
             items: BTreeSet::new(),
             done: BTreeSet::new(),
             terminal: None,
+            latest_usage: None,
             output_observed: false,
         }
     }
@@ -194,6 +194,7 @@ impl<'a> Responses<'a> {
                 return Err(protocol());
             }
             self.response_id = Some(string(event, "/response/id")?.to_owned());
+            self.observe_usage(event)?;
             self.emit(&json!({"type":"created"}), false)?;
             return self.emit(
                 &json!({"type":"server_model","model":self.receipt.route.model_id}),
@@ -206,6 +207,7 @@ impl<'a> Responses<'a> {
         if self.response_id.is_none() {
             return Err(protocol());
         }
+        self.observe_usage(event)?;
         let mapped = match kind {
             "response.output_item.added" | "response.output_item.done" => {
                 let item = event
@@ -285,6 +287,20 @@ impl<'a> Responses<'a> {
         Ok(())
     }
 
+    fn observe_usage(&mut self, event: &Value) -> Result<(), HttpsSseProviderError> {
+        let Some(response) = event
+            .get("response")
+            .filter(|response| response.get("usage").is_some_and(|value| !value.is_null()))
+        else {
+            return Ok(());
+        };
+        if Some(string(response, "/id")?) != self.response_id.as_deref() {
+            return Err(protocol());
+        }
+        self.latest_usage = Some(token_usage(response)?);
+        Ok(())
+    }
+
     fn fail(&mut self, event: &Value) -> Result<(), HttpsSseProviderError> {
         let response = event.get("response");
         if let Some(id) = response
@@ -319,10 +335,8 @@ impl<'a> Responses<'a> {
             "server_error" | "internal_error" => ProviderStreamFailureKind::Server,
             _ => ProviderStreamFailureKind::Unknown,
         };
-        let usage = response
-            .filter(|response| response.get("usage").is_some_and(|value| !value.is_null()))
-            .map(token_usage)
-            .transpose()?;
+        self.observe_usage(event)?;
+        let usage = self.latest_usage;
         let mut converter = ProviderStreamConverter::from_gateway_receipt(self.receipt);
         if let Some(id) = &self.response_id {
             converter
@@ -615,6 +629,42 @@ mod tests {
         let mut drifted = events;
         drifted.last_mut().unwrap()["response"]["id"] = json!("other-response");
         assert!(observed_receipt(&wire(&drifted), 4096, 100).is_none());
+    }
+
+    #[test]
+    fn observed_responses_usage_survives_framing_limits_without_stream_success() {
+        let events = vec![
+            json!({"type":"response.created","response":{"id":"resp-one"}}),
+            json!({"type":"response.in_progress","response":{"id":"resp-one","usage":{"input_tokens":10,"output_tokens":4}}}),
+        ];
+        let prefix = wire(&events);
+        let observed = observed_receipt(&prefix, 4096, 2).unwrap();
+        for suffix in [
+            format!("data: {}\n\n", "x".repeat(4097)),
+            "data: {}\n\ndata: {}\n\n".into(),
+        ] {
+            let mut bytes = prefix.clone();
+            bytes.extend_from_slice(suffix.as_bytes());
+            assert_eq!(observed_receipt(&bytes, 4096, 2), Some(observed.clone()));
+            assert_eq!(
+                parse_response(&bytes, &receipt(), 4096, 2)
+                    .unwrap_err()
+                    .kind(),
+                HttpsSseProviderErrorKind::SizeLimit
+            );
+        }
+        assert!(
+            observed_receipt(&prefix, 4096, 1).is_none(),
+            "usage beyond the frame limit is not observed"
+        );
+        let mut drifted = events;
+        drifted.push(json!({"type":"response.in_progress","response":{"id":"other-response"}}));
+        let mut bytes = wire(&drifted);
+        bytes.extend_from_slice(format!("data: {}\n\n", "x".repeat(4097)).as_bytes());
+        assert!(observed_receipt(&bytes, 4096, 8).is_none());
+        let mut invalid = prefix;
+        invalid.push(0xff);
+        assert!(observed_receipt(&invalid, 4096, 2).is_none());
     }
 
     #[test]

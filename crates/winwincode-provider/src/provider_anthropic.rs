@@ -1819,7 +1819,8 @@ pub(crate) fn observed_anthropic_receipt(
     options: AnthropicMessagesOptions,
 ) -> Option<(String, ProviderTokenUsage)> {
     options.validate().ok()?;
-    let frames = crate::provider_sse_framing::parse(bytes, max_event_bytes, max_events).ok()?;
+    let frames =
+        crate::provider_sse_framing::parse_prefix(bytes, max_event_bytes, max_events).ok()?;
     let mut envelopes = Vec::new();
     for frame in frames {
         let mut event = frame.event.filter(|event| !event.is_empty());

@@ -270,11 +270,10 @@ pub(crate) fn observed_openai_usage(
         Err(_) => return None,
     };
     let frames =
-        crate::provider_sse_framing::parse(bytes, max_event_bytes, max_events.saturating_add(1))
-            .ok()?;
+        crate::provider_sse_framing::parse_prefix(bytes, max_event_bytes, max_events).ok()?;
     let mut response_id: Option<String> = None;
     let mut usage = None;
-    for frame in frames.into_iter().take(max_events) {
+    for frame in frames {
         if frame.data == "[DONE]" {
             break;
         }
@@ -1655,6 +1654,48 @@ mod tests {
         assert!(
             observed_openai_usage(format!("data: {invalid}\n\n").as_bytes(), 2048, 8).is_none()
         );
+    }
+
+    #[test]
+    fn observed_openai_usage_survives_framing_limits_without_stream_success() {
+        let chunk = json!({"id":"response-1","choices":[{"index":0,
+            "delta":{"content":"partial"},"finish_reason":null}],
+            "usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}});
+        let prefix = format!("data: {chunk}\n\n");
+        let observed = observed_openai_usage(prefix.as_bytes(), 2048, 1).unwrap();
+        for suffix in [
+            format!("data: {}\n\n", "x".repeat(2049)),
+            "data: {}\n\ndata: {}\n\n".into(),
+        ] {
+            let bytes = format!("{prefix}{suffix}");
+            assert_eq!(
+                observed_openai_usage(bytes.as_bytes(), 2048, 1),
+                Some(observed.clone())
+            );
+            let error = parse_openai_chat_sse(
+                bytes.as_bytes(),
+                2048,
+                1,
+                &AnthropicToolBindings::default(),
+                options(),
+            )
+            .err()
+            .expect("framing violation cannot succeed");
+            assert_eq!(
+                error.kind(),
+                crate::provider_anthropic::AnthropicCodecErrorKind::SizeLimit
+            );
+        }
+        assert!(observed_openai_usage(prefix.as_bytes(), 2048, 0).is_none());
+        let different = json!({"id":"response-2","choices":[]});
+        let drifted = format!(
+            "{prefix}data: {different}\n\ndata: {}\n\n",
+            "x".repeat(2049)
+        );
+        assert!(observed_openai_usage(drifted.as_bytes(), 2048, 8).is_none());
+        let mut invalid = prefix.into_bytes();
+        invalid.push(0xff);
+        assert!(observed_openai_usage(&invalid, 2048, 1).is_none());
     }
 
     #[test]

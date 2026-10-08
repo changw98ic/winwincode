@@ -286,3 +286,37 @@ fn malformed_tool_json_retains_observed_final_usage_without_stream_success() {
         assert!(observed_anthropic_receipt(&wire(&invalid), 64 * 1024, 64, options()).is_none());
     }
 }
+
+#[test]
+fn observed_anthropic_usage_survives_framing_limits_without_stream_success() {
+    let prefix = wire(&[start(), finish()]);
+    let observed = observed_anthropic_receipt(&prefix, 2048, 2, options()).unwrap();
+    for suffix in [
+        format!("data: {}\n\n", "x".repeat(2049)),
+        "data: {}\n\ndata: {}\n\n".into(),
+    ] {
+        let mut bytes = prefix.clone();
+        bytes.extend_from_slice(suffix.as_bytes());
+        assert_eq!(
+            observed_anthropic_receipt(&bytes, 2048, 2, options()),
+            Some(observed.clone())
+        );
+        let error = parse_anthropic_sse(
+            &bytes,
+            2048,
+            2,
+            &AnthropicToolBindings::default(),
+            options(),
+        )
+        .err()
+        .expect("framing violation cannot succeed");
+        assert_eq!(error.kind(), AnthropicCodecErrorKind::SizeLimit);
+    }
+    assert!(observed_anthropic_receipt(&prefix, 2048, 1, options()).is_none());
+    let mut duplicate = wire(&[start(), finish(), start()]);
+    duplicate.extend_from_slice(format!("data: {}\n\n", "x".repeat(2049)).as_bytes());
+    assert!(observed_anthropic_receipt(&duplicate, 2048, 8, options()).is_none());
+    let mut invalid = prefix;
+    invalid.push(0xff);
+    assert!(observed_anthropic_receipt(&invalid, 2048, 2, options()).is_none());
+}

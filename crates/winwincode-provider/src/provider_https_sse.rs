@@ -748,6 +748,7 @@ impl HttpsSseProviderAdapter {
                         && matches!(
                             completion.terminal,
                             ProviderGatewayTerminal::Completed { .. }
+                                | ProviderGatewayTerminal::Failed { .. }
                         )
                     {
                         return Ok(completion);
@@ -2146,10 +2147,10 @@ mod tests {
         assert_eq!(facts.provider_request_id, None);
     }
 
-    struct TestResponse {
+    struct TestResponse<'body> {
         status: &'static str,
         content_type: &'static str,
-        body: &'static str,
+        body: &'body str,
         declared_length: Option<usize>,
         delay: Duration,
     }
@@ -2162,11 +2163,11 @@ mod tests {
     }
 
     impl TlsFixture {
-        fn start(responses: Vec<TestResponse>) -> Self {
+        fn start(responses: Vec<TestResponse<'_>>) -> Self {
             Self::start_streaming(responses, Duration::ZERO)
         }
 
-        fn start_streaming(responses: Vec<TestResponse>, chunk_delay: Duration) -> Self {
+        fn start_streaming(responses: Vec<TestResponse<'_>>, chunk_delay: Duration) -> Self {
             let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
             let CertifiedKey { cert, signing_key } =
                 generate_simple_self_signed(vec!["localhost".to_owned()])
@@ -2180,9 +2181,28 @@ mod tests {
             let listener = TcpListener::bind("127.0.0.1:0").expect("bind TLS fixture");
             let address = listener.local_addr().expect("TLS fixture address");
             let (request_tx, requests) = mpsc::channel();
+            let responses = responses
+                .into_iter()
+                .map(|response| {
+                    (
+                        response.status,
+                        response.content_type,
+                        response.body.to_owned(),
+                        response.declared_length,
+                        response.delay,
+                    )
+                })
+                .collect::<Vec<_>>();
             let server = thread::spawn(move || {
                 let config = Arc::new(config);
-                for response in responses {
+                for (status, content_type, body, declared_length, delay) in responses {
+                    let response = TestResponse {
+                        status,
+                        content_type,
+                        body: &body,
+                        declared_length,
+                        delay,
+                    };
                     let (socket, _) = listener.accept().expect("accept TLS request");
                     let connection =
                         ServerConnection::new(Arc::clone(&config)).expect("TLS connection");
@@ -2289,7 +2309,7 @@ mod tests {
 
     fn write_http_response(
         stream: &mut StreamOwned<ServerConnection, TcpStream>,
-        response: &TestResponse,
+        response: &TestResponse<'_>,
         chunk_delay: Duration,
     ) {
         let content_type = if response.content_type.is_empty() {
@@ -3226,6 +3246,291 @@ mod tests {
             let body: serde_json::Value = serde_json::from_slice(&requests[0][start..]).unwrap();
             assert_eq!(body["model"], "fixture-model");
             assert!(body.get("request").is_none());
+        }
+    }
+
+    fn responses_fixture_adapter(
+        fixture: &TlsFixture,
+        plan: bool,
+    ) -> (HttpsSseProviderAdapter, ProviderGatewayOpenReceipt) {
+        let mut settings = config(fixture);
+        settings.endpoint = if plan {
+            crate::chatgpt_oauth::ENDPOINT
+        } else {
+            crate::codex_login::CODEX_ENDPOINT
+        }
+        .into();
+        let mut settings = if plan {
+            settings.with_chatgpt_plan().unwrap()
+        } else {
+            settings
+                .with_codex_chatgpt("account-fixture".into())
+                .unwrap()
+        };
+        // Validate the production origin before substituting this private TLS fixture.
+        settings.endpoint = fixture.endpoint.clone();
+        let adapter = HttpsSseProviderAdapter::try_new(settings).unwrap();
+        let exchange = ModelExchangeId("mdl_00000000000000000000000001".into());
+        let request_id = RequestId("req_00000000000000000000000001".into());
+        let mut request = invocation(&exchange, &request_id);
+        request.payload = br#"{"request":{"model":"fixture-model","instructions":"Reply OK","input":[],"stream":true,"store":false}}"#;
+        adapter.open_https(request, SECRET).unwrap();
+        let mut leak_gate = crate::CredentialLeakGate::new();
+        leak_gate.track_secret(&ResolvedSecret::from_bytes(SECRET.to_vec()).unwrap());
+        let receipt = ProviderGatewayOpenReceipt {
+            model_exchange_id: exchange,
+            request_id,
+            route: winwincode_api::generated::ModelRoute {
+                provider_id: "provider-https-fixture".into(),
+                model_id: "fixture-model".into(),
+                credential_reference_id: winwincode_domain::CredentialReferenceId(
+                    "crd_00000000000000000000000001".into(),
+                ),
+            },
+            adapter_request_id: "pad_00000000000000000000000001".into(),
+            idempotent_replay: false,
+            stream_leak_gate: leak_gate,
+        };
+        (adapter, receipt)
+    }
+
+    fn failed_responses_events(
+        code: &str,
+        prefix_usage: bool,
+        terminal_usage: bool,
+    ) -> Vec<serde_json::Value> {
+        let mut events = vec![serde_json::json!({
+            "type": "response.created", "response": { "id": "failed-response" },
+        })];
+        if prefix_usage {
+            events.push(serde_json::json!({
+                "type": "response.in_progress", "response": {
+                    "id": "failed-response", "usage": {
+                        "input_tokens": 7, "output_tokens": 3,
+                        "input_tokens_details": { "cached_tokens": 2 },
+                        "output_tokens_details": { "reasoning_tokens": 1 },
+                    },
+                },
+            }));
+        }
+        events.push(serde_json::json!({
+            "type": "response.output_text.delta", "delta": "partial output",
+        }));
+        let mut terminal = serde_json::json!({
+            "type": "response.failed", "response": {
+                "id": "failed-response",
+                "error": { "code": code, "message": "private failure diagnostic" },
+            },
+        });
+        if terminal_usage {
+            terminal["response"]["usage"] = serde_json::json!({
+                "input_tokens": 10, "output_tokens": 4,
+                "input_tokens_details": { "cached_tokens": 2 },
+                "output_tokens_details": { "reasoning_tokens": 1 },
+            });
+        }
+        events.push(terminal);
+        events
+    }
+
+    fn responses_wire(events: &[serde_json::Value]) -> String {
+        use std::fmt::Write as _;
+        let mut wire = String::new();
+        for event in events {
+            writeln!(wire, "data: {event}\n").unwrap();
+        }
+        wire
+    }
+
+    fn assert_failed_responses_usage(
+        completion: &HttpsSseProviderCompletion,
+        input_tokens: u64,
+        output_tokens: u64,
+    ) {
+        let charge = completion.terminal.charge().expect("observed paid usage");
+        assert_eq!(charge.usage.input_tokens, input_tokens);
+        assert_eq!(charge.usage.output_tokens, output_tokens);
+        assert_eq!(charge.usage.cached_input_tokens, Some(2));
+        assert_eq!(charge.usage.reasoning_output_tokens, 1);
+        assert_eq!(charge.actual_cost_micros, None);
+        let frame = completion.frames.last().expect("canonical failed frame");
+        assert!(frame.is_terminal());
+        let value: serde_json::Value = serde_json::from_str(frame.payload_json()).unwrap();
+        assert_eq!(value["tokenUsage"]["input_tokens"], input_tokens);
+        assert_eq!(value["tokenUsage"]["output_tokens"], output_tokens);
+        assert_eq!(value["tokenUsage"]["cached_input_tokens"], 2);
+        assert_eq!(value["tokenUsage"]["reasoning_output_tokens"], 1);
+        assert_eq!(
+            value["tokenUsage"]["total_tokens"],
+            input_tokens + output_tokens
+        );
+    }
+
+    #[test]
+    fn responses_http_tail_cut_preserves_failed_terminal_classification_and_usage() {
+        for plan in [false, true] {
+            for (code, category, expected_code) in [
+                (
+                    "invalid_api_key",
+                    crate::ModelAttemptFailureKind::Authentication,
+                    "AUTH",
+                ),
+                (
+                    "insufficient_quota",
+                    crate::ModelAttemptFailureKind::Quota,
+                    "QUOTA",
+                ),
+                (
+                    "context_length_exceeded",
+                    crate::ModelAttemptFailureKind::ContextWindowExceeded,
+                    "CONTEXT_WINDOW_EXCEEDED",
+                ),
+                (
+                    "rate_limit_exceeded",
+                    crate::ModelAttemptFailureKind::RateLimit,
+                    "RATE_LIMIT",
+                ),
+            ] {
+                let body = responses_wire(&failed_responses_events(code, false, true));
+                let fixture = TlsFixture::start(vec![TestResponse {
+                    status: "200 OK",
+                    content_type: "text/event-stream",
+                    body: &body,
+                    declared_length: Some(body.len() + 100),
+                    delay: Duration::ZERO,
+                }]);
+                let (adapter, receipt) = responses_fixture_adapter(&fixture, plan);
+                let result = adapter.drain_canonical(&receipt);
+                assert_eq!(fixture.finish().len(), 1, "one actual HTTPS attempt");
+                let completion = result.expect("complete Failed must survive HTTP tail-cut");
+                let ProviderGatewayTerminal::Failed { failure, .. } = completion.terminal else {
+                    panic!("expected a canonical Failed terminal for {code}, plan={plan}");
+                };
+                assert_eq!(failure.kind, category);
+                assert_eq!(failure.certainty, ModelExecutionCertainty::OutputObserved);
+                assert_failed_responses_usage(&completion, 10, 4);
+                let last = completion.frames.last().unwrap().payload_json();
+                let value: serde_json::Value = serde_json::from_str(last).unwrap();
+                assert_eq!(value["error"]["code"], expected_code);
+                assert!(!last.contains("private failure diagnostic"));
+                assert!(!last.contains(std::str::from_utf8(SECRET).unwrap()));
+            }
+        }
+    }
+
+    #[test]
+    fn responses_http_tail_cut_preserves_prefix_usage_and_prefers_terminal_usage() {
+        for plan in [false, true] {
+            for terminal_usage in [false, true] {
+                let body = responses_wire(&failed_responses_events(
+                    "insufficient_quota",
+                    true,
+                    terminal_usage,
+                ));
+                let fixture = TlsFixture::start(vec![TestResponse {
+                    status: "200 OK",
+                    content_type: "text/event-stream",
+                    body: &body,
+                    declared_length: Some(body.len() + 100),
+                    delay: Duration::ZERO,
+                }]);
+                let (adapter, receipt) = responses_fixture_adapter(&fixture, plan);
+                let result = adapter.drain_canonical(&receipt);
+                assert_eq!(fixture.finish().len(), 1);
+                let completion = result.expect("complete Failed retains known usage");
+                let ProviderGatewayTerminal::Failed { failure, .. } = completion.terminal else {
+                    panic!("expected a canonical Failed terminal");
+                };
+                assert_eq!(failure.kind, crate::ModelAttemptFailureKind::Quota);
+                assert_eq!(failure.certainty, ModelExecutionCertainty::OutputObserved);
+                let (input, output) = if terminal_usage { (10, 4) } else { (7, 3) };
+                assert_failed_responses_usage(&completion, input, output);
+            }
+        }
+    }
+
+    #[test]
+    fn responses_http_tail_cut_does_not_recover_after_cancellation() {
+        for plan in [false, true] {
+            let body = responses_wire(&failed_responses_events("insufficient_quota", false, true));
+            let fixture = TlsFixture::start(vec![TestResponse {
+                status: "200 OK",
+                content_type: "text/event-stream",
+                body: &body,
+                declared_length: Some(body.len() + 100),
+                delay: Duration::ZERO,
+            }]);
+            let (adapter, receipt) = responses_fixture_adapter(&fixture, plan);
+            assert_eq!(fixture.finish().len(), 1);
+            // Set the late task cancellation flag without interrupting the already-sent
+            // fixture bytes, so the recovery gate must reject a complete Failed body.
+            let cancellation = Arc::new(crate::provider_transport::ExchangeCancellation::default());
+            let adapter = adapter.with_cancellation(Arc::clone(&cancellation));
+            cancellation.cancel();
+            let error = adapter
+                .drain_canonical(&receipt)
+                .expect_err("task cancellation takes priority over a parsed Failed terminal");
+            assert_eq!(error.kind(), HttpsSseProviderErrorKind::Transport);
+            let (response_id, usage) = error.observed_receipt().expect("actual HTTP body was read");
+            assert_eq!(response_id, "failed-response");
+            assert_eq!(usage.input_tokens, 10);
+            assert_eq!(usage.output_tokens, 4);
+        }
+    }
+
+    #[test]
+    fn responses_http_tail_cut_recovery_keeps_identity_leak_and_structure_gates() {
+        for plan in [false, true] {
+            for fault in [
+                "identity",
+                "prefix_identity",
+                "prefix_without_identity",
+                "prefix_usage",
+                "credential",
+                "after_terminal",
+            ] {
+                let mut events = failed_responses_events("insufficient_quota", true, true);
+                match fault {
+                    "identity" => {
+                        events.last_mut().unwrap()["response"]["id"] = "foreign-response".into();
+                    }
+                    "prefix_identity" => {
+                        events[1]["response"]["id"] = "foreign-response".into();
+                    }
+                    "prefix_without_identity" => {
+                        events[1]["response"].as_object_mut().unwrap().remove("id");
+                    }
+                    "prefix_usage" => {
+                        events[1]["response"]["usage"]["input_tokens"] = "invalid".into();
+                    }
+                    "credential" => {
+                        events[2]["delta"] = std::str::from_utf8(SECRET).unwrap().into();
+                    }
+                    "after_terminal" => events.push(serde_json::json!({
+                        "type": "response.output_text.delta", "delta": "late output",
+                    })),
+                    _ => unreachable!(),
+                }
+                let body = responses_wire(&events);
+                let fixture = TlsFixture::start(vec![TestResponse {
+                    status: "200 OK",
+                    content_type: "text/event-stream",
+                    body: &body,
+                    declared_length: Some(body.len() + 100),
+                    delay: Duration::ZERO,
+                }]);
+                let (adapter, receipt) = responses_fixture_adapter(&fixture, plan);
+                let result = adapter.drain_canonical(&receipt);
+                assert_eq!(fixture.finish().len(), 1);
+                let error =
+                    result.expect_err("invalid response cannot become canonical completion");
+                assert_eq!(
+                    error.kind(),
+                    HttpsSseProviderErrorKind::Transport,
+                    "{fault}, plan={plan}"
+                );
+                assert!(!format!("{error:?}").contains(std::str::from_utf8(SECRET).unwrap()));
+            }
         }
     }
 
