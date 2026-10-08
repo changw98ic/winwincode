@@ -25,12 +25,12 @@ const PROVIDER_MODEL_SLOTS: usize = 3;
 /// Moving this value into the model thread keeps the slot until that thread completes.
 #[derive(Debug)]
 pub struct DeviceModelPermit {
-    _slot: Option<File>,
+    slot: Option<File>,
 }
 
 impl Drop for DeviceModelPermit {
     fn drop(&mut self) {
-        if let Some(slot) = &self._slot {
+        if let Some(slot) = &self.slot {
             // An unrelated child can retain this open file description until exec.
             // The invocation owner returns its slot before those aliases close.
             let _ = slot.unlock();
@@ -138,7 +138,7 @@ impl DeviceProviderStore {
             match file.try_lock() {
                 Ok(()) => {
                     return Ok(DeviceModelAdmission::Ready(DeviceModelPermit {
-                        _slot: Some(file),
+                        slot: Some(file),
                     }));
                 }
                 Err(TryLockError::WouldBlock) => {}
@@ -150,7 +150,7 @@ impl DeviceProviderStore {
 }
 
 fn without_invocation() -> DeviceModelAdmission {
-    DeviceModelAdmission::Ready(DeviceModelPermit { _slot: None })
+    DeviceModelAdmission::Ready(DeviceModelPermit { slot: None })
 }
 
 pub(crate) fn private_directory(path: &Path) -> Result<(), DeviceProviderError> {

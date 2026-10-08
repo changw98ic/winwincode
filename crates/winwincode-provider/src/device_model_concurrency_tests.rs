@@ -244,13 +244,13 @@ fn invocation_slot_drop_releases_a_lock_with_a_duplicated_descriptor() {
     let duplicate = held
         .last()
         .unwrap()
-        ._slot
+        .slot
         .as_ref()
         .unwrap()
         .try_clone()
         .unwrap();
     let replay = permit(&store, &retained);
-    assert!(replay._slot.is_none());
+    assert!(replay.slot.is_none());
     assert_eq!(store.execute_model(&retained).unwrap(), previous);
     assert!(matches!(
         store.try_model_attempt_permit(&retained).unwrap(),
@@ -330,7 +330,7 @@ fn invocation_slot_drop_releases_a_lock_still_inherited_by_a_live_child() {
     let inherited = held
         .last()
         .unwrap()
-        ._slot
+        .slot
         .as_ref()
         .unwrap()
         .try_clone()
@@ -380,7 +380,7 @@ fn invocation_slot_drop_releases_a_lock_still_inherited_by_a_live_child() {
         .expect("descriptor child must become ready before the handshake deadline")
         .expect("descriptor child must hold the inherited descriptor");
     let replay = permit(&store, &retained);
-    assert!(replay._slot.is_none());
+    assert!(replay.slot.is_none());
     assert_eq!(store.execute_model(&retained).unwrap(), previous);
     assert!(matches!(
         store.try_model_attempt_permit(&retained).unwrap(),
