@@ -997,6 +997,7 @@ fn graceful_shutdown_keeps_taken_frames_durable() {
 
 struct LockCommandTransport {
     server: Arc<ServerSim>,
+    enrollment_delay: Duration,
 }
 impl ExchangeTransport for LockCommandTransport {
     fn exchange(
@@ -1007,6 +1008,9 @@ impl ExchangeTransport for LockCommandTransport {
         let request: ExchangeRequest = serde_json::from_slice(bytes).expect("request");
         let mut response: ExchangeResponse =
             serde_json::from_slice(&self.server.exchange(credential, bytes)?).expect("response");
+        if response.enrollment.is_some() {
+            thread::sleep(self.enrollment_delay);
+        }
         if response.enrollment.is_none() && request.ack_sequence < 1 {
             response.frames.push(
                 serde_json::to_value(ServerToClientEnvelope {
@@ -1038,20 +1042,37 @@ impl ExchangeTransport for LockCommandTransport {
 
 #[test]
 fn a_failed_downlink_effect_is_not_acknowledged_and_is_replayed_after_restart() {
+    assert_failed_downlink_replays(Duration::ZERO);
+}
+
+#[test]
+fn a_slow_enrollment_does_not_mask_a_failed_downlink_effect() {
+    // Exceed the former 20 ms synthetic tick offset deterministically.
+    assert_failed_downlink_replays(Duration::from_millis(30));
+}
+
+fn assert_failed_downlink_replays(enrollment_delay: Duration) {
     let root = temporary_directory("downlink-effect-before-ack");
     let (store, identity) = open_identity(&root);
     let database = store.database_path().to_owned();
     let config = daemon_config("effect-before-ack");
     let transport = Arc::new(LockCommandTransport {
         server: Arc::new(ServerSim::new()),
+        enrollment_delay,
     });
     let mut daemon =
         DeviceDaemon::start(config.clone(), store, transport.clone(), &identity).expect("daemon");
-    let now = Instant::now();
-    daemon.tick(now).expect("enrollment");
+    daemon.tick(Instant::now()).expect("enrollment");
+    assert!(daemon.is_enrolled());
     let connection = rusqlite::Connection::open(&database).expect("fault connection");
     connection.execute_batch("CREATE TRIGGER fail_policy BEFORE INSERT ON client_connection_policy BEGIN SELECT RAISE(FAIL, 'injected policy write failure'); END;").expect("inject failure");
-    assert!(daemon.tick(now + Duration::from_millis(20)).is_err());
+    // Enrollment resets the retry boundary to its completion time. Sample
+    // again so a slow enrollment cannot turn this fault probe into Waiting.
+    let failed = daemon.tick(Instant::now());
+    assert!(
+        matches!(failed, Err(DaemonError::Store(_))),
+        "injected policy write must fail: {failed:?}"
+    );
     assert!(
         daemon
             .store_mut()

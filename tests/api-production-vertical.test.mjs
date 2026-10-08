@@ -12,6 +12,7 @@ import { runDeviceTaskVertical } from '../scripts/run-device-task-vertical.mjs'
 import { deviceTaskIdentities, withDeviceTaskRuntime } from '../scripts/device-task-runtime.mjs'
 import { benchmarkConfiguration } from '../scripts/run-real-task-benchmark.mjs'
 import { deterministicDeviceProvider, installDevicePublicSmoke, waitFor } from '../scripts/device-production-fixture.mjs'
+import { cancellationEvidence } from './fixtures/code-mode-cancellation-evidence.mjs'
 
 /**
  * Production vertical acceptance coverage is retained: Chat, StrongFlow,
@@ -149,8 +150,29 @@ test('public API cancellation closes an active native cell and preserves an inde
         productSessionId: ids.A, reason: 'Cancel the observed active native cell',
       })
       assert.equal(cancelled.result.state, 'cancelled')
-      await waitFor(async () => (await activities(ids.A)).some(row => row.coreTool?.cell?.cellId === live.A.cell.cellId
-        && row.coreTool.cell.lifecycle === 'closed'), 'cancelled cell closed in the Core projection', 60_000)
+      try {
+        await waitFor(async () => (await activities(ids.A)).some(row => row.coreTool?.cell?.cellId === live.A.cell.cellId
+          && row.coreTool.cell.lifecycle === 'closed'), 'cancelled cell closed in the Core projection', 60_000)
+      } catch (error) {
+        const sessions = await Promise.all(Object.entries(ids).map(async ([tag, id]) => {
+          const session = (await api.query('session.get', { productSessionId: id })).result
+          const rows = (await activities(id)).map(row => row.coreTool).filter(Boolean)
+          return { tag, state: session.state, revision: session.revision,
+            cells: rows.filter(row => row.cell).slice(-16).map(row => ({
+              sourceThreadId: row.sourceThreadId, sourceSequence: row.sourceSequence, cell: row.cell,
+            })),
+            calls: rows.filter(row => row.call).slice(-16).map(row => ({
+              sourceThreadId: row.sourceThreadId, sourceSequence: row.sourceSequence,
+              requestSequence: row.call.requestSequence, toolName: row.call.toolName,
+              execution: row.call.execution, disposition: row.call.disposition,
+              delivery: row.call.delivery, cancelled: row.call.cancelled,
+            })),
+          }
+        }))
+        const evidence = { sessions, workers: cancellationEvidence(devicePath.deviceData),
+          calls: calls().slice(-32).map(({ tag, phase, state }) => ({ tag, phase, state })) }
+        throw new Error(`${error.message}\nCancellation evidence: ${JSON.stringify(evidence)}`, { cause: error })
+      }
       assert.ok(!(await activities(ids.B)).some(row => row.coreTool?.cell?.cellId === live.B.cell.cellId
         && row.coreTool.cell.lifecycle === 'closed'), 'Session B remains active while A closes')
       writeFileSync(join(directory, 'A.release'), '')
