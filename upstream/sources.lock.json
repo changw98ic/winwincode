@@ -1137,6 +1137,16 @@
         "MODULE.bazel.lock",
         "codex-rs/Cargo.lock"
       ]
+    },
+    {
+      "id": "codex-tool-review-memmap",
+      "file": "upstream/patches/codex/0077-tool-review-memmap.patch",
+      "planned": false,
+      "patchSha256": "388d85d4492f634c4a0e21dbcf3f1ae1d921727785eccadd72d142ca7590682d",
+      "targets": [
+        "MODULE.bazel.lock",
+        "codex-rs/Cargo.lock"
+      ]
     }
   ],
   "licenseObligations": {

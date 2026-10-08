@@ -229,7 +229,7 @@ test('the tool runtime patch stack reproduces every changed dispatch file from t
 test('the tool runtime manifest and ordered patch digests describe the dispatch sources', () => {
   const applied = sourceLock.patches.filter(({ file, planned }) => file.startsWith('upstream/patches/codex/') && !planned)
   assert.deepEqual(manifest.patchesApplied, applied.map(({ file }) => file))
-  assert.equal(patches.length, 63)
+  assert.equal(patches.length, 64)
   assert.deepEqual([...new Set(patches.flatMap(({ targets }) => targets))].sort(), Object.keys(originalHashes).sort())
   for (const patch of patches) {
     assert.equal(digest(readFileSync(join(root, patch.file))), patch.patchSha256, patch.file)
