@@ -120,7 +120,7 @@
     },
     {
       "path": "schema/winwincode/v1/execution-port.schema.json",
-      "sha256": "1b7f0db12a833103f8380534007e328748c5c45fc957fd33cc32c2514451789e",
+      "sha256": "8500171b196e64783be8e72607561086e669432446f3062d323e737a373df118",
       "facts": [
         "Worker execution transport and fenced identity",
         "Snapshot freeze request, freeze receipt and verification dispatch"
