@@ -5489,6 +5489,127 @@ fn production_worker_cancellation_closes_the_same_gateway_exchange() {
 }
 
 #[test]
+fn production_worker_cancel_forwards_closed_native_cell() {
+    run_on_large_stack(async {
+        let root = TestDirectory::new("production-cancel-native-cell");
+        let dispatch = dispatch(&root);
+        let port = RecordedPort::default();
+        let adapter = winwincode_codex::ProductionCodexAdapter::open(adapter_config(&root))
+            .expect("open native cancellation adapter");
+        let mut worker = winwincode_worker::WorkerMain::new(
+            worker_config(),
+            port.clone(),
+            adapter,
+            root.workspace_runtime(),
+        );
+        register(&mut worker, &port).await;
+        worker
+            .accept_control(
+                &ExecutionPortMessage::JobDispatchMessage(dispatch.clone()),
+                at("2030-01-01T00:00:00.000Z"),
+            )
+            .await
+            .unwrap();
+        let open = poll_until_message(
+            &mut worker,
+            &port,
+            &at("2030-01-01T00:00:01.000Z"),
+            |messages| {
+                messages.iter().find_map(|message| match message {
+                    ExecutionPortMessage::ModelOpenMessage(open) => Some(open.clone()),
+                    _ => None,
+                })
+            },
+            "native cell ModelOpen was not delivered",
+        )
+        .await;
+        setup(&root, &open, &dispatch.job);
+        let mut app = application(&root);
+        let gateway = opened(
+            app.accept_local(&typed(ExecutionPortMessage::ModelOpenMessage(open.clone())))
+                .unwrap(),
+        );
+        let identity = ProviderToolIdentity::try_new(
+            ProviderToolKind::Custom,
+            "exec".to_owned(),
+            Some("functions".to_owned()),
+        )
+        .unwrap();
+        let chunks = provider_chunks(&open, &gateway, [
+            ProviderStreamEvent::ResponseStarted { observed_model_id: None, provider_response_id: "cancel-native-response".to_owned() },
+            ProviderStreamEvent::ToolCallStarted { index: 0, provider_call_id: "cancel-native-call".to_owned(), identity },
+            ProviderStreamEvent::ToolCallArgumentsDelta { index: 0, provider_call_id: "cancel-native-call".to_owned(),
+                delta: "// @exec: {\"yield_time_ms\":1}\nawait new Promise(() => {}); text('after');".to_owned() },
+            ProviderStreamEvent::ToolCallEnded { index: 0, provider_call_id: "cancel-native-call".to_owned() },
+            ProviderStreamEvent::Finished(ProviderFinishReason::ToolCalls),
+        ], 200);
+        for chunk in chunks {
+            worker
+                .accept_control(
+                    &ExecutionPortMessage::ModelChunkMessage(chunk),
+                    at("2030-01-01T00:00:02.000Z"),
+                )
+                .await
+                .unwrap();
+        }
+        let cell = poll_until_message(
+            &mut worker,
+            &port,
+            &at("2030-01-01T00:00:02.000Z"),
+            |messages| native_cell_fact(messages, "live"),
+            "native cell did not become live",
+        )
+        .await;
+        let active = worker.active_jobs()[0].clone();
+        let now = at("2030-01-01T00:00:03.000Z");
+        worker
+            .accept_control(
+                &ExecutionPortMessage::JobCancelMessage(JobCancelMessage {
+                    kind: JobCancelMessageKind::JobCancel,
+                    lease: active.lease.clone(),
+                    message_id: ExecutionMessageId(id("xmsg", 90)),
+                    reason: JobCancelMessageReason::UserRequested,
+                    requested_at: now.clone(),
+                    request_id: RequestId(id("req", 90)),
+                    schema_version: SchemaVersion::WinwincodeV1,
+                    sent_at: now.clone(),
+                    session_identity: active.session_identity.clone(),
+                    worker_session_id: active.worker_session_id.clone(),
+                }),
+                now.clone(),
+            )
+            .await
+            .unwrap();
+        let closed = poll_until_message(
+            &mut worker,
+            &port,
+            &now,
+            |messages| native_cell_fact(messages, "closed"),
+            "cancelled native cell was not forwarded",
+        )
+        .await;
+        assert_eq!(closed["fact"]["cell_id"], cell["fact"]["cell_id"]);
+        worker.shutdown(now).await.unwrap();
+    });
+}
+
+fn native_cell_fact(
+    messages: &[ExecutionPortMessage],
+    lifecycle: &str,
+) -> Option<serde_json::Value> {
+    messages.iter().find_map(|message| {
+        let ExecutionPortMessage::RuntimeEventMessage(message) = message else {
+            return None;
+        };
+        let payload = message.event.payload.as_ref()?;
+        let bytes = STANDARD.decode(&payload.data_base64).ok()?;
+        let wrapper: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+        let fact: serde_json::Value = serde_json::from_str(wrapper["factJson"].as_str()?).ok()?;
+        (fact["kind"] == "cell" && fact["fact"]["lifecycle"] == lifecycle).then_some(fact)
+    })
+}
+
+#[test]
 fn submission_crash_reopens_the_exact_provider_exchange_and_finishes_once() {
     run_on_large_stack(async {
         let root = TestDirectory::new("production-submission-crash");

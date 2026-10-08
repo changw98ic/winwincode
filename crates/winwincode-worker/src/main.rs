@@ -311,23 +311,15 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
             }
             _ = drive.tick() => {
                 Box::pin(drain_controls(&mut worker, &handle)).await?;
-                // Retry pending Worker→Server evidence every drive tick so a
-                // Server restart / Connection-refused window cannot strand
-                // runtime.event / artifact.chunk / JobOutcome in the outbox.
-                if worker.lifecycle() == WorkerLifecycleState::Active
-                    && let Err(error) = Box::pin(worker.flush_durable_outbox_at(now_instant()?)).await
-                {
-                    if env::var_os("WWC_WORKER_POLL_DEBUG").is_some() {
-                        eprintln!("winwincode-worker: durable outbox flush retry failed: {:?}", error.code);
-                    }
-                    if error.code == winwincode_worker::WorkerErrorCode::ExecutionBackpressure {
-                        // Polling Core performs another flush. Yield first so
-                        // the next turn can consume and confirm queued controls.
-                        continue;
-                    }
-                }
                 if worker.transport_failure().is_some() { break; }
-                let _ = Box::pin(worker.poll_codex(now_instant()?)).await;
+                // The shared driver retries one bounded outbox batch and polls
+                // Core even when that batch is backpressured. A separate
+                // pre-flush must not prevent cancellation facts from draining.
+                if let Err(error) = Box::pin(worker.poll_codex(now_instant()?)).await
+                    && env::var_os("WWC_WORKER_POLL_DEBUG").is_some()
+                {
+                    eprintln!("winwincode-worker: Core drive retry failed: {:?}", error.code);
+                }
                 if exit_after_work && worker.work_drained() { break; }
             }
         }

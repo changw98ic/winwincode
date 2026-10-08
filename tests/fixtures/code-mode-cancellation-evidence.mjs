@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { existsSync, readdirSync } from 'node:fs'
+import { closeSync, existsSync, fstatSync, openSync, readSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
@@ -17,6 +17,40 @@ function readDatabase(path, read) {
   } finally { database?.close() }
 }
 
+function intakeFailures(path) {
+  if (!existsSync(path)) return { unavailable: 'missing' }
+  const allowed = new Set([
+    'model_bridge:resolve:MODEL_BRIDGE_UNAVAILABLE', 'model_bridge:resolve:MODEL_BRIDGE_CONFLICT',
+    'model_bridge:resolve:MODEL_EXCHANGE_UNKNOWN', 'model_bridge:resolve:MODEL_AUTHORITY_STALE',
+    'model_bridge:authority:MODEL_AUTHORITY_STALE', 'model_bridge:authority:MODEL_BRIDGE_UNAVAILABLE',
+    'model_bridge:retention:MODEL_PAYLOAD_INVALID', 'model_bridge:retention:MODEL_BRIDGE_CONFLICT',
+    'model_bridge:retention:MODEL_BRIDGE_UNAVAILABLE',
+    'worker:accept_chunk:MODEL_CHUNK_ACCEPT_FAILED',
+    'device_models:accept_chunk:MODEL_CHUNK_ACCEPT_FAILED',
+    'device_models:poll_codex:FOREIGN_OR_UNOWNED_EXCHANGE',
+    'device_models:recover_skip:FOREIGN_EXCHANGE',
+  ])
+  let descriptor
+  try {
+    descriptor = openSync(path, 'r')
+    const size = fstatSync(descriptor).size, start = Math.max(0, size - 65_536)
+    const bytes = Buffer.alloc(size - start)
+    const count = readSync(descriptor, bytes, 0, bytes.length, start)
+    const rows = bytes.subarray(0, count).toString('utf8').split('\n')
+    if (start > 0) rows.shift()
+    const totals = new Map()
+    for (const line of rows) {
+      const match = /\bcomponent=(\w+) stage=(\w+) code=(\w+) /u.exec(line)
+      if (!match) continue
+      const [, component, stage, code] = match, key = `${component}:${stage}:${code}`
+      if (!allowed.has(key)) continue
+      totals.set(key, { component, stage, code, count: (totals.get(key)?.count ?? 0) + 1 })
+    }
+    return [...totals.values()].slice(-16)
+  } catch { return { unavailable: 'read-failed' } }
+  finally { if (descriptor !== undefined) closeSync(descriptor) }
+}
+
 /** Read bounded metadata at the Device -> Worker -> Core cancellation seams. */
 export function cancellationEvidence(deviceData) {
   return readDatabase(join(deviceData, 'device-client.sqlite3'), device => {
@@ -29,6 +63,7 @@ export function cancellationEvidence(deviceData) {
         workerSessionId: worker.worker_session_id,
         processState: worker.state,
         exitCode: worker.exit_code,
+        intakeFailures: intakeFailures(join(runtime, 'model-intake.log')),
         adapter: readDatabase(join(runtime, 'worker-codex.sqlite3'), adapter => ({
           runs: adapter.prepare(`SELECT
             json_extract(record_json, '$.kernelSessionId') AS kernelSessionId,

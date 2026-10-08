@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -12,6 +12,14 @@ test('cancellation failure evidence distinguishes Core closure from a stalled Wo
   t.after(() => rmSync(root, { recursive: true, force: true }))
   const runtime = join(root, 'worker/codex-runtime'), home = join(runtime, 'kernel-home')
   mkdirSync(home, { recursive: true })
+  writeFileSync(join(runtime, 'model-intake.log'), [
+    'component=model_bridge stage=authority code=MODEL_AUTHORITY_STALE exchange=SECRET-CANARY',
+    'SECRET-CANARY'.repeat(6000),
+    'component=model_bridge stage=resolve code=MODEL_EXCHANGE_UNKNOWN exchange=SECRET-CANARY detail=SECRET-CANARY',
+    'component=worker stage=accept_chunk code=MODEL_CHUNK_ACCEPT_FAILED exchange=SECRET-CANARY',
+    'component=worker stage=accept_chunk code=MODEL_CHUNK_ACCEPT_FAILED exchange=SECRET-CANARY',
+    'component=SECRET-CANARY stage=SECRET-CANARY code=SECRET-CANARY detail=SECRET-CANARY',
+  ].join('\n'))
   const device = new DatabaseSync(join(root, 'device-client.sqlite3'))
   device.exec(`CREATE TABLE worker_process_registry (
     worker_session_id TEXT, state TEXT, exit_code INTEGER, data_directory TEXT)`)
@@ -42,6 +50,10 @@ test('cancellation failure evidence distinguishes Core closure from a stalled Wo
   assert.equal(evidence[0].adapter.runs[0].coreToolCursor, 7)
   assert.equal(evidence[0].core[0].cells[0].lifecycle, 'closed')
   assert.equal(evidence[0].core[0].facts[0].sourceSequence, 9)
+  assert.deepEqual(evidence[0].intakeFailures, [
+    { component: 'model_bridge', stage: 'resolve', code: 'MODEL_EXCHANGE_UNKNOWN', count: 1 },
+    { component: 'worker', stage: 'accept_chunk', code: 'MODEL_CHUNK_ACCEPT_FAILED', count: 2 },
+  ])
   assert.deepEqual(evidence[0].adapter.outbox.map(row => ({ ...row })), [
     { family: 'runtime-event', state: 'sent_attempt', count: 1 },
   ])

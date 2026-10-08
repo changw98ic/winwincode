@@ -275,6 +275,7 @@ struct CodexState {
 enum FailurePoint {
     Ensure,
     Submit,
+    ModelChunk,
     Interrupt,
     Close,
     RetainOutcome,
@@ -644,12 +645,15 @@ impl CodexCoreAdapter for FakeCodex {
         chunk: &winwincode_execution_port::generated::ModelChunkMessage,
         _received_at: &Instant,
     ) -> impl Future<Output = Result<(), Self::Error>> {
-        self.state
-            .lock()
-            .expect("FakeCodex state")
+        let mut state = self.state.lock().expect("FakeCodex state");
+        state
             .calls
             .push(format!("model_chunk:{}", chunk.sequence.0));
-        std::future::ready(Ok(()))
+        std::future::ready(if state.failures.contains(&FailurePoint::ModelChunk) {
+            Err(())
+        } else {
+            Ok(())
+        })
     }
 
     fn accept_action_receipt(
@@ -4556,6 +4560,61 @@ async fn worker_backpressure_stops_the_batch_without_marking_refused_frames_sent
 }
 
 #[tokio::test]
+async fn backpressure_keeps_core_facts_retained_for_the_next_send() {
+    let port = RecordingPort::default();
+    let blocked = Rc::clone(&port.backpressured);
+    let messages = Rc::clone(&port.messages);
+    let codex = FakeCodex::with_threads([thread('A')]);
+    let pump = codex.clone();
+    let mut worker = test_worker(worker_config(1), port, codex);
+    register(&mut worker).await;
+    worker
+        .accept_control_and_drive(
+            &ExecutionPortMessage::JobDispatchMessage(dispatch('A', delivery_scope('A'))),
+            now(),
+        )
+        .await
+        .unwrap();
+    let active = worker.active_jobs()[0].clone();
+    let ExecutionPortMessage::RuntimeEventMessage(mut frame) =
+        execution_port_fixture("runtime.event")
+    else {
+        unreachable!()
+    };
+    frame.lease = active.lease.clone();
+    frame.worker_session_id = active.worker_session_id.clone();
+    frame.session_identity = active.session_identity.clone();
+    frame.codex_thread_id = active.codex_thread_id.clone();
+    frame.event.sequence = ExecutionSequence(1);
+    pump.queue_poll(
+        &active.codex_thread_id,
+        Ok(CodexPoll::RuntimeTrace(Box::new(frame.clone()))),
+    );
+    blocked.set(true);
+    assert_eq!(
+        worker.poll_codex_boxed().await.unwrap_err().code,
+        WorkerErrorCode::ExecutionBackpressure
+    );
+    assert!(
+        pump.pending_kinds()
+            .iter()
+            .any(|kind| kind == "runtime.event"),
+        "the shared drive retains Core evidence while the transport batch is refused"
+    );
+    blocked.set(false);
+    worker.poll_codex_boxed().await.unwrap();
+    assert_eq!(
+        messages
+            .borrow()
+            .iter()
+            .filter(|message| matches!(message,
+        ExecutionPortMessage::RuntimeEventMessage(delivered) if delivered == &frame))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn candidate_ack_keeps_original_upload_authority_after_current_lease_renewal() {
     let port = RecordingPort::default();
     let messages = Rc::clone(&port.messages);
@@ -5096,6 +5155,90 @@ async fn full_provider_slots_do_not_block_another_provider_or_model_cancellation
         "Provider admission and cancellation remain local to the Device"
     );
     drop(worker);
+}
+
+#[tokio::test]
+async fn owned_model_chunk_retry_does_not_starve_cancelled_core_facts() {
+    use base64::Engine as _;
+    let port = RecordingPort::default();
+    let messages = Rc::clone(&port.messages);
+    let codex = FakeCodex::with_threads([thread('A')]);
+    let pump = codex.clone();
+    let root = tempfile::tempdir().unwrap();
+    let providers = root.path().join("providers");
+    let mut worker = test_worker(worker_config(1), port, codex)
+        .with_device_providers(&providers)
+        .unwrap();
+    register(&mut worker).await;
+    worker
+        .accept_control_and_drive(
+            &ExecutionPortMessage::JobDispatchMessage(dispatch('A', delivery_scope('A'))),
+            now(),
+        )
+        .await
+        .unwrap();
+    let active = worker.active_jobs()[0].clone();
+    let (open, _, _) = provider_quota_messages(&active);
+    let store = winwincode_provider::DeviceProviderStore::open(&providers).unwrap();
+    let original = store.reject_model_start(&open).unwrap();
+    worker
+        .accept_control(
+            &ExecutionPortMessage::JobCancelMessage(cancel_for(&active, 'C')),
+            now(),
+        )
+        .await
+        .unwrap();
+    pump.state
+        .lock()
+        .unwrap()
+        .failures
+        .insert(FailurePoint::ModelChunk);
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "schemaVersion": "winwincode.core-tool-fact.v1", "sourceThreadId": "core-thread",
+        "sourceSequence": 184, "factJson": "{\"kind\":\"cell\",\"fact\":{\"cell_id\":\"1\",\"lifecycle\":\"closed\"}}",
+    })).unwrap();
+    let frame: RuntimeEventMessage = serde_json::from_value(serde_json::json!({
+        "kind":"runtime.event", "schemaVersion":SchemaVersion::WinwincodeV1,
+        "messageId":id("xmsg",'Z'), "sentAt":now(), "lease":active.lease,
+        "workerSessionId":active.worker_session_id, "sessionIdentity":active.session_identity,
+        "codexThreadId":active.codex_thread_id,
+        "event":{"eventId":id("evt",'Z'), "sequence":1, "category":"activity",
+            "occurredAt":now(), "summary":"Core cell closed", "payload": {
+                "contentType":"application/vnd.winwincode.core-tool-fact+json",
+                "dataBase64":base64::engine::general_purpose::STANDARD.encode(&bytes),
+                "payloadDigest":format!("sha256:{:x}", Sha256::digest(&bytes)),
+            }},
+    }))
+    .unwrap();
+    pump.queue_poll(
+        &active.codex_thread_id,
+        Ok(CodexPoll::RuntimeTrace(Box::new(frame.clone()))),
+    );
+    for _ in 0..3 {
+        let error = worker.poll_codex_boxed().await.unwrap_err();
+        assert_eq!(error.code, WorkerErrorCode::UnexpectedMessage);
+    }
+    assert!(
+        messages.borrow().iter().any(|message| matches!(message,
+        ExecutionPortMessage::RuntimeEventMessage(delivered) if delivered == &frame)),
+        "retrying an owned Provider frame must not strand already recorded Core cancellation facts"
+    );
+    assert_eq!(
+        pump.calls()
+            .iter()
+            .filter(|call| *call == "model_chunk:1")
+            .count(),
+        3,
+        "the exact refused input remains retryable on the next poll"
+    );
+    assert_eq!(
+        store.replay_model(&open.model_exchange_id.0, 1).unwrap(),
+        original
+    );
+    assert!(
+        observed_outcomes(&messages).is_empty(),
+        "input retry cannot invent a business outcome"
+    );
 }
 
 #[tokio::test]
