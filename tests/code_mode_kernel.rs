@@ -729,8 +729,7 @@ fn native_cell_waits_for_user_input_and_rejects_direct_tool_calls() {
                 .unwrap();
             wait_for_kind(&kernel, &session.session_id, "turn_complete").await;
             kernel.shutdown().await.unwrap();
-            let requests = model.requests.lock().unwrap();
-            let history = requests.last().unwrap()["request"]["input"].to_string();
+            let history = model_outputs(&model);
             for expected in [
                 "must be invoked through Code Mode exec",
                 "question-answer:",
@@ -816,7 +815,7 @@ fn repeated_internal_calls_reach_current_model_at_yield_and_keep_cell_alive() {
                 .await
                 .unwrap();
             wait_for_kind(&kernel, &session.session_id, "turn_complete").await;
-            let history = serde_json::to_string(&*model.requests.lock().unwrap()).unwrap();
+            let history = serde_json::to_string(&latest_exec_outputs(&model)).unwrap();
             assert!(history.contains("model_behavior_diagnosis"));
             assert!(history.contains("repeated_operation"));
             assert!(history.contains("diagnostic_id"));
@@ -838,6 +837,7 @@ fn repeated_internal_calls_reach_current_model_at_yield_and_keep_cell_alive() {
                 .iter()
                 .map(|event| serde_json::from_str(&event.fact_json).unwrap())
                 .collect();
+            assert_model_diagnostic_sources(&model, &facts);
             assert!(
                 facts
                     .iter()
@@ -905,7 +905,7 @@ fn alternating_operations_and_repeated_branches_reach_model_as_questions() {
                     .await
                     .unwrap();
                 wait_for_kind(&kernel, &session.session_id, "turn_complete").await;
-                let history = serde_json::to_string(&*model.requests.lock().unwrap()).unwrap();
+                let history = serde_json::to_string(&latest_exec_outputs(&model)).unwrap();
                 assert!(history.contains(expected), "missing {expected}: {history}");
                 assert!(history.contains("cell-resumed"));
                 assert_eq!(
@@ -917,10 +917,337 @@ fn alternating_operations_and_repeated_branches_reach_model_as_questions() {
                         .count(),
                     calls
                 );
+                let facts = all_facts(&kernel, &session.session_id).await;
+                assert_model_diagnostic_sources(&model, &facts);
                 kernel.shutdown().await.unwrap();
             }
         });
     });
+}
+
+fn model_outputs(model: &ScriptedModel) -> String {
+    model
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .flat_map(|request| request["request"]["input"].as_array().unwrap())
+        .filter(|item| {
+            matches!(
+                item["type"].as_str(),
+                Some("custom_tool_call_output" | "function_call_output")
+            )
+        })
+        .map(|item| item["output"].to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Read one current exec and its following waits from the final model request.
+/// Earlier tool outputs remain in Core history across turns and cannot prove this delivery.
+fn latest_exec_outputs(model: &ScriptedModel) -> Vec<Value> {
+    let requests = model.requests.lock().unwrap();
+    let input = requests.last().unwrap()["request"]["input"]
+        .as_array()
+        .unwrap();
+    let latest = input
+        .iter()
+        .rposition(|item| item["type"] == "custom_tool_call" && item["name"] == "exec")
+        .expect("latest native exec call");
+    input[latest + 1..]
+        .iter()
+        .filter(|item| {
+            matches!(
+                item["type"].as_str(),
+                Some("custom_tool_call_output" | "function_call_output")
+            )
+        })
+        .map(|item| item["output"].clone())
+        .collect()
+}
+
+/// Resolve nested requests through Core's exact parent request and cell scope.
+fn latest_exec_requests(facts: &[Value]) -> std::collections::BTreeMap<i64, &Value> {
+    let boundary = facts
+        .iter()
+        .filter(|fact| {
+            fact["kind"] == "request"
+                && matches!(
+                    fact["fact"]["request"]["tool_name"].as_str(),
+                    Some("exec" | "functions.exec")
+                )
+        })
+        .map(|fact| fact["fact"]["request_sequence"].as_i64().unwrap())
+        .max()
+        .expect("current Core exec request");
+    let cells = facts
+        .iter()
+        .filter(|fact| {
+            fact["kind"] == "cell" && fact["fact"]["parent_request_sequence"] == boundary
+        })
+        .map(|fact| {
+            (
+                fact["fact"]["cell_id"].as_str().unwrap(),
+                fact["fact"]["scope_id"].as_str().unwrap(),
+            )
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(!cells.is_empty(), "current exec must own a Core cell");
+    let requests = facts
+        .iter()
+        .filter(|fact| {
+            fact["kind"] == "request"
+                && fact["fact"]["request"]["source"] == "code_mode"
+                && cells.contains(&(
+                    fact["fact"]["request"]["cell_id"].as_str().unwrap(),
+                    fact["fact"]["request"]["scope_id"].as_str().unwrap(),
+                ))
+        })
+        .map(|fact| {
+            (
+                fact["fact"]["request_sequence"].as_i64().unwrap(),
+                &fact["fact"],
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert!(
+        !requests.is_empty(),
+        "current exec must own nested Core requests"
+    );
+    requests
+}
+
+async fn all_facts(kernel: &Kernel, session: &str) -> Vec<Value> {
+    let mut cursor = 0;
+    let mut facts = Vec::new();
+    loop {
+        let page = kernel
+            .tool_runtime_events(session, cursor, 200)
+            .await
+            .unwrap();
+        if page.is_empty() {
+            return facts;
+        }
+        cursor = page.last().unwrap().source_sequence;
+        facts.extend(
+            page.into_iter()
+                .map(|event| serde_json::from_str(&event.fact_json).unwrap()),
+        );
+    }
+}
+
+fn assert_model_diagnostic_sources(model: &ScriptedModel, facts: &[Value]) {
+    fn collect(value: &Value, diagnostics: &mut Vec<Value>) {
+        match value {
+            Value::String(text) => {
+                if let Some((_, tail)) = text.split_once("<model_behavior_diagnosis>") {
+                    let body = tail.split_once("</model_behavior_diagnosis>").unwrap().0;
+                    let fragment: Value = serde_json::from_str(body).unwrap();
+                    assert_eq!(fragment["type"], "model_behavior_diagnosis");
+                    diagnostics.extend(fragment["diagnostics"].as_array().unwrap().iter().cloned());
+                }
+            }
+            Value::Array(values) => values.iter().for_each(|value| collect(value, diagnostics)),
+            Value::Object(values) => values
+                .values()
+                .for_each(|value| collect(value, diagnostics)),
+            _ => {}
+        }
+    }
+    let mut diagnostics = Vec::new();
+    for output in latest_exec_outputs(model) {
+        collect(&output, &mut diagnostics);
+    }
+    assert!(
+        !diagnostics.is_empty(),
+        "model received no Core diagnosis in latest exec"
+    );
+    let current_requests = latest_exec_requests(facts);
+    for diagnostic in diagnostics {
+        let durable = facts
+            .iter()
+            .find(|fact| {
+                fact["kind"] == "diagnostic"
+                    && fact["fact"]["delivery"] == "offered"
+                    && fact["fact"]["diagnostic"]["diagnostic_id"] == diagnostic["diagnostic_id"]
+                    && fact["fact"]["diagnostic"]["evidence_version"]
+                        == diagnostic["evidence_version"]
+            })
+            .expect("model diagnosis must identify an offered Core fact");
+        let calls = diagnostic["calls"].as_array().unwrap();
+        // Branch evidence may refer to other branches, but this question must
+        // include at least one original request from the current exec scope.
+        assert!(
+            calls
+                .iter()
+                .any(|call| current_requests
+                    .contains_key(&call["request_sequence"].as_i64().unwrap())),
+            "latest exec diagnosis must include current scope evidence"
+        );
+        assert_eq!(
+            calls.len(),
+            durable["fact"]["diagnostic"]["evidence"]
+                .as_array()
+                .unwrap()
+                .len()
+                .min(2)
+        );
+        if diagnostic["kind"] == "branch_expansion" {
+            for field in ["parent_call_id", "cell_id"] {
+                let branches = calls
+                    .iter()
+                    .map(|call| call[field].as_str().expect("original branch identity"))
+                    .collect::<std::collections::BTreeSet<_>>();
+                assert!(branches.len() >= 2, "branch diagnosis collapsed {field}");
+            }
+        }
+        for call in calls {
+            let sequence = &call["request_sequence"];
+            let request = facts
+                .iter()
+                .rfind(|fact| {
+                    fact["kind"] == "request" && fact["fact"]["request_sequence"] == *sequence
+                })
+                .expect("diagnosis must identify an original Core request");
+            let operation = facts
+                .iter()
+                .rfind(|fact| {
+                    fact["kind"] == "sharing" && fact["fact"]["request_sequence"] == *sequence
+                })
+                .map_or(&request["fact"]["attempt"]["operation_digest"], |sharing| {
+                    &sharing["fact"]["operation_digest"]
+                });
+            assert!(operation.as_str().is_some_and(|digest| digest.len() == 64));
+            let evidence = durable["fact"]["diagnostic"]["evidence"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|evidence| evidence["request_sequence"] == *sequence)
+                .expect("model diagnosis must preserve its Core evidence");
+            assert_eq!(call["tool"], request["fact"]["request"]["tool_name"]);
+            assert_eq!(
+                call["parent_call_id"],
+                request["fact"]["request"]["parent_call_id"]
+            );
+            assert_eq!(call["cell_id"], request["fact"]["request"]["cell_id"]);
+            assert_eq!(call["operation_digest"], *operation);
+            assert_eq!(evidence["operation_digest"], *operation);
+        }
+    }
+}
+
+#[test]
+fn model_outputs_ignore_script_markers_until_they_are_returned() {
+    for (source, marker) in [
+        (DIAGNOSTIC_SOURCE, "diagnosis-cell-resumed"),
+        (ALTERNATING_SOURCE, "alternating-cell-resumed"),
+        (BRANCH_SOURCE, "branch-cell-resumed"),
+        (QUESTION_SOURCE, "question-after-yield"),
+    ] {
+        let model = ScriptedModel {
+            requests: Mutex::new(vec![json!({"request":{"input":[
+                {"type":"custom_tool_call","name":"exec","input":source},
+                {"type":"custom_tool_call_output","output":"Script terminated before continuation"},
+                {"type":"function_call_output","output":"returned function output"},
+            ]}})]),
+            source,
+            exec_count: 1,
+            cancel_boundary: None,
+            cancelled_cell: Mutex::new(None),
+            direct_probe: false,
+        };
+        assert!(
+            model.requests.lock().unwrap()[0]
+                .to_string()
+                .contains(marker)
+        );
+        assert_eq!(
+            model_outputs(&model),
+            "\"Script terminated before continuation\"\n\"returned function output\""
+        );
+        assert!(!model_outputs(&model).contains(marker));
+        assert!(
+            !serde_json::to_string(&latest_exec_outputs(&model))
+                .unwrap()
+                .contains(marker)
+        );
+    }
+}
+
+/// A valid old diagnosis and receipt remain in history after a new exec starts.
+fn historical_feedback_fixture() -> (ScriptedModel, Vec<Value>) {
+    let operation = "a".repeat(64);
+    let call = json!({"request_sequence":2,"tool":"mcp.fixture.public_smoke",
+        "parent_call_id":"old-exec","cell_id":"old-cell","operation_digest":operation});
+    let diagnosis = json!({"diagnostic_id":"d".repeat(64),"evidence_version":2,
+        "kind":"repeated_operation","calls":[call]});
+    let diagnosis_output = format!(
+        "<model_behavior_diagnosis>{}</model_behavior_diagnosis>",
+        json!({"type":"model_behavior_diagnosis","diagnostics":[diagnosis]})
+    );
+    let receipt_output = format!(
+        "<core_tool_receipts>{}</core_tool_receipts>",
+        json!({"receipts":[{"request_sequence":2,"source_id":"old-request",
+            "tool":"mcp.fixture.public_smoke","execution":"completed",
+            "disposition":"accepted","delivery":"offered","source_request_sequence":null}]})
+    );
+    let old_request = json!({"kind":"request","fact":{"request_sequence":2,
+        "request":{"logical_id":"old-request","tool_name":"mcp.fixture.public_smoke",
+            "source":"code_mode","parent_call_id":"old-exec","cell_id":"old-cell","scope_id":"old-scope"},
+        "attempt":{"operation_digest":operation,"execution":"completed","disposition":"accepted","delivery":"offered"}}});
+    let mut current_request = old_request.clone();
+    current_request["fact"]["request_sequence"] = json!(4);
+    for (field, value) in [
+        ("logical_id", "current-request"),
+        ("parent_call_id", "current-exec"),
+        ("cell_id", "current-cell"),
+        ("scope_id", "current-scope"),
+    ] {
+        current_request["fact"]["request"][field] = json!(value);
+    }
+    let mut durable = diagnosis;
+    durable["evidence"] = json!([call]);
+    let facts = vec![
+        old_request,
+        json!({"kind":"diagnostic","fact":{"delivery":"offered","diagnostic":durable}}),
+        json!({"kind":"request","fact":{"request_sequence":3,"request":{"tool_name":"exec"}}}),
+        json!({"kind":"cell","fact":{"parent_request_sequence":3,"cell_id":"current-cell","scope_id":"current-scope"}}),
+        current_request,
+    ];
+    let model = ScriptedModel {
+        requests: Mutex::new(vec![json!({"request":{"input":[
+            {"type":"custom_tool_call","name":"exec","call_id":"old-exec","input":"old source"},
+            {"type":"custom_tool_call_output","call_id":"old-exec","output":[diagnosis_output,receipt_output]},
+            {"type":"custom_tool_call","name":"exec","call_id":"current-exec","input":"current source"},
+            {"type":"custom_tool_call_output","call_id":"current-exec","output":"current execution output"}
+        ]}})]),
+        source: "",
+        exec_count: 1,
+        cancel_boundary: None,
+        cancelled_cell: Mutex::new(None),
+        direct_probe: false,
+    };
+    (model, facts)
+}
+
+#[test]
+#[should_panic(expected = "model received no Core diagnosis in latest exec")]
+fn historical_diagnosis_cannot_substitute_for_latest_exec_feedback() {
+    let (model, facts) = historical_feedback_fixture();
+    assert!(model_outputs(&model).contains("model_behavior_diagnosis"));
+    assert_model_diagnostic_sources(&model, &facts);
+}
+
+#[test]
+#[should_panic(expected = "latest exec diagnosis must include current scope evidence")]
+fn republished_historical_diagnosis_cannot_substitute_for_current_scope_evidence() {
+    let (model, facts) = historical_feedback_fixture();
+    {
+        let mut requests = model.requests.lock().unwrap();
+        let input = requests[0]["request"]["input"].as_array_mut().unwrap();
+        input[3]["output"] = input[1]["output"].clone();
+    }
+    assert_model_diagnostic_sources(&model, &facts);
 }
 
 #[path = "code_mode_sharing.rs"]

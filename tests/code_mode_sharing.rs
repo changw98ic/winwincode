@@ -139,10 +139,13 @@ fn native_progress_write_failure_preserves_accepted_tool_results() {
             kernel.submit_turn(&session.session_id, "Read the trusted source".into(),
                 TurnSubmissionOptions::default()).await.unwrap();
             wait_for_kind(&kernel, &session.session_id, "turn_complete").await;
-            let outputs = model_outputs(&model);
+            let outputs = serde_json::to_string(&latest_exec_outputs(&model)).unwrap();
             assert!(outputs.contains("shared-cell-resumed"), "{outputs}");
             assert!(!outputs.contains("progress fixture failure"), "{outputs}");
+            assert_smoke_outputs(&model, &vec![json!({"source":"A","execution":1}); 9]);
             let facts = all_facts(&kernel, &session.session_id).await;
+            assert_eq!(latest_exec_requests(&facts).len(), 9);
+            assert_model_diagnostic_sources(&model, &facts);
             assert_eq!(facts.iter().filter(|fact| fact["kind"] == "progress").count(), 0);
             let accepted = facts.iter().filter(|fact| fact["kind"] == "request"
                 && fact["fact"]["request"]["tool_name"].as_str().is_some_and(|name| name.ends_with("public_smoke"))
@@ -177,7 +180,7 @@ fn native_shared_execution_reuse_and_diagnosis_keep_each_logical_observation() {
                 .create_session(fixture.session_options())
                 .await
                 .unwrap();
-            for source in ["A", "B", "A"] {
+            for (source, execution) in [("A", 1), ("B", 2), ("A", 1)] {
                 std::fs::write(fixture.0.join("workspace/source.txt"), source).unwrap();
                 model.requests.lock().unwrap().clear();
                 kernel
@@ -189,7 +192,7 @@ fn native_shared_execution_reuse_and_diagnosis_keep_each_logical_observation() {
                     .await
                     .unwrap();
                 wait_for_kind(&kernel, &session.session_id, "turn_complete").await;
-                let history = model_outputs(&model);
+                let history = serde_json::to_string(&latest_exec_outputs(&model)).unwrap();
                 assert!(
                     history.contains("shared-cell-resumed"),
                     "cell did not resume"
@@ -202,6 +205,14 @@ fn native_shared_execution_reuse_and_diagnosis_keep_each_logical_observation() {
                     !history.contains("tool_sharing:"),
                     "shared operation failed"
                 );
+                assert_smoke_outputs(
+                    &model,
+                    &vec![json!({"source":source,"execution":execution}); 9],
+                );
+                let facts = all_facts(&kernel, &session.session_id).await;
+                assert_eq!(latest_exec_requests(&facts).len(), 9);
+                assert_model_diagnostic_sources(&model, &facts);
+                assert_model_receipts(&model, &facts);
             }
             let facts = all_facts(&kernel, &session.session_id).await;
             let requests: std::collections::BTreeMap<_, _> = facts
@@ -236,7 +247,6 @@ fn native_shared_execution_reuse_and_diagnosis_keep_each_logical_observation() {
                     .all(|s| s["disposition"] == "accepted" && s["delivery"] == "offered")
             );
             assert_eq!(facts.iter().filter(|f| f["kind"] == "progress").count(), 2);
-            assert_model_receipts(&model, &facts);
             kernel.shutdown().await.unwrap();
         });
     });
@@ -283,13 +293,18 @@ fn native_input_change_during_execution_is_observed_and_requires_new_validation(
                 .await
                 .unwrap();
             wait_for_kind(&kernel, &session.session_id, "turn_complete").await;
-            let history = model_outputs(&model);
+            let history = serde_json::to_string(&latest_exec_outputs(&model)).unwrap();
             assert!(history.contains("shared-cell-resumed"));
             assert!(
                 !history.contains("tool_sharing:"),
                 "tool outputs: {history}"
             );
+            let mut expected = vec![json!({"source":"B","execution":1})];
+            expected.extend(vec![json!({"source":"B","execution":2}); 9]);
+            assert_smoke_outputs(&model, &expected);
             let facts = all_facts(&kernel, &session.session_id).await;
+            assert_eq!(latest_exec_requests(&facts).len(), 10);
+            assert_model_diagnostic_sources(&model, &facts);
             assert_model_receipts(&model, &facts);
             let mut validations: Vec<_> = facts
                 .iter()
@@ -316,51 +331,40 @@ fn native_input_change_during_execution_is_observed_and_requires_new_validation(
     });
 }
 
-async fn all_facts(kernel: &Kernel, session: &str) -> Vec<Value> {
-    let mut cursor = 0;
-    let mut facts = Vec::new();
-    loop {
-        let page = kernel
-            .tool_runtime_events(session, cursor, 200)
-            .await
-            .unwrap();
-        if page.is_empty() {
-            return facts;
+fn assert_smoke_outputs(model: &ScriptedModel, expected: &[Value]) {
+    fn collect(value: &Value, reports: &mut Vec<Value>) {
+        match value {
+            Value::String(text) => {
+                if let Ok(result) = serde_json::from_str::<Value>(text)
+                    && let Some(report) = result.get("structuredContent")
+                {
+                    let content = result["content"][0]["text"]
+                        .as_str()
+                        .expect("native MCP report text");
+                    assert_eq!(serde_json::from_str::<Value>(content).unwrap(), *report);
+                    reports.push(report.clone());
+                }
+            }
+            Value::Array(values) => values.iter().for_each(|value| collect(value, reports)),
+            Value::Object(values) => values.values().for_each(|value| collect(value, reports)),
+            _ => {}
         }
-        cursor = page.last().unwrap().source_sequence;
-        facts.extend(
-            page.into_iter()
-                .map(|event| serde_json::from_str(&event.fact_json).unwrap()),
-        );
     }
+    let mut reports = Vec::new();
+    for output in latest_exec_outputs(model) {
+        collect(&output, &mut reports);
+    }
+    assert_eq!(reports.as_slice(), expected);
 }
 
-fn model_outputs(model: &ScriptedModel) -> String {
-    model
-        .requests
-        .lock()
-        .unwrap()
-        .iter()
-        .flat_map(|request| request["request"]["input"].as_array().unwrap())
-        .filter(|item| {
-            matches!(
-                item["type"].as_str(),
-                Some("custom_tool_call_output" | "function_call_output")
-            )
-        })
-        .map(|item| item["output"].to_string())
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn model_receipts(model: &ScriptedModel) -> Vec<Value> {
-    fn collect(value: &Value, receipts: &mut Vec<Value>) {
+fn model_receipts(model: &ScriptedModel) -> Vec<Vec<Value>> {
+    fn collect(value: &Value, receipts: &mut Vec<Vec<Value>>) {
         match value {
             Value::String(text) => {
                 if let Some((_, tail)) = text.split_once("<core_tool_receipts>") {
                     let body = tail.split_once("</core_tool_receipts>").unwrap().0;
                     let fragment: Value = serde_json::from_str(body).unwrap();
-                    receipts.extend(fragment["receipts"].as_array().unwrap().iter().cloned());
+                    receipts.push(fragment["receipts"].as_array().unwrap().clone());
                 }
             }
             Value::Array(values) => values.iter().for_each(|value| collect(value, receipts)),
@@ -369,50 +373,70 @@ fn model_receipts(model: &ScriptedModel) -> Vec<Value> {
         }
     }
     let mut receipts = Vec::new();
-    for request in model.requests.lock().unwrap().iter() {
-        for item in request["request"]["input"].as_array().unwrap() {
-            if matches!(
-                item["type"].as_str(),
-                Some("custom_tool_call_output" | "function_call_output")
-            ) {
-                collect(&item["output"], &mut receipts);
-            }
-        }
+    for output in latest_exec_outputs(model) {
+        collect(&output, &mut receipts);
     }
     receipts
 }
 
 fn assert_model_receipts(model: &ScriptedModel, facts: &[Value]) {
-    let receipts = model_receipts(model);
-    assert!(
-        !receipts.is_empty(),
-        "model received no original Core references"
-    );
-    for receipt in receipts {
-        let sequence = &receipt["request_sequence"];
-        let request = facts
+    let batches = model_receipts(model);
+    assert!(!batches.is_empty(), "latest exec received no Core receipts");
+    let requests = latest_exec_requests(facts);
+    // Core projects the latest four references at each boundary. These scripts
+    // execute no nested calls after yielding, so exec and wait expose the same four.
+    let expected: Vec<_> = requests.keys().rev().take(4).copied().collect();
+    for receipts in batches {
+        let sequences = receipts
             .iter()
-            .find(|fact| fact["kind"] == "request" && fact["fact"]["request_sequence"] == *sequence)
-            .unwrap();
+            .map(|receipt| receipt["request_sequence"].as_i64().unwrap())
+            .collect::<Vec<_>>();
         assert_eq!(
-            receipt["source_id"],
-            request["fact"]["request"]["logical_id"]
+            sequences, expected,
+            "latest exec must expose its complete ordered latest-four receipt projection"
         );
-        assert_eq!(receipt["tool"], request["fact"]["request"]["tool_name"]);
-        assert_eq!(receipt["disposition"], "accepted");
-        assert_eq!(receipt["delivery"], "offered");
-        if let Some(shared) = facts
-            .iter()
-            .find(|fact| fact["kind"] == "sharing" && fact["fact"]["request_sequence"] == *sequence)
-        {
-            assert_eq!(
-                receipt["source_request_sequence"],
-                shared["fact"]["source_request_sequence"]
-            );
-            assert!(
-                receipt["execution"].is_null(),
-                "logical sharing invented an attempt"
-            );
+        for receipt in receipts {
+            let sequence = receipt["request_sequence"].as_i64().unwrap();
+            let request = requests[&sequence];
+            assert_eq!(receipt["source_id"], request["request"]["logical_id"]);
+            assert_eq!(receipt["tool"], request["request"]["tool_name"]);
+            assert_eq!(receipt["disposition"], "accepted");
+            assert_eq!(receipt["delivery"], "offered");
+            if let Some(shared) = facts.iter().rfind(|fact| {
+                fact["kind"] == "sharing" && fact["fact"]["request_sequence"] == sequence
+            }) {
+                assert_eq!(
+                    receipt["source_request_sequence"],
+                    shared["fact"]["source_request_sequence"]
+                );
+                assert!(
+                    receipt["execution"].is_null(),
+                    "logical sharing invented an attempt"
+                );
+            } else {
+                assert!(receipt["source_request_sequence"].is_null());
+                assert_eq!(receipt["execution"], request["attempt"]["execution"]);
+            }
         }
     }
+}
+
+#[test]
+#[should_panic(expected = "latest exec received no Core receipts")]
+fn historical_receipts_cannot_substitute_for_latest_exec_feedback() {
+    let (model, facts) = historical_feedback_fixture();
+    assert!(model_outputs(&model).contains("core_tool_receipts"));
+    assert_model_receipts(&model, &facts);
+}
+
+#[test]
+#[should_panic(expected = "complete ordered latest-four receipt projection")]
+fn republished_historical_receipts_cannot_substitute_for_current_scope_receipts() {
+    let (model, facts) = historical_feedback_fixture();
+    {
+        let mut requests = model.requests.lock().unwrap();
+        let input = requests[0]["request"]["input"].as_array_mut().unwrap();
+        input[3]["output"] = input[1]["output"].clone();
+    }
+    assert_model_receipts(&model, &facts);
 }

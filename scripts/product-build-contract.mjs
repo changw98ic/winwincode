@@ -42,6 +42,7 @@ export function projectSourceDigest(root) {
     .map(path => join(root, path))
     .filter(path => existsSync(path))
   walk(join(root, 'crates'), paths)
+  walk(join(root, 'upstream/vendor'), paths)
   walk(join(root, 'third_party/codex/codex-rs'), paths)
   const hash = createHash('sha256')
   for (const path of paths.toSorted((left, right) => left.localeCompare(right))) {

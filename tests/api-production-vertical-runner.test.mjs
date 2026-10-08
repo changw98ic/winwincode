@@ -16,6 +16,8 @@ import { loadDeviceAgentTask } from '../scripts/device-agent-task.mjs'
 
 import {
   prepareControlledRepository,
+  probeDeviceErrorTruthfulness,
+  stopDevicePath,
   appendDeliveryTransition,
   DELIVERY_TRANSITION_DIAGNOSTIC_CAPACITY,
   driveDelivery,
@@ -763,4 +765,98 @@ test('product source identity includes embedded Core while excluding build outpu
   assert.equal(projectSourceDigest(fixture), original)
   writeFileSync(resolve(source, 'lib.rs'), 'pub const VERSION: u32 = 2;\n')
   assert.notEqual(projectSourceDigest(fixture), original)
+})
+
+
+test('source seal rejects changes in every locally patched Cargo dependency', t => {
+  const directory = mkdtempSync(resolve(tmpdir(), 'winwincode-api-vendor-source-seal-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const sourceRoot = resolve(directory, 'source')
+  const binaryRoot = resolve(directory, 'bin')
+  mkdirSync(resolve(sourceRoot, 'scripts'), { recursive: true })
+  mkdirSync(resolve(sourceRoot, 'crates/helper/src'), { recursive: true })
+  mkdirSync(binaryRoot)
+  writeFileSync(resolve(sourceRoot, 'package.json'), JSON.stringify({ version: '0.1.0' }))
+  writeFileSync(resolve(sourceRoot, 'Cargo.toml'), '[workspace.package]\nversion = "0.1.0"\n[patch.crates-io]\nrusqlite = { path = "upstream/vendor/rusqlite-0.39.0" }\ni18n-embed-fl = { path = "upstream/vendor/i18n-embed-fl-0.9.4" }\n')
+  writeFileSync(resolve(sourceRoot, 'crates/helper/src/main.rs'), 'fn main() {}\n')
+  for (const name of ['run-api-production-vertical.mjs', 'product-build-contract.mjs', 'compact-kernel-helper.mjs']) {
+    writeFileSync(resolve(sourceRoot, 'scripts', name), '// build input\n')
+  }
+  const dependencies = ['rusqlite-0.39.0', 'i18n-embed-fl-0.9.4']
+  for (const dependency of dependencies) {
+    mkdirSync(resolve(sourceRoot, 'upstream/vendor', dependency, 'src'), { recursive: true })
+    writeFileSync(resolve(sourceRoot, 'upstream/vendor', dependency, 'src/lib.rs'), 'pub const VERSION: u32 = 1;\n')
+  }
+  const git = (...args) => execFileSync('git', ['-C', sourceRoot, ...args], { encoding: 'utf8' }).trim()
+  git('init', '--quiet')
+  git('config', 'core.filemode', 'true')
+  git('add', '.')
+  git('-c', 'user.name=Source Seal Test', '-c', 'user.email=source-seal@example.invalid',
+    '-c', 'commit.gpgSign=false', 'commit', '--quiet', '-m', 'fixture')
+  const head = git('rev-parse', 'HEAD')
+  for (const name of ['winwincode-server', 'winwincode-kernel-helper', 'winwincode-worker', 'wwc']) {
+    const path = resolve(binaryRoot, name)
+    writeFileSync(path, '#!/bin/sh\nexit 0\n')
+    chmodSync(path, 0o755)
+  }
+  const serverBinary = resolve(binaryRoot, 'winwincode-server')
+  const helperExecutable = resolve(binaryRoot, 'winwincode-kernel-helper')
+  const options = { root: sourceRoot, serverBinary, helperExecutable }
+  const sealed = writeApiProductionSourceSeal({ ...options,
+    helperReleaseManifest: writeHelperReleaseManifest(sourceRoot, helperExecutable) })
+  const originalDigest = projectSourceDigest(sourceRoot)
+  verifyApiProductionSourceSeal(options)
+  for (const dependency of dependencies) {
+    const path = resolve(sourceRoot, 'upstream/vendor', dependency, 'src/lib.rs')
+    writeFileSync(path, 'pub const VERSION: u32 = 2;\n')
+    assert.equal(git('rev-parse', 'HEAD'), head)
+    assert.notEqual(projectSourceDigest(sourceRoot), originalDigest,
+      `${dependency}: patched dependency is a Rust build input`)
+    assert.throws(() => verifyApiProductionSourceSeal(options), /source seal is stale/u)
+    writeFileSync(path, 'pub const VERSION: u32 = 1;\n')
+    verifyApiProductionSourceSeal(options)
+    // Equal bytes with a changed tracked file mode still invalidate the sealed input.
+    chmodSync(path, 0o755)
+    assert.equal(projectSourceDigest(sourceRoot), originalDigest)
+    assert.throws(() => verifyApiProductionSourceSeal(options), /tracked diff is stale/u)
+    chmodSync(path, 0o644)
+    assert.equal(verifyApiProductionSourceSeal(options).seal.gitHead, sealed.seal.gitHead)
+  }
+})
+
+test('Device prerequisite truthfulness rejects accepted chats and unrelated error codes', async () => {
+  const api = result => ({ async command(command) {
+    if (command === 'session.create') return { outcome: 'completed', currentRevision: 1 }
+    if (result === 'accepted') return { outcome: 'completed' }
+    throw Object.assign(new Error('public probe error'), { code: result, status: 409 })
+  } })
+  for (const code of ['DEVICE_SESSION_REQUIRED', 'DEVICE_MODEL_UNAVAILABLE']) {
+    const probe = await probeDeviceErrorTruthfulness(api(code))
+    assert.equal(probe.truthfulDeviceCodes, true)
+    assert.equal(probe.notWrongStateDisguise, true)
+    assert.equal(probe.chatSubmit.accepted, false)
+    assert.equal(probe.chatSubmit.code, code)
+  }
+  for (const code of ['WRONG_STATE', 'INTERNAL', 'accepted']) {
+    await assert.rejects(probeDeviceErrorTruthfulness(api(code)),
+      /Device prerequisite probe must reject with a dedicated Device error/u)
+  }
+  await assert.rejects(probeDeviceErrorTruthfulness({ async command() {
+    throw Object.assign(new Error('public probe error'), { code: 'WRONG_STATE' })
+  } }), /Device prerequisite probe must reject with a dedicated Device error/u)
+})
+
+test('Device cleanup records the final Provider request count and preserves its failure', async () => {
+  for (const fails of [false, true]) {
+    const requests = []
+    const report = { devicePath: { modelServerRequestCount: 0 } }
+    const failure = new Error('Device cleanup failed')
+    const devicePath = { modelServer: { requests }, async stop() {
+      requests.push({ request: 'first' }, { request: 'during shutdown' })
+      if (fails) throw failure
+    } }
+    if (fails) await assert.rejects(stopDevicePath(report, devicePath), error => error === failure)
+    else await stopDevicePath(report, devicePath)
+    assert.equal(report.devicePath.modelServerRequestCount, 2)
+  }
 })

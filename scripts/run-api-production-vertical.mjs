@@ -102,6 +102,7 @@ const API_SOURCE_TRACKED_PATHS = [
   'third_party/codex/codex-rs',
   'third_party/codex.UPSTREAM.json',
   'upstream/sources.lock.json',
+  'upstream/vendor',
   API_RUNNER_SOURCE_PATH,
   'scripts/product-build-contract.mjs',
   'scripts/compact-kernel-helper.mjs',
@@ -2021,6 +2022,75 @@ async function runtimeWorkRunEvidence(client, detail) {
   return snapshots
 }
 
+/** Verify the public Device prerequisite errors before launching a Device. */
+export async function probeDeviceErrorTruthfulness(api) {
+  const probeSessionId = 'psn_01J00000000000000000000099'
+  const probe = {
+    probeSessionId,
+    sessionCreate: null,
+    chatSubmit: null,
+    truthfulDeviceCodes: false,
+    notWrongStateDisguise: false,
+  }
+  try {
+    const created = await api.command('session.create', 0, {
+      productSessionId: probeSessionId,
+      projectId: IDS.project,
+      repositoryId: IDS.repository,
+      title: 'Device gate truthfulness probe',
+      modelRoute: configuredModelRoute({}),
+    })
+    probe.sessionCreate = {
+      outcome: created.outcome,
+      revision: created.currentRevision,
+    }
+    try {
+      await api.command('chat.submit', 1, {
+        productSessionId: probeSessionId,
+        message: 'probe without Device prerequisites',
+      })
+      probe.chatSubmit = { accepted: true, code: null, status: 200 }
+      probe.truthfulDeviceCodes = false
+      probe.notWrongStateDisguise = true
+    } catch (error) {
+      probe.chatSubmit = {
+        accepted: false,
+        code: error.code ?? null,
+        status: error.status ?? null,
+        message: error.message,
+      }
+      probe.truthfulDeviceCodes = error.code === 'DEVICE_SESSION_REQUIRED'
+        || error.code === 'DEVICE_MODEL_UNAVAILABLE'
+      probe.notWrongStateDisguise = error.code !== 'WRONG_STATE'
+    }
+  } catch (error) {
+    probe.sessionCreate = {
+      outcome: 'error',
+      code: error.code ?? null,
+      message: error.message,
+    }
+    probe.truthfulDeviceCodes = error.code === 'DEVICE_SESSION_REQUIRED'
+      || error.code === 'DEVICE_MODEL_UNAVAILABLE'
+    probe.notWrongStateDisguise = error.code !== 'WRONG_STATE'
+  }
+  assert.equal(probe.truthfulDeviceCodes, true,
+    'Device prerequisite probe must reject with a dedicated Device error')
+  assert.equal(probe.notWrongStateDisguise, true,
+    'Device prerequisite probe must not disguise a missing Device as WRONG_STATE')
+  return probe
+}
+
+/** Stop Device resources before finalizing their observed Provider request count. */
+export async function stopDevicePath(report, devicePath) {
+  try {
+    await devicePath.stop?.()
+  } finally {
+    if (report.devicePath !== null) {
+      report.devicePath.modelServerRequestCount = devicePath.modelServer?.requests?.length ?? 0
+    }
+  }
+}
+
 /**
  * Start one standalone Server and prove the API-only Chat + StrongFlow path.
  * The returned report contains only canonical, secret-free observations.
@@ -2227,56 +2297,7 @@ export async function runApiProductionVertical({
     // Live public-error truthfulness: without Device prerequisites the Server
     // must reject chat with a dedicated Device terminal code, not WRONG_STATE.
     if (devicePrerequisites && retainedEndpoint === null) {
-      const probeSessionId = 'psn_01J00000000000000000000099'
-      const probe = {
-        probeSessionId,
-        sessionCreate: null,
-        chatSubmit: null,
-        truthfulDeviceCodes: false,
-        notWrongStateDisguise: false,
-      }
-      try {
-        const created = await api.command('session.create', 0, {
-          productSessionId: probeSessionId,
-          projectId: IDS.project,
-          repositoryId: IDS.repository,
-          title: 'Device gate truthfulness probe',
-          modelRoute: configuredModelRoute({}),
-        })
-        probe.sessionCreate = {
-          outcome: created.outcome,
-          revision: created.currentRevision,
-        }
-        try {
-          await api.command('chat.submit', 1, {
-            productSessionId: probeSessionId,
-            message: 'probe without Device prerequisites',
-          })
-          probe.chatSubmit = { accepted: true, code: null, status: 200 }
-          probe.truthfulDeviceCodes = false
-          probe.notWrongStateDisguise = true
-        } catch (error) {
-          probe.chatSubmit = {
-            accepted: false,
-            code: error.code ?? null,
-            status: error.status ?? null,
-            message: error.message,
-          }
-          probe.truthfulDeviceCodes = error.code === 'DEVICE_SESSION_REQUIRED'
-            || error.code === 'DEVICE_MODEL_UNAVAILABLE'
-          probe.notWrongStateDisguise = error.code !== 'WRONG_STATE'
-        }
-      } catch (error) {
-        probe.sessionCreate = {
-          outcome: 'error',
-          code: error.code ?? null,
-          message: error.message,
-        }
-        probe.truthfulDeviceCodes = error.code === 'DEVICE_SESSION_REQUIRED'
-          || error.code === 'DEVICE_MODEL_UNAVAILABLE'
-        probe.notWrongStateDisguise = error.code !== 'WRONG_STATE'
-      }
-      report.errorCodeTruthfulness = probe
+      report.errorCodeTruthfulness = await probeDeviceErrorTruthfulness(api)
     }
 
     if (remoteWorkerBinary !== null) {
@@ -2735,7 +2756,7 @@ export async function runApiProductionVertical({
     failure = error
   } finally {
     if (devicePath !== null) {
-      try { await devicePath.stop?.() } catch (error) { failure ??= error }
+      try { await stopDevicePath(report, devicePath) } catch (error) { failure ??= error }
       serverOutput += ''
     }
     if (workerStarted !== null) {
