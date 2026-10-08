@@ -58,7 +58,7 @@ test('an oversized release build cannot replace the development helper', t => {
   assert.equal(statSync(helper).size, limit + 1)
 })
 
-test('workspace tests use the compact helper after the final feature-specific link', t => {
+test('workspace tests use the compact helper after Cargo runs its binary tests', t => {
   const { root, helper, options } = fixture(t)
   writeFileSync(join(root, 'bin/cargo'), `#!${process.execPath}
 const fs = require('node:fs');
@@ -67,13 +67,17 @@ const root = process.env.CARGO_TARGET_DIR;
 const args = process.argv.slice(2);
 const helper = path.join(root, 'debug/winwincode-kernel-helper');
 fs.appendFileSync(path.join(root, 'commands.jsonl'), JSON.stringify(args) + '\\n');
-if (args.includes('--no-run')) {
+if (args.includes('--no-run') || (args[0] === 'test' && args.includes('-p') && args.includes('winwincode-kernel-helper'))) {
   fs.writeFileSync(helper, 'freshly linked development helper');
   fs.truncateSync(helper, ${limit + 1});
 } else if (args.includes('--release')) {
   fs.writeFileSync(path.join(root, 'release/winwincode-kernel-helper'), 'compact product helper');
-} else if (fs.readFileSync(helper, 'utf8') !== 'compact product helper') {
-  process.exit(2);
+} else {
+  if (args.includes('--workspace') && !args.includes('--exclude')) {
+    fs.writeFileSync(helper, 'Cargo restored its development binary');
+    fs.truncateSync(helper, ${limit + 1});
+  }
+  if (fs.readFileSync(helper, 'utf8') !== 'compact product helper') process.exit(2);
 }
 `, { mode: 0o755 })
   const result = spawnSync(process.execPath,
@@ -82,8 +86,9 @@ if (args.includes('--no-run')) {
   assert.equal(result.status, 0, result.stderr)
   assert.equal(readFileSync(helper, 'utf8'), 'compact product helper')
   assert.deepEqual(readFileSync(join(root, 'commands.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line)), [
-    ['test', '--workspace', '--all-features', '--locked', '--no-run'],
+    ['test', '--all-features', '--locked', '--workspace', '--no-run'],
+    ['test', '--all-features', '--locked', '-p', 'winwincode-kernel-helper'],
     ['build', '--release', '-p', 'winwincode-kernel-helper', '--locked'],
-    ['test', '--workspace', '--all-features', '--locked'],
+    ['test', '--all-features', '--locked', '--workspace', '--exclude', 'winwincode-kernel-helper'],
   ])
 })
