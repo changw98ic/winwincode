@@ -1296,7 +1296,7 @@ async fn handle_shell_command_user_approved_records_tool_decision() {
     )
     .await;
 
-    let TestCodex { codex, .. } = test_codex()
+    let test = test_codex()
         .with_config(|config| {
             config.permissions.approval_policy =
                 Constrained::allow_any(AskForApproval::UnlessTrusted);
@@ -1304,6 +1304,18 @@ async fn handle_shell_command_user_approved_records_tool_decision() {
         .build(&server)
         .await
         .unwrap();
+    let home = test.home.path().to_owned();
+    let cwd = test.cwd.path().to_owned();
+    let codex = test.codex.clone();
+    drop(test);
+    assert!(
+        home.is_dir(),
+        "the live thread must retain its fixture state directory"
+    );
+    assert!(
+        cwd.is_dir(),
+        "the live thread must retain its fixture workspace"
+    );
 
     codex
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {

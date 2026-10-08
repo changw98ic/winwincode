@@ -1,0 +1,87 @@
+diff --git a/codex-rs/core/tests/common/test_codex.rs b/codex-rs/core/tests/common/test_codex.rs
+index cf2ad9a7..a1d053f8 100644
+--- a/codex-rs/core/tests/common/test_codex.rs
++++ b/codex-rs/core/tests/common/test_codex.rs
+@@ -792,6 +792,18 @@ impl TestCodexBuilder {
+             }
+         };
+ 
++        let test_env = Arc::new(test_env);
++        // Tests may retain only the thread from this temporary fixture.
++        // Its directories and executor cleanup must follow the same runtime.
++        let _ = new_conversation
++            .thread
++            .thread_extension_data()
++            .insert(TestCodexResourceGuard {
++                _home: Arc::clone(&home),
++                _cwd: Arc::clone(&cwd),
++                _test_env: Arc::clone(&test_env),
++            });
++
+         Ok(TestCodex {
+             home,
+             cwd,
+@@ -883,6 +895,13 @@ fn ensure_test_model_catalog(config: &mut Config) -> Result<()> {
+     Ok(())
+ }
+ 
++/// Retains fixture resources without retaining the thread or its manager.
++struct TestCodexResourceGuard {
++    _home: Arc<TempDir>,
++    _cwd: Arc<TempDir>,
++    _test_env: Arc<TestEnv>,
++}
++
+ pub struct TestCodex {
+     pub home: Arc<TempDir>,
+     pub cwd: Arc<TempDir>,
+@@ -891,7 +910,7 @@ pub struct TestCodex {
+     pub config: Config,
+     pub thread_manager: Arc<ThreadManager>,
+     pub thread_store: Arc<dyn ThreadStore>,
+-    _test_env: TestEnv,
++    _test_env: Arc<TestEnv>,
+ }
+ 
+ impl TestCodex {
+@@ -916,7 +935,7 @@ impl TestCodex {
+     }
+ 
+     pub fn executor_environment(&self) -> &TestEnv {
+-        &self._test_env
++        self._test_env.as_ref()
+     }
+ 
+     pub fn fs(&self) -> Arc<dyn ExecutorFileSystem> {
+diff --git a/codex-rs/core/tests/suite/otel.rs b/codex-rs/core/tests/suite/otel.rs
+index 6fd4c436..ac139d7b 100644
+--- a/codex-rs/core/tests/suite/otel.rs
++++ b/codex-rs/core/tests/suite/otel.rs
+@@ -1296,7 +1296,7 @@ async fn handle_shell_command_user_approved_records_tool_decision() {
+     )
+     .await;
+ 
+-    let TestCodex { codex, .. } = test_codex()
++    let test = test_codex()
+         .with_config(|config| {
+             config.permissions.approval_policy =
+                 Constrained::allow_any(AskForApproval::UnlessTrusted);
+@@ -1304,6 +1304,18 @@ async fn handle_shell_command_user_approved_records_tool_decision() {
+         .build(&server)
+         .await
+         .unwrap();
++    let home = test.home.path().to_owned();
++    let cwd = test.cwd.path().to_owned();
++    let codex = test.codex.clone();
++    drop(test);
++    assert!(
++        home.is_dir(),
++        "the live thread must retain its fixture state directory"
++    );
++    assert!(
++        cwd.is_dir(),
++        "the live thread must retain its fixture workspace"
++    );
+ 
+     codex
+         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {

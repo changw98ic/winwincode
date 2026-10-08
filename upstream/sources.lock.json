@@ -1187,6 +1187,16 @@
       "targets": [
         "codex-rs/core/src/tools/code_mode/terminal_tests.rs"
       ]
+    },
+    {
+      "id": "codex-tool-review-fixture-resource-lifetime",
+      "file": "upstream/patches/codex/0082-tool-review-fixture-resource-lifetime.patch",
+      "planned": false,
+      "patchSha256": "4a9a6de9ea7fc46e37edec0c2a0bcd60afe138473a5413446ec7aaeeed6492bc",
+      "targets": [
+        "codex-rs/core/tests/common/test_codex.rs",
+        "codex-rs/core/tests/suite/otel.rs"
+      ]
     }
   ],
   "licenseObligations": {
