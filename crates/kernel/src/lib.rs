@@ -633,6 +633,7 @@ pub const CODEX_PATCH_SET: &[&str] = &[
     "upstream/patches/codex/0075-tool-review-diagnostic-evidence.patch",
     "upstream/patches/codex/0076-tool-review-tls.patch",
     "upstream/patches/codex/0077-tool-review-memmap.patch",
+    "upstream/patches/codex/0078-tool-review-diagnostic-offer-regressions.patch",
 ];
 
 const ROLE_SESSION_POLICY_SCHEMA_VERSION: u32 = 2;
@@ -2802,6 +2803,7 @@ mod tests {
                 "upstream/patches/codex/0075-tool-review-diagnostic-evidence.patch",
                 "upstream/patches/codex/0076-tool-review-tls.patch",
                 "upstream/patches/codex/0077-tool-review-memmap.patch",
+                "upstream/patches/codex/0078-tool-review-diagnostic-offer-regressions.patch",
             ]
         );
         assert_eq!(build.event_capacity, 16);

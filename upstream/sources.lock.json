@@ -1147,6 +1147,16 @@
         "MODULE.bazel.lock",
         "codex-rs/Cargo.lock"
       ]
+    },
+    {
+      "id": "codex-tool-review-diagnostic-offer-regressions",
+      "file": "upstream/patches/codex/0078-tool-review-diagnostic-offer-regressions.patch",
+      "planned": false,
+      "patchSha256": "fe3d5e4ebb53263df359d7ed6574b256eba7ba8a3b0300ddf71ae1bf3cb3605a",
+      "targets": [
+        "codex-rs/state/src/runtime/tool_diagnostics_tests.rs",
+        "codex-rs/state/src/sqlite.rs"
+      ]
     }
   ],
   "licenseObligations": {
