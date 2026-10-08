@@ -78,6 +78,7 @@
     "upstream/patches/codex/0069-tool-receipts-portable-fixtures.patch",
     "upstream/patches/codex/0070-tool-receipts-stream-dispatch.patch",
     "upstream/patches/codex/0071-tool-review-stream-delivery.patch",
-    "upstream/patches/codex/0072-tool-review-progress-isolation.patch"
+    "upstream/patches/codex/0072-tool-review-progress-isolation.patch",
+    "upstream/patches/codex/0073-tool-review-sharing-settlement.patch"
   ]
 }

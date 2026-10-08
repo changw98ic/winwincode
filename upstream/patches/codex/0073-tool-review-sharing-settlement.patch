@@ -1,0 +1,237 @@
+diff --git a/codex-rs/core/src/tools/registry.rs b/codex-rs/core/src/tools/registry.rs
+index c64e429e..b464abe6 100644
+--- a/codex-rs/core/src/tools/registry.rs
++++ b/codex-rs/core/src/tools/registry.rs
+@@ -749,7 +749,8 @@ impl ToolRegistry {
+             return Err(err);
+         }
+ 
+-        let dispatch =
++        // Keep the logical sharing lease through post hooks and durable acceptance.
++        let mut dispatch =
+             super::tool_sharing::ToolDispatch::prepare(&invocation, tool.clone(), facts.clone())
+                 .await?;
+         super::tool_diagnostics::ToolDiagnostics::refresh(&invocation.session).await;
+@@ -788,6 +789,7 @@ impl ToolRegistry {
+                 || {
+                     let tool = tool.clone();
+                     let response_cell = &response_cell;
++                    let dispatch = &mut dispatch;
+                     async move {
+                         match dispatch.run(invocation_for_tool, tool).await {
+                             Ok(result) => {
+diff --git a/codex-rs/core/src/tools/tool_sharing.rs b/codex-rs/core/src/tools/tool_sharing.rs
+index d04fb38d..5796a130 100644
+--- a/codex-rs/core/src/tools/tool_sharing.rs
++++ b/codex-rs/core/src/tools/tool_sharing.rs
+@@ -45,7 +45,12 @@ use tokio_util::sync::CancellationToken;
+ /// Only trusted shared reads enter this pool. Entries own the actual execution;
+ /// logical caller cancellation releases one lease, never another caller's lease.
+ #[derive(Default)]
+-struct SharingPool(Mutex<BTreeMap<String, Arc<Flight>>>);
++struct SharingPool(Mutex<SharingPoolState>);
++#[derive(Default)]
++struct SharingPoolState {
++    flights: BTreeMap<String, Arc<Flight>>,
++    revision: u64,
++}
+ struct Flight {
+     source: Arc<ToolFactRecord>,
+     result: watch::Receiver<Option<Result<String, String>>>,
+@@ -166,22 +171,49 @@ impl ToolDispatch {
+             waiters: AtomicUsize::new(1),
+             cancellation: CancellationToken::new(),
+         });
+-        let (flight, follower) = {
+-            let mut flights = pool.0.lock().await;
+-            // A closed preparation cannot strand future callers. Completed
+-            // flights return through the durable, authorized reuse lookup.
+-            flights.retain(|_, flight| {
+-                flight.result.borrow().is_none()
+-                    && flight.result.has_changed().is_ok()
+-                    && !flight.cancellation.is_cancelled()
+-            });
+-            if let Some(flight) = flights.get(&key) {
+-                flight.waiters.fetch_add(1, Ordering::AcqRel);
+-                (Arc::clone(flight), true)
+-            } else {
+-                flights.insert(key.clone(), Arc::clone(&candidate));
+-                (candidate, false)
++        let (flight, follower) = loop {
++            let revision = {
++                let mut state = pool.0.lock().await;
++                // Keep a completed flight while logical callers settle their
++                // results. The durable reuse record may not be accepted yet.
++                state.flights.retain(|_, flight| {
++                    (flight.result.borrow().is_some() || flight.result.has_changed().is_ok())
++                        && !flight.cancellation.is_cancelled()
++                });
++                if let Some(flight) = state.flights.get(&key).filter(|flight| {
++                    flight
++                        .waiters
++                        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
++                            count.checked_add(1).filter(|_| count > 0)
++                        })
++                        .is_ok()
++                }) {
++                    break (Arc::clone(flight), true);
++                }
++                state.revision
++            };
++            // Acceptance may have completed after the first lookup and
++            // before the last logical lease left this pool.
++            if let Some(source) = facts
++                .store
++                .reusable_tool_execution(&thread, &operation, input)
++                .await
++                .map_err(storage_error)?
++            {
++                let raw = read_shared(gate, context, input, &source, &facts.store).await?;
++                link(&facts, &source, input, ToolSharingKind::Reuse).await?;
++                dispatch.sharing = Some(SharingDispatch::Cached(raw));
++                return Ok(dispatch);
++            }
++            // Recheck admission after the database await. Even an intervening
++            // execution that already settled and was pruned changes revision.
++            let mut state = pool.0.lock().await;
++            if state.revision != revision {
++                continue;
+             }
++            state.revision += 1;
++            state.flights.insert(key.clone(), Arc::clone(&candidate));
++            break (candidate, false);
+         };
+         let lease = Waiter::new(Arc::clone(&flight), Arc::clone(&facts));
+         if follower {
+@@ -202,7 +234,6 @@ impl ToolDispatch {
+             sharing: None,
+         };
+         let execution_cancel = flight.cancellation.clone();
+-        let running_flight = Arc::clone(&flight);
+         tokio::spawn(async move {
+             let output = tokio::select! {
+                 result = actual.execute_actual(execution, tool) => result.and_then(|result| snapshot(&result)),
+@@ -212,13 +243,6 @@ impl ToolDispatch {
+                 }
+             };
+             sender.send_replace(Some(output.map_err(|error| error.to_string())));
+-            let mut flights = pool.0.lock().await;
+-            if flights
+-                .get(&key)
+-                .is_some_and(|current| Arc::ptr_eq(current, &running_flight))
+-            {
+-                flights.remove(&key);
+-            }
+         });
+         // The lease is owned by this logical caller. The spawned execution owns
+         // only the actual attempt, not an implicit extra waiter.
+@@ -230,19 +254,16 @@ impl ToolDispatch {
+     }
+ 
+     pub(super) async fn run(
+-        self,
++        &mut self,
+         invocation: ToolInvocation,
+         tool: Arc<dyn CoreToolRuntime>,
+     ) -> Result<AnyToolResult, FunctionCallError> {
+-        match self.sharing {
++        match &mut self.sharing {
+             None => self.execute_actual(invocation, tool).await,
+             Some(SharingDispatch::Cached(raw)) => {
+-                super::result_recovery::shared_output(&raw, &invocation, tool.as_ref())
++                super::result_recovery::shared_output(raw, &invocation, tool.as_ref())
+             }
+-            Some(SharingDispatch::Flight {
+-                mut lease,
+-                follower,
+-            }) => {
++            Some(SharingDispatch::Flight { lease, follower }) => {
+                 let mut receiver = lease.flight.result.clone();
+                 let raw = loop {
+                     if let Some(result) = receiver.borrow().clone() {
+@@ -254,7 +275,7 @@ impl ToolDispatch {
+                         _ = invocation.cancellation_token.cancelled() => return Err(sharing_error("logical_waiter_cancelled")),
+                     }
+                 };
+-                if follower {
++                if *follower {
+                     let (gate, context, input) = self
+                         .trusted
+                         .as_ref()
+diff --git a/codex-rs/core/src/tools/tool_sharing_tests.rs b/codex-rs/core/src/tools/tool_sharing_tests.rs
+index b783878b..54b4d15e 100644
+--- a/codex-rs/core/src/tools/tool_sharing_tests.rs
++++ b/codex-rs/core/src/tools/tool_sharing_tests.rs
+@@ -173,6 +173,63 @@ async fn begin(invocation: &ToolInvocation) -> Arc<ToolFactRecord> {
+     Arc::new(facts)
+ }
+ #[tokio::test]
++async fn completed_execution_stays_shared_until_logical_settlement() {
++    for reuse in [false, true] {
++        let first = invocation(gate(reuse, true)).await;
++        let runtime = tool(false);
++        {
++            let first_facts = begin(&first).await;
++            let mut leader = ToolDispatch::prepare(&first, runtime.clone(), first_facts.clone())
++                .await
++                .unwrap();
++            let output = leader.run(first.clone(), runtime.clone()).await.unwrap();
++
++            // Actual execution is verified, while the caller still has post hooks
++            // and result acceptance to complete. Another caller overlaps that work.
++            let mut second = first.clone();
++            second.call_id = "during-settlement".into();
++            let second_facts = begin(&second).await;
++            let mut follower =
++                ToolDispatch::prepare(&second, runtime.clone(), second_facts.clone())
++                    .await
++                    .unwrap();
++            let shared = follower.run(second, runtime.clone()).await.unwrap();
++            assert_eq!(runtime.calls.load(Ordering::SeqCst), 1);
++            assert_eq!(
++                second_facts
++                    .store
++                    .tool_sharing_fact(second_facts.sequence)
++                    .await
++                    .unwrap()
++                    .unwrap()
++                    .kind,
++                ToolSharingKind::Merged
++            );
++            first_facts
++                .accepted(snapshot(&output).unwrap())
++                .await
++                .unwrap();
++            second_facts
++                .accepted(snapshot(&shared).unwrap())
++                .await
++                .unwrap();
++        }
++        // Once both logical callers settle, only explicit immutable reuse may
++        // avoid a new execution. Coalescing alone must not become a cache.
++        let mut next = first;
++        next.call_id = "after-settlement".into();
++        let registry = ToolRegistry::from_tools([runtime.clone() as Arc<dyn CoreToolRuntime>]);
++        registry
++            .dispatch_any_with_terminal_outcome(next, None)
++            .await
++            .unwrap();
++        assert_eq!(
++            runtime.calls.load(Ordering::SeqCst),
++            if reuse { 1 } else { 2 }
++        );
++    }
++}
++#[tokio::test]
+ async fn cancellation_of_one_logical_waiter_preserves_the_other_delivery() {
+     for cancel_leader in [true, false] {
+         let first = invocation(gate(false, true)).await;
+@@ -189,7 +246,7 @@ async fn cancellation_of_one_logical_waiter_preserves_the_other_delivery() {
+         let follower = ToolDispatch::prepare(&second, runtime.clone(), second_facts.clone())
+             .await
+             .unwrap();
+-        let (surviving, active, facts) = if cancel_leader {
++        let (mut surviving, active, facts) = if cancel_leader {
+             drop(leader);
+             (follower, second, second_facts.clone())
+         } else {

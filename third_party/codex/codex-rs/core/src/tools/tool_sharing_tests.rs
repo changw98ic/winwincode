@@ -173,6 +173,63 @@ async fn begin(invocation: &ToolInvocation) -> Arc<ToolFactRecord> {
     Arc::new(facts)
 }
 #[tokio::test]
+async fn completed_execution_stays_shared_until_logical_settlement() {
+    for reuse in [false, true] {
+        let first = invocation(gate(reuse, true)).await;
+        let runtime = tool(false);
+        {
+            let first_facts = begin(&first).await;
+            let mut leader = ToolDispatch::prepare(&first, runtime.clone(), first_facts.clone())
+                .await
+                .unwrap();
+            let output = leader.run(first.clone(), runtime.clone()).await.unwrap();
+
+            // Actual execution is verified, while the caller still has post hooks
+            // and result acceptance to complete. Another caller overlaps that work.
+            let mut second = first.clone();
+            second.call_id = "during-settlement".into();
+            let second_facts = begin(&second).await;
+            let mut follower =
+                ToolDispatch::prepare(&second, runtime.clone(), second_facts.clone())
+                    .await
+                    .unwrap();
+            let shared = follower.run(second, runtime.clone()).await.unwrap();
+            assert_eq!(runtime.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                second_facts
+                    .store
+                    .tool_sharing_fact(second_facts.sequence)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .kind,
+                ToolSharingKind::Merged
+            );
+            first_facts
+                .accepted(snapshot(&output).unwrap())
+                .await
+                .unwrap();
+            second_facts
+                .accepted(snapshot(&shared).unwrap())
+                .await
+                .unwrap();
+        }
+        // Once both logical callers settle, only explicit immutable reuse may
+        // avoid a new execution. Coalescing alone must not become a cache.
+        let mut next = first;
+        next.call_id = "after-settlement".into();
+        let registry = ToolRegistry::from_tools([runtime.clone() as Arc<dyn CoreToolRuntime>]);
+        registry
+            .dispatch_any_with_terminal_outcome(next, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            runtime.calls.load(Ordering::SeqCst),
+            if reuse { 1 } else { 2 }
+        );
+    }
+}
+#[tokio::test]
 async fn cancellation_of_one_logical_waiter_preserves_the_other_delivery() {
     for cancel_leader in [true, false] {
         let first = invocation(gate(false, true)).await;
@@ -189,7 +246,7 @@ async fn cancellation_of_one_logical_waiter_preserves_the_other_delivery() {
         let follower = ToolDispatch::prepare(&second, runtime.clone(), second_facts.clone())
             .await
             .unwrap();
-        let (surviving, active, facts) = if cancel_leader {
+        let (mut surviving, active, facts) = if cancel_leader {
             drop(leader);
             (follower, second, second_facts.clone())
         } else {

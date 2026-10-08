@@ -749,7 +749,8 @@ impl ToolRegistry {
             return Err(err);
         }
 
-        let dispatch =
+        // Keep the logical sharing lease through post hooks and durable acceptance.
+        let mut dispatch =
             super::tool_sharing::ToolDispatch::prepare(&invocation, tool.clone(), facts.clone())
                 .await?;
         super::tool_diagnostics::ToolDiagnostics::refresh(&invocation.session).await;
@@ -788,6 +789,7 @@ impl ToolRegistry {
                 || {
                     let tool = tool.clone();
                     let response_cell = &response_cell;
+                    let dispatch = &mut dispatch;
                     async move {
                         match dispatch.run(invocation_for_tool, tool).await {
                             Ok(result) => {

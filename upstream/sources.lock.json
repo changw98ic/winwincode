@@ -1093,6 +1093,17 @@
       "targets": [
         "codex-rs/core/src/tools/registry.rs"
       ]
+    },
+    {
+      "id": "codex-tool-review-sharing-settlement",
+      "file": "upstream/patches/codex/0073-tool-review-sharing-settlement.patch",
+      "planned": false,
+      "patchSha256": "df93150c4535963435e4a5ae81c2713bbc2e2689f02ca24843bde59025b33882",
+      "targets": [
+        "codex-rs/core/src/tools/registry.rs",
+        "codex-rs/core/src/tools/tool_sharing.rs",
+        "codex-rs/core/src/tools/tool_sharing_tests.rs"
+      ]
     }
   ],
   "licenseObligations": {

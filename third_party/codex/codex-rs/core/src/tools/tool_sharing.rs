@@ -45,7 +45,12 @@ use tokio_util::sync::CancellationToken;
 /// Only trusted shared reads enter this pool. Entries own the actual execution;
 /// logical caller cancellation releases one lease, never another caller's lease.
 #[derive(Default)]
-struct SharingPool(Mutex<BTreeMap<String, Arc<Flight>>>);
+struct SharingPool(Mutex<SharingPoolState>);
+#[derive(Default)]
+struct SharingPoolState {
+    flights: BTreeMap<String, Arc<Flight>>,
+    revision: u64,
+}
 struct Flight {
     source: Arc<ToolFactRecord>,
     result: watch::Receiver<Option<Result<String, String>>>,
@@ -166,22 +171,49 @@ impl ToolDispatch {
             waiters: AtomicUsize::new(1),
             cancellation: CancellationToken::new(),
         });
-        let (flight, follower) = {
-            let mut flights = pool.0.lock().await;
-            // A closed preparation cannot strand future callers. Completed
-            // flights return through the durable, authorized reuse lookup.
-            flights.retain(|_, flight| {
-                flight.result.borrow().is_none()
-                    && flight.result.has_changed().is_ok()
-                    && !flight.cancellation.is_cancelled()
-            });
-            if let Some(flight) = flights.get(&key) {
-                flight.waiters.fetch_add(1, Ordering::AcqRel);
-                (Arc::clone(flight), true)
-            } else {
-                flights.insert(key.clone(), Arc::clone(&candidate));
-                (candidate, false)
+        let (flight, follower) = loop {
+            let revision = {
+                let mut state = pool.0.lock().await;
+                // Keep a completed flight while logical callers settle their
+                // results. The durable reuse record may not be accepted yet.
+                state.flights.retain(|_, flight| {
+                    (flight.result.borrow().is_some() || flight.result.has_changed().is_ok())
+                        && !flight.cancellation.is_cancelled()
+                });
+                if let Some(flight) = state.flights.get(&key).filter(|flight| {
+                    flight
+                        .waiters
+                        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                            count.checked_add(1).filter(|_| count > 0)
+                        })
+                        .is_ok()
+                }) {
+                    break (Arc::clone(flight), true);
+                }
+                state.revision
+            };
+            // Acceptance may have completed after the first lookup and
+            // before the last logical lease left this pool.
+            if let Some(source) = facts
+                .store
+                .reusable_tool_execution(&thread, &operation, input)
+                .await
+                .map_err(storage_error)?
+            {
+                let raw = read_shared(gate, context, input, &source, &facts.store).await?;
+                link(&facts, &source, input, ToolSharingKind::Reuse).await?;
+                dispatch.sharing = Some(SharingDispatch::Cached(raw));
+                return Ok(dispatch);
             }
+            // Recheck admission after the database await. Even an intervening
+            // execution that already settled and was pruned changes revision.
+            let mut state = pool.0.lock().await;
+            if state.revision != revision {
+                continue;
+            }
+            state.revision += 1;
+            state.flights.insert(key.clone(), Arc::clone(&candidate));
+            break (candidate, false);
         };
         let lease = Waiter::new(Arc::clone(&flight), Arc::clone(&facts));
         if follower {
@@ -202,7 +234,6 @@ impl ToolDispatch {
             sharing: None,
         };
         let execution_cancel = flight.cancellation.clone();
-        let running_flight = Arc::clone(&flight);
         tokio::spawn(async move {
             let output = tokio::select! {
                 result = actual.execute_actual(execution, tool) => result.and_then(|result| snapshot(&result)),
@@ -212,13 +243,6 @@ impl ToolDispatch {
                 }
             };
             sender.send_replace(Some(output.map_err(|error| error.to_string())));
-            let mut flights = pool.0.lock().await;
-            if flights
-                .get(&key)
-                .is_some_and(|current| Arc::ptr_eq(current, &running_flight))
-            {
-                flights.remove(&key);
-            }
         });
         // The lease is owned by this logical caller. The spawned execution owns
         // only the actual attempt, not an implicit extra waiter.
@@ -230,19 +254,16 @@ impl ToolDispatch {
     }
 
     pub(super) async fn run(
-        self,
+        &mut self,
         invocation: ToolInvocation,
         tool: Arc<dyn CoreToolRuntime>,
     ) -> Result<AnyToolResult, FunctionCallError> {
-        match self.sharing {
+        match &mut self.sharing {
             None => self.execute_actual(invocation, tool).await,
             Some(SharingDispatch::Cached(raw)) => {
-                super::result_recovery::shared_output(&raw, &invocation, tool.as_ref())
+                super::result_recovery::shared_output(raw, &invocation, tool.as_ref())
             }
-            Some(SharingDispatch::Flight {
-                mut lease,
-                follower,
-            }) => {
+            Some(SharingDispatch::Flight { lease, follower }) => {
                 let mut receiver = lease.flight.result.clone();
                 let raw = loop {
                     if let Some(result) = receiver.borrow().clone() {
@@ -254,7 +275,7 @@ impl ToolDispatch {
                         _ = invocation.cancellation_token.cancelled() => return Err(sharing_error("logical_waiter_cancelled")),
                     }
                 };
-                if follower {
+                if *follower {
                     let (gate, context, input) = self
                         .trusted
                         .as_ref()
