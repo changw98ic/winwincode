@@ -5490,15 +5490,20 @@ fn production_worker_cancellation_closes_the_same_gateway_exchange() {
 
 #[test]
 fn production_worker_cancel_forwards_closed_native_cell() {
-    native_cell_cancellation_fixture(false);
+    native_cell_cancellation_fixture(false, false);
 }
 
 #[test]
 fn production_worker_cancel_forwards_closed_native_cell_after_runtime_acknowledgements() {
-    native_cell_cancellation_fixture(true);
+    native_cell_cancellation_fixture(true, false);
 }
 
-fn native_cell_cancellation_fixture(acknowledge: bool) {
+#[test]
+fn production_worker_cancel_forwards_closed_native_cell_after_transport_refusal() {
+    native_cell_cancellation_fixture(true, true);
+}
+
+fn native_cell_cancellation_fixture(acknowledge: bool, refuse_interrupt_flush: bool) {
     run_on_large_stack(async move {
         let root = TestDirectory::new("production-cancel-native-cell");
         let dispatch = dispatch(&root);
@@ -5591,6 +5596,21 @@ fn native_cell_cancellation_fixture(acknowledge: bool) {
             )
             .await
             .unwrap();
+        if refuse_interrupt_flush {
+            for _ in 0..4 {
+                port.failures_remaining.store(1, Ordering::SeqCst);
+                let error = worker
+                    .poll_codex(now.clone())
+                    .await
+                    .expect_err("transport refusal");
+                assert_eq!(
+                    error.code,
+                    winwincode_worker::WorkerErrorCode::ExecutionPort,
+                    "retained cancellation traces must precede newer Core facts: {error:?}"
+                );
+            }
+            port.failures_remaining.store(0, Ordering::SeqCst);
+        }
         let closed = poll_native_cell(
             &mut worker,
             &port,
