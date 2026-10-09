@@ -55,6 +55,26 @@ These endpoint and Lite requirements follow the provider's
 [Codex configuration](https://mimo.mi.com/docs/en-US/tokenplan/integration/codex-configuration)
 and [Responses API](https://mimo.mi.com/docs/en-US/api/chat/responses).
 
+## Native Provider failure diagnostics
+
+The native Provider transport retains non-2xx response bodies through the same
+private log channel as failed SSE conversion. Public diagnostics contain the
+original HTTP classification and the opaque `responseLog` / `responseLogStatus`
+fields. Upstream text, credentials, and arbitrary URLs stay out of public errors.
+
+The log directory has mode `0700`, and each generated log has mode `0600`.
+Its first line is JSON metadata; the remaining bytes are the response body.
+For non-2xx responses, `capture.complete`, `capture.truncated`,
+`capture.limitBytes`, and `capture.readFailure` describe the retained bytes.
+Capture uses the smaller of the configured response limit and 64 KiB, while the
+original opening deadline and cancellation still apply. The opaque filename
+uses the existing `sse-<digest>.log` namespace for both HTTP and SSE failures.
+
+An interrupted read, truncation, or log-write failure does not change the HTTP
+retry decision. Permanent failures remain permanent; transient responses retain
+their finite request retry policy. A historical failure without a body reference
+keeps its unknown cause, and operators must not replay it merely to obtain logs.
+
 ## JEV session replay is a different track
 
 Baseline vs Deterministic GC vs GC+Jev comparison lives in

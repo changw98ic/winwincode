@@ -1060,19 +1060,16 @@ impl HttpsSseProviderAdapter {
                     error.metadata.diagnostic = diagnostic;
                 }
                 let mut failure = error.network_failure();
-                if let Some(bytes) = error.response.as_deref()
-                    && let Ok(directory) = self.shared.sse_failure_log.lock()
-                    && let Some(directory) = directory.as_ref()
-                {
-                    let mut diagnostic = failure.diagnostic.unwrap_or_else(|| winwincode_network::NetworkDiagnostic::new(winwincode_network::DiagnosticCode::SseEvent));
-                    match crate::provider_sse_failure_log::retain(directory, &serde_json::json!({"schemaVersion":1,"failure":failure,"providerDiagnostic":error.metadata.diagnostic}), bytes) {
-                        Ok(id) => {
-                            diagnostic.response_log = winwincode_network::SseResponseLogId::parse(&format!("{id}.log"));
-                            diagnostic.response_log_status = Some(winwincode_network::ResponseLogStatus::Retained);
-                        }
-                        Err(_) => diagnostic.response_log_status = Some(winwincode_network::ResponseLogStatus::WriteFailed),
-                    }
-                    failure.diagnostic = Some(diagnostic);
+                if let Some(bytes) = error.response.as_deref() {
+                    failure = self.retain_failed_response(
+                        failure,
+                        &serde_json::json!({
+                            "schemaVersion": 1,
+                            "failure": failure,
+                            "providerDiagnostic": error.metadata.diagnostic,
+                        }),
+                        bytes,
+                    );
                 }
                 error.network = Some(Box::new(failure));
                 error
@@ -1670,10 +1667,89 @@ impl HttpsSseProviderAdapter {
         }
     }
 
+    fn retain_failed_response(
+        &self,
+        mut failure: winwincode_network::NetworkFailure,
+        metadata: &serde_json::Value,
+        body: &[u8],
+    ) -> winwincode_network::NetworkFailure {
+        let directory = match self.shared.sse_failure_log.lock() {
+            Ok(directory) => directory.clone(),
+            Err(_) => return failure,
+        };
+        let Some(directory) = directory else {
+            return failure;
+        };
+        let mut diagnostic = failure.diagnostic.unwrap_or_else(|| {
+            winwincode_network::NetworkDiagnostic::new(winwincode_network::DiagnosticCode::SseEvent)
+        });
+        match crate::provider_sse_failure_log::retain(&directory, metadata, body) {
+            Ok(id) => {
+                diagnostic.response_log =
+                    winwincode_network::SseResponseLogId::parse(&format!("{id}.log"));
+                diagnostic.response_log_status =
+                    Some(winwincode_network::ResponseLogStatus::Retained);
+            }
+            Err(_) => {
+                diagnostic.response_log_status =
+                    Some(winwincode_network::ResponseLogStatus::WriteFailed);
+            }
+        }
+        failure.diagnostic = Some(diagnostic);
+        failure
+    }
+
+    fn retain_http_error_response(
+        &self,
+        response: &mut ureq::http::Response<ureq::Body>,
+        failure: winwincode_network::NetworkFailure,
+        metadata: &ProviderFailureMetadata,
+    ) -> winwincode_network::NetworkFailure {
+        if !self
+            .shared
+            .sse_failure_log
+            .lock()
+            .is_ok_and(|directory| directory.is_some())
+        {
+            return failure;
+        }
+        // Capture is bounded even when successful inference streams have no total limit.
+        // ExchangeIo remains in its finite opening stage; cancellation and ureq's
+        // original global deadline continue to bound each read.
+        let limit = self.shared.config.max_response_bytes.min(64 * 1024);
+        let mut bytes = Vec::new();
+        let result = response
+            .body_mut()
+            .as_reader()
+            .take(u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1))
+            .read_to_end(&mut bytes);
+        let truncated = bytes.len() > limit;
+        bytes.truncate(limit);
+        let read_failure = result
+            .as_ref()
+            .err()
+            .map(winwincode_network::NetworkDiagnostic::io);
+        self.retain_failed_response(
+            failure,
+            &serde_json::json!({
+                "schemaVersion": 1,
+                "failure": failure,
+                "providerDiagnostic": metadata.diagnostic,
+                "capture": {
+                    "complete": result.is_ok() && !truncated,
+                    "truncated": truncated,
+                    "limitBytes": limit,
+                    "readFailure": read_failure,
+                },
+            }),
+            &bytes,
+        )
+    }
+
     fn validate_http_response(
         &self,
         invocation: HttpInvocation<'_>,
-        response: &ureq::http::Response<ureq::Body>,
+        response: &mut ureq::http::Response<ureq::Body>,
         credential: &[u8],
     ) -> Result<ProviderFailureMetadata, ProviderAdapterError> {
         let status = response.status().as_u16();
@@ -1683,23 +1759,23 @@ impl HttpsSseProviderAdapter {
             credential,
             &self.shared.config.custom_headers,
         );
-        if !(200..=299).contains(&status)
-            && winwincode_network::NetworkFailure::http(status, None).retryable()
-        {
-            self.abandon_retryable_open(invocation)?;
-            return Err(ProviderAdapterError::from_network(
+        if !(200..=299).contains(&status) {
+            let failure = self.retain_http_error_response(
+                response,
                 winwincode_network::NetworkFailure::http(
                     status,
                     metadata
                         .provider_retry_after_millis
                         .map(Duration::from_millis),
                 ),
-            )
-            .with_metadata(metadata));
-        }
-        if !(200..=299).contains(&status) {
-            self.finish_open(invocation, StreamState::Fenced)?;
-            return Err(ProviderAdapterError::rejected().with_metadata(metadata));
+                &metadata,
+            );
+            if failure.retryable() {
+                self.abandon_retryable_open(invocation)?;
+            } else {
+                self.finish_open(invocation, StreamState::Fenced)?;
+            }
+            return Err(ProviderAdapterError::from_network(failure).with_metadata(metadata));
         }
         let content_type = response.headers().get("content-type");
         // These fixed official endpoints can omit MIME; the bounded Responses parser
@@ -1815,7 +1891,7 @@ impl HttpsSseProviderAdapter {
         };
         let response = request.send(payload);
         drop(authorization);
-        let response = match response {
+        let mut response = match response {
             Ok(response) => response,
             Err(error) => {
                 self.abandon_retryable_open(invocation)?;
@@ -1824,7 +1900,7 @@ impl HttpsSseProviderAdapter {
                 )));
             }
         };
-        let metadata = self.validate_http_response(invocation, &response, credential)?;
+        let metadata = self.validate_http_response(invocation, &mut response, credential)?;
         self.shared
             .streams
             .lock()
@@ -2624,6 +2700,8 @@ mod tests {
 
     const SECRET: &[u8] = b"provider-https-sse-secret-fixture";
     const PAYLOAD: &[u8] = br#"{"input":"local TLS fixture"}"#;
+
+    include!("provider_http_error_diagnostics.test.rs");
 
     fn responses_api_payload() -> Vec<u8> {
         serde_json::to_vec(&serde_json::json!({"request":{

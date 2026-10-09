@@ -290,6 +290,7 @@ fn four_failed_model_calls_preserve_all_physical_diagnostics_and_paid_budget() {
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     assert_eq!(rows.len(), 4);
+    let mut references = std::collections::HashSet::new();
     for (index, row) in rows.iter().enumerate() {
         assert_eq!(row.0, i64::try_from(index).unwrap() + 1);
         assert_eq!(row.1, i64::try_from(index).unwrap() + 1);
@@ -298,6 +299,16 @@ fn four_failed_model_calls_preserve_all_physical_diagnostics_and_paid_budget() {
         assert_eq!(failure["httpStatus"], 503);
         assert_eq!(failure["kind"], "server_transient");
         assert_eq!(failure["diagnostic"]["code"], "http_status");
+        assert_eq!(failure["diagnostic"]["responseLogStatus"], "retained");
+        let reference = failure["diagnostic"]["responseLog"].as_str().unwrap();
+        assert!(
+            references.insert(reference.to_owned()),
+            "each physical attempt needs its own evidence"
+        );
+        let private =
+            std::fs::read(store.sse_failure_log_directory().unwrap().join(reference)).unwrap();
+        let end = private.iter().position(|byte| *byte == b'\n').unwrap();
+        assert_eq!(&private[end + 1..], b"SYNTHETIC_PRIVATE_RESPONSE");
         assert!(!row.3.contains("SYNTHETIC_PRIVATE"));
         assert!(row.5.is_some());
     }
@@ -314,6 +325,10 @@ fn four_failed_model_calls_preserve_all_physical_diagnostics_and_paid_budget() {
         )
         .unwrap();
     assert_eq!(paid, 4);
+    let final_wire = serde_json::to_string(chunks.last().unwrap()).unwrap();
+    let last_failure: serde_json::Value = serde_json::from_str(&rows.last().unwrap().3).unwrap();
+    assert!(final_wire.contains(last_failure["diagnostic"]["responseLog"].as_str().unwrap()));
+    assert!(!final_wire.contains("SYNTHETIC_PRIVATE"));
     drop(statement);
     let replay = store
         .execute_model_using(
