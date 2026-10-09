@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Independent native launch regressions. These tests use the real application,
-//! credential publication and SQLite transaction. They start no HTTP server,
+//! credential publication and `SQLite` transaction. They start no HTTP server,
 //! Worker process or model request. A retained launch frame is a launch intent,
 //! not evidence that a Worker process started.
 
@@ -150,7 +150,7 @@ impl Fixture {
             &ClientSessionsConfig {
                 launch_wait: Duration::from_millis(80),
                 poll_interval: Duration::from_millis(5),
-                grant_ttl: Duration::from_secs(120),
+                grant_ttl: Duration::from_mins(2),
             },
             exchange,
         )
