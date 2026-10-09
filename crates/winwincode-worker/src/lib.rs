@@ -1309,10 +1309,17 @@ where
                 continue;
             }
             *stage = DriveStage::CorePoll;
-            let Ok(polled) = self.codex.poll(&thread_id, &now).await else {
-                self.finish_unavailable_codex_job(&job_id, now.clone())
-                    .await?;
-                continue;
+            let polled = match self.codex.poll(&thread_id, &now).await {
+                Ok(polled) => polled,
+                Err(error) => {
+                    let diagnostic = self
+                        .codex
+                        .retained_failure_diagnostic(&thread_id)
+                        .or_else(|| self.codex.error_diagnostic(&error));
+                    self.finish_unavailable_codex_job(&job_id, diagnostic, now.clone())
+                        .await?;
+                    continue;
+                }
             };
             *stage = DriveStage::CollectPollEffects;
             self.enqueue_codex_effects()?;
@@ -2524,8 +2531,13 @@ where
     async fn finish_unavailable_codex_job(
         &mut self,
         job_id: &str,
+        diagnostic: Option<winwincode_codex::CodexFailureDiagnostic>,
         now: Instant,
     ) -> Result<(), WorkerError> {
+        let message = diagnostic.map_or_else(
+            || "embedded Codex runtime became unavailable".to_owned(),
+            |diagnostic| diagnostic.append_to("embedded Codex runtime became unavailable"),
+        );
         self.finish_job(
             job_id,
             ExecutionOutcomeStatus::InfrastructureError,
@@ -2534,7 +2546,7 @@ where
             None,
             Some(port_error(
                 ExecutionPortErrorCode::InfrastructureError,
-                "embedded Codex runtime became unavailable",
+                &message,
                 true,
             )),
             now,
@@ -3050,7 +3062,11 @@ where
             .await
         {
             Ok(thread_session) => thread_session,
-            Err(_error) => {
+            Err(error) => {
+                let message = self.codex.error_diagnostic(&error).map_or_else(
+                    || "embedded Codex Core is unavailable".to_owned(),
+                    |diagnostic| diagnostic.append_to("embedded Codex Core is unavailable"),
+                );
                 let _ = self.workspaces.prepare_close_job(
                     &dispatch.job.job_id,
                     WorkspaceCloseReason::Failed,
@@ -3060,7 +3076,7 @@ where
                     dispatch,
                     JobDispatchResultMessageStatus::RejectedCapability,
                     ExecutionPortErrorCode::InfrastructureError,
-                    "embedded Codex Core is unavailable",
+                    &message,
                     true,
                     now,
                 )?;
@@ -3147,10 +3163,18 @@ where
             .active
             .get(&job.job_id.0)
             .and_then(|active| active.snapshot_id.as_ref());
-        let submitted =
+        let (submitted, diagnostic) =
             match winwincode_codex::stage_product::snapshot_bound_prompt(job, snapshot_id) {
-                Ok(prompt) => self.codex.submit_turn(thread_id, &prompt).await.is_ok(),
-                Err(_error) => false,
+                Ok(prompt) => match self.codex.submit_turn(thread_id, &prompt).await {
+                    Ok(()) => (true, None),
+                    Err(error) => (
+                        false,
+                        self.codex
+                            .retained_failure_diagnostic(thread_id)
+                            .or_else(|| self.codex.error_diagnostic(&error)),
+                    ),
+                },
+                Err(_error) => (false, None),
             };
         if let Some(record) = self.dispatches.get_mut(&job.job_id.0) {
             record.submission_started = true;
@@ -3164,6 +3188,10 @@ where
                     "test process stopped after submission intent",
                 ));
             }
+            let message = diagnostic.map_or_else(
+                || "embedded Codex turn did not start".to_owned(),
+                |diagnostic| diagnostic.append_to("embedded Codex turn did not start"),
+            );
             self.finish_job(
                 &job.job_id.0,
                 ExecutionOutcomeStatus::InfrastructureError,
@@ -3172,7 +3200,7 @@ where
                 None,
                 Some(port_error(
                     ExecutionPortErrorCode::InfrastructureError,
-                    "embedded Codex turn did not start",
+                    &message,
                     true,
                 )),
                 now,
@@ -3924,6 +3952,18 @@ where
                 "terminal result has no active Job",
             )
         })?;
+        let error = if matches!(status, ExecutionOutcomeStatus::Failed | ExecutionOutcomeStatus::InfrastructureError) {
+            error.map(|mut error| {
+                if matches!(error.code, ExecutionPortErrorCode::InfrastructureError | ExecutionPortErrorCode::ExecutionFailed)
+                    && let Some(diagnostic) = self.codex.retained_failure_diagnostic(&active.codex_thread_id)
+                {
+                    error.message = diagnostic.append_to(&error.message);
+                }
+                error
+            })
+        } else {
+            error
+        };
         let usage = if usage.is_none() {
             self.codex.retained_outcome_usage(&active.codex_thread_id).ok().flatten()
         } else {

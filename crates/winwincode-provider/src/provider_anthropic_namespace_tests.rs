@@ -146,6 +146,123 @@ fn namespaced_request_and_history_use_bound_aliases_without_losing_identity() {
     assert_eq!(patch_identity.namespace(), Some("repository-tools"));
 }
 
+#[test]
+fn custom_tool_translation_explains_json_wrapper_and_preserves_grammar() {
+    let instructions =
+        "Accepts raw JavaScript source text, not JSON, quoted strings, or markdown code fences.";
+    let grammar = "start: pragma_source | plain_source\nplain_source: /[\\s\\S]+/";
+    for namespaced in [false, true] {
+        let mut exec = custom_tool("exec");
+        exec["description"] = instructions.into();
+        exec["format"]["definition"] = grammar.into();
+        let tools = if namespaced {
+            vec![repository_namespace(vec![exec]), function_tool("read-file")]
+        } else {
+            vec![exec, function_tool("read-file")]
+        };
+        let prepared = prepare_anthropic_request(
+            &canonical_request(tools, Vec::new()),
+            "mimo-v2.6-pro",
+            options(),
+        )
+        .expect("prepare custom tool translation");
+        let body: Value = serde_json::from_slice(&prepared.body).expect("Anthropic request body");
+        let translated = &body["tools"][0];
+        assert_eq!(
+            translated["input_schema"],
+            json!({
+                "type": "object",
+                "properties": {"input": {"type": "string"}},
+                "required": ["input"],
+                "additionalProperties": false,
+            })
+        );
+        let description = translated["description"].as_str().unwrap();
+        assert!(
+            description.contains(
+                "Call this tool with a JSON object containing exactly one required field, \"input\", whose value is a string."
+            ),
+            "custom tool description must explain its required transport wrapper"
+        );
+        assert!(description.contains(
+            "The raw-input instructions below apply to the string contents, not to the outer JSON object."
+        ));
+        assert!(description.contains("Type: grammar"));
+        assert!(description.contains("Syntax: lark"));
+        assert!(description.contains(grammar));
+        assert!(description.contains(instructions));
+        if namespaced {
+            assert!(description.contains("Repository operations"));
+        }
+        let exposed_name = translated["name"].as_str().unwrap();
+        assert_eq!(
+            exposed_name,
+            if namespaced {
+                "repository-tools__exec"
+            } else {
+                "exec"
+            }
+        );
+        let identity = prepared.tool_bindings.identity(exposed_name).unwrap();
+        assert_eq!(identity.kind(), ProviderToolKind::Custom);
+        assert_eq!(identity.name(), "exec");
+        assert_eq!(
+            identity.namespace(),
+            namespaced.then_some("repository-tools")
+        );
+        assert_eq!(body["tools"][1]["description"], "Call read-file");
+        assert_eq!(
+            body["tools"][1]["input_schema"],
+            function_tool("read-file")["parameters"]
+        );
+    }
+}
+
+#[test]
+fn captured_mimo_empty_exec_arguments_remain_rejected() {
+    let prepared = prepare_anthropic_request(
+        &canonical_request(vec![custom_tool("exec")], Vec::new()),
+        "mimo-v2.6-pro",
+        options(),
+    )
+    .expect("prepare advertised custom exec binding");
+    // Minimized from the 2026-10-08 real response. Opaque IDs are replaced and
+    // unrelated blocks/metadata omitted. The tool block had no argument delta.
+    let response = concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"mimo-response\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"mimo-v2.6-pro\",\"usage\":{\"input_tokens\":13568,\"output_tokens\":0}}}\n\n",
+        "event: content_block_start\n",
+        "data: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"mimo-call\",\"name\":\"exec\",\"input\":{}}}\n\n",
+        "event: content_block_stop\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":2}\n\n",
+        "event: message_delta\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"input_tokens\":13568,\"output_tokens\":411}}\n\n",
+        "event: message_stop\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+    );
+    let Err(error) = parse_anthropic_sse(
+        response.as_bytes(),
+        64 * 1_024,
+        64,
+        &prepared.tool_bindings,
+        options(),
+    ) else {
+        panic!("empty custom exec arguments must not become executable input");
+    };
+    assert_eq!(error.kind(), AnthropicCodecErrorKind::Protocol);
+    assert_eq!(
+        error.diagnostic(),
+        Some(AnthropicCodecDiagnostic {
+            stage: "response_fields",
+            event_type: "content_block_stop",
+            field_path: "$.content_block.input.input",
+        })
+    );
+    let diagnostic = format!("{error:?}");
+    assert!(!diagnostic.contains("mimo-response"));
+    assert!(!diagnostic.contains("mimo-call"));
+}
+
 fn parallel_tool_sse() -> String {
     [
         r#"event: message_start

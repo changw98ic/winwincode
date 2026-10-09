@@ -1213,15 +1213,110 @@ fn open_mirror_view_connection(
     data_directory: &Path,
 ) -> Result<rusqlite::Connection, MirrorRevisionViewError> {
     std::fs::create_dir_all(data_directory).map_err(|_| MirrorRevisionViewError::Storage)?;
-    let connection = rusqlite::Connection::open(data_directory.join(MIRROR_VIEW_DATABASE_FILE))
-        .map_err(|_| MirrorRevisionViewError::Storage)?;
+    let database = data_directory.join(MIRROR_VIEW_DATABASE_FILE);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(MirrorRevisionViewError::Storage);
+        }
+        let connection =
+            rusqlite::Connection::open(&database).map_err(|_| MirrorRevisionViewError::Storage)?;
+        let initialized = initialize_mirror_view_connection(&connection, deadline);
+        match initialized {
+            Ok(()) => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(MirrorRevisionViewError::Storage);
+                }
+                connection
+                    .busy_timeout(std::time::Duration::from_secs(5))
+                    .map_err(|_| MirrorRevisionViewError::Storage)?;
+                if std::time::Instant::now() >= deadline {
+                    return Err(MirrorRevisionViewError::Storage);
+                }
+                return Ok(connection);
+            }
+            Err(MirrorInitializationError::Storage) => {
+                return Err(MirrorRevisionViewError::Storage);
+            }
+            Err(MirrorInitializationError::Busy) => {
+                // A WAL-mode lock upgrade can skip SQLite's busy handler while
+                // this connection owns a read cut. Release it before retrying.
+                drop(connection);
+                #[cfg(test)]
+                observe_mirror_init_retry_for_test();
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    return Err(MirrorRevisionViewError::Storage);
+                }
+                std::thread::sleep(remaining.min(std::time::Duration::from_millis(1)));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+type MirrorInitRetryObserver = Box<dyn FnMut()>;
+
+#[cfg(test)]
+thread_local! {
+    static MIRROR_INIT_RETRY_OBSERVER: std::cell::RefCell<Option<MirrorInitRetryObserver>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn observe_mirror_init_retry_for_test() {
+    MIRROR_INIT_RETRY_OBSERVER.with(|observer| {
+        if let Some(observer) = observer.borrow_mut().as_mut() {
+            observer();
+        }
+    });
+}
+
+enum MirrorInitializationError {
+    Busy,
+    Storage,
+}
+
+fn initialize_mirror_view_connection(
+    connection: &rusqlite::Connection,
+    deadline: std::time::Instant,
+) -> Result<(), MirrorInitializationError> {
+    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+    if remaining.is_zero() {
+        return Err(MirrorInitializationError::Storage);
+    }
     connection
-        .execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")
-        .map_err(|_| MirrorRevisionViewError::Storage)?;
+        .busy_timeout(remaining)
+        .map_err(|_| MirrorInitializationError::Storage)?;
+    let mode: String = connection
+        .query_row("PRAGMA journal_mode=WAL;", [], |row| row.get(0))
+        .map_err(|error| mirror_initialization_error(&error))?;
+    if mode != "wal" {
+        return Err(MirrorInitializationError::Storage);
+    }
+    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+    if remaining.is_zero() {
+        return Err(MirrorInitializationError::Storage);
+    }
+    connection
+        .busy_timeout(remaining)
+        .map_err(|_| MirrorInitializationError::Storage)?;
     connection
         .execute_batch(MIRROR_VIEW_SCHEMA)
-        .map_err(|_| MirrorRevisionViewError::Storage)?;
-    Ok(connection)
+        .map_err(|error| mirror_initialization_error(&error))?;
+    if std::time::Instant::now() >= deadline {
+        return Err(MirrorInitializationError::Storage);
+    }
+    Ok(())
+}
+
+fn mirror_initialization_error(error: &rusqlite::Error) -> MirrorInitializationError {
+    if error.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy) {
+        MirrorInitializationError::Busy
+    } else {
+        MirrorInitializationError::Storage
+    }
 }
 
 /// Enqueues one `client.occupancy.*` downlink frame into the durable outbox
@@ -1450,6 +1545,123 @@ mod tests {
 
     fn canonical_node(suffix_digit: char) -> String {
         format!("cnd_{suffix_digit}{}", "A".repeat(25))
+    }
+
+    fn mirror_writer_fixture(label: &str) -> (PathBuf, rusqlite::Connection) {
+        let directory = view_directory(label);
+        std::fs::create_dir_all(&directory).expect("isolated mirror directory");
+        let writer = rusqlite::Connection::open(directory.join(MIRROR_VIEW_DATABASE_FILE))
+            .expect("real SQLite writer");
+        let mode: String = writer
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .expect("initial rollback journal mode");
+        assert_eq!(
+            mode, "delete",
+            "the mirror WAL/schema must not be preheated"
+        );
+        writer
+            .execute_batch(
+                "CREATE TABLE adxi_mirror_busy_fixture(value INTEGER NOT NULL);
+                 BEGIN IMMEDIATE;
+                 INSERT INTO adxi_mirror_busy_fixture VALUES(1);",
+            )
+            .expect("hold a real RESERVED writer lock");
+        assert!(!writer.is_autocommit());
+        (directory, writer)
+    }
+
+    #[test]
+    fn the_mirror_revision_view_recovers_after_real_init_busy() {
+        let (directory, writer) = mirror_writer_fixture("real-busy-recovery");
+        let (arrived_tx, arrived_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let worker_directory = directory.clone();
+        let worker = std::thread::spawn(move || {
+            let mut gate = Some((arrived_tx, resume_rx));
+            MIRROR_INIT_RETRY_OBSERVER.with(|observer| {
+                *observer.borrow_mut() = Some(Box::new(move || {
+                    if let Some((arrived, resume)) = gate.take() {
+                        arrived
+                            .send(())
+                            .expect("actual Busy reached after connection drop");
+                        resume
+                            .recv_timeout(std::time::Duration::from_secs(10))
+                            .expect("bounded test release after writer commit");
+                    }
+                }));
+            });
+            client_mirror_revision_view(&worker_directory, &canonical_node('B'))
+        });
+        let arrived = arrived_rx.recv_timeout(std::time::Duration::from_secs(10));
+        // The initializer is held only after its failed connection was dropped.
+        // Committing here checks that this retry boundary leaves no blocking cut.
+        let committed = writer.execute_batch("COMMIT");
+        let resumed = resume_tx.send(());
+        let joined = worker.join();
+        drop(writer);
+        let persisted = (|| {
+            let connection = rusqlite::Connection::open(directory.join(MIRROR_VIEW_DATABASE_FILE))?;
+            let mode: String = connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+            let count: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM adxi_mirror_busy_fixture WHERE value=1",
+                [],
+                |row| row.get(0),
+            )?;
+            let integrity: String =
+                connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+            Ok::<_, rusqlite::Error>((mode, count, integrity))
+        })();
+        std::fs::remove_dir_all(&directory).expect("cleanup before assertions");
+        assert!(
+            arrived.is_ok(),
+            "the native initialization must actually observe Busy"
+        );
+        committed.expect("no failed initializer connection blocks writer commit");
+        resumed.expect("resume the fresh native initialization attempt");
+        assert_eq!(joined.expect("native initializer thread"), Ok(0));
+        assert_eq!(
+            persisted.expect("reopen real database"),
+            ("wal".to_owned(), 1, "ok".to_owned())
+        );
+    }
+
+    #[test]
+    fn the_mirror_revision_view_stops_init_busy_at_its_deadline() {
+        let (directory, writer) = mirror_writer_fixture("real-busy-deadline");
+        let retries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_retries = retries.clone();
+        let worker_directory = directory.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            MIRROR_INIT_RETRY_OBSERVER.with(|observer| {
+                *observer.borrow_mut() = Some(Box::new(move || {
+                    observed_retries.fetch_add(1, Ordering::Relaxed);
+                }));
+            });
+            let result = client_mirror_revision_view(&worker_directory, &canonical_node('B'));
+            done_tx.send(()).expect("native initialization returned");
+            result
+        });
+        // This guard bounds a broken test. The writer is never released until
+        // initialization returns; no wall-clock performance threshold is scored.
+        let returned_while_locked = done_rx.recv_timeout(std::time::Duration::from_secs(10));
+        let released = writer.execute_batch("ROLLBACK");
+        let joined = worker.join();
+        drop(writer);
+        std::fs::remove_dir_all(&directory).expect("cleanup before assertions");
+        assert!(
+            returned_while_locked.is_ok(),
+            "initialization must stop while the writer remains held"
+        );
+        released.expect("release held native writer");
+        assert!(
+            retries.load(Ordering::Relaxed) > 1,
+            "multiple real Busy attempts must precede exhaustion"
+        );
+        assert_eq!(
+            joined.expect("native initializer thread"),
+            Err(MirrorRevisionViewError::Storage)
+        );
     }
 
     #[test]

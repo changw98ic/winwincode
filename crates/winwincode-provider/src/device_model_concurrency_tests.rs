@@ -233,6 +233,46 @@ fn unsafe_provider_slot_paths_are_hard_errors_and_never_report_a_full_queue() {
 }
 
 #[test]
+fn exchange_owner_drop_releases_a_lock_with_a_duplicated_descriptor() {
+    let directory = TestDirectory::new("exchange-owner-with-duplicate");
+    let store = DeviceProviderStore::open(&directory.0).unwrap();
+    let reopened = DeviceProviderStore::open(&directory.0.join(".")).unwrap();
+    let exchange = model_open("provider-a", 10).model_exchange_id;
+    let owner = store
+        .try_model_exchange_owner(&exchange.0)
+        .unwrap()
+        .unwrap();
+    let duplicate = owner.file.try_clone().unwrap();
+    assert!(
+        reopened
+            .try_model_exchange_owner(&exchange.0)
+            .unwrap()
+            .is_none(),
+        "a live owner must exclude another owner"
+    );
+    drop(owner);
+    let next_owner = reopened
+        .try_model_exchange_owner(&exchange.0)
+        .unwrap()
+        .expect("the actual owner releases its lock while an alias remains open");
+    drop(duplicate);
+    assert!(
+        store
+            .try_model_exchange_owner(&exchange.0)
+            .unwrap()
+            .is_none(),
+        "closing an old alias cannot release the next owner's lock"
+    );
+    drop(next_owner);
+    assert!(
+        store
+            .try_model_exchange_owner(&exchange.0)
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
 fn invocation_slot_drop_releases_a_lock_with_a_duplicated_descriptor() {
     let directory = TestDirectory::new("drop-with-duplicate");
     let store = DeviceProviderStore::open(&directory.0).unwrap();

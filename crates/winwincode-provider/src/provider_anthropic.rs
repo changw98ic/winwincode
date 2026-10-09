@@ -673,6 +673,17 @@ fn translate_tool(
             for key in ["type", "syntax", "definition"] {
                 validate_text(string(format, key)?)?;
             }
+            let description = format!(
+                "Call this tool with a JSON object containing exactly one required field, \"input\", whose value is a string.\n\
+                 Put the complete raw custom-tool input in that string.\n\
+                 The raw-input instructions below apply to the string contents, not to the outer JSON object.\n\n\
+                 Custom tool input format:\nType: {}\nSyntax: {}\nDefinition:\n{}\n\n\
+                 Tool instructions:\n{description}",
+                string(format, "type")?,
+                string(format, "syntax")?,
+                string(format, "definition")?,
+            );
+            validate_text(&description)?;
             json!({
                 "name": exposed_name,
                 "description": description,

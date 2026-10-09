@@ -3176,6 +3176,536 @@ mod tests {
             WorkerLaunchGrantState::Consumed
         );
     }
+    fn reuse_credential(command: &LaunchGrantIssuance) -> crate::CredentialIssuance {
+        crate::CredentialIssuance::try_new(
+            format!("wcred_{}", &command.worker_launch_grant_id[4..]),
+            &command.worker_session_id,
+            &command.worker_id,
+            &command.worker_instance_id,
+            &command.worker_launch_grant_id,
+            &command.credential_digest,
+            unit_instant("2026-01-01T02:00:00.000Z"),
+        )
+        .expect("credential")
+    }
+
+    fn reuse_bundle_fixture() -> (PathBuf, SqliteStorage, LaunchGrantIssuance) {
+        let directory = temporary_directory("bundle-reuse");
+        let mut storage = SqliteStorage::open(&directory).expect("storage");
+        let holder = user_id(7);
+        let (node, lease, binding, token) = seed_happy_path(&mut storage, 50000, &holder);
+        let mut command = issuance(
+            50010,
+            &node,
+            &format!("cix_{}", crockford(50001)),
+            &holder,
+            &lease,
+            token,
+            &binding,
+            50020,
+        );
+        command.expires_at = unit_instant("2026-01-01T00:05:00.000Z");
+        crate::issue_worker_launch_bundle(&mut storage, &command, None, &reuse_credential(&command),
+            |sequence| {
+                let message = format!("msg_{}", crockford(50010));
+                let frame = serde_json::json!({"kind":"client.worker.launch","messageId":message,
+                    "clientNodeId":command.client_node_id,"clientInstanceId":command.client_instance_id,
+                    "sequence":sequence,"payload":{"occupancyLeaseId":command.occupancy_lease_id,
+                    "occupancyFencingToken":command.occupancy_fencing_token.to_string(),"launchGrant":{
+                    "workerLaunchGrantId":command.worker_launch_grant_id,"clientNodeId":command.client_node_id,
+                    "clientInstanceId":command.client_instance_id,"occupancyLeaseId":command.occupancy_lease_id,
+                    "occupancyFencingToken":command.occupancy_fencing_token.to_string(),
+                    "repositoryBindingId":command.repository_binding_id,"productSessionId":command.product_session_id,
+                    "workRunId":command.work_run_id.as_ref().map(|id|&id.0),"workerSessionId":command.worker_session_id,
+                    "workerId":command.worker_id,"workerInstanceId":command.worker_instance_id,
+                    "credentialDigest":command.credential_digest,"expiresAt":command.expires_at.0,
+                    "state":"issued","revision":1}}});
+                crate::ClientDownlinkAppend::try_new(&command.client_node_id, message, sequence, frame.to_string())
+                    .map_err(|_| StorageError::invalid_input("fixture frame"))
+            }, &unit_instant("2026-01-01T00:02:00.000Z"),
+        ).expect("real atomic publication");
+        (directory, storage, command)
+    }
+
+    fn reuse_request(original: &LaunchGrantIssuance) -> LaunchGrantIssuance {
+        let mut command = original.clone();
+        command.worker_launch_grant_id = grant_id(50011);
+        command.worker_session_id = session_id(50030);
+        command.worker_id = format!("wrk_{}", crockford(50031));
+        command.worker_instance_id = format!("wki_{}", crockford(50032));
+        command.expires_at = unit_instant("2026-01-01T01:00:00.000Z");
+        command
+    }
+
+    fn reuse_public_counts(storage: &SqliteStorage) -> (i64, i64, i64, i64) {
+        storage
+            .connection()
+            .expect("connection")
+            .query_row(
+                "SELECT (SELECT count(*) FROM worker_launch_grants),
+             (SELECT count(*) FROM worker_session_credentials),
+             (SELECT count(*) FROM worker_launch_publications),
+             (SELECT COALESCE(MAX(sequence),0) FROM client_downlink_frames)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("public counts")
+    }
+
+    #[test]
+    fn bundle_reuse_survives_reopen_at_full_capacity_without_calling_encoder() {
+        let (directory, storage, original) = reuse_bundle_fixture();
+        let request = reuse_request(&original);
+        storage
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE client_nodes SET max_concurrent_worker_sessions=1",
+                [],
+            )
+            .unwrap();
+        drop(storage);
+        let mut storage = SqliteStorage::open(&directory).unwrap();
+        let result = crate::issue_worker_launch_bundle(
+            &mut storage,
+            &request,
+            None,
+            &reuse_credential(&request),
+            |_| panic!("reuse must not allocate a frame"),
+            &unit_instant("2026-01-01T00:03:00.000Z"),
+        )
+        .unwrap();
+        assert_eq!(
+            result.worker_launch_grant_id,
+            original.worker_launch_grant_id
+        );
+        assert_eq!(result.worker_session_id, original.worker_session_id);
+        assert_eq!(reuse_public_counts(&storage), (1, 1, 1, 1));
+        drop(storage);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn bundle_reuse_consumed_identity_outlives_only_its_launch_ack_deadline() {
+        let (directory, mut storage, original) = reuse_bundle_fixture();
+        let ack = LaunchAckSettlement::try_new(
+            &original.worker_launch_grant_id,
+            &original.occupancy_lease_id,
+            original.occupancy_fencing_token,
+            &original.worker_session_id,
+            &original.worker_id,
+            &original.worker_instance_id,
+            true,
+            None,
+        )
+        .unwrap();
+        storage
+            .worker_launch_grant_ledger()
+            .unwrap()
+            .settle_launch_ack(&ack, &unit_instant("2026-01-01T00:03:00.000Z"))
+            .unwrap();
+        let request = reuse_request(&original);
+        let result = crate::issue_worker_launch_bundle(
+            &mut storage,
+            &request,
+            None,
+            &reuse_credential(&request),
+            |_| panic!("consumed reuse must not publish"),
+            &unit_instant("2026-01-01T00:10:00.000Z"),
+        )
+        .unwrap();
+        assert_eq!(
+            result.worker_launch_grant_id,
+            original.worker_launch_grant_id
+        );
+        assert_eq!(result.state, WorkerLaunchGrantState::Consumed);
+        assert_eq!(reuse_public_counts(&storage), (1, 1, 1, 1));
+        drop(storage);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn bundle_reuse_refuses_foreign_authority_scope_and_recovery_lineage() {
+        let (directory, mut storage, original) = reuse_bundle_fixture();
+        let request = reuse_request(&original);
+        for field in 0..8 {
+            let mut changed = request.clone();
+            match field {
+                0 => changed.client_node_id = format!("cnd_{}", crockford(60000)),
+                1 => changed.client_instance_id = format!("cix_{}", crockford(60000)),
+                2 => changed.holder_user_id = user_id(60000),
+                3 => changed.repository_binding_id = format!("rbd_{}", crockford(60000)),
+                4 => changed.occupancy_lease_id = format!("ocl_{}", crockford(60000)),
+                5 => changed.occupancy_fencing_token += 1,
+                6 => changed.product_session_id = Some(format!("ps_{}", crockford(60000))),
+                _ => changed.work_run_id = Some(WorkRunId(format!("wrn_{}", crockford(60000)))),
+            }
+            let credential = reuse_credential(&changed);
+            let tx = storage
+                .connection_mut()
+                .unwrap()
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            let result = reusable_launch_in_transaction(
+                &tx,
+                &changed,
+                None,
+                &credential,
+                &unit_instant("2026-01-01T00:03:00.000Z"),
+            );
+            assert!(
+                !matches!(result, Ok(Some(_))),
+                "foreign field {field} must not reuse"
+            );
+            tx.rollback().unwrap();
+            assert_eq!(reuse_public_counts(&storage), (1, 1, 1, 1));
+        }
+        let tx = storage
+            .connection_mut()
+            .unwrap()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        let result = reusable_launch_in_transaction(
+            &tx,
+            &request,
+            Some(&grant_id(60000)),
+            &reuse_credential(&request),
+            &unit_instant("2026-01-01T00:03:00.000Z"),
+        );
+        assert!(
+            result.is_err(),
+            "unrelated predecessor must refuse rather than start another Worker"
+        );
+        tx.rollback().unwrap();
+        assert_eq!(reuse_public_counts(&storage), (1, 1, 1, 1));
+        drop(storage);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn bundle_reuse_refuses_changed_current_authority_credentials_and_publication() {
+        let (directory, mut storage, original) = reuse_bundle_fixture();
+        let request = reuse_request(&original);
+        for mutation in [
+            "UPDATE client_nodes SET lock_state='locked'",
+            "UPDATE client_nodes SET presence_state='offline'",
+            "UPDATE client_nodes SET current_instance_id='cix_00000000000000000000000001'",
+            "UPDATE client_occupancy_leases SET fencing_token=fencing_token+1",
+            "UPDATE client_access_grants SET state='revoked'",
+            "UPDATE repository_access_grants SET state='revoked'",
+            "UPDATE worker_session_credentials SET state='revoked'",
+            "UPDATE worker_session_credentials SET expires_at='2026-01-01T00:02:30.000Z'",
+            "UPDATE worker_session_credentials SET credential_digest='sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'",
+            "UPDATE worker_launch_grants SET expires_at='2026-01-01T00:02:30.000Z'",
+            "INSERT INTO worker_launch_grant_exits (worker_launch_grant_id,worker_session_id,worker_instance_id,client_node_id,client_instance_id,occupancy_lease_id,occupancy_fencing_token,observed_at) SELECT worker_launch_grant_id,worker_session_id,worker_instance_id,client_node_id,client_instance_id,occupancy_lease_id,occupancy_fencing_token,'2026-01-01T00:02:30.000Z' FROM worker_launch_grants",
+            "INSERT INTO device_execution_bindings (device_execution_binding_id,worker_session_id,client_node_id,client_instance_id,holder_user_id,repository_binding_id,occupancy_lease_id,occupancy_fencing_token,worker_launch_grant_id,product_session_id,work_run_id,state,bound_at,released_at,revision) SELECT 'deb_00000000000000000000000001',worker_session_id,client_node_id,client_instance_id,holder_user_id,repository_binding_id,occupancy_lease_id,occupancy_fencing_token,worker_launch_grant_id,product_session_id,work_run_id,'released','2026-01-01T00:02:00.000Z','2026-01-01T00:02:30.000Z',1 FROM worker_launch_grants",
+            "INSERT INTO worker_session_slots (worker_session_id,codex_thread_id,job_id,worker_id,worker_instance_id,lease_id,attempt,fencing_token,state,event_cursor,memory_bytes,disk_bytes,process_slots,revision,opened_at,updated_at,terminal_at) SELECT worker_session_id,'cth_00000000000000000000000001','job_00000000000000000000000001',worker_id,worker_instance_id,'lea_00000000000000000000000001',1,'1','completed',0,0,0,1,1,'2026-01-01T00:02:00.000Z','2026-01-01T00:02:30.000Z','2026-01-01T00:02:30.000Z' FROM worker_launch_grants",
+            "DELETE FROM worker_launch_publications",
+        ] {
+            let tx = storage
+                .connection_mut()
+                .unwrap()
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            tx.execute(mutation, []).unwrap();
+            let result = reusable_launch_in_transaction(
+                &tx,
+                &request,
+                None,
+                &reuse_credential(&request),
+                &unit_instant("2026-01-01T00:03:00.000Z"),
+            );
+            assert!(
+                !matches!(result, Ok(Some(_))),
+                "changed authority must not reuse: {mutation}"
+            );
+            tx.rollback().unwrap();
+            assert_eq!(reuse_public_counts(&storage), (1, 1, 1, 1));
+        }
+        let mut extra = request.clone();
+        extra.worker_launch_grant_id = grant_id(50012);
+        storage
+            .worker_launch_grant_ledger()
+            .unwrap()
+            .issue(&extra, &unit_instant("2026-01-01T00:03:00.000Z"))
+            .unwrap();
+        let tx = storage
+            .connection_mut()
+            .unwrap()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        let result = reusable_launch_in_transaction(
+            &tx,
+            &request,
+            None,
+            &reuse_credential(&request),
+            &unit_instant("2026-01-01T00:03:00.000Z"),
+        );
+        assert_eq!(
+            result.unwrap_err().kind(),
+            WorkerLaunchGrantStoreErrorKind::CorruptState
+        );
+        tx.rollback().unwrap();
+        assert_eq!(reuse_public_counts(&storage), (2, 1, 1, 1));
+        drop(storage);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn bundle_reuse_recovery_refuses_the_predecessor_worker_instance() {
+        let (directory, mut storage, predecessor) = reuse_bundle_fixture();
+        let ack = LaunchAckSettlement::try_new(
+            &predecessor.worker_launch_grant_id,
+            &predecessor.occupancy_lease_id,
+            predecessor.occupancy_fencing_token,
+            &predecessor.worker_session_id,
+            &predecessor.worker_id,
+            &predecessor.worker_instance_id,
+            true,
+            None,
+        )
+        .unwrap();
+        storage
+            .worker_launch_grant_ledger()
+            .unwrap()
+            .settle_launch_ack(&ack, &unit_instant("2026-01-01T00:02:15.000Z"))
+            .unwrap();
+        assert!(
+            storage
+                .worker_launch_grant_ledger()
+                .unwrap()
+                .observe_trusted_exit(
+                    &predecessor.client_node_id,
+                    &predecessor.worker_session_id,
+                    &predecessor.worker_instance_id,
+                    &predecessor.occupancy_lease_id,
+                    &unit_instant("2026-01-01T00:02:30.000Z"),
+                )
+                .unwrap()
+        );
+        let mut successor = reuse_request(&predecessor);
+        successor.worker_id.clone_from(&predecessor.worker_id);
+        let published = crate::issue_worker_launch_bundle(&mut storage, &successor,
+            Some(&predecessor.worker_launch_grant_id), &reuse_credential(&successor),
+            |sequence| {
+                let message = format!("msg_{}", crockford(50011));
+                let frame = serde_json::json!({"kind":"client.worker.launch","messageId":message,
+                    "clientNodeId":successor.client_node_id,"clientInstanceId":successor.client_instance_id,
+                    "sequence":sequence,"payload":{"occupancyLeaseId":successor.occupancy_lease_id,
+                    "occupancyFencingToken":successor.occupancy_fencing_token.to_string(),"launchGrant":{
+                    "workerLaunchGrantId":successor.worker_launch_grant_id,"clientNodeId":successor.client_node_id,
+                    "clientInstanceId":successor.client_instance_id,"occupancyLeaseId":successor.occupancy_lease_id,
+                    "occupancyFencingToken":successor.occupancy_fencing_token.to_string(),
+                    "repositoryBindingId":successor.repository_binding_id,"productSessionId":successor.product_session_id,
+                    "workRunId":successor.work_run_id.as_ref().map(|id|&id.0),"workerSessionId":successor.worker_session_id,
+                    "workerId":successor.worker_id,"workerInstanceId":successor.worker_instance_id,
+                    "credentialDigest":successor.credential_digest,"expiresAt":successor.expires_at.0,
+                    "state":"issued","revision":1}}});
+                crate::ClientDownlinkAppend::try_new(&successor.client_node_id, message, sequence, frame.to_string())
+                    .map_err(|_| StorageError::invalid_input("recovery fixture frame"))
+            }, &unit_instant("2026-01-01T00:03:00.000Z"),
+        ).expect("publish the real successor through the atomic bundle");
+        assert_ne!(published.worker_instance_id, predecessor.worker_instance_id);
+        assert_eq!(reuse_public_counts(&storage), (2, 2, 2, 2));
+        let mut retry = successor.clone();
+        retry.worker_launch_grant_id = grant_id(50012);
+        retry.worker_session_id = session_id(50040);
+        retry.worker_instance_id = format!("wki_{}", crockford(50042));
+        let retained = crate::issue_worker_launch_bundle(
+            &mut storage,
+            &retry,
+            Some(&predecessor.worker_launch_grant_id),
+            &reuse_credential(&retry),
+            |_| panic!("valid recovery reuse must not republish"),
+            &unit_instant("2026-01-01T00:03:30.000Z"),
+        )
+        .expect("positive control retains the exact existing successor");
+        assert_eq!(retained, published);
+        assert_eq!(reuse_public_counts(&storage), (2, 2, 2, 2));
+        // This is the only changed request field. Credential identity stays
+        // consistently bound to the request so only the original guard rejects it.
+        retry
+            .worker_instance_id
+            .clone_from(&predecessor.worker_instance_id);
+        let error = crate::issue_worker_launch_bundle(
+            &mut storage,
+            &retry,
+            Some(&predecessor.worker_launch_grant_id),
+            &reuse_credential(&retry),
+            |_| panic!("invalid recovery reuse must not allocate a frame"),
+            &unit_instant("2026-01-01T00:03:30.000Z"),
+        )
+        .expect_err("the existing successor must not waive predecessor-instance refusal");
+        let crate::WorkerLaunchBundleError::Launch(error) = error else {
+            panic!("the original recovery identity guard must reject the request");
+        };
+        assert_eq!(error.kind(), WorkerLaunchGrantStoreErrorKind::InvalidInput);
+        assert_eq!(reuse_public_counts(&storage), (2, 2, 2, 2));
+        drop(storage);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+/// Rechecks one already-published identity under the bundle's writer transaction.
+/// Fresh issuance still owns capacity and all publication writes.
+#[allow(clippy::too_many_lines)]
+pub(crate) fn reusable_launch_in_transaction(
+    transaction: &Transaction<'_>,
+    issuance: &LaunchGrantIssuance,
+    predecessor: Option<&str>,
+    credential: &crate::CredentialIssuance,
+    now: &Instant,
+) -> Result<Option<WorkerLaunchGrantRecord>, WorkerLaunchGrantStoreError> {
+    validate_instant(now, "reuse time")?;
+    if issuance.product_session_id.is_none() && issuance.work_run_id.is_none() {
+        return Ok(None);
+    }
+    // Find the whole live scope before checking lineage. A different
+    // predecessor must not disguise an existing Worker as a fresh launch.
+    let mut statement = transaction
+        .prepare(
+            "SELECT g.worker_launch_grant_id FROM worker_launch_grants g
+         WHERE g.product_session_id IS ?1 AND g.work_run_id IS ?2
+           AND g.state IN ('issued', 'consumed')
+           AND NOT EXISTS (SELECT 1 FROM worker_launch_grant_exits e
+             WHERE e.worker_launch_grant_id = g.worker_launch_grant_id)
+           AND NOT EXISTS (SELECT 1 FROM device_execution_bindings b
+             WHERE b.worker_launch_grant_id = g.worker_launch_grant_id AND b.state = 'released')
+           AND NOT EXISTS (SELECT 1 FROM worker_session_slots s
+             WHERE s.worker_session_id = g.worker_session_id
+               AND s.state IN ('completed','cancelled','failed','recovery_failed'))
+         ORDER BY g.created_at DESC, g.worker_launch_grant_id DESC LIMIT 2",
+        )
+        .map_err(|sql| sql_error(&sql))?;
+    let ids = statement
+        .query_map(
+            params![
+                issuance.product_session_id,
+                issuance.work_run_id.as_ref().map(|id| &id.0)
+            ],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|sql| sql_error(&sql))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|sql| sql_error(&sql))?;
+    drop(statement);
+    let [id] = ids.as_slice() else {
+        return if ids.is_empty() {
+            Ok(None)
+        } else {
+            Err(error(
+                WorkerLaunchGrantStoreErrorKind::CorruptState,
+                "launch scope carries multiple live identities",
+            ))
+        };
+    };
+    let grant = load_launch_grant(transaction, id)?.ok_or_else(grant_missing_after_write)?;
+    if !matches!(
+        grant.state,
+        WorkerLaunchGrantState::Issued | WorkerLaunchGrantState::Consumed
+    ) || (grant.state == WorkerLaunchGrantState::Issued && grant.expires_at.0 <= now.0)
+    {
+        return Ok(None);
+    }
+    // Reuse consumes no additional slot, but never bypasses current authority.
+    ensure_device_facts(transaction, issuance)?;
+    ensure_occupancy_facts(transaction, issuance)?;
+    ensure_binding_visibility(transaction, issuance)?;
+    if grant.client_node_id != issuance.client_node_id
+        || grant.client_instance_id != issuance.client_instance_id
+        || grant.holder_user_id != issuance.holder_user_id
+        || grant.repository_binding_id != issuance.repository_binding_id
+        || grant.occupancy_lease_id != issuance.occupancy_lease_id
+        || grant.occupancy_fencing_token != issuance.occupancy_fencing_token
+        || grant.product_session_id != issuance.product_session_id
+        || grant.work_run_id != issuance.work_run_id
+        || credential.worker_session_id != issuance.worker_session_id
+        || credential.worker_id != issuance.worker_id
+        || credential.worker_instance_id != issuance.worker_instance_id
+        || credential.worker_launch_grant_id != issuance.worker_launch_grant_id
+        || credential.credential_digest != issuance.credential_digest
+        || credential.expires_at.0 <= now.0
+        || issuance.expires_at.0 <= now.0
+    {
+        return Err(error(
+            WorkerLaunchGrantStoreErrorKind::InvalidInput,
+            "launch reuse authority differs",
+        ));
+    }
+    let parent: Option<String> = transaction.query_row(
+        "SELECT predecessor_grant_id FROM worker_replacement_launches WHERE successor_grant_id=?1",
+        [id], |row| row.get(0),
+    ).optional().map_err(|sql| sql_error(&sql))?;
+    if parent.as_deref() != predecessor {
+        return Err(error(
+            WorkerLaunchGrantStoreErrorKind::InvalidInput,
+            "launch reuse recovery lineage differs",
+        ));
+    }
+    if let Some(predecessor) = predecessor {
+        let previous =
+            load_launch_grant(transaction, predecessor)?.ok_or_else(grant_missing_after_write)?;
+        let closed_current: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM worker_launch_process_closures
+             WHERE grant_id=?1 AND reporting_client_instance_id=?2)",
+                params![predecessor, issuance.client_instance_id],
+                |row| row.get(0),
+            )
+            .map_err(|sql| sql_error(&sql))?;
+        let exited: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM worker_launch_grant_exits WHERE worker_launch_grant_id=?1)",
+            [predecessor], |row| row.get(0),
+        ).map_err(|sql| sql_error(&sql))?;
+        if !exited
+            || previous.client_node_id != issuance.client_node_id
+            || (previous.client_instance_id != issuance.client_instance_id && !closed_current)
+            || previous.holder_user_id != issuance.holder_user_id
+            || previous.repository_binding_id != issuance.repository_binding_id
+            || previous.occupancy_lease_id != issuance.occupancy_lease_id
+            || previous.occupancy_fencing_token != issuance.occupancy_fencing_token
+            || previous.product_session_id != issuance.product_session_id
+            || previous.work_run_id != issuance.work_run_id
+            || previous.worker_id != issuance.worker_id
+            || previous.worker_instance_id == issuance.worker_instance_id
+            || grant.worker_id != issuance.worker_id
+        {
+            return Err(error(
+                WorkerLaunchGrantStoreErrorKind::InvalidInput,
+                "launch reuse predecessor authority differs",
+            ));
+        }
+    }
+    let live: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM worker_session_credentials c
+           JOIN worker_launch_publications p ON p.grant_id=c.worker_launch_grant_id
+           WHERE c.worker_launch_grant_id=?1 AND c.worker_session_id=?2
+             AND c.worker_id=?3 AND c.worker_instance_id=?4 AND c.credential_digest=?5
+             AND c.state='active' AND c.expires_at>?6 AND p.client_node_id=?7)
+         AND NOT EXISTS(SELECT 1 FROM worker_launch_grant_exits WHERE worker_launch_grant_id=?1)
+         AND NOT EXISTS(SELECT 1 FROM device_execution_bindings WHERE worker_launch_grant_id=?1 AND state='released')
+         AND NOT EXISTS(SELECT 1 FROM worker_session_slots WHERE worker_session_id=?2
+             AND state IN ('completed','cancelled','failed','recovery_failed'))
+         AND NOT EXISTS(SELECT 1 FROM device_execution_bindings b
+             JOIN worker_launch_grants g ON g.worker_launch_grant_id=b.worker_launch_grant_id
+             WHERE g.worker_launch_grant_id=?1 AND (
+                 b.worker_session_id!=g.worker_session_id OR b.client_node_id!=g.client_node_id
+                 OR b.client_instance_id!=g.client_instance_id OR b.holder_user_id!=g.holder_user_id
+                 OR b.repository_binding_id!=g.repository_binding_id
+                 OR b.occupancy_lease_id!=g.occupancy_lease_id
+                 OR b.occupancy_fencing_token!=g.occupancy_fencing_token
+                 OR b.product_session_id IS NOT g.product_session_id
+                 OR b.work_run_id IS NOT g.work_run_id))",
+        params![grant.worker_launch_grant_id, grant.worker_session_id, grant.worker_id,
+            grant.worker_instance_id, grant.credential_digest, now.0, grant.client_node_id],
+        |row| row.get(0),
+    ).map_err(|sql| sql_error(&sql))?;
+    if !live {
+        return Err(error(
+            WorkerLaunchGrantStoreErrorKind::LaunchGrantConflict,
+            "launch identity is no longer reusable",
+        ));
+    }
+    Ok(Some(grant))
 }
 
 pub(crate) fn issue_launch_in_transaction(

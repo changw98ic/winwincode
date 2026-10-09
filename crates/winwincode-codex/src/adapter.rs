@@ -106,6 +106,7 @@ use winwincode_execution_port::execution_identity::{
 };
 
 use crate::action_bridge::{ActionBridgeError, ExecutionPortActionGate};
+use crate::failure_diagnostic::{CodexFailureDiagnostic, CodexFailureStage};
 use crate::helper_release::{HELPER_RELEASE_BINARY_MODE, HelperReleaseManifest, MAX_HELPER_BYTES};
 use crate::model_bridge::{
     BridgeError, ExecutionPortModelBridge, ModelRunBinding, SharedAuthoritySource,
@@ -201,6 +202,8 @@ pub struct ProductionCodexConfig {
     #[cfg(feature = "test-support")]
     event_poll_faults: VecDeque<ProductionEventPollFault>,
     #[cfg(feature = "test-support")]
+    close_kernel_before_session_start: bool,
+    #[cfg(feature = "test-support")]
     submission_faults: VecDeque<ProductionSubmissionFault>,
     #[cfg(feature = "test-support")]
     delegated_transition_faults: VecDeque<ProductionDelegatedTransitionFault>,
@@ -210,13 +213,17 @@ pub struct ProductionCodexConfig {
 
 /// Test-only faults injected at the embedded Kernel event boundary.
 #[cfg(feature = "test-support")]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProductionEventPollFault {
     Closed,
     MalformedEvent,
     KernelError,
+    /// Close the actual Kernel before reading its next event.
+    KernelClosed,
     /// A valid Codex `ErrorEvent` before any `TurnStarted` event.
     ErrorEvent,
+    /// A normal typed Core error with private text that must not cross the boundary.
+    CoreError(codex_protocol::protocol::CodexErrorInfo),
 }
 
 /// Test-only crash boundary around the durable submission intent.
@@ -224,6 +231,8 @@ pub enum ProductionEventPollFault {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProductionSubmissionFault {
     AfterIntentBeforeKernel,
+    /// Close the real Kernel before its exact-turn reconciliation call.
+    KernelClosedBeforeKernel,
 }
 
 /// Test-only crash boundaries around one durable delegated-loop transition.
@@ -311,6 +320,8 @@ impl ProductionCodexConfig {
             #[cfg(feature = "test-support")]
             event_poll_faults: VecDeque::new(),
             #[cfg(feature = "test-support")]
+            close_kernel_before_session_start: false,
+            #[cfg(feature = "test-support")]
             submission_faults: VecDeque::new(),
             #[cfg(feature = "test-support")]
             delegated_transition_faults: VecDeque::new(),
@@ -324,6 +335,14 @@ impl ProductionCodexConfig {
     #[must_use]
     pub fn with_test_event_poll_fault(mut self, fault: ProductionEventPollFault) -> Self {
         self.event_poll_faults.push_back(fault);
+        self
+    }
+
+    /// Closes the actual Kernel before the first normal session creation call.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn with_test_closed_kernel_before_session_start(mut self) -> Self {
+        self.close_kernel_before_session_start = true;
         self
     }
 
@@ -900,9 +919,17 @@ impl ProductionCodexAdapter {
                 submission_options,
             )
             .await;
-        let Ok(submission) = reconciliation else {
-            self.retain_submission_failure(&run_key).await?;
-            return Err(kernel_error());
+        let submission = match reconciliation {
+            Ok(submission) => submission,
+            Err(error) => {
+                let error = classified_kernel_error(CodexFailureStage::TurnSubmit, &error);
+                self.retain_failure_diagnostic(
+                    &run_key,
+                    error.diagnostic.clone().ok_or_else(kernel_error)?,
+                )?;
+                self.retain_submission_failure(&run_key).await?;
+                return Err(error);
+            }
         };
         match submission {
             ExactTurnReconciliation::Started { turn_id, .. } if turn_id == submission_id => {}
@@ -1528,6 +1555,19 @@ impl ProductionCodexAdapter {
             .ok_or_else(unavailable)
     }
 
+    fn retain_failure_diagnostic(
+        &mut self,
+        run_key: &str,
+        diagnostic: CodexFailureDiagnostic,
+    ) -> Result<(), ProductionCodexError> {
+        let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
+        if run.record.failure_diagnostic.is_none() && run.record.terminal.is_none() {
+            run.record.failure_diagnostic = Some(diagnostic);
+            self.persist_run(run_key)?;
+        }
+        Ok(())
+    }
+
     fn persist_run(&self, run_key: &str) -> Result<(), ProductionCodexError> {
         let run = self.runs.get(run_key).ok_or_else(unknown_thread)?;
         self.store
@@ -1804,6 +1844,13 @@ impl ProductionCodexAdapter {
         &mut self,
         run_key: &str,
     ) -> Result<(), ProductionCodexError> {
+        self.retain_failure_diagnostic(
+            run_key,
+            CodexFailureDiagnostic::new(
+                CodexFailureStage::TurnSubmit,
+                "SUBMISSION_FAILED_UNCLASSIFIED",
+            ),
+        )?;
         let activity_at = self
             .runs
             .get(run_key)
@@ -1904,19 +1951,42 @@ impl ProductionCodexAdapter {
         if let Some(fact) = self.poll_tool_facts(run_key, session, now).await? {
             return Ok(fact);
         }
-        let Ok(event) = self.next_kernel_event(session).await else {
-            return self.poll_infrastructure_terminal(run_key, now).await;
+        let event = match self.next_kernel_event(session).await {
+            Ok(event) => event,
+            Err(diagnostic) => {
+                self.retain_failure_diagnostic(run_key, diagnostic)?;
+                return self.poll_infrastructure_terminal(run_key, now).await;
+            }
         };
         let EventPoll::Event(event) = event else {
             return match event {
                 EventPoll::Timeout => Ok(CodexPoll::Pending),
-                EventPoll::Closed => self.poll_infrastructure_terminal(run_key, now).await,
+                EventPoll::Closed => {
+                    self.retain_failure_diagnostic(
+                        run_key,
+                        CodexFailureDiagnostic::new(
+                            CodexFailureStage::EventPoll,
+                            "EVENT_STREAM_CLOSED",
+                        ),
+                    )?;
+                    self.poll_infrastructure_terminal(run_key, now).await
+                }
                 EventPoll::Event(_) => unreachable!(),
             };
         };
-        let Ok(event) = decode_kernel_event(&event.payload_json) else {
+        let Ok(decoded) = decode_kernel_event(&event.payload_json) else {
+            let cause = match event.kind.as_str() {
+                "stream_error" => "CORE_EVENT_STREAM_FAILED",
+                "serialization_error" => "CORE_EVENT_SERIALIZATION_FAILED",
+                _ => "EVENT_DECODE_FAILED",
+            };
+            self.retain_failure_diagnostic(
+                run_key,
+                CodexFailureDiagnostic::new(CodexFailureStage::EventDecode, cause),
+            )?;
             return self.poll_infrastructure_terminal(run_key, now).await;
         };
+        let event = decoded;
         let is_error_event = matches!(&event.msg, CodexEventMsg::Error(_));
         let result = self.accept_polled_event(run_key, event, now);
         if is_error_event && result.is_ok() {
@@ -1937,9 +2007,24 @@ impl ProductionCodexAdapter {
         result
     }
 
-    async fn next_kernel_event(&mut self, session: &str) -> Result<EventPoll, ()> {
+    async fn next_kernel_event(
+        &mut self,
+        session: &str,
+    ) -> Result<EventPoll, CodexFailureDiagnostic> {
         #[cfg(feature = "test-support")]
         if let Some(fault) = self.config.event_poll_faults.pop_front() {
+            if fault == ProductionEventPollFault::KernelClosed {
+                self.kernel.shutdown().await.map_err(|error| {
+                    CodexFailureDiagnostic::kernel(CodexFailureStage::EventPoll, error.code())
+                })?;
+                return self
+                    .kernel
+                    .next_event(session, Some(self.config.event_poll_timeout))
+                    .await
+                    .map_err(|error| {
+                        CodexFailureDiagnostic::kernel(CodexFailureStage::EventPoll, error.code())
+                    });
+            }
             return match fault {
                 ProductionEventPollFault::Closed => Ok(EventPoll::Closed),
                 ProductionEventPollFault::MalformedEvent => Ok(EventPoll::Event(KernelEvent {
@@ -1947,7 +2032,23 @@ impl ProductionCodexAdapter {
                     kind: "malformed_test_event".to_owned(),
                     payload_json: "{".to_owned(),
                 })),
-                ProductionEventPollFault::KernelError => Err(()),
+                ProductionEventPollFault::KernelError => Err(CodexFailureDiagnostic::new(
+                    CodexFailureStage::EventPoll,
+                    "KERNEL_OPERATION_FAILED",
+                )),
+                ProductionEventPollFault::KernelClosed => unreachable!(),
+                ProductionEventPollFault::CoreError(info) => Ok(EventPoll::Event(KernelEvent {
+                    sequence: 1,
+                    kind: "error".to_owned(),
+                    payload_json: serde_json::json!({
+                        "id": "winwincode-z7xn-typed-error",
+                        "msg": {
+                            "type": "error",
+                            "message": "z7xn-private-sentinel token=do-not-publish /private/z7xn-tool-input",
+                            "codex_error_info": info,
+                        },
+                    }).to_string(),
+                })),
                 ProductionEventPollFault::ErrorEvent => Ok(EventPoll::Event(KernelEvent {
                     sequence: 1,
                     kind: "error".to_owned(),
@@ -1966,7 +2067,9 @@ impl ProductionCodexAdapter {
         self.kernel
             .next_event(session, Some(self.config.event_poll_timeout))
             .await
-            .map_err(|_| ())
+            .map_err(|error| {
+                CodexFailureDiagnostic::kernel(CodexFailureStage::EventPoll, error.code())
+            })
     }
 
     fn accept_polled_event(
@@ -2057,7 +2160,7 @@ impl ProductionCodexAdapter {
                 }
                 Ok(CodexPoll::Pending)
             }
-            CodexEventMsg::Error(_error) => self.accept_error(run_key, now),
+            CodexEventMsg::Error(error) => self.accept_error(run_key, &error, now),
             _ => Ok(CodexPoll::Pending),
         }
     }
@@ -2183,6 +2286,15 @@ impl ProductionCodexAdapter {
         completed: &codex_protocol::protocol::TurnCompleteEvent,
         now: &Instant,
     ) -> Result<CodexPoll, ProductionCodexError> {
+        if let Some(error) = &completed.error {
+            self.retain_failure_diagnostic(
+                run_key,
+                CodexFailureDiagnostic::core(
+                    CodexFailureStage::TurnComplete,
+                    error.codex_error_info.as_ref(),
+                ),
+            )?;
+        }
         let (failed, final_message) = {
             let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
             run.record.current_turn_id = Some(completed.turn_id.clone());
@@ -2978,8 +3090,16 @@ impl ProductionCodexAdapter {
     fn accept_error(
         &mut self,
         run_key: &str,
+        error: &codex_protocol::protocol::ErrorEvent,
         now: &Instant,
     ) -> Result<CodexPoll, ProductionCodexError> {
+        self.retain_failure_diagnostic(
+            run_key,
+            CodexFailureDiagnostic::core(
+                CodexFailureStage::CoreEvent,
+                error.codex_error_info.as_ref(),
+            ),
+        )?;
         self.store
             .commit_provider_final_model_calls(run_key)
             .map_err(map_store_error)?;
@@ -3599,15 +3719,16 @@ impl ProductionCodexAdapter {
             self.kernel
                 .resume_session(rollout_path, options)
                 .await
-                .map_err(|_| kernel_error())?
+                .map_err(|error| {
+                    classified_kernel_error(CodexFailureStage::SessionResume, &error)
+                })?
         } else if matches!(
             record.phase,
             StoredRunPhase::Prepared | StoredRunPhase::SubmissionIntent
         ) {
-            self.kernel
-                .create_session(options)
-                .await
-                .map_err(|_| kernel_error())?
+            self.kernel.create_session(options).await.map_err(|error| {
+                classified_kernel_error(CodexFailureStage::SessionCreate, &error)
+            })?
         } else {
             return Err(ProductionCodexError::new(
                 ProductionCodexErrorKind::Restart,
@@ -4332,6 +4453,12 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             });
         }
         let repository_rule_pack = load_repository_rule_pack(&workspace)?;
+        #[cfg(feature = "test-support")]
+        if std::mem::take(&mut self.config.close_kernel_before_session_start) {
+            self.kernel.shutdown().await.map_err(|error| {
+                classified_kernel_error(CodexFailureStage::SessionCreate, &error)
+            })?;
+        }
         let session = self
             .kernel
             .create_session(session_options(
@@ -4341,7 +4468,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
                 agent_config.clone(),
             ))
             .await
-            .map_err(|_| kernel_error())?;
+            .map_err(|error| classified_kernel_error(CodexFailureStage::SessionCreate, &error))?;
         let record = StoredRun {
             snapshot_id: start.snapshot_id.cloned(),
             job: start.job.clone(),
@@ -4361,6 +4488,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             last_runtime_millis: 0,
             last_activity_at: start.lease.issued_at.clone(),
             terminal: None,
+            failure_diagnostic: None,
             terminal_trace: None,
             current_turn_id: None,
             last_agent_message: None,
@@ -4453,13 +4581,19 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             return Ok(());
         }
         #[cfg(feature = "test-support")]
-        if self.config.submission_faults.pop_front()
-            == Some(ProductionSubmissionFault::AfterIntentBeforeKernel)
-        {
-            return Err(ProductionCodexError::new(
-                ProductionCodexErrorKind::Restart,
-                "test submission stopped before embedded Kernel call",
-            ));
+        match self.config.submission_faults.pop_front() {
+            Some(ProductionSubmissionFault::AfterIntentBeforeKernel) => {
+                return Err(ProductionCodexError::new(
+                    ProductionCodexErrorKind::Restart,
+                    "test submission stopped before embedded Kernel call",
+                ));
+            }
+            Some(ProductionSubmissionFault::KernelClosedBeforeKernel) => {
+                self.kernel.shutdown().await.map_err(|error| {
+                    classified_kernel_error(CodexFailureStage::TurnSubmit, &error)
+                })?;
+            }
+            None => {}
         }
         if self.schedule_fusion_panel(thread_id, goal)? {
             return Ok(());
@@ -4511,7 +4645,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             DelegatedLoopPhase::Continue => {}
         }
 
-        if let Some(existing) = self
+        let existing = self
             .runs
             .get(&run_key)
             .ok_or_else(unknown_thread)?
@@ -4519,7 +4653,8 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             .delegated_transitions
             .iter()
             .find(|stored| stored.turn_id == turn_id)
-        {
+            .cloned();
+        if let Some(existing) = existing {
             if existing.transition != transition {
                 return Err(conflict());
             }
@@ -4889,6 +5024,32 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             .runs
             .get(run_key)
             .and_then(|run| run.record.delegated_stop.clone()))
+    }
+
+    fn retained_failure_diagnostic(
+        &self,
+        thread_id: &CodexThreadId,
+    ) -> Option<CodexFailureDiagnostic> {
+        self.thread_to_run
+            .get(&thread_id.0)
+            .and_then(|key| self.runs.get(key))
+            .and_then(|run| run.record.failure_diagnostic.clone())
+    }
+
+    fn error_diagnostic(&self, error: &Self::Error) -> Option<CodexFailureDiagnostic> {
+        Some(error.diagnostic.clone().unwrap_or_else(|| {
+            let cause = match error.kind {
+                ProductionCodexErrorKind::InvalidConfiguration => "ADAPTER_INVALID_CONFIGURATION",
+                ProductionCodexErrorKind::Authority => "ADAPTER_AUTHORITY",
+                ProductionCodexErrorKind::Conflict => "ADAPTER_CONFLICT",
+                ProductionCodexErrorKind::DurableState => "ADAPTER_DURABLE_STATE",
+                ProductionCodexErrorKind::ModelBridge => "ADAPTER_MODEL_BRIDGE",
+                ProductionCodexErrorKind::Kernel => "KERNEL_OPERATION_FAILED",
+                ProductionCodexErrorKind::Restart => "ADAPTER_RESTART",
+                ProductionCodexErrorKind::UnknownThread => "ADAPTER_UNKNOWN_THREAD",
+            };
+            CodexFailureDiagnostic::new(CodexFailureStage::AdapterOperation, cause)
+        }))
     }
 
     fn retained_outcome_usage(
@@ -6116,6 +6277,8 @@ struct StoredRun {
     last_runtime_millis: i64,
     last_activity_at: Instant,
     terminal: Option<StoredTerminal>,
+    #[serde(default)]
+    failure_diagnostic: Option<CodexFailureDiagnostic>,
     terminal_trace: Option<StoredTerminalTrace>,
     #[serde(default)]
     current_turn_id: Option<String>,
@@ -7768,11 +7931,21 @@ pub enum ProductionCodexErrorKind {
 pub struct ProductionCodexError {
     kind: ProductionCodexErrorKind,
     message: &'static str,
+    diagnostic: Option<CodexFailureDiagnostic>,
 }
 
 impl ProductionCodexError {
     const fn new(kind: ProductionCodexErrorKind, message: &'static str) -> Self {
-        Self { kind, message }
+        Self {
+            kind,
+            message,
+            diagnostic: None,
+        }
+    }
+
+    fn with_diagnostic(mut self, diagnostic: CodexFailureDiagnostic) -> Self {
+        self.diagnostic = Some(diagnostic);
+        self
     }
 
     #[must_use]
@@ -7822,6 +7995,13 @@ fn kernel_error() -> ProductionCodexError {
         ProductionCodexErrorKind::Kernel,
         "embedded Codex Kernel operation failed",
     )
+}
+
+fn classified_kernel_error(
+    stage: CodexFailureStage,
+    error: &winwincode_kernel::KernelFailure,
+) -> ProductionCodexError {
+    kernel_error().with_diagnostic(CodexFailureDiagnostic::kernel(stage, error.code()))
 }
 
 fn unknown_thread() -> ProductionCodexError {
@@ -11590,6 +11770,7 @@ mod tests {
             last_runtime_millis: 0,
             last_activity_at: Instant("2026-08-28T00:00:00Z".to_owned()),
             terminal: None,
+            failure_diagnostic: None,
             terminal_trace: None,
             current_turn_id: None,
             last_agent_message: None,
@@ -11752,6 +11933,7 @@ mod tests {
             last_runtime_millis: 0,
             last_activity_at: Instant("2026-08-28T00:00:00Z".to_owned()),
             terminal: None,
+            failure_diagnostic: None,
             terminal_trace: None,
             current_turn_id: Some("turn-fixture".to_owned()),
             last_agent_message: None,

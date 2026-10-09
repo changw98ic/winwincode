@@ -11,7 +11,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use rusqlite::Connection;
 use winwincode_client_port::domain::ClientOccupancyReleaseMode;
-use winwincode_client_port::exchange::{FrameCodec, FrameOutbox, OutboxSession};
+use winwincode_client_port::exchange::{
+    FrameCodec, FrameOutbox, OutboxError, OutboxSession, OutboxStateError,
+};
 use winwincode_client_port::messages::{
     CLIENT_CONTROL_PORT_SCHEMA_VERSION, ClientRepositoryRemovedPayload, ClientToServerEnvelope,
     ClientToServerMessage, CommandContext,
@@ -611,6 +613,11 @@ fn frame_outbox_maps_client_outbox_rows_to_stored_frames() {
     unbound.close().expect("second store handle close");
 
     // The stream starts empty and appends persist the exact frame bytes.
+    assert!(
+        FrameOutbox::load(&mut store)
+            .expect("load the empty bound stream")
+            .is_none()
+    );
     assert_eq!(session.next_sequence(&mut store).expect("next"), 1);
     let stored = codec
         .encode_envelope(&envelope("msg-one", "inst-a", 1))
@@ -655,6 +662,128 @@ fn frame_outbox_maps_client_outbox_rows_to_stored_frames() {
 
     store.close().expect("store close");
     fs::remove_dir_all(root).expect("database directory should be released");
+}
+
+#[test]
+fn frame_outbox_releases_decode_errors_and_reuses_the_same_handle() {
+    let (root, mut store) = open_store("outbox-decode-rollback");
+    store
+        .bind_outbox_stream("node_local", "inst-a")
+        .expect("bind stream");
+    let codec = FrameCodec::default();
+    let first = codec
+        .encode_envelope(&envelope("msg-one", "inst-a", 1))
+        .expect("encode first frame");
+    FrameOutbox::append(&mut store, 0, &first).expect("append first frame");
+    let fixture = Connection::open(store.database_path()).expect("corruption fixture");
+    let original: Vec<u8> = fixture
+        .query_row(
+            "SELECT payload FROM client_outbox WHERE message_id = ?1",
+            ["msg-one"],
+            |row| row.get(0),
+        )
+        .expect("retain exact original payload");
+    assert_eq!(
+        fixture
+            .execute(
+                "UPDATE client_outbox SET payload = ?1 WHERE message_id = ?2",
+                rusqlite::params![&b"{"[..], "msg-one"],
+            )
+            .expect("corrupt stored envelope"),
+        1
+    );
+    fixture.close().expect("close corruption fixture");
+
+    let failure = FrameOutbox::load(&mut store).expect_err("corrupt payload must fail closed");
+    assert_eq!(failure.kind(), DeviceStoreErrorKind::InvalidInput);
+    let second = codec
+        .encode_envelope(&envelope("msg-two", "inst-a", 2))
+        .expect("encode second frame");
+    FrameOutbox::append(&mut store, 1, &second)
+        .expect("failed read must release its transaction before a same-handle append");
+    store.close().expect("close corrupt store");
+
+    let mut store = DeviceStore::open(&root).expect("reopen corrupt store");
+    store
+        .bind_outbox_stream("node_local", "inst-a")
+        .expect("rebind stream");
+    let failure = OutboxSession::new()
+        .next_sequence(&mut store)
+        .expect_err("restart must not hide stored payload corruption");
+    assert!(matches!(
+        failure,
+        OutboxError::Store(error) if error.kind() == DeviceStoreErrorKind::InvalidInput
+    ));
+    let fixture = Connection::open(store.database_path()).expect("repair fixture");
+    assert_eq!(
+        fixture
+            .execute(
+                "UPDATE client_outbox SET payload = ?1 WHERE message_id = ?2",
+                rusqlite::params![original, "msg-one"],
+            )
+            .expect("restore exact original payload"),
+        1
+    );
+    fixture.close().expect("close repair fixture");
+    let snapshot = FrameOutbox::load(&mut store)
+        .expect("same handle recovers after repair")
+        .expect("retained stream");
+    snapshot.validate().expect("restored snapshot validates");
+    assert_eq!(snapshot.frames, [first, second]);
+    assert_eq!(snapshot.highest_sequence, 2);
+    assert_eq!(snapshot.ack_sequence, 0);
+    store.close().expect("close repaired store");
+    fs::remove_dir_all(root).expect("release fixture directory");
+}
+
+#[test]
+fn frame_outbox_rejects_a_persistent_sequence_gap_after_restart() {
+    let (root, mut store) = open_store("outbox-persistent-gap");
+    store
+        .bind_outbox_stream("node_local", "inst-a")
+        .expect("bind stream");
+    let codec = FrameCodec::default();
+    let session = OutboxSession::new();
+    for (message_id, sequence) in [("msg-one", 1), ("msg-two", 2), ("msg-three", 3)] {
+        let frame = codec
+            .encode_envelope(&envelope(message_id, "inst-a", sequence))
+            .expect("encode contiguous frame");
+        session
+            .enqueue(&mut store, sequence, &frame)
+            .expect("append");
+    }
+    let fixture = Connection::open(store.database_path()).expect("gap fixture");
+    assert_eq!(
+        fixture
+            .execute(
+                "DELETE FROM client_outbox WHERE message_id = ?1",
+                ["msg-two"]
+            )
+            .expect("remove the middle persisted frame"),
+        1
+    );
+    fixture.close().expect("close gap fixture");
+    assert!(matches!(
+        session.next_sequence(&mut store),
+        Err(OutboxError::CorruptState(OutboxStateError::NonContiguous {
+            expected: 2,
+            found: 3,
+        }))
+    ));
+    store.close().expect("close store with durable gap");
+    let mut store = DeviceStore::open(&root).expect("reopen store with durable gap");
+    store
+        .bind_outbox_stream("node_local", "inst-a")
+        .expect("rebind stream");
+    assert!(matches!(
+        session.next_sequence(&mut store),
+        Err(OutboxError::CorruptState(OutboxStateError::NonContiguous {
+            expected: 2,
+            found: 3,
+        }))
+    ));
+    store.close().expect("close final store");
+    fs::remove_dir_all(root).expect("release fixture directory");
 }
 
 #[test]

@@ -8,13 +8,71 @@ import test from 'node:test'
 import { benchmarkDeviceProfiles, deviceBenchmarkExperimentBinding,
   persistedBenchmarkDeviceFailure, removeTerminalBenchmarkPublicSmoke } from '../scripts/benchmark-device-adapter.mjs'
 import { buildBenchmarkPlan } from '../scripts/run-real-task-benchmark.mjs'
-import { benchmarkDeviceEnvironment } from '../scripts/run-device-task-vertical.mjs'
-import { runtimeChildEnvironment } from '../scripts/device-production-fixture.mjs'
+import { benchmarkDeviceEnvironment, deviceTaskProvider } from '../scripts/run-device-task-vertical.mjs'
+import { DEVICE_PROVIDER_ENCRYPTION_CONTEXT, runtimeChildEnvironment,
+  seedDeviceLocalProvider } from '../scripts/device-production-fixture.mjs'
 
 const models = ['glm-5.3-flash', 'mimo-v2.6-pro', 'deepseek-flash', 'qwen3.8-flash']
 const providerEnvironment = Object.fromEntries(['ZHIPU', 'XIAOMI', 'DEEPSEEK', 'OPENCODE']
   .flatMap((prefix, index) => [[`${prefix}_API_KEY`, 'fixture-only'],
     [`${prefix}_BASE_URL`, 'https://provider.invalid'], [`${prefix}_MODEL`, models[index]]]))
+providerEnvironment.XIAOMI_RESPONSES_URL = 'https://provider.invalid/v1/responses'
+
+async function assertEncryptedDeviceProviderSave(provider, expectedMode) {
+  const device = createECDH('prime256v1')
+  device.generateKeys()
+  const saved = new Map()
+  const snapshot = { clientNodeId: 'device-owned', revision: 0,
+    encryptionPublicKey: device.getPublicKey().toString('base64'), providers: [] }
+  let posted = false
+  const api = { async request(path, options) {
+    if (options?.method === 'POST') {
+      assert.equal(posted, false)
+      posted = true
+      const envelope = options.body
+      assert.equal(JSON.stringify(envelope).includes('responsesStructuredOutput'), false)
+      assert.equal(JSON.stringify(envelope).includes(provider.apiKey), false)
+      const aad = `${DEVICE_PROVIDER_ENCRYPTION_CONTEXT}\n${envelope.clientNodeId}\n${envelope.requestId}\n${envelope.expectedRevision}`
+      const shared = device.computeSecret(Buffer.from(envelope.publicKey, 'base64'))
+      const key = hkdfSync('sha256', shared, Buffer.from(DEVICE_PROVIDER_ENCRYPTION_CONTEXT), Buffer.from(aad), 32)
+      const cipher = createDecipheriv('aes-256-gcm', key, Buffer.from(envelope.nonce, 'base64'))
+      const bytes = Buffer.from(envelope.ciphertext, 'base64')
+      cipher.setAAD(Buffer.from(aad))
+      cipher.setAuthTag(bytes.subarray(-16))
+      const mutation = JSON.parse(Buffer.concat([cipher.update(bytes.subarray(0, -16)), cipher.final()]).toString())
+      assert.equal(mutation.operation, 'save')
+      assert.equal(mutation.apiKey, provider.apiKey)
+      assert.deepEqual(mutation.customHeaders, provider.customHeaders)
+      assert.equal(mutation.config.protocol, provider.protocol)
+      assert.equal(mutation.config.responsesStructuredOutput, expectedMode)
+      if (expectedMode === undefined) assert.equal(Object.hasOwn(mutation.config, 'responsesStructuredOutput'), false)
+      saved.set(mutation.config.providerId, mutation.config)
+      return { status: 202 }
+    }
+    return { status: 200, json: { snapshot: { ...snapshot,
+      providers: [...saved.values()].map(config => ({ config, credentialConfigured: true })) },
+    ...(path.includes('/receipts/') ? { receipt: { outcome: 'saved' } } : {}) } }
+  } }
+  const receipt = await seedDeviceLocalProvider({ api, publicClientId: 'client-owned', ...provider })
+  assert.equal(receipt.receiptOutcome, 'saved')
+  assert.equal(posted, true)
+  assert.equal(saved.get(provider.providerId).responsesStructuredOutput, expectedMode)
+}
+
+test('encrypted Device Provider save retains the explicit MiMo structured-output capability', async () => {
+  for (const name of ['mimo', 'glm', 'deepseek', 'qwen']) {
+    const provider = deviceTaskProvider(name, providerEnvironment)
+    // Supply the option explicitly to isolate encrypted transport from profile selection.
+    if (name === 'mimo') provider.responsesStructuredOutput = 'json_object'
+    await assertEncryptedDeviceProviderSave(provider, name === 'mimo' ? 'json_object' : undefined)
+  }
+})
+
+test('MiMo profile retains text in the encrypted Device Provider configuration', async () => {
+  const provider = deviceTaskProvider('mimo', providerEnvironment)
+  assert.equal(provider.responsesStructuredOutput, 'text')
+  await assertEncryptedDeviceProviderSave(provider, 'text')
+})
 
 test('benchmark Device proxy is opt-in and stays out of Server and generic runtime environments', () => {
   const cell = buildBenchmarkPlan({ taskIds: Array.from({ length: 20 }, (_, index) => `task-${index}`) }).cells[0]

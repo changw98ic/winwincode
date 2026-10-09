@@ -3,7 +3,7 @@
 import type { ControlPlaneClientTransport } from './community-control-plane-client.js'
 
 import { encryptDeviceProvider, type DeviceProviderMutation } from './device-provider-encryption.js'
-import { DeviceProviderProtocol, type DeviceProviderConfig, type DeviceProviderView } from './generated/contracts.js'
+import { DeviceProviderProtocol, DeviceResponsesStructuredOutput, type DeviceProviderConfig, type DeviceProviderView } from './generated/contracts.js'
 import { matchesCanonicalSchema } from './generated/control-plane-client.js'
 
 interface Device { readonly clientId: string; readonly displayName: string }
@@ -59,10 +59,20 @@ export function mountDeviceProviderPanel(options: DeviceProviderPanelOptions) {
   endpoint.placeholder = 'https://open.bigmodel.cn/api/anthropic/v1/messages'
   const protocol = node('select')
   protocol.id = 'wwc-device-provider-protocol'
-  for (const [value, label] of [[DeviceProviderProtocol.AnthropicMessages, 'Anthropic Messages'], [DeviceProviderProtocol.OpenaiChatCompletions, 'OpenAI Chat Completions'], [DeviceProviderProtocol.Canonical, 'Canonical SSE'], [DeviceProviderProtocol.CodexChatgpt, 'Codex ChatGPT（设备登录态）'], [DeviceProviderProtocol.ChatgptPlan, 'ChatGPT（直接授权）']] as const) {
+  for (const [value, label] of [[DeviceProviderProtocol.AnthropicMessages, 'Anthropic Messages'], [DeviceProviderProtocol.OpenaiChatCompletions, 'OpenAI Chat Completions'], [DeviceProviderProtocol.OpenaiResponses, 'OpenAI Responses'], [DeviceProviderProtocol.Canonical, 'Canonical SSE'], [DeviceProviderProtocol.CodexChatgpt, 'Codex ChatGPT（设备登录态）'], [DeviceProviderProtocol.ChatgptPlan, 'ChatGPT（直接授权）']] as const) {
     const option = node('option', label); option.value = value; protocol.append(option)
   }
   const protocolLabel = node('label', '接口协议'); protocolLabel.htmlFor = protocol.id; protocolLabel.append(protocol); form.append(protocolLabel)
+  const structuredOutput = node('select')
+  structuredOutput.id = 'wwc-device-provider-responses-structured-output'
+  for (const [value, label] of [[DeviceResponsesStructuredOutput.JsonSchema, 'JSON Schema（默认）'], [DeviceResponsesStructuredOutput.JsonObject, 'JSON Object'], [DeviceResponsesStructuredOutput.Text, '文本（本地 JSON 校验）']] as const) {
+    const option = node('option', label); option.value = value; structuredOutput.append(option)
+  }
+  const structuredOutputLabel = node('label', '结构化输出格式')
+  structuredOutputLabel.htmlFor = structuredOutput.id
+  structuredOutputLabel.hidden = true
+  structuredOutputLabel.append(structuredOutput)
+  form.append(structuredOutputLabel)
   const models = field('models', '模型 ID（多个用逗号分隔）')
   models.placeholder = 'glm-5.3-flash'
   const key = field('key', 'API Key', 'password')
@@ -105,6 +115,9 @@ export function mountDeviceProviderPanel(options: DeviceProviderPanelOptions) {
   function syncProtocol(): void {
     const codex = protocol.value === DeviceProviderProtocol.CodexChatgpt
     const plan = protocol.value === DeviceProviderProtocol.ChatgptPlan
+    const responses = protocol.value === DeviceProviderProtocol.OpenaiResponses
+    structuredOutputLabel.hidden = !responses
+    if (!responses) structuredOutput.value = DeviceResponsesStructuredOutput.JsonSchema
     endpoint.readOnly = codex || plan
     key.closest('label')?.toggleAttribute('hidden', codex || plan)
     authorize.hidden = !plan
@@ -127,7 +140,7 @@ export function mountDeviceProviderPanel(options: DeviceProviderPanelOptions) {
   function lock(): void {
     devices.disabled = busy
     refresh.disabled = busy
-    for (const control of [provider, name, endpoint, protocol, models, key, headers, enabled, authorize, save, test, remove, clear]) {
+    for (const control of [provider, name, endpoint, protocol, structuredOutput, models, key, headers, enabled, authorize, save, test, remove, clear]) {
       control.disabled = busy || options.readOnly === true || view?.online !== true || view.snapshot === null
     }
   }
@@ -137,7 +150,8 @@ export function mountDeviceProviderPanel(options: DeviceProviderPanelOptions) {
   }
   function edit(config: DeviceProviderConfig): void {
     provider.value = config.providerId; name.value = config.displayName; endpoint.value = config.endpoint
-    protocol.value = config.protocol; models.value = config.modelIds.join(', '); enabled.checked = config.enabled; key.value = ''; headers.value = ''; syncProtocol()
+    protocol.value = config.protocol; structuredOutput.value = config.responsesStructuredOutput ?? DeviceResponsesStructuredOutput.JsonSchema
+    models.value = config.modelIds.join(', '); enabled.checked = config.enabled; key.value = ''; headers.value = ''; syncProtocol()
   }
   function show(): void {
     list.replaceChildren()
@@ -187,7 +201,8 @@ export function mountDeviceProviderPanel(options: DeviceProviderPanelOptions) {
     }
     const secret = protocol.value === DeviceProviderProtocol.CodexChatgpt || protocol.value === DeviceProviderProtocol.ChatgptPlan ? '' : key.value
     const mutation: DeviceProviderMutation = { operation, config: { providerId: provider.value.trim(), displayName: name.value.trim(), endpoint: endpoint.value.trim(),
-      protocol: protocol.value as DeviceProviderProtocol, modelIds: models.value.split(',').map(value => value.trim()).filter(Boolean), enabled: enabled.checked }, ...(secret === '' ? {} : { apiKey: secret }), ...(customHeaders === undefined ? {} : { customHeaders }) }
+      protocol: protocol.value as DeviceProviderProtocol, modelIds: models.value.split(',').map(value => value.trim()).filter(Boolean), enabled: enabled.checked,
+      ...(protocol.value === DeviceProviderProtocol.OpenaiResponses ? { responsesStructuredOutput: structuredOutput.value as DeviceResponsesStructuredOutput } : {}) }, ...(secret === '' ? {} : { apiKey: secret }), ...(customHeaders === undefined ? {} : { customHeaders }) }
     busy = true; show(); status.textContent = operation === 'authorize' ? '请在所选设备的系统浏览器中完成 ChatGPT 授权，最长等待三分钟…' : operation === 'test' ? '等待设备测试连接…' : '等待设备保存回执…'
     try {
       const id = `provider_${(browser?.crypto ?? crypto).randomUUID().replaceAll('-', '')}`

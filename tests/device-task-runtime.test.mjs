@@ -10,8 +10,44 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { deviceTaskIdentities, prepareDeviceTaskBaseline,
   prepareDeviceBenchmarkProviderSlots } from '../scripts/device-task-runtime.mjs'
-import { pendingDeviceTaskWorkRuns } from '../scripts/run-device-task-vertical.mjs'
-import { deviceTaskLaunchResult } from '../scripts/device-production-fixture.mjs'
+import { deviceProviderSecretValues, pendingDeviceTaskWorkRuns } from '../scripts/run-device-task-vertical.mjs'
+import { assertDeviceSecretsNeverOnServer, deviceTaskLaunchResult } from '../scripts/device-production-fixture.mjs'
+
+test('public Responses Lite header does not make a public Server log path a Provider secret', () => {
+  const provider = Object.freeze({ protocol: 'openai_responses', apiKey: 'fixture-private-key',
+    customHeaders: Object.freeze({ 'x-openai-internal-codex-responses-lite': 'true' }) })
+  assert.doesNotThrow(() => assertDeviceSecretsNeverOnServer(
+    { WWC_DEBUG_RUNTIME_LOG: '/tmp/true-model-audit.log' }, deviceProviderSecretValues(provider)))
+  assert.throws(() => assertDeviceSecretsNeverOnServer(
+    { WWC_DEBUG_RUNTIME_LOG: '/tmp/fixture-private-key.log' }, deviceProviderSecretValues(provider)),
+    /Device Provider secrets/u)
+})
+
+test('public Lite header exemption retains API keys and all other protocol or header values', () => {
+  for (const [provider, secret] of [
+    [{ protocol: 'openai_responses', apiKey: 'true',
+      customHeaders: { 'x-openai-internal-codex-responses-lite': 'true' } }, 'true'],
+    [{ protocol: 'openai_responses', apiKey: 'fixture-private-key',
+      customHeaders: { 'x-provider-session': 'true' } }, 'true'],
+    [{ protocol: 'anthropic_messages', apiKey: 'fixture-private-key',
+      customHeaders: { 'x-openai-internal-codex-responses-lite': 'true' } }, 'true'],
+    [{ protocol: 'openai_chat_completions', apiKey: 'fixture-private-key',
+      customHeaders: { 'x-openai-internal-codex-responses-lite': 'true' } }, 'true'],
+    [{ protocol: 'openai_responses', apiKey: 'fixture-private-key',
+      customHeaders: { 'x-openai-internal-codex-responses-lite': 'TRUE' } }, 'TRUE'],
+    [{ protocol: 'openai_responses', apiKey: 'fixture-private-key',
+      customHeaders: { 'x-openai-internal-codex-responses-lite': 'true ' } }, 'true '],
+    [{ protocol: 'openai_responses', apiKey: 'fixture-private-key',
+      customHeaders: { 'x-openai-internal-codex-responses-lite': 'false' } }, 'false'],
+    [{ protocol: 'openai_responses', apiKey: 'fixture-private-key', customHeaders: {
+      'x-openai-internal-codex-responses-lite': 'true', 'x-private-session': 'fixture-session-secret' } },
+    'fixture-session-secret'],
+  ]) {
+    assert.throws(() => assertDeviceSecretsNeverOnServer(
+      { WWC_DEBUG_RUNTIME_LOG: `/tmp/${secret}.log` }, deviceProviderSecretValues(provider)),
+      /Device Provider secrets/u)
+  }
+})
 
 function providerSlotFixture(t) {
   const directory = mkdtempSync(join(tmpdir(), 'device-provider-slots-'))

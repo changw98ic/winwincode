@@ -159,7 +159,7 @@ pub struct LocalDeliveryAuthority {
     scanner: RepositoryContextScanner,
     storage: SqliteStorage,
     artifacts: ArtifactStore,
-    source_resolver: LocalGitSourceResolver,
+    source_resolver: crate::strongflow_read_snapshot::SharedGitSourceResolver,
 }
 
 struct DeviceDeliveryTarget {
@@ -381,7 +381,9 @@ impl LocalDeliveryAuthority {
             scanner: RepositoryContextScanner::default(),
             storage,
             artifacts,
-            source_resolver,
+            source_resolver: crate::strongflow_read_snapshot::SharedGitSourceResolver::new(
+                Box::new(source_resolver),
+            ),
         })
     }
 
@@ -1094,12 +1096,7 @@ impl ControlPlane {
         // one composition step below.
         let repository_source_root = authority.repository_source_root.clone();
         let dispatcher = LocalExecutionJobDispatcher::open(data_directory, repository_scope)?;
-        let source_resolver = LocalGitSourceResolver::open_artifact_cache(&repository_source_root)
-            .map_err(|error| {
-                LocalDeliveryAdapterError::new(format!(
-                    "failed to open the local Git candidate resolver: {error}"
-                ))
-            })?;
+        let source_resolver = authority.source_resolver.clone();
         self.install_strongflow_projection_sources(
             crate::strongflow_projection::production_sources(),
         )
@@ -1111,7 +1108,8 @@ impl ControlPlane {
         self.delivery_authority = Some(Box::new(authority));
         self.delivery_dispatcher = Some(Box::new(dispatcher));
         self.git_repository_root = Some(repository_source_root);
-        self.git_source_resolver = Some(Box::new(source_resolver));
+        self.git_source_resolver = Some(Box::new(source_resolver.clone()));
+        self.git_source_read_handle = Some(source_resolver);
         Ok(())
     }
 

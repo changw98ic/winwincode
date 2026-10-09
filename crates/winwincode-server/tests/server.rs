@@ -93,12 +93,31 @@ fn open_auth(
 }
 
 #[derive(Default)]
+struct BlockingCall {
+    entered: tokio::sync::Notify,
+    started: Mutex<Option<std::time::Instant>>,
+}
+
+impl BlockingCall {
+    fn pause(&self) {
+        *self.started.lock().unwrap() = Some(std::time::Instant::now());
+        self.entered.notify_one();
+        std::thread::sleep(Duration::from_secs(2));
+    }
+
+    fn elapsed(&self) -> Duration {
+        self.started.lock().unwrap().unwrap().elapsed()
+    }
+}
+
+#[derive(Default)]
 struct FakeApi {
     commands: Mutex<Vec<(String, Value)>>,
     queries: Mutex<Vec<(String, Value)>>,
     subscriptions: Mutex<Vec<Value>>,
     event_senders: Mutex<Vec<mpsc::Sender<Value>>>,
     shutdowns: AtomicU64,
+    blocking: Arc<BlockingCall>,
 }
 
 impl ControlPlaneApiPort for FakeApi {
@@ -107,6 +126,14 @@ impl ControlPlaneApiPort for FakeApi {
         principal: &AuthenticatedPrincipal,
         request: Value,
     ) -> Result<Value, ApiError> {
+        assert_ne!(
+            request.get("command").and_then(Value::as_str),
+            Some("fixture.panic"),
+            "private fixture panic {FIXTURE_SECRET}"
+        );
+        if request.get("command").and_then(Value::as_str) == Some("fixture.slow") {
+            self.blocking.pause();
+        }
         self.commands
             .lock()
             .expect("command lock")
@@ -121,6 +148,14 @@ impl ControlPlaneApiPort for FakeApi {
     }
 
     fn query(&self, principal: &AuthenticatedPrincipal, request: Value) -> Result<Value, ApiError> {
+        assert_ne!(
+            request.get("query").and_then(Value::as_str),
+            Some("fixture.panic"),
+            "private fixture panic {FIXTURE_SECRET}"
+        );
+        if request.get("query").and_then(Value::as_str) == Some("fixture.slow") {
+            self.blocking.pause();
+        }
         self.queries
             .lock()
             .expect("query lock")
@@ -1584,6 +1619,239 @@ async fn accounting_https_route_is_separate_and_preserves_query_and_receipt_byte
     }
     running.shutdown().await.unwrap();
     fs::remove_dir_all(directory).unwrap();
+}
+
+#[cfg(all(feature = "local-worker", unix))]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one native TLS fixture observes control and Worker progress on a single async thread"
+)]
+async fn assert_blocking_handler_preserves_other_route(blocked_route: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    use winwincode_codex::WorkerExecutionPort;
+    use winwincode_execution_port::generated::ExecutionPortMessage;
+    use winwincode_server::{
+        RemoteWorkerExchangePort, RemoteWorkerTransportError, start_server_with_remote_worker,
+    };
+    use winwincode_worker::remote_transport::RemoteWorkerPort;
+
+    struct Boundary {
+        blocking: Arc<BlockingCall>,
+        slow: bool,
+    }
+    impl RemoteWorkerExchangePort for Boundary {
+        fn exchange(
+            &self,
+            credential: Vec<u8>,
+            body: &[u8],
+            _: Instant,
+        ) -> Result<Vec<u8>, RemoteWorkerTransportError> {
+            assert_eq!(credential, b"execution-token");
+            let request =
+                winwincode_execution_port::transport::RemoteExchangeRequest::decode(body).unwrap();
+            assert!(request.supports_acceptance_receipt());
+            if self.slow {
+                self.blocking.pause();
+            }
+            Ok(
+                winwincode_execution_port::transport::RemoteExchangeResponse::with_acceptance(
+                    Vec::new(),
+                    true,
+                )
+                .unwrap()
+                .encode()
+                .unwrap(),
+            )
+        }
+    }
+    async fn tls_request(connector: TlsConnector, address: SocketAddr, request: String) -> String {
+        let tcp = TcpStream::connect(address).await.unwrap();
+        let mut tls = connector
+            .connect(ServerName::try_from("localhost").unwrap().to_owned(), tcp)
+            .await
+            .unwrap();
+        tls.write_all(request.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        tls.read_to_end(&mut response).await.unwrap();
+        String::from_utf8(response).unwrap()
+    }
+    let directory = test_directory("blocking-handler-progress");
+    fs::create_dir_all(&directory).unwrap();
+    let CertifiedKey { cert, signing_key } =
+        generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let certificate_path = directory.join("certificate.pem");
+    let private_key_path = directory.join("private-key.pem");
+    fs::write(&certificate_path, cert.pem()).unwrap();
+    fs::write(&private_key_path, signing_key.serialize_pem()).unwrap();
+    let configuration = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "https://control.example",
+        ServerTls::Pem {
+            certificate_path,
+            private_key_path,
+        },
+        BTreeSet::from(["https://client.example".into()]),
+        directory.join("data"),
+        Duration::from_secs(2),
+    )
+    .unwrap();
+    let sessions = auth();
+    let authenticator: Arc<dyn RequestAuthenticator> = sessions.clone();
+    let api = Arc::new(FakeApi::default());
+    let worker_gate = Arc::new(BlockingCall::default());
+    let boundary = Arc::new(Boundary {
+        blocking: worker_gate.clone(),
+        slow: blocked_route == "exchange",
+    });
+    let running = start_server_with_remote_worker(
+        configuration,
+        sessions,
+        authenticator,
+        api.clone(),
+        Some(boundary),
+        None,
+    )
+    .await
+    .unwrap();
+    let address = running.local_address();
+    let mut roots = RootCertStore::empty();
+    roots.add(cert.der().clone()).unwrap();
+    let tls_config = ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    let connector = TlsConnector::from(Arc::new(tls_config));
+    let server_name = ServerName::try_from("localhost").unwrap().to_owned();
+    let cookie = bootstrap_cookie_https(&connector, &server_name, address).await;
+    let credential = directory.join("execution-credential");
+    fs::write(&credential, b"execution-token").unwrap();
+    fs::set_permissions(&credential, fs::Permissions::from_mode(0o600)).unwrap();
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/contracts/execution-port.valid.json"
+    ))
+    .unwrap();
+    let message: ExecutionPortMessage = serde_json::from_value(
+        fixture["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["kind"] == "worker.heartbeat")
+            .unwrap()
+            .clone(),
+    )
+    .unwrap();
+    let ExecutionPortMessage::WorkerHeartbeatMessage(heartbeat) = &message else {
+        panic!("heartbeat")
+    };
+    let (mut port, handle) = RemoteWorkerPort::open(
+        &format!("https://localhost:{}", address.port()),
+        cert.der().as_ref(),
+        credential,
+        heartbeat.worker_id.clone(),
+        heartbeat.worker_instance_id.clone(),
+        Duration::from_secs(5),
+    )
+    .unwrap();
+    let elapsed = if blocked_route == "exchange" {
+        let worker = tokio::spawn(async move {
+            port.send(message).await.unwrap();
+        });
+        worker_gate.entered.notified().await;
+        let response = tls_request(connector, address, cookie_post("/api/v1/queries",
+            r#"{"schemaVersion":"winwincode/v1","requestId":"req_00000000000000000000000001","query":"fixture.fast"}"#,
+            "https://client.example", &cookie)).await;
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        let elapsed = worker_gate.elapsed();
+        worker.await.unwrap();
+        elapsed
+    } else {
+        let (path, body) = if blocked_route == "command" {
+            (
+                "/api/v1/commands",
+                r#"{"schemaVersion":"winwincode/v1","requestId":"req_00000000000000000000000001","command":"fixture.slow"}"#,
+            )
+        } else {
+            (
+                "/api/v1/queries",
+                r#"{"schemaVersion":"winwincode/v1","requestId":"req_00000000000000000000000001","query":"fixture.slow"}"#,
+            )
+        };
+        let request = cookie_post(path, body, "https://client.example", &cookie);
+        let control = tokio::spawn(tls_request(connector, address, request));
+        api.blocking.entered.notified().await;
+        port.send(message).await.unwrap();
+        let elapsed = api.blocking.elapsed();
+        assert!(control.await.unwrap().starts_with("HTTP/1.1 200"));
+        elapsed
+    };
+    assert!(handle.terminal_error().is_none());
+    running.shutdown().await.unwrap();
+    fs::remove_dir_all(directory).unwrap();
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "{blocked_route} blocked the other native route for {elapsed:?}"
+    );
+}
+
+#[cfg(all(feature = "local-worker", unix))]
+#[tokio::test]
+async fn slow_control_query_keeps_worker_exchange_responsive() {
+    assert_blocking_handler_preserves_other_route("query").await;
+}
+
+#[cfg(all(feature = "local-worker", unix))]
+#[tokio::test]
+async fn slow_control_command_keeps_worker_exchange_responsive() {
+    assert_blocking_handler_preserves_other_route("command").await;
+}
+
+#[cfg(all(feature = "local-worker", unix))]
+#[tokio::test]
+async fn slow_worker_exchange_keeps_control_query_responsive() {
+    assert_blocking_handler_preserves_other_route("exchange").await;
+}
+
+#[tokio::test]
+async fn blocking_api_panic_keeps_request_identity_and_returns_safe_unavailable() {
+    let api = Arc::new(FakeApi::default());
+    let running = start_server(config("127.0.0.1:0".parse().unwrap()), auth(), api.clone())
+        .await
+        .unwrap();
+    let address = running.local_address();
+    let cookie = bootstrap_cookie(address).await;
+    for (path, kind) in [
+        ("/api/v1/commands", "command"),
+        ("/api/v1/queries", "query"),
+    ] {
+        let body = json!({
+            "schemaVersion": "winwincode/v1",
+            "requestId": "req_00000000000000000000000001",
+            kind: "fixture.panic",
+        })
+        .to_string();
+        let response = http_request(
+            address,
+            &cookie_post(path, &body, "https://client.example", &cookie),
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 503 Service Unavailable"));
+        assert!(response.contains("access-control-allow-origin: https://client.example"));
+        assert!(!response.contains(FIXTURE_SECRET));
+        assert!(!response.contains("private fixture panic"));
+        let envelope: ErrorEnvelope = serde_json::from_value(response_json(&response)).unwrap();
+        assert_eq!(envelope.request_id.0, "req_00000000000000000000000001");
+        let Error::RetryableError(error) = envelope.error else {
+            panic!("blocking task failure must remain retryable");
+        };
+        assert_eq!(error.code, RetryableErrorCode::ServiceUnavailable);
+        assert!(error.retryable);
+    }
+    assert!(api.commands.lock().unwrap().is_empty());
+    assert!(api.queries.lock().unwrap().is_empty());
+    running.shutdown().await.unwrap();
 }
 
 #[tokio::test]

@@ -37,6 +37,7 @@ mod action_policy_enforcement;
 mod artifact_transaction;
 pub mod automation_recipe;
 mod candidate_git_release;
+mod candidate_rejection_transaction;
 mod candidate_source;
 mod chat_interaction_application;
 pub mod chat_interaction_projection;
@@ -87,6 +88,8 @@ pub mod model_settings;
 mod model_stream_flow_control;
 mod observer_decision_service;
 mod page_annotation_delivery;
+mod strongflow_read_snapshot;
+pub use strongflow_read_snapshot::StrongFlowReadSnapshot;
 pub mod peer_collaboration;
 mod product_session_execution_application;
 mod product_session_service;
@@ -985,10 +988,11 @@ pub struct ControlPlane {
     audit_store: Option<AuditStore>,
     artifact_store: Option<ArtifactStore>,
     git_source_resolver: Option<Box<dyn GitSourceResolver>>,
+    git_source_read_handle: Option<strongflow_read_snapshot::SharedGitSourceResolver>,
     git_repository_root: Option<PathBuf>,
     publisher: Option<Box<dyn EventPublisher>>,
     temporary_root: Option<OwnedTemporaryRoot>,
-    strongflow_sources: Option<strongflow_projection::StrongFlowProjectionSources>,
+    strongflow_sources: Option<std::sync::Arc<strongflow_projection::StrongFlowProjectionSources>>,
     delivery_authority: Option<Box<dyn DeliveryAuthorityPort>>,
     delivery_dispatcher: Option<Box<dyn ExecutionJobDispatcher>>,
     publication_authority: Option<Box<dyn PublicationAuthorityPort>>,
@@ -1250,6 +1254,7 @@ impl ControlPlane {
             audit_store,
             artifact_store,
             git_source_resolver: None,
+            git_source_read_handle: None,
             git_repository_root: None,
             publisher: Some(publisher),
             temporary_root: Some(temporary_root),
@@ -1317,7 +1322,7 @@ impl ControlPlane {
                 ),
             );
         }
-        self.strongflow_sources = Some(sources);
+        self.strongflow_sources = Some(std::sync::Arc::new(sources));
         Ok(())
     }
 
@@ -1338,7 +1343,9 @@ impl ControlPlane {
             ));
         }
         self.git_repository_root = resolver.controlled_repository_root().map(Path::to_path_buf);
-        self.git_source_resolver = Some(resolver);
+        let resolver = strongflow_read_snapshot::SharedGitSourceResolver::new(resolver);
+        self.git_source_resolver = Some(Box::new(resolver.clone()));
+        self.git_source_read_handle = Some(resolver);
         Ok(())
     }
 

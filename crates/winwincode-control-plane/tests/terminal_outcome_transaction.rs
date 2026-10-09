@@ -11,6 +11,9 @@ use std::{
 
 #[path = "../../../tests/support/git_candidate.rs"]
 mod git_candidate;
+
+#[path = "support/persisted_rework_rejection.rs"]
+mod persisted_rework_rejection;
 use git_candidate::candidate_bundle;
 
 use sha2::{Digest, Sha256};
@@ -2699,6 +2702,648 @@ fn missing_wrong_topic_corrupt_foreign_or_wrong_scope_execution_job_fails_closed
         control_plane.shutdown().expect("shutdown");
         fs::remove_dir_all(root).expect("database directory release");
     }
+}
+
+#[test]
+fn persisted_successful_candidate_rejection_is_readable_and_restart_idempotent() {
+    assert_persisted_candidate_rejection(85, None, false);
+}
+
+#[test]
+fn temporary_candidate_source_failure_does_not_become_a_permanent_rejection() {
+    assert_persisted_candidate_rejection(86, Some("artifact"), false);
+    assert_persisted_candidate_rejection(87, Some("resolver"), false);
+}
+
+#[test]
+fn persisted_candidate_rejection_preserves_history_and_allows_new_spec() {
+    assert_persisted_candidate_rejection(88, None, true);
+}
+
+struct HistoricalCandidateFixture {
+    seed: u64,
+    root: PathBuf,
+    repository: PathBuf,
+    scope: RepositoryScope,
+    delivery: Delivery,
+    job: ExecutionJob,
+    message: JobOutcomeMessage,
+    authority_stream: String,
+    accepted: StoredState,
+}
+
+impl HistoricalCandidateFixture {
+    fn start_control_plane(&self) -> ControlPlane {
+        ControlPlane::start_local_with_delivery_adapters(
+            ControlPlaneConfig::local(&self.root),
+            Box::new(RecordingPublisher),
+            LocalDeliveryAdapterConfig::new(&self.repository, self.scope.clone()),
+        )
+        .expect("production Control Plane restart")
+    }
+}
+
+fn assert_persisted_candidate_rejection(
+    seed: u64,
+    temporary_failure: Option<&str>,
+    check_history_and_new_spec: bool,
+) {
+    let fixture = seed_historical_candidate_success(seed);
+    let rejected_cut =
+        assert_historical_refusal_restarts(&fixture, temporary_failure, check_history_and_new_spec);
+    assert_historical_candidate_usage(&fixture);
+    if check_history_and_new_spec {
+        assert_explicit_spec_restart(
+            &fixture,
+            rejected_cut.expect("the original rejected read cut"),
+        );
+    }
+    fs::remove_dir_all(fixture.root).expect("fixture cleanup");
+}
+
+fn seed_historical_candidate_success(seed: u64) -> HistoricalCandidateFixture {
+    // A historical Worker can already have reported success before the CP
+    // discovers that its candidate cannot satisfy the durable rework contract.
+    // Persist through the real terminal transaction, rather than constructing
+    // the post-terminal snapshot or replacing the Worker report with Failed.
+    let root = temporary_directory("candidate-rejected-after-success");
+    let repository = root.join("repository");
+    let (base_commit, candidate_commit) = initialize_git_repository(&repository);
+    let repository = fs::canonicalize(repository).expect("canonical repository");
+    let scope = repository_scope(seed);
+    let mut snapshot =
+        repository_executor_delivery(seed, &repository, &base_commit).into_snapshot();
+    let binding = snapshot
+        .session_bindings
+        .first_mut()
+        .expect("writer binding");
+    binding.execution_profile = Some("remediator".into());
+    binding
+        .runtime_context
+        .as_mut()
+        .expect("runtime context")
+        .agent_identity
+        .role = "remediator".into();
+    snapshot.status = DeliveryStatus::Reworking;
+    let delivery = Delivery::try_from_snapshot(snapshot).expect("historical remediator");
+    let mut job = execution_job(&delivery, &scope);
+    job.workspace.write_mode = ExecutionWorkspaceWriteMode::Candidate;
+    let mut message = terminal_message(&job, &delivery, seed, ExecutionOutcomeStatus::Succeeded);
+    message.outcome.summary = "Historical remediator uploaded its candidate".into();
+    seed_candidate_artifact(
+        &root,
+        &repository,
+        &base_commit,
+        &scope,
+        &delivery,
+        &mut message,
+        &candidate_commit,
+        seed,
+    );
+    seed_delivery_and_job(&root, &delivery, &job);
+    seed_authenticated_worker_execution(&root, &scope, &job, &message, seed);
+    let facts = outcome_facts_for_stage(
+        &delivery,
+        &message,
+        winwincode_domain::WorkRunId(canonical_id("wrn", seed)),
+    );
+    let mut first = ControlPlane::start_local(
+        ControlPlaneConfig::local(&root),
+        Box::new(RecordingPublisher),
+    )
+    .expect("first Control Plane");
+    first
+        .commit_delivery_terminal_outcome(&scope, &message, &facts, &message.sent_at)
+        .expect("Worker success durably accepted before candidate validation");
+    let authority_stream = format!("delivery-terminal-authority:{}", job.job_id.0);
+    let accepted = first
+        .load_state(&authority_stream)
+        .expect("authority read")
+        .expect("durable successful terminal");
+    let terminal: serde_json::Value =
+        serde_json::from_slice(&accepted.payload).expect("terminal JSON");
+    assert_eq!(terminal["status"], "succeeded");
+    assert_eq!(
+        worker_terminal_state(&root, &job.job_id),
+        ("settled".into(), 1)
+    );
+    first.shutdown().expect("first shutdown");
+
+    HistoricalCandidateFixture {
+        seed,
+        root,
+        repository,
+        scope,
+        delivery,
+        job,
+        message,
+        authority_stream,
+        accepted,
+    }
+}
+
+fn assert_historical_refusal_restarts(
+    fixture: &HistoricalCandidateFixture,
+    temporary_failure: Option<&str>,
+    check_history_and_new_spec: bool,
+) -> Option<winwincode_api::generated::StrongFlowReadCursor> {
+    let mut last_state = None;
+    let mut last_rejected_cut = None;
+    for reopen in 0..2 {
+        let mut control_plane = fixture.start_control_plane();
+        let mut ingress_storage = SqliteStorage::open(&fixture.root).expect("ingress storage");
+        if reopen == 0
+            && let Some(failure) = temporary_failure
+        {
+            assert_temporary_candidate_outage(
+                fixture,
+                &mut control_plane,
+                &mut ingress_storage,
+                failure,
+            );
+        }
+        replay_historical_candidate_twice(fixture, &mut control_plane, &mut ingress_storage);
+        let (state, rejected) = assert_historical_refusal_state(fixture, &control_plane);
+        let read_cut = assert_historical_refusal_read(
+            fixture,
+            &mut control_plane,
+            &state,
+            &rejected,
+            check_history_and_new_spec,
+        );
+        if read_cut.is_some() {
+            last_rejected_cut = read_cut;
+        }
+        if reopen == 0 {
+            last_state = Some(state);
+        } else {
+            assert_eq!(Some(state), last_state, "restart replays one refusal only");
+        }
+        Box::new(ingress_storage).close().expect("ingress close");
+        control_plane.shutdown().expect("shutdown");
+    }
+    last_rejected_cut
+}
+
+fn assert_temporary_candidate_outage(
+    fixture: &HistoricalCandidateFixture,
+    control_plane: &mut ControlPlane,
+    ingress_storage: &mut SqliteStorage,
+    temporary_failure: &str,
+) {
+    let before = control_plane
+        .load_state(&format!("delivery:{}", fixture.delivery.id().0))
+        .expect("state before outage")
+        .expect("Delivery before outage");
+    let digest = fixture.message.outcome.artifacts[0]
+        .digest
+        .0
+        .strip_prefix("sha256:")
+        .expect("candidate digest");
+    let object = fixture
+        .root
+        .join("artifacts/objects/sha256")
+        .join(&digest[..2])
+        .join(&digest[2..]);
+    let parked_object = object.with_extension("unavailable");
+    let blocked_repository = fixture.root.join("delivery-sources/repository");
+    match temporary_failure {
+        "artifact" => fs::rename(&object, &parked_object).expect("temporary object outage"),
+        "resolver" => fs::write(&blocked_repository, b"temporary resolver outage")
+            .expect("temporary Git command outage"),
+        _ => unreachable!(),
+    }
+    let failure = DurableExecutionPortIngress::new(
+        control_plane,
+        ingress_storage,
+        &fixture.scope,
+        fixture.message.sent_at.clone(),
+    )
+    .expect("outage ingress")
+    .handle(&ExecutionPortMessage::JobOutcomeMessage(
+        fixture.message.clone(),
+    ));
+    assert!(
+        failure.is_err(),
+        "temporary source failure must remain retryable"
+    );
+    assert_eq!(
+        control_plane
+            .load_state(&format!("delivery:{}", fixture.delivery.id().0))
+            .expect("state during source outage")
+            .expect("Delivery retained"),
+        before,
+        "an unavailable source cannot create a permanent rejection or Attention"
+    );
+    match temporary_failure {
+        "artifact" => fs::rename(parked_object, object).expect("restore exact object"),
+        "resolver" => fs::remove_file(blocked_repository).expect("restore resolver"),
+        _ => unreachable!(),
+    }
+}
+
+fn replay_historical_candidate_twice(
+    fixture: &HistoricalCandidateFixture,
+    control_plane: &mut ControlPlane,
+    ingress_storage: &mut SqliteStorage,
+) {
+    for _ in 0..2 {
+        let response = DurableExecutionPortIngress::new(
+            control_plane,
+            ingress_storage,
+            &fixture.scope,
+            fixture.message.sent_at.clone(),
+        )
+        .expect("durable Worker ingress")
+        .handle(&ExecutionPortMessage::JobOutcomeMessage(
+            fixture.message.clone(),
+        ))
+        .expect("candidate refusal must converge to a readable product failure");
+        let [ExecutionPortMessage::JobOutcomeAckMessage(ack)] = response.as_slice() else {
+            panic!("one terminal acknowledgement");
+        };
+        assert_eq!(
+            ack.status,
+            JobOutcomeAckMessageStatus::Duplicate,
+            "the exact successful terminal was already durably accepted"
+        );
+    }
+}
+
+fn assert_historical_refusal_state(
+    fixture: &HistoricalCandidateFixture,
+    control_plane: &ControlPlane,
+) -> (StoredState, Delivery) {
+    let state = control_plane
+        .load_state(&format!("delivery:{}", fixture.delivery.id().0))
+        .expect("current product state")
+        .expect("Delivery retained");
+    let rejected = Delivery::decode_json(&state.payload).expect("readable rejected Delivery");
+    assert_eq!(rejected.snapshot().status, DeliveryStatus::NeedsAttention);
+    assert_eq!(
+        rejected
+            .snapshot()
+            .attention_items
+            .iter()
+            .filter(|item| item.blocking
+                && item.status == winwincode_delivery::domain::AttentionItemStatus::Open)
+            .count(),
+        1
+    );
+    assert_eq!(
+        rejected.snapshot().work_run_aggregate.runs.len(),
+        1,
+        "a rejected candidate must not dispatch a Reviewer"
+    );
+    assert_eq!(
+        rejected.snapshot().work_run_aggregate.runs[0].state,
+        winwincode_domain::WorkRunState::CandidateReady,
+        "the original successful Worker fact remains unchanged"
+    );
+    assert_eq!(
+        control_plane
+            .load_state(&fixture.authority_stream)
+            .expect("terminal authority")
+            .expect("success retained")
+            .payload,
+        fixture.accepted.payload
+    );
+    (state, rejected)
+}
+
+fn assert_historical_refusal_read(
+    fixture: &HistoricalCandidateFixture,
+    control_plane: &mut ControlPlane,
+    state: &StoredState,
+    rejected: &Delivery,
+    check_history_and_new_spec: bool,
+) -> Option<winwincode_api::generated::StrongFlowReadCursor> {
+    let query = winwincode_api::generated::DeliveryGetQuery {
+        actor: Actor::UserActor(UserActor {
+            id: UserId(canonical_id("usr", fixture.seed)),
+            kind: winwincode_domain::UserActorKind::User,
+        }),
+        page: winwincode_api::generated::PageRequest {
+            cursor: None,
+            limit: 20,
+        },
+        parameters: winwincode_api::generated::DeliveryGetParameters {
+            at_cursor: None,
+            delivery_id: fixture.delivery.id().clone(),
+        },
+        query: winwincode_api::generated::DeliveryGetQueryQuery::DeliveryGet,
+        request_id: RequestId(canonical_id("req", fixture.seed + 20_000)),
+        schema_version: SchemaVersion::WinwincodeV1,
+        scope: fixture.scope.clone(),
+    };
+    let response = winwincode_control_plane::strongflow_projection::StrongFlowProjectionQueryPort::delivery_get(
+        control_plane, &query,
+    ).expect("delivery.get stays available after the exact candidate refusal");
+    let winwincode_api::generated::QueryResultResponse::DeliveryGetResultResponse(response) =
+        response
+    else {
+        panic!("Delivery detail response");
+    };
+    assert!(response.result.current_candidate.is_none());
+    assert_eq!(response.result.attention.len(), 1);
+    if check_history_and_new_spec {
+        assert_rejected_candidate_history(
+            control_plane,
+            &query,
+            response.result.read_cursor.clone(),
+        );
+        assert_generic_refusal_resolution_blocked(fixture, control_plane, &query, state, rejected);
+        Some(response.result.read_cursor)
+    } else {
+        None
+    }
+}
+
+fn assert_generic_refusal_resolution_blocked(
+    fixture: &HistoricalCandidateFixture,
+    control_plane: &mut ControlPlane,
+    query: &winwincode_api::generated::DeliveryGetQuery,
+    state: &StoredState,
+    rejected: &Delivery,
+) {
+    for (offset, decision) in [(1, "resolve"), (2, "dismiss")] {
+        let attempted = control_plane.delivery_resolve_attention(
+            &winwincode_api::generated::DeliveryResolveAttentionCommand {
+                actor: query.actor.clone(), scope: fixture.scope.clone(), schema_version: SchemaVersion::WinwincodeV1,
+                command: winwincode_api::generated::DeliveryResolveAttentionCommandCommand::DeliveryResolveAttention,
+                expected_revision: Revision(i64::try_from(rejected.revision()).unwrap()),
+                request_id: RequestId(canonical_id("req", fixture.seed + 21_000 + offset)),
+                payload: winwincode_api::generated::DeliveryResolveAttentionPayload {
+                    delivery_id: fixture.delivery.id().clone(), attention_item_id: rejected.snapshot().attention_items[0].id.clone(),
+                    decision: decision.into(), remediation: None, resolution: "Attempt generic resume".into(),
+                },
+            });
+        let blocked =
+            attempted.expect_err("a rejected source cannot obtain a generic resume authorization");
+        assert!(
+            blocked
+                .to_string()
+                .contains("a rejected candidate cannot resume"),
+            "the exact typed refusal, rather than an unrelated validation failure, blocks generic resume: {blocked}"
+        );
+        assert_eq!(
+            control_plane
+                .load_state(&format!("delivery:{}", fixture.delivery.id().0))
+                .expect("state after rejected resume")
+                .expect("retained refusal"),
+            *state
+        );
+    }
+}
+
+fn assert_historical_candidate_usage(fixture: &HistoricalCandidateFixture) {
+    assert_eq!(
+        changed_terminal_replay_status(&fixture.root, &fixture.scope, &fixture.message),
+        JobOutcomeAckMessageStatus::RejectedConflict
+    );
+    let connection = rusqlite::Connection::open(fixture.root.join("control-plane.sqlite3"))
+        .expect("usage audit");
+    let usage: (i64, i64) = connection.query_row(
+        "SELECT actual_tokens, actual_cost_microunits FROM execution_admission_reservations WHERE job_id = ?1",
+        [&fixture.job.job_id.0], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).expect("original successful usage");
+    assert_eq!(usage, (40, 400));
+    connection.close().expect("usage audit close");
+}
+
+fn assert_explicit_spec_restart(
+    fixture: &HistoricalCandidateFixture,
+    old_cut: winwincode_api::generated::StrongFlowReadCursor,
+) {
+    let mut control_plane = fixture.start_control_plane();
+    let next = replace_refused_spec(fixture, &mut control_plane);
+    assert_old_terminal_preserves_new_spec(fixture, &mut control_plane, &next);
+    assert_new_spec_and_old_cut_reads(fixture, &control_plane, old_cut);
+    control_plane.shutdown().expect("new Spec shutdown");
+    assert_rejected_source_retained(fixture);
+}
+
+fn restarted_spec_input(
+    fixture: &HistoricalCandidateFixture,
+    refused: &Delivery,
+) -> winwincode_api::generated::DeliverySpecInput {
+    let spec = &refused.snapshot().spec;
+    winwincode_api::generated::DeliverySpecInput {
+        verification_command: None,
+        title: "Start a new specification after candidate refusal".into(),
+        goal: spec.goal.clone(),
+        scope: spec.scope.clone(),
+        out_of_scope: spec.out_of_scope.clone(),
+        constraints: spec.constraints.clone(),
+        base_revision: spec.base_revision.clone(),
+        source_product_session_id: spec.source_product_session_id.clone(),
+        publication_target: None,
+        repository_id: fixture.scope.repository_id.clone(),
+        acceptance_criteria: spec
+            .acceptance_criteria
+            .iter()
+            .map(
+                |criterion| winwincode_api::generated::AcceptanceCriterionInput {
+                    id: criterion.id.0.clone(),
+                    title: criterion.description.clone(),
+                    required: criterion.required,
+                },
+            )
+            .collect(),
+    }
+}
+
+fn replace_refused_spec(
+    fixture: &HistoricalCandidateFixture,
+    control_plane: &mut ControlPlane,
+) -> Delivery {
+    let state = control_plane
+        .load_state(&format!("delivery:{}", fixture.delivery.id().0))
+        .expect("refused state")
+        .expect("retained refused state");
+    let refused = Delivery::decode_json(&state.payload).expect("refused Delivery");
+    let spec = &refused.snapshot().spec;
+    control_plane
+        .delivery_update_spec(&winwincode_api::generated::DeliveryUpdateSpecCommand {
+            actor: Actor::UserActor(UserActor {
+                id: UserId(canonical_id("usr", fixture.seed)),
+                kind: winwincode_domain::UserActorKind::User,
+            }),
+            scope: fixture.scope.clone(),
+            schema_version: SchemaVersion::WinwincodeV1,
+            command:
+                winwincode_api::generated::DeliveryUpdateSpecCommandCommand::DeliveryUpdateSpec,
+            expected_revision: Revision(i64::try_from(refused.revision()).unwrap()),
+            request_id: RequestId(canonical_id("req", fixture.seed + 22_000)),
+            payload: winwincode_api::generated::DeliveryUpdateSpecPayload {
+                delivery_id: fixture.delivery.id().clone(),
+                spec: restarted_spec_input(fixture, &refused),
+            },
+        })
+        .expect(
+            "public Spec update can explicitly start again without accepting the refused candidate",
+        );
+    let next = control_plane
+        .load_state(&format!("delivery:{}", fixture.delivery.id().0))
+        .expect("new Spec state")
+        .expect("new Spec retained");
+    let next = Delivery::decode_json(&next.payload).expect("new Spec Delivery");
+    assert_eq!(next.snapshot().status, DeliveryStatus::Ready);
+    assert_eq!(next.snapshot().spec.revision, spec.revision + 1);
+    assert!(next.snapshot().session_bindings.is_empty());
+    assert!(next.snapshot().work_run_aggregate.runs.is_empty());
+    assert!(next.snapshot().attention_items.is_empty());
+    assert!(next.snapshot().verdict.is_none());
+    assert!(next.snapshot().evidence.is_empty());
+    assert_eq!(
+        control_plane
+            .load_state(&fixture.authority_stream)
+            .expect("old authority retained")
+            .expect("old success retained")
+            .payload,
+        fixture.accepted.payload
+    );
+    next
+}
+
+fn assert_old_terminal_preserves_new_spec(
+    fixture: &HistoricalCandidateFixture,
+    control_plane: &mut ControlPlane,
+    next: &Delivery,
+) {
+    let expected_new_spec = next.encode_json().expect("new Spec bytes");
+    let mut replay_storage = SqliteStorage::open(&fixture.root).expect("new Spec replay storage");
+    let replay = DurableExecutionPortIngress::new(
+        control_plane,
+        &mut replay_storage,
+        &fixture.scope,
+        fixture.message.sent_at.clone(),
+    )
+    .expect("old terminal ingress after Spec replacement")
+    .handle(&ExecutionPortMessage::JobOutcomeMessage(
+        fixture.message.clone(),
+    ))
+    .expect("old terminal exact replay must stay idempotent after its bindings were replaced");
+    let [ExecutionPortMessage::JobOutcomeAckMessage(ack)] = replay.as_slice() else {
+        panic!("one old terminal Ack");
+    };
+    assert_eq!(ack.status, JobOutcomeAckMessageStatus::Duplicate);
+    assert_eq!(
+        control_plane
+            .load_state(&format!("delivery:{}", fixture.delivery.id().0))
+            .expect("new Spec after old terminal replay")
+            .expect("new Spec remains retained")
+            .payload,
+        expected_new_spec,
+        "a late old terminal cannot change the current Spec or dispatch another run"
+    );
+    Box::new(replay_storage)
+        .close()
+        .expect("new Spec replay storage close");
+}
+
+fn assert_new_spec_and_old_cut_reads(
+    fixture: &HistoricalCandidateFixture,
+    control_plane: &ControlPlane,
+    old_cut: winwincode_api::generated::StrongFlowReadCursor,
+) {
+    let query = winwincode_api::generated::DeliveryGetQuery {
+        actor: Actor::UserActor(UserActor {
+            id: UserId(canonical_id("usr", fixture.seed)),
+            kind: winwincode_domain::UserActorKind::User,
+        }),
+        page: winwincode_api::generated::PageRequest {
+            cursor: None,
+            limit: 20,
+        },
+        parameters: winwincode_api::generated::DeliveryGetParameters {
+            at_cursor: None,
+            delivery_id: fixture.delivery.id().clone(),
+        },
+        query: winwincode_api::generated::DeliveryGetQueryQuery::DeliveryGet,
+        request_id: RequestId(canonical_id("req", fixture.seed + 23_000)),
+        schema_version: SchemaVersion::WinwincodeV1,
+        scope: fixture.scope.clone(),
+    };
+    let response = winwincode_control_plane::strongflow_projection::StrongFlowProjectionQueryPort::delivery_get(control_plane, &query)
+        .expect("new Spec detail readable");
+    let winwincode_api::generated::QueryResultResponse::DeliveryGetResultResponse(response) =
+        response
+    else {
+        panic!("Delivery detail");
+    };
+    assert!(response.result.current_candidate.is_none());
+    assert_rejected_candidate_history(control_plane, &query, response.result.read_cursor);
+    let mut old_query = query.clone();
+    old_query.parameters.at_cursor = Some(old_cut.clone());
+    let old_response = winwincode_control_plane::strongflow_projection::StrongFlowProjectionQueryPort::delivery_get(control_plane, &old_query)
+        .expect("the original rejected cut remains readable after public Spec replacement");
+    let winwincode_api::generated::QueryResultResponse::DeliveryGetResultResponse(old_response) =
+        old_response
+    else {
+        panic!("historical rejected detail");
+    };
+    assert_eq!(old_response.result.read_cursor, old_cut);
+    assert!(old_response.result.current_candidate.is_none());
+    assert_eq!(old_response.result.attention.len(), 1);
+    assert_rejected_candidate_history(control_plane, &old_query, old_cut);
+}
+
+fn assert_rejected_source_retained(fixture: &HistoricalCandidateFixture) {
+    let digest = &fixture.message.outcome.artifacts[0].digest;
+    let digest_hex = digest
+        .0
+        .strip_prefix("sha256:")
+        .expect("retained source digest");
+    let source_bytes = fs::read(
+        fixture
+            .root
+            .join("artifacts/objects/sha256")
+            .join(&digest_hex[..2])
+            .join(&digest_hex[2..]),
+    )
+    .expect("original source bytes retained after new Spec");
+    assert_eq!(
+        format!("sha256:{:x}", Sha256::digest(source_bytes)),
+        digest.0,
+        "the failed old candidate source is never rewritten"
+    );
+    let objects = LocalArtifactObjectStore::open(fixture.root.join("artifacts"))
+        .expect("old Artifact objects");
+    let artifacts = ArtifactStore::open(fixture.root.join("artifact-catalog"), Box::new(objects))
+        .expect("old Artifact catalog");
+    artifacts
+        .close()
+        .expect("old Artifact catalog remains openable");
+    assert_eq!(
+        worker_terminal_state(&fixture.root, &fixture.job.job_id),
+        ("settled".into(), 1)
+    );
+}
+
+fn assert_rejected_candidate_history(
+    control_plane: &ControlPlane,
+    read: &winwincode_api::generated::DeliveryGetQuery,
+    cursor: winwincode_api::generated::StrongFlowReadCursor,
+) {
+    let history = winwincode_control_plane::strongflow_projection::StrongFlowProjectionQueryPort::candidate_history_list(
+        control_plane, &winwincode_api::generated::CandidateHistoryListQuery {
+            actor: read.actor.clone(), scope: read.scope.clone(), page: read.page.clone(), schema_version: read.schema_version.clone(),
+            request_id: read.request_id.clone(), query: winwincode_api::generated::CandidateHistoryListQueryQuery::CandidateList,
+            parameters: winwincode_api::generated::CandidateHistoryListParameters {
+                at_cursor: cursor, delivery_id: read.parameters.delivery_id.clone(), read_page_limit: read.page.limit,
+            },
+        },
+    ).expect("candidate.list must remain readable without inventing a Candidate for a rejected historical success");
+    let winwincode_api::generated::QueryResultResponse::CandidateHistoryListResultResponse(history) =
+        history
+    else {
+        panic!("Candidate history");
+    };
+    assert!(
+        history.result.items.is_empty(),
+        "an invalid successful output is never a legal Candidate"
+    );
 }
 
 #[test]

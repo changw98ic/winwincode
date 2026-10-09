@@ -36,6 +36,7 @@ impl Fixture {
             display_name: "Original subscription".into(),
             endpoint: crate::chatgpt_oauth::ENDPOINT.into(),
             protocol: DeviceProviderProtocol::ChatgptPlan,
+            responses_structured_output: None,
             model_ids: vec!["original-model".into()],
             enabled: true,
         };

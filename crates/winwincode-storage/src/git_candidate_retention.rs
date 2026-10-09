@@ -82,7 +82,7 @@ impl CandidateGitRetentionError {
         Self::new(CandidateGitRetentionErrorKind::Corrupt, message)
     }
 
-    fn adapter(message: impl Into<String>) -> Self {
+    pub(crate) fn adapter(message: impl Into<String>) -> Self {
         Self::new(CandidateGitRetentionErrorKind::Adapter, message)
     }
 
@@ -1205,6 +1205,67 @@ fn load_by_artifact(
         .map_err(sql_adapter)?;
     row.map(|row| decode_row(&row.0, &row.1, &row.2, &row.3, &row.4))
         .transpose()
+}
+
+pub(crate) fn read_candidate_retention_receipts(
+    connection: &Connection,
+    controlled_repository_root: &Path,
+    delivery_id: &DeliveryId,
+) -> Result<Vec<CandidateGitPinReceipt>, CandidateGitRetentionError> {
+    canonical_public_id(&delivery_id.0, "dlv_", "deliveryId")?;
+    let root = fs::canonicalize(controlled_repository_root).map_err(|_| {
+        CandidateGitRetentionError::new(
+            CandidateGitRetentionErrorKind::NotFound,
+            "controlled repository root is unavailable",
+        )
+    })?;
+    let records = load_by_delivery(connection, &delivery_id.0)?;
+    records
+        .into_iter()
+        .map(|record| {
+            let repository = SystemGit.repository_identity(&root, &record.repository_locator)?;
+            if path_text(&repository.repository, "repository path")? != record.repository_path
+                || path_text(&repository.git_common_directory, "Git directory")?
+                    != record.git_common_directory
+            {
+                return Err(CandidateGitRetentionError::new(
+                    CandidateGitRetentionErrorKind::PermissionDenied,
+                    "controlled repository identity changed after candidate retention",
+                ));
+            }
+            match record.state {
+                CandidateGitRetentionState::Pinned => {
+                    verify_candidate_objects(&repository, &record)?;
+                    match reference_target(&repository.repository, &record.reference_name)? {
+                        Some(target) if target == record.candidate_commit_id => {}
+                        Some(_) => {
+                            return Err(CandidateGitRetentionError::conflict(
+                                "candidate Git reference points to a foreign object",
+                            ));
+                        }
+                        None => {
+                            return Err(CandidateGitRetentionError::new(
+                                CandidateGitRetentionErrorKind::NotFound,
+                                "pinned Candidate Git reference is unavailable",
+                            ));
+                        }
+                    }
+                }
+                CandidateGitRetentionState::Released => {
+                    if reference_target(&repository.repository, &record.reference_name)?.is_some() {
+                        return Err(CandidateGitRetentionError::conflict(
+                            "released Candidate Git reference still exists",
+                        ));
+                    }
+                }
+                // Return intent state unchanged. Projection availability must
+                // reject it rather than silently advancing the writer's state.
+                CandidateGitRetentionState::PinIntent
+                | CandidateGitRetentionState::ReleaseIntent => {}
+            }
+            Ok(record.pin_receipt(true))
+        })
+        .collect()
 }
 
 fn load_by_delivery(

@@ -13463,6 +13463,7 @@ dependencies = [
  "winwincode-execution-port",
  "winwincode-kernel",
  "winwincode-provider",
+ "winwincode-server",
  "winwincode-storage",
 ]
 

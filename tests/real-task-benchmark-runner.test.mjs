@@ -16,7 +16,7 @@ import { openBenchmarkLedger } from '../scripts/benchmark-ledger.mjs'
 import { benchmarkAggregationInput, deviceBenchmarkExperimentBinding, executeDeviceBenchmark, prepareBenchmarkDeviceTask, recoverBenchmarkDeviceCell,
   runBenchmarkDeviceAggregation, terminalBenchmarkDeviceFailure,
   terminalDeviceFailure, failedDispatchDeviceResult, resolveRegisteredDeviceTask } from '../scripts/benchmark-device-adapter.mjs'
-import { runDeviceTaskVertical, fusionDeviceProviders, inspectUnresolvedDeviceTasks, benchmarkDeviceEnvironment,
+import { runDeviceTaskVertical, deviceTaskProvider, fusionDeviceProviders, inspectUnresolvedDeviceTasks, benchmarkDeviceEnvironment,
   expiredCrashedDeviceWorkRun, expiredDeviceWorkRunLease, failedDeviceDispatch,
   loadDeviceProviderEnvironment } from '../scripts/run-device-task-vertical.mjs'
 
@@ -807,6 +807,7 @@ test('rejected formal preflight leaves no frozen identity and corrected configur
     [`${prefix}_API_KEY`, 'fixture-only'], [`${prefix}_BASE_URL`, 'https://provider.invalid'],
     [`${prefix}_MODEL`, providers[index].requestedModelId],
   ]))
+  providerEnvironment.XIAOMI_RESPONSES_URL = 'https://provider.invalid/v1/responses'
   for (const [index, invalid] of cases.entries()) {
     const evidenceRoot = resolve(directory, `device-${index}`)
     await assert.rejects(executeDeviceBenchmark({ ...invalid, automaticTaskActions: true, evidenceRoot,
@@ -2241,6 +2242,78 @@ test('returned product stop halts its standalone or Fusion task while the next t
 })
 
 
+test('MiMo Device provisioning uses explicit text with native Responses Lite on the configured official origin', () => {
+  for (const base of ['https://token-plan-cn.xiaomimimo.com',
+    'https://token-plan-cn.xiaomimimo.com/anthropic',
+    'https://token-plan-cn.xiaomimimo.com/anthropic/',
+    'https://token-plan-cn.xiaomimimo.com/anthropic/v1/messages']) {
+    const provider = deviceTaskProvider('mimo', { XIAOMI_API_KEY: 'private-key',
+      XIAOMI_BASE_URL: base, XIAOMI_MODEL: 'mimo-v2.6-pro' })
+    assert.equal(provider.protocol, 'openai_responses')
+    assert.equal(provider.responsesStructuredOutput, 'text')
+    assert.equal(provider.endpoint, 'https://token-plan-cn.xiaomimimo.com/v1/responses')
+    assert.deepEqual(provider.customHeaders, { 'x-openai-internal-codex-responses-lite': 'true' })
+  }
+  const standard = deviceTaskProvider('mimo', { XIAOMI_API_KEY: 'private-key',
+    XIAOMI_BASE_URL: 'https://api.xiaomimimo.com/v1', XIAOMI_MODEL: 'mimo-v2.6-pro' })
+  assert.equal(standard.endpoint, 'https://api.xiaomimimo.com/v1/responses')
+})
+
+test('MiMo Device provisioning accepts an explicit Responses proxy endpoint without guessing its path', () => {
+  const endpoint = 'https://proxy.example.invalid/model-gateway/responses'
+  const provider = deviceTaskProvider('mimo', { XIAOMI_API_KEY: 'private-key',
+    XIAOMI_RESPONSES_URL: endpoint, XIAOMI_MODEL: 'mimo-v2.6-pro' })
+  assert.equal(provider.endpoint, endpoint)
+  assert.equal(provider.protocol, 'openai_responses')
+  assert.equal(provider.responsesStructuredOutput, 'text')
+  assert.deepEqual(provider.customHeaders, { 'x-openai-internal-codex-responses-lite': 'true' })
+  const preferred = deviceTaskProvider('mimo', { XIAOMI_API_KEY: 'private-key',
+    XIAOMI_BASE_URL: 'https://token-plan-cn.xiaomimimo.com/anthropic',
+    XIAOMI_RESPONSES_URL: endpoint, XIAOMI_MODEL: 'mimo-v2.6-pro' })
+  assert.equal(preferred.endpoint, endpoint)
+})
+
+test('MiMo Device provisioning rejects ambiguous proxy bases and invalid private URLs safely', () => {
+  for (const base of ['https://proxy.example.invalid', 'https://proxy.example.invalid/anthropic',
+    'https://token-plan-cn.xiaomimimo.com.proxy.example.invalid/anthropic']) {
+    assert.throws(() => deviceTaskProvider('mimo', { XIAOMI_API_KEY: 'private-key',
+      XIAOMI_BASE_URL: base, XIAOMI_MODEL: 'mimo-v2.6-pro' }), error => {
+      assert.match(error.message, /XIAOMI_RESPONSES_URL/u)
+      assert.doesNotMatch(error.message, /private-key|proxy\.example/u)
+      return true
+    })
+  }
+  for (const endpoint of ['not-a-url-private-secret', 'http://proxy.example.invalid/responses',
+    'https://private-secret@proxy.example.invalid/responses',
+    'https://proxy.example.invalid/responses?token=private-secret',
+    'https://proxy.example.invalid/responses#private-secret']) {
+    assert.throws(() => deviceTaskProvider('mimo', { XIAOMI_API_KEY: 'private-key',
+      XIAOMI_RESPONSES_URL: endpoint, XIAOMI_MODEL: 'mimo-v2.6-pro' }), error => {
+      assert.match(error.message, /XIAOMI_RESPONSES_URL/u)
+      assert.doesNotMatch(error.message, /private-secret|private-key|proxy\.example/u)
+      return true
+    })
+  }
+})
+
+test('MiMo Responses provisioning preserves the other Device provider protocols and headers', () => {
+  for (const [name, prefix] of [['glm', 'ZHIPU'], ['deepseek', 'DEEPSEEK']]) {
+    const provider = deviceTaskProvider(name, { [`${prefix}_API_KEY`]: 'private-key',
+      [`${prefix}_BASE_URL`]: 'https://provider.example.invalid/anthropic/', [`${prefix}_MODEL`]: `${name}-model` })
+    assert.equal(provider.protocol, 'anthropic_messages')
+    assert.equal(provider.responsesStructuredOutput, undefined)
+    assert.equal(provider.endpoint, 'https://provider.example.invalid/anthropic/v1/messages')
+    assert.equal(provider.customHeaders, undefined)
+  }
+  const qwen = deviceTaskProvider('qwen', { OPENCODE_API_KEY: 'private-key',
+    OPENCODE_BASE_URL: 'https://provider.example.invalid/v1/chat/completions', OPENCODE_MODEL: 'qwen-model',
+    OPENCODE_SESSION_HEADER: 'x-provider-session', OPENCODE_SESSION_VALUE: 'private-session' })
+  assert.equal(qwen.protocol, 'openai_chat_completions')
+  assert.equal(qwen.responsesStructuredOutput, undefined)
+  assert.equal(qwen.endpoint, 'https://provider.example.invalid/v1/chat/completions')
+  assert.deepEqual(qwen.customHeaders, { 'x-provider-session': 'private-session' })
+})
+
 test('Fusion Device provisioning binds four exact models and preserves private settings in memory', () => {
   const entries = [
     ['ZHIPU', 'zhipu-glm', 'glm-5.3-flash'], ['XIAOMI', 'xiaomi-mimo', 'mimo-v2.6-pro'],
@@ -2249,8 +2322,14 @@ test('Fusion Device provisioning binds four exact models and preserves private s
   const environment = Object.fromEntries(entries.flatMap(([prefix, , model]) => [
     [`${prefix}_MODEL`, model], [`${prefix}_BASE_URL`, 'https://provider.invalid'], [`${prefix}_API_KEY`, 'private-key'],
   ]))
+  environment.XIAOMI_RESPONSES_URL = 'https://provider.invalid/v1/responses'
+  delete environment.XIAOMI_BASE_URL
   const profile = { members: entries.map(([, provider, model]) => ({ id: provider, provider, model, reasoning: 'max' })) }
   assert.deepEqual(fusionDeviceProviders(profile, environment).map(row => row.modelId), entries.map(row => row[2]))
+  const mimo = fusionDeviceProviders(profile, environment)[1]
+  assert.equal(mimo.protocol, 'openai_responses')
+  assert.equal(mimo.responsesStructuredOutput, 'text')
+  assert.deepEqual(mimo.customHeaders, { 'x-openai-internal-codex-responses-lite': 'true' })
   const changed = structuredClone(profile)
   changed.members[0].model = 'wrong-model'
   assert.throws(() => fusionDeviceProviders(changed, environment))
@@ -2663,6 +2742,7 @@ test('Device JEV arms select only their explicit component profiles and keep bas
   const fusionEnvironment = {
     ZHIPU_API_KEY: 'zhipu-secret', ZHIPU_BASE_URL: 'https://glm.example.invalid', ZHIPU_MODEL: 'glm-5.3-flash',
     XIAOMI_API_KEY: 'mimo-secret', XIAOMI_BASE_URL: 'https://mimo.example.invalid', XIAOMI_MODEL: 'mimo-v2.6-pro',
+    XIAOMI_RESPONSES_URL: 'https://mimo.example.invalid/v1/responses',
     DEEPSEEK_API_KEY: 'deepseek-secret', DEEPSEEK_BASE_URL: 'https://deepseek.example.invalid', DEEPSEEK_MODEL: 'deepseek-flash',
     OPENCODE_API_KEY: 'qwen-secret', OPENCODE_BASE_URL: 'https://qwen.example.invalid/v1/chat/completions',
     OPENCODE_MODEL: 'qwen3.8-flash', OPENCODE_SESSION_VALUE: 'private-session',
@@ -2721,6 +2801,7 @@ test('Device benchmark loads private routes and pins the four frozen model selec
   await writeFile(envFile, [
     'ZHIPU_API_KEY=file-glm-key', 'ZHIPU_BASE_URL=https://glm.invalid', 'ZHIPU_MODEL=glm-5.3-flash',
     'XIAOMI_API_KEY=file-mimo-key', 'XIAOMI_BASE_URL=https://mimo.invalid', 'XIAOMI_MODEL=mimo-v2.6-pro',
+    'XIAOMI_RESPONSES_URL=https://mimo.invalid/v1/responses',
     'DEEPSEEK_API_KEY=file-deepseek-key', 'DEEPSEEK_BASE_URL=https://deepseek.invalid', 'DEEPSEEK_MODEL=deepseek-flash',
     'OPENCODE_API_KEY=file-qwen-key', 'OPENCODE_BASE_URL=https://qwen.invalid/v1/chat/completions',
     'OPENCODE_MODEL=qwen3.8-flash',

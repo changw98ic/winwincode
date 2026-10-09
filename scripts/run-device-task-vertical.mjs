@@ -36,7 +36,7 @@ import {
 
 const providerSeats = {
   glm: { prefix: 'ZHIPU', providerId: 'zhipu-glm', protocol: 'anthropic_messages' },
-  mimo: { prefix: 'XIAOMI', providerId: 'xiaomi-mimo', protocol: 'anthropic_messages' },
+  mimo: { prefix: 'XIAOMI', providerId: 'xiaomi-mimo', protocol: 'openai_responses' },
   deepseek: { prefix: 'DEEPSEEK', providerId: 'deepseek', protocol: 'anthropic_messages' },
   qwen: { prefix: 'OPENCODE', providerId: 'opencode', protocol: 'openai_chat_completions' },
 }
@@ -78,7 +78,9 @@ function fusionConfigurationIssues(environment) {
   const mismatched = []
   for (const [provider, , model] of fusionSeats) {
     const prefix = providerSeats[provider].prefix
-    for (const suffix of ['API_KEY', 'BASE_URL', 'MODEL']) {
+    const suffixes = provider === 'mimo' && environment.XIAOMI_RESPONSES_URL
+      ? ['API_KEY', 'MODEL'] : ['API_KEY', 'BASE_URL', 'MODEL']
+    for (const suffix of suffixes) {
       if (!environment[`${prefix}_${suffix}`]) missing.push(`${prefix}_${suffix}`)
     }
     if (environment[`${prefix}_MODEL`] && environment[`${prefix}_MODEL`] !== model) {
@@ -88,23 +90,56 @@ function fusionConfigurationIssues(environment) {
   return { missing, mismatched }
 }
 
+function mimoResponsesEndpoint(environment) {
+  const variable = environment.XIAOMI_RESPONSES_URL === undefined ? 'XIAOMI_BASE_URL' : 'XIAOMI_RESPONSES_URL'
+  const value = environment[variable]
+  let endpoint
+  try { endpoint = new URL(value) } catch {
+    assert.fail(`${variable} must be a complete HTTPS URL`)
+  }
+  assert.ok(endpoint.protocol === 'https:' && !endpoint.username && !endpoint.password
+    && !endpoint.search && !endpoint.hash, `${variable} must be HTTPS without credentials, query, or fragment`)
+  if (variable === 'XIAOMI_RESPONSES_URL') return value
+  // Only these official origins document the Responses endpoint. A proxy's
+  // route must be supplied explicitly rather than inferred from its base URL.
+  assert.ok(['api.xiaomimimo.com', 'token-plan-cn.xiaomimimo.com'].includes(endpoint.hostname)
+    && !endpoint.port, 'Set XIAOMI_RESPONSES_URL to the complete Responses endpoint for this route')
+  return `${endpoint.origin}/v1/responses`
+}
+
+export function deviceProviderSecretValues(provider) {
+  // Only this exact protocol switch is public. An API key with the same value
+  // and every other header still belong in the secret guard and redaction.
+  const headerSecrets = Object.entries(provider.customHeaders ?? {})
+    .filter(([name, value]) => !(provider.protocol === 'openai_responses'
+      && name === 'x-openai-internal-codex-responses-lite' && value === 'true'))
+    .map(([, value]) => value)
+  return [provider.apiKey, ...headerSecrets]
+}
+
 export function deviceTaskProvider(providerName, environment = process.env) {
   const seat = providerSeats[providerName]
   assert.ok(seat, 'Provider must be glm, mimo, deepseek, or qwen')
-  for (const suffix of ['API_KEY', 'BASE_URL', 'MODEL']) {
+  const suffixes = providerName === 'mimo' && environment.XIAOMI_RESPONSES_URL
+    ? ['API_KEY', 'MODEL'] : ['API_KEY', 'BASE_URL', 'MODEL']
+  for (const suffix of suffixes) {
     assert.ok(environment[`${seat.prefix}_${suffix}`], `${seat.prefix}_${suffix} is required for a real Provider`)
   }
-  const customHeaders = providerName === 'qwen' && environment.OPENCODE_SESSION_VALUE
-    ? { [environment.OPENCODE_SESSION_HEADER ?? 'x-opencode-session']: environment.OPENCODE_SESSION_VALUE }
-    : undefined
+  const customHeaders = providerName === 'mimo'
+    ? { 'x-openai-internal-codex-responses-lite': 'true' }
+    : providerName === 'qwen' && environment.OPENCODE_SESSION_VALUE
+      ? { [environment.OPENCODE_SESSION_HEADER ?? 'x-opencode-session']: environment.OPENCODE_SESSION_VALUE }
+      : undefined
   return {
     apiKey: environment[`${seat.prefix}_API_KEY`],
     providerId: seat.providerId,
     modelId: environment[`${seat.prefix}_MODEL`],
     protocol: seat.protocol,
-    endpoint: seat.protocol === 'openai_chat_completions'
-      ? environment[`${seat.prefix}_BASE_URL`]
-      : `${environment[`${seat.prefix}_BASE_URL`].replace(/\/$/u, '')}/v1/messages`,
+    ...(providerName === 'mimo' ? { responsesStructuredOutput: 'text' } : {}),
+    endpoint: providerName === 'mimo' ? mimoResponsesEndpoint(environment)
+      : seat.protocol === 'openai_chat_completions'
+        ? environment[`${seat.prefix}_BASE_URL`]
+        : `${environment[`${seat.prefix}_BASE_URL`].replace(/\/$/u, '')}/v1/messages`,
     displayName: `${providerName} live agent-loop smoke`,
     ...(customHeaders === undefined ? {} : { customHeaders }),
   }
@@ -375,13 +410,13 @@ export async function runDeviceTaskVertical({
   const { apiKey, ...deviceProvider } = useDeviceDeterministic
     ? { providerId: 'winwincode-device-deterministic', modelId: 'device-deterministic-model' }
     : deviceTaskProvider(providerName, providerEnvironment)
-  const customHeaders = deviceProvider.customHeaders
   const fusionProviders = deviceAgentEnvironment.WWC_WORKER_FUSION === undefined ? []
     : fusionDeviceProviders(JSON.parse(deviceAgentEnvironment.WWC_WORKER_FUSION), providerEnvironment)
   assert.ok(!useDeviceDeterministic || fusionProviders.length === 0, 'Fusion trial requires real providers')
   const additionalProviders = fusionProviders.filter(provider => provider.providerId !== deviceProvider.providerId)
-  const deviceSecrets = useDeviceDeterministic ? [] : [apiKey,
-    ...additionalProviders.flatMap(provider => [provider.apiKey, ...Object.values(provider.customHeaders ?? {})])]
+  const deviceSecrets = useDeviceDeterministic ? [] : [
+    { apiKey, ...deviceProvider }, ...additionalProviders,
+  ].flatMap(deviceProviderSecretValues)
   const deviceRoute = {
     providerId: deviceProvider.providerId,
     modelId: deviceProvider.modelId,
@@ -671,7 +706,7 @@ export async function runDeviceTaskVertical({
     report.errorCode = error?.code ?? null
     report.errorStatus = Number.isInteger(error?.status) && error.status >= 100 && error.status <= 599
       ? error.status : null
-    for (const secret of [...deviceSecrets, ...Object.values(customHeaders ?? {})]) {
+    for (const secret of deviceSecrets) {
       if (secret) report.error = report.error.replaceAll(secret, '<redacted>')
     }
     save()

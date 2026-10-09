@@ -10,9 +10,18 @@
       "enum": [
         "anthropic_messages",
         "openai_chat_completions",
+        "openai_responses",
         "canonical",
         "codex_chatgpt",
         "chatgpt_plan"
+      ]
+    },
+    "DeviceResponsesStructuredOutput": {
+      "type": "string",
+      "enum": [
+        "json_schema",
+        "json_object",
+        "text"
       ]
     },
     "DeviceProviderConfig": {
@@ -37,6 +46,10 @@
         "protocol": {
           "$ref": "#/$defs/DeviceProviderProtocol"
         },
+        "responsesStructuredOutput": {
+          "$ref": "#/$defs/DeviceResponsesStructuredOutput",
+          "description": "Structured output transport for openai_responses. Omission uses json_schema. Explicit text uses the API default text format with schema instructions and local validation."
+        },
         "modelIds": {
           "type": "array",
           "minItems": 1,
@@ -59,7 +72,19 @@
         "protocol",
         "modelIds",
         "enabled"
-      ]
+      ],
+      "not": {
+        "required": [
+          "responsesStructuredOutput"
+        ],
+        "properties": {
+          "protocol": {
+            "not": {
+              "const": "openai_responses"
+            }
+          }
+        }
+      }
     },
     "DeviceProviderProjection": {
       "type": "object",

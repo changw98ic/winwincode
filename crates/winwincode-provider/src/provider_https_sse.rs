@@ -129,8 +129,19 @@ enum HttpsSseProviderProtocol {
     Canonical,
     CodexChatgpt,
     ChatgptPlan,
+    OpenAiResponses {
+        max_output_tokens: u32,
+        structured_output: ResponsesStructuredOutput,
+    },
     AnthropicMessages(AnthropicMessagesOptions),
     OpenAiChatCompletions(AnthropicMessagesOptions),
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ResponsesStructuredOutput {
+    JsonSchema,
+    JsonObject,
+    Text,
 }
 
 /// Maximum number of extra request headers accepted on one Provider.
@@ -293,6 +304,55 @@ impl HttpsSseProviderConfig {
         Ok(self)
     }
 
+    /// Selects the native Responses API with a bounded output and ordinary API credentials.
+    /// The configured HTTPS endpoint and extra headers remain authoritative.
+    ///
+    /// # Errors
+    /// Rejects a zero output limit or invalid transport configuration.
+    pub fn with_openai_responses(
+        mut self,
+        max_output_tokens: u32,
+    ) -> Result<Self, HttpsSseProviderError> {
+        self.protocol = HttpsSseProviderProtocol::OpenAiResponses {
+            max_output_tokens,
+            structured_output: ResponsesStructuredOutput::JsonSchema,
+        };
+        self.validate()?;
+        Ok(self)
+    }
+
+    /// Selects Responses JSON-object compatibility for structured final output.
+    ///
+    /// # Errors
+    /// Rejects invalid transport configuration or a zero output limit.
+    pub fn with_openai_responses_json_object(
+        mut self,
+        max_output_tokens: u32,
+    ) -> Result<Self, HttpsSseProviderError> {
+        self.protocol = HttpsSseProviderProtocol::OpenAiResponses {
+            max_output_tokens,
+            structured_output: ResponsesStructuredOutput::JsonObject,
+        };
+        self.validate()?;
+        Ok(self)
+    }
+
+    /// Selects native Responses text with local structured final-output validation.
+    ///
+    /// # Errors
+    /// Rejects invalid transport configuration or a zero output limit.
+    pub fn with_openai_responses_text(
+        mut self,
+        max_output_tokens: u32,
+    ) -> Result<Self, HttpsSseProviderError> {
+        self.protocol = HttpsSseProviderProtocol::OpenAiResponses {
+            max_output_tokens,
+            structured_output: ResponsesStructuredOutput::Text,
+        };
+        self.validate()?;
+        Ok(self)
+    }
+
     /// Replaces any previous extra request headers with a bounded validated set.
     ///
     /// # Errors
@@ -387,6 +447,15 @@ impl HttpsSseProviderConfig {
             HttpsSseProviderProtocol::Canonical
             | HttpsSseProviderProtocol::CodexChatgpt
             | HttpsSseProviderProtocol::ChatgptPlan => {}
+            HttpsSseProviderProtocol::OpenAiResponses {
+                max_output_tokens, ..
+            } => {
+                if max_output_tokens == 0 {
+                    return Err(HttpsSseProviderError::new(
+                        HttpsSseProviderErrorKind::InvalidConfiguration,
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -560,6 +629,7 @@ struct StreamRecord {
     invocation_digest: [u8; 32],
     controls: u8,
     tool_bindings: AnthropicToolBindings,
+    response_schema: Option<crate::provider_response_schema::ResponseSchema>,
     state: StreamState,
     io: Arc<crate::provider_transport::ExchangeIo>,
     metadata: ProviderFailureMetadata,
@@ -696,8 +766,9 @@ impl HttpsSseProviderAdapter {
         }
         let mut body = self.take_body(receipt)?;
         let tool_bindings = self.stream_tool_bindings(receipt)?;
+        let response_schema = self.stream_response_schema(receipt)?;
         let result = self
-            .convert_response(receipt, &mut body, &tool_bindings)
+            .convert_response(receipt, &mut body, &tool_bindings, response_schema.as_ref())
             .map_err(|mut error| {
                 if let Ok(streams) = self.shared.streams.lock()
                     && let Some(record) = streams.get(&receipt.adapter_request_id)
@@ -717,9 +788,19 @@ impl HttpsSseProviderAdapter {
         receipt: &ProviderGatewayOpenReceipt,
         body: &mut ureq::Body,
         tool_bindings: &AnthropicToolBindings,
+        schema: Option<&crate::provider_response_schema::ResponseSchema>,
     ) -> Result<HttpsSseProviderCompletion, HttpsSseProviderError> {
         let mut receipt = receipt.clone();
-        for (_, value) in &self.shared.config.custom_headers {
+        for (name, value) in &self.shared.config.custom_headers {
+            // This public protocol switch is a literal boolean, not a credential.
+            if matches!(
+                self.shared.config.protocol,
+                HttpsSseProviderProtocol::OpenAiResponses { .. }
+            ) && name.eq_ignore_ascii_case("x-openai-internal-codex-responses-lite")
+                && value == "true"
+            {
+                continue;
+            }
             let secret = ResolvedSecret::from_bytes(value.as_bytes().to_vec()).map_err(|_| {
                 HttpsSseProviderError::new(HttpsSseProviderErrorKind::InvalidConfiguration)
             })?;
@@ -739,12 +820,14 @@ impl HttpsSseProviderAdapter {
                     if matches!(
                         self.shared.config.protocol,
                         HttpsSseProviderProtocol::OpenAiChatCompletions(_)
+                            | HttpsSseProviderProtocol::OpenAiResponses { .. }
                             | HttpsSseProviderProtocol::CodexChatgpt
                             | HttpsSseProviderProtocol::ChatgptPlan
                     ) && error.kind == HttpsSseProviderErrorKind::Transport
                         && !cancelled
                         && !self.drain_interrupted(receipt)?
-                        && let Ok(completion) = self.convert_bytes(receipt, tool_bindings, bytes)
+                        && let Ok(completion) =
+                            self.convert_bytes(receipt, tool_bindings, bytes, schema)
                         && matches!(
                             completion.terminal,
                             ProviderGatewayTerminal::Completed { .. }
@@ -757,7 +840,7 @@ impl HttpsSseProviderAdapter {
                 return Err(error);
             }
         };
-        self.convert_bytes(receipt, tool_bindings, &bytes)
+        self.convert_bytes(receipt, tool_bindings, &bytes, schema)
             .map_err(|mut error| {
                 error.observed_receipt = self.observed_receipt(&bytes, receipt).map(Box::new);
                 error.with_response(bytes)
@@ -769,7 +852,20 @@ impl HttpsSseProviderAdapter {
         receipt: &ProviderGatewayOpenReceipt,
         tool_bindings: &AnthropicToolBindings,
         bytes: &[u8],
+        schema: Option<&crate::provider_response_schema::ResponseSchema>,
     ) -> Result<HttpsSseProviderCompletion, HttpsSseProviderError> {
+        if matches!(
+            self.shared.config.protocol,
+            HttpsSseProviderProtocol::OpenAiResponses { .. }
+        ) {
+            return crate::provider_codex::parse_api_response_with_schema(
+                bytes,
+                receipt,
+                self.shared.config.max_event_bytes,
+                self.shared.config.max_events,
+                schema,
+            );
+        }
         if matches!(
             self.shared.config.protocol,
             HttpsSseProviderProtocol::CodexChatgpt | HttpsSseProviderProtocol::ChatgptPlan
@@ -782,7 +878,9 @@ impl HttpsSseProviderAdapter {
             );
         }
         let (events, terminal) = match self.shared.config.protocol {
-            HttpsSseProviderProtocol::CodexChatgpt | HttpsSseProviderProtocol::ChatgptPlan => {
+            HttpsSseProviderProtocol::CodexChatgpt
+            | HttpsSseProviderProtocol::ChatgptPlan
+            | HttpsSseProviderProtocol::OpenAiResponses { .. } => {
                 unreachable!("Responses protocols return above")
             }
             HttpsSseProviderProtocol::Canonical => {
@@ -867,6 +965,13 @@ impl HttpsSseProviderAdapter {
                     self.shared.config.max_events,
                 )
             }
+            HttpsSseProviderProtocol::OpenAiResponses { .. } => {
+                crate::provider_codex::observed_api_receipt(
+                    bytes,
+                    self.shared.config.max_event_bytes,
+                    self.shared.config.max_events,
+                )
+            }
             HttpsSseProviderProtocol::Canonical => None,
         };
         observed.filter(|(id, _)| {
@@ -895,6 +1000,25 @@ impl HttpsSseProviderAdapter {
             ));
         }
         Ok(record.tool_bindings.clone())
+    }
+
+    fn stream_response_schema(
+        &self,
+        receipt: &ProviderGatewayOpenReceipt,
+    ) -> Result<Option<crate::provider_response_schema::ResponseSchema>, HttpsSseProviderError>
+    {
+        let streams = self
+            .shared
+            .streams
+            .lock()
+            .map_err(|_| HttpsSseProviderError::new(HttpsSseProviderErrorKind::Unavailable))?;
+        let record = streams
+            .get(&receipt.adapter_request_id)
+            .filter(|record| record.model_exchange_id == receipt.model_exchange_id)
+            .ok_or_else(|| {
+                HttpsSseProviderError::new(HttpsSseProviderErrorKind::IdentityConflict)
+            })?;
+        Ok(record.response_schema.clone())
     }
 
     fn read_bounded(
@@ -1062,6 +1186,7 @@ impl HttpsSseProviderAdapter {
         invocation: HttpInvocation<'_>,
         digest: [u8; 32],
         tool_bindings: AnthropicToolBindings,
+        response_schema: Option<crate::provider_response_schema::ResponseSchema>,
     ) -> Result<(), ProviderAdapterError> {
         let mut streams = self
             .shared
@@ -1078,6 +1203,7 @@ impl HttpsSseProviderAdapter {
                 invocation_digest: digest,
                 controls: 0,
                 tool_bindings,
+                response_schema,
                 state: StreamState::Pending,
                 io: self.exchange_io(),
                 metadata: ProviderFailureMetadata::default(),
@@ -1152,6 +1278,7 @@ impl HttpsSseProviderAdapter {
     ) -> Result<Option<PreparedAnthropicRequest>, ProviderAdapterError> {
         Ok(match self.shared.config.protocol {
             HttpsSseProviderProtocol::Canonical
+            | HttpsSseProviderProtocol::OpenAiResponses { .. }
             | HttpsSseProviderProtocol::CodexChatgpt
             | HttpsSseProviderProtocol::ChatgptPlan => None,
             HttpsSseProviderProtocol::AnthropicMessages(options) => Some(
@@ -1180,11 +1307,54 @@ impl HttpsSseProviderAdapter {
             HttpsSseProviderProtocol::ChatgptPlan => {
                 crate::provider_codex::prepare_plan_request(invocation.payload, invocation.model_id)
             }
+            HttpsSseProviderProtocol::OpenAiResponses {
+                max_output_tokens,
+                structured_output,
+            } => match structured_output {
+                ResponsesStructuredOutput::JsonObject => {
+                    crate::provider_codex::prepare_api_json_object_request(
+                        invocation.payload,
+                        invocation.model_id,
+                        max_output_tokens,
+                    )
+                }
+                ResponsesStructuredOutput::JsonSchema => {
+                    crate::provider_codex::prepare_api_request(
+                        invocation.payload,
+                        invocation.model_id,
+                        max_output_tokens,
+                    )
+                }
+                ResponsesStructuredOutput::Text => crate::provider_codex::prepare_api_text_request(
+                    invocation.payload,
+                    invocation.model_id,
+                    max_output_tokens,
+                ),
+            },
             _ => return Ok(None),
         };
         payload
             .map(Some)
             .map_err(|_| ProviderAdapterError::request_translation())
+    }
+
+    fn prepare_response_schema(
+        &self,
+        invocation: HttpInvocation<'_>,
+    ) -> Result<Option<crate::provider_response_schema::ResponseSchema>, ProviderAdapterError> {
+        if matches!(
+            self.shared.config.protocol,
+            HttpsSseProviderProtocol::OpenAiResponses {
+                structured_output: ResponsesStructuredOutput::JsonObject
+                    | ResponsesStructuredOutput::Text,
+                ..
+            }
+        ) {
+            crate::provider_codex::response_schema(invocation.payload)
+                .map_err(|_| ProviderAdapterError::request_translation())
+        } else {
+            Ok(None)
+        }
     }
 
     fn validate_http_response(
@@ -1247,7 +1417,8 @@ impl HttpsSseProviderAdapter {
                 request.tool_bindings.clone()
             });
         let responses_payload = self.prepare_responses_payload(invocation)?;
-        self.begin_open(invocation, digest, tool_bindings)?;
+        let response_schema = self.prepare_response_schema(invocation)?;
+        self.begin_open(invocation, digest, tool_bindings, response_schema)?;
         let authorization = authorization_value(credential).inspect_err(|_error| {
             let _ = self.finish_open(invocation, StreamState::Fenced);
         })?;
@@ -1294,6 +1465,7 @@ impl HttpsSseProviderAdapter {
                     request = request.header("Anthropic-Version", "2023-06-01");
                 }
                 HttpsSseProviderProtocol::Canonical
+                | HttpsSseProviderProtocol::OpenAiResponses { .. }
                 | HttpsSseProviderProtocol::CodexChatgpt
                 | HttpsSseProviderProtocol::ChatgptPlan
                 | HttpsSseProviderProtocol::OpenAiChatCompletions(_) => {}
@@ -1363,6 +1535,7 @@ impl ProviderAdapterPort for HttpsSseProviderAdapter {
                 invocation_digest: [0; 32],
                 controls: 0,
                 tool_bindings: AnthropicToolBindings::default(),
+                response_schema: None,
                 state: StreamState::Fenced,
                 io: self.exchange_io(),
                 metadata: ProviderFailureMetadata::default(),
@@ -2118,6 +2291,580 @@ mod tests {
 
     const SECRET: &[u8] = b"provider-https-sse-secret-fixture";
     const PAYLOAD: &[u8] = br#"{"input":"local TLS fixture"}"#;
+
+    fn responses_api_payload() -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({"request":{
+            "model":"fixture-model", "instructions":"Use native tools", "stream":true, "store":false,
+            "tools":[{"type":"custom","name":"exec","description":"Raw JavaScript","format":{"type":"grammar","syntax":"lark","definition":"start: /[\\s\\S]+/"}}],
+            "input":[{"type":"custom_tool_call","name":"exec","call_id":"old-call","input":"text('previous');"},{"type":"custom_tool_call_output","call_id":"old-call","output":"previous"}]
+        }})).unwrap()
+    }
+
+    fn responses_api_body(source: &str) -> String {
+        use std::fmt::Write as _;
+
+        let events = [
+            serde_json::json!({"type":"response.created","response":{"id":"resp-api","model":"observed-api-model"}}),
+            serde_json::json!({"type":"response.output_item.added","item":{"type":"custom_tool_call","id":"ct-api","call_id":"call-api","name":"exec","input":""}}),
+            serde_json::json!({"type":"response.custom_tool_call_input.delta","item_id":"ct-api","call_id":"call-api","delta":source}),
+            serde_json::json!({"type":"response.output_item.done","item":{"type":"custom_tool_call","id":"ct-api","call_id":"call-api","name":"exec","input":source}}),
+            serde_json::json!({"type":"response.completed","response":{"id":"resp-api","model":"observed-api-model","usage":{"input_tokens":20,"output_tokens":7},"end_turn":true}}),
+        ];
+        let mut body = String::new();
+        for event in events {
+            write!(&mut body, "data: {event}\n\n").unwrap();
+        }
+        body
+    }
+
+    fn responses_api_receipt(
+        exchange: ModelExchangeId,
+        request_id: RequestId,
+    ) -> ProviderGatewayOpenReceipt {
+        let mut stream_leak_gate = crate::CredentialLeakGate::new();
+        stream_leak_gate.track_secret(&ResolvedSecret::from_bytes(SECRET.to_vec()).unwrap());
+        ProviderGatewayOpenReceipt {
+            model_exchange_id: exchange,
+            request_id,
+            route: winwincode_api::generated::ModelRoute {
+                provider_id: "provider-https-fixture".into(),
+                model_id: "fixture-model".into(),
+                credential_reference_id: winwincode_domain::CredentialReferenceId(
+                    "crd_00000000000000000000000001".into(),
+                ),
+            },
+            adapter_request_id: "pad_00000000000000000000000001".into(),
+            idempotent_replay: false,
+            stream_leak_gate,
+        }
+    }
+
+    fn json_object_payload() -> Vec<u8> {
+        let mut payload: serde_json::Value =
+            serde_json::from_slice(&responses_api_payload()).unwrap();
+        payload["request"]["text"] = serde_json::json!({"format":{
+            "type":"json_schema","strict":true,"name":"fixture_result",
+            "schema":{"type":"object","additionalProperties":false,
+                "required":["ok","findings"],"properties":{
+                    "ok":{"type":"boolean"},
+                    "findings":{"type":"array","items":{"type":"object",
+                        "additionalProperties":false,"required":["verdict"],
+                        "properties":{"verdict":{"type":"string","enum":["pass","fail"]}}}}
+                }}
+        }});
+        serde_json::to_vec(&payload).unwrap()
+    }
+
+    fn json_object_body(answer: &str) -> String {
+        use std::fmt::Write as _;
+
+        let mut events = Vec::new();
+        events.push(serde_json::json!({"type":"response.created","response":{"id":"resp-api","model":"observed-api-model"}}));
+        events.push(serde_json::json!({"type":"response.output_item.added","item":{"type":"message","id":"message-api","role":"assistant","phase":"final_answer","content":[]}}));
+        events.push(serde_json::json!({"type":"response.output_item.done","item":{"type":"message","id":"message-api","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":answer}]}}));
+        events.push(serde_json::json!({"type":"response.completed","response":{"id":"resp-api","model":"observed-api-model","usage":{"input_tokens":20,"output_tokens":7},"end_turn":true}}));
+        let mut body = String::new();
+        for event in events {
+            writeln!(&mut body, "data: {event}\n").unwrap();
+        }
+        body
+    }
+
+    #[test]
+    fn json_object_responses_https_maps_only_format_and_keeps_canonical_schema() {
+        let payload = json_object_payload();
+        let original: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        let body = json_object_body(r#"{"ok":true,"findings":[{"verdict":"pass"}]}"#);
+        let fixture = TlsFixture::start(vec![TestResponse {
+            status: "200 OK",
+            content_type: "text/event-stream",
+            body: &body,
+            declared_length: None,
+            delay: Duration::ZERO,
+        }]);
+        let adapter = HttpsSseProviderAdapter::try_new(
+            config(&fixture)
+                .with_openai_responses_json_object(32_768)
+                .unwrap(),
+        )
+        .unwrap();
+        let exchange = ModelExchangeId("mdl_00000000000000000000000001".into());
+        let request_id = RequestId("req_00000000000000000000000001".into());
+        let mut request = invocation(&exchange, &request_id);
+        request.payload = &payload;
+        adapter.open_https(request, SECRET).unwrap();
+        let completion = adapter
+            .drain_canonical(&responses_api_receipt(exchange, request_id))
+            .unwrap();
+        assert!(matches!(
+            completion.terminal,
+            ProviderGatewayTerminal::Completed { .. }
+        ));
+        let requests = fixture.finish();
+        let start = find_bytes(&requests[0], b"\r\n\r\n").unwrap() + 4;
+        let sent: serde_json::Value = serde_json::from_slice(&requests[0][start..]).unwrap();
+        assert_eq!(
+            sent["text"]["format"],
+            serde_json::json!({"type":"json_object"})
+        );
+        assert_eq!(sent["tools"], original["request"]["tools"]);
+        assert_eq!(sent["input"], original["request"]["input"]);
+        let instructions = sent["instructions"].as_str().unwrap();
+        assert!(instructions.starts_with(original["request"]["instructions"].as_str().unwrap()));
+        assert!(instructions.contains(
+            &serde_json::to_string(&original["request"]["text"]["format"]["schema"]).unwrap()
+        ));
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&payload).unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn text_responses_https_omits_text_and_retains_native_tools_and_schema() {
+        let payload = json_object_payload();
+        let original: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        let body = json_object_body(r#"{"ok":true,"findings":[{"verdict":"pass"}]}"#);
+        let fixture = TlsFixture::start(vec![TestResponse {
+            status: "200 OK",
+            content_type: "text/event-stream",
+            body: &body,
+            declared_length: None,
+            delay: Duration::ZERO,
+        }]);
+        let adapter = HttpsSseProviderAdapter::try_new(
+            config(&fixture).with_openai_responses_text(32_768).unwrap(),
+        )
+        .unwrap();
+        let exchange = ModelExchangeId("mdl_00000000000000000000000001".into());
+        let request_id = RequestId("req_00000000000000000000000001".into());
+        let mut request = invocation(&exchange, &request_id);
+        request.payload = &payload;
+        adapter.open_https(request, SECRET).unwrap();
+        let completion = adapter
+            .drain_canonical(&responses_api_receipt(exchange, request_id))
+            .unwrap();
+        assert!(matches!(
+            completion.terminal,
+            ProviderGatewayTerminal::Completed { .. }
+        ));
+        let requests = fixture.finish();
+        let start = find_bytes(&requests[0], b"\r\n\r\n").unwrap() + 4;
+        let sent: serde_json::Value = serde_json::from_slice(&requests[0][start..]).unwrap();
+        assert!(
+            sent.get("text").is_none(),
+            "Text mode uses native default format"
+        );
+        assert_eq!(sent["tools"], original["request"]["tools"]);
+        assert_eq!(sent["input"], original["request"]["input"]);
+        let instructions = sent["instructions"].as_str().unwrap();
+        assert!(instructions.starts_with(original["request"]["instructions"].as_str().unwrap()));
+        assert_eq!(
+            instructions
+                .matches(
+                    &serde_json::to_string(&original["request"]["text"]["format"]["schema"])
+                        .unwrap()
+                )
+                .count(),
+            1
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&payload).unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn text_responses_https_rejects_invalid_final_with_paid_usage_and_real_model() {
+        let payload = json_object_payload();
+        let body = json_object_body(r#"{"ok":"wrong","findings":[]}"#);
+        let fixture = TlsFixture::start(vec![TestResponse {
+            status: "200 OK",
+            content_type: "text/event-stream",
+            body: &body,
+            declared_length: None,
+            delay: Duration::ZERO,
+        }]);
+        let adapter = HttpsSseProviderAdapter::try_new(
+            config(&fixture).with_openai_responses_text(32_768).unwrap(),
+        )
+        .unwrap();
+        let exchange = ModelExchangeId("mdl_00000000000000000000000001".into());
+        let request_id = RequestId("req_00000000000000000000000001".into());
+        let mut request = invocation(&exchange, &request_id);
+        request.payload = &payload;
+        adapter.open_https(request, SECRET).unwrap();
+        let completion = adapter
+            .drain_canonical(&responses_api_receipt(exchange, request_id))
+            .unwrap();
+        assert!(
+            matches!(completion.terminal, ProviderGatewayTerminal::Failed { charge: Some(charge), .. } if charge.usage.input_tokens == 20 && charge.usage.output_tokens == 7)
+        );
+        let frames = completion
+            .frames
+            .iter()
+            .map(|frame| serde_json::from_str::<serde_json::Value>(frame.payload_json()).unwrap())
+            .collect::<Vec<_>>();
+        assert!(
+            frames
+                .iter()
+                .any(|frame| frame["type"] == "server_model"
+                    && frame["model"] == "observed-api-model")
+        );
+        assert!(!frames.iter().any(|frame| frame["type"] == "completed"));
+        assert_eq!(
+            frames.last().unwrap()["error"]["code"],
+            "RESPONSE_SCHEMA_INVALID"
+        );
+        assert_eq!(frames.last().unwrap()["error"]["retryable"], false);
+        assert_eq!(fixture.finish().len(), 1);
+    }
+
+    #[test]
+    fn text_responses_https_accepts_native_tool_input_with_a_final_schema() {
+        let payload = json_object_payload();
+        let source = "const result = await tools.exec_command({cmd:'printf ready'}); text(result);";
+        let body = responses_api_body(source);
+        let fixture = TlsFixture::start(vec![TestResponse {
+            status: "200 OK",
+            content_type: "text/event-stream",
+            body: &body,
+            declared_length: None,
+            delay: Duration::ZERO,
+        }]);
+        let adapter = HttpsSseProviderAdapter::try_new(
+            config(&fixture).with_openai_responses_text(32_768).unwrap(),
+        )
+        .unwrap();
+        let exchange = ModelExchangeId("mdl_00000000000000000000000001".into());
+        let request_id = RequestId("req_00000000000000000000000001".into());
+        let mut request = invocation(&exchange, &request_id);
+        request.payload = &payload;
+        adapter.open_https(request, SECRET).unwrap();
+        let completion = adapter
+            .drain_canonical(&responses_api_receipt(exchange, request_id))
+            .unwrap();
+        assert!(matches!(
+            completion.terminal,
+            ProviderGatewayTerminal::Completed { .. }
+        ));
+        let frames = completion
+            .frames
+            .iter()
+            .map(|frame| serde_json::from_str::<serde_json::Value>(frame.payload_json()).unwrap())
+            .collect::<Vec<_>>();
+        let item = &frames
+            .iter()
+            .find(|frame| frame["type"] == "output_item_done")
+            .unwrap()["item"];
+        assert_eq!(item["type"], "custom_tool_call");
+        assert_eq!(item["id"], "ct-api");
+        assert_eq!(item["call_id"], "call-api");
+        assert_eq!(item["input"], source);
+        assert_eq!(fixture.finish().len(), 1);
+    }
+
+    #[test]
+    fn text_responses_device_config_selects_explicit_wire_mode_and_keeps_defaults() {
+        let payload = json_object_payload();
+        let original: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        for mode in [None, Some("json_schema"), Some("json_object"), Some("text")] {
+            let mut config = serde_json::json!({
+                "providerId":"provider-https-fixture","displayName":"Public fixture",
+                "endpoint":"https://models.example/v1/responses","protocol":"openai_responses",
+                "modelIds":["fixture-model"],"enabled":true
+            });
+            if let Some(mode) = mode {
+                config["responsesStructuredOutput"] = mode.into();
+            }
+            let config = serde_json::from_value(config).unwrap();
+            let adapter = crate::device_store::adapter(&config, BTreeMap::new(), None).unwrap();
+            let exchange = ModelExchangeId("mdl_00000000000000000000000001".into());
+            let request_id = RequestId("req_00000000000000000000000001".into());
+            let mut request = invocation(&exchange, &request_id);
+            request.payload = &payload;
+            let bytes = adapter.prepare_responses_payload(request).unwrap().unwrap();
+            let sent: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(sent["tools"], original["request"]["tools"]);
+            assert_eq!(sent["input"], original["request"]["input"]);
+            match mode {
+                Some("text") => assert!(sent.get("text").is_none()),
+                Some("json_object") => assert_eq!(
+                    sent["text"]["format"],
+                    serde_json::json!({"type":"json_object"})
+                ),
+                None | Some("json_schema") => {
+                    assert_eq!(sent["text"], original["request"]["text"]);
+                    assert_eq!(sent["instructions"], original["request"]["instructions"]);
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn text_responses_rejects_unknown_schema_before_network() {
+        let fixture = TlsFixture::start(Vec::new());
+        let adapter = HttpsSseProviderAdapter::try_new(
+            config(&fixture).with_openai_responses_text(32_768).unwrap(),
+        )
+        .unwrap();
+        let mut payload: serde_json::Value =
+            serde_json::from_slice(&json_object_payload()).unwrap();
+        payload["request"]["text"]["format"]["schema"]["properties"]["ok"]["pattern"] =
+            serde_json::json!("unsupported");
+        let payload = serde_json::to_vec(&payload).unwrap();
+        let exchange = ModelExchangeId("mdl_00000000000000000000000001".into());
+        let request_id = RequestId("req_00000000000000000000000001".into());
+        let mut request = invocation(&exchange, &request_id);
+        request.payload = &payload;
+        assert!(adapter.open_https(request, SECRET).is_err());
+        assert_eq!(fixture.finish().len(), 0);
+    }
+
+    #[test]
+    fn json_object_responses_https_rejects_invalid_final_retaining_usage_and_model() {
+        let payload = json_object_payload();
+        let body = json_object_body(r#"{"ok":"wrong","findings":[]}"#);
+        let fixture = TlsFixture::start(vec![TestResponse {
+            status: "200 OK",
+            content_type: "text/event-stream",
+            body: &body,
+            declared_length: None,
+            delay: Duration::ZERO,
+        }]);
+        let adapter = HttpsSseProviderAdapter::try_new(
+            config(&fixture)
+                .with_openai_responses_json_object(32_768)
+                .unwrap(),
+        )
+        .unwrap();
+        let exchange = ModelExchangeId("mdl_00000000000000000000000001".into());
+        let request_id = RequestId("req_00000000000000000000000001".into());
+        let mut request = invocation(&exchange, &request_id);
+        request.payload = &payload;
+        adapter.open_https(request, SECRET).unwrap();
+        let completion = adapter
+            .drain_canonical(&responses_api_receipt(exchange, request_id))
+            .unwrap();
+        assert!(
+            matches!(completion.terminal, ProviderGatewayTerminal::Failed { charge: Some(charge), .. } if charge.usage.input_tokens == 20 && charge.usage.output_tokens == 7)
+        );
+        let frames = completion
+            .frames
+            .iter()
+            .map(|frame| serde_json::from_str::<serde_json::Value>(frame.payload_json()).unwrap())
+            .collect::<Vec<_>>();
+        assert!(
+            frames
+                .iter()
+                .any(|frame| frame["type"] == "server_model"
+                    && frame["model"] == "observed-api-model")
+        );
+        assert!(!frames.iter().any(|frame| frame["type"] == "completed"));
+        assert_eq!(frames.last().unwrap()["type"], "error");
+        assert_eq!(fixture.finish().len(), 1);
+    }
+
+    #[test]
+    fn json_object_responses_rejects_unknown_schema_before_network() {
+        let fixture = TlsFixture::start(Vec::new());
+        let adapter = HttpsSseProviderAdapter::try_new(
+            config(&fixture)
+                .with_openai_responses_json_object(32_768)
+                .unwrap(),
+        )
+        .unwrap();
+        let mut payload: serde_json::Value =
+            serde_json::from_slice(&json_object_payload()).unwrap();
+        payload["request"]["text"]["format"]["schema"]["properties"]["ok"]["pattern"] =
+            serde_json::json!("unsupported");
+        let payload = serde_json::to_vec(&payload).unwrap();
+        let exchange = ModelExchangeId("mdl_00000000000000000000000001".into());
+        let request_id = RequestId("req_00000000000000000000000001".into());
+        let mut request = invocation(&exchange, &request_id);
+        request.payload = &payload;
+        assert!(adapter.prepare_responses_payload(request).is_err());
+        assert_eq!(fixture.finish().len(), 0);
+    }
+
+    #[test]
+    fn openai_responses_https_preserves_custom_contract_and_observes_real_model() {
+        let payload = responses_api_payload();
+        let original: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        let source = "text(true);\ntext('中文');";
+        let body = responses_api_body(source);
+        let fixture = TlsFixture::start(vec![TestResponse {
+            status: "200 OK",
+            content_type: "text/event-stream",
+            body: &body,
+            declared_length: None,
+            delay: Duration::ZERO,
+        }]);
+        let settings = config(&fixture)
+            .with_openai_responses(32_768)
+            .unwrap()
+            .with_custom_headers([(
+                "x-openai-internal-codex-responses-lite".into(),
+                "true".into(),
+            )])
+            .unwrap();
+        let adapter = HttpsSseProviderAdapter::try_new(settings).unwrap();
+        let exchange = ModelExchangeId("mdl_00000000000000000000000001".into());
+        let request_id = RequestId("req_00000000000000000000000001".into());
+        let mut request = invocation(&exchange, &request_id);
+        request.payload = &payload;
+        adapter.open_https(request, SECRET).unwrap();
+        let completion = adapter
+            .drain_canonical(&responses_api_receipt(exchange, request_id))
+            .unwrap();
+        let frames = completion
+            .frames
+            .iter()
+            .map(|frame| serde_json::from_str::<serde_json::Value>(frame.payload_json()).unwrap())
+            .collect::<Vec<_>>();
+        assert!(
+            frames
+                .iter()
+                .any(|frame| frame["type"] == "server_model"
+                    && frame["model"] == "observed-api-model")
+        );
+        assert!(
+            frames
+                .iter()
+                .any(|frame| frame["type"] == "output_item_done"
+                    && frame["item"]["type"] == "custom_tool_call"
+                    && frame["item"]["input"] == source)
+        );
+        let requests = fixture.finish();
+        assert_eq!(requests.len(), 1);
+        let request = &requests[0];
+        assert!(contains_ascii_case_insensitive(
+            request,
+            b"x-openai-internal-codex-responses-lite: true"
+        ));
+        assert!(contains_ascii_case_insensitive(
+            request,
+            b"Authorization: Bearer provider-https-sse-secret-fixture"
+        ));
+        for header in [
+            b"ChatGPT-Account-Id:".as_slice(),
+            b"OpenAI-Beta:",
+            b"Anthropic-Version:",
+            b"originator:",
+        ] {
+            assert!(!contains_ascii_case_insensitive(request, header));
+        }
+        let start = find_bytes(request, b"\r\n\r\n").unwrap() + 4;
+        let sent: serde_json::Value = serde_json::from_slice(&request[start..]).unwrap();
+        assert_eq!(sent["tools"], original["request"]["tools"]);
+        assert_eq!(sent["input"], original["request"]["input"]);
+        assert_eq!(sent["max_output_tokens"], 32_768);
+    }
+
+    #[test]
+    fn openai_responses_https_still_blocks_keys_and_private_header_echoes() {
+        for echoed in ["private-header-token", std::str::from_utf8(SECRET).unwrap()] {
+            let body = responses_api_body(&format!("text('{echoed}');"));
+            let fixture = TlsFixture::start(vec![TestResponse {
+                status: "200 OK",
+                content_type: "text/event-stream",
+                body: &body,
+                declared_length: None,
+                delay: Duration::ZERO,
+            }]);
+            let settings = config(&fixture)
+                .with_openai_responses(32_768)
+                .unwrap()
+                .with_custom_headers([
+                    (
+                        "x-openai-internal-codex-responses-lite".into(),
+                        "true".into(),
+                    ),
+                    (
+                        "x-private-provider-header".into(),
+                        "private-header-token".into(),
+                    ),
+                ])
+                .unwrap();
+            let adapter = HttpsSseProviderAdapter::try_new(settings).unwrap();
+            let exchange = ModelExchangeId("mdl_00000000000000000000000001".into());
+            let request_id = RequestId("req_00000000000000000000000001".into());
+            let payload = responses_api_payload();
+            let mut request = invocation(&exchange, &request_id);
+            request.payload = &payload;
+            adapter.open_https(request, SECRET).unwrap();
+            assert_eq!(
+                adapter
+                    .drain_canonical(&responses_api_receipt(exchange, request_id))
+                    .unwrap_err()
+                    .kind(),
+                HttpsSseProviderErrorKind::CredentialLeak
+            );
+            assert_eq!(fixture.finish().len(), 1);
+        }
+    }
+
+    #[test]
+    fn openai_responses_https_requires_sse_mime() {
+        for content_type in ["", "application/json"] {
+            let body = responses_api_body("text(true);");
+            let fixture = TlsFixture::start(vec![TestResponse {
+                status: "200 OK",
+                content_type,
+                body: &body,
+                declared_length: None,
+                delay: Duration::ZERO,
+            }]);
+            let adapter = HttpsSseProviderAdapter::try_new(
+                config(&fixture).with_openai_responses(32_768).unwrap(),
+            )
+            .unwrap();
+            let exchange = ModelExchangeId("mdl_00000000000000000000000001".into());
+            let request_id = RequestId("req_00000000000000000000000001".into());
+            let payload = responses_api_payload();
+            let mut request = invocation(&exchange, &request_id);
+            request.payload = &payload;
+            assert_eq!(
+                format!(
+                    "{:?}",
+                    adapter.open_https(request, SECRET).unwrap_err().kind()
+                ),
+                "ResponseContentType"
+            );
+            assert_eq!(fixture.finish().len(), 1);
+        }
+    }
+
+    #[test]
+    fn openai_responses_https_accepts_complete_terminal_before_http_tail_cut() {
+        let body = responses_api_body("text(true);");
+        let fixture = TlsFixture::start(vec![TestResponse {
+            status: "200 OK",
+            content_type: "text/event-stream",
+            body: &body,
+            declared_length: Some(100_000),
+            delay: Duration::ZERO,
+        }]);
+        let adapter = HttpsSseProviderAdapter::try_new(
+            config(&fixture).with_openai_responses(32_768).unwrap(),
+        )
+        .unwrap();
+        let exchange = ModelExchangeId("mdl_00000000000000000000000001".into());
+        let request_id = RequestId("req_00000000000000000000000001".into());
+        let payload = responses_api_payload();
+        let mut request = invocation(&exchange, &request_id);
+        request.payload = &payload;
+        adapter.open_https(request, SECRET).unwrap();
+        let completion = adapter
+            .drain_canonical(&responses_api_receipt(exchange, request_id))
+            .unwrap();
+        assert_eq!(
+            completion.terminal.outcome(),
+            crate::ProviderGatewayTerminalOutcome::Succeeded
+        );
+        assert_eq!(fixture.finish().len(), 1);
+    }
 
     #[test]
     fn retry_after_retains_delta_and_http_date_without_copying_secret_headers() {

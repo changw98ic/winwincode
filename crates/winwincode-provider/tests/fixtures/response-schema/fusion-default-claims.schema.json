@@ -1,0 +1,83 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "claims": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "claimKey": {
+            "type": "string"
+          },
+          "evidence": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "evidenceType": {
+                  "enum": [
+                    "test",
+                    "command",
+                    "diff",
+                    "file",
+                    "commit",
+                    "pull_request",
+                    "runtime_event",
+                    "review_finding"
+                  ],
+                  "type": "string"
+                },
+                "sourceRef": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "evidenceType",
+                "sourceRef"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "position": {
+            "enum": [
+              "supports",
+              "opposes"
+            ],
+            "type": "string"
+          },
+          "requiredEvidence": {
+            "items": {
+              "enum": [
+                "test",
+                "command",
+                "diff",
+                "file",
+                "commit",
+                "pull_request",
+                "runtime_event",
+                "review_finding"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "summary": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "claimKey",
+          "summary",
+          "position",
+          "evidence",
+          "requiredEvidence"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "claims"
+  ],
+  "type": "object"
+}

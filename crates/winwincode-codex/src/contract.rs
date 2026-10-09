@@ -30,6 +30,7 @@ use crate::candidate_artifact_outbox::{
 use crate::diagnostic_artifact_outbox::{
     DiagnosticArtifactAuthority, DiagnosticArtifactUpload, RetainedDiagnosticArtifact,
 };
+use crate::failure_diagnostic::CodexFailureDiagnostic;
 
 /// Local first-start check shared with a Provider thread; it carries no secrets.
 pub type LocalModelStartGuard = Arc<dyn Fn() -> bool + Send + Sync>;
@@ -356,6 +357,19 @@ pub trait CodexCoreAdapter {
         _thread_id: &CodexThreadId,
     ) -> Result<Option<ExecutionOutcomeUsage>, Self::Error> {
         Ok(None)
+    }
+
+    /// Returns the first retained safe classification for this exact run.
+    fn retained_failure_diagnostic(
+        &self,
+        _thread_id: &CodexThreadId,
+    ) -> Option<CodexFailureDiagnostic> {
+        None
+    }
+
+    /// Classifies an adapter error before a durable thread exists.
+    fn error_diagnostic(&self, _error: &Self::Error) -> Option<CodexFailureDiagnostic> {
+        None
     }
 
     fn ensure_thread(

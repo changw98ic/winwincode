@@ -138,11 +138,71 @@ pub enum ClientSessionsErrorKind {
     Unavailable,
 }
 
+/// Finite internal stages; diagnostics never retain an upstream error or input.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum LaunchFailureStage {
+    StorageOpen,
+    Prepare,
+    CredentialPublication,
+    MirrorRevision,
+    LaunchBundle,
+    GrantPoll,
+    RouteExecution,
+}
+
+impl LaunchFailureStage {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::StorageOpen => "storage_open",
+            Self::Prepare => "prepare",
+            Self::CredentialPublication => "credential_publication",
+            Self::MirrorRevision => "mirror_revision",
+            Self::LaunchBundle => "launch_bundle",
+            Self::GrantPoll => "grant_poll",
+            Self::RouteExecution => "route_execution",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum LaunchFailureCode {
+    Unavailable,
+    ExchangeUnavailable,
+    ExchangeInvalidRequest,
+    ExchangeAuthentication,
+    Storage(winwincode_storage::StorageErrorKind),
+}
+
+impl LaunchFailureCode {
+    const fn as_str(self) -> &'static str {
+        use winwincode_storage::StorageErrorKind;
+        match self {
+            Self::Unavailable => "unavailable",
+            Self::ExchangeUnavailable => "exchange_unavailable",
+            Self::ExchangeInvalidRequest => "exchange_invalid_request",
+            Self::ExchangeAuthentication => "exchange_authentication",
+            Self::Storage(kind) => match kind {
+                StorageErrorKind::InvalidInput => "storage_invalid_input",
+                StorageErrorKind::RevisionConflict => "storage_revision_conflict",
+                StorageErrorKind::RequestConflict => "storage_request_conflict",
+                StorageErrorKind::RequestReplayMissing => "storage_request_replay_missing",
+                StorageErrorKind::JournalAlreadyExists => "storage_journal_already_exists",
+                StorageErrorKind::JournalNotFound => "storage_journal_not_found",
+                StorageErrorKind::JournalConflict => "storage_journal_conflict",
+                StorageErrorKind::EventCursorExpired => "storage_event_cursor_expired",
+                StorageErrorKind::Adapter => "storage_adapter",
+                StorageErrorKind::Closed => "storage_closed",
+            },
+        }
+    }
+}
+
 /// Secret-free launch flow failure.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct ClientSessionsError {
     kind: ClientSessionsErrorKind,
     message: String,
+    failure: Option<(LaunchFailureStage, LaunchFailureCode)>,
 }
 
 impl ClientSessionsError {
@@ -151,11 +211,43 @@ impl ClientSessionsError {
         self.kind
     }
 
+    /// Internal failure stage for safe request-correlated diagnostics.
+    #[must_use]
+    pub const fn failure_stage(&self) -> Option<&'static str> {
+        match self.failure {
+            Some((stage, _)) => Some(stage.as_str()),
+            None => None,
+        }
+    }
+
+    /// Finite adapter category; never an upstream error message or SQL text.
+    #[must_use]
+    pub const fn failure_code(&self) -> Option<&'static str> {
+        match self.failure {
+            Some((_, code)) => Some(code.as_str()),
+            None => None,
+        }
+    }
+
     fn new(kind: ClientSessionsErrorKind, message: impl Into<String>) -> Self {
         Self {
             kind,
             message: message.into(),
+            failure: None,
         }
+    }
+
+    fn unavailable_at(stage: LaunchFailureStage, code: LaunchFailureCode) -> Self {
+        let mut error = Self::unavailable();
+        error.failure = Some((stage, code));
+        error
+    }
+
+    fn at_stage(mut self, stage: LaunchFailureStage) -> Self {
+        if self.kind == ClientSessionsErrorKind::Unavailable && self.failure.is_none() {
+            self.failure = Some((stage, LaunchFailureCode::Unavailable));
+        }
+        self
     }
 
     fn invalid_request() -> Self {
@@ -170,6 +262,18 @@ impl ClientSessionsError {
             ClientSessionsErrorKind::Unavailable,
             "client session launch service is unavailable",
         )
+    }
+}
+
+impl fmt::Debug for ClientSessionsError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ClientSessionsError")
+            .field("kind", &self.kind)
+            .field("message", &self.message)
+            .field("failure_stage", &self.failure_stage())
+            .field("failure_code", &self.failure_code())
+            .finish_non_exhaustive()
     }
 }
 
@@ -326,14 +430,20 @@ impl ClientSessionsApplication {
         user_id: &str,
         request: &Value,
     ) -> Result<Value, ClientSessionsError> {
-        let prepared = self.prepare(user_id, request)?;
+        let prepared = self
+            .prepare(user_id, request)
+            .map_err(|error| error.at_stage(LaunchFailureStage::Prepare))?;
         let grant_id = prepared.grant.worker_launch_grant_id.clone();
         let deadline = tokio::time::Instant::now() + self.config.launch_wait;
         loop {
-            match self.poll(&grant_id)? {
+            match self
+                .poll(&grant_id)
+                .map_err(|error| error.at_stage(LaunchFailureStage::GrantPoll))?
+            {
                 PollOutcome::Pending => {}
                 PollOutcome::Consumed => {
-                    self.route_work_run(user_id, &prepared)?;
+                    self.route_work_run(user_id, &prepared)
+                        .map_err(|error| error.at_stage(LaunchFailureStage::RouteExecution))?;
                     return Ok(session_body(&prepared));
                 }
                 PollOutcome::Failed(error) => return Err(error),
@@ -789,13 +899,28 @@ impl ClientSessionsApplication {
                 worker_credential: credential_material.material().to_owned(),
                 expires_at: expires_at.clone(),
             })
-            .map_err(|_| ClientSessionsError::unavailable())?;
+            .map_err(|error| {
+                let code = if error.is_invalid_request() {
+                    LaunchFailureCode::ExchangeInvalidRequest
+                } else if error.is_authentication() {
+                    LaunchFailureCode::ExchangeAuthentication
+                } else {
+                    LaunchFailureCode::ExchangeUnavailable
+                };
+                ClientSessionsError::unavailable_at(LaunchFailureStage::CredentialPublication, code)
+            })?;
 
         // The launch command is computed against the mirror revision the
         // device last confirmed: the device refuses any other stamp.
         let mirror_revision_view =
-            client_mirror_revision_view(&self.data_directory, &node.client_node_id)
-                .map_err(|_| ClientSessionsError::unavailable())?;
+            client_mirror_revision_view(&self.data_directory, &node.client_node_id).map_err(
+                |_| {
+                    ClientSessionsError::unavailable_at(
+                        LaunchFailureStage::MirrorRevision,
+                        LaunchFailureCode::Unavailable,
+                    )
+                },
+            )?;
         let message = ServerToClientMessage::WorkerLaunch(ServerWorkerLaunchPayload {
             occupancy: occupancy_stamp(
                 mirror_revision_view,
@@ -839,9 +964,13 @@ impl ClientSessionsApplication {
         .map_err(|error| match error {
             winwincode_storage::WorkerLaunchBundleError::Launch(error) => issue_gate_error(
                 winwincode_control_plane::WorkerLaunchGrantServiceError::from(error).kind(),
-            ),
-            winwincode_storage::WorkerLaunchBundleError::Storage(_) => {
-                ClientSessionsError::unavailable()
+            )
+            .at_stage(LaunchFailureStage::LaunchBundle),
+            winwincode_storage::WorkerLaunchBundleError::Storage(error) => {
+                ClientSessionsError::unavailable_at(
+                    LaunchFailureStage::LaunchBundle,
+                    LaunchFailureCode::Storage(error.kind()),
+                )
             }
         })?;
 
@@ -867,7 +996,9 @@ impl ClientSessionsApplication {
             .snapshot(worker_launch_grant_id)
             .map_err(|_| ClientSessionsError::unavailable())?;
         let Some(grant) = grant else {
-            return Ok(PollOutcome::Failed(ClientSessionsError::unavailable()));
+            return Ok(PollOutcome::Failed(
+                ClientSessionsError::unavailable().at_stage(LaunchFailureStage::GrantPoll),
+            ));
         };
         match grant.state {
             LaunchGrantState::Issued => {
@@ -962,7 +1093,12 @@ impl ClientSessionsApplication {
     }
 
     fn open_storage(&self) -> Result<SqliteStorage, ClientSessionsError> {
-        SqliteStorage::open(&self.data_directory).map_err(|_| ClientSessionsError::unavailable())
+        SqliteStorage::open(&self.data_directory).map_err(|error| {
+            ClientSessionsError::unavailable_at(
+                LaunchFailureStage::StorageOpen,
+                LaunchFailureCode::Storage(error.kind()),
+            )
+        })
     }
 }
 
@@ -1454,6 +1590,34 @@ fn generate_prefixed_id(prefix: &str) -> Result<String, ClientSessionsError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_launch_grant_retains_safe_poll_diagnostics() {
+        let grant_id = generate_prefixed_id("wlg_").expect("canonical missing grant id");
+        let directory = std::env::temp_dir().join(format!(
+            "winwincode-server-grant-poll-{}-{grant_id}",
+            std::process::id()
+        ));
+        let application =
+            ClientSessionsApplication::open(&directory, &ClientSessionsConfig::default())
+                .expect("real launch application");
+        let outcome = application
+            .poll(&grant_id)
+            .expect("the native SQLite snapshot succeeds for an absent grant");
+        drop(application);
+        std::fs::remove_dir_all(&directory).expect("cleanup before red assertion");
+        let PollOutcome::Failed(error) = outcome else {
+            panic!("a missing durable grant must fail the poll");
+        };
+        assert_eq!(error.kind(), ClientSessionsErrorKind::Unavailable);
+        assert_eq!(
+            error.to_string(),
+            "client session launch service is unavailable"
+        );
+        assert!(!format!("{error:?}").contains(directory.to_string_lossy().as_ref()));
+        assert_eq!(error.failure_stage(), Some("grant_poll"));
+        assert_eq!(error.failure_code(), Some("unavailable"));
+    }
 
     #[test]
     fn config_rejects_zero_bounds() {

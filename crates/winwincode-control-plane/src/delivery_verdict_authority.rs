@@ -6,6 +6,9 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::from_slice;
 use sha2::{Digest, Sha256};
 use winwincode_delivery::{
+    application::candidate_rejection::{
+        CandidateRejectionFact, CandidateRejectionReason, current_candidate_rejection,
+    },
     application::workrun_execution::DeliveryTerminalOutcomeFacts,
     domain::{
         Delivery, SessionBinding,
@@ -148,6 +151,14 @@ pub(crate) fn resolve_current_candidate_with_source(
         return Ok(None);
     }
     let terminal = load_terminal(storage, delivery, &writer.execution_job_id)?;
+    if let Some(fact) = current_candidate_rejection(delivery)
+        && *terminal.metadata().last_event_sequence() == fact.last_event_sequence
+        && terminal.metadata().artifacts().iter().any(|artifact| {
+            artifact.artifact_id == fact.artifact_id && artifact.digest == fact.artifact_digest
+        })
+    {
+        return Ok(None);
+    }
     let source = source_for_terminal(
         artifacts,
         source_resolver,
@@ -197,7 +208,16 @@ pub(crate) fn freeze_source(
     let input = winwincode_storage::delivery_candidate_source(source);
     if !remediator {
         return freeze_delivery_candidate_from_source(delivery, &input, terminal, candidate_id)
-            .map_err(|error| authority_error(&error));
+            .map_err(|error| {
+                rejected_source_error(
+                    delivery,
+                    source,
+                    terminal,
+                    None,
+                    CandidateRejectionReason::InvalidCandidateSource,
+                    error.to_string(),
+                )
+            });
     }
     let (durable, job) = crate::delivery_transaction::load_durable_execution_job(storage, job_id)
         .map_err(|error| storage_error(&error))?;
@@ -206,10 +226,16 @@ pub(crate) fn freeze_source(
             "remediator has no WorkRun scope",
         ));
     };
-    let sealed = job_scope
-        .rework_authorization
-        .as_ref()
-        .ok_or_else(|| DeliveryAuthorityError::new("remediator has no sealed rework scope"))?;
+    let sealed = job_scope.rework_authorization.as_ref().ok_or_else(|| {
+        rejected_source_error(
+            delivery,
+            source,
+            terminal,
+            None,
+            CandidateRejectionReason::MissingReworkAuthorization,
+            "remediator has no sealed rework scope",
+        )
+    })?;
     let key = crate::delivery_transaction::delivery_journal_key(delivery.id())
         .map_err(|error| authority_error(&error))?;
     let loaded = storage
@@ -260,7 +286,12 @@ pub(crate) fn freeze_source(
         || candidate.candidate_tree_id() != sealed.source_candidate_tree_id
         || !sealed.requires_full_reverification
     {
-        return Err(DeliveryAuthorityError::new(
+        return Err(rejected_source_error(
+            delivery,
+            source,
+            terminal,
+            Some(sealed.authorization_digest.clone()),
+            CandidateRejectionReason::ReworkAuthorizationMismatch,
             "rework output differs from its durable authorization",
         ));
     }
@@ -272,12 +303,38 @@ pub(crate) fn freeze_source(
         terminal,
         candidate.candidate_commit_id(),
     )?;
+    if delta.changed_paths().iter().any(|path| {
+        !sealed
+            .targets
+            .iter()
+            .any(|target| target.file_path == path.path())
+    }) {
+        return Err(rejected_source_error(
+            delivery,
+            source,
+            terminal,
+            Some(sealed.authorization_digest.clone()),
+            CandidateRejectionReason::ReworkSourceOutsideAuthorization,
+            "rework output changes a path outside its sealed authorization",
+        ));
+    }
     let delta = winwincode_storage::delivery_rework_candidate_source(
         source_resolver,
         &previous_source,
         &delta,
     )
-    .map_err(|error| authority_error(&error))?;
+    .map_err(|error| match error.kind() {
+        winwincode_storage::ArtifactErrorKind::Conflict
+        | winwincode_storage::ArtifactErrorKind::InvalidInput => rejected_source_error(
+            delivery,
+            source,
+            terminal,
+            Some(sealed.authorization_digest.clone()),
+            CandidateRejectionReason::ReworkSourceOutsideAuthorization,
+            error.to_string(),
+        ),
+        _ => authority_error(&error),
+    })?;
     freeze_rework_candidate_from_sources(
         delivery,
         &authorization,
@@ -286,7 +343,54 @@ pub(crate) fn freeze_source(
         terminal,
         candidate_id,
     )
-    .map_err(|error| authority_error(&error))
+    .map_err(|error| {
+        rejected_source_error(
+            delivery,
+            source,
+            terminal,
+            Some(sealed.authorization_digest.clone()),
+            CandidateRejectionReason::ReworkSourceOutsideAuthorization,
+            error.to_string(),
+        )
+    })
+}
+
+fn rejected_source_error(
+    delivery: &Delivery,
+    source: &ValidatedGitSourceArtifact,
+    terminal: &DeliveryTerminalOutcomeFacts,
+    authorization_digest: Option<Sha256Digest>,
+    reason: CandidateRejectionReason,
+    message: impl Into<String>,
+) -> DeliveryAuthorityError {
+    let Some(writer) = delivery.snapshot().session_bindings.iter().find(|binding| {
+        binding.execution_job_id == *terminal.authority().active_lease().execution_job_id()
+            && binding.work_run_id == *terminal.work_run_id()
+    }) else {
+        return DeliveryAuthorityError::new(message);
+    };
+    DeliveryAuthorityError::rejected_candidate(
+        message,
+        CandidateRejectionFact {
+            version: 1,
+            delivery_id: delivery.id().clone(),
+            delivery_spec_id: delivery.snapshot().spec.id.clone(),
+            delivery_spec_revision: delivery.snapshot().spec.revision,
+            source_delivery_revision: delivery.revision(),
+            session_binding_id: writer.id.clone(),
+            work_run_id: writer.work_run_id.clone(),
+            job_id: writer.execution_job_id.clone(),
+            attempt: writer.attempt,
+            artifact_id: source.artifact().artifact_id().clone(),
+            artifact_digest: source.artifact().digest().clone(),
+            last_event_sequence: terminal.metadata().last_event_sequence().clone(),
+            candidate_commit_id: source.candidate_commit_id().into(),
+            candidate_tree_id: source.candidate_tree_id().into(),
+            diff_sha256: source.diff_sha256().into(),
+            authorization_digest,
+            reason,
+        },
+    )
 }
 
 pub(crate) fn current_writer(

@@ -283,6 +283,35 @@ function errorCodeOf(block) {
   return null
 }
 
+function providerReport(protocol, responsesStructuredOutput) {
+  const message = validMessage('client.provider.report')
+  message.snapshot.providers = [{ config: {
+    providerId: 'responses-test', displayName: 'Responses Test', endpoint: 'https://models.example/v1/responses',
+    protocol, modelIds: ['test-model'], enabled: true,
+    ...(responsesStructuredOutput === undefined ? {} : { responsesStructuredOutput }),
+  }, credentialConfigured: true }]
+  return message
+}
+
+for (const mode of [undefined, 'json_schema', 'json_object', 'text']) {
+  test(`Provider reports preserve Responses structured output ${mode ?? 'default'}`, () => {
+    const message = providerReport('openai_responses', mode)
+    const parsed = parseClientToServerMessage(message)
+    assert.deepEqual(parsed.snapshot.providers[0].config, message.snapshot.providers[0].config)
+  })
+}
+
+test('Provider reports reject structured output modes on other protocols and unknown modes', () => {
+  for (const protocol of ['anthropic_messages', 'openai_chat_completions', 'canonical', 'codex_chatgpt', 'chatgpt_plan']) {
+    for (const mode of ['json_schema', 'json_object', 'text']) {
+      assert.equal(errorCodeOf(() => parseClientToServerMessage(providerReport(protocol, mode))), 'INVALID_VALUE')
+    }
+  }
+  for (const mode of ['json', '', null, 1]) {
+    assert.equal(errorCodeOf(() => parseClientToServerMessage(providerReport('openai_responses', mode))), 'INVALID_VALUE')
+  }
+})
+
 test('schemaVersion is the string constant winwincode/v1', () => {
   assert.equal(CLIENT_CONTROL_SCHEMA_VERSION, 'winwincode/v1')
   assert.equal(typeof CLIENT_CONTROL_SCHEMA_VERSION, 'string')

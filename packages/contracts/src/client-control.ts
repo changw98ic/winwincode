@@ -1,4 +1,4 @@
-import { DeviceExtensionOutcome, DeviceExtensionMcpTransport, DeviceExtensionMcpConnectionStatus, type DeviceExtensionReport, DeviceProviderOutcome, DeviceProviderProtocol, type DeviceConfigurationEnvelope,
+import { DeviceExtensionOutcome, DeviceExtensionMcpTransport, DeviceExtensionMcpConnectionStatus, type DeviceExtensionReport, DeviceProviderOutcome, DeviceProviderProtocol, DeviceResponsesStructuredOutput, type DeviceConfigurationEnvelope,
   type DeviceProviderReport, type DeviceProviderConfig } from './device-provider.generated.js'
 
 /**
@@ -2801,12 +2801,17 @@ function providerText(value: unknown, path: string, max: number): string {
 
 function parseProviderConfig(value: unknown, path: string): DeviceProviderConfig {
   const input = record(value, path)
-  exactKeys(input, ['providerId', 'displayName', 'endpoint', 'protocol', 'modelIds', 'enabled'], path)
+  exactKeys(input, ['providerId', 'displayName', 'endpoint', 'protocol', 'modelIds', 'enabled'], path, ['responsesStructuredOutput'])
   const modelIds = boundedArray(input.modelIds, `${path}.modelIds`, 100).map(item => providerText(item, path, 128))
   if (modelIds.length === 0 || new Set(modelIds).size !== modelIds.length) controlError('INVALID_VALUE', path, 'Provider models must be nonempty and unique')
+  const protocol = enumValue(input.protocol, Object.values(DeviceProviderProtocol), path)
+  const responsesStructuredOutput = Object.hasOwn(input, 'responsesStructuredOutput')
+    ? enumValue(input.responsesStructuredOutput, Object.values(DeviceResponsesStructuredOutput), `${path}.responsesStructuredOutput`)
+    : undefined
+  if (responsesStructuredOutput !== undefined && protocol !== DeviceProviderProtocol.OpenaiResponses) controlError('INVALID_VALUE', path, 'Structured output mode requires OpenAI Responses')
   return { providerId: providerText(input.providerId, path, 128), displayName: providerText(input.displayName, path, 200),
-    endpoint: providerText(input.endpoint, path, 2048), protocol: enumValue(input.protocol, Object.values(DeviceProviderProtocol), path),
-    modelIds, enabled: booleanValue(input.enabled, path) }
+    endpoint: providerText(input.endpoint, path, 2048), protocol,
+    modelIds, enabled: booleanValue(input.enabled, path), ...(responsesStructuredOutput === undefined ? {} : { responsesStructuredOutput }) }
 }
 
 function parseProviderReport(input: Readonly<Record<string, unknown>>, path: string): ClientProviderReportMessage {
