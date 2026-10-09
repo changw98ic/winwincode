@@ -15,10 +15,9 @@ pub use opencode_store::OpenCodeCredentialError;
 mod provider_anthropic;
 pub mod provider_https_sse;
 mod provider_openai;
+mod provider_sse_failure_log;
 mod provider_sse_framing;
 pub mod provider_stream;
-mod provider_transport;
-mod request_retry;
 mod types;
 
 pub use credential_leak_gate::{
@@ -76,3 +75,6 @@ pub use device_extensions::InstalledMcpTools;
 
 mod device_jev_judge;
 pub use device_jev_judge::StoredJevJudge;
+
+#[cfg(test)]
+mod diagnostics_regression_tests;

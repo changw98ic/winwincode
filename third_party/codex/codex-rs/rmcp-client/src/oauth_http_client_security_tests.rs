@@ -459,3 +459,125 @@ async fn same_origin_redirects_preserve_timeout_and_response_body_limits() -> Re
 
     Ok(())
 }
+
+struct RetryOwnershipHttpClient {
+    requests: std::sync::Mutex<Vec<HttpRequestParams>>,
+    status: u16,
+}
+impl HttpClient for RetryOwnershipHttpClient {
+    fn http_request(
+        &self,
+        _: HttpRequestParams,
+    ) -> BoxFuture<'_, Result<HttpRequestResponse, ExecServerError>> {
+        Box::pin(async { panic!("OAuth uses the complete streaming attempt") })
+    }
+    fn http_request_stream(
+        &self,
+        params: HttpRequestParams,
+    ) -> BoxFuture<'_, Result<(HttpRequestResponse, HttpResponseBodyStream), ExecServerError>> {
+        Box::pin(async move {
+            let mut requests = self.requests.lock().unwrap();
+            requests.push(params);
+            Ok((
+                HttpRequestResponse {
+                    status: self.status,
+                    headers: Vec::new(),
+                    body: Vec::new().into(),
+                },
+                HttpResponseBodyStream::from_chunks(Vec::new()),
+            ))
+        })
+    }
+}
+
+#[tokio::test]
+async fn embedded_oauth_policy_owns_one_budget_and_preserves_request_identity() -> Result<()> {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let policy_seen = Arc::clone(&seen);
+    let policy: Arc<crate::NetworkRetryPolicy> = Arc::new(move |attempt, _, facts| {
+        policy_seen
+            .lock()
+            .unwrap()
+            .push((attempt, facts.status, facts.reconcile_first));
+        (!facts.reconcile_first && attempt < 4).then_some(Duration::from_millis(1))
+    });
+    crate::network_retry_policy::TEST_POLICY
+        .scope(policy, async {
+            let client = Arc::new(RetryOwnershipHttpClient {
+                requests: Default::default(),
+                status: 503,
+            });
+            let adapter = OAuthHttpClientAdapter::new(
+                client.clone(),
+                Default::default(),
+                "https://resource.example/mcp",
+            );
+            for verb in ["GET", "POST"] {
+                let response = adapter
+                    .execute_request(
+                        oauth2::http::Request::builder()
+                            .method(verb)
+                            .uri("https://issuer.example/token")
+                            .body(b"stable-input".to_vec())?,
+                        OAuthHttpRedirectPolicy::Stop,
+                        Some(Duration::from_secs(1)),
+                    )
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                assert_eq!(response.status().as_u16(), 503);
+            }
+            let requests = client.requests.lock().unwrap();
+            assert_eq!(requests.len(), 5);
+            let mut first = serde_json::to_value(&requests[0])?;
+            first.as_object_mut().unwrap().remove("timeoutMs");
+            for request in &requests[1..4] {
+                let mut value = serde_json::to_value(request)?;
+                value.as_object_mut().unwrap().remove("timeoutMs");
+                assert_eq!(value, first);
+            }
+            assert_eq!(
+                *seen.lock().unwrap(),
+                vec![
+                    (1, Some(503), false),
+                    (2, Some(503), false),
+                    (3, Some(503), false),
+                    (4, Some(503), false),
+                    (1, Some(503), true)
+                ]
+            );
+            Ok::<(), anyhow::Error>(())
+        })
+        .await
+}
+
+#[tokio::test]
+async fn embedded_metadata_fallback_resolves_before_network_backoff() -> Result<()> {
+    let policy: Arc<crate::NetworkRetryPolicy> =
+        Arc::new(|_, _, _| panic!("a successful metadata fallback must not retry the discovery"));
+    crate::network_retry_policy::TEST_POLICY
+        .scope(policy, async {
+            let resource = MockServer::start().await;
+            let authorization = MockServer::start().await;
+            let manager = metadata_manager(&resource, &authorization, "").await?;
+            Mock::given(method("GET"))
+                .and(path("/.well-known/oauth-authorization-server"))
+                .respond_with(ResponseTemplate::new(503))
+                .expect(1)
+                .mount(&authorization)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/.well-known/openid-configuration"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "issuer": authorization.uri(),
+                    "authorization_endpoint": format!("{}/authorize", authorization.uri()),
+                    "token_endpoint": format!("{}/token", authorization.uri())
+                })))
+                .expect(1)
+                .mount(&authorization)
+                .await;
+            manager.resolve_metadata().await?;
+            authorization.verify().await;
+            Ok::<(), anyhow::Error>(())
+        })
+        .await
+}

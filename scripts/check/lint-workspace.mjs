@@ -2,6 +2,7 @@
 
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { join, relative, resolve } from 'node:path'
+import ts from 'typescript'
 
 import { sourceBoundaryErrors } from '../lib/source-boundary-lint.mjs'
 
@@ -14,6 +15,7 @@ const workspacePackages = Object.freeze([
   'packages/contracts',
   'packages/control-plane-client',
   'packages/strongflow',
+  'packages/network-request',
 ])
 const requiredIgnoredPaths = Object.freeze([
   '.cache/',
@@ -90,7 +92,9 @@ for (const packageDirectory of workspacePackages) {
     if (/from\s+['"][^'"]+\/src\//u.test(text)) {
       errors.push(`${name}: imports another package's private src path`)
     }
-    if (/\bany\b/u.test(text)) errors.push(`${name}: explicit any is forbidden`)
+    const syntax = ts.createSourceFile(name, text, ts.ScriptTarget.Latest, true)
+    const hasExplicitAny = node => node.kind === ts.SyntaxKind.AnyKeyword || ts.forEachChild(node, hasExplicitAny) === true
+    if (hasExplicitAny(syntax)) errors.push(`${name}: explicit any is forbidden`)
     if (/\.(?:only|skip)\s*\(/u.test(text)) {
       errors.push(`${name}: focused or skipped test marker is forbidden`)
     }

@@ -434,8 +434,8 @@ where
             };
             let delivery_id = delivery.delivery_id.clone();
             sent_bytes += frame_bytes;
-            // Finish an in-flight exchange under the port's own timeout. In
-            // particular, do not cancel its receipt/accounting commit halfway.
+            // A shutdown may drop active HTTP I/O. The attempt journal then
+            // retains unknown acceptance until the durable queue reconciles it.
             let sent = self.dispatch_retained_effect(delivery).await;
             if let Err(error) = sent {
                 if error.code == WorkerErrorCode::ModelStartDeferred {

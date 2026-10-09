@@ -457,7 +457,7 @@ impl<'storage> WorkerSessionCredentialLedger<'storage> {
                    AND b.occupancy_lease_id=o.occupancy_lease_id
                    AND b.occupancy_fencing_token=o.fencing_token
                    AND g.occupancy_fencing_token=o.fencing_token
-                   AND o.client_node_id=g.client_node_id AND o.state IN ('occupied','draining')
+                   AND o.client_node_id=g.client_node_id AND o.state IN ('occupied','draining','recovery_pending')
                )
                AND EXISTS (
                  SELECT 1 FROM execution_leases l

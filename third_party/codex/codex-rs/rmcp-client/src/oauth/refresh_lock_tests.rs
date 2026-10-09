@@ -38,3 +38,26 @@ async fn acquisition_times_out_without_stealing() -> Result<()> {
     .await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn unknown_refresh_is_fenced_after_restart_until_credential_rotation() -> Result<()> {
+    let home = tempdir()?;
+    let old = "a".repeat(64);
+    let rotated = "b".repeat(64);
+    let mut lock =
+        RefreshCredentialLock::acquire_in(home.path(), "unknown", Duration::from_secs(1)).await?;
+    lock.check_refresh_outcome(&old)?;
+    lock.begin_refresh(&old)?;
+    drop(lock);
+    let mut reopened =
+        RefreshCredentialLock::acquire_in(home.path(), "unknown", Duration::from_secs(1)).await?;
+    assert!(reopened.check_refresh_outcome(&old).is_err());
+    reopened.check_refresh_outcome(&rotated)?;
+    reopened.begin_refresh(&rotated)?;
+    reopened.clear_refresh_outcome()?;
+    drop(reopened);
+    let mut completed =
+        RefreshCredentialLock::acquire_in(home.path(), "unknown", Duration::from_secs(1)).await?;
+    completed.check_refresh_outcome(&rotated)?;
+    Ok(())
+}

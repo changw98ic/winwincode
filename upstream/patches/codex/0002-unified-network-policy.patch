@@ -1,0 +1,1797 @@
+diff --git a/codex-rs/exec-server/src/client.rs b/codex-rs/exec-server/src/client.rs
+index 538bb214..868460bb 100644
+--- a/codex-rs/exec-server/src/client.rs
++++ b/codex-rs/exec-server/src/client.rs
+@@ -684,6 +684,8 @@ pub enum ExecServerError {
+     Json(#[from] serde_json::Error),
+     #[error("HTTP request failed: {0}")]
+     HttpRequest(String),
++    #[error(transparent)]
++    NetworkHttpRequest(crate::HttpNetworkFailure),
+     #[error("exec-server protocol error: {0}")]
+     Protocol(String),
+     #[error(
+@@ -1360,9 +1362,12 @@ impl From<RpcCallError> for ExecServerError {
+         match value {
+             RpcCallError::Closed => Self::Closed,
+             RpcCallError::Json(err) => Self::Json(err),
+-            RpcCallError::Server(error) => Self::Server {
+-                code: error.code,
+-                message: error.message,
++            RpcCallError::Server(error) => match crate::HttpNetworkFailure::from_rpc(&error) {
++                Some(failure) => Self::NetworkHttpRequest(failure),
++                None => Self::Server {
++                    code: error.code,
++                    message: error.message,
++                },
+             },
+             RpcCallError::TimedOut { method, timeout } => Self::Protocol(format!(
+                 "timed out waiting for exec-server `{method}` response after {timeout:?}"
+diff --git a/codex-rs/exec-server/src/client/connection_failure.rs b/codex-rs/exec-server/src/client/connection_failure.rs
+index fb263633..792a2dfb 100644
+--- a/codex-rs/exec-server/src/client/connection_failure.rs
++++ b/codex-rs/exec-server/src/client/connection_failure.rs
+@@ -42,6 +42,7 @@ impl ExecServerError {
+             | Self::ProvisioningFailed(_)
+             | Self::Json(_)
+             | Self::HttpRequest(_)
++            | Self::NetworkHttpRequest(_)
+             | Self::Protocol(_)
+             | Self::ProvisioningModeConflict { .. }
+             | Self::Server { .. }
+diff --git a/codex-rs/exec-server/src/client/route_aware_http_client.rs b/codex-rs/exec-server/src/client/route_aware_http_client.rs
+index 81dd4607..b2c4fac6 100644
+--- a/codex-rs/exec-server/src/client/route_aware_http_client.rs
++++ b/codex-rs/exec-server/src/client/route_aware_http_client.rs
+@@ -126,7 +126,12 @@ impl HttpClient for RouteAwareHttpClient {
+                     ..params
+                 })
+                 .await
+-                .map_err(|error| ExecServerError::HttpRequest(error.message))?;
++                .map_err(|error| {
++                    crate::HttpNetworkFailure::from_rpc(&error).map_or_else(
++                        || ExecServerError::HttpRequest(error.message),
++                        ExecServerError::NetworkHttpRequest,
++                    )
++                })?;
+             Ok(response)
+         }
+         .boxed()
+@@ -144,7 +149,12 @@ impl HttpClient for RouteAwareHttpClient {
+                     ..params
+                 })
+                 .await
+-                .map_err(|error| ExecServerError::HttpRequest(error.message))?;
++                .map_err(|error| {
++                    crate::HttpNetworkFailure::from_rpc(&error).map_or_else(
++                        || ExecServerError::HttpRequest(error.message),
++                        ExecServerError::NetworkHttpRequest,
++                    )
++                })?;
+             let pending_stream = pending_stream.ok_or_else(|| {
+                 ExecServerError::Protocol(
+                     "http request stream did not return a response body stream".to_string(),
+@@ -201,11 +211,9 @@ impl RouteAwareHttpRequestRunner {
+             Ok(response) => response,
+             Err(error) => {
+                 request_span.record("error.type", "request");
+-                let error_message = error.to_string();
++                let failure = crate::HttpNetworkFailure::from_request(&error);
+                 log_send_error(&method, error);
+-                return Err(internal_error(format!(
+-                    "http/request failed: {error_message}"
+-                )));
++                return Err(failure.into_rpc());
+             }
+         };
+         let status = response.status().as_u16();
+diff --git a/codex-rs/exec-server/src/lib.rs b/codex-rs/exec-server/src/lib.rs
+index 2d850e95..dd825822 100644
+--- a/codex-rs/exec-server/src/lib.rs
++++ b/codex-rs/exec-server/src/lib.rs
+@@ -1,3 +1,5 @@
++mod http_network_failure;
++pub use http_network_failure::{HttpNetworkErrorKind, HttpNetworkFailure};
+ mod arg0_exec_helper;
+ mod capability_discovery;
+ mod capability_discovery_cache;
+diff --git a/codex-rs/rmcp-client/src/http_client_adapter.rs b/codex-rs/rmcp-client/src/http_client_adapter.rs
+index bc49bd06..be2225de 100644
+--- a/codex-rs/rmcp-client/src/http_client_adapter.rs
++++ b/codex-rs/rmcp-client/src/http_client_adapter.rs
+@@ -84,6 +84,9 @@ pub(crate) struct StreamableHttpClientAdapter {
+     has_configured_headers: bool,
+     redirect_mode: StreamableHttpRedirectMode,
+     initialize_deadline: Arc<Mutex<Option<Instant>>>,
++    continuation_stops: Arc<Mutex<std::collections::BTreeSet<String>>>,
++    continuation_auth:
++        Option<std::sync::Weak<tokio::sync::Mutex<rmcp::transport::AuthorizationManager>>>,
+ }
+ 
+ struct EventStreamCancellation {
+@@ -104,6 +107,11 @@ impl Drop for EventStreamCancellation {
+ pub(crate) enum StreamableHttpClientAdapterError {
+     #[error("streamable HTTP session expired with 404 Not Found")]
+     SessionExpired404,
++    #[error("HTTP {status}")]
++    NetworkStatus {
++        status: u16,
++        retry_after: Option<String>,
++    },
+     #[error(transparent)]
+     HttpRequest(#[from] ExecServerError),
+     #[error("invalid HTTP header: {0}")]
+@@ -129,6 +137,8 @@ impl StreamableHttpClientAdapter {
+             has_configured_headers,
+             redirect_mode,
+             initialize_deadline,
++            continuation_auth: None,
++            continuation_stops: Arc::default(),
+         }
+     }
+ 
+@@ -151,7 +161,7 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
+         let (mcp_method, mcp_request_id) = client_jsonrpc_message_fields(&message);
+         let has_session_id = session_id.is_some();
+         let mut headers = self.default_headers.clone();
+-        headers.extend(custom_headers);
++        headers.extend(custom_headers.clone());
+         self.add_auth_headers(&mut headers);
+         insert_header(
+             &mut headers,
+@@ -165,7 +175,7 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
+             JSON_MIME_TYPE.to_string(),
+             StreamableHttpClientAdapterError::Header,
+         )?;
+-        if let Some(auth_token) = auth_token {
++        if let Some(auth_token) = &auth_token {
+             insert_header(
+                 &mut headers,
+                 AUTHORIZATION,
+@@ -315,6 +325,15 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
+         let content_type = response_header(&response.headers, CONTENT_TYPE);
+         let session_id = response_header(&response.headers, HEADER_SESSION_ID);
+         if !status_is_success(response.status) {
++            if matches!(response.status, 408 | 425 | 429 | 500..=599) {
++                return Err(StreamableHttpError::Client(
++                    StreamableHttpClientAdapterError::NetworkStatus {
++                        status: response.status,
++                        retry_after: response_header(&response.headers, "retry-after")
++                            .filter(|value| value.len() <= 256),
++                    },
++                ));
++            }
+             let body = collect_body(&mut body_stream, maximum_response_bytes).await?;
+             if !retryable_post_response_status(mcp_method.as_deref(), response.status)
+                 && (content_type
+@@ -426,6 +445,19 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
+                     )
+                     .boxed();
+                 }
++                if crate::network_retry_policy::policy_configured() && !is_event_stream_request {
++                    let session = session_id.clone().map(Arc::from);
++                    let stopped = self.stream_stop_callback(uri.clone(), session.clone());
++                    let connect = self.stream_connector(uri, session, auth_token, custom_headers);
++                    event_stream = crate::network_sse::resume(
++                        event_stream,
++                        connect,
++                        Default::default(),
++                        None,
++                        false,
++                        stopped,
++                    );
++                }
+                 Ok(StreamableHttpPostResponse::Sse(event_stream, session_id))
+             }
+             Some(content_type) if content_type.starts_with(JSON_MIME_TYPE) => {
+@@ -498,8 +530,12 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
+             return Ok(());
+         }
+         if !status_is_success(response.status) {
+-            return Err(StreamableHttpError::UnexpectedServerResponse(
+-                format!("DELETE returned HTTP {}", response.status).into(),
++            return Err(StreamableHttpError::Client(
++                StreamableHttpClientAdapterError::NetworkStatus {
++                    status: response.status,
++                    retry_after: response_header(&response.headers, "retry-after")
++                        .filter(|value| value.len() <= 256),
++                },
+             ));
+         }
+         Ok(())
+@@ -512,9 +548,113 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
+         last_event_id: Option<String>,
+         auth_token: Option<String>,
+         custom_headers: HashMap<HeaderName, HeaderValue>,
++    ) -> Result<BoxStream<'static, Result<Sse, sse_stream::Error>>, StreamableHttpError<Self::Error>>
++    {
++        if !crate::network_retry_policy::policy_configured() {
++            return self
++                .get_stream_once(uri, session_id, last_event_id, auth_token, custom_headers)
++                .await;
++        }
++        let key = continuation_key(&uri, session_id.as_deref(), last_event_id.as_deref());
++        {
++            let stopped = self
++                .continuation_stops
++                .lock()
++                .unwrap_or_else(PoisonError::into_inner);
++            if stopped.len() >= 4096 || stopped.contains(&key) {
++                return Err(StreamableHttpError::Client(
++                    StreamableHttpClientAdapterError::HttpRequest(ExecServerError::Protocol(
++                        "MCP continuation retry budget exhausted".to_owned(),
++                    )),
++                ));
++            }
++        }
++        let stopped = self.stream_stop_callback(uri.clone(), session_id.clone());
++        let connect = self.stream_connector(uri, session_id, auth_token, custom_headers);
++        let mut retry = crate::network_sse::RetryState::default();
++        let events = crate::network_sse::open(&connect, last_event_id.clone(), &mut retry).await?;
++        Ok(crate::network_sse::resume(
++            events,
++            connect,
++            retry,
++            last_event_id,
++            true,
++            stopped,
++        ))
++    }
++}
++
++impl StreamableHttpClientAdapter {
++    pub(crate) fn bind_continuation_auth(
++        &mut self,
++        manager: &Arc<tokio::sync::Mutex<rmcp::transport::AuthorizationManager>>,
++    ) {
++        self.continuation_auth = Some(Arc::downgrade(manager));
++    }
++
++    fn stream_stop_callback(
++        &self,
++        uri: Arc<str>,
++        session: Option<Arc<str>>,
++    ) -> Arc<dyn Fn(Option<String>) + Send + Sync> {
++        let stops = self.continuation_stops.clone();
++        Arc::new(move |id| {
++            let mut stops = stops.lock().unwrap_or_else(PoisonError::into_inner);
++            if stops.len() < 4096 {
++                stops.insert(continuation_key(&uri, session.as_deref(), id.as_deref()));
++            }
++        })
++    }
++
++    fn stream_connector(
++        &self,
++        uri: Arc<str>,
++        session_id: Option<Arc<str>>,
++        auth_token: Option<String>,
++        custom_headers: HashMap<HeaderName, HeaderValue>,
++    ) -> crate::network_sse::OpenStream {
++        let adapter = self.clone();
++        Arc::new(move |last_event_id| {
++            let (adapter, uri, session_id, auth_token, custom_headers) = (
++                adapter.clone(),
++                uri.clone(),
++                session_id.clone(),
++                auth_token.clone(),
++                custom_headers.clone(),
++            );
++            Box::pin(async move {
++                let auth_token = if let Some(manager) = adapter
++                    .continuation_auth
++                    .as_ref()
++                    .and_then(std::sync::Weak::upgrade)
++                {
++                    Some(
++                        manager
++                            .lock()
++                            .await
++                            .get_access_token()
++                            .await
++                            .map_err(StreamableHttpError::from)?,
++                    )
++                } else {
++                    auth_token
++                };
++                adapter
++                    .get_stream_once(uri, session_id, last_event_id, auth_token, custom_headers)
++                    .await
++            })
++        })
++    }
++    async fn get_stream_once(
++        &self,
++        uri: Arc<str>,
++        session_id: Option<Arc<str>>,
++        last_event_id: Option<String>,
++        auth_token: Option<String>,
++        custom_headers: HashMap<HeaderName, HeaderValue>,
+     ) -> std::result::Result<
+         BoxStream<'static, std::result::Result<Sse, sse_stream::Error>>,
+-        StreamableHttpError<Self::Error>,
++        StreamableHttpError<StreamableHttpClientAdapterError>,
+     > {
+         let mut headers = self.default_headers.clone();
+         headers.extend(custom_headers);
+@@ -551,6 +691,19 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
+         }
+         let redirect_policy = self.redirect_policy(&headers);
+ 
++        let timeout_ms = self
++            .initialize_deadline
++            .lock()
++            .unwrap_or_else(PoisonError::into_inner)
++            .map(|deadline| {
++                u64::try_from(
++                    deadline
++                        .saturating_duration_since(Instant::now())
++                        .as_millis(),
++                )
++                .unwrap_or(u64::MAX)
++                .max(1)
++            });
+         let (response, body_stream) = self
+             .http_client
+             .http_request_stream(HttpRequestParams {
+@@ -558,7 +711,7 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
+                 url: uri.to_string(),
+                 headers: protocol_headers(&headers),
+                 body: None,
+-                timeout_ms: None,
++                timeout_ms,
+                 redirect_policy,
+                 request_id: "buffered-request".to_string(),
+                 stream_response: true,
+@@ -576,8 +729,12 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
+             ));
+         }
+         if !status_is_success(response.status) {
+-            return Err(StreamableHttpError::UnexpectedServerResponse(
+-                format!("GET returned HTTP {}", response.status).into(),
++            return Err(StreamableHttpError::Client(
++                StreamableHttpClientAdapterError::NetworkStatus {
++                    status: response.status,
++                    retry_after: response_header(&response.headers, "retry-after")
++                        .filter(|value| value.len() <= 256),
++                },
+             ));
+         }
+ 
+@@ -757,15 +914,7 @@ fn retryable_post_response_status(mcp_method: Option<&str>, status: u16) -> bool
+ }
+ 
+ fn is_retryable_http_status(status: StatusCode) -> bool {
+-    matches!(
+-        status,
+-        StatusCode::REQUEST_TIMEOUT
+-            | StatusCode::TOO_MANY_REQUESTS
+-            | StatusCode::INTERNAL_SERVER_ERROR
+-            | StatusCode::BAD_GATEWAY
+-            | StatusCode::SERVICE_UNAVAILABLE
+-            | StatusCode::GATEWAY_TIMEOUT
+-    )
++    matches!(status.as_u16(), 408 | 425 | 429 | 500..=599)
+ }
+ 
+ fn parse_json_rpc_error(body: &[u8]) -> Option<ServerJsonRpcMessage> {
+@@ -1073,3 +1222,9 @@ impl SseEventSizeLimit {
+ #[cfg(test)]
+ #[path = "http_client_adapter_tests.rs"]
+ mod tests;
++
++fn continuation_key(uri: &str, session: Option<&str>, id: Option<&str>) -> String {
++    use sha2::Digest;
++    let input = serde_json::to_vec(&(uri, session, id)).expect("string tuple encoding");
++    format!("{:x}", sha2::Sha256::digest(input))
++}
+diff --git a/codex-rs/rmcp-client/src/http_client_adapter_tests.rs b/codex-rs/rmcp-client/src/http_client_adapter_tests.rs
+index c3effd99..f9d0f669 100644
+--- a/codex-rs/rmcp-client/src/http_client_adapter_tests.rs
++++ b/codex-rs/rmcp-client/src/http_client_adapter_tests.rs
+@@ -283,3 +283,39 @@ fn size_accounting_saturates_without_overflow() {
+ 
+     assert_eq!((error.kind(), limit.failed), (ErrorKind::InvalidData, true));
+ }
++
++#[tokio::test]
++async fn embedded_sse_exhaustion_fences_rmcp_immediate_reconnect() {
++    use super::StreamableHttpClientAdapter;
++    use futures::StreamExt;
++    use rmcp::transport::streamable_http_client::StreamableHttpClient;
++    use std::sync::Arc;
++    use std::time::Duration;
++
++    let policy: Arc<crate::NetworkRetryPolicy> =
++        Arc::new(|attempt, _, _| (attempt < 4).then_some(Duration::from_millis(1)));
++    crate::network_retry_policy::TEST_POLICY.scope(policy, async {
++        let server = wiremock::MockServer::start().await;
++        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
++        let observed = calls.clone();
++        wiremock::Mock::given(wiremock::matchers::method("GET"))
++            .respond_with(move |request: &wiremock::Request| {
++                if observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
++                    wiremock::ResponseTemplate::new(200)
++                        .set_body_raw("id: 1\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\"}\n\n", "text/event-stream")
++                } else {
++                    assert_eq!(request.headers.get("last-event-id").unwrap(), "1");
++                    wiremock::ResponseTemplate::new(503)
++                }
++            }).mount(&server).await;
++        let http_client = Arc::new(codex_exec_server::RouteAwareHttpClient::new(codex_http_client::HttpClientFactory::new(codex_http_client::OutboundProxyPolicy::ReqwestDefault)));
++        let adapter = StreamableHttpClientAdapter::new(http_client, Default::default(), None, false, StreamableHttpRedirectMode::Legacy, Arc::default());
++        let uri: Arc<str> = server.uri().into();
++        let mut events = adapter.get_stream(uri.clone(), None, None, None, Default::default()).await.unwrap();
++        assert_eq!(events.next().await.unwrap().unwrap().id.as_deref(), Some("1"));
++        assert!(tokio::time::timeout(Duration::from_secs(2), events.next()).await.unwrap().unwrap().is_err());
++        // RMCP makes this immediate reconnect before consulting NeverRetry.
++        assert!(adapter.get_stream(uri, None, Some("1".to_owned()), None, Default::default()).await.is_err());
++        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 4);
++    }).await;
++}
+diff --git a/codex-rs/rmcp-client/src/lib.rs b/codex-rs/rmcp-client/src/lib.rs
+index 3a4a2b0f..42bbab00 100644
+--- a/codex-rs/rmcp-client/src/lib.rs
++++ b/codex-rs/rmcp-client/src/lib.rs
+@@ -1,3 +1,6 @@
++mod network_retry_policy;
++mod network_sse;
++pub use network_retry_policy::{NetworkRetryFacts, NetworkRetryPolicy, set_network_retry_policy};
+ mod auth_status;
+ mod bounded_stdio_transport;
+ mod elicitation_client_service;
+diff --git a/codex-rs/rmcp-client/src/oauth/refresh_lock.rs b/codex-rs/rmcp-client/src/oauth/refresh_lock.rs
+index e038dc2a..2d45c1f2 100644
+--- a/codex-rs/rmcp-client/src/oauth/refresh_lock.rs
++++ b/codex-rs/rmcp-client/src/oauth/refresh_lock.rs
+@@ -26,7 +26,7 @@ const REFRESH_LOCK_RETRY_SLEEP: Duration = Duration::from_millis(/*millis*/ 50);
+ const LOCK_CONTENTION_EVENT_TARGET: &str = "codex_rmcp_client::oauth::refresh_lock::contention";
+ 
+ pub(crate) struct RefreshCredentialLock {
+-    _file: File,
++    file: File,
+ }
+ 
+ impl RefreshCredentialLock {
+@@ -38,6 +38,36 @@ impl RefreshCredentialLock {
+             .with_context(|| format!("failed to acquire OAuth credential lock for {server_name}"))
+     }
+ 
++    /// A durable digest fences an unknown rotating-token outcome across restarts.
++    pub(crate) fn check_refresh_outcome(&mut self, fingerprint: &str) -> Result<()> {
++        use std::io::{Read, Seek, SeekFrom};
++        self.file.seek(SeekFrom::Start(0))?;
++        let mut retained = String::new();
++        (&self.file).take(65).read_to_string(&mut retained)?;
++        if retained.is_empty() {
++            return Ok(());
++        }
++        if retained.len() != 64 || retained == fingerprint {
++            return Err(rmcp::transport::auth::AuthError::AuthorizationRequired)
++                .context("MCP OAuth refresh acceptance is unknown; reauthorization required");
++        }
++        // A different authoritative credential proves a completed refresh or reauthorization.
++        self.clear_refresh_outcome()
++    }
++    pub(crate) fn begin_refresh(&mut self, fingerprint: &str) -> Result<()> {
++        use std::io::{Seek, SeekFrom, Write};
++        self.file.seek(SeekFrom::Start(0))?;
++        self.file.set_len(0)?;
++        self.file.write_all(fingerprint.as_bytes())?;
++        self.file.sync_all()?;
++        Ok(())
++    }
++    pub(crate) fn clear_refresh_outcome(&mut self) -> Result<()> {
++        self.file.set_len(0)?;
++        self.file.sync_all()?;
++        Ok(())
++    }
++
+     async fn acquire_in(
+         codex_home: &Path,
+         store_key: &str,
+@@ -95,7 +125,7 @@ impl RefreshCredentialLock {
+         })?
+         .with_context(|| format!("failed to lock OAuth refresh lock {}", path.display()))?;
+ 
+-        Ok(Self { _file: file })
++        Ok(Self { file })
+     }
+ }
+ 
+diff --git a/codex-rs/rmcp-client/src/oauth/refresh_lock_tests.rs b/codex-rs/rmcp-client/src/oauth/refresh_lock_tests.rs
+index 6344bd03..9589fd50 100644
+--- a/codex-rs/rmcp-client/src/oauth/refresh_lock_tests.rs
++++ b/codex-rs/rmcp-client/src/oauth/refresh_lock_tests.rs
+@@ -38,3 +38,26 @@ async fn acquisition_times_out_without_stealing() -> Result<()> {
+     .await?;
+     Ok(())
+ }
++
++#[tokio::test]
++async fn unknown_refresh_is_fenced_after_restart_until_credential_rotation() -> Result<()> {
++    let home = tempdir()?;
++    let old = "a".repeat(64);
++    let rotated = "b".repeat(64);
++    let mut lock =
++        RefreshCredentialLock::acquire_in(home.path(), "unknown", Duration::from_secs(1)).await?;
++    lock.check_refresh_outcome(&old)?;
++    lock.begin_refresh(&old)?;
++    drop(lock);
++    let mut reopened =
++        RefreshCredentialLock::acquire_in(home.path(), "unknown", Duration::from_secs(1)).await?;
++    assert!(reopened.check_refresh_outcome(&old).is_err());
++    reopened.check_refresh_outcome(&rotated)?;
++    reopened.begin_refresh(&rotated)?;
++    reopened.clear_refresh_outcome()?;
++    drop(reopened);
++    let mut completed =
++        RefreshCredentialLock::acquire_in(home.path(), "unknown", Duration::from_secs(1)).await?;
++    completed.check_refresh_outcome(&rotated)?;
++    Ok(())
++}
+diff --git a/codex-rs/rmcp-client/src/oauth/refresh_transaction.rs b/codex-rs/rmcp-client/src/oauth/refresh_transaction.rs
+index e5341ca7..a07ac670 100644
+--- a/codex-rs/rmcp-client/src/oauth/refresh_transaction.rs
++++ b/codex-rs/rmcp-client/src/oauth/refresh_transaction.rs
+@@ -60,9 +60,8 @@ impl OAuthPersistor {
+         let keyring_store = keyring_store.clone();
+         // Once the provider can consume a rotating token, caller cancellation must not cancel
+         // persistence. The owned task continues with independently bounded lock and request waits.
+-        // A provider timeout leaves the outcome unknown and permits a later serialized retry:
+-        // provider grace may recover, otherwise reauthorization is unavoidable. This residual
+-        // risk is preferred to holding the credential lock indefinitely.
++        // A provider timeout leaves a durable unknown outcome. The same rotating
++        // refresh token remains fenced across process restart.
+         let transaction_task = tokio::spawn(async move {
+             let result = persistor
+                 .refresh_transaction(&keyring_store, refresh_request_timeout)
+@@ -107,7 +106,7 @@ impl OAuthPersistor {
+         refresh_request_timeout: Duration,
+     ) -> Result<()> {
+         debug!("waiting for the MCP OAuth credential transaction lock");
+-        let _lock =
++        let mut refresh_lock =
+             RefreshCredentialLock::acquire_for_server(&self.inner.server_name, &self.inner.url)
+                 .await?;
+         debug!("acquired the MCP OAuth credential transaction lock");
+@@ -138,6 +137,20 @@ impl OAuthPersistor {
+             });
+         };
+ 
++        use sha2::{Digest, Sha256};
++        let mut fingerprint = Sha256::new();
++        fingerprint.update(self.inner.url.as_bytes());
++        fingerprint.update([0]);
++        fingerprint.update(
++            latest
++                .token_response
++                .0
++                .refresh_token()
++                .map_or("", |token| token.secret())
++                .as_bytes(),
++        );
++        let token_fingerprint = format!("{:x}", fingerprint.finalize());
++        refresh_lock.check_refresh_outcome(&token_fingerprint)?;
+         if !token_needs_refresh(latest.expires_at) {
+             debug!("adopting newer MCP OAuth credentials without contacting the provider");
+             let manager = self.inner.authorization_manager.clone();
+@@ -191,6 +204,7 @@ impl OAuthPersistor {
+             timeout_ms = refresh_request_timeout.as_millis(),
+             "requesting refreshed MCP OAuth credentials from the provider"
+         );
++        refresh_lock.begin_refresh(&token_fingerprint)?;
+         let refreshed = match timeout(refresh_request_timeout, guard.refresh_token()).await {
+             Ok(Ok(token_response)) => {
+                 debug!("received refreshed MCP OAuth credentials from the provider");
+@@ -211,6 +225,20 @@ impl OAuthPersistor {
+                 });
+             }
+             Ok(Err(error)) => {
++                // Clear the intent only when a typed transport fact proves that
++                // no token request reached the provider.
++                let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&error);
++                while let Some(current) = source {
++                    if let Some(codex_exec_server::ExecServerError::NetworkHttpRequest(failure)) =
++                        current.downcast_ref::<codex_exec_server::ExecServerError>()
++                    {
++                        if failure.not_sent {
++                            refresh_lock.clear_refresh_outcome()?;
++                        }
++                        break;
++                    }
++                    source = current.source();
++                }
+                 warn!(
+                     error = %error,
+                     "MCP OAuth provider refresh failed"
+@@ -226,7 +254,7 @@ impl OAuthPersistor {
+             Err(_) => {
+                 warn!(
+                     timeout_ms = refresh_request_timeout.as_millis(),
+-                    "MCP OAuth provider refresh timed out; the outcome is unknown and a later serialized retry is permitted"
++                    "MCP OAuth provider refresh timed out; the unknown outcome is durably fenced"
+                 );
+                 let error = anyhow::anyhow!(
+                     "timed out after {refresh_request_timeout:?} refreshing OAuth tokens for server {}",
+@@ -263,6 +291,8 @@ impl OAuthPersistor {
+             return Err(error);
+         }
+ 
++        refresh_lock.clear_refresh_outcome()?;
++
+         // This layer retains RMCP's legacy persistence hook. Install the same merged response
+         // (including carried-forward refresh token/scopes) so that hook cannot overwrite durable
+         // credentials with the provider's partial response.
+diff --git a/codex-rs/rmcp-client/src/oauth/tests/persistor_tests.rs b/codex-rs/rmcp-client/src/oauth/tests/persistor_tests.rs
+index 2951504e..68cf94a2 100644
+--- a/codex-rs/rmcp-client/src/oauth/tests/persistor_tests.rs
++++ b/codex-rs/rmcp-client/src/oauth/tests/persistor_tests.rs
+@@ -737,7 +737,7 @@ async fn failed_refresh_does_not_adopt_unbound_replacement_credentials() -> Resu
+ }
+ 
+ #[tokio::test(flavor = "current_thread")]
+-async fn expired_refresh_failure_preserves_credentials_for_a_later_retry() -> Result<()> {
++async fn expired_refresh_unknown_outcome_requires_credential_rotation() -> Result<()> {
+     let (_env, server, initial) = test_context().await?;
+     save_oauth_tokens_to_file(&initial)?;
+     let persistor = persistor_for(&initial).await?;
+@@ -757,9 +757,24 @@ async fn expired_refresh_failure_preserves_credentials_for_a_later_retry() -> Re
+         .expect("failed refresh must preserve stored credentials");
+     assert_tokens_match_without_expiry(&stored, &initial);
+     drop(failure);
++    let blocked = persistor
++        .refresh_if_needed()
++        .await
++        .expect_err("unknown acceptance fences the old rotating token");
++    assert!(is_authentication_required_error(&blocked));
++    assert!(format!("{blocked:#}").contains("acceptance is unknown"));
++    // A durably replaced credential provides new authority to refresh.
++    let mut replacement = initial.clone();
++    replacement
++        .token_response
++        .0
++        .set_refresh_token(Some(RefreshToken::new("replacement-refresh-token".into())));
++    save_oauth_tokens_to_file(&replacement)?;
+     Mock::given(method("POST"))
+         .and(path("/oauth/token"))
+-        .and(body_string_contains("refresh_token=refresh-token"))
++        .and(body_string_contains(
++            "refresh_token=replacement-refresh-token",
++        ))
+         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+             "access_token": "retry-access-token",
+             "token_type": "Bearer",
+diff --git a/codex-rs/rmcp-client/src/oauth_http_client.rs b/codex-rs/rmcp-client/src/oauth_http_client.rs
+index f827e172..170dc374 100644
+--- a/codex-rs/rmcp-client/src/oauth_http_client.rs
++++ b/codex-rs/rmcp-client/src/oauth_http_client.rs
+@@ -74,13 +74,24 @@ pub(crate) struct OAuthHttpClientAdapter {
+ }
+ 
+ impl OAuthHttpClientAdapter {
++    async fn execute_with_metadata_fallback(
++        &self,
++        request: HttpRequest,
++        redirect_policy: OAuthHttpRedirectPolicy,
++        timeout: Option<Duration>,
++    ) -> Result<HttpResponse, OAuthHttpClientError> {
++        self.execute_request_policy(request, redirect_policy, timeout, true)
++            .await
++    }
++
+     /// Recover only a candidate-local 503 without turning failed discovery into
+     /// missing metadata (which would enable RMCP's legacy endpoint fallback).
+-    async fn execute_with_metadata_fallback(
++    async fn execute_metadata_once(
+         &self,
+         request: HttpRequest,
+         redirect_policy: OAuthHttpRedirectPolicy,
+         timeout: Option<Duration>,
++        request_id: &str,
+     ) -> Result<HttpResponse, OAuthHttpClientError> {
+         let issuer_path = request
+             .uri()
+@@ -92,7 +103,7 @@ impl OAuthHttpClientAdapter {
+                 && matches!(redirect_policy, OAuthHttpRedirectPolicy::Stop)
+         }) else {
+             return self
+-                .execute_request(request, redirect_policy, timeout)
++                .execute_request_once(request, redirect_policy, timeout, request_id)
+                 .await;
+         };
+         let mut candidates = vec![format!("/.well-known/openid-configuration{issuer_path}")];
+@@ -105,7 +116,7 @@ impl OAuthHttpClientAdapter {
+         candidate_url.set_fragment(None);
+         let operation = async {
+             let original = self
+-                .execute_request(request.clone(), redirect_policy, timeout)
++                .execute_request_once(request.clone(), redirect_policy, timeout, request_id)
+                 .await?;
+             if original.status() != StatusCode::SERVICE_UNAVAILABLE {
+                 return Ok(original);
+@@ -113,7 +124,7 @@ impl OAuthHttpClientAdapter {
+             // These are the same issuer's OIDC candidates, in RMCP's discovery
+             // order. Reuse the adapter's header, origin and body-size checks.
+             // Do not follow redirects here: RMCP owns discovery redirect policy.
+-            for path in candidates {
++            for (index, path) in candidates.into_iter().enumerate() {
+                 candidate_url.set_path(&path);
+                 let mut candidate = request.clone();
+                 *candidate.uri_mut() = candidate_url
+@@ -121,7 +132,12 @@ impl OAuthHttpClientAdapter {
+                     .parse()
+                     .map_err(oauth_http_client_error)?;
+                 let response = self
+-                    .execute_request(candidate, OAuthHttpRedirectPolicy::Stop, timeout)
++                    .execute_request_once(
++                        candidate,
++                        OAuthHttpRedirectPolicy::Stop,
++                        timeout,
++                        &format!("{request_id}-oidc-{index}"),
++                    )
+                     .await?;
+                 match response.status() {
+                     StatusCode::OK => {
+@@ -215,6 +231,154 @@ impl OAuthHttpClientAdapter {
+         request: HttpRequest,
+         redirect_policy: OAuthHttpRedirectPolicy,
+         timeout: Option<Duration>,
++    ) -> Result<HttpResponse, OAuthHttpClientError> {
++        self.execute_request_policy(request, redirect_policy, timeout, false)
++            .await
++    }
++
++    async fn execute_request_policy(
++        &self,
++        request: HttpRequest,
++        redirect_policy: OAuthHttpRedirectPolicy,
++        timeout: Option<Duration>,
++        metadata_fallback: bool,
++    ) -> Result<HttpResponse, OAuthHttpClientError> {
++        let request_id = format!(
++            "oauth-request-{}",
++            NEXT_OAUTH_REQUEST_ID.fetch_add(1, Ordering::Relaxed)
++        );
++        if !crate::network_retry_policy::policy_configured() {
++            return if metadata_fallback {
++                self.execute_metadata_once(request, redirect_policy, timeout, &request_id)
++                    .await
++            } else {
++                self.execute_request_once(request, redirect_policy, timeout, &request_id)
++                    .await
++            };
++        }
++        let timeout = match self.timeout {
++            OAuthDiscoveryTimeout::Requested => timeout,
++            OAuthDiscoveryTimeout::Capped(cap) => Some(timeout.map_or(cap, |value| value.min(cap))),
++        };
++        let deadline = timeout.map(|duration| Instant::now() + duration);
++        let reconcile_first = !matches!(*request.method(), Method::GET | Method::HEAD);
++        let mut attempt = 1_u32;
++        let mut connections = 0_u32;
++        loop {
++            let remaining = match deadline {
++                Some(deadline) => Some(
++                    deadline
++                        .checked_duration_since(Instant::now())
++                        .ok_or_else(|| {
++                            oauth_http_client_error(OAuthHttpClientAdapterError::TimedOut)
++                        })?,
++                ),
++                None => None,
++            };
++            // The metadata candidate sequence is one read-only logical attempt.
++            // Its HTTP leaves never add nested retry loops or renew this deadline.
++            let operation = async {
++                if metadata_fallback {
++                    self.execute_metadata_once(
++                        request.clone(),
++                        redirect_policy,
++                        remaining,
++                        &request_id,
++                    )
++                    .await
++                } else {
++                    self.execute_request_once(
++                        request.clone(),
++                        redirect_policy,
++                        remaining,
++                        &request_id,
++                    )
++                    .await
++                }
++            };
++            let result = match remaining {
++                Some(duration) => tokio::time::timeout(duration, operation)
++                    .await
++                    .map_err(|_| oauth_http_client_error(OAuthHttpClientAdapterError::TimedOut))?,
++                None => operation.await,
++            };
++            let facts = match &result {
++                Ok(response)
++                    if matches!(response.status().as_u16(), 408 | 425 | 429 | 500..=599) =>
++                {
++                    crate::NetworkRetryFacts {
++                        reconcile_first,
++                        status: Some(response.status().as_u16()),
++                        transport: None,
++                        retry_after: response
++                            .headers()
++                            .get("retry-after")
++                            .and_then(|value| value.to_str().ok())
++                            .filter(|value| value.len() <= 256)
++                            .map(str::to_owned),
++                    }
++                }
++                Ok(_) => return result,
++                Err(error) => {
++                    let mut source: Option<&(dyn std::error::Error + 'static)> =
++                        Some(error.as_ref());
++                    let mut transport = None;
++                    while let Some(error) = source {
++                        if let Some(error) =
++                            error.downcast_ref::<codex_exec_server::ExecServerError>()
++                        {
++                            match error {
++                                codex_exec_server::ExecServerError::NetworkHttpRequest(failure) => transport = Some(*failure),
++                                codex_exec_server::ExecServerError::HttpRequest(_) => transport = Some(codex_exec_server::HttpNetworkFailure { kind: codex_exec_server::HttpNetworkErrorKind::TransportInterrupted, not_sent: false }),
++                                _ => {}
++                            }
++                            if transport.is_some() {
++                                break;
++                            }
++                        }
++                        source = error.source();
++                    }
++                    let Some(transport) = transport else {
++                        return result;
++                    };
++                    crate::NetworkRetryFacts {
++                        reconcile_first,
++                        transport: Some(transport),
++                        ..Default::default()
++                    }
++                }
++            };
++            if facts.transport.is_some_and(|failure| failure.not_sent) {
++                connections = connections.saturating_add(1);
++            } else {
++                connections = 0;
++            }
++            let Some(delay) =
++                crate::network_retry_policy::retry_delay(attempt, connections, &facts)
++            else {
++                return result;
++            };
++            if connections == 0 {
++                attempt = attempt.saturating_add(1);
++            }
++            if !crate::rmcp_client::streamable_http_retry::sleep_with_retry_deadline(
++                delay, deadline,
++            )
++            .await
++            {
++                return Err(oauth_http_client_error(
++                    OAuthHttpClientAdapterError::TimedOut,
++                ));
++            }
++        }
++    }
++
++    async fn execute_request_once(
++        &self,
++        request: HttpRequest,
++        redirect_policy: OAuthHttpRedirectPolicy,
++        timeout: Option<Duration>,
++        request_id: &str,
+     ) -> Result<HttpResponse, OAuthHttpClientError> {
+         let redirect_policy = match redirect_policy {
+             OAuthHttpRedirectPolicy::Follow => HttpRedirectPolicy::Follow,
+@@ -289,13 +453,12 @@ impl OAuthHttpClientAdapter {
+             } else {
+                 redirect_policy
+             },
+-            request_id: String::new(),
++            request_id: request_id.to_owned(),
+             stream_response: true,
+         };
+         let mut redirects = 0;
+         let (response, body) = loop {
+-            let request_id = NEXT_OAUTH_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+-            params.request_id = format!("oauth-request-{request_id}");
++            params.request_id = format!("{request_id}-{redirects}");
+             let (response, mut body_stream) = self
+                 .http_client
+                 .http_request_stream(params.clone())
+diff --git a/codex-rs/rmcp-client/src/oauth_http_client_security_tests.rs b/codex-rs/rmcp-client/src/oauth_http_client_security_tests.rs
+index 6ce9f0a3..a4a1e9df 100644
+--- a/codex-rs/rmcp-client/src/oauth_http_client_security_tests.rs
++++ b/codex-rs/rmcp-client/src/oauth_http_client_security_tests.rs
+@@ -459,3 +459,125 @@ async fn same_origin_redirects_preserve_timeout_and_response_body_limits() -> Re
+ 
+     Ok(())
+ }
++
++struct RetryOwnershipHttpClient {
++    requests: std::sync::Mutex<Vec<HttpRequestParams>>,
++    status: u16,
++}
++impl HttpClient for RetryOwnershipHttpClient {
++    fn http_request(
++        &self,
++        _: HttpRequestParams,
++    ) -> BoxFuture<'_, Result<HttpRequestResponse, ExecServerError>> {
++        Box::pin(async { panic!("OAuth uses the complete streaming attempt") })
++    }
++    fn http_request_stream(
++        &self,
++        params: HttpRequestParams,
++    ) -> BoxFuture<'_, Result<(HttpRequestResponse, HttpResponseBodyStream), ExecServerError>> {
++        Box::pin(async move {
++            let mut requests = self.requests.lock().unwrap();
++            requests.push(params);
++            Ok((
++                HttpRequestResponse {
++                    status: self.status,
++                    headers: Vec::new(),
++                    body: Vec::new().into(),
++                },
++                HttpResponseBodyStream::from_chunks(Vec::new()),
++            ))
++        })
++    }
++}
++
++#[tokio::test]
++async fn embedded_oauth_policy_owns_one_budget_and_preserves_request_identity() -> Result<()> {
++    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
++    let policy_seen = Arc::clone(&seen);
++    let policy: Arc<crate::NetworkRetryPolicy> = Arc::new(move |attempt, _, facts| {
++        policy_seen
++            .lock()
++            .unwrap()
++            .push((attempt, facts.status, facts.reconcile_first));
++        (!facts.reconcile_first && attempt < 4).then_some(Duration::from_millis(1))
++    });
++    crate::network_retry_policy::TEST_POLICY
++        .scope(policy, async {
++            let client = Arc::new(RetryOwnershipHttpClient {
++                requests: Default::default(),
++                status: 503,
++            });
++            let adapter = OAuthHttpClientAdapter::new(
++                client.clone(),
++                Default::default(),
++                "https://resource.example/mcp",
++            );
++            for verb in ["GET", "POST"] {
++                let response = adapter
++                    .execute_request(
++                        oauth2::http::Request::builder()
++                            .method(verb)
++                            .uri("https://issuer.example/token")
++                            .body(b"stable-input".to_vec())?,
++                        OAuthHttpRedirectPolicy::Stop,
++                        Some(Duration::from_secs(1)),
++                    )
++                    .await
++                    .map_err(|e| anyhow::anyhow!(e))?;
++                assert_eq!(response.status().as_u16(), 503);
++            }
++            let requests = client.requests.lock().unwrap();
++            assert_eq!(requests.len(), 5);
++            let mut first = serde_json::to_value(&requests[0])?;
++            first.as_object_mut().unwrap().remove("timeoutMs");
++            for request in &requests[1..4] {
++                let mut value = serde_json::to_value(request)?;
++                value.as_object_mut().unwrap().remove("timeoutMs");
++                assert_eq!(value, first);
++            }
++            assert_eq!(
++                *seen.lock().unwrap(),
++                vec![
++                    (1, Some(503), false),
++                    (2, Some(503), false),
++                    (3, Some(503), false),
++                    (4, Some(503), false),
++                    (1, Some(503), true)
++                ]
++            );
++            Ok::<(), anyhow::Error>(())
++        })
++        .await
++}
++
++#[tokio::test]
++async fn embedded_metadata_fallback_resolves_before_network_backoff() -> Result<()> {
++    let policy: Arc<crate::NetworkRetryPolicy> =
++        Arc::new(|_, _, _| panic!("a successful metadata fallback must not retry the discovery"));
++    crate::network_retry_policy::TEST_POLICY
++        .scope(policy, async {
++            let resource = MockServer::start().await;
++            let authorization = MockServer::start().await;
++            let manager = metadata_manager(&resource, &authorization, "").await?;
++            Mock::given(method("GET"))
++                .and(path("/.well-known/oauth-authorization-server"))
++                .respond_with(ResponseTemplate::new(503))
++                .expect(1)
++                .mount(&authorization)
++                .await;
++            Mock::given(method("GET"))
++                .and(path("/.well-known/openid-configuration"))
++                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
++                    "issuer": authorization.uri(),
++                    "authorization_endpoint": format!("{}/authorize", authorization.uri()),
++                    "token_endpoint": format!("{}/token", authorization.uri())
++                })))
++                .expect(1)
++                .mount(&authorization)
++                .await;
++            manager.resolve_metadata().await?;
++            authorization.verify().await;
++            Ok::<(), anyhow::Error>(())
++        })
++        .await
++}
+diff --git a/codex-rs/rmcp-client/src/rmcp_client.rs b/codex-rs/rmcp-client/src/rmcp_client.rs
+index b8817d2e..edbb9356 100644
+--- a/codex-rs/rmcp-client/src/rmcp_client.rs
++++ b/codex-rs/rmcp-client/src/rmcp_client.rs
+@@ -102,10 +102,9 @@ use crate::utils::build_default_headers;
+ use codex_config::types::OAuthCredentialsStoreMode;
+ 
+ #[path = "streamable_http_retry.rs"]
+-mod streamable_http_retry;
++pub(crate) mod streamable_http_retry;
+ 
+ use self::streamable_http_retry::HandshakeError;
+-use self::streamable_http_retry::STREAMABLE_HTTP_RETRY_DELAYS_MS;
+ use self::streamable_http_retry::sleep_with_retry_deadline;
+ 
+ const READ_ONLY_TOOLS_META_KEY: &str = "openai/readOnly";
+@@ -1226,8 +1225,7 @@ impl RmcpClient {
+                                 "OAuth metadata discovery is unavailable for MCP server `{server_name}`; falling back to stored bearer token authentication"
+                             );
+                             let http_config =
+-                                StreamableHttpClientTransportConfig::with_uri(url.clone())
+-                                    .auth_header(access_token);
++                                network_transport_config(url.clone()).auth_header(access_token);
+                             let transport = StreamableHttpClientTransport::with_client(
+                                 StreamableHttpClientAdapter::new(
+                                     Arc::clone(http_client),
+@@ -1244,8 +1242,7 @@ impl RmcpClient {
+                         Err(err) => Err(err),
+                     }
+                 } else {
+-                    let mut http_config =
+-                        StreamableHttpClientTransportConfig::with_uri(url.clone());
++                    let mut http_config = network_transport_config(url.clone());
+                     if let Some(StreamableHttpBearerToken::Resolved(bearer_token)) = bearer_token {
+                         http_config = http_config.auth_header(bearer_token.clone());
+                     }
+@@ -1423,13 +1420,9 @@ impl RmcpClient {
+         Fut: std::future::Future<Output = std::result::Result<T, rmcp::service::ServiceError>>,
+     {
+         let retry_deadline = timeout.map(|duration| Instant::now() + duration);
+-        for (attempt, retry_delay_ms) in STREAMABLE_HTTP_RETRY_DELAYS_MS
+-            .iter()
+-            .copied()
+-            .map(Some)
+-            .chain(std::iter::once(None))
+-            .enumerate()
+-        {
++        let mut attempt = 1_u32;
++        let mut connections = 0_u32;
++        loop {
+             let attempt_timeout = remaining_operation_timeout(label, timeout, retry_deadline)?;
+             match Self::run_service_operation_once(
+                 Arc::clone(&service),
+@@ -1442,16 +1435,33 @@ impl RmcpClient {
+             {
+                 Ok(result) => return Ok(result),
+                 Err(error) if Self::is_retryable_tools_list_error(label, &error) => {
+-                    let Some(retry_delay_ms) = retry_delay_ms else {
++                    let facts = match &error {
++                        ClientOperationError::Service(
++                            rmcp::service::ServiceError::TransportSend(error),
++                        ) => error
++                            .error
++                            .downcast_ref::<StreamableHttpError<StreamableHttpClientAdapterError>>()
++                            .map(streamable_http_retry::streamable_retry_facts)
++                            .unwrap_or_default(),
++                        _ => crate::NetworkRetryFacts::default(),
++                    };
++                    if facts.transport.is_some_and(|failure| failure.not_sent) {
++                        connections = connections.saturating_add(1);
++                    } else {
++                        connections = 0;
++                    }
++                    let Some(delay) =
++                        crate::network_retry_policy::retry_delay(attempt, connections, &facts)
++                    else {
+                         return Err(error);
+                     };
+-                    let delay = Duration::from_millis(retry_delay_ms);
++                    if connections == 0 {
++                        attempt = attempt.saturating_add(1);
++                    }
+                     warn!(
+-                        attempt = attempt + 1,
+-                        max_attempts = STREAMABLE_HTTP_RETRY_DELAYS_MS.len() + 1,
++                        attempt,
+                         delay_ms = delay.as_millis(),
+-                        error = %error,
+-                        "streamable HTTP MCP tools/list failed with a retryable error; retrying"
++                        "streamable HTTP MCP tools/list retry scheduled"
+                     );
+                     if !sleep_with_retry_deadline(delay, retry_deadline).await {
+                         return Err(ClientOperationError::Timeout {
+@@ -1463,8 +1473,6 @@ impl RmcpClient {
+                 Err(error) => return Err(error),
+             }
+         }
+-
+-        unreachable!("service operation retry loop should return on success or final error")
+     }
+ 
+     async fn run_service_operation_once<T, F, Fut>(
+@@ -1652,7 +1660,7 @@ async fn create_oauth_transport_and_runtime(
+         McpOAuthRefreshMode::Legacy | McpOAuthRefreshMode::Coordinated => None,
+     };
+ 
+-    let auth_client = AuthClient::new(
++    let mut auth_client = AuthClient::new(
+         StreamableHttpClientAdapter::new(
+             http_client,
+             default_headers,
+@@ -1664,10 +1672,13 @@ async fn create_oauth_transport_and_runtime(
+         manager,
+     );
+     let auth_manager = auth_client.auth_manager.clone();
++    auth_client
++        .http_client
++        .bind_continuation_auth(&auth_manager);
+ 
+     let transport = StreamableHttpClientTransport::with_client(
+         auth_client,
+-        StreamableHttpClientTransportConfig::with_uri(url.to_string()),
++        network_transport_config(url.to_string()),
+     );
+ 
+     if use_stored_access_token_only {
+@@ -1744,3 +1755,15 @@ mod tests {
+         assert_eq!(Ok("done"), result);
+     }
+ }
++
++// The adapter owns GET/SSE retries. RMCP must not multiply them or replay tools
++// after session expiry, where the preceding POST's outcome may be unknown.
++fn network_transport_config(uri: String) -> StreamableHttpClientTransportConfig {
++    let mut config = StreamableHttpClientTransportConfig::with_uri(uri);
++    if crate::network_retry_policy::policy_configured() {
++        config.retry_config =
++            Arc::new(rmcp::transport::common::client_side_sse::NeverRetry::default());
++        config.reinit_on_expired_session = false;
++    }
++    config
++}
+diff --git a/codex-rs/rmcp-client/src/streamable_http_retry.rs b/codex-rs/rmcp-client/src/streamable_http_retry.rs
+index 66dda2cb..bccf80f4 100644
+--- a/codex-rs/rmcp-client/src/streamable_http_retry.rs
++++ b/codex-rs/rmcp-client/src/streamable_http_retry.rs
+@@ -21,7 +21,6 @@ use super::PendingTransport;
+ use super::RmcpClient;
+ 
+ const JSON_RPC_INTERNAL_ERROR_CODE: i64 = -32603;
+-pub(super) const STREAMABLE_HTTP_RETRY_DELAYS_MS: [u64; 2] = [250, 1_000];
+ 
+ impl RmcpClient {
+     pub(super) async fn connect_pending_transport_with_initialize_retries(
+@@ -39,16 +38,12 @@ impl RmcpClient {
+             | PendingTransport::StreamableHttpWithOAuth { .. }
+             | PendingTransport::StreamableHttpWithAccessTokenOnly { .. } => true,
+         };
+-        let mut retry_deadline = timeout.map(|duration| Instant::now() + duration);
++        let retry_deadline = timeout.map(|duration| Instant::now() + duration);
+         let mut pending_transport = Some(initial_transport);
+ 
+-        for (attempt, retry_delay_ms) in STREAMABLE_HTTP_RETRY_DELAYS_MS
+-            .iter()
+-            .copied()
+-            .map(Some)
+-            .chain(std::iter::once(None))
+-            .enumerate()
+-        {
++        let mut attempt = 1_u32;
++        let mut connections = 0_u32;
++        loop {
+             let transport = match pending_transport.take() {
+                 Some(transport) => transport,
+                 None => {
+@@ -65,13 +60,9 @@ impl RmcpClient {
+                 }
+             };
+             if let PendingTransport::StreamableHttpWithOAuth { oauth_runtime, .. } = &transport {
+-                // OAuth refresh has its own lock and provider request bounds. Exclude it from the
+-                // MCP handshake budget, and finish persistence before attempting initialize.
+-                let refresh_started_at = Instant::now();
++                // Credential persistence is retained by its owned refresh task. The
++                // caller's total handshake deadline is never extended by refresh.
+                 oauth_runtime.refresh_if_needed().await?;
+-                if let Some(deadline) = retry_deadline.as_mut() {
+-                    *deadline += refresh_started_at.elapsed();
+-                }
+             }
+             let attempt_timeout = remaining_initialize_timeout(timeout, retry_deadline)?;
+ 
+@@ -81,16 +72,24 @@ impl RmcpClient {
+             {
+                 Ok(result) => return Ok(result),
+                 Err(error) if should_retry && Self::is_retryable_initialize_error(&error) => {
+-                    let Some(retry_delay_ms) = retry_delay_ms else {
++                    let facts = initialize_retry_facts(&error);
++                    if facts.transport.is_some_and(|failure| failure.not_sent) {
++                        connections = connections.saturating_add(1);
++                    } else {
++                        connections = 0;
++                    }
++                    let Some(delay) =
++                        crate::network_retry_policy::retry_delay(attempt, connections, &facts)
++                    else {
+                         return Err(error);
+                     };
+-                    let delay = Duration::from_millis(retry_delay_ms);
++                    if connections == 0 {
++                        attempt = attempt.saturating_add(1);
++                    }
+                     warn!(
+-                        attempt = attempt + 1,
+-                        max_attempts = STREAMABLE_HTTP_RETRY_DELAYS_MS.len() + 1,
++                        attempt,
+                         delay_ms = delay.as_millis(),
+-                        error = %error,
+-                        "streamable HTTP MCP initialize failed with a retryable error; retrying"
++                        "streamable HTTP MCP initialize retry scheduled"
+                     );
+                     if !sleep_with_retry_deadline(delay, retry_deadline).await {
+                         let duration = timeout.unwrap_or(delay);
+@@ -102,8 +101,6 @@ impl RmcpClient {
+                 Err(error) => return Err(error),
+             }
+         }
+-
+-        unreachable!("initialize retry loop should return on success or final error")
+     }
+ 
+     fn is_retryable_initialize_error(error: &anyhow::Error) -> bool {
+@@ -148,10 +145,22 @@ impl RmcpClient {
+         }
+     }
+ 
+-    pub(super) fn is_retryable_streamable_http_error(
++    pub(crate) fn is_retryable_streamable_http_error(
+         error: &StreamableHttpError<StreamableHttpClientAdapterError>,
+     ) -> bool {
+         match error {
++            StreamableHttpError::Client(StreamableHttpClientAdapterError::NetworkStatus {
++                status,
++                ..
++            }) => matches!(*status, 408 | 425 | 429 | 500..=599),
++            StreamableHttpError::Client(StreamableHttpClientAdapterError::HttpRequest(
++                ExecServerError::NetworkHttpRequest(failure),
++            )) => matches!(
++                failure.kind,
++                codex_exec_server::HttpNetworkErrorKind::ConnectionUnavailable
++                    | codex_exec_server::HttpNetworkErrorKind::TransportInterrupted
++                    | codex_exec_server::HttpNetworkErrorKind::Timeout
++            ),
+             StreamableHttpError::Client(StreamableHttpClientAdapterError::HttpRequest(
+                 ExecServerError::HttpRequest(_),
+             )) => true,
+@@ -197,15 +206,54 @@ fn is_retryable_unexpected_server_response(message: &str) -> bool {
+ }
+ 
+ fn is_retryable_http_status(status: StatusCode) -> bool {
+-    matches!(
+-        status,
+-        StatusCode::REQUEST_TIMEOUT
+-            | StatusCode::TOO_MANY_REQUESTS
+-            | StatusCode::INTERNAL_SERVER_ERROR
+-            | StatusCode::BAD_GATEWAY
+-            | StatusCode::SERVICE_UNAVAILABLE
+-            | StatusCode::GATEWAY_TIMEOUT
+-    )
++    matches!(status.as_u16(), 408 | 425 | 429 | 500..=599)
++}
++
++pub(crate) fn streamable_retry_facts(
++    error: &StreamableHttpError<StreamableHttpClientAdapterError>,
++) -> crate::NetworkRetryFacts {
++    match error {
++        StreamableHttpError::Client(StreamableHttpClientAdapterError::NetworkStatus {
++            status,
++            retry_after,
++        }) => crate::NetworkRetryFacts {
++            status: Some(*status),
++            retry_after: retry_after.clone(),
++            transport: None,
++            reconcile_first: false,
++        },
++        StreamableHttpError::Client(StreamableHttpClientAdapterError::HttpRequest(
++            ExecServerError::NetworkHttpRequest(failure),
++        )) => crate::NetworkRetryFacts {
++            transport: Some(*failure),
++            ..Default::default()
++        },
++        _ => crate::NetworkRetryFacts::default(),
++    }
++}
++fn initialize_retry_facts(error: &anyhow::Error) -> crate::NetworkRetryFacts {
++    fn facts(error: &rmcp::service::ClientInitializeError) -> crate::NetworkRetryFacts {
++        match error {
++            rmcp::service::ClientInitializeError::LegacyFallbackFailed { fallback, .. } => {
++                facts(fallback)
++            }
++            rmcp::service::ClientInitializeError::TransportError { error, .. } => error
++                .error
++                .downcast_ref::<StreamableHttpError<StreamableHttpClientAdapterError>>()
++                .map(streamable_retry_facts)
++                .unwrap_or_default(),
++            _ => Default::default(),
++        }
++    }
++    for source in error.chain() {
++        if let Some(error) = source.downcast_ref::<HandshakeError>() {
++            return facts(&error.source);
++        }
++        if let Some(error) = source.downcast_ref::<rmcp::service::ClientInitializeError>() {
++            return facts(error);
++        }
++    }
++    Default::default()
+ }
+ 
+ fn remaining_initialize_timeout(
+@@ -228,7 +276,7 @@ fn initialize_timeout_error(timeout: Option<Duration>, fallback: Duration) -> an
+     anyhow!("timed out handshaking with MCP server after {duration:?}")
+ }
+ 
+-pub(super) async fn sleep_with_retry_deadline(delay: Duration, deadline: Option<Instant>) -> bool {
++pub(crate) async fn sleep_with_retry_deadline(delay: Duration, deadline: Option<Instant>) -> bool {
+     if let Some(deadline) = deadline {
+         let remaining = deadline.saturating_duration_since(Instant::now());
+         if remaining.is_zero() {
+diff --git a/codex-rs/exec-server/src/http_network_failure.rs b/codex-rs/exec-server/src/http_network_failure.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/exec-server/src/http_network_failure.rs
+@@ -0,0 +1,71 @@
++//! Bounded transport evidence shared across local and remote HTTP capabilities.
++use serde::{Deserialize, Serialize};
++
++#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
++#[serde(rename_all = "snake_case")]
++pub enum HttpNetworkErrorKind {
++    ConnectionUnavailable,
++    TransportInterrupted,
++    Timeout,
++    TlsInvalid,
++    RequestInvalid,
++    Authorization,
++}
++
++#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
++#[serde(deny_unknown_fields)]
++pub struct HttpNetworkFailure {
++    pub kind: HttpNetworkErrorKind,
++    pub not_sent: bool,
++}
++
++impl std::fmt::Display for HttpNetworkFailure {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        write!(f, "HTTP network {:?};not_sent={}", self.kind, self.not_sent)
++    }
++}
++impl std::error::Error for HttpNetworkFailure {}
++
++impl HttpNetworkFailure {
++    pub(crate) fn from_request(error: &codex_http_client::RouteAwareRequestError) -> Self {
++        use codex_http_client::{RouteAwareRequestError, RouteFailureClass};
++        let kind = if error.failure_class() == Some(RouteFailureClass::TlsError) {
++            HttpNetworkErrorKind::TlsInvalid
++        } else if matches!(error, RouteAwareRequestError::Policy(_)) {
++            HttpNetworkErrorKind::Authorization
++        } else if error.is_builder()
++            || matches!(
++                error,
++                RouteAwareRequestError::Build(_)
++                    | RouteAwareRequestError::UnsupportedRedirectScheme(_)
++                    | RouteAwareRequestError::TooManyRedirects
++            )
++        {
++            HttpNetworkErrorKind::RequestInvalid
++        } else if error.is_timeout() {
++            HttpNetworkErrorKind::Timeout
++        } else if error.is_connect() {
++            HttpNetworkErrorKind::ConnectionUnavailable
++        } else {
++            HttpNetworkErrorKind::TransportInterrupted
++        };
++        Self {
++            kind,
++            not_sent: error.is_connect()
++                || matches!(
++                    kind,
++                    HttpNetworkErrorKind::TlsInvalid
++                        | HttpNetworkErrorKind::Authorization
++                        | HttpNetworkErrorKind::RequestInvalid
++                ),
++        }
++    }
++    pub(crate) fn from_rpc(error: &codex_exec_server_protocol::JSONRPCErrorError) -> Option<Self> {
++        serde_json::from_value(error.data.as_ref()?.get("httpNetworkFailure")?.clone()).ok()
++    }
++    pub(crate) fn into_rpc(self) -> codex_exec_server_protocol::JSONRPCErrorError {
++        let mut error = crate::rpc::internal_error(self.to_string());
++        error.data = Some(serde_json::json!({"httpNetworkFailure": self}));
++        error
++    }
++}
+diff --git a/codex-rs/rmcp-client/src/network_retry_policy.rs b/codex-rs/rmcp-client/src/network_retry_policy.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/rmcp-client/src/network_retry_policy.rs
+@@ -0,0 +1,54 @@
++//! Embedders supply one request policy at the SDK retry ownership boundary.
++use codex_exec_server::HttpNetworkFailure;
++use std::{
++    sync::{Arc, OnceLock},
++    time::Duration,
++};
++
++#[derive(Clone, Debug, Default)]
++pub struct NetworkRetryFacts {
++    pub reconcile_first: bool,
++    pub transport: Option<HttpNetworkFailure>,
++    pub status: Option<u16>,
++    pub retry_after: Option<String>,
++}
++pub type NetworkRetryPolicy =
++    dyn Fn(u32, u32, &NetworkRetryFacts) -> Option<Duration> + Send + Sync;
++static POLICY: OnceLock<Arc<NetworkRetryPolicy>> = OnceLock::new();
++
++#[cfg(test)]
++tokio::task_local! {
++    pub(crate) static TEST_POLICY: Arc<NetworkRetryPolicy>;
++}
++
++pub(crate) fn policy_configured() -> bool {
++    #[cfg(test)]
++    if TEST_POLICY.try_with(|_| ()).is_ok() {
++        return true;
++    }
++    POLICY.get().is_some()
++}
++
++/// Install before constructing MCP clients. Repeated initialization is harmless.
++pub fn set_network_retry_policy(policy: Arc<NetworkRetryPolicy>) {
++    let _ = POLICY.set(policy);
++}
++
++pub(crate) fn retry_delay(
++    attempt: u32,
++    connections: u32,
++    facts: &NetworkRetryFacts,
++) -> Option<Duration> {
++    #[cfg(test)]
++    if let Ok(delay) = TEST_POLICY.try_with(|policy| policy(attempt, connections, facts)) {
++        return delay;
++    }
++    if let Some(policy) = POLICY.get() {
++        policy(attempt, connections, facts)
++    } else {
++        [250, 1_000]
++            .get(attempt.saturating_sub(1) as usize)
++            .copied()
++            .map(Duration::from_millis)
++    }
++}
+diff --git a/codex-rs/rmcp-client/src/network_sse.rs b/codex-rs/rmcp-client/src/network_sse.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/rmcp-client/src/network_sse.rs
+@@ -0,0 +1,293 @@
++//! One retry owner for MCP GET streams and Last-Event-ID continuations.
++use std::sync::Arc;
++use std::time::Duration;
++
++use futures::{
++    StreamExt,
++    future::BoxFuture,
++    stream::{self, BoxStream},
++};
++use rmcp::transport::streamable_http_client::StreamableHttpError;
++use sse_stream::{Error, Sse};
++
++use crate::http_client_adapter::StreamableHttpClientAdapterError;
++use crate::network_retry_policy::{NetworkRetryFacts, retry_delay};
++use crate::rmcp_client::streamable_http_retry::streamable_retry_facts;
++
++type Events = BoxStream<'static, Result<Sse, Error>>;
++type OpenError = StreamableHttpError<StreamableHttpClientAdapterError>;
++pub(crate) type OpenStream =
++    Arc<dyn Fn(Option<String>) -> BoxFuture<'static, Result<Events, OpenError>> + Send + Sync>;
++
++#[derive(Default)]
++pub(crate) struct RetryState {
++    attempt: u32,
++    connections: u32,
++}
++impl RetryState {
++    fn delay(&mut self, facts: &NetworkRetryFacts) -> Option<Duration> {
++        self.attempt = self.attempt.max(1);
++        if facts.transport.is_some_and(|failure| failure.not_sent) {
++            self.connections = self.connections.saturating_add(1);
++        } else {
++            self.connections = 0;
++        }
++        let delay = retry_delay(self.attempt, self.connections, facts);
++        if self.connections == 0 {
++            self.attempt = self.attempt.saturating_add(1);
++        }
++        delay
++    }
++}
++
++pub(crate) async fn open(
++    connect: &OpenStream,
++    id: Option<String>,
++    retry: &mut RetryState,
++) -> Result<Events, OpenError> {
++    loop {
++        match connect(id.clone()).await {
++            Ok(stream) => return Ok(stream),
++            Err(error) => {
++                // Permanent protocol/auth/TLS errors never enter a generic reconnect loop.
++                if !crate::rmcp_client::RmcpClient::is_retryable_streamable_http_error(&error) {
++                    return Err(error);
++                }
++                let Some(delay) = retry.delay(&streamable_retry_facts(&error)) else {
++                    return Err(error);
++                };
++                tokio::time::sleep(delay).await;
++            }
++        }
++    }
++}
++
++pub(crate) fn resume(
++    events: Events,
++    connect: OpenStream,
++    retry: RetryState,
++    id: Option<String>,
++    allow_without_id: bool,
++    on_stop: Arc<dyn Fn(Option<String>) + Send + Sync>,
++) -> Events {
++    stream::unfold(
++        Some((events, connect, retry, id, None::<Duration>)),
++        move |state| {
++            let on_stop = on_stop.clone();
++            async move {
++                let (mut events, connect, mut retry, mut id, mut server_delay) = state?;
++                loop {
++                    let failure = match events.next().await {
++                        Some(Ok(event)) => {
++                            if let Some(value) = &event.id {
++                                id = Some(value.clone());
++                            }
++                            if let Some(value) = event.retry {
++                                server_delay = Some(Duration::from_millis(value));
++                            }
++                            retry = RetryState::default(); // Received progress starts a new reconnect budget.
++                            return Some((
++                                Ok(event),
++                                Some((events, connect, retry, id, server_delay)),
++                            ));
++                        }
++                        Some(Err(error)) => {
++                            if is_invalid_data(&error) || (!allow_without_id && id.is_none()) {
++                                on_stop(id.clone());
++                                return Some((Err(error), None));
++                            }
++                            error
++                        }
++                        None if !allow_without_id && id.is_none() => return None,
++                        None => Error::Body(Box::new(std::io::Error::new(
++                            std::io::ErrorKind::UnexpectedEof,
++                            "MCP SSE ended",
++                        ))),
++                    };
++                    let Some(delay) = retry.delay(&NetworkRetryFacts::default()) else {
++                        on_stop(id.clone());
++                        return Some((Err(failure), None));
++                    };
++                    // The server's SSE retry field is a lower bound, never shortened.
++                    tokio::time::sleep(delay.max(server_delay.take().unwrap_or_default())).await;
++                    match open(&connect, id.clone(), &mut retry).await {
++                        Ok(stream) => events = stream,
++                        Err(_) => {
++                            // RMCP makes one immediate reconnect before consulting its retry
++                            // policy. Fence that continuation before yielding the terminal error.
++                            on_stop(id.clone());
++                            return Some((
++                                Err(Error::Body(Box::new(std::io::Error::other(
++                                    "MCP SSE continuation failed",
++                                )))),
++                                None,
++                            ));
++                        }
++                    }
++                }
++            }
++        },
++    )
++    .boxed()
++}
++
++fn is_invalid_data(error: &Error) -> bool {
++    if !matches!(error, Error::Body(_)) {
++        return true;
++    }
++    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(error);
++    while let Some(error) = source {
++        if error
++            .downcast_ref::<std::io::Error>()
++            .is_some_and(|error| error.kind() == std::io::ErrorKind::InvalidData)
++        {
++            return true;
++        }
++        source = error.source();
++    }
++    false
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::network_retry_policy::{NetworkRetryPolicy, TEST_POLICY};
++    use std::sync::{
++        Mutex,
++        atomic::{AtomicUsize, Ordering},
++    };
++
++    fn policy() -> Arc<NetworkRetryPolicy> {
++        Arc::new(|attempt, _, facts| {
++            assert!(!facts.reconcile_first);
++            (attempt < 4).then_some(Duration::from_millis(1))
++        })
++    }
++    fn event(id: &str) -> Sse {
++        Sse {
++            id: Some(id.to_owned()),
++            data: Some("{}".to_owned()),
++            ..Default::default()
++        }
++    }
++    #[tokio::test]
++    async fn sse_continuation_uses_last_event_id_and_one_typed_budget() {
++        TEST_POLICY
++            .scope(policy(), async {
++                let calls = Arc::new(Mutex::new(Vec::new()));
++                let observed = calls.clone();
++                let connect: OpenStream = Arc::new(move |id| {
++                    let index = {
++                        let mut calls = observed.lock().unwrap();
++                        calls.push(id);
++                        calls.len()
++                    };
++                    Box::pin(async move {
++                        if index == 1 {
++                            Err(StreamableHttpError::Client(
++                                StreamableHttpClientAdapterError::NetworkStatus {
++                                    status: 503,
++                                    retry_after: Some("0".to_owned()),
++                                },
++                            ))
++                        } else {
++                            Ok(stream::iter([Ok(event("2"))])
++                                .chain(stream::pending())
++                                .boxed())
++                        }
++                    })
++                });
++                let initial = stream::iter([
++                    Ok(event("1")),
++                    Err(Error::Body(Box::new(std::io::Error::other("closed")))),
++                ])
++                .boxed();
++                let mut resumed = resume(
++                    initial,
++                    connect,
++                    Default::default(),
++                    None,
++                    false,
++                    Arc::new(|_| {}),
++                );
++                assert_eq!(
++                    resumed.next().await.unwrap().unwrap().id.as_deref(),
++                    Some("1")
++                );
++                assert_eq!(
++                    resumed.next().await.unwrap().unwrap().id.as_deref(),
++                    Some("2")
++                );
++                assert_eq!(
++                    *calls.lock().unwrap(),
++                    vec![Some("1".to_owned()), Some("1".to_owned())]
++                );
++            })
++            .await;
++    }
++    #[tokio::test]
++    async fn sse_open_exhaustion_and_tls_stop_do_not_multiply_attempts() {
++        TEST_POLICY
++            .scope(policy(), async {
++                let calls = Arc::new(AtomicUsize::new(0));
++                let observed = calls.clone();
++                let connect: OpenStream = Arc::new(move |_| {
++                    observed.fetch_add(1, Ordering::SeqCst);
++                    Box::pin(async {
++                        Err(StreamableHttpError::Client(
++                            StreamableHttpClientAdapterError::NetworkStatus {
++                                status: 503,
++                                retry_after: None,
++                            },
++                        ))
++                    })
++                });
++                assert!(open(&connect, None, &mut Default::default()).await.is_err());
++                assert_eq!(calls.load(Ordering::SeqCst), 4);
++                let connect: OpenStream = Arc::new(move |_| {
++                    Box::pin(async {
++                        Err(StreamableHttpError::Client(
++                            StreamableHttpClientAdapterError::HttpRequest(
++                                codex_exec_server::ExecServerError::NetworkHttpRequest(
++                                    codex_exec_server::HttpNetworkFailure {
++                                        kind: codex_exec_server::HttpNetworkErrorKind::TlsInvalid,
++                                        not_sent: true,
++                                    },
++                                ),
++                            ),
++                        ))
++                    })
++                });
++                assert!(open(&connect, None, &mut Default::default()).await.is_err());
++            })
++            .await;
++    }
++    #[tokio::test]
++    async fn a_post_without_resume_id_and_invalid_sse_never_reopens() {
++        TEST_POLICY
++            .scope(policy(), async {
++                let connect: OpenStream =
++                    Arc::new(|_| panic!("unsafe or invalid stream cannot reopen"));
++                let mut resumed = resume(
++                    stream::empty().boxed(),
++                    connect.clone(),
++                    Default::default(),
++                    None,
++                    false,
++                    Arc::new(|_| {}),
++                );
++                assert!(resumed.next().await.is_none());
++                let mut resumed = resume(
++                    stream::iter([Err(Error::InvalidLine)]).boxed(),
++                    connect,
++                    Default::default(),
++                    Some("1".to_owned()),
++                    true,
++                    Arc::new(|_| {}),
++                );
++                assert!(resumed.next().await.unwrap().is_err());
++                assert!(resumed.next().await.is_none());
++            })
++            .await;
++    }
++}

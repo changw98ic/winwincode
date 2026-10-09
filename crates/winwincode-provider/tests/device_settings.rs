@@ -50,7 +50,7 @@ fn failed_device_key_validation_does_not_commit_a_schema_upgrade() {
         .execute_batch(
             "ALTER TABLE exchanges DROP COLUMN accounting_chunks;
              DROP TABLE accounting_closed_attempts;
-             DROP TABLE model_open_attempts; DROP TABLE opencode_accounts;
+             DROP TABLE model_attempt_diagnostics; DROP TABLE jev_attempt_diagnostics; DROP TABLE model_open_attempts; DROP TABLE opencode_accounts;
              DROP TABLE opencode_connections;
              DROP TABLE opencode_session_bindings;
              DROP TABLE opencode_logins;
@@ -65,7 +65,7 @@ fn failed_device_key_validation_does_not_commit_a_schema_upgrade() {
         .expect("retained schema version");
     assert_eq!(version, 8, "a failed open must roll back the migration");
     database
-        .pragma_update(None, "user_version", 12)
+        .pragma_update(None, "user_version", 13)
         .expect("future schema");
     assert!(DeviceProviderStore::open(&directory).is_err());
     drop(database);
@@ -364,7 +364,7 @@ fn old_database_upgrade_preserves_identity_and_provider_state() {
         let before = store.snapshot("device-1").expect("snapshot");
         drop(store);
         let db = rusqlite::Connection::open(directory.join("providers.sqlite3")).expect("db");
-        db.execute_batch("DROP TABLE model_open_attempts; DROP TABLE opencode_accounts; DROP TABLE opencode_connections; DROP TABLE opencode_session_bindings; DROP TABLE opencode_logins; DROP TABLE provider_defaults; DROP TABLE accounting_closed_attempts; ALTER TABLE exchanges DROP COLUMN accounting_chunks; DROP TABLE jev_judge_exchanges;")
+        db.execute_batch("DROP TABLE model_attempt_diagnostics; DROP TABLE jev_attempt_diagnostics; DROP TABLE model_open_attempts; DROP TABLE opencode_accounts; DROP TABLE opencode_connections; DROP TABLE opencode_session_bindings; DROP TABLE opencode_logins; DROP TABLE provider_defaults; DROP TABLE accounting_closed_attempts; ALTER TABLE exchanges DROP COLUMN accounting_chunks; DROP TABLE jev_judge_exchanges;")
             .expect("old schema");
         db.execute_batch("ALTER TABLE jev_context_exchanges DROP COLUMN request_json;")
             .expect("old schema");
@@ -399,7 +399,7 @@ fn old_database_upgrade_preserves_identity_and_provider_state() {
         let upgraded: i64 = db
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(upgraded, 11);
+        assert_eq!(upgraded, 12);
         let old: (String, String, Option<String>, Option<Vec<u8>>) = db.query_row(
             "SELECT digest, chunks, request_open, prepared_payload FROM exchanges WHERE exchange_id='old-exchange'", [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
@@ -446,7 +446,7 @@ fn assert_private_headers(store: &DeviceProviderStore, directory: &std::path::Pa
 fn reconstruct_v9(directory: &std::path::Path) {
     // Reconstruct v9 with real static credentials, headers and replay receipts.
     let database = rusqlite::Connection::open(directory.join("providers.sqlite3")).unwrap();
-    database.execute_batch("DROP TABLE model_open_attempts; DROP TABLE opencode_accounts; DROP TABLE opencode_connections;
+    database.execute_batch("DROP TABLE model_attempt_diagnostics; DROP TABLE jev_attempt_diagnostics; DROP TABLE model_open_attempts; DROP TABLE opencode_accounts; DROP TABLE opencode_connections;
         DROP TABLE opencode_session_bindings; DROP TABLE opencode_logins; DROP TABLE provider_defaults;
         PRAGMA user_version=9;").unwrap();
     drop(database);

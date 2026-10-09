@@ -1,3 +1,5 @@
+mod http_network_failure;
+pub use http_network_failure::{HttpNetworkErrorKind, HttpNetworkFailure};
 mod arg0_exec_helper;
 mod capability_discovery;
 mod capability_discovery_cache;

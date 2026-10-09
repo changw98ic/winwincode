@@ -283,3 +283,39 @@ fn size_accounting_saturates_without_overflow() {
 
     assert_eq!((error.kind(), limit.failed), (ErrorKind::InvalidData, true));
 }
+
+#[tokio::test]
+async fn embedded_sse_exhaustion_fences_rmcp_immediate_reconnect() {
+    use super::StreamableHttpClientAdapter;
+    use futures::StreamExt;
+    use rmcp::transport::streamable_http_client::StreamableHttpClient;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let policy: Arc<crate::NetworkRetryPolicy> =
+        Arc::new(|attempt, _, _| (attempt < 4).then_some(Duration::from_millis(1)));
+    crate::network_retry_policy::TEST_POLICY.scope(policy, async {
+        let server = wiremock::MockServer::start().await;
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = calls.clone();
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(move |request: &wiremock::Request| {
+                if observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    wiremock::ResponseTemplate::new(200)
+                        .set_body_raw("id: 1\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\"}\n\n", "text/event-stream")
+                } else {
+                    assert_eq!(request.headers.get("last-event-id").unwrap(), "1");
+                    wiremock::ResponseTemplate::new(503)
+                }
+            }).mount(&server).await;
+        let http_client = Arc::new(codex_exec_server::RouteAwareHttpClient::new(codex_http_client::HttpClientFactory::new(codex_http_client::OutboundProxyPolicy::ReqwestDefault)));
+        let adapter = StreamableHttpClientAdapter::new(http_client, Default::default(), None, false, StreamableHttpRedirectMode::Legacy, Arc::default());
+        let uri: Arc<str> = server.uri().into();
+        let mut events = adapter.get_stream(uri.clone(), None, None, None, Default::default()).await.unwrap();
+        assert_eq!(events.next().await.unwrap().unwrap().id.as_deref(), Some("1"));
+        assert!(tokio::time::timeout(Duration::from_secs(2), events.next()).await.unwrap().unwrap().is_err());
+        // RMCP makes this immediate reconnect before consulting NeverRetry.
+        assert!(adapter.get_stream(uri, None, Some("1".to_owned()), None, Default::default()).await.is_err());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 4);
+    }).await;
+}

@@ -8,11 +8,12 @@
   "cargoLockSha256BeforePatches": "5553f06583159ed64666b6eb4beea3154e06b612e6312528131bdc226a6a860c",
   "license": "Apache-2.0",
   "patchesApplied": [
-    "upstream/patches/codex/0001-winwincode-integration.patch"
+    "upstream/patches/codex/0001-winwincode-integration.patch",
+    "upstream/patches/codex/0002-unified-network-policy.patch"
   ],
   "archiveUrl": "https://codeload.github.com/openai/codex/tar.gz/refs/tags/rust-v0.160.1",
   "excludedSourceExtensions": [
     ".md"
   ],
-  "sourceTreeSha256": "ddcb8c77401e65c5a0b30ea75c204118d5049300572aa31f8886e31e47ef4004"
+  "sourceTreeSha256": "125a059709ca6381393dd3387abe66e4d8a54744b92a395b55a5d391e31ced8c"
 }

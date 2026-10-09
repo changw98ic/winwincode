@@ -33,6 +33,17 @@ impl WorkerInterrupt {
         }
     }
 
+    pub(crate) async fn until_interrupt<T>(
+        &mut self,
+        operation: impl Future<Output = T>,
+    ) -> Option<T> {
+        tokio::select! {
+            biased;
+            () = self.wait() => None,
+            result = operation => Some(result),
+        }
+    }
+
     pub(crate) async fn wait(&mut self) {
         #[cfg(unix)]
         tokio::select! {
@@ -49,6 +60,7 @@ mod tests {
     use super::WorkerInterrupt;
     use std::process::Command;
     use std::time::Duration;
+    use tokio::io::AsyncReadExt;
 
     #[test]
     fn interrupt_survives_an_awaited_drive_turn() {
@@ -112,6 +124,33 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), terminate.wait())
             .await
             .expect("termination during registration must remain pending");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut active = WorkerInterrupt::new().unwrap();
+        let peer = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            send_interrupt();
+            let mut byte = [0];
+            let read = tokio::time::timeout(Duration::from_millis(500), socket.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                read, 0,
+                "interrupt must close the real in-flight connection"
+            );
+        });
+        let started = std::time::Instant::now();
+        let result = active
+            .until_interrupt(async {
+                let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
+                let mut byte = [0];
+                socket.read(&mut byte).await.unwrap()
+            })
+            .await;
+        assert!(result.is_none());
+        assert!(started.elapsed() < Duration::from_millis(500));
+        peer.await.unwrap();
     }
 
     fn send_interrupt() {

@@ -524,6 +524,8 @@ pub enum TeamsGraphCallErrorKind {
 pub struct TeamsGraphCallError {
     kind: TeamsGraphCallErrorKind,
     retry_after_millis: Option<u64>,
+    network: Option<winwincode_network::NetworkFailure>,
+    replay: winwincode_network::Replay,
 }
 
 impl TeamsGraphCallError {
@@ -539,6 +541,8 @@ impl TeamsGraphCallError {
         Ok(Self {
             kind,
             retry_after_millis: None,
+            network: None,
+            replay: winwincode_network::Replay::ReconcileFirst,
         })
     }
 
@@ -554,7 +558,29 @@ impl TeamsGraphCallError {
         Ok(Self {
             kind: TeamsGraphCallErrorKind::RateLimited,
             retry_after_millis: Some(retry_after_millis),
+            network: None,
+            replay: winwincode_network::Replay::ReconcileFirst,
         })
+    }
+
+    fn from_network(
+        failure: winwincode_network::NetworkFailure,
+        replay: winwincode_network::Replay,
+    ) -> Self {
+        let kind = match failure.kind {
+            winwincode_network::ErrorKind::Authentication
+            | winwincode_network::ErrorKind::Authorization => {
+                TeamsGraphCallErrorKind::CredentialRevoked
+            }
+            _ if failure.retryable() => TeamsGraphCallErrorKind::Retryable,
+            _ => TeamsGraphCallErrorKind::Permanent,
+        };
+        Self {
+            kind,
+            retry_after_millis: failure.retry_after_ms,
+            network: Some(failure),
+            replay,
+        }
     }
 
     #[must_use]
@@ -584,6 +610,7 @@ pub struct TeamsGraphOutboundMessage {
     channel_id: TeamsChannelId,
     operation_key: Sha256Digest,
     body: Vec<u8>,
+    reconciliation_required: bool,
 }
 
 impl TeamsGraphOutboundMessage {
@@ -812,42 +839,73 @@ impl TeamsGraphHttpTransport {
             .map_err(|_| graph_error(TeamsGraphCallErrorKind::CredentialRevoked))?;
         let authorization = format!("Bearer {token}");
         let client_request_id = client_request_id(operation_key);
-        let response = match (method, body) {
-            ("GET", None) => self
-                .agent
-                .get(url)
-                .header("Accept", "application/json")
-                .header("Authorization", &authorization)
-                .header("client-request-id", &client_request_id)
-                .header("User-Agent", GRAPH_USER_AGENT)
-                .call(),
-            ("POST", Some(body)) => self
-                .agent
-                .post(url)
-                .header("Accept", "application/json")
-                .header("Authorization", &authorization)
-                .header("client-request-id", &client_request_id)
-                .header("User-Agent", GRAPH_USER_AGENT)
-                .send_json(body),
-            _ => return Err(graph_error(TeamsGraphCallErrorKind::Permanent)),
+        if !matches!((method, body), ("GET", None) | ("POST", Some(_))) {
+            return Err(graph_error(TeamsGraphCallErrorKind::Permanent));
         }
-        .map_err(|_| graph_error(TeamsGraphCallErrorKind::Retryable))?;
+        let replay = if method == "GET" {
+            winwincode_network::Replay::ReplayExact
+        } else {
+            winwincode_network::Replay::ReconcileFirst
+        };
+        let response = winwincode_network::http::execute_http_once(
+            &self.agent,
+            |agent| match (method, body) {
+                ("GET", None) => agent
+                    .get(url)
+                    .header("Accept", "application/json")
+                    .header("Authorization", &authorization)
+                    .header("client-request-id", &client_request_id)
+                    .header("User-Agent", GRAPH_USER_AGENT)
+                    .call(),
+                ("POST", Some(body)) => agent
+                    .post(url)
+                    .header("Accept", "application/json")
+                    .header("Authorization", &authorization)
+                    .header("client-request-id", &client_request_id)
+                    .header("User-Agent", GRAPH_USER_AGENT)
+                    .send_json(body),
+                _ => unreachable!("validated Graph request"),
+            },
+            MAX_GRAPH_RESPONSE_BYTES,
+            Duration::from_secs(30),
+            || true,
+        )
+        .map_err(|failure| TeamsGraphCallError::from_network(failure, replay))?;
         let status = response.status().as_u16();
+        if matches!(status, 408 | 425 | 500..=599) {
+            return Err(TeamsGraphCallError::from_network(
+                winwincode_network::NetworkFailure::http(
+                    status,
+                    response
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| {
+                            winwincode_network::retry_after(v, std::time::SystemTime::now())
+                        }),
+                ),
+                replay,
+            ));
+        }
         let retry_after_seconds = response
             .headers()
             .get("retry-after")
             .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<u64>().ok());
-        let bytes = response
-            .into_body()
-            .with_config()
-            .limit(MAX_GRAPH_RESPONSE_BYTES)
-            .read_to_vec()
-            .map_err(|_| graph_error(TeamsGraphCallErrorKind::Retryable))?;
-        let body = if bytes.is_empty() {
+            .and_then(winwincode_network::retry_after_seconds);
+        let bytes = response.into_body();
+        let body = if bytes.is_empty() || status == 429 {
             None
         } else {
-            serde_json::from_slice(&bytes).ok()
+            Some(serde_json::from_slice(&bytes).map_err(|_| {
+                TeamsGraphCallError::from_network(
+                    winwincode_network::NetworkFailure::new(
+                        winwincode_network::ErrorKind::ProtocolInvalid,
+                        winwincode_network::Acceptance::ResponseReceived,
+                        winwincode_network::Phase::Decode,
+                    ),
+                    replay,
+                )
+            })?)
         };
         Ok(TeamsGraphHttpResponse {
             status,
@@ -866,6 +924,16 @@ impl TeamsGraphTransportPort for TeamsGraphHttpTransport {
         if let Some(remote_id) = self.find_message(access_token, message)? {
             return TeamsGraphMessageReceipt::try_new(remote_id, false)
                 .map_err(|_| graph_response_invalid());
+        }
+        if message.reconciliation_required {
+            return Err(TeamsGraphCallError::from_network(
+                winwincode_network::NetworkFailure::new(
+                    winwincode_network::ErrorKind::ProtocolInvalid,
+                    winwincode_network::Acceptance::Unknown,
+                    winwincode_network::Phase::Persist,
+                ),
+                winwincode_network::Replay::ReconcileFirst,
+            ));
         }
         self.create_message(access_token, message)
     }
@@ -1155,6 +1223,7 @@ impl TeamsOutboundOperation {
             channel_id: payload.channel_id.clone(),
             operation_key: claim.operation_key().digest().clone(),
             body,
+            reconciliation_required: claim.requires_reconciliation(),
         })
     }
 }
@@ -1363,6 +1432,10 @@ fn connector_credential_error(error: TeamsCredentialError) -> ConnectorCallError
 }
 
 fn graph_call_error(error: TeamsGraphCallError) -> ConnectorCallError {
+    if let Some(failure) = error.network {
+        return ConnectorCallError::from_network("TEAMS_NETWORK_FAILURE", failure)
+            .for_replay(error.replay);
+    }
     match error.kind() {
         TeamsGraphCallErrorKind::RateLimited => error
             .retry_after_millis()
@@ -1415,7 +1488,14 @@ fn graph_error(kind: TeamsGraphCallErrorKind) -> TeamsGraphCallError {
 }
 
 fn graph_response_invalid() -> TeamsGraphCallError {
-    graph_error(TeamsGraphCallErrorKind::Retryable)
+    TeamsGraphCallError::from_network(
+        winwincode_network::NetworkFailure::new(
+            winwincode_network::ErrorKind::ProtocolInvalid,
+            winwincode_network::Acceptance::ResponseReceived,
+            winwincode_network::Phase::Decode,
+        ),
+        winwincode_network::Replay::ReconcileFirst,
+    )
 }
 
 fn operation_marker(operation_key: &Sha256Digest) -> String {

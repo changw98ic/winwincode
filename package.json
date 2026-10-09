@@ -14,9 +14,9 @@
     "preinstall": "node scripts/check/check-runtime.mjs",
     "clean": "node scripts/build/clean.mjs",
     "format:check": "node scripts/check/check-format.mjs && cargo fmt --all -- --check",
-    "contracts:generate": "node scripts/build/generate-contracts.mjs",
-    "contracts:check": "node scripts/build/generate-contracts.mjs --check",
-    "lint:source": "node scripts/check/lint-workspace.mjs",
+    "contracts:generate": "node scripts/build/generate-network-policy.mjs && node scripts/build/generate-contracts.mjs",
+    "contracts:check": "node scripts/build/generate-network-policy.mjs --check && node scripts/build/generate-contracts.mjs --check",
+    "lint:source": "node scripts/check/lint-workspace.mjs && node scripts/check/check-network-entrypoints.mjs",
     "check:no-absolute-paths": "node scripts/check/check-no-absolute-paths.mjs",
     "lint:rust": "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings",
     "lint": "pnpm lint:source && pnpm typecheck && pnpm lint:rust",
@@ -54,6 +54,7 @@
     "ajv-formats": "3.0.1",
     "esbuild": "0.28.2",
     "jsdom": "29.1.1",
-    "typescript": "6.0.3"
+    "typescript": "6.0.3",
+    "@winwincode/network-request": "0.1.0-alpha.2"
   }
 }

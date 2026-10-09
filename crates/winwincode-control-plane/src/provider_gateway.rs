@@ -50,11 +50,16 @@ const MODEL_CANCELLATION_MESSAGE: &str = "model exchange cancelled by Worker";
 pub struct ProviderGatewayError {
     kind: ProviderGatewayErrorKind,
     message: &'static str,
+    network: Option<winwincode_network::NetworkFailure>,
 }
 
 impl ProviderGatewayError {
     const fn new(kind: ProviderGatewayErrorKind, message: &'static str) -> Self {
-        Self { kind, message }
+        Self {
+            kind,
+            message,
+            network: None,
+        }
     }
 
     pub(crate) const fn storage() -> Self {
@@ -92,6 +97,12 @@ impl ProviderGatewayError {
         )
     }
 
+    /// Returns bounded transport facts without upstream text or credentials.
+    #[must_use]
+    pub const fn network_failure(&self) -> Option<winwincode_network::NetworkFailure> {
+        self.network
+    }
+
     /// Returns the stable machine-readable category.
     #[must_use]
     pub const fn kind(&self) -> ProviderGatewayErrorKind {
@@ -101,7 +112,15 @@ impl ProviderGatewayError {
 
 impl fmt::Display for ProviderGatewayError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.message)
+        formatter.write_str(self.message)?;
+        if let Some(failure) = self.network {
+            write!(
+                formatter,
+                ";network={}",
+                serde_json::to_string(&failure).map_err(|_| fmt::Error)?
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -982,7 +1001,19 @@ impl<'a> ProviderGateway<'a> {
         };
         let adapter_result = self
             .adapter(&resolved.route.provider_id)?
-            .open(&invocation, &credential)
+            .open_recovering(
+                &invocation,
+                &credential,
+                &ProviderGatewayOpenReceipt {
+                    model_exchange_id: message.model_exchange_id.clone(),
+                    request_id: message.request_id.clone(),
+                    route: resolved.route.clone(),
+                    adapter_request_id: adapter_request_id.to_owned(),
+                    idempotent_replay: false,
+                    stream_leak_gate: leak_gate.fingerprint_snapshot(),
+                },
+                &|| self.identity.authorize(message).is_ok(),
+            )
             .map_err(|error| map_adapter_error(&error));
         let adapter_receipt = match adapter_result {
             Ok(receipt) => receipt,
@@ -2041,7 +2072,7 @@ fn map_secret_store_error(_error: &SecretStoreError) -> ProviderGatewayError {
 }
 
 fn map_adapter_error(error: &ProviderAdapterError) -> ProviderGatewayError {
-    match error.kind() {
+    let mut mapped = match error.kind() {
         ProviderAdapterErrorKind::RequestInvalid => ProviderGatewayError::new(
             ProviderGatewayErrorKind::AdapterRequestInvalid,
             "Provider request is invalid",
@@ -2086,9 +2117,10 @@ fn map_adapter_error(error: &ProviderAdapterError) -> ProviderGatewayError {
             ProviderGatewayErrorKind::AdapterProtocol,
             "Provider adapter response is invalid",
         ),
-    }
+    };
+    mapped.network = Some(error.network_failure());
+    mapped
 }
-
 fn decode_payload(payload: &EncodedPayload) -> Result<Vec<u8>, ProviderGatewayError> {
     validate_content_type(&payload.content_type)?;
     if payload.data_base64.len() > MAX_PROVIDER_PAYLOAD_BYTES.saturating_mul(2) {

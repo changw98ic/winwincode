@@ -129,6 +129,7 @@ pub struct ProviderAdapterError {
     http_status: Option<u16>,
     retry_after: Option<std::time::Duration>,
     connection_pending: bool,
+    network: Option<Box<winwincode_network::NetworkFailure>>,
 }
 
 impl ProviderAdapterError {
@@ -139,7 +140,92 @@ impl ProviderAdapterError {
             http_status: None,
             retry_after: None,
             connection_pending: false,
+            network: None,
         }
+    }
+
+    pub(crate) fn from_network(failure: winwincode_network::NetworkFailure) -> Self {
+        use winwincode_network::ErrorKind;
+        let mut error = match failure.kind {
+            ErrorKind::ConnectionUnavailable
+            | ErrorKind::TransportInterrupted
+            | ErrorKind::Timeout => Self::connection(),
+            ErrorKind::RateLimited => Self::rate_limited(),
+            ErrorKind::ServerTransient => Self::upstream(),
+            ErrorKind::Authentication | ErrorKind::Authorization | ErrorKind::Cancelled => {
+                Self::rejected()
+            }
+            ErrorKind::RequestInvalid => Self::request_invalid(),
+            _ => Self::protocol(),
+        };
+        error.connection_pending =
+            failure.acceptance == winwincode_network::Acceptance::NotSent && failure.retryable();
+        error.http_status = failure.http_status;
+        error.retry_after = failure.retry_after_ms.map(std::time::Duration::from_millis);
+        error.network = Some(Box::new(failure));
+        error
+    }
+
+    /// Bounded request facts without upstream text or credentials.
+    #[must_use]
+    pub fn network_failure(&self) -> winwincode_network::NetworkFailure {
+        use winwincode_network::{Acceptance, ErrorKind, NetworkFailure, Phase};
+        self.network.as_deref().copied().unwrap_or_else(|| {
+            if let Some(status) = self.http_status {
+                return NetworkFailure::http(status, self.retry_after);
+            }
+            let kind = match self.kind {
+                ProviderAdapterErrorKind::Connection => ErrorKind::TransportInterrupted,
+                ProviderAdapterErrorKind::Upstream => ErrorKind::ServerTransient,
+                ProviderAdapterErrorKind::RateLimited => ErrorKind::RateLimited,
+                ProviderAdapterErrorKind::RequestInvalid
+                | ProviderAdapterErrorKind::RequestTranslation
+                | ProviderAdapterErrorKind::RequestSizeLimit
+                | ProviderAdapterErrorKind::Rejected => ErrorKind::RequestInvalid,
+                ProviderAdapterErrorKind::IdentityConflict => ErrorKind::IntegrityInvalid,
+                ProviderAdapterErrorKind::Unavailable => ErrorKind::StorageUnavailable,
+                ProviderAdapterErrorKind::ResponseContentType
+                | ProviderAdapterErrorKind::Protocol => ErrorKind::ProtocolInvalid,
+            };
+            let mut failure = NetworkFailure::new(
+                if self.connection_pending {
+                    ErrorKind::ConnectionUnavailable
+                } else {
+                    kind
+                },
+                if self.connection_pending {
+                    Acceptance::NotSent
+                } else {
+                    Acceptance::Unknown
+                },
+                Phase::ResponseHeaders,
+            );
+            failure.retry_after_ms = self.retry_after.map(winwincode_network::duration_millis);
+            failure.diagnostic = Some(winwincode_network::NetworkDiagnostic::new(
+                match self.kind {
+                    ProviderAdapterErrorKind::ResponseContentType => {
+                        winwincode_network::DiagnosticCode::ContentType
+                    }
+                    ProviderAdapterErrorKind::Protocol => {
+                        winwincode_network::DiagnosticCode::HttpProtocol
+                    }
+                    ProviderAdapterErrorKind::RequestSizeLimit => {
+                        winwincode_network::DiagnosticCode::BodyTooLarge
+                    }
+                    ProviderAdapterErrorKind::IdentityConflict => {
+                        winwincode_network::DiagnosticCode::IdentityConflict
+                    }
+                    ProviderAdapterErrorKind::Unavailable => {
+                        winwincode_network::DiagnosticCode::Storage
+                    }
+                    ProviderAdapterErrorKind::Connection => {
+                        winwincode_network::DiagnosticCode::Connect
+                    }
+                    _ => winwincode_network::DiagnosticCode::Configuration,
+                },
+            ));
+            failure
+        })
     }
 
     #[must_use]
@@ -174,18 +260,31 @@ impl ProviderAdapterError {
         )
     }
 
+    pub(crate) fn response_content_type_status(status: u16) -> Self {
+        use winwincode_network::{Acceptance, ErrorKind, NetworkFailure, Phase};
+        Self {
+            http_status: Some(status),
+            network: Some(Box::new(NetworkFailure {
+                http_status: Some(status),
+                ..NetworkFailure::new(
+                    ErrorKind::ProtocolInvalid,
+                    Acceptance::ResponseReceived,
+                    Phase::ResponseHeaders,
+                )
+                .with_diagnostic(winwincode_network::NetworkDiagnostic::new(
+                    winwincode_network::DiagnosticCode::ContentType,
+                ))
+            })),
+            ..Self::response_content_type()
+        }
+    }
+
     #[must_use]
     pub const fn connection() -> Self {
         Self::new(
             ProviderAdapterErrorKind::Connection,
             "Provider connection failed",
         )
-    }
-    pub(crate) const fn connection_not_sent() -> Self {
-        Self {
-            connection_pending: true,
-            ..Self::connection()
-        }
     }
 
     #[must_use]
@@ -200,11 +299,10 @@ impl ProviderAdapterError {
         status: u16,
         retry_after: Option<std::time::Duration>,
     ) -> Self {
-        Self {
-            http_status: Some(status),
-            retry_after,
-            ..Self::upstream()
-        }
+        let mut error = Self::upstream();
+        error.http_status = Some(status);
+        error.retry_after = retry_after;
+        error
     }
 
     #[must_use]
@@ -223,6 +321,7 @@ impl ProviderAdapterError {
             http_status: None,
             retry_after: None,
             connection_pending: false,
+            network: None,
         }
     }
 
@@ -234,6 +333,7 @@ impl ProviderAdapterError {
             http_status: Some(429),
             retry_after: None,
             connection_pending: false,
+            network: None,
         }
     }
 
@@ -256,6 +356,7 @@ impl ProviderAdapterError {
             http_status: None,
             retry_after: None,
             connection_pending: false,
+            network: None,
         }
     }
 
@@ -267,6 +368,7 @@ impl ProviderAdapterError {
             http_status: None,
             retry_after: None,
             connection_pending: false,
+            network: None,
         }
     }
 
@@ -276,10 +378,9 @@ impl ProviderAdapterError {
     }
 
     pub(crate) const fn rejected_status(status: u16) -> Self {
-        Self {
-            http_status: Some(status),
-            ..Self::rejected()
-        }
+        let mut error = Self::rejected();
+        error.http_status = Some(status);
+        error
     }
 
     /// Only the bounded status is retained; upstream bodies and headers are discarded.
@@ -297,20 +398,18 @@ impl fmt::Display for ProviderAdapterError {
 
 impl std::error::Error for ProviderAdapterError {}
 
-impl crate::request_retry::RetryFailure for ProviderAdapterError {
+impl winwincode_network::RetryFailure for ProviderAdapterError {
     fn retryable(&self) -> bool {
-        matches!(
-            self.kind,
-            ProviderAdapterErrorKind::Connection
-                | ProviderAdapterErrorKind::Upstream
-                | ProviderAdapterErrorKind::RateLimited
-        )
+        self.network_failure().retryable()
     }
     fn retry_after(&self) -> Option<std::time::Duration> {
         self.retry_after
     }
     fn wait_for_connection(&self) -> bool {
         self.connection_pending
+    }
+    fn network_failure(&self) -> winwincode_network::NetworkFailure {
+        self.network_failure()
     }
 }
 
@@ -369,6 +468,31 @@ pub trait ProviderAdapterPort: Send + Sync {
         invocation: &ProviderAdapterInvocation<'_>,
         credential: &ResolvedSecret,
     ) -> Result<ProviderAdapterOpenReceipt, ProviderAdapterError>;
+
+    /// Executes recovery at the complete response boundary. Non-HTTP adapters
+    /// keep their own deterministic open behavior. HTTPS adapters retain every
+    /// network attempt before retrying and cache only a validated completion.
+    /// # Errors
+    /// Rejects lost live authority, permanent failures and exhausted budgets.
+    fn open_recovering(
+        &self,
+        invocation: &ProviderAdapterInvocation<'_>,
+        credential: &ResolvedSecret,
+        receipt: &ProviderGatewayOpenReceipt,
+        can_start: &(dyn Fn() -> bool + Sync),
+    ) -> Result<ProviderAdapterOpenReceipt, ProviderAdapterError> {
+        let _ = receipt;
+        if !can_start() {
+            return Err(ProviderAdapterError::from_network(
+                winwincode_network::NetworkFailure::new(
+                    winwincode_network::ErrorKind::AuthorityExpired,
+                    winwincode_network::Acceptance::NotSent,
+                    winwincode_network::Phase::Connect,
+                ),
+            ));
+        }
+        self.open(invocation, credential)
+    }
 
     /// Applies one transport-level stream control transition. The tuple
     /// (`model_exchange_id`, `adapter_request_id`, `action`) is the mandatory
@@ -747,3 +871,51 @@ impl fmt::Display for SecretStoreError {
 }
 
 impl std::error::Error for SecretStoreError {}
+
+#[cfg(test)]
+mod network_error_tests {
+    use super::*;
+    use winwincode_network::{Acceptance, ErrorKind, Phase};
+
+    #[test]
+    fn protocol_retry_preserves_local_rejections_and_identity_fences() {
+        for (error, kind) in [
+            (
+                ProviderAdapterError::request_invalid(),
+                ErrorKind::RequestInvalid,
+            ),
+            (
+                ProviderAdapterError::request_translation(),
+                ErrorKind::RequestInvalid,
+            ),
+            (
+                ProviderAdapterError::request_size_limit(),
+                ErrorKind::RequestInvalid,
+            ),
+            (ProviderAdapterError::rejected(), ErrorKind::RequestInvalid),
+            (
+                ProviderAdapterError::identity_conflict(),
+                ErrorKind::IntegrityInvalid,
+            ),
+            (
+                ProviderAdapterError::unavailable(),
+                ErrorKind::StorageUnavailable,
+            ),
+        ] {
+            assert_eq!(error.network_failure().kind, kind);
+            assert!(!error.network_failure().retryable());
+        }
+    }
+
+    #[test]
+    fn wrong_content_type_retains_received_http_status_and_retries() {
+        let error = ProviderAdapterError::response_content_type_status(200);
+        assert_eq!(error.kind(), ProviderAdapterErrorKind::ResponseContentType);
+        let failure = error.network_failure();
+        assert_eq!(failure.kind, ErrorKind::ProtocolInvalid);
+        assert_eq!(failure.acceptance, Acceptance::ResponseReceived);
+        assert_eq!(failure.phase, Phase::ResponseHeaders);
+        assert_eq!(failure.http_status, Some(200));
+        assert!(failure.retryable());
+    }
+}

@@ -48,10 +48,9 @@
 //!    worker process. Every verdict is answered with a durable
 //!    `client.worker.launch_ack` echoing the grant identities — accepted,
 //!    idempotent duplicate, or rejected with a reason.
-//! 8. **Backoff.** Transport failures, malformed responses, and protocol
-//!    violations double the exchange backoff from
-//!    [`DaemonConfig::initial_backoff`] up to
-//!    [`DaemonConfig::max_backoff`]; any successful exchange resets it.
+//! 8. **Network recovery.** The shared request policy and durable attempt
+//!    journal own transport retries. Valid protocol rescheduling uses the
+//!    daemon's separate backoff and does not spend the network attempt budget.
 //! 9. **Lifecycle.** [`DeviceDaemon::run`] loops on a plain `std` thread
 //!    with interruptible sleeps until an [`AtomicBool`] shutdown flag is
 //!    observed. Shutdown never discards taken frames: frames leave the
@@ -204,6 +203,7 @@ const WAKE_SLICE: Duration = Duration::from_millis(20);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExchangeTransportError {
     message: String,
+    failure: winwincode_network::NetworkFailure,
 }
 
 impl ExchangeTransportError {
@@ -212,7 +212,25 @@ impl ExchangeTransportError {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            failure: winwincode_network::NetworkFailure::new(
+                winwincode_network::ErrorKind::TransportInterrupted,
+                winwincode_network::Acceptance::Unknown,
+                winwincode_network::Phase::ResponseHeaders,
+            ),
         }
+    }
+
+    #[must_use]
+    pub fn from_network(failure: winwincode_network::NetworkFailure) -> Self {
+        Self {
+            message: failure.to_string(),
+            failure,
+        }
+    }
+
+    #[must_use]
+    pub const fn network_failure(&self) -> winwincode_network::NetworkFailure {
+        self.failure
     }
 
     /// The failure reason.
@@ -250,6 +268,28 @@ pub trait ExchangeTransport: Send + Sync {
         credential: Option<&str>,
         request_bytes: &[u8],
     ) -> Result<Vec<u8>, ExchangeTransportError>;
+    /// Executes one queue-owned attempt while checking live shutdown authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns cancellation or the transport failure for this attempt.
+    fn exchange_authorized(
+        &self,
+        credential: Option<&str>,
+        request_bytes: &[u8],
+        can_start: &(dyn Fn() -> bool + Sync),
+    ) -> Result<Vec<u8>, ExchangeTransportError> {
+        if !can_start() {
+            return Err(ExchangeTransportError::from_network(
+                winwincode_network::NetworkFailure::new(
+                    winwincode_network::ErrorKind::Cancelled,
+                    winwincode_network::Acceptance::NotSent,
+                    winwincode_network::Phase::Connect,
+                ),
+            ));
+        }
+        self.exchange(credential, request_bytes)
+    }
 }
 
 /// Canonical exchange request body: a bounded batch of client-to-server
@@ -374,9 +414,9 @@ pub struct DaemonConfig {
     pub enroll_poll_interval: Duration,
     /// Maximum client-to-server frames per exchange batch.
     pub max_frames_per_exchange: usize,
-    /// First exponential-backoff step after a failed exchange.
+    /// First backoff step for a valid protocol reschedule.
     pub initial_backoff: Duration,
-    /// Backoff ceiling (`上限 30s` in production defaults).
+    /// Backoff ceiling for a valid protocol reschedule.
     pub max_backoff: Duration,
     /// Worker session capacity report skeleton; real capacity is owned by
     /// the later occupancy and worker lanes.
@@ -393,11 +433,13 @@ impl Default for DaemonConfig {
             platform: ClientPlatformTarget::Aarch64AppleDarwin,
             architecture: ClientArchitecture::Aarch64,
             client_version: env!("CARGO_PKG_VERSION").to_owned(),
-            heartbeat_interval: Duration::from_secs(15),
+            heartbeat_interval: Duration::from_secs(5),
             enroll_poll_interval: Duration::from_secs(1),
             max_frames_per_exchange: 16,
-            initial_backoff: Duration::from_secs(1),
-            max_backoff: Duration::from_secs(30),
+            initial_backoff: Duration::from_millis(winwincode_network::defaults().initial_delay_ms),
+            max_backoff: Duration::from_millis(
+                winwincode_network::defaults().max_connection_delay_ms,
+            ),
             capacity: ClientCapacityReport {
                 max_concurrent_worker_sessions: 0,
                 running_worker_sessions: 0,
@@ -414,6 +456,8 @@ impl Default for DaemonConfig {
 pub enum DaemonError {
     /// The daemon configuration is invalid.
     Config(String),
+    /// A permanent request failure or an exhausted ordinary request budget.
+    Network(winwincode_network::NetworkFailure),
     /// The local store failed.
     Store(DeviceStoreError),
     /// The durable outbox violates its invariants; recovery is refused
@@ -428,6 +472,7 @@ impl fmt::Display for DaemonError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Config(message) => write!(formatter, "device daemon config error: {message}"),
+            Self::Network(failure) => write!(formatter, "device daemon {failure}"),
             Self::Store(error) => write!(formatter, "device daemon store failure: {error}"),
             Self::CorruptOutbox(error) => {
                 write!(formatter, "device daemon outbox is corrupt: {error:?}")
@@ -540,6 +585,8 @@ pub struct DeviceDaemon {
     config: DaemonConfig,
     store: DeviceStore,
     transport: Arc<dyn ExchangeTransport>,
+    network_journal: winwincode_network::journal::RequestJournal,
+    network_clock: (Instant, u64),
     codec: FrameCodec,
     session: OutboxSession,
     device_id: String,
@@ -642,10 +689,18 @@ impl DeviceDaemon {
         // durable row — a restart never clears it; the server-side recovery
         // flow reconciles against whatever the device still mirrors.
         let occupancy_mirror = store.occupancy_mirror().map_err(DaemonError::Store)?;
+        let network_journal = winwincode_network::journal::RequestJournal::open(
+            &store
+                .database_path()
+                .with_file_name("network-requests.sqlite3"),
+        )
+        .map_err(DaemonError::Network)?;
         let mut daemon = Self {
             config,
             store,
             transport,
+            network_journal,
+            network_clock: (Instant::now(), winwincode_network::journal::now_millis()),
             codec: FrameCodec::default(),
             session: OutboxSession::new(),
             device_id,
@@ -1106,7 +1161,8 @@ impl DeviceDaemon {
     /// outbox, enrollment identity contradiction).
     pub fn run(&mut self, shutdown: &AtomicBool) -> Result<DaemonStatus, DaemonError> {
         while !shutdown.load(Ordering::Relaxed) {
-            let outcome = self.tick(Instant::now())?;
+            let outcome =
+                self.tick_authorized(Instant::now(), &|| !shutdown.load(Ordering::Acquire))?;
             let ready_in = match outcome {
                 TickOutcome::Waiting { ready_in }
                 | TickOutcome::Retrying {
@@ -1129,13 +1185,21 @@ impl DeviceDaemon {
     /// Returns the first fatal [`DaemonError`]; retriable failures are
     /// reported as [`TickOutcome::Retrying`] instead.
     pub fn tick(&mut self, now: Instant) -> Result<TickOutcome, DaemonError> {
+        self.tick_authorized(now, &|| true)
+    }
+
+    fn tick_authorized(
+        &mut self,
+        now: Instant,
+        can_start: &(dyn Fn() -> bool + Sync),
+    ) -> Result<TickOutcome, DaemonError> {
         if now < self.next_attempt_at {
             return Ok(TickOutcome::Waiting {
                 ready_in: self.next_attempt_at.duration_since(now),
             });
         }
         self.ensure_pending_reports(now)?;
-        let batch = match self.session.deliverable(
+        let mut batch = match self.session.deliverable(
             &mut self.store,
             self.delivery_cursor,
             self.config.max_frames_per_exchange,
@@ -1160,42 +1224,167 @@ impl DeviceDaemon {
             };
             return Ok(TickOutcome::Waiting { ready_in });
         }
-        self.status.exchanges_started += 1;
-        let request = self.build_request(&batch)?;
+        let operation = format!("{}:{}", self.device_id, batch.frames[0].sequence);
+        let bound = self
+            .network_journal
+            .bind_envelope(
+                operation.as_bytes(),
+                &winwincode_network::journal::EnvelopeCursor {
+                    last_sequence: batch.frames.last().map_or(0, |frame| frame.sequence),
+                    ack_sequence: self.downlink.ack_sequence(),
+                    ..Default::default()
+                },
+            )
+            .map_err(DaemonError::Network)?;
+        batch
+            .frames
+            .retain(|frame| frame.sequence <= bound.last_sequence);
+        let mut request = self.build_request(&batch)?;
+        request.ack_sequence = bound.ack_sequence;
         let request_bytes = serde_json::to_vec(&request)
             .map_err(|error| DaemonError::Protocol(format!("request encoding failed: {error}")))?;
-        let response_bytes = match self
-            .transport
-            .exchange(self.credential.as_deref(), &request_bytes)
+        let network_now = self.network_now(now);
+        let sequence = match self
+            .network_journal
+            .prepare(
+                operation.as_bytes(),
+                winwincode_network::Replay::ReplayExact,
+                winwincode_network::defaults().max_attempts,
+                network_now,
+            )
+            .map_err(DaemonError::Network)?
         {
+            winwincode_network::journal::QueuePermit::Ready(sequence) => sequence,
+            winwincode_network::journal::QueuePermit::Waiting(delay, failure) => {
+                self.next_attempt_at = now + delay;
+                self.status.current_backoff = delay;
+                self.status.last_error = Some(failure.to_string());
+                return Ok(self.retry_outcome());
+            }
+            winwincode_network::journal::QueuePermit::Stopped(failure) => {
+                return Err(DaemonError::Network(failure));
+            }
+        };
+        self.status.exchanges_started += 1;
+        let response_bytes = match self.transport.exchange_authorized(
+            self.credential.as_deref(),
+            &request_bytes,
+            can_start,
+        ) {
             Ok(bytes) => bytes,
             Err(error) => {
-                let reason = format!("exchange transport failed: {}", error.message());
-                self.register_failure(now, reason);
-                return Ok(self.retry_outcome());
+                return self.record_exchange_failure(
+                    &operation,
+                    sequence,
+                    &error,
+                    now,
+                    network_now,
+                );
             }
         };
-        let response: ExchangeResponse = match serde_json::from_slice(&response_bytes) {
-            Ok(response) => response,
-            Err(error) => {
-                let reason = format!("exchange response is not a valid body: {error}");
-                self.register_failure(now, reason);
-                return Ok(self.retry_outcome());
-            }
-        };
-        if response.schema_version != CLIENT_CONTROL_PORT_SCHEMA_VERSION {
-            let reason = format!(
-                "exchange response names schema version {} instead of \
-                 {CLIENT_CONTROL_PORT_SCHEMA_VERSION}",
-                response.schema_version
-            );
-            self.register_failure(now, reason);
-            return Ok(self.retry_outcome());
-        }
+        let response =
+            self.decode_exchange_response(&response_bytes, &operation, sequence, network_now)?;
+        self.network_journal
+            .finish(operation.as_bytes(), sequence, None, network_now)
+            .map_err(DaemonError::Network)?;
         if let Some(replay_from) = response.replay_from_sequence {
             self.apply_gap(&response, replay_from, &batch, now)
         } else {
             self.apply_accepted(&response, &batch, now)
+        }
+    }
+
+    fn network_now(&self, now: Instant) -> u64 {
+        self.network_clock
+            .1
+            .saturating_add(winwincode_network::duration_millis(
+                now.saturating_duration_since(self.network_clock.0),
+            ))
+    }
+
+    fn record_exchange_failure(
+        &mut self,
+        operation: &str,
+        sequence: u64,
+        error: &ExchangeTransportError,
+        now: Instant,
+        network_now: u64,
+    ) -> Result<TickOutcome, DaemonError> {
+        let reason = format!("exchange transport failed: {}", error.message());
+        self.network_journal
+            .finish(
+                operation.as_bytes(),
+                sequence,
+                Some(error.network_failure()),
+                network_now,
+            )
+            .map_err(DaemonError::Network)?;
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        self.status.consecutive_failures = self.consecutive_failures;
+        self.status.last_error = Some(reason);
+        if let winwincode_network::journal::QueuePermit::Waiting(delay, _) = self
+            .network_journal
+            .prepare(
+                operation.as_bytes(),
+                winwincode_network::Replay::ReplayExact,
+                winwincode_network::defaults().max_attempts,
+                network_now,
+            )
+            .map_err(DaemonError::Network)?
+        {
+            self.next_attempt_at = now + delay;
+            self.status.current_backoff = delay;
+        } else {
+            return Err(DaemonError::Network(error.network_failure()));
+        }
+        Ok(self.retry_outcome())
+    }
+
+    fn decode_exchange_response(
+        &mut self,
+        bytes: &[u8],
+        operation: &str,
+        sequence: u64,
+        network_now: u64,
+    ) -> Result<ExchangeResponse, DaemonError> {
+        let decoded = serde_json::from_slice::<ExchangeResponse>(bytes)
+            .map_err(|error| {
+                (
+                    "exchange response is not valid JSON".to_owned(),
+                    winwincode_network::NetworkDiagnostic::json(&error),
+                )
+            })
+            .and_then(|response| {
+                if response.schema_version == CLIENT_CONTROL_PORT_SCHEMA_VERSION {
+                    Ok(response)
+                } else {
+                    Err((
+                        "exchange response schema version is invalid".to_owned(),
+                        winwincode_network::NetworkDiagnostic::new(
+                            winwincode_network::DiagnosticCode::SchemaVersion,
+                        ),
+                    ))
+                }
+            });
+        match decoded {
+            Ok(response) => Ok(response),
+            Err((reason, diagnostic)) => {
+                let failure = winwincode_network::NetworkFailure::new(
+                    if diagnostic.code == winwincode_network::DiagnosticCode::SchemaVersion {
+                        winwincode_network::ErrorKind::RequestInvalid
+                    } else {
+                        winwincode_network::ErrorKind::ProtocolInvalid
+                    },
+                    winwincode_network::Acceptance::ResponseReceived,
+                    winwincode_network::Phase::Decode,
+                )
+                .with_diagnostic(diagnostic);
+                self.network_journal
+                    .finish(operation.as_bytes(), sequence, Some(failure), network_now)
+                    .map_err(DaemonError::Network)?;
+                self.status.last_error = Some(format!("{reason}; {failure}"));
+                Err(DaemonError::Network(failure))
+            }
         }
     }
 
@@ -3117,15 +3306,11 @@ fn fatal_outbox(error: OutboxError<DeviceStoreError>) -> DaemonError {
 /// Exponential backoff for the n-th consecutive failure, capped at
 /// `max_backoff`.
 fn backoff_for(failures: u64, initial_backoff: Duration, max_backoff: Duration) -> Duration {
-    let mut backoff = initial_backoff;
-    for _ in 1..failures {
-        let doubled = backoff.saturating_mul(2);
-        backoff = doubled;
-        if backoff >= max_backoff {
-            break;
-        }
-    }
-    backoff.min(max_backoff)
+    winwincode_network::exponential_delay(
+        u32::try_from(failures).unwrap_or(u32::MAX),
+        initial_backoff,
+        max_backoff,
+    )
 }
 
 fn validate_config(config: &DaemonConfig) -> Result<(), DaemonError> {

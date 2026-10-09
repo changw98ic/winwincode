@@ -154,7 +154,7 @@ impl WorkRunRuntimeProjector {
         let snapshot = load_snapshot(store, &replay_identity(context))?;
         let catalog = evidence_catalog(&snapshot)?;
         let mut sources = catalog.into_iter().map(|(source_id, binding)| {
-            serde_json::json!({"source_id":source_id, "outcome":format!("{:?}", binding.outcome)})
+            serde_json::json!({"source_id":source_id, "outcome":format!("{:?}", binding.outcome), "command_digest":binding.command_digest})
         }).collect::<Vec<_>>();
         sources.sort_by(|left, right| left["source_id"].as_str().cmp(&right["source_id"].as_str()));
         let input = serde_json::to_string(&job.work_input)
@@ -162,7 +162,7 @@ impl WorkRunRuntimeProjector {
         let evidence_instruction = if sources.is_empty() {
             "There are no retained verification command receipts. First run each assigned criterion's exact verificationMethod through exec_command in this read-only checkout and wait for completion. Only then return the verdict JSON. Tool names and command text are not source_id values."
         } else {
-            "Use the retained direct command receipts. Run any still-unverified assigned method before returning a verdict."
+            "Run every assigned exact verificationMethod that is missing from the cited command receipts through exec_command in this read-only checkout. An inspection command does not replace the assigned method. Wait for completion and cite its actual source_id. If the assigned method reports missing or stale host test receipts, report fail with that command receipt; automatic rework must regenerate the host receipts. Do not claim pass from inspection or create a passing receipt yourself."
         };
         Ok(format!(
             "The preceding verification result was rejected: its JSON, sealed input identities, or evidence references are invalid. {evidence_instruction} Return one corrected JSON object matching the active independent-verification-result schema. Use the exact delivery specification, revision, candidate and assigned criterion IDs in the sealed input below. Choose a unique finding_id and describe the actual observed result in explanation. Cite only source_id values from the retained direct command receipts below; their outcomes are authoritative. Do not modify files or invent evidence. Preserve every required Fusion investigation and claim key from the original instructions.\nSealed workInput: {input}\nRetained direct receipts: {}",
@@ -335,6 +335,7 @@ impl WorkRunRuntimeProjector {
                     return Err(WorkRunRuntimeProjectionError::InvalidSource);
                 }
                 let bound = bind_verification_evidence(
+                    job,
                     final_message,
                     &snapshot,
                     expected_fusion_claim_keys,
@@ -597,6 +598,7 @@ fn snapshot_has_policy<AuthorityError, StoreError>(
 }
 
 fn bind_verification_evidence<AuthorityError, StoreError>(
+    job: &ExecutionJob,
     final_message: &str,
     snapshot: &ReplaySnapshot,
     expected_fusion_claim_keys: Option<&[String]>,
@@ -619,6 +621,35 @@ fn bind_verification_evidence<AuthorityError, StoreError>(
                 || finding.explanation.trim() == "OBSERVED_RESULT"
             {
                 return Err(WorkRunRuntimeProjectionError::InvalidEvidence);
+            }
+            if let Some(method) = finding.criterion_id.as_ref().and_then(|id| {
+                job.work_input
+                    .as_ref()?
+                    .work_contract
+                    .criteria
+                    .iter()
+                    .find(|criterion| criterion.id.0 == *id)?
+                    .verification_method
+                    .as_deref()
+            }) {
+                let approved = verification_method_digest(method)
+                    .ok_or(WorkRunRuntimeProjectionError::InvalidEvidence)?;
+                let observed = finding
+                    .evidence_sources
+                    .iter()
+                    .filter_map(|source| catalog.get(&source.source_id))
+                    .filter(|evidence| evidence.command_digest.as_ref() == Some(&approved))
+                    .collect::<Vec<_>>();
+                if observed.is_empty()
+                    || finding.verdict == "pass"
+                        && !observed
+                            .iter()
+                            .any(|evidence| evidence.outcome == BoundEvidenceOutcome::Succeeded)
+                {
+                    // Reject before terminal projection so the existing durable
+                    // ReAct correction can execute the still-missing method.
+                    return Err(WorkRunRuntimeProjectionError::InvalidEvidence);
+                }
             }
             let evidence_sources = finding
                 .evidence_sources
@@ -930,6 +961,7 @@ struct EvidenceBinding {
     kind: EvidenceKind,
     event_id: String,
     outcome: BoundEvidenceOutcome,
+    command_digest: Option<Sha256Digest>,
 }
 
 fn evidence_catalog<AuthorityError, StoreError>(
@@ -966,6 +998,12 @@ fn evidence_catalog<AuthorityError, StoreError>(
                 kind,
                 event_id: message.event.event_id.0,
                 outcome: sealed_command_outcome(&value),
+                command_digest: value
+                    .get("command_digest")
+                    .filter(|value| !value.is_null())
+                    .map(|value| serde_json::from_value(value.clone()))
+                    .transpose()
+                    .map_err(|_| WorkRunRuntimeProjectionError::CorruptOriginal)?,
             },
         );
         if previous.is_some() {
@@ -1305,7 +1343,7 @@ mod tests {
                 description: "The exact fixture behavior is verified.".to_owned(),
                 required: true,
                 required_evidence_class: "machine".into(),
-                verification_method: Some("Run the exact fixture check.".to_owned()),
+                verification_method: Some("cargo test".to_owned()),
             }],
             id: contract_id.clone(),
             objective: "Implement fixture".to_owned(),
@@ -1501,6 +1539,43 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn inspection_receipt_cannot_finish_an_assigned_test_before_react_correction() {
+        for verdict in ["pass", "fail"] {
+            let fixture = fixture();
+            let mut store = MemoryStore::default();
+            let projector = WorkRunRuntimeProjector::new();
+            let mut job = job("reviewer");
+            job.work_input.as_mut().unwrap().work_contract.criteria[0].verification_method =
+                Some("cargo test".to_owned());
+            retain_verification_sequence(&projector, &mut store, &fixture, &job);
+            let mut result: Value = serde_json::from_str(VERIFICATION_RESULT).unwrap();
+            result["findings"][0]["verdict"] = serde_json::json!(verdict);
+            result["findings"][0]["evidence_sources"] =
+                serde_json::json!([{"source_id":"call-command"}]);
+            let message = serde_json::to_string(&result).unwrap();
+            let before = store.0.clone();
+            assert!(
+                matches!(
+                    projector.retain_turn_completed(
+                        &mut store,
+                        &AllowAuthority,
+                        fixture.context(),
+                        &job,
+                        StageTurnCompletion {
+                            turn_id: "turn-verifier",
+                            final_message: Some(&message),
+                            failed: false
+                        }
+                    ),
+                    Err(WorkRunRuntimeProjectionError::InvalidEvidence)
+                ),
+                "{verdict} with only an inspection must request correction"
+            );
+            assert_eq!(store.0, before);
+        }
     }
 
     #[test]

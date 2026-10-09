@@ -154,7 +154,7 @@
     "excludedSourceExtensions": [
       ".md"
     ],
-    "sourceTreeSha256": "ddcb8c77401e65c5a0b30ea75c204118d5049300572aa31f8886e31e47ef4004"
+    "sourceTreeSha256": "125a059709ca6381393dd3387abe66e4d8a54744b92a395b55a5d391e31ced8c"
   },
   "historicalSources": [
     {
@@ -412,6 +412,39 @@
         "delegated-change-batch-handoff",
         "deterministic-tool-context-gc",
         "embedded-text-resources"
+      ]
+    },
+    {
+      "file": "upstream/patches/codex/0002-unified-network-policy.patch",
+      "stripComponents": 1,
+      "reason": "Delegate embedded MCP requests to the product network policy, preserve typed failure facts and OAuth refresh outcome fences.",
+      "affectedPaths": [
+        "codex-rs/exec-server/src/client.rs",
+        "codex-rs/exec-server/src/client/connection_failure.rs",
+        "codex-rs/exec-server/src/client/route_aware_http_client.rs",
+        "codex-rs/exec-server/src/http_network_failure.rs",
+        "codex-rs/exec-server/src/lib.rs",
+        "codex-rs/rmcp-client/src/http_client_adapter.rs",
+        "codex-rs/rmcp-client/src/http_client_adapter_tests.rs",
+        "codex-rs/rmcp-client/src/lib.rs",
+        "codex-rs/rmcp-client/src/network_retry_policy.rs",
+        "codex-rs/rmcp-client/src/network_sse.rs",
+        "codex-rs/rmcp-client/src/oauth/refresh_lock.rs",
+        "codex-rs/rmcp-client/src/oauth/refresh_lock_tests.rs",
+        "codex-rs/rmcp-client/src/oauth/refresh_transaction.rs",
+        "codex-rs/rmcp-client/src/oauth/tests/persistor_tests.rs",
+        "codex-rs/rmcp-client/src/oauth_http_client.rs",
+        "codex-rs/rmcp-client/src/oauth_http_client_security_tests.rs",
+        "codex-rs/rmcp-client/src/rmcp_client.rs",
+        "codex-rs/rmcp-client/src/streamable_http_retry.rs"
+      ],
+      "patchSha256": "33fe9573e9a57ddd02ef35bc07a3a2e26004f0296f360394b3c0c2ff9b15a9dd",
+      "baselineCommit": "8f38d0be54e65067efdba86f52c2a3cdb7463a04",
+      "capabilities": [
+        "typed-network-failure",
+        "one-retry-owner",
+        "mcp-continuation-budget",
+        "durable-oauth-refresh-fence"
       ]
     }
   ],

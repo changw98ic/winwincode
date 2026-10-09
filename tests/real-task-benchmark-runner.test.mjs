@@ -340,6 +340,11 @@ test('device recovery settles only complete terminal failures and leaves product
   const observation = { delivery: { status: 'failed', attention: [] },
     workRunAggregate: { items: [{ state: 'failed' }], runs: [{ state: 'failed' }] } }
   assert.deepEqual(terminalDeviceFailure(observation), { code: 'DEVICE_PRODUCT_FAILED', status: 'failed' })
+  assert.deepEqual(terminalDeviceFailure({ delivery: { status: 'failed', attention: [] },
+    workRunAggregate: { items: [{ id: 'item', revision: 1, state: 'candidate_ready' }], runs: [
+      { workItemId: 'item', workItemRevision: 1, state: 'candidate_ready' },
+      { workItemId: 'item', workItemRevision: 1, state: 'failed' },
+    ] } }), { code: 'DEVICE_PRODUCT_FAILED', status: 'failed' })
   assert.deepEqual(terminalDeviceFailure({ delivery: { status: 'cancelled', attention: [] },
     workRunAggregate: { items: [{ state: 'done' }, { state: 'cancelled' }],
       runs: [{ state: 'settled' }, { state: 'cancelled' }] } }),
@@ -355,6 +360,11 @@ test('device recovery settles only complete terminal failures and leaves product
   assert.deepEqual(terminalDeviceFailure({ delivery: { status: 'candidate_ready', attention: [] },
     workRunAggregate: { items: [{ state: 'candidate_ready' }], runs: [{ state: 'candidate_ready' }, { state: 'failed' }] } }),
   { code: 'DEVICE_PRODUCT_STALLED', status: 'candidate_ready' })
+  assert.equal(terminalDeviceFailure({ delivery: { status: 'failed', attention: [] },
+    workRunAggregate: { items: [{ id: 'item', revision: 1, state: 'candidate_ready' }], runs: [
+      { workItemId: 'item', workItemRevision: 1, state: 'failed' },
+      { workItemId: 'item', workItemRevision: 1, state: 'settled' },
+    ] } }), null, 'an earlier failed consumer cannot override a successful retry')
   const waitingHuman = { delivery: { status: 'waiting_human', attention: [{ status: 'open', blocking: true }] },
     workRunAggregate: { items: [{ state: 'candidate_ready' }], runs: [{ state: 'settled' }] } }
   assert.equal(terminalDeviceFailure(waitingHuman), null)
@@ -2641,6 +2651,20 @@ test('Fusion Device provisioning binds four exact models and preserves private s
 })
 
 
+test('durable assertion failures retain the source location and safe cause', async t => {
+  const directory = await mkdtemp(resolve(tmpdir(), 'wwc-assertion-diagnostic-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const result = await runBenchmarkPlan({ cells: [{ runId: 'assertion' }] }, {
+    ledgerPath: resolve(directory, 'ledger.sqlite'),
+    experimentBinding: { experimentId: 'assertion-diagnostic' },
+    executeCell: async () => { assert.equal('recovery_pending', 'occupied') },
+  })
+  const failure = result.records[0].failure
+  assert.equal(failure.code, 'ERR_ASSERTION')
+  assert.ok(failure.diagnostic.stack.some(frame => frame.file === 'tests/real-task-benchmark-runner.test.mjs'))
+  assert.equal(failure.diagnostic.phase, 'cell')
+})
+
 test('durable failures retain safe codes but never raw adapter errors', async t => {
   const directory = await mkdtemp(resolve(tmpdir(), 'wwc-failure-redaction-'))
   t.after(() => rm(directory, { recursive: true, force: true }))
@@ -2656,7 +2680,7 @@ test('durable failures retain safe codes but never raw adapter errors', async t 
     },
   }
   const ledger = await runBenchmarkPlan(plan, options)
-  assert.deepEqual(ledger.records.map(row => row.failure), [
+  assert.deepEqual(ledger.records.map(row => ({ code: row.failure.code, message: row.failure.message })), [
     { code: 'PROVIDER_UNAVAILABLE', message: 'PROVIDER_UNAVAILABLE' },
     { code: 'RUNNER_UNEXPECTED', message: 'RUNNER_UNEXPECTED' },
   ])
@@ -2769,12 +2793,17 @@ test('unresolved Device inspection queries the original TLS endpoint without cha
     assert.equal((await inspectUnresolvedDeviceTasks(path))[0].observation, 'unavailable')
     assert.equal(requests.slice(forbiddenStart).filter(row => row.body?.query === 'delivery.get').length, 1,
       'permission errors must not retry')
-    interruptions.push(...Array(4).fill('unavailable'))
+    interruptions.push(...Array(8).fill('unavailable'))
     const exhaustedStart = requests.length
+    const unavailableSince = performance.now()
     assert.equal((await inspectUnresolvedDeviceTasks(path))[0].observation, 'unavailable')
-    assert.equal(requests.slice(exhaustedStart).filter(row => row.body?.query === 'delivery.get').length, 4,
-      'query retries must stop after four attempts')
-    assert.equal(interruptions.length, 0)
+    const timedAttempts = requests.slice(exhaustedStart).filter(row => row.body?.query === 'delivery.get')
+    assert.ok(timedAttempts.length > 1 && timedAttempts.length < 8)
+    assert.ok(performance.now() - unavailableSince >= 25_000 && performance.now() - unavailableSince < 40_000,
+      'read-only inspection must stop at its explicit deadline')
+    for (const attempt of timedAttempts) assert.deepEqual(attempt, timedAttempts[0])
+    assert.ok(interruptions.length > 0, 'deadline must end inspection while the original Server is unavailable')
+    interruptions.length = 0
     wrongCursor = true
     assert.equal((await inspectUnresolvedDeviceTasks(path))[0].observation, 'unavailable')
     const requestCount = requests.length

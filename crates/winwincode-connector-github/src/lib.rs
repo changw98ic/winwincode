@@ -822,6 +822,7 @@ impl<Credentials, Mapper, Clock> GitHubConnector<Credentials, Mapper, Clock> {
         if let Some(remote_id) = self.lookup_marked_array(token, &path, "body", &marker)? {
             return remote_receipt("issue-comment", &remote_id, false);
         }
+        claim.require_new_write_authority()?;
         let response = self.request(
             token,
             "POST",
@@ -848,6 +849,7 @@ impl<Credentials, Mapper, Clock> GitHubConnector<Credentials, Mapper, Clock> {
         if let Some(remote_id) = self.lookup_marked_array(token, &path, "body", &marker)? {
             return remote_receipt("pull-request-review", &remote_id, false);
         }
+        claim.require_new_write_authority()?;
         let response = self.request(
             token,
             "POST",
@@ -904,6 +906,7 @@ impl<Credentials, Mapper, Clock> GitHubConnector<Credentials, Mapper, Clock> {
             "repos/{}/check-runs",
             encode_repository(&self.config.repository.0)
         );
+        claim.require_new_write_authority()?;
         let response = self.request(
             token,
             "POST",
@@ -1009,47 +1012,65 @@ impl<Credentials, Mapper, Clock> GitHubConnector<Credentials, Mapper, Clock> {
             path.trim_start_matches('/')
         );
         let authorization = format!("Bearer {}", token.value());
-        let response = match (method, body) {
-            ("GET", None) => self
-                .agent
-                .get(&url)
-                .header("Accept", "application/vnd.github+json")
-                .header("Authorization", &authorization)
-                .header("User-Agent", USER_AGENT)
-                .header("X-GitHub-Api-Version", API_VERSION)
-                .call(),
-            ("POST", Some(body)) => {
-                let mut request = self
-                    .agent
-                    .post(&url)
+        let replay = if method == "GET" {
+            winwincode_network::Replay::ReplayExact
+        } else {
+            winwincode_network::Replay::ReconcileFirst
+        };
+        let response = winwincode_network::http::execute_http_once(
+            &self.agent,
+            |agent| match (method, body) {
+                ("GET", None) => agent
+                    .get(&url)
                     .header("Accept", "application/vnd.github+json")
                     .header("Authorization", &authorization)
                     .header("User-Agent", USER_AGENT)
-                    .header("X-GitHub-Api-Version", API_VERSION);
-                if let Some(key) = idempotency_key {
-                    request = request.header("X-GitHub-Idempotency-Key", &key.0);
+                    .header("X-GitHub-Api-Version", API_VERSION)
+                    .call(),
+                ("POST", Some(body)) => {
+                    let mut request = agent
+                        .post(&url)
+                        .header("Accept", "application/vnd.github+json")
+                        .header("Authorization", &authorization)
+                        .header("User-Agent", USER_AGENT)
+                        .header("X-GitHub-Api-Version", API_VERSION);
+                    if let Some(key) = idempotency_key {
+                        request = request.header("X-GitHub-Idempotency-Key", &key.0);
+                    }
+                    request.send_json(body)
                 }
-                request.send_json(body)
-            }
-            _ => {
-                return Err(connector_error(
-                    ConnectorCallErrorKind::Permanent,
-                    "GITHUB_REQUEST_INVALID",
-                ));
-            }
-        }
-        .map_err(|_| {
-            connector_error(
-                ConnectorCallErrorKind::Retryable,
-                "GITHUB_TRANSPORT_UNAVAILABLE",
-            )
+                _ => unreachable!("validated connector request"),
+            },
+            MAX_RESPONSE_BYTES,
+            self.config.request_timeout,
+            || true,
+        )
+        .map_err(|failure| {
+            ConnectorCallError::from_network("GITHUB_TRANSPORT_UNAVAILABLE", failure)
+                .for_replay(replay)
         })?;
         let status = response.status().as_u16();
+        if matches!(status, 408 | 425 | 500..=599) {
+            return Err(ConnectorCallError::from_network(
+                "GITHUB_HTTP_TRANSIENT",
+                winwincode_network::NetworkFailure::http(
+                    status,
+                    response
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|value| value.to_str().ok())
+                        .and_then(|value| {
+                            winwincode_network::retry_after(value, std::time::SystemTime::now())
+                        }),
+                ),
+            )
+            .for_replay(replay));
+        }
         let retry_after_seconds = response
             .headers()
             .get("retry-after")
             .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<u64>().ok());
+            .and_then(winwincode_network::retry_after_seconds);
         let rate_limited = status == 429
             || status == 403
                 && (response
@@ -1057,22 +1078,20 @@ impl<Credentials, Mapper, Clock> GitHubConnector<Credentials, Mapper, Clock> {
                     .get("x-ratelimit-remaining")
                     .is_some_and(|value| value == "0")
                     || retry_after_seconds.is_some());
-        let bytes = response
-            .into_body()
-            .with_config()
-            .limit(MAX_RESPONSE_BYTES)
-            .read_to_vec()
-            .map_err(|_| {
-                connector_error(
-                    ConnectorCallErrorKind::Retryable,
-                    "GITHUB_RESPONSE_UNREADABLE",
-                )
-            })?;
-        let body = if bytes.is_empty() {
+        let bytes = response.into_body();
+        let body = if bytes.is_empty() || status == 429 {
             None
         } else {
             Some(serde_json::from_slice(&bytes).map_err(|_| {
-                connector_error(ConnectorCallErrorKind::Retryable, "GITHUB_RESPONSE_INVALID")
+                ConnectorCallError::from_network(
+                    "GITHUB_RESPONSE_INVALID",
+                    winwincode_network::NetworkFailure::new(
+                        winwincode_network::ErrorKind::ProtocolInvalid,
+                        winwincode_network::Acceptance::ResponseReceived,
+                        winwincode_network::Phase::Decode,
+                    ),
+                )
+                .for_replay(replay)
             })?)
         };
         Ok(GitHubResponse {

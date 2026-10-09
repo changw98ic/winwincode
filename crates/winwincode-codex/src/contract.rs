@@ -358,6 +358,18 @@ pub trait CodexCoreAdapter {
         Ok(None)
     }
 
+    /// Restores the exact persisted Worker session before opening its checkout.
+    /// A lease renewal changes its deadline, not its existing session identity.
+    ///
+    /// # Errors
+    /// Rejects a stored run whose Job, snapshot, lease, or thread differs.
+    fn recovered_worker_session_id(
+        &mut self,
+        _dispatch: &JobDispatchMessage,
+    ) -> Result<Option<WorkerSessionId>, Self::Error> {
+        Ok(None)
+    }
+
     fn ensure_thread(
         &mut self,
         start: CodexThreadStart<'_>,
@@ -478,6 +490,20 @@ pub trait CodexCoreAdapter {
         thread_id: &CodexThreadId,
         now: &Instant,
     ) -> impl Future<Output = Result<CodexPoll, Self::Error>> + Send;
+
+    /// Releases an unaccepted poll delivery for exact replay. Durable operation
+    /// identities and committed effects remain unchanged; this must never reset
+    /// action receipts or terminal ACKs.
+    ///
+    /// # Errors
+    /// Rejects a thread or operation that does not match the retained delivery.
+    fn release_poll_delivery(
+        &mut self,
+        _thread_id: &CodexThreadId,
+        _delivery: &CodexPoll,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
 
     fn accept_model_chunk(
         &mut self,

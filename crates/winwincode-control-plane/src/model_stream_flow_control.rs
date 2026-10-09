@@ -30,7 +30,7 @@ pub enum ModelStreamFlowErrorKind {
 pub struct ModelStreamFlowError {
     kind: ModelStreamFlowErrorKind,
     pool: Option<ModelRequestPoolError>,
-    gateway: Option<ProviderGatewayError>,
+    gateway: Option<Box<ProviderGatewayError>>,
 }
 
 impl ModelStreamFlowError {
@@ -57,7 +57,7 @@ impl std::error::Error for ModelStreamFlowError {
             .map(|error| error as &dyn std::error::Error)
             .or_else(|| {
                 self.gateway
-                    .as_ref()
+                    .as_deref()
                     .map(|error| error as &dyn std::error::Error)
             })
     }
@@ -78,7 +78,7 @@ impl From<ProviderGatewayError> for ModelStreamFlowError {
         Self {
             kind: ModelStreamFlowErrorKind::Gateway,
             pool: None,
-            gateway: Some(error),
+            gateway: Some(Box::new(error)),
         }
     }
 }

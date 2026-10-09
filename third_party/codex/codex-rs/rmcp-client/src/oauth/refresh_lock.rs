@@ -26,7 +26,7 @@ const REFRESH_LOCK_RETRY_SLEEP: Duration = Duration::from_millis(/*millis*/ 50);
 const LOCK_CONTENTION_EVENT_TARGET: &str = "codex_rmcp_client::oauth::refresh_lock::contention";
 
 pub(crate) struct RefreshCredentialLock {
-    _file: File,
+    file: File,
 }
 
 impl RefreshCredentialLock {
@@ -36,6 +36,36 @@ impl RefreshCredentialLock {
         Self::acquire_in(&codex_home, &store_key, REFRESH_LOCK_ACQUIRE_TIMEOUT)
             .await
             .with_context(|| format!("failed to acquire OAuth credential lock for {server_name}"))
+    }
+
+    /// A durable digest fences an unknown rotating-token outcome across restarts.
+    pub(crate) fn check_refresh_outcome(&mut self, fingerprint: &str) -> Result<()> {
+        use std::io::{Read, Seek, SeekFrom};
+        self.file.seek(SeekFrom::Start(0))?;
+        let mut retained = String::new();
+        (&self.file).take(65).read_to_string(&mut retained)?;
+        if retained.is_empty() {
+            return Ok(());
+        }
+        if retained.len() != 64 || retained == fingerprint {
+            return Err(rmcp::transport::auth::AuthError::AuthorizationRequired)
+                .context("MCP OAuth refresh acceptance is unknown; reauthorization required");
+        }
+        // A different authoritative credential proves a completed refresh or reauthorization.
+        self.clear_refresh_outcome()
+    }
+    pub(crate) fn begin_refresh(&mut self, fingerprint: &str) -> Result<()> {
+        use std::io::{Seek, SeekFrom, Write};
+        self.file.seek(SeekFrom::Start(0))?;
+        self.file.set_len(0)?;
+        self.file.write_all(fingerprint.as_bytes())?;
+        self.file.sync_all()?;
+        Ok(())
+    }
+    pub(crate) fn clear_refresh_outcome(&mut self) -> Result<()> {
+        self.file.set_len(0)?;
+        self.file.sync_all()?;
+        Ok(())
     }
 
     async fn acquire_in(
@@ -95,7 +125,7 @@ impl RefreshCredentialLock {
         })?
         .with_context(|| format!("failed to lock OAuth refresh lock {}", path.display()))?;
 
-        Ok(Self { _file: file })
+        Ok(Self { file })
     }
 }
 

@@ -3,11 +3,12 @@
 import { createHash } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { readFile, readdir } from 'node:fs/promises'
-import { resolve } from 'node:path'
+import { relative, resolve } from 'node:path'
 import { promisify } from 'node:util'
 
 import { openBenchmarkLedger } from '../lib/benchmark-ledger.mjs'
 import { assertBenchmarkExecutionReceipts } from '../lib/benchmark-execution-receipts.mjs'
+import { retainedRequestFailure } from '../lib/device-model-failures.mjs'
 
 const runFile = promisify(execFile)
 
@@ -57,8 +58,34 @@ function runnerFailureCode(error) {
     ? error.code : 'RUNNER_UNEXPECTED'
 }
 
+const retainedRunnerFailures = new WeakMap()
+
+// Retain source locations and controlled phase names, never arbitrary error
+// text, request headers, assertion values, or Provider response bodies.
+function runnerFailure(error, phase = 'cell') {
+  const cacheable = error !== null && typeof error === 'object'
+  if (cacheable && retainedRunnerFailures.has(error)) return structuredClone(retainedRunnerFailures.get(error))
+  const code = runnerFailureCode(error)
+  const root = resolve(import.meta.dirname, '../..')
+  const stack = String(error?.stack ?? '').split('\n').slice(1).flatMap(line => {
+    const frame = line.match(/(?:file:\/\/)?(\/[^()\n]+):(\d+):(\d+)\)?$/u)
+    if (!frame) return []
+    const file = relative(root, frame[1])
+    if (!/^(?:scripts|tests|packages)\/[A-Za-z0-9_./-]+$/u.test(file)) return []
+    return [{ file, line: Number(frame[2]), column: Number(frame[3]) }]
+  }).slice(0, 12)
+  const cause = error?.cause ? runnerFailureCode(error.cause) : undefined
+  const controlledPhase = ['occupancy', 'launch', 'model', 'aggregation'].includes(error?.benchmarkPhase)
+    ? error.benchmarkPhase : phase
+  const request = retainedRequestFailure(error)
+  const diagnostic = { phase: controlledPhase, stack, ...(cause ? { causeCode: cause } : {}), ...(request ? { request } : {}) }
+  const failure = { code, message: code, diagnostic, ...(error?.unresolvedDeviceExecution ? { executionUnresolved: true } : {}) }
+  if (cacheable) retainedRunnerFailures.set(error, failure)
+  return structuredClone(failure)
+}
+
 function requiresBenchmarkRecovery(error) {
-  return error?.benchmarkPersistenceFailure === true
+  return error?.unresolvedDeviceExecution === true || error?.benchmarkPersistenceFailure === true
     || ['BENCHMARK_EVIDENCE_FAILED', 'LEDGER_RUN_UNRESOLVED'].includes(error?.code)
 }
 
@@ -291,8 +318,7 @@ export async function executeBenchmarkCell(cell, adapter, {
       result = await execute(request, runner)
       if (persistenceFailure) throw persistenceFailure
     } catch (error) {
-      const code = runnerFailureCode(error)
-      persistCall({ callId: request.callId, status: 'failed', failure: { code } })
+      persistCall({ callId: request.callId, status: 'failed', failure: runnerFailure(error, 'call') })
       throw error
     }
     persistCall({ callId: request.callId, status: 'returned', result })
@@ -320,7 +346,7 @@ export async function executeBenchmarkCell(cell, adapter, {
         // A failed model is one retained member outcome, not permission to
         // omit the remaining independent members or reuse another cell.
         return { status: 'failed', provider, callId: request.callId,
-          failure: { code: runnerFailureCode(error) } }
+          failure: runnerFailure(error, 'member') }
       }
     }))
     // Keep the ledger open until every launched member has retained its result,
@@ -387,8 +413,10 @@ export async function recoverBenchmarkCell(cell, observed, resolveModel) {
   const replay = async request => {
     const retained = observed.calls.find(call => call.callId === request.callId)
     if (retained?.status === 'returned') return retained.result
-    if (retained?.status === 'failed' && retained.failure.code !== 'BENCHMARK_EVIDENCE_FAILED') {
-      throw Object.assign(new Error(retained.failure.code), { code: retained.failure.code, retainedFailure: true })
+    if (retained?.status === 'failed' && retained.failure.code !== 'BENCHMARK_EVIDENCE_FAILED' && retained.failure.executionUnresolved !== true) {
+      const error = Object.assign(new Error(retained.failure.code), { code: retained.failure.code, retainedFailure: true })
+      retainedRunnerFailures.set(error, retained.failure)
+      throw error
     }
     const launch = observed.launches.find(target => target.callId === request.callId)
     if ((request.provider || request.engine === 'fusion-engine') && launch && resolveModel) return resolveModel(request, launch)
@@ -407,8 +435,7 @@ export async function recoverBenchmarkCell(cell, observed, resolveModel) {
   } catch (error) {
     if (requiresBenchmarkRecovery(error)) throw error
     if (!error.retainedFailure && !runnerTermination(error)) throw error
-    const code = runnerFailureCode(error)
-    result = { status: 'failed', termination: runnerTermination(error), failure: { code, message: code } }
+    result = { status: 'failed', termination: runnerTermination(error), failure: runnerFailure(error, 'recovery') }
   }
   // Existing receipts retain their durable order for the recovery transaction;
   // parallel member replay may finish in a different order from the first run.
@@ -489,6 +516,7 @@ export async function runBenchmarkPlan(plan, {
   recoverCell,
   concurrency = 1,
   selectedConfigurationIds,
+  retainedCompleted = [],
 }) {
   validateBenchmarkDispatchPolicy(plan, { concurrency, selectedConfigurationIds })
   const selected = selectedConfigurationIds === undefined ? null : new Set(selectedConfigurationIds)
@@ -497,6 +525,8 @@ export async function runBenchmarkPlan(plan, {
     : null
   const records = plan.cells.map(cell => ({ ...cell, status: 'planned', verdict: null, score: null, termination: null }))
   try {
+    if (retainedCompleted.length && !store) fail('LEDGER_REQUIRED', 'retained completions require a durable ledger')
+    store?.retainCompleted(retainedCompleted)
     for (const [index, record] of (store?.records() ?? []).entries()) {
       if (record !== null) records[index] = record
     }
@@ -563,7 +593,7 @@ export async function runBenchmarkPlan(plan, {
             verdict: null,
             score: null,
             termination,
-            failure: {
+            failure: { ...runnerFailure(error),
               code: termination?.reason ?? runnerFailureCode(error),
               // Raw adapter errors can contain request headers or credentials.
               // Detailed diagnostics remain in the sanitized product evidence.

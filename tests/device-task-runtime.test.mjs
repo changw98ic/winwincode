@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { deviceTaskIdentities, prepareDeviceTaskBaseline,
-  prepareDeviceBenchmarkProviderSlots } from '../scripts/lib/device-task-runtime.mjs'
+  prepareDeviceBenchmarkProviderSlots, ensureBenchmarkDeviceOccupancy } from '../scripts/lib/device-task-runtime.mjs'
 import { pendingDeviceTaskWorkRuns, cancelStoppedDeviceTask } from '../scripts/acceptance/run-device-task-vertical.mjs'
 import { deviceTaskLaunchResult } from '../scripts/lib/device-production-fixture.mjs'
 
@@ -336,4 +336,29 @@ test('a stopped task cancels only its active and queued roles and source Session
   assert.deepEqual(result.workRunIds, ['active-a'])
   assert.deepEqual(commands.map(command => [command.name, command.payload.workRunId ?? command.payload.productSessionId]),
     [['workrun.cancel', 'active-a'], ['session.cancel', 'source-a']])
+})
+
+
+test('benchmark admission waits for its original Device occupancy recovery without claiming another lease', async () => {
+  const states = ['recovery_pending', 'occupied']
+  const requests = []
+  await ensureBenchmarkDeviceOccupancy({ devicePath: { publicClientId: 'device-a' }, api: {
+    actor: { id: 'holder-a' },
+    request: async (path, options) => {
+      requests.push({ path, options })
+      return { json: { occupancy: states.shift(), holderUserId: 'holder-a' } }
+    },
+  } })
+  assert.equal(requests.length, 2)
+  assert.ok(requests.every(request => request.path === '/api/v1/clients/device-a/occupancy' && request.options.method === undefined
+    && request.options.timeoutMillis > 0 && request.options.timeoutMillis <= 300_000))
+})
+
+test('benchmark admission rejects another holder with a safe occupancy diagnostic', async () => {
+  let requests = 0
+  await assert.rejects(ensureBenchmarkDeviceOccupancy({ devicePath: { publicClientId: 'device-a' }, api: {
+    actor: { id: 'holder-a' },
+    request: async () => { requests++; return { json: { occupancy: 'recovery_pending', holderUserId: 'holder-b' } } },
+  } }), { code: 'DEVICE_OCCUPANCY_FOREIGN_HOLDER', benchmarkPhase: 'occupancy' })
+  assert.equal(requests, 1)
 })

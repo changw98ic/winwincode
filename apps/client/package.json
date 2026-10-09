@@ -37,7 +37,8 @@
     "micromark-util-symbol": "2.0.1",
     "react": "18.3.1",
     "react-dom": "18.3.1",
-    "shiki": "4.3.1"
+    "shiki": "4.3.1",
+    "@winwincode/network-request": "0.1.0-alpha.2"
   },
   "scripts": {
     "build": "node scripts/build.mjs",

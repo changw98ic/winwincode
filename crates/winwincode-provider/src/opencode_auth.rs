@@ -4,7 +4,6 @@
 
 use std::{
     fmt,
-    io::Read,
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
@@ -23,6 +22,7 @@ const MAX_TOKEN_BYTES: usize = 8192;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OpenCodeAuthError {
     Transport,
+    Network(winwincode_network::NetworkFailure),
     InvalidResponse,
     Http(u16),
     Denied,
@@ -116,8 +116,10 @@ impl OpenCodeOAuth {
     /// # Errors
     /// Rejects malformed responses and verification origins outside `OpenCode`.
     pub fn begin(&self) -> Result<OpenCodeDeviceGrant, OpenCodeAuthError> {
-        let (status, body) =
-            self.post("/auth/device/code", json!({"client_id":OPENCODE_CLIENT_ID}))?;
+        let (status, body) = self.post(
+            "/auth/device/code",
+            &json!({"client_id":OPENCODE_CLIENT_ID}),
+        )?;
         require_ok(status)?;
         let response: DeviceResponse = decode(body)?;
         if !valid_text(&response.user_code, 128)
@@ -145,7 +147,7 @@ impl OpenCodeOAuth {
     /// Polls once when due. Calling early does not issue another HTTP request.
     ///
     /// # Errors
-    /// Ends cancelled, denied or expired grants. It never retries transport failures.
+    /// Ends cancelled, denied or expired grants. Transport recovery follows the shared policy.
     pub fn poll_once(
         &self,
         grant: &mut OpenCodeDeviceGrant,
@@ -161,7 +163,13 @@ impl OpenCodeOAuth {
         if now < grant.next_poll {
             return Ok(OpenCodePollResult::Pending);
         }
-        let result = self.poll_code(&grant.device_code);
+        let result = self.poll_code_authorized(&grant.device_code, || {
+            !cancelled.load(Ordering::Acquire) && Instant::now() < grant.deadline
+        });
+        // A received token must reach the durable store even if authority ended during I/O.
+        if matches!(&result, Ok(OpenCodePollResult::Authorized(_))) {
+            return result;
+        }
         if cancelled.load(Ordering::Acquire) {
             return Err(OpenCodeAuthError::Cancelled);
         }
@@ -180,10 +188,18 @@ impl OpenCodeOAuth {
         &self,
         device_code: &ResolvedSecret,
     ) -> Result<OpenCodePollResult, OpenCodeAuthError> {
-        let (status,body) = self.post("/auth/device/token",json!({
+        self.poll_code_authorized(device_code, || true)
+    }
+
+    fn poll_code_authorized(
+        &self,
+        device_code: &ResolvedSecret,
+        can_start: impl Fn() -> bool + Sync,
+    ) -> Result<OpenCodePollResult, OpenCodeAuthError> {
+        let (status,body) = self.post_authorized("/auth/device/token", &json!({
             "client_id":OPENCODE_CLIENT_ID,"grant_type":"urn:ietf:params:oauth:grant-type:device_code",
             "device_code":secret_text(device_code)?,
-        }))?;
+        }), can_start)?;
         decode_poll(status, body)
     }
 
@@ -199,18 +215,26 @@ impl OpenCodeOAuth {
         if !valid_text(organization_id, 200) {
             return Err(OpenCodeAuthError::InvalidResponse);
         }
-        let mut response = self
-            .http
-            .get(crate::opencode_route::GO_USAGE_ENDPOINT)
-            .header("Authorization", format!("Bearer {}", secret_text(access)?))
-            .header("x-opencode-org-id", organization_id)
-            .header(
-                "User-Agent",
-                concat!("winwincode/", env!("CARGO_PKG_VERSION")),
-            )
-            .header("Accept", "application/json")
-            .call()
-            .map_err(|_| OpenCodeAuthError::Transport)?;
+        let authorization = format!("Bearer {}", secret_text(access)?);
+        let mut response = winwincode_network::http::execute_http(
+            &self.http,
+            |http| {
+                http.get(crate::opencode_route::GO_USAGE_ENDPOINT)
+                    .header("Authorization", &authorization)
+                    .header("x-opencode-org-id", organization_id)
+                    .header(
+                        "User-Agent",
+                        concat!("winwincode/", env!("CARGO_PKG_VERSION")),
+                    )
+                    .header("Accept", "application/json")
+                    .call()
+            },
+            MAX_BODY_BYTES as u64,
+            winwincode_network::Replay::ReplayExact,
+            Duration::from_secs(20),
+            || true,
+        )
+        .map_err(OpenCodeAuthError::Network)?;
         require_ok(response.status().as_u16())?;
         read_body(&mut response)
     }
@@ -223,7 +247,7 @@ impl OpenCodeOAuth {
         &self,
         refresh: &ResolvedSecret,
     ) -> Result<OpenCodeTokenGrant, OpenCodeAuthError> {
-        let (status, body) = self.post("/auth/device/token", json!({
+        let (status, body) = self.post("/auth/device/token", &json!({
             "client_id":OPENCODE_CLIENT_ID,"grant_type":"refresh_token","refresh_token":secret_text(refresh)?,
         }))?;
         require_ok(status)?;
@@ -276,17 +300,35 @@ impl OpenCodeOAuth {
         self.get("/api/config", access, Some(org))
     }
 
-    fn post(&self, path: &str, body: Value) -> Result<(u16, Value), OpenCodeAuthError> {
-        let mut response = self
-            .http
-            .post(format!("{OPENCODE_ISSUER}{path}"))
-            .header("Accept", "application/json")
-            .header(
-                "User-Agent",
-                concat!("winwincode/", env!("CARGO_PKG_VERSION")),
-            )
-            .send_json(body)
-            .map_err(|_| OpenCodeAuthError::Transport)?;
+    fn post(&self, path: &str, body: &Value) -> Result<(u16, Value), OpenCodeAuthError> {
+        self.post_authorized(path, body, || true)
+    }
+
+    fn post_authorized(
+        &self,
+        path: &str,
+        body: &Value,
+        can_start: impl Fn() -> bool + Sync,
+    ) -> Result<(u16, Value), OpenCodeAuthError> {
+        let bytes = serde_json::to_vec(body).map_err(|_| OpenCodeAuthError::InvalidResponse)?;
+        let mut response = winwincode_network::http::execute_http(
+            &self.http,
+            |http| {
+                http.post(format!("{OPENCODE_ISSUER}{path}"))
+                    .header("Accept", "application/json")
+                    .header("Content-Type", "application/json")
+                    .header(
+                        "User-Agent",
+                        concat!("winwincode/", env!("CARGO_PKG_VERSION")),
+                    )
+                    .send(bytes.as_slice())
+            },
+            MAX_BODY_BYTES as u64,
+            winwincode_network::Replay::ReconcileFirst,
+            Duration::from_secs(20),
+            can_start,
+        )
+        .map_err(OpenCodeAuthError::Network)?;
         let status = response.status().as_u16();
         Ok((status, read_body(&mut response)?))
     }
@@ -297,19 +339,29 @@ impl OpenCodeOAuth {
         access: &ResolvedSecret,
         org: Option<&str>,
     ) -> Result<Value, OpenCodeAuthError> {
-        let mut request = self
-            .http
-            .get(format!("{OPENCODE_ISSUER}{path}"))
-            .header("Accept", "application/json")
-            .header(
-                "User-Agent",
-                concat!("winwincode/", env!("CARGO_PKG_VERSION")),
-            )
-            .header("Authorization", format!("Bearer {}", secret_text(access)?));
-        if let Some(org) = org {
-            request = request.header("x-org-id", org);
-        }
-        let mut response = request.call().map_err(|_| OpenCodeAuthError::Transport)?;
+        let authorization = format!("Bearer {}", secret_text(access)?);
+        let mut response = winwincode_network::http::execute_http(
+            &self.http,
+            |http| {
+                let mut request = http
+                    .get(format!("{OPENCODE_ISSUER}{path}"))
+                    .header("Accept", "application/json")
+                    .header(
+                        "User-Agent",
+                        concat!("winwincode/", env!("CARGO_PKG_VERSION")),
+                    )
+                    .header("Authorization", &authorization);
+                if let Some(org) = org {
+                    request = request.header("x-org-id", org);
+                }
+                request.call()
+            },
+            MAX_BODY_BYTES as u64,
+            winwincode_network::Replay::ReplayExact,
+            Duration::from_secs(20),
+            || true,
+        )
+        .map_err(OpenCodeAuthError::Network)?;
         require_ok(response.status().as_u16())?;
         read_body(&mut response)
     }
@@ -327,21 +379,9 @@ impl OpenCodeDeviceGrant {
     }
 }
 
-fn read_body(response: &mut ureq::http::Response<ureq::Body>) -> Result<Value, OpenCodeAuthError> {
-    let mut bytes = Vec::new();
-    let read = response
-        .body_mut()
-        .as_reader()
-        .take((MAX_BODY_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|_| OpenCodeAuthError::Transport);
-    let parsed = if read.is_err() {
-        Err(OpenCodeAuthError::Transport)
-    } else if bytes.len() > MAX_BODY_BYTES {
-        Err(OpenCodeAuthError::InvalidResponse)
-    } else {
-        serde_json::from_slice(&bytes).map_err(|_| OpenCodeAuthError::InvalidResponse)
-    };
+fn read_body(response: &mut ureq::http::Response<Vec<u8>>) -> Result<Value, OpenCodeAuthError> {
+    let bytes = response.body_mut();
+    let parsed = serde_json::from_slice(bytes).map_err(|_| OpenCodeAuthError::InvalidResponse);
     bytes.fill(0);
     parsed
 }

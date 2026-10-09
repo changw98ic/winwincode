@@ -1,3 +1,4 @@
+import { requestFetch as sendHttp } from '@winwincode/network-request'
 // SPDX-License-Identifier: Apache-2.0
 
 import type { ControlPlaneClientTransport } from './community-control-plane-client.js'
@@ -100,7 +101,7 @@ export function mountDeviceProviderPanel(options: DeviceProviderPanelOptions) {
 
   async function request(path: string, method: 'GET' | 'POST' | 'DELETE' = 'GET', body?: unknown): Promise<unknown> {
     if (fetcher === undefined) throw new Error('设备设置连接尚未就绪。')
-    const response = await fetcher(new URL(path, options.serverUrl).toString(), { method, headers: {}, credentials: 'include', signal: controller.signal,
+    const response = await sendHttp(fetcher, new URL(path, options.serverUrl).toString(), { method, headers: {}, credentials: 'include', signal: controller.signal,
       ...(body === undefined ? {} : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }) })
     if (!response.ok) {
       if (response.status === 403) throw new Error('需要所选设备的管理权限。')

@@ -84,6 +84,8 @@ pub struct ConnectorCallError {
     kind: ConnectorCallErrorKind,
     code: String,
     retry_after_millis: Option<u64>,
+    network: Option<winwincode_network::NetworkFailure>,
+    replay: winwincode_network::Replay,
 }
 
 impl ConnectorCallError {
@@ -109,7 +111,57 @@ impl ConnectorCallError {
             kind,
             code,
             retry_after_millis: None,
+            network: None,
+            replay: winwincode_network::Replay::ReconcileFirst,
         })
+    }
+
+    /// Maps shared request facts while preserving the connector's stable code.
+    #[must_use]
+    pub fn from_network(code: &str, failure: winwincode_network::NetworkFailure) -> Self {
+        use winwincode_network::ErrorKind;
+        let kind = match failure.kind {
+            ErrorKind::Authentication | ErrorKind::Authorization => {
+                ConnectorCallErrorKind::CredentialRevoked
+            }
+            _ if failure.retryable() => ConnectorCallErrorKind::Retryable,
+            _ => ConnectorCallErrorKind::Permanent,
+        };
+        let mut error = Self::try_new(kind, code).unwrap_or(Self {
+            kind: ConnectorCallErrorKind::Permanent,
+            code: "NETWORK_ERROR_CODE_INVALID".to_owned(),
+            retry_after_millis: None,
+            network: None,
+            replay: winwincode_network::Replay::ReconcileFirst,
+        });
+        error.retry_after_millis = failure.retry_after_ms;
+        error.network = Some(failure);
+        error
+    }
+    #[must_use]
+    pub fn for_replay(mut self, replay: winwincode_network::Replay) -> Self {
+        self.replay = replay;
+        self
+    }
+    #[must_use]
+    pub fn requires_reconciliation(&self) -> bool {
+        self.replay == winwincode_network::Replay::ReconcileFirst
+            && self.network.is_some_and(|failure| {
+                failure.acceptance != winwincode_network::Acceptance::NotSent
+                    && !matches!(
+                        failure.kind,
+                        winwincode_network::ErrorKind::RateLimited
+                            | winwincode_network::ErrorKind::Authentication
+                            | winwincode_network::ErrorKind::Authorization
+                            | winwincode_network::ErrorKind::RequestInvalid
+                    )
+                    && failure.http_status != Some(425)
+            })
+    }
+
+    #[must_use]
+    pub const fn network_failure(&self) -> Option<winwincode_network::NetworkFailure> {
+        self.network
     }
 
     /// Builds a retryable error carrying a provider lower bound for the next attempt.

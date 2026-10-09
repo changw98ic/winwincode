@@ -459,7 +459,11 @@ impl ReplayAuthority for SharedAuthoritySource {
             worker_session_id: context.worker_session_id.clone(),
             session_identity: context.session_identity.clone(),
         };
-        if expected != presented
+        if !(expected == presented
+            || (winwincode_execution_port::execution_identity::retained_lease_matches_current(
+                &presented.lease,
+                &expected.lease,
+            ) && same_binding_with_extended_lease(&presented, &expected)))
             || context.codex_thread_id != context.session_identity.codex_thread_id
             || expected.session_identity.codex_thread_id != context.codex_thread_id
         {

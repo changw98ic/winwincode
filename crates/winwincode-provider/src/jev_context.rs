@@ -119,6 +119,20 @@ impl JevRuntime {
                     provider_id: observation.provider_id.clone(),
                     kind: JevProviderErrorKind::InvalidResponse,
                     latency: Duration::ZERO,
+                    network: Some(
+                        winwincode_network::NetworkFailure::new(
+                            winwincode_network::ErrorKind::ProtocolInvalid,
+                            winwincode_network::Acceptance::ResponseReceived,
+                            winwincode_network::Phase::Decode,
+                        )
+                        .with_diagnostic(
+                            winwincode_network::NetworkDiagnostic::new(
+                                winwincode_network::DiagnosticCode::ResponseInvariant,
+                            ),
+                        ),
+                    ),
+                    attempt: None,
+                    connection_wait: false,
                 });
             }
         }

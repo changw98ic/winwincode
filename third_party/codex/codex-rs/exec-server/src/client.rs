@@ -684,6 +684,8 @@ pub enum ExecServerError {
     Json(#[from] serde_json::Error),
     #[error("HTTP request failed: {0}")]
     HttpRequest(String),
+    #[error(transparent)]
+    NetworkHttpRequest(crate::HttpNetworkFailure),
     #[error("exec-server protocol error: {0}")]
     Protocol(String),
     #[error(
@@ -1360,9 +1362,12 @@ impl From<RpcCallError> for ExecServerError {
         match value {
             RpcCallError::Closed => Self::Closed,
             RpcCallError::Json(err) => Self::Json(err),
-            RpcCallError::Server(error) => Self::Server {
-                code: error.code,
-                message: error.message,
+            RpcCallError::Server(error) => match crate::HttpNetworkFailure::from_rpc(&error) {
+                Some(failure) => Self::NetworkHttpRequest(failure),
+                None => Self::Server {
+                    code: error.code,
+                    message: error.message,
+                },
             },
             RpcCallError::TimedOut { method, timeout } => Self::Protocol(format!(
                 "timed out waiting for exec-server `{method}` response after {timeout:?}"

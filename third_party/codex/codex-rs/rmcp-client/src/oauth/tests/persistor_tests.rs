@@ -737,7 +737,7 @@ async fn failed_refresh_does_not_adopt_unbound_replacement_credentials() -> Resu
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn expired_refresh_failure_preserves_credentials_for_a_later_retry() -> Result<()> {
+async fn expired_refresh_unknown_outcome_requires_credential_rotation() -> Result<()> {
     let (_env, server, initial) = test_context().await?;
     save_oauth_tokens_to_file(&initial)?;
     let persistor = persistor_for(&initial).await?;
@@ -757,9 +757,24 @@ async fn expired_refresh_failure_preserves_credentials_for_a_later_retry() -> Re
         .expect("failed refresh must preserve stored credentials");
     assert_tokens_match_without_expiry(&stored, &initial);
     drop(failure);
+    let blocked = persistor
+        .refresh_if_needed()
+        .await
+        .expect_err("unknown acceptance fences the old rotating token");
+    assert!(is_authentication_required_error(&blocked));
+    assert!(format!("{blocked:#}").contains("acceptance is unknown"));
+    // A durably replaced credential provides new authority to refresh.
+    let mut replacement = initial.clone();
+    replacement
+        .token_response
+        .0
+        .set_refresh_token(Some(RefreshToken::new("replacement-refresh-token".into())));
+    save_oauth_tokens_to_file(&replacement)?;
     Mock::given(method("POST"))
         .and(path("/oauth/token"))
-        .and(body_string_contains("refresh_token=refresh-token"))
+        .and(body_string_contains(
+            "refresh_token=replacement-refresh-token",
+        ))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "access_token": "retry-access-token",
             "token_type": "Bearer",

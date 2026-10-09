@@ -74,13 +74,24 @@ pub(crate) struct OAuthHttpClientAdapter {
 }
 
 impl OAuthHttpClientAdapter {
-    /// Recover only a candidate-local 503 without turning failed discovery into
-    /// missing metadata (which would enable RMCP's legacy endpoint fallback).
     async fn execute_with_metadata_fallback(
         &self,
         request: HttpRequest,
         redirect_policy: OAuthHttpRedirectPolicy,
         timeout: Option<Duration>,
+    ) -> Result<HttpResponse, OAuthHttpClientError> {
+        self.execute_request_policy(request, redirect_policy, timeout, true)
+            .await
+    }
+
+    /// Recover only a candidate-local 503 without turning failed discovery into
+    /// missing metadata (which would enable RMCP's legacy endpoint fallback).
+    async fn execute_metadata_once(
+        &self,
+        request: HttpRequest,
+        redirect_policy: OAuthHttpRedirectPolicy,
+        timeout: Option<Duration>,
+        request_id: &str,
     ) -> Result<HttpResponse, OAuthHttpClientError> {
         let issuer_path = request
             .uri()
@@ -92,7 +103,7 @@ impl OAuthHttpClientAdapter {
                 && matches!(redirect_policy, OAuthHttpRedirectPolicy::Stop)
         }) else {
             return self
-                .execute_request(request, redirect_policy, timeout)
+                .execute_request_once(request, redirect_policy, timeout, request_id)
                 .await;
         };
         let mut candidates = vec![format!("/.well-known/openid-configuration{issuer_path}")];
@@ -105,7 +116,7 @@ impl OAuthHttpClientAdapter {
         candidate_url.set_fragment(None);
         let operation = async {
             let original = self
-                .execute_request(request.clone(), redirect_policy, timeout)
+                .execute_request_once(request.clone(), redirect_policy, timeout, request_id)
                 .await?;
             if original.status() != StatusCode::SERVICE_UNAVAILABLE {
                 return Ok(original);
@@ -113,7 +124,7 @@ impl OAuthHttpClientAdapter {
             // These are the same issuer's OIDC candidates, in RMCP's discovery
             // order. Reuse the adapter's header, origin and body-size checks.
             // Do not follow redirects here: RMCP owns discovery redirect policy.
-            for path in candidates {
+            for (index, path) in candidates.into_iter().enumerate() {
                 candidate_url.set_path(&path);
                 let mut candidate = request.clone();
                 *candidate.uri_mut() = candidate_url
@@ -121,7 +132,12 @@ impl OAuthHttpClientAdapter {
                     .parse()
                     .map_err(oauth_http_client_error)?;
                 let response = self
-                    .execute_request(candidate, OAuthHttpRedirectPolicy::Stop, timeout)
+                    .execute_request_once(
+                        candidate,
+                        OAuthHttpRedirectPolicy::Stop,
+                        timeout,
+                        &format!("{request_id}-oidc-{index}"),
+                    )
                     .await?;
                 match response.status() {
                     StatusCode::OK => {
@@ -216,6 +232,154 @@ impl OAuthHttpClientAdapter {
         redirect_policy: OAuthHttpRedirectPolicy,
         timeout: Option<Duration>,
     ) -> Result<HttpResponse, OAuthHttpClientError> {
+        self.execute_request_policy(request, redirect_policy, timeout, false)
+            .await
+    }
+
+    async fn execute_request_policy(
+        &self,
+        request: HttpRequest,
+        redirect_policy: OAuthHttpRedirectPolicy,
+        timeout: Option<Duration>,
+        metadata_fallback: bool,
+    ) -> Result<HttpResponse, OAuthHttpClientError> {
+        let request_id = format!(
+            "oauth-request-{}",
+            NEXT_OAUTH_REQUEST_ID.fetch_add(1, Ordering::Relaxed)
+        );
+        if !crate::network_retry_policy::policy_configured() {
+            return if metadata_fallback {
+                self.execute_metadata_once(request, redirect_policy, timeout, &request_id)
+                    .await
+            } else {
+                self.execute_request_once(request, redirect_policy, timeout, &request_id)
+                    .await
+            };
+        }
+        let timeout = match self.timeout {
+            OAuthDiscoveryTimeout::Requested => timeout,
+            OAuthDiscoveryTimeout::Capped(cap) => Some(timeout.map_or(cap, |value| value.min(cap))),
+        };
+        let deadline = timeout.map(|duration| Instant::now() + duration);
+        let reconcile_first = !matches!(*request.method(), Method::GET | Method::HEAD);
+        let mut attempt = 1_u32;
+        let mut connections = 0_u32;
+        loop {
+            let remaining = match deadline {
+                Some(deadline) => Some(
+                    deadline
+                        .checked_duration_since(Instant::now())
+                        .ok_or_else(|| {
+                            oauth_http_client_error(OAuthHttpClientAdapterError::TimedOut)
+                        })?,
+                ),
+                None => None,
+            };
+            // The metadata candidate sequence is one read-only logical attempt.
+            // Its HTTP leaves never add nested retry loops or renew this deadline.
+            let operation = async {
+                if metadata_fallback {
+                    self.execute_metadata_once(
+                        request.clone(),
+                        redirect_policy,
+                        remaining,
+                        &request_id,
+                    )
+                    .await
+                } else {
+                    self.execute_request_once(
+                        request.clone(),
+                        redirect_policy,
+                        remaining,
+                        &request_id,
+                    )
+                    .await
+                }
+            };
+            let result = match remaining {
+                Some(duration) => tokio::time::timeout(duration, operation)
+                    .await
+                    .map_err(|_| oauth_http_client_error(OAuthHttpClientAdapterError::TimedOut))?,
+                None => operation.await,
+            };
+            let facts = match &result {
+                Ok(response)
+                    if matches!(response.status().as_u16(), 408 | 425 | 429 | 500..=599) =>
+                {
+                    crate::NetworkRetryFacts {
+                        reconcile_first,
+                        status: Some(response.status().as_u16()),
+                        transport: None,
+                        retry_after: response
+                            .headers()
+                            .get("retry-after")
+                            .and_then(|value| value.to_str().ok())
+                            .filter(|value| value.len() <= 256)
+                            .map(str::to_owned),
+                    }
+                }
+                Ok(_) => return result,
+                Err(error) => {
+                    let mut source: Option<&(dyn std::error::Error + 'static)> =
+                        Some(error.as_ref());
+                    let mut transport = None;
+                    while let Some(error) = source {
+                        if let Some(error) =
+                            error.downcast_ref::<codex_exec_server::ExecServerError>()
+                        {
+                            match error {
+                                codex_exec_server::ExecServerError::NetworkHttpRequest(failure) => transport = Some(*failure),
+                                codex_exec_server::ExecServerError::HttpRequest(_) => transport = Some(codex_exec_server::HttpNetworkFailure { kind: codex_exec_server::HttpNetworkErrorKind::TransportInterrupted, not_sent: false }),
+                                _ => {}
+                            }
+                            if transport.is_some() {
+                                break;
+                            }
+                        }
+                        source = error.source();
+                    }
+                    let Some(transport) = transport else {
+                        return result;
+                    };
+                    crate::NetworkRetryFacts {
+                        reconcile_first,
+                        transport: Some(transport),
+                        ..Default::default()
+                    }
+                }
+            };
+            if facts.transport.is_some_and(|failure| failure.not_sent) {
+                connections = connections.saturating_add(1);
+            } else {
+                connections = 0;
+            }
+            let Some(delay) =
+                crate::network_retry_policy::retry_delay(attempt, connections, &facts)
+            else {
+                return result;
+            };
+            if connections == 0 {
+                attempt = attempt.saturating_add(1);
+            }
+            if !crate::rmcp_client::streamable_http_retry::sleep_with_retry_deadline(
+                delay, deadline,
+            )
+            .await
+            {
+                return Err(oauth_http_client_error(
+                    OAuthHttpClientAdapterError::TimedOut,
+                ));
+            }
+        }
+    }
+
+    async fn execute_request_once(
+        &self,
+        request: HttpRequest,
+        redirect_policy: OAuthHttpRedirectPolicy,
+        timeout: Option<Duration>,
+        request_id: &str,
+    ) -> Result<HttpResponse, OAuthHttpClientError> {
         let redirect_policy = match redirect_policy {
             OAuthHttpRedirectPolicy::Follow => HttpRedirectPolicy::Follow,
             OAuthHttpRedirectPolicy::Stop => HttpRedirectPolicy::Stop,
@@ -289,13 +453,12 @@ impl OAuthHttpClientAdapter {
             } else {
                 redirect_policy
             },
-            request_id: String::new(),
+            request_id: request_id.to_owned(),
             stream_response: true,
         };
         let mut redirects = 0;
         let (response, body) = loop {
-            let request_id = NEXT_OAUTH_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
-            params.request_id = format!("oauth-request-{request_id}");
+            params.request_id = format!("{request_id}-{redirects}");
             let (response, mut body_stream) = self
                 .http_client
                 .http_request_stream(params.clone())

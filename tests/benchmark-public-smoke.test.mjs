@@ -201,7 +201,7 @@ def entered(child):
     assert child.stdout.readline().strip() == b'entered'
 try:
     with tempfile.TemporaryDirectory() as directory:
-        root = pathlib.Path(directory)
+        root = pathlib.Path(directory).resolve(strict=True)
         lock = root / 'execution.lock'
         owner = start(lock)
         entered(owner)

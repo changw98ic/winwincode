@@ -12851,6 +12851,7 @@ dependencies = [
  "winwincode-domain",
  "winwincode-integration-core",
  "winwincode-integration-sqlite",
+ "winwincode-network",
  "winwincode-publication",
  "winwincode-storage",
 ]
@@ -12869,6 +12870,7 @@ dependencies = [
  "winwincode-domain",
  "winwincode-integration-core",
  "winwincode-integration-sqlite",
+ "winwincode-network",
 ]
 
 [[package]]
@@ -12885,6 +12887,7 @@ dependencies = [
  "winwincode-domain",
  "winwincode-integration-core",
  "winwincode-integration-sqlite",
+ "winwincode-network",
 ]
 
 [[package]]
@@ -12901,6 +12904,7 @@ dependencies = [
  "winwincode-domain",
  "winwincode-integration-core",
  "winwincode-integration-sqlite",
+ "winwincode-network",
 ]
 
 [[package]]
@@ -12916,6 +12920,7 @@ dependencies = [
  "winwincode-domain",
  "winwincode-integration-core",
  "winwincode-integration-sqlite",
+ "winwincode-network",
 ]
 
 [[package]]
@@ -12956,6 +12961,7 @@ dependencies = [
  "winwincode-domain",
  "winwincode-execution-port",
  "winwincode-fusion",
+ "winwincode-network",
  "winwincode-provider",
  "winwincode-publication",
  "winwincode-repository-context",
@@ -13006,6 +13012,7 @@ dependencies = [
  "ureq",
  "winwincode-api",
  "winwincode-client-port",
+ "winwincode-network",
  "winwincode-provider",
  "winwincode-worker",
 ]
@@ -13061,6 +13068,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "winwincode-domain",
+ "winwincode-network",
 ]
 
 [[package]]
@@ -13074,6 +13082,7 @@ dependencies = [
  "winwincode-connector-slack",
  "winwincode-domain",
  "winwincode-integration-core",
+ "winwincode-network",
 ]
 
 [[package]]
@@ -13093,6 +13102,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "winwincode-execution-port",
+ "winwincode-network",
 ]
 
 [[package]]
@@ -13113,6 +13123,25 @@ dependencies = [
  "winwincode-control-plane",
  "winwincode-observability-core",
  "winwincode-worker",
+]
+
+[[package]]
+name = "winwincode-network"
+version = "0.1.0-alpha.2"
+dependencies = [
+ "codex-exec-server",
+ "codex-rmcp-client",
+ "getrandom 0.3.4",
+ "httpdate",
+ "reqwest 0.12.28",
+ "rusqlite",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "time",
+ "tokio",
+ "ureq",
 ]
 
 [[package]]
@@ -13163,6 +13192,7 @@ dependencies = [
  "winwincode-api",
  "winwincode-domain",
  "winwincode-execution-port",
+ "winwincode-network",
 ]
 
 [[package]]
@@ -13300,6 +13330,7 @@ dependencies = [
  "winwincode-domain",
  "winwincode-execution-port",
  "winwincode-kernel",
+ "winwincode-network",
  "winwincode-provider",
  "winwincode-storage",
 ]

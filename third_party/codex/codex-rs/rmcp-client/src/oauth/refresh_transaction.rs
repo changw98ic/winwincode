@@ -60,9 +60,8 @@ impl OAuthPersistor {
         let keyring_store = keyring_store.clone();
         // Once the provider can consume a rotating token, caller cancellation must not cancel
         // persistence. The owned task continues with independently bounded lock and request waits.
-        // A provider timeout leaves the outcome unknown and permits a later serialized retry:
-        // provider grace may recover, otherwise reauthorization is unavoidable. This residual
-        // risk is preferred to holding the credential lock indefinitely.
+        // A provider timeout leaves a durable unknown outcome. The same rotating
+        // refresh token remains fenced across process restart.
         let transaction_task = tokio::spawn(async move {
             let result = persistor
                 .refresh_transaction(&keyring_store, refresh_request_timeout)
@@ -107,7 +106,7 @@ impl OAuthPersistor {
         refresh_request_timeout: Duration,
     ) -> Result<()> {
         debug!("waiting for the MCP OAuth credential transaction lock");
-        let _lock =
+        let mut refresh_lock =
             RefreshCredentialLock::acquire_for_server(&self.inner.server_name, &self.inner.url)
                 .await?;
         debug!("acquired the MCP OAuth credential transaction lock");
@@ -138,6 +137,20 @@ impl OAuthPersistor {
             });
         };
 
+        use sha2::{Digest, Sha256};
+        let mut fingerprint = Sha256::new();
+        fingerprint.update(self.inner.url.as_bytes());
+        fingerprint.update([0]);
+        fingerprint.update(
+            latest
+                .token_response
+                .0
+                .refresh_token()
+                .map_or("", |token| token.secret())
+                .as_bytes(),
+        );
+        let token_fingerprint = format!("{:x}", fingerprint.finalize());
+        refresh_lock.check_refresh_outcome(&token_fingerprint)?;
         if !token_needs_refresh(latest.expires_at) {
             debug!("adopting newer MCP OAuth credentials without contacting the provider");
             let manager = self.inner.authorization_manager.clone();
@@ -191,6 +204,7 @@ impl OAuthPersistor {
             timeout_ms = refresh_request_timeout.as_millis(),
             "requesting refreshed MCP OAuth credentials from the provider"
         );
+        refresh_lock.begin_refresh(&token_fingerprint)?;
         let refreshed = match timeout(refresh_request_timeout, guard.refresh_token()).await {
             Ok(Ok(token_response)) => {
                 debug!("received refreshed MCP OAuth credentials from the provider");
@@ -211,6 +225,20 @@ impl OAuthPersistor {
                 });
             }
             Ok(Err(error)) => {
+                // Clear the intent only when a typed transport fact proves that
+                // no token request reached the provider.
+                let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+                while let Some(current) = source {
+                    if let Some(codex_exec_server::ExecServerError::NetworkHttpRequest(failure)) =
+                        current.downcast_ref::<codex_exec_server::ExecServerError>()
+                    {
+                        if failure.not_sent {
+                            refresh_lock.clear_refresh_outcome()?;
+                        }
+                        break;
+                    }
+                    source = current.source();
+                }
                 warn!(
                     error = %error,
                     "MCP OAuth provider refresh failed"
@@ -226,7 +254,7 @@ impl OAuthPersistor {
             Err(_) => {
                 warn!(
                     timeout_ms = refresh_request_timeout.as_millis(),
-                    "MCP OAuth provider refresh timed out; the outcome is unknown and a later serialized retry is permitted"
+                    "MCP OAuth provider refresh timed out; the unknown outcome is durably fenced"
                 );
                 let error = anyhow::anyhow!(
                     "timed out after {refresh_request_timeout:?} refreshing OAuth tokens for server {}",
@@ -262,6 +290,8 @@ impl OAuthPersistor {
                 )?;
             return Err(error);
         }
+
+        refresh_lock.clear_refresh_outcome()?;
 
         // This layer retains RMCP's legacy persistence hook. Install the same merged response
         // (including carried-forward refresh token/scopes) so that hook cannot overwrite durable

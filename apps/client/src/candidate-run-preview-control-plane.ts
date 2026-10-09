@@ -1,3 +1,4 @@
+import { requestFetch as sendHttp } from '@winwincode/network-request'
 // SPDX-License-Identifier: Apache-2.0
 
 import {
@@ -399,7 +400,7 @@ export function createControlPlaneCandidatePreviewPort(options: {
       throw failure('protocol', 'TRANSPORT_UNAVAILABLE', '浏览器 HTTP transport 不可用。')
     }
     try {
-      return await Reflect.apply(options.fetch, undefined, [`${location.serverUrl}${path}`, {
+      return await sendHttp(options.fetch, `${location.serverUrl}${path}`, {
         method,
         headers: body === undefined ? {} : { 'content-type': 'application/json' },
         ...(body === undefined ? {} : { body }),
@@ -407,7 +408,7 @@ export function createControlPlaneCandidatePreviewPort(options: {
         cache: 'no-store',
         referrerPolicy: 'no-referrer',
         credentials: 'include',
-      }])
+      })
     } catch (error) {
       if (error instanceof ControlPlaneClientError) throw error
       throw failure('network', 'NETWORK_ERROR', '无法连接 Server 的预览服务。')

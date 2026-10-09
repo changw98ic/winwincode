@@ -4,7 +4,7 @@
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use std::sync::{Mutex, OnceLock};
-type ActiveDeviceExchange = std::sync::Arc<crate::provider_transport::ExchangeCancellation>;
+type ActiveDeviceExchange = std::sync::Arc<winwincode_network::transport::ExchangeCancellation>;
 static ACTIVE_EXCHANGES: OnceLock<
     Mutex<std::collections::BTreeMap<(String, String), ActiveDeviceExchange>>,
 > = OnceLock::new();
@@ -87,17 +87,41 @@ enum DeviceAttemptError {
     Configuration,
 }
 
-impl crate::request_retry::RetryFailure for DeviceAttemptError {
+impl winwincode_network::RetryFailure for DeviceAttemptError {
     fn retryable(&self) -> bool {
+        self.network_failure().retryable()
+    }
+    fn network_failure(&self) -> winwincode_network::NetworkFailure {
+        use winwincode_network::{
+            Acceptance, DiagnosticCode, ErrorKind, NetworkDiagnostic, NetworkFailure, Phase,
+        };
         match self {
-            Self::Open(error) => crate::request_retry::RetryFailure::retryable(error),
-            Self::Stream(error) => matches!(
-                error.kind(),
-                crate::HttpsSseProviderErrorKind::Transport
-                    | crate::HttpsSseProviderErrorKind::IncompleteStream
-            ),
-            Self::EmptyResponse(_) => true,
-            Self::Stopped | Self::Storage | Self::Configuration => false,
+            Self::Open(error) => error.network_failure(),
+            Self::Stream(error) => error.network_failure(),
+            Self::EmptyResponse(_) => NetworkFailure::new(
+                ErrorKind::EmptyResponse,
+                Acceptance::ResponseReceived,
+                Phase::Stream,
+            )
+            .with_diagnostic(NetworkDiagnostic::new(DiagnosticCode::EmptyResponse)),
+            Self::Stopped => NetworkFailure::new(
+                ErrorKind::AuthorityExpired,
+                Acceptance::Unknown,
+                Phase::ResponseHeaders,
+            )
+            .with_diagnostic(NetworkDiagnostic::new(DiagnosticCode::AuthorityEnded)),
+            Self::Storage => NetworkFailure::new(
+                ErrorKind::StorageUnavailable,
+                Acceptance::Unknown,
+                Phase::Persist,
+            )
+            .with_diagnostic(NetworkDiagnostic::new(DiagnosticCode::Storage)),
+            Self::Configuration => NetworkFailure::new(
+                ErrorKind::RequestInvalid,
+                Acceptance::NotSent,
+                Phase::Connect,
+            )
+            .with_diagnostic(NetworkDiagnostic::new(DiagnosticCode::Configuration)),
         }
     }
     fn retry_after(&self) -> Option<std::time::Duration> {
@@ -108,7 +132,7 @@ impl crate::request_retry::RetryFailure for DeviceAttemptError {
     }
     fn wait_for_connection(&self) -> bool {
         match self {
-            Self::Open(error) => crate::request_retry::RetryFailure::wait_for_connection(error),
+            Self::Open(error) => winwincode_network::RetryFailure::wait_for_connection(error),
             _ => false,
         }
     }
@@ -324,7 +348,7 @@ impl DeviceProviderStore {
             return Ok(chunks);
         }
         let cancellation =
-            std::sync::Arc::new(crate::provider_transport::ExchangeCancellation::default());
+            std::sync::Arc::new(winwincode_network::transport::ExchangeCancellation::default());
         active.insert(key.clone(), std::sync::Arc::clone(&cancellation));
         drop(active);
         let _registration = ExchangeRegistration(key);
@@ -419,7 +443,10 @@ impl DeviceProviderStore {
             .active_cancellation(&open.model_exchange_id.0)?
             .ok_or(DeviceModelFailure::Unavailable)?;
         self.retain_prepared_payload(open, &payload)?;
-        let retry = crate::request_retry::RequestRetry::new(4, open.model_exchange_id.0.as_bytes());
+        let sse_failure_log = self.sse_failure_log_directory()?;
+        let retry = winwincode_network::RequestRetry::new(4, open.model_exchange_id.0.as_bytes());
+        // Physical attempts include connection waits; paid policy ordinals do not.
+        let diagnostic_sequence = std::cell::Cell::new(None);
         let result = retry.run_blocking(
             || {
                 can_start()
@@ -431,6 +458,7 @@ impl DeviceProviderStore {
             |attempt| {
                 let adapter = make_adapter(&config, headers.clone())
                     .map_err(|_| DeviceAttemptError::Configuration)?
+                    .with_sse_failure_log(sse_failure_log.clone())
                     .with_cancellation(cancellation.clone());
                 if !can_start()
                     || self
@@ -439,12 +467,20 @@ impl DeviceProviderStore {
                 {
                     return Err(DeviceAttemptError::Stopped);
                 }
+                let sequence = self
+                    .begin_model_diagnostic(open, attempt)
+                    .map_err(|_| DeviceAttemptError::Storage)?;
+                diagnostic_sequence.set(Some(sequence));
                 // Retain a possible paid attempt before its network side effect.
                 self.retain_model_attempt(open, attempt, "failed", None, None)
                     .map_err(|_| DeviceAttemptError::Storage)?;
                 invoke_provider_attempt(&adapter, open, &secret, &payload, &provider_id, &model_id)
             },
             |attempt, result| {
+                if let Some(sequence) = diagnostic_sequence.take() {
+                    self.finish_model_diagnostic(open, sequence, result)
+                        .map_err(|_| DeviceAttemptError::Storage)?;
+                }
                 if matches!(
                     result,
                     Err(DeviceAttemptError::Configuration
@@ -454,7 +490,7 @@ impl DeviceProviderStore {
                     return Ok(());
                 }
                 if let Err(DeviceAttemptError::Open(error)) = result
-                    && crate::request_retry::RetryFailure::wait_for_connection(error)
+                    && winwincode_network::RetryFailure::wait_for_connection(error)
                 {
                     // The tracked socket was never established. Remove only this
                     // provisional attempt; no HTTP request could have been sent.
@@ -483,6 +519,20 @@ impl DeviceProviderStore {
                     .map_err(|_| DeviceAttemptError::Storage)
             },
         );
+        let stop_reason = match &result {
+            Ok(_) => "succeeded",
+            Err(DeviceAttemptError::Stopped) => "authority_ended",
+            Err(DeviceAttemptError::Storage) => "storage_failed",
+            Err(DeviceAttemptError::Configuration) => "configuration_invalid",
+            Err(error) if winwincode_network::RetryFailure::retryable(error) => {
+                "retry_budget_exhausted"
+            }
+            Err(_) => "permanent_failure",
+        };
+        self.connection.execute(
+            "UPDATE model_attempt_diagnostics SET stop_reason=?1 WHERE exchange_id=?2 AND sequence=(SELECT MAX(sequence) FROM model_attempt_diagnostics WHERE exchange_id=?2)",
+            params![stop_reason, open.model_exchange_id.0],
+        ).map_err(|_| DeviceModelFailure::Unavailable)?;
         match result {
             Ok(chunks) | Err(DeviceAttemptError::EmptyResponse(chunks)) => Ok(chunks),
             Err(DeviceAttemptError::Open(error)) => {
@@ -498,25 +548,66 @@ impl DeviceProviderStore {
                         return Ok(vec![model_failure(open, "DEVICE_OPENCODE_ACCESS_DENIED")]);
                     }
                 }
-                Ok(vec![model_failure(
-                    open,
-                    adapter_error_message(error.kind()),
-                )])
+                let mut failure = model_failure(open, adapter_error_message(error.kind()));
+                append_network_failure(&mut failure, error.network_failure());
+                Ok(vec![failure])
             }
             Err(DeviceAttemptError::Stream(error)) => {
                 let mut failure = model_failure(open, provider_error_message(error.kind()));
-                if let (Some(diagnostic), Some(retained)) =
-                    (error.diagnostic(), failure.error.as_mut())
-                {
-                    retained.message.push_str("; ");
-                    retained.message.push_str(diagnostic);
-                }
+                append_network_failure(&mut failure, error.network_failure());
                 Ok(vec![failure])
             }
             Err(DeviceAttemptError::Stopped) => Err(DeviceModelFailure::LeaseExpired),
             Err(DeviceAttemptError::Storage) => Err(DeviceModelFailure::Unavailable),
             Err(DeviceAttemptError::Configuration) => Err(DeviceModelFailure::InvalidConfiguration),
         }
+    }
+
+    fn begin_model_diagnostic(
+        &self,
+        open: &ModelOpenMessage,
+        attempt: u32,
+    ) -> Result<i64, DeviceProviderError> {
+        let now = i64::try_from(winwincode_network::journal::now_millis())
+            .map_err(|_| DeviceProviderError)?;
+        self.connection.query_row(
+            "INSERT INTO model_attempt_diagnostics (exchange_id,sequence,policy_attempt,started_ms,outcome)
+             SELECT ?1,COALESCE(MAX(sequence),0)+1,?2,?3,'in_flight'
+             FROM model_attempt_diagnostics WHERE exchange_id=?1 RETURNING sequence",
+            params![open.model_exchange_id.0, attempt, now],
+            |row| row.get(0),
+        ).map_err(Into::into)
+    }
+
+    fn finish_model_diagnostic(
+        &self,
+        open: &ModelOpenMessage,
+        sequence: i64,
+        result: &Result<Vec<ModelChunkMessage>, DeviceAttemptError>,
+    ) -> Result<(), DeviceProviderError> {
+        let failure = result
+            .as_ref()
+            .err()
+            .map(winwincode_network::RetryFailure::network_failure)
+            .map(|failure| serde_json::to_string(&failure))
+            .transpose()?;
+        let now = i64::try_from(winwincode_network::journal::now_millis())
+            .map_err(|_| DeviceProviderError)?;
+        let changed = self.connection.execute(
+            "UPDATE model_attempt_diagnostics SET finished_ms=?1,outcome=?2,failure_json=?3
+             WHERE exchange_id=?4 AND sequence=?5 AND outcome='in_flight'",
+            params![
+                now,
+                if result.is_ok() { "accepted" } else { "failed" },
+                failure,
+                open.model_exchange_id.0,
+                sequence
+            ],
+        )?;
+        if changed != 1 {
+            return Err(DeviceProviderError);
+        }
+        Ok(())
     }
 
     fn retain_model_attempt(
@@ -726,6 +817,36 @@ pub(crate) fn validated_model_payload(
         return Err(DeviceProviderError);
     }
     Ok(payload)
+}
+
+fn append_network_failure(
+    chunk: &mut ModelChunkMessage,
+    failure: winwincode_network::NetworkFailure,
+) {
+    if let Some(error) = chunk.error.as_mut() {
+        // Complete facts are already durable in model_attempt_diagnostics.
+        // The bounded wire message carries a compact view, never partial JSON.
+        let mut wire = failure;
+        let Ok(mut facts) = serde_json::to_string(&wire) else {
+            return;
+        };
+        if facts.chars().count() > 430 {
+            if let Some(diagnostic) = wire.diagnostic.as_mut() {
+                diagnostic.line = None;
+                diagnostic.column = None;
+                diagnostic.os_code = None;
+                diagnostic.io_kind = None;
+            }
+            let Ok(compact) = serde_json::to_string(&wire) else {
+                return;
+            };
+            facts = compact;
+        }
+        let suffix = format!(";network={facts}");
+        let available = 500_usize.saturating_sub(suffix.chars().count());
+        error.message = error.message.chars().take(available).collect();
+        error.message.push_str(&suffix);
+    }
 }
 
 fn adapter_error_message(kind: crate::ProviderAdapterErrorKind) -> &'static str {
@@ -1390,3 +1511,7 @@ mod tests {
         std::fs::remove_dir_all(directory).unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "device_model_diagnostics_regression_tests.rs"]
+mod diagnostics_regression_tests;

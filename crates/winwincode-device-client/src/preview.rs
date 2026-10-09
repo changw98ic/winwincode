@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -27,7 +27,6 @@ use winwincode_client_port::preview::{
 
 const MAX_HTTP_RESPONSE_BYTES: usize = MAX_PREVIEW_BODY_BYTES + 64 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
-const RECONNECT_DELAY: Duration = Duration::from_millis(250);
 const STOP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// One service approved by the local run supervisor.
@@ -302,6 +301,97 @@ impl PreviewTunnelClient {
                 "preview tunnel has no authorized sources",
             ));
         }
+        let request = self.websocket_request()?;
+        let connector = self.tls_connector.clone().map(Connector::Rustls);
+        let connect = tokio::time::timeout(
+            IO_TIMEOUT,
+            connect_async_tls_with_config(request, None, false, connector),
+        );
+        let connect = tokio::select! {
+            result = connect => result,
+            () = wait_for_stop(stop) => return Ok(()),
+        };
+        let (socket, _) = connect
+            .map_err(|_| {
+                PreviewTunnelError::network(winwincode_network::NetworkFailure::new(
+                    winwincode_network::ErrorKind::Timeout,
+                    winwincode_network::Acceptance::Unknown,
+                    winwincode_network::Phase::ResponseHeaders,
+                ))
+            })?
+            .map_err(classify_websocket)?;
+        let (mut writer, mut reader) = socket.split();
+        let sources = self.registry.snapshot();
+        let registration_revision = self.registry.revision();
+        let register = DevicePreviewFrame::Register {
+            schema_version: PREVIEW_TUNNEL_SCHEMA_VERSION.to_owned(),
+            sources: sources
+                .into_iter()
+                .map(|source| source.descriptor.clone())
+                .collect(),
+        };
+        let register = Message::Text(
+            serde_json::to_string(&register)
+                .map_err(|_| PreviewTunnelError::new("preview registration failed"))?
+                .into(),
+        );
+        tokio::select! {
+            result = writer.send(register) => result.map_err(classify_websocket)?,
+            () = wait_for_stop(stop) => return Ok(()),
+        }
+
+        loop {
+            if self.registry.revision() != registration_revision {
+                let _ = tokio::time::timeout(STOP_POLL_INTERVAL, writer.close()).await;
+                return Ok(());
+            }
+            let message = tokio::select! {
+                message = tokio::time::timeout(STOP_POLL_INTERVAL, reader.next()) => {
+                    match message {
+                        Ok(message) => message,
+                        Err(_) => continue,
+                    }
+                }
+                () = wait_for_stop(stop) => {
+                    let _ = tokio::time::timeout(STOP_POLL_INTERVAL, writer.close()).await;
+                    return Ok(())
+                }
+            };
+            let Some(message) = message else {
+                return Err(PreviewTunnelError::network(
+                    winwincode_network::NetworkFailure::new(
+                        winwincode_network::ErrorKind::TransportInterrupted,
+                        winwincode_network::Acceptance::Unknown,
+                        winwincode_network::Phase::Stream,
+                    ),
+                ));
+            };
+            let message = message.map_err(classify_websocket)?;
+            let Message::Text(text) = message else {
+                if message.is_close() {
+                    return Ok(());
+                }
+                continue;
+            };
+            let request: ServerPreviewFrame = serde_json::from_str(&text)
+                .map_err(|_| PreviewTunnelError::new("preview tunnel frame is invalid"))?;
+            let response = tokio::select! {
+                response = self.forward(request) => response,
+                () = wait_for_stop(stop) => return Ok(()),
+            };
+            let response = Message::Text(
+                serde_json::to_string(&response)
+                    .map_err(|_| PreviewTunnelError::new("preview response failed"))?
+                    .into(),
+            );
+            tokio::select! {
+                result = writer.send(response) => result.map_err(classify_websocket)?,
+                () = wait_for_stop(stop) => return Ok(()),
+            }
+        }
+    }
+
+    fn websocket_request(&self) -> Result<http::Request<()>, PreviewTunnelError> {
         let mut request = self
             .endpoint
             .as_str()
@@ -317,76 +407,7 @@ impl PreviewTunnelClient {
             HeaderValue::from_str(&self.client_node_id)
                 .map_err(|_| PreviewTunnelError::new("preview tunnel node id is invalid"))?,
         );
-        let connector = self.tls_connector.clone().map(Connector::Rustls);
-        let connect = tokio::time::timeout(
-            IO_TIMEOUT,
-            connect_async_tls_with_config(request, None, false, connector),
-        );
-        let connect = tokio::select! {
-            result = connect => result,
-            () = wait_for_stop(stop) => return Ok(()),
-        };
-        let (socket, _) = connect
-            .map_err(|_| PreviewTunnelError::new("preview tunnel connection timed out"))?
-            .map_err(|_| PreviewTunnelError::new("preview tunnel connection failed"))?;
-        let (mut writer, mut reader) = socket.split();
-        let sources = self.registry.snapshot();
-        let registration_revision = self.registry.revision();
-        let register = DevicePreviewFrame::Register {
-            schema_version: PREVIEW_TUNNEL_SCHEMA_VERSION.to_owned(),
-            sources: sources
-                .into_iter()
-                .map(|source| source.descriptor.clone())
-                .collect(),
-        };
-        writer
-            .send(Message::Text(
-                serde_json::to_string(&register)
-                    .map_err(|_| PreviewTunnelError::new("preview registration failed"))?
-                    .into(),
-            ))
-            .await
-            .map_err(|_| PreviewTunnelError::new("preview tunnel send failed"))?;
-
-        loop {
-            if self.registry.revision() != registration_revision {
-                let _ = writer.close().await;
-                return Ok(());
-            }
-            let message = tokio::select! {
-                message = tokio::time::timeout(STOP_POLL_INTERVAL, reader.next()) => {
-                    match message {
-                        Ok(message) => message,
-                        Err(_) => continue,
-                    }
-                }
-                () = wait_for_stop(stop) => {
-                    let _ = writer.close().await;
-                    return Ok(())
-                }
-            };
-            let Some(message) = message else { break };
-            let message =
-                message.map_err(|_| PreviewTunnelError::new("preview tunnel receive failed"))?;
-            let Message::Text(text) = message else {
-                if message.is_close() {
-                    return Ok(());
-                }
-                continue;
-            };
-            let request: ServerPreviewFrame = serde_json::from_str(&text)
-                .map_err(|_| PreviewTunnelError::new("preview tunnel frame is invalid"))?;
-            let response = self.forward(request).await;
-            writer
-                .send(Message::Text(
-                    serde_json::to_string(&response)
-                        .map_err(|_| PreviewTunnelError::new("preview response failed"))?
-                        .into(),
-                ))
-                .await
-                .map_err(|_| PreviewTunnelError::new("preview tunnel send failed"))?;
-        }
-        Ok(())
+        Ok(request)
     }
 
     async fn forward(&self, frame: ServerPreviewFrame) -> DevicePreviewFrame {
@@ -400,7 +421,10 @@ impl PreviewTunnelClient {
         } = frame;
         let result = match self.registry.get(&source_id) {
             Some(source) => {
-                forward_http(source.socket, &method, &target, &headers, &body_base64).await
+                tokio::select! {
+                    result = forward_http(source.socket, &method, &target, &headers, &body_base64) => result,
+                    () = async { while self.registry.get(&source_id).is_some() { tokio::time::sleep(STOP_POLL_INTERVAL).await; } } => Err(PreviewTunnelError::new("preview source authority ended")),
+                }
             }
             None => Err(PreviewTunnelError::new(
                 "preview source is not authorized on this device",
@@ -490,24 +514,40 @@ impl PreviewTunnelSupervisor {
                 else {
                     return;
                 };
-                let mut reconnect_delay = RECONNECT_DELAY;
+                let mut reconnect_attempt = 1_u32;
+                let mut connection_attempt = 0_u32;
                 while !thread_stop.load(Ordering::Acquire) {
                     if client.registry.is_empty() {
                         sleep_with_stop(&thread_stop, STOP_POLL_INTERVAL);
                         continue;
                     }
+                    let prior_revision = client.registry.revision();
                     let result = runtime.block_on(client.run_once_with_stop(Some(&thread_stop)));
                     if thread_stop.load(Ordering::Acquire) {
                         break;
                     }
-                    let delay = if result.is_ok() {
-                        reconnect_delay = RECONNECT_DELAY;
-                        RECONNECT_DELAY
-                    } else {
-                        let delay = reconnect_delay;
-                        reconnect_delay =
-                            reconnect_delay.saturating_mul(2).min(MAX_RECONNECT_DELAY);
-                        delay
+                    let delay = match result {
+                        Ok(()) => {
+                            reconnect_attempt = 1;
+                            connection_attempt = 0;
+                            if client.registry.revision() == prior_revision {
+                                Duration::from_millis(
+                                    winwincode_network::defaults().initial_delay_ms,
+                                )
+                            } else {
+                                Duration::ZERO
+                            }
+                        }
+                        Err(error) => {
+                            let Some(delay) = preview_retry_delay(
+                                error.failure,
+                                &mut reconnect_attempt,
+                                &mut connection_attempt,
+                            ) else {
+                                break;
+                            };
+                            delay
+                        }
                     };
                     sleep_with_stop(&thread_stop, delay);
                 }
@@ -554,10 +594,8 @@ async fn wait_for_stop(stop: Option<&AtomicBool>) {
     }
 }
 
-const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
-
 fn sleep_with_stop(stop: &AtomicBool, duration: Duration) {
-    let started = std::time::Instant::now();
+    let started = Instant::now();
     while !stop.load(Ordering::Acquire) {
         let elapsed = started.elapsed();
         if elapsed >= duration {
@@ -579,6 +617,40 @@ fn build_tls_connector(root_der: Vec<u8>) -> Result<Arc<rustls::ClientConfig>, P
         .with_root_certificates(roots)
         .with_no_client_auth();
     Ok(Arc::new(config))
+}
+
+fn preview_retry_delay(
+    failure: winwincode_network::NetworkFailure,
+    attempt: &mut u32,
+    connections: &mut u32,
+) -> Option<Duration> {
+    let disconnected = failure.acceptance == winwincode_network::Acceptance::NotSent
+        && matches!(
+            failure.kind,
+            winwincode_network::ErrorKind::ConnectionUnavailable
+                | winwincode_network::ErrorKind::Timeout
+        );
+    *connections = if disconnected {
+        connections.saturating_add(1)
+    } else {
+        0
+    };
+    let decision = winwincode_network::decide(
+        failure,
+        winwincode_network::Replay::ReplayExact,
+        *attempt,
+        *connections,
+        winwincode_network::defaults().max_attempts,
+        0,
+    );
+    if !disconnected {
+        *attempt = attempt.saturating_add(1);
+    }
+    match decision {
+        winwincode_network::RetryDecision::RetryAfter(delay)
+        | winwincode_network::RetryDecision::DeferredUntil(delay) => Some(delay),
+        _ => None,
+    }
 }
 
 async fn forward_http(
@@ -611,19 +683,94 @@ async fn forward_http(
     }
     request.push_str("\r\n");
 
+    let last_response = std::sync::Mutex::new(None);
+    let deadline = Instant::now() + IO_TIMEOUT;
+    let replay = if matches!(method, "GET" | "HEAD") {
+        winwincode_network::Replay::ReplayExact
+    } else {
+        winwincode_network::Replay::ReconcileFirst
+    };
+    let result = winwincode_network::RequestRetry::new(
+        winwincode_network::defaults().max_attempts,
+        request.as_bytes(),
+    )
+    .for_replay(replay)
+    .run_async(
+        || Instant::now() < deadline,
+        || {
+            io_failure(
+                std::io::ErrorKind::TimedOut,
+                false,
+                winwincode_network::Phase::ResponseBody,
+            )
+        },
+        |_| async {
+            let response = forward_http_attempt(socket, &request, &body).await?;
+            let parsed = parse_http_response(&response)?;
+            let retry_after = parsed
+                .1
+                .iter()
+                .find(|header| header.name == "retry-after")
+                .and_then(|header| {
+                    winwincode_network::retry_after(&header.value, std::time::SystemTime::now())
+                });
+            let failure = winwincode_network::NetworkFailure::http(parsed.0, retry_after);
+            if failure.retryable() {
+                *last_response
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(parsed);
+                return Err(PreviewTunnelError::network(failure));
+            }
+            Ok(parsed)
+        },
+        |_, _| Ok(()),
+    )
+    .await;
+    match result {
+        Ok(response) => Ok(response),
+        Err(error) => last_response
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .ok_or(error),
+    }
+}
+
+async fn forward_http_attempt(
+    socket: SocketAddr,
+    request: &str,
+    body: &[u8],
+) -> Result<Vec<u8>, PreviewTunnelError> {
     let mut stream = tokio::time::timeout(IO_TIMEOUT, TcpStream::connect(socket))
         .await
-        .map_err(|_| PreviewTunnelError::new("preview source connect timed out"))?
-        .map_err(|_| PreviewTunnelError::new("preview source connect failed"))?;
+        .map_err(|_| {
+            io_failure(
+                std::io::ErrorKind::TimedOut,
+                true,
+                winwincode_network::Phase::Connect,
+            )
+        })?
+        .map_err(|error| io_failure(error.kind(), true, winwincode_network::Phase::Connect))?;
     tokio::time::timeout(IO_TIMEOUT, async {
         stream.write_all(request.as_bytes()).await?;
-        stream.write_all(&body).await?;
+        stream.write_all(body).await?;
         stream.flush().await?;
         Ok::<(), std::io::Error>(())
     })
     .await
-    .map_err(|_| PreviewTunnelError::new("preview source write timed out"))?
-    .map_err(|_| PreviewTunnelError::new("preview source write failed"))?;
+    .map_err(|_| {
+        io_failure(
+            std::io::ErrorKind::TimedOut,
+            false,
+            winwincode_network::Phase::ResponseHeaders,
+        )
+    })?
+    .map_err(|error| {
+        io_failure(
+            error.kind(),
+            false,
+            winwincode_network::Phase::ResponseHeaders,
+        )
+    })?;
     let mut response = Vec::new();
     tokio::time::timeout(
         IO_TIMEOUT,
@@ -632,14 +779,20 @@ async fn forward_http(
             .read_to_end(&mut response),
     )
     .await
-    .map_err(|_| PreviewTunnelError::new("preview source read timed out"))?
-    .map_err(|_| PreviewTunnelError::new("preview source read failed"))?;
+    .map_err(|_| {
+        io_failure(
+            std::io::ErrorKind::TimedOut,
+            false,
+            winwincode_network::Phase::ResponseBody,
+        )
+    })?
+    .map_err(|error| io_failure(error.kind(), false, winwincode_network::Phase::ResponseBody))?;
     if response.len() > MAX_HTTP_RESPONSE_BYTES {
         return Err(PreviewTunnelError::new(
             "preview source response is too large",
         ));
     }
-    parse_http_response(&response)
+    Ok(response)
 }
 
 fn parse_http_response(
@@ -648,7 +801,13 @@ fn parse_http_response(
     let header_end = response
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
-        .ok_or_else(|| PreviewTunnelError::new("preview source response has no headers"))?;
+        .ok_or_else(|| {
+            PreviewTunnelError::network(winwincode_network::NetworkFailure::new(
+                winwincode_network::ErrorKind::StreamIncomplete,
+                winwincode_network::Acceptance::Unknown,
+                winwincode_network::Phase::ResponseBody,
+            ))
+        })?;
     let head = std::str::from_utf8(&response[..header_end])
         .map_err(|_| PreviewTunnelError::new("preview source response headers are invalid"))?;
     let mut lines = head.split("\r\n");
@@ -698,7 +857,13 @@ fn parse_http_response(
     } else if let Some(length) = content_length {
         encoded
             .get(..length)
-            .ok_or_else(|| PreviewTunnelError::new("preview source body is incomplete"))?
+            .ok_or_else(|| {
+                PreviewTunnelError::network(winwincode_network::NetworkFailure::new(
+                    winwincode_network::ErrorKind::StreamIncomplete,
+                    winwincode_network::Acceptance::Unknown,
+                    winwincode_network::Phase::ResponseBody,
+                ))
+            })?
             .to_vec()
     } else {
         encoded.to_vec()
@@ -717,7 +882,13 @@ fn decode_chunked(mut body: &[u8]) -> Result<Vec<u8>, PreviewTunnelError> {
         let line_end = body
             .windows(2)
             .position(|window| window == b"\r\n")
-            .ok_or_else(|| PreviewTunnelError::new("preview chunk size is missing"))?;
+            .ok_or_else(|| {
+                PreviewTunnelError::network(winwincode_network::NetworkFailure::new(
+                    winwincode_network::ErrorKind::StreamIncomplete,
+                    winwincode_network::Acceptance::Unknown,
+                    winwincode_network::Phase::ResponseBody,
+                ))
+            })?;
         let size = std::str::from_utf8(&body[..line_end])
             .ok()
             .and_then(|line| line.split(';').next())
@@ -727,9 +898,13 @@ fn decode_chunked(mut body: &[u8]) -> Result<Vec<u8>, PreviewTunnelError> {
         if size == 0 {
             return Ok(decoded);
         }
-        let chunk = body
-            .get(..size)
-            .ok_or_else(|| PreviewTunnelError::new("preview chunk is incomplete"))?;
+        let chunk = body.get(..size).ok_or_else(|| {
+            PreviewTunnelError::network(winwincode_network::NetworkFailure::new(
+                winwincode_network::ErrorKind::StreamIncomplete,
+                winwincode_network::Acceptance::Unknown,
+                winwincode_network::Phase::ResponseBody,
+            ))
+        })?;
         decoded.extend_from_slice(chunk);
         if decoded.len() > MAX_PREVIEW_BODY_BYTES || body.get(size..size + 2) != Some(b"\r\n") {
             return Err(PreviewTunnelError::new("preview chunked body is invalid"));
@@ -796,14 +971,106 @@ fn portable_identifier(value: &str) -> bool {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreviewTunnelError {
     message: String,
+    failure: winwincode_network::NetworkFailure,
 }
 
 impl PreviewTunnelError {
     fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            failure: winwincode_network::NetworkFailure::new(
+                winwincode_network::ErrorKind::ProtocolInvalid,
+                winwincode_network::Acceptance::ResponseReceived,
+                winwincode_network::Phase::Decode,
+            ),
         }
     }
+    fn network(failure: winwincode_network::NetworkFailure) -> Self {
+        Self {
+            message: failure.to_string(),
+            failure,
+        }
+    }
+}
+
+impl winwincode_network::RetryFailure for PreviewTunnelError {
+    fn retryable(&self) -> bool {
+        self.failure.retryable()
+    }
+    fn network_failure(&self) -> winwincode_network::NetworkFailure {
+        self.failure
+    }
+    fn wait_for_connection(&self) -> bool {
+        self.failure.acceptance == winwincode_network::Acceptance::NotSent
+    }
+}
+fn io_failure(
+    kind: std::io::ErrorKind,
+    not_sent: bool,
+    phase: winwincode_network::Phase,
+) -> PreviewTunnelError {
+    PreviewTunnelError::network(winwincode_network::NetworkFailure::new(
+        if kind == std::io::ErrorKind::TimedOut {
+            winwincode_network::ErrorKind::Timeout
+        } else if not_sent {
+            winwincode_network::ErrorKind::ConnectionUnavailable
+        } else {
+            winwincode_network::ErrorKind::TransportInterrupted
+        },
+        if not_sent {
+            winwincode_network::Acceptance::NotSent
+        } else {
+            winwincode_network::Acceptance::Unknown
+        },
+        phase,
+    ))
+}
+fn classify_websocket(error: tokio_tungstenite::tungstenite::Error) -> PreviewTunnelError {
+    use winwincode_network::{Acceptance, ErrorKind, NetworkFailure, Phase};
+    let failure = match error {
+        tokio_tungstenite::tungstenite::Error::Http(response) => NetworkFailure::http(
+            response.status().as_u16(),
+            response
+                .headers()
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| {
+                    winwincode_network::retry_after(value, std::time::SystemTime::now())
+                }),
+        ),
+        tokio_tungstenite::tungstenite::Error::Tls(_) => {
+            NetworkFailure::new(ErrorKind::TlsInvalid, Acceptance::NotSent, Phase::Connect)
+        }
+        tokio_tungstenite::tungstenite::Error::Io(error) => NetworkFailure::new(
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::NetworkUnreachable
+                    | std::io::ErrorKind::HostUnreachable
+            ) {
+                ErrorKind::ConnectionUnavailable
+            } else {
+                ErrorKind::TransportInterrupted
+            },
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::NetworkUnreachable
+                    | std::io::ErrorKind::HostUnreachable
+            ) {
+                Acceptance::NotSent
+            } else {
+                Acceptance::Unknown
+            },
+            Phase::Connect,
+        ),
+        _ => NetworkFailure::new(
+            ErrorKind::ProtocolInvalid,
+            Acceptance::Unknown,
+            Phase::Stream,
+        ),
+    };
+    PreviewTunnelError::network(failure)
 }
 
 impl fmt::Display for PreviewTunnelError {
@@ -914,7 +1181,12 @@ mod tests {
         let server = thread::spawn(move || {
             let server_runtime = tokio::runtime::Runtime::new().expect("server runtime");
             for _ in 0..3 {
-                let (stream, _) = server_runtime.block_on(listener.accept()).expect("accept");
+                let (stream, _) = server_runtime
+                    .block_on(async {
+                        tokio::time::timeout(Duration::from_secs(5), listener.accept()).await
+                    })
+                    .expect("accept deadline")
+                    .expect("accept");
                 let mut socket = server_runtime
                     .block_on(accept_async(stream))
                     .expect("websocket");
@@ -955,19 +1227,16 @@ mod tests {
         let second =
             AuthorizedPreviewSource::new(second, "127.0.0.1:4174".parse().expect("socket"))
                 .expect("second source");
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
-        while counts.read().expect("counts lock").is_empty() && std::time::Instant::now() < deadline
-        {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while counts.read().expect("counts lock").is_empty() && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(10));
         }
         registry.insert(second);
-        while counts.read().expect("counts lock").len() < 2 && std::time::Instant::now() < deadline
-        {
+        while counts.read().expect("counts lock").len() < 2 && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(10));
         }
         assert!(registry.remove("pvs_demo"));
-        while counts.read().expect("counts lock").len() < 3 && std::time::Instant::now() < deadline
-        {
+        while counts.read().expect("counts lock").len() < 3 && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(10));
         }
         supervisor.shutdown();

@@ -467,17 +467,40 @@ impl TemporaryRootLeaseManager {
         // without write access. Open this owner-only file relative to a verified
         // parent descriptor, reject aliases, and let process exit release it.
         let parent = open_lifecycle_parent(&self.parent)?;
-        let lock = fs::File::from(
+        let flags =
+            rustix::fs::OFlags::RDWR | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC;
+        let open = || {
             rustix::fs::openat(
                 &parent,
                 LIFECYCLE_LOCK_FILE,
-                rustix::fs::OFlags::RDWR
-                    | rustix::fs::OFlags::CREATE
-                    | rustix::fs::OFlags::NOFOLLOW
-                    | rustix::fs::OFlags::CLOEXEC,
-                rustix::fs::Mode::from_raw_mode(0o600),
+                flags,
+                rustix::fs::Mode::empty(),
             )
-            .map_err(|_| TemporaryRootLeaseError::io())?,
+        };
+        // On macOS a concurrent O_CREAT | O_NOFOLLOW open can return ENOENT
+        // even when the parent and lock inode remain valid. Create exclusively
+        // only after a missing-file result, then open the winning stable inode.
+        let lock = fs::File::from(
+            open()
+                .or_else(|error| {
+                    if error != rustix::io::Errno::NOENT {
+                        return Err(error);
+                    }
+                    rustix::fs::openat(
+                        &parent,
+                        LIFECYCLE_LOCK_FILE,
+                        flags | rustix::fs::OFlags::CREATE | rustix::fs::OFlags::EXCL,
+                        rustix::fs::Mode::from_raw_mode(0o600),
+                    )
+                    .or_else(|error| {
+                        if error == rustix::io::Errno::EXIST {
+                            open()
+                        } else {
+                            Err(error)
+                        }
+                    })
+                })
+                .map_err(|_| TemporaryRootLeaseError::io())?,
         );
         let metadata = lock.metadata().map_err(|_| TemporaryRootLeaseError::io())?;
         if !metadata.is_file()

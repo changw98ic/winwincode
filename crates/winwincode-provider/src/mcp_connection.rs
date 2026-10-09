@@ -62,6 +62,7 @@ pub(crate) async fn discover(
     configuration: &str,
     home: &Path,
 ) -> Result<Vec<String>, DeviceProviderError> {
+    winwincode_network::codex::install_retry_policy();
     let config = validate(configuration)?;
     let enabled_tools = config.enabled_tools;
     let disabled_tools = config.disabled_tools.unwrap_or_default();

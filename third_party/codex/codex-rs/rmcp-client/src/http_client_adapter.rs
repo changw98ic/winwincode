@@ -84,6 +84,9 @@ pub(crate) struct StreamableHttpClientAdapter {
     has_configured_headers: bool,
     redirect_mode: StreamableHttpRedirectMode,
     initialize_deadline: Arc<Mutex<Option<Instant>>>,
+    continuation_stops: Arc<Mutex<std::collections::BTreeSet<String>>>,
+    continuation_auth:
+        Option<std::sync::Weak<tokio::sync::Mutex<rmcp::transport::AuthorizationManager>>>,
 }
 
 struct EventStreamCancellation {
@@ -104,6 +107,11 @@ impl Drop for EventStreamCancellation {
 pub(crate) enum StreamableHttpClientAdapterError {
     #[error("streamable HTTP session expired with 404 Not Found")]
     SessionExpired404,
+    #[error("HTTP {status}")]
+    NetworkStatus {
+        status: u16,
+        retry_after: Option<String>,
+    },
     #[error(transparent)]
     HttpRequest(#[from] ExecServerError),
     #[error("invalid HTTP header: {0}")]
@@ -129,6 +137,8 @@ impl StreamableHttpClientAdapter {
             has_configured_headers,
             redirect_mode,
             initialize_deadline,
+            continuation_auth: None,
+            continuation_stops: Arc::default(),
         }
     }
 
@@ -151,7 +161,7 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
         let (mcp_method, mcp_request_id) = client_jsonrpc_message_fields(&message);
         let has_session_id = session_id.is_some();
         let mut headers = self.default_headers.clone();
-        headers.extend(custom_headers);
+        headers.extend(custom_headers.clone());
         self.add_auth_headers(&mut headers);
         insert_header(
             &mut headers,
@@ -165,7 +175,7 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
             JSON_MIME_TYPE.to_string(),
             StreamableHttpClientAdapterError::Header,
         )?;
-        if let Some(auth_token) = auth_token {
+        if let Some(auth_token) = &auth_token {
             insert_header(
                 &mut headers,
                 AUTHORIZATION,
@@ -315,6 +325,15 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
         let content_type = response_header(&response.headers, CONTENT_TYPE);
         let session_id = response_header(&response.headers, HEADER_SESSION_ID);
         if !status_is_success(response.status) {
+            if matches!(response.status, 408 | 425 | 429 | 500..=599) {
+                return Err(StreamableHttpError::Client(
+                    StreamableHttpClientAdapterError::NetworkStatus {
+                        status: response.status,
+                        retry_after: response_header(&response.headers, "retry-after")
+                            .filter(|value| value.len() <= 256),
+                    },
+                ));
+            }
             let body = collect_body(&mut body_stream, maximum_response_bytes).await?;
             if !retryable_post_response_status(mcp_method.as_deref(), response.status)
                 && (content_type
@@ -426,6 +445,19 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
                     )
                     .boxed();
                 }
+                if crate::network_retry_policy::policy_configured() && !is_event_stream_request {
+                    let session = session_id.clone().map(Arc::from);
+                    let stopped = self.stream_stop_callback(uri.clone(), session.clone());
+                    let connect = self.stream_connector(uri, session, auth_token, custom_headers);
+                    event_stream = crate::network_sse::resume(
+                        event_stream,
+                        connect,
+                        Default::default(),
+                        None,
+                        false,
+                        stopped,
+                    );
+                }
                 Ok(StreamableHttpPostResponse::Sse(event_stream, session_id))
             }
             Some(content_type) if content_type.starts_with(JSON_MIME_TYPE) => {
@@ -498,8 +530,12 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
             return Ok(());
         }
         if !status_is_success(response.status) {
-            return Err(StreamableHttpError::UnexpectedServerResponse(
-                format!("DELETE returned HTTP {}", response.status).into(),
+            return Err(StreamableHttpError::Client(
+                StreamableHttpClientAdapterError::NetworkStatus {
+                    status: response.status,
+                    retry_after: response_header(&response.headers, "retry-after")
+                        .filter(|value| value.len() <= 256),
+                },
             ));
         }
         Ok(())
@@ -512,9 +548,113 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
         last_event_id: Option<String>,
         auth_token: Option<String>,
         custom_headers: HashMap<HeaderName, HeaderValue>,
+    ) -> Result<BoxStream<'static, Result<Sse, sse_stream::Error>>, StreamableHttpError<Self::Error>>
+    {
+        if !crate::network_retry_policy::policy_configured() {
+            return self
+                .get_stream_once(uri, session_id, last_event_id, auth_token, custom_headers)
+                .await;
+        }
+        let key = continuation_key(&uri, session_id.as_deref(), last_event_id.as_deref());
+        {
+            let stopped = self
+                .continuation_stops
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if stopped.len() >= 4096 || stopped.contains(&key) {
+                return Err(StreamableHttpError::Client(
+                    StreamableHttpClientAdapterError::HttpRequest(ExecServerError::Protocol(
+                        "MCP continuation retry budget exhausted".to_owned(),
+                    )),
+                ));
+            }
+        }
+        let stopped = self.stream_stop_callback(uri.clone(), session_id.clone());
+        let connect = self.stream_connector(uri, session_id, auth_token, custom_headers);
+        let mut retry = crate::network_sse::RetryState::default();
+        let events = crate::network_sse::open(&connect, last_event_id.clone(), &mut retry).await?;
+        Ok(crate::network_sse::resume(
+            events,
+            connect,
+            retry,
+            last_event_id,
+            true,
+            stopped,
+        ))
+    }
+}
+
+impl StreamableHttpClientAdapter {
+    pub(crate) fn bind_continuation_auth(
+        &mut self,
+        manager: &Arc<tokio::sync::Mutex<rmcp::transport::AuthorizationManager>>,
+    ) {
+        self.continuation_auth = Some(Arc::downgrade(manager));
+    }
+
+    fn stream_stop_callback(
+        &self,
+        uri: Arc<str>,
+        session: Option<Arc<str>>,
+    ) -> Arc<dyn Fn(Option<String>) + Send + Sync> {
+        let stops = self.continuation_stops.clone();
+        Arc::new(move |id| {
+            let mut stops = stops.lock().unwrap_or_else(PoisonError::into_inner);
+            if stops.len() < 4096 {
+                stops.insert(continuation_key(&uri, session.as_deref(), id.as_deref()));
+            }
+        })
+    }
+
+    fn stream_connector(
+        &self,
+        uri: Arc<str>,
+        session_id: Option<Arc<str>>,
+        auth_token: Option<String>,
+        custom_headers: HashMap<HeaderName, HeaderValue>,
+    ) -> crate::network_sse::OpenStream {
+        let adapter = self.clone();
+        Arc::new(move |last_event_id| {
+            let (adapter, uri, session_id, auth_token, custom_headers) = (
+                adapter.clone(),
+                uri.clone(),
+                session_id.clone(),
+                auth_token.clone(),
+                custom_headers.clone(),
+            );
+            Box::pin(async move {
+                let auth_token = if let Some(manager) = adapter
+                    .continuation_auth
+                    .as_ref()
+                    .and_then(std::sync::Weak::upgrade)
+                {
+                    Some(
+                        manager
+                            .lock()
+                            .await
+                            .get_access_token()
+                            .await
+                            .map_err(StreamableHttpError::from)?,
+                    )
+                } else {
+                    auth_token
+                };
+                adapter
+                    .get_stream_once(uri, session_id, last_event_id, auth_token, custom_headers)
+                    .await
+            })
+        })
+    }
+    async fn get_stream_once(
+        &self,
+        uri: Arc<str>,
+        session_id: Option<Arc<str>>,
+        last_event_id: Option<String>,
+        auth_token: Option<String>,
+        custom_headers: HashMap<HeaderName, HeaderValue>,
     ) -> std::result::Result<
         BoxStream<'static, std::result::Result<Sse, sse_stream::Error>>,
-        StreamableHttpError<Self::Error>,
+        StreamableHttpError<StreamableHttpClientAdapterError>,
     > {
         let mut headers = self.default_headers.clone();
         headers.extend(custom_headers);
@@ -551,6 +691,19 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
         }
         let redirect_policy = self.redirect_policy(&headers);
 
+        let timeout_ms = self
+            .initialize_deadline
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .map(|deadline| {
+                u64::try_from(
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .as_millis(),
+                )
+                .unwrap_or(u64::MAX)
+                .max(1)
+            });
         let (response, body_stream) = self
             .http_client
             .http_request_stream(HttpRequestParams {
@@ -558,7 +711,7 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
                 url: uri.to_string(),
                 headers: protocol_headers(&headers),
                 body: None,
-                timeout_ms: None,
+                timeout_ms,
                 redirect_policy,
                 request_id: "buffered-request".to_string(),
                 stream_response: true,
@@ -576,8 +729,12 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
             ));
         }
         if !status_is_success(response.status) {
-            return Err(StreamableHttpError::UnexpectedServerResponse(
-                format!("GET returned HTTP {}", response.status).into(),
+            return Err(StreamableHttpError::Client(
+                StreamableHttpClientAdapterError::NetworkStatus {
+                    status: response.status,
+                    retry_after: response_header(&response.headers, "retry-after")
+                        .filter(|value| value.len() <= 256),
+                },
             ));
         }
 
@@ -757,15 +914,7 @@ fn retryable_post_response_status(mcp_method: Option<&str>, status: u16) -> bool
 }
 
 fn is_retryable_http_status(status: StatusCode) -> bool {
-    matches!(
-        status,
-        StatusCode::REQUEST_TIMEOUT
-            | StatusCode::TOO_MANY_REQUESTS
-            | StatusCode::INTERNAL_SERVER_ERROR
-            | StatusCode::BAD_GATEWAY
-            | StatusCode::SERVICE_UNAVAILABLE
-            | StatusCode::GATEWAY_TIMEOUT
-    )
+    matches!(status.as_u16(), 408 | 425 | 429 | 500..=599)
 }
 
 fn parse_json_rpc_error(body: &[u8]) -> Option<ServerJsonRpcMessage> {
@@ -1073,3 +1222,9 @@ impl SseEventSizeLimit {
 #[cfg(test)]
 #[path = "http_client_adapter_tests.rs"]
 mod tests;
+
+fn continuation_key(uri: &str, session: Option<&str>, id: Option<&str>) -> String {
+    use sha2::Digest;
+    let input = serde_json::to_vec(&(uri, session, id)).expect("string tuple encoding");
+    format!("{:x}", sha2::Sha256::digest(input))
+}

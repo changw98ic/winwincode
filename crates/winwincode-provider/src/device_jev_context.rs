@@ -158,12 +158,10 @@ impl DeviceProviderStore {
         &self,
         settings: &crate::OpenJevRemoteSettings,
     ) -> Result<(), DeviceProviderError> {
-        settings
-            .to_config_and_runtime()
-            .map_err(|_| DeviceProviderError)?;
+        let settings = validated_system_one_settings(settings.clone())?;
         self.connection.execute(
             "INSERT INTO jev_settings VALUES (?1, ?2) ON CONFLICT(provider_id) DO UPDATE SET settings=excluded.settings",
-            params![settings.provider_id, serde_json::to_string(settings)?],
+            params![settings.provider_id, serde_json::to_string(&settings)?],
         )?;
         Ok(())
     }
@@ -222,10 +220,7 @@ impl DeviceProviderStore {
         if settings.provider_id != provider {
             return Err(DeviceProviderError);
         }
-        settings
-            .to_config_and_runtime()
-            .map_err(|_| DeviceProviderError)?;
-        Ok(settings)
+        validated_system_one_settings(settings)
     }
 
     /// Runs the configured `SystemOne` provider with the session's sealed policy.
@@ -520,6 +515,11 @@ impl DeviceProviderStore {
         if inserted == 0 {
             return Ok(StoredJevContext::Incomplete);
         }
+        let runtime = runtime.clone().with_attempt_journal(
+            self.connection.path().ok_or(DeviceProviderError)?,
+            operation_id,
+            "context",
+        );
         let run = runtime
             .evaluate_context_authorized(input, policy, options, can_start)
             .await
@@ -636,6 +636,21 @@ fn is_assistant_commentary(item: &serde_json::Value) -> bool {
                             })
                     })
             })
+}
+
+// Device JEV uses SystemOne. Self-hosted NLI keeps its separate hardware defaults.
+fn validated_system_one_settings(
+    mut settings: crate::OpenJevRemoteSettings,
+) -> Result<crate::OpenJevRemoteSettings, DeviceProviderError> {
+    settings
+        .devices
+        .get_or_insert_with(|| vec!["remote".into()]);
+    settings.dtypes.get_or_insert_with(|| vec!["auto".into()]);
+    let (config, _) = settings
+        .to_config_and_runtime()
+        .map_err(|_| DeviceProviderError)?;
+    crate::HttpsJevRemoteTransport::try_new_system_one(&config).map_err(|_| DeviceProviderError)?;
+    Ok(settings)
 }
 
 pub(crate) fn configured_context_digest(
@@ -847,6 +862,40 @@ mod tests {
 
     #[derive(Debug)]
     struct Scores(usize);
+
+    #[test]
+    fn system_one_import_defaults_are_executable_before_first_inference() {
+        let root = std::env::temp_dir().join(format!("wwc-jev-defaults-{}", std::process::id()));
+        let store = DeviceProviderStore::open(&root).unwrap();
+        let settings: crate::OpenJevRemoteSettings = serde_json::from_value(serde_json::json!({
+            "providerId":"typesafe-systemone", "endpoint":"https://nli.invalid/score",
+            "apiKey":"offline-fixture", "timeoutMs":1000, "retries":0
+        }))
+        .unwrap();
+        store.save_jev_settings(&settings).unwrap();
+        let saved = store.resolve_jev_settings("typesafe-systemone").unwrap();
+        let (config, _) = saved.to_config_and_runtime().unwrap();
+        crate::HttpsJevRemoteTransport::try_new_system_one(&config)
+            .expect("accepted Device settings must construct the actual SystemOne transport");
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn system_one_import_rejects_explicit_unsupported_hardware_before_saving() {
+        let root = std::env::temp_dir().join(format!("wwc-jev-hardware-{}", std::process::id()));
+        let store = DeviceProviderStore::open(&root).unwrap();
+        let settings: crate::OpenJevRemoteSettings = serde_json::from_value(serde_json::json!({
+            "providerId":"typesafe-systemone", "endpoint":"https://nli.invalid/score",
+            "apiKey":"offline-fixture", "timeoutMs":1000, "retries":0,
+            "devices":["cpu"], "dtypes":["float32"]
+        }))
+        .unwrap();
+        assert!(store.save_jev_settings(&settings).is_err());
+        assert!(store.resolve_jev_settings("typesafe-systemone").is_err());
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     impl JevRemoteTransport for Scores {
         fn score(

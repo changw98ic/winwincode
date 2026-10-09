@@ -856,7 +856,7 @@ impl<'storage> WorkerLaunchGrantLedger<'storage> {
                AND g.state IN ('issued','consumed') AND g.occupancy_lease_id=?4
                AND o.client_node_id=g.client_node_id AND o.holder_user_id=g.holder_user_id
                AND o.fencing_token=g.occupancy_fencing_token
-               AND o.state IN ('occupied','draining')",
+               AND o.state IN ('occupied','draining','recovery_pending')",
                 params![node_id, session_id, instance_id, occupancy_id, now.0],
             )
             .map_err(|sql| sql_error(&sql))?;
@@ -3317,7 +3317,7 @@ impl WorkerLaunchGrantLedger<'_> {
         }
         let current:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM client_nodes n JOIN client_occupancy_leases o ON o.client_node_id=n.client_node_id
          WHERE n.client_node_id=?1 AND n.current_instance_id=?2 AND o.occupancy_lease_id=?3 AND o.fencing_token=?4
-         AND o.holder_user_id=?5 AND o.state IN ('occupied','draining'))",
+         AND o.holder_user_id=?5 AND o.state IN ('occupied','draining','recovery_pending'))",
          params![node_id,closure.reporting_client_instance_id,occupancy_id,sql_integer(closure.occupancy_fencing_token)?,grant.holder_user_id],|row|row.get(0)).map_err(|e|sql_error(&e))?;
         if !current
             || (closure.never_started

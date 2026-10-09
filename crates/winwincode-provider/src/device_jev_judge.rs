@@ -300,6 +300,11 @@ impl DeviceProviderStore {
         if inserted == 0 {
             return Ok(StoredJevJudge::Incomplete);
         }
+        let runtime = runtime.clone().with_attempt_journal(
+            self.connection.path().ok_or(DeviceProviderError)?,
+            operation_id,
+            "judge",
+        );
         let evaluated = runtime.evaluate_authorized(input, options, can_start).await;
         let run = JevRun {
             value: evaluated.value.map(|value| {
@@ -589,7 +594,7 @@ mod tests {
         ));
         let store = DeviceProviderStore::open(&root).unwrap();
         // Upgrade an existing version-7 store without changing its context rows.
-        store.connection.execute_batch("DROP TABLE model_open_attempts; DROP TABLE jev_judge_exchanges; DROP TABLE accounting_closed_attempts; ALTER TABLE exchanges DROP COLUMN accounting_chunks;
+        store.connection.execute_batch("DROP TABLE model_attempt_diagnostics; DROP TABLE jev_attempt_diagnostics; DROP TABLE model_open_attempts; DROP TABLE jev_judge_exchanges; DROP TABLE accounting_closed_attempts; ALTER TABLE exchanges DROP COLUMN accounting_chunks;
             DROP TABLE opencode_accounts; DROP TABLE opencode_connections; DROP TABLE opencode_session_bindings; DROP TABLE opencode_logins; DROP TABLE provider_defaults; PRAGMA user_version=7;
             INSERT INTO jev_context_exchanges(operation_id,digest,request_json) VALUES('retained','digest','input');").unwrap();
         drop(store);

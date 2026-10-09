@@ -42,6 +42,7 @@ impl ExecServerError {
             | Self::ProvisioningFailed(_)
             | Self::Json(_)
             | Self::HttpRequest(_)
+            | Self::NetworkHttpRequest(_)
             | Self::Protocol(_)
             | Self::ProvisioningModeConflict { .. }
             | Self::Server { .. }

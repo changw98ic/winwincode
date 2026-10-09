@@ -83,6 +83,7 @@ impl DeviceProviderStore {
     /// # Errors
     /// Rejects symbolic links, public files, unknown schemas, and unavailable storage.
     pub fn open(directory: &Path) -> Result<Self, DeviceProviderError> {
+        winwincode_network::codex::install_retry_policy();
         fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
@@ -112,7 +113,7 @@ impl DeviceProviderStore {
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;",
         )?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        let key = if version == 11 {
+        let key = if version == 12 {
             load_device_key(&connection)?
         } else {
             // Only an actual migration needs the writer lock. Worker polling,
@@ -527,15 +528,23 @@ impl DeviceProviderStore {
             Some(headers) => headers,
             None => self.custom_headers(&mutation.config.provider_id)?,
         };
-        let _permit = match self.try_provider_model_permit(&mutation.config.provider_id)? {
-            crate::DeviceModelAdmission::Ready(permit) => permit,
-            crate::DeviceModelAdmission::Deferred => return Err(DeviceProviderError),
-        };
-        let adapter = adapter(&mutation.config, headers)?;
+        let adapter = self.probe_adapter(&mutation.config, headers)?;
         let mut leak_gate = CredentialLeakGate::new();
         leak_gate.track_secret(&secret);
+        let receipt = ProviderGatewayOpenReceipt {
+            model_exchange_id: exchange.clone(),
+            request_id: request.clone(),
+            route: ModelRoute {
+                provider_id: mutation.config.provider_id.clone(),
+                model_id: model.clone(),
+                credential_reference_id: CredentialReferenceId(format!("crd_{id}")),
+            },
+            adapter_request_id: adapter_id.clone(),
+            idempotent_replay: false,
+            stream_leak_gate: leak_gate,
+        };
         adapter
-            .open(
+            .open_recovering_admitted(
                 &ProviderAdapterInvocation {
                     model_exchange_id: &exchange,
                     request_id: &request,
@@ -545,21 +554,20 @@ impl DeviceProviderStore {
                     payload: &payload,
                 },
                 &secret,
+                &receipt,
+                &|| true,
+                || match self.try_provider_model_permit(&mutation.config.provider_id) {
+                    Ok(crate::DeviceModelAdmission::Ready(permit)) => Ok(permit),
+                    _ => Err(crate::ProviderAdapterError::from_network(
+                        winwincode_network::NetworkFailure::new(
+                            winwincode_network::ErrorKind::ConnectionUnavailable,
+                            winwincode_network::Acceptance::NotSent,
+                            winwincode_network::Phase::Connect,
+                        ),
+                    )),
+                },
             )
             .map_err(|_| DeviceProviderError)?;
-        drop(secret);
-        let receipt = ProviderGatewayOpenReceipt {
-            model_exchange_id: exchange.clone(),
-            request_id: request,
-            route: ModelRoute {
-                provider_id: mutation.config.provider_id,
-                model_id: model,
-                credential_reference_id: CredentialReferenceId(format!("crd_{id}")),
-            },
-            adapter_request_id: adapter_id.clone(),
-            idempotent_replay: false,
-            stream_leak_gate: leak_gate,
-        };
         let result = adapter.drain_canonical(&receipt);
         let _ = adapter.control(&exchange, &adapter_id, ProviderStreamControlAction::Release);
         let completion = result.map_err(|_| DeviceProviderError)?;
@@ -567,6 +575,32 @@ impl DeviceProviderStore {
             return Err(DeviceProviderError);
         }
         Ok(())
+    }
+
+    fn probe_adapter(
+        &self,
+        config: &DeviceProviderConfig,
+        headers: BTreeMap<String, String>,
+    ) -> Result<HttpsSseProviderAdapter, DeviceProviderError> {
+        let journal_path = Path::new(self.connection.path().ok_or(DeviceProviderError)?)
+            .with_file_name("provider-probe-network.sqlite3");
+        let journal = winwincode_network::journal::RequestJournal::open(&journal_path)
+            .map_err(|_| DeviceProviderError)?;
+        Ok(adapter(config, headers)?
+            .with_journal(journal)
+            .with_sse_failure_log(self.sse_failure_log_directory()?))
+    }
+
+    pub(crate) fn sse_failure_log_directory(
+        &self,
+    ) -> Result<std::path::PathBuf, DeviceProviderError> {
+        Ok(
+            Path::new(self.connection.path().ok_or(DeviceProviderError)?)
+                .parent()
+                .ok_or(DeviceProviderError)?
+                .join("logs")
+                .join("sse-failures"),
+        )
     }
 
     pub(crate) fn custom_headers(
@@ -762,7 +796,7 @@ fn migrate_device_store(
             "INSERT INTO identity VALUES (1, ?1, 0)",
             [key.to_bytes().as_slice()],
         )?;
-    } else if ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].contains(&version) {
+    } else if ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].contains(&version) {
         return Err(DeviceProviderError);
     }
     if version < 2 {
@@ -841,6 +875,30 @@ fn migrate_device_store(
     if version < 11 {
         migrate_model_open_attempts(transaction)?;
     }
+    if version < 12 {
+        migrate_attempt_diagnostics(transaction)?;
+    }
+    Ok(())
+}
+
+fn migrate_attempt_diagnostics(
+    transaction: &rusqlite::Transaction<'_>,
+) -> Result<(), DeviceProviderError> {
+    transaction.execute_batch(
+        "CREATE TABLE model_attempt_diagnostics (
+                exchange_id TEXT NOT NULL REFERENCES exchanges(exchange_id),
+                sequence INTEGER NOT NULL CHECK(sequence>0),
+                policy_attempt INTEGER NOT NULL CHECK(policy_attempt BETWEEN 1 AND 4),
+                started_ms INTEGER NOT NULL, finished_ms INTEGER,
+                outcome TEXT NOT NULL CHECK(outcome IN ('in_flight','accepted','failed')),
+                failure_json TEXT, stop_reason TEXT,
+                PRIMARY KEY(exchange_id,sequence));
+             CREATE TABLE jev_attempt_diagnostics (
+                operation_id TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence>0),
+                role TEXT NOT NULL CHECK(role IN ('context','judge')),
+                recorded_ms INTEGER NOT NULL, failure_json TEXT NOT NULL,
+                PRIMARY KEY(operation_id,sequence)); PRAGMA user_version=12;",
+    )?;
     Ok(())
 }
 

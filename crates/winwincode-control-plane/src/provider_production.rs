@@ -939,7 +939,7 @@ impl StandaloneModelExecutionApplication {
             )
         })?;
         drop(pool);
-        let configured = configured_providers(config.providers)?;
+        let configured = configured_providers(config.providers, &config.data_directory)?;
         let mut storage = SqliteStorage::open(&config.data_directory).map_err(|_| {
             StandaloneModelExecutionError::new(
                 StandaloneModelExecutionErrorKind::DependencyUnavailable,
@@ -1371,6 +1371,7 @@ struct ConfiguredProviderAdapters {
 
 fn configured_providers(
     providers: Vec<StandaloneProviderConfig>,
+    data_directory: &Path,
 ) -> Result<ConfiguredProviderAdapters, StandaloneModelExecutionError> {
     if providers.is_empty() {
         return Err(invalid_configuration());
@@ -1386,8 +1387,14 @@ fn configured_providers(
             }
             StandaloneProviderConfig::HttpsSse(config) => {
                 let provider_id = config.provider_id().to_owned();
+                let journal = winwincode_network::journal::RequestJournal::open(
+                    &data_directory.join("provider-network-attempts.sqlite3"),
+                )
+                .map_err(|_| dependency_unavailable())?;
                 let adapter = HttpsSseProviderAdapter::try_new(config)
-                    .map_err(|_| invalid_configuration())?;
+                    .map_err(|_| invalid_configuration())?
+                    .with_journal(journal)
+                    .with_sse_failure_log(data_directory.join("logs/sse-failures"));
                 (provider_id, None, Some(adapter))
             }
         };

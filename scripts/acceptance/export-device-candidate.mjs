@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, globSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { retainedModelFailure } from '../lib/device-model-failures.mjs'
+import { retainedModelFailure, retainedNetworkFailure, retainedJevFailure, retainedStopReason } from '../lib/device-model-failures.mjs'
 
 const digest = bytes => createHash('sha256').update(bytes).digest('hex')
 const objectId = /^[0-9a-f]{40}$/u
@@ -44,6 +44,30 @@ function taskReceiptJobs(directory, scope) {
   } finally { server.close() }
 }
 
+// Only exact active jobs can contribute pending Core approvals. Return IDs,
+// never the private StoredRun payload, prompts, or command details.
+export function readDevicePendingApprovalIds(directory, runs) {
+  const active = runs.filter(run => ['leased', 'running'].includes(run.state))
+  if (active.length === 0 || !existsSync(join(directory, 'device-data'))) return []
+  const deviceDirectory = realpathSync(join(directory, 'device-data'))
+  const pending = new Set()
+  for (const path of globSync('**/worker-codex.sqlite3', { cwd: deviceDirectory }).sort()) {
+    const database = new DatabaseSync(join(deviceDirectory, path), { readOnly: true })
+    try {
+      database.exec('PRAGMA busy_timeout=5000')
+      for (const row of database.prepare(`SELECT a.approval_id, r.record_json
+        FROM approval_operation a JOIN codex_run r ON r.run_key = a.run_key
+        WHERE a.state = 'pending'`).all()) {
+        const record = JSON.parse(Buffer.from(row.record_json).toString('utf8'))
+        if (record.terminal != null || ['terminal', 'outcomeRetained'].includes(record.phase)) continue
+        if (active.some(run => run.executionJobId === record.job?.jobId
+          && run.codexThreadId === record.canonicalThreadId)) pending.add(row.approval_id)
+      }
+    } finally { database.close() }
+  }
+  return [...pending].sort()
+}
+
 // Export identity/accounting facts only; prompts, tool output and credentials stay private.
 export function readDeviceExecutionReceipts(directory, scope) {
   const selectedJobs = taskReceiptJobs(directory, scope)
@@ -51,12 +75,15 @@ export function readDeviceExecutionReceipts(directory, scope) {
   const calls = []
   const jev = []
   const performance = []
+  const interactionTimeouts = []
   const identities = new Set()
   for (const path of (deviceDirectory === null ? [] : globSync('**/providers.sqlite3', { cwd: deviceDirectory }).map(path => join('device-data', path))).sort()) {
     const database = new DatabaseSync(join(directory, path), { readOnly: true })
     try {
       database.exec('PRAGMA busy_timeout=5000')
       const exchanges = new Map()
+      const hasModelDiagnostics = !!database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='model_attempt_diagnostics'").get()
+      const hasJevDiagnostics = !!database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='jev_attempt_diagnostics'").get()
       for (const row of database.prepare('SELECT exchange_id, request_open, chunks FROM exchanges WHERE request_open IS NOT NULL ORDER BY exchange_id').all()) {
         const opened = JSON.parse(row.request_open)
         if (selectedJobs !== null && !selectedJobs.has(opened.lease.jobId)) continue
@@ -88,10 +115,21 @@ export function readDeviceExecutionReceipts(directory, scope) {
         if (usage !== null) for (const key of ['input_tokens', 'output_tokens', 'total_tokens']) {
           assert.ok(Number.isSafeInteger(usage[key]) && usage[key] >= 0, 'invalid measured usage')
         }
+        const attempts = hasModelDiagnostics ? database.prepare(`SELECT sequence,policy_attempt,started_ms,finished_ms,outcome,failure_json,stop_reason
+          FROM model_attempt_diagnostics WHERE exchange_id=? ORDER BY sequence`).all(row.exchange_id).map(attempt => ({
+            diagnosticRef: `model-attempt:${digest(row.exchange_id)}:${attempt.sequence}`,
+            sequence: attempt.sequence, policyAttempt: attempt.policy_attempt,
+            startedMs: attempt.started_ms, finishedMs: attempt.finished_ms,
+            outcome: ['in_flight', 'accepted', 'failed'].includes(attempt.outcome) ? attempt.outcome : null,
+            network: attempt.failure_json === null ? null : retainedNetworkFailure(JSON.parse(attempt.failure_json)),
+            stopReason: retainedStopReason(attempt.stop_reason),
+          })) : null
+        if (failure !== null && attempts !== null) failure = { ...failure, attempts,
+          stopReason: attempts.at(-1)?.stopReason ?? null }
         const call = { exchangeId: row.exchange_id, jobId: opened.lease.jobId,
           workerSessionId: opened.workerSessionId, provider: request.provider,
           requestedModel: request.request.model, reasoningEffort: request.request.reasoning?.effort ?? null,
-          actualModels, terminalType: terminal?.type ?? null,
+          actualModels, terminalType: terminal?.type ?? null, attempts,
           ...(failure === null ? {} : { failure }),
           usage: usage === null ? null : {
             inputTokens: usage.input_tokens, outputTokens: usage.output_tokens,
@@ -114,11 +152,17 @@ export function readDeviceExecutionReceipts(directory, scope) {
           assert.ok(call, 'JEV receipt must belong to a retained model exchange')
           const run = row.result === null ? null : JSON.parse(row.result)
           const observation = run?.observation
+          const retainedFailures = run?.failures ?? (hasJevDiagnostics
+            ? database.prepare('SELECT failure_json FROM jev_attempt_diagnostics WHERE operation_id=? AND role=? ORDER BY sequence')
+              .all(row.operation_id, kind).map(attempt => JSON.parse(attempt.failure_json)) : null)
+          const failures = retainedFailures === null ? null : retainedFailures.map((failure, index) => ({
+            diagnosticRef: `jev-attempt:${digest(row.operation_id)}:${index + 1}`, ...retainedJevFailure(failure),
+          }))
           jev.push({ operationId: row.operation_id, exchangeId, jobId: call.jobId, kind,
             provider: observation?.providerId ?? null, requestedModel: observation?.modelId ?? null,
             actualModel: observation?.resolvedModelId ?? null,
             inputTokens: observation?.inputTokens ?? null, outputTokens: observation?.outputTokens ?? null,
-            failureCount: run?.failures?.length ?? null,
+            failureCount: failures?.length ?? null, failures, completed: run !== null,
             requestSha256: row.request_json === null ? null : digest(row.request_json),
             resultSha256: row.result === null ? null : digest(row.result), source: path })
         }
@@ -131,6 +175,23 @@ export function readDeviceExecutionReceipts(directory, scope) {
     const database = new DatabaseSync(join(directory, path), { readOnly: true })
     try {
       database.exec('PRAGMA busy_timeout=5000')
+      if (database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='codex_run'").get()) {
+        for (const row of database.prepare('SELECT run_key, record_json FROM codex_run ORDER BY run_key').all()) {
+          const record = JSON.parse(Buffer.from(row.record_json).toString('utf8'))
+          if (selectedJobs !== null && !selectedJobs.has(record.job.jobId)) continue
+          for (const timeout of record.interactionTimeouts ?? []) {
+            const request = timeout.request
+            const kind = request.kind === 'approval.request' ? 'approval' : 'input'
+            const id = kind === 'approval' ? request.approvalId : request.inputRequestId
+            assert.ok(typeof id === 'string', 'interaction timeout must retain its exact request identity')
+            interactionTimeouts.push({ runKey: row.run_key, jobId: record.job.jobId,
+              kind, id, causeCode: 'INTERACTION_DEADLINE_EXPIRED',
+              expiresAt: request.expiresAt, observedAt: timeout.observedAt,
+              requestSha256: timeout.requestDigest,
+              responseSubmitted: typeof timeout.appliedKernelSessionId === 'string', source: path })
+          }
+        }
+      }
       if (!database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='performance_projection'").get()) continue
       const projections = database.prepare('SELECT run_key, record_json FROM performance_projection ORDER BY run_key').all()
       const operationsTable = database.prepare("SELECT 1 FROM sqlite_master WHERE type='view' AND name='performance_operation_accounted'").get()
@@ -174,7 +235,7 @@ export function readDeviceExecutionReceipts(directory, scope) {
   }
   const completeUsage = calls.length > 0 && calls.every(call => call.usage !== null)
     && jev.every(call => call.inputTokens !== null && call.outputTokens !== null && call.failureCount === 0)
-  const evidence = { calls, jev, performance, completeUsage,
+  const evidence = { calls, jev, performance, interactionTimeouts, completeUsage,
     totalTokens: completeUsage ? calls.reduce((sum, call) => sum + call.usage.totalTokens, 0)
       + jev.reduce((sum, call) => sum + call.inputTokens + call.outputTokens, 0) : null,
     actualCost: null, externalVerdict: null, externalScore: null }

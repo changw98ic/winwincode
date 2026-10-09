@@ -171,6 +171,7 @@ fn accept_members(
                 let config = Arc::clone(config);
                 let request_tx = request_tx.clone();
                 members.push(thread::spawn(move || {
+                    socket.set_nonblocking(false).unwrap();
                     socket.set_read_timeout(Some(WAIT)).unwrap();
                     socket.set_write_timeout(Some(WAIT)).unwrap();
                     let mut stream =
@@ -200,7 +201,13 @@ fn read_request(stream: &mut TlsStream) -> (String, serde_json::Value) {
     let mut request = Vec::new();
     let mut buffer = [0; 4096];
     loop {
-        let count = stream.read(&mut buffer).unwrap();
+        let count = stream.read(&mut buffer).unwrap_or_else(|error| {
+            panic!(
+                "fixture request read failed after {} bytes (headers_complete={}): {error}",
+                request.len(),
+                request.windows(4).any(|bytes| bytes == b"\r\n\r\n")
+            )
+        });
         assert_ne!(count, 0);
         request.extend_from_slice(&buffer[..count]);
         if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {

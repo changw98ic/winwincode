@@ -126,7 +126,12 @@ impl HttpClient for RouteAwareHttpClient {
                     ..params
                 })
                 .await
-                .map_err(|error| ExecServerError::HttpRequest(error.message))?;
+                .map_err(|error| {
+                    crate::HttpNetworkFailure::from_rpc(&error).map_or_else(
+                        || ExecServerError::HttpRequest(error.message),
+                        ExecServerError::NetworkHttpRequest,
+                    )
+                })?;
             Ok(response)
         }
         .boxed()
@@ -144,7 +149,12 @@ impl HttpClient for RouteAwareHttpClient {
                     ..params
                 })
                 .await
-                .map_err(|error| ExecServerError::HttpRequest(error.message))?;
+                .map_err(|error| {
+                    crate::HttpNetworkFailure::from_rpc(&error).map_or_else(
+                        || ExecServerError::HttpRequest(error.message),
+                        ExecServerError::NetworkHttpRequest,
+                    )
+                })?;
             let pending_stream = pending_stream.ok_or_else(|| {
                 ExecServerError::Protocol(
                     "http request stream did not return a response body stream".to_string(),
@@ -201,11 +211,9 @@ impl RouteAwareHttpRequestRunner {
             Ok(response) => response,
             Err(error) => {
                 request_span.record("error.type", "request");
-                let error_message = error.to_string();
+                let failure = crate::HttpNetworkFailure::from_request(&error);
                 log_send_error(&method, error);
-                return Err(internal_error(format!(
-                    "http/request failed: {error_message}"
-                )));
+                return Err(failure.into_rpc());
             }
         };
         let status = response.status().as_u16();

@@ -21,7 +21,6 @@ use super::PendingTransport;
 use super::RmcpClient;
 
 const JSON_RPC_INTERNAL_ERROR_CODE: i64 = -32603;
-pub(super) const STREAMABLE_HTTP_RETRY_DELAYS_MS: [u64; 2] = [250, 1_000];
 
 impl RmcpClient {
     pub(super) async fn connect_pending_transport_with_initialize_retries(
@@ -39,16 +38,12 @@ impl RmcpClient {
             | PendingTransport::StreamableHttpWithOAuth { .. }
             | PendingTransport::StreamableHttpWithAccessTokenOnly { .. } => true,
         };
-        let mut retry_deadline = timeout.map(|duration| Instant::now() + duration);
+        let retry_deadline = timeout.map(|duration| Instant::now() + duration);
         let mut pending_transport = Some(initial_transport);
 
-        for (attempt, retry_delay_ms) in STREAMABLE_HTTP_RETRY_DELAYS_MS
-            .iter()
-            .copied()
-            .map(Some)
-            .chain(std::iter::once(None))
-            .enumerate()
-        {
+        let mut attempt = 1_u32;
+        let mut connections = 0_u32;
+        loop {
             let transport = match pending_transport.take() {
                 Some(transport) => transport,
                 None => {
@@ -65,13 +60,9 @@ impl RmcpClient {
                 }
             };
             if let PendingTransport::StreamableHttpWithOAuth { oauth_runtime, .. } = &transport {
-                // OAuth refresh has its own lock and provider request bounds. Exclude it from the
-                // MCP handshake budget, and finish persistence before attempting initialize.
-                let refresh_started_at = Instant::now();
+                // Credential persistence is retained by its owned refresh task. The
+                // caller's total handshake deadline is never extended by refresh.
                 oauth_runtime.refresh_if_needed().await?;
-                if let Some(deadline) = retry_deadline.as_mut() {
-                    *deadline += refresh_started_at.elapsed();
-                }
             }
             let attempt_timeout = remaining_initialize_timeout(timeout, retry_deadline)?;
 
@@ -81,16 +72,24 @@ impl RmcpClient {
             {
                 Ok(result) => return Ok(result),
                 Err(error) if should_retry && Self::is_retryable_initialize_error(&error) => {
-                    let Some(retry_delay_ms) = retry_delay_ms else {
+                    let facts = initialize_retry_facts(&error);
+                    if facts.transport.is_some_and(|failure| failure.not_sent) {
+                        connections = connections.saturating_add(1);
+                    } else {
+                        connections = 0;
+                    }
+                    let Some(delay) =
+                        crate::network_retry_policy::retry_delay(attempt, connections, &facts)
+                    else {
                         return Err(error);
                     };
-                    let delay = Duration::from_millis(retry_delay_ms);
+                    if connections == 0 {
+                        attempt = attempt.saturating_add(1);
+                    }
                     warn!(
-                        attempt = attempt + 1,
-                        max_attempts = STREAMABLE_HTTP_RETRY_DELAYS_MS.len() + 1,
+                        attempt,
                         delay_ms = delay.as_millis(),
-                        error = %error,
-                        "streamable HTTP MCP initialize failed with a retryable error; retrying"
+                        "streamable HTTP MCP initialize retry scheduled"
                     );
                     if !sleep_with_retry_deadline(delay, retry_deadline).await {
                         let duration = timeout.unwrap_or(delay);
@@ -102,8 +101,6 @@ impl RmcpClient {
                 Err(error) => return Err(error),
             }
         }
-
-        unreachable!("initialize retry loop should return on success or final error")
     }
 
     fn is_retryable_initialize_error(error: &anyhow::Error) -> bool {
@@ -148,10 +145,22 @@ impl RmcpClient {
         }
     }
 
-    pub(super) fn is_retryable_streamable_http_error(
+    pub(crate) fn is_retryable_streamable_http_error(
         error: &StreamableHttpError<StreamableHttpClientAdapterError>,
     ) -> bool {
         match error {
+            StreamableHttpError::Client(StreamableHttpClientAdapterError::NetworkStatus {
+                status,
+                ..
+            }) => matches!(*status, 408 | 425 | 429 | 500..=599),
+            StreamableHttpError::Client(StreamableHttpClientAdapterError::HttpRequest(
+                ExecServerError::NetworkHttpRequest(failure),
+            )) => matches!(
+                failure.kind,
+                codex_exec_server::HttpNetworkErrorKind::ConnectionUnavailable
+                    | codex_exec_server::HttpNetworkErrorKind::TransportInterrupted
+                    | codex_exec_server::HttpNetworkErrorKind::Timeout
+            ),
             StreamableHttpError::Client(StreamableHttpClientAdapterError::HttpRequest(
                 ExecServerError::HttpRequest(_),
             )) => true,
@@ -197,15 +206,54 @@ fn is_retryable_unexpected_server_response(message: &str) -> bool {
 }
 
 fn is_retryable_http_status(status: StatusCode) -> bool {
-    matches!(
-        status,
-        StatusCode::REQUEST_TIMEOUT
-            | StatusCode::TOO_MANY_REQUESTS
-            | StatusCode::INTERNAL_SERVER_ERROR
-            | StatusCode::BAD_GATEWAY
-            | StatusCode::SERVICE_UNAVAILABLE
-            | StatusCode::GATEWAY_TIMEOUT
-    )
+    matches!(status.as_u16(), 408 | 425 | 429 | 500..=599)
+}
+
+pub(crate) fn streamable_retry_facts(
+    error: &StreamableHttpError<StreamableHttpClientAdapterError>,
+) -> crate::NetworkRetryFacts {
+    match error {
+        StreamableHttpError::Client(StreamableHttpClientAdapterError::NetworkStatus {
+            status,
+            retry_after,
+        }) => crate::NetworkRetryFacts {
+            status: Some(*status),
+            retry_after: retry_after.clone(),
+            transport: None,
+            reconcile_first: false,
+        },
+        StreamableHttpError::Client(StreamableHttpClientAdapterError::HttpRequest(
+            ExecServerError::NetworkHttpRequest(failure),
+        )) => crate::NetworkRetryFacts {
+            transport: Some(*failure),
+            ..Default::default()
+        },
+        _ => crate::NetworkRetryFacts::default(),
+    }
+}
+fn initialize_retry_facts(error: &anyhow::Error) -> crate::NetworkRetryFacts {
+    fn facts(error: &rmcp::service::ClientInitializeError) -> crate::NetworkRetryFacts {
+        match error {
+            rmcp::service::ClientInitializeError::LegacyFallbackFailed { fallback, .. } => {
+                facts(fallback)
+            }
+            rmcp::service::ClientInitializeError::TransportError { error, .. } => error
+                .error
+                .downcast_ref::<StreamableHttpError<StreamableHttpClientAdapterError>>()
+                .map(streamable_retry_facts)
+                .unwrap_or_default(),
+            _ => Default::default(),
+        }
+    }
+    for source in error.chain() {
+        if let Some(error) = source.downcast_ref::<HandshakeError>() {
+            return facts(&error.source);
+        }
+        if let Some(error) = source.downcast_ref::<rmcp::service::ClientInitializeError>() {
+            return facts(error);
+        }
+    }
+    Default::default()
 }
 
 fn remaining_initialize_timeout(
@@ -228,7 +276,7 @@ fn initialize_timeout_error(timeout: Option<Duration>, fallback: Duration) -> an
     anyhow!("timed out handshaking with MCP server after {duration:?}")
 }
 
-pub(super) async fn sleep_with_retry_deadline(delay: Duration, deadline: Option<Instant>) -> bool {
+pub(crate) async fn sleep_with_retry_deadline(delay: Duration, deadline: Option<Instant>) -> bool {
     if let Some(deadline) = deadline {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {

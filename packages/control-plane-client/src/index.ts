@@ -1,3 +1,4 @@
+import { executeFetch, wait, withResponseFailure, policy as networkPolicy } from '@winwincode/network-request'
 // SPDX-License-Identifier: Apache-2.0
 
 import type {
@@ -37,6 +38,7 @@ export type {
 }
 
 export interface ControlPlaneHttpRequestInit {
+  readonly signal?: AbortSignal
   readonly method: 'DELETE' | 'GET' | 'POST'
   readonly headers: Readonly<Record<string, string>>
   readonly body?: string
@@ -44,6 +46,7 @@ export interface ControlPlaneHttpRequestInit {
 }
 
 export interface ControlPlaneHttpResponse {
+  readonly headers?: { get(name: string): string | null }
   readonly ok: boolean
   readonly status: number
   text(): Promise<string>
@@ -145,7 +148,7 @@ export interface ControlPlaneGeneratedTransport<
     readonly baseUrl: string
     readonly fetch: ControlPlaneFetch
     readonly maxNetworkRetries: number
-    readonly waitBeforeRetry: (attempt: number) => Promise<void>
+    readonly waitBeforeRetry?: (attempt: number) => Promise<void>
   }): ControlPlaneGeneratedHttpClient<
     ProductCommandRequest,
     ProductCommandResponse,
@@ -155,7 +158,7 @@ export interface ControlPlaneGeneratedTransport<
   createWebSocketClient(options: {
     readonly baseUrl: string
     readonly createSocket?: ControlPlaneWebSocketFactory
-    readonly reconnectDelayMillis: number
+    readonly reconnectDelayMillis?: number
     readonly onEventQueued?: (event: ProductEventFrame) => void
     readonly onEvent: (event: ProductEventFrame) => Promise<void> | void
     readonly onResetRequired?: (
@@ -174,8 +177,8 @@ export interface ControlPlaneGeneratedTransport<
 }
 
 const CONTROL_PLANE_SCHEMA_VERSION = 'winwincode/v1'
-const DEFAULT_NETWORK_RETRIES = 2
-const DEFAULT_RECONNECT_DELAY_MILLIS = 250
+const DEFAULT_NETWORK_RETRIES = networkPolicy.maxAttempts - 1
+const DEFAULT_RECONNECT_DELAY_MILLIS = networkPolicy.initialDelayMs
 const AUTH_SESSION_PATH = '/api/v1/auth/session'
 const AUTH_PASSWORD_PATH = '/api/v1/auth/password'
 const SERVER_INITIALIZATION_PATH = '/api/v1/server/initialization'
@@ -842,6 +845,7 @@ function versionCheckedResponse(
   return {
     ok: response.ok,
     status: response.status,
+    ...(response.headers === undefined ? {} : { headers: response.headers }),
     async text() {
       return source
     },
@@ -894,7 +898,7 @@ export function createControlPlaneClient<
   const maximumRetries = options.maxNetworkRetries ?? DEFAULT_NETWORK_RETRIES
   const reconnectDelayMillis = options.reconnectDelayMillis ?? DEFAULT_RECONNECT_DELAY_MILLIS
   const transportFetch = options.transport?.fetch
-  const waitBeforeRetry = options.waitBeforeRetry ?? (async () => {})
+  const waitBeforeRetry = options.waitBeforeRetry ?? (async (attempt: number) => wait(networkPolicy.initialDelayMs * 2 ** (attempt - 1), { canStart: () => !closed }))
   const subscriptions = new Set<ControlPlaneSubscription>()
   let closed = false
 
@@ -972,7 +976,7 @@ export function createControlPlaneClient<
     }
     if (submission !== null) assertLoginCredentials(submission)
     try {
-      const response = await transportRequest(
+      const response = await executeFetch((input: string, init: Omit<ControlPlaneTransportRequestInit, 'credentials'>) => transportRequest(input, init, init.signal),
         `${location.serverUrl}${AUTH_SESSION_PATH}`,
         {
           method,
@@ -995,12 +999,13 @@ export function createControlPlaneClient<
           cache: 'no-store',
           referrerPolicy: 'no-referrer',
         },
-        requestOptions?.signal,
+        { replay: method === 'GET' ? 'replay_exact' : 'reconcile_first', canStart: () => !closed,
+          ...(requestOptions?.signal === undefined ? {} : { signal: requestOptions.signal }) },
       )
       const source = await response.text()
-      if (!response.ok) throw method === 'POST'
+      if (!response.ok) throw withResponseFailure(method === 'POST'
         ? loginBoundaryError(response.status, source)
-        : sessionBoundaryError(response.status, source)
+        : sessionBoundaryError(response.status, source), response)
       if (method === 'DELETE') {
         if (response.status === 204 && source.length === 0) return null
         throw new ControlPlaneClientError({
@@ -1030,6 +1035,7 @@ export function createControlPlaneClient<
           message: 'The authentication server could not be reached.',
           requestId: null,
           retryable: true,
+          cause: error,
         })
       reportAccessFailure(normalized)
       throw normalized
@@ -1061,7 +1067,7 @@ export function createControlPlaneClient<
         requestOptions?.signal,
       )
       const source = await response.text()
-      if (!response.ok) throw sessionBoundaryError(response.status, source)
+      if (!response.ok) throw withResponseFailure(sessionBoundaryError(response.status, source), response)
       if (response.status !== 204 || source.length !== 0) {
         throw new ControlPlaneClientError({
           kind: 'protocol',
@@ -1081,6 +1087,7 @@ export function createControlPlaneClient<
             message: 'The authentication server could not be reached.',
             requestId: null,
             retryable: true,
+            cause: error,
           })
       reportAccessFailure(normalized)
       throw normalized
@@ -1102,7 +1109,7 @@ export function createControlPlaneClient<
           method: init.method,
           headers: init.headers,
           ...(init.body === undefined ? {} : { body: init.body }),
-        }, signal)
+        }, init.signal === undefined ? signal : signal === undefined ? init.signal : AbortSignal.any([init.signal, signal]))
       } catch (error) {
         if (signalIsAborted(signal)) throw generated.createError({
           code: 'REQUEST_CANCELLED',
@@ -1140,9 +1147,7 @@ export function createControlPlaneClient<
       baseUrl: location.serverUrl,
       fetch: fetchImplementation,
       maxNetworkRetries: maximumRetries,
-      async waitBeforeRetry(attempt) {
-        await waitBeforeRetry(attempt)
-      },
+      ...(options.waitBeforeRetry === undefined ? {} : { waitBeforeRetry }),
     })
   }
 
@@ -1200,7 +1205,7 @@ export function createControlPlaneClient<
           requestOptions?.signal,
         )
         const source = await response.text()
-        if (!response.ok) throw initializationBoundaryError(response.status, source)
+        if (!response.ok) throw withResponseFailure(initializationBoundaryError(response.status, source), response)
         if (response.status !== 200) throw new ControlPlaneClientError({
           kind: 'protocol',
           code: 'INVALID_SERVER_INITIALIZATION_RESPONSE',
@@ -1219,6 +1224,7 @@ export function createControlPlaneClient<
             message: 'The Control Plane server could not be reached.',
             requestId: null,
             retryable: true,
+            cause: error,
           })
         reportAccessFailure(normalized)
         throw normalized
@@ -1246,7 +1252,7 @@ export function createControlPlaneClient<
         ...(options.transport?.createSocket === undefined
           ? {}
           : { createSocket: options.transport.createSocket }),
-        reconnectDelayMillis,
+        ...(options.reconnectDelayMillis === undefined ? {} : { reconnectDelayMillis }),
         ...(subscriptionOptions.onEventQueued === undefined
           ? {}
           : { onEventQueued: subscriptionOptions.onEventQueued }),

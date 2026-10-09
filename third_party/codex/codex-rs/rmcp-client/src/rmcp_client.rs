@@ -102,10 +102,9 @@ use crate::utils::build_default_headers;
 use codex_config::types::OAuthCredentialsStoreMode;
 
 #[path = "streamable_http_retry.rs"]
-mod streamable_http_retry;
+pub(crate) mod streamable_http_retry;
 
 use self::streamable_http_retry::HandshakeError;
-use self::streamable_http_retry::STREAMABLE_HTTP_RETRY_DELAYS_MS;
 use self::streamable_http_retry::sleep_with_retry_deadline;
 
 const READ_ONLY_TOOLS_META_KEY: &str = "openai/readOnly";
@@ -1226,8 +1225,7 @@ impl RmcpClient {
                                 "OAuth metadata discovery is unavailable for MCP server `{server_name}`; falling back to stored bearer token authentication"
                             );
                             let http_config =
-                                StreamableHttpClientTransportConfig::with_uri(url.clone())
-                                    .auth_header(access_token);
+                                network_transport_config(url.clone()).auth_header(access_token);
                             let transport = StreamableHttpClientTransport::with_client(
                                 StreamableHttpClientAdapter::new(
                                     Arc::clone(http_client),
@@ -1244,8 +1242,7 @@ impl RmcpClient {
                         Err(err) => Err(err),
                     }
                 } else {
-                    let mut http_config =
-                        StreamableHttpClientTransportConfig::with_uri(url.clone());
+                    let mut http_config = network_transport_config(url.clone());
                     if let Some(StreamableHttpBearerToken::Resolved(bearer_token)) = bearer_token {
                         http_config = http_config.auth_header(bearer_token.clone());
                     }
@@ -1423,13 +1420,9 @@ impl RmcpClient {
         Fut: std::future::Future<Output = std::result::Result<T, rmcp::service::ServiceError>>,
     {
         let retry_deadline = timeout.map(|duration| Instant::now() + duration);
-        for (attempt, retry_delay_ms) in STREAMABLE_HTTP_RETRY_DELAYS_MS
-            .iter()
-            .copied()
-            .map(Some)
-            .chain(std::iter::once(None))
-            .enumerate()
-        {
+        let mut attempt = 1_u32;
+        let mut connections = 0_u32;
+        loop {
             let attempt_timeout = remaining_operation_timeout(label, timeout, retry_deadline)?;
             match Self::run_service_operation_once(
                 Arc::clone(&service),
@@ -1442,16 +1435,33 @@ impl RmcpClient {
             {
                 Ok(result) => return Ok(result),
                 Err(error) if Self::is_retryable_tools_list_error(label, &error) => {
-                    let Some(retry_delay_ms) = retry_delay_ms else {
+                    let facts = match &error {
+                        ClientOperationError::Service(
+                            rmcp::service::ServiceError::TransportSend(error),
+                        ) => error
+                            .error
+                            .downcast_ref::<StreamableHttpError<StreamableHttpClientAdapterError>>()
+                            .map(streamable_http_retry::streamable_retry_facts)
+                            .unwrap_or_default(),
+                        _ => crate::NetworkRetryFacts::default(),
+                    };
+                    if facts.transport.is_some_and(|failure| failure.not_sent) {
+                        connections = connections.saturating_add(1);
+                    } else {
+                        connections = 0;
+                    }
+                    let Some(delay) =
+                        crate::network_retry_policy::retry_delay(attempt, connections, &facts)
+                    else {
                         return Err(error);
                     };
-                    let delay = Duration::from_millis(retry_delay_ms);
+                    if connections == 0 {
+                        attempt = attempt.saturating_add(1);
+                    }
                     warn!(
-                        attempt = attempt + 1,
-                        max_attempts = STREAMABLE_HTTP_RETRY_DELAYS_MS.len() + 1,
+                        attempt,
                         delay_ms = delay.as_millis(),
-                        error = %error,
-                        "streamable HTTP MCP tools/list failed with a retryable error; retrying"
+                        "streamable HTTP MCP tools/list retry scheduled"
                     );
                     if !sleep_with_retry_deadline(delay, retry_deadline).await {
                         return Err(ClientOperationError::Timeout {
@@ -1463,8 +1473,6 @@ impl RmcpClient {
                 Err(error) => return Err(error),
             }
         }
-
-        unreachable!("service operation retry loop should return on success or final error")
     }
 
     async fn run_service_operation_once<T, F, Fut>(
@@ -1652,7 +1660,7 @@ async fn create_oauth_transport_and_runtime(
         McpOAuthRefreshMode::Legacy | McpOAuthRefreshMode::Coordinated => None,
     };
 
-    let auth_client = AuthClient::new(
+    let mut auth_client = AuthClient::new(
         StreamableHttpClientAdapter::new(
             http_client,
             default_headers,
@@ -1664,10 +1672,13 @@ async fn create_oauth_transport_and_runtime(
         manager,
     );
     let auth_manager = auth_client.auth_manager.clone();
+    auth_client
+        .http_client
+        .bind_continuation_auth(&auth_manager);
 
     let transport = StreamableHttpClientTransport::with_client(
         auth_client,
-        StreamableHttpClientTransportConfig::with_uri(url.to_string()),
+        network_transport_config(url.to_string()),
     );
 
     if use_stored_access_token_only {
@@ -1743,4 +1754,16 @@ mod tests {
 
         assert_eq!(Ok("done"), result);
     }
+}
+
+// The adapter owns GET/SSE retries. RMCP must not multiply them or replay tools
+// after session expiry, where the preceding POST's outcome may be unknown.
+fn network_transport_config(uri: String) -> StreamableHttpClientTransportConfig {
+    let mut config = StreamableHttpClientTransportConfig::with_uri(uri);
+    if crate::network_retry_policy::policy_configured() {
+        config.retry_config =
+            Arc::new(rmcp::transport::common::client_side_sse::NeverRetry::default());
+        config.reinit_on_expired_session = false;
+    }
+    config
 }

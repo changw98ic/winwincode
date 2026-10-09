@@ -906,6 +906,9 @@ impl<'application> DurableExecutionPortIngress<'application> {
                         | StorageErrorKind::RevisionConflict
                 ) =>
             {
+                if std::env::var_os("WWC_DEBUG_RUNTIME").is_some() {
+                    eprintln!("terminal outcome rejection: {error}");
+                }
                 return Ok(Err(outcome_rejection(
                     message,
                     JobOutcomeAckMessageStatus::RejectedConflict,

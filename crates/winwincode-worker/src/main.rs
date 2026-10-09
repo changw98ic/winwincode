@@ -298,18 +298,28 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
         }
     }
 
-    let mut heartbeat = tokio::time::interval(Duration::from_secs(1));
+    let heartbeat_interval_ms = worker
+        .heartbeat_interval_ms()
+        .ok_or("registered Worker heartbeat interval is unavailable")?;
+    let mut heartbeat = tokio::time::interval(Duration::from_millis(heartbeat_interval_ms));
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut drive = tokio::time::interval(Duration::from_millis(25));
     loop {
         tokio::select! {
             () = interrupt.wait() => break,
             _ = heartbeat.tick() => {
-                Box::pin(drain_controls(&mut worker, &handle)).await?;
-                let _ = Box::pin(worker.heartbeat(now_instant()?)).await;
-                // A refused upstream frame still carries valid controls.
-                Box::pin(drain_controls(&mut worker, &handle)).await?;
+                let step = async {
+                    Box::pin(drain_controls(&mut worker, &handle)).await?;
+                    let _ = Box::pin(worker.heartbeat(now_instant()?)).await;
+                    // A refused upstream frame still carries valid controls.
+                    Box::pin(drain_controls(&mut worker, &handle)).await?;
+                    Ok::<_, Box<dyn std::error::Error>>(())
+                };
+                let Some(result) = interrupt.until_interrupt(step).await else { break; };
+                result?;
             }
             _ = drive.tick() => {
+                let step = async {
                 Box::pin(drain_controls(&mut worker, &handle)).await?;
                 // Retry pending Worker→Server evidence every drive tick so a
                 // Server restart / Connection-refused window cannot strand
@@ -323,12 +333,15 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
                     if error.code == winwincode_worker::WorkerErrorCode::ExecutionBackpressure {
                         // Polling Core performs another flush. Yield first so
                         // the next turn can consume and confirm queued controls.
-                        continue;
+                        return Ok(false);
                     }
                 }
-                if worker.transport_failure().is_some() { break; }
+                if worker.transport_failure().is_some() { return Ok(true); }
                 let _ = Box::pin(worker.poll_codex(now_instant()?)).await;
-                if exit_after_work && worker.work_drained() { break; }
+                Ok::<_, Box<dyn std::error::Error>>(exit_after_work && worker.work_drained())
+                };
+                let Some(result) = interrupt.until_interrupt(step).await else { break; };
+                if result? { break; }
             }
         }
         if handle.terminal_error().is_some()
@@ -463,6 +476,11 @@ fn production_codex(
         observer_mode,
     };
     let mut config = ProductionCodexConfig::try_new(options)?;
+    match env::var("WWC_WORKER_APPROVAL_OWNER").as_deref() {
+        Ok("execution_port") => config = config.with_host_action_approvals(),
+        Ok("core") | Err(env::VarError::NotPresent) => {}
+        _ => return Err("invalid Worker approval owner".into()),
+    }
     if let Some(value) = env::var_os("WWC_BENCHMARK_TOOL_REPEAT_GUARD") {
         if value != "1" {
             return Err("invalid benchmark tool repeat guard".into());

@@ -1144,7 +1144,7 @@ fn safe_sse_shape(index: usize, value: &Value) -> String {
         None => "absent",
     };
     format!(
-        "sse_event={kind};index={index};usage_mask={usage_mask};usage_keys={};input={:?};output={:?};read={:?};write={:?};stop={stop}",
+        "sse_event={kind};wire_index={index};usage_mask={usage_mask};usage_keys={};input={:?};output={:?};read={:?};write={:?};stop={stop}",
         usage.as_object().map_or(0, Map::len),
         usage["input_tokens"].as_u64(),
         usage["output_tokens"].as_u64(),
@@ -1212,12 +1212,15 @@ fn dispatch_envelope(
     }
     let value: Value =
         serde_json::from_str(data).map_err(|_| AnthropicCodecError::protocol().at_stage("json"))?;
-    let event_name = value
-        .get("type")
-        .and_then(Value::as_str)
-        .ok_or_else(|| AnthropicCodecError::protocol().at_stage("event_type"))?;
+    let event_name = value.get("type").and_then(Value::as_str).ok_or_else(|| {
+        AnthropicCodecError::protocol().at_stage(if value.get("type").is_none() {
+            "event_type_missing"
+        } else {
+            "event_type_not_string"
+        })
+    })?;
     if event.as_deref().is_some_and(|value| value != event_name) {
-        return Err(AnthropicCodecError::protocol());
+        return Err(AnthropicCodecError::protocol().at_stage("event_type_mismatch"));
     }
     envelopes.push(SseEnvelope {
         event: event.take(),
@@ -1313,21 +1316,26 @@ impl<'a> AnthropicStreamParser<'a> {
         &mut self,
         value: &Map<String, Value>,
     ) -> Result<(), AnthropicCodecError> {
-        exact_keys(value, &["type", "index", "content_block"])?;
-        self.require_started()?;
-        let index = index(value)?;
+        exact_keys(value, &["type", "index", "content_block"])
+            .map_err(|error| error.at_stage("block_start_fields"))?;
+        self.require_started()
+            .map_err(|error| error.at_stage("block_before_message"))?;
+        let index = index(value).map_err(|error| error.at_stage("block_index_invalid"))?;
         if self.blocks.contains_key(&index) {
-            return Err(AnthropicCodecError::protocol());
+            return Err(AnthropicCodecError::protocol().at_stage("block_index_duplicate"));
         }
-        let block = object(required(value, "content_block")?)?;
-        let open = match string(block, "type")? {
+        let block = object(required(value, "content_block")?)
+            .map_err(|error| error.at_stage("block_object_invalid"))?;
+        let open = match string(block, "type")
+            .map_err(|error| error.at_stage("block_type_invalid"))?
+        {
             "text" => {
                 if block
                     .get("text")
                     .and_then(Value::as_str)
                     .is_none_or(|value| !value.is_empty())
                 {
-                    return Err(AnthropicCodecError::protocol());
+                    return Err(AnthropicCodecError::protocol().at_stage("initial_text_invalid"));
                 }
                 self.events.push(ProviderStreamEvent::TextStarted { index });
                 OpenAnthropicBlock::Text
@@ -1344,10 +1352,13 @@ impl<'a> AnthropicStreamParser<'a> {
                 let name = string(block, "name")?;
                 validate_token(call_id, 200)?;
                 validate_tool_name(name)?;
-                let identity = self.tool_bindings.response_identity(name)?;
+                let identity = self
+                    .tool_bindings
+                    .response_identity(name)
+                    .map_err(|error| error.at_stage("tool_identity_unbound"))?;
                 let input = required(block, "input")?;
                 if !input.is_object() {
-                    return Err(AnthropicCodecError::protocol());
+                    return Err(AnthropicCodecError::protocol().at_stage("tool_input_not_object"));
                 }
                 let partial_json = if input.as_object().is_some_and(Map::is_empty) {
                     String::new()
@@ -1365,7 +1376,7 @@ impl<'a> AnthropicStreamParser<'a> {
                     partial_json,
                 }
             }
-            _ => return Err(AnthropicCodecError::protocol()),
+            _ => return Err(AnthropicCodecError::protocol().at_stage("block_type_unsupported")),
         };
         self.blocks.insert(index, open);
         Ok(())
@@ -1914,6 +1925,42 @@ mod tests {
             }
         }))
         .expect("canonical request JSON")
+    }
+
+    #[test]
+    fn malformed_block_causes_are_distinct_without_retaining_provider_text() {
+        let prefix = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"fixture\",\"type\":\"message\",\"role\":\"assistant\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n";
+        let cases = [
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":"secret-text"}}),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"secret-type"}}),
+            json!({"type":"content_block_start","content_block":{"type":"text","text":""}}),
+            json!({"type":"content_block_start","index":0,"extra":"secret-extra","content_block":{"type":"text","text":""}}),
+        ];
+        let mut diagnostics = BTreeSet::new();
+        for event in cases {
+            let wire = format!("{prefix}event: content_block_start\ndata: {event}\n\n");
+            let error = parse_anthropic_sse(
+                wire.as_bytes(),
+                4096,
+                16,
+                &AnthropicToolBindings::default(),
+                AnthropicMessagesOptions {
+                    max_output_tokens: 1024,
+                    pricing: ProviderTokenPricing::default(),
+                },
+            )
+            .err()
+            .unwrap();
+            let diagnostic = error.diagnostic().unwrap();
+            assert!(!diagnostic.contains("secret"));
+            assert!(diagnostic.len() <= 399);
+            diagnostics.insert(diagnostic.to_owned());
+        }
+        assert_eq!(
+            diagnostics.len(),
+            4,
+            "the retained error must identify each structural defect"
+        );
     }
 
     #[test]
