@@ -273,6 +273,8 @@ struct CodexState {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum FailurePoint {
+    CollectEffects,
+    CollectPollEffects,
     Ensure,
     Submit,
     ModelChunk,
@@ -1098,6 +1100,12 @@ impl CodexCoreAdapter for FakeCodex {
 
     fn take_execution_messages(&mut self) -> Result<Vec<ExecutionPortMessage>, Self::Error> {
         let mut state = self.state.lock().expect("FakeCodex state");
+        if state.failures.contains(&FailurePoint::CollectEffects)
+            || (state.failures.contains(&FailurePoint::CollectPollEffects)
+                && state.calls.iter().any(|call| call.starts_with("poll:")))
+        {
+            return Err(());
+        }
         Ok(std::mem::take(&mut state.queued_execution_messages))
     }
 
@@ -5166,9 +5174,11 @@ async fn owned_model_chunk_retry_does_not_starve_cancelled_core_facts() {
     let pump = codex.clone();
     let root = tempfile::tempdir().unwrap();
     let providers = root.path().join("providers");
+    let intake_log = root.path().join("intake.log");
     let mut worker = test_worker(worker_config(1), port, codex)
         .with_device_providers(&providers)
-        .unwrap();
+        .unwrap()
+        .with_model_intake_log(&intake_log);
     register(&mut worker).await;
     worker
         .accept_control_and_drive(
@@ -5238,6 +5248,12 @@ async fn owned_model_chunk_retry_does_not_starve_cancelled_core_facts() {
     assert!(
         observed_outcomes(&messages).is_empty(),
         "input retry cannot invent a business outcome"
+    );
+    let log = std::fs::read_to_string(&intake_log).unwrap();
+    assert_eq!(
+        log.matches("stage=drive_device_intake code=UnexpectedMessage")
+            .count(),
+        1
     );
 }
 
@@ -7066,5 +7082,72 @@ async fn same_running_job_accepts_stop_after_lease_expiry() {
             .iter()
             .any(|call| call.starts_with("interrupt:")),
         "the exact stop reaches Core"
+    );
+}
+
+#[tokio::test]
+async fn drive_collection_failure_retains_error_and_logs_one_safe_boundary() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("intake.log");
+    let codex = FakeCodex::default();
+    let pump = codex.clone();
+    let mut worker =
+        test_worker(worker_config(1), RecordingPort::default(), codex).with_model_intake_log(&path);
+    register(&mut worker).await;
+    pump.state
+        .lock()
+        .unwrap()
+        .failures
+        .insert(FailurePoint::CollectEffects);
+    let mut original = None;
+    for _ in 0..3 {
+        let error = worker.poll_codex_boxed().await.unwrap_err();
+        assert_eq!(error.code, WorkerErrorCode::UnexpectedMessage);
+        if let Some(prior) = &original {
+            assert_eq!(prior, &error);
+        }
+        original = Some(error);
+    }
+    let log = std::fs::read_to_string(&path).expect("bounded drive failure evidence");
+    assert_eq!(
+        log,
+        "component=worker stage=drive_collect_effects code=UnexpectedMessage \n"
+    );
+    assert!(pump.calls().iter().all(|call| !call.starts_with("poll:")));
+}
+
+#[tokio::test]
+async fn drive_collection_after_core_poll_has_a_distinct_safe_boundary() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("intake.log");
+    let codex = FakeCodex::with_threads([thread('A')]);
+    let pump = codex.clone();
+    let mut worker =
+        test_worker(worker_config(1), RecordingPort::default(), codex).with_model_intake_log(&path);
+    register(&mut worker).await;
+    worker
+        .accept_control_and_drive(
+            &ExecutionPortMessage::JobDispatchMessage(dispatch('A', delivery_scope('A'))),
+            now(),
+        )
+        .await
+        .unwrap();
+    {
+        let mut state = pump.state.lock().unwrap();
+        state.calls.clear();
+        state.failures.insert(FailurePoint::CollectPollEffects);
+    }
+    let error = worker.poll_codex_boxed().await.unwrap_err();
+    assert_eq!(error.code, WorkerErrorCode::UnexpectedMessage);
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "component=worker stage=drive_collect_poll_effects code=UnexpectedMessage \n"
+    );
+    assert_eq!(
+        pump.calls()
+            .iter()
+            .filter(|call| call.starts_with("poll:"))
+            .count(),
+        1
     );
 }

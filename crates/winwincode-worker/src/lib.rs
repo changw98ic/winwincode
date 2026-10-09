@@ -15,6 +15,7 @@ pub mod context_safety;
 pub mod debug_experiment;
 pub mod debug_probe_context;
 mod device_model;
+mod drive_diagnostics;
 mod driver_clock;
 mod execution_effects;
 pub mod handoff_snapshot;
@@ -352,6 +353,7 @@ impl CandidateTerminalFact {
 pub struct WorkerMain<Port, Codex> {
     device_models: Option<device_model::DeviceModels>,
     intake_log_path: Option<std::path::PathBuf>,
+    drive_diagnostics: drive_diagnostics::DriveDiagnostics,
     config: WorkerConfig,
     port: Port,
     codex: Codex,
@@ -505,6 +507,7 @@ where
         Self {
             device_models: None,
             intake_log_path: None,
+            drive_diagnostics: drive_diagnostics::DriveDiagnostics::default(),
             config,
             port,
             codex,
@@ -1031,6 +1034,22 @@ where
     /// failures become infrastructure outcomes without exposing adapter text.
     #[allow(clippy::too_many_lines)]
     pub async fn poll_codex(&mut self, now: Instant) -> Result<(), WorkerError> {
+        let mut stage = drive_diagnostics::DriveStage::Admission;
+        let result = Box::pin(self.poll_codex_at_stage(now, &mut stage)).await;
+        if let Err(error) = &result {
+            self.drive_diagnostics
+                .record(self.intake_log_path.as_deref(), stage, error.code);
+        }
+        result
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn poll_codex_at_stage(
+        &mut self,
+        now: Instant,
+        stage: &mut drive_diagnostics::DriveStage,
+    ) -> Result<(), WorkerError> {
+        use drive_diagnostics::DriveStage;
         self.observe_driver_clock(now.clone());
         if self.lifecycle != WorkerLifecycleState::Active {
             return Err(worker_error(
@@ -1057,10 +1076,13 @@ where
         // Collect before dispatch; a refused batch still permits result intake and
         // state progression, but cannot trigger another batch in the same poll.
         self.sent_delivery_ids.clear();
+        *stage = DriveStage::CollectEffects;
         self.enqueue_codex_effects()?;
+        *stage = DriveStage::FlushBeforePoll;
         let dispatch_error = self.flush_durable_execution_deliveries().await.err();
         let mut intake_error = None;
         loop {
+            *stage = DriveStage::DeviceRead;
             let chunk = match &mut self.device_models {
                 Some(models) => models.next_chunk().map_err(|_| codex_model_error())?,
                 None => None,
@@ -1068,6 +1090,7 @@ where
             let Some(chunk) = chunk else {
                 break;
             };
+            *stage = DriveStage::DeviceIntake;
             let result = async {
                 if chunk.session_identity.work_run_id.is_none() {
                     let public = winwincode_provider::public_model_chunk(&chunk)
@@ -1138,12 +1161,14 @@ where
             })
             .cloned()
             .collect::<Vec<_>>();
+        *stage = DriveStage::PreparedTurn;
         for active in pending {
             self.start_bound_job(&active.job, &active.codex_thread_id, now.clone())
                 .await?;
         }
         let mut job_ids = self.active.keys().cloned().collect::<Vec<_>>();
         job_ids.sort();
+        *stage = DriveStage::DelegatedState;
         for job_id in &job_ids {
             let Some(thread_id) = self
                 .active
@@ -1206,8 +1231,10 @@ where
                 .await?;
             }
         }
+        *stage = DriveStage::ObservationOpen;
         self.enqueue_pending_observation_opens().await?;
         for job_id in job_ids {
+            *stage = DriveStage::DelegatedState;
             if !self.pending_candidates.contains_key(&job_id) {
                 let recovered_final = self.active.get(&job_id).cloned().and_then(|active| {
                     self.workspaces
@@ -1281,6 +1308,7 @@ where
                     .await?;
                 continue;
             }
+            *stage = DriveStage::CorePoll;
             let polled = match self.codex.poll(&thread_id, &now).await {
                 Ok(polled) => polled,
                 Err(error) => {
@@ -1293,18 +1321,23 @@ where
                     continue;
                 }
             };
+            *stage = DriveStage::CollectPollEffects;
             self.enqueue_codex_effects()?;
             if self.core_interaction_jobs.remove(&job_id) {
                 self.deferred_core_interaction_jobs.remove(&job_id);
             }
             // Completion includes workspace manifest decoding. Keep its large
             // async state off the polling stack before entering that decoder.
+            *stage = DriveStage::CoreFact;
             Box::pin(self.handle_codex_poll(&job_id, polled, now.clone())).await?;
         }
         if let Some(error) = dispatch_error {
+            *stage = DriveStage::FlushBeforePoll;
             return Err(error);
         }
+        *stage = DriveStage::FlushAfterPoll;
         self.flush_durable_execution_deliveries().await?;
+        *stage = DriveStage::DeviceIntake;
         intake_error.map_or(Ok(()), Err)
     }
 

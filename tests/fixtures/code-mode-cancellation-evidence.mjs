@@ -42,6 +42,9 @@ function intakeFailures(path) {
     'device_models:accept_chunk:MODEL_CHUNK_ACCEPT_FAILED',
     'device_models:poll_codex:FOREIGN_OR_UNOWNED_EXCHANGE',
     'device_models:recover_skip:FOREIGN_EXCHANGE',
+    ...['admission', 'collect_effects', 'flush_before_poll', 'device_read', 'device_intake',
+      'prepared_turn', 'delegated_state', 'observation_open', 'core_poll', 'collect_poll_effects',
+      'core_fact', 'flush_after_poll'].map(stage => `worker:drive_${stage}:UnexpectedMessage`),
     ...['InvalidLifecycle', 'UnexpectedMessage', 'RegistrationMismatch', 'RegistrationRejected',
       'InvalidDispatchAuthority', 'RuntimeTraceMismatch', 'DelegatedPollMismatch', 'DelegatedContextLimit',
       'Workspace', 'CandidateArtifactMismatch', 'ExecutionPort', 'ExecutionBackpressure',
@@ -69,7 +72,7 @@ function intakeFailures(path) {
       }
       totals.set(key, row)
     }
-    return [...totals.values()].slice(-16)
+    return [...totals.values()].slice(-28)
   } catch { return { unavailable: 'read-failed' } }
   finally { if (descriptor !== undefined) closeSync(descriptor) }
 }
