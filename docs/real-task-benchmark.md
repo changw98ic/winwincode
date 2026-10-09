@@ -55,6 +55,25 @@ These endpoint and Lite requirements follow the provider's
 [Codex configuration](https://mimo.mi.com/docs/en-US/tokenplan/integration/codex-configuration)
 and [Responses API](https://mimo.mi.com/docs/en-US/api/chat/responses).
 
+## Native Provider request identity
+
+All native HTTPS protocols derive conversation headers from the original
+kernel `ModelStreamRequest` envelope before translating its body. `session-id`
+uses its `sessionId`, and `thread-id` uses its `threadId`. These are kernel
+identities; a Worker session or a benchmark batch identifier is not substituted.
+Concurrent conversations keep separate headers, and a physical retry keeps the
+same headers without updating shared Device Provider configuration.
+
+The default User-Agent is `WinWinCode/<version>`. On the official
+`https://opencode.ai` origin (default port or port 443), `x-opencode-session`
+also carries the stable `threadId`, as required by the provider's
+[coding-agent integration](https://opencode.ai/docs/go/#where-can-i-use-it).
+Explicit custom headers override each matching default case-insensitively;
+the transport emits one value for each name. Identity values must be nonempty
+printable ASCII tokens of at most 512 bytes. Invalid envelope identities are
+rejected before the request is sent. Raw canonical payloads without an envelope
+keep their body and do not acquire invented conversation identities.
+
 ## Native Provider failure diagnostics
 
 The native Provider transport retains non-2xx response bodies through the same

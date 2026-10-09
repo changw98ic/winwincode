@@ -1824,6 +1824,11 @@ impl HttpsSseProviderAdapter {
         if let Some(replay) = self.existing_open(invocation, &digest)? {
             return Ok(replay);
         }
+        let native_headers = native_request_headers(
+            invocation.payload,
+            &self.shared.config.endpoint,
+            &self.shared.config.custom_headers,
+        )?;
         let prepared = self.prepare_request(invocation)?;
         let tool_bindings = prepared
             .as_ref()
@@ -1851,6 +1856,9 @@ impl HttpsSseProviderAdapter {
             .header("Authorization", &authorization)
             .header("Idempotency-Key", invocation.adapter_request_id)
             .header("X-WinWinCode-Model", invocation.model_id);
+        for (name, value) in &native_headers {
+            request = request.header(*name, value.as_str());
+        }
         for (name, value) in &self.shared.config.custom_headers {
             request = request.header(name.as_str(), value.as_str());
         }
@@ -2600,6 +2608,70 @@ fn authorization_value(secret: &[u8]) -> Result<String, ProviderAdapterError> {
     String::from_utf8(value).map_err(|_| ProviderAdapterError::rejected())
 }
 
+/// Derive routing headers from the kernel's original request envelope before
+/// protocol translation removes it. Never mutate shared Provider configuration:
+/// concurrent conversations and physical retries retain their own identities.
+fn native_request_headers(
+    payload: &[u8],
+    endpoint: &str,
+    custom_headers: &[(String, String)],
+) -> Result<Vec<(&'static str, String)>, ProviderAdapterError> {
+    let mut headers = Vec::with_capacity(4);
+    let mut append = |name: &'static str, value: &str| {
+        if !custom_headers
+            .iter()
+            .any(|(configured, _)| configured.eq_ignore_ascii_case(name))
+        {
+            headers.push((name, value.to_owned()));
+        }
+    };
+    append(
+        "User-Agent",
+        concat!("WinWinCode/", env!("CARGO_PKG_VERSION")),
+    );
+    // Raw canonical payloads are also supported; they have no Core envelope.
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(payload) else {
+        return Ok(headers);
+    };
+    let Some(envelope) = value.as_object() else {
+        return Ok(headers);
+    };
+    if !["requestId", "provider", "request"]
+        .iter()
+        .all(|field| envelope.contains_key(*field))
+    {
+        return Ok(headers);
+    }
+    let identity = |field| {
+        envelope
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| {
+                !id.is_empty()
+                    && id.len() <= 512
+                    && id.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+            })
+            .ok_or_else(ProviderAdapterError::request_translation)
+    };
+    let session_id = identity("sessionId")?;
+    let thread_id = identity("threadId")?;
+    append("session-id", session_id);
+    append("thread-id", thread_id);
+    // OpenCode Go/Zen expects an explicit per-conversation routing alias from
+    // clients with their own User-Agent. Restrict it to the official HTTPS origin.
+    let opencode_origin = ureq::http::Uri::from_str(endpoint).is_ok_and(|uri| {
+        uri.scheme_str() == Some("https")
+            && uri.authority().is_some_and(|authority| {
+                authority.as_str().eq_ignore_ascii_case("opencode.ai")
+                    || authority.as_str().eq_ignore_ascii_case("opencode.ai:443")
+            })
+    });
+    if opencode_origin {
+        append("x-opencode-session", thread_id);
+    }
+    Ok(headers)
+}
+
 /// Canonical HTTPS endpoint shape for every Provider module: a trimmed
 /// `https` URI with a host, no embedded userinfo, and no query or fragment.
 /// The fragment guard is explicit because `Uri::from_str` strips a fragment
@@ -2702,6 +2774,7 @@ mod tests {
     const PAYLOAD: &[u8] = br#"{"input":"local TLS fixture"}"#;
 
     include!("provider_http_error_diagnostics.test.rs");
+    include!("provider_request_identity_diagnostics.test.rs");
 
     fn responses_api_payload() -> Vec<u8> {
         serde_json::to_vec(&serde_json::json!({"request":{
