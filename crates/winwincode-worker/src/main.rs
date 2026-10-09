@@ -9,6 +9,7 @@ mod shutdown_signal;
 use std::env;
 use std::fs;
 use std::future::Future;
+use std::io::Write as _;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -300,6 +301,7 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
 
     let mut heartbeat = tokio::time::interval(Duration::from_secs(1));
     let mut drive = tokio::time::interval(Duration::from_millis(25));
+    let mut observed_drive_failures = Vec::new();
     loop {
         tokio::select! {
             () = interrupt.wait() => break,
@@ -311,23 +313,27 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
             }
             _ = drive.tick() => {
                 Box::pin(drain_controls(&mut worker, &handle)).await?;
-                // Retry pending Worker→Server evidence every drive tick so a
-                // Server restart / Connection-refused window cannot strand
-                // runtime.event / artifact.chunk / JobOutcome in the outbox.
-                if worker.lifecycle() == WorkerLifecycleState::Active
-                    && let Err(error) = Box::pin(worker.flush_durable_outbox_at(now_instant()?)).await
-                {
-                    if env::var_os("WWC_WORKER_POLL_DEBUG").is_some() {
-                        eprintln!("winwincode-worker: durable outbox flush retry failed: {:?}", error.code);
+                if worker.transport_failure().is_some() { break; }
+                // The shared driver retries one bounded outbox batch and polls
+                // Core even when that batch is backpressured. A separate
+                // pre-flush must not prevent cancellation facts from draining.
+                if let Err(error) = Box::pin(worker.poll_codex(now_instant()?)).await {
+                    // Retain each finite category once. A trace mismatch also
+                    // carries only numeric cursors and identity-match booleans;
+                    // never persist raw frames, identities or Provider content.
+                    if !observed_drive_failures.contains(&error.code) {
+                        observed_drive_failures.push(error.code);
+                        if let Ok(mut log) = fs::OpenOptions::new().create(true).append(true).open(&intake_log) {
+                            let diagnostic = if error.code == winwincode_worker::WorkerErrorCode::RuntimeTraceMismatch {
+                                error.reason.as_str()
+                            } else { "" };
+                            let _ = writeln!(log, "component=worker stage=drive code={:?} {diagnostic}", error.code);
+                        }
                     }
-                    if error.code == winwincode_worker::WorkerErrorCode::ExecutionBackpressure {
-                        // Polling Core performs another flush. Yield first so
-                        // the next turn can consume and confirm queued controls.
-                        continue;
+                    if env::var_os("WWC_WORKER_POLL_DEBUG").is_some() {
+                        eprintln!("winwincode-worker: Core drive retry failed: {:?}", error.code);
                     }
                 }
-                if worker.transport_failure().is_some() { break; }
-                let _ = Box::pin(worker.poll_codex(now_instant()?)).await;
                 if exit_after_work && worker.work_drained() { break; }
             }
         }

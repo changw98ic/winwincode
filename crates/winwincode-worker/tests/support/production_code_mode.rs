@@ -86,13 +86,21 @@ pub(super) fn events(
 }
 
 pub(super) fn source_id(open: &ModelOpenMessage, tool: &str) -> String {
-    fn find(value: &Value, tool: &str) -> Option<String> {
+    fn find(value: &Value, tool: &str, receipt_states: &mut Vec<[bool; 4]>) -> Option<String> {
         match value {
             Value::String(text) => {
                 let (_, rest) = text.split_once("<core_tool_receipts>")?;
                 let (body, _) = rest.split_once("</core_tool_receipts>")?;
                 let fragment: Value = serde_json::from_str(body).ok()?;
                 fragment["receipts"].as_array()?.iter().find_map(|receipt| {
+                    if receipt["tool"].as_str()?.ends_with(tool) && receipt_states.len() < 16 {
+                        receipt_states.push([
+                            receipt["execution"] == "completed",
+                            receipt["disposition"] == "accepted",
+                            receipt["delivery"] == "offered",
+                            receipt["source_id"].as_str().is_some(),
+                        ]);
+                    }
                     (receipt["tool"].as_str()?.ends_with(tool)
                         && receipt["execution"] == "completed"
                         && receipt["disposition"] == "accepted"
@@ -101,8 +109,12 @@ pub(super) fn source_id(open: &ModelOpenMessage, tool: &str) -> String {
                         .flatten()
                 })
             }
-            Value::Array(values) => values.iter().find_map(|value| find(value, tool)),
-            Value::Object(values) => values.values().find_map(|value| find(value, tool)),
+            Value::Array(values) => values
+                .iter()
+                .find_map(|value| find(value, tool, receipt_states)),
+            Value::Object(values) => values
+                .values()
+                .find_map(|value| find(value, tool, receipt_states)),
             _ => None,
         }
     }
@@ -112,6 +124,8 @@ pub(super) fn source_id(open: &ModelOpenMessage, tool: &str) -> String {
             .expect("model request bytes"),
     )
     .expect("model request JSON");
+    let mut receipt_states = Vec::new();
+    let mut tool_outputs = 0_usize;
     request["request"]["input"]
         .as_array()
         .expect("model input")
@@ -122,6 +136,14 @@ pub(super) fn source_id(open: &ModelOpenMessage, tool: &str) -> String {
                 Some("custom_tool_call_output" | "function_call_output")
             )
         })
-        .find_map(|item| find(&item["output"], tool))
-        .expect("model receives the original completed Core tool source")
+        .find_map(|item| {
+            tool_outputs += 1;
+            find(&item["output"], tool, &mut receipt_states)
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "model receives the original completed Core tool source: tool_outputs={tool_outputs} \
+                 receipt_states[completed,accepted,offered,source_present]={receipt_states:?}"
+            )
+        })
 }

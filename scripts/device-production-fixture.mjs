@@ -183,6 +183,12 @@ export const DETERMINISTIC_VERIFICATION_YIELD_MS = 30_000
  * never appears in Server environment maps or public receipts.
  */
 export function encryptDeviceProviderEnvelope(snapshot, requestId, mutation) {
+  return encryptDeviceConfigurationEnvelope(DEVICE_PROVIDER_ENCRYPTION_CONTEXT, snapshot, requestId, mutation)
+}
+
+// API and installed-product acceptance run without Client build artifacts.
+// Match the Web client envelope using only Node's standard crypto primitives.
+function encryptDeviceConfigurationEnvelope(context, snapshot, requestId, mutation) {
   assert.equal(typeof snapshot?.clientNodeId, 'string')
   assert.equal(typeof snapshot?.encryptionPublicKey, 'string')
   assert.equal(typeof requestId, 'string')
@@ -190,11 +196,11 @@ export function encryptDeviceProviderEnvelope(snapshot, requestId, mutation) {
   const ephemeral = createECDH('prime256v1')
   ephemeral.generateKeys()
   const shared = ephemeral.computeSecret(Buffer.from(snapshot.encryptionPublicKey, 'base64'))
-  const aad = `${DEVICE_PROVIDER_ENCRYPTION_CONTEXT}\n${snapshot.clientNodeId}\n${requestId}\n${expectedRevision}`
+  const aad = `${context}\n${snapshot.clientNodeId}\n${requestId}\n${expectedRevision}`
   const key = Buffer.from(hkdfSync(
     'sha256',
     shared,
-    Buffer.from(DEVICE_PROVIDER_ENCRYPTION_CONTEXT),
+    Buffer.from(context),
     Buffer.from(aad),
     32,
   ))
@@ -519,8 +525,14 @@ export function startDeterministicDeviceModelServer({
   privateKeyPath,
   chatContent = 'WinWinCode Device deterministic Provider completed the Chat workflow.',
   repeatToolMarker = null,
+  nativeCellScripts = {},
 }) {
   assert.ok(repeatToolMarker === null || (typeof repeatToolMarker === 'string' && repeatToolMarker.length > 0))
+  for (const [marker, source] of Object.entries(nativeCellScripts)) {
+    assert.match(marker, /^native-cell-[AB]$/u)
+    assert.equal(typeof source, 'string')
+    assert.ok(source.length <= 6000)
+  }
   const errors = []
   const requests = []
   const server = createHttpsServer({
@@ -539,6 +551,7 @@ export function startDeterministicDeviceModelServer({
         assert.ok(size <= 512 * 1024, 'Device Provider request exceeds fixture bound')
         const providerRequest = JSON.parse(bodyText)
         const repeatTool = repeatToolMarker !== null && bodyText.includes(repeatToolMarker)
+        const nativeCell = Object.keys(nativeCellScripts).find(marker => bodyText.includes(marker)) ?? null
         requests.push({
           path: request.url ?? '',
           verification: bodyText.includes(DETERMINISTIC_VERIFICATION_BEHAVIOR_MARKER),
@@ -570,11 +583,25 @@ export function startDeterministicDeviceModelServer({
         let stopReason = 'end_turn'
         let toolYieldMs = 1000
         let toolInput = null
+        let toolSource = null
         let selectedTool = executionTool
         let waitInput = null
 
         const observation = isExecutor ? executorObservation : verificationObservation
-        if ((isExecutor || isVerification) && observation.cellId !== null) {
+        if (nativeCell !== null) {
+          assert.deepEqual(providerRequest.tools.map(tool => tool.name).sort(), ['exec', 'wait'])
+          const native = observeToolProcess(providerRequest, nativeCell)
+          toolCallId = native.hasToolOutput ? native.nextCallId : nativeCell
+          if (native.cellId !== null) {
+            selectedTool = waitTool
+            waitInput = { cell_id: native.cellId, yield_time_ms: 1000 }
+          } else if (!native.hasToolOutput) {
+            toolSource = nativeCellScripts[nativeCell]
+          }
+          useTool = native.cellId !== null || !native.hasToolOutput
+          stopReason = useTool ? 'tool_use' : 'end_turn'
+          text = useTool ? '' : `${nativeCell} completed`
+        } else if ((isExecutor || isVerification) && observation.cellId !== null) {
           assert.ok(waitTool, 'running cell requires the Code Mode wait tool')
           selectedTool = waitTool
           useTool = true
@@ -652,7 +679,7 @@ export function startDeterministicDeviceModelServer({
               input: {},
             },
           }])
-          const input = waitInput ?? { input: deviceFixtureCodeModeCommand(toolInput ?? {
+          const input = waitInput ?? { input: toolSource ?? deviceFixtureCodeModeCommand(toolInput ?? {
             cmd: toolCommand, workdir: '.', yield_time_ms: toolYieldMs,
           }) }
           events.push(['content_block_delta', {
@@ -726,13 +753,14 @@ async function mutateDeviceExtension(api, publicClientId, mutation, expected, ti
   if (!clients) { clients = new Map(); deviceExtensionMutations.set(api, clients) }
   const previous = clients.get(publicClientId) ?? Promise.resolve()
   const result = previous.catch(() => {}).then(async () => {
-    const { encryptDeviceExtension } = await import('../apps/client/dist/module/device-provider-encryption.js')
     const base = `/api/v1/clients/${encodeURIComponent(publicClientId)}/extensions`
     const current = await api.request(base)
     assert.equal(current.status, 200)
     assert.equal(current.json?.online, true, 'Device must be online to configure public smoke')
     const requestId = `extension_${randomBytes(16).toString('hex')}`
-    const envelope = await encryptDeviceExtension(current.json.snapshot, requestId, mutation)
+    const envelope = encryptDeviceConfigurationEnvelope(
+      'winwincode.device-extensions.v1', current.json.snapshot, requestId, mutation,
+    )
     const applied = await api.request(base, { method: 'POST', body: envelope })
     assert.equal(applied.status, 202, 'Device extension apply was rejected')
     const completed = await waitFor(async () => {
@@ -1336,6 +1364,7 @@ export async function establishDeviceOnlyExecutionPath({
           certificatePath,
           privateKeyPath,
           repeatToolMarker: deviceProvider.repeatToolMarker,
+          nativeCellScripts: deviceProvider.nativeCellScripts,
         }).listen()
       }
       providerApiKey = deviceSecret ?? `device-local-${randomBytes(24).toString('hex')}`

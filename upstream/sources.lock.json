@@ -1232,6 +1232,79 @@
       "targets": [
         "codex-rs/app-server-client/src/lib.rs"
       ]
+    },
+    {
+      "id": "codex-tool-review-completion-wait-state",
+      "file": "upstream/patches/codex/0086-tool-review-completion-wait-state.patch",
+      "planned": false,
+      "patchSha256": "28b257109a820f7cfe5f5911d895af61596dfa7c7e8f96921d5b618391740c30",
+      "targets": [
+        "codex-rs/state/src/lib.rs",
+        "codex-rs/state/src/tool_runtime.rs",
+        "codex-rs/state/src/tool_diagnostics.rs",
+        "codex-rs/state/src/runtime/tool_runtime.rs",
+        "codex-rs/state/src/runtime/tool_diagnostics_tests.rs",
+        "codex-rs/core/src/context/tool_diagnostics.rs",
+        "codex-rs/core/src/context/tool_diagnostics_tests.rs",
+        "codex-rs/core/src/tools/code_mode/terminal_tests.rs",
+        "codex-rs/core/src/tools/result_recovery_tests.rs",
+        "codex-rs/core/src/tools/tool_diagnostic_detector.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-review-agent-completion-graph",
+      "file": "upstream/patches/codex/0087-tool-review-agent-completion-graph.patch",
+      "planned": false,
+      "patchSha256": "e92dd6188573a4630528a7891d097cc7af1b669546d36b0d8eb6d74db4454e5b",
+      "targets": [
+        "codex-rs/core/src/tools/agent_wait_graph.rs",
+        "codex-rs/core/src/agent/control.rs",
+        "codex-rs/core/src/tools/mod.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-review-agent-completion-runtime",
+      "file": "upstream/patches/codex/0088-tool-review-agent-completion-runtime.patch",
+      "planned": false,
+      "patchSha256": "aac39865ee659667b110827732ff2ded21745d2a6143865e93fefa3bb6c28b17",
+      "targets": [
+        "codex-rs/core/src/tools/agent_wait_facts.rs",
+        "codex-rs/core/src/tools/cell_facts.rs",
+        "codex-rs/core/src/tools/code_mode/wait_handler.rs",
+        "codex-rs/core/src/tools/execution_facts.rs",
+        "codex-rs/core/src/tools/execution_facts_tests.rs",
+        "codex-rs/core/src/tools/handlers/multi_agents/wait.rs",
+        "codex-rs/core/src/tools/tool_diagnostics.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-review-shell-telemetry-outcomes",
+      "file": "upstream/patches/codex/0089-tool-review-shell-telemetry-outcomes.patch",
+      "planned": false,
+      "patchSha256": "2020da77c65324b4627e3db356d3387f47dddf386de0ced40d9d80bd18d8a9ce",
+      "targets": [
+        "codex-rs/core/tests/suite/otel.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-review-wait-agent-tree-fixtures",
+      "file": "upstream/patches/codex/0090-tool-review-wait-agent-tree-fixtures.patch",
+      "planned": false,
+      "patchSha256": "190b3d90f840e01056996558ffe434962744397ba183ae2d56f906391e21a5b7",
+      "targets": [
+        "codex-rs/core/src/agent/control_tests.rs",
+        "codex-rs/core/src/tools/handlers/multi_agents_tests.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-review-exec-server-resume-diagnostics",
+      "file": "upstream/patches/codex/0091-tool-review-exec-server-resume-diagnostics.patch",
+      "planned": false,
+      "patchSha256": "0a9a78007e9fb8abd2f964e39fa5f54a540428db069492a2b1584619c88fe454",
+      "targets": [
+        "codex-rs/exec-server/tests/common/exec_server.rs",
+        "codex-rs/exec-server/tests/process.rs"
+      ]
     }
   ],
   "licenseObligations": {

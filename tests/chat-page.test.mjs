@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import test from 'node:test'
-import { sharedCoreActivity, diagnosticCoreActivity } from './fixtures/core-tool-activity.mjs'
+import { sharedCoreActivity, diagnosticCoreActivity, agentWaitCoreActivity } from './fixtures/core-tool-activity.mjs'
 import { JSDOM } from 'jsdom'
 import { createRequire } from 'node:module'
 const clientRequire = createRequire(new URL('../apps/client/package.json', import.meta.url))
@@ -927,13 +927,15 @@ test('DSH renders safe Markdown, highlighted code and user attachments in the co
 test('Chat renders canonical sharing and diagnostic relationships as text', () => {
   const document = new FakeDocument()
   const rootElement = document.createElement('main')
-  const activities = [sharedCoreActivity(), diagnosticCoreActivity()]
+  const activities = [sharedCoreActivity(), diagnosticCoreActivity(), agentWaitCoreActivity()]
   const model = new FakeChatViewModel(state({ runtime: { sessions: [{ activities }] } }))
   const mounted = mountChatPage({ root: rootElement, model })
   const rows = [...rootElement.querySelectorAll('.wwc-runtime-activity')]
-  assert.equal(rows.length, 2)
+  assert.equal(rows.length, 3)
   assert.match(rows[0].textContent, /public_smoke · 已取消.*父请求 #1.*代码运行 cell-1.*合并等待请求 #7.*结果已接受.*结果已交付给调用者.*输入来源已验证/su)
   assert.match(rows[1].textContent, /疑似等待成环 · 已提示模型.*这些等待是否成环？.*public_smoke · 调用 logical-8/su)
+  assert.match(rows[1].textContent, /代码运行 cell-1 → Agent agent-2 · 期限 2030-01-01T00:00:00.000Z/u)
+  assert.match(rows[2].textContent, /代码运行 cell-1.*等待 Agent agent-2.*等待状态待核对.*等待期限 2030-01-01T00:00:00.000Z/su)
   assert.equal(rows[1].querySelector('script'), null)
   assert.equal(findByClass(rootElement, 'wwc-chat-runtime').hidden, false)
   mounted.close()

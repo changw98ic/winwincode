@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+#[path = "agent_wait_facts.rs"]
+mod agent_wait_facts;
 #[path = "cell_facts.rs"]
 mod cell_facts;
 #[path = "tool_fact_owner.rs"]
@@ -11,6 +13,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
@@ -38,12 +41,26 @@ use crate::session::session::Session;
 pub(crate) struct ExecutionFacts {
     owner: ToolFactOwner,
     pub(super) store: OnceCell<Arc<StateRuntime>>,
-    pub(super) owner_id: OnceCell<String>,
+    pub(super) owner_id: OnceLock<String>,
     cells: Mutex<HashMap<String, (String, String)>>,
     pub(super) active_requests: Mutex<HashSet<i64>>,
 }
 
 impl ExecutionFacts {
+    pub(crate) fn current_owner(session: &Session) -> String {
+        let facts = Self::for_session(session);
+        let owner = facts
+            .owner_id
+            .get_or_init(|| uuid::Uuid::new_v4().to_string())
+            .clone();
+        session
+            .services
+            .agent_control
+            .completion_waits
+            .register_owner(&session.thread_id.to_string(), &owner);
+        owner
+    }
+
     pub(super) fn for_session(session: &Session) -> Arc<Self> {
         session
             .services
@@ -133,12 +150,8 @@ impl ToolFactRecord {
         invocation: &ToolInvocation,
     ) -> Result<ToolFactAdmission, FunctionCallError> {
         let service = ExecutionFacts::for_session(&invocation.session);
+        let owner_id = ExecutionFacts::current_owner(&invocation.session);
         let writer = service.try_writer().ok_or_else(owner::closing_error)?;
-        let owner_id = service
-            .owner_id
-            .get_or_init(|| async { uuid::Uuid::new_v4().to_string() })
-            .await
-            .clone();
         let store = service
             .store
             .get_or_try_init(|| async {

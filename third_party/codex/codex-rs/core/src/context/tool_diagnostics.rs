@@ -28,12 +28,25 @@ impl ContextualUserFragment for ToolDiagnosticFeedback {
                     "operation_digest": bounded_reference(&call.operation_digest),
                 })).collect::<Vec<_>>(),
                 "question": bounded_text(&diagnostic.question, 256, 256),
+                "wait_graph": bounded_wait_graph(&diagnostic.wait_graph),
             })).collect();
         serde_json::json!({
             "type": "model_behavior_diagnosis", "schema_version": 1,
             "assessment": "possible", "diagnostics": diagnostics,
             "next_step": "Assess the evidence, explain whether the waiting or repetition is justified, and choose the next action.",
         }).to_string()
+    }
+}
+
+fn bounded_wait_graph(edges: &[codex_state::ToolWaitEdge]) -> serde_json::Value {
+    if edges.is_empty() {
+        return serde_json::Value::Null;
+    }
+    let value = serde_json::json!(edges);
+    if edges.len() <= 8 && value.to_string().len() <= 4096 {
+        value
+    } else {
+        serde_json::json!({"state":"evidence_exceeds_context_bound","edge_count":edges.len()})
     }
 }
 

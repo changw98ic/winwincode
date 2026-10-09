@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 import { resolve } from 'node:path'
 import test from 'node:test'
-import { sharedCoreActivity, diagnosticCoreActivity } from './fixtures/core-tool-activity.mjs'
+import { sharedCoreActivity, diagnosticCoreActivity, agentWaitCoreActivity } from './fixtures/core-tool-activity.mjs'
 import { JSDOM } from 'jsdom'
 
 const root = resolve(import.meta.dirname, '..')
@@ -627,7 +627,7 @@ test('rendered diff marks line changes while keeping code text inert', () => {
 
 test('StrongFlow retains and renders canonical Core facts through the view model', async () => {
   const base = fixtureClient()
-  const activities = [sharedCoreActivity(), diagnosticCoreActivity()]
+  const activities = [sharedCoreActivity(), diagnosticCoreActivity(), agentWaitCoreActivity()]
   const client = {
     ...base,
     async query(request) {
@@ -652,6 +652,9 @@ test('StrongFlow retains and renders canonical Core facts through the view model
   const diagnosis = rows.find(row => row.dataset.runtimeCallId === activities[1].callId)
   assert.match(sharing.textContent, /public_smoke · 已取消.*父请求 #1.*合并等待请求 #7.*输入来源已验证/su)
   assert.match(diagnosis.textContent, /疑似等待成环 · 已提示模型.*public_smoke · 调用 logical-8/su)
+  assert.match(diagnosis.textContent, /代码运行 cell-1 → Agent agent-2 · 期限 2030-01-01T00:00:00.000Z/u)
+  const waiting = rows.find(row => row.dataset.runtimeCallId === activities[2].callId)
+  assert.match(waiting.textContent, /代码运行 cell-1.*等待 Agent agent-2.*等待状态待核对.*等待期限 2030-01-01T00:00:00.000Z/su)
   assert.equal(diagnosis.querySelector('script'), null)
   mounted.close()
   annotations.close()

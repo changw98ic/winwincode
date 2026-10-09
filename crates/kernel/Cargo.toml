@@ -29,6 +29,7 @@ winwincode-execution-port.workspace = true
 
 [dev-dependencies]
 rusqlite.workspace = true
+sha2.workspace = true
 
 [lints]
 workspace = true

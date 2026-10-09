@@ -1,5 +1,5 @@
 import { createInterface } from 'node:readline'
-import { readFile } from 'node:fs/promises'
+import { appendFile, readFile } from 'node:fs/promises'
 
 let smokeExecutions = 0
 
@@ -40,6 +40,7 @@ for await (const line of input) {
       if (request.params.name === 'public_smoke') {
         await new Promise(resolve => setTimeout(resolve, 150))
         const report = { source: await readFile('source.txt', 'utf8'), execution: ++smokeExecutions }
+        if (process.argv[2]) await appendFile(process.argv[2], `${JSON.stringify({ name: 'public_smoke', ...report })}\n`)
         result = { structuredContent: report, content: [{ type: 'text', text: JSON.stringify(report) }] }
         break
       }
@@ -51,6 +52,7 @@ for await (const line of input) {
         break
       }
       if (request.params.name !== 'echo') throw new Error('unknown fixture tool')
+      if (process.argv[2]) await appendFile(process.argv[2], `${JSON.stringify(request.params.arguments)}\n`)
       result = { content: [{ type: 'text', text: request.params.arguments.value }] }
       break
     case 'resources/list':

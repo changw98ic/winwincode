@@ -570,6 +570,43 @@ async fn get_status_returns_pending_init_for_new_thread() {
 }
 
 #[tokio::test]
+async fn completion_wait_owner_resolves_registered_thread_in_current_tree() {
+    let harness = AgentControlHarness::new().await;
+    let (thread_id, thread) = harness.start_thread().await;
+    let control = thread.session.services.agent_control.clone();
+    control.register_session_root(thread_id, /*current_parent_thread_id*/ None);
+    assert_eq!(
+        control
+            .completion_wait_owner(thread_id)
+            .await
+            .expect("same-tree thread should have a verified completion owner"),
+        crate::tools::ExecutionFacts::current_owner(&thread.session)
+    );
+    thread.submit(Op::Shutdown {}).await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn completion_wait_owner_rejects_registered_thread_in_another_tree() {
+    let harness = AgentControlHarness::new().await;
+    let (thread_id, thread) = harness.start_thread().await;
+    // The same manager may load several independent agent trees.
+    harness
+        .control
+        .register_session_root(thread_id, /*current_parent_thread_id*/ None);
+    assert!(harness.control.get_agent_metadata(thread_id).is_some());
+    let error = harness
+        .control
+        .completion_wait_owner(thread_id)
+        .await
+        .expect_err("foreign thread must not become a completion target");
+    assert_matches!(
+        error.details(),
+        CodexErrorDetails::ThreadNotFound(id) if *id == thread_id
+    );
+    thread.submit(Op::Shutdown {}).await.expect("shutdown");
+}
+
+#[tokio::test]
 async fn subscribe_status_errors_for_missing_thread() {
     let harness = AgentControlHarness::new().await;
     let thread_id = ThreadId::new();

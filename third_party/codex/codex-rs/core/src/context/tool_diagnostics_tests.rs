@@ -14,6 +14,7 @@ fn diagnosis() -> ToolDiagnostic {
         kind: ToolDiagnosticKind::RepeatedOperation,
         evidence_version: i64::MAX,
         progress_source_sequence: Some(i64::MAX),
+        wait_graph: Vec::new(),
         question: "Is this repetition justified?".into(),
         evidence: vec![ToolDiagnosticCall {
             request_sequence: i64::MAX,

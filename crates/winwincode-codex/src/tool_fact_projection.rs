@@ -22,8 +22,8 @@ use winwincode_kernel::KernelToolRuntimeEvent;
 const CONTENT_TYPE: &str = "application/vnd.winwincode.core-tool-fact+json";
 
 impl ProductionCodexAdapter {
-    /// Stop the final Core owner, then drain its fixed receipt stream before
-    /// publishing a business terminal. The final source cursor survives restart.
+    /// Request the final Core close and forward recorded receipts while it
+    /// finishes. Seal the final cursor only after that same owner has closed.
     pub(super) async fn poll_final_tool_facts(
         &mut self,
         run_key: &str,
@@ -43,20 +43,37 @@ impl ProductionCodexAdapter {
             return Ok(None);
         }
         let session = run.record.kernel_session_id.clone();
-        if run.kernel_live {
+        // Core can persist closed-cell facts before a shutdown hook or MCP client
+        // finishes. Forward that evidence between close attempts; withholding it
+        // can strand a caller that needs the fact to release its external wait.
+        // Start shutdown first so a running producer cannot prolong this drain.
+        if run.kernel_close_pending
+            && let Some(fact) = self.poll_tool_facts(run_key, &session, now).await?
+        {
+            return Ok(Some(fact));
+        }
+        if self
+            .runs
+            .get(run_key)
+            .ok_or_else(unknown_thread)?
+            .kernel_live
+        {
             match self.kernel.close_session(&session).await {
                 Ok(()) => {}
                 // The original terminal remains authoritative while the same
                 // Core session finishes closing. A later poll can wait again.
                 Err(error) if error.code() == "SESSION_SHUTDOWN_TIMEOUT" => {
+                    self.runs
+                        .get_mut(run_key)
+                        .ok_or_else(unknown_thread)?
+                        .kernel_close_pending = true;
                     return Ok(Some(CodexPoll::Pending));
                 }
                 Err(_) => return Err(unavailable()),
             }
-            self.runs
-                .get_mut(run_key)
-                .ok_or_else(unknown_thread)?
-                .kernel_live = false;
+            let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
+            run.kernel_live = false;
+            run.kernel_close_pending = false;
         }
         if let Some(fact) = self.poll_tool_facts(run_key, &session, now).await? {
             return Ok(Some(fact));

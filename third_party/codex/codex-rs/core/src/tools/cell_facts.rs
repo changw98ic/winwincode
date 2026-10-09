@@ -90,6 +90,7 @@ impl ExecutionFacts {
         turn: &TurnContext,
         cell_id: &str,
         call_id: &str,
+        timeout_ms: u64,
     ) -> Result<Option<ToolCellWait>, FunctionCallError> {
         let facts = Self::for_session(session);
         let writer = facts.try_writer().ok_or_else(super::owner::closing_error)?;
@@ -156,8 +157,34 @@ impl ExecutionFacts {
             .await;
             return Ok(None);
         };
+        let request = store
+            .tool_request_fact(&session.thread_id.to_string(), &logical)
+            .await
+            .map_err(storage_error)?
+            .ok_or_else(|| storage_error("wait request missing"))?;
+        let graph_lease = session.services.agent_control.completion_waits.insert(
+            codex_state::ToolWaitEdge {
+                tree_id: session.services.agent_control.session_id().to_string(),
+                request_sequence: request.request_sequence,
+                logical_id: logical,
+                source: codex_state::ToolWaitNode::Thread {
+                    thread_id: session.thread_id.to_string(),
+                    owner_id: owner.clone(),
+                },
+                targets: vec![codex_state::ToolWaitNode::Cell {
+                    thread_id: session.thread_id.to_string(),
+                    owner_id: owner.clone(),
+                    cell_id: cell_id.into(),
+                    scope_id: scope,
+                }],
+                deadline_unix_ms: crate::tools::agent_wait_graph::unix_ms()
+                    .saturating_add(timeout_ms),
+            },
+            crate::tools::agent_wait_graph::evidence(&request),
+        );
         crate::tools::tool_diagnostics::ToolDiagnostics::refresh(session).await;
         Ok(Some(ToolCellWait {
+            _graph_lease: graph_lease,
             _writer: writer,
             facts: Arc::clone(&facts),
             thread_id: session.thread_id.to_string(),
@@ -168,6 +195,7 @@ impl ExecutionFacts {
 
 /// Dropping an interrupted waiter preserves its unresolved durable edge.
 pub(crate) struct ToolCellWait {
+    _graph_lease: crate::tools::agent_wait_graph::CompletionWaitLease,
     _writer: tokio_util::task::task_tracker::TaskTrackerToken,
     facts: Arc<ExecutionFacts>,
     thread_id: String,

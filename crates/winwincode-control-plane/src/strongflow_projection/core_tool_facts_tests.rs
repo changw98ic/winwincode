@@ -112,6 +112,49 @@ fn corrupted_or_unknown_core_facts_cannot_be_projected_as_completed_activity() {
 }
 
 #[test]
+fn completion_wait_and_diagnosis_preserve_the_same_typed_edges() {
+    let edge = serde_json::json!({"tree_id":"tree","request_sequence":8,"logical_id":"wait-8",
+        "source":{"kind":"cell","thread_id":"thread-a","owner_id":"owner-a","cell_id":"cell-a","scope_id":"scope-a"},
+        "targets":[{"kind":"thread","thread_id":"thread-b","owner_id":"owner-b"}],"deadline_unix_ms":1_893_456_000_000_i64});
+    let wait = serde_json::json!({"kind":"agent_wait","fact":{"schema_version":1,"thread_id":"thread-a","edge":edge,"state":"waiting"}});
+    let waiting = decode(&event(&wait), "original-wait".into())
+        .unwrap()
+        .unwrap();
+    assert_eq!(waiting.status, RuntimeActivityStatus::Unknown);
+    let original = waiting.core_tool.unwrap().agent_wait.unwrap().edge;
+    assert_eq!(original.source.owner_id, "owner-a");
+    assert_eq!(original.source.cell_id.as_deref(), Some("cell-a"));
+    assert_eq!(original.targets[0].thread_id, "thread-b");
+    assert_eq!(original.targets[0].owner_id, "owner-b");
+    assert_eq!(original.deadline_unix_ms, 1_893_456_000_000);
+    let diagnostic = serde_json::json!({"kind":"diagnostic","fact":{"schema_version":1,"delivery":"offered",
+        "diagnostic":{"schema_version":1,"diagnostic_id":"stable-id","evidence_version":8,"kind":"wait_cycle","question":"Which participant can advance the task?","evidence":[],"wait_graph":[edge]}}});
+    let diagnosis = decode(&event(&diagnostic), "original-diagnosis".into())
+        .unwrap()
+        .unwrap();
+    assert_eq!(diagnosis.status, RuntimeActivityStatus::Unknown);
+    assert_eq!(
+        diagnosis
+            .core_tool
+            .unwrap()
+            .diagnosis
+            .unwrap()
+            .wait_graph
+            .unwrap(),
+        vec![original]
+    );
+    let mut settled = wait;
+    settled["fact"]["state"] = serde_json::json!("settled");
+    assert_eq!(
+        decode(&event(&settled), "settled".into())
+            .unwrap()
+            .unwrap()
+            .status,
+        RuntimeActivityStatus::Completed
+    );
+}
+
+#[test]
 fn downstream_evidence_remains_separate_from_execution_completion() {
     for state in ["unavailable", "unconfirmed", "running", "exited"] {
         let fact = serde_json::json!({"kind":"reconciliation","fact":{"schema_version":1,"request_sequence":7,"evidence":{"state":state}}});

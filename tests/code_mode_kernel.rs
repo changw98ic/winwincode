@@ -80,9 +80,25 @@ struct ScriptedModel {
     requests: Mutex<Vec<Value>>,
     source: &'static str,
     exec_count: usize,
-    cancel_boundary: Option<Arc<tokio::sync::Notify>>,
+    cancel_boundary: Option<(Arc<tokio::sync::Notify>, CancelBoundary)>,
     cancelled_cell: Mutex<Option<String>>,
     direct_probe: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CancelBoundary {
+    PendingModel,
+    ActiveWait,
+}
+
+impl ScriptedModel {
+    fn wait_yield_time(&self, step: usize) -> u64 {
+        if step == 1 && matches!(self.cancel_boundary, Some((_, CancelBoundary::ActiveWait))) {
+            30_000
+        } else {
+            1000
+        }
+    }
 }
 
 fn call_item(name: &str, call_id: &str, arguments: &Value) -> Value {
@@ -130,7 +146,7 @@ impl ModelPort for ScriptedModel {
         requests.push(payload);
         let step = index.saturating_sub(usize::from(self.direct_probe));
         if step == 1
-            && let Some(boundary) = &self.cancel_boundary
+            && let Some((boundary, phase)) = &self.cancel_boundary
         {
             let (_, rest) = input
                 .split_once("Script running with cell ID ")
@@ -142,7 +158,11 @@ impl ModelPort for ScriptedModel {
                     .to_owned(),
             );
             boundary.notify_one();
-            return Box::pin(async { Ok(Box::pin(futures::stream::pending()) as ModelPortStream) });
+            if matches!(phase, CancelBoundary::PendingModel) {
+                return Box::pin(async {
+                    Ok(Box::pin(futures::stream::pending()) as ModelPortStream)
+                });
+            }
         }
         let item = if self.direct_probe && index == 0 {
             call_item(
@@ -163,10 +183,11 @@ impl ModelPort for ScriptedModel {
                 .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
                 .next()
                 .unwrap();
+            let yield_time_ms = self.wait_yield_time(step);
             call_item(
                 "wait",
                 &format!("wait-{index}"),
-                &json!({"cell_id":cell_id,"yield_time_ms":1000}),
+                &json!({"cell_id":cell_id,"yield_time_ms":yield_time_ms}),
             )
         } else if requests.last().unwrap()["request"]["input"]
             .as_array()
@@ -258,6 +279,7 @@ impl Fixture {
         let mcp = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/fixtures/code-mode-mcp.mjs");
         let mcp_arg = serde_json::to_string(&mcp.canonicalize().unwrap()).unwrap();
+        let oracle_arg = serde_json::to_string(&root.join("echo-calls.jsonl")).unwrap();
         let catalog: Value = serde_json::from_str(include_str!(
             "../third_party/codex/codex-rs/models-manager/models.json"
         ))
@@ -273,7 +295,7 @@ impl Fixture {
         )
         .unwrap();
         std::fs::write(root.join("home/config.toml"), format!(
-            "model_catalog_json = \"models.json\"\n[features]\ncode_mode_only = false\n[mcp_servers.fixture]\ncommand = \"node\"\nargs = [{mcp_arg}]\nrequired = true\n[mcp_servers.fixture_other]\ncommand = \"node\"\nargs = [{mcp_arg}]\nrequired = true\n"
+            "model_catalog_json = \"models.json\"\n[features]\ncode_mode_only = false\n[mcp_servers.fixture]\ncommand = \"node\"\nargs = [{mcp_arg}, {oracle_arg}]\nrequired = true\n[mcp_servers.fixture_other]\ncommand = \"node\"\nargs = [{mcp_arg}]\nrequired = true\n"
         )).unwrap();
         Self(root)
     }
@@ -285,6 +307,33 @@ impl Fixture {
         options.linux_sandbox_executable =
             cfg!(target_os = "linux").then(|| self.0.join("codex-linux-sandbox"));
         options
+    }
+
+    fn configure_cancellation_mcp(&self) {
+        let mcp = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/code-mode-cancellation-mcp.mjs")
+            .canonicalize()
+            .unwrap();
+        std::fs::write(
+            self.0.join("home/config.toml"),
+            format!(
+                "model_catalog_json = \"models.json\"\n[mcp_servers.fixture]\ncommand = \"node\"\nargs = [{}, {}]\nrequired = true\n",
+                serde_json::to_string(&mcp).unwrap(),
+                serde_json::to_string(&self.0).unwrap(),
+            ),
+        )
+        .unwrap();
+    }
+
+    fn assert_no_mcp_phase(&self, phase: &str) {
+        let oracle = std::fs::read_to_string(self.0.join("calls.jsonl")).unwrap();
+        assert!(
+            !oracle.lines().any(|line| {
+                let observation: Value = serde_json::from_str(line).unwrap();
+                observation["phase"] == phase
+            }),
+            "cancelled cell must not issue MCP phase {phase}: {oracle}"
+        );
     }
 
     fn write_image(&self) {
@@ -606,15 +655,92 @@ fn native_cell_hands_control_to_the_host_through_common_dispatch() {
 
 #[test]
 fn user_interrupt_closes_the_native_cell_before_the_next_turn() {
-    run_native_test(|runtime| {
+    assert_interrupt_closes_native_cell(CANCEL_SOURCE, false, false);
+}
+
+#[test]
+fn user_interrupt_closes_a_native_cell_blocked_in_a_real_mcp_call() {
+    assert_interrupt_closes_native_cell(
+        r#"// @exec: {"yield_time_ms":1000}
+const tool = ALL_TOOLS.find(t => t.name.endsWith('fixture__public_smoke'));
+text(await tools[tool.name]({tag:'A', phase:'hold'}));
+text(await tools[tool.name]({tag:'A', phase:'after'}));
+"#,
+        true,
+        false,
+    );
+}
+
+#[test]
+fn shutdown_immediately_after_interrupt_drains_a_blocked_native_cell() {
+    assert_interrupt_closes_native_cell(
+        r#"// @exec: {"yield_time_ms":1000}
+const tool = ALL_TOOLS.find(t => t.name.endsWith('fixture__public_smoke'));
+text(await tools[tool.name]({tag:'A', phase:'hold'}));
+text(await tools[tool.name]({tag:'A', phase:'after'}));
+"#,
+        true,
+        true,
+    );
+}
+
+async fn assert_blocked_mcp_wait(fixture: &Fixture, kernel: &Kernel, session_id: &str) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let started = std::fs::read_to_string(fixture.0.join("calls.jsonl"))
+                .ok()
+                .is_some_and(|oracle| {
+                    oracle.lines().any(|line| {
+                        serde_json::from_str::<Value>(line)
+                            .ok()
+                            .is_some_and(|observation| {
+                                observation["phase"] == "hold" && observation["state"] == "started"
+                            })
+                    })
+                });
+            let facts = kernel
+                .tool_runtime_events(session_id, 0, 200)
+                .await
+                .unwrap();
+            if started
+                && facts.iter().any(|event| {
+                    let fact: Value = serde_json::from_str(&event.fact_json).unwrap();
+                    fact["kind"] == "wait" && fact["fact"]["state"] == "waiting"
+                })
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("interrupt reaches a real blocked MCP call while functions.wait is active");
+}
+
+fn assert_interrupt_closes_native_cell(
+    source: &'static str,
+    blocked_mcp: bool,
+    shutdown_immediately: bool,
+) {
+    run_native_test(move |runtime| {
         runtime.block_on(async {
             let fixture = Fixture::new();
+            if blocked_mcp {
+                fixture.configure_cancellation_mcp();
+            }
             let boundary = Arc::new(tokio::sync::Notify::new());
             let model = Arc::new(ScriptedModel {
                 requests: Mutex::new(Vec::new()),
-                source: CANCEL_SOURCE,
+                source,
                 exec_count: 1,
-                cancel_boundary: Some(boundary.clone()),
+                cancel_boundary: Some((
+                    boundary.clone(),
+                    if blocked_mcp {
+                        CancelBoundary::ActiveWait
+                    } else {
+                        CancelBoundary::PendingModel
+                    },
+                )),
                 cancelled_cell: Mutex::new(None),
                 direct_probe: false,
             });
@@ -639,17 +765,22 @@ fn user_interrupt_closes_the_native_cell_before_the_next_turn() {
             tokio::time::timeout(Duration::from_secs(30), boundary.notified())
                 .await
                 .expect("cell yielded");
+            if blocked_mcp {
+                assert_blocked_mcp_wait(&fixture, &kernel, &session.session_id).await;
+            }
             kernel.interrupt(&session.session_id).await.unwrap();
-            wait_for_kind(&kernel, &session.session_id, "turn_aborted").await;
-            kernel
-                .submit_turn(
-                    &session.session_id,
-                    "Check the interrupted cell".into(),
-                    TurnSubmissionOptions::default(),
-                )
-                .await
-                .unwrap();
-            wait_for_kind(&kernel, &session.session_id, "turn_complete").await;
+            if !shutdown_immediately {
+                wait_for_kind(&kernel, &session.session_id, "turn_aborted").await;
+                kernel
+                    .submit_turn(
+                        &session.session_id,
+                        "Check the interrupted cell".into(),
+                        TurnSubmissionOptions::default(),
+                    )
+                    .await
+                    .unwrap();
+                wait_for_kind(&kernel, &session.session_id, "turn_complete").await;
+            }
             kernel.close_session(&session.session_id).await.unwrap();
             let final_facts = kernel
                 .tool_runtime_events(&session.session_id, 0, 200)
@@ -663,29 +794,36 @@ fn user_interrupt_closes_the_native_cell_before_the_next_turn() {
                 .unwrap();
             assert_eq!(final_cell["fact"]["lifecycle"], "closed");
             kernel.shutdown().await.unwrap();
-            let requests = model.requests.lock().unwrap();
-            let input = requests.last().unwrap()["request"]["input"]
-                .as_array()
-                .unwrap();
-            let last_input = input
-                .iter()
-                .find(|item| {
-                    item["type"] == "function_call_output" && item["call_id"] == "wait-cancelled"
-                })
-                .expect("wait result after cancellation")["output"]
-                .to_string();
-            assert!(
-                last_input.contains("not found"),
-                "cancelled cell remained live: {last_input}"
-            );
-            assert!(!last_input.contains("should-never-complete"));
-            assert!(
-                last_input.contains("unavailable_wait"),
-                "missing wait diagnosis: {last_input}"
-            );
-            assert!(last_input.contains("model_behavior_diagnosis"));
+            if blocked_mcp {
+                fixture.assert_no_mcp_phase("after");
+            }
+            if !shutdown_immediately {
+                assert_cancelled_cell_unavailable(&model);
+            }
         });
     });
+}
+
+fn assert_cancelled_cell_unavailable(model: &ScriptedModel) {
+    let requests = model.requests.lock().unwrap();
+    let input = requests.last().unwrap()["request"]["input"]
+        .as_array()
+        .unwrap();
+    let last_input = input
+        .iter()
+        .find(|item| item["type"] == "function_call_output" && item["call_id"] == "wait-cancelled")
+        .expect("wait result after cancellation")["output"]
+        .to_string();
+    assert!(
+        last_input.contains("not found"),
+        "cancelled cell remained live: {last_input}"
+    );
+    assert!(!last_input.contains("should-never-complete"));
+    assert!(
+        last_input.contains("unavailable_wait"),
+        "missing wait diagnosis: {last_input}"
+    );
+    assert!(last_input.contains("model_behavior_diagnosis"));
 }
 
 #[test]
@@ -1252,3 +1390,9 @@ fn republished_historical_diagnosis_cannot_substitute_for_current_scope_evidence
 
 #[path = "code_mode_sharing.rs"]
 mod sharing;
+
+#[path = "code_mode_recovery.rs"]
+mod recovery;
+
+#[path = "code_mode_agent_wait.rs"]
+mod agent_wait;

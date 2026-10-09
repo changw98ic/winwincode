@@ -47,6 +47,10 @@ impl CoreToolRelations {
             "wait" => {
                 meta["wait"] = json!({"requestSequence":fact["waiter_request_sequence"],"targetCellSequence":fact["target_cell_sequence"],"state":fact["state"]});
             }
+            "agent_wait" => {
+                meta["agentWait"] =
+                    json!({"edge": wait_edge(&fact["edge"]), "state":fact["state"]});
+            }
             "sharing" => {
                 meta["sharing"] = json!({"sourceRequestSequence":fact["source_request_sequence"],"sourceAttemptId":fact["source_attempt_id"],"kind":fact["kind"]});
                 if meta["call"].is_object() {
@@ -112,5 +116,23 @@ impl CoreToolRelations {
 }
 fn diagnosis(fact: &Value, delivery: &Value) -> Value {
     let evidence = fact["evidence"].as_array().into_iter().flatten().map(|call| json!({"requestSequence":call["request_sequence"],"logicalId":call["logical_id"],"toolName":call["tool_name"],"parentCallId":call["parent_call_id"],"cellId":call["cell_id"]})).collect::<Vec<_>>();
-    json!({"diagnosticId":fact["diagnostic_id"],"evidenceVersion":fact["evidence_version"],"kind":fact["kind"],"question":fact["question"],"evidence":evidence,"delivery":delivery})
+    let waits = fact["wait_graph"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .take(8)
+        .map(wait_edge)
+        .collect::<Vec<_>>();
+    json!({"diagnosticId":fact["diagnostic_id"],"evidenceVersion":fact["evidence_version"],"kind":fact["kind"],"question":fact["question"],"evidence":evidence,"delivery":delivery,"waitGraph":waits})
+}
+
+fn wait_edge(edge: &Value) -> Value {
+    let targets = edge["targets"].as_array();
+    json!({"treeId":edge["tree_id"],"requestSequence":edge["request_sequence"],"logicalId":edge["logical_id"],
+        "source":wait_node(&edge["source"]),"targets":targets.into_iter().flatten().take(8).map(wait_node).collect::<Vec<_>>(),
+        "targetCount":targets.map_or(0, Vec::len),"deadlineUnixMs":edge["deadline_unix_ms"]})
+}
+
+fn wait_node(node: &Value) -> Value {
+    json!({"kind":node["kind"],"threadId":node["thread_id"],"ownerId":node["owner_id"],"cellId":node["cell_id"],"scopeId":node["scope_id"]})
 }

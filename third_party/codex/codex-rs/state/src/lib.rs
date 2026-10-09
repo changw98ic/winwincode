@@ -140,11 +140,14 @@ pub use tool_execution::ToolRequestObservation;
 pub use tool_execution::ToolRequestResolution;
 pub use tool_execution::ToolStoredResults;
 
+pub use tool_runtime::ToolAgentWaitFact;
 pub use tool_runtime::ToolCellFact;
 pub use tool_runtime::ToolCellLifecycle;
 pub use tool_runtime::ToolRuntimeEvent;
 pub use tool_runtime::ToolRuntimeFact;
+pub use tool_runtime::ToolWaitEdge;
 pub use tool_runtime::ToolWaitFact;
+pub use tool_runtime::ToolWaitNode;
 pub use tool_runtime::ToolWaitState;
 
 pub use tool_runtime::ToolReconciliationFact;

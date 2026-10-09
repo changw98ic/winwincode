@@ -55,6 +55,7 @@ async fn feedback_survives_interruption_and_is_offered_after_original_output() {
             parent_call_id: None,
             cell_id: None,
         }],
+        wait_graph: Vec::new(),
         question: "What can advance the task?".into(),
     };
     store.enqueue_tool_diagnostic(&diagnostic).await.unwrap();
@@ -212,6 +213,7 @@ async fn diagnostic_offer_fixture(
             parent_call_id: None,
             cell_id: None,
         }],
+        wait_graph: Vec::new(),
         question,
     };
     store.enqueue_tool_diagnostic(&diagnostic).await.unwrap();

@@ -8609,6 +8609,22 @@
         ],
         "type": "object"
       },
+      "CoreToolAgentWaitProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "edge": {
+            "$ref": "#/components/schemas/CoreToolWaitEdgeProjection"
+          },
+          "state": {
+            "$ref": "#/components/schemas/CoreToolWaitState"
+          }
+        },
+        "required": [
+          "edge",
+          "state"
+        ],
+        "type": "object"
+      },
       "CoreToolCallProjection": {
         "additionalProperties": false,
         "properties": {
@@ -8880,6 +8896,13 @@
                 "type": "null"
               }
             ]
+          },
+          "waitGraph": {
+            "items": {
+              "$ref": "#/components/schemas/CoreToolWaitEdgeProjection"
+            },
+            "maxItems": 8,
+            "type": "array"
           }
         },
         "required": [
@@ -8912,7 +8935,8 @@
           "sharing",
           "waiter_cancellation",
           "input_binding",
-          "input_validation"
+          "input_validation",
+          "agent_wait"
         ],
         "type": "string"
       },
@@ -9023,6 +9047,16 @@
       "CoreToolRuntimeProjection": {
         "additionalProperties": false,
         "properties": {
+          "agentWait": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CoreToolAgentWaitProjection"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "call": {
             "oneOf": [
               {
@@ -9134,6 +9168,111 @@
           "sourceRequestSequence",
           "sourceAttemptId",
           "kind"
+        ],
+        "type": "object"
+      },
+      "CoreToolWaitEdgeProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "deadlineUnixMs": {
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "logicalId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "requestSequence": {
+            "$ref": "#/components/schemas/ExecutionSequence"
+          },
+          "source": {
+            "$ref": "#/components/schemas/CoreToolWaitNodeProjection"
+          },
+          "targetCount": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "targets": {
+            "items": {
+              "$ref": "#/components/schemas/CoreToolWaitNodeProjection"
+            },
+            "maxItems": 8,
+            "minItems": 1,
+            "type": "array"
+          },
+          "treeId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "treeId",
+          "requestSequence",
+          "logicalId",
+          "source",
+          "targets",
+          "targetCount",
+          "deadlineUnixMs"
+        ],
+        "type": "object"
+      },
+      "CoreToolWaitNodeKind": {
+        "enum": [
+          "thread",
+          "cell"
+        ],
+        "type": "string"
+      },
+      "CoreToolWaitNodeProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "cellId": {
+            "oneOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "kind": {
+            "$ref": "#/components/schemas/CoreToolWaitNodeKind"
+          },
+          "ownerId": {
+            "maxLength": 80,
+            "minLength": 1,
+            "type": "string"
+          },
+          "scopeId": {
+            "oneOf": [
+              {
+                "maxLength": 80,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "threadId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "threadId",
+          "ownerId",
+          "cellId",
+          "scopeId"
         ],
         "type": "object"
       },
@@ -16754,7 +16893,7 @@
             }
           }
         ],
-        "description": "Acknowledges model chunks. Core progress stays inside the Device; server acknowledgements confirm durable public text projection.",
+        "description": "Acknowledges model chunks. Core progress stays inside the Device; server acknowledgements confirm durable public frame handling. After ProductSession cancellation, frames from its accepted execution are retained without appending Chat text or continuing model exchanges.",
         "properties": {
           "ackSequence": {
             "$ref": "#/components/schemas/ExecutionAckSequence"
@@ -29091,7 +29230,7 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:623d7bb1e65dba64ffa395043378f72455f3f343c4cdbebd0eadb6be24ded0bf",
+  "x-source-digest": "sha256:f1ca8ca96c4af8b1a654ac7b65dfa6322c3f8652f669f60552a8929e692438d9",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {

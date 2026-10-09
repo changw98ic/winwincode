@@ -93,7 +93,7 @@
   "currentCanonicalSources": [
     {
       "path": "schema/winwincode/v1/domain.schema.json",
-      "sha256": "f37c8c6fa289a492996a69365651ba4dc1e7def3b132bab3d5555abfb600744f",
+      "sha256": "132acd0624f11b3741ac6ff84f32b9838107ecaa0fe16d765f1a018c74c3ae57",
       "facts": [
         "WorkContract",
         "WorkItem",
@@ -120,7 +120,7 @@
     },
     {
       "path": "schema/winwincode/v1/execution-port.schema.json",
-      "sha256": "1b7f0db12a833103f8380534007e328748c5c45fc957fd33cc32c2514451789e",
+      "sha256": "8500171b196e64783be8e72607561086e669432446f3062d323e737a373df118",
       "facts": [
         "Worker execution transport and fenced identity",
         "Snapshot freeze request, freeze receipt and verification dispatch"

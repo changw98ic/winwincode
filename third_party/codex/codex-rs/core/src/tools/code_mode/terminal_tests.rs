@@ -159,6 +159,7 @@ impl crate::tools::registry::CoreToolRuntime for DiagnosticHandoffTool {
                     parent_call_id: boundary.request.parent_call_id.clone(),
                     cell_id: boundary.request.cell_id.clone(),
                 }],
+                wait_graph: Vec::new(),
                 question: "What can advance the task?".into(),
             };
             store

@@ -1059,6 +1059,7 @@ where
         self.sent_delivery_ids.clear();
         self.enqueue_codex_effects()?;
         let dispatch_error = self.flush_durable_execution_deliveries().await.err();
+        let mut intake_error = None;
         loop {
             let chunk = match &mut self.device_models {
                 Some(models) => models.next_chunk().map_err(|_| codex_model_error())?,
@@ -1118,7 +1119,12 @@ where
                         error.code
                     );
                 }
-                return Err(error);
+                // Keep the exact owned input retryable, but do not let its
+                // failed intake strand already recorded Core facts. In
+                // particular, cancellation closure must remain observable
+                // while a late Provider frame cannot enter the model bridge.
+                intake_error = Some(error);
+                break;
             }
         }
         // A lost binding response must not strand a prepared Core turn.
@@ -1291,7 +1297,8 @@ where
         if let Some(error) = dispatch_error {
             return Err(error);
         }
-        self.flush_durable_execution_deliveries().await
+        self.flush_durable_execution_deliveries().await?;
+        intake_error.map_or(Ok(()), Err)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -3833,7 +3840,14 @@ where
         {
             return Err(worker_error(
                 WorkerErrorCode::RuntimeTraceMismatch,
-                "runtime trace identity or sequence differs from the active Job",
+                &format!(
+                    "runtime trace differs from active Job: trace_next={} trace_observed={sequence} trace_lease={} trace_worker={} trace_session={} trace_thread={}",
+                    last_sequence.saturating_add(1),
+                    message.lease == active.lease,
+                    message.worker_session_id == active.worker_session_id,
+                    message.session_identity == active.session_identity,
+                    message.codex_thread_id == active.codex_thread_id,
+                ),
             ));
         }
         let delivery =

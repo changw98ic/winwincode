@@ -75,6 +75,14 @@ impl ToolDiagnostics {
         for diagnostic in diagnostics {
             store.enqueue_tool_diagnostic(&diagnostic).await?;
         }
+        if let Some(diagnostic) = session
+            .services
+            .agent_control
+            .completion_waits
+            .diagnose(&session.thread_id.to_string(), owner_id)
+        {
+            store.enqueue_tool_diagnostic(&diagnostic).await?;
+        }
         Ok(())
     }
     pub(super) async fn unavailable_wait(
@@ -120,6 +128,7 @@ impl ToolDiagnostics {
             question: format!(
                 "Core reports {state} for the requested cell. Which current execution or alternative action can advance the task?"
             ),
+            wait_graph: Vec::new(),
         };
         if let Err(error) = store.enqueue_tool_diagnostic(&diagnostic).await {
             tracing::warn!(%error, "wait diagnosis unavailable");

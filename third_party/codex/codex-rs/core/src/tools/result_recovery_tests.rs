@@ -310,6 +310,7 @@ impl ToolExecutor<ToolInvocation> for DiagnosticOfferTool {
                     parent_call_id: None,
                     cell_id: None,
                 }],
+                wait_graph: Vec::new(),
                 question: "What can advance the task?".into(),
             };
             store

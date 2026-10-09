@@ -48,6 +48,7 @@ impl Detector {
                         self.requests.keys().next_back().copied().unwrap_or(0);
                 }
                 ToolRuntimeFact::Reconciliation(_)
+                | ToolRuntimeFact::AgentWait(_)
                 | ToolRuntimeFact::InputBinding(_)
                 | ToolRuntimeFact::InputValidation(_)
                 | ToolRuntimeFact::WaiterCancellation(_)
@@ -183,6 +184,7 @@ impl Detector {
                 })
                 .collect(),
             question: question.into(),
+            wait_graph: Vec::new(),
         }
     }
     fn wait_cycle(&self, owner: &str) -> Option<Vec<&ToolExecutionFact>> {
