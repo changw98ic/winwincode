@@ -1314,6 +1314,15 @@
       "targets": [
         "codex-rs/core/tests/suite/rollout_budget.rs"
       ]
+    },
+    {
+      "id": "codex-tool-review-code-mode-reconnect-diagnostics",
+      "file": "upstream/patches/codex/0093-tool-review-code-mode-reconnect-diagnostics.patch",
+      "planned": false,
+      "patchSha256": "bda698e90ccd7b39bace1e0a5710e2c2bdeaa7f23c071b7693df81939493106b",
+      "targets": [
+        "codex-rs/core/tests/suite/code_mode.rs"
+      ]
     }
   ],
   "licenseObligations": {

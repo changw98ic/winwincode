@@ -2174,6 +2174,35 @@ impl ToolLifecycleContributor for WaitStartObserver {
     }
 }
 
+#[derive(Debug)]
+enum ReconnectWaitStage {
+    InitialExec,
+    WaitResponse,
+    TimeoutTurnComplete,
+    ReplacementExec,
+}
+
+/// Identify a failed await while preserving its original error or panic.
+struct ReconnectWaitDiagnostic(Option<ReconnectWaitStage>);
+
+impl ReconnectWaitDiagnostic {
+    fn new(stage: ReconnectWaitStage) -> Self {
+        Self(Some(stage))
+    }
+
+    fn complete(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for ReconnectWaitDiagnostic {
+    fn drop(&mut self) {
+        if let Some(stage) = &self.0 {
+            eprintln!("code_mode_reconnect_wait_failed stage={stage:?}");
+        }
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn code_mode_wait_timeout_reconnects_on_next_exec() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -2214,7 +2243,9 @@ async fn code_mode_wait_timeout_reconnects_on_next_exec() -> Result<()> {
     )
     .await;
 
+    let wait_stage = ReconnectWaitDiagnostic::new(ReconnectWaitStage::InitialExec);
     test.submit_turn("start a stalled code-mode cell").await?;
+    wait_stage.complete();
     let first_request = first_turn
         .last_request()
         .expect("initial exec should be returned to the model");
@@ -2239,6 +2270,7 @@ async fn code_mode_wait_timeout_reconnects_on_next_exec() -> Result<()> {
             text_elements: Vec::new(),
         }]))
         .await?;
+    let wait_stage = ReconnectWaitDiagnostic::new(ReconnectWaitStage::WaitResponse);
     wait_for_event_match(&test.codex, |event| match event {
         EventMsg::RawResponseItem(raw) => match &raw.item {
             ResponseItem::FunctionCall { call_id, .. } if call_id == "call-2" => Some(()),
@@ -2247,6 +2279,8 @@ async fn code_mode_wait_timeout_reconnects_on_next_exec() -> Result<()> {
         _ => None,
     })
     .await;
+
+    wait_stage.complete();
 
     // SQLite commits use a real I/O worker. Pause virtual time only after
     // dispatch reaches the actual handler, rather than the raw model response.
@@ -2273,10 +2307,13 @@ async fn code_mode_wait_timeout_reconnects_on_next_exec() -> Result<()> {
         }
     }
     tokio::time::resume();
+    let wait_stage = ReconnectWaitDiagnostic::new(ReconnectWaitStage::TimeoutTurnComplete);
     wait_for_event(&test.codex, |event| {
         matches!(event, EventMsg::TurnComplete(_))
     })
     .await;
+
+    wait_stage.complete();
 
     let timeout_output = timeout_completion
         .function_call_output_text("call-2")
@@ -2306,7 +2343,9 @@ async fn code_mode_wait_timeout_reconnects_on_next_exec() -> Result<()> {
     )
     .await;
 
+    let wait_stage = ReconnectWaitDiagnostic::new(ReconnectWaitStage::ReplacementExec);
     test.submit_turn("run a cell after the timeout").await?;
+    wait_stage.complete();
     let reconnect_request = reconnect_turn
         .last_request()
         .expect("replacement exec should be returned to the model");
