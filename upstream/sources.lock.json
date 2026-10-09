@@ -1305,6 +1305,15 @@
         "codex-rs/exec-server/tests/common/exec_server.rs",
         "codex-rs/exec-server/tests/process.rs"
       ]
+    },
+    {
+      "id": "codex-tool-review-rollout-budget-diagnostics",
+      "file": "upstream/patches/codex/0092-tool-review-rollout-budget-diagnostics.patch",
+      "planned": false,
+      "patchSha256": "e0d724c4738ad452c697673417f7388b564d6054e9e844cd2062b39a58c0559f",
+      "targets": [
+        "codex-rs/core/tests/suite/rollout_budget.rs"
+      ]
     }
   ],
   "licenseObligations": {

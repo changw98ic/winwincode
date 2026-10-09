@@ -135,6 +135,7 @@ const originalHashes = {
   "codex-rs/core/tests/suite/mcp_tool_exposure.rs": "02d5aa372f94c8c87974b73381701d119d08f93224cde5debaa52bb842d9a100",
   "codex-rs/core/tests/suite/model_runtime_selectors.rs": "301d554123ef29ee252375e500a9a951d43955add31a21893e1c2e8b38d45ab4",
   "codex-rs/core/tests/suite/multi_agent_resume.rs": "fa3e452b96ec3f02f79cafeac3c15e6329bf201a298767f7823f1a78380b92a3",
+  "codex-rs/core/tests/suite/rollout_budget.rs": "771922d708ba95a5e84a8a653bcf674d85950366d219b4a94c8aaa974f1a7de9",
   "codex-rs/core/tests/suite/send_user_message_async.rs": "f921f899c80f9047fdd377b03df69dc927b87a505393c93214a1cf005c087255",
   "codex-rs/core/tests/suite/skills_extension.rs": "42a74c95549c12cf4f0918dff87b4a16f8dcc91de5e89d88eaff33523739eaac",
   "codex-rs/core/tests/suite/subagent_notifications.rs": "4b9277bd89e66179c50ec2cab17d77b665480ce69055fd7a1b410649ed9a2a2d",
@@ -243,7 +244,7 @@ test('the tool runtime patch stack reproduces every changed dispatch file from t
 test('the tool runtime manifest and ordered patch digests describe the dispatch sources', () => {
   const applied = sourceLock.patches.filter(({ file, planned }) => file.startsWith('upstream/patches/codex/') && !planned)
   assert.deepEqual(manifest.patchesApplied, applied.map(({ file }) => file))
-  assert.equal(patches.length, 78)
+  assert.equal(patches.length, 79)
   assert.deepEqual([...new Set(patches.flatMap(({ targets }) => targets))].sort(), Object.keys(originalHashes).sort())
   for (const patch of patches) {
     assert.equal(digest(readFileSync(join(root, patch.file))), patch.patchSha256, patch.file)
