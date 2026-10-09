@@ -16,6 +16,13 @@ test('Device public smoke configures encrypted extensions without Client build a
   await copyFile(new URL('../scripts/device-production-fixture.mjs', import.meta.url), fixture)
   await copyFile(new URL('../scripts/device-agent-environment.mjs', import.meta.url),
     join(directory, 'scripts/device-agent-environment.mjs'))
+  await copyFile(new URL('../scripts/device-provider-credentials.mjs', import.meta.url),
+    join(directory, 'scripts/device-provider-credentials.mjs'))
+  await mkdir(join(directory, 'packages/network-request/src'), { recursive: true })
+  for (const name of ['index.mjs', 'policy.generated.mjs']) {
+    await copyFile(new URL(`../packages/network-request/src/${name}`, import.meta.url),
+      join(directory, 'packages/network-request/src', name))
+  }
   const { installDevicePublicSmoke } = await import(pathToFileURL(fixture).href)
   for (const outcome of ['tested', 'connection_failed']) {
     const device = createECDH('prime256v1')

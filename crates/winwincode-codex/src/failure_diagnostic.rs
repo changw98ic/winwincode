@@ -222,8 +222,34 @@ const ALLOWED_CAUSES: &[&str] = &[
     "ADAPTER_UNKNOWN_THREAD",
 ];
 
+const FUSION_FAILURE_CAUSES: &[&str] = &[
+    "FUSION_UNKNOWN_MEMBER",
+    "FUSION_NO_SUCCESSFUL_MEMBERS",
+    "FUSION_INVALID_CLAIMS",
+    "FUSION_STORE_UNAVAILABLE",
+    "FUSION_STORE_CORRUPT",
+    "FUSION_CANDIDATE_INVALID",
+    "FUSION_CANDIDATE_UNAVAILABLE",
+    "FUSION_CANDIDATE_CONFLICT",
+    "FUSION_PANEL_CONFLICT",
+    "FUSION_PANEL_PENDING",
+    "FUSION_INVALID_PANEL",
+    "FUSION_INVALID_REQUEST",
+    "FUSION_MODEL_FAILED",
+    "FUSION_INVALID_ANSWER",
+    "FUSION_INVALID_USAGE",
+];
+
+/// Returns only a known constant, never a caller's error text or code suffix.
+pub(crate) fn fusion_failure_cause(code: &str) -> Option<&'static str> {
+    FUSION_FAILURE_CAUSES
+        .iter()
+        .copied()
+        .find(|cause| *cause == code)
+}
+
 fn allowed_cause(cause: &str) -> bool {
-    ALLOWED_CAUSES.contains(&cause)
+    ALLOWED_CAUSES.contains(&cause) || fusion_failure_cause(cause).is_some()
 }
 
 #[cfg(test)]

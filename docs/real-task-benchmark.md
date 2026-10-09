@@ -62,6 +62,17 @@ The check reads the owner record without advancing the supervision journal.
 Active WorkRuns still pass through their exact launch anchors, execution lease
 checks and approval projections. An obsolete owner stops before the next poll.
 
+After restart, retained approval and input requests both wait for the exact
+Core request event before applying their deadline rejection. Their original
+operation identity, deadline, frame and digest remain authoritative. Transport
+expiration stops retransmission. Submission acceptance remains separate from
+Core waiter consumption and never creates a Control Plane decision.
+
+On macOS, an approved parent command keeps denied-read restrictions during
+child execution. Intercepted approval fallback uses the same constrained
+permission mode as the launched process. Explicit command rules and dangerous
+command checks still apply.
+
 Device Provider, extension and repository configuration relays bind a request ID
 to the complete encrypted envelope. The HTTP executor freezes that envelope
 before sending and retries transient failures with the same bytes and request ID.
@@ -111,6 +122,48 @@ rejected before the request is sent. Raw canonical payloads without an envelope
 keep their body and do not acquire invented conversation identities.
 
 ## Native Provider failure diagnostics
+
+Chat and Anthropic protocols represent a custom tool as a function with an
+exact `{ "input": "raw custom input" }` argument wrapper. The adapter converts
+that wrapper to a canonical custom call only when its shape matches. A valid
+JSON object with a wrong wrapper remains a function call with the original
+call ID, name, namespace and complete object. Core rejects the incompatible
+payload before hooks, authorization or execution, records the failure and
+returns it to the model for correction. The next request retains that call and
+its error result through the same explicit tool binding.
+
+An empty input string reaches the tool's own input validation. The adapter
+does not guess command fields, drop extra fields or coerce arrays into code.
+These model argument errors do not trigger a physical transport retry of an
+otherwise complete response. Framing, JSON, lifecycle, size, identity and
+credential-output checks still apply.
+
+The shared Fusion answer reader accepts a completed canonical response whose
+optional `endTurn` and assistant `phase` fields are absent or null. Both the
+native panel and control-plane composition use this reader. It still requires
+one complete assistant JSON object and rejects explicit continuation, tools,
+errors, missing completion and duplicate terminal events. Optional metadata is
+not added to saved responses or used to manufacture a successful verdict.
+
+Observer terminal admission follows the same optional `endTurn` contract.
+Its response identity, exact lease, chunk digest, terminal marker and duplicate
+receipt checks still apply. Explicit continuation, invalid field types and
+tool frames remain rejected.
+
+Fusion member admission and aggregation share the same claim validator. An
+invalid member answer is retained as a member failure before panel admission;
+valid sibling answers remain available for aggregation. Reference format,
+control-character, size, count and normalized identity constraints apply at
+both boundaries. Model citations retain their existing evidence authority.
+The adapter persists known finite Fusion error codes through terminal
+diagnostics. Unknown codes use the safe `FUSION_PANEL_FAILED` classification.
+
+The benchmark's terminal request diagnostics follow the current error's cause
+chain even when a domain wrapper carries retry history. A precise current
+failure takes precedence over a generic wrapper. Historical failed attempts
+remain separate from the terminal classification, so an earlier HTTP 503 does
+not replace a later permanent schema failure. The shared network classifier
+preserves only typed diagnostics and opaque response-log references.
 
 External usage receipts allow additive metadata. OpenAI Chat, Responses, and
 Anthropic adapters validate the counters they consume instead of requiring an

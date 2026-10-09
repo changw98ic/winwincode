@@ -11088,7 +11088,7 @@ async fn abort_review_task_emits_exited_then_aborted_and_records_history() {
 }
 
 #[tokio::test]
-async fn fatal_tool_error_stops_turn_and_reports_error() {
+async fn incompatible_tool_payload_is_reported_to_model() {
     let (session, turn_context, _rx) = make_session_and_context_with_rx().await;
     let step_context = StepContext::for_test(Arc::clone(&turn_context));
     let (registry, hosted_specs) = tool_registry_for_test_step(step_context.as_ref());
@@ -11123,16 +11123,16 @@ async fn fatal_tool_error_stops_turn_and_reports_error() {
         )
         .await
         .err()
-        .expect("expected fatal error");
+        .expect("expected model-visible payload error");
 
     match err {
-        FunctionCallError::Fatal(message) => {
+        FunctionCallError::RespondToModel(message) => {
             assert_eq!(
                 message,
-                "tool shell_command invoked with incompatible payload"
+                "tool shell_command invoked with incompatible payload. Use the tool's declared input format."
             );
         }
-        other => panic!("expected FunctionCallError::Fatal, got {other:?}"),
+        other => panic!("expected FunctionCallError::RespondToModel, got {other:?}"),
     }
 }
 

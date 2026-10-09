@@ -100,6 +100,9 @@
     "upstream/patches/codex/0091-tool-review-exec-server-resume-diagnostics.patch",
     "upstream/patches/codex/0092-tool-review-rollout-budget-diagnostics.patch",
     "upstream/patches/codex/0093-recover-original-turn-start-options.patch",
-    "upstream/patches/codex/0094-export-mcp-server-transport-config.patch"
+    "upstream/patches/codex/0094-export-mcp-server-transport-config.patch",
+    "upstream/patches/codex/0095-tool-payload-mismatch-model-feedback.patch",
+    "upstream/patches/codex/0096-seatbelt-explicit-literal-deny.patch",
+    "upstream/patches/codex/0097-zsh-parent-approval-context.patch"
   ]
 }

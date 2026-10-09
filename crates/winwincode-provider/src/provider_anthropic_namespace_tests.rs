@@ -219,7 +219,7 @@ fn custom_tool_translation_explains_json_wrapper_and_preserves_grammar() {
 }
 
 #[test]
-fn captured_mimo_empty_exec_arguments_remain_rejected() {
+fn captured_mimo_empty_exec_object_reaches_core_as_function_feedback() {
     let prepared = prepare_anthropic_request(
         &canonical_request(vec![custom_tool("exec")], Vec::new()),
         "mimo-v2.6-pro",
@@ -240,27 +240,42 @@ fn captured_mimo_empty_exec_arguments_remain_rejected() {
         "event: message_stop\n",
         "data: {\"type\":\"message_stop\"}\n\n",
     );
-    let Err(error) = parse_anthropic_sse(
+    let parsed = parse_anthropic_sse(
         response.as_bytes(),
         64 * 1_024,
         64,
         &prepared.tool_bindings,
         options(),
-    ) else {
-        panic!("empty custom exec arguments must not become executable input");
-    };
-    assert_eq!(error.kind(), AnthropicCodecErrorKind::Protocol);
-    assert_eq!(
-        error.diagnostic(),
-        Some(AnthropicCodecDiagnostic {
-            stage: "response_fields",
-            event_type: "content_block_stop",
-            field_path: "$.content_block.input.input",
+    )
+    .expect("valid empty object is retained for Core payload-kind rejection");
+    assert!(parsed.events.iter().any(
+        |event| matches!(event, ProviderStreamEvent::ToolCallStarted {
+        index: 2, provider_call_id, identity
+    } if provider_call_id == "mimo-call" && identity.kind() == ProviderToolKind::Function
+        && identity.name() == "exec" && identity.namespace().is_none())
+    ));
+    let arguments: String = parsed
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            ProviderStreamEvent::ToolCallArgumentsDelta {
+                provider_call_id,
+                delta,
+                ..
+            } if provider_call_id == "mimo-call" => Some(delta.as_str()),
+            _ => None,
         })
+        .collect();
+    assert_eq!(
+        serde_json::from_str::<Value>(&arguments).unwrap(),
+        json!({})
     );
-    let diagnostic = format!("{error:?}");
-    assert!(!diagnostic.contains("mimo-response"));
-    assert!(!diagnostic.contains("mimo-call"));
+    assert!(parsed.events.iter().any(|event| matches!(event,
+        ProviderStreamEvent::ToolCallEnded {index: 2, provider_call_id} if provider_call_id == "mimo-call")));
+    assert!(
+        matches!(parsed.terminal, ProviderGatewayTerminal::Completed {usage, ..}
+        if usage.input_tokens == 13568 && usage.output_tokens == 411)
+    );
 }
 
 fn parallel_tool_sse() -> String {

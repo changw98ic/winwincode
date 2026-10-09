@@ -156,10 +156,8 @@ impl ProductionCodexAdapter {
             else {
                 return Ok(());
             };
-            let waiting_for_exact_event =
-                matches!(request, ExecutionPortMessage::InputRequestMessage(_))
-                    && (!self.runs.contains_key(run_key)
-                        || record.recovered_input_requests.contains(id));
+            let waiting_for_exact_event = !self.runs.contains_key(run_key)
+                || record.recovered_interaction_requests.contains(id);
             record.interaction_timeouts.push(StoredInteractionTimeout {
                 cause_code: "INTERACTION_DEADLINE_EXPIRED".to_owned(),
                 request_digest: private_payload_digest(
@@ -241,24 +239,22 @@ impl ProductionCodexAdapter {
         Ok(())
     }
 
-    pub(super) fn recover_pending_input_requests(
+    pub(super) fn recover_pending_interaction_requests(
         &self,
         run_key: &str,
         record: &mut StoredRun,
     ) -> Result<(), ProductionCodexError> {
         for delivery in self.outbox.pending().map_err(map_store_error)? {
-            if let ExecutionPortMessage::InputRequestMessage(request) = &delivery.message
-                && request.session_identity.codex_thread_id == record.canonical_thread_id
+            let Some((id, _, identity)) = request_identity(&delivery.message) else {
+                continue;
+            };
+            if identity.codex_thread_id == record.canonical_thread_id
                 && self
                     .pending_interaction_digest(run_key, &delivery.message)?
                     .is_some()
-                && !record
-                    .recovered_input_requests
-                    .contains(&request.message_id)
+                && !record.recovered_interaction_requests.contains(id)
             {
-                record
-                    .recovered_input_requests
-                    .push(request.message_id.clone());
+                record.recovered_interaction_requests.push(id.clone());
             }
         }
         Ok(())
@@ -318,13 +314,9 @@ impl ProductionCodexAdapter {
                 // resolution and transport cleanup. Complete that once here.
                 self.finish_interaction_delivery(&timeout.request)?;
             }
-            // Never send an old turn-scoped input answer into a newer waiter.
-            // An exact replayed Core event can re-arm the response below.
-            timeout.waiting_for_exact_event = resolved
-                || matches!(
-                    timeout.request,
-                    ExecutionPortMessage::InputRequestMessage(_)
-                );
+            // Submission acceptance does not prove a resumed waiter consumed it.
+            // Both approval and input responses wait for the exact Core request.
+            timeout.waiting_for_exact_event = true;
         }
         Ok(())
     }
@@ -414,19 +406,22 @@ impl ProductionCodexAdapter {
             // waiter which happens to share the same turn.
             timeout.applied_kernel_session_id = None;
             timeout.waiting_for_exact_event = false;
+            run.record
+                .recovered_interaction_requests
+                .retain(|stored| stored != id);
             self.persist_run(&run_key)?;
             return Ok(CodexPoll::Pending);
         }
-        // The exact Core event has recreated this input waiter. A retained
+        // The exact Core event has recreated this interaction waiter. A retained
         // request from another waiter stays fenced across session recovery.
         let recovered = run
             .record
-            .recovered_input_requests
+            .recovered_interaction_requests
             .iter()
             .any(|stored| stored == id);
         if recovered {
             run.record
-                .recovered_input_requests
+                .recovered_interaction_requests
                 .retain(|stored| stored != id);
             self.persist_run(&run_key)?;
         }
@@ -572,7 +567,7 @@ impl ProductionCodexAdapter {
                 .get(run_key)
                 .ok_or_else(unknown_thread)?
                 .record
-                .recovered_input_requests
+                .recovered_interaction_requests
                 .contains(id);
             let timeout = StoredInteractionTimeout {
                 cause_code: "INTERACTION_DEADLINE_EXPIRED".to_owned(),

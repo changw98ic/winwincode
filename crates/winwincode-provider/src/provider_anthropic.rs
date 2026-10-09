@@ -997,6 +997,20 @@ fn exposed_history_tool_name<'bindings>(
     if let Some(exposed_name) = tool_bindings.exposed_name(&identity) {
         return Ok(exposed_name);
     }
+    if kind == ProviderToolKind::Function {
+        let custom_identity = ProviderToolIdentity::try_new(
+            ProviderToolKind::Custom,
+            name.to_owned(),
+            namespace.map(str::to_owned),
+        )
+        .map_err(|_| AnthropicCodecError::invalid_request())?;
+        if let Some(exposed_name) = tool_bindings.exposed_name(&custom_identity) {
+            // A rejected custom wrapper retains its original function payload
+            // in history. Replay that exact binding and object alongside Core's
+            // error result. This does not advertise or authorize another tool.
+            return Ok(exposed_name);
+        }
+    }
     // Keep Core's unsupported-call feedback in the next request without
     // adding this historical function to the advertised tool catalogue.
     if kind == ProviderToolKind::Function && namespace == Some(UNADVERTISED_TOOL_NAMESPACE) {
@@ -1512,22 +1526,22 @@ impl<'a> AnthropicStreamParser<'a> {
                         serde_json::to_string(input).map_err(|_| AnthropicCodecError::protocol())?
                     }
                     ProviderToolKind::Custom => {
-                        // This is a translated custom-tool argument, not a
-                        // provider response envelope. Its contract stays exact.
-                        exact_keys(input, &["input"])
-                            .map_err(|error| error.at_response_field("$.content_block.input"))?;
-                        response_string(input, "input", "$.content_block.input.input")?.to_owned()
+                        crate::provider_tool_arguments::translated_custom_arguments(
+                            input,
+                            index,
+                            &call_id,
+                            &mut self.events,
+                        )?
                     }
                 };
-                if arguments.is_empty() {
-                    return Err(AnthropicCodecError::protocol());
+                if !arguments.is_empty() {
+                    self.events
+                        .push(ProviderStreamEvent::ToolCallArgumentsDelta {
+                            index,
+                            provider_call_id: call_id.clone(),
+                            delta: arguments,
+                        });
                 }
-                self.events
-                    .push(ProviderStreamEvent::ToolCallArgumentsDelta {
-                        index,
-                        provider_call_id: call_id.clone(),
-                        delta: arguments,
-                    });
                 self.events.push(ProviderStreamEvent::ToolCallEnded {
                     index,
                     provider_call_id: call_id,

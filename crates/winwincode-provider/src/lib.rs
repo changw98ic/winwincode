@@ -17,6 +17,7 @@ mod provider_response_schema;
 mod provider_sse_failure_log;
 mod provider_sse_framing;
 pub mod provider_stream;
+mod provider_tool_arguments;
 mod provider_transport {
     pub(crate) use winwincode_network::transport::*;
 }

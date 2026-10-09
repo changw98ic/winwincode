@@ -1,4 +1,5 @@
 import executionPortSchema from '../schema/winwincode/v1/execution-port.schema.json' with { type: 'json' }
+import { classifyError } from '../packages/network-request/src/index.mjs'
 
 const modelCodes = new Set(executionPortSchema.$defs.ExecutionPortErrorCode.enum.filter(code =>
   code.startsWith('DEVICE_PROVIDER_') || code.startsWith('DEVICE_MODEL_') || code === 'DEVICE_JEV_UNAVAILABLE'))
@@ -111,23 +112,33 @@ export function retainedStopReason(value) {
 
 export function retainedRequestFailure(error) {
   const seen = new Set()
-  let current = error, network = null, attempts = null, stopReason = null
+  let current = error, network = null, precise = false, attempts = null, stopReason = null
   for (let depth = 0; current && depth < 8 && !seen.has(current); depth += 1) {
     seen.add(current)
-    network ??= retainedNetworkFailure(current.networkFailure ?? current.failure)
-    if (Array.isArray(current.networkAttempts)) {
+    const fact = retainedNetworkFailure(current.networkFailure ?? current.failure)
+    const factIsPrecise = fact?.diagnostic !== undefined || fact?.httpStatus != null
+    // A generic domain wrapper must not hide its exact request cause. The
+    // first precise current failure remains authoritative over older causes.
+    if (fact && (network === null || (!precise && factIsPrecise))) {
+      network = fact
+      precise = factIsPrecise
+    }
+    if (attempts === null && Array.isArray(current.networkAttempts)) {
       attempts = current.networkAttempts.map(fact => ({
         attempt: safeInteger(fact?.attempt), networkAttempt: safeInteger(fact?.networkAttempt),
         connectionWaits: safeInteger(fact?.connectionWaits),
         outcome: ['succeeded', 'failed'].includes(fact?.outcome) ? fact.outcome : null,
         failure: retainedNetworkFailure(fact?.failure),
       }))
-      network = retainedNetworkFailure(current.networkFailure ?? current.failure)
-        ?? attempts.findLast(fact => fact.failure)?.failure ?? network
       stopReason = retainedStopReason(current.networkStopReason)
-      break
     }
     current = current.cause
+  }
+  // Socket errors can carry their classification in a nested error code.
+  // Attempt history is retained separately and never establishes the terminal.
+  if (!precise && (network || attempts)) {
+    const classified = retainedNetworkFailure(classifyError(error))
+    if (network === null || classified?.diagnostic?.code !== 'transport_other') network = classified
   }
   return network || attempts ? { network, attempts, stopReason } : null
 }

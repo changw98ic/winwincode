@@ -562,7 +562,9 @@ fn strongest_evidence(evidence: &[FusionEvidence]) -> FusionEvidenceQuality {
         .unwrap_or(FusionEvidenceQuality::Unsupported)
 }
 
-fn validate_candidates(candidates: &[FusionCandidateClaims]) -> Result<(), FusionAnalysisError> {
+pub(crate) fn validate_candidates(
+    candidates: &[FusionCandidateClaims],
+) -> Result<(), FusionAnalysisError> {
     if candidates.is_empty() || candidates.len() > MAX_CANDIDATES {
         return Err(FusionAnalysisError::InvalidInput);
     }

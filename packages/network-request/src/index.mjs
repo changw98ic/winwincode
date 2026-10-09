@@ -78,6 +78,8 @@ function safeFailure(value) {
     for (const key of ['osCode', 'line', 'column']) {
       if (Number.isSafeInteger(diagnostic[key]) && (key === 'osCode' || diagnostic[key] >= 0)) safe.diagnostic[key] = diagnostic[key]
     }
+    if (/^sse-[0-9a-f]{64}\.log$/u.test(diagnostic.responseLog)) safe.diagnostic.responseLog = diagnostic.responseLog
+    if (['retained', 'write_failed'].includes(diagnostic.responseLogStatus)) safe.diagnostic.responseLogStatus = diagnostic.responseLogStatus
   }
   if (safe.diagnostic === undefined) safe.diagnostic = { code: {
     protocol_invalid: 'response_invariant', integrity_invalid: 'response_invariant',

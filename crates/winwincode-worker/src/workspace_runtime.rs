@@ -3843,7 +3843,10 @@ fn parse_observation_model_chunk(
                 .is_some_and(|value| {
                     !value.is_empty() && value.len() <= 200 && !value.chars().any(char::is_control)
                 })
-                && object.get("endTurn").and_then(serde_json::Value::as_bool) == Some(true) =>
+                && matches!(
+                    object.get("endTurn"),
+                    None | Some(serde_json::Value::Null | serde_json::Value::Bool(true))
+                ) =>
         {
             let model_usage = terminal_model_usage(object)
                 .unwrap_or_else(|| ExecutionOutcomeUsage::unknown(0, 0));

@@ -10,10 +10,15 @@ import test from 'node:test'
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const sourceLock = JSON.parse(readFileSync(join(root, 'upstream/sources.lock.json'), 'utf8'))
 const manifest = JSON.parse(readFileSync(join(root, 'third_party/codex.UPSTREAM.json'), 'utf8'))
-const patches = sourceLock.patches.filter(({ id }) => id.startsWith('codex-code-mode-dispatch-') || id.startsWith('codex-tool-execution-facts-') || id.startsWith('codex-tool-runtime-recovery-') || id.startsWith('codex-tool-diagnostics-') || id.startsWith('codex-tool-dependencies-') || id.startsWith('codex-tool-receipts-') || id.startsWith('codex-tool-review-') || id.startsWith('codex-tool-runtime-reconciliation-') || id === 'codex-recover-original-turn-start-options')
+const patches = sourceLock.patches.filter(({ id }) => id.startsWith('codex-code-mode-dispatch-') || id.startsWith('codex-tool-execution-facts-') || id.startsWith('codex-tool-runtime-recovery-') || id.startsWith('codex-tool-diagnostics-') || id.startsWith('codex-tool-dependencies-') || id.startsWith('codex-tool-receipts-') || id.startsWith('codex-tool-review-') || id.startsWith('codex-tool-runtime-reconciliation-') || id === 'codex-recover-original-turn-start-options' || id === 'codex-tool-payload-mismatch-model-feedback' || id === 'codex-seatbelt-explicit-literal-deny' || id === 'codex-zsh-parent-approval-context')
 // Measured from P1 commit a3533326af80d7aa0b19bfdf89ba54575dfe1b74.
 // The retrospective 0094 export was already present in P1; the clean archive replay covers it.
 const originalHashes = {
+  "codex-rs/core/src/tools/runtimes/shell/unix_escalation.rs": "0579ad2a03c3c4bb50c141725cd46b50982a60654d3cfc6dcb41be2a185c828c",
+  "codex-rs/core/tests/suite/skill_approval.rs": "1e15ef12fe4881ddfd47ffe6390911c2f91760538563ea1681c3b82ab663182d",
+  "codex-rs/exec-server/tests/exec_process.rs": "fc308c108474662ddc95f3ec9d8fa47b1ca0148b0b87e1319ab4ba921a1dfda4",
+  "codex-rs/sandboxing/src/restricted_read_only_platform_defaults.sbpl": "092b34f8104b3a73da42bbcb600ba83f03c6f3eee1c8b39c02bf0939d824db56",
+  "codex-rs/sandboxing/src/seatbelt.rs": "fe56fa7fbf4000e7f181373b94fd492e9ca0058cd7b62a9b192c84ae3d3c31b3",
   "codex-rs/core/src/session/turn_input.rs": "9886eb4b9e1afab5583e7e667cc4926127983c195402c9d7fbd7e31ce7409e16",
   "codex-rs/core/src/session/turn_input_tests.rs": "45152701a3009a7d16ad2d7251836dba0307097b7606aedc5074aedd639de383",
   "codex-rs/core/tests/suite/turn_input_submission.rs": "d7130ff7377381976d468832067f18ecb5b875285067597c095d2537aaf90f75",
@@ -251,8 +256,11 @@ test('the tool runtime manifest and ordered patch digests describe the dispatch 
   const applied = sourceLock.patches.filter(({ file, planned }) => file.startsWith('upstream/patches/codex/') && !planned)
   assert.deepEqual(manifest.patchesApplied, applied.map(({ file }) => file))
   assert.equal(sourceLock.patches.find(({ id }) => id === 'codex-recover-original-turn-start-options')?.file, 'upstream/patches/codex/0093-recover-original-turn-start-options.patch')
+  assert.equal(sourceLock.patches.find(({ id }) => id === 'codex-tool-payload-mismatch-model-feedback')?.file, 'upstream/patches/codex/0095-tool-payload-mismatch-model-feedback.patch')
   assert.equal(sourceLock.patches.find(({ id }) => id === 'codex-export-mcp-server-transport-config')?.file, 'upstream/patches/codex/0094-export-mcp-server-transport-config.patch')
-  assert.equal(patches.length, 80)
+  assert.equal(sourceLock.patches.find(({ id }) => id === 'codex-seatbelt-explicit-literal-deny')?.file, 'upstream/patches/codex/0096-seatbelt-explicit-literal-deny.patch')
+  assert.equal(sourceLock.patches.find(({ id }) => id === 'codex-zsh-parent-approval-context')?.file, 'upstream/patches/codex/0097-zsh-parent-approval-context.patch')
+  assert.equal(patches.length, 83)
   assert.deepEqual([...new Set(patches.flatMap(({ targets }) => targets))].sort(), Object.keys(originalHashes).sort())
   for (const patch of patches) {
     assert.equal(digest(readFileSync(join(root, patch.file))), patch.patchSha256, patch.file)

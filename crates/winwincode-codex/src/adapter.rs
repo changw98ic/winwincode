@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+#[cfg(test)]
+#[path = "fusion_claim_admission_tests.rs"]
+mod fusion_claim_admission_tests;
 #[path = "tool_fact_projection.rs"]
 mod tool_fact_projection;
 #[path = "tool_runtime_contract.rs"]
@@ -949,11 +952,14 @@ impl ProductionCodexAdapter {
         .map_err(|_| invalid_job())?;
         let prompt =
             result.and_then(|panel| crate::durable_fusion::aggregation_prompt(&goal, &panel));
-        if let Ok(prompt) = prompt {
-            self.submit_kernel_turn(thread_id, &prompt).await?;
-        } else {
-            self.retain_infrastructure_failure_code(&run_key, "FUSION_PANEL_FAILED")?;
-            self.retain_submission_failure(&run_key).await?;
+        match prompt {
+            Ok(prompt) => self.submit_kernel_turn(thread_id, &prompt).await?,
+            Err(error) => {
+                let cause = crate::failure_diagnostic::fusion_failure_cause(error.code())
+                    .unwrap_or("FUSION_PANEL_FAILED");
+                self.retain_infrastructure_failure_code(&run_key, cause)?;
+                self.retain_submission_failure(&run_key).await?;
+            }
         }
         Ok(true)
     }
@@ -3889,7 +3895,7 @@ impl ProductionCodexAdapter {
                 &record.kernel_session_id,
             )
             .map_err(map_store_error)?;
-        self.recover_pending_input_requests(run_key, record)?;
+        self.recover_pending_interaction_requests(run_key, record)?;
         self.recover_interaction_timeouts(run_key, record)?;
         self.store
             .save_run(run_key, record)
@@ -4691,7 +4697,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             post_action_traces: Vec::new(),
             pending_completion: None,
             interaction_timeouts: Vec::new(),
-            recovered_input_requests: Vec::new(),
+            recovered_interaction_requests: Vec::new(),
         };
         self.store
             .save_run(&run_key, &record)
@@ -6542,8 +6548,10 @@ struct StoredRun {
     pending_completion: Option<StoredPendingCompletion>,
     #[serde(default)]
     interaction_timeouts: Vec<StoredInteractionTimeout>,
-    #[serde(default)]
-    recovered_input_requests: Vec<ExecutionMessageId>,
+    /// Requests retained across restart wait for their exact Core event.
+    /// Keep the existing persisted name while both interaction kinds share this fence.
+    #[serde(default, rename = "recoveredInputRequests")]
+    recovered_interaction_requests: Vec<ExecutionMessageId>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -12466,7 +12474,7 @@ mod tests {
             post_action_traces: Vec::new(),
             pending_completion: None,
             interaction_timeouts: Vec::new(),
-            recovered_input_requests: Vec::new(),
+            recovered_interaction_requests: Vec::new(),
         };
         let mut legacy = serde_json::to_value(record).expect("encode stored run");
         let role_policy = legacy
@@ -12633,7 +12641,7 @@ mod tests {
             post_action_traces: Vec::new(),
             pending_completion: None,
             interaction_timeouts: Vec::new(),
-            recovered_input_requests: Vec::new(),
+            recovered_interaction_requests: Vec::new(),
         };
         let binding = ModelRunBinding {
             run_key: format!("sha256:{}", "b".repeat(64)),

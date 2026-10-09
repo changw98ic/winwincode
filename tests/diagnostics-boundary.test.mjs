@@ -156,3 +156,37 @@ test('exact request preserves generated schema error identity and hides its sing
   assert.equal(Object.getOwnPropertyDescriptor(caught, 'networkStopReason').enumerable, false)
   assert.doesNotMatch(JSON.stringify(caught), /networkAttempts|networkStopReason/u)
 })
+
+test('retained schema mismatch stays terminal despite an earlier HTTP503 attempt', () => {
+  const error = new ControlPlaneClientError({ code: 'SCHEMA_VERSION_MISMATCH', message: sensitive,
+    requestId: query.requestId, retryable: true, details: {} })
+  const previous = httpFailure(503)
+  Object.defineProperties(error, {
+    cause: { value: new NetworkError(previous) },
+    networkAttempts: { value: [{ attempt: 1, networkAttempt: 1, connectionWaits: 0,
+      outcome: 'failed', failure: previous }] },
+    networkStopReason: { value: 'permanent_failure' },
+  })
+  const facts = retainedRequestFailure(error)
+  assert.equal(facts.network.kind, 'request_invalid')
+  assert.equal(facts.network.diagnostic.code, 'schema_version')
+  assert.equal(facts.network.httpStatus, null)
+  assert.equal(facts.stopReason, 'permanent_failure')
+  assert.equal(facts.attempts.length, 1)
+  assert.equal(facts.attempts[0].failure.httpStatus, 503)
+  assert.doesNotMatch(JSON.stringify(facts), /SYNTHETIC_PRIVATE|SYNTHETIC_CREDENTIAL|invalid\.example/u)
+})
+
+test('direct SSE NetworkError retains its safe private response reference', () => {
+  const responseLog = `sse-${'b'.repeat(64)}.log`
+  const source = new NetworkError({ kind: 'protocol_invalid', acceptance: 'response_received',
+    phase: 'decode', httpStatus: 200, retryAfterMs: null,
+    diagnostic: { code: 'sse_event', responseLog, responseLogStatus: 'retained', message: sensitive } })
+  const facts = retainedRequestFailure(source)
+  assert.deepEqual(facts.network, { kind: 'protocol_invalid', acceptance: 'response_received',
+    phase: 'decode', httpStatus: 200, retryAfterMs: null,
+    diagnostic: { code: 'sse_event', responseLog, responseLogStatus: 'retained' } })
+  assert.equal(facts.attempts, null)
+  assert.equal(facts.stopReason, null)
+  assert.doesNotMatch(JSON.stringify(facts), /SYNTHETIC_PRIVATE|SYNTHETIC_CREDENTIAL|invalid\.example/u)
+})

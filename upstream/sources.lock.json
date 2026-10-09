@@ -1339,6 +1339,40 @@
       "targets": [
         "codex-rs/core-api/src/lib.rs"
       ]
+    },
+    {
+      "id": "codex-tool-payload-mismatch-model-feedback",
+      "file": "upstream/patches/codex/0095-tool-payload-mismatch-model-feedback.patch",
+      "planned": false,
+      "patchSha256": "c47cd36a56a876ef7b3f828a352abf25782caf89bdba7050d036de2021591c7d",
+      "targets": [
+        "codex-rs/core/src/session/tests.rs",
+        "codex-rs/core/src/tools/registry.rs",
+        "codex-rs/core/src/tools/tool_dispatch_trace_tests.rs",
+        "codex-rs/core/tests/suite/code_mode.rs"
+      ]
+    },
+    {
+      "id": "codex-seatbelt-explicit-literal-deny",
+      "file": "upstream/patches/codex/0096-seatbelt-explicit-literal-deny.patch",
+      "planned": false,
+      "patchSha256": "876087e19f87b8dd2884e26348007e12762923f3171eb32bfe5d3ecc9badcb06",
+      "targets": [
+        "codex-rs/exec-server/tests/exec_process.rs",
+        "codex-rs/sandboxing/src/restricted_read_only_platform_defaults.sbpl",
+        "codex-rs/sandboxing/src/seatbelt.rs",
+        "codex-rs/sandboxing/src/seatbelt_tests.rs"
+      ]
+    },
+    {
+      "id": "codex-zsh-parent-approval-context",
+      "file": "upstream/patches/codex/0097-zsh-parent-approval-context.patch",
+      "planned": false,
+      "patchSha256": "bf5b3cddfba8fba26119dd1abd6f942dc65f912edef395489e36389f175f00e1",
+      "targets": [
+        "codex-rs/core/src/tools/runtimes/shell/unix_escalation.rs",
+        "codex-rs/core/tests/suite/skill_approval.rs"
+      ]
     }
   ],
   "licenseObligations": {

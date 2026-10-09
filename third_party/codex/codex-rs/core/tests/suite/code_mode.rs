@@ -819,6 +819,139 @@ text(JSON.stringify(await tools.exec_command({ cmd: "printf code_mode_exec_marke
     Ok(())
 }
 
+#[cfg_attr(windows, ignore = "no exec_command on Windows")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn code_mode_function_payload_rejection_reaches_model_then_correct_custom_exec_completes()
+-> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let mut builder = test_codex()
+        .with_model("test-gpt-5.1-codex")
+        .with_config(|config| {
+            let _ = config.features.enable(Feature::CodeMode);
+        });
+    let test = builder.build_with_auto_env(&server).await?;
+    let bad_path = test.workspace_path("bad-payload-side-effect.txt");
+    let good_path = test.workspace_path("correct-custom-side-effect.txt");
+    let bad_command = format!(
+        "printf bad > {}",
+        shlex::try_join([bad_path.to_string_lossy().as_ref()])?
+    );
+    let good_command = format!(
+        "printf fixture > {}",
+        shlex::try_join([good_path.to_string_lossy().as_ref()])?
+    );
+    let bad_source =
+        format!("text(await tools.exec_command({{cmd:{bad_command:?},login:false}}));");
+    let good_source = format!(
+        "text(JSON.stringify(await tools.exec_command({{cmd:{good_command:?},login:false}}))); "
+    );
+    let bad_arguments = serde_json::to_string(&serde_json::json!({"input":bad_source}))?;
+    let response_mock = responses::mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("response-bad-kind"),
+                responses::ev_function_call("bad-kind-call", "exec", &bad_arguments),
+                ev_completed("response-bad-kind"),
+            ]),
+            sse(vec![
+                ev_response_created("response-correct-kind"),
+                ev_custom_tool_call("correct-kind-call", "exec", &good_source),
+                ev_completed("response-correct-kind"),
+            ]),
+            sse(vec![
+                ev_response_created("response-fixture-final"),
+                ev_assistant_message("fixture-final-message", "fixture complete"),
+                ev_completed("response-fixture-final"),
+            ]),
+        ],
+    )
+    .await;
+
+    test.submit_turn("Correct an incompatible exec payload and finish the fixture.")
+        .await?;
+
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 3);
+    let first = requests[0].body_json();
+    let exec = first["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|tool| {
+            if tool["name"] == "exec" {
+                Some(tool)
+            } else {
+                tool["name"]
+                    .as_str()
+                    .and_then(|namespace| namespace_child_tool(&first, namespace, "exec"))
+            }
+        })
+        .expect("actual CodeMode host must expose exec");
+    assert_eq!(exec["type"], "custom");
+    let rejected = requests[1]
+        .function_call_output_text("bad-kind-call")
+        .expect("the next inference receives Core payload-kind failure");
+    assert!(rejected.contains("incompatible payload"));
+    assert!(rejected.contains("Use the tool's declared input format."));
+    let retained = requests[1]
+        .input()
+        .into_iter()
+        .find(|item| item["type"] == "function_call" && item["call_id"] == "bad-kind-call")
+        .expect("rejected function input remains in history");
+    assert_eq!(retained["arguments"], bad_arguments);
+    let (output, success) = custom_tool_output_body_and_success(&requests[2], "correct-kind-call");
+    assert_ne!(success, Some(false));
+    let items = custom_tool_output_items(&requests[2], "correct-kind-call");
+    assert!(text_item(&items, 0).contains("Script completed"));
+    let command_result: Value = serde_json::from_str(&output)?;
+    assert_eq!(command_result["exit_code"], 0);
+    assert!(!bad_path.exists());
+    assert_eq!(fs::read_to_string(good_path)?, "fixture");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn code_mode_empty_custom_exec_returns_model_error_without_executing_a_cell() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let mut builder = test_codex()
+        .with_model("test-gpt-5.1-codex")
+        .with_config(|config| {
+            let _ = config.features.enable(Feature::CodeMode);
+        });
+    let test = builder.build_with_auto_env(&server).await?;
+    let response_mock = responses::mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("response-empty-input"),
+                ev_custom_tool_call("empty-input-call", "exec", ""),
+                ev_completed("response-empty-input"),
+            ]),
+            sse(vec![
+                ev_response_created("response-after-empty"),
+                ev_assistant_message("after-empty-message", "fixture complete"),
+                ev_completed("response-after-empty"),
+            ]),
+        ],
+    )
+    .await;
+    test.submit_turn("Handle empty exec input without starting a cell.")
+        .await?;
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 2);
+    let (output, success) = custom_tool_output_body_and_success(&requests[1], "empty-input-call");
+    assert_ne!(success, Some(true), "empty input cannot return success");
+    assert!(!output.contains("Script completed"));
+    assert!(!output.contains("Script running"));
+    assert!(output.to_lowercase().contains("empty"));
+    Ok(())
+}
+
 #[tokio::test]
 async fn code_mode_exec_holds_captured_result_during_elicitation() -> Result<()> {
     let server = responses::start_mock_server().await;

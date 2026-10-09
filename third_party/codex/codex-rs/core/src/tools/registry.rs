@@ -659,7 +659,9 @@ impl ToolRegistry {
             }
         }
         if !tool.matches_kind(&invocation.payload) {
-            let message = format!("tool {tool_name} invoked with incompatible payload");
+            let message = format!(
+                "tool {tool_name} invoked with incompatible payload. Use the tool's declared input format."
+            );
             let log_payload = tool_log_payload(&invocation.payload, &invocation.source);
             otel.tool_result_with_tags(
                 tool_name_flat.as_ref(),
@@ -671,7 +673,7 @@ impl ToolRegistry {
                 &tool_result_tags,
                 &extra_trace_fields,
             );
-            let err = FunctionCallError::Fatal(message);
+            let err = FunctionCallError::RespondToModel(message);
             dispatch_trace.record_failed(&err);
             facts.deny().await?;
             return Err(err);

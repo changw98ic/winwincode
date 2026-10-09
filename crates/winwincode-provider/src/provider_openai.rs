@@ -730,18 +730,20 @@ impl<'a> OpenAiStreamParser<'a> {
                 let input: Value =
                     serde_json::from_str(&arguments).map_err(|_| tool_arguments_error(reason))?;
                 let input = object(&input)?;
-                exact_keys(input, &["input"])?;
-                let delta = string(input, "input")?.to_owned();
-                validate_text(&delta)?;
-                if delta.is_empty() {
-                    return Err(AnthropicCodecError::protocol());
+                let delta = crate::provider_tool_arguments::translated_custom_arguments(
+                    input,
+                    index,
+                    &provider_call_id,
+                    &mut self.events,
+                )?;
+                if !delta.is_empty() {
+                    self.events
+                        .push(ProviderStreamEvent::ToolCallArgumentsDelta {
+                            index,
+                            provider_call_id: provider_call_id.clone(),
+                            delta,
+                        });
                 }
-                self.events
-                    .push(ProviderStreamEvent::ToolCallArgumentsDelta {
-                        index,
-                        provider_call_id: provider_call_id.clone(),
-                        delta,
-                    });
             } else if let Some(arguments) = self.function_arguments.remove(&index) {
                 let input: Value =
                     serde_json::from_str(&arguments).map_err(|_| tool_arguments_error(reason))?;

@@ -168,7 +168,7 @@ fn consumed_response_fields_remain_typed_and_diagnostics_never_copy_values() {
 }
 
 #[test]
-fn extensions_do_not_relax_tool_arguments_or_event_order() {
+fn extensions_preserve_event_order_and_invalid_wrapper_payloads() {
     let invalid_inputs = [json!([]), json!("secret"), json!(null)];
     for input in invalid_inputs {
         let Err(error) = parse(&[
@@ -211,9 +211,35 @@ fn extensions_do_not_relax_tool_arguments_or_event_order() {
         finish(),
         json!({"type":"message_stop"}),
     ]);
+    let parsed = parse_anthropic_sse(&body, 64 * 1024, 64, &bindings, options())
+        .expect("valid object with extra wrapper field reaches Core as a function call");
+    assert!(parsed.events.iter().any(
+        |event| matches!(event, ProviderStreamEvent::ToolCallStarted {
+        index: 0, provider_call_id, identity
+    } if provider_call_id == "call-1" && identity.kind() == ProviderToolKind::Function
+        && identity.name() == "apply_patch" && identity.namespace().is_none())
+    ));
+    let arguments: String = parsed
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            ProviderStreamEvent::ToolCallArgumentsDelta {
+                provider_call_id,
+                delta,
+                ..
+            } if provider_call_id == "call-1" => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        serde_json::from_str::<Value>(&arguments).unwrap(),
+        json!({"input":"patch", "extra":true})
+    );
+    assert!(parsed.events.iter().any(|event| matches!(event,
+        ProviderStreamEvent::ToolCallEnded {index: 0, provider_call_id} if provider_call_id == "call-1")));
     assert!(
-        matches!(parse_anthropic_sse(&body, 64 * 1024, 64, &bindings, options()),
-        Err(error) if error.kind() == AnthropicCodecErrorKind::Protocol)
+        matches!(parsed.terminal, ProviderGatewayTerminal::Completed {usage, ..}
+        if usage.input_tokens == 12 && usage.output_tokens == 3)
     );
 }
 
