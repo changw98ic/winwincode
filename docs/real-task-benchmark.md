@@ -31,12 +31,13 @@ benefit. A zero denominator stays `null`; it is never reported as a zero rate.
 `x-openai-internal-codex-responses-lite: true`. This preserves native CodeMode
 custom tools and their Lark grammar. The API key remains Device-local.
 
-The MiMo profile also sets `responsesStructuredOutput: 'json_object'` in the
-encrypted Device Provider configuration. The server generates a JSON object;
-the Device Provider validates it locally against the original schema when a
-structured result is requested. This mode accepts a limited schema subset and
-rejects unknown keywords before sending a model request. Native custom tools
-and grammar are preserved.
+The MiMo profile also sets `responsesStructuredOutput: 'text'` in the
+encrypted Device Provider configuration. For a structured result, the Device
+Provider includes the complete original JSON Schema in the instructions and
+omits the request's `text` field. The final response must parse as JSON and
+pass strict local validation against the original schema. This mode accepts a
+limited schema subset and rejects unknown keywords before sending a model
+request. Native custom tools and grammar are preserved.
 
 Set `XIAOMI_API_KEY`, `XIAOMI_MODEL=mimo-v2.6-pro`, and the complete HTTPS
 endpoint in `XIAOMI_RESPONSES_URL`. For example, the official endpoints are
