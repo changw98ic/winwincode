@@ -153,11 +153,25 @@ test('public API cancellation closes an active native cell and preserves an inde
       try {
         await waitFor(async () => (await activities(ids.A)).some(row => row.coreTool?.cell?.cellId === live.A.cell.cellId
           && row.coreTool.cell.lifecycle === 'closed'), 'cancelled cell closed in the Core projection', 60_000)
+        assert.ok(!(await activities(ids.B)).some(row => row.coreTool?.cell?.cellId === live.B.cell.cellId
+          && row.coreTool.cell.lifecycle === 'closed'), 'Session B remains active while A closes')
+        writeFileSync(join(directory, 'A.release'), '')
+        writeFileSync(join(directory, 'B.release'), '')
+        await waitFor(async () => {
+          await approve(ids.B)
+          const messages = (await api.query('session.messages.list', { productSessionId: ids.B })).result.items
+          return messages.some(message => message.role === 'assistant' && message.state === 'completed'
+            && message.content.includes('native-cell-B completed'))
+        }, 'independent Session B completed after A cancellation', 60_000)
       } catch (error) {
         const sessions = await Promise.all(Object.entries(ids).map(async ([tag, id]) => {
           const session = (await api.query('session.get', { productSessionId: id })).result
           const rows = (await activities(id)).map(row => row.coreTool).filter(Boolean)
+          const messages = (await api.query('session.messages.list', { productSessionId: id })).result.items
           return { tag, state: session.state, revision: session.revision,
+            messages: messages.slice(-8).map(message => ({ role: message.role, state: message.state,
+              completionMarkerObserved: message.role === 'assistant' && message.content.includes(`native-cell-${tag} completed`),
+            })),
             cells: rows.filter(row => row.cell).slice(-16).map(row => ({
               sourceThreadId: row.sourceThreadId, sourceSequence: row.sourceSequence, cell: row.cell,
             })),
@@ -173,16 +187,6 @@ test('public API cancellation closes an active native cell and preserves an inde
           calls: calls().slice(-32).map(({ tag, phase, state }) => ({ tag, phase, state })) }
         throw new Error(`${error.message}\nCancellation evidence: ${JSON.stringify(evidence)}`, { cause: error })
       }
-      assert.ok(!(await activities(ids.B)).some(row => row.coreTool?.cell?.cellId === live.B.cell.cellId
-        && row.coreTool.cell.lifecycle === 'closed'), 'Session B remains active while A closes')
-      writeFileSync(join(directory, 'A.release'), '')
-      writeFileSync(join(directory, 'B.release'), '')
-      await waitFor(async () => {
-        await approve(ids.B)
-        const messages = (await api.query('session.messages.list', { productSessionId: ids.B })).result.items
-        return messages.some(message => message.role === 'assistant' && message.state === 'completed'
-          && message.content.includes('native-cell-B completed'))
-      }, 'independent Session B completed after A cancellation', 60_000)
       assert.equal(calls().filter(call => call.tag === 'A' && call.phase === 'after').length, 0)
       assert.equal(calls().filter(call => call.tag === 'B' && call.phase === 'after' && call.state === 'completed').length, 1)
       const settledA = (await api.query('session.get', { productSessionId: ids.A })).result
