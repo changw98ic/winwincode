@@ -922,7 +922,7 @@ impl ProductionCodexAdapter {
         let submission = match reconciliation {
             Ok(submission) => submission,
             Err(error) => {
-                let error = classified_kernel_error(CodexFailureStage::TurnSubmit, error);
+                let error = classified_kernel_error(CodexFailureStage::TurnSubmit, &error);
                 self.retain_failure_diagnostic(
                     &run_key,
                     error.diagnostic.clone().ok_or_else(kernel_error)?,
@@ -3719,15 +3719,16 @@ impl ProductionCodexAdapter {
             self.kernel
                 .resume_session(rollout_path, options)
                 .await
-                .map_err(|error| classified_kernel_error(CodexFailureStage::SessionResume, error))?
+                .map_err(|error| {
+                    classified_kernel_error(CodexFailureStage::SessionResume, &error)
+                })?
         } else if matches!(
             record.phase,
             StoredRunPhase::Prepared | StoredRunPhase::SubmissionIntent
         ) {
-            self.kernel
-                .create_session(options)
-                .await
-                .map_err(|error| classified_kernel_error(CodexFailureStage::SessionCreate, error))?
+            self.kernel.create_session(options).await.map_err(|error| {
+                classified_kernel_error(CodexFailureStage::SessionCreate, &error)
+            })?
         } else {
             return Err(ProductionCodexError::new(
                 ProductionCodexErrorKind::Restart,
@@ -4455,7 +4456,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         #[cfg(feature = "test-support")]
         if std::mem::take(&mut self.config.close_kernel_before_session_start) {
             self.kernel.shutdown().await.map_err(|error| {
-                classified_kernel_error(CodexFailureStage::SessionCreate, error)
+                classified_kernel_error(CodexFailureStage::SessionCreate, &error)
             })?;
         }
         let session = self
@@ -4467,7 +4468,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
                 agent_config.clone(),
             ))
             .await
-            .map_err(|error| classified_kernel_error(CodexFailureStage::SessionCreate, error))?;
+            .map_err(|error| classified_kernel_error(CodexFailureStage::SessionCreate, &error))?;
         let record = StoredRun {
             snapshot_id: start.snapshot_id.cloned(),
             job: start.job.clone(),
@@ -4589,7 +4590,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             }
             Some(ProductionSubmissionFault::KernelClosedBeforeKernel) => {
                 self.kernel.shutdown().await.map_err(|error| {
-                    classified_kernel_error(CodexFailureStage::TurnSubmit, error)
+                    classified_kernel_error(CodexFailureStage::TurnSubmit, &error)
                 })?;
             }
             None => {}
@@ -7998,7 +7999,7 @@ fn kernel_error() -> ProductionCodexError {
 
 fn classified_kernel_error(
     stage: CodexFailureStage,
-    error: winwincode_kernel::KernelFailure,
+    error: &winwincode_kernel::KernelFailure,
 ) -> ProductionCodexError {
     kernel_error().with_diagnostic(CodexFailureDiagnostic::kernel(stage, error.code()))
 }

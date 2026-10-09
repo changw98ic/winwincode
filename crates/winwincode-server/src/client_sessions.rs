@@ -996,7 +996,9 @@ impl ClientSessionsApplication {
             .snapshot(worker_launch_grant_id)
             .map_err(|_| ClientSessionsError::unavailable())?;
         let Some(grant) = grant else {
-            return Ok(PollOutcome::Failed(ClientSessionsError::unavailable()));
+            return Ok(PollOutcome::Failed(
+                ClientSessionsError::unavailable().at_stage(LaunchFailureStage::GrantPoll),
+            ));
         };
         match grant.state {
             LaunchGrantState::Issued => {
@@ -1588,6 +1590,34 @@ fn generate_prefixed_id(prefix: &str) -> Result<String, ClientSessionsError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_launch_grant_retains_safe_poll_diagnostics() {
+        let grant_id = generate_prefixed_id("wlg_").expect("canonical missing grant id");
+        let directory = std::env::temp_dir().join(format!(
+            "winwincode-server-grant-poll-{}-{grant_id}",
+            std::process::id()
+        ));
+        let application =
+            ClientSessionsApplication::open(&directory, &ClientSessionsConfig::default())
+                .expect("real launch application");
+        let outcome = application
+            .poll(&grant_id)
+            .expect("the native SQLite snapshot succeeds for an absent grant");
+        drop(application);
+        std::fs::remove_dir_all(&directory).expect("cleanup before red assertion");
+        let PollOutcome::Failed(error) = outcome else {
+            panic!("a missing durable grant must fail the poll");
+        };
+        assert_eq!(error.kind(), ClientSessionsErrorKind::Unavailable);
+        assert_eq!(
+            error.to_string(),
+            "client session launch service is unavailable"
+        );
+        assert!(!format!("{error:?}").contains(directory.to_string_lossy().as_ref()));
+        assert_eq!(error.failure_stage(), Some("grant_poll"));
+        assert_eq!(error.failure_code(), Some("unavailable"));
+    }
 
     #[test]
     fn config_rejects_zero_bounds() {

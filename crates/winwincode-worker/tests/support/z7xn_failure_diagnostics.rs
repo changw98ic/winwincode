@@ -251,7 +251,9 @@ async fn assert_shutdown_then_recover(submission: bool) {
     assert!(stored["coreToolPending"].is_null());
     assert_eq!(stored["phase"], "outcome_retained");
     assert_secret_safe(&messages, &stored);
-    assert_control_plane_retains_failure(&root, &dispatch, &messages);
+    let mut ingress_messages = port.messages();
+    ingress_messages.extend(messages.iter().cloned());
+    assert_control_plane_retains_failure(&root, &dispatch, &ingress_messages);
     recovered
         .shutdown(at("2030-01-01T00:00:03.000Z"))
         .await
