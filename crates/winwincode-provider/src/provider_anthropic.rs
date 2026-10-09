@@ -1291,15 +1291,14 @@ impl<'a> AnthropicStreamParser<'a> {
         value: &Map<String, Value>,
         event_name: &str,
     ) -> Result<(), AnthropicCodecError> {
+        // Transport heartbeats do not advance the message lifecycle.
+        if event_name == "ping" {
+            return Ok(());
+        }
         if self.terminal.is_some() {
             return Err(AnthropicCodecError::protocol());
         }
         match event_name {
-            "ping" => {
-                if !self.started {
-                    return Err(AnthropicCodecError::protocol());
-                }
-            }
             "message_start" => self.message_start(value)?,
             "content_block_start" => self.content_block_start(value)?,
             "content_block_delta" => self.content_block_delta(value)?,
@@ -1675,18 +1674,17 @@ fn anthropic_usage(
         previous.is_none(),
         prior.output_tokens,
     )?;
-    if previous.is_some()
-        && (standard_input_tokens < prior_standard_input
-            || cached_input_tokens < prior.cached_input_tokens.unwrap_or(0)
-            || cache_write_input_tokens < prior.cache_write_input_tokens
-            || output_tokens < prior.output_tokens)
-    {
-        return Err(AnthropicCodecError::protocol().at_response_field("$.usage"));
-    }
     let input_tokens = standard_input_tokens
         .checked_add(cached_input_tokens)
         .and_then(|value| value.checked_add(cache_write_input_tokens))
         .ok_or_else(|| AnthropicCodecError::protocol().at_response_field("$.usage"))?;
+    // Input categories are a snapshot and may be reclassified. Validate the
+    // cumulative total, rather than requiring each category to increase.
+    if previous.is_some()
+        && (input_tokens < prior.input_tokens || output_tokens < prior.output_tokens)
+    {
+        return Err(AnthropicCodecError::protocol().at_response_field("$.usage"));
+    }
     let usage = ProviderTokenUsage {
         input_tokens,
         cached_input_tokens: Some(cached_input_tokens),
@@ -2705,3 +2703,11 @@ mod provider_anthropic_namespace_safety_tests;
 #[cfg(test)]
 #[path = "provider_anthropic_response_tests.rs"]
 mod provider_anthropic_response_tests;
+
+#[cfg(test)]
+#[path = "provider_anthropic_heartbeat_tests.rs"]
+mod provider_anthropic_heartbeat_tests;
+
+#[cfg(test)]
+#[path = "provider_anthropic_cache_snapshot_tests.rs"]
+mod provider_anthropic_cache_snapshot_tests;

@@ -113,6 +113,21 @@ stream completion or a known monetary cost. Historical failed attempts are
 preserved; an offline replay verifies a repaired decoder without rewriting
 their paid ledger or issuing another upstream request.
 
+Anthropic `ping` events are transport heartbeats. They do not create or advance
+a message, and can appear before `message_start`, between message events, or
+after a terminal event. Message ordering, JSON and event-type validation, and
+frame limits still apply. A heartbeat cannot replace `message_start` or
+`message_stop`. This follows the [Anthropic SDK stream handling](https://github.com/anthropics/anthropic-sdk-python/blob/main/src/anthropic/_streaming.py).
+
+Anthropic usage deltas replace the counters they provide and preserve omitted
+counters. The adapter sums uncached input, cache reads, and cache writes into
+the canonical input total. A later snapshot can revise that breakdown while
+keeping or increasing the total. The total input and output counts must remain
+nondecreasing; individual input categories need not. Completion, observed
+accounting, and pricing use the same final breakdown. See the
+[Anthropic cache accounting contract](https://platform.claude.com/docs/en/build-with-claude/prompt-caching#tracking-cache-performance)
+and [SDK snapshot accumulation](https://github.com/anthropics/anthropic-sdk-python/blob/main/src/anthropic/lib/streaming/_messages.py).
+
 The native Provider transport retains non-2xx response bodies through the same
 private log channel as failed SSE conversion. Public diagnostics contain the
 original HTTP classification and the opaque `responseLog` / `responseLogStatus`
