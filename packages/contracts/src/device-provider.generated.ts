@@ -76,6 +76,7 @@ export type DeviceProviderConfig = {
   readonly "modelIds": ReadonlyArray<string>
   readonly "protocol": DeviceProviderProtocol
   readonly "providerId": string
+  readonly "responsesStructuredOutput"?: DeviceResponsesStructuredOutput
 }
 
 export enum DeviceProviderOutcome {
@@ -96,6 +97,7 @@ export type DeviceProviderProjection = {
 export enum DeviceProviderProtocol {
   AnthropicMessages = "anthropic_messages",
   OpenaiChatCompletions = "openai_chat_completions",
+  OpenaiResponses = "openai_responses",
   Canonical = "canonical",
   CodexChatgpt = "codex_chatgpt",
   ChatgptPlan = "chatgpt_plan",
@@ -117,4 +119,10 @@ export type DeviceProviderSnapshot = {
   readonly "encryptionPublicKey": string
   readonly "providers": ReadonlyArray<DeviceProviderProjection>
   readonly "revision": number
+}
+
+export enum DeviceResponsesStructuredOutput {
+  JsonSchema = "json_schema",
+  JsonObject = "json_object",
+  Text = "text",
 }

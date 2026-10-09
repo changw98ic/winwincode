@@ -121,6 +121,39 @@ pub fn resolve_attention(
             )
         })?;
     let item = &delivery.snapshot().attention_items[item_index];
+    validate_attention_resolution(delivery, item, &input)?;
+    let solution_review_settlement = resolve_typed_review_context(delivery, item, &input)?;
+    let verdict_actions = current_verdict_attention_actions(delivery, item)?;
+    if verdict_actions.is_some() && input.decision != AttentionDecision::Resolved {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::WrongState,
+            "computed verdict Attention must be resolved before stage movement",
+        ));
+    }
+    let resolved = apply_resolution(
+        delivery.clone().into_snapshot(),
+        input,
+        item_index,
+        verdict_actions,
+        solution_review_settlement,
+    )?;
+    Ok(ResolvedAttentionTransition {
+        source_delivery: delivery.clone(),
+        delivery: resolved,
+    })
+}
+
+fn validate_attention_resolution(
+    delivery: &Delivery,
+    item: &AttentionItem,
+    input: &ResolveAttentionInput,
+) -> Result<(), CoordinationError> {
+    if super::candidate_rejection::rejection_attention_fact(item).is_some() {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::WrongState,
+            "a rejected candidate cannot resume through generic Attention resolution; its execution result and source remain retained",
+        ));
+    }
     if item.delivery_id != *delivery.id()
         || item.delivery_spec_id != delivery.snapshot().spec.id
         || item.status != AttentionItemStatus::Open
@@ -182,25 +215,7 @@ pub fn resolve_attention(
             ));
         }
     }
-    let solution_review_settlement = resolve_typed_review_context(delivery, item, &input)?;
-    let verdict_actions = current_verdict_attention_actions(delivery, item)?;
-    if verdict_actions.is_some() && input.decision != AttentionDecision::Resolved {
-        return Err(CoordinationError::new(
-            CoordinationErrorCode::WrongState,
-            "computed verdict Attention must be resolved before stage movement",
-        ));
-    }
-    let resolved = apply_resolution(
-        delivery.clone().into_snapshot(),
-        input,
-        item_index,
-        verdict_actions,
-        solution_review_settlement,
-    )?;
-    Ok(ResolvedAttentionTransition {
-        source_delivery: delivery.clone(),
-        delivery: resolved,
-    })
+    Ok(())
 }
 
 fn resolve_typed_review_context(

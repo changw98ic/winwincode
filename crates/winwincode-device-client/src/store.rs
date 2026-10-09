@@ -2052,14 +2052,18 @@ impl FrameOutbox for DeviceStore {
     type Error = DeviceStoreError;
 
     fn load(&mut self) -> Result<Option<OutboxSnapshot>, Self::Error> {
-        let stream = self.outbox_stream()?;
-        let connection = self.connection()?;
+        let stream = self.outbox_stream()?.clone();
+        let connection = self.connection_mut()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(sql_error)?;
         let (ack_sequence, highest_sequence) =
-            outbox_stream_cursor(connection, &stream.client_node_id)?;
+            outbox_stream_cursor(&transaction, &stream.client_node_id)?;
         let Some(highest_sequence) = highest_sequence else {
+            transaction.commit().map_err(sql_error)?;
             return Ok(None);
         };
-        let mut statement = connection
+        let mut statement = transaction
             .prepare(
                 "SELECT message_id, envelope_sequence, kind, payload, occurred_at \
                  FROM client_outbox \
@@ -2091,6 +2095,8 @@ impl FrameOutbox for DeviceStore {
                 &occurred_at,
             )?);
         }
+        drop(statement);
+        transaction.commit().map_err(sql_error)?;
         Ok(Some(OutboxSnapshot {
             ack_sequence: ack_sequence.unwrap_or(0),
             highest_sequence,
@@ -3639,5 +3645,240 @@ mod migration_concurrency_tests {
             .expect("second initializer must reread committed version");
         drop(first);
         fs::remove_dir_all(root).expect("cleanup");
+    }
+}
+
+#[cfg(test)]
+mod outbox_read_cut_tests {
+    use super::{DeviceStore, DeviceStoreError};
+    use rusqlite::trace::{TraceEvent, TraceEventCodes};
+    use std::cell::RefCell;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::mpsc::{self, Receiver, Sender};
+    use std::time::Duration;
+    use winwincode_client_port::exchange::{
+        CompactingOutbox, FrameCodec, FrameOutbox, OutboxSession, OutboxSnapshot, StoredFrame,
+    };
+    use winwincode_client_port::messages::{
+        CLIENT_CONTROL_PORT_SCHEMA_VERSION, ClientRepositoryRemovedPayload, ClientToServerEnvelope,
+        ClientToServerMessage, CommandContext,
+    };
+
+    type CommitResult = Result<(), String>;
+
+    struct TraceGate {
+        start: Sender<()>,
+        committed: Receiver<CommitResult>,
+    }
+
+    thread_local! {
+        static LOAD_GATE: RefCell<Option<TraceGate>> = const { RefCell::new(None) };
+        static TRACE_RESULT: RefCell<Option<CommitResult>> = const { RefCell::new(None) };
+    }
+
+    static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(1);
+
+    #[derive(Clone, Copy)]
+    enum Mutation {
+        Append,
+        Compact,
+    }
+
+    struct Fixture {
+        root: PathBuf,
+        reader: DeviceStore,
+        writer: DeviceStore,
+    }
+
+    struct RaceCapture {
+        first: Result<Option<OutboxSnapshot>, DeviceStoreError>,
+        later: Result<Option<OutboxSnapshot>, DeviceStoreError>,
+        trace: Option<CommitResult>,
+        writer: CommitResult,
+    }
+
+    fn frame(sequence: u64) -> StoredFrame {
+        let envelope = ClientToServerEnvelope {
+            schema_version: CLIENT_CONTROL_PORT_SCHEMA_VERSION.to_owned(),
+            message_id: format!("read-cut-{sequence}"),
+            client_node_id: "read-cut-node".to_owned(),
+            client_instance_id: "read-cut-instance".to_owned(),
+            sequence,
+            occurred_at: "2026-10-09T00:00:00.000Z".to_owned(),
+            message: ClientToServerMessage::RepositoryRemoved(ClientRepositoryRemovedPayload {
+                command: CommandContext {
+                    expected_revision: 0,
+                    idempotency_key: format!("read-cut-idempotency-{sequence}"),
+                },
+                repository_binding_id: "read-cut-binding".to_owned(),
+            }),
+        };
+        FrameCodec::default()
+            .encode_envelope(&envelope)
+            .expect("encode canonical fixture frame")
+    }
+
+    fn bind(store: &mut DeviceStore) {
+        store
+            .bind_outbox_stream("read-cut-node", "read-cut-instance")
+            .expect("bind canonical fixture stream");
+    }
+
+    fn fixture(mutation: Mutation) -> Fixture {
+        let suffix = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "wwc-outbox-read-cut-{}-{suffix}",
+            std::process::id()
+        ));
+        let mut reader = DeviceStore::open(&root).expect("open fixture reader");
+        bind(&mut reader);
+        let session = OutboxSession::new();
+        for sequence in 1..=14 {
+            session
+                .enqueue(&mut reader, sequence, &frame(sequence))
+                .expect("retain canonical seed frame");
+        }
+        if matches!(mutation, Mutation::Append) {
+            session
+                .acknowledge(&mut reader, 14)
+                .expect("acknowledge seed frames");
+        }
+        let mut writer = DeviceStore::open(&root).expect("pre-open writer before reader cut");
+        bind(&mut writer);
+        Fixture {
+            root,
+            reader,
+            writer,
+        }
+    }
+
+    fn trace_pending_frames(event: &TraceEvent<'_>) {
+        let TraceEvent::Stmt(_, sql) = event else {
+            return;
+        };
+        if !sql.starts_with("SELECT message_id, envelope_sequence, kind, payload, occurred_at")
+            || !sql.contains("published = 0")
+        {
+            return;
+        }
+        let Some(gate) = LOAD_GATE.with(|slot| slot.borrow_mut().take()) else {
+            return;
+        };
+        let committed = gate
+            .start
+            .send(())
+            .map_err(|error| error.to_string())
+            .and_then(|()| {
+                gate.committed
+                    .recv_timeout(Duration::from_secs(5))
+                    .map_err(|error| error.to_string())?
+            });
+        TRACE_RESULT.with(|slot| *slot.borrow_mut() = Some(committed));
+    }
+
+    fn mutate(writer: &mut DeviceStore, mutation: Mutation) -> CommitResult {
+        match mutation {
+            Mutation::Append => OutboxSession::new()
+                .enqueue(writer, 15, &frame(15))
+                .map(|_| ())
+                .map_err(|error| format!("atomic append failed: {error:?}")),
+            Mutation::Compact => writer
+                .compact_through(14)
+                .map(|_| ())
+                .map_err(|error| format!("atomic compaction failed: {error:?}")),
+        }
+    }
+
+    fn capture_race(mutation: Mutation) -> RaceCapture {
+        let Fixture {
+            root,
+            mut reader,
+            mut writer,
+        } = fixture(mutation);
+        let (start_tx, start_rx) = mpsc::channel();
+        let (committed_tx, committed_rx) = mpsc::channel();
+        let join_handle = std::thread::spawn(move || {
+            let committed = start_rx
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|error| error.to_string())
+                .and_then(|()| mutate(&mut writer, mutation));
+            let _ = committed_tx.send(committed.clone());
+            (writer, committed)
+        });
+        LOAD_GATE.with(|slot| {
+            *slot.borrow_mut() = Some(TraceGate {
+                start: start_tx,
+                committed: committed_rx,
+            });
+        });
+        TRACE_RESULT.with(|slot| *slot.borrow_mut() = None);
+        reader.connection().expect("reader connection").trace_v2(
+            TraceEventCodes::SQLITE_TRACE_STMT,
+            Some(|event| trace_pending_frames(&event)),
+        );
+        let first = FrameOutbox::load(&mut reader);
+        reader
+            .connection()
+            .expect("reader connection after load")
+            .trace_v2(TraceEventCodes::empty(), None);
+        LOAD_GATE.with(|slot| drop(slot.borrow_mut().take()));
+        let trace = TRACE_RESULT.with(|slot| slot.borrow_mut().take());
+        let (writer_store, writer_result) = join_handle.join().expect("join fixture writer");
+        let later = FrameOutbox::load(&mut reader);
+        writer_store.close().expect("close writer after reader cut");
+        reader.close().expect("close reader fixture");
+        fs::remove_dir_all(root).expect("remove closed fixture");
+        RaceCapture {
+            first,
+            later,
+            trace,
+            writer: writer_result,
+        }
+    }
+
+    fn snapshots(capture: RaceCapture) -> (OutboxSnapshot, OutboxSnapshot) {
+        assert_eq!(
+            capture.trace,
+            Some(Ok(())),
+            "pending SELECT must wait until the other connection has committed"
+        );
+        capture.writer.expect("writer mutation must commit");
+        let first = capture.first.expect("load pinned cut").expect("seed rows");
+        let later = capture
+            .later
+            .expect("load fresh cut")
+            .expect("durable rows");
+        later.validate().expect("fresh load must remain valid");
+        (first, later)
+    }
+
+    #[test]
+    fn frame_outbox_load_pins_cursors_and_frames_during_concurrent_append() {
+        let (first, later) = snapshots(capture_race(Mutation::Append));
+        first
+            .validate()
+            .expect("load must retain one SQLite read cut during append");
+        assert_eq!(first.ack_sequence, 14);
+        assert_eq!(first.highest_sequence, 14);
+        assert!(first.frames.is_empty());
+        assert_eq!(later.ack_sequence, 14);
+        assert_eq!(later.highest_sequence, 15);
+        assert_eq!(later.frames, vec![frame(15)]);
+    }
+
+    #[test]
+    fn frame_outbox_load_pins_cursors_and_frames_during_concurrent_compaction() {
+        let (first, later) = snapshots(capture_race(Mutation::Compact));
+        first
+            .validate()
+            .expect("load must retain one SQLite read cut during compaction");
+        assert_eq!(first.ack_sequence, 0);
+        assert_eq!(first.highest_sequence, 14);
+        assert_eq!(first.frames, (1..=14).map(frame).collect::<Vec<_>>());
+        assert_eq!(later.ack_sequence, 14);
+        assert_eq!(later.highest_sequence, 14);
+        assert!(later.frames.is_empty());
     }
 }

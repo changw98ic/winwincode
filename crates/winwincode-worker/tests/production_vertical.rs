@@ -5,6 +5,16 @@
 #[path = "support/production_code_mode.rs"]
 mod production_code_mode;
 
+#[cfg(unix)]
+#[path = "support/native_mcp_progress.rs"]
+mod native_mcp_progress;
+
+#[cfg(unix)]
+#[test]
+fn slow_server_query_preserves_native_mcp_approval_progress() {
+    run_on_large_stack(native_mcp_progress::run());
+}
+
 use std::{
     fs,
     future::Future,

@@ -850,6 +850,7 @@ export async function seedDeviceLocalProvider({
   apiKey,
   protocol = 'anthropic_messages',
   customHeaders,
+  responsesStructuredOutput,
   displayName = 'WinWinCode Device deterministic Provider',
   timeoutMillis = 60_000,
 }) {
@@ -875,6 +876,7 @@ export async function seedDeviceLocalProvider({
       displayName,
       endpoint,
       protocol,
+      ...(responsesStructuredOutput === undefined ? {} : { responsesStructuredOutput }),
       modelIds: [modelId],
       enabled: true,
     },
@@ -1346,6 +1348,7 @@ export async function establishDeviceOnlyExecutionPath({
         apiKey: providerApiKey,
         protocol: deviceProvider.protocol,
         customHeaders: deviceProvider.customHeaders,
+        responsesStructuredOutput: deviceProvider.responsesStructuredOutput,
         displayName: deviceProvider.displayName
           ?? 'WinWinCode Device deterministic Provider',
         timeoutMillis,

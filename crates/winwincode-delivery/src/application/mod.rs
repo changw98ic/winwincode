@@ -10,6 +10,7 @@ use std::{error::Error, fmt};
 use crate::domain::{Delivery, MAX_SAFE_INTEGER};
 
 pub mod attention;
+pub mod candidate_rejection;
 pub mod failure_router;
 pub mod session_binding;
 pub mod solution_review;

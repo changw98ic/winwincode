@@ -13192,6 +13192,18 @@
     },
     "DeviceProviderConfig": {
       "additionalProperties": false,
+      "not": {
+        "properties": {
+          "protocol": {
+            "not": {
+              "const": "openai_responses"
+            }
+          }
+        },
+        "required": [
+          "responsesStructuredOutput"
+        ]
+      },
       "properties": {
         "displayName": {
           "maxLength": 200,
@@ -13224,6 +13236,10 @@
           "maxLength": 128,
           "minLength": 1,
           "type": "string"
+        },
+        "responsesStructuredOutput": {
+          "$ref": "#/$defs/DeviceResponsesStructuredOutput",
+          "description": "Structured output transport for openai_responses. Omission uses json_schema. Explicit text uses the API default text format with schema instructions and local validation."
         }
       },
       "required": [
@@ -13268,6 +13284,7 @@
       "enum": [
         "anthropic_messages",
         "openai_chat_completions",
+        "openai_responses",
         "canonical",
         "codex_chatgpt",
         "chatgpt_plan"
@@ -13430,6 +13447,14 @@
         "repositoryBindingId"
       ],
       "type": "object"
+    },
+    "DeviceResponsesStructuredOutput": {
+      "enum": [
+        "json_schema",
+        "json_object",
+        "text"
+      ],
+      "type": "string"
     },
     "DiagnosticBaseline": {
       "additionalProperties": false,
@@ -28634,7 +28659,7 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:aa3ed5d81770e6735fd26eed81b271af3a6f7efe220a0f2e6af421fd498241b1",
+  "x-source-digest": "sha256:623d7bb1e65dba64ffa395043378f72455f3f343c4cdbebd0eadb6be24ded0bf",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {

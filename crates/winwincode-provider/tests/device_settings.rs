@@ -6,8 +6,81 @@ use std::{
     os::unix::fs::PermissionsExt,
     process::{Command, Stdio},
 };
-use winwincode_api::generated::{DeviceConfigurationEnvelope, DeviceProviderOutcome};
-use winwincode_provider::DeviceProviderStore;
+use winwincode_api::generated::{
+    DeviceConfigurationEnvelope, DeviceProviderConfig, DeviceProviderOutcome,
+    DeviceProviderProtocol, DeviceProviderSnapshot,
+};
+use winwincode_provider::{DeviceProviderStore, valid_device_provider_config};
+
+#[test]
+fn responses_protocol_accepts_custom_https_endpoints_without_chatgpt_binding() {
+    let mut config: DeviceProviderConfig = serde_json::from_value(serde_json::json!({
+        "providerId":"custom-responses", "displayName":"Custom Responses",
+        "endpoint":"https://models.example/v1/responses", "protocol":"openai_responses",
+        "modelIds":["custom-model"], "enabled":true
+    }))
+    .expect("public Responses configuration contract");
+    assert_eq!(config.protocol, DeviceProviderProtocol::OpenaiResponses);
+    assert!(valid_device_provider_config(&config));
+    config.endpoint = "https://another.example/api/responses".into();
+    assert!(valid_device_provider_config(&config));
+    config.endpoint = "http://another.example/api/responses".into();
+    assert!(!valid_device_provider_config(&config));
+    config.endpoint = "https://models.example/v1/responses".into();
+    for protocol in [
+        DeviceProviderProtocol::CodexChatgpt,
+        DeviceProviderProtocol::ChatgptPlan,
+    ] {
+        config.protocol = protocol;
+        assert!(!valid_device_provider_config(&config));
+    }
+}
+
+#[test]
+fn responses_structured_output_is_optional_and_exclusive_to_responses() {
+    for (protocol, endpoint) in [
+        ("openai_responses", "https://models.example/v1/responses"),
+        ("anthropic_messages", "https://models.example/v1/messages"),
+        (
+            "openai_chat_completions",
+            "https://models.example/v1/chat/completions",
+        ),
+        ("canonical", "https://models.example/v1/canonical"),
+        (
+            "codex_chatgpt",
+            "https://chatgpt.com/backend-api/codex/responses",
+        ),
+        ("chatgpt_plan", "https://api.openai.com/v1/responses"),
+    ] {
+        let baseline = serde_json::json!({
+            "providerId":"structured-test", "displayName":"Structured Test",
+            "endpoint":endpoint, "protocol":protocol, "modelIds":["test-model"], "enabled":true
+        });
+        let config: DeviceProviderConfig = serde_json::from_value(baseline.clone()).unwrap();
+        assert!(valid_device_provider_config(&config), "{protocol} default");
+        assert!(
+            serde_json::to_value(config)
+                .unwrap()
+                .get("responsesStructuredOutput")
+                .is_none()
+        );
+        for mode in ["json_schema", "json_object", "text"] {
+            let mut configured = baseline.clone();
+            configured["responsesStructuredOutput"] = mode.into();
+            let config: DeviceProviderConfig = serde_json::from_value(configured).unwrap();
+            assert_eq!(
+                valid_device_provider_config(&config),
+                protocol == "openai_responses",
+                "{protocol}/{mode}"
+            );
+        }
+        for mode in [serde_json::json!("unsupported"), serde_json::json!(1)] {
+            let mut configured = baseline.clone();
+            configured["responsesStructuredOutput"] = mode;
+            assert!(serde_json::from_value::<DeviceProviderConfig>(configured).is_err());
+        }
+    }
+}
 
 #[test]
 fn opening_current_device_store_does_not_require_the_writer_lock() {
@@ -69,35 +142,82 @@ fn failed_device_key_validation_does_not_commit_a_schema_upgrade() {
 
 #[test]
 fn browser_crypto_device_storage_replay_and_tamper() {
-    let directory =
-        std::env::temp_dir().join(format!("wwc-device-provider-{}", std::process::id()));
+    browser_crypto_device_storage_for_protocol("anthropic_messages", None);
+}
+
+#[test]
+fn responses_api_key_configuration_survives_encrypted_save_and_restart() {
+    browser_crypto_device_storage_for_protocol("openai_responses", None);
+}
+
+#[test]
+fn text_responses_configuration_survives_encrypted_save_and_restart() {
+    browser_crypto_device_storage_for_protocol("openai_responses", Some("text"));
+}
+
+#[test]
+fn responses_structured_output_survives_encrypted_save_restart_replay_and_tamper() {
+    for mode in ["json_schema", "json_object"] {
+        browser_crypto_device_storage_for_protocol("openai_responses", Some(mode));
+    }
+}
+
+#[test]
+fn encrypted_invalid_structured_output_is_invalid_request_without_config_writes() {
+    for (index, (protocol, mode)) in [
+        ("anthropic_messages", "\"json_schema\""),
+        ("anthropic_messages", "\"json_object\""),
+        ("anthropic_messages", "null"),
+        ("openai_responses", "null"),
+        ("anthropic_messages", "\"text\""),
+        ("openai_responses", "\"unsupported\""),
+        ("openai_responses", "\"Text\""),
+        ("openai_responses", "false"),
+        ("openai_responses", "1"),
+        ("openai_responses", "{}"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let directory = std::env::temp_dir().join(format!(
+            "wwc-provider-invalid-format-{}-{index}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        let mut store = DeviceProviderStore::open(&directory).unwrap();
+        let snapshot = store.snapshot("structured-format-device").unwrap();
+        let envelope = browser_crypto_provider_envelope_with_mode_json(&snapshot, protocol, mode);
+        let receipt = store.apply(&snapshot.client_node_id, &envelope).unwrap();
+        assert_eq!(
+            receipt.outcome,
+            DeviceProviderOutcome::InvalidRequest,
+            "{protocol}/{mode}"
+        );
+        assert_eq!(receipt.revision, 0);
+        assert_eq!(
+            store.apply(&snapshot.client_node_id, &envelope).unwrap(),
+            receipt
+        );
+        let after = store.snapshot(&snapshot.client_node_id).unwrap();
+        assert_eq!(after.revision, 0);
+        assert!(after.providers.is_empty());
+        drop(store);
+        fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+fn browser_crypto_device_storage_for_protocol(protocol: &str, structured_output: Option<&str>) {
+    let directory = std::env::temp_dir().join(format!(
+        "wwc-device-provider-{}-{protocol}-{}",
+        std::process::id(),
+        structured_output.unwrap_or("default")
+    ));
     let _ = fs::remove_dir_all(&directory);
     let mut store = DeviceProviderStore::open(&directory).expect("private store");
     let snapshot = store
         .snapshot("cnd_00000000000000000000000001")
         .expect("public state");
-    let module = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../apps/client/src/device-provider-encryption.ts");
-    let mut child = Command::new("node").args(["--input-type=module", "-e", r"
-        import { pathToFileURL } from 'node:url';
-        import { readFileSync } from 'node:fs';
-        const { encryptDeviceProvider } = await import(pathToFileURL(process.argv[1]));
-        const snapshot = JSON.parse(readFileSync(0, 'utf8'));
-        process.stdout.write(JSON.stringify(await encryptDeviceProvider(snapshot, 'provider_test_save', {
-          operation:'save', config:{providerId:'test-provider',displayName:'Local Provider',endpoint:'https://example.com/v1/messages',protocol:'anthropic_messages',modelIds:['test-model'],enabled:true},apiKey:'device-only-test-secret',customHeaders:{'x-opencode-session':'private-session-value'}
-        })));
-    "]).arg(module).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().expect("WebCrypto runner");
-    child
-        .stdin
-        .take()
-        .expect("stdin")
-        .write_all(&serde_json::to_vec(&snapshot).expect("snapshot JSON"))
-        .expect("write snapshot");
-    let result = child.wait_with_output().expect("WebCrypto output");
-    assert!(result.status.success());
-    assert!(!String::from_utf8_lossy(&result.stdout).contains("device-only-test-secret"));
-    let envelope: DeviceConfigurationEnvelope =
-        serde_json::from_slice(&result.stdout).expect("encrypted contract");
+    let envelope = browser_crypto_provider_envelope(&snapshot, protocol, structured_output);
     let receipt = store
         .apply(&snapshot.client_node_id, &envelope)
         .expect("decrypt and save");
@@ -118,17 +238,11 @@ fn browser_crypto_device_storage_replay_and_tamper() {
         .expect("public JSON")
         .contains("device-only-test-secret")
     );
-    assert_eq!(
-        store
-            .resolve("test-provider")
-            .expect("device secret")
-            .1
-            .expose(),
-        b"device-only-test-secret"
-    );
+    assert_saved_provider_configuration(&store, protocol, structured_output);
     assert_private_headers(&store, &directory, &snapshot.client_node_id);
     drop(store);
     let mut store = DeviceProviderStore::open(&directory).expect("restart");
+    assert_saved_provider_configuration(&store, protocol, structured_output);
     assert_eq!(
         store
             .apply(&snapshot.client_node_id, &envelope)
@@ -136,7 +250,7 @@ fn browser_crypto_device_storage_replay_and_tamper() {
         receipt
     );
     let mut tampered = envelope.clone();
-    tampered.request_id = "provider_changed_identity".to_owned();
+    "provider_changed_identity".clone_into(&mut tampered.request_id);
     tampered.expected_revision = 1;
     assert_eq!(
         store
@@ -165,6 +279,69 @@ fn browser_crypto_device_storage_replay_and_tamper() {
     .expect("make unsafe file");
     assert!(DeviceProviderStore::open(&directory).is_err());
     fs::remove_dir_all(directory).expect("remove test data");
+}
+
+fn assert_saved_provider_configuration(
+    store: &DeviceProviderStore,
+    protocol: &str,
+    structured_output: Option<&str>,
+) {
+    let (config, secret) = store
+        .resolve("test-provider")
+        .expect("API key configuration");
+    assert_eq!(serde_json::to_value(&config.protocol).unwrap(), protocol);
+    assert_eq!(
+        serde_json::to_value(&config)
+            .unwrap()
+            .get("responsesStructuredOutput")
+            .and_then(serde_json::Value::as_str),
+        structured_output
+    );
+    assert_eq!(secret.expose(), b"device-only-test-secret");
+}
+
+fn browser_crypto_provider_envelope(
+    snapshot: &DeviceProviderSnapshot,
+    protocol: &str,
+    structured_output: Option<&str>,
+) -> DeviceConfigurationEnvelope {
+    browser_crypto_provider_envelope_with_mode_json(
+        snapshot,
+        protocol,
+        &structured_output
+            .map(|mode| serde_json::to_string(mode).unwrap())
+            .unwrap_or_default(),
+    )
+}
+
+fn browser_crypto_provider_envelope_with_mode_json(
+    snapshot: &DeviceProviderSnapshot,
+    protocol: &str,
+    structured_output_json: &str,
+) -> DeviceConfigurationEnvelope {
+    let module = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../apps/client/src/device-provider-encryption.ts");
+    let mut child = Command::new("node").args(["--input-type=module", "-e", r"
+        import { pathToFileURL } from 'node:url';
+        import { readFileSync } from 'node:fs';
+        const { encryptDeviceProvider } = await import(pathToFileURL(process.argv[1]));
+        const snapshot = JSON.parse(readFileSync(0, 'utf8'));
+        const config = {providerId:'test-provider',displayName:'Local Provider',endpoint:'https://example.com/v1/responses',protocol:process.argv[2],modelIds:['test-model'],enabled:true};
+        if (process.argv[3] !== '') config.responsesStructuredOutput = JSON.parse(process.argv[3]);
+        process.stdout.write(JSON.stringify(await encryptDeviceProvider(snapshot, 'provider_test_save', {
+          operation:'save',config,apiKey:'device-only-test-secret',customHeaders:{'x-opencode-session':'private-session-value'}
+        })));
+    "]).arg(module).arg(protocol).arg(structured_output_json).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().expect("WebCrypto runner");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(&serde_json::to_vec(snapshot).expect("snapshot JSON"))
+        .expect("write snapshot");
+    let result = child.wait_with_output().expect("WebCrypto output");
+    assert!(result.status.success());
+    assert!(!String::from_utf8_lossy(&result.stdout).contains("device-only-test-secret"));
+    serde_json::from_slice(&result.stdout).expect("encrypted contract")
 }
 
 #[test]

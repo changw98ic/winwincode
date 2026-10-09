@@ -41,6 +41,7 @@ workspace = true
 # `winwincode-worker --managed-session` entry, so the reader runs against
 # supervisor-written files in the launch tests.
 [dev-dependencies]
+rusqlite = { workspace = true, features = ["trace"] }
 rcgen.workspace = true
 tokio-rustls.workspace = true
 winwincode-worker = { path = "../winwincode-worker" }

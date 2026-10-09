@@ -431,6 +431,7 @@ async fn scenario(chunks: usize) {
                         return;
                     }
                     let _ = tls.write_all(&response).await;
+                    let _ = tls.flush().await;
                 });
             }
         })

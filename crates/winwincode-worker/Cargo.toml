@@ -53,6 +53,7 @@ winwincode-api.workspace = true
 winwincode-control-plane = { path = "../winwincode-control-plane", features = ["test-support"] }
 winwincode-delivery = { path = "../winwincode-delivery", features = ["test-support"] }
 winwincode-kernel = { path = "../kernel" }
+winwincode-server = { path = "../winwincode-server", default-features = false }
 winwincode-storage.workspace = true
 
 [lints]

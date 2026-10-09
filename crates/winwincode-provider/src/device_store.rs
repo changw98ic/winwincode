@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
     DeviceConfigurationEnvelope, DeviceProviderConfig, DeviceProviderOutcome,
     DeviceProviderProjection, DeviceProviderProtocol, DeviceProviderReceipt,
-    DeviceProviderSnapshot,
+    DeviceProviderSnapshot, DeviceResponsesStructuredOutput,
 };
 
 use crate::{
@@ -322,9 +322,13 @@ impl DeviceProviderStore {
                 },
             )
             .map_err(|_| DeviceProviderError)?;
-        let mutation = serde_json::from_slice(&plaintext);
+        let mutation = if context == CONTEXT && !valid_provider_structured_output_json(&plaintext) {
+            Err(DeviceProviderError)
+        } else {
+            serde_json::from_slice(&plaintext).map_err(DeviceProviderError::from)
+        };
         plaintext.fill(0);
-        Ok(mutation?)
+        mutation
     }
 
     fn mutate(&self, mutation: Mutation) -> Result<DeviceProviderOutcome, DeviceProviderError> {
@@ -889,6 +893,19 @@ fn valid_token(value: &str, max: usize) -> bool {
         && !value.chars().any(char::is_control)
 }
 
+fn valid_provider_structured_output_json(plaintext: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(plaintext) else {
+        return false;
+    };
+    let Some(config) = value.get("config").and_then(serde_json::Value::as_object) else {
+        return false;
+    };
+    config.get("responsesStructuredOutput").is_none_or(|mode| {
+        config.get("protocol").and_then(serde_json::Value::as_str) == Some("openai_responses")
+            && matches!(mode.as_str(), Some("json_schema" | "json_object" | "text"))
+    })
+}
+
 /// Validates public Provider configuration at Device and projection boundaries.
 #[must_use]
 pub fn valid_device_provider_config(config: &DeviceProviderConfig) -> bool {
@@ -905,6 +922,8 @@ pub fn valid_device_provider_config(config: &DeviceProviderConfig) -> bool {
             == config.model_ids.len()
         && config.endpoint.len() <= 2048
         && crate::canonical_https_endpoint(&config.endpoint)
+        && (config.responses_structured_output.is_none()
+            || config.protocol == DeviceProviderProtocol::OpenaiResponses)
         && (config.protocol != DeviceProviderProtocol::CodexChatgpt
             || config.endpoint == crate::codex_login::CODEX_ENDPOINT)
         && (config.protocol != DeviceProviderProtocol::ChatgptPlan
@@ -955,6 +974,17 @@ pub(crate) fn adapter(
         }
         DeviceProviderProtocol::OpenaiChatCompletions => transport
             .with_openai_chat_completions(MAX_OUTPUT_TOKENS, ProviderTokenPricing::default()),
+        DeviceProviderProtocol::OpenaiResponses => match config.responses_structured_output {
+            Some(DeviceResponsesStructuredOutput::JsonObject) => {
+                transport.with_openai_responses_json_object(MAX_OUTPUT_TOKENS)
+            }
+            Some(DeviceResponsesStructuredOutput::Text) => {
+                transport.with_openai_responses_text(MAX_OUTPUT_TOKENS)
+            }
+            None | Some(DeviceResponsesStructuredOutput::JsonSchema) => {
+                transport.with_openai_responses(MAX_OUTPUT_TOKENS)
+            }
+        },
         DeviceProviderProtocol::CodexChatgpt => {
             transport.with_codex_chatgpt(codex_account.ok_or(DeviceProviderError)?)
         }
@@ -1069,6 +1099,7 @@ mod codex_tests {
             display_name: "Codex ChatGPT".into(),
             endpoint: crate::codex_login::CODEX_ENDPOINT.into(),
             protocol: DeviceProviderProtocol::CodexChatgpt,
+            responses_structured_output: None,
             model_ids: vec![
                 std::env::var("WWC_CODEX_TEST_MODEL").unwrap_or_else(|_| "gpt-6.1-sol".into()),
             ],

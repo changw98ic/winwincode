@@ -3516,7 +3516,7 @@ function generate(options) {
   if (options.typescriptClientOutput !== undefined) {
     outputs.set(options.typescriptClientOutput, renderControlPlaneClient(context, digest))
     const deviceTypes = [...context.registry.values()]
-      .filter(entry => (entry.name.startsWith('DeviceProvider') || entry.name.startsWith('DeviceExtension') || entry.name === 'DeviceConfigurationEnvelope') && !entry.name.endsWith('View'))
+      .filter(entry => (entry.name.startsWith('DeviceProvider') || entry.name.startsWith('DeviceExtension') || entry.name === 'DeviceConfigurationEnvelope' || entry.name === 'DeviceResponsesStructuredOutput') && !entry.name.endsWith('View'))
       .sort((left, right) => left.name.localeCompare(right.name))
       .map(entry => renderTypescriptDefinition(entry, context))
     if (options.typescriptOutput === join(root, 'apps/client/src/generated/contracts.ts')) outputs.set(

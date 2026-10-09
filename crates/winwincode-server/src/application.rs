@@ -1083,58 +1083,53 @@ impl StandaloneControlPlaneApplication {
     }
 
     fn strongflow_query(&self, request: QueryRequest) -> Result<QueryResultResponse, ApiError> {
-        let mut guard = self.state()?;
-        let state = guard.as_mut().ok_or_else(service_unavailable)?;
-        match request {
-            QueryRequest::DeliveryGetQuery(query) => state
+        let snapshot = {
+            let guard = self.state()?;
+            let state = guard.as_ref().ok_or_else(service_unavailable)?;
+            state
                 .control_plane
+                .strongflow_read_snapshot()
+                .map_err(|error| strongflow_error(&error))?
+        };
+        match request {
+            QueryRequest::DeliveryGetQuery(query) => snapshot
                 .delivery_get(&query)
                 .map_err(|error| strongflow_error(&error)),
-            QueryRequest::RuntimeProjectionGetQuery(query) => state
-                .control_plane
+            QueryRequest::RuntimeProjectionGetQuery(query) => snapshot
                 .runtime_projection_get(&query)
                 .map_err(|error| strongflow_error(&error)),
             QueryRequest::WorkRunGetQuery(query) => {
-                let mut response = state
-                    .control_plane
+                let mut response = snapshot
                     .workrun_get(&query)
                     .map_err(|error| strongflow_error(&error))?;
                 if let QueryResultResponse::WorkRunGetResultResponse(result) = &mut response {
                     result.result.managed_app_run_configs =
-                        project_managed_app_run_configs(&state.storage, &result.result)?;
+                        project_managed_app_run_configs(&snapshot, &result.result)?;
                 }
                 Ok(response)
             }
-            QueryRequest::CandidateFilesListQuery(query) => state
-                .control_plane
+            QueryRequest::CandidateFilesListQuery(query) => snapshot
                 .candidate_files_list(&query)
                 .map_err(|error| strongflow_error(&error)),
-            QueryRequest::CandidateDiffGetQuery(query) => state
-                .control_plane
+            QueryRequest::CandidateDiffGetQuery(query) => snapshot
                 .candidate_diff_get(&query)
                 .map_err(|error| strongflow_error(&error)),
-            QueryRequest::CandidateFileContentGetQuery(query) => state
-                .control_plane
+            QueryRequest::CandidateFileContentGetQuery(query) => snapshot
                 .candidate_file_content_get(&query)
                 .map_err(|error| strongflow_error(&error)),
-            QueryRequest::CandidateHistoryListQuery(query) => state
-                .control_plane
+            QueryRequest::CandidateHistoryListQuery(query) => snapshot
                 .candidate_history_list(&query)
                 .map_err(|error| strongflow_error(&error)),
-            QueryRequest::CandidateHistoricalReviewGetQuery(query) => state
-                .control_plane
+            QueryRequest::CandidateHistoricalReviewGetQuery(query) => snapshot
                 .candidate_historical_review_get(&query)
                 .map_err(|error| strongflow_error(&error)),
-            QueryRequest::EvidenceGetQuery(query) => state
-                .control_plane
+            QueryRequest::EvidenceGetQuery(query) => snapshot
                 .evidence_get(&query)
                 .map_err(|error| strongflow_error(&error)),
-            QueryRequest::EvidenceArtifactContentGetQuery(query) => state
-                .control_plane
+            QueryRequest::EvidenceArtifactContentGetQuery(query) => snapshot
                 .evidence_artifact_content_get(&query)
                 .map_err(|error| strongflow_error(&error)),
-            QueryRequest::DeliveryListQuery(query) => state
-                .control_plane
+            QueryRequest::DeliveryListQuery(query) => snapshot
                 .delivery_list(&query)
                 .map(QueryResultResponse::DeliveryListResultResponse)
                 .map_err(|error| delivery_application_error(&error)),
@@ -1144,14 +1139,14 @@ impl StandaloneControlPlaneApplication {
 }
 
 fn project_managed_app_run_configs(
-    storage: &SqliteStorage,
+    control_plane: &ControlPlane,
     aggregate: &WorkRunAggregateProjection,
 ) -> Result<Vec<ApiManagedAppRunConfig>, ApiError> {
     aggregate
         .runs
         .iter()
         .filter_map(|run| {
-            let record = match storage.load_managed_app_run_config_for_work_run(&run.id.0) {
+            let record = match control_plane.load_managed_app_run_config_for_work_run(&run.id) {
                 Ok(Some(record)) => record,
                 Ok(None) => return None,
                 Err(_) => return Some(Err(service_unavailable())),

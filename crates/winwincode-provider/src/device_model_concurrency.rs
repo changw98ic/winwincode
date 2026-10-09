@@ -21,6 +21,19 @@ mod tests;
 
 const PROVIDER_MODEL_SLOTS: usize = 3;
 
+/// Exclusive authority to invoke or recover one model exchange.
+#[derive(Debug)]
+pub(crate) struct DeviceModelExchangeOwner {
+    file: File,
+}
+
+impl Drop for DeviceModelExchangeOwner {
+    fn drop(&mut self) {
+        // A child may retain an alias until exec. Authority ends with this guard.
+        let _ = self.file.unlock();
+    }
+}
+
 /// An acquired Device-wide Provider slot, or a request that cannot invoke a new model.
 /// Moving this value into the model thread keeps the slot until that thread completes.
 #[derive(Debug)]
@@ -49,7 +62,7 @@ impl DeviceProviderStore {
     pub(crate) fn try_model_exchange_owner(
         &self,
         exchange_id: &str,
-    ) -> Result<Option<File>, DeviceProviderError> {
+    ) -> Result<Option<DeviceModelExchangeOwner>, DeviceProviderError> {
         let database = Path::new(self.connection.path().ok_or(DeviceProviderError)?);
         let root = database
             .parent()
@@ -59,7 +72,7 @@ impl DeviceProviderStore {
         let file =
             private_slot_file(&root.join(format!("{:x}", Sha256::digest(exchange_id.as_bytes()))))?;
         match file.try_lock() {
-            Ok(()) => Ok(Some(file)),
+            Ok(()) => Ok(Some(DeviceModelExchangeOwner { file })),
             Err(TryLockError::WouldBlock) => Ok(None),
             Err(TryLockError::Error(_)) => Err(DeviceProviderError),
         }

@@ -775,14 +775,18 @@ async fn remote_worker_exchange(
     // Reuse the application clock so a registration and its placement cannot
     // acquire different fractional-second widths at the HTTP boundary.
     let now = SystemStandaloneApplicationClock.now_instant();
-    match exchange.exchange(credential.as_bytes().to_vec(), &body, now) {
-        Ok(response) => (
+    let exchange = Arc::clone(exchange);
+    let credential = credential.as_bytes().to_vec();
+    let result =
+        tokio::task::spawn_blocking(move || exchange.exchange(credential, &body, now)).await;
+    match result {
+        Ok(Ok(response)) => (
             StatusCode::OK,
             [(CONTENT_TYPE, "application/json")],
             response,
         )
             .into_response(),
-        Err(error) => {
+        Ok(Err(error)) => {
             if std::env::var_os("WWC_DEBUG_RUNTIME").is_some() {
                 eprintln!("remote Worker exchange error: {error}");
             }
@@ -790,6 +794,7 @@ async fn remote_worker_exchange(
                 .unwrap_or(StatusCode::SERVICE_UNAVAILABLE)
                 .into_response()
         }
+        Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
     }
 }
 
@@ -2399,11 +2404,9 @@ async fn command(State(state): State<ServerState>, request: Request<Body>) -> Re
         Ok(authorized) => authorized,
         Err(error) => return error.with_request_id(request_id).into_response(),
     };
-    api_response(
-        state.api.command(&principal, body),
-        request_id,
-        origin.as_ref(),
-    )
+    let api = Arc::clone(&state.api);
+    let result = run_blocking_api_operation(move || api.command(&principal, body)).await;
+    api_response(result, request_id, origin.as_ref())
 }
 
 async fn query(State(state): State<ServerState>, request: Request<Body>) -> Response {
@@ -2422,11 +2425,23 @@ async fn query(State(state): State<ServerState>, request: Request<Body>) -> Resp
         Ok(authorized) => authorized,
         Err(error) => return error.with_request_id(request_id).into_response(),
     };
-    api_response(
-        state.api.query(&principal, body),
-        request_id,
-        origin.as_ref(),
-    )
+    let api = Arc::clone(&state.api);
+    let result = run_blocking_api_operation(move || api.query(&principal, body)).await;
+    api_response(result, request_id, origin.as_ref())
+}
+
+async fn run_blocking_api_operation(
+    operation: impl FnOnce() -> Result<Value, ApiError> + Send + 'static,
+) -> Result<Value, ApiError> {
+    tokio::task::spawn_blocking(operation)
+        .await
+        .unwrap_or_else(|_| {
+            Err(ApiError::new(
+                503,
+                "SERVICE_UNAVAILABLE",
+                "application service is unavailable",
+            ))
+        })
 }
 
 async fn parse_json_body(

@@ -10,7 +10,7 @@ import { checkedWwc, configuredDeviceModelRoute, establishDeviceOnlyExecutionPat
   registerOrReuseDeviceRepository, seedDeviceLocalProvider, waitFor } from './device-production-fixture.mjs'
 import { loadDeviceAgentTask } from './device-agent-task.mjs'
 import { runApiProductionVertical } from './run-api-production-vertical.mjs'
-import { benchmarkDeviceEnvironment } from './run-device-task-vertical.mjs'
+import { benchmarkDeviceEnvironment, deviceProviderSecretValues } from './run-device-task-vertical.mjs'
 
 // Stable protocol identities for an already frozen launch, not a retry attempt.
 export function deviceTaskIdentities(experimentId, callId) {
@@ -190,8 +190,8 @@ export async function withDeviceTaskRuntime({ directory, profiles, providers, ag
   prepareDeviceBenchmarkProviderSlots({ directory, profiles, providers })
   return runApiProductionVertical({ directory, build, restart: false, repeat: false,
     ...(timeoutMillis === undefined ? {} : { timeoutMillis }),
-    retainRepository: true, deviceProvider: primary, deviceProviderSecrets: providers.flatMap(provider => [provider.apiKey,
-      ...Object.values(provider.customHeaders ?? {})]).filter(Boolean),
+    retainRepository: true, deviceProvider: primary,
+    deviceProviderSecrets: providers.flatMap(deviceProviderSecretValues).filter(Boolean),
     deviceRoute: { providerId: primary.providerId, modelId: primary.modelId },
     deviceAgentEnvironment: benchmarkDeviceEnvironment(first, agentSettings, providerEnvironment),
     serverEnvironment: { WWC_SERVER_WORKER_MODE: 'remote', WWC_SERVER_MAX_RUNTIME_SECONDS: 'unlimited',
