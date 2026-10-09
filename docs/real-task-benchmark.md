@@ -55,6 +55,24 @@ These endpoint and Lite requirements follow the provider's
 [Codex configuration](https://mimo.mi.com/docs/en-US/tokenplan/integration/codex-configuration)
 and [Responses API](https://mimo.mi.com/docs/en-US/api/chat/responses).
 
+## Device Provider credential admission
+
+OpenCode configuration may contain [environment and file references](https://opencode.ai/docs/config/#env-vars)
+such as `{env:NAME}` and `{file:/path/to/key}`. Batch preparation must resolve
+these references from the explicitly selected account's credential source before
+provisioning a Device. Account bindings must remain separate; the shared shell
+environment must not silently replace another account's saved credential.
+
+Device provisioning and task configuration share a local admission check.
+Missing or non-string API keys fail with `PROVIDER_CREDENTIAL_MISSING`.
+Unresolved environment or file references in API keys or custom header values
+fail with `PROVIDER_CREDENTIAL_REFERENCE_UNRESOLVED`, including embedded
+references. Both errors omit credential values and stop before Device requests,
+encrypted saves, or paid model preflight. Valid opaque credentials retain their
+original bytes. A saved token's local expiry does not prove upstream acceptance;
+the actual native preflight supplies that evidence. Previous failed requests and
+their billing and diagnostic records remain unchanged.
+
 ## Native Provider request identity
 
 All native HTTPS protocols derive conversation headers from the original

@@ -17,6 +17,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { parseEnv } from 'node:util'
 import { loadDeviceAgentTask } from './device-agent-task.mjs'
 import { deviceAgentEnvironment } from './device-agent-environment.mjs'
+import { assertResolvedDeviceProviderCredentials } from './device-provider-credentials.mjs'
 import { exportDeviceCandidate, exportDeviceExecutionReceipts, readDeviceExecutionReceipts,
   readDevicePendingApprovalIds } from './export-device-candidate.mjs'
 import { deviceFailureWithModelCauses } from './device-model-failures.mjs'
@@ -123,18 +124,20 @@ export function deviceProviderSecretValues(provider) {
 export function deviceTaskProvider(providerName, environment = process.env) {
   const seat = providerSeats[providerName]
   assert.ok(seat, 'Provider must be glm, mimo, deepseek, or qwen')
-  const suffixes = providerName === 'mimo' && environment.XIAOMI_RESPONSES_URL
-    ? ['API_KEY', 'MODEL'] : ['API_KEY', 'BASE_URL', 'MODEL']
-  for (const suffix of suffixes) {
-    assert.ok(environment[`${seat.prefix}_${suffix}`], `${seat.prefix}_${suffix} is required for a real Provider`)
-  }
   const customHeaders = providerName === 'mimo'
     ? { 'x-openai-internal-codex-responses-lite': 'true' }
     : providerName === 'qwen' && environment.OPENCODE_SESSION_VALUE
       ? { [environment.OPENCODE_SESSION_HEADER ?? 'x-opencode-session']: environment.OPENCODE_SESSION_VALUE }
       : undefined
+  const apiKey = environment[`${seat.prefix}_API_KEY`]
+  assertResolvedDeviceProviderCredentials({ apiKey, customHeaders })
+  const suffixes = providerName === 'mimo' && environment.XIAOMI_RESPONSES_URL
+    ? ['MODEL'] : ['BASE_URL', 'MODEL']
+  for (const suffix of suffixes) {
+    assert.ok(environment[`${seat.prefix}_${suffix}`], `${seat.prefix}_${suffix} is required for a real Provider`)
+  }
   return {
-    apiKey: environment[`${seat.prefix}_API_KEY`],
+    apiKey,
     providerId: seat.providerId,
     modelId: environment[`${seat.prefix}_MODEL`],
     protocol: seat.protocol,

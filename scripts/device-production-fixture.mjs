@@ -25,6 +25,7 @@ import { createServer as createNetServer } from 'node:net'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { deviceAgentEnvironment } from './device-agent-environment.mjs'
+import { assertResolvedDeviceProviderCredentials } from './device-provider-credentials.mjs'
 
 /** Runtime children receive platform settings, never the orchestrator's credentials. */
 export function runtimeChildEnvironment(environment = process.env) {
@@ -894,8 +895,7 @@ export async function seedDeviceLocalProvider({
   displayName = 'WinWinCode Device deterministic Provider',
   timeoutMillis = 60_000,
 }) {
-  assert.equal(typeof apiKey, 'string')
-  assert.ok(apiKey.length > 0)
+  assertResolvedDeviceProviderCredentials({ apiKey, customHeaders })
   assert.ok(typeof publicClientId === 'string' && publicClientId.length > 0,
     'Device public client id is required to seed Provider')
   const providerPath = `/api/v1/clients/${encodeURIComponent(publicClientId)}/providers`

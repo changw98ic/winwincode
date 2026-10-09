@@ -31,6 +31,7 @@ const canonicalTestFiles = Object.freeze([
   'tests/device-fixture-shutdown.test.mjs',
   'tests/device-task-runtime.test.mjs',
   'tests/device-provider-structured-output.test.mjs',
+  'tests/device-provider-credentials.test.mjs',
   'tests/architecture-documentation.test.mjs',
   'tests/candidate-run-preview-ui.test.mjs',
   'tests/okqq-sidebar-board-wiring.test.mjs',
